@@ -37,7 +37,11 @@ with tempfile.TemporaryDirectory(prefix="fmn-video-ownership-") as directory:
             else:
                 raise AssertionError("writer callback invalidated an accepted pristine scene")
             assert target.read_bytes() == b"prior artifact"
-            assert scene.root_count() == (1 if mutation == "adopt" else 0)
+            # The refused render left the scene as it was: the listed frame
+            # (fm-6l2i), plus the square the callback adopted.
+            assert scene.mobjects[0] is scene.frame
+            assert scene.root_count() == (2 if mutation == "adopt" else 1)
+
             assert scene.time == (0 if mutation == "adopt" else 0.125)
             assert not hasattr(scene, "_fmn_owned_render_session")
 

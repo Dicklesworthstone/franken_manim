@@ -128,7 +128,7 @@ class NativeCurveLifecycle(unittest.TestCase):
                 scene = m.Scene()
                 scene.add(obj)
                 obj.init_points()
-                self.assertIs(scene.mobjects[0], obj)
+                self.assertIs(scene.mobjects[1], obj)
                 self.assertIs(obj[0], obj.label)
                 np.testing.assert_array_equal(obj.get_field("weight", 0), [3, 7])
 

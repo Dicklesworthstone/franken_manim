@@ -51,7 +51,10 @@ class ConfiguredSubdivision(unittest.TestCase):
         self.assertIs(scene.render_result, result)
         self.assertEqual(self.calls, ['setup', 'construct', 'tear_down'])
         self.assertIs(scene.frame, frame)
-        self.assertIs(scene.mobjects[0], scene.square)
+        # The list starts with the frame, as in the Reference (fm-6l2i).
+        self.assertIs(scene.mobjects[0], frame)
+        self.assertIs(scene.mobjects[1], scene.square)
+
         self.assertEqual(m._portal_scene_clock(scene), (8, 3))
 
     def test_writer_movie_path_and_flags_select_the_configured_collection(self):

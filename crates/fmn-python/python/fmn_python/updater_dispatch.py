@@ -184,17 +184,16 @@ def install_updater_dispatch(native):
 
     def update_mobjects(self, dt):
         dt = float(dt)
-        # CameraFrame is intentionally absent from the drawable Stage. It is
-        # nevertheless first in the Reference update order. Snapshot drawable
-        # roots before its callbacks, as the native scene release path does.
+        # Reference scene.py:265 updates the scene list in order. The camera
+        # frame is a member of that list (first, by its z_index) while it is
+        # listed; once clear() or remove() drops it, its updaters stop
+        # (fm-6l2i). Snapshot the roots before any callback runs, as the
+        # native scene release path does.
         roots = list(self.mobjects)
-        frame = self.frame
         jobs = NativePass()
         try:
-            delegate_update(frame, dt, jobs, (), root=True)
             for root in roots:
-                if root is not frame:
-                    delegate_update(root, dt, jobs, (), root=True)
+                delegate_update(root, dt, jobs, (), root=True)
             finish_native(jobs, jobs.roots)
         finally:
             # A later root's failure must not leak an earlier root's deferred
@@ -206,8 +205,9 @@ def install_updater_dispatch(native):
         if self.always_update_mobjects:
             return True
         # has_updaters owns the recursive/live family query. Looking only at
-        # each root's list misses callbacks on descendants and the camera.
-        return any(root.has_updaters() for root in (self.frame, *self.mobjects))
+        # each root's list misses callbacks on descendants. A listed camera
+        # frame is one of the roots (fm-6l2i).
+        return any(root.has_updaters() for root in self.mobjects)
 
     for name, function in (("update_mobjects", update_mobjects),
                            ("should_update_mobjects", should_update_mobjects)):
@@ -282,7 +282,7 @@ def install_updater_dispatch(native):
                        for name, method in methods.items())
 
         return public_update_scan(
-            [self.frame, *self.mobjects],
+            list(self.mobjects),
             (Mobject, hook_names, child_protocols, _instance_dict, _plain_instance_dict,
              member_changed, submobjects_kept, container_changed, _generic_getattr))
 

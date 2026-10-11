@@ -70,7 +70,8 @@ class CameraConfigurationTests(unittest.TestCase):
         np.testing.assert_allclose(frame.get_orientation(), before.get_orientation())
         self.assertEqual(frame.get_shape(), (4.5, 3.))
         self.assertIn(updater, frame.updaters)
-        self.assertEqual(scene.mobjects, [])
+        # The Reference's scene list starts with the frame (fm-6l2i).
+        self.assertEqual(scene.mobjects, [frame])
 
     def test_aspect_ratio_uses_actual_live_width_not_stale_recipe(self):
         scene = m.Scene(camera_config={"resolution": (120, 60), "frame_config": {"frame_shape": (8., 8.)}})

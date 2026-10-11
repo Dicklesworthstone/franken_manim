@@ -32,7 +32,9 @@ class SurfaceGeometryTests(unittest.TestCase):
         surface.passed_uv_func = sample
         with self.assertRaisesRegex(RuntimeError, 'changed during regeneration'):
             surface.init_points()
-        self.assertEqual(tuple(scene.mobjects), (surface,))
+        # The list starts with the frame, as in the Reference (fm-6l2i).
+        self.assertEqual(tuple(scene.mobjects), (scene.frame, surface))
+
         self.assertIs(surface._scene, scene)
         np.testing.assert_array_equal(surface.data, before)
         surface.passed_uv_func = lambda u, v: (u, v, 4)

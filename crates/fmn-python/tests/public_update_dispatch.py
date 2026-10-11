@@ -610,6 +610,11 @@ class PublicSceneUpdateTests(unittest.TestCase):
                 return super().update(dt)
         scene = m.Scene()
         scene.frame = Frame()
+        # As in the Reference, reassigning scene.frame does not list the new
+        # frame, and only listed mobjects update (fm-6l2i).
+        scene.update_mobjects(.125)
+        self.assertEqual(calls, [])
+        scene.add(scene.frame)
         scene.update_mobjects(.125)
         self.assertEqual(calls, [.125])
 

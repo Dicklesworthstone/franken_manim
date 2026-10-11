@@ -186,7 +186,7 @@ class AxialSolidTests(unittest.TestCase):
                 operation()
                 expected = Authored(height=3., radius=.75, axis=m.RIGHT, resolution=shape)
                 self.assertIs(actual._scene, scene)
-                self.assertIs(scene.mobjects[0], actual)
+                self.assertIs(scene.mobjects[1], actual)
                 self.assertEqual(m._surface_grid_resolution(actual), shape)
                 np.testing.assert_allclose(actual.get_points(), expected.get_points(), atol=1e-6)
 
@@ -384,7 +384,7 @@ class FlatSolidTests(unittest.TestCase):
             for operation, shape in ((lambda: None, (3, 4)), (actual.init_points, (3, 4)),
                                      (lambda: actual.set_resolution((4, 5)), (4, 5))):
                 operation()
-                self.assertIs(scene.mobjects[0], actual)
+                self.assertIs(scene.mobjects[1], actual)
                 self.assertEqual(len(calls), 3*shape[0]*shape[1])
                 calls.clear()
                 expected = m.ParametricSurface(uv, u_range=domains[0], v_range=domains[1],

@@ -87,7 +87,7 @@ class LiveMarkdownTests(unittest.TestCase):
         np.testing.assert_allclose(annotation.get_center()-block._markdown_anchor.get_center(), before, atol=1e-6)
         self.assertEqual(calls, [])
         self.assertEqual(scene.get_time(), 0)
-        self.assertEqual(tuple(scene.mobjects), (doc,))
+        self.assertEqual(tuple(scene.mobjects), (scene.frame, doc))
 
     def test_unchanged_paint_survives_reflow_and_noop_is_truly_noop(self):
         doc=MarkdownMobject('first\n\nkeep')
@@ -247,7 +247,7 @@ class LiveMarkdownTests(unittest.TestCase):
             doc.__init__('replacement')
         self.assertEqual(doc.source,'original')
         self.assertEqual(records(doc),before)
-        self.assertEqual(tuple(scene.mobjects),(doc,))
+        self.assertEqual(tuple(scene.mobjects),(scene.frame,doc))
         doc.set_source('supported edit')
 
     def test_reflow_overflow_refuses_before_publishing_new_geometry(self):
@@ -271,7 +271,7 @@ class LiveMarkdownTests(unittest.TestCase):
         doc.shift(m.RIGHT).set_color(m.RED).set_source('only one new block')
         self.assertIs(doc.restore(),doc)
         self.assertEqual(doc.source,'first\n\nsecond')
-        self.assertEqual(tuple(scene.mobjects),(doc,))
+        self.assertEqual(tuple(scene.mobjects),(scene.frame,doc))
         self.assertEqual(capture(doc),before)
         self.assertEqual(records(saved),saved_records)
         self.assertEqual(len(doc.submobjects),3)
@@ -349,7 +349,7 @@ class LiveMarkdownTests(unittest.TestCase):
         scene=m.Scene();scene.add(doc)
         self.assertIs(doc.get_blocks(),doc.get_blocks())
         scene.play(doc.get_blocks().animate.shift(m.RIGHT),run_time=.25)
-        self.assertEqual(tuple(scene.mobjects),(doc,))
+        self.assertEqual(tuple(scene.mobjects),(scene.frame,doc))
         doc.set_source('one\n\ntwo\n\nnewly inserted')
         self.assertEqual(len(doc.block_ranges),3)
         actual=m.Camera(resolution=(192,108)).capture_snapshot(*scene.mobjects).png()
@@ -359,7 +359,7 @@ class LiveMarkdownTests(unittest.TestCase):
         doc=MarkdownMobject('paragraph\n\n```rust\nlet x = 1;\n```')
         scene=m.Scene();scene.add(doc)
         scene.play(doc.select_text('let x')[0].animate.shift(.3*m.RIGHT),run_time=.25)
-        self.assertEqual(tuple(scene.mobjects),(doc,))
+        self.assertEqual(tuple(scene.mobjects),(scene.frame,doc))
         before=capture(doc)
         doc.set_source(doc.source+'\n\n| Name | Value |\n| --- | --- |\n| ready | 1 |\n')
         self.assertEqual(doc.block_kinds[-1],'table')

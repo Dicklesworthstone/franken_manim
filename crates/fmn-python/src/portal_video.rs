@@ -100,6 +100,9 @@ impl PortalVideoConfig {
 }
 
 pub(crate) fn check_scene_ownership(scene: &Bound<'_, PyScene>) -> PyResult<()> {
+    // A fresh scene's arena holds its own listed camera frame (fm-6l2i), a
+    // point-less entry the arena replacement carries across.
+    let frame = crate::scene_frame_entry(scene)?.map(|(_, mob)| mob);
     let scene = scene.try_borrow()?;
     if scene
         .render
@@ -111,8 +114,9 @@ pub(crate) fn check_scene_ownership(scene: &Bound<'_, PyScene>) -> PyResult<()> 
             "a portal render generation is already active",
         ));
     }
-    if !scene.proxies.borrow().is_empty()
-        || !scene.engine.borrow().stage().roots().is_empty()
+    let only_frame = |mob: &fmn_mobject::Mob| Some(*mob) == frame;
+    if !scene.proxies.borrow().keys().all(only_frame)
+        || !scene.engine.borrow().stage().roots().iter().all(only_frame)
         || scene.engine.borrow().stage().time() != 0.0
         || !scene.engine.borrow().sound_requests().is_empty()
     {

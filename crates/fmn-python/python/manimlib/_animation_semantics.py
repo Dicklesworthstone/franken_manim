@@ -2014,6 +2014,14 @@ def _install_camera_choreography(g):
                         if root not in present:
                             self.add(root)
                             present.update(root.get_family())
+                elif (isinstance(animation.mobject, CameraFrame)
+                      and animation.mobject not in present):
+                    # The frame is a member of the scene list (fm-6l2i); once
+                    # clear() or remove() dropped it, animating it adds it
+                    # back, as begin_animations does. Its pose stays on the
+                    # camera track; the slot below carries no frame state.
+                    self.add(animation.mobject)
+                    present.add(animation.mobject)
                 children.append(make_driver(self, animation))
             self._adopt(slot)
             clock = ClockDriver(self, slot, children, animations)

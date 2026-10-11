@@ -71,7 +71,7 @@ class NativeMarkdownTests(unittest.TestCase):
         scene=m.Scene(); scene.add(obj)
         with self.assertRaisesRegex(ValueError, 'detached'):
             m._build_markdown(obj, m._native_shell_factory, 'ok')
-        self.assertEqual(tuple(scene.mobjects), (obj,))
+        self.assertEqual(tuple(scene.mobjects), (scene.frame, obj))
         np.testing.assert_array_equal(obj.data, before)
 
 

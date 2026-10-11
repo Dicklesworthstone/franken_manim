@@ -90,7 +90,7 @@ class SurfaceMeshTests(unittest.TestCase):
         wires[1].add_updater(callback, call=False)
         source.shift((0, 0, 2))
         mesh.init_points()
-        self.assertEqual(tuple(scene.mobjects), (source, mesh))
+        self.assertEqual(tuple(scene.mobjects), (scene.frame, source, mesh))
         self.assertEqual(tuple(mesh.submobjects), (*wires, annotation))
         self.assertEqual(calls, [])
         self.assertIs(wires[1].updaters[0], callback)
@@ -127,7 +127,7 @@ class SurfaceMeshTests(unittest.TestCase):
         self.assert_planar_wires(mesh, (2, 1), .01)
         self.assertNotIn(mesh, old[(0, 2)].parents)
         self.assertTrue(np.isfinite(old[(0, 2)].get_points()).all())
-        self.assertEqual(tuple(scene.mobjects), (mesh,))
+        self.assertEqual(tuple(scene.mobjects), (scene.frame, mesh))
 
     def test_singleton_strip_and_empty_sources_keep_existing_native_semantics(self):
         for shape in ((0, 0), (0, 3), (3, 0), (1, 1), (1, 7), (5, 1)):

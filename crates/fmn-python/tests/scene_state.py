@@ -92,8 +92,10 @@ def ordered_roots():
     scene.add(right, left)
     assert not state.mobjects_match(scene.get_state())
     state.restore_scene(scene)
-    assert len(scene.mobjects) == 2
-    assert scene.mobjects[0] is left and scene.mobjects[1] is right
+    # clear() dropped the frame; the state restores it first (fm-6l2i).
+    assert len(scene.mobjects) == 3
+    assert scene.mobjects[0] is scene.frame
+    assert scene.mobjects[1] is left and scene.mobjects[2] is right
 
 
 def scene_mobjects_follow_every_structural_change():
@@ -106,37 +108,40 @@ def scene_mobjects_follow_every_structural_change():
         return [id(mob) for mob in scene.mobjects]
 
     scene = m.Scene()
+    frame = id(scene.frame)  # the list starts with the frame (fm-6l2i)
     a, b, c = m.Square(), m.Circle(), m.Dot()
     group = m.Group(a)
     scene.add(group, b)
-    assert roots(scene) == [id(group), id(b)] == roots(scene)
+    assert roots(scene) == [frame, id(group), id(b)] == roots(scene)
     assert all(x is y for x, y in zip(scene.mobjects, scene.mobjects))
     scene.remove(b)
-    assert roots(scene) == [id(group)]
+    assert roots(scene) == [frame, id(group)]
     scene.add(c)
-    assert roots(scene) == [id(group), id(c)]
+    assert roots(scene) == [frame, id(group), id(c)]
     scene.bring_to_back(c)
-    assert roots(scene) == [id(c), id(group)]
+    assert roots(scene) == [id(c), frame, id(group)]
     group.add(b)
-    assert roots(scene) == [id(c), id(group)]
+    assert roots(scene) == [id(c), frame, id(group)]
     assert [id(x) for x in group.submobjects] == [id(a), id(b)]
     group.set_submobjects([b, a])
-    assert [id(x) for x in scene.mobjects[1].submobjects] == [id(b), id(a)]
+    assert [id(x) for x in scene.mobjects[2].submobjects] == [id(b), id(a)]
     group.remove(b)
-    assert [id(x) for x in scene.mobjects[1].submobjects] == [id(a)]
+    assert [id(x) for x in scene.mobjects[2].submobjects] == [id(a)]
     # Removing a rooted member ungroups its ancestor in place.
     scene.remove(a)
-    assert roots(scene) == [id(c)]
+    assert roots(scene) == [id(c), frame]
     # A root whose proxy may die with its last Python reference: the next
     # read must still project it, then reuse whatever proxy it projected.
     scene.add(m.Square())
     gc.collect()
     shells = scene.mobjects
-    assert len(shells) == 2 and shells[0] is c and isinstance(shells[1], m.Mobject)
-    kept = shells[1]
+    # add() re-sorts by z_index, which returns the frame (-1) ahead of c.
+    assert len(shells) == 3 and shells[0] is scene.frame and shells[1] is c
+    assert isinstance(shells[2], m.Mobject)
+    kept = shells[2]
     del shells
     gc.collect()
-    assert scene.mobjects[1] is kept
+    assert scene.mobjects[2] is kept
 
 
 def native_only_edits_reach_python_through_scene_mobjects():
@@ -213,7 +218,7 @@ def camera_pose_and_callbacks():
     restored_default.to_default_state()
     close(restored_default.orientation(), (0., 0., 1., 0.))
     assert len(frame.updaters) == 1 and frame.updaters[0] is rotate
-    assert all(obj is not frame for obj in scene.mobjects)
+    assert scene.mobjects == [frame]
 
 
 def native_clock_and_bytes():
@@ -311,7 +316,7 @@ def foreign_owner_refusal():
         raise AssertionError("a checkpoint cannot be restored into another arena")
     close(a.get_center(), m.ORIGIN)
     close(b.get_center(), 3 * m.RIGHT)
-    assert source.mobjects[0] is a and target.mobjects[0] is b
+    assert source.mobjects[1] is a and target.mobjects[1] is b
 
 
 def ignored_camera():
@@ -326,6 +331,9 @@ def ignored_camera():
     close(scene.frame.get_center(), 2 * m.RIGHT)
     close(square.get_center(), m.ORIGIN)
     assert scene.get_time() == state.time
+    # The ignored frame was not saved, so the restore leaves it unlisted; the
+    # Reference's list after this restore is [Square] (fm-6l2i).
+    assert scene.mobjects == [square]
 
 
 def rendered_restore():

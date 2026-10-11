@@ -86,7 +86,7 @@ class ImplicitLifecycle(unittest.TestCase):
         scene.add(obj)
         obj.func = lambda x, y: y-.5
         obj.init_points()
-        self.assertIs(scene.mobjects[0], obj)
+        self.assertIs(scene.mobjects[1], obj)
         self.assertIs(obj._scene, scene)
         self.assertIs(obj[0], obj.label)
         self.assertEqual(obj.get_stroke_color(), m.BLUE)

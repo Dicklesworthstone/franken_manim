@@ -217,9 +217,14 @@ def install_scene_state(native: Any) -> None:
         )
         # Copying a bound Mobject allocates native helper entries. Capture
         # AFTER those allocations. Ignoring a non-drawable camera does not
-        # require discarding the native record/clock/RNG checkpoint.
+        # require discarding the native record/clock/RNG checkpoint, even
+        # though the frame is a listed root (fm-6l2i). The restore reseats
+        # every captured root, then unlists an ignored frame, as the
+        # Reference's restore keeps only the saved mobjects.
+        self._checkpoint_roots = all_roots
         self._checkpoint = (bytes(scene._checkpoint_bytes())
-                            if len(roots) == len(all_roots) else None)
+                            if all(id(root) not in ignored or root is frame
+                                   for root in all_roots) else None)
 
     def attributes_match(self, other, root_id):
         ids = [row[0] for row in self._root_topologies[root_id]]

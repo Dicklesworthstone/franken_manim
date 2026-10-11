@@ -74,7 +74,7 @@ class InfiniteReadoutTests(unittest.TestCase):
                 self.assert_finite_geometry(number)
                 self.assertTrue(all(child.get_fill_color() == m.BLUE
                                     for child in number.family_members_with_points()))
-                if bound: self.assertIs(scene.mobjects[0], number)
+                if bound: self.assertIs(scene.mobjects[1], number)
 
     def test_generated_glyphs_are_replaced_without_losing_custom_records_or_children(self):
         number = DecoratedNumber(2.5)

@@ -73,7 +73,7 @@ class SurfaceRegriddingTests(unittest.TestCase):
         old_view = obj.get_points(); before = old_view.copy()
         obj.set_resolution((7, 5))
         self.assertIs(obj._scene, scene)
-        self.assertEqual(tuple(scene.mobjects), (obj,))
+        self.assertEqual(tuple(scene.mobjects), (scene.frame, obj))
         self.assertEqual(tuple(obj.submobjects), (child,))
         self.assertIs(obj.updaters[0], callback)
         self.assertEqual(calls, [])
@@ -310,7 +310,7 @@ class SurfaceRegriddingTests(unittest.TestCase):
         reference = m.SurfaceMesh(surface((7, 9)), resolution=(3, 4))
         for a, b in zip(mesh, reference):
             np.testing.assert_array_equal(a.get_points(), b.get_points())
-        self.assertEqual(tuple(scene.mobjects), (obj, mesh))
+        self.assertEqual(tuple(scene.mobjects), (scene.frame, obj, mesh))
 
     def test_raw_bridge_keeps_source_and_destination_material_owners(self):
         target, source = surface((2, 3), color=m.RED), surface((5, 4), 2, color=m.BLUE)

@@ -48,7 +48,7 @@ def rotation_is_absolute_at_every_native_sample():
                 close(frame.get_orientation(), start.copy().rotate(angle, axis=(0, 2, 1)).get_orientation())
                 close(frame.get_shape(), start.get_shape())
                 assert frame.get_field_of_view() == 0.9
-                assert frame._core is core and scene.mobjects == [] and not frame._is_bound()
+                assert frame._core is core and scene.mobjects == [frame] and frame._is_bound()
 
 
 def rotation_obeys_live_rates_windows_and_final_alpha():
@@ -85,7 +85,7 @@ def succession_captures_predecessor_camera_orientation():
     expected = initial.copy().rotate(0.7, axis=m.RIGHT)
     close(second.starting_mobject.get_orientation(), expected.get_orientation())
     close(frame.get_orientation(), expected.rotate(-1.3, axis=m.UP).get_orientation())
-    assert not frame._is_bound() and scene.mobjects == []
+    assert frame._is_bound() and scene.mobjects == [frame]
 
 
 def path_uses_true_length_and_preserves_optical_pose():
@@ -101,7 +101,7 @@ def path_uses_true_length_and_preserves_optical_pose():
         close(quaternion, orientation)
     close(scene.frame.get_shape(), shape)
     assert scene.frame.get_field_of_view() == 0.8
-    assert not path._is_bound() and scene.mobjects == []
+    assert not path._is_bound() and scene.mobjects == [scene.frame]
 
 
 def simultaneous_path_and_rotation_keep_native_play_order():
@@ -119,7 +119,7 @@ def simultaneous_path_and_rotation_keep_native_play_order():
         close(center, (index, 0, 0))
         close(quaternion, start.copy().rotate(1.2 * index / 4).get_orientation())
     close(square.get_center(), 2 * m.UP)
-    assert scene.mobjects == [square] and not scene.frame._is_bound()
+    assert scene.mobjects == [scene.frame, square] and scene.frame._is_bound()
 
 
 def tracking_uses_construction_offset_and_current_sibling_state():
@@ -134,7 +134,7 @@ def tracking_uses_construction_offset_and_current_sibling_state():
     samples = camera_samples(scene)
     scene.play(dot.animate(rate_func=m.linear).shift(4 * m.RIGHT), follower, run_time=4 / 30)
     close([sample[0] for sample in samples], [(4, 1, 0), (5, 1, 0), (6, 1, 0), (7, 1, 0)])
-    assert scene.mobjects == [dot] and not scene.frame._is_bound()
+    assert scene.mobjects == [scene.frame, dot] and scene.frame._is_bound()
 
 
 def tracking_samples_authored_centers_exactly_once_at_construction():
@@ -174,9 +174,9 @@ def foreign_helpers_and_destructive_camera_operations_are_refused():
             raise AssertionError("invalid camera motion was accepted")
         close(scene.frame.get_center(), before.get_center())
         close(scene.frame.get_orientation(), before.get_orientation())
-        assert scene.time == 0 and scene.mobjects == []
-        assert not scene.frame._is_updating_suspended() and not scene.frame._is_bound()
-    assert other.mobjects == [path, dot]
+        assert scene.time == 0 and scene.mobjects == [scene.frame]
+        assert not scene.frame._is_updating_suspended() and scene.frame._is_bound()
+    assert other.mobjects == [other.frame, path, dot]
 
 
 def authored_rotation_dispatch_preserves_live_receiver():

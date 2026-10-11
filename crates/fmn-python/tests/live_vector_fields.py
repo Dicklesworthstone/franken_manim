@@ -27,7 +27,7 @@ class LiveVectorFieldAcceptance(unittest.TestCase):
         root = field
         samples = np.array([[-1., -1.], [0., 0.], [1., 1.]])
         field.set_sample_coords(samples).update_vectors()
-        self.assertIs(scene.mobjects[0], root)
+        self.assertIs(scene.mobjects[1], root)
         self.assertEqual(field.get_num_points(), 23)
         np.testing.assert_allclose(field.get_points()[0::8], axes.c2p(*samples.T), atol=2e-5)
         origin = axes.c2p(0., 0.)

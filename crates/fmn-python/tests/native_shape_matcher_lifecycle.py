@@ -80,7 +80,7 @@ class NativeShapeMatcherLifecycle(unittest.TestCase):
         target.shift(m.UP).stretch(2, 0)
         self.assertIs(obj.surround(target, .4), obj)
         self.assertEqual(hash(obj), identity)
-        self.assertIs(scene.mobjects[0], obj)
+        self.assertIs(scene.mobjects[1], obj)
         self.assertIs(obj[0], obj.marker)
         self.assertIs(obj.updaters[0], updater)
         self.assert_points(obj.data["heat"], .25)

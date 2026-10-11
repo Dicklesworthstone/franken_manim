@@ -21,7 +21,7 @@ class PreambleScene(m.Scene):
         number = second.make_number_changeable("2.00")
         self.play(m.ChangeDecimalToValue(number, 4), run_time=1 / 4)
         self.wait(1 / 8)
-        assert list(self.mobjects) == [label, second]
+        assert list(self.mobjects) == [self.frame, label, second]
         assert number.get_value() == 4
         assert second.get_part_by_tex(r"\decimalmob")[0] is number
         assert second.get_part_by_tex("x").family_members_with_points()

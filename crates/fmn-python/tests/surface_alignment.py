@@ -119,7 +119,7 @@ class SurfaceAlignmentTests(unittest.TestCase):
         np.testing.assert_array_equal(right.data, before)
         np.testing.assert_allclose(left.uv_to_point(.25, .5), (.25, .5, 2.125), atol=2e-6)
         self.assertIs(left._scene, scene)
-        self.assertEqual(tuple(scene.mobjects), (left,))
+        self.assertEqual(tuple(scene.mobjects), (scene.frame, left))
 
     def test_every_normal_and_color_lane_is_aligned(self):
         left, right = surface(), surface((3, 4), 2)
@@ -198,7 +198,7 @@ class SurfaceAlignmentTests(unittest.TestCase):
         scene = m.Scene()
         scene.add(left, right)
         left.align_points(right)
-        self.assertEqual(tuple(scene.mobjects), (left, right))
+        self.assertEqual(tuple(scene.mobjects), (scene.frame, left, right))
         self.assertIs(left.submobjects[0], child)
         self.assertIs(left.updaters[0], callback)
         self.assertEqual(calls, [])
@@ -232,7 +232,7 @@ class SurfaceAlignmentTests(unittest.TestCase):
         scene = m.Scene()
         scene.add(source)
         scene.play(m.ReplacementTransform(source, target), run_time=.25)
-        self.assertEqual(tuple(scene.mobjects), (target,))
+        self.assertEqual(tuple(scene.mobjects), (scene.frame, target))
         self.assert_topology(target, (3, 2))
         np.testing.assert_array_equal(target.data, before)
 

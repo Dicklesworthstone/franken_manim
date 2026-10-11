@@ -17,11 +17,11 @@ class ComplexMatrixTests(unittest.TestCase):
         self.assertIs(matrix.elements[0], circle)
         self.assertIs(matrix.elements[1], square)
         scene.add(matrix)
-        self.assertEqual(list(scene.mobjects), [matrix])
+        self.assertEqual(list(scene.mobjects), [scene.frame, matrix])
         before = circle.get_center().copy()
         scene.play(circle.animate.shift(m.UP), run_time=.25)
         np.testing.assert_allclose(circle.get_center(), before + m.UP, atol=1e-6)
-        self.assertEqual(list(scene.mobjects), [matrix])
+        self.assertEqual(list(scene.mobjects), [scene.frame, matrix])
         self.assertIs(matrix.get_row(0)[0], circle)
         self.assertIs(matrix.get_column(0)[0], circle)
 
@@ -77,7 +77,7 @@ class ComplexMatrixTests(unittest.TestCase):
                 matrix = m.Matrix([[shape, m.Tex("x")], [m.Square(side_length=.5), 1.25]])
                 self.add(matrix)
                 self.play(shape.animate.shift(.5 * m.UP), run_time=.5)
-                assert list(self.mobjects) == [matrix]
+                assert list(self.mobjects) == [self.frame, matrix]
                 assert matrix.get_row(0)[0] is shape
                 assert matrix.get_column(0)[0] is shape
         root = Path(tempfile.mkdtemp(prefix="fmn-geometry-matrix-"))
@@ -145,7 +145,7 @@ class ComplexMatrixTests(unittest.TestCase):
         scene.add(parent)
         scene.play(m.ChangeDecimalToValue(entries[0], -2j),
                    m.ChangeDecimalToValue(entries[1], 7), run_time=0.5)
-        self.assertEqual(list(scene.mobjects), [parent])
+        self.assertEqual(list(scene.mobjects), [scene.frame, parent])
         self.assertEqual(list(matrix.elements), entries)
         self.assertEqual(list(matrix.brackets), brackets)
         for index, expected in enumerate((-2j, 7)):

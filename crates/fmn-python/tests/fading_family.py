@@ -43,7 +43,7 @@ def unequal_and_nested_sources_restore_the_original_graph():
             animation = m.FadeTransformPieces(source, target)
             saved_copy = snapshot(animation._fade_saved_source)
             scene.play(m.AnimationGroup(animation), run_time=.125)
-            assert scene.mobjects == [target]
+            assert scene.mobjects == [scene.frame, target]
             assert_restored(source, saved)
             assert_restored(animation._fade_saved_source, saved_copy)
             assert not source._is_updating_suspended()
@@ -75,7 +75,7 @@ def a_later_saved_state_does_not_replace_the_fade_snapshot():
     newer = source.saved_state
     scene = m.Scene().add(source)
     scene.play(animation, run_time=.125)
-    assert source.saved_state is newer and scene.mobjects == []
+    assert source.saved_state is newer and scene.mobjects == [scene.frame]
     assert_restored(source, initial)
 
 

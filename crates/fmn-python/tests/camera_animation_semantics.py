@@ -95,8 +95,10 @@ def camera_builder_owns_runtime_and_renderer_identity():
     np.testing.assert_allclose(np.array(samples)[:, 0], [1., 2., 3., 4.], atol=1e-8)
     assert math.isclose(scene.time, 4 / 30)
     assert scene.frame is live and scene.camera.frame is live and live._core is core
-    assert not live._is_bound()
-    assert scene.mobjects == []
+    # The frame is the scene list's first member (fm-6l2i); its pose rode
+    # the camera track, not the record lerp.
+    assert live._is_bound()
+    assert scene.mobjects == [live]
 
 
 def nested_camera_succession_uses_predecessor_pose():
@@ -112,8 +114,8 @@ def nested_camera_succession_uses_predecessor_pose():
     np.testing.assert_allclose(np.array(samples)[:, 0], [.5, 1., 1.5, 2., 2.5, 3., 3.], atol=1e-8)
     np.testing.assert_allclose(second.starting_mobject.get_center(), [1., 0., 0.])
     assert first.mobject is second.mobject is live
-    assert not live._is_bound()
-    assert scene.mobjects == []
+    assert live._is_bound()
+    assert scene.mobjects == [live]
 
 
 def authored_camera_path_runs_during_native_drawable_coplay():
@@ -132,8 +134,8 @@ def authored_camera_path_runs_during_native_drawable_coplay():
                run_time=4 / 30)
     np.testing.assert_allclose([sample[0][1] for sample in samples], [.75, 1., .75, 0.], atol=1e-8)
     np.testing.assert_allclose([sample[1][0] for sample in samples], [1., 2., 3., 4.], atol=1e-6)
-    assert scene.mobjects == [square]
-    assert not scene.frame._is_bound()
+    assert scene.mobjects == [scene.frame, square]
+    assert scene.frame._is_bound()
 
 
 def camera_authored_lifecycle_keeps_source_identity():
@@ -161,7 +163,7 @@ def camera_play_keeps_present_roots_in_draw_order():
     scene = Scene()
     first, tracker, last = Square(), ValueTracker(0.), Square()
     scene.add(first, tracker, last)
-    order = [id(first), id(tracker), id(last)]
+    order = [id(scene.frame), id(first), id(tracker), id(last)]
     scene.play(first.animate.shift((1., 0., 0.)), scene.frame.animate.shift((1., 0., 0.)), run_time=2 / 30)
     assert [id(m) for m in scene.mobjects] == order
     scene.play(tracker.animate.set_value(1.), scene.frame.animate.shift((-1., 0., 0.)), run_time=2 / 30)
@@ -235,11 +237,11 @@ def camera_failure_unwinds_and_allows_next_play():
     else:
         raise AssertionError("authored camera failure was swallowed")
     assert not scene.frame._is_updating_suspended()
-    assert not scene.frame._is_bound()
-    assert scene.mobjects == [square]
+    assert scene.frame._is_bound()
+    assert scene.mobjects == [scene.frame, square]
     scene.play(scene.frame.animate.shift((2., 0., 0.)), run_time=2 / 30, rate_func=linear)
     np.testing.assert_allclose(scene.frame.get_center(), [2., 0., 0.], atol=1e-8)
-    assert scene.mobjects == [square]
+    assert scene.mobjects == [scene.frame, square]
 
 
 def nested_camera_changes_real_rendered_frames():

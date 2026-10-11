@@ -1604,6 +1604,86 @@ fn register_proxy(
     Ok(())
 }
 
+/// The camera frame Scene construction listed, and its handle, while it is
+/// bound to this scene's current engine (fm-6l2i). Construction lists the frame
+/// as the Reference's `self.mobjects = [self.camera.frame]` does, so a fresh
+/// scene's arena holds exactly this one point-less entry. Reassigning
+/// `scene.frame` later does not unlist it, as in the Reference.
+pub(crate) fn scene_frame_entry<'py>(
+    scene: &Bound<'py, PyScene>,
+) -> PyResult<Option<(Bound<'py, BridgeMobject>, Mob)>> {
+    // A bare `_SceneCore` has no constructed frame.
+    let Some(frame) = scene
+        .getattr("_fmn_construction_frame")
+        .ok()
+        .and_then(|frame| frame.cast_into::<BridgeMobject>().ok())
+    else {
+        return Ok(None);
+    };
+    let engine = Rc::clone(&scene.borrow().engine);
+    let mob = {
+        let cell = frame.borrow();
+        match (&cell.engine, cell.mob) {
+            (Some(owner), Some(mob)) if same_engine(owner, &engine) => Some(mob),
+            _ => None,
+        }
+    };
+    Ok(mob.map(|mob| (frame, mob)))
+}
+
+/// Install a replacement arena for a pristine scene, carrying the scene's own
+/// camera frame across (fm-6l2i): it moves into the new Stage, is re-listed
+/// first if it was listed, and its proxy is re-registered there. Rendering,
+/// recording, Studio and FMTL bundle generations replace the arena to select
+/// the clock and seed; without this the frame would stay bound to the
+/// discarded one.
+pub(crate) fn install_pristine_arena(
+    scene: &Bound<'_, PyScene>,
+    replacement: Engine,
+) -> PyResult<()> {
+    let py = scene.py();
+    let frame = scene_frame_entry(scene)?;
+    let carried = match &frame {
+        Some((_, old_mob)) => {
+            let old = Rc::clone(&scene.borrow().engine);
+            let listed = old.borrow().stage().roots().contains(old_mob);
+            let new_mob = {
+                let mut source = old.borrow_mut();
+                let mut target = replacement.borrow_mut();
+                let new_mob = source
+                    .stage_mut()
+                    .move_into(*old_mob, target.stage_mut())
+                    .map_err(stage_error)?;
+                target.stage_mut().pin(new_mob).map_err(stage_error)?;
+                if listed {
+                    target
+                        .add(&[new_mob])
+                        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+                }
+                new_mob
+            };
+            Some((*old_mob, new_mob))
+        }
+        None => None,
+    };
+    {
+        let mut owner = scene.try_borrow_mut()?;
+        owner.engine = Rc::clone(&replacement);
+        owner.render_invocations.clear();
+        owner.render_audio_inputs.clear();
+    }
+    if let (Some((proxy, _)), Some((old_mob, new_mob))) = (frame, carried) {
+        {
+            let mut cell = proxy.borrow_mut();
+            cell.engine = Some(Rc::clone(&replacement));
+            cell.mob = Some(new_mob);
+        }
+        scene.borrow().proxies.borrow_mut().remove(&old_mob);
+        register_proxy(py, scene, new_mob, proxy.as_any())?;
+    }
+    Ok(())
+}
+
 /// A complete `_engine_roots` projection: every member of every root family
 /// had a registered live proxy whose Python `submobjects` list held exactly
 /// its native children, in order.
@@ -7964,14 +8044,6 @@ fn update_targets(scene: &Bound<'_, PyScene>) -> Vec<Mob> {
     targets
 }
 
-/// The Reference keeps the camera frame at the head of `Scene.mobjects`, so
-/// its host-language updaters run before every drawable-root updater.  The
-/// portal deliberately keeps CameraFrame out of Marionette's drawable Stage;
-/// recover that same update ordering through the real Python frame object.
-fn camera_frame<'py>(scene: &Bound<'py, PyScene>) -> PyResult<Bound<'py, PyAny>> {
-    scene.getattr("frame")
-}
-
 fn run_proxy_updaters(proxy: &Bound<'_, PyAny>, dt: f64) -> PyResult<()> {
     let py = proxy.py();
     crossing::record(CrossingClass::Other);
@@ -7994,11 +8066,14 @@ fn run_proxy_updaters(proxy: &Bound<'_, PyAny>, dt: f64) -> PyResult<()> {
 /// Run the portal half of Scene.update_mobjects with no Scene/Stage borrow
 /// live. Choreo's stepped play releases exactly at this call site; ordinary
 /// `Scene.update(dt)` uses the same helper before its native updater pass.
+///
+/// The camera frame is a scene root like any other (fm-6l2i): first while it
+/// is listed, as in the Reference's `Scene.mobjects`, and not updated once
+/// `clear()`/`remove()` has dropped it.
 fn run_python_updaters(scene: &Bound<'_, PyScene>, dt: f64) -> PyResult<u64> {
     let targets = update_targets(scene);
     let py = scene.py();
     let python_start = Instant::now();
-    run_proxy_updaters(&camera_frame(scene)?, dt)?;
     for target in targets {
         let Some(proxy) = live_proxy(py, scene, target) else {
             continue;
@@ -8034,9 +8109,6 @@ fn run_resumed_python_updaters(scene: &Bound<'_, PyScene>, roots: &[Mob]) -> PyR
 
 fn has_python_updaters(scene: &Bound<'_, PyScene>) -> PyResult<bool> {
     let py = scene.py();
-    if camera_frame(scene)?.getattr("updaters")?.is_truthy()? {
-        return Ok(true);
-    }
     for target in update_targets(scene) {
         if let Some(proxy) = live_proxy(py, scene, target)
             && proxy.getattr("updaters")?.is_truthy()?
@@ -8201,13 +8273,11 @@ fn begin_portal_render(slf: &Bound<'_, PyScene>, request: PortalRenderRequest) -
             "a portal render generation is already active",
         ));
     }
-    {
-        let mut scene = slf.borrow_mut();
-        scene.engine = replacement;
-        scene.render_invocations.clear();
-        scene.render_audio_inputs.clear();
-        scene.render_routes = PortalRoutes::default();
+    if let Err(error) = install_pristine_arena(slf, replacement) {
+        session.abort();
+        return Err(error);
     }
+    slf.borrow_mut().render_routes = PortalRoutes::default();
     *render = Some(session);
     Ok(())
 }
@@ -8855,8 +8925,7 @@ impl PyScene {
     fn update_batched(slf: &Bound<'_, Self>, dt: f64) -> PyResult<()> {
         let targets = update_targets(slf);
         let py = slf.py();
-        let mut batch = Vec::with_capacity(targets.len() + 1);
-        batch.push(camera_frame(slf)?);
+        let mut batch = Vec::with_capacity(targets.len());
         for target in targets {
             if let Some(proxy) = live_proxy(py, slf, target) {
                 batch.push(proxy);
@@ -9275,12 +9344,22 @@ impl PyScene {
     /// root count, total family membership, and the aggregate family bbox
     /// (zero boxes skipped) — measured on the Stage directly, so the
     /// numbers never depend on Python proxy liveness or GC timing.
+    ///
+    /// The facts describe the scene's content. The listed camera frame
+    /// (fm-6l2i) is left out, as the structural-facts oracle drops it from
+    /// the roots and counts it in its own `camera_frame_roots` fact.
     #[allow(clippy::type_complexity)]
     fn _engine_facts(slf: &Bound<'_, Self>) -> PyResult<(usize, usize, [f64; 3], [f64; 3])> {
+        let frame = scene_frame_entry(slf)?.map(|(_, mob)| mob);
         let engine = Rc::clone(&slf.borrow().engine);
         let scene = engine.borrow();
         let stage = scene.stage();
-        let roots = stage.roots().to_vec();
+        let roots: Vec<Mob> = stage
+            .roots()
+            .iter()
+            .copied()
+            .filter(|&root| Some(root) != frame)
+            .collect();
         let mut family_total = 0usize;
         let mut low = [f64::INFINITY; 3];
         let mut high = [f64::NEG_INFINITY; 3];

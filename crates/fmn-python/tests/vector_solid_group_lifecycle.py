@@ -205,7 +205,7 @@ class VectorSolidLifecycleTests(unittest.TestCase):
             with self.subTest(cls=cls):
                 back,front=cls(z_index=-1),cls(z_index=1)
                 scene=m.Scene();scene.add(front,back)
-                self.assertEqual(scene.get_mobjects(),[back,front])
+                self.assertEqual(scene.get_mobjects(),[scene.frame,back,front])
 
     def test_explicit_channels_beat_the_color_shorthand_which_beats_defaults(self):
         # fm-qead (BN-07 C-19): explicit fill_color/stroke_color > color= >

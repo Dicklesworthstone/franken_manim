@@ -140,14 +140,6 @@
       "reason": "Default stroke/fill colors differ: VCube stroke, NumberPlane axis fill. Annulus has taken VMobject's unset-channel defaults since fm-78b6's native-root fix."
     },
     {
-      "id": "fm-6l2i-camera-frame-root",
-      "kind": "open-bead",
-      "ref": "fm-6l2i",
-      "scope": "scenes",
-      "fact": "camera_frame_roots",
-      "reason": "The Reference's scene.mobjects starts with the CameraFrame; the portal's does not."
-    },
-    {
       "id": "bn02-frame-count",
       "kind": "behavior-note",
       "ref": "BN-02",

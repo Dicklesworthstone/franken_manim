@@ -142,7 +142,7 @@ def explicit_cancellation_restores_state_and_reports_abort_failure():
         assert animation.abort_calls == 1 and not root.updaters
         root.clear_updaters()
         assert animation.abort_calls == 1
-        assert scene.mobjects == [objects[0]]
+        assert scene.mobjects == [scene.frame, objects[0]]
 
 
 def self_cancellation_then_failure_unwinds_once():
@@ -181,7 +181,7 @@ def nested_children_and_external_ancestors_are_recovered():
     restored(before)
     assert first.abort_calls == 1 and not anchor.updaters
     # The original scene roots are not removed or replaced by updater cleanup.
-    assert scene.mobjects == [objects[0], other]
+    assert scene.mobjects == [scene.frame, objects[0], other]
 
 
 def wait_failure_leaves_the_same_native_scene_usable():

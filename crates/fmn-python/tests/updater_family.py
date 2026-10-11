@@ -17,7 +17,7 @@ def detached_recursive_flags_survive_scene_adoption():
     assert flags(root) == [True] * 4
     assert root.resume_updating(call_updater=False) is root
     assert flags(root) == [False] * 4
-    assert scene.mobjects == [root]
+    assert scene.mobjects == [scene.frame, root]
 
 
 def self_only_scope_keeps_descendants_and_callbacks_untouched():
@@ -64,7 +64,7 @@ def detached_parent_of_bound_child_is_not_an_invisible_suspension_barrier():
     assert flags(wrapper) == [True] * 3
     a.resume_updating(recurse=False, call_updater=False)
     assert flags(wrapper) == [False, False, True]
-    assert scene.mobjects == [a]
+    assert scene.mobjects == [scene.frame, a]
     assert not wrapper._is_bound() and not b._is_bound()
 
 

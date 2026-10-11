@@ -803,8 +803,9 @@ outsider = Mobject()
 parent.add(child)
 assert parent.family_size() == 2
 scene.add(parent, outsider)
-assert scene.root_count() == 2
-assert scene.mobjects[0] is parent
+# The scene list starts with the camera frame (fm-6l2i).
+assert scene.root_count() == 3
+assert scene.mobjects[0] is scene.frame and scene.mobjects[1] is parent
 assert parent.family_size() == 2
 parent.submobjects.clear()
 assert parent.family_size() == 1
@@ -1074,13 +1075,16 @@ order_middle = Mobject()
 order_front = Mobject()
 order_scene.add(order_back, order_middle, order_front)
 assert order_scene.bring_to_front(order_back) is order_scene
-assert order_scene.mobjects == [order_middle, order_front, order_back]
+order_frame = order_scene.frame  # first in the list, z_index -1 (fm-6l2i)
+assert order_scene.mobjects == [order_frame, order_middle, order_front, order_back]
 assert order_scene.bring_to_back(order_back, order_front) is order_scene
-assert order_scene.mobjects == [order_back, order_front, order_middle]
+assert order_scene.mobjects == [order_back, order_front, order_frame, order_middle]
 
 detached_back = Mobject()
 assert order_scene.bring_to_back(detached_back) is order_scene
-assert order_scene.mobjects == [detached_back, order_back, order_front, order_middle]
+assert order_scene.mobjects == [
+    detached_back, order_back, order_front, order_frame, order_middle,
+]
 assert order_scene.mobjects[0] is detached_back
 
 order_before_refusal = list(order_scene.mobjects)
@@ -1119,27 +1123,34 @@ assert replace_scene.replace(
     replacement_right,
 ) is replace_scene
 assert replace_scene.mobjects == [
+    replace_scene.frame,
     replace_back,
     replacement_left,
     replacement_right,
     replace_front,
 ]
-assert replace_scene.mobjects[1] is replacement_left
-assert replace_scene.mobjects[2] is replacement_right
+assert replace_scene.mobjects[2] is replacement_left
+assert replace_scene.mobjects[3] is replacement_right
 
 assert replace_scene.replace(replacement_left) is replace_scene
-assert replace_scene.mobjects == [replace_back, replacement_right, replace_front]
+assert replace_scene.mobjects == [
+    replace_scene.frame, replace_back, replacement_right, replace_front,
+]
 
 detached_source = Mobject()
 detached_replacement = Mobject()
 assert replace_scene.replace(detached_source, detached_replacement) is replace_scene
-assert replace_scene.mobjects == [replace_back, replacement_right, replace_front]
+assert replace_scene.mobjects == [
+    replace_scene.frame, replace_back, replacement_right, replace_front,
+]
 assert not detached_source._is_bound()
 assert not detached_replacement._is_bound()
 
 nonmobject_replacement = Mobject()
 assert replace_scene.replace(object(), nonmobject_replacement) is replace_scene
-assert replace_scene.mobjects == [replace_back, replacement_right, replace_front]
+assert replace_scene.mobjects == [
+    replace_scene.frame, replace_back, replacement_right, replace_front,
+]
 assert not nonmobject_replacement._is_bound()
 
 family_scene = Scene()
@@ -1149,7 +1160,7 @@ family_root.submobjects.append(family_child)
 family_scene.add(family_root)
 nonroot_replacement = Mobject()
 assert family_scene.replace(family_child, nonroot_replacement) is family_scene
-assert family_scene.mobjects == [family_root]
+assert family_scene.mobjects == [family_scene.frame, family_root]
 assert not nonroot_replacement._is_bound()
 
 replace_before_refusal = list(replace_scene.mobjects)
@@ -1189,11 +1200,18 @@ membership_old = Mobject()
 membership_front = Mobject().set_z_index(1)
 membership_scene.add(membership_old, membership_front, membership_back)
 membership_snapshot = membership_scene.get_mobjects()
-assert membership_snapshot == [membership_back, membership_old, membership_front]
+# The frame's z_index of -1 ties with membership_back; it was listed first
+# (fm-6l2i). remove_all_except() below clears the list, frame included.
+membership_frame = membership_scene.frame
+assert membership_snapshot == [
+    membership_frame, membership_back, membership_old, membership_front,
+]
 assert membership_snapshot is not membership_scene.get_mobjects()
-assert membership_snapshot[0] is membership_back
+assert membership_snapshot[1] is membership_back
 membership_snapshot.clear()
-assert membership_scene.mobjects == [membership_back, membership_old, membership_front]
+assert membership_scene.mobjects == [
+    membership_frame, membership_back, membership_old, membership_front,
+]
 
 membership_detached = Mobject()
 assert membership_scene.remove_all_except(
@@ -1251,7 +1269,7 @@ mixed_group = group_scene.get_group(group_vmobject, group_mobject)
 assert type(mixed_group) is manimlib.Group
 assert list(mixed_group.submobjects) == [group_vmobject, group_mobject]
 assert type(group_scene.get_group()) is manimlib.VGroup
-assert group_scene.get_mobjects() == []
+assert group_scene.get_mobjects() == [group_scene.frame]
 
 
 # Python-owned Scene collection helpers filter arbitrary iterables before
@@ -1274,8 +1292,8 @@ def among_values():
 
 assert among_scene.add_mobjects_among(among_values()) is among_scene
 assert len(among_seen) == 5
-assert among_scene.mobjects == [among_back, among_front]
-assert among_scene.mobjects[1] is among_front
+assert among_scene.mobjects == [among_scene.frame, among_back, among_front]
+assert among_scene.mobjects[2] is among_front
 
 among_failed = Mobject()
 
@@ -2191,12 +2209,12 @@ captured = state_scene.get_state()
 assert isinstance(captured, scene_module.SceneState)
 assert captured._checkpoint == state_scene._checkpoint_bytes()
 assert scene_module.SceneState(state_scene, ignore=[])._checkpoint is not None
-assert list(captured.mobjects_to_copies) == [state_square, state_circle]
+assert list(captured.mobjects_to_copies) == [state_scene.frame, state_square, state_circle]
 assert captured.n_changes(captured) == 0
 state_square.shift(manimlib.RIGHT)
 assert captured.n_changes(captured) == 1
 ignored = scene_module.SceneState(state_scene, ignore=[state_circle])
-assert list(ignored.mobjects_to_copies) == [state_square]
+assert list(ignored.mobjects_to_copies) == [state_scene.frame, state_square]
 state_scene.restore_state(captured)
 assert np.allclose(state_square.get_center(), origin)
 restored_state_roots = state_scene.get_mobjects()
@@ -2213,9 +2231,10 @@ print(
         for root in restored_state_roots
     ],
     "expected:",
-    [(id(state_square), "Square"), (id(state_circle), "Circle")],
+    [(id(state_scene.frame), "CameraFrame"), (id(state_square), "Square"),
+     (id(state_circle), "Circle")],
 )
-assert restored_state_roots == [state_square, state_circle]
+assert restored_state_roots == [state_scene.frame, state_square, state_circle]
 assert state_scene._checkpoint_bytes() == captured._checkpoint
 failed_state = scene_module.SceneState.__new__(scene_module.SceneState)
 try:
@@ -2309,14 +2328,19 @@ family_scene.add(
 )
 family_roots_before = family_scene.get_mobjects()
 top_level = family_scene.get_top_level_mobjects()
-assert len(top_level) == 2
-assert top_level[0] is family_root
-assert top_level[1] is family_isolated
+# The frame is listed first and is top level, as in the Reference (fm-6l2i).
+assert len(top_level) == 3
+assert top_level[0] is family_scene.frame
+assert top_level[1] is family_root
+assert top_level[2] is family_isolated
+
 assert family_scene.get_top_level_mobjects() is not top_level
 
 scene_family_expected = [
+    family_scene.frame,
     family_root,
     family_left,
+
     family_shared,
     family_right,
     family_shared,
@@ -2394,7 +2418,14 @@ copy_scene = Scene()
 copy_scene.add(copy_source, copy_source)
 copy_roots_before = copy_scene.get_mobjects()
 scene_copies = copy_scene.get_mobject_copies()
-assert len(scene_copies) == 2
+# One copy per listed mobject; the list starts with the frame (fm-6l2i).
+assert len(scene_copies) == 3
+frame_copy = scene_copies[0]
+assert type(frame_copy) is type(copy_scene.frame)
+assert frame_copy is not copy_scene.frame
+assert all(frame_copy is not root for root in copy_scene.get_mobjects())
+scene_copies = scene_copies[1:]
+
 assert scene_copies[0] is not copy_source
 assert scene_copies[1] is not copy_source
 assert scene_copies[0] is not scene_copies[1]
@@ -2972,7 +3003,8 @@ reference = weakref.ref(clone)
 assert reference() is clone
 identity_map = {parent: "parent", child: "child"}
 assert identity_map[parent] == "parent"
-assert identity_map[scene.mobjects[0]] == "parent"
+assert identity_map[scene.mobjects[1]] == "parent"  # [0] is the frame (fm-6l2i)
+
 del clone
 gc.collect()
 assert reference() is None
@@ -5623,7 +5655,7 @@ assert np.array_equal(color_dest.data["rgba"], before_rgba)
 back_surface = manimlib.Surface(resolution=(2, 2), z_index=-1)
 front_surface = manimlib.Surface(resolution=(2, 2), z_index=1)
 surface_order_scene = Scene().add(front_surface, back_surface)
-assert surface_order_scene.get_mobjects() == [back_surface, front_surface]
+assert surface_order_scene.get_mobjects() == [surface_order_scene.frame, back_surface, front_surface]
 
 failed_pgroup = point_cloud_mobjects.PGroup.__new__(
     point_cloud_mobjects.PGroup
@@ -6356,7 +6388,7 @@ bound_plate_scene.add(bound_plate_target)
 assert bound_plate_target.add_background_rectangle(buff=0.1) is bound_plate_target
 assert bound_plate_target.background_rectangle._is_bound()
 assert bound_plate_target.submobjects[0] is bound_plate_target.background_rectangle
-assert bound_plate_scene.get_mobjects()[0] is bound_plate_target
+assert bound_plate_scene.get_mobjects()[1] is bound_plate_target
 
 immediate_a = geometry.Square(side_length=0.5)
 immediate_b = geometry.Square(side_length=0.75)
@@ -7626,7 +7658,7 @@ grow_point_scene.play(
     rate_func=manimlib.linear,
 )
 assert id(grow_point_source) == grow_point_identity
-assert grow_point_scene.get_mobjects()[0] is grow_point_source
+assert grow_point_scene.get_mobjects()[1] is grow_point_source
 # The pinned Reference fires copied updaters on the animation's helper
 # copies each frame (Animation.update_mobjects: starting mobject, then
 # target copy), then on the source in the scene pass, and once more after
@@ -10402,7 +10434,7 @@ bound_tip_scene.add(bound_tippable)
 bound_tippable_identity = id(bound_tippable)
 assert bound_tippable.add_tip(length=0.3) is bound_tippable
 assert id(bound_tippable) == bound_tippable_identity
-assert bound_tip_scene.get_mobjects()[0] is bound_tippable
+assert bound_tip_scene.get_mobjects()[1] is bound_tippable
 assert bound_tippable.tip._is_bound()
 assert bound_tippable.submobjects == [bound_tippable.tip]
 assert bound_tippable.family_size() == 2
@@ -10687,7 +10719,7 @@ assert bound_rectangle._is_bound()
 assert bound_rectangle.surround(circle_target, buff=0.05) is bound_rectangle
 assert id(bound_rectangle) == bound_rectangle_identity
 assert bound_rectangle._is_bound()
-assert bound_primitive_scene.mobjects == [bound_rectangle]
+assert bound_primitive_scene.mobjects == [bound_primitive_scene.frame, bound_rectangle]
 assert np.allclose(
     [bound_rectangle.get_width(), bound_rectangle.get_height()],
     [2.1, 1.1],
@@ -11103,7 +11135,7 @@ assert bound_line.set_points_by_ends(
     path_arc=math.pi / 3.0,
 ) is bound_line
 assert id(bound_line) == bound_line_identity
-assert bound_line_scene.get_mobjects()[0] is bound_line
+assert bound_line_scene.get_mobjects()[1] is bound_line
 assert bound_line.get_arc_length() > bound_line.get_length()
 assert bound_line.reset_points_around_ends() is bound_line
 
@@ -13202,7 +13234,7 @@ assert default_cylinder.n_records() == 101 * 11
 back_cylinder = three_dimensions.Cylinder(resolution=(3, 3), z_index=-1)
 front_cylinder = three_dimensions.Cylinder(resolution=(3, 3), z_index=1)
 cylinder_order_scene = Scene().add(front_cylinder, back_cylinder)
-assert cylinder_order_scene.get_mobjects() == [back_cylinder, front_cylinder]
+assert cylinder_order_scene.get_mobjects() == [cylinder_order_scene.frame, back_cylinder, front_cylinder]
 
 failed_cylinder = three_dimensions.Cylinder.__new__(three_dimensions.Cylinder)
 try:
@@ -13267,7 +13299,7 @@ assert default_torus.n_records() == 101 * 101
 back_torus = three_dimensions.Torus(resolution=(3, 3), z_index=-1)
 front_torus = three_dimensions.Torus(resolution=(3, 3), z_index=1)
 torus_order_scene = Scene().add(front_torus, back_torus)
-assert torus_order_scene.get_mobjects() == [back_torus, front_torus]
+assert torus_order_scene.get_mobjects() == [torus_order_scene.frame, back_torus, front_torus]
 
 sphere_mesh = three_dimensions.SurfaceMesh(sphere, resolution=(4, 3))
 assert len(sphere_mesh.submobjects) == 7
@@ -13340,7 +13372,7 @@ assert default_cone.n_records() == 101 * 11
 back_cone = three_dimensions.Cone(resolution=(3, 3), z_index=-1)
 front_cone = three_dimensions.Cone(resolution=(3, 3), z_index=1)
 cone_order_scene = Scene().add(front_cone, back_cone)
-assert cone_order_scene.get_mobjects() == [back_cone, front_cone]
+assert cone_order_scene.get_mobjects() == [cone_order_scene.frame, back_cone, front_cone]
 
 failed_cone = three_dimensions.Cone.__new__(three_dimensions.Cone)
 try:
@@ -13389,7 +13421,7 @@ front_line3d = three_dimensions.Line3D(
     z_index=1,
 )
 line3d_order_scene = Scene().add(front_line3d, back_line3d)
-assert line3d_order_scene.get_mobjects() == [back_line3d, front_line3d]
+assert line3d_order_scene.get_mobjects() == [line3d_order_scene.frame, back_line3d, front_line3d]
 
 failed_line3d = three_dimensions.Line3D.__new__(three_dimensions.Line3D)
 try:
@@ -13425,7 +13457,7 @@ assert default_disk3d.n_records() == 2 * 100
 back_disk3d = three_dimensions.Disk3D(resolution=(2, 5), z_index=-1)
 front_disk3d = three_dimensions.Disk3D(resolution=(2, 5), z_index=1)
 disk3d_order_scene = Scene().add(front_disk3d, back_disk3d)
-assert disk3d_order_scene.get_mobjects() == [back_disk3d, front_disk3d]
+assert disk3d_order_scene.get_mobjects() == [disk3d_order_scene.frame, back_disk3d, front_disk3d]
 
 failed_disk3d = three_dimensions.Disk3D.__new__(three_dimensions.Disk3D)
 try:
@@ -13461,7 +13493,9 @@ assert default_square3d.n_records() == 2 * 2
 back_square3d = three_dimensions.Square3D(z_index=-1)
 front_square3d = three_dimensions.Square3D(z_index=1)
 square3d_order_scene = Scene().add(front_square3d, back_square3d)
-assert square3d_order_scene.get_mobjects() == [back_square3d, front_square3d]
+assert square3d_order_scene.get_mobjects() == [
+    square3d_order_scene.frame, back_square3d, front_square3d,
+]
 
 failed_square3d = three_dimensions.Square3D.__new__(three_dimensions.Square3D)
 try:
@@ -13475,7 +13509,7 @@ else:
 assert not hasattr(failed_square3d, "submobjects")
 
 solid_scene = Scene().add(torus, cone, line3d, disk3d, square3d)
-assert solid_scene.get_mobjects() == [torus, cone, line3d, disk3d, square3d]
+assert solid_scene.get_mobjects() == [solid_scene.frame, torus, cone, line3d, disk3d, square3d]
 
 cube_face = three_dimensions.Square3D(side_length=2.0)
 cube_faces = three_dimensions.square_to_cube_faces(cube_face)
@@ -13496,7 +13530,7 @@ assert all(face.n_records() == 3 * 4 for face in dense_cube.submobjects)
 back_cube = three_dimensions.Cube(z_index=-1)
 front_cube = three_dimensions.Cube(z_index=1)
 cube_order_scene = Scene().add(front_cube, back_cube)
-assert cube_order_scene.get_mobjects() == [back_cube, front_cube]
+assert cube_order_scene.get_mobjects() == [cube_order_scene.frame, back_cube, front_cube]
 
 failed_cube = three_dimensions.Cube.__new__(three_dimensions.Cube)
 try:
@@ -13583,7 +13617,7 @@ assert np.allclose(
 back_prism = three_dimensions.Prism(z_index=-1)
 front_prism = three_dimensions.Prism(z_index=1)
 prism_order_scene = Scene().add(front_prism, back_prism)
-assert prism_order_scene.get_mobjects() == [back_prism, front_prism]
+assert prism_order_scene.get_mobjects() == [prism_order_scene.frame, back_prism, front_prism]
 
 failed_prism = three_dimensions.Prism.__new__(three_dimensions.Prism)
 try:
@@ -13631,7 +13665,7 @@ assert np.allclose(
 back_vcube = three_dimensions.VCube(z_index=-1)
 front_vcube = three_dimensions.VCube(z_index=1)
 vcube_order_scene = Scene().add(front_vcube, back_vcube)
-assert vcube_order_scene.get_mobjects() == [back_vcube, front_vcube]
+assert vcube_order_scene.get_mobjects() == [vcube_order_scene.frame, back_vcube, front_vcube]
 
 failed_vcube = three_dimensions.VCube.__new__(three_dimensions.VCube)
 try:
@@ -13670,7 +13704,7 @@ assert np.allclose(
 back_vprism = three_dimensions.VPrism(z_index=-1)
 front_vprism = three_dimensions.VPrism(z_index=1)
 vprism_order_scene = Scene().add(front_vprism, back_vprism)
-assert vprism_order_scene.get_mobjects() == [back_vprism, front_vprism]
+assert vprism_order_scene.get_mobjects() == [vprism_order_scene.frame, back_vprism, front_vprism]
 
 failed_vprism = three_dimensions.VPrism.__new__(three_dimensions.VPrism)
 try:
@@ -13705,6 +13739,7 @@ back_dodecahedron = three_dimensions.Dodecahedron(z_index=-1)
 front_dodecahedron = three_dimensions.Dodecahedron(z_index=1)
 dodecahedron_order_scene = Scene().add(front_dodecahedron, back_dodecahedron)
 assert dodecahedron_order_scene.get_mobjects() == [
+    dodecahedron_order_scene.frame,
     back_dodecahedron,
     front_dodecahedron,
 ]
@@ -13755,7 +13790,7 @@ vector_solid_scene = Scene().add(
     vector_group, vcube, vprism, dodecahedron, prismified
 )
 assert vector_solid_scene.get_mobjects() == [
-    vector_group, vcube, vprism, dodecahedron, prismified
+    vector_solid_scene.frame, vector_group, vcube, vprism, dodecahedron, prismified
 ]
 
 failed_vcube = three_dimensions.VCube.__new__(three_dimensions.VCube)
@@ -15362,8 +15397,8 @@ def verify_portal_console_scene():
     assert elbow_receipt[5] == 1
     assert_white_stroke_witness(elbow_destination)
 
-    # The camera frame is intentionally not a drawable Stage root, but the
-    # Reference places it first in Scene.mobjects for updater dispatch.  Both
+    # The camera frame is the scene list's first member, as in the
+    # Reference (fm-6l2i), so updater dispatch reaches it first.  Both
     # crossing rungs, wait, ordinary play, and camera-only play must preserve
     # frame-before-root ordering.  The camera-only observation also proves
     # frame interpolation lands before the updater phase rather than inside
@@ -20323,7 +20358,7 @@ assert base_wrapper.surround(base_wrapped, buff=1.0) is base_wrapper
 assert np.allclose(base_wrapper.get_center(), [3.0, 2.0, 0.0])
 assert np.allclose([base_wrapper.get_width(), base_wrapper.get_height()], [5.0, 5.0])
 assert base_wrapper._is_bound()
-assert base_scene.mobjects == [base_wrapped, base_wrapper]
+assert base_scene.mobjects == [base_scene.frame, base_wrapped, base_wrapper]
 assert base_wrapper.surround(base_wrapped, dim_to_match=1, stretch=True, buff=0.5) is base_wrapper
 assert np.allclose([base_wrapper.get_width(), base_wrapper.get_height()], [5.0, 2.5])
 assert np.allclose(base_wrapped.get_points(), [[1.0, 1.0, 0.0], [5.0, 3.0, 0.0]])
@@ -21459,9 +21494,9 @@ _ra, _rb, _rc = manimlib.Dot(), manimlib.Dot(), manimlib.Dot()
 _never_added = manimlib.VGroup(_ra, _rb)
 _remove_scene.add(manimlib.VGroup(_ra, _rb, _rc))
 _remove_scene.remove(_never_added)
-assert len(_remove_scene.mobjects) == 1 and _remove_scene.mobjects[0] is _rc
+assert _remove_scene.mobjects == [_remove_scene.frame, _rc]
 _remove_scene.remove(manimlib.Square())
-assert len(_remove_scene.mobjects) == 1
+assert _remove_scene.mobjects == [_remove_scene.frame, _rc]
 _foreign_scene = manimlib.Scene()
 _foreign = manimlib.Dot()
 _foreign_scene.add(_foreign)

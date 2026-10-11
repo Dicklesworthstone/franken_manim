@@ -32,10 +32,9 @@ def install_scene_camera_configuration(native):
         if self.random_seed is not None:
             getattr(g["_FMN_ROOT"], "random").seed(self.random_seed)
             g["_np"].random.seed(self.random_seed)
-        # Reference Scene.__init__ constructs the camera and puts its frame
-        # first in the update list immediately.  The portal keeps that frame
-        # out of the drawable Stage, but it must still exist before the first
-        # update crossing so initialization never contaminates frame work.
+        # Reference Scene.__init__ constructs the camera and starts the scene
+        # list as `[self.camera.frame]` (scene.py:117); the frame is an
+        # ordinary, point-less member of that list (fm-6l2i, below).
         # Resolve the frame recipe before publishing the identity used by
         # animations and updaters. The capture Camera stays lazy, but must not
         # discard frame_config by replacing its frame with a default one.
@@ -60,6 +59,14 @@ def install_scene_camera_configuration(native):
         self.frame = g["CameraFrame"](**frame_config)
         self.frame.reorient(*self.default_frame_orientation)
         self.frame.make_orientation_default()
+        # fm-6l2i: the list starts with the frame. Scene.add sorts it by its
+        # z_index of -1, clear() and remove() drop it, and only a listed
+        # frame's updaters run. The native add leaves id_to_mobject_map
+        # alone, which the Reference fills only from add().
+        g["_SceneCore"].add(self, self.frame)
+        # The listed frame stays listed if `self.frame` is later reassigned,
+        # as in the Reference; render generations carry this one across.
+        self.__dict__["_fmn_construction_frame"] = self.frame
         self.num_plays = 0
         self.undo_stack = []
         self.redo_stack = []

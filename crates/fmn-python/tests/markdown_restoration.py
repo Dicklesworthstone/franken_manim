@@ -64,7 +64,8 @@ class SavedMarkdownTests(unittest.TestCase):
                         for (_, current), (_, original) in zip(records(saved), saved_records):
                             np.testing.assert_array_equal(current, original)
                     self.assertEqual(scene.get_time(), 0)
-                    self.assertEqual(tuple(scene.mobjects), (doc,) if bound else ())
+                    self.assertEqual(tuple(scene.mobjects),
+                                     (scene.frame, doc) if bound else (scene.frame,))
 
     def test_bound_restore_retains_root_parent_callbacks_and_remaps_saved_annotations(self):
         doc = self.document()
@@ -79,7 +80,7 @@ class SavedMarkdownTests(unittest.TestCase):
         doc.note.shift((3, 0, 0))
         self.assertIs(doc.restore(), doc)
         self.assertIs(parent[0], doc)
-        self.assertEqual(tuple(scene.mobjects), (parent,))
+        self.assertEqual(tuple(scene.mobjects), (scene.frame, parent))
         self.assertIs(doc._scene, scene)
         self.assertIs(doc.updaters[0], callback)
         self.assertEqual(calls, [])
@@ -128,7 +129,7 @@ class SavedMarkdownTests(unittest.TestCase):
         self.assertEqual(doc.block_ranges, ())
         self.assertTrue(doc.math_mode)
         self.assertEqual(doc.line_width, 2.5)
-        self.assertEqual(tuple(scene.mobjects), (doc,))
+        self.assertEqual(tuple(scene.mobjects), (scene.frame, doc))
         doc.set_source('```math\nx^2\n```')
         self.assertEqual(doc.block_kinds, ('math',))
 
@@ -155,8 +156,8 @@ class SavedMarkdownTests(unittest.TestCase):
         self.assertIs(other._scene, other_scene)
         self.assertTrue({id(member) for member in doc.get_family()}.isdisjoint(
             {id(member) for member in other.get_family()}))
-        self.assertEqual(tuple(scene.mobjects), (doc,))
-        self.assertEqual(tuple(other_scene.mobjects), (other,))
+        self.assertEqual(tuple(scene.mobjects), (scene.frame, doc))
+        self.assertEqual(tuple(other_scene.mobjects), (other_scene.frame, other))
         doc.saved_state = saved
         doc.restore()
         with self.assertRaises(m._CapabilityError):

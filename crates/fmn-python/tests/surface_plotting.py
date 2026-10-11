@@ -154,7 +154,7 @@ class SurfacePlottingTests(unittest.TestCase):
         self.assertIs(plot[0], extra)
         self.assertIs(plot.updaters[0], updater)
         self.assertEqual(calls, [])
-        self.assertEqual(tuple(scene.mobjects), (plot,))
+        self.assertEqual(tuple(scene.mobjects), (scene.frame, plot))
 
     def test_copy_and_deepcopy_keep_external_axes_binding_without_mutating_source(self):
         chart = axes().rotate(.5)

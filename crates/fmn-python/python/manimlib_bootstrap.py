@@ -14863,6 +14863,10 @@ class CameraFrame(Mobject):
         **kwargs,
     ):
         super().__init__(z_index=z_index, **kwargs)
+        # The Reference's Scene.add sorts its list by z_index, where the
+        # frame's -1 keeps it ahead of default content (fm-6l2i). Write the
+        # engine sort key, not only the instance attribute.
+        self.set_z_index(z_index)
         self._core = _CameraFrameCore(
             (float(frame_shape[0]), float(frame_shape[1])),
             _vec3(center_point),
@@ -15429,13 +15433,18 @@ class Scene(_SceneCore):
         if self.random_seed is not None:
             getattr(_FMN_ROOT, "random").seed(self.random_seed)
             _np.random.seed(self.random_seed)
-        # Reference Scene.__init__ constructs the camera and puts its frame
-        # first in the update list immediately.  The portal keeps that frame
-        # out of the drawable Stage, but it must still exist before the first
-        # update crossing so initialization never contaminates frame work.
+        # Reference Scene.__init__ constructs the camera and starts the scene
+        # list as `[self.camera.frame]` (scene.py:117). The frame is an
+        # ordinary member of that list (fm-6l2i): Scene.add sorts it by its
+        # z_index of -1, clear() and remove() drop it, and only a listed
+        # frame's updaters run. It has no points, so Lumen draws nothing for
+        # it; the camera reads its engine core. The native add skips
+        # id_to_mobject_map, which the Reference fills only from add().
         self.frame = CameraFrame()
         self.frame.reorient(*self.default_frame_orientation)
         self.frame.make_orientation_default()
+        _SceneCore.add(self, self.frame)
+        self.__dict__["_fmn_construction_frame"] = self.frame
         self.num_plays = 0
         self.undo_stack = []
         self.redo_stack = []
@@ -15642,6 +15651,15 @@ class Scene(_SceneCore):
         # Scene/Stage borrow survives the Python callback phase.
         if not proto_animations:
             return
+        for proto in proto_animations:
+            # Reference Scene.begin_animations adds an animated mobject that
+            # is not in the scene list. For the camera frame, which
+            # clear() and remove() drop, that puts it back first (fm-6l2i).
+            mobject = getattr(proto, "mobject", None)
+            if isinstance(mobject, CameraFrame) and not any(
+                listed is mobject for listed in self.mobjects
+            ):
+                self.add(mobject)
         def rate_payload(value, where, run_time_hint):
             if value is None or isinstance(value, str):
                 return value
@@ -16460,7 +16478,17 @@ class SceneState:
             raise TypeError("restore_scene expects a Scene")
         if scene is self._scene and self._checkpoint is not None:
             scene._restore_checkpoint_bytes(self._checkpoint)
-            scene._reseat_engine_roots(*self.mobjects_to_copies)
+            # The checkpoint holds every root listed at capture. A listed frame
+            # the state ignored is reseated with them, then unlisted: the
+            # Reference restores exactly the saved mobjects (fm-6l2i).
+            captured = getattr(self, "_checkpoint_roots", None)
+            if captured is None:
+                captured = tuple(self.mobjects_to_copies)
+            scene._reseat_engine_roots(*captured)
+            saved = {id(mobject) for mobject in self.mobjects_to_copies}
+            unsaved = [root for root in captured if id(root) not in saved]
+            if unsaved:
+                scene.remove(*unsaved)
             scene.num_plays = self.num_plays
             return
         restored = [

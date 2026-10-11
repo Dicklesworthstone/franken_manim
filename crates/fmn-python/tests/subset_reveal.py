@@ -78,8 +78,9 @@ class NativeSubsetTests(unittest.TestCase):
         self.assertTrue(all(list(row) == members[:len(row)] for row in seen))
         # A stock composition delegates root allocation to Choreo; the
         # authoring descriptor does not own that generated native proxy.
-        self.assertEqual(len(scene.mobjects), 1)
-        native_root = scene.mobjects[0]
+        self.assertEqual(len(scene.mobjects), 2)
+        self.assertIs(scene.mobjects[0], scene.frame)
+        native_root = scene.mobjects[1]
         self.assertIsInstance(native_root, m.Group)
         self.assertEqual(list(native_root.submobjects), [group])
         self.assertTrue(all(node.parents == [group] for node in members))
@@ -168,7 +169,7 @@ class NativeSubsetTests(unittest.TestCase):
                 animation.interpolate(.5)
             self.assertIs(caught.exception, failure)
             self.assertEqual(list(group.submobjects), members)
-            self.assertEqual(list(scene.mobjects), [group])
+            self.assertEqual(list(scene.mobjects), [scene.frame, group])
             assert_released(self, group, members)
         finally:
             group.__dict__.pop("set_submobjects", None)

@@ -53,7 +53,7 @@ class ComplexReadouts(m.Scene):
         self.wait(1 / 8)
         assert self.readout.get_value() == -2j
         assert tuple(entry.get_value() for entry in entries) == (2 - 1j, 4, 5j, 0j)
-        assert list(self.mobjects) == [self.formula, self.matrix]
+        assert list(self.mobjects) == [self.frame, self.formula, self.matrix]
         assert self.formula.get_part_by_tex(r"\decimalmob")[0] is self.readout
         assert list(self.matrix.elements) == entries
         assert all(len(entry) == len(entry.num_string) for entry in entries)
