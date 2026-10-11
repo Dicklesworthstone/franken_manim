@@ -11374,7 +11374,7 @@ mod tests {
         ));
         let before = inspect(&mut worker);
         assert!(before.contains(
-            "\"view\":{\"frame_index\":0,\"frame_count\":12,\"fps\":30,\"width\":96,\"height\":54,\"scale\":9,\"origin\":[48,27],\"input_events\":false}"
+            "\"view\":{\"frame_index\":0,\"frame_count\":12,\"fps\":30,\"width\":96,\"height\":54,\"scale\":9,\"origin\":[48,27],\"y_up\":true,\"input_events\":false}"
         ), "{before}");
         assert!(before.contains("\"scene_time\":0.03333333333333333"));
         let frame_budget = worker.max_frame_bytes;

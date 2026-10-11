@@ -307,7 +307,7 @@ fn inspector_view_is_additive_and_obeys_the_exact_json_byte_limit() {
     assert_eq!(snapshot.version, 1);
     assert_eq!(
         json,
-        br#"{"version":1,"scene_time":0,"truncated":false,"nodes":[],"view":{"frame_index":2,"frame_count":3,"fps":8,"width":96,"height":54,"scale":6.75,"origin":[48,27],"input_events":false}}"#
+        br#"{"version":1,"scene_time":0,"truncated":false,"nodes":[],"view":{"frame_index":2,"frame_count":3,"fps":8,"width":96,"height":54,"scale":6.75,"origin":[48,27],"y_up":true,"input_events":false}}"#
     );
     assert_eq!(
         snapshot
@@ -322,6 +322,31 @@ fn inspector_view_is_additive_and_obeys_the_exact_json_byte_limit() {
         snapshot.to_json(InspectorLimits { max_json_bytes: json.len() - 1, ..limits }),
         Err(InspectError::JsonLimit { limit, needed }) if limit == json.len() - 1 && needed == json.len()
     ));
+    // Native workers also accept raw pixel-oriented maps. The wire view must
+    // distinguish them, rather than making the UI guess from scene identity.
+    let map = fmn_render::ScreenMap {
+        scale: 6.75,
+        origin: [48.0, 27.0],
+        y_up: false,
+    };
+    snapshot.view = Some(
+        InspectorView::new(
+            2,
+            3,
+            8,
+            fmn_render::Viewport {
+                width: 96,
+                height: 54,
+            },
+            map,
+            false,
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        snapshot.to_json(limits).unwrap(),
+        br#"{"version":1,"scene_time":0,"truncated":false,"nodes":[],"view":{"frame_index":2,"frame_count":3,"fps":8,"width":96,"height":54,"scale":6.75,"origin":[48,27],"y_up":false,"input_events":false}}"#
+    );
     snapshot.view = None;
     assert_eq!(snapshot.to_json(limits).unwrap(), before);
 }

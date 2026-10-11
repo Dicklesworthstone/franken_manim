@@ -11,6 +11,11 @@ const start = source.indexOf('  async function run(');
 const end = source.indexOf('  // FrameHub parts', start);
 assert.ok(start >= 0 && end > start, 'production input controller boundaries');
 const controller = source.slice(start, end);
+const overlayStart = source.indexOf('  function drawOverlay() {');
+const viewStart = source.indexOf('  function viewOf(snapshot) {');
+const viewEnd = source.indexOf('  function matchesFrame() {', viewStart);
+assert.ok(overlayStart >= 0 && overlayStart < start && viewStart >= 0 && viewEnd > viewStart,
+  'production inspector and overlay boundaries');
 
 class Element {
   constructor() { this.events = new Map(); this.style = {}; this.checked = true; this.capture = new Set(); }
@@ -23,13 +28,13 @@ class Element {
       ctrlKey:false, shiftKey:false, altKey:false, metaKey:false, preventDefault() {}, ...values};
     for (const callback of this.events.get(name) || []) callback(event);
   }
-  getBoundingClientRect() { return {left:0, top:0, width:96, height:54}; }
+  getBoundingClientRect() { return this.rect || {left:0, top:0, width:96, height:54}; }
   focus() {}
   setPointerCapture(id) { this.capture.add(id); }
   hasPointerCapture(id) { return this.capture.has(id); }
   releasePointerCapture(id) { this.capture.delete(id); this.emit('lostpointercapture', {pointerId:id}); }
 }
-function fixture() {
+function fixture({yUp = true} = {}) {
   const elements = new Map(), $ = id => {
     if (!elements.has(id)) elements.set(id, new Element());
     return elements.get(id);
@@ -44,7 +49,7 @@ function fixture() {
   const refresh = async () => {
     state.generation = generation;
     state.snapshot = {view:{frame_index:frame, frame_count:control.live ? 6 : 61, width:96, height:54,
-      scale:6, origin:[48,27], fps:30, input_events:true, input_revision:revision, live_advance:Boolean(control.live)}};
+      scale:6, origin:[48,27], y_up:yUp, fps:30, input_events:true, input_revision:revision, live_advance:Boolean(control.live)}};
   };
   void refresh();
   const api = async (path, fields) => {
@@ -123,6 +128,70 @@ test('rapid held-key drag preserves every admitted transition while rendering is
   assert.ok(calls.every(x => x.frame === '5' && x.worker_generation === '3'));
   assert.deepEqual(calls.filter(x => x.type === 'mouse_drag').map(x => x.dx), [1/3, 1/2]);
   assert.equal(f.errors.length, 0);
+});
+
+for (const [yUp, pressY, dragY, releaseY, wheelY] of [
+  [true, 72, 81, 78, 63],
+  [false, 78, 69, 72, 87],
+]) {
+  test(`pointer positions and deltas follow the renderer's ${yUp ? 'up' : 'down'} Y map through CSS scaling`, async () => {
+    const f = fixture({yUp}), preview = f.$('preview');
+    // The image is 96 x 54; CSS doubles it and moves its top-left to (13,21).
+    // These independently chosen pixel positions represent the same world
+    // gesture in the two native ScreenMap orientations.
+    preview.rect = {left:13, top:21, width:192, height:108};
+    preview.emit('pointerdown', {buttons:1, clientX:91, clientY:pressY});
+    preview.emit('pointermove', {buttons:1, clientX:100, clientY:dragY});
+    preview.emit('pointerup', {clientX:103, clientY:releaseY});
+    preview.emit('wheel', {clientX:121, clientY:wheelY, deltaX:2, deltaY:-3});
+    await f.settled();
+    const calls = eventCalls(f);
+    assert.deepEqual(calls.map(({type,x,y}) => [type,x,y]), [
+      ['mouse_press',-1.5,0.25], ['mouse_drag',-0.75,-0.5],
+      ['mouse_release',-0.5,-0.25], ['mouse_scroll',1,1],
+    ]);
+    assert.deepEqual([calls[1].dx,calls[1].dy], [0.75,-0.75]);
+    assert.deepEqual([calls[3].offset_x,calls[3].offset_y], [2,-3]);
+    assert.equal(f.errors.length, 0);
+  });
+}
+
+for (const [yUp, pointY, boundsY, boundsHeight] of [
+  [true,24,28.5,-4.5], [false,30,25.5,4.5],
+]) {
+  test(`control points and bounds use the same ${yUp ? 'up' : 'down'} Y map as the preview`, () => {
+    const marks = [], status = {dataset:{}};
+    const canvas = {width:96, height:54, getContext:() => ({
+      clearRect() {}, beginPath() {}, fill() {},
+      arc(x,y) { marks.push(['point',x,y]); },
+      strokeRect(x,y,width,height) { marks.push(['bounds',x,y,width,height]); },
+    })};
+    const state = {
+      snapshot:{view:{frame_index:0, width:96, height:54, scale:6, origin:[48,27], y_up:yUp}, nodes:[]},
+      overlay:{layers:6, tiles:[], nodes:[{id:0, control_points:[[1,0.5,0]],
+        bounds:[[-0.5,-0.25,0],[0.25,0.125,0],[1,0.5,0]]}]},
+    };
+    vm.runInNewContext(source.slice(overlayStart, start) + '\n drawOverlay();', {
+      state, $:id => id === 'overlay' ? canvas : status,
+      layers:() => 6, matchesFrame:() => true,
+    });
+    assert.deepEqual(marks, [['point',54,pointY], ['bounds',45,boundsY,9,boundsHeight]]);
+    assert.equal(status.dataset.marks, '2');
+  });
+}
+
+test('inspector views require an explicit boolean renderer orientation', () => {
+  const snapshot = {version:1, scene_time:0, nodes:[], view:{frame_index:0, frame_count:1,
+    fps:30, width:96, height:54, scale:6, origin:[48,27], input_events:false}};
+  const readView = () => vm.runInNewContext(source.slice(viewStart, viewEnd) + '\n viewOf(snapshot);', {snapshot});
+  for (const yUp of [undefined,null,0,1,'true']) {
+    snapshot.view.y_up = yUp;
+    assert.throws(readView, /invalid inspector view metadata/);
+  }
+  for (const yUp of [true,false]) {
+    snapshot.view.y_up = yUp;
+    assert.equal(readView().y_up, yUp);
+  }
 });
 
 test('restart waits for accepted gesture transitions and synthetic releases', async () => {

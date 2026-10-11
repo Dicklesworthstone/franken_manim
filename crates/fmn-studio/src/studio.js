@@ -85,7 +85,8 @@
         !Number.isInteger(v.fps) || v.fps < 1 || !Number.isInteger(v.width) || !Number.isInteger(v.height) ||
         v.width < 1 || v.height < 1 || v.width * v.height > 33554432 ||
         !Number.isFinite(v.scale) || v.scale <= 0 || !Array.isArray(v.origin) ||
-        v.origin.length !== 2 || !v.origin.every(Number.isFinite) || typeof v.input_events !== "boolean") {
+        v.origin.length !== 2 || !v.origin.every(Number.isFinite) || typeof v.y_up !== "boolean" ||
+        typeof v.input_events !== "boolean") {
       throw new Error("Worker returned unsupported or invalid inspector view metadata.");
     }
     return v;
@@ -230,7 +231,8 @@
     if (!mask) { $("overlay-state").textContent = "Overlays off."; return; }
     if (!data || data.layers !== mask || !matchesFrame()) { $("overlay-state").textContent = "Waiting for overlay data matching the displayed frame…"; return; }
     const v = state.snapshot.view;
-    const point = p => Array.isArray(p) && p.length >= 2 && p.slice(0, 2).every(Number.isFinite) ? [v.origin[0] + p[0] * v.scale, v.origin[1] - p[1] * v.scale] : null;
+    const yScale = v.y_up ? -v.scale : v.scale;
+    const point = p => Array.isArray(p) && p.length >= 2 && p.slice(0, 2).every(Number.isFinite) ? [v.origin[0] + p[0] * v.scale, v.origin[1] + p[1] * yScale] : null;
     ctx.lineWidth = Math.max(1, v.width / 960); ctx.font = `${Math.max(10, v.width / 80)}px monospace`;
     let primitives = 0;
     const inspectedNodes = new Map(state.snapshot.nodes.map(node => [node.id, node]));
@@ -497,8 +499,9 @@
   function pointerPoint(event) {
     const v = state.snapshot?.view, rect = $("preview").getBoundingClientRect();
     if (!v || !rect.width || !rect.height) return null;
+    const yScale = v.y_up ? -v.scale : v.scale;
     return {x:((event.clientX - rect.left) * v.width / rect.width - v.origin[0]) / v.scale,
-      y:(v.origin[1] - (event.clientY - rect.top) * v.height / rect.height) / v.scale};
+      y:((event.clientY - rect.top) * v.height / rect.height - v.origin[1]) / yScale};
   }
   const pointerButton = event => ["left","middle","right"][event.button] || `other:${event.button}`;
   $("preview").addEventListener("pointerdown", event => {

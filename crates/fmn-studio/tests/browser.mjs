@@ -222,6 +222,7 @@ try {
   await synchronized(0);
   const interactiveInitial = await inspect();
   assert.equal(interactiveInitial.view.input_events, true);
+  assert.equal(interactiveInitial.view.y_up, true, "native scenes render world +Y toward the top of the image");
   assert.equal(interactiveInitial.view.input_revision, 0);
   const nested = interactiveInitial.nodes.find(node => node.parents.length && node.records.count);
   const swatch = interactiveInitial.nodes.find(node => node.root && node.records.count);
@@ -249,7 +250,8 @@ try {
   }
   async function nativePointer(point, type = "mouseMoved", modifiers = 0, buttons = 0) {
     const revision = (await inspect()).view.input_revision;
-    const position = await evaluate(`(() => { const r=document.getElementById('preview').getBoundingClientRect(); return {x:r.x + (${point[0]} * ${interactiveInitial.view.scale} + ${interactiveInitial.view.origin[0]}) * r.width / ${interactiveInitial.view.width}, y:r.y + (${point[1]} * ${interactiveInitial.view.scale} + ${interactiveInitial.view.origin[1]}) * r.height / ${interactiveInitial.view.height}}; })()`);
+    const yScale = interactiveInitial.view.y_up ? -interactiveInitial.view.scale : interactiveInitial.view.scale;
+    const position = await evaluate(`(() => { const r=document.getElementById('preview').getBoundingClientRect(); return {x:r.x + (${point[0]} * ${interactiveInitial.view.scale} + ${interactiveInitial.view.origin[0]}) * r.width / ${interactiveInitial.view.width}, y:r.y + (${point[1]} * ${yScale} + ${interactiveInitial.view.origin[1]}) * r.height / ${interactiveInitial.view.height}}; })()`);
     // CDP requires the held button on mouseMoved too. Omitting it can drop
     // pointer capture even when the buttons bitmask still says left is down.
     await command("Input.dispatchMouseEvent", {type,...position,modifiers,buttons,

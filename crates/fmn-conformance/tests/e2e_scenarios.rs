@@ -2353,7 +2353,7 @@ fn studio_view(bytes: &[u8], frame: usize) -> Result<(), ScenarioError> {
     studio_contains(
         bytes,
         &format!(
-            "\"view\":{{\"frame_index\":{frame},\"frame_count\":8,\"fps\":30,\"width\":96,\"height\":54,\"scale\":6.75,\"origin\":[48,27],\"input_events\":false}}"
+            "\"view\":{{\"frame_index\":{frame},\"frame_count\":8,\"fps\":30,\"width\":96,\"height\":54,\"scale\":6.75,\"origin\":[48,27],\"y_up\":true,\"input_events\":false}}"
         ),
     )
 }
