@@ -452,7 +452,17 @@ fn ensure_managed_directory(
     Ok(())
 }
 
-fn ensure_capability_root(fs: &dyn FileSystem, root: &Path) -> Result<(), CacheError> {
+/// Create `root` and any missing ancestors as real directories.
+///
+/// With `system_links_trusted` (only the ambient host filesystem can vouch
+/// for one), an operating-system link ([`trusted_system_link`]) is accepted
+/// as a component, the rule [`reject_symlink_components`] applies above a
+/// host store root. `root` must then be a strict ancestor of the store root.
+fn ensure_capability_root(
+    fs: &dyn FileSystem,
+    root: &Path,
+    system_links_trusted: bool,
+) -> Result<(), CacheError> {
     let mut ancestors: Vec<&Path> = root.ancestors().collect();
     ancestors.reverse();
     for directory in ancestors {
@@ -461,6 +471,7 @@ fn ensure_capability_root(fs: &dyn FileSystem, root: &Path) -> Result<(), CacheE
         }
         match fs.node_kind_no_follow(directory)? {
             Some(FsNodeKind::Directory) => {}
+            Some(FsNodeKind::Link) if system_links_trusted && trusted_system_link(directory) => {}
             Some(kind) => {
                 return Err(root_refused(
                     root,
@@ -507,7 +518,8 @@ fn ensure_capability_root(fs: &dyn FileSystem, root: &Path) -> Result<(), CacheE
 /// Platform conventions name directories such as `$HOME/.cache` which may
 /// legitimately be absent on a fresh profile. The application-owned leaf is
 /// intentionally left absent so [`Store::open`] remains the sole operation
-/// that can atomically claim and stamp it.
+/// that can atomically claim and stamp it. A `$HOME` below an operating-system
+/// link (macOS `/var`, fm-macos-var-symlink-gate-aqr1) keeps its cache.
 fn ensure_platform_cache_parent(fs: &dyn FileSystem, root: &Path) -> Result<(), CacheError> {
     let parent = root.parent().ok_or_else(|| {
         root_refused(
@@ -516,7 +528,7 @@ fn ensure_platform_cache_parent(fs: &dyn FileSystem, root: &Path) -> Result<(), 
             "the resolved platform cache root must name a dedicated leaf",
         )
     })?;
-    ensure_capability_root(fs, parent)
+    ensure_capability_root(fs, parent, fs.grants_host_destructive_lifecycle())
 }
 
 fn managed_leaf_kind(
@@ -869,7 +881,7 @@ fn ensure_owned_root(
             ));
         }
         None if matches!(state, RootOpenState::CapabilityManaged) => {
-            ensure_capability_root(fs, root)?;
+            ensure_capability_root(fs, root, false)?;
             false
         }
         None => {
@@ -2648,6 +2660,47 @@ mod tests {
         assert!(
             !trusted_system_link(&link),
             "a link below the filesystem root is never trusted"
+        );
+    }
+
+    /// fm-macos-var-symlink-gate-aqr1: the platform cache base may sit below
+    /// an operating-system link (a `$HOME` under macOS `/var`), as an explicit
+    /// store root may; a link a user planted above it is still refused and
+    /// nothing is created through it. The accepting half needs a root-owned
+    /// top-level directory link on the host (macOS `/var`, merged-`/usr`
+    /// Linux `/bin`).
+    #[cfg(unix)]
+    #[test]
+    fn platform_parent_preparation_trusts_only_operating_system_links() {
+        use fmn_platform::fs::StdFs;
+
+        let system_link = fs::read_dir("/")
+            .expect("the filesystem root lists")
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| trusted_system_link(path) && path.is_dir());
+        if let Some(link) = system_link {
+            ensure_platform_cache_parent(&StdFs, &link.join(DEFAULT_CACHE_LEAF))
+                .expect("a base below an operating-system link is accepted");
+        }
+
+        let dir =
+            std::env::temp_dir().join(format!("fmn-cache-platform-link-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("scratch directory");
+        let canonical = fs::canonicalize(&dir).expect("canonical scratch directory");
+        let alias = canonical.join("alias");
+        let _ = fs::remove_file(&alias);
+        std::os::unix::fs::symlink(&canonical, &alias).expect("scratch link");
+        let base = alias.join(".cache");
+        match ensure_platform_cache_parent(&StdFs, &base.join(DEFAULT_CACHE_LEAF)) {
+            Err(CacheError::RootRefused { code, .. }) => {
+                assert_eq!(code, RootRefusalCode::WrongNodeKind);
+            }
+            other => panic!("a user link above the cache base must be refused: {other:?}"),
+        }
+        assert!(
+            !canonical.join(".cache").exists(),
+            "nothing is created through the refused link"
         );
     }
 

@@ -43,15 +43,14 @@ impl Fixture {
         panic!("could not allocate a unique typeset-cache fixture");
     }
 
-    /// The fixture's home directory, canonical. On macOS the temp dir lives
-    /// under the `/var` -> `/private/var` link. Explicit `--cache-dir` roots
-    /// below that link are accepted, but the platform-convention base under a
-    /// linked `$HOME` is still refused (fm-macos-var-symlink-gate-aqr1). A real
-    /// home is never under `/var`, so the home itself is resolved.
+    /// The fixture's home directory, spelled as the temp dir is. On macOS
+    /// that runs through the `/var` -> `/private/var` link, and the
+    /// platform-convention cache base below it must still be persistent
+    /// (fm-macos-var-symlink-gate-aqr1).
     fn home(&self) -> PathBuf {
         let home = self.root.join("home");
         fs::create_dir_all(&home).expect("fixture home");
-        fs::canonicalize(&home).expect("canonical fixture home")
+        home
     }
 
     fn cache(&self) -> PathBuf {
