@@ -889,6 +889,11 @@ class _NativeZIndex:
         return self if obj is None else obj._get_z_index()
 
 
+_MOBJECT_INIT_PARAMETERS = (
+    "color", "opacity", "shading", "texture_paths", "is_fixed_in_frame", "depth_test", "z_index",
+)
+
+
 class Mobject(_BridgeMobject):
     dim = 3
     data_dtype = [("point", 3), ("rgba", 4)]
@@ -897,13 +902,28 @@ class Mobject(_BridgeMobject):
     pointlike_data_keys = ["point"]
     render_primitive = 5  # moderngl.TRIANGLE_STRIP, without importing a renderer
 
-    def __init__(self, *submobjects, **kwargs):
+    def __init__(self, *args, **kwargs):
+        # Reference mobject.py:79: a fixed signature (color, opacity,
+        # shading, texture_paths, is_fixed_in_frame, depth_test, z_index),
+        # positional in that order, and Python's own TypeError for anything
+        # else (fm-5wq.20). Members belong to Group; subclasses set their own
+        # configuration before calling here. Only the passed seeds are set.
+        if len(args) > len(_MOBJECT_INIT_PARAMETERS):
+            raise TypeError(
+                "Mobject.__init__() takes from 1 to 8 positional arguments but "
+                f"{len(args) + 1} were given"
+            )
+        for name, value in zip(_MOBJECT_INIT_PARAMETERS, args):
+            if name in kwargs:
+                raise TypeError(f"Mobject.__init__() got multiple values for argument {name!r}")
+            kwargs[name] = value
+        for name in kwargs:
+            if name not in _MOBJECT_INIT_PARAMETERS:
+                raise TypeError(f"Mobject.__init__() got an unexpected keyword argument {name!r}")
         _install_live_state(self)
         for key, value in kwargs.items():
             setattr(self, key, value)
         self._engine_init()
-        if submobjects:
-            self._ingest_args(*submobjects)
 
     def _ingest_args(self, *args):
         # Reference Group._ingest_args (mobject.py:2201) verbatim: a single

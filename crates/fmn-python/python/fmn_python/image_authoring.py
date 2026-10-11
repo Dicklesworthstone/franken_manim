@@ -128,10 +128,13 @@ def install_image_authoring(native):
             # inherited _install_live_state must not reset the requested alpha.
             constructing[id(self)] = raster
             try:
+                # ImageMobject's own configuration is set here; Mobject takes
+                # only its Reference keywords (fm-5wq.20).
+                self.height, self.image_path = height, path
+                self._fmn_image_z_index, self._fmn_image_fixed = z_index, fixed
+                self._fmn_image_depth = depth
                 super(Image, self).__init__(
-                    height=height, opacity=opacity, color=g["_WHITE"] if color is None else color,
-                    image_path=path, _fmn_image_z_index=z_index,
-                    _fmn_image_fixed=fixed, _fmn_image_depth=depth,
+                    opacity=opacity, color=g["_WHITE"] if color is None else color,
                 )
                 # An authored init_data can supply all six records instead of
                 # calling super(). Admit that actual table, never replace it

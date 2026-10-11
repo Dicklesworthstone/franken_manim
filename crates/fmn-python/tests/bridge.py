@@ -981,9 +981,9 @@ assert family_add_root.submobjects == [family_add_a]
 # recurse=False touches only the selected root.  Shared descendants retain
 # their Python identity while both parent edges are edited independently.
 family_remove_shared = Mobject()
-family_remove_left = Mobject(family_remove_shared)
-family_remove_right = Mobject(family_remove_shared)
-family_remove_root = Mobject(family_remove_left, family_remove_right)
+family_remove_left = Mobject().add(family_remove_shared)
+family_remove_right = Mobject().add(family_remove_shared)
+family_remove_root = Mobject().add(family_remove_left, family_remove_right)
 assert family_remove_root.remove(family_remove_shared) is family_remove_root
 assert family_remove_left.submobjects == []
 assert family_remove_right.submobjects == []
@@ -1319,9 +1319,9 @@ assert among_scene.get_mobjects() == among_before_failure
 family_shared = VMobject().set_points_as_corners(
     [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]
 )
-family_left = Mobject(family_shared)
-family_right = Mobject(family_shared)
-family_root = Mobject(family_left, family_right)
+family_left = Mobject().add(family_shared)
+family_right = Mobject().add(family_shared)
+family_root = Mobject().add(family_left, family_right)
 family_expected = [
     family_root,
     family_left,
@@ -1376,7 +1376,7 @@ assert np.allclose(
 assert family_root.refresh_bounding_box() is family_root
 assert family_root.refresh_bounding_box(True, False) is family_root
 
-empty_spatial = Mobject(Mobject())
+empty_spatial = Mobject().add(Mobject())
 assert empty_spatial.get_all_points().shape == (0, 3)
 assert np.array_equal(empty_spatial.compute_bounding_box(), np.zeros((3, 3)))
 
@@ -1432,7 +1432,7 @@ assert np.allclose(
         [2.5, 3.5, 0.5],
     ],
 )
-dot_group = Mobject(dot_spatial)
+dot_group = Mobject().add(dot_spatial)
 assert np.allclose(dot_group.get_bounding_box(), dot_box)
 dot_scene = Scene()
 dot_scene.add(dot_group)
@@ -2456,7 +2456,7 @@ utility_a = utility_marker(2.0, "a")
 utility_b = utility_marker(-1.0, "b")
 utility_c = utility_marker(1.0, "c")
 utility_d = utility_marker(1.0, "d")
-utility_group = Mobject(utility_a, utility_b)
+utility_group = Mobject().add(utility_a, utility_b)
 utility_scene = Scene()
 utility_scene.add(utility_group)
 
@@ -2480,9 +2480,9 @@ assert [mob.name for mob in utility_group.submobjects] == ["a", "b", "c", "d"]
 assert [mob.name for mob in utility_group.copy().submobjects] == ["a", "b", "c", "d"]
 
 shuffle_child_members = [utility_marker(i, f"inner-{i}") for i in range(3)]
-shuffle_child = Mobject(*shuffle_child_members)
+shuffle_child = Mobject().add(*shuffle_child_members)
 shuffle_leaf = utility_marker(5.0, "outer-leaf")
-shuffle_root = Mobject(shuffle_child, shuffle_leaf)
+shuffle_root = Mobject().add(shuffle_child, shuffle_leaf)
 shuffle_seed = 1729
 shuffle_rng = manimlib.random.Random(shuffle_seed)
 expected_inner = list(shuffle_child_members)
@@ -2495,7 +2495,7 @@ assert list(shuffle_child.submobjects) == expected_inner
 assert list(shuffle_root.submobjects) == expected_outer
 
 detached_restore_child = utility_marker(0.0, "detached-restore")
-detached_restore_group = Mobject(detached_restore_child)
+detached_restore_group = Mobject().add(detached_restore_child)
 detached_restore_group.named_child = detached_restore_child
 detached_restore_group.save_state()
 detached_restore_group.named_child = utility_marker(8.0, "wrong-detached-alias")
@@ -2505,7 +2505,7 @@ assert np.allclose(detached_restore_child.get_center(), [0.0, 0.0, 0.0])
 assert detached_restore_group.named_child is detached_restore_child
 
 bound_restore_child = utility_marker(0.0, "bound-restore")
-bound_restore_group = Mobject(bound_restore_child)
+bound_restore_group = Mobject().add(bound_restore_child)
 bound_restore_group.named_child = bound_restore_child
 bound_restore_scene = Scene()
 bound_restore_scene.add(bound_restore_group)
@@ -2524,7 +2524,7 @@ except Exception as error:
 else:
     raise AssertionError("restore without save_state did not refuse")
 
-shape_restore_group = Mobject(Mobject())
+shape_restore_group = Mobject().add(Mobject())
 shape_restore_group.resize(1)
 shape_restore_group.save_state()
 shape_restore_group.set_field("point", 0, [4.0, 0.0, 0.0])
@@ -2537,7 +2537,7 @@ assert shape_restore_group.restore() is shape_restore_group
 assert shape_restore_group.get_field("point", 0) == [0.0, 0.0, 0.0]
 assert len(shape_restore_group.submobjects) == 2
 
-schema_restore_group = Mobject(Mobject())
+schema_restore_group = Mobject().add(Mobject())
 schema_restore_group.resize(1)
 schema_restore_group.save_state()
 schema_restore_group.set_field("point", 0, [7.0, 0.0, 0.0])
@@ -2552,7 +2552,7 @@ assert schema_restore_group.get_field("point", 0) == [7.0, 0.0, 0.0]
 
 spacing_left = utility_marker(1.0, "spacing-left")
 spacing_right = utility_marker(3.0, "spacing-right")
-spacing_group = Mobject(spacing_left, spacing_right)
+spacing_group = Mobject().add(spacing_left, spacing_right)
 spacing_widths = [mob.get_width() for mob in spacing_group.submobjects]
 assert (
     spacing_group.space_out_submobjects(2.0, about_point=[1.0, 0.0, 0.0])
@@ -2654,7 +2654,7 @@ assert np.allclose(
 # Every member keeps its directly transformed Reference box until a later
 # member revision invalidates that family of caches.
 box_child = manimlib.Square().shift(3 * manimlib.RIGHT)
-box_family = Mobject(manimlib.Square(), box_child)
+box_family = Mobject().add(manimlib.Square(), box_child)
 family_box_before = box_family.get_bounding_box().copy()
 box_family.apply_points_function(
     nonlinear_box_map,
@@ -2668,7 +2668,7 @@ box_child.shift(manimlib.RIGHT)
 assert np.allclose(box_family.get_right(), [6.0, 0.0, 0.0])
 
 detached_matrix_child = manimlib.Square().shift(manimlib.RIGHT)
-detached_matrix_family = Mobject(detached_matrix_child)
+detached_matrix_family = Mobject().add(detached_matrix_child)
 detached_before = detached_matrix_child.get_center().copy()
 assert detached_matrix_family.apply_matrix([[2.0, 0.0], [0.0, 3.0]]) is (
     detached_matrix_family
@@ -2677,7 +2677,7 @@ assert np.allclose(detached_matrix_child.get_center(), [2.0, 0.0, 0.0])
 assert not np.allclose(detached_matrix_child.get_center(), 4.0 * detached_before)
 
 bound_matrix_child = manimlib.Square().shift(manimlib.RIGHT)
-bound_matrix_family = Mobject(bound_matrix_child)
+bound_matrix_family = Mobject().add(bound_matrix_child)
 bound_matrix_scene = Scene()
 bound_matrix_scene.add(bound_matrix_family)
 assert bound_matrix_family.apply_matrix(
@@ -2704,7 +2704,9 @@ family_walker_override.apply_matrix([[2.0, 0.0], [0.0, 3.0]])
 assert family_walker_override.matrix_family_walker_calls == 1
 
 shared_matrix_leaf = manimlib.Square().shift(manimlib.RIGHT)
-shared_matrix_family = Mobject(Mobject(shared_matrix_leaf), Mobject(shared_matrix_leaf))
+shared_matrix_family = Mobject().add(
+    Mobject().add(shared_matrix_leaf), Mobject().add(shared_matrix_leaf)
+)
 shared_matrix_family.apply_matrix([[2.0, 0.0], [0.0, 1.0]])
 assert np.allclose(shared_matrix_leaf.get_center(), [4.0, 0.0, 0.0])
 
@@ -2736,7 +2738,7 @@ assert np.isclose(position_mapped.get_width(), position_width)
 
 positions_left = manimlib.Square().shift(manimlib.LEFT)
 positions_right = manimlib.Square().shift(manimlib.RIGHT)
-positions_group = Mobject(positions_left, positions_right)
+positions_group = Mobject().add(positions_left, positions_right)
 assert positions_group.apply_function_to_submobject_positions(
     lambda point: point + [0.0, 2.0, 0.0]
 ) is positions_group
@@ -2749,7 +2751,7 @@ assert complex_mapped.apply_complex_function(lambda value: value * (1.0 + 1.0j))
 )
 assert np.allclose(complex_mapped.get_center(), [-1.0, 3.0, 3.0])
 
-callback_partial = Mobject(
+callback_partial = Mobject().add(
     manimlib.Square().shift(manimlib.LEFT),
     manimlib.Square().shift(manimlib.RIGHT),
 )
@@ -2832,7 +2834,7 @@ assert np.allclose(style_target.get_shading(), style_source.get_shading())
 fade_child = Mobject()
 fade_child.resize(1)
 fade_child.set_opacity(0.25)
-fade_parent = Mobject(fade_child)
+fade_parent = Mobject().add(fade_child)
 fade_parent.resize(1)
 fade_parent.set_opacity(0.8, recurse=False)
 assert fade_parent.fade(0.1, recurse=False) is None
@@ -2852,7 +2854,7 @@ assert str(inspect.signature(Mobject.set_color_by_gradient)) == "(self, *colors)
 assert str(inspect.signature(Mobject.set_submobject_colors_by_gradient)) == (
     "(self, *colors, interp_by_hsl=False)"
 )
-gradient_group = Mobject(manimlib.Square(), manimlib.Square(), manimlib.Square())
+gradient_group = Mobject().add(manimlib.Square(), manimlib.Square(), manimlib.Square())
 assert (
     gradient_group.set_submobject_colors_by_gradient("#FF0000", "#0000FF")
     is gradient_group
@@ -2900,7 +2902,7 @@ point_gradient_colors = point_gradient.get_fill_colors()
 assert point_gradient_colors[0] == "#FF0000"
 assert point_gradient_colors[-1] == "#0000FF"
 
-pointless_gradient = Mobject(*[manimlib.Square() for _ in range(3)])
+pointless_gradient = Mobject().add(*[manimlib.Square() for _ in range(3)])
 assert pointless_gradient.set_color_by_gradient("#FF0000", "#0000FF") is pointless_gradient
 assert [mob.get_color() for mob in pointless_gradient.submobjects] == [
     "#FF0000",
@@ -5546,16 +5548,37 @@ assert str(inspect.signature(point_cloud_mobjects.PGroup)) == (
 )
 pgroup_left = manimlib.DotCloud([(-1.0, 0.0, 0.0)])
 pgroup_right = manimlib.DotCloud([(1.0, 0.0, 0.0)])
-pgroup = point_cloud_mobjects.PGroup(
-    pgroup_left,
-    pgroup_right,
-    pgroup_left,
-    marker="native",
-)
+pgroup = point_cloud_mobjects.PGroup(pgroup_left, pgroup_right, pgroup_left)
 assert list(pgroup.submobjects) == [pgroup_left, pgroup_right]
 assert pgroup.submobjects[0] is pgroup_left
 assert pgroup.submobjects[1] is pgroup_right
-assert pgroup.marker == "native"
+# fm-5wq.20: the Reference's Mobject.__init__ takes a fixed signature, so an
+# unknown keyword is Python's TypeError, not a stored attribute. A keyword the
+# Reference accepts but the native builder does not route yet still refuses
+# by name.
+for unknown_keyword_case in (
+    lambda: point_cloud_mobjects.PGroup(pgroup_left, marker="native"),
+    lambda: Mobject(shape=1),
+    lambda: VMobject(shape=1),
+    lambda: manimlib.Group(shape=1),
+    lambda: manimlib.VGroup(shape=1),
+    lambda: manimlib.SGroup(shape=(8, 8)),
+):
+    try:
+        unknown_keyword_case()
+    except TypeError as error:
+        assert str(error).startswith("Mobject.__init__() got an unexpected keyword argument"), error
+    else:
+        raise AssertionError("an unknown Mobject keyword was accepted")
+try:
+    manimlib.SurfaceMesh(manimlib.Sphere(), color=manimlib.BLUE)
+except NotImplementedError as error:
+    assert "not yet routed" in str(error), error
+else:
+    raise AssertionError("an unrouted Reference keyword was silently accepted")
+# Mobject's parameters are positional in the Reference's order: a bare
+# Mobject holds no members (Group does), and Mobject(RED) is its color.
+assert Mobject(manimlib.RED).color == manimlib.RED and len(Mobject(manimlib.RED)) == 0
 assert pgroup.get_num_points() == 0
 assert pgroup.data.dtype.names == ("point", "rgba")
 pgroup.shift(manimlib.UP)
@@ -6360,7 +6383,7 @@ assert bound_plate_scene.get_mobjects()[0] is bound_plate_target
 
 immediate_a = geometry.Square(side_length=0.5)
 immediate_b = geometry.Square(side_length=0.75)
-immediate_group = Mobject(immediate_a, immediate_b)
+immediate_group = Mobject().add(immediate_a, immediate_b)
 bound_plate_scene.add(immediate_group)
 assert immediate_group.add_background_rectangle_to_submobjects(opacity=0.4) is immediate_group
 for immediate in (immediate_a, immediate_b):
@@ -6370,8 +6393,8 @@ for immediate in (immediate_a, immediate_b):
 
 family_point_a = geometry.Square(side_length=0.5)
 family_point_b = geometry.Square(side_length=0.75)
-family_point_container = Mobject(family_point_b)
-family_plate_root = Mobject(family_point_a, family_point_container)
+family_point_container = Mobject().add(family_point_b)
+family_plate_root = Mobject().add(family_point_a, family_point_container)
 bound_plate_scene.add(family_plate_root)
 assert (
     family_plate_root.add_background_rectangle_to_family_members_with_points(
@@ -19484,8 +19507,8 @@ assert holder.submobjects == [first, replacement]
 # A shared descendant legally records every parent; detaching from one keeps
 # the other edge intact.
 shared = Mobject()
-family_a = Mobject(shared)
-family_b = Mobject(shared)
+family_a = Mobject().add(shared)
+family_b = Mobject().add(shared)
 assert shared.parents == [family_a, family_b]
 family_a.remove(shared)
 assert shared.parents == [family_b]
@@ -19495,7 +19518,7 @@ top, mid, leaf = _chain()
 assert leaf.get_ancestors() == [top, mid]
 assert mid.get_ancestors() == [top]
 assert top.get_ancestors() == []
-outside = Mobject(leaf)
+outside = Mobject().add(leaf)
 assert top not in outside.get_family(recurse=False)
 extended = leaf.get_ancestors(extended=True)
 # Reference extended traversal starts from the downward family only, so
@@ -19904,7 +19927,7 @@ z_mob = Mobject()
 z_mob.move_to([1.0, 2.0, 3.0])
 assert np.allclose(z_mob.get_z_index_reference_point(), z_mob.get_center())
 z_group = Mobject()
-z_member = Mobject(z_group)
+z_member = Mobject().add(z_group)
 z_member.z_index_group = z_group
 z_group.move_to([9.0, 9.0, 9.0])
 assert np.allclose(z_member.get_z_index_reference_point(), z_group.get_center())
