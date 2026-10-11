@@ -11586,6 +11586,8 @@ assert np.allclose(vectorized_point.get_location(), [1.5, -2.0, 0.25])
 assert np.allclose(vectorized_point.get_start(), vectorized_point.get_end())
 assert vectorized_point.get_stroke_width() == 0.0
 assert vectorized_point.get_fill_opacity() == 0.0
+# fm-78b6: VMobject's stroke opacity default, as the pinned Reference reports.
+assert vectorized_point.get_stroke_opacity() == 1.0
 vectorized_point.shift([0.5, 1.0, -0.25])
 assert np.allclose(vectorized_point.get_location(), [2.0, -1.0, 0.0])
 

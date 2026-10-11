@@ -218,6 +218,23 @@ class VectorSolidLifecycleTests(unittest.TestCase):
             obj=cls(color=m.GREEN)
             self.assertTrue(all(p.get_fill_color()==m.GREEN and p.get_stroke_color()==m.GREEN for p in obj))
 
+    def test_point_less_roots_take_vmobject_defaults_under_constructor_keywords(self):
+        # fm-78b6: the Reference's VGroup3D runs VMobject.__init__ before it
+        # adds the faces, so an unset root channel is VMobject's default
+        # (GREY_C fill at opacity 0, GREY_A stroke at width 4). Values
+        # measured on the pinned Reference.
+        def root(obj):
+            return (obj.get_fill_color(),obj.get_fill_opacity(),obj.get_stroke_color(),
+                    obj.get_stroke_width(),obj.get_stroke_opacity())
+        cases=((m.VCube(),('#29ABCA',1.,'#DDDDDD',0.,1.)),
+               (m.VPrism(),('#29ABCA',1.,'#DDDDDD',0.,1.)),
+               (m.Dodecahedron(),('#1C758A',1.,'#1C758A',1.,1.)),
+               (m.Prismify(m.Square()),('#888888',0.,'#DDDDDD',4.,1.)),
+               (m.Prismify(m.Square(),fill_color=m.RED,fill_opacity=.5),('#FC6255',.5,'#DDDDDD',4.,1.)))
+        for obj,expected in cases:
+            with self.subTest(cls=type(obj).__name__):
+                self.assertEqual(root(obj),expected)
+
     def test_prismify_uses_live_source_geometry_and_keeps_each_source_paint(self):
         left=m.Square(side_length=.5,fill_color=m.RED,fill_opacity=.3).shift(m.LEFT)
         right=m.Triangle(fill_color=m.BLUE,fill_opacity=.7).shift(m.RIGHT)

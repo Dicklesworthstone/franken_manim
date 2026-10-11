@@ -45,6 +45,9 @@ class SurfaceMeshTests(unittest.TestCase):
         self.assertEqual(mesh.get_stroke_width(), 2)
         self.assertFalse(mesh.uniforms['depth_test'])
         self.assert_planar_wires(mesh, (3, 4), .125)
+        # fm-78b6: the point-less root's fill is VMobject's default, as the
+        # pinned Reference reports it (#888888 at opacity 0).
+        self.assertEqual((mesh.get_fill_color(), mesh.get_fill_opacity()), ('#888888', 0.0))
 
     def test_rebuild_follows_current_native_points_without_uv_evaluation(self):
         source = plane()

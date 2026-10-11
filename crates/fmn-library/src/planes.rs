@@ -145,10 +145,12 @@ impl Default for FadedLineStyle {
 }
 
 /// The Reference's `NumberPlane.default_axis_config`: white 2-width
-/// stroke, no ticks, no tip, number labels `DL` at `SMALL_BUFF`.
+/// stroke, no ticks, no tip, number labels `DL` at `SMALL_BUFF`. Only the
+/// stroke is white; the fill keeps `NumberLine`'s `DEFAULT_LIGHT_COLOR`
+/// (fm-78b6).
 fn number_plane_axis_config() -> AxisConfig {
     AxisConfig {
-        color: Some(DEFAULT_MOBJECT_COLOR),
+        stroke_color: Some(DEFAULT_MOBJECT_COLOR),
         stroke_width: Some(2.0),
         include_ticks: Some(false),
         include_tip: Some(false),
@@ -1466,6 +1468,19 @@ mod tests {
             assert_eq!(style.stroke_color, BLUE_D);
             assert!((style.stroke_width - 1.0).abs() < 1e-12);
             assert!((style.stroke_opacity - 0.25).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn number_plane_axes_stroke_white_and_keep_the_number_line_fill() {
+        // The Reference's NumberPlane.default_axis_config sets only
+        // stroke_color, so each axis keeps NumberLine's DEFAULT_LIGHT_COLOR
+        // fill (fm-78b6: get_fill_color() is #BBBBBB on the Reference).
+        let plane = NumberPlane::new().build(&book()).expect("build");
+        for axis in [plane.x_axis(), plane.y_axis()] {
+            let style = axis.vmob().style();
+            assert_eq!(style.stroke_color, WHITE);
+            assert_eq!(style.fill_color, fmn_core::constants::DEFAULT_LIGHT_COLOR);
         }
     }
 

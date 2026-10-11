@@ -4584,6 +4584,9 @@ class VectorizedPoint(Point, VMobject):
         kwargs.setdefault("color", color)
         kwargs.setdefault("fill_opacity", fill_opacity)
         kwargs.setdefault("stroke_width", stroke_width)
+        # VMobject's own stroke opacity default, which the Reference's
+        # VectorizedPoint passes through (fm-78b6).
+        kwargs.setdefault("stroke_opacity", 1.0)
         _apply_vmobject_style_kwargs(self, kwargs)
 
 
@@ -5117,7 +5120,10 @@ class BackgroundRectangle(SurroundingRectangle):
         **kwargs,
     ):
         if color is None:
-            color = _pinned_manim_config().camera.background_color
+            # The Reference's manim_config.camera.background_color: the
+            # pinned default under the cwd custom_config.yml, the layer
+            # Scene's camera resolves too (fm-78b6).
+            color = _reference_camera_layer()["background_color"]
         super().__init__(
             mobject,
             color=color,
@@ -7454,7 +7460,7 @@ class ThreeDAxes(Axes):
 
 class NumberPlane(Axes):
     default_axis_config = dict(
-        color=_WHITE,
+        stroke_color=_WHITE,
         stroke_width=2,
         include_ticks=False,
         include_tip=False,

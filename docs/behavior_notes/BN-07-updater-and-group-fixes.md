@@ -1,4 +1,4 @@
-# BN-07 — Corrected mobject behavior (C-5, C-6, C-14, C-15, C-17, C-18, C-19, C-20, C-21, C-23, C-24, C-26, C-29)
+# BN-07 — Corrected mobject behavior (C-5, C-6, C-14, C-15, C-17, C-18, C-19, C-20, C-21, C-23, C-24, C-26, C-29, C-30, C-31)
 
 **Status:** Draft (W3, fm-yra; W10, fm-23ev, fm-5wq.4.39, and fm-easc). Consumed by Choreo (§9.1's
 `suspend_mobject_updating` interaction), fmn-python (whose `manimlib`
@@ -309,3 +309,43 @@ Locked by the C-29 assertions in `crates/fmn-python/tests/bridge.py`.
 
 **Migration:** none needed. A scene that reads a restored member's style
 gets the saved value, matching what is drawn.
+
+## C-30 — `BackgroundRectangle.get_fill_color()` reports the rectangle's color
+
+The Reference's `BackgroundRectangle.get_fill_color()` returns
+`Color(self.color)` (`shape_matchers.py:96`). `VMobject.__init__` consumes
+`color=` itself, so `self.color` is `Mobject`'s default white. The getter
+reports `Color("white")`, a `colour.Color` rather than a hex string, whatever
+the rectangle is filled with; by default that is the camera background,
+`#333333`.
+
+**FrankenManim:** the getter reports the rectangle's own color as a hex
+string: the constructor's `color=`, the camera background by default. That is
+the fill it draws until a `set_style` call forces black (the Reference's
+fixed style, kept).
+
+Excluded from the structural diff by the `bn07-c30-background-rectangle-fill-getter` row,
+pinned to the Reference's `<Color white>`.
+
+**Migration:** none needed. A scene that read this getter got white; it
+now gets the rectangle's color.
+
+## C-31 — `match_style` styles a point-less mobject
+
+The Reference's `VMobject.set_style` writes `fill_rgba` and `stroke_rgba`
+into `data` only (`vectorized_mobject.py:232`, `:242`). Every other color
+setter falls back to `_data_defaults` when there are no points
+(`mobject.py:1329`), so `set_fill` and `set_stroke` style a point-less
+mobject, but `match_style` (`vectorized_mobject.py:276`), which passes the
+source's arrays through `set_style`, is silently dropped. `DashedVMobject`
+calls `self.match_style(vmobject, recurse=False)` on its point-less root
+(`vectorized_mobject.py:1414`), which keeps VMobject's default colors, and
+`VGroup().match_style(Circle())` stays grey.
+
+**FrankenManim:** a point-less member takes the matched style, as C-29
+carries it through `become()` and `restore()`.
+
+Excluded from the structural diff by the `bn07-c31-point-less-match-style` row.
+
+**Migration:** none needed. The dashes keep the source's style in both
+engines; only the point-less root's getters differ.
