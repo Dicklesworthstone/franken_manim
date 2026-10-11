@@ -186,13 +186,13 @@ try {
     const beforePaste = edited.nodes.length;
     await nativeKey("c",2); await nativeKey("v",2);
     assert.equal((await inspect()).nodes.length,beforePaste + 1,"clipboard pastes exactly the selected primitive or glyph");
-    await nativeKey("ArrowRight",1);
+    await nativeKey("ArrowRight",8);
     const pasted = await inspect(), pastedPixels = await pixelHash();
     assert.notEqual(pastedPixels,coloredPixels,"the copied object is independently movable and visible");
     await nativeKey("z",2); await nativeKey("z",2);
     assert.equal((await inspect()).nodes.length,beforePaste,"undo removes the paste after undoing its move");
     assert.equal(await pixelHash(),coloredPixels,"undo restores actual edited pixels");
-    await nativeKey("z",3); await nativeKey("z",3);
+    await nativeKey("z",10); await nativeKey("z",10);
     assert.deepEqual((await inspect()).nodes,pasted.nodes,"redo restores the copied object's state and selection");
     assert.equal(await pixelHash(),pastedPixels,"redo restores the copied object's actual pixels");
     const final = await inspect();
@@ -357,6 +357,8 @@ try {
     assert.equal(await evaluate("document.getElementById('error').hidden"), true);
   }
   async function nativeKey(value, modifiers = 0, types = ["keyDown", "keyUp"]) {
+    // CDP modifiers use Alt=1, Control=2, Meta=4, Shift=8; Studio maps DOM
+    // modifier flags into its separate native bit layout after delivery.
     const view = (await inspect()).view, revision = view.input_revision;
     const code = value === "ArrowRight" ? "ArrowRight" : "Key" + value.toUpperCase();
     const windowsVirtualKeyCode = value === "ArrowRight" ? 39 : value.toUpperCase().charCodeAt(0);

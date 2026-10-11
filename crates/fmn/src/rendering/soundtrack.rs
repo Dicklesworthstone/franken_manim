@@ -474,12 +474,12 @@ mod tests {
         let fs = VirtualFs::new();
         assert!(matches!(
             PreparedSceneSoundtrack::new(&fs, &[request("/missing.wav", 0, 8)], &mut native_decoder(), config(), None),
-            Err(RenderError::SoundAsset { path, .. }) if path == PathBuf::from("/missing.wav")
+            Err(RenderError::SoundAsset { path, .. }) if path.as_path() == std::path::Path::new("/missing.wav")
         ));
         fs.insert("/invalid.wav", b"invalid media".to_vec());
         assert!(matches!(
             PreparedSceneSoundtrack::new(&fs, &[request("/invalid.wav", 0, 8)], &mut native_decoder(), config(), None),
-            Err(RenderError::SoundDecode { path, .. }) if path == PathBuf::from("/invalid.wav")
+            Err(RenderError::SoundDecode { path, .. }) if path.as_path() == std::path::Path::new("/invalid.wav")
         ));
         let prepared =
             PreparedSceneSoundtrack::new(&fs, &[], &mut native_decoder(), config(), None).unwrap();

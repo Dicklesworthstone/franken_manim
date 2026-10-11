@@ -176,7 +176,8 @@ fn invalid_deferred_sound_is_rejected_without_recording_a_cue() {
     assert!(
         program
             .next_frame()
-            .unwrap_err()
+            .err()
+            .expect("invalid deferred sound must be rejected")
             .to_string()
             .contains("sound time_offset must be finite")
     );

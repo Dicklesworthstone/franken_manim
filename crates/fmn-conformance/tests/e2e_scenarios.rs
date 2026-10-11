@@ -2554,8 +2554,8 @@ fn studio_builtin_inputs_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
                 .field("native_spans", truth(has_spans)),
         );
         outcome = outcome
-            .with_artifact(format!("{name}.replayed.png"), restored_png)
-            .with_artifact(format!("{name}.inspector.json"), restored);
+            .with_artifact(&format!("{name}.replayed.png"), restored_png)
+            .with_artifact(&format!("{name}.inspector.json"), restored);
     }
     ctx.counter("studio_live_builtin_families", 5);
     Ok(outcome.with_counter("studio_live_builtin_families", 5))

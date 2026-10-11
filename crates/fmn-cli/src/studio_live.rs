@@ -759,7 +759,7 @@ mod tests {
     }
 
     #[test]
-    fn native_builtin_template_refusal_does_not_initialize_unused_primitive_typesetting() {
+    fn native_builtin_templates_validate_config_and_leave_unused_engines_lazy() {
         let fs = fmn_platform::fs::VirtualFs::new();
         fs.insert(
             "/cfg/studio-template.yml",
@@ -767,25 +767,52 @@ mod tests {
         );
         let mut command = camera_command("circle_shift.v1");
         command.render.common.config_file = Some(PathBuf::from("/cfg/studio-template.yml"));
-        assert_eq!(
-            configuration(&fs, &command).unwrap().template,
-            "not-a-native-template"
-        );
-        // The identical configured template would fail on any engine() call.
-        // A primitive worker can therefore only succeed while leaving it lazy.
-        assert!(worker(&fs, &command).is_ok());
+        // Public configuration validates pack names for every scene, before
+        // constructing a worker or initializing a typesetting engine.
+        for name in ordinary_builtin_names() {
+            command.render.scene_names = vec![name.into()];
+            let error = match worker(&fs, &command) {
+                Ok(_) => panic!("invalid configured template accepted for {name}"),
+                Err(error) => error,
+            };
+            assert_eq!(error.exit_name(), "config", "{name}");
+            assert!(
+                error.to_string().contains("not-a-native-template"),
+                "{name}: {error}"
+            );
+        }
+
+        // Exercise the factory below that admission boundary with an invalid
+        // sentinel: any engine() request must fail, making eager initialization
+        // observable without weakening the public configuration contract.
+        let runtime = fmn_scene::RuntimeConfig {
+            fps: 30,
+            ..fmn_scene::RuntimeConfig::default()
+        };
+        let primitive = Builtin::named("circle_shift.v1").unwrap();
+        let limit = primitive.frame_count(30).unwrap() - 1;
+        let mut live = primitive
+            .program(runtime.clone(), 71, limit, "not-a-native-template", 1)
+            .unwrap();
+        assert_eq!(live.preview().stage().roots().len(), 2);
+        live.advance_to(limit).unwrap();
         for name in [
             fmn::builtins::TEX_SPAN_SCENE_NAME,
             fmn::builtins::FORMULA_SHEET_SCENE_NAME,
             fmn::builtins::SEMANTIC_WITNESS_SCENE_NAME,
             camera_route::SEMANTIC_WITNESS_CAMERA_SCENE_NAME,
         ] {
-            command.render.scene_names = vec![name.into()];
-            let error = match worker(&fs, &command) {
-                Ok(_) => panic!("invalid configured template accepted for {name}"),
+            let error = match Builtin::named(name).unwrap().program(
+                runtime.clone(),
+                71,
+                limit,
+                "not-a-native-template",
+                1,
+            ) {
+                Ok(_) => panic!("required typesetting engine was not initialized for {name}"),
                 Err(error) => error,
             };
-            assert_eq!(error.exit_name(), "scene", "{name}");
+            assert_eq!(error.code, fmn_studio::WorkerErrorCode::ExecutionFailed);
             assert!(
                 error.to_string().contains("not-a-native-template"),
                 "{name}: {error}"
