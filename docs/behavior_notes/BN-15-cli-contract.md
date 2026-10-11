@@ -99,6 +99,18 @@ in provenance. Existing callers that supply no controls keep encoder defaults.
 See [video encoding quality](../VIDEO_ENCODING_QUALITY.md) for catalogs,
 examples, and the matching Rust API precedence rules.
 
+## Long-render ffmpeg budgets
+
+The standalone native CLI uses the render API's finite 24-hour ffmpeg watchdog
+instead of the boundary's ten-minute short-job default. Its four explicit
+controls are `--ffmpeg-timeout` (whole seconds), `--ffmpeg-max-log-bytes`,
+`--ffmpeg-max-artifact-bytes`, and `--ffmpeg-max-input-bytes`. These select video
+output, reject zero/invalid bounds and native formats, and preserve the existing
+frame-count/resident-memory safeguards. The artifact cap is intersected with
+the raw-input allowance. Both the robot render receipt and C9 provenance record
+the admitted policy. Tool probes keep their own short deadlines. See
+[native video limits](../NATIVE_VIDEO_LIMITS.md) for defaults and usage.
+
 ## Python portal video-quality extension
 
 `fmn-python` additionally accepts `--crf`, `--preset`, `--tune`, and

@@ -68,6 +68,10 @@ The Reference's `manimlib/config.py` declares 34 options. Every row has exactly 
 | `--preset` | render | `preset` | improved | BN-15 | store | — | Set the x264/x265 compression-speed preset |
 | `--tune` | render | `tune` | improved | BN-15 | store | — | Set one supported video encoder tune |
 | `--video-bitrate` | render | `video_bitrate` | improved | BN-15 | store | — | Set target video bitrate in bits per second (exclusive with CRF) |
+| `--ffmpeg-timeout` | render | `ffmpeg_timeout` | improved | BN-15 | store | — | Set positive ffmpeg wall-clock seconds per video encode (default 86400) |
+| `--ffmpeg-max-log-bytes` | render | `ffmpeg_max_log_bytes` | improved | BN-15 | store | — | Bound captured bytes per ffmpeg stdout/stderr stream (default 1048576) |
+| `--ffmpeg-max-artifact-bytes` | render | `ffmpeg_max_artifact_bytes` | improved | BN-15 | store | — | Bound encoded video bytes, capped by the input allowance (default 8589934592) |
+| `--ffmpeg-max-input-bytes` | render | `ffmpeg_max_input_bytes` | improved | BN-15 | store | — | Bound cumulative raw-frame bytes sent to ffmpeg (default 68719476736) |
 | `--math-pack` | render | `math_pack` | improved | BN-15 | store | default | Select an fmd-math preamble pack |
 | `--budget-ms` | batch | `budget_ms` | improved | BN-15 | store | — | Wall-clock budget for the batch |
 | `--max-scenes` | batch | `max_scenes` | improved | BN-15 | store | — | Bound simultaneously active scene jobs |
@@ -124,6 +128,10 @@ These rules are emitted into the parser artifact and executed after token collec
 | `preset-writes` | implies | `preset`, `write_file` | — | --preset implies video output |
 | `tune-writes` | implies | `tune`, `write_file` | — | --tune implies video output |
 | `video-bitrate-writes` | implies | `video_bitrate`, `write_file` | — | --video-bitrate implies video output |
+| `ffmpeg-timeout-writes` | implies | `ffmpeg_timeout`, `write_file` | — | --ffmpeg-timeout implies video output |
+| `ffmpeg-log-limit-writes` | implies | `ffmpeg_max_log_bytes`, `write_file` | — | --ffmpeg-max-log-bytes implies video output |
+| `ffmpeg-artifact-limit-writes` | implies | `ffmpeg_max_artifact_bytes`, `write_file` | — | --ffmpeg-max-artifact-bytes implies video output |
+| `ffmpeg-input-limit-writes` | implies | `ffmpeg_max_input_bytes`, `write_file` | — | --ffmpeg-max-input-bytes implies video output |
 | `video-rate-control-exclusive` | at_most_one | `crf`, `video_bitrate` | usage | --crf and --video-bitrate are mutually exclusive |
 | `subdivide-writes` | implies | `subdivide`, `write_file` | — | --subdivide implies durable output |
 | `filename-writes` | implies | `file_name`, `write_file` | — | --file_name implies durable output |
@@ -139,6 +147,14 @@ These rules are emitted into the parser artifact and executed after token collec
 | `gif-vs-preset` | conflicts | `gif`, `preset` | usage | --preset applies only to ffmpeg video output |
 | `gif-vs-tune` | conflicts | `gif`, `tune` | usage | --tune applies only to ffmpeg video output |
 | `gif-vs-video-bitrate` | conflicts | `gif`, `video_bitrate` | usage | --video-bitrate applies only to ffmpeg video output |
+| `native-format-vs-ffmpeg-timeout` | conflicts | `format=png,png_sequence,gif,y4m,wav,svg`, `ffmpeg_timeout` | usage | ffmpeg resource limits apply only to video output |
+| `native-format-vs-ffmpeg-log-limit` | conflicts | `format=png,png_sequence,gif,y4m,wav,svg`, `ffmpeg_max_log_bytes` | usage | ffmpeg resource limits apply only to video output |
+| `native-format-vs-ffmpeg-artifact-limit` | conflicts | `format=png,png_sequence,gif,y4m,wav,svg`, `ffmpeg_max_artifact_bytes` | usage | ffmpeg resource limits apply only to video output |
+| `native-format-vs-ffmpeg-input-limit` | conflicts | `format=png,png_sequence,gif,y4m,wav,svg`, `ffmpeg_max_input_bytes` | usage | ffmpeg resource limits apply only to video output |
+| `gif-vs-ffmpeg-timeout` | conflicts | `gif`, `ffmpeg_timeout` | usage | ffmpeg resource limits apply only to video output |
+| `gif-vs-ffmpeg-log-limit` | conflicts | `gif`, `ffmpeg_max_log_bytes` | usage | ffmpeg resource limits apply only to video output |
+| `gif-vs-ffmpeg-artifact-limit` | conflicts | `gif`, `ffmpeg_max_artifact_bytes` | usage | ffmpeg resource limits apply only to video output |
+| `gif-vs-ffmpeg-input-limit` | conflicts | `gif`, `ffmpeg_max_input_bytes` | usage | ffmpeg resource limits apply only to video output |
 | `transparent-vs-opaque-pixel-format` | conflicts | `transparent`, `pix_fmt=yuv420p,yuv422p,yuv444p,nv12,p010,p010le,rgb24,bgr24` | usage | --transparent requires an alpha-capable output pixel format |
 | `transparent-vs-opaque-native-format` | conflicts | `transparent`, `format=y4m,wav` | usage | --transparent is incompatible with y4m and WAV outputs |
 | `skip-vs-subdivide` | conflicts | `skip_animations`, `subdivide` | usage | --skip_animations cannot produce per-animation subdivisions |

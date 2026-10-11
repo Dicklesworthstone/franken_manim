@@ -35,6 +35,7 @@ use std::time::Duration;
 #[cfg(feature = "batch")]
 use std::time::Instant;
 
+use fmn::rendering::FfmpegLimitsReport;
 use fmn_codec::{SampleFormat, WavLimits, decode_wav};
 use fmn_core::color::Srgb;
 use fmn_core::rng::{RNG_LAYOUT_VERSION, RngRoot};
@@ -274,6 +275,53 @@ pub enum SceneSourceKind {
     Python,
 }
 
+/// Optional resource bounds for an offline ffmpeg video request.
+///
+/// Unspecified fields use the same finite defaults as the native render API.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FfmpegLimitOptions {
+    /// Wall-clock seconds for an encode, including time spent rendering frames.
+    pub timeout_seconds: Option<u64>,
+    /// Captured bytes per stdout/stderr stream.
+    pub max_log_bytes: Option<u64>,
+    /// Maximum encoded artifact bytes, also bounded by the input allowance.
+    pub max_artifact_bytes: Option<u64>,
+    /// Cumulative raw-frame bytes supplied to the encoder.
+    pub max_input_bytes: Option<u64>,
+}
+
+impl FfmpegLimitOptions {
+    fn has_overrides(&self) -> bool {
+        self.timeout_seconds.is_some()
+            || self.max_log_bytes.is_some()
+            || self.max_artifact_bytes.is_some()
+            || self.max_input_bytes.is_some()
+    }
+
+    /// Resolve and validate the policy before discovering or starting ffmpeg.
+    ///
+    /// Returns the admitted job limits and the independent raw-input ceiling.
+    ///
+    /// # Errors
+    /// Refuses zero bounds and deadlines outside the host monotonic clock range.
+    pub fn effective_limits(&self) -> Result<(JobLimits, u64), CliError> {
+        let mut limits = fmn::rendering::default_render_ffmpeg_limits();
+        if let Some(seconds) = self.timeout_seconds {
+            limits.timeout = std::time::Duration::from_secs(seconds);
+        }
+        if let Some(bytes) = self.max_log_bytes {
+            limits.max_log_bytes = bytes;
+        }
+        if let Some(bytes) = self.max_artifact_bytes {
+            limits.max_artifact_bytes = bytes;
+        }
+        let max_input_bytes = self.max_input_bytes.unwrap_or(64 * 1024 * 1024 * 1024);
+        let admitted = fmn::rendering::admit_render_ffmpeg_limits(&limits, max_input_bytes)
+            .map_err(|error| CliError::new("config", error.to_string()))?;
+        Ok((admitted, max_input_bytes))
+    }
+}
+
 /// Semantic render request after parsing and interaction application.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderCommand {
@@ -321,6 +369,8 @@ pub struct RenderCommand {
     pub pix_fmt: Option<String>,
     /// Explicit video encoder overrides, layered above `file_writer` settings.
     pub video_quality: VideoQuality,
+    /// Explicit ffmpeg wall-clock and byte budgets for video rendering.
+    pub ffmpeg_limits: FfmpegLimitOptions,
     /// Output format.
     pub format: OutputFormat,
     /// Explicit fmd-math preamble pack; absent preserves user configuration.
@@ -690,6 +740,10 @@ fn typed_consumer_scope(binding: &str) -> Option<CommandScope> {
         | "preset"
         | "tune"
         | "video_bitrate"
+        | "ffmpeg_timeout"
+        | "ffmpeg_max_log_bytes"
+        | "ffmpeg_max_artifact_bytes"
+        | "ffmpeg_max_input_bytes"
         | "video_dir"
         | "write_all"
         | "background"
@@ -1201,6 +1255,12 @@ fn build_render(values: Collected, common: CommonOptions) -> Result<RenderComman
                 .transpose()
                 .map_err(|error| usage(format!("--tune: {error}")))?,
             bitrate: parse_optional_positive(&values, "video_bitrate")?,
+        },
+        ffmpeg_limits: FfmpegLimitOptions {
+            timeout_seconds: parse_optional_positive(&values, "ffmpeg_timeout")?,
+            max_log_bytes: parse_optional_positive(&values, "ffmpeg_max_log_bytes")?,
+            max_artifact_bytes: parse_optional_positive(&values, "ffmpeg_max_artifact_bytes")?,
+            max_input_bytes: parse_optional_positive(&values, "ffmpeg_max_input_bytes")?,
         },
         format,
         math_pack: values.explicit_value("math_pack").map(str::to_owned),
@@ -2599,6 +2659,8 @@ struct FfmpegRenderContext {
     capabilities: EncoderCapabilities,
     job: VideoJob,
     workdir_root: PathBuf,
+    job_limits: JobLimits,
+    max_input_bytes: u64,
 }
 
 enum RenderTarget {
@@ -2644,6 +2706,7 @@ struct VideoArtifactReport {
     process_mechanism: String,
     process_policy_version: u32,
     argv: Vec<String>,
+    ffmpeg_limits: FfmpegLimitsReport,
 }
 
 enum RenderArtifactReport {
@@ -3878,6 +3941,7 @@ struct RenderSink {
     output_layout: FrameLayout,
     emitter: Option<OrderedEmitter>,
     receipt: RenderReceipt,
+    ffmpeg_limits: Option<FfmpegLimitsReport>,
     next_sequence: u64,
 }
 
@@ -3928,6 +3992,25 @@ impl RenderSink {
         let output_layout = FrameLayout::tight(format, width, height)
             .map_err(|error| CliError::new("config", error.to_string()))?;
         let limits = render_sink_limits(&output_layout)?;
+        let (limits, ffmpeg_limits) = if let RenderTarget::Video(context) = target {
+            let limits = SinkLimits::new(
+                limits.max_frames(),
+                limits.max_resident_bytes(),
+                context.max_input_bytes,
+                context.job_limits.max_artifact_bytes,
+            )
+            .map_err(output_adapter_error)?;
+            let report = FfmpegLimitsReport {
+                timeout: context.job_limits.timeout,
+                max_log_bytes: context.job_limits.max_log_bytes,
+                max_artifact_bytes: context.job_limits.max_artifact_bytes,
+                max_input_bytes: context.max_input_bytes,
+                keep_workdir: context.job_limits.keep_workdir,
+            };
+            (limits, Some(report))
+        } else {
+            (limits, None)
+        };
         let frame_config = resolved_frame_config(config)?;
         if camera.as_ref().is_some_and(|camera| {
             plan.engine != fmn_runtime::ExecutionEngine::CertifiedCpu
@@ -4037,7 +4120,7 @@ impl RenderSink {
                         audio: None,
                         destination,
                         workdir_root: context.workdir_root.clone(),
-                        job_limits: JobLimits::default(),
+                        job_limits: context.job_limits.clone(),
                         first_sequence: 0,
                         limits,
                         profile: None,
@@ -4138,6 +4221,7 @@ impl RenderSink {
             output_layout,
             emitter: Some(emitter),
             receipt,
+            ffmpeg_limits,
             next_sequence: 0,
         })
     }
@@ -4297,6 +4381,9 @@ impl RenderSink {
                     process_mechanism: invocation.provenance.process_mechanism.clone(),
                     process_policy_version: invocation.provenance.process_policy_version,
                     argv: invocation.provenance.argv.clone(),
+                    ffmpeg_limits: self.ffmpeg_limits.clone().ok_or_else(|| {
+                        internal("ffmpeg publication omitted its admitted resource policy")
+                    })?,
                 })
             }
         };
@@ -4860,6 +4947,11 @@ enum RequestedRenderFormat {
 }
 
 fn requested_render_format(command: &RenderCommand) -> Result<RequestedRenderFormat, CliError> {
+    if command.ffmpeg_limits.has_overrides()
+        && !matches!(command.format, OutputFormat::Auto | OutputFormat::Video)
+    {
+        return Err(usage("ffmpeg resource limits require video output"));
+    }
     if !command.video_quality.is_default()
         && !matches!(command.format, OutputFormat::Auto | OutputFormat::Video)
     {
@@ -4882,7 +4974,8 @@ fn requested_render_format(command: &RenderCommand) -> Result<RequestedRenderFor
         OutputFormat::Auto
             if command.vcodec.is_some()
                 || command.pix_fmt.is_some()
-                || !command.video_quality.is_default() =>
+                || !command.video_quality.is_default()
+                || command.ffmpeg_limits.has_overrides() =>
         {
             Ok(RequestedRenderFormat::Video)
         }
@@ -5230,6 +5323,7 @@ fn render_manifest(
         ),
         RenderArtifactReport::Video(report) => {
             let tool_path = report.tool_path.to_string_lossy();
+            let resource_policy = report.ffmpeg_limits.to_json();
             ClosureItem::structural(
                 9,
                 "native capabilities plus audited ffmpeg boundary",
@@ -5247,6 +5341,7 @@ fn render_manifest(
                     StructuralField::Text(report.native_image_architecture),
                     StructuralField::U64(report.native_image_bytes),
                     StructuralField::U64(u64::from(report.native_image_policy_version)),
+                    StructuralField::Text(&resource_policy),
                 ],
             )
         }
@@ -5435,7 +5530,9 @@ fn prepare_ffmpeg_context(
     locator: &dyn fmn_platform::process::FfmpegLocator,
     configured: &Path,
     job: VideoJob,
+    requested_limits: &FfmpegLimitOptions,
 ) -> Result<FfmpegRenderContext, CliError> {
+    let (job_limits, max_input_bytes) = requested_limits.effective_limits()?;
     let executable = locator.locate_ffmpeg(configured).map_err(|error| {
         CliError::new(
             "capability",
@@ -5476,6 +5573,8 @@ fn prepare_ffmpeg_context(
         capabilities,
         job,
         workdir_root,
+        job_limits,
+        max_input_bytes,
     })
 }
 
@@ -5876,6 +5975,7 @@ fn execute_native_render_with_cancellation(
                 locator,
                 Path::new(&config.file_writer.ffmpeg_bin),
                 job,
+                &command.ffmpeg_limits,
             )?))
         }
         _ => {
@@ -6715,6 +6815,11 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
                         json_string(&report.process_mechanism),
                         report.process_policy_version,
                         json_array(&report.argv),
+                    );
+                    let _ = write!(
+                        stdout,
+                        ",\"ffmpeg_limits\":{}",
+                        report.ffmpeg_limits.to_json(),
                     );
                     stdout.push_str(&backend_json);
                     stdout.push_str(&manifest_json);
@@ -8639,6 +8744,9 @@ mod tests {
             "preset" => "slow",
             "tune" => "animation",
             "video_bitrate" => "2000000",
+            "ffmpeg_timeout" => "21600",
+            "ffmpeg_max_log_bytes" => "1048576",
+            "ffmpeg_max_artifact_bytes" | "ffmpeg_max_input_bytes" => "68719476736",
             "format" => "png",
             "engine" => "cpu",
             "preview_codec" => "png",
@@ -8765,6 +8873,10 @@ mod tests {
             &["--preset", "slow"],
             &["--tune", "animation"],
             &["--video-bitrate", "2000000"],
+            &["--ffmpeg-timeout", "21600"],
+            &["--ffmpeg-max-log-bytes", "1048576"],
+            &["--ffmpeg-max-artifact-bytes", "8589934592"],
+            &["--ffmpeg-max-input-bytes", "68719476736"],
             &["--subdivide"],
             &["--file_name", "out"],
             &["--video_dir", "/tmp/out"],
@@ -9121,6 +9233,184 @@ mod tests {
             assert!(output.stderr.is_empty());
             assert_eq!(output.stdout.lines().count(), 1);
             assert!(output.stdout.contains("\"exit_name\":\"config\""));
+        }
+    }
+
+    #[test]
+    fn ffmpeg_limit_flags_select_video_and_use_shared_admission() {
+        let command = render(
+            parse_args([
+                "--ffmpeg-timeout",
+                "21600",
+                "--ffmpeg-max-log-bytes",
+                "73",
+                "--ffmpeg-max-artifact-bytes",
+                "17179869184",
+                "--ffmpeg-max-input-bytes",
+                "8589934592",
+            ])
+            .unwrap(),
+        );
+        assert!(command.write_file);
+        assert_eq!(
+            requested_render_format(&command).unwrap(),
+            RequestedRenderFormat::Video
+        );
+        let (limits, input) = command.ffmpeg_limits.effective_limits().unwrap();
+        assert_eq!(limits.timeout, std::time::Duration::from_secs(21_600));
+        assert_eq!(limits.max_log_bytes, 73);
+        assert_eq!(limits.max_artifact_bytes, 8 << 30);
+        assert_eq!(input, 8 << 30);
+        assert!(!limits.keep_workdir);
+        assert_eq!(command.ffmpeg_limits.max_artifact_bytes, Some(16 << 30));
+        let (defaults, input) = FfmpegLimitOptions::default().effective_limits().unwrap();
+        assert_eq!(
+            defaults.timeout,
+            fmn::rendering::DEFAULT_RENDER_FFMPEG_TIMEOUT
+        );
+        assert_eq!(defaults.max_artifact_bytes, 8 << 30);
+        assert_eq!(defaults.max_log_bytes, 1 << 20);
+        assert_eq!(input, 64 << 30);
+    }
+
+    #[test]
+    fn ffmpeg_limits_reject_invalid_bounds_and_non_video_formats() {
+        for flag in [
+            "--ffmpeg-timeout",
+            "--ffmpeg-max-log-bytes",
+            "--ffmpeg-max-artifact-bytes",
+            "--ffmpeg-max-input-bytes",
+        ] {
+            for value in ["0", "-1", "1.5", "18446744073709551616"] {
+                assert_eq!(
+                    parse_args([format!("{flag}={value}")])
+                        .unwrap_err()
+                        .exit_name(),
+                    "usage"
+                );
+            }
+            for format in ["png", "png_sequence", "gif", "y4m", "wav", "svg"] {
+                assert_eq!(
+                    parse_args([flag, "1", "--format", format])
+                        .unwrap_err()
+                        .exit_name(),
+                    "usage"
+                );
+            }
+            assert_eq!(
+                parse_args([flag, "1", "--gif"]).unwrap_err().exit_name(),
+                "usage"
+            );
+        }
+        let command = render(parse_args(["--ffmpeg-timeout", "18446744073709551615"]).unwrap());
+        let error = command.ffmpeg_limits.effective_limits().unwrap_err();
+        assert_eq!(error.exit_name(), "config");
+        assert!(error.message().contains("monotonic clock"));
+        let output = run_with_capabilities(
+            [
+                "--robot",
+                "--ffmpeg-timeout",
+                "18446744073709551615",
+                BUILTIN_SCENE_SOURCE,
+                "circle_shift.v1",
+            ],
+            Arc::new(VirtualFs::new()),
+            Arc::new(fmn_platform::process::ScriptedRunner::new()),
+            &no_ffmpeg_locator(),
+        );
+        assert_eq!(output.code, exit_code("config"), "{}", output.stdout);
+        assert!(output.stdout.contains("monotonic clock"));
+        assert!(output.stderr.is_empty());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    #[test]
+    fn ffmpeg_limits_reach_the_streaming_process_and_failed_jobs_publish_nothing() {
+        use fmn_platform::process::{
+            ProcessCancellation, ProcessError, ProcessMechanism, ProcessOutcome, ProcessRunner,
+            ProcessSpec, ProcessStdinLimits, RunningProcess,
+        };
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct RecordLimits(Mutex<Vec<(std::time::Duration, u64, u64)>>);
+        impl ProcessRunner for RecordLimits {
+            fn mechanism(&self) -> ProcessMechanism {
+                ProcessMechanism::Scripted
+            }
+            fn run(&self, spec: &ProcessSpec) -> Result<ProcessOutcome, ProcessError> {
+                SuccessfulFfmpegProbeRunner.run(spec)
+            }
+            fn start(
+                &self,
+                spec: &ProcessSpec,
+                _: ProcessCancellation,
+                stdin: ProcessStdinLimits,
+            ) -> Result<Box<dyn RunningProcess>, ProcessError> {
+                self.0.lock().unwrap().push((
+                    spec.timeout,
+                    spec.max_output_bytes,
+                    stdin.max_total_bytes,
+                ));
+                Err(ProcessError::NotScripted {
+                    program: spec.program.clone(),
+                })
+            }
+        }
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("fmn-cli-limits-{}-{unique}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let executable = root.join("ffmpeg");
+        write_native_ffmpeg_fixture(&executable);
+        let output_dir = root.join("video");
+        let runner = Arc::new(RecordLimits::default());
+        let output = run_with_capabilities(
+            [
+                "--robot",
+                "--ffmpeg",
+                executable.to_str().unwrap(),
+                "--vcodec",
+                "h264_nvenc",
+                "--ffmpeg-timeout",
+                "21600",
+                "--ffmpeg-max-log-bytes",
+                "73",
+                "--ffmpeg-max-artifact-bytes",
+                "4096",
+                "--ffmpeg-max-input-bytes",
+                "8192",
+                "--video_dir",
+                output_dir.to_str().unwrap(),
+                "--resolution",
+                "16x16",
+                "--fps",
+                "2",
+                "--threads",
+                "1",
+                BUILTIN_SCENE_SOURCE,
+                "circle_shift.v1",
+            ],
+            Arc::new(StdFs),
+            runner.clone(),
+            &no_ffmpeg_locator(),
+        );
+        assert_ne!(
+            output.code, 0,
+            "the scripted encoder intentionally refuses to start"
+        );
+        assert_eq!(
+            *runner.0.lock().unwrap(),
+            vec![(std::time::Duration::from_secs(21_600), 73, 8192)],
+            "{}",
+            output.stdout
+        );
+        assert!(!output_dir.join("circle_shift.mp4").exists());
+        if output_dir.exists() {
+            assert!(std::fs::read_dir(&output_dir).unwrap().next().is_none());
         }
     }
 

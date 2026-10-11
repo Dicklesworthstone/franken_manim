@@ -31,6 +31,10 @@ fmn.cli.global	-v,--version	version	cli_flag	0	action=store_true;nargs=-;type=-;
 fmn.cli.render	--autoreload	autoreload	cli_flag	0	action=store_true;nargs=-;type=-;default=False	tiered	OOT-CLI-AUTORELOAD	crates/fmn-cli/src/lib.rs#tests	re-specified as supervised Studio worker reload
 fmn.cli.render	--crf	crf	cli_flag	0	action=store;nargs=-;type=u64;default=-	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Set libx264/libx265 constant rate factor (0 through 51)
 fmn.cli.render	--engine	engine	cli_flag	0	action=store;nargs=-;type=engine;default=-	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Select the CPU engine or a standard-only accelerator annex
+fmn.cli.render	--ffmpeg-max-artifact-bytes	ffmpeg_max_artifact_bytes	cli_flag	0	action=store;nargs=-;type=u64;default=-	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Bound encoded video bytes, capped by the input allowance (default 8589934592)
+fmn.cli.render	--ffmpeg-max-input-bytes	ffmpeg_max_input_bytes	cli_flag	0	action=store;nargs=-;type=u64;default=-	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Bound cumulative raw-frame bytes sent to ffmpeg (default 68719476736)
+fmn.cli.render	--ffmpeg-max-log-bytes	ffmpeg_max_log_bytes	cli_flag	0	action=store;nargs=-;type=u64;default=-	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Bound captured bytes per ffmpeg stdout/stderr stream (default 1048576)
+fmn.cli.render	--ffmpeg-timeout	ffmpeg_timeout	cli_flag	0	action=store;nargs=-;type=u64;default=-	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Set positive ffmpeg wall-clock seconds per video encode (default 86400)
 fmn.cli.render	--file_name	file_name	cli_flag	0	action=store;nargs=-;type=-;default=-	same	-	crates/fmn-cli/src/lib.rs#tests	explicit output stem
 fmn.cli.render	--finder	finder	cli_flag	0	action=store_true;nargs=-;type=-;default=False	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	portable reveal-in-file-manager action
 fmn.cli.render	--format	format	cli_flag	0	action=store;nargs=-;type=output_format;default=auto	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Select auto, png, png_sequence, gif, y4m, wav, svg, or video output; wav refuses scenes without add_sound cues

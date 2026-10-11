@@ -44,6 +44,17 @@ frames, zero dimensions or frame rate.
 
 ## 2. The D2 invocation protocol
 
+Offline native video requests use the finite render policy described in
+[native video limits](NATIVE_VIDEO_LIMITS.md): a 24-hour default watchdog,
+explicit timeout/log/artifact/input budgets, and the same admission function
+for the Rust API and standalone CLI. The streaming encoder's wall clock
+includes scene construction and frame rendering. CLI overrides are
+`--ffmpeg-timeout`, `--ffmpeg-max-log-bytes`, `--ffmpeg-max-artifact-bytes`, and
+`--ffmpeg-max-input-bytes`. The resolved limits enter the video receipt and CLI
+provenance; they do not alter tool-probe deadlines or the low-level boundary's
+short-job defaults. [Video quality](VIDEO_ENCODING_QUALITY.md) documents the
+separate negotiated CRF/preset/tune/bitrate controls.
+
 ### 2.0 Audited executable discovery
 
 Executable discovery is an fmn-platform capability, not process-runner

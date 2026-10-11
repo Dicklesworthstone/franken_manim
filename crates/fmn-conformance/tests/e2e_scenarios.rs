@@ -1250,6 +1250,85 @@ fn failure_cli_video_quality_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenari
         .with_counter("cli_video_quality_tool_calls", tool_calls))
 }
 
+/// Native CLI job limits are admitted without spawning; invalid limits fail
+/// with stable identities before a tool or output generation is selected.
+fn failure_cli_ffmpeg_limits_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_platform::process::{FfmpegExecutable, FfmpegLocator, FfmpegLocatorError};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct CountTool(AtomicU64);
+    impl FfmpegLocator for CountTool {
+        fn locate_ffmpeg(
+            &self,
+            _: &std::path::Path,
+        ) -> Result<FfmpegExecutable, FfmpegLocatorError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(FfmpegLocatorError::NotFound)
+        }
+    }
+    let locator = CountTool(AtomicU64::new(0));
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    let runner = Arc::new(fmn_platform::process::ScriptedRunner::new());
+    let mut refused = 0;
+    for (args, code) in [
+        (&["--ffmpeg-timeout", "0"][..], 2),
+        (&["--ffmpeg-max-input-bytes", "0"], 2),
+        (&["--gif", "--ffmpeg-max-log-bytes", "73"], 2),
+        (&["--ffmpeg-timeout", "18446744073709551615"], 3),
+    ] {
+        let output = fmn_cli::run_with_capabilities(
+            args.iter().copied().chain([
+                "--robot",
+                fmn_cli::BUILTIN_SCENE_SOURCE,
+                "circle_shift.v1",
+            ]),
+            fs.clone(),
+            runner.clone(),
+            &locator,
+        );
+        if output.code != code || !output.stderr.is_empty() || output.stdout.lines().count() != 1 {
+            return Err(fail(format!(
+                "CLI ffmpeg limit admission {args:?}: code={} stdout={:?}",
+                output.code, output.stdout
+            )));
+        }
+        refused += 1;
+    }
+    let invocation = fmn_cli::parse_args([
+        "--ffmpeg-timeout",
+        "21600",
+        "--ffmpeg-max-artifact-bytes",
+        "17179869184",
+        "--ffmpeg-max-input-bytes",
+        "8589934592",
+    ])
+    .map_err(|error| fail(error.to_string()))?;
+    let fmn_cli::Invocation::Render(command) = invocation else {
+        return Err(fail(
+            "ffmpeg resource flags did not select a render request",
+        ));
+    };
+    let (limits, input) = command
+        .ffmpeg_limits
+        .effective_limits()
+        .map_err(|error| fail(error.to_string()))?;
+    let tool_calls = locator.0.load(Ordering::SeqCst);
+    ctx.event(
+        LogEvent::new("e2e.failure.cli_ffmpeg_limits")
+            .field("refused", refused)
+            .field("tool_calls", tool_calls)
+            .field("admitted_timeout_seconds", limits.timeout.as_secs())
+            .field("admitted_artifact_bytes", limits.max_artifact_bytes)
+            .field("admitted_input_bytes", input),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("cli_ffmpeg_limit_refusals", refused)
+        .with_counter("cli_ffmpeg_limit_tool_calls", tool_calls)
+        .with_counter("cli_ffmpeg_admitted_timeout", limits.timeout.as_secs())
+        .with_counter("cli_ffmpeg_admitted_artifact", limits.max_artifact_bytes)
+        .with_counter("cli_ffmpeg_admitted_input", input))
+}
+
 /// The facade's MP4 request with no ffmpeg capability is a named capability
 /// refusal (D2) that runs no scene code and publishes nothing; a native
 /// format from the same options still renders.
@@ -8210,6 +8289,29 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "failure_path.cli_ffmpeg_limit_admission.v1",
+        ScenarioClass::FailurePath,
+        Surface::CliInProcess,
+        Invocation::new(failure_cli_ffmpeg_limits_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("cli_ffmpeg_limit_refusals", 4),
+            counter_eq("cli_ffmpeg_limit_tool_calls", 0),
+            counter_eq("cli_ffmpeg_admitted_timeout", 21_600),
+            counter_eq("cli_ffmpeg_admitted_artifact", 8 << 30),
+            counter_eq("cli_ffmpeg_admitted_input", 8 << 30),
+            Assertion::NdjsonSchema,
+        ],
+        vec![LogExpect::span_present(
+            "e2e.failure.cli_ffmpeg_limits",
+            vec![
+                FieldPred::u64_eq("refused", 4),
+                FieldPred::u64_eq("tool_calls", 0),
+                FieldPred::u64_eq("admitted_timeout_seconds", 21_600),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "failure_path.facade_video_requires_ffmpeg_capability.v1",
         ScenarioClass::FailurePath,
         Surface::RustApi,
@@ -9080,6 +9182,17 @@ fn cli_video_quality_admission_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "failure_path.cli_video_quality_admission.v1")
         .expect("CLI video-quality scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+/// CLI ffmpeg budgets share native admission and refuse before tool discovery.
+#[test]
+fn cli_ffmpeg_limit_admission_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "failure_path.cli_ffmpeg_limit_admission.v1")
+        .expect("CLI ffmpeg-limit scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

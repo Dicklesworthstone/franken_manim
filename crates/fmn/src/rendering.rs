@@ -60,7 +60,10 @@ mod ffmpeg_limits;
 mod pipeline;
 pub use camera_animation::{render_camera, render_camera_with_fs};
 pub use compiled::{render_bundle, render_bundle_with_fs};
-pub use ffmpeg_limits::{DEFAULT_RENDER_FFMPEG_TIMEOUT, FfmpegLimitsReport};
+pub use ffmpeg_limits::{
+    DEFAULT_RENDER_FFMPEG_TIMEOUT, FfmpegLimitsReport, admit_render_ffmpeg_limits,
+    default_render_ffmpeg_limits,
+};
 pub use pipeline::{NativeFrameError, NativeFramePipeline};
 
 pub use fmn_output::negotiate::{EncoderPreset, EncoderTune, VideoQuality};
