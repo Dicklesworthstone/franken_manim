@@ -82,6 +82,23 @@ while the file kept its configured rate, so `-f --fps 60` wrote 12 frames into a
   separation, doctor, cache lifecycle, and exhaustive interaction tests.
 - `docs/api/cli_flags.md`: generated user-facing flag and command tables.
 
+## Native video-quality controls
+
+The standalone Rust `fmn` command accepts `--crf`, `--preset`, `--tune`, and
+`--video-bitrate` through the generated contract. These select compressed-video
+policy independently of scene-resolution presets and imply video output.
+The optional `file_writer.video_crf`, `video_preset`, `video_tune`, and
+`video_bitrate` configuration keys supply defaults for video requests.
+
+Explicit CLI fields override file settings. Selecting CRF clears a configured
+bitrate and selecting bitrate clears a configured CRF; specifying both explicit
+modes is a usage error. Native output formats (including `--gif`) reject the
+flags. Shared Reel negotiation checks encoder compatibility before discovery
+or scene execution. The resolved configuration and actual encoder argv remain
+in provenance. Existing callers that supply no controls keep encoder defaults.
+See [video encoding quality](../VIDEO_ENCODING_QUALITY.md) for catalogs,
+examples, and the matching Rust API precedence rules.
+
 ## Python portal video-quality extension
 
 `fmn-python` additionally accepts `--crf`, `--preset`, `--tune`, and
@@ -102,5 +119,4 @@ The same overrides reach named batches, `--write_all`, subdivisions, and video
 primaries paired with a final PNG, without injecting scene constructor kwargs
 or rerunning the scene. Actual encoder argv remains in each native receipt.
 See [Python video quality](../PYTHON_VIDEO_QUALITY.md) for usage and permanent
-parser/extension tests. This extension does not claim standalone Rust `fmn`
-CLI/config-file or AAC-bitrate support; those remain separate adapters.
+parser/extension tests. AAC-bitrate control remains a separate extension.

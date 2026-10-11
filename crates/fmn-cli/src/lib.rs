@@ -44,6 +44,7 @@ use fmn_frame::convert::swap_rb8;
 #[cfg(feature = "metal")]
 use fmn_frame::{ChromaSiting, ColorRange};
 use fmn_frame::{FrameBuffer, FrameLayout, PixelFormat};
+use fmn_output::negotiate::{EncoderPreset, EncoderTune, VideoQuality};
 use fmn_output::{
     ArtifactDigest, ClosureItem, ColorDescription, Container, DitherPolicy, EmitterConfig,
     EmitterHandle, EncoderCapabilities, EncoderChoice, FfmpegArtifactReport, FfmpegSink,
@@ -318,6 +319,8 @@ pub struct RenderCommand {
     pub vcodec: Option<String>,
     /// ffmpeg pixel format.
     pub pix_fmt: Option<String>,
+    /// Explicit video encoder overrides, layered above `file_writer` settings.
+    pub video_quality: VideoQuality,
     /// Output format.
     pub format: OutputFormat,
     /// Explicit fmd-math preamble pack; absent preserves user configuration.
@@ -683,6 +686,10 @@ fn typed_consumer_scope(binding: &str) -> Option<CommandScope> {
         | "subdivide"
         | "uhd"
         | "vcodec"
+        | "crf"
+        | "preset"
+        | "tune"
+        | "video_bitrate"
         | "video_dir"
         | "write_all"
         | "background"
@@ -1151,6 +1158,10 @@ fn build_render(values: Collected, common: CommonOptions) -> Result<RenderComman
         OutputFormat::parse(values.value("format").unwrap_or("auto"))
             .ok_or_else(|| usage("unknown output format"))?
     };
+    let crf = parse_optional::<u8>(&values, "crf")?;
+    if crf.is_some_and(|value| value > 51) {
+        return Err(usage("--crf must lie in 0..=51"));
+    }
 
     Ok(RenderCommand {
         common,
@@ -1177,6 +1188,20 @@ fn build_render(values: Collected, common: CommonOptions) -> Result<RenderComman
         video_dir: values.explicit_value("video_dir").map(PathBuf::from),
         vcodec: values.explicit_value("vcodec").map(str::to_owned),
         pix_fmt: values.explicit_value("pix_fmt").map(str::to_owned),
+        video_quality: VideoQuality {
+            crf,
+            preset: values
+                .explicit_value("preset")
+                .map(str::parse::<EncoderPreset>)
+                .transpose()
+                .map_err(|error| usage(format!("--preset: {error}")))?,
+            tune: values
+                .explicit_value("tune")
+                .map(str::parse::<EncoderTune>)
+                .transpose()
+                .map_err(|error| usage(format!("--tune: {error}")))?,
+            bitrate: parse_optional_positive(&values, "video_bitrate")?,
+        },
         format,
         math_pack: values.explicit_value("math_pack").map(str::to_owned),
         engine: values
@@ -1417,6 +1442,38 @@ pub fn resolve_render_config(
         pairs.push((
             "file_writer.pixel_format",
             fmn_config::Value::Str(pix_fmt.clone()),
+        ));
+    }
+    if command.video_quality.crf.is_some() || command.video_quality.bitrate.is_some() {
+        pairs.push((
+            "file_writer.video_crf",
+            command
+                .video_quality
+                .crf
+                .map_or(fmn_config::Value::Null, |crf| {
+                    fmn_config::Value::Int(i64::from(crf))
+                }),
+        ));
+        pairs.push((
+            "file_writer.video_bitrate",
+            command
+                .video_quality
+                .bitrate
+                .map_or(fmn_config::Value::Null, |bitrate| {
+                    fmn_config::Value::Int(i64::from(bitrate))
+                }),
+        ));
+    }
+    if let Some(preset) = command.video_quality.preset {
+        pairs.push((
+            "file_writer.video_preset",
+            fmn_config::Value::Str(preset.as_str().to_owned()),
+        ));
+    }
+    if let Some(tune) = command.video_quality.tune {
+        pairs.push((
+            "file_writer.video_tune",
+            fmn_config::Value::Str(tune.as_str().to_owned()),
         ));
     }
     if let Some(math_pack) = &command.math_pack {
@@ -4803,6 +4860,13 @@ enum RequestedRenderFormat {
 }
 
 fn requested_render_format(command: &RenderCommand) -> Result<RequestedRenderFormat, CliError> {
+    if !command.video_quality.is_default()
+        && !matches!(command.format, OutputFormat::Auto | OutputFormat::Video)
+    {
+        return Err(usage(
+            "--crf, --preset, --tune and --video-bitrate require ffmpeg video output",
+        ));
+    }
     match command.format {
         OutputFormat::Png => Ok(RequestedRenderFormat::Native(NativeFrameFormat::Png)),
         OutputFormat::PngSequence => Ok(RequestedRenderFormat::Native(
@@ -4815,7 +4879,11 @@ fn requested_render_format(command: &RenderCommand) -> Result<RequestedRenderFor
         OutputFormat::Gif => Ok(RequestedRenderFormat::Native(NativeFrameFormat::Gif)),
         OutputFormat::Y4m => Ok(RequestedRenderFormat::Native(NativeFrameFormat::Y4m)),
         OutputFormat::Video => Ok(RequestedRenderFormat::Video),
-        OutputFormat::Auto if command.vcodec.is_some() || command.pix_fmt.is_some() => {
+        OutputFormat::Auto
+            if command.vcodec.is_some()
+                || command.pix_fmt.is_some()
+                || !command.video_quality.is_default() =>
+        {
             Ok(RequestedRenderFormat::Video)
         }
         OutputFormat::Auto => Err(CliError::new(
@@ -5344,6 +5412,12 @@ fn ffmpeg_video_job(
         encoder,
         crf: None,
     };
+    let job = job
+        .with_quality(
+            fmn::rendering::configured_video_quality(&config.file_writer)
+                .map_err(|error| CliError::new("config", error.to_string()))?,
+        )
+        .map_err(|error| CliError::new("config", error.to_string()))?;
     let resolved_encoder = job
         .resolved_encoder()
         .map_err(|error| CliError::new("config", error.to_string()))?;
@@ -8561,6 +8635,10 @@ mod tests {
             "background" => "#112233",
             "vcodec" => "libx264",
             "pix_fmt" => "rgba",
+            "crf" => "16",
+            "preset" => "slow",
+            "tune" => "animation",
+            "video_bitrate" => "2000000",
             "format" => "png",
             "engine" => "cpu",
             "preview_codec" => "png",
@@ -8683,6 +8761,10 @@ mod tests {
             &["--reproducible"],
             &["--vcodec", "libx264"],
             &["--pix_fmt", "rgba"],
+            &["--crf", "16"],
+            &["--preset", "slow"],
+            &["--tune", "animation"],
+            &["--video-bitrate", "2000000"],
             &["--subdivide"],
             &["--file_name", "out"],
             &["--video_dir", "/tmp/out"],
@@ -8857,6 +8939,189 @@ mod tests {
             requested_render_format(&command).expect("codec implies video"),
             RequestedRenderFormat::Video
         );
+    }
+
+    #[test]
+    fn video_quality_flags_reach_encoder_argv_and_record_resolved_configuration() {
+        let fs = VirtualFs::new();
+        let command = render(
+            parse_args(["--crf", "16", "--preset", "slow", "--tune", "animation"])
+                .expect("quality flags parse"),
+        );
+        assert!(command.write_file);
+        assert_eq!(
+            requested_render_format(&command).unwrap(),
+            RequestedRenderFormat::Video
+        );
+        let config = resolve_render_config(&fs, &command).unwrap();
+        let job = ffmpeg_video_job(&command, &config).unwrap();
+        assert_eq!(job.quality().unwrap(), command.video_quality);
+        let argv = fmn_output::negotiate::encode_argv(&job, Path::new("/quality.mp4")).unwrap();
+        let input = argv.iter().position(|arg| arg == "-i").unwrap();
+        for (flag, value) in [("-crf", "16"), ("-preset", "slow"), ("-tune", "animation")] {
+            let at = argv.iter().position(|arg| arg == flag).unwrap();
+            assert!(at > input + 1 && at + 1 < argv.len() - 1);
+            assert_eq!(argv[at + 1], value);
+            assert_eq!(argv.iter().filter(|arg| arg.as_str() == flag).count(), 1);
+        }
+        assert!(!argv.iter().any(|arg| arg == "-b:v"));
+        assert_eq!(
+            config.raw.get_path("file_writer.video_crf"),
+            Some(&fmn_config::Value::Int(16))
+        );
+        let defaults =
+            resolve_render_config(&fs, &render(parse_args(["--format", "video"]).unwrap()))
+                .unwrap();
+        assert_ne!(
+            config.canonical_bytes().unwrap(),
+            defaults.canonical_bytes().unwrap()
+        );
+        let changed =
+            resolve_render_config(&fs, &render(parse_args(["--crf", "28"]).unwrap())).unwrap();
+        assert_ne!(
+            config.canonical_bytes().unwrap(),
+            changed.canonical_bytes().unwrap()
+        );
+    }
+
+    #[test]
+    fn video_quality_cli_overrides_config_and_switches_rate_control_modes() {
+        let fs = VirtualFs::new();
+        fs.insert(
+            "/cfg/quality.yml",
+            b"file_writer:\n  video_crf: 28\n  video_preset: slow\n  video_tune: animation\n"
+                .to_vec(),
+        );
+        let configured =
+            render(parse_args(["--config_file", "/cfg/quality.yml", "--format", "video"]).unwrap());
+        let config = resolve_render_config(&fs, &configured).unwrap();
+        assert_eq!(
+            ffmpeg_video_job(&configured, &config)
+                .unwrap()
+                .quality()
+                .unwrap(),
+            VideoQuality {
+                crf: Some(28),
+                preset: Some(EncoderPreset::Slow),
+                tune: Some(EncoderTune::Animation),
+                bitrate: None,
+            }
+        );
+        let bitrate = render(
+            parse_args([
+                "--config_file",
+                "/cfg/quality.yml",
+                "--video-bitrate",
+                "2000000",
+                "--preset",
+                "fast",
+            ])
+            .unwrap(),
+        );
+        let config = resolve_render_config(&fs, &bitrate).unwrap();
+        let job = ffmpeg_video_job(&bitrate, &config).unwrap();
+        assert_eq!(
+            job.quality().unwrap(),
+            VideoQuality {
+                crf: None,
+                preset: Some(EncoderPreset::Fast),
+                tune: Some(EncoderTune::Animation),
+                bitrate: Some(2_000_000),
+            }
+        );
+        let argv = fmn_output::negotiate::encode_argv(&job, Path::new("/quality.mp4")).unwrap();
+        assert!(argv.windows(2).any(|pair| pair == ["-b:v", "2000000"]));
+        assert!(!argv.iter().any(|arg| arg == "-crf"));
+
+        fs.insert(
+            "/cfg/quality.yml",
+            b"file_writer:\n  video_bitrate: 2000000\n  video_preset: fast\n".to_vec(),
+        );
+        let crf = render(parse_args(["--config_file", "/cfg/quality.yml", "--crf", "0"]).unwrap());
+        let config = resolve_render_config(&fs, &crf).unwrap();
+        let job = ffmpeg_video_job(&crf, &config).unwrap();
+        assert_eq!(job.quality().unwrap().crf, Some(0));
+        assert_eq!(job.quality().unwrap().bitrate, None);
+        assert_eq!(job.quality().unwrap().preset, Some(EncoderPreset::Fast));
+
+        let mut conflicting = crf;
+        conflicting.video_quality.bitrate = Some(2_000_000);
+        let config = resolve_render_config(&fs, &conflicting).unwrap();
+        assert!(ffmpeg_video_job(&conflicting, &config).is_err());
+    }
+
+    #[test]
+    fn video_quality_rejects_invalid_flags_and_incompatible_outputs() {
+        for args in [
+            &["--crf", "52"][..],
+            &["--crf", "256"],
+            &["--crf=-1"],
+            &["--preset", "arbitrary"],
+            &["--tune", "film,grain"],
+            &["--video-bitrate", "0"],
+            &["--video-bitrate", "4294967296"],
+        ] {
+            assert_eq!(
+                parse_args(args.iter().copied()).unwrap_err().exit_name(),
+                "usage",
+                "{args:?}"
+            );
+        }
+        assert_eq!(
+            parse_args(["--crf", "16", "--video-bitrate", "2000000"])
+                .unwrap_err()
+                .rule(),
+            Some("video-rate-control-exclusive"),
+        );
+        for (flag, value) in [
+            ("--crf", "16"),
+            ("--preset", "slow"),
+            ("--tune", "animation"),
+            ("--video-bitrate", "2000000"),
+        ] {
+            for format in ["png", "png_sequence", "gif", "y4m", "wav", "svg"] {
+                assert_eq!(
+                    parse_args(["--format", format, flag, value])
+                        .unwrap_err()
+                        .exit_name(),
+                    "usage"
+                );
+            }
+            assert_eq!(
+                parse_args(["--gif", flag, value]).unwrap_err().exit_name(),
+                "usage"
+            );
+        }
+    }
+
+    #[test]
+    fn video_quality_incompatibilities_refuse_before_tool_discovery() {
+        let fs = Arc::new(VirtualFs::new());
+        let runner = Arc::new(fmn_platform::process::ScriptedRunner::new());
+        for args in [
+            &["--vcodec", "h264_nvenc", "--crf", "16"][..],
+            &["--vcodec", "h264_videotoolbox", "--preset", "slow"],
+            &["--vcodec", "libx265", "--tune", "film"],
+            &["--transparent", "--video-bitrate", "2000000"],
+        ] {
+            let output = run_with_capabilities(
+                args.iter()
+                    .copied()
+                    .chain(["--robot", BUILTIN_SCENE_SOURCE, "circle_shift.v1"]),
+                fs_capability(&fs),
+                runner.clone(),
+                &no_ffmpeg_locator(),
+            );
+            assert_eq!(
+                output.code,
+                exit_code("config"),
+                "{args:?}: {}",
+                output.stdout
+            );
+            assert!(output.stderr.is_empty());
+            assert_eq!(output.stdout.lines().count(), 1);
+            assert!(output.stdout.contains("\"exit_name\":\"config\""));
+        }
     }
 
     #[test]

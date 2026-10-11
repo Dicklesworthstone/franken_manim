@@ -1177,6 +1177,79 @@ fn failure_cli_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         .with_counter("cli_rule_named", 1))
 }
 
+/// The CLI rejects invalid quality policies before probing an external tool.
+fn failure_cli_video_quality_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_platform::process::{FfmpegExecutable, FfmpegLocator, FfmpegLocatorError};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct CountTool(AtomicU64);
+    impl FfmpegLocator for CountTool {
+        fn locate_ffmpeg(
+            &self,
+            _: &std::path::Path,
+        ) -> Result<FfmpegExecutable, FfmpegLocatorError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(FfmpegLocatorError::NotFound)
+        }
+    }
+    let locator = CountTool(AtomicU64::new(0));
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    let runner = Arc::new(fmn_platform::process::ScriptedRunner::new());
+    let cases: &[(&[&str], u8, &str)] = &[
+        (
+            &["--crf", "16", "--video-bitrate", "2000000"],
+            2,
+            "mutually exclusive",
+        ),
+        (&["--gif", "--preset", "slow"], 2, "ffmpeg video"),
+        (&["--crf", "52"], 2, "0..=51"),
+        (&["--vcodec", "h264_nvenc", "--crf", "16"], 3, "software"),
+        (
+            &["--vcodec", "libx265", "--tune", "film"],
+            3,
+            "require libx264",
+        ),
+        (
+            &["--transparent", "--video-bitrate", "2000000"],
+            3,
+            "opaque MP4/MOV",
+        ),
+    ];
+    let mut refused = 0;
+    for (args, code, message) in cases {
+        let output = fmn_cli::run_with_capabilities(
+            args.iter().copied().chain([
+                "--robot",
+                fmn_cli::BUILTIN_SCENE_SOURCE,
+                "circle_shift.v1",
+            ]),
+            fs.clone(),
+            runner.clone(),
+            &locator,
+        );
+        if output.code != *code
+            || !output.stderr.is_empty()
+            || output.stdout.lines().count() != 1
+            || !output.stdout.contains(message)
+        {
+            return Err(fail(format!(
+                "video-quality admission {args:?}: code={} stdout={:?} stderr={:?}",
+                output.code, output.stdout, output.stderr
+            )));
+        }
+        refused += 1;
+    }
+    let tool_calls = locator.0.load(Ordering::SeqCst);
+    ctx.event(
+        LogEvent::new("e2e.failure.cli_video_quality")
+            .field("refused", refused)
+            .field("tool_calls", tool_calls),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("cli_video_quality_refusals", refused)
+        .with_counter("cli_video_quality_tool_calls", tool_calls))
+}
+
 /// The facade's MP4 request with no ffmpeg capability is a named capability
 /// refusal (D2) that runs no scene code and publishes nothing; a native
 /// format from the same options still renders.
@@ -8118,6 +8191,25 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "failure_path.cli_video_quality_admission.v1",
+        ScenarioClass::FailurePath,
+        Surface::CliInProcess,
+        Invocation::new(failure_cli_video_quality_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("cli_video_quality_refusals", 6),
+            counter_eq("cli_video_quality_tool_calls", 0),
+            Assertion::NdjsonSchema,
+        ],
+        vec![LogExpect::span_present(
+            "e2e.failure.cli_video_quality",
+            vec![
+                FieldPred::u64_eq("refused", 6),
+                FieldPred::u64_eq("tool_calls", 0),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "failure_path.facade_video_requires_ffmpeg_capability.v1",
         ScenarioClass::FailurePath,
         Surface::RustApi,
@@ -8979,6 +9071,17 @@ fn hoeffding_d_full_scenario_passes_when_enabled() {
             report.summary()
         );
     }
+}
+
+/// Quality flag interactions and encoder compatibility fail before tool discovery.
+#[test]
+fn cli_video_quality_admission_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "failure_path.cli_video_quality_admission.v1")
+        .expect("CLI video-quality scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
 }
 
 /// The facade's video formats need an explicit ffmpeg capability (D2).

@@ -152,6 +152,14 @@ pub struct FileWriterConfig {
     pub video_codec: String,
     /// Pixel format passed to ffmpeg.
     pub pixel_format: String,
+    /// Optional software encoder constant rate factor; admitted by video negotiation.
+    pub video_crf: Option<u32>,
+    /// Optional x264/x265 compression-speed preset.
+    pub video_preset: Option<String>,
+    /// Optional encoder-specific source/latency tune.
+    pub video_tune: Option<String>,
+    /// Optional target video bitrate in bits per second.
+    pub video_bitrate: Option<u32>,
     /// Saturation adjustment.
     pub saturation: f64,
     /// Gamma adjustment.
@@ -627,6 +635,14 @@ impl Cx<'_> {
                 message: format!("{v} is out of range for a non-negative 32-bit integer"),
             }),
             other => Err(Self::type_err(path, "a non-negative integer", other)),
+        }
+    }
+
+    pub(crate) fn opt_u32(&self, path: &str) -> Result<Option<u32>, ConfigError> {
+        match self.lookup(path) {
+            Ok(Value::Null) | Err(ConfigError::Value { .. }) => Ok(None),
+            Ok(_) => self.u32(path).map(Some),
+            Err(error) => Err(error),
         }
     }
 

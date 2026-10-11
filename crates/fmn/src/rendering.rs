@@ -68,6 +68,40 @@ pub use fmn_output::{EmitterReport, JobLimits, NativeArtifactReport};
 pub use fmn_render::{CameraConfig, CameraFrame};
 pub use fmn_runtime::ExecutionPlan;
 
+/// Read optional `file_writer` video controls after configuration layering.
+///
+/// Both native front doors use the same typed encoder catalogs. This performs
+/// no I/O; the resulting policy still passes through `VideoJob::with_quality`
+/// for encoder/container admission. Absent keys preserve encoder defaults.
+pub fn configured_video_quality(
+    writer: &fmn_config::config::FileWriterConfig,
+) -> Result<VideoQuality, fmn_output::NegotiationError> {
+    let crf = writer
+        .video_crf
+        .map(|value| {
+            u8::try_from(value).ok().filter(|value| *value <= 51).ok_or(
+                fmn_output::NegotiationError("file_writer.video_crf must lie in 0..=51"),
+            )
+        })
+        .transpose()?;
+    let preset = writer
+        .video_preset
+        .as_deref()
+        .map(str::parse::<EncoderPreset>)
+        .transpose()?;
+    let tune = writer
+        .video_tune
+        .as_deref()
+        .map(str::parse::<EncoderTune>)
+        .transpose()?;
+    Ok(VideoQuality {
+        crf,
+        preset,
+        tune,
+        bitrate: writer.video_bitrate,
+    })
+}
+
 /// Output formats. The output path is a directory for PNG sequences and a
 /// file otherwise. No format silently substitutes for another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -286,7 +320,10 @@ pub struct RenderOptions {
     /// formats ignore this policy; tool probes retain their own short bounds.
     pub ffmpeg_limits: JobLimits,
     /// Opt-in CRF, preset, tune, or bitrate for opaque MP4/MOV. The default
-    /// requests no override and preserves existing encoder behavior. Settings
+    /// inherits optional `config.file_writer.video_*` controls; absent config
+    /// keys preserve existing encoder behavior. Explicit fields override the
+    /// corresponding configured fields, and selecting CRF or bitrate replaces
+    /// the other configured rate-control mode. Settings
     /// incompatible with the selected codec, alpha MOV, or native formats are
     /// refused before tool discovery rather than dropped. Never changes raw
     /// frame rendering, frame sampling, or certified artifact semantics.
@@ -327,6 +364,26 @@ impl RenderOptions {
         let mut options = Self::new(output)?;
         options.format = format;
         Ok(options)
+    }
+
+    /// Resolve configuration and explicit video overrides without tool access.
+    /// Encoder/container compatibility is checked by the ordinary video job.
+    pub fn effective_video_quality(&self) -> Result<VideoQuality, RenderError> {
+        let mut writer = self.config.file_writer.clone();
+        let explicit = self.video_quality;
+        if explicit.crf.is_some() || explicit.bitrate.is_some() {
+            // An explicit rate mode replaces the configured one. Preserve
+            // two explicit modes so ordinary negotiation rejects the conflict.
+            writer.video_crf = explicit.crf.map(u32::from);
+            writer.video_bitrate = explicit.bitrate;
+        }
+        if let Some(preset) = explicit.preset {
+            writer.video_preset = Some(preset.as_str().to_owned());
+        }
+        if let Some(tune) = explicit.tune {
+            writer.video_tune = Some(tune.as_str().to_owned());
+        }
+        configured_video_quality(&writer).map_err(RenderError::Negotiation)
     }
 
     /// Build a perspective camera matching the current export configuration.
@@ -690,7 +747,7 @@ impl RenderSink {
             }
             Some(
                 negotiate_video(options.format, config, options.camera.as_ref())?
-                    .with_quality(options.video_quality)
+                    .with_quality(options.effective_video_quality()?)
                     .map_err(RenderError::Negotiation)?,
             )
         } else {

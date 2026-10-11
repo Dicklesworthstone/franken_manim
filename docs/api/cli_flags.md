@@ -64,6 +64,10 @@ The Reference's `manimlib/config.py` declares 34 options. Every row has exactly 
 | `--cache-dir` | global | `cache_dir` | improved | BN-15 | store | — | Explicit FrankenManim content-store root |
 | `--engine` | render | `engine` | improved | BN-15 | store | — | Select the CPU engine or a standard-only accelerator annex |
 | `--format` | render | `format` | improved | BN-15 | store | auto | Select auto, png, png_sequence, gif, y4m, wav, svg, or video output; wav refuses scenes without add_sound cues |
+| `--crf` | render | `crf` | improved | BN-15 | store | — | Set libx264/libx265 constant rate factor (0 through 51) |
+| `--preset` | render | `preset` | improved | BN-15 | store | — | Set the x264/x265 compression-speed preset |
+| `--tune` | render | `tune` | improved | BN-15 | store | — | Set one supported video encoder tune |
+| `--video-bitrate` | render | `video_bitrate` | improved | BN-15 | store | — | Set target video bitrate in bits per second (exclusive with CRF) |
 | `--math-pack` | render | `math_pack` | improved | BN-15 | store | default | Select an fmd-math preamble pack |
 | `--budget-ms` | batch | `budget_ms` | improved | BN-15 | store | — | Wall-clock budget for the batch |
 | `--max-scenes` | batch | `max_scenes` | improved | BN-15 | store | — | Bound simultaneously active scene jobs |
@@ -116,12 +120,25 @@ These rules are emitted into the parser artifact and executed after token collec
 | `certified-writes` | implies | `reproducible`, `write_file` | — | --reproducible implies durable canonical output |
 | `codec-writes` | implies | `vcodec`, `write_file` | — | --vcodec implies durable output |
 | `pixel-format-writes` | implies | `pix_fmt`, `write_file` | — | --pix_fmt implies durable output |
+| `crf-writes` | implies | `crf`, `write_file` | — | --crf implies video output |
+| `preset-writes` | implies | `preset`, `write_file` | — | --preset implies video output |
+| `tune-writes` | implies | `tune`, `write_file` | — | --tune implies video output |
+| `video-bitrate-writes` | implies | `video_bitrate`, `write_file` | — | --video-bitrate implies video output |
+| `video-rate-control-exclusive` | at_most_one | `crf`, `video_bitrate` | usage | --crf and --video-bitrate are mutually exclusive |
 | `subdivide-writes` | implies | `subdivide`, `write_file` | — | --subdivide implies durable output |
 | `filename-writes` | implies | `file_name`, `write_file` | — | --file_name implies durable output |
 | `video-directory-writes` | implies | `video_dir`, `write_file` | — | --video_dir implies durable output |
 | `gif-vs-non-gif-format` | conflicts | `gif`, `format=auto,png,png_sequence,y4m,wav,svg,video` | usage | --gif conflicts with a non-GIF --format |
 | `native-format-vs-codec` | conflicts | `format=png,png_sequence,gif,y4m,wav,svg`, `vcodec` | usage | --vcodec applies only to ffmpeg video output |
 | `native-format-vs-pixel-format` | conflicts | `format=png,png_sequence,gif,y4m,wav,svg`, `pix_fmt` | usage | --pix_fmt applies only to ffmpeg video output |
+| `native-format-vs-crf` | conflicts | `format=png,png_sequence,gif,y4m,wav,svg`, `crf` | usage | --crf applies only to ffmpeg video output |
+| `native-format-vs-preset` | conflicts | `format=png,png_sequence,gif,y4m,wav,svg`, `preset` | usage | --preset applies only to ffmpeg video output |
+| `native-format-vs-tune` | conflicts | `format=png,png_sequence,gif,y4m,wav,svg`, `tune` | usage | --tune applies only to ffmpeg video output |
+| `native-format-vs-video-bitrate` | conflicts | `format=png,png_sequence,gif,y4m,wav,svg`, `video_bitrate` | usage | --video-bitrate applies only to ffmpeg video output |
+| `gif-vs-crf` | conflicts | `gif`, `crf` | usage | --crf applies only to ffmpeg video output |
+| `gif-vs-preset` | conflicts | `gif`, `preset` | usage | --preset applies only to ffmpeg video output |
+| `gif-vs-tune` | conflicts | `gif`, `tune` | usage | --tune applies only to ffmpeg video output |
+| `gif-vs-video-bitrate` | conflicts | `gif`, `video_bitrate` | usage | --video-bitrate applies only to ffmpeg video output |
 | `transparent-vs-opaque-pixel-format` | conflicts | `transparent`, `pix_fmt=yuv420p,yuv422p,yuv444p,nv12,p010,p010le,rgb24,bgr24` | usage | --transparent requires an alpha-capable output pixel format |
 | `transparent-vs-opaque-native-format` | conflicts | `transparent`, `format=y4m,wav` | usage | --transparent is incompatible with y4m and WAV outputs |
 | `skip-vs-subdivide` | conflicts | `skip_animations`, `subdivide` | usage | --skip_animations cannot produce per-animation subdivisions |

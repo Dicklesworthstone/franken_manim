@@ -225,6 +225,80 @@ fn typed_extraction_diagnostics_are_golden() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn optional_video_quality_keys_layer_and_clear_without_changing_defaults() {
+    let defaults = Config::resolve(&[], None).unwrap().config;
+    assert_eq!(defaults.file_writer.video_crf, None);
+    assert_eq!(defaults.file_writer.video_preset, None);
+    assert_eq!(defaults.file_writer.video_tune, None);
+    assert_eq!(defaults.file_writer.video_bitrate, None);
+    for key in ["video_crf", "video_preset", "video_tune", "video_bitrate"] {
+        assert_eq!(defaults.raw.get_path(&format!("file_writer.{key}")), None);
+    }
+    let layers = [Layer {
+        name: "quality.yml",
+        text: "file_writer:\n  video_crf: 16\n  video_preset: slow\n  video_tune: animation\n",
+    }];
+    let configured = Config::resolve(&layers, None).unwrap().config;
+    assert_eq!(configured.file_writer.video_crf, Some(16));
+    assert_eq!(configured.file_writer.video_preset.as_deref(), Some("slow"));
+    assert_eq!(
+        configured.file_writer.video_tune.as_deref(),
+        Some("animation")
+    );
+    assert_ne!(
+        configured.canonical_bytes().unwrap(),
+        defaults.canonical_bytes().unwrap()
+    );
+
+    let switched = Config::resolve(
+        &layers,
+        Some(overlay([
+            ("file_writer.video_crf", Value::Null),
+            ("file_writer.video_bitrate", Value::Int(2_000_000)),
+            ("file_writer.video_tune", Value::Null),
+        ])),
+    )
+    .unwrap()
+    .config;
+    assert_eq!(switched.file_writer.video_crf, None);
+    assert_eq!(switched.file_writer.video_bitrate, Some(2_000_000));
+    assert_eq!(switched.file_writer.video_preset.as_deref(), Some("slow"));
+    assert_eq!(switched.file_writer.video_tune, None);
+    assert_ne!(
+        switched.canonical_bytes().unwrap(),
+        configured.canonical_bytes().unwrap()
+    );
+}
+
+#[test]
+fn optional_video_quality_keys_reject_wrong_types_and_integer_overflow() {
+    for (key, value) in [
+        ("video_crf", "-1"),
+        ("video_crf", "4294967296"),
+        ("video_crf", "true"),
+        ("video_bitrate", "-1"),
+        ("video_bitrate", "4294967296"),
+        ("video_bitrate", "2.5"),
+        ("video_preset", "16"),
+        ("video_tune", "false"),
+    ] {
+        let text = format!("file_writer:\n  {key}: {value}\n");
+        let error = Config::resolve(
+            &[Layer {
+                name: "bad-quality.yml",
+                text: &text,
+            }],
+            None,
+        )
+        .expect_err("invalid optional key must not disappear as if absent");
+        assert!(
+            error.to_string().contains(&format!("file_writer.{key}")),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn precedence_defaults_then_user_files_then_cli() {
     let user1 = "camera:\n  fps: 60\n  background_color: \"#101010\"\n";
     let user2 = "camera:\n  fps: 90\n"; // --config_file, later than custom_config.yml

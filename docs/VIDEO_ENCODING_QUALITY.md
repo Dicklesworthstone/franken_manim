@@ -1,7 +1,8 @@
 # Explicit video encoding quality
 
-`RenderOptions::video_quality` now controls compressed video independently of
-scene resolution, frame sampling, and Lumen's raw-frame renderer. It reaches
+`RenderOptions::video_quality`, the CLI, and optional configuration keys control
+compressed video independently of scene resolution, frame sampling, and Lumen's
+raw-frame renderer. The resolved policy reaches
 the existing negotiated `VideoJob` and `encode_argv` through the ordinary
 streaming ffmpeg boundary. It is not an argv-rewriting process wrapper.
 
@@ -22,8 +23,8 @@ options.video_quality = VideoQuality {
 ```
 
 This is an explicit settings example, not a new default or a visual-quality
-certificate. `VideoQuality::default()` sets every field to `None`: no `-crf`,
-`-preset`, `-tune`, or `-b:v` is added and the existing encoder behavior remains.
+certificate. `VideoQuality::default()` sets every field to `None`: absent
+configuration overrides, no `-crf`, `-preset`, `-tune`, or `-b:v` is added.
 The new controls do not fix a color-transfer/tag mismatch or establish HDR,
 codec availability, cross-platform encoding identity, or a renderer speedup.
 
@@ -47,6 +48,45 @@ zero bitrate, alpha-preserving MOV, and native PNG/GIF/Y4M reject explicit video
 quality settings rather than quietly dropping them. Catalog string parsers
 accept only exact canonical spellings, not raw argv or shell fragments.
 
+## CLI and configuration files
+
+The same controls are available for registered native scenes and compiled FMTL
+inputs. A quality flag selects video output and implies `--write_file`:
+
+```sh
+fmn --crf 16 --preset slow --tune animation --video_dir videos @builtin circle_shift.v1
+fmn --format video --video-bitrate 12000000 --vcodec h264_nvenc @builtin circle_shift.v1
+```
+
+| CLI flag | Configuration key | Meaning |
+| --- | --- | --- |
+| `--crf 16` | `file_writer.video_crf` | Software x264/x265 CRF, integer 0–51 |
+| `--preset slow` | `file_writer.video_preset` | One preset from the software encoder catalog |
+| `--tune animation` | `file_writer.video_tune` | One tune supported by the selected software encoder |
+| `--video-bitrate 12000000` | `file_writer.video_bitrate` | Positive target bitrate in bits per second, at most 4,294,967,295 |
+
+For reusable encoder defaults, pass a file with `--config_file quality.yml`:
+
+```yaml
+file_writer:
+  video_crf: 16
+  video_preset: slow
+  video_tune: animation
+```
+
+These keys are optional and accept `null` to clear an earlier file layer. The
+CLI overrides configuration one field at a time. Selecting `--video-bitrate`
+clears a configured CRF; selecting `--crf` clears a configured bitrate. Supplying
+both flags, or both non-null values in the effective configuration, is an error.
+Explicit `RenderOptions::video_quality` fields follow the same override rules;
+`effective_video_quality()` exposes the resolved policy before rendering.
+
+File settings apply when video output is requested; use `--format video` when
+the controls come entirely from a configuration file. They do not select a
+format by themselves or affect PNG, GIF, Y4M, WAV, or SVG output. Explicit quality
+flags on those formats, including `--gif`, are refused. Encoder compatibility
+and configured values are checked before ffmpeg discovery or scene execution.
+
 ## Shared negotiation and provenance
 
 Lower-level callers use `VideoJob::with_quality`. Existing `VideoJob` struct
@@ -62,28 +102,37 @@ are emitted once, after the raw input and output codec and before the output
 path. Frame dimensions/rate, pixel conversion, color description, mux stream
 copy, private executable binding, and atomic no-clobber publication are unchanged.
 
-A successful native video receipt includes `RenderArtifact::video_quality` and
-the existing ffmpeg invocation provenance records the exact encoder argv. An
+A successful native video receipt includes the resolved
+`RenderArtifact::video_quality`, and the existing ffmpeg invocation provenance
+records the exact encoder argv. An
 empty policy in a receipt means that the encoder's defaults were requested;
 it does not infer a particular default CRF from the installed tool.
 
-This tranche does **not** add CLI/config-file flags, Python keywords, or AAC
-audio bitrate control. Those adapters must consume this same typed policy in
-their own entry points; no second negotiation implementation is needed.
+CLI provenance includes the settings in the resolved configuration input (C4)
+and records the exact emitted encoder arguments. Python controls are documented
+in [Python video quality](PYTHON_VIDEO_QUALITY.md). AAC audio bitrate is not yet
+configurable through this policy.
 
 ## Regression evidence
 
 ```sh
 cargo test --locked -p fmn-output --lib negotiate::quality
 cargo test --locked -p fmn-output --features ffmpeg-test-fixture --test video_quality_boundary
+cargo test --locked -p fmn-config --test config optional_video_quality
+cargo test --locked -p fmn-cli --lib video_quality
+cargo test --locked -p fmn-conformance --test e2e_scenarios cli_video_quality_admission_scenario_passes
 FMN_REQUIRE_FULL_INPUTS=1 cargo test --locked -p fmn --test native_video_quality -- --nocapture
 ```
 
-The pure tests cover the complete CRF/preset/tune combinations, out-of-range
+The CLI/configuration tests cover layering, explicit overrides, rate-mode
+switching, optional-key typing, actual negotiated argv, changed configuration
+bytes, and named refusals before tool discovery. The pure tests cover the
+complete CRF/preset/tune combinations, out-of-range
 values, hardware refusals, conflicting rate modes, mutation revalidation and
 unchanged default argv. The native fake executable records what the actual
 streaming child received. The supported-host test renders MP4/MOV through the
-native API, with and without a camera, then checks x264's user-data SEI inside
+native API, with and without a camera and using both configured and explicit
+quality policies, then checks x264's user-data SEI inside
 `mdat`: requested CRF, the slow preset's `subme=8`, and animation's `psy_rd=0.40`.
 The bounded test reader exercises AVC emulation-prevention bytes and refuses
 truncated NAL/box lengths; it does not mistake unrelated metadata text for SEI.

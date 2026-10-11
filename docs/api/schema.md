@@ -29,14 +29,14 @@ Generated from `API_SCHEMA.tsv` (extracted from the pinned Reference) and `API_O
 
 ## Parity Ledger coverage
 
-The single Ledger contains 2483 rows: 2275 Python symbols, 34 Reference CLI flags, 21 FrankenManim-native CLI flags, 4 CLI commands, and 149 config keys. Its reviewed-identity ratchet is `90653427eea0916f0be340e80289f8f9db749839086211b28a47575fe5e99db7`.
+The single Ledger contains 2491 rows: 2275 Python symbols, 34 Reference CLI flags, 25 FrankenManim-native CLI flags, 4 CLI commands, and 153 config keys. Its reviewed-identity ratchet is `fa39c9e3a0cb2956b81e1d4d95734835edcbcbb88943827254688d322010d05d`.
 
 ## Semantic tiers (§16.1)
 
 | Status | Ledger rows |
 |---|---|
 | same | 2038 |
-| improved | 171 |
+| improved | 179 |
 | tiered | 92 |
 | excluded | 182 |
 | unreviewed | 0 |
@@ -78,5 +78,5 @@ The single Ledger contains 2483 rows: 2275 Python symbols, 34 Reference CLI flag
 
 ## Config keys
 
-149 keys, 142 of them shared with the Reference's `default_config.yml`. Every one is bound to a Rust field by `API_OVERLAY.tsv`, and the binding generates `crates/fmn-config/src/generated.rs`.
+153 keys, 142 of them shared with the Reference's `default_config.yml`. Every one is bound to a Rust field by `API_OVERLAY.tsv`, and the binding generates `crates/fmn-config/src/generated.rs`.
 
