@@ -9834,7 +9834,7 @@ fn studio_native_interactive_lifecycle_scenario_passes() {
 }
 
 #[test]
-fn studio_builtin_input_lifecycle_scenario_passes() {
+fn studio_native_builtin_input_lifecycle_scenario_passes() {
     let scenario = catalog()
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.studio_builtin_inputs.v1")
