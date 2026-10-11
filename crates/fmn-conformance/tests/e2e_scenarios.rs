@@ -3449,6 +3449,154 @@ fn cli_builtin_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError>
         .with_counter("cli_manifest", 1))
 }
 
+/// The shared CLI/facade audio composer consumes real scene lifecycle events
+/// and sound requests. Native PCM is the oracle here; the CLI's process-
+/// capability tests separately exercise delivery to the two-stage video mux.
+fn scene_soundtrack_windows_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::rendering::{PreparedSceneSoundtrack, SoundtrackTimeline};
+    use fmn_output::{AudioDecodeLimits, AudioDecoder, MixerConfig, frames_to_samples};
+    struct Score;
+    impl fmn::SceneConstruct for Score {
+        fn name(&self) -> &str {
+            "scene_soundtrack_windows"
+        }
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            stage.scene_mut().force_skipping();
+            stage
+                .scene_mut()
+                .add_sound("omitted.wav", 0.0, None, None)?;
+            stage.wait(0.125)?;
+            stage.scene_mut().revert_to_original_skipping_status();
+            stage
+                .scene_mut()
+                .add_sound("background.wav", 0.0, None, None)?;
+            stage.wait(0.25)?;
+            stage
+                .scene_mut()
+                .add_sound("overlay.wav", -2.0 / 59.0, Some(-3.0), Some(-6.0))?;
+            stage.wait(0.5)?;
+            Ok(())
+        }
+    }
+    #[derive(Default)]
+    struct ClockSink {
+        timeline: SoundtrackTimeline,
+        captured: u64,
+    }
+    impl fmn_scene::SceneSink for ClockSink {
+        fn event(
+            &mut self,
+            event: fmn_scene::LifecycleEvent,
+        ) -> Result<(), fmn_scene::IntegrationError> {
+            self.timeline
+                .observe(event.time.frames(), event.skipping)
+                .map_err(|error| fmn_scene::IntegrationError::new("soundtrack", error.to_string()))
+        }
+        fn capture(
+            &mut self,
+            _: fmn_scene::CaptureReason,
+            _: FramePacket,
+        ) -> Result<(), fmn_scene::IntegrationError> {
+            self.captured += 1;
+            Ok(())
+        }
+    }
+    let mut sink = ClockSink::default();
+    let scene = fmn::run_scene(
+        &mut Score,
+        fmn_scene::RuntimeConfig {
+            fps: 59,
+            ..fmn_scene::RuntimeConfig::default()
+        },
+        7,
+        &mut sink,
+    )
+    .map_err(|error| fail(format!("sound scene lifecycle: {error}")))?
+    .into_scene();
+    let requests = scene.sound_requests();
+    let rebased_end = sink
+        .timeline
+        .output_frame(scene.time().frames())
+        .map_err(|error| fail(error.to_string()))?;
+    if requests.len() != 2
+        || scene.time().frames() != 53
+        || rebased_end != 45
+        || sink.captured != 45
+    {
+        return Err(fail(
+            "sound scene lost skip/no-op or rational frame semantics",
+        ));
+    }
+    let fs = fmn_platform::fs::VirtualFs::new();
+    let background: Vec<f32> = (0..16_000)
+        .map(|index| (index % 97) as f32 / 194.0 - 0.25)
+        .collect();
+    let background = fmn_codec::encode_wav(1, 44_100, fmn_codec::SampleFormat::S16, &background);
+    fs.insert("background.wav", background.clone());
+    fs.insert(
+        "overlay.wav",
+        fmn_codec::encode_wav(1, 48_000, fmn_codec::SampleFormat::S16, &vec![0.25; 8_000]),
+    );
+    let mut decoder = AudioDecoder::new(AudioDecodeLimits::default(), None)
+        .map_err(|error| fail(error.to_string()))?;
+    let end = frames_to_samples(53, 59, 48_000).map_err(|error| fail(error.to_string()))? as u64;
+    let prepared =
+        PreparedSceneSoundtrack::new(&fs, requests, &mut decoder, MixerConfig::default(), None)
+            .map_err(|error| fail(error.to_string()))?
+            .with_timeline_frames(end);
+    let full = prepared.mix(1).map_err(|error| fail(error.to_string()))?;
+    let start = frames_to_samples(8, 59, 48_000).map_err(|error| fail(error.to_string()))? as u64;
+    let split = frames_to_samples(23, 59, 48_000).map_err(|error| fail(error.to_string()))? as u64;
+    let left = prepared
+        .mix_window(start, split - start, 4)
+        .map_err(|error| fail(error.to_string()))?;
+    let right = prepared
+        .mix_window(split, end - split, 1)
+        .map_err(|error| fail(error.to_string()))?;
+    let mut joined = left.audio.samples;
+    joined.extend(right.audio.samples);
+    if joined != full.audio.samples[start as usize * 2..end as usize * 2]
+        || prepared.inputs()[0].report.source_digest != sha256(&background)
+        || !prepared.invocations().is_empty()
+    {
+        return Err(fail(
+            "soundtrack windows changed phase, ducking, source identity, or native decode",
+        ));
+    }
+    let rebased = PreparedSceneSoundtrack::new(
+        &fs,
+        requests,
+        &mut decoder,
+        MixerConfig::default(),
+        Some(&sink.timeline),
+    )
+    .map_err(|error| fail(error.to_string()))?
+    .mix(4)
+    .map_err(|error| fail(error.to_string()))?;
+    if full.audio.samples[..start as usize * 2]
+        .iter()
+        .any(|sample| *sample != 0.0)
+        || !rebased.audio.samples[..100]
+            .iter()
+            .any(|sample| sample.abs() > 0.01)
+    {
+        return Err(fail("skipped prefix was not removed from emitted audio"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.soundtrack.windows")
+            .field("cues", 2_u64)
+            .field("captured_frames", sink.captured)
+            .field("sample_window_equal", "true")
+            .field("skipped_prefix_removed", "true")
+            .field("source_identity", "true"),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("soundtrack_cues", 2)
+        .with_counter("soundtrack_windows_equal", 1)
+        .with_counter("soundtrack_skip_rebased", 1)
+        .with_counter("soundtrack_source_identity", 1))
+}
+
 /// One certified in-process render of the CLI's `formula_sheet.v1` builtin
 /// against `cache`, returning the render record and its frames in order.
 fn formula_sheet_render(
@@ -8215,6 +8363,30 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )
         .tier(Tier::Full),
     );
+
+    specs.push(spec(
+        "lifecycle.scene_soundtrack_windows.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(scene_soundtrack_windows_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("soundtrack_cues", 2),
+            counter_eq("soundtrack_windows_equal", 1),
+            counter_eq("soundtrack_skip_rebased", 1),
+            counter_eq("soundtrack_source_identity", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.soundtrack.windows",
+            vec![
+                FieldPred::u64_eq("cues", 2),
+                FieldPred::u64_eq("captured_frames", 45),
+                FieldPred::str_eq("sample_window_equal", "true"),
+                FieldPred::str_eq("skipped_prefix_removed", "true"),
+                FieldPred::str_eq("source_identity", "true"),
+            ],
+        )],
+    ));
 
     // FAILURE-PATH DRILLS.
     specs.push(spec(
