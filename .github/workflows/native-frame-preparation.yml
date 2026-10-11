@@ -4,7 +4,7 @@ on:
     branches: [main]
     paths: ['.github/workflows/native-frame-preparation.yml']
   workflow_dispatch:
-# Test immutable source candidates; only the connector publishes commits/refs.
+# Validate immutable candidates; only the GitHub connector publishes refs.
 permissions:
   contents: write
 concurrency:
@@ -13,7 +13,7 @@ concurrency:
 jobs:
   validate:
     if: github.repository == 'Dicklesworthstone/franken_manim' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-24.04
     timeout-minutes: 55
     env:
       CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
@@ -23,7 +23,9 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ github.sha }}
+          # Ownership source is now on main; apply the full immutable stack
+          # to its original source base, not over the already-published files.
+          ref: e3a3db00fa718df52d9f8ca82fd27d652b476537
           persist-credentials: false
       - run: rustup show active-toolchain
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
@@ -36,7 +38,7 @@ jobs:
           restore-keys: |
             cargo-${{ runner.os }}-${{ runner.arch }}-portable-
             fmtl-rates-${{ runner.os }}-${{ runner.arch }}-
-      - name: Verify and apply ownership and native pipeline candidates
+      - name: Verify and apply native pipeline candidate
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -61,6 +63,8 @@ jobs:
                '7e5771f5c5388287ee71fd874a83e0947a5d22ae37cc50da57a506cae467dd84', False),
               (['99ccc58a686119f977e5860a4e878772b00c59e2'],
                'b4c416ffad788eb764ef9973e38d70474d5e30288cf1f3ef21fc1c6cc726b880', False),
+              (['2b7056a8d3293ab8a0fd1043bd80995fcf31b1e1'],
+               '4514dbf906188d9f27b2a9a85f13e83a833fb687b18d0cc54792ce53bdee5afd', False),
           ]
           allowed = {
               'crates/fmn-mobject/src/lib.rs', 'crates/fmn-mobject/src/stage.rs',
@@ -93,47 +97,13 @@ jobs:
               target.parent.mkdir(parents=True, exist_ok=True)
               target.write_bytes(pathlib.Path(name).read_bytes())
           (out / 'paths.json').write_text(json.dumps(paths))
-          (out / 'base.txt').write_text(os.environ['GITHUB_SHA'])
+          (out / 'base.txt').write_text(subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip())
+          (out / 'validation-commit.txt').write_text(os.environ['GITHUB_SHA'])
           PY
       - name: Test snapshot ownership and animation integration
         run: |
           set -o pipefail
           cargo test --locked -p fmn-mobject -p fmn-anim --all-targets 2>&1 | tee "$RUNNER_TEMP/native-prepare/ownership-tests.log"
-      - name: Archive tested ownership source checkpoint
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python3 - <<'PY'
-          import base64, hashlib, json, os, pathlib, urllib.request
-          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'native-prepare'
-          out = root / 'ownership-checkpoint'
-          out.mkdir()
-          entries = []
-          for name in json.loads((root / 'paths.json').read_text()):
-              if not name.startswith(('crates/fmn-mobject/', 'crates/fmn-anim/')):
-                  continue
-              content = pathlib.Path(name).read_bytes()
-              expected = hashlib.sha1(b'blob '+str(len(content)).encode()+b'\0'+content).hexdigest()
-              request = urllib.request.Request(
-                  f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs',
-                  data=json.dumps({'encoding':'base64','content':base64.b64encode(content).decode()}).encode(),
-                  headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'], 'Content-Type':'application/json'}, method='POST')
-              with urllib.request.urlopen(request, timeout=60) as response:
-                  assert json.load(response)['sha'] == expected
-              entries.append({'path':name,'mode':'100644','type':'blob','sha':expected})
-              target = out / 'source' / name
-              target.parent.mkdir(parents=True, exist_ok=True)
-              target.write_bytes(content)
-          manifest = {'base':os.environ['GITHUB_SHA'], 'files':entries}
-          (out / 'validated-blobs.json').write_text(json.dumps(manifest, indent=2))
-          (out / 'ownership-tests.log').write_bytes((root / 'ownership-tests.log').read_bytes())
-          print(json.dumps(manifest, indent=2))
-          PY
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: frozen-handoff-${{ github.run_id }}
-          path: ${{ runner.temp }}/native-prepare/ownership-checkpoint
-          if-no-files-found: error
       - name: Test native rendering and frame pipeline
         run: |
           set -o pipefail
@@ -168,7 +138,7 @@ jobs:
               with urllib.request.urlopen(request, timeout=60) as response:
                   assert json.load(response)['sha'] == expected
               entries.append({'path':name,'mode':'100644','type':'blob','sha':expected})
-          manifest = {'base':os.environ['GITHUB_SHA'], 'files':entries}
+          manifest = {'base':(out / 'base.txt').read_text(), 'validation_commit':os.environ['GITHUB_SHA'], 'files':entries}
           (out / 'validated-blobs.json').write_text(json.dumps(manifest, indent=2))
           print(json.dumps(manifest, indent=2))
           PY
