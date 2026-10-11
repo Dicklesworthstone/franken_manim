@@ -33,6 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let map = ScreenMap {
         scale: 1.0,
         origin: [f64::from(WIDTH) / 2.0, f64::from(HEIGHT) / 2.0],
+        y_up: true,
     };
     let viewport = Viewport {
         width: WIDTH,

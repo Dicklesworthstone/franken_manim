@@ -955,6 +955,7 @@ fn native_preview_unavailability_uses_the_cpu_visible_studio_stream() {
         fmn_render::ScreenMap {
             scale: 1.0,
             origin: [8.0, 8.0],
+            y_up: true,
         },
         fmn_core::color::Srgb::from_rgb8(12, 18, 24).to_linear(1.0),
     );

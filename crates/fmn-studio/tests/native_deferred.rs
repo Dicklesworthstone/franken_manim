@@ -113,6 +113,77 @@ fn late_targets_and_edits_match_ordinary_scene_playback_at_every_capture() {
 }
 
 #[test]
+fn deferred_sound_cues_use_the_completed_native_clock_without_extra_frames() {
+    let (mut ordinary, _) = source();
+    let mut captures = Captures::default();
+    ordinary.wait(Some(0.25), &mut captures).unwrap();
+    ordinary
+        .add_sound("cue.wav", -0.125, Some(-3.0), Some(-9.0))
+        .unwrap();
+    ordinary.wait(Some(0.5), &mut captures).unwrap();
+
+    let (scene, _) = source();
+    let mut program = NativeSceneProgram::new(
+        scene,
+        vec![
+            NativeSegment::Wait {
+                duration: Some(0.25),
+            },
+            NativeSegment::edit(|context| {
+                context.add_sound("cue.wav", -0.125, Some(-3.0), Some(-9.0))
+            }),
+            NativeSegment::Wait {
+                duration: Some(0.5),
+            },
+        ],
+        7,
+    )
+    .unwrap();
+    assert!(program.preview().scene().sound_requests().is_empty());
+    program.advance_to(2).unwrap();
+    assert!(
+        program.preview().scene().sound_requests().is_empty(),
+        "pausing at the last capture must not execute the next authored statement"
+    );
+    program.advance_to(3).unwrap();
+    assert_eq!(
+        program.preview().scene().sound_requests(),
+        ordinary.sound_requests()
+    );
+    program.advance_to(6).unwrap();
+    assert!(program.next_frame().unwrap().is_none());
+    assert_eq!(
+        program.preview().scene().play_count(),
+        ordinary.play_count()
+    );
+    assert_eq!(
+        program.state_bytes().unwrap(),
+        ordinary.state_bytes().unwrap()
+    );
+}
+
+#[test]
+fn invalid_deferred_sound_is_rejected_without_recording_a_cue() {
+    let (scene, _) = source();
+    let mut program = NativeSceneProgram::new(
+        scene,
+        vec![NativeSegment::edit(|context| {
+            context.add_sound("cue.wav", f64::NAN, None, None)
+        })],
+        1,
+    )
+    .unwrap();
+    assert!(
+        program
+            .next_frame()
+            .unwrap_err()
+            .to_string()
+            .contains("sound time_offset must be finite")
+    );
+    assert!(program.preview().scene().sound_requests().is_empty());
+}
+
+#[test]
 fn construction_waits_for_finish_not_the_last_interpolation_sample() {
     let (scene, root) = source();
     let seen = Rc::new(Cell::new(false));

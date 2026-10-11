@@ -2348,14 +2348,217 @@ fn studio_contains(bytes: &[u8], expected: &str) -> Result<(), ScenarioError> {
 }
 
 fn studio_view(bytes: &[u8], frame: usize) -> Result<(), ScenarioError> {
-    // tex_span waits 0.25 s at the windowed runtime's effective 30 fps,
-    // yielding eight nominal samples despite the requested CLI output FPS.
+    // Constructed frame zero plus the 0.25 s hold's eight native samples.
     studio_contains(
         bytes,
         &format!(
-            "\"view\":{{\"frame_index\":{frame},\"frame_count\":8,\"fps\":30,\"width\":96,\"height\":54,\"scale\":6.75,\"origin\":[48,27],\"y_up\":true,\"input_events\":false}}"
+            "\"view\":{{\"frame_index\":{frame},\"frame_count\":9,\"fps\":30,\"width\":96,\"height\":54,\"scale\":6.75,\"origin\":[48,27],\"y_up\":true,\"input_events\":true,\"input_revision\":"
         ),
     )
+}
+
+const STUDIO_BUILTIN_INPUT_CASES: [(&str, usize, bool); 5] = [
+    ("circle_shift.v1", 13, false),
+    ("tex_span.v1", 9, true),
+    ("formula_sheet.v1", 13, true),
+    ("semantic_witness.v1", 9, true),
+    ("sound_cue.v1", 31, false),
+];
+
+/// Ordinary native scene registrations cross the shipping host's guarded input
+/// boundary, then reproduce their edited state after a real worker restart.
+fn studio_builtin_inputs_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    fn input(
+        endpoint: &StudioEndpoint,
+        frames: &mut StudioFrameReader,
+        frame: usize,
+        revision: &mut usize,
+        publication: &mut usize,
+        fields: &str,
+    ) -> Result<Vec<u8>, ScenarioError> {
+        let body = format!("{fields}&worker_generation=1&frame={frame}&revision={revision}");
+        endpoint.request("POST", "/api/event", body.as_bytes(), 200)?;
+        *revision += 1;
+        *publication += 1;
+        frames.frame(frame, *publication)
+    }
+
+    ctx.set_fps((30, 1));
+    ctx.record_asset(
+        "studio/builtin-source.rs",
+        include_bytes!("../../fmn/src/lib.rs"),
+    );
+    ctx.record_asset(
+        "studio/registrations.rs",
+        include_bytes!("../../fmn-cli/src/studio_live.rs"),
+    );
+    let directory = scenario_dir("studio_builtin_inputs")?;
+    let mut outcome = RunOutcome::ok();
+    for (name, count, has_spans) in STUDIO_BUILTIN_INPUT_CASES {
+        let (mut process, endpoint) = StudioProcess::launch_named(&directory, name)?;
+        let mut frames = endpoint.stream()?;
+        let initial_png = frames.frame(0, 0)?;
+        let initial = endpoint.request("GET", "/api/inspect", b"", 200)?;
+        studio_contains(&initial, "\"scene_time\":0,")?;
+        studio_contains(&initial, &format!("\"frame_count\":{count},\"fps\":30"))?;
+        studio_contains(&initial, "\"input_events\":true,\"input_revision\":0")?;
+        if has_spans {
+            studio_contains(&initial, "\"source_span\":{\"kind\":\"math_glyph\"")?;
+        }
+        let last = count - 1;
+        endpoint.request(
+            "POST",
+            "/api/scrub",
+            format!("frame={last}&commit=true").as_bytes(),
+            200,
+        )?;
+        frames.frame(last, 1)?;
+        let mut revision = 1;
+        let mut publication = 1;
+        input(
+            &endpoint,
+            &mut frames,
+            last,
+            &mut revision,
+            &mut publication,
+            "type=key_press&key=a&modifiers=2",
+        )?;
+        let selected_png = input(
+            &endpoint,
+            &mut frames,
+            last,
+            &mut revision,
+            &mut publication,
+            "type=key_release&key=a&modifiers=2",
+        )?;
+        input(
+            &endpoint,
+            &mut frames,
+            last,
+            &mut revision,
+            &mut publication,
+            "type=key_press&key=arrow_right",
+        )?;
+        let moved_png = input(
+            &endpoint,
+            &mut frames,
+            last,
+            &mut revision,
+            &mut publication,
+            "type=key_release&key=arrow_right",
+        )?;
+        if moved_png == selected_png {
+            return Err(fail(format!(
+                "{name}: native editing did not move any rendered pixels"
+            )));
+        }
+        input(
+            &endpoint,
+            &mut frames,
+            last,
+            &mut revision,
+            &mut publication,
+            "type=key_press&key=z&modifiers=2",
+        )?;
+        let undone_png = input(
+            &endpoint,
+            &mut frames,
+            last,
+            &mut revision,
+            &mut publication,
+            "type=key_release&key=z&modifiers=2",
+        )?;
+        if undone_png != selected_png {
+            return Err(fail(format!(
+                "{name}: native undo changed the original selected image"
+            )));
+        }
+        input(
+            &endpoint,
+            &mut frames,
+            last,
+            &mut revision,
+            &mut publication,
+            "type=key_press&key=z&modifiers=3",
+        )?;
+        let redone_png = input(
+            &endpoint,
+            &mut frames,
+            last,
+            &mut revision,
+            &mut publication,
+            "type=key_release&key=z&modifiers=3",
+        )?;
+        if redone_png != moved_png {
+            return Err(fail(format!("{name}: native redo lost the edited image")));
+        }
+        let edited = endpoint.request("GET", "/api/inspect", b"", 200)?;
+        studio_contains(
+            &edited,
+            &format!("\"frame_index\":{last},\"frame_count\":{count}"),
+        )?;
+        studio_contains(&edited, &format!("\"input_revision\":{revision}"))?;
+        let stale = endpoint.request(
+            "POST",
+            "/api/event",
+            format!("type=key_press&key=arrow_right&worker_generation=1&frame={last}&revision=0")
+                .as_bytes(),
+            422,
+        )?;
+        studio_contains(&stale, "stale native input revision")?;
+        if endpoint.request("GET", "/api/inspect", b"", 200)? != edited {
+            return Err(fail(format!(
+                "{name}: stale input changed the edited scene"
+            )));
+        }
+
+        endpoint.request("POST", "/api/scrub", b"frame=0&commit=false", 200)?;
+        publication += 1;
+        if frames.frame(0, publication)? != initial_png {
+            return Err(fail(format!(
+                "{name}: later edits leaked into constructed frame zero"
+            )));
+        }
+        endpoint.request(
+            "POST",
+            "/api/scrub",
+            format!("frame={last}&commit=true").as_bytes(),
+            200,
+        )?;
+        publication += 1;
+        if frames.frame(last, publication)? != moved_png {
+            return Err(fail(format!(
+                "{name}: forward scrub discarded the committed edits"
+            )));
+        }
+        let committed = endpoint.request("GET", "/api/inspect", b"", 200)?;
+        let restarted = endpoint.request("POST", "/api/restart", b"", 200)?;
+        studio_contains(&restarted, "\"worker_generation\":2")?;
+        studio_contains(&restarted, &format!("\"frame_index\":{last}"))?;
+        publication += 1;
+        let restored_png = frames.frame(last, publication)?;
+        let restored = endpoint.request("GET", "/api/inspect", b"", 200)?;
+        if restored_png != moved_png || restored != committed {
+            return Err(fail(format!(
+                "{name}: worker replay changed native pixels or inspected state"
+            )));
+        }
+        drop(frames);
+        process.finish()?;
+        ctx.event(
+            LogEvent::new("e2e.studio.builtin_input")
+                .field("scene", name)
+                .field("phase", "edited_undone_replayed")
+                .field("frame_count", count as u64)
+                .field("inputs", (revision - 1) as u64)
+                .field("native_spans", truth(has_spans)),
+        );
+        outcome = outcome
+            .with_artifact(format!("{name}.replayed.png"), restored_png)
+            .with_artifact(format!("{name}.inspector.json"), restored);
+    }
+    ctx.counter("studio_live_builtin_families", 5);
+    Ok(outcome.with_counter("studio_live_builtin_families", 5))
 }
 
 fn studio_interactive_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -2510,7 +2713,7 @@ fn studio_subprocess_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scena
     let initial_png = frames.frame(0, 0)?;
     let initial = endpoint.request("GET", "/api/inspect", b"", 200)?;
     studio_view(&initial, 0)?;
-    studio_contains(&initial, "\"scene_time\":0.03333333333333333")?;
+    studio_contains(&initial, "\"scene_time\":0,")?;
     for span in [
         "\"source_span\":{\"kind\":\"math_glyph\",\"start\":6,\"end\":7,\"source_bytes\":11,\"excerpt\":\"x\"",
         "\"source_span\":{\"kind\":\"math_rule\",\"start\":0,\"end\":5,\"source_bytes\":11,\"excerpt\":\"\\\\frac\"",
@@ -2559,12 +2762,18 @@ fn studio_subprocess_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scena
         ));
     }
     studio_view(&endpoint.request("GET", "/api/inspect", b"", 200)?, 0)?;
-    let refusal = endpoint.request("POST", "/api/scrub", b"frame=8&commit=false", 422)?;
-    studio_contains(&refusal, "outside 0..8")?;
+    let refusal = endpoint.request("POST", "/api/scrub", b"frame=9&commit=false", 422)?;
+    studio_contains(
+        &refusal,
+        "native target exceeds the scene or execution budget",
+    )?;
     studio_view(&endpoint.request("GET", "/api/inspect", b"", 200)?, 0)?;
     let event_refusal =
         endpoint.request("POST", "/api/event", b"type=key_press&key=arrow_left", 422)?;
-    studio_contains(&event_refusal, "no live command/event adapter")?;
+    studio_contains(
+        &event_refusal,
+        "worker_generation, frame and revision are required",
+    )?;
     ctx.event(
         LogEvent::new("e2e.studio.lifecycle")
             .field("phase", "transient_and_refusals")
@@ -7821,6 +8030,39 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         .collect(),
     ));
     specs.push(spec(
+        "lifecycle.studio_builtin_inputs.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::StudioSubprocess,
+        Invocation::new(studio_builtin_inputs_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(
+                STUDIO_BUILTIN_INPUT_CASES
+                    .iter()
+                    .flat_map(|(name, _, _)| {
+                        [
+                            format!("{name}.replayed.png"),
+                            format!("{name}.inspector.json"),
+                        ]
+                    })
+                    .collect(),
+            ),
+            counter_eq("studio_live_builtin_families", 5),
+        ],
+        STUDIO_BUILTIN_INPUT_CASES
+            .iter()
+            .map(|(name, _, _)| {
+                LogExpect::span_present(
+                    "e2e.studio.builtin_input",
+                    vec![
+                        FieldPred::str_eq("scene", *name),
+                        FieldPred::str_eq("phase", "edited_undone_replayed"),
+                    ],
+                )
+            })
+            .collect(),
+    ));
+    specs.push(spec(
         "render_matrix.python_portal_png_sequence.v1",
         ScenarioClass::RenderMatrix,
         Surface::PythonInProcess,
@@ -9587,6 +9829,16 @@ fn studio_native_interactive_lifecycle_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.studio_native_interactive.v1")
         .expect("native Studio interactive lifecycle scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn studio_builtin_input_lifecycle_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.studio_builtin_inputs.v1")
+        .expect("native builtin input lifecycle scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }
