@@ -340,7 +340,9 @@ mobject, but `match_style` (`vectorized_mobject.py:276`), which passes the
 source's arrays through `set_style`, is silently dropped. `DashedVMobject`
 calls `self.match_style(vmobject, recurse=False)` on its point-less root
 (`vectorized_mobject.py:1414`), which keeps VMobject's default colors, and
-`VGroup().match_style(Circle())` stays grey.
+`VGroup().match_style(Circle())` stays grey. `cube.match_style(square)` on a
+`VCube` restyles the faces but leaves the root's BLUE_D fill
+(`_2026/spheres_talk/random_puzzles.py` `SumOfTwoSquares`).
 
 **FrankenManim:** a point-less member takes the matched style, as C-29
 carries it through `become()` and `restore()`.

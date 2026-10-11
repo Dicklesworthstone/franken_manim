@@ -4,15 +4,6 @@
   "rules": "First matching row wins. `class` names the Reference-side member class; `under` requires an ancestor of that class; `mro_missing` admits an mro difference only when the Reference chain is the portal chain plus exactly those names; `scope` (constructions, scenes, or any by default) limits where a row applies and is checked for staleness. A behavior-note row is a deliberate, documented divergence. An open-bead row is a known bug: an open-bead row that matches nothing in its scope fails the diff, so a fixed bug forces its row out. A Behavior Note justifies a different outline, not an unbounded size or position, so every behavior-note or ADR row that covers bbox carries an `envelope`: {size_rel, center_abs} bounds each axis's extent to size_rel of the Reference's and its centre to center_abs scene units, or {bounded_by: ancestor} defers to the envelope of the `under` ancestor whose bbox contains it. A bbox outside a row's envelope falls through to later rows; an open-bead row may state its bug's measured magnitude as an envelope. A bbox no row admits is a difference that names the first envelope it broke (fm-5wq.45).",
   "exclusions": [
     {
-      "id": "fm-15k9-glyph-classes",
-      "kind": "open-bead",
-      "ref": "fm-15k9",
-      "class": ["VMobjectFromSVGPath", "Rectangle"],
-      "under": ["Text", "MarkupText", "Tex", "TexText", "SingleStringTex", "OldTex", "OldTexText", "Title", "BulletedList", "Code"],
-      "fact": ["class", "mro", "getters", "getters.*"],
-      "reason": "Glyphs are plain VMobject (Reference VMobjectFromSVGPath), and Tex rules are not Rectangle."
-    },
-    {
       "id": "bn07-c19-text-color-keyword",
       "kind": "behavior-note",
       "ref": "BN-07",
@@ -47,10 +38,10 @@
       "kind": "behavior-note",
       "ref": "BN-07",
       "scope": ["classes", "scenes"],
-      "class": "DashedVMobject",
+      "class": ["DashedVMobject", "VCube"],
       "fact": ["style.fill_color", "style.fill_opacity", "style.stroke_color", "style.stroke_width", "style.stroke_opacity"],
-      "reference_values": ["#888888", "#DDDDDD", 0, 4000, 1000],
-      "reason": "C-31: at the pin set_style writes rgba arrays into data only, so match_style is dropped on a point-less mobject and DashedVMobject's root keeps VMobject's defaults. FrankenManim's root takes the source's style (BN-07). The class names the point-less root only (its dashes are VMobject), and the row applies only where the Reference shows those defaults."
+      "reference_values": ["#888888", "#DDDDDD", "#29ABCA", 0, 4000, 1000],
+      "reason": "C-31: at the pin set_style writes rgba arrays into data only, so match_style is dropped on a point-less mobject. DashedVMobject's root keeps VMobject's defaults, and a VCube root keeps its own BLUE_D fill (SumOfTwoSquares: cube.match_style(square)). FrankenManim's root takes the source's style (BN-07). The classes name point-less roots only (dashes and faces are VMobject or Square), and the row applies only where the Reference shows those defaults."
     },
     {
       "id": "bn05-svg-path-geometry",
@@ -70,15 +61,6 @@
       "under": ["Tex", "TexText", "OldTex", "OldTexText", "SingleStringTex"],
       "fact": ["member", "class", "mro", "string", "n_points", "style.*"],
       "reason": "The portal's Tex submobjects are every glyph, then every rule, then every drawn path, where the Reference keeps TeX's emission order (39 corpus scenes: equal glyph counts, a t2c color on a different index). It also emits multi-piece TeX constructions (long arrows, \\mapsto, quotes, extensible brackets, brace fills) as one submobject (20 scenes). Measured on a clean Reference after fm-0v8k fixed its TeX cache race (Appendix C-22)."
-    },
-    {
-      "id": "fm-15k9-svg-path-classes",
-      "kind": "open-bead",
-      "ref": "fm-15k9",
-      "scope": ["classes", "scenes"],
-      "class": "VMobjectFromSVGPath",
-      "fact": ["class", "mro"],
-      "reason": "Every SVG-derived path, glyph or SVG file, is VMobjectFromSVGPath in the Reference and VMobject in the portal. Scenes regroup glyphs (VGroup(*tex[0])), so they appear outside any text ancestor."
     },
     {
       "id": "bn05-text-geometry",
@@ -150,6 +132,15 @@
       "class": "Annulus",
       "fact": ["n_points", "points", "points_sha256"],
       "reason": "The Reference builds each Annulus circle with quadratic_bezier_points_for_arc(TAU), whose default is 8 components (35 points). FrankenManim applies BN-09's one arc-density rule, 16 components for a full circle (67 points). bbox stays compared."
+    },
+    {
+      "id": "fm-b97z-padding-class",
+      "kind": "open-bead",
+      "ref": "fm-b97z",
+      "scope": ["scenes"],
+      "class": "VMobjectFromSVGPath",
+      "fact": ["class", "mro"],
+      "reason": "Glyphs are VMobjectFromSVGPath since fm-15k9, but padding members that native family alignment creates during Scene.play are published as plain VMobject, while the Reference's invisible_copy keeps the source's class (one corpus scene: a Transform between Tex selections of different glyph counts)."
     },
     {
       "id": "fm-6l2i-camera-frame-root",
@@ -284,9 +275,9 @@
       "kind": "open-bead",
       "ref": "fm-78b6",
       "scope": ["scenes"],
-      "class": ["AnnularSector", "Sector", "ArrowTip", "VPrism", "DashedVMobject", "VectorizedPoint", "BackgroundRectangle", "Prismify", "SurfaceMesh", "VGroup", "Square", "Rectangle", "Line", "Text", "RoundedRectangle"],
-      "fact": ["style.stroke_color", "style.fill_color", "style.fill_opacity", "style.stroke_width", "style.stroke_opacity"],
-      "reason": "Default style getters differ (class sweep): point-less container roots and leaf defaults."
+      "class": ["VGroup", "Line", "Rectangle"],
+      "fact": ["style.fill_color", "style.fill_opacity", "style.stroke_color", "style.stroke_width"],
+      "reason": "Eight corpus scenes, measured on wheel10 (2026-10-11), was 29. Four RepeatedConvolution* scenes: become() onto a sliced VGroup carries the point-less root's style (C-29, BN-07), and the Reference keeps the slice's default grey. A point-less VGroup's fill opacity (AnalyzeStepAlongDiagonalLine). NumberLine's tick-group root stroke (VisualizeMaxOfPairCDF). Two Riemann rectangles' negative_color near a zero crossing (Graph15Case). A Line's undrawn fill (CompareFirstTwoMethods)."
     },
     {
       "id": "fm-c1up-rounded-rectangle-corners",
