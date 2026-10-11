@@ -226,4 +226,13 @@ emulated execution and this sentence.
   platform transcendentals and for hand-written FMA. It found sixteen live libm
   call sites when it was written, two of them inside the frame G0-6 itself hashed;
   closing them needed ADR-0014, which makes fmn-dmath the DAG root so the funnel is
-  reachable from every crate that computes.
+  reachable from every crate that computes. The same sweep reads the dependencies a
+  certified crate reaches through others (fm-wi8l, fm-f0hk):
+  - FrankenSuite crates, at their SUITE.lock pins;
+  - third-party crates, at their Cargo.lock versions;
+  - only the functions reachable by name from fmn's call sites.
+
+  A test fails on any resolved dependency of a swept crate that is neither swept nor
+  argued off the path. A call still on the path is a known leak owned by an open
+  bead. A crate whose arithmetic the needles cannot see (FMA in intrinsics) is
+  either argued off the path with a pinned witness or recorded as a gap.
