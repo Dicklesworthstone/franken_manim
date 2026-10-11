@@ -179,6 +179,11 @@ python3 crates/fmn-python/tests/test_solid_lifecycle_protocol.py
 FMN_TEST_NATIVE=1 python3 crates/fmn-python/tests/test_speed.py
 FMN_TEST_NATIVE=1 python3 crates/fmn-python/tests/test_speed_updaters.py
 
+# Every protocol suite, not only the ones named above, so a fake Scene or
+# lifted namespace that falls behind production code fails here (fm-fmgv:
+# 52 such errors went unseen for a day).
+python3 -m unittest discover -s crates/fmn-python/tests -p 'test_*.py'
+
 report_file="$(mktemp)"
 echo "retaining installed-wheel parity receipt: $report_file" >&2
 set +e
