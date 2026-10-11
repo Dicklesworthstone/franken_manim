@@ -116,7 +116,7 @@ fn incompatible_video_profiles_fail_before_any_process() {
 
     let mut stopped = options("/movie.mp4", RenderFormat::Mp4);
     stopped.config.camera.fps = 0;
-    assert_refused(stopped, "zero frame rate");
+    assert_refused(stopped, "fps must be nonzero");
 
     // A translucent background needs the alpha-preserving MOV route.
     let mut translucent = options("/movie.mp4", RenderFormat::Mp4);

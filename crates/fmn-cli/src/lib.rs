@@ -9770,7 +9770,7 @@ mod tests {
                 BUILTIN_SCENE_SOURCE,
                 "circle_shift.v1",
             ],
-            Arc::new(StdFs),
+            Arc::new(fmn_platform::fs::StdFs),
             runner.clone(),
             &no_ffmpeg_locator(),
         );
