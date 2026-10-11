@@ -8051,11 +8051,11 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         ],
         STUDIO_BUILTIN_INPUT_CASES
             .iter()
-            .map(|(name, _, _)| {
+            .map(|&(name, _, _)| {
                 LogExpect::span_present(
                     "e2e.studio.builtin_input",
                     vec![
-                        FieldPred::str_eq("scene", *name),
+                        FieldPred::str_eq("scene", name),
                         FieldPred::str_eq("phase", "edited_undone_replayed"),
                     ],
                 )
