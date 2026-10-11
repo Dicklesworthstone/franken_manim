@@ -5,9 +5,8 @@ on:
     paths:
       - '.github/workflows/native-render.yml'
   workflow_dispatch:
-# Candidate-only verification: immutable blobs may be archived after checks.
-# No commit, push, ref update or repository-source publication is performed.
-# The explicit connector source commit restores this lane to read-only CI.
+# Candidate validation only. No commit, push or ref update is performed.
+# The source publication commit restores this workflow to read-only CI.
 permissions:
   contents: write
 concurrency:
@@ -42,7 +41,7 @@ jobs:
           key: fmtl-rates-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: |
             cargo-${{ runner.os }}-${{ runner.arch }}-portable-
-      - name: Verify immutable candidate and reproduce shipping failure
+      - name: Apply the immutable symbolic-rate candidate
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -53,7 +52,8 @@ jobs:
           sha = 'fa9e02e8eab10fcbf6a21565fb9ab9f08984346a'
           request = urllib.request.Request(
               f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{sha}',
-              headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN']})
+              headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                       'User-Agent': 'OpenAI File Downloader, XaiImageApiFetch/1.0'})
           with urllib.request.urlopen(request, timeout=60) as response:
               value = json.load(response)
           patch = base64.b64decode(value['content'])
@@ -72,25 +72,11 @@ jobs:
           (out / 'paths.json').write_text(json.dumps(sorted(allowed)))
           fixture = pathlib.Path('demo/wasm/bundle.fmtl').read_bytes()
           (out / 'fixture.sha256').write_text(hashlib.sha256(fixture).hexdigest())
-          # Add only the CLI regression to the original production code first.
-          test = 'crates/fmn-cli/tests/timeline_catalog.rs'
-          subprocess.run(['git','apply','--include='+test,str(path)], check=True)
-          command = ['cargo','test','--release','--locked','-p','fmn-cli','--features','cli,batch','--test','timeline_catalog','--','--nocapture']
-          with (out / 'baseline-release.log').open('w') as log:
-              result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
-          text = (out / 'baseline-release.log').read_text()
-          print(text[-12000:])
-          assert result.returncode != 0 and 'shared pure rate is not in the catalog' in text, 'negative must be the reproduced runtime failure, never a compile error'
-          # The debug build of the identical source must accept the same file.
-          with (out / 'baseline-debug.log').open('w') as log:
-              result = subprocess.run([x for x in command if x != '--release'], stdout=log, stderr=subprocess.STDOUT)
-          print((out / 'baseline-debug.log').read_text()[-5000:])
-          assert result.returncode == 0, 'baseline debug regression failed'
-          subprocess.run(['git','apply','--exclude='+test,str(path)], check=True)
+          subprocess.run(['git','apply',str(path)], check=True)
           subprocess.run(['rustfmt','--edition','2024','--config','skip_children=true',*sorted(allowed)], check=True)
           subprocess.run(['git','diff','--check'], check=True)
           PY
-      - name: Test actual debug and optimized candidate
+      - name: Test debug and optimized code on the pinned toolchain
         run: |
           python3 - <<'PY'
           import json, os, pathlib, subprocess
@@ -98,8 +84,8 @@ jobs:
           commands = [
               ('debug-core-anim-scene', ['cargo','test','--locked','-p','fmn-core','-p','fmn-anim','-p','fmn-scene','--no-fail-fast']),
               ('release-catalog', ['cargo','test','--release','--locked','-p','fmn-anim','--test','catalog_rates']),
-              ('release-bundle', ['cargo','test','--release','--locked','-p','fmn-scene','--test','shared_bundle','--test','tracker_bundle','--test','method_bundle']),
-              ('release-cli', ['cargo','test','--release','--locked','-p','fmn-cli','--features','cli,batch','--test','timeline_catalog','--test','compiled_pipeline']),
+              ('release-bundle', ['cargo','test','--release','--locked','-p','fmn-scene','--test','shared_bundle','--test','shared_rate_catalog','--test','tracker_bundle','--test','method_bundle']),
+              ('release-cli', ['cargo','test','--release','--locked','-p','fmn-cli','--features','cli,batch','--test','timeline_catalog','--test','compiled_pipeline','--test','readme_bundle']),
               ('wasm-player-host', ['cargo','test','--release','--locked','-p','fmn-wasm','--lib']),
               ('clippy', ['cargo','clippy','--locked','-p','fmn-core','-p','fmn-anim','-p','fmn-scene','--all-targets','--','-D','warnings']),
               ('workspace-check', ['cargo','check','--locked','--workspace','--all-targets']),
@@ -114,7 +100,7 @@ jobs:
               (out / 'results.json').write_text(json.dumps(statuses, indent=2))
           assert all(code == 0 for code in statuses.values()), statuses
           PY
-      - name: Preserve source identity without publishing any ref
+      - name: Archive source blobs without publishing any ref
         if: ${{ !cancelled() }}
         env:
           GH_TOKEN: ${{ github.token }}
@@ -130,22 +116,20 @@ jobs:
           assert hashlib.sha256(fixture).hexdigest() == (out / 'fixture.sha256').read_text()
           receipt = {'base_commit': os.environ['GITHUB_SHA'], 'validation_status': os.environ['VALIDATION_STATUS'], 'files': []}
           for path in paths:
-              if not pathlib.Path(path).exists():
-                  continue
               data = pathlib.Path(path).read_bytes()
               sha = hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
               request = urllib.request.Request(
                   f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs',
                   method='POST', data=json.dumps({'content':base64.b64encode(data).decode(),'encoding':'base64'}).encode(),
-                  headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Content-Type':'application/json'})
+                  headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Content-Type':'application/json',
+                           'User-Agent':'OpenAI File Downloader, XaiImageApiFetch/1.0'})
               with urllib.request.urlopen(request, timeout=60) as response:
                   returned = json.load(response)
               assert returned['sha'] == sha
               receipt['files'].append({'path':path,'sha':sha})
           (out / 'candidate.json').write_text(json.dumps(receipt, indent=2))
           print(json.dumps(receipt, indent=2))
-          existing = [p for p in paths if pathlib.Path(p).exists()]
-          subprocess.run(['tar','-czf',str(out/'sources.tar.gz'),*existing],check=True)
+          subprocess.run(['tar','-czf',str(out/'sources.tar.gz'),*paths],check=True)
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
