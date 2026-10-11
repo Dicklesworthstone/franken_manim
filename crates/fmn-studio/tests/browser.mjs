@@ -116,6 +116,116 @@ try {
     return evaluate(`fetch("/api/inspect",{headers:{"X-FMN-Capability":${JSON.stringify(studio.cap)}},signal:AbortSignal.timeout(10000)}).then(r=>r.json())`);
   }
   async function screenshot(name) { const result = await command("Page.captureScreenshot",{format:"png",captureBeyondViewport:true}); await writeFile(join(output,name),Buffer.from(result.data,"base64")); }
+  async function editBuiltinScene(scene, initial, frame) {
+    await command("Emulation.setDeviceMetricsOverride",{width:1280,height:1000,deviceScaleFactor:1,mobile:false});
+    await click("#inspect"); await synchronized(frame);
+    const before = await inspect(), beforePixels = await pixelHash();
+    const nested = scene === "tex_span.v1";
+    const subject = nested
+      ? before.nodes.find(node => node.source_span?.kind === "math_glyph" && node.source_span.excerpt === "x")
+      : before.nodes.find(node => node.root && node.records.count &&
+          JSON.stringify(node.bounds) !== JSON.stringify(initial.nodes.find(old => old.id === node.id)?.bounds));
+    assert.ok(subject?.bounds, `${scene} has its actual authored edit target`);
+    if (nested) assert.ok(subject.parents.length > 0, "edit an actual nested Tex glyph");
+    const siblings = before.nodes.filter(node => node.id !== subject.id && node.records.count);
+    const candidates = before.nodes.filter(node => node.bounds && (nested ? node.records.count : node.root));
+    let pick;
+    for (const fy of [0.5,0.2,0.8]) for (const fx of [0.5,0.2,0.8]) {
+      const point = [subject.bounds[0][0] + fx * (subject.bounds[2][0] - subject.bounds[0][0]),
+        subject.bounds[0][1] + fy * (subject.bounds[2][1] - subject.bounds[0][1])];
+      if (!pick && !candidates.some(node => node.id !== subject.id && point.every((value,axis) =>
+        value >= node.bounds[0][axis] - 0.01 && value <= node.bounds[2][axis] + 0.01))) pick = point;
+    }
+    assert.ok(pick, `${scene} target has a visible, independently selectable point`);
+    await click("#input-events");
+    await evaluate("document.getElementById('preview').scrollIntoView({block:'center'}); document.getElementById('preview').focus()");
+    if (nested) await nativeKey("t",2);
+    await nativePointer(pick);
+    await nativePointer(pick,"mousePressed",2,1);
+    await nativePointer(pick,"mouseReleased",2);
+    assert.equal((await inspect()).nodes.find(node => node.id === subject.id).animating,true,
+      "browser selection reaches the original native object");
+    await nativeKey("g",0,["keyDown"]);
+    await nativePointer(pick,"mousePressed",0,1);
+    const destination = [pick[0] + 0.5,pick[1] + 0.25];
+    await nativePointer(destination,"mouseMoved",0,1);
+    await nativePointer(destination,"mouseReleased");
+    await nativeKey("g",0,["keyUp"]);
+    let edited = await inspect(), target = edited.nodes.find(node => node.id === subject.id);
+    for (const [axis,delta] of [[0,0.5],[1,0.25]]) assert.ok(
+      Math.abs(target.bounds[1][axis] - subject.bounds[1][axis] - delta) < 1e-4,
+      `${scene} drag preserves its pointer offset and moves the selected coordinate`);
+    assert.notEqual(await pixelHash(),beforePixels,"editing the authored object changes real decoded pixels");
+    const width = target.bounds[2][0] - target.bounds[0][0], center = target.bounds[1];
+    assert.ok(width > 0);
+    await nativePointer([center[0] + 0.4,center[1]]);
+    await nativeKey("t",0,["keyDown"]);
+    await nativePointer([center[0] + 0.6,center[1]]);
+    await nativeKey("t",0,["keyUp"]);
+    edited = await inspect(); target = edited.nodes.find(node => node.id === subject.id);
+    assert.ok(Math.abs((target.bounds[2][0] - target.bounds[0][0]) / width - 1.5) < 1e-4,
+      "native resize uses the authored object's current center");
+    for (const sibling of siblings) assert.deepEqual(edited.nodes.find(node => node.id === sibling.id).bounds,
+      sibling.bounds,"editing one authored object preserves other leaf geometry");
+    if (nested) assert.deepEqual(target.source_span,subject.source_span,"live glyph edits retain their real source span");
+    const resizedPixels = await pixelHash();
+    const fill = node => node.records.fields.find(field => field.name === "fill_rgba")?.values.slice(0,4);
+    const colorSource = edited.nodes.find(node => node.id !== subject.id && node.records.count && node.bounds && fill(node));
+    assert.ok(colorSource,"the authored scene has another native color source");
+    const contrasting = JSON.stringify(fill(colorSource).slice(0,3)) !== JSON.stringify(fill(target).slice(0,3));
+    const opacity = fill(target)[3];
+    await nativeKey("c");
+    await nativePointer(colorSource.bounds[1],"mousePressed",0,1);
+    await nativePointer(colorSource.bounds[1],"mouseReleased");
+    edited = await inspect(); target = edited.nodes.find(node => node.id === subject.id);
+    assert.deepEqual(fill(target).slice(0,3),fill(colorSource).slice(0,3),"native color picking reaches the authored target");
+    assert.equal(fill(target)[3],opacity,"color picking preserves the selected object's opacity");
+    const coloredPixels = await pixelHash();
+    if (contrasting) assert.notEqual(coloredPixels,resizedPixels,"contrasting native color picking changes pixels");
+    else assert.equal(coloredPixels,resizedPixels,"picking the same authored white has no invented color change");
+    const beforePaste = edited.nodes.length;
+    await nativeKey("c",2); await nativeKey("v",2);
+    assert.equal((await inspect()).nodes.length,beforePaste + 1,"clipboard pastes exactly the selected primitive or glyph");
+    await nativeKey("ArrowRight",8);
+    const pasted = await inspect(), pastedPixels = await pixelHash();
+    assert.notEqual(pastedPixels,coloredPixels,"the copied object is independently movable and visible");
+    await nativeKey("z",2); await nativeKey("z",2);
+    assert.equal((await inspect()).nodes.length,beforePaste,"undo removes the paste after undoing its move");
+    assert.equal(await pixelHash(),coloredPixels,"undo restores actual edited pixels");
+    await nativeKey("z",10); await nativeKey("z",10);
+    assert.deepEqual((await inspect()).nodes,pasted.nodes,"redo restores the copied object's state and selection");
+    assert.equal(await pixelHash(),pastedPixels,"redo restores the copied object's actual pixels");
+    const final = await inspect();
+    assert.equal(final.view.frame_index,frame,"editing never silently advances the authored frame");
+    assert.equal(final.view.frame_count,initial.view.frame_count);
+    assert.equal(final.scene_time,before.scene_time,"editing does not advance the scene clock");
+    assert.ok(final.view.input_revision > before.view.input_revision);
+    await evaluate("document.getElementById('timeline').value='0'; document.getElementById('timeline').dispatchEvent(new Event('input',{bubbles:true}))");
+    await synchronized(0);
+    assert.deepEqual((await inspect()).nodes,initial.nodes,"future edits do not leak into earlier authored frames");
+    await click("#last"); await synchronized(frame);
+    const committed = await inspect();
+    assert.deepEqual(committed.nodes,final.nodes,"scrubbing replays committed edits at their own frame");
+    assert.equal(await pixelHash(),pastedPixels);
+    await click("#restart"); await synchronized(frame);
+    await until(() => evaluate("/Restart restored/.test(document.getElementById('replay').textContent)"),"authored live scene edit replay");
+    assert.deepEqual((await inspect()).nodes,committed.nodes,"worker restart restores authored geometry and edit history");
+    assert.equal((await inspect()).view.input_revision,committed.view.input_revision);
+    assert.equal(await pixelHash(),pastedPixels,"worker restart restores exact decoded authored-scene pixels");
+    const saved = await download(scene + ".saved-session"), oldCapability = studio.cap;
+    await command("Page.navigate",{url:"about:blank"}); await stop(studio.child);
+    assert.equal(studio.child.exitCode,0); assert.equal(studio.stderr(),""); studio = null;
+    studio = await startStudio(scene,["--restore-session",saved.path],"4");
+    assert.notEqual(studio.cap,oldCapability);
+    await command("Page.navigate",{url:studio.url.href}); await synchronized(frame);
+    assert.deepEqual((await inspect()).nodes,committed.nodes,"fresh host restores the original native scene and all edits");
+    assert.equal((await inspect()).view.input_revision,committed.view.input_revision);
+    assert.equal(await pixelHash(),pastedPixels,"fresh host and four render threads reproduce exact edited pixels");
+    await screenshot(scene + ".edited-restored.png");
+    return {nested_selection:nested,drag:true,resize:true,color_picker:true,contrasting_recolor:contrasting,
+      clipboard:true,undo:true,redo:true,frame_identity:true,restart_same_state:true,restart_same_pixels:true,
+      whole_host_resume:true,cross_thread_resume:true,final_revision:committed.view.input_revision,final_pixels:pastedPixels};
+  }
   await command("Page.enable"); await command("Runtime.enable"); await command("Network.enable");
   // Observe actual browser delivery without intercepting the installed handler.
   await command("Page.addScriptToEvaluateOnNewDocument", {source:`
@@ -136,11 +246,14 @@ try {
     await synchronized(0);
     const begin = await inspect(), last = begin.view.frame_count - 1;
     assert.ok(last >= 1);
+    assert.equal(begin.view.frame_count,scene === "circle_shift.v1" ? 13 : 9,"live previews include the initial authored frame");
+    assert.equal(begin.scene_time,0,"live frame zero precedes animation and updater sampling");
     assert.equal(begin.view.fps,30,"native windowed clock overrides requested FPS");
     assert.ok((await evaluate("document.getElementById('position').textContent")).includes(begin.scene_time.toFixed(3) + " s"));
     assert.equal(await evaluate("location.search"), "");
-    assert.equal(await evaluate("document.getElementById('input-events').disabled"), true);
-    assert.match(await evaluate("document.getElementById('input-support').textContent"), /no live scene input adapter/);
+    assert.equal(begin.view.input_events,true,"ordinary native registrations expose actual live editing");
+    assert.equal(begin.view.input_revision,0);
+    assert.equal(await evaluate("document.getElementById('input-events').disabled"), false);
     const initialHash = await evaluate("document.getElementById('display').dataset.sha256");
     await click("#last"); await synchronized(last);
     const end = await inspect();
@@ -205,14 +318,16 @@ try {
     const denied = await fetch(new URL("/api/inspect", studio.url),{headers:{"User-Agent":userAgent,"X-FMN-Capability":"0".repeat(64)},signal:AbortSignal.timeout(10000)});
     assert.equal(denied.status,403); assert.ok(!(await denied.text()).includes(studio.cap));
     const event = await fetch(new URL("/api/event", studio.url),{method:"POST",headers:{"User-Agent":userAgent,"X-FMN-Capability":studio.cap,"Origin":studio.url.origin,"Content-Type":"application/x-www-form-urlencoded"},body:"type=key_press&key=x",signal:AbortSignal.timeout(10000)});
-    assert.equal(event.status,422); assert.match(await event.text(),/no live command\/event adapter/);
+    assert.equal(event.status,422); assert.match(await event.text(),/worker_generation, frame and revision are required/);
     // A real typed refusal must be useful in the page, too: inject an invalid
     // control value then submit through the actual installed event handler.
     await evaluate(`document.getElementById('frame').value=${JSON.stringify(String(begin.view.frame_count))}; document.getElementById('timeline-form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))`);
     assert.match(await evaluate("document.getElementById('error').textContent"), /Choose an integer frame/);
     assert.equal(await evaluate(`document.body.innerText.includes(${JSON.stringify(studio.cap)})`),false);
+    const overlayMarks = await evaluate("Number(document.getElementById('overlay-state').dataset.marks)");
+    const editing = await editBuiltinScene(scene,begin,last);
     receipt.scenarios.push({scene,frame_count:begin.view.frame_count,nested_nodes:begin.nodes.filter(n=>n.parents.length).length,
-      committed_restart_frame:last,rejections,overlay_marks:await evaluate("Number(document.getElementById('overlay-state').dataset.marks)"),keyboard:true,compact:true});
+      committed_restart_frame:last,rejections,overlay_marks:overlayMarks,keyboard:true,compact:true,...editing});
     await command("Page.navigate",{url:"about:blank"}); await stop(studio.child);
     assert.equal(studio.child.exitCode,0); assert.equal(studio.stderr(),""); studio = null;
     await command("Emulation.setDeviceMetricsOverride",{width:1280,height:1000,deviceScaleFactor:1,mobile:false});
@@ -222,6 +337,7 @@ try {
   await synchronized(0);
   const interactiveInitial = await inspect();
   assert.equal(interactiveInitial.view.input_events, true);
+  assert.equal(interactiveInitial.view.y_up, true, "native scenes render world +Y toward the top of the image");
   assert.equal(interactiveInitial.view.input_revision, 0);
   const nested = interactiveInitial.nodes.find(node => node.parents.length && node.records.count);
   const swatch = interactiveInitial.nodes.find(node => node.root && node.records.count);
@@ -241,21 +357,26 @@ try {
     assert.equal(await evaluate("document.getElementById('error').hidden"), true);
   }
   async function nativeKey(value, modifiers = 0, types = ["keyDown", "keyUp"]) {
-    const revision = (await inspect()).view.input_revision;
+    // CDP modifiers use Alt=1, Control=2, Meta=4, Shift=8; Studio maps DOM
+    // modifier flags into its separate native bit layout after delivery.
+    const view = (await inspect()).view, revision = view.input_revision;
     const code = value === "ArrowRight" ? "ArrowRight" : "Key" + value.toUpperCase();
     const windowsVirtualKeyCode = value === "ArrowRight" ? 39 : value.toUpperCase().charCodeAt(0);
     for (const type of types) await command("Input.dispatchKeyEvent", {type,key:value,code,windowsVirtualKeyCode,modifiers});
     await inputReady(revision + types.length);
+    assert.equal((await inspect()).view.frame_index,view.frame_index,"keyboard input keeps its admitted frame owner");
   }
   async function nativePointer(point, type = "mouseMoved", modifiers = 0, buttons = 0) {
-    const revision = (await inspect()).view.input_revision;
-    const position = await evaluate(`(() => { const r=document.getElementById('preview').getBoundingClientRect(); return {x:r.x + (${point[0]} * ${interactiveInitial.view.scale} + ${interactiveInitial.view.origin[0]}) * r.width / ${interactiveInitial.view.width}, y:r.y + (${point[1]} * ${interactiveInitial.view.scale} + ${interactiveInitial.view.origin[1]}) * r.height / ${interactiveInitial.view.height}}; })()`);
+    const view = (await inspect()).view, revision = view.input_revision;
+    const yScale = view.y_up ? -view.scale : view.scale;
+    const position = await evaluate(`(() => { const r=document.getElementById('preview').getBoundingClientRect(); return {x:r.x + (${point[0]} * ${view.scale} + ${view.origin[0]}) * r.width / ${view.width}, y:r.y + (${point[1]} * ${yScale} + ${view.origin[1]}) * r.height / ${view.height}}; })()`);
     // CDP requires the held button on mouseMoved too. Omitting it can drop
     // pointer capture even when the buttons bitmask still says left is down.
     await command("Input.dispatchMouseEvent", {type,...position,modifiers,buttons,
       button: type === "mouseMoved" ? (buttons & 1 ? "left" : "none") : "left",
       ...(type === "mouseMoved" ? {} : {clickCount:1})});
     await inputReady(revision + 1);
+    assert.equal((await inspect()).view.frame_index,view.frame_index,"pointer input keeps its admitted frame owner");
   }
   async function pixelHash() {
     return evaluate("(async () => { const c=document.getElementById('preview'); const bytes=c.getContext('2d').getImageData(0,0,c.width,c.height).data; return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),x=>x.toString(16).padStart(2,'0')).join(''); })()");
@@ -424,7 +545,7 @@ try {
     [shortPath,"interactive.v1","384x216",/decode saved session/],
     [hugePath,"interactive.v1","384x216",/read saved session/],
     [linkPath,"interactive.v1","384x216",/regular file/],
-    [saved.path,"circle_shift.v1","384x216",/registered live/],
+    [saved.path,"circle_shift.v1","384x216",/saved scene or render configuration does not match/],
     [saved.path,"interactive.v1","192x108",/configuration/],
   ]) {
     const result = spawnSync(binary,["studio","--robot","--no-browser","--resolution",resolution,"--fps","8","--threads","1","--restore-session",path,"@builtin",scene],

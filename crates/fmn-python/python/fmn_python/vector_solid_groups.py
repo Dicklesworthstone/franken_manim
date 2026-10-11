@@ -54,12 +54,13 @@ def install_vector_solid_groups(native):
     def assemble(cls, obj, faces, config):
         style, depth_test, shading, joint_type, z_index = config
         faces = _faces(g, obj, faces, VMobject)
-        # Retain the native root's style defaults. They apply during the normal
+        # The Reference's VGroup3D runs VMobject.__init__ before it adds the
+        # faces, so the point-less root takes VMobject's unset-channel defaults
+        # (GREY_C fill at opacity 0, GREY_A stroke at width 4) under the
+        # constructor's own keywords (fm-78b6). They apply during the normal
         # color hook, so an authored override can still replace them. Supplying
         # already-styled faces avoids repainting them after their public factory.
-        root_style = dict(fill_color=g['WHITE'], fill_opacity=1., stroke_color=g['WHITE'],
-                          stroke_opacity=1., stroke_width=1., fill_border_width=1.)
-        root_style.update(style)
+        root_style = dict(style)
         if root_style.get('color') is not None:
             root_style['fill_color'] = root_style['stroke_color'] = root_style['color']
         super(cls, obj).__init__(*faces, depth_test=depth_test, shading=shading,

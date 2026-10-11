@@ -55,7 +55,7 @@ pub fn path_tag(path: PathFunc) -> Option<u8> {
 /// The rate function a `rate` tag names, as composable data.
 #[must_use]
 pub fn rate_from_tag(tag: u8) -> Option<RateFunc> {
-    fmn_core::rate::from_tag(tag).map(RateFunc::Base)
+    fmn_core::rate::CatalogRate::from_tag(tag).map(RateFunc::Catalog)
 }
 
 /// The tag of a catalog rate function, or `None` for combinators and
@@ -63,6 +63,7 @@ pub fn rate_from_tag(tag: u8) -> Option<RateFunc> {
 #[must_use]
 pub fn rate_tag(rate: &RateFunc) -> Option<u8> {
     match rate {
+        RateFunc::Catalog(rate) => Some(rate.tag()),
         RateFunc::Base(func) => fmn_core::rate::tag_of(*func),
         _ => None,
     }

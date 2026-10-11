@@ -34,8 +34,8 @@ use fmn_output::{
     EncoderChoice, FfmpegArtifactReport, FfmpegSink, FfmpegSinkConfig, FfmpegSoundtrack,
     FfmpegTool, GifSink, GifSinkConfig, InvocationReport, MixReport, MixerConfig,
     NativeArtifactKind, NegotiationError, OrderedEmitter, PngSink, PngSinkConfig, PngTarget,
-    ReceiptError, SinkAdapterError, SinkLimits, SinkReceipt, SoundCue, SoundError, SoundMixer,
-    VideoJob, WireFormat, Y4mSink, Y4mSinkConfig, frames_to_samples,
+    ReceiptError, SinkAdapterError, SinkLimits, SinkReceipt, SoundError, VideoJob, WireFormat,
+    Y4mSink, Y4mSinkConfig, frames_to_samples,
 };
 use fmn_platform::clock::StdClock;
 use fmn_platform::fs::{FileSystem, FsError, StdFs};
@@ -58,15 +58,54 @@ mod camera_animation;
 mod compiled;
 mod ffmpeg_limits;
 mod pipeline;
+mod soundtrack;
 pub use camera_animation::{render_camera, render_camera_with_fs};
 pub use compiled::{render_bundle, render_bundle_with_fs};
-pub use ffmpeg_limits::{DEFAULT_RENDER_FFMPEG_TIMEOUT, FfmpegLimitsReport};
+pub use ffmpeg_limits::{
+    DEFAULT_RENDER_FFMPEG_TIMEOUT, FfmpegLimitsReport, admit_render_ffmpeg_limits,
+    default_render_ffmpeg_limits,
+};
 pub use pipeline::{NativeFrameError, NativeFramePipeline};
+pub use soundtrack::{PreparedSceneSoundtrack, SoundtrackInput, SoundtrackTimeline};
 
 pub use fmn_output::negotiate::{EncoderPreset, EncoderTune, VideoQuality};
 pub use fmn_output::{EmitterReport, JobLimits, NativeArtifactReport};
 pub use fmn_render::{CameraConfig, CameraFrame};
 pub use fmn_runtime::ExecutionPlan;
+
+/// Read optional `file_writer` video controls after configuration layering.
+///
+/// Both native front doors use the same typed encoder catalogs. This performs
+/// no I/O; the resulting policy still passes through `VideoJob::with_quality`
+/// for encoder/container admission. Absent keys preserve encoder defaults.
+pub fn configured_video_quality(
+    writer: &fmn_config::config::FileWriterConfig,
+) -> Result<VideoQuality, fmn_output::NegotiationError> {
+    let crf = writer
+        .video_crf
+        .map(|value| {
+            u8::try_from(value).ok().filter(|value| *value <= 51).ok_or(
+                fmn_output::NegotiationError("file_writer.video_crf must lie in 0..=51"),
+            )
+        })
+        .transpose()?;
+    let preset = writer
+        .video_preset
+        .as_deref()
+        .map(str::parse::<EncoderPreset>)
+        .transpose()?;
+    let tune = writer
+        .video_tune
+        .as_deref()
+        .map(str::parse::<EncoderTune>)
+        .transpose()?;
+    Ok(VideoQuality {
+        crf,
+        preset,
+        tune,
+        bitrate: writer.video_bitrate,
+    })
+}
 
 /// Output formats. The output path is a directory for PNG sequences and a
 /// file otherwise. No format silently substitutes for another.
@@ -167,10 +206,15 @@ pub struct RenderArtifact {
     pub bytes: u64,
     /// Raw-file digest, or the canonical ordered tree digest for a PNG sequence.
     pub digest: ArtifactDigest,
-    /// Every ffmpeg invocation behind a video artifact, in execution order
-    /// (encode, then the optional audio mux), each naming the hashed tool and
-    /// exact argv. Empty for native codecs.
+    /// Video-boundary invocations in execution order (encode, then optional
+    /// audio mux), each naming the hashed tool and exact argv. Media decode
+    /// may overlap the live encoder and is listed separately in
+    /// [`Self::audio_decodes`]. Empty for native codecs.
     pub ffmpeg: Vec<InvocationReport>,
+    /// Governed media-decode invocations in cue decode order. Native PCM WAV
+    /// adds none. These may overlap the video encode, so the two lists do not
+    /// imply a single sequential execution order.
+    pub audio_decodes: Vec<InvocationReport>,
     /// Effective resource bounds used for this video's encode, mux, and media
     /// decode. Native artifacts carry no ffmpeg policy. See
     /// [`FfmpegLimitsReport::to_json`] for manifest embedding.
@@ -208,6 +252,7 @@ impl RenderArtifact {
             bytes: report.bytes,
             digest: report.digest,
             ffmpeg: Vec::new(),
+            audio_decodes: Vec::new(),
             ffmpeg_limits: None,
             video_quality: None,
             soundtrack: None,
@@ -226,6 +271,7 @@ impl RenderArtifact {
             bytes: report.boundary.artifact_bytes,
             digest: report.boundary.artifact_digest,
             ffmpeg: report.boundary.invocations,
+            audio_decodes: Vec::new(),
             ffmpeg_limits: None,
             video_quality: None,
             soundtrack,
@@ -286,7 +332,10 @@ pub struct RenderOptions {
     /// formats ignore this policy; tool probes retain their own short bounds.
     pub ffmpeg_limits: JobLimits,
     /// Opt-in CRF, preset, tune, or bitrate for opaque MP4/MOV. The default
-    /// requests no override and preserves existing encoder behavior. Settings
+    /// inherits optional `config.file_writer.video_*` controls; absent config
+    /// keys preserve existing encoder behavior. Explicit fields override the
+    /// corresponding configured fields, and selecting CRF or bitrate replaces
+    /// the other configured rate-control mode. Settings
     /// incompatible with the selected codec, alpha MOV, or native formats are
     /// refused before tool discovery rather than dropped. Never changes raw
     /// frame rendering, frame sampling, or certified artifact semantics.
@@ -327,6 +376,26 @@ impl RenderOptions {
         let mut options = Self::new(output)?;
         options.format = format;
         Ok(options)
+    }
+
+    /// Resolve configuration and explicit video overrides without tool access.
+    /// Encoder/container compatibility is checked by the ordinary video job.
+    pub fn effective_video_quality(&self) -> Result<VideoQuality, RenderError> {
+        let mut writer = self.config.file_writer.clone();
+        let explicit = self.video_quality;
+        if explicit.crf.is_some() || explicit.bitrate.is_some() {
+            // An explicit rate mode replaces the configured one. Preserve
+            // two explicit modes so ordinary negotiation rejects the conflict.
+            writer.video_crf = explicit.crf.map(u32::from);
+            writer.video_bitrate = explicit.bitrate;
+        }
+        if let Some(preset) = explicit.preset {
+            writer.video_preset = Some(preset.as_str().to_owned());
+        }
+        if let Some(tune) = explicit.tune {
+            writer.video_tune = Some(tune.as_str().to_owned());
+        }
+        configured_video_quality(&writer).map_err(RenderError::Negotiation)
     }
 
     /// Build a perspective camera matching the current export configuration.
@@ -620,10 +689,9 @@ struct VideoSession {
     job_limits: JobLimits,
     max_input_bytes: u64,
     video_quality: VideoQuality,
+    timeline: SoundtrackTimeline,
+    audio_decodes: Vec<InvocationReport>,
 }
-
-/// Bytes read from any one sound-cue asset (the CLI's cue budget).
-const MAX_SOUND_ASSET_BYTES: usize = 64 * 1024 * 1024;
 
 struct RenderSink {
     pipeline: Option<NativeFramePipeline>,
@@ -683,16 +751,17 @@ impl RenderSink {
                     "ffmpeg video is outside the certified artifact set; use RenderFormat::PngSequence or RenderFormat::Y4m with certified determinism",
                 ));
             }
+            // Invalid profiles have the same refusal with or without a host
+            // ffmpeg capability. Admission itself needs no process access.
+            let job = negotiate_video(options.format, config, options.camera.as_ref())?
+                .with_quality(options.effective_video_quality()?)
+                .map_err(RenderError::Negotiation)?;
             if options.ffmpeg.is_none() {
                 return Err(RenderError::Capability(
                     "video output requires RenderOptions::ffmpeg (or render() with the `ffmpeg` feature); native PNG-sequence, GIF and Y4M outputs need no external tool",
                 ));
             }
-            Some(
-                negotiate_video(options.format, config, options.camera.as_ref())?
-                    .with_quality(options.video_quality)
-                    .map_err(RenderError::Negotiation)?,
-            )
+            Some(job)
         } else {
             None
         };
@@ -944,6 +1013,8 @@ impl RenderSink {
                     job_limits,
                     max_input_bytes: options.max_output_bytes,
                     video_quality,
+                    timeline: SoundtrackTimeline::default(),
+                    audio_decodes: Vec::new(),
                 });
                 let (binding, receipt) = sink.into_binding("ffmpeg-video");
                 (binding, RenderReceipt::Video(receipt))
@@ -1072,6 +1143,9 @@ impl RenderSink {
             .as_ref()
             .map(|video| FfmpegLimitsReport::new(&video.job_limits, video.max_input_bytes));
         artifact.video_quality = self.video.as_ref().map(|video| video.video_quality);
+        if let Some(video) = self.video.as_mut() {
+            artifact.audio_decodes = std::mem::take(&mut video.audio_decodes);
+        }
         Ok(FinishedRender {
             frame_pipeline,
             emission,
@@ -1084,7 +1158,7 @@ impl VideoSession {
     /// Mix the scene's sound cues on the exact rational timeline, spanning at
     /// least the published picture. `None` when the scene authored no sound.
     fn mix(
-        &self,
+        &mut self,
         scene: &fmn_scene::Scene,
         frames_published: u64,
         threads: usize,
@@ -1095,7 +1169,7 @@ impl VideoSession {
         }
         let config = MixerConfig::default();
         let time = scene.time();
-        let picture_frames = time.frames().max(
+        let picture_frames = self.timeline.output_frame(time.frames())?.max(
             i64::try_from(frames_published)
                 .map_err(|_| RenderError::InvalidOptions("published frame count exceeds i64"))?,
         );
@@ -1103,9 +1177,6 @@ impl VideoSession {
             .map_err(RenderError::Sound)?;
         let timeline = u64::try_from(timeline)
             .map_err(|_| RenderError::InvalidOptions("soundtrack timeline is negative"))?;
-        let mut mixer = SoundMixer::new(config)
-            .map_err(RenderError::Sound)?
-            .with_timeline_frames(timeline);
         // Non-WAV cues transcode through the same governed capability that
         // encodes the picture; native PCM WAV never reaches a process.
         let boundary = Boundary::new(
@@ -1120,32 +1191,17 @@ impl VideoSession {
                 path: PathBuf::new(),
                 error,
             })?;
-        for request in requests {
-            let bytes = self
-                .fs
-                .read_bounded(&request.sound_file, MAX_SOUND_ASSET_BYTES)
-                .map_err(|error| RenderError::SoundAsset {
-                    path: request.sound_file.clone(),
-                    error,
-                })?;
-            let decoded = decoder
-                .decode(&bytes)
-                .map_err(|error| RenderError::SoundDecode {
-                    path: request.sound_file.clone(),
-                    error,
-                })?;
-            mixer
-                .add(SoundCue {
-                    audio: decoded.audio,
-                    frame: request.time.frames(),
-                    fps: request.time.fps(),
-                    time_offset: request.time_offset,
-                    gain: request.gain,
-                    gain_to_background: request.gain_to_background,
-                })
-                .map_err(RenderError::Sound)?;
-        }
-        mixer.mix(threads).map(Some).map_err(RenderError::Sound)
+        let prepared = PreparedSceneSoundtrack::new(
+            self.fs.as_ref(),
+            requests,
+            &mut decoder,
+            config,
+            Some(&self.timeline),
+        )?
+        .with_timeline_frames(timeline);
+        let mixed = prepared.mix(threads)?;
+        self.audio_decodes = prepared.invocations();
+        Ok(Some(mixed))
     }
 }
 
@@ -1246,6 +1302,23 @@ fn negotiate_video(
 }
 
 impl SceneSink for RenderSink {
+    fn event(&mut self, event: fmn_scene::LifecycleEvent) -> Result<(), IntegrationError> {
+        if let Some(error) = &self.failure {
+            return Err(IntegrationError::new("native-render", error.to_string()));
+        }
+        if let Some(video) = self.video.as_mut() {
+            video
+                .timeline
+                .observe(event.time.frames(), event.skipping)
+                .map_err(|error| {
+                    let message = error.to_string();
+                    self.failure = Some(error);
+                    IntegrationError::new("native-render", message)
+                })?;
+        }
+        Ok(())
+    }
+
     fn capture(
         &mut self,
         _reason: CaptureReason,

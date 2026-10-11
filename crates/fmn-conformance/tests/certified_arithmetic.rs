@@ -905,6 +905,12 @@ struct SuiteCrate {
     /// function of a called name, and everything any of them calls) count.
     /// Empty means every function counts.
     entry_points: &'static [&'static str],
+    /// Earlier swept crates (by label) that call into this one, for a crate
+    /// fmn reaches only through other suite crates. When non-empty, the entry
+    /// points are every name those crates' reachable functions call that
+    /// this crate defines (the same by-name over-approximation, across the
+    /// crate boundary), and `entry_points` must be empty.
+    entered_from: &'static [&'static str],
     /// The fmn call sites that put the crate on the path.
     reason: &'static str,
 }
@@ -915,6 +921,7 @@ const SUITE_CERTIFIED: &[SuiteCrate] = &[
         dir: "crates/fsci-integrate",
         modules: &[],
         entry_points: &[],
+        entered_from: &[],
         reason: "fmn-library fields.rs: StreamLines solve_ivp(Rk45)",
     },
     SuiteCrate {
@@ -922,13 +929,48 @@ const SUITE_CERTIFIED: &[SuiteCrate] = &[
         dir: "crates/fsci-linalg",
         modules: &[],
         entry_points: &["solve", "solve_banded"],
+        entered_from: &[],
         reason: "fmn-geom smoothing.rs: fsci_linalg::solve and solve_banded only",
+    },
+    SuiteCrate {
+        repo: "frankenscipy",
+        dir: "crates/fsci-fft",
+        modules: &[],
+        entry_points: &[],
+        entered_from: &["frankenscipy/crates/fsci-linalg"],
+        reason: "what fmn's fsci_linalg::solve path calls in it",
+    },
+    SuiteCrate {
+        repo: "frankenscipy",
+        dir: "crates/fsci-opt",
+        modules: &[],
+        // fsci-integrate's api.rs imports brentq and the RootOptions struct
+        // (built as a literal) and nothing else; by name, its `new` and
+        // `default` calls would enter every optimizer.
+        entry_points: &["brentq"],
+        entered_from: &[],
+        reason: "solve_ivp's event location (brentq), on fmn's StreamLines path",
+    },
+    SuiteCrate {
+        repo: "frankenscipy",
+        dir: "crates/fsci-runtime",
+        modules: &[],
+        entry_points: &[],
+        entered_from: &[
+            "frankenscipy/crates/fsci-integrate",
+            "frankenscipy/crates/fsci-linalg",
+            "frankenscipy/crates/fsci-fft",
+            "frankenscipy/crates/fsci-opt",
+        ],
+        reason: "fmn's fsci_linalg::solve decides through its policy controller and solver \
+                 portfolio",
     },
     SuiteCrate {
         repo: "franken_numpy",
         dir: "crates/fnp-random-core",
         modules: &[],
         entry_points: &[],
+        entered_from: &[],
         reason: "fmn-core rng.rs: PCG64DXSM, the one RNG",
     },
     SuiteCrate {
@@ -936,6 +978,7 @@ const SUITE_CERTIFIED: &[SuiteCrate] = &[
         dir: "crates/fnp-ndarray",
         modules: &[],
         entry_points: &[],
+        entered_from: &[],
         reason: "fmn-mobject record.rs, numpy.rs: NdLayout and MemoryOrder",
     },
     SuiteCrate {
@@ -943,6 +986,7 @@ const SUITE_CERTIFIED: &[SuiteCrate] = &[
         dir: "crates/fnp-dtype",
         modules: &[],
         entry_points: &["item_size", "name"],
+        entered_from: &[],
         reason: "fmn-mobject numpy.rs: the DType enum and StructuredField as data, and \
                  DType::item_size (name is included conservatively)",
     },
@@ -951,6 +995,7 @@ const SUITE_CERTIFIED: &[SuiteCrate] = &[
         dir: "fmd-font",
         modules: &[],
         entry_points: &[],
+        entered_from: &[],
         reason: "fmn-text: sfnt parsing and glyph outlines",
     },
     SuiteCrate {
@@ -958,6 +1003,7 @@ const SUITE_CERTIFIED: &[SuiteCrate] = &[
         dir: "fmd-math",
         modules: &[],
         entry_points: &[],
+        entered_from: &[],
         reason: "fmn-tex: TeX math layout",
     },
     SuiteCrate {
@@ -965,6 +1011,7 @@ const SUITE_CERTIFIED: &[SuiteCrate] = &[
         dir: ".",
         modules: &["ast.rs", "parse", "highlight.rs"],
         entry_points: &[],
+        entered_from: &[],
         reason: "fmn-library markdown.rs, markdown_document.rs, code.rs: parser, AST and highlighter only",
     },
     SuiteCrate {
@@ -972,9 +1019,49 @@ const SUITE_CERTIFIED: &[SuiteCrate] = &[
         dir: "crates/fnx-classes",
         modules: &[],
         entry_points: &[],
+        entered_from: &[],
         reason: "fmn-library network_graph.rs",
     },
+    SuiteCrate {
+        repo: "franken_networkx",
+        dir: "crates/fnx-runtime",
+        modules: &[],
+        entry_points: &[],
+        entered_from: &["franken_networkx/crates/fnx-classes"],
+        reason: "what fnx-classes calls in it, on fmn's network_graph.rs path",
+    },
+    // A third-party crate (fm-f0hk): `repo` is the registry, `dir` the
+    // crate name, read at its Cargo.lock version.
+    SuiteCrate {
+        repo: REGISTRY,
+        dir: "nalgebra",
+        // The decompositions fsci-linalg's solve path calls (LU, QR, the SVD
+        // fallback and Cholesky) with the BLAS kernels and norms they run on.
+        modules: &[
+            "linalg/lu.rs",
+            "linalg/qr.rs",
+            "linalg/svd.rs",
+            "linalg/svd2.rs",
+            "linalg/svd3.rs",
+            "linalg/bidiagonal.rs",
+            "linalg/householder.rs",
+            "linalg/givens.rs",
+            "linalg/solve.rs",
+            "linalg/permutation_sequence.rs",
+            "linalg/cholesky.rs",
+            "linalg/decomposition.rs",
+            "base/blas.rs",
+            "base/blas_uninit.rs",
+            "base/norm.rs",
+        ],
+        entry_points: &[],
+        entered_from: &[],
+        reason: "fmn's fsci_linalg::solve factors with its LU and QR and falls back to its SVD",
+    },
 ];
+
+/// The `repo` of a third-party [`SuiteCrate`]: Cargo's registry sources.
+const REGISTRY: &str = "crates.io";
 
 /// Suite dependencies of the swept crates that this sweep does not read, each
 /// with the argument: either no certified output reaches them, or the calls
@@ -1004,7 +1091,101 @@ const SUITE_NOT_SWEPT: &[(&str, &str)] = &[
         "fmn-conformance reads and writes .npy fixtures with it; no certified artifact is \
          computed through it",
     ),
+    (
+        "fsci-sparse",
+        "fsci-integrate imports it only in bvp.rs, which SUITE_UNREACHABLE_FILES argues out \
+         (no fmn boundary-value solve)",
+    ),
 ];
+
+/// Third-party dependencies of swept crates that the sweep does not read
+/// (fm-f0hk), each with the argument: no certified value is computed through
+/// it, or it does no floating-point arithmetic.
+const THIRD_PARTY_NOT_SWEPT: &[(&str, &str)] = &[
+    (
+        "rayon",
+        "fsci-linalg's parallel blocked kernels run on it; it does no arithmetic of its own, \
+         and the order of their reductions is fsci-linalg code, which is swept",
+    ),
+    (
+        "serde",
+        "derive-driven (de)serialization of the suite crates' evidence and audit records",
+    ),
+    (
+        "serde_json",
+        "the suite crates' JSON evidence and audit records; fmn computes no certified value \
+         through them",
+    ),
+    (
+        "rand",
+        "fsci-opt's stochastic optimizers; brentq, its one entry point, draws no random number",
+    ),
+    (
+        "blake3",
+        "fsci-runtime's audit fingerprints: integer hashing",
+    ),
+    (
+        "half",
+        "fnp-dtype's f16 conversions; fmn's entry points (item_size, name) convert nothing",
+    ),
+    (
+        "clap",
+        "franken_markdown's command-line parser; the swept modules (ast, parse, highlight) do \
+         not call it",
+    ),
+    (
+        "indexmap",
+        "fnx-classes' node and edge maps: hashing and ordering, no floating point",
+    ),
+    ("rustc-hash", "fnx-classes' map hasher: integer hashing"),
+    (
+        "approx",
+        "the swept nalgebra modules use it only in doc examples and for its AbsDiffEq epsilon \
+         constants",
+    ),
+    (
+        "glam",
+        "nalgebra's conversions to and from glam types; no swept module converts through them",
+    ),
+    (
+        "nalgebra-macros",
+        "proc macros for matrix! and vector! literals: compile time only",
+    ),
+    (
+        "num-complex",
+        "complex scalars; fmn's solves are real, and the swept modules run on f64",
+    ),
+    (
+        "num-rational",
+        "rational scalars; nalgebra's f64 decompositions do not use them",
+    ),
+    (
+        "num-traits",
+        "the Num/Float traits, whose f64 implementations forward to std: a libm-reaching call \
+         is a method call the needles see at its nalgebra call site",
+    ),
+    (
+        "simba",
+        "the ComplexField/RealField traits nalgebra's decompositions are generic over; for f64 \
+         each method forwards to std, so a libm-reaching call shows at its nalgebra call site \
+         (svd.rs's hypot, svd2.rs's atan2 and sin_cos)",
+    ),
+    (
+        "typenum",
+        "type-level integers for static dimensions: no runtime arithmetic",
+    ),
+    (
+        "matrixmultiply",
+        "its dgemm picks an FMA kernel at run time, which no needle sees. nalgebra's gemm reaches \
+         it only for f64 products whose dimensions all exceed 5. On fmn's path the one such \
+         product is the SVD fallback's pseudo-inverse, and fmn-geom's \
+         closed_smoothing_solves_never_leave_lu pins that fallback as unreachable (fm-77rt)",
+    ),
+];
+
+/// Crates on a certified path whose arithmetic this sweep cannot judge, each
+/// owned by an open bead: (crate, owner). Recording one is not arguing it out.
+const CERTIFIED_PATH_GAPS: &[(&str, &str)] = &[];
 
 /// Calls this guard reports but does not yet fail on, each owned by an open
 /// bead: (label, file, needle, exact count, owner). An entry whose count no
@@ -1026,17 +1207,61 @@ const SUITE_KNOWN_LEAKS: &[(&str, &str, &str, usize, &str)] = &[
         "lib.rs",
         "log10",
         1,
-        "fm-wi8l: solve's policy signal condition_signal_from_rcond; decides FailClosed/FullValidate \
-         at thresholds, never the solution values",
+        "fm-pexg: solve's policy signal condition_signal_from_rcond; decides FailClosed/FullValidate \
+         at thresholds, never the solution values. Fixed upstream in frankenscipy d00db63ac \
+         (fm-wi8l); it leaves with fm-pexg's pin bump",
+    ),
+    (
+        "frankenscipy/crates/fsci-runtime",
+        "policy.rs",
+        "exp",
+        1,
+        "fm-pexg: the solve policy's softmax, whose posterior picks FailClosed/FullValidate. \
+         Fixed upstream in frankenscipy d00db63ac (fm-wi8l); it leaves with fm-pexg's pin bump",
+    ),
+    (
+        "frankenscipy/crates/fsci-runtime",
+        "lib.rs",
+        "log10",
+        2,
+        "fm-pexg: the solve portfolio's rcond map (condition_posterior) and outcome row \
+         (rcond_decade). Fixed upstream in frankenscipy d00db63ac (fm-wi8l); they leave with \
+         fm-pexg's pin bump",
     ),
     (
         "frankenscipy/crates/fsci-linalg",
         "lib.rs",
         "mul_add",
-        12,
-        "fm-bp82: SPD blocked-Cholesky panel TRSM/SYRK kernels, run only for symmetric systems of \
-         n >= 128; fmn's one dense solve (closed smoothing) never builds a symmetric matrix, pinned \
-         by fmn-geom's closed_smoothing_matrix_is_never_symmetric",
+        13,
+        "fm-bp82 (12): SPD blocked-Cholesky panel TRSM/SYRK kernels, run only for symmetric \
+         systems of n >= 128; fmn's one dense solve (closed smoothing) never builds a symmetric \
+         matrix, pinned by fmn-geom's closed_smoothing_matrix_is_never_symmetric. fm-g1ey (1): \
+         two_prod's exact error term in the solve certificate's residual, which fmn never reads",
+    ),
+    (
+        "crates.io/nalgebra",
+        "svd.rs",
+        "hypot",
+        2,
+        "fm-pexg: at the 85edd7a9 pin fsci-linalg estimates rcond for n <= 4 from this SVD's \
+         singular values, on every 2- and 3-anchor closed smoothing solve; the rcond only steers \
+         decisions, far from their thresholds there. simba's f64 hypot is the platform libm's. \
+         frankenscipy ed84bdd15 (fm-dboe) drops that use; after fm-pexg's bump only the SVD \
+         fallback, pinned unreachable for fmn (fm-77rt), still calls it",
+    ),
+    (
+        "crates.io/nalgebra",
+        "svd2.rs",
+        "atan2",
+        2,
+        "fm-pexg: the 2x2 SVD inside that n <= 4 rcond estimate (see svd.rs)",
+    ),
+    (
+        "crates.io/nalgebra",
+        "svd2.rs",
+        "sin_cos",
+        2,
+        "fm-pexg: the 2x2 SVD inside that n <= 4 rcond estimate (see svd.rs)",
     ),
 ];
 
@@ -1080,7 +1305,32 @@ const SUITE_UNREACHABLE_FILES: &[(&str, &str, &str)] = &[
         "complex.rs",
         "complex integration: no fmn call site",
     ),
+    (
+        "frankenscipy/crates/fsci-opt",
+        "gsa.rs",
+        "generalized simulated annealing: brentq reaches it only through the constructor \
+         name `new` (its visiting distribution's)",
+    ),
+    (
+        "frankenscipy/crates/fsci-runtime",
+        "eprocess.rs",
+        "EProcessMonitor: no swept crate names it; the by-name entry reaches it only through \
+         the constructor name `new`",
+    ),
 ];
+
+/// Functions of a swept suite crate that a by-name entry reaches only through
+/// a name collision, with the argument: (label, file, function, reason). The
+/// reachability walk neither counts nor enters them, and an entry naming a
+/// function that no longer exists fails.
+const SUITE_UNREACHABLE_FUNCTIONS: &[(&str, &str, &str, &str)] = &[(
+    "franken_networkx/crates/fnx-runtime",
+    "lib.rs",
+    "fit",
+    "BayesianGpdEstimator::fit, called only by BayesianGpdEstimator::observe; only \
+     fnx-runtime's own tests construct the estimator. Two other fnx-runtime types define \
+     `observe`, and the runtime policy fnx-classes uses calls theirs",
+)];
 
 /// The pinned revision of a suite repository, from SUITE.lock.
 fn suite_rev(repo: &str) -> Result<String, String> {
@@ -1102,15 +1352,7 @@ fn suite_rev(repo: &str) -> Result<String, String> {
 /// `$CARGO_HOME/git/checkouts/<repo>-<hash>/<rev[..7]>`.
 fn suite_checkout(repo: &str) -> Result<PathBuf, String> {
     let rev = suite_rev(repo)?;
-    let cargo_home = std::env::var_os("CARGO_HOME").map_or_else(
-        || {
-            std::env::var_os("HOME")
-                .map(|home| PathBuf::from(home).join(".cargo"))
-                .ok_or_else(|| "neither CARGO_HOME nor HOME is set".to_owned())
-        },
-        |home| Ok(PathBuf::from(home)),
-    )?;
-    let checkouts = cargo_home.join("git").join("checkouts");
+    let checkouts = cargo_home()?.join("git").join("checkouts");
     let entries = std::fs::read_dir(&checkouts)
         .map_err(|error| format!("reading {}: {error}", checkouts.display()))?;
     let mut found = Vec::new();
@@ -1143,6 +1385,128 @@ fn suite_checkout(repo: &str) -> Result<PathBuf, String> {
     }
 }
 
+/// `$CARGO_HOME`, or `$HOME/.cargo`.
+fn cargo_home() -> Result<PathBuf, String> {
+    std::env::var_os("CARGO_HOME").map_or_else(
+        || {
+            std::env::var_os("HOME")
+                .map(|home| PathBuf::from(home).join(".cargo"))
+                .ok_or_else(|| "neither CARGO_HOME nor HOME is set".to_owned())
+        },
+        |home| Ok(PathBuf::from(home)),
+    )
+}
+
+/// One `[[package]]` of the workspace's Cargo.lock: name, version, and the
+/// names it depends on as resolved (every enabled optional dependency
+/// included).
+struct LockedPackage {
+    name: String,
+    version: String,
+    dependencies: Vec<String>,
+}
+
+fn locked_packages() -> Result<Vec<LockedPackage>, String> {
+    let lock = read_utf8_bounded(
+        std::fs::File::open(workspace().join("Cargo.lock"))
+            .map_err(|error| format!("opening Cargo.lock: {error}"))?,
+        "Cargo.lock",
+        8 * 1024 * 1024,
+    )?;
+    let mut out = Vec::new();
+    for block in lock.split("[[package]]").skip(1) {
+        let field = |key: &str| {
+            block.lines().find_map(|line| {
+                line.strip_prefix(key)
+                    .and_then(|rest| rest.strip_prefix(" = \""))
+                    .and_then(|rest| rest.strip_suffix('"'))
+                    .map(str::to_owned)
+            })
+        };
+        let (Some(name), Some(version)) = (field("name"), field("version")) else {
+            return Err(format!(
+                "Cargo.lock package without a name or version:{block}"
+            ));
+        };
+        let dependencies = block
+            .split_once("dependencies = [")
+            .and_then(|(_, rest)| rest.split_once(']'))
+            .map(|(list, _)| {
+                list.lines()
+                    .filter_map(|line| {
+                        let entry = line.trim().trim_end_matches(',').trim_matches('"');
+                        entry.split(' ').next().filter(|name| !name.is_empty())
+                    })
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.push(LockedPackage {
+            name,
+            version,
+            dependencies,
+        });
+    }
+    Ok(out)
+}
+
+/// Cargo's registry source of the one locked version of `name`:
+/// `$CARGO_HOME/registry/src/<index>/<name>-<version>`.
+fn registry_source(name: &str) -> Result<PathBuf, String> {
+    let versions: Vec<String> = locked_packages()?
+        .into_iter()
+        .filter(|package| package.name == name)
+        .map(|package| package.version)
+        .collect();
+    let [version] = versions.as_slice() else {
+        return Err(format!(
+            "Cargo.lock holds {} versions of {name}: {versions:?}; sweep each or none",
+            versions.len()
+        ));
+    };
+    let indexes = cargo_home()?.join("registry").join("src");
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(&indexes)
+        .map_err(|error| format!("reading {}: {error}", indexes.display()))?
+    {
+        let entry = entry.map_err(|error| format!("reading {}: {error}", indexes.display()))?;
+        let candidate = entry.path().join(format!("{name}-{version}"));
+        if candidate.is_dir() {
+            found.push(candidate);
+        }
+    }
+    match found.len() {
+        1 => Ok(found.remove(0)),
+        0 => Err(format!(
+            "no registry source of {name} {version} under {}: build the workspace first; \
+             a missing source is not a clean one",
+            indexes.display()
+        )),
+        _ => Err(format!(
+            "{} registry sources of {name} {version}: ambiguous",
+            found.len()
+        )),
+    }
+}
+
+/// The directory a swept crate's `src/` is in.
+fn crate_root(krate: &SuiteCrate) -> Result<PathBuf, String> {
+    if krate.repo == REGISTRY {
+        registry_source(krate.dir)
+    } else {
+        Ok(suite_checkout(krate.repo)?.join(krate.dir))
+    }
+}
+
+/// The Cargo.lock name of a swept crate.
+fn crate_name(krate: &SuiteCrate) -> &'static str {
+    if krate.dir == "." {
+        krate.repo
+    } else {
+        krate.dir.rsplit('/').next().unwrap_or(krate.dir)
+    }
+}
+
 /// Every swept suite file, grouped by crate: (crate, label, files).
 /// Binary targets (`src/bin`) are never linked into fmn and are not read.
 /// One swept crate with its label and the files read.
@@ -1151,7 +1515,7 @@ type SuiteGroup = (&'static SuiteCrate, String, Vec<PathBuf>);
 fn suite_files() -> Result<Vec<SuiteGroup>, String> {
     let mut out = Vec::new();
     for krate in SUITE_CERTIFIED {
-        let src = suite_checkout(krate.repo)?.join(krate.dir).join("src");
+        let src = crate_root(krate)?.join("src");
         let label = format!("{}/{}", krate.repo, krate.dir.trim_start_matches("./"));
         let mut files = Vec::new();
         if krate.modules.is_empty() {
@@ -1217,10 +1581,26 @@ fn suite_functions(files: &[PathBuf]) -> Result<Vec<SuiteFn>, String> {
                 continue;
             }
             let name = code[name_start..j].to_owned();
-            let Some(open_rel) = code[j..].find(['{', ';']) else {
+            // The body opens at the first `{` outside the signature's
+            // parentheses and brackets, and a `;` there ends a declaration
+            // without one. An array type (`-> [f64; 3]`) puts a `;` inside
+            // brackets: taking that for the end hid every such function.
+            let mut nesting = 0usize;
+            let mut found = None;
+            for (k, &byte) in bytes.iter().enumerate().skip(j) {
+                match byte {
+                    b'(' | b'[' => nesting += 1,
+                    b')' | b']' => nesting = nesting.saturating_sub(1),
+                    b'{' | b';' if nesting == 0 => {
+                        found = Some(k);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            let Some(open) = found else {
                 continue;
             };
-            let open = j + open_rel;
             if bytes[open] == b';' {
                 continue; // a declaration without a body
             }
@@ -1282,6 +1662,26 @@ fn reachable_ranges(
     functions: &[SuiteFn],
     entry_points: &[&str],
 ) -> Result<Vec<LineRange>, String> {
+    Ok(reached_functions(functions, entry_points)?
+        .into_iter()
+        .map(|f| (f.file.clone(), f.lines))
+        .collect())
+}
+
+/// The functions reachable by name from `entry_points`.
+fn reached_functions<'a>(
+    functions: &'a [SuiteFn],
+    entry_points: &[&str],
+) -> Result<Vec<&'a SuiteFn>, String> {
+    reached_functions_skipping(functions, entry_points, &|_| false)
+}
+
+/// [`reached_functions`], never counting or entering a function `skip` names.
+fn reached_functions_skipping<'a>(
+    functions: &'a [SuiteFn],
+    entry_points: &[&str],
+    skip: &dyn Fn(&SuiteFn) -> bool,
+) -> Result<Vec<&'a SuiteFn>, String> {
     let mut reached: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     let mut queue: Vec<&str> = Vec::new();
     for entry in entry_points {
@@ -1294,7 +1694,7 @@ fn reachable_ranges(
         if !reached.insert(name) {
             continue;
         }
-        for function in functions.iter().filter(|f| f.name == name) {
+        for function in functions.iter().filter(|f| f.name == name && !skip(f)) {
             for callee in &function.callees {
                 if !reached.contains(callee.as_str()) {
                     queue.push(callee.as_str());
@@ -1304,9 +1704,31 @@ fn reachable_ranges(
     }
     Ok(functions
         .iter()
-        .filter(|f| reached.contains(f.name.as_str()))
-        .map(|f| (f.file.clone(), f.lines))
+        .filter(|f| reached.contains(f.name.as_str()) && !skip(f))
         .collect())
+}
+
+/// The file name of a suite source, for the argued-out tables.
+fn file_name(file: &Path) -> String {
+    file.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Whether `file` of the crate labelled `label` is argued unreachable.
+fn unreachable_file(label: &str, file: &Path) -> bool {
+    let name = file_name(file);
+    SUITE_UNREACHABLE_FILES
+        .iter()
+        .any(|(l, f, _)| *l == label && *f == name)
+}
+
+/// Whether `function` of the crate labelled `label` is argued unreachable.
+fn unreachable_function(label: &str, function: &SuiteFn) -> bool {
+    let file = file_name(&function.file);
+    SUITE_UNREACHABLE_FUNCTIONS
+        .iter()
+        .any(|(l, f, name, _)| *l == label && *f == file && function.name == *name)
 }
 
 /// Scan the suite, split into (offences, known-leak counts, lines read,
@@ -1319,24 +1741,74 @@ fn suite_sweep(
     let mut offences = Vec::new();
     let mut scanned = 0;
     let mut unreachable = 0;
+    // The names each swept crate's reachable functions call, by label: the
+    // entry points of the crates entered from it.
+    let mut called: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+        std::collections::BTreeMap::new();
     for (krate, label, files) in suite_files()? {
-        let ranges = if krate.entry_points.is_empty() {
+        let functions = suite_functions(&files)?;
+        for (l, file, name, _) in SUITE_UNREACHABLE_FUNCTIONS {
+            if *l == label
+                && !functions
+                    .iter()
+                    .any(|f| f.name == *name && file_name(&f.file) == *file)
+            {
+                return Err(format!(
+                    "{label}: unreachable-function entry {file}::{name} names no function"
+                ));
+            }
+        }
+        let skip = |function: &SuiteFn| unreachable_function(&label, function);
+        let reached = if !krate.entered_from.is_empty() {
+            if !krate.entry_points.is_empty() {
+                return Err(format!(
+                    "{label}: entered_from and entry_points are exclusive"
+                ));
+            }
+            let mut entries = std::collections::BTreeSet::new();
+            for source in krate.entered_from {
+                let names = called.get(*source).ok_or_else(|| {
+                    format!("{label} is entered from {source}, which is not an earlier swept crate")
+                })?;
+                entries.extend(
+                    names
+                        .iter()
+                        .filter(|name| functions.iter().any(|f| f.name == **name))
+                        .cloned(),
+                );
+            }
+            let entries: Vec<&str> = entries.iter().map(String::as_str).collect();
+            Some(reached_functions_skipping(&functions, &entries, &skip)?)
+        } else if krate.entry_points.is_empty() {
             None
         } else {
-            Some(reachable_ranges(
-                &suite_functions(&files)?,
+            Some(reached_functions_skipping(
+                &functions,
                 krate.entry_points,
+                &skip,
             )?)
         };
-        for file in files {
-            let name = file
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            if SUITE_UNREACHABLE_FILES
+        let callees = match &reached {
+            Some(reached) => reached
                 .iter()
-                .any(|(l, f, _)| *l == label && *f == name)
-            {
+                .filter(|f| !unreachable_file(&label, &f.file))
+                .flat_map(|f| f.callees.iter().cloned())
+                .collect(),
+            None => functions
+                .iter()
+                .filter(|f| !unreachable_file(&label, &f.file))
+                .flat_map(|f| f.callees.iter().cloned())
+                .collect(),
+        };
+        called.insert(label.clone(), callees);
+        let ranges: Option<Vec<LineRange>> = reached.map(|reached| {
+            reached
+                .into_iter()
+                .map(|f| (f.file.clone(), f.lines))
+                .collect()
+        });
+        for file in files {
+            if unreachable_file(&label, &file) {
                 continue;
             }
             let mut found = Vec::new();
@@ -1421,61 +1893,82 @@ fn every_certified_suite_transcendental_is_accounted_for() {
     }
 }
 
-#[test]
-fn every_suite_dependency_of_a_certified_crate_is_classified() {
-    // A suite crate added to a certified crate's [dependencies] must be swept
-    // or argued outside the certified path; otherwise it would be forgotten.
+/// The FrankenSuite git dependencies of the fmn workspace, by name.
+fn suite_git_dependencies() -> Vec<String> {
     let manifest = read_utf8_bounded(
         std::fs::File::open(workspace().join("Cargo.toml")).expect("workspace manifest"),
         "Cargo.toml",
         1024 * 1024,
     )
     .expect("workspace manifest is readable");
-    let suite: Vec<&str> = manifest
+    let suite: Vec<String> = manifest
         .lines()
         .filter(|line| line.contains("git = \"https://github.com/Dicklesworthstone/"))
-        .filter_map(|line| line.split_once(" = ").map(|(name, _)| name.trim()))
+        .filter_map(|line| {
+            line.split_once(" = ")
+                .map(|(name, _)| name.trim().to_owned())
+        })
         .collect();
     assert!(
         suite.len() >= 10,
         "found only {} suite git dependencies",
         suite.len()
     );
-    let classified: Vec<&str> = SUITE_CERTIFIED
+    suite
+}
+
+/// Every suite crate the sweep reads or argues out, by crate name.
+fn classified_crates() -> Vec<&'static str> {
+    SUITE_CERTIFIED
         .iter()
-        .map(|krate| {
-            if krate.dir == "." {
-                krate.repo
-            } else {
-                krate.dir.rsplit('/').next().unwrap_or(krate.dir)
-            }
-        })
+        .map(crate_name)
         .chain(SUITE_NOT_SWEPT.iter().map(|(name, _)| *name))
-        .collect();
+        .chain(THIRD_PARTY_NOT_SWEPT.iter().map(|(name, _)| *name))
+        .chain(CERTIFIED_PATH_GAPS.iter().map(|(name, _)| *name))
+        .collect()
+}
+
+/// The names in a manifest's `[dependencies]` table.
+fn manifest_dependencies(path: &Path) -> Vec<String> {
+    let text = read_utf8_bounded(
+        std::fs::File::open(path).unwrap_or_else(|error| panic!("{}: {error}", path.display())),
+        "crate manifest",
+        1024 * 1024,
+    )
+    .expect("crate manifest is readable");
+    let mut in_dependencies = false;
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_dependencies = trimmed == "[dependencies]";
+            continue;
+        }
+        if !in_dependencies {
+            continue;
+        }
+        let name = trimmed.split(['.', ' ', '=']).next().unwrap_or("");
+        if !name.is_empty() && !name.starts_with('#') {
+            out.push(name.to_owned());
+        }
+    }
+    out
+}
+
+#[test]
+fn every_suite_dependency_of_a_certified_crate_is_classified() {
+    // A suite crate added to a certified crate's [dependencies] must be swept
+    // or argued outside the certified path; otherwise it would be forgotten.
+    let suite = suite_git_dependencies();
+    let classified = classified_crates();
     let mut unclassified = Vec::new();
     for (crate_name, _) in certified_roots().expect("crate roots are readable") {
         let path = workspace()
             .join("crates")
             .join(&crate_name)
             .join("Cargo.toml");
-        let text = read_utf8_bounded(
-            std::fs::File::open(&path).expect("crate manifest"),
-            "crate manifest",
-            1024 * 1024,
-        )
-        .expect("crate manifest is readable");
-        let mut in_dependencies = false;
-        for line in text.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with('[') {
-                in_dependencies = trimmed == "[dependencies]";
-                continue;
-            }
-            if !in_dependencies {
-                continue;
-            }
-            let name = trimmed.split(['.', ' ', '=']).next().unwrap_or("");
-            if suite.contains(&name) && !classified.contains(&name) {
+        for name in manifest_dependencies(&path) {
+            if suite.contains(&name) && !classified.contains(&name.as_str()) {
                 unclassified.push(format!("{crate_name} -> {name}"));
             }
         }
@@ -1484,6 +1977,36 @@ fn every_suite_dependency_of_a_certified_crate_is_classified() {
         unclassified.is_empty(),
         "suite dependencies of certified crates with no classification: {unclassified:?}. \
          Add each to SUITE_CERTIFIED (swept) or SUITE_NOT_SWEPT (with the argument)."
+    );
+}
+
+#[test]
+fn every_dependency_of_a_swept_crate_is_classified() {
+    // A crate a swept crate calls is on the path as surely as one fmn names:
+    // fsci-runtime decides fsci_linalg::solve's policy (fm-wi8l) and nalgebra
+    // factors its systems (fm-f0hk), though no fmn manifest names either.
+    // Cargo.lock's resolved dependencies are the list, so an optional
+    // dependency a feature turns on (nalgebra's matrixmultiply) counts too.
+    let packages = locked_packages().expect("Cargo.lock is readable");
+    let classified = classified_crates();
+    let mut unclassified = Vec::new();
+    for krate in SUITE_CERTIFIED {
+        let name = crate_name(krate);
+        let locked: Vec<&LockedPackage> = packages.iter().filter(|p| p.name == name).collect();
+        assert!(!locked.is_empty(), "{name}: swept but not in Cargo.lock");
+        for dependency in locked.iter().flat_map(|package| &package.dependencies) {
+            if !classified.contains(&dependency.as_str()) {
+                unclassified.push(format!("{name} -> {dependency}"));
+            }
+        }
+    }
+    unclassified.sort();
+    unclassified.dedup();
+    assert!(
+        unclassified.is_empty(),
+        "dependencies of swept crates with no classification: {unclassified:?}. Sweep each \
+         (SUITE_CERTIFIED), argue it off the path (SUITE_NOT_SWEPT, THIRD_PARTY_NOT_SWEPT), or \
+         record the gap with its owner (CERTIFIED_PATH_GAPS)."
     );
 }
 
@@ -1497,8 +2020,28 @@ fn every_swept_suite_crate_states_why_it_is_on_the_path() {
             krate.dir
         );
     }
-    for (name, reason) in SUITE_NOT_SWEPT {
+    for (name, reason) in SUITE_NOT_SWEPT.iter().chain(THIRD_PARTY_NOT_SWEPT) {
         assert!(reason.len() > 20, "{name}: argue why it is not swept");
+    }
+    for (name, owner) in CERTIFIED_PATH_GAPS {
+        assert!(
+            owner.starts_with("fm-") && owner.len() > 40,
+            "{name}: a gap on the certified path names its owning bead and what it is"
+        );
+    }
+    let labels: Vec<String> = SUITE_CERTIFIED
+        .iter()
+        .map(|krate| format!("{}/{}", krate.repo, krate.dir.trim_start_matches("./")))
+        .collect();
+    for (label, file, name, reason) in SUITE_UNREACHABLE_FUNCTIONS {
+        assert!(
+            labels.iter().any(|swept| swept == label),
+            "{label}::{file}::{name}: not a swept crate"
+        );
+        assert!(
+            reason.len() > 40,
+            "{label}::{file}::{name}: argue why it is unreachable"
+        );
     }
 }
 
@@ -1506,14 +2049,15 @@ fn every_swept_suite_crate_states_why_it_is_on_the_path() {
 fn reachability_keeps_calls_an_entry_point_reaches_and_drops_the_rest() {
     // Negative and positive control for the entry-point filter: a transcendental
     // two calls deep from the entry point is kept; one in an unrelated function
-    // is dropped; a brace inside a comment or string does not end a body.
+    // is dropped; a brace inside a comment or string does not end a body, and an
+    // array type's `;` does not end a signature (`refine`).
     let dir = std::env::temp_dir().join(format!("fmn-suite-reach-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let file = dir.join("lib.rs");
     std::fs::write(
         &file,
-        "pub fn solve(x: f64) -> f64 { let s = \"}\"; /* } */ refine(x) }\n\
-         fn refine(x: f64) -> f64 { step::<f64>(x) }\n\
+        "pub fn solve(x: f64) -> f64 { let s = \"}\"; /* } */ refine([x; 1])[0] }\n\
+         fn refine(x: [f64; 1]) -> [f64; 1] { [step::<f64>(x[0])] }\n\
          fn step<T>(x: f64) -> f64 { x.powf(0.2) }\n\
          pub fn unrelated(y: f64) -> f64 { y.sin() }\n",
     )
@@ -1532,6 +2076,51 @@ fn reachability_keeps_calls_an_entry_point_reaches_and_drops_the_rest() {
         reachable_ranges(&functions, &["missing"]).is_err(),
         "an entry point that does not exist is an error, not an empty (clean) scope"
     );
+}
+
+#[test]
+fn reachability_crosses_into_a_crate_entered_from_a_swept_one() {
+    // Positive and negative control for `entered_from`: the caller's reachable
+    // `solve` calls `decide` in the callee crate, two calls above an `exp`;
+    // the callee's `unrelated` holds an `ln` nothing reaches.
+    let dir = std::env::temp_dir().join(format!("fmn-suite-cross-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let caller = dir.join("caller.rs");
+    let callee = dir.join("callee.rs");
+    std::fs::write(
+        &caller,
+        "pub fn solve(r: f64) -> f64 { policy.decide(r) }\n\
+         pub fn elsewhere(r: f64) -> f64 { unrelated(r) }\n",
+    )
+    .expect("write planted caller");
+    std::fs::write(
+        &callee,
+        "pub fn decide(r: f64) -> f64 { softmax(r) }\n\
+         fn softmax(v: f64) -> f64 { v.exp() }\n\
+         pub fn unrelated(y: f64) -> f64 { y.ln() }\n",
+    )
+    .expect("write planted callee");
+    let caller_functions = suite_functions(std::slice::from_ref(&caller)).expect("index caller");
+    let called: std::collections::BTreeSet<&str> = reached_functions(&caller_functions, &["solve"])
+        .expect("reachable from solve")
+        .into_iter()
+        .flat_map(|f| f.callees.iter().map(String::as_str))
+        .collect();
+    let callee_functions = suite_functions(std::slice::from_ref(&callee)).expect("index callee");
+    let entries: Vec<&str> = called
+        .into_iter()
+        .filter(|name| callee_functions.iter().any(|f| f.name == *name))
+        .collect();
+    assert_eq!(entries, ["decide"]);
+    let ranges = reachable_ranges(&callee_functions, &entries).expect("reachable from decide");
+    let mut offences = Vec::new();
+    scan(&callee, "planted", &transcendental_needles(), &mut offences).expect("scan");
+    let kept: Vec<&str> = offences
+        .iter()
+        .filter(|o| ranges.iter().any(|(_, (a, b))| (*a..=*b).contains(&o.line)))
+        .map(|o| o.needle.as_str())
+        .collect();
+    assert_eq!(kept, ["exp"], "{offences:?}");
 }
 
 #[test]

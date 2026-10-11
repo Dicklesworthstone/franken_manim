@@ -83,7 +83,7 @@ pub fn indicate(
         color: color.unwrap_or(INDICATION_YELLOW),
     });
     t.state_mut().config.name = "Indicate".to_owned();
-    t.state_mut().config.rate_func = RateFunc::Base(rate::there_and_back);
+    t.state_mut().config.rate_func = RateFunc::Catalog(rate::CatalogRate::ThereAndBack);
     Ok(t)
 }
 
@@ -111,7 +111,7 @@ pub fn flash(
 pub fn circle_indicate(pre_circle: Mob, circle: Mob, remover: bool) -> Transform {
     let mut transform = Transform::new(pre_circle, circle);
     transform.state_mut().config.name = "CircleIndicate".to_owned();
-    transform.state_mut().config.rate_func = RateFunc::Base(rate::there_and_back);
+    transform.state_mut().config.rate_func = RateFunc::Catalog(rate::CatalogRate::ThereAndBack);
     transform.state_mut().config.remover = remover;
     transform
 }

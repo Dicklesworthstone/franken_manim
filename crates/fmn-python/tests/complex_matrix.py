@@ -63,11 +63,13 @@ class ComplexMatrixTests(unittest.TestCase):
         self.assertIsInstance(matrix.elements[3], m.Tex)
         self.assertLess(matrix.brackets[0].get_right()[0], matrix.get_entries().get_left()[0])
         self.assertGreater(matrix.brackets[1].get_left()[0], matrix.get_entries().get_right()[0])
-        # Conversion completes before moving a caller-owned object, even when
-        # the invalid entry is a real scalar rather than a complex component.
+        # A real NaN cell is a DecimalNumber reading `nan`, as in the pinned
+        # Reference (fm-5wq.30). Conversion still completes before moving a
+        # caller-owned object when a cell refuses (a complex NaN component).
+        self.assertEqual(m.Matrix([[m.Square(), float("nan")]]).elements[1].get_tex(), "nan")
         before = shape.get_points().copy()
         with self.assertRaises(ValueError):
-            m.Matrix([[shape, float("nan")]])
+            m.Matrix([[shape, complex(float("nan"), 0)]])
         np.testing.assert_array_equal(shape.get_points(), before)
 
     def test_geometry_matrix_motion_renders_without_duplicate_scene_roots(self):

@@ -111,7 +111,7 @@ for actual, target, before in zip(piece_source, piece_target, piece_targets):
     assert actual.get_fill_opacity() == actual.get_stroke_opacity() == 0
     assert np.array_equal(target.get_points(), before)
 
-root = Mobject(Mobject(), Mobject())
+root = Mobject().add(Mobject(), Mobject())
 square_rate = lambda value: value * value
 animation = AnimationProbe(
     root,
@@ -346,7 +346,7 @@ for composition_class, duration in ((AnimationGroup, 1.0), (LaggedStart, 1.05), 
     assert composition.get_run_time() == duration
     assert composition.animations == composition_children
     assert str(composition) == composition_class.__name__
-mapped_members = Mobject(Mobject(), Mobject())
+mapped_members = Mobject().add(Mobject(), Mobject())
 mapped = LaggedStartMap(Animation, mapped_members)
 assert [child.mobject for child in mapped.animations] == list(mapped_members)
 for cyclic_class in (CyclicReplace, Swap):

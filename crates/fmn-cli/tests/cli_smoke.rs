@@ -484,6 +484,53 @@ fn flag_written_keys(cli: &str) -> Vec<String> {
     keys
 }
 
+/// Shared front doors may pass `&config.file_writer` into a typed helper.
+/// Follow that parameter within its own function body instead of treating a
+/// shortened `writer.field` access as an unread configuration key.
+fn borrowed_file_writer_reads(source: &str, field: &str) -> bool {
+    source.split("fn ").skip(1).any(|function| {
+        let Some((signature, body)) = function.split_once('{') else {
+            return false;
+        };
+        let Some((_, parameters)) = signature.split_once('(') else {
+            return false;
+        };
+        let Some((parameters, _)) = parameters.rsplit_once(')') else {
+            return false;
+        };
+        let parameter = parameters.split(',').find_map(|parameter| {
+            let (name, ty) = parameter.split_once(':')?;
+            let ty: String = ty.split_whitespace().collect();
+            (ty == "&fmn_config::config::FileWriterConfig").then(|| name.trim())
+        });
+        let Some(parameter) = parameter else {
+            return false;
+        };
+        let mut depth = 1_u32;
+        let end = body.char_indices().find_map(|(at, ch)| {
+            match ch {
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                _ => {}
+            }
+            (depth == 0).then_some(at)
+        });
+        let Some(end) = end else {
+            return false;
+        };
+        let body: String = body[..end].split_whitespace().collect();
+        let access = format!("{parameter}.{field}");
+        let identifier = |ch: char| ch.is_ascii_alphanumeric() || ch == '_';
+        body.match_indices(&access).any(|(at, _)| {
+            !body[..at].chars().next_back().is_some_and(identifier)
+                && !body[at + access.len()..]
+                    .chars()
+                    .next()
+                    .is_some_and(identifier)
+        })
+    })
+}
+
 /// Keys no source reads, other than those whose flag is refused for a file
 /// render and exercised by `refusals` (the refusal test's flag table).
 fn orphan_keys(
@@ -494,9 +541,12 @@ fn orphan_keys(
 ) -> Vec<String> {
     keys.iter()
         .filter(|key| {
-            let read = sources
-                .iter()
-                .any(|source| source.contains(&format!(".{key}")));
+            let read = sources.iter().any(|source| {
+                source.contains(&format!(".{key}"))
+                    || key
+                        .strip_prefix("file_writer.")
+                        .is_some_and(|field| borrowed_file_writer_reads(source, field))
+            });
             let refused_and_tested = refused.iter().any(|(refused_key, flag)| {
                 refused_key == key && refusals.contains(&format!("&[\"{flag}\""))
             });
@@ -560,5 +610,22 @@ fn every_flag_written_config_key_has_a_reader_or_a_refused_flag() {
     assert_eq!(
         orphan_keys(&untested, &reader, &REFUSED, "&[\"-p\"]"),
         untested
+    );
+
+    // Typed borrowed readers count only fields that their own body accesses.
+    // A similarly named field or an access in another function is not proof.
+    let borrowed = vec![
+        "fn quality(writer: &fmn_config::config::FileWriterConfig) {\n\
+             writer\n.video_crf; writer.video_preset_extra;\n\
+         }\n\
+         fn unrelated(writer: &OtherConfig) { writer.video_tune; }\n\
+         fn another() { writer.video_bitrate; }"
+            .to_owned(),
+    ];
+    let candidates = ["video_crf", "video_preset", "video_tune", "video_bitrate"]
+        .map(|field| format!("file_writer.{field}"));
+    assert_eq!(
+        orphan_keys(&candidates, &borrowed, &REFUSED, refusals),
+        candidates[1..]
     );
 }

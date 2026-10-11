@@ -1,5 +1,6 @@
 """Surrounding and background rectangle lifecycle over actual native records."""
 import copy
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -112,6 +113,22 @@ class NativeShapeMatcherLifecycle(unittest.TestCase):
         self.assert_points(obj.data["fill_rgba"][:, :3], 0)
         self.assert_points(obj.data["fill_rgba"][:, 3], .2)
         self.assertEqual(obj.get_stroke_width(), 0)
+
+    def test_default_color_is_the_configured_camera_background(self):
+        # fm-78b6: the Reference reads manim_config.camera.background_color,
+        # so a cwd custom_config.yml background (the corpus sets black)
+        # colors the rectangle; #333333 is only the pinned default.
+        self.assertEqual(m.BackgroundRectangle(m.Square()).get_fill_color(), "#333333")
+        original = Path.cwd()
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "custom_config.yml").write_text('camera:\n  background_color: "#123456"\n')
+            try:
+                os.chdir(directory)
+                obj = m.BackgroundRectangle(m.Square())
+            finally:
+                os.chdir(original)
+        self.assertEqual((obj.get_fill_color(), obj.get_stroke_color()), ("#123456", "#123456"))
+        self.assertEqual(obj.get_fill_colors()[0], "#123456")
 
     def test_set_buff_dispatches_a_single_argument_subclass_hook(self):
         calls = []

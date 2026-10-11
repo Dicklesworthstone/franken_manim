@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	90653427eea0916f0be340e80289f8f9db749839086211b28a47575fe5e99db7
+ledger_reviewed_digest	8b78fb1c5f1073b01966f02e1be246b25deb12f9cf21dfe0a1adeed557aa7bf7
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -107,6 +107,10 @@ manimlib.constants:RIGHT_SIDE	RIGHT	C-16	-
 directories.removed_mirror_prefix	string	1
 window.position	tuple	1
 window.size	tuple	1
+file_writer.video_crf	int	0
+file_writer.video_preset	string	0
+file_writer.video_tune	string	0
+file_writer.video_bitrate	int	0
 
 # ---------------------------------------------------------------------------
 # [config_binding] — the kwargs displacement (§15.1, D-05 adjacency).
@@ -144,6 +148,10 @@ camera.background_opacity	CameraConfig	background_opacity	f64
 file_writer.ffmpeg_bin	FileWriterConfig	ffmpeg_bin	string
 file_writer.video_codec	FileWriterConfig	video_codec	string
 file_writer.pixel_format	FileWriterConfig	pixel_format	string
+file_writer.video_crf	FileWriterConfig	video_crf	opt_u32
+file_writer.video_preset	FileWriterConfig	video_preset	opt_string
+file_writer.video_tune	FileWriterConfig	video_tune	opt_string
+file_writer.video_bitrate	FileWriterConfig	video_bitrate	opt_u32
 file_writer.saturation	FileWriterConfig	saturation	f64
 file_writer.gamma	FileWriterConfig	gamma	f64
 scene.show_animation_progress	SceneConfig	show_animation_progress	bool
@@ -279,6 +287,10 @@ file_writer	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/conf
 file_writer.ffmpeg_bin	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the ffmpeg binary executable name or path
 file_writer.gamma	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the display gamma correction factor
 file_writer.pixel_format	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the output video pixel format string
+file_writer.video_crf	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	sets the negotiated x264/x265 constant rate factor for video output
+file_writer.video_preset	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	selects a typed x264/x265 encoder preset after configuration layering
+file_writer.video_tune	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	selects one typed tune admitted for the requested video encoder
+file_writer.video_bitrate	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	sets the target video bitrate and is exclusive with constant rate factor
 file_writer.saturation	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the color saturation adjustment factor
 file_writer.video_codec	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the video compression codec name
 ignore_manimlib_modules_on_reload	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	controls whether manimlib internal modules are skipped during reload
@@ -2728,6 +2740,14 @@ scene_names	same	-	render	scene_names	crates/fmn-cli/src/lib.rs#tests	explicit s
 --cache-dir	store	-	-	path	global	cache_dir	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Explicit FrankenManim content-store root
 --engine	store	-	-	engine	render	engine	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Select the CPU engine or a standard-only accelerator annex
 --format	store	-	auto	output_format	render	format	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Select auto, png, png_sequence, gif, y4m, wav, svg, or video output; wav refuses scenes without add_sound cues
+--crf	store	-	-	u64	render	crf	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Set libx264/libx265 constant rate factor (0 through 51)
+--preset	store	-	-	-	render	preset	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Set the x264/x265 compression-speed preset
+--tune	store	-	-	-	render	tune	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Set one supported video encoder tune
+--video-bitrate	store	-	-	u64	render	video_bitrate	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Set target video bitrate in bits per second (exclusive with CRF)
+--ffmpeg-timeout	store	-	-	u64	render	ffmpeg_timeout	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Set positive ffmpeg wall-clock seconds per video encode (default 86400)
+--ffmpeg-max-log-bytes	store	-	-	u64	render	ffmpeg_max_log_bytes	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Bound captured bytes per ffmpeg stdout/stderr stream (default 1048576)
+--ffmpeg-max-artifact-bytes	store	-	-	u64	render	ffmpeg_max_artifact_bytes	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Bound encoded video bytes, capped by the input allowance (default 8589934592)
+--ffmpeg-max-input-bytes	store	-	-	u64	render	ffmpeg_max_input_bytes	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Bound cumulative raw-frame bytes sent to ffmpeg (default 68719476736)
 --math-pack	store	-	default	pack	render	math_pack	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Select an fmd-math preamble pack
 --budget-ms	store	-	-	u64	batch	budget_ms	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Wall-clock budget for the batch
 --max-scenes	store	-	-	usize	batch	max_scenes	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Bound simultaneously active scene jobs
@@ -2789,12 +2809,37 @@ format-writes	implies	format|write_file	-	--format implies durable output
 certified-writes	implies	reproducible|write_file	-	--reproducible implies durable canonical output
 codec-writes	implies	vcodec|write_file	-	--vcodec implies durable output
 pixel-format-writes	implies	pix_fmt|write_file	-	--pix_fmt implies durable output
+crf-writes	implies	crf|write_file	-	--crf implies video output
+preset-writes	implies	preset|write_file	-	--preset implies video output
+tune-writes	implies	tune|write_file	-	--tune implies video output
+video-bitrate-writes	implies	video_bitrate|write_file	-	--video-bitrate implies video output
+ffmpeg-timeout-writes	implies	ffmpeg_timeout|write_file	-	--ffmpeg-timeout implies video output
+ffmpeg-log-limit-writes	implies	ffmpeg_max_log_bytes|write_file	-	--ffmpeg-max-log-bytes implies video output
+ffmpeg-artifact-limit-writes	implies	ffmpeg_max_artifact_bytes|write_file	-	--ffmpeg-max-artifact-bytes implies video output
+ffmpeg-input-limit-writes	implies	ffmpeg_max_input_bytes|write_file	-	--ffmpeg-max-input-bytes implies video output
+video-rate-control-exclusive	at_most_one	crf|video_bitrate	usage	--crf and --video-bitrate are mutually exclusive
 subdivide-writes	implies	subdivide|write_file	-	--subdivide implies durable output
 filename-writes	implies	file_name|write_file	-	--file_name implies durable output
 video-directory-writes	implies	video_dir|write_file	-	--video_dir implies durable output
 gif-vs-non-gif-format	conflicts	gif|format=auto,png,png_sequence,y4m,wav,svg,video	usage	--gif conflicts with a non-GIF --format
 native-format-vs-codec	conflicts	format=png,png_sequence,gif,y4m,wav,svg|vcodec	usage	--vcodec applies only to ffmpeg video output
 native-format-vs-pixel-format	conflicts	format=png,png_sequence,gif,y4m,wav,svg|pix_fmt	usage	--pix_fmt applies only to ffmpeg video output
+native-format-vs-crf	conflicts	format=png,png_sequence,gif,y4m,wav,svg|crf	usage	--crf applies only to ffmpeg video output
+native-format-vs-preset	conflicts	format=png,png_sequence,gif,y4m,wav,svg|preset	usage	--preset applies only to ffmpeg video output
+native-format-vs-tune	conflicts	format=png,png_sequence,gif,y4m,wav,svg|tune	usage	--tune applies only to ffmpeg video output
+native-format-vs-video-bitrate	conflicts	format=png,png_sequence,gif,y4m,wav,svg|video_bitrate	usage	--video-bitrate applies only to ffmpeg video output
+gif-vs-crf	conflicts	gif|crf	usage	--crf applies only to ffmpeg video output
+gif-vs-preset	conflicts	gif|preset	usage	--preset applies only to ffmpeg video output
+gif-vs-tune	conflicts	gif|tune	usage	--tune applies only to ffmpeg video output
+gif-vs-video-bitrate	conflicts	gif|video_bitrate	usage	--video-bitrate applies only to ffmpeg video output
+native-format-vs-ffmpeg-timeout	conflicts	format=png,png_sequence,gif,y4m,wav,svg|ffmpeg_timeout	usage	ffmpeg resource limits apply only to video output
+native-format-vs-ffmpeg-log-limit	conflicts	format=png,png_sequence,gif,y4m,wav,svg|ffmpeg_max_log_bytes	usage	ffmpeg resource limits apply only to video output
+native-format-vs-ffmpeg-artifact-limit	conflicts	format=png,png_sequence,gif,y4m,wav,svg|ffmpeg_max_artifact_bytes	usage	ffmpeg resource limits apply only to video output
+native-format-vs-ffmpeg-input-limit	conflicts	format=png,png_sequence,gif,y4m,wav,svg|ffmpeg_max_input_bytes	usage	ffmpeg resource limits apply only to video output
+gif-vs-ffmpeg-timeout	conflicts	gif|ffmpeg_timeout	usage	ffmpeg resource limits apply only to video output
+gif-vs-ffmpeg-log-limit	conflicts	gif|ffmpeg_max_log_bytes	usage	ffmpeg resource limits apply only to video output
+gif-vs-ffmpeg-artifact-limit	conflicts	gif|ffmpeg_max_artifact_bytes	usage	ffmpeg resource limits apply only to video output
+gif-vs-ffmpeg-input-limit	conflicts	gif|ffmpeg_max_input_bytes	usage	ffmpeg resource limits apply only to video output
 transparent-vs-opaque-pixel-format	conflicts	transparent|pix_fmt=yuv420p,yuv422p,yuv444p,nv12,p010,p010le,rgb24,bgr24	usage	--transparent requires an alpha-capable output pixel format
 transparent-vs-opaque-native-format	conflicts	transparent|format=y4m,wav	usage	--transparent is incompatible with y4m and WAV outputs
 skip-vs-subdivide	conflicts	skip_animations|subdivide	usage	--skip_animations cannot produce per-animation subdivisions

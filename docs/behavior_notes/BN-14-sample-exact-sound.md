@@ -53,6 +53,47 @@ the named native-alternative capability error when ffmpeg is absent. That
 decoded product, like every ffmpeg product, is outside certification; the
 native mix and certified WAV artifact are inside it.
 
+## Native video composition
+
+The native Rust rendering API and standalone CLI use the same
+`PreparedSceneSoundtrack` composer. It reads each authored source path once
+under the asset byte cap and retains that immutable source snapshot for all
+uses of the cue. Native WAV decoding, channel conversion, resampling, gain,
+ducking and output quantization remain Reel's operations. Other supported
+containers use the injected video boundary for decoding, including its
+ffmpeg fingerprint, timeout, log cap and artifact cap.
+
+Ordinary live video runs the scene once. Lifecycle events record omitted
+frame intervals; sound call-site frames are rebased onto the emitted video
+timeline before the relative offset is applied. `add_sound` calls made while
+skipping remain an early no-op, so their paths are not read. The mix spans at
+least the emitted picture and retains a longer cue tail.
+
+The CLI's `--subdivide` already performs a deterministic counting pass for
+its compiled-in native programs. It also collects that pass's complete cue
+list and decodes it once before starting the clips. Each clip receives the
+corresponding half-open absolute sample window of that whole-scene mix:
+background phase and ducking are preserved, cue tails stop at the clip end,
+and a cue authored later with a negative offset can affect an earlier clip.
+The start and end scene positions are rounded to samples independently, so
+adjacent clips neither lose nor repeat a rounding sample. This is offline
+whole-scene composition; the portal's live per-call clips see the cues
+available when their own recording boundary closes.
+
+The completed native PCM is supplied before the video sink prepares its
+output. The existing second ffmpeg stage uses `-c:v copy -c:a aac`; audio
+decode, mix, or mux failure prevents publication of the failing video
+generation. Encoded video remains outside certification.
+
+CLI robot records include `soundtrack` (cue count, sample frames, rate,
+channels, clipping), `audio_inputs` (source and normalized PCM SHA-256),
+`ffmpeg_invocations` (encode, then optional mux), and `audio_decodes`.
+Decoder receipts are separate because decoding can overlap a streaming
+video encoder. C1 binds each source path once even when several cues reuse
+it; C9 binds the audio identities and all media invocation receipts. Native
+Rust `RenderArtifact` likewise separates `audio_decodes` from its existing
+encode/mux `ffmpeg` list.
+
 ## Migration guidance
 
 - Code that expected integer-millisecond placement should remove that
@@ -76,6 +117,14 @@ native mix and certified WAV artifact are inside it.
   decode and fake-ffmpeg capability proof.
 - `crates/fmn-conformance/tests/sound_pipeline.rs`: frame-N click placement and
   identical certified WAV bytes at `{1,4,16}` workers.
+- `crates/fmn/src/rendering/soundtrack.rs`: shared source snapshots, skipped
+  time, offsets, and rational-window parity with resampling and ducking.
+- `crates/fmn-cli/src/lib.rs`, `tests::video_soundtrack`: the live CLI render,
+  deferred mux, subdivision windows, compressed input receipts, and failure
+  publication contract through a scripted process capability.
+- `crates/fmn-conformance/tests/e2e_scenarios.rs`,
+  `lifecycle.scene_soundtrack_windows.v1`: real scene clock and skip events
+  through the shared audio composer and adjacent sample windows.
 - Pinned Reference
   `manimlib/scene/scene.py::add_sound` and
   `manimlib/scene/scene_file_writer.py::add_sound`.

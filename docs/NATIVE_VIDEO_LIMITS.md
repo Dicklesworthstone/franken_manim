@@ -48,15 +48,58 @@ seconds plus subsecond nanoseconds. This is an admitted-policy receipt, not an
 input-closure certificate or an automatically published sidecar. The ordinary
 ffmpeg invocation records still carry the tool hash and exact argv.
 
+## Standalone CLI
+
+The standalone `fmn` command uses the same 24-hour default and admission policy
+for its streaming video sink. The encoder watchdog includes frame construction
+and rendering time. Set explicit bounds for long jobs:
+
+```sh
+fmn --format video --ffmpeg-timeout 21600 \
+  --ffmpeg-max-artifact-bytes 17179869184 \
+  --ffmpeg-max-input-bytes 274877906944 \
+  --crf 16 --preset slow --video_dir videos @builtin circle_shift.v1
+```
+
+| Flag | Unit | Default |
+| --- | --- | --- |
+| `--ffmpeg-timeout` | Whole wall-clock seconds per encode | 86,400 (24 hours) |
+| `--ffmpeg-max-log-bytes` | Captured bytes per stdout/stderr stream | 1,048,576 (1 MiB) |
+| `--ffmpeg-max-artifact-bytes` | Encoded artifact bytes | 8,589,934,592 (8 GiB) |
+| `--ffmpeg-max-input-bytes` | Cumulative raw-frame bytes | 68,719,476,736 (64 GiB) |
+
+All values are positive integers. Any of these flags selects video output and
+implies durable output; explicit native formats and `--gif` reject them. A
+timeout outside the host monotonic clock's range fails before tool discovery.
+The artifact ceiling is the smaller of the requested artifact and input caps.
+Frame-count and resident-memory guards remain separate, so raising a byte cap
+permits a longer stream without retaining its frames in memory.
+
+The `--robot` render record contains `ffmpeg_limits` with the effective policy.
+The same stable policy enters the video manifest's C9 capability record. Native
+artifact manifests retain their existing contract. Flags travel with native
+scene, compiled FMTL, batch, and subdivision video requests. The Python portal's
+limit adapter remains separate.
+
+The shared Rust functions `default_render_ffmpeg_limits()` and
+`admit_render_ffmpeg_limits()` allow other front doors to use the same defaults,
+validation, and cap intersection. The existing `RenderOptions` method delegates
+to that admission function.
+
 The process/negotiation rules are specified in [FFMPEG_PROTOCOL.md](FFMPEG_PROTOCOL.md).
-This native Rust option does not by itself add a CLI flag or Python keyword.
 
 Regression entry points:
 
 ```sh
 cargo test --locked -p fmn --lib rendering::ffmpeg_limits
 cargo test --locked -p fmn --test native_video_limits
+cargo test --locked -p fmn-cli --lib ffmpeg_limit
+cargo test --locked -p fmn-conformance --test e2e_scenarios cli_ffmpeg_limit_admission_scenario_passes
 ```
 
 The real encode/mux checks require a supported host ffmpeg and honor
 `FMN_REQUIRE_FULL_INPUTS=1`; admission and native-codec checks do not need it.
+The CLI process-boundary regression records the actual streaming `ProcessSpec`
+and stdin budget through a scripted process capability, then verifies that its
+intentional start failure publishes neither video nor a sidecar. It does not
+claim to measure a real encoder's elapsed timeout.

@@ -280,3 +280,68 @@ fn zero_frame_subdivision_refuses_before_publishing_any_generation() {
     );
     assert_eq!(std::fs::read_dir(output).unwrap().count(), 0);
 }
+
+#[test]
+fn readme_fmtl_fixture_renders_without_retagging_decoded_functions() {
+    // Run this test with --release as well as the dev profile. The regression
+    // lives at a cross-crate/codegen boundary; an exporter-created fixture can
+    // silently fall back to recorded data and cannot exercise this failure.
+    // Do not regenerate the repository's shipped README artifact here.
+    let bytes = include_bytes!("../../../demo/wasm/bundle.fmtl");
+    let reader = TimelineBundle::from_bytes(bytes).unwrap();
+    assert_eq!(reader.frame_count(), 45);
+    assert_eq!(reader.segment_kind(0), Some(BundleSegmentKind::Pure));
+    assert_eq!(reader.segment_kind(1), Some(BundleSegmentKind::Pure));
+    let expected = serial_pixels(&reader);
+    assert_ne!(
+        expected[0], expected[29],
+        "README scene must visibly animate"
+    );
+    let root = root();
+    let source = root.join("bundle.fmtl");
+    std::fs::write(&source, bytes).unwrap();
+    let mut first = None;
+    for threads in ["1", "4", "16"] {
+        let output = root.join(threads);
+        let result = Command::new(env!("CARGO_BIN_EXE_fmn"))
+            .current_dir(&root)
+            .args([
+                "--reproducible",
+                "--robot",
+                "--format",
+                "png_sequence",
+                "--resolution",
+                "32x24",
+                "--threads",
+                threads,
+                "--video_dir",
+            ])
+            .arg(&output)
+            .arg(&source)
+            .arg("DemoTimeline")
+            .env("PATH", "")
+            .env_remove("PYTHONPATH")
+            .env_remove("PYTHONHOME")
+            .output()
+            .unwrap();
+        // In particular, do not set --fps: the README artifact owns its clock.
+        let stdout = success(result);
+        assert!(
+            stdout.contains("\"submitted\":45,\"emitted\":45"),
+            "{stdout}"
+        );
+        let actual = pngs(&output.join("DemoTimeline"));
+        assert_eq!(actual.len(), expected.len());
+        for (png, pixels) in actual.iter().zip(&expected) {
+            assert_eq!(
+                &decode_png(png, &PngLimits::default()).unwrap().rgba,
+                pixels
+            );
+        }
+        if let Some(first) = &first {
+            assert_eq!(&actual, first);
+        } else {
+            first = Some(actual);
+        }
+    }
+}

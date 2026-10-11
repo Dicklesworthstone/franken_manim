@@ -11,6 +11,15 @@ def pixels(color, shape=(2, 3)):
     return np.full((*shape, 4), color, dtype=np.uint8)
 
 
+def bare_like(mob):
+    """A plain Mobject with `mob`'s record schema, not its class. The
+    Reference's Mobject takes no data_dtype keyword; a subclass declares it
+    (fm-5wq.20)."""
+    class Bare(m.Mobject):
+        data_dtype = mob.data_dtype
+    return Bare().become(mob)
+
+
 RED, BLUE, GREEN = (255, 0, 0, 255), (0, 0, 255, 255), (0, 255, 0, 255)
 
 
@@ -26,8 +35,7 @@ class TransformMaterialKernelTests(unittest.TestCase):
 
     def test_plans_use_native_resources_not_class_or_filename_metadata(self):
         self.a.image_path = self.b.image_path = 'not a readable path'
-        start = m.Mobject(data_dtype=self.a.data_dtype).become(self.a)
-        end = m.Mobject(data_dtype=self.b.data_dtype).become(self.b)
+        start, end = bare_like(self.a), bare_like(self.b)
         self.assertEqual(self.Plan.required_texels(start, end), 12)
         plan = self.Plan.between(start, end)
         self.assertTrue(plan.matches(start, end))

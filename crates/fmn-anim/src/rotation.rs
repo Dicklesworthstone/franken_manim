@@ -189,6 +189,6 @@ pub fn clock_passes_time(
     let mut group =
         AnimationGroup::new(stage, vec![hour_rot, minute_rot])?.with_name("ClockPassesTime");
     group.state_mut().config.run_time = run_time;
-    group.state_mut().config.rate_func = RateFunc::Base(rate::linear);
+    group.state_mut().config.rate_func = RateFunc::Catalog(rate::CatalogRate::Linear);
     Ok(group)
 }

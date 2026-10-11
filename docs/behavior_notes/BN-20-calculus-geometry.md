@@ -22,7 +22,12 @@ samples receive `negative_color`. Zero-height rectangles are nonnegative.
 
 The Reference at `6199a00d4c1b1127ebe45cb629c3f22538b10e13` instead measures
 width and sign using world-space components, extends the sampling range, and
-does not act on `show_signed_area`. These are intentional corrections under
+does not act on `show_signed_area`. Its sign is
+`i2gp(sample, graph)[1] > c2p(sample, 0)[1]`, a curve-proportion lookup. Near a
+zero crossing that lookup can land on the other side of the axis:
+`_2022/borwein/main.py` `Graph15Case` gets `negative_color` on two rectangles
+that the data-coordinate sample makes positive. The corpus differential
+excludes them by the `bn20-riemann-sign` row. These are intentional corrections under
 the plan's correctness-first contract, not pixel-compatibility promises.
 
 ## Migration and bounds

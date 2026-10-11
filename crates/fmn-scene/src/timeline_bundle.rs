@@ -724,12 +724,13 @@ enum SegmentEntry {
 /// Curved method animations are pure for native reconstruction, but only
 /// qualify for this serialized law when the frame-by-frame proof succeeds;
 /// otherwise their actual captured frames are preserved as kind 1.
-fn nominate(step: &Step, report: &SegmentReport) -> Option<(PathFunc, RateFunc)> {
+fn nominate(step: &Step, report: &SegmentReport) -> Option<(PathFunc, u8)> {
     if !report.purity.is_pure() {
         return None;
     }
     match step {
-        Step::Wait(_) => Some((PathFunc::Straight, RateFunc::Base(fmn_core::rate::linear))),
+        // Wait is linear by construction; FMTL/1 assigns it tag zero.
+        Step::Wait(_) => Some((PathFunc::Straight, 0)),
         Step::Play(animations) => {
             let mut tag: Option<u8> = None;
             for animation in animations.iter() {
@@ -747,7 +748,7 @@ fn nominate(step: &Step, report: &SegmentReport) -> Option<(PathFunc, RateFunc)>
                     Some(_) => return None,
                 }
             }
-            Some((PathFunc::Straight, rate_from_tag(tag?)?))
+            Some((PathFunc::Straight, tag?))
         }
     }
 }
@@ -939,18 +940,20 @@ fn classify_captured_segment(
     begin: Vec<u8>,
     mut frames: Vec<Vec<u8>>,
     path: PathFunc,
-    rate: &RateFunc,
+    rate_tag: u8,
     run_time: f64,
     fps: u32,
     budget: &mut CaptureBudget,
 ) -> Result<SegmentEntry, BundleError> {
     let path_tag =
         fmn_anim::path_tag(path).ok_or(BundleError::PlanDrift("nominated path is untaggable"))?;
-    let rate_tag = rate_tag(rate).ok_or(BundleError::PlanDrift("nominated rate is untaggable"))?;
+    // Nomination has established identity. Resolve it for the reconstruction
+    // proof, but do not infer the tag again from a compiled function address.
+    let rate = rate_from_tag(rate_tag).ok_or(BundleError::PlanDrift("nominated rate tag"))?;
 
     if frames.is_empty() {
         let end = clone_snapshot_bytes(&begin, budget, "frameless pure end snapshot")?;
-        return if prove_pure_segment(&begin, &end, path, rate, &frames, run_time, fps)? {
+        return if prove_pure_segment(&begin, &end, path, &rate, &frames, run_time, fps)? {
             Ok(SegmentEntry::Pure {
                 begin,
                 end,
@@ -966,7 +969,7 @@ fn classify_captured_segment(
         let end = frames.last().ok_or(BundleError::PlanDrift(
             "captured segment lost its last frame",
         ))?;
-        prove_pure_segment(&begin, end, path, rate, &frames, run_time, fps)?
+        prove_pure_segment(&begin, end, path, &rate, &frames, run_time, fps)?
     };
     if proven {
         let end = frames.pop().ok_or(BundleError::PlanDrift(
@@ -1099,7 +1102,7 @@ pub fn export_timeline_bundle_with_limits(
         }
 
         let entry = match nominate(step, &report) {
-            Some((path, rate)) => {
+            Some((path, rate_tag)) => {
                 let begin_bytes = report
                     .begin_state
                     .as_ref()
@@ -1112,7 +1115,7 @@ pub fn export_timeline_bundle_with_limits(
                         begin,
                         frames,
                         path,
-                        &rate,
+                        rate_tag,
                         planned.run_time,
                         fps,
                         &mut budget,

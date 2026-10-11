@@ -120,6 +120,73 @@ fn incompatible_quality_refuses_before_tool_discovery_or_scene_work() {
 }
 
 #[test]
+fn configured_video_quality_inherits_and_explicit_rate_modes_replace_it() {
+    let (mut options, _) = options(RenderFormat::Mp4);
+    options.config.file_writer.video_crf = Some(28);
+    options.config.file_writer.video_preset = Some("slow".to_owned());
+    options.config.file_writer.video_tune = Some("animation".to_owned());
+    assert_eq!(
+        options.effective_video_quality().unwrap(),
+        VideoQuality {
+            crf: Some(28),
+            preset: Some(EncoderPreset::Slow),
+            tune: Some(EncoderTune::Animation),
+            bitrate: None,
+        }
+    );
+    options.video_quality.bitrate = Some(2_000_000);
+    options.video_quality.preset = Some(EncoderPreset::Fast);
+    assert_eq!(
+        options.effective_video_quality().unwrap(),
+        VideoQuality {
+            crf: None,
+            preset: Some(EncoderPreset::Fast),
+            tune: Some(EncoderTune::Animation),
+            bitrate: Some(2_000_000),
+        }
+    );
+    options.config.file_writer.video_crf = Some(u32::MAX);
+    options.config.file_writer.video_bitrate = Some(3_000_000);
+    options.config.file_writer.video_preset = Some("invalid-but-overridden".to_owned());
+    options.video_quality = VideoQuality {
+        crf: Some(0),
+        preset: Some(EncoderPreset::Slow),
+        ..VideoQuality::default()
+    };
+    assert_eq!(
+        options.effective_video_quality().unwrap(),
+        VideoQuality {
+            crf: Some(0),
+            preset: Some(EncoderPreset::Slow),
+            tune: Some(EncoderTune::Animation),
+            bitrate: None,
+        }
+    );
+}
+
+#[test]
+fn invalid_configured_video_quality_refuses_before_tool_or_scene_work() {
+    for (crf, preset, tune, bitrate) in [
+        (Some(52), None, None, None),
+        (Some(u32::MAX), None, None, None),
+        (None, Some("arbitrary"), None, None),
+        (None, None, Some("film,grain"), None),
+        (None, None, None, Some(0)),
+        (Some(16), None, None, Some(2_000_000)),
+    ] {
+        let (mut options, calls) = options(RenderFormat::Mp4);
+        options.config.file_writer.video_crf = crf;
+        options.config.file_writer.video_preset = preset.map(str::to_owned);
+        options.config.file_writer.video_tune = tune.map(str::to_owned);
+        options.config.file_writer.video_bitrate = bitrate;
+        let error =
+            render_with_fs(&mut MustNotRun, options, Arc::new(VirtualFs::new())).unwrap_err();
+        assert!(matches!(error, RenderError::Negotiation(_)), "{error}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[test]
 fn video_quality_on_native_formats_is_not_silently_discarded() {
     for format in [
         RenderFormat::PngSequence,
@@ -318,7 +385,15 @@ fn native_mp4_mov_quality_survives_into_provenance_and_x264_sei() {
                     tune: Some(EncoderTune::Animation),
                     bitrate: None,
                 };
-                options.video_quality = quality;
+                if crf == 16 {
+                    // Exercise file defaults through the same real sink and
+                    // bitstream assertions as explicit Rust API controls.
+                    options.config.file_writer.video_crf = Some(u32::from(crf));
+                    options.config.file_writer.video_preset = Some("slow".to_owned());
+                    options.config.file_writer.video_tune = Some("animation".to_owned());
+                } else {
+                    options.video_quality = quality;
+                }
                 if camera {
                     options.camera = Some(options.camera_config().unwrap());
                 }

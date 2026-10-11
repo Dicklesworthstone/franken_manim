@@ -1177,6 +1177,158 @@ fn failure_cli_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         .with_counter("cli_rule_named", 1))
 }
 
+/// The CLI rejects invalid quality policies before probing an external tool.
+fn failure_cli_video_quality_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_platform::process::{FfmpegExecutable, FfmpegLocator, FfmpegLocatorError};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct CountTool(AtomicU64);
+    impl FfmpegLocator for CountTool {
+        fn locate_ffmpeg(
+            &self,
+            _: &std::path::Path,
+        ) -> Result<FfmpegExecutable, FfmpegLocatorError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(FfmpegLocatorError::NotFound)
+        }
+    }
+    let locator = CountTool(AtomicU64::new(0));
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    let runner = Arc::new(fmn_platform::process::ScriptedRunner::new());
+    let cases: &[(&[&str], u8, &str)] = &[
+        (
+            &["--crf", "16", "--video-bitrate", "2000000"],
+            2,
+            "mutually exclusive",
+        ),
+        (&["--gif", "--preset", "slow"], 2, "ffmpeg video"),
+        (&["--crf", "52"], 2, "0..=51"),
+        (&["--vcodec", "h264_nvenc", "--crf", "16"], 3, "software"),
+        (
+            &["--vcodec", "libx265", "--tune", "film"],
+            3,
+            "require libx264",
+        ),
+        (
+            &["--transparent", "--video-bitrate", "2000000"],
+            3,
+            "opaque MP4/MOV",
+        ),
+    ];
+    let mut refused = 0;
+    for (args, code, message) in cases {
+        let output = fmn_cli::run_with_capabilities(
+            args.iter().copied().chain([
+                "--robot",
+                fmn_cli::BUILTIN_SCENE_SOURCE,
+                "circle_shift.v1",
+            ]),
+            fs.clone(),
+            runner.clone(),
+            &locator,
+        );
+        if output.code != *code
+            || !output.stderr.is_empty()
+            || output.stdout.lines().count() != 1
+            || !output.stdout.contains(message)
+        {
+            return Err(fail(format!(
+                "video-quality admission {args:?}: code={} stdout={:?} stderr={:?}",
+                output.code, output.stdout, output.stderr
+            )));
+        }
+        refused += 1;
+    }
+    let tool_calls = locator.0.load(Ordering::SeqCst);
+    ctx.event(
+        LogEvent::new("e2e.failure.cli_video_quality")
+            .field("refused", refused)
+            .field("tool_calls", tool_calls),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("cli_video_quality_refusals", refused)
+        .with_counter("cli_video_quality_tool_calls", tool_calls))
+}
+
+/// Native CLI job limits are admitted without spawning; invalid limits fail
+/// with stable identities before a tool or output generation is selected.
+fn failure_cli_ffmpeg_limits_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_platform::process::{FfmpegExecutable, FfmpegLocator, FfmpegLocatorError};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct CountTool(AtomicU64);
+    impl FfmpegLocator for CountTool {
+        fn locate_ffmpeg(
+            &self,
+            _: &std::path::Path,
+        ) -> Result<FfmpegExecutable, FfmpegLocatorError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(FfmpegLocatorError::NotFound)
+        }
+    }
+    let locator = CountTool(AtomicU64::new(0));
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    let runner = Arc::new(fmn_platform::process::ScriptedRunner::new());
+    let mut refused = 0;
+    for (args, code) in [
+        (&["--ffmpeg-timeout", "0"][..], 2),
+        (&["--ffmpeg-max-input-bytes", "0"], 2),
+        (&["--gif", "--ffmpeg-max-log-bytes", "73"], 2),
+        (&["--ffmpeg-timeout", "18446744073709551615"], 3),
+    ] {
+        let output = fmn_cli::run_with_capabilities(
+            args.iter().copied().chain([
+                "--robot",
+                fmn_cli::BUILTIN_SCENE_SOURCE,
+                "circle_shift.v1",
+            ]),
+            fs.clone(),
+            runner.clone(),
+            &locator,
+        );
+        if output.code != code || !output.stderr.is_empty() || output.stdout.lines().count() != 1 {
+            return Err(fail(format!(
+                "CLI ffmpeg limit admission {args:?}: code={} stdout={:?}",
+                output.code, output.stdout
+            )));
+        }
+        refused += 1;
+    }
+    let invocation = fmn_cli::parse_args([
+        "--ffmpeg-timeout",
+        "21600",
+        "--ffmpeg-max-artifact-bytes",
+        "17179869184",
+        "--ffmpeg-max-input-bytes",
+        "8589934592",
+    ])
+    .map_err(|error| fail(error.to_string()))?;
+    let fmn_cli::Invocation::Render(command) = invocation else {
+        return Err(fail(
+            "ffmpeg resource flags did not select a render request",
+        ));
+    };
+    let (limits, input) = command
+        .ffmpeg_limits
+        .effective_limits()
+        .map_err(|error| fail(error.to_string()))?;
+    let tool_calls = locator.0.load(Ordering::SeqCst);
+    ctx.event(
+        LogEvent::new("e2e.failure.cli_ffmpeg_limits")
+            .field("refused", refused)
+            .field("tool_calls", tool_calls)
+            .field("admitted_timeout_seconds", limits.timeout.as_secs())
+            .field("admitted_artifact_bytes", limits.max_artifact_bytes)
+            .field("admitted_input_bytes", input),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("cli_ffmpeg_limit_refusals", refused)
+        .with_counter("cli_ffmpeg_limit_tool_calls", tool_calls)
+        .with_counter("cli_ffmpeg_admitted_timeout", limits.timeout.as_secs())
+        .with_counter("cli_ffmpeg_admitted_artifact", limits.max_artifact_bytes)
+        .with_counter("cli_ffmpeg_admitted_input", input))
+}
+
 /// The facade's MP4 request with no ffmpeg capability is a named capability
 /// refusal (D2) that runs no scene code and publishes nothing; a native
 /// format from the same options still renders.
@@ -2196,14 +2348,217 @@ fn studio_contains(bytes: &[u8], expected: &str) -> Result<(), ScenarioError> {
 }
 
 fn studio_view(bytes: &[u8], frame: usize) -> Result<(), ScenarioError> {
-    // tex_span waits 0.25 s at the windowed runtime's effective 30 fps,
-    // yielding eight nominal samples despite the requested CLI output FPS.
+    // Constructed frame zero plus the 0.25 s hold's eight native samples.
     studio_contains(
         bytes,
         &format!(
-            "\"view\":{{\"frame_index\":{frame},\"frame_count\":8,\"fps\":30,\"width\":96,\"height\":54,\"scale\":6.75,\"origin\":[48,27],\"input_events\":false}}"
+            "\"view\":{{\"frame_index\":{frame},\"frame_count\":9,\"fps\":30,\"width\":96,\"height\":54,\"scale\":6.75,\"origin\":[48,27],\"y_up\":true,\"input_events\":true,\"input_revision\":"
         ),
     )
+}
+
+const STUDIO_BUILTIN_INPUT_CASES: [(&str, usize, bool); 5] = [
+    ("circle_shift.v1", 13, false),
+    ("tex_span.v1", 9, true),
+    ("formula_sheet.v1", 13, true),
+    ("semantic_witness.v1", 9, true),
+    ("sound_cue.v1", 31, false),
+];
+
+/// Ordinary native scene registrations cross the shipping host's guarded input
+/// boundary, then reproduce their edited state after a real worker restart.
+fn studio_builtin_inputs_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    fn input(
+        endpoint: &StudioEndpoint,
+        frames: &mut StudioFrameReader,
+        frame: usize,
+        revision: &mut usize,
+        publication: &mut usize,
+        fields: &str,
+    ) -> Result<Vec<u8>, ScenarioError> {
+        let body = format!("{fields}&worker_generation=1&frame={frame}&revision={revision}");
+        endpoint.request("POST", "/api/event", body.as_bytes(), 200)?;
+        *revision += 1;
+        *publication += 1;
+        frames.frame(frame, *publication)
+    }
+
+    ctx.set_fps((30, 1));
+    ctx.record_asset(
+        "studio/builtin-source.rs",
+        include_bytes!("../../fmn/src/lib.rs"),
+    );
+    ctx.record_asset(
+        "studio/registrations.rs",
+        include_bytes!("../../fmn-cli/src/studio_live.rs"),
+    );
+    let directory = scenario_dir("studio_builtin_inputs")?;
+    let mut outcome = RunOutcome::ok();
+    for (name, count, has_spans) in STUDIO_BUILTIN_INPUT_CASES {
+        let (mut process, endpoint) = StudioProcess::launch_named(&directory, name)?;
+        let mut frames = endpoint.stream()?;
+        let initial_png = frames.frame(0, 0)?;
+        let initial = endpoint.request("GET", "/api/inspect", b"", 200)?;
+        studio_contains(&initial, "\"scene_time\":0,")?;
+        studio_contains(&initial, &format!("\"frame_count\":{count},\"fps\":30"))?;
+        studio_contains(&initial, "\"input_events\":true,\"input_revision\":0")?;
+        if has_spans {
+            studio_contains(&initial, "\"source_span\":{\"kind\":\"math_glyph\"")?;
+        }
+        let last = count - 1;
+        endpoint.request(
+            "POST",
+            "/api/scrub",
+            format!("frame={last}&commit=true").as_bytes(),
+            200,
+        )?;
+        frames.frame(last, 1)?;
+        let mut revision = 1;
+        let mut publication = 1;
+        input(
+            &endpoint,
+            &mut frames,
+            last,
+            &mut revision,
+            &mut publication,
+            "type=key_press&key=a&modifiers=2",
+        )?;
+        let selected_png = input(
+            &endpoint,
+            &mut frames,
+            last,
+            &mut revision,
+            &mut publication,
+            "type=key_release&key=a&modifiers=2",
+        )?;
+        input(
+            &endpoint,
+            &mut frames,
+            last,
+            &mut revision,
+            &mut publication,
+            "type=key_press&key=arrow_right",
+        )?;
+        let moved_png = input(
+            &endpoint,
+            &mut frames,
+            last,
+            &mut revision,
+            &mut publication,
+            "type=key_release&key=arrow_right",
+        )?;
+        if moved_png == selected_png {
+            return Err(fail(format!(
+                "{name}: native editing did not move any rendered pixels"
+            )));
+        }
+        input(
+            &endpoint,
+            &mut frames,
+            last,
+            &mut revision,
+            &mut publication,
+            "type=key_press&key=z&modifiers=2",
+        )?;
+        let undone_png = input(
+            &endpoint,
+            &mut frames,
+            last,
+            &mut revision,
+            &mut publication,
+            "type=key_release&key=z&modifiers=2",
+        )?;
+        if undone_png != selected_png {
+            return Err(fail(format!(
+                "{name}: native undo changed the original selected image"
+            )));
+        }
+        input(
+            &endpoint,
+            &mut frames,
+            last,
+            &mut revision,
+            &mut publication,
+            "type=key_press&key=z&modifiers=3",
+        )?;
+        let redone_png = input(
+            &endpoint,
+            &mut frames,
+            last,
+            &mut revision,
+            &mut publication,
+            "type=key_release&key=z&modifiers=3",
+        )?;
+        if redone_png != moved_png {
+            return Err(fail(format!("{name}: native redo lost the edited image")));
+        }
+        let edited = endpoint.request("GET", "/api/inspect", b"", 200)?;
+        studio_contains(
+            &edited,
+            &format!("\"frame_index\":{last},\"frame_count\":{count}"),
+        )?;
+        studio_contains(&edited, &format!("\"input_revision\":{revision}"))?;
+        let stale = endpoint.request(
+            "POST",
+            "/api/event",
+            format!("type=key_press&key=arrow_right&worker_generation=1&frame={last}&revision=0")
+                .as_bytes(),
+            422,
+        )?;
+        studio_contains(&stale, "stale native input revision")?;
+        if endpoint.request("GET", "/api/inspect", b"", 200)? != edited {
+            return Err(fail(format!(
+                "{name}: stale input changed the edited scene"
+            )));
+        }
+
+        endpoint.request("POST", "/api/scrub", b"frame=0&commit=false", 200)?;
+        publication += 1;
+        if frames.frame(0, publication)? != initial_png {
+            return Err(fail(format!(
+                "{name}: later edits leaked into constructed frame zero"
+            )));
+        }
+        endpoint.request(
+            "POST",
+            "/api/scrub",
+            format!("frame={last}&commit=true").as_bytes(),
+            200,
+        )?;
+        publication += 1;
+        if frames.frame(last, publication)? != moved_png {
+            return Err(fail(format!(
+                "{name}: forward scrub discarded the committed edits"
+            )));
+        }
+        let committed = endpoint.request("GET", "/api/inspect", b"", 200)?;
+        let restarted = endpoint.request("POST", "/api/restart", b"", 200)?;
+        studio_contains(&restarted, "\"worker_generation\":2")?;
+        studio_contains(&restarted, &format!("\"frame_index\":{last}"))?;
+        publication += 1;
+        let restored_png = frames.frame(last, publication)?;
+        let restored = endpoint.request("GET", "/api/inspect", b"", 200)?;
+        if restored_png != moved_png || restored != committed {
+            return Err(fail(format!(
+                "{name}: worker replay changed native pixels or inspected state"
+            )));
+        }
+        drop(frames);
+        process.finish()?;
+        ctx.event(
+            LogEvent::new("e2e.studio.builtin_input")
+                .field("scene", name)
+                .field("phase", "edited_undone_replayed")
+                .field("frame_count", count as u64)
+                .field("inputs", (revision - 1) as u64)
+                .field("native_spans", truth(has_spans)),
+        );
+        outcome = outcome
+            .with_artifact(&format!("{name}.replayed.png"), restored_png)
+            .with_artifact(&format!("{name}.inspector.json"), restored);
+    }
+    ctx.counter("studio_live_builtin_families", 5);
+    Ok(outcome.with_counter("studio_live_builtin_families", 5))
 }
 
 fn studio_interactive_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -2358,7 +2713,7 @@ fn studio_subprocess_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scena
     let initial_png = frames.frame(0, 0)?;
     let initial = endpoint.request("GET", "/api/inspect", b"", 200)?;
     studio_view(&initial, 0)?;
-    studio_contains(&initial, "\"scene_time\":0.03333333333333333")?;
+    studio_contains(&initial, "\"scene_time\":0,")?;
     for span in [
         "\"source_span\":{\"kind\":\"math_glyph\",\"start\":6,\"end\":7,\"source_bytes\":11,\"excerpt\":\"x\"",
         "\"source_span\":{\"kind\":\"math_rule\",\"start\":0,\"end\":5,\"source_bytes\":11,\"excerpt\":\"\\\\frac\"",
@@ -2407,12 +2762,18 @@ fn studio_subprocess_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scena
         ));
     }
     studio_view(&endpoint.request("GET", "/api/inspect", b"", 200)?, 0)?;
-    let refusal = endpoint.request("POST", "/api/scrub", b"frame=8&commit=false", 422)?;
-    studio_contains(&refusal, "outside 0..8")?;
+    let refusal = endpoint.request("POST", "/api/scrub", b"frame=9&commit=false", 422)?;
+    studio_contains(
+        &refusal,
+        "native target exceeds the scene or execution budget",
+    )?;
     studio_view(&endpoint.request("GET", "/api/inspect", b"", 200)?, 0)?;
     let event_refusal =
         endpoint.request("POST", "/api/event", b"type=key_press&key=arrow_left", 422)?;
-    studio_contains(&event_refusal, "no live command/event adapter")?;
+    studio_contains(
+        &event_refusal,
+        "worker_generation, frame and revision are required",
+    )?;
     ctx.event(
         LogEvent::new("e2e.studio.lifecycle")
             .field("phase", "transient_and_refusals")
@@ -2666,6 +3027,27 @@ fn python_structural_envelope_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenar
             ),
     );
     Ok(RunOutcome::ok().with_counter("envelope_violations_detected", 1))
+}
+
+/// Reference corpus regressions (fm-5wq.30 first; fm-5wq.27..29 and
+/// fm-sq8.10 add their cases): minimized constructs from corpus scenes the
+/// portal once refused or rendered differently, each checked against what the
+/// pinned Reference showed. One log event per case; a zero-case run fails.
+fn python_reference_corpus_regressions_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let cases = manimlib::run_portal_gauntlet_reference_corpus_regressions()
+        .map_err(|error| fail(format!("Reference corpus regressions: {error}")))?;
+    for case in &cases {
+        ctx.event(
+            LogEvent::new("e2e.python.reference_corpus_regression")
+                .field("bead", case.bead.as_str())
+                .field("construct", case.construct.as_str())
+                .field("observed", case.observed.as_str())
+                .field("expected", case.expected.as_str())
+                .field("provenance", case.provenance.as_str())
+                .field("verdict", "pass"),
+        );
+    }
+    Ok(RunOutcome::ok().with_counter("corpus_regression_cases", cases.len() as u64))
 }
 
 fn python_svg_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -3295,6 +3677,154 @@ fn cli_builtin_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError>
         .with_counter("cli_render_frames", 3)
         .with_counter("cli_png_signature", 1)
         .with_counter("cli_manifest", 1))
+}
+
+/// The shared CLI/facade audio composer consumes real scene lifecycle events
+/// and sound requests. Native PCM is the oracle here; the CLI's process-
+/// capability tests separately exercise delivery to the two-stage video mux.
+fn scene_soundtrack_windows_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::rendering::{PreparedSceneSoundtrack, SoundtrackTimeline};
+    use fmn_output::{AudioDecodeLimits, AudioDecoder, MixerConfig, frames_to_samples};
+    struct Score;
+    impl fmn::SceneConstruct for Score {
+        fn name(&self) -> &str {
+            "scene_soundtrack_windows"
+        }
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            stage.scene_mut().force_skipping();
+            stage
+                .scene_mut()
+                .add_sound("omitted.wav", 0.0, None, None)?;
+            stage.wait(0.125)?;
+            stage.scene_mut().revert_to_original_skipping_status();
+            stage
+                .scene_mut()
+                .add_sound("background.wav", 0.0, None, None)?;
+            stage.wait(0.25)?;
+            stage
+                .scene_mut()
+                .add_sound("overlay.wav", -2.0 / 59.0, Some(-3.0), Some(-6.0))?;
+            stage.wait(0.5)?;
+            Ok(())
+        }
+    }
+    #[derive(Default)]
+    struct ClockSink {
+        timeline: SoundtrackTimeline,
+        captured: u64,
+    }
+    impl fmn_scene::SceneSink for ClockSink {
+        fn event(
+            &mut self,
+            event: fmn_scene::LifecycleEvent,
+        ) -> Result<(), fmn_scene::IntegrationError> {
+            self.timeline
+                .observe(event.time.frames(), event.skipping)
+                .map_err(|error| fmn_scene::IntegrationError::new("soundtrack", error.to_string()))
+        }
+        fn capture(
+            &mut self,
+            _: fmn_scene::CaptureReason,
+            _: FramePacket,
+        ) -> Result<(), fmn_scene::IntegrationError> {
+            self.captured += 1;
+            Ok(())
+        }
+    }
+    let mut sink = ClockSink::default();
+    let scene = fmn::run_scene(
+        &mut Score,
+        fmn_scene::RuntimeConfig {
+            fps: 59,
+            ..fmn_scene::RuntimeConfig::default()
+        },
+        7,
+        &mut sink,
+    )
+    .map_err(|error| fail(format!("sound scene lifecycle: {error}")))?
+    .into_scene();
+    let requests = scene.sound_requests();
+    let rebased_end = sink
+        .timeline
+        .output_frame(scene.time().frames())
+        .map_err(|error| fail(error.to_string()))?;
+    if requests.len() != 2
+        || scene.time().frames() != 53
+        || rebased_end != 45
+        || sink.captured != 45
+    {
+        return Err(fail(
+            "sound scene lost skip/no-op or rational frame semantics",
+        ));
+    }
+    let fs = fmn_platform::fs::VirtualFs::new();
+    let background: Vec<f32> = (0..16_000)
+        .map(|index| (index % 97) as f32 / 194.0 - 0.25)
+        .collect();
+    let background = fmn_codec::encode_wav(1, 44_100, fmn_codec::SampleFormat::S16, &background);
+    fs.insert("background.wav", background.clone());
+    fs.insert(
+        "overlay.wav",
+        fmn_codec::encode_wav(1, 48_000, fmn_codec::SampleFormat::S16, &vec![0.25; 8_000]),
+    );
+    let mut decoder = AudioDecoder::new(AudioDecodeLimits::default(), None)
+        .map_err(|error| fail(error.to_string()))?;
+    let end = frames_to_samples(53, 59, 48_000).map_err(|error| fail(error.to_string()))? as u64;
+    let prepared =
+        PreparedSceneSoundtrack::new(&fs, requests, &mut decoder, MixerConfig::default(), None)
+            .map_err(|error| fail(error.to_string()))?
+            .with_timeline_frames(end);
+    let full = prepared.mix(1).map_err(|error| fail(error.to_string()))?;
+    let start = frames_to_samples(8, 59, 48_000).map_err(|error| fail(error.to_string()))? as u64;
+    let split = frames_to_samples(23, 59, 48_000).map_err(|error| fail(error.to_string()))? as u64;
+    let left = prepared
+        .mix_window(start, split - start, 4)
+        .map_err(|error| fail(error.to_string()))?;
+    let right = prepared
+        .mix_window(split, end - split, 1)
+        .map_err(|error| fail(error.to_string()))?;
+    let mut joined = left.audio.samples;
+    joined.extend(right.audio.samples);
+    if joined != full.audio.samples[start as usize * 2..end as usize * 2]
+        || prepared.inputs()[0].report.source_digest != sha256(&background)
+        || !prepared.invocations().is_empty()
+    {
+        return Err(fail(
+            "soundtrack windows changed phase, ducking, source identity, or native decode",
+        ));
+    }
+    let rebased = PreparedSceneSoundtrack::new(
+        &fs,
+        requests,
+        &mut decoder,
+        MixerConfig::default(),
+        Some(&sink.timeline),
+    )
+    .map_err(|error| fail(error.to_string()))?
+    .mix(4)
+    .map_err(|error| fail(error.to_string()))?;
+    if full.audio.samples[..start as usize * 2]
+        .iter()
+        .any(|sample| *sample != 0.0)
+        || !rebased.audio.samples[..100]
+            .iter()
+            .any(|sample| sample.abs() > 0.01)
+    {
+        return Err(fail("skipped prefix was not removed from emitted audio"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.soundtrack.windows")
+            .field("cues", 2_u64)
+            .field("captured_frames", sink.captured)
+            .field("sample_window_equal", "true")
+            .field("skipped_prefix_removed", "true")
+            .field("source_identity", "true"),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("soundtrack_cues", 2)
+        .with_counter("soundtrack_windows_equal", 1)
+        .with_counter("soundtrack_skip_rebased", 1)
+        .with_counter("soundtrack_source_identity", 1))
 }
 
 /// One certified in-process render of the CLI's `formula_sheet.v1` builtin
@@ -7500,6 +8030,39 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         .collect(),
     ));
     specs.push(spec(
+        "lifecycle.studio_builtin_inputs.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::StudioSubprocess,
+        Invocation::new(studio_builtin_inputs_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(
+                STUDIO_BUILTIN_INPUT_CASES
+                    .iter()
+                    .flat_map(|(name, _, _)| {
+                        [
+                            format!("{name}.replayed.png"),
+                            format!("{name}.inspector.json"),
+                        ]
+                    })
+                    .collect(),
+            ),
+            counter_eq("studio_live_builtin_families", 5),
+        ],
+        STUDIO_BUILTIN_INPUT_CASES
+            .iter()
+            .map(|&(name, _, _)| {
+                LogExpect::span_present(
+                    "e2e.studio.builtin_input",
+                    vec![
+                        FieldPred::str_eq("scene", name),
+                        FieldPred::str_eq("phase", "edited_undone_replayed"),
+                    ],
+                )
+            })
+            .collect(),
+    ));
+    specs.push(spec(
         "render_matrix.python_portal_png_sequence.v1",
         ScenarioClass::RenderMatrix,
         Surface::PythonInProcess,
@@ -7718,6 +8281,23 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 FieldPred::str_eq("subject", "tex"),
                 FieldPred::str_eq("planted_verdict", "differs"),
                 FieldPred::str_eq("violated_row", "bn05-text-geometry"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "parity.reference_corpus_regressions.v1",
+        ScenarioClass::ParityDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_reference_corpus_regressions_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("corpus_regression_cases", 4),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.reference_corpus_regression",
+            vec![
+                FieldPred::str_eq("bead", "fm-5wq.30"),
+                FieldPred::str_eq("verdict", "pass"),
             ],
         )],
     ));
@@ -8064,6 +8644,30 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         .tier(Tier::Full),
     );
 
+    specs.push(spec(
+        "lifecycle.scene_soundtrack_windows.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(scene_soundtrack_windows_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("soundtrack_cues", 2),
+            counter_eq("soundtrack_windows_equal", 1),
+            counter_eq("soundtrack_skip_rebased", 1),
+            counter_eq("soundtrack_source_identity", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.soundtrack.windows",
+            vec![
+                FieldPred::u64_eq("cues", 2),
+                FieldPred::u64_eq("captured_frames", 45),
+                FieldPred::str_eq("sample_window_equal", "true"),
+                FieldPred::str_eq("skipped_prefix_removed", "true"),
+                FieldPred::str_eq("source_identity", "true"),
+            ],
+        )],
+    ));
+
     // FAILURE-PATH DRILLS.
     specs.push(spec(
         "failure_path.tex_unsupported_construct_named.v1",
@@ -8114,6 +8718,48 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 FieldPred::str_eq("rule", "quality-exclusive"),
                 FieldPred::str_eq("rule_named", "true"),
                 FieldPred::str_eq("stderr_empty", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "failure_path.cli_video_quality_admission.v1",
+        ScenarioClass::FailurePath,
+        Surface::CliInProcess,
+        Invocation::new(failure_cli_video_quality_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("cli_video_quality_refusals", 6),
+            counter_eq("cli_video_quality_tool_calls", 0),
+            Assertion::NdjsonSchema,
+        ],
+        vec![LogExpect::span_present(
+            "e2e.failure.cli_video_quality",
+            vec![
+                FieldPred::u64_eq("refused", 6),
+                FieldPred::u64_eq("tool_calls", 0),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "failure_path.cli_ffmpeg_limit_admission.v1",
+        ScenarioClass::FailurePath,
+        Surface::CliInProcess,
+        Invocation::new(failure_cli_ffmpeg_limits_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("cli_ffmpeg_limit_refusals", 4),
+            counter_eq("cli_ffmpeg_limit_tool_calls", 0),
+            counter_eq("cli_ffmpeg_admitted_timeout", 21_600),
+            counter_eq("cli_ffmpeg_admitted_artifact", 8 << 30),
+            counter_eq("cli_ffmpeg_admitted_input", 8 << 30),
+            Assertion::NdjsonSchema,
+        ],
+        vec![LogExpect::span_present(
+            "e2e.failure.cli_ffmpeg_limits",
+            vec![
+                FieldPred::u64_eq("refused", 4),
+                FieldPred::u64_eq("tool_calls", 0),
+                FieldPred::u64_eq("admitted_timeout_seconds", 21_600),
             ],
         )],
     ));
@@ -8981,6 +9627,28 @@ fn hoeffding_d_full_scenario_passes_when_enabled() {
     }
 }
 
+/// Quality flag interactions and encoder compatibility fail before tool discovery.
+#[test]
+fn cli_video_quality_admission_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "failure_path.cli_video_quality_admission.v1")
+        .expect("CLI video-quality scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+/// CLI ffmpeg budgets share native admission and refuse before tool discovery.
+#[test]
+fn cli_ffmpeg_limit_admission_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "failure_path.cli_ffmpeg_limit_admission.v1")
+        .expect("CLI ffmpeg-limit scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
 /// The facade's video formats need an explicit ffmpeg capability (D2).
 #[test]
 fn facade_video_capability_scenario_passes() {
@@ -9161,6 +9829,16 @@ fn studio_native_interactive_lifecycle_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.studio_native_interactive.v1")
         .expect("native Studio interactive lifecycle scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn studio_native_builtin_input_lifecycle_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.studio_builtin_inputs.v1")
+        .expect("native builtin input lifecycle scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }
@@ -9425,6 +10103,16 @@ fn python_structural_envelope_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "parity.structural_envelope.v1")
         .expect("structural envelope scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn python_reference_corpus_regressions_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "parity.reference_corpus_regressions.v1")
+        .expect("Reference corpus regressions scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

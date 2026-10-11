@@ -46,16 +46,21 @@ def install_surface_lifecycle(native):
         options = sampling_options(dict(resolution=resolution, u_range=u_range,
             v_range=v_range, preferred_creation_axis=preferred_creation_axis,
             epsilon=epsilon, normal_nudge=normal_nudge))
-        options.update(color=g["GREY"] if color is None else color,
-                       opacity=1.0 if opacity is None else opacity,
-                       shading=(.3, .2, .4) if shading is None else shading,
-                       depth_test=bool(depth_test), z_index=z_index)
+        seeds = dict(color=g["GREY"] if color is None else color,
+                     opacity=1.0 if opacity is None else opacity,
+                     shading=(.3, .2, .4) if shading is None else shading,
+                     depth_test=bool(depth_test), z_index=z_index)
         constructing.add(id(self))
         try:
+            # The Reference's Surface keeps its sampling controls itself and
+            # passes only Mobject's own keywords up (fm-5wq.20).
+            # _install_live_state leaves these attributes alone.
+            for name, value in options.items():
+                setattr(self, name, value)
             # Mobject installs live fields, then the native engine dispatches
             # init_data, init_points and init_uniforms through the actual MRO.
             # Seeds follow _install_live_state so it cannot reset their values.
-            super(Surface, self).__init__(**options)
+            super(Surface, self).__init__(**seeds)
             # An authored hook may replace sampling entirely. Its actual table
             # must still gain durable native topology before entering a Scene.
             shape = controls(self)["resolution"]

@@ -1,0 +1,150 @@
+name: Native frame preparation
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/native-frame-preparation.yml']
+  workflow_dispatch:
+# Validate immutable candidates; only the GitHub connector publishes refs.
+permissions:
+  contents: write
+concurrency:
+  group: native-frame-preparation-${{ github.run_id }}
+  cancel-in-progress: false
+jobs:
+  validate:
+    if: github.repository == 'Dicklesworthstone/franken_manim' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+      CARGO_TERM_COLOR: never
+      CARGO_TARGET_DIR: target/portable
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          # Ownership source is now on main; apply the full immutable stack
+          # to its original source base, not over the already-published files.
+          ref: e3a3db00fa718df52d9f8ca82fd27d652b476537
+          persist-credentials: false
+      - run: rustup show active-toolchain
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/portable
+          key: native-prepare-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-portable-
+            fmtl-rates-${{ runner.os }}-${{ runner.arch }}-
+      - name: Verify and apply native pipeline candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, gzip, hashlib, json, os, pathlib, subprocess, urllib.request
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'native-prepare'
+          out.mkdir()
+          def fetch(sha):
+              request = urllib.request.Request(
+                  f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{sha}',
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN']})
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  content = base64.b64decode(json.load(response)['content'])
+              assert hashlib.sha1(b'blob '+str(len(content)).encode()+b'\0'+content).hexdigest() == sha
+              return content
+          candidates = [
+              (['813648ec48a605a854069ed58883c5114862ab33', '0e1f3f4ed7c9c243d7286000dfcf898aea867566'],
+               '99565d19fc25c3fe03e2a6bcd0876fee2fe177b00733bf6e3f90f9a33dd44239', True),
+              (['f6d753f223b909aead798d109170a38e2ee063ef', '326c3af0d97e3aa7e8a834dd0127a5594b38c144', '3c632d09d9dd5c201d1121677f6162ee2d5929e3'],
+               '851712ae1f70a7785a6847a9a195de8906c2c3c490dab995ac0e4a3e02b79bea', True),
+              (['cb2e465372c3dc08ce1c0583ffa8bf6004fe255d'],
+               '7e5771f5c5388287ee71fd874a83e0947a5d22ae37cc50da57a506cae467dd84', False),
+              (['99ccc58a686119f977e5860a4e878772b00c59e2'],
+               'b4c416ffad788eb764ef9973e38d70474d5e30288cf1f3ef21fc1c6cc726b880', False),
+              (['2b7056a8d3293ab8a0fd1043bd80995fcf31b1e1'],
+               '4514dbf906188d9f27b2a9a85f13e83a833fb687b18d0cc54792ce53bdee5afd', False),
+          ]
+          allowed = {
+              'crates/fmn-mobject/src/lib.rs', 'crates/fmn-mobject/src/stage.rs',
+              'crates/fmn-mobject/src/stage/frozen_render.rs', 'crates/fmn-mobject/tests/frozen_render.rs',
+              'crates/fmn-anim/src/frame.rs', 'crates/fmn-anim/tests/render_handoff.rs',
+              'crates/fmn/src/rendering/pipeline.rs', 'crates/fmn/src/rendering.rs',
+              'crates/fmn/tests/native_preparation.rs',
+              'crates/fmn-cli/src/offline_cpu.rs', 'crates/fmn-cli/src/lib.rs',
+          }
+          names = set()
+          for index, (blobs, expected, compressed) in enumerate(candidates):
+              patch = b''.join(fetch(sha) for sha in blobs)
+              if compressed:
+                  patch = gzip.decompress(base64.b64decode(patch, validate=True))
+              assert hashlib.sha256(patch).hexdigest() == expected
+              path = out / f'candidate-{index}.patch'
+              path.write_bytes(patch)
+              stats = subprocess.check_output(['git','apply','--numstat',str(path)], text=True)
+              paths = {line.split('\t',2)[2] for line in stats.splitlines()}
+              assert paths and paths <= allowed, paths
+              subprocess.run(['git','apply','--check',str(path)], check=True)
+              subprocess.run(['git','apply',str(path)], check=True)
+              names |= paths
+          paths = sorted(names)
+          subprocess.run(['rustfmt','--edition','2024','--config','skip_children=true',*paths], check=True)
+          subprocess.run(['git','add','-N','--',*paths], check=True)
+          subprocess.run(['git','diff','--check'], check=True)
+          for name in paths:
+              target = out / 'candidate-source' / name
+              target.parent.mkdir(parents=True, exist_ok=True)
+              target.write_bytes(pathlib.Path(name).read_bytes())
+          (out / 'paths.json').write_text(json.dumps(paths))
+          (out / 'base.txt').write_text(subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip())
+          (out / 'validation-commit.txt').write_text(os.environ['GITHUB_SHA'])
+          PY
+      - name: Test snapshot ownership and animation integration
+        run: |
+          set -o pipefail
+          cargo test --locked -p fmn-mobject -p fmn-anim --all-targets 2>&1 | tee "$RUNNER_TEMP/native-prepare/ownership-tests.log"
+      - name: Test native rendering and frame pipeline
+        run: |
+          set -o pipefail
+          cargo test --locked -p fmn --all-targets 2>&1 | tee "$RUNNER_TEMP/native-prepare/native-tests.log"
+      - name: Test real CLI CPU pipeline
+        run: |
+          set -o pipefail
+          cargo test --locked -p fmn-cli --features cli,batch --lib offline_cpu 2>&1 | tee "$RUNNER_TEMP/native-prepare/cli-tests.log"
+      - name: Check workspace integration
+        run: |
+          set -o pipefail
+          cargo check --locked --workspace 2>&1 | tee "$RUNNER_TEMP/native-prepare/workspace-check.log"
+      - name: Clippy for changed production crates and tests
+        run: |
+          set -o pipefail
+          cargo clippy --locked -p fmn-mobject -p fmn-anim -p fmn -p fmn-cli --features fmn-cli/cli,fmn-cli/batch --all-targets -- -D warnings 2>&1 | tee "$RUNNER_TEMP/native-prepare/clippy.log"
+      - name: Archive exact validated source blobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, os, pathlib, urllib.request
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'native-prepare'
+          entries = []
+          for name in json.loads((out / 'paths.json').read_text()):
+              content = pathlib.Path(name).read_bytes()
+              expected = hashlib.sha1(b'blob '+str(len(content)).encode()+b'\0'+content).hexdigest()
+              request = urllib.request.Request(
+                  f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs',
+                  data=json.dumps({'encoding':'base64','content':base64.b64encode(content).decode()}).encode(),
+                  headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'], 'Content-Type':'application/json'}, method='POST')
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  assert json.load(response)['sha'] == expected
+              entries.append({'path':name,'mode':'100644','type':'blob','sha':expected})
+          manifest = {'base':(out / 'base.txt').read_text(), 'validation_commit':os.environ['GITHUB_SHA'], 'files':entries}
+          (out / 'validated-blobs.json').write_text(json.dumps(manifest, indent=2))
+          print(json.dumps(manifest, indent=2))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: native-preparation-${{ github.run_id }}
+          path: ${{ runner.temp }}/native-prepare
+          if-no-files-found: error

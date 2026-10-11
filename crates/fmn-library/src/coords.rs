@@ -377,12 +377,17 @@ impl NumberLine {
     /// The Reference defaults: `unit_size=1`, ticks on at `0.1` with
     /// `1.5×` longer big ticks, no numbers, `line_to_number_direction=DOWN`,
     /// `buff=MED_SMALL_BUFF`, no tip, `num_decimal_places=0`,
-    /// `font_size=36`, stroke `DEFAULT_LIGHT_COLOR` at width 2.
+    /// `font_size=36`, `color=DEFAULT_LIGHT_COLOR` (fill and stroke, as the
+    /// Reference's `Line(color=...)` resolves it) and a 2-width stroke.
     #[must_use]
     pub fn new(x_range: [f64; 3]) -> Self {
         let mut line = Self {
             x_range,
-            style: Style::default().stroke(DEFAULT_LIGHT_COLOR, 2.0, 1.0),
+            style: Style::default().color(DEFAULT_LIGHT_COLOR).stroke(
+                DEFAULT_LIGHT_COLOR,
+                2.0,
+                1.0,
+            ),
             unit_size: 1.0,
             width: None,
             include_ticks: true,

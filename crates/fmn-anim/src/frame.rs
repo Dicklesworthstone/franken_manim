@@ -158,6 +158,21 @@ impl FramePacket {
         stage
     }
 
+    /// Consume this packet into a callback-free, thread-transferable render state.
+    ///
+    /// Unshared packets move their geometry and graph metadata without first
+    /// materializing another Stage. Shared journal/preview packets retain their
+    /// full replay state and produce an isolated copy-on-write render projection.
+    /// Updater references are only dropped on this calling scene-owner thread.
+    #[must_use]
+    pub fn into_render_state(self) -> fmn_mobject::FrozenRenderState {
+        let time = self.time.to_f64();
+        match Rc::try_unwrap(self.state) {
+            Ok(state) => state.into_render_state(time),
+            Err(state) => state.render_state(time),
+        }
+    }
+
     /// The keyed per-frame fork of a named substream (§6.5): a pure
     /// function of `(seed, name, frame index)`, identical from any thread
     /// in any order — the property that makes frame parallelism

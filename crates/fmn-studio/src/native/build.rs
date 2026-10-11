@@ -69,6 +69,23 @@ impl NativeBuildContext<'_> {
         self.spans
     }
 
+    /// Record an authored sound cue at this completed segment boundary.
+    ///
+    /// The ordinary Scene validation and rational call-site clock apply. This
+    /// records the request for output composition; it does not start playback,
+    /// decode an asset, or consume a preview frame.
+    pub fn add_sound(
+        &mut self,
+        sound_file: impl Into<std::path::PathBuf>,
+        time_offset: f64,
+        gain: Option<f64>,
+        gain_to_background: Option<f64>,
+    ) -> Result<(), SceneError> {
+        self.scene
+            .add_sound(sound_file, time_offset, gain, gain_to_background)?;
+        Ok(())
+    }
+
     /// Construct a camera transition from the *current* completed rig state.
     /// The existing Transform remains responsible for interpolation/lifecycle.
     pub fn camera_to(

@@ -13,6 +13,8 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 #[cfg(test)]
+mod catalog_rate_identity;
+#[cfg(test)]
 mod corpus;
 mod crossing;
 mod ladder;
@@ -42,8 +44,9 @@ mod structural_parity;
 pub use portal_texture::{run_portal_gauntlet_surface_lifecycle, run_portal_gauntlet_textures};
 #[cfg(feature = "gauntlet")]
 pub use structural_parity::{
-    EnvelopeDrillReport, StructuralParityReport, run_portal_gauntlet_class_sweep,
-    run_portal_gauntlet_envelope_drill, run_portal_gauntlet_structural_facts,
+    CorpusRegressionCase, EnvelopeDrillReport, StructuralParityReport,
+    run_portal_gauntlet_class_sweep, run_portal_gauntlet_envelope_drill,
+    run_portal_gauntlet_reference_corpus_regressions, run_portal_gauntlet_structural_facts,
 };
 mod portal_provenance;
 mod report;
@@ -7364,6 +7367,20 @@ impl BridgeMobject {
             .iter()
             .map(|sub| (sub.span.start, sub.span.end))
             .collect();
+        // Which primitive each sub is, parallel to the spans: the portal
+        // classes glyphs and paths as the Reference's VMobjectFromSVGPath
+        // and rules as its Rectangle (dvisvgm's <rect>) (fm-15k9).
+        let kinds: Vec<&str> = built
+            .typeset
+            .subs
+            .iter()
+            .map(|sub| match sub.prim {
+                fmn_library::TexPrim::Glyph(_) => "glyph",
+                fmn_library::TexPrim::Rule(_) => "rule",
+                fmn_library::TexPrim::Path(_) => "path",
+            })
+            .collect();
+        slf.as_any().setattr("_string_sub_kinds", kinds)?;
         if parts.is_empty() || (parts.len() == 1 && !group_single_part) {
             let paths: Vec<Vec<usize>> = (0..spans.len()).map(|index| vec![index]).collect();
             slf.as_any().setattr("_string_sub_spans", spans)?;
@@ -10411,15 +10428,16 @@ fn rate_func_from_py(value: &Bound<'_, PyAny>) -> PyResult<fmn_anim::RateFunc> {
 }
 
 fn named_rate_func(name: &str) -> PyResult<fmn_anim::RateFunc> {
-    let function: fn(f64) -> f64 = match name {
-        "linear" => fmn_core::rate::linear,
-        "smooth" => fmn_core::rate::smooth,
-        "rush_into" => fmn_core::rate::rush_into,
-        "rush_from" => fmn_core::rate::rush_from,
-        "slow_into" => fmn_core::rate::slow_into,
-        "double_smooth" => fmn_core::rate::double_smooth,
-        "there_and_back" => fmn_core::rate::there_and_back,
-        "lingering" => fmn_core::rate::lingering,
+    use fmn_core::rate::CatalogRate;
+    let rate = match name {
+        "linear" => CatalogRate::Linear,
+        "smooth" => CatalogRate::Smooth,
+        "rush_into" => CatalogRate::RushInto,
+        "rush_from" => CatalogRate::RushFrom,
+        "slow_into" => CatalogRate::SlowInto,
+        "double_smooth" => CatalogRate::DoubleSmooth,
+        "there_and_back" => CatalogRate::ThereAndBack,
+        "lingering" => CatalogRate::Lingering,
         other => {
             return Err(PyValueError::new_err(format!(
                 "rate_func `{other}` is not in the engine's named catalog \
@@ -10429,7 +10447,7 @@ fn named_rate_func(name: &str) -> PyResult<fmn_anim::RateFunc> {
             )));
         }
     };
-    Ok(fmn_anim::RateFunc::Base(function))
+    Ok(fmn_anim::RateFunc::Catalog(rate))
 }
 
 fn lerp(a: f64, b: f64, t: f64) -> f64 {

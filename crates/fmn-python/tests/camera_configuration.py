@@ -1,5 +1,7 @@
 """Native scene camera configuration, live frame identity and actual pixels."""
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -8,6 +10,32 @@ import manimlib as m
 
 
 class CameraConfigurationTests(unittest.TestCase):
+    def test_manim_config_carries_the_reference_sections(self):
+        # fm-e661: manim_config is default_config.yml at the pin, with the
+        # camera layer under the cwd custom_config.yml, read once at import
+        # (as in the Reference), so the configured case runs in a child.
+        config = m.manim_config
+        self.assertEqual(dict(config.camera), {"resolution": (1920, 1080), "fps": 30,
+                                               "background_color": "#333333",
+                                               "background_opacity": 1.0})
+        self.assertEqual(dict(config.vmobject), {"default_stroke_width": 4.0,
+                                                 "default_stroke_color": "#DDDDDD",
+                                                 "default_fill_color": "#888888"})
+        self.assertEqual(config.tex.font_size_for_unit_height, 144)
+        self.assertEqual(config.text.font_size_for_unit_height, 144)
+        self.assertEqual(config.sizes.frame_height, 8.0)
+        self.assertEqual(config.colors.blue_c, "#58C4DD")
+        self.assertEqual(dict(config.camera), m.Scene().camera_config)
+        probe = ("import manimlib as m; c = m.manim_config.camera; "
+                 "print(c.background_color, c.fps, tuple(c.resolution))")
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "custom_config.yml").write_text(
+                'camera:\n  background_color: "#000000"\n  fps: 24\n')
+            child = subprocess.run([sys.executable, "-c", probe], cwd=directory,
+                                   capture_output=True, text=True, timeout=120)
+        self.assertEqual(child.returncode, 0, child.stderr)
+        self.assertEqual(child.stdout.split(), ["#000000", "24", "(1920,", "1080)"])
+
     def test_scene_frame_uses_configured_pose_and_field_of_view(self):
         scene = m.Scene(camera_config={"frame_config": {
             "frame_shape": (10., 6.), "center_point": (2., -1., .5), "fovy": .7,

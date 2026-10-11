@@ -889,6 +889,11 @@ class _NativeZIndex:
         return self if obj is None else obj._get_z_index()
 
 
+_MOBJECT_INIT_PARAMETERS = (
+    "color", "opacity", "shading", "texture_paths", "is_fixed_in_frame", "depth_test", "z_index",
+)
+
+
 class Mobject(_BridgeMobject):
     dim = 3
     data_dtype = [("point", 3), ("rgba", 4)]
@@ -897,13 +902,28 @@ class Mobject(_BridgeMobject):
     pointlike_data_keys = ["point"]
     render_primitive = 5  # moderngl.TRIANGLE_STRIP, without importing a renderer
 
-    def __init__(self, *submobjects, **kwargs):
+    def __init__(self, *args, **kwargs):
+        # Reference mobject.py:79: a fixed signature (color, opacity,
+        # shading, texture_paths, is_fixed_in_frame, depth_test, z_index),
+        # positional in that order, and Python's own TypeError for anything
+        # else (fm-5wq.20). Members belong to Group; subclasses set their own
+        # configuration before calling here. Only the passed seeds are set.
+        if len(args) > len(_MOBJECT_INIT_PARAMETERS):
+            raise TypeError(
+                "Mobject.__init__() takes from 1 to 8 positional arguments but "
+                f"{len(args) + 1} were given"
+            )
+        for name, value in zip(_MOBJECT_INIT_PARAMETERS, args):
+            if name in kwargs:
+                raise TypeError(f"Mobject.__init__() got multiple values for argument {name!r}")
+            kwargs[name] = value
+        for name in kwargs:
+            if name not in _MOBJECT_INIT_PARAMETERS:
+                raise TypeError(f"Mobject.__init__() got an unexpected keyword argument {name!r}")
         _install_live_state(self)
         for key, value in kwargs.items():
             setattr(self, key, value)
         self._engine_init()
-        if submobjects:
-            self._ingest_args(*submobjects)
 
     def _ingest_args(self, *args):
         # Reference Group._ingest_args (mobject.py:2201) verbatim: a single
@@ -4584,6 +4604,9 @@ class VectorizedPoint(Point, VMobject):
         kwargs.setdefault("color", color)
         kwargs.setdefault("fill_opacity", fill_opacity)
         kwargs.setdefault("stroke_width", stroke_width)
+        # VMobject's own stroke opacity default, which the Reference's
+        # VectorizedPoint passes through (fm-78b6).
+        kwargs.setdefault("stroke_opacity", 1.0)
         _apply_vmobject_style_kwargs(self, kwargs)
 
 
@@ -5117,7 +5140,10 @@ class BackgroundRectangle(SurroundingRectangle):
         **kwargs,
     ):
         if color is None:
-            color = _pinned_manim_config().camera.background_color
+            # The Reference's manim_config.camera.background_color: the
+            # pinned default under the cwd custom_config.yml, the layer
+            # Scene's camera resolves too (fm-78b6).
+            color = _reference_camera_layer()["background_color"]
         super().__init__(
             mobject,
             color=color,
@@ -7454,7 +7480,7 @@ class ThreeDAxes(Axes):
 
 class NumberPlane(Axes):
     default_axis_config = dict(
-        color=_WHITE,
+        stroke_color=_WHITE,
         stroke_width=2,
         include_ticks=False,
         include_tip=False,
@@ -24362,18 +24388,21 @@ def _install_config_module():
         return config
 
     def initialize_manim_config():
+        # The Reference's default_config.yml at the pin, with the camera and
+        # directories sections under the cwd custom_config.yml, resolved by
+        # the one native config reader (no PyYAML). The camera section is
+        # the layer Scene's camera merges (fm-e661).
+        pinned = _pinned_manim_config()
+        sections = {
+            name: dict(vars(getattr(pinned, name)))
+            for name in ("sizes", "key_bindings", "vmobject", "mobject", "text", "tex")
+        }
         config = _ConfigDict(
             {
-                "camera": {
-                    "frame_rate": 30,
-                    "pixel_height": 1080,
-                    "pixel_width": 1920,
-                },
-                # Reference defaults merged with the cwd custom_config.yml,
-                # resolved by the one native config reader (no PyYAML).
+                **sections,
+                "colors": dict(pinned.colors),
+                "camera": _reference_camera_layer(),
                 "directories": _FMN_ROOT._resolved_directories(_cwd_custom_config()),
-                "tex": {"font_size_for_unit_height": 48},
-                "text": {"font_size_for_unit_height": 48},
                 "log_level": "INFO",
             }
         )

@@ -35,6 +35,9 @@ use crate::record::RecordBuffer;
 use crate::shape::ShapeSlot;
 use crate::uniforms::Uniforms;
 
+mod frozen_render;
+pub use frozen_render::FrozenRenderState;
+
 static NEXT_STAGE_ID: AtomicU64 = AtomicU64::new(1);
 /// Source of [`Stage::topology_epoch`] values, shared by every stage so that
 /// equal epochs never name two different topologies, even across a

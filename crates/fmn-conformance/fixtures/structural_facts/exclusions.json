@@ -4,15 +4,6 @@
   "rules": "First matching row wins. `class` names the Reference-side member class; `under` requires an ancestor of that class; `mro_missing` admits an mro difference only when the Reference chain is the portal chain plus exactly those names; `scope` (constructions, scenes, or any by default) limits where a row applies and is checked for staleness. A behavior-note row is a deliberate, documented divergence. An open-bead row is a known bug: an open-bead row that matches nothing in its scope fails the diff, so a fixed bug forces its row out. A Behavior Note justifies a different outline, not an unbounded size or position, so every behavior-note or ADR row that covers bbox carries an `envelope`: {size_rel, center_abs} bounds each axis's extent to size_rel of the Reference's and its centre to center_abs scene units, or {bounded_by: ancestor} defers to the envelope of the `under` ancestor whose bbox contains it. A bbox outside a row's envelope falls through to later rows; an open-bead row may state its bug's measured magnitude as an envelope. A bbox no row admits is a difference that names the first envelope it broke (fm-5wq.45).",
   "exclusions": [
     {
-      "id": "fm-15k9-glyph-classes",
-      "kind": "open-bead",
-      "ref": "fm-15k9",
-      "class": ["VMobjectFromSVGPath", "Rectangle"],
-      "under": ["Text", "MarkupText", "Tex", "TexText", "SingleStringTex", "OldTex", "OldTexText", "Title", "BulletedList", "Code"],
-      "fact": ["class", "mro", "getters", "getters.*"],
-      "reason": "Glyphs are plain VMobject (Reference VMobjectFromSVGPath), and Tex rules are not Rectangle."
-    },
-    {
       "id": "bn07-c19-text-color-keyword",
       "kind": "behavior-note",
       "ref": "BN-07",
@@ -33,6 +24,26 @@
       "reason": "C-19: at the pin Dot passes fill_color=DEFAULT_MOBJECT_COLOR and stroke_color=BLACK to Circle, masking the caller's color=; Dot(color=RED) is white with a black stroke. FrankenManim ranks color= above constructor defaults and an explicit channel above color= (fm-qead), so Dot(color=RED, fill_color=BLUE) keeps the blue fill the Reference also keeps and a red stroke where the Reference shows black. The row applies only where the Reference shows those defaults."
     },
     {
+      "id": "bn07-c30-background-rectangle-fill-getter",
+      "kind": "behavior-note",
+      "ref": "BN-07",
+      "scope": ["classes", "scenes"],
+      "class": "BackgroundRectangle",
+      "fact": "style.fill_color",
+      "reference_values": ["<Color white>"],
+      "reason": "C-30: at the pin BackgroundRectangle.get_fill_color() returns Color(self.color), Mobject's default white, whatever the fill is. FrankenManim reports the rectangle's color, the constructor's color= (BN-07)."
+    },
+    {
+      "id": "bn07-c31-point-less-match-style",
+      "kind": "behavior-note",
+      "ref": "BN-07",
+      "scope": ["classes", "scenes"],
+      "class": ["DashedVMobject", "VCube"],
+      "fact": ["style.fill_color", "style.fill_opacity", "style.stroke_color", "style.stroke_width", "style.stroke_opacity"],
+      "reference_values": ["#888888", "#DDDDDD", "#29ABCA", 0, 4000, 1000],
+      "reason": "C-31: at the pin set_style writes rgba arrays into data only, so match_style is dropped on a point-less mobject. DashedVMobject's root keeps VMobject's defaults, and a VCube root keeps its own BLUE_D fill (SumOfTwoSquares: cube.match_style(square)). FrankenManim's root takes the source's style (BN-07). The classes name point-less roots only (dashes and faces are VMobject or Square), and the row applies only where the Reference shows those defaults."
+    },
+    {
       "id": "bn05-svg-path-geometry",
       "kind": "behavior-note",
       "ref": "BN-05",
@@ -50,15 +61,6 @@
       "under": ["Tex", "TexText", "OldTex", "OldTexText", "SingleStringTex"],
       "fact": ["member", "class", "mro", "string", "n_points", "style.*"],
       "reason": "The portal's Tex submobjects are every glyph, then every rule, then every drawn path, where the Reference keeps TeX's emission order (39 corpus scenes: equal glyph counts, a t2c color on a different index). It also emits multi-piece TeX constructions (long arrows, \\mapsto, quotes, extensible brackets, brace fills) as one submobject (20 scenes). Measured on a clean Reference after fm-0v8k fixed its TeX cache race (Appendix C-22)."
-    },
-    {
-      "id": "fm-15k9-svg-path-classes",
-      "kind": "open-bead",
-      "ref": "fm-15k9",
-      "scope": ["classes", "scenes"],
-      "class": "VMobjectFromSVGPath",
-      "fact": ["class", "mro"],
-      "reason": "Every SVG-derived path, glyph or SVG file, is VMobjectFromSVGPath in the Reference and VMobject in the portal. Scenes regroup glyphs (VGroup(*tex[0])), so they appear outside any text ancestor."
     },
     {
       "id": "bn05-text-geometry",
@@ -132,12 +134,13 @@
       "reason": "The Reference builds each Annulus circle with quadratic_bezier_points_for_arc(TAU), whose default is 8 components (35 points). FrankenManim applies BN-09's one arc-density rule, 16 components for a full circle (67 points). bbox stays compared."
     },
     {
-      "id": "fm-78b6-style-defaults",
+      "id": "fm-b97z-padding-class",
       "kind": "open-bead",
-      "ref": "fm-78b6",
-      "class": ["VCube", "NumberLine"],
-      "fact": ["style.stroke_color", "style.fill_color"],
-      "reason": "Default stroke/fill colors differ: VCube stroke, NumberPlane axis fill. Annulus has taken VMobject's unset-channel defaults since fm-78b6's native-root fix."
+      "ref": "fm-b97z",
+      "scope": ["scenes"],
+      "class": "VMobjectFromSVGPath",
+      "fact": ["class", "mro"],
+      "reason": "Glyphs are VMobjectFromSVGPath since fm-15k9, but padding members that native family alignment creates during Scene.play are published as plain VMobject, while the Reference's invisible_copy keeps the source's class (one corpus scene: a Transform between Tex selections of different glyph counts)."
     },
     {
       "id": "bn02-frame-count",
@@ -260,23 +263,58 @@
       "reason": "The portal's point-cloud records carry glow_factor; the Reference's is a uniform."
     },
     {
-      "id": "fm-78b6-style-defaults-sweep",
-      "kind": "open-bead",
-      "ref": "fm-78b6",
+      "id": "bn07-c29-become-point-less-style",
+      "kind": "behavior-note",
+      "ref": "BN-07",
       "scope": ["scenes"],
-      "class": ["AnnularSector", "Sector", "ArrowTip", "VPrism", "DashedVMobject", "VectorizedPoint", "BackgroundRectangle", "Prismify", "SurfaceMesh", "VGroup", "Square", "Rectangle", "Line", "Text", "RoundedRectangle"],
-      "fact": ["style.stroke_color", "style.fill_color", "style.fill_opacity", "style.stroke_width", "style.stroke_opacity"],
-      "reason": "Default style getters differ (class sweep): point-less container roots and leaf defaults."
+      "subject": ["RepeatedConvolution", "RepeatedConvolutionDoubleLump", "RepeatedConvolutionExp", "RepeatedConvolutionGaussian"],
+      "class": "VGroup",
+      "fact": ["style.fill_color", "style.fill_opacity", "style.stroke_color", "style.stroke_width"],
+      "reference_values": ["#888888", "#DDDDDD", 0, 4000],
+      "reason": "C-29: prod_rhs = fg_label[6:] then prod_rhs.become(new_prod_rhs). At the pin become() copies data only, so the sliced VGroup's point-less root keeps VMobject's defaults. FrankenManim's become() carries the source root's style (BN-07)."
     },
     {
-      "id": "fm-78b6-style-defaults-classes",
+      "id": "bn20-riemann-sign",
+      "kind": "behavior-note",
+      "ref": "BN-20",
+      "scope": ["scenes"],
+      "subject": ["Graph15Case"],
+      "class": "Rectangle",
+      "fact": "style.fill_color",
+      "reference_values": ["#FC6255"],
+      "reason": "BN-20: the Reference's get_riemann_rectangles takes a rectangle's sign from i2gp(sample, graph), a curve-proportion lookup in world space. FrankenManim samples in data coordinates, so near a zero crossing two of Graph15Case's rectangles take the positive color where the Reference shows negative_color."
+    },
+    {
+      "id": "fm-v4lv-write-point-less-root",
       "kind": "open-bead",
-      "ref": "fm-78b6",
-      "scope": ["classes"],
-      "subject": ["BackgroundRectangle#1", "DashedVMobject#1", "SurfaceMesh#1", "VPrism", "VPrism#1", "VectorizedPoint", "VectorizedPoint#1"],
-      "class": ["AnnularSector", "Sector", "ArrowTip", "VPrism", "DashedVMobject", "VectorizedPoint", "BackgroundRectangle", "Prismify", "SurfaceMesh", "VGroup", "Square", "Rectangle", "Line", "Text", "RoundedRectangle"],
-      "fact": ["style.stroke_color", "style.fill_color", "style.fill_opacity", "style.stroke_width", "style.stroke_opacity"],
-      "reason": "Default style getters differ (class sweep): point-less container roots and leaf defaults. Class-sweep scope is pinned to the subjects that need it (13 measured 2026-09-28, fm-qead; 7 since fm-78b6's native-root defaults fixed AnnularSector, ArrowTip and Sector, 2026-10-10), so a style regression elsewhere, e.g. Square(color=RED, fill_color=BLUE), is no longer masked."
+      "ref": "fm-v4lv",
+      "scope": ["scenes"],
+      "subject": ["AnalyzeStepAlongDiagonalLine"],
+      "class": "VGroup",
+      "fact": "style.fill_opacity",
+      "reason": "Write's DrawBorderThenFill leaves a point-less root at the outline's fill opacity (0); the Reference keeps 0.5."
+    },
+    {
+      "id": "bn07-c31-axes-ticks-match-style",
+      "kind": "behavior-note",
+      "ref": "BN-07",
+      "scope": ["scenes"],
+      "subject": ["VisualizeMaxOfPairCDF"],
+      "class": "VGroup",
+      "fact": "style.stroke_color",
+      "reference_values": ["#DDDDDD"],
+      "reason": "C-31: a match_style inside a play reaches a ThreeDAxes tick group's point-less root. The Reference drops it (set_style writes data only) and the root keeps VGroup's grey; FrankenManim's root takes the matched axis color (BN-07)."
+    },
+    {
+      "id": "bn03-chord-length-threshold",
+      "kind": "behavior-note",
+      "ref": "BN-03",
+      "scope": ["scenes"],
+      "subject": ["CompareFirstTwoMethods"],
+      "class": "Line",
+      "fact": ["style.fill_color", "style.stroke_color"],
+      "reference_values": ["#FFFFFF", "#58C4DD"],
+      "reason": "BN-03: the scene colors a random chord BLUE when it is longer than the inscribed triangle's side, and builds chords from circle.pfp(random()). True-arclength point_from_proportion moves the endpoints slightly, so one chord at the threshold flips color."
     },
     {
       "id": "fm-c1up-rounded-rectangle-corners",

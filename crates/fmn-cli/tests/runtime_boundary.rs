@@ -1926,19 +1926,19 @@ fn studio_inspect_serves_real_tex_span_entries_for_the_tex_span_scene() {
 #[test]
 fn studio_inspector_view_tracks_committed_transient_and_restarted_frames() {
     let (child, stdout, authority, query) = spawn_studio_for("tex_span.v1");
-    // tex_span waits 0.25 s; windowed runtime captures ceil(0.25 * 30) = 8
-    // frames even though the CLI requests 8 fps. Its first sample is 1/30 s.
+    // tex_span starts at constructed frame zero, then captures
+    // ceil(0.25 * 30) = 8 samples on the native windowed clock.
     let inspect = || studio_get(&authority, &format!("/api/inspect?{query}"));
     let assert_view = |response: &str, frame| {
         assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
         let view = format!(
-            "\"view\":{{\"frame_index\":{frame},\"frame_count\":8,\"fps\":30,\"width\":96,\"height\":54,\"scale\":6.75,\"origin\":[48,27],\"input_events\":false}}"
+            "\"view\":{{\"frame_index\":{frame},\"frame_count\":9,\"fps\":30,\"width\":96,\"height\":54,\"scale\":6.75,\"origin\":[48,27],\"y_up\":true,\"input_events\":true,\"input_revision\":"
         );
         assert!(response.contains(&view), "{response}");
     };
     let initial = inspect();
     assert_view(&initial, 0);
-    assert!(initial.contains("\"scene_time\":0.03333333333333333"));
+    assert!(initial.contains("\"scene_time\":0,"));
 
     let committed = studio_post(
         &authority,
@@ -1961,10 +1961,13 @@ fn studio_inspector_view_tracks_committed_transient_and_restarted_frames() {
     let outside = studio_post(
         &authority,
         &format!("/api/scrub?{query}"),
-        b"frame=8&commit=false",
+        b"frame=9&commit=false",
     );
     assert!(outside.starts_with("HTTP/1.1 422"), "{outside}");
-    assert!(outside.contains("outside 0..8"), "{outside}");
+    assert!(
+        outside.contains("native target exceeds the scene or execution budget"),
+        "{outside}"
+    );
     assert_view(&inspect(), 0);
 
     let event = studio_post(
@@ -1973,7 +1976,10 @@ fn studio_inspector_view_tracks_committed_transient_and_restarted_frames() {
         b"type=key_press&key=arrow_left",
     );
     assert!(event.starts_with("HTTP/1.1 422"), "{event}");
-    assert!(event.contains("no live command/event adapter"), "{event}");
+    assert!(
+        event.contains("worker_generation, frame and revision are required"),
+        "{event}"
+    );
     assert_view(&inspect(), 0);
 
     let restart = studio_post(&authority, &format!("/api/restart?{query}"), b"");

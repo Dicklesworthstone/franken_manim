@@ -92,8 +92,8 @@ mod tests {
             "studio",
             "--restore-session",
             "missing.fmns",
-            "@builtin",
-            "circle_shift.v1",
+            "recorded.fmtl",
+            "RecordedScene",
         ])
         .unwrap() else {
             panic!("Studio invocation")
@@ -102,11 +102,53 @@ mod tests {
         let error = prepare(
             &fs,
             &command,
-            "circle_shift.v1",
+            "RecordedScene",
             &config,
             fmn_studio::ProtocolLimits::default(),
         )
         .unwrap_err();
         assert!(error.to_string().contains("registered live"));
+    }
+
+    #[test]
+    fn ordinary_native_builtins_receive_saved_session_contexts() {
+        let fs = fmn_platform::fs::VirtualFs::new();
+        for name in [
+            "circle_shift.v1",
+            "tex_span.v1",
+            "formula_sheet.v1",
+            "semantic_witness.v1",
+            "sound_cue.v1",
+            "semantic_witness_camera.v1",
+        ] {
+            let Invocation::Studio(mut command) = parse_args(["studio", "@builtin", name]).unwrap()
+            else {
+                panic!("Studio invocation")
+            };
+            let config = resolve_render_config(&fs, &command.render).unwrap();
+            let (context, saved) = prepare(
+                &fs,
+                &command,
+                name,
+                &config,
+                fmn_studio::ProtocolLimits::default(),
+            )
+            .unwrap();
+            assert!(context.is_some(), "{name}");
+            assert!(saved.is_none());
+            command.restore_session = Some(PathBuf::from("missing.fmns"));
+            let error = prepare(
+                &fs,
+                &command,
+                name,
+                &config,
+                fmn_studio::ProtocolLimits::default(),
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("existing regular file"),
+                "{name}: {error}"
+            );
+        }
     }
 }

@@ -247,7 +247,7 @@ pub fn v_fade_out(vmobject: Mob) -> VFade {
 pub fn v_fade_in_then_out(vmobject: Mob) -> VFade {
     let mut anim = v_fade_in(vmobject);
     anim.state.config.name = "VFadeInThenOut".to_owned();
-    anim.state.config.rate_func = RateFunc::Base(rate::there_and_back);
+    anim.state.config.rate_func = RateFunc::Catalog(rate::CatalogRate::ThereAndBack);
     anim.state.config.remover = true;
     anim.state.config.final_alpha_value = 0.5;
     anim

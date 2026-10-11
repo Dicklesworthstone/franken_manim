@@ -124,6 +124,17 @@ pub mod builtins {
 
     const COLORS: [Srgb; 7] = [BLUE_C, GREEN_B, MAROON_C, RED_C, TEAL_B, YELLOW_C, WHITE];
 
+    // Match Scene::add_mobject exactly without requiring a playback context.
+    // Live programs use these constructors before their first stepped frame.
+    fn add_builtin_mobject(
+        stage: &mut crate::mobject::Stage,
+        mobject: impl Into<Mobject>,
+    ) -> crate::Result<Mob> {
+        let mob = stage.add(mobject);
+        stage.add_to_scene(mob)?;
+        Ok(mob)
+    }
+
     /// One native program from [`PRIMITIVE_SCENE_NAMES`].
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct PrimitiveScene {
@@ -131,14 +142,20 @@ pub mod builtins {
         name: &'static str,
     }
 
-    impl SceneConstruct for PrimitiveScene {
-        fn name(&self) -> &str {
-            self.name
-        }
+    impl PrimitiveScene {
+        /// Duration of the authored movement before the closing hold.
+        pub const PLAY_DURATION: f64 = 0.25;
+        /// Duration of the closing hold, rounded as its own native segment.
+        pub const WAIT_DURATION: f64 = 0.125;
 
-        fn construct(&mut self, stage: &mut Stage<'_>) -> crate::Result<()> {
+        /// Construct and root the original primitive family without playback.
+        /// Returns the main object whose animation follows this construction.
+        ///
+        /// # Errors
+        /// Preserves the geometry and scene-rooting errors of `construct`.
+        pub fn populate(&self, stage: &mut crate::mobject::Stage) -> crate::Result<Mob> {
             let color = COLORS[self.index % COLORS.len()];
-            let main = stage.add(primitive(self.index, color)?)?;
+            let main = add_builtin_mobject(stage, primitive(self.index, color)?)?;
             stage.set_fill(
                 main,
                 Some(color),
@@ -157,7 +174,8 @@ pub mod builtins {
 
             // A quiet back layer makes painter ordering and alpha composition
             // part of every sequence, not only the layered fixture.
-            let back = stage.add(
+            let back = add_builtin_mobject(
+                stage,
                 Circle::new()
                     .radius(0.32 + 0.015 * self.index as f64)
                     .arc_center([-0.55, 0.28, 0.0]),
@@ -171,18 +189,29 @@ pub mod builtins {
             );
             stage.set_stroke(back, None, Some(0.0), Some(0.0), None, true);
             stage.set_z_index(back, -1, true);
-            stage.arena_mut().add_to_scene(back)?;
+            stage.add_to_scene(back)?;
 
             let start_x = -0.72 + 0.06 * (self.index % 5) as f64;
             let start_y = -0.32 + 0.11 * (self.index % 7) as f64;
             stage.shift(main, [start_x, start_y, 0.0]);
+            Ok(main)
+        }
 
+        /// Build the same fluent movement used by offline playback.
+        /// Prepare it at its segment boundary so edits to `main` remain visible.
+        ///
+        /// # Errors
+        /// Preserves the fluent builder's argument-validation errors.
+        pub fn animation(
+            &self,
+            main: Mob,
+        ) -> Result<crate::mobject::AnimBuilder, crate::mobject::AnimateError> {
             let builder = main.animate().set_anim_args(AnimateArgs {
-                run_time: Some(0.25),
+                run_time: Some(Self::PLAY_DURATION),
                 rate_func: Some(crate::core::rate::linear),
                 ..AnimateArgs::default()
             })?;
-            let builder = if self.index < 11 {
+            if self.index < 11 {
                 builder.shift([
                     1.0 + 0.04 * (self.index % 4) as f64,
                     0.18 - 0.03 * (self.index % 3) as f64,
@@ -194,9 +223,19 @@ pub mod builtins {
                 builder
                     .shift([0.76, 0.16, 0.0])
                     .and_then(|builder| builder.scale(0.9))
-            }?;
-            stage.play(builder)?;
-            stage.wait(0.125)?;
+            }
+        }
+    }
+
+    impl SceneConstruct for PrimitiveScene {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn construct(&mut self, stage: &mut Stage<'_>) -> crate::Result<()> {
+            let main = self.populate(stage.arena_mut())?;
+            stage.play(self.animation(main)?)?;
+            stage.wait(Self::WAIT_DURATION)?;
             Ok(())
         }
     }
@@ -233,21 +272,39 @@ pub mod builtins {
         name: &'static str,
     }
 
+    impl SoundCueScene {
+        /// The initial hold before the authored sound request.
+        pub const BEFORE_SOUND_DURATION: f64 = 0.5;
+        /// The hold after the sound request, rounded independently.
+        pub const AFTER_SOUND_DURATION: f64 = 0.5;
+
+        /// Construct the sound scene's visual content without advancing time
+        /// or submitting the sound request. The request belongs between the
+        /// two holds, at the actual completed native frame time.
+        ///
+        /// # Errors
+        /// Preserves scene-rooting failures.
+        pub fn populate(&self, stage: &mut crate::mobject::Stage) -> crate::Result<Mob> {
+            let main = add_builtin_mobject(stage, Circle::new().radius(0.6).color(WHITE))?;
+            stage.set_fill(main, Some(TEAL_B), Some(0.3), Some(0.0), true);
+            stage.set_stroke(main, Some(WHITE), Some(1.2), Some(0.95), None, true);
+            Ok(main)
+        }
+    }
+
     impl SceneConstruct for SoundCueScene {
         fn name(&self) -> &str {
             self.name
         }
 
         fn construct(&mut self, stage: &mut Stage<'_>) -> crate::Result<()> {
-            let main = stage.add(Circle::new().radius(0.6).color(WHITE))?;
-            stage.set_fill(main, Some(TEAL_B), Some(0.3), Some(0.0), true);
-            stage.set_stroke(main, Some(WHITE), Some(1.2), Some(0.95), None, true);
-            stage.wait(0.5)?;
+            self.populate(stage.arena_mut())?;
+            stage.wait(Self::BEFORE_SOUND_DURATION)?;
             stage
                 .scene_mut()
                 .add_sound(SOUND_CUE_ASSET_NAME, 0.0, None, None)
                 .map(|_| ())?;
-            stage.wait(0.5)?;
+            stage.wait(Self::AFTER_SOUND_DURATION)?;
             Ok(())
         }
     }
@@ -281,11 +338,41 @@ pub mod builtins {
     }
 
     impl TexSpanScene {
+        /// The authored hold after text and mathematics have been constructed.
+        pub const WAIT_DURATION: f64 = 0.25;
+
         /// Consume the scene into the span records gathered at
         /// construct time, in collection order.
         #[must_use]
         pub fn into_span_records(self) -> Vec<crate::library::SpanRecord> {
             self.collector.into_records()
+        }
+
+        /// Construct and root both span-mapped values without playback.
+        /// Returns the math and text roots, in their original draw-list order;
+        /// `into_span_records` retains their native source maps for inspection.
+        ///
+        /// # Errors
+        /// Preserves typesetting, scene-rooting, and span-collection failures.
+        pub fn populate(
+            &mut self,
+            stage: &mut crate::mobject::Stage,
+            engine: &crate::tex::TexEngine,
+        ) -> crate::Result<[Mob; 2]> {
+            let tex = Tex::new(r"\frac{x}{y}").build(engine)?;
+            let text = Text::new("hello")
+                .build(&FontBook::bundled().map_err(crate::library::TextMobjectError::Text)?)?;
+            let (tex_data, text_data) = (tex.span_map(), text.span_map());
+            // Record order is the span table's order: root ordinal 0 is
+            // the formula, 1 is the text. Both roots share the default
+            // z-index, so the stable draw-list sort keeps insertion order
+            // and the recorded ordinals hold for every reconstructed
+            // frame stage.
+            let tex_root = add_builtin_mobject(stage, tex.vmob)?;
+            self.collector.record(stage, tex_root, tex_data)?;
+            let text_root = add_builtin_mobject(stage, text.vmob)?;
+            self.collector.record(stage, text_root, text_data)?;
+            Ok([tex_root, text_root])
         }
     }
 
@@ -299,20 +386,8 @@ pub mod builtins {
         }
 
         fn construct(&mut self, stage: &mut Stage<'_>) -> crate::Result<()> {
-            let tex = Tex::new(r"\frac{x}{y}").build(stage.tex_engine()?)?;
-            let text = Text::new("hello")
-                .build(&FontBook::bundled().map_err(crate::library::TextMobjectError::Text)?)?;
-            let (tex_data, text_data) = (tex.span_map(), text.span_map());
-            // Record order is the span table's order: root ordinal 0 is
-            // the formula, 1 is the text. Both roots share the default
-            // z-index, so the stable draw-list sort keeps insertion order
-            // and the recorded ordinals hold for every reconstructed
-            // frame stage.
-            let tex_root = stage.add(tex.vmob)?;
-            self.collector.record(stage.arena(), tex_root, tex_data)?;
-            let text_root = stage.add(text.vmob)?;
-            self.collector.record(stage.arena(), text_root, text_data)?;
-            stage.wait(0.25)?;
+            self.populate(stage.scene.stage_mut(), stage.typesetting.engine()?)?;
+            stage.wait(Self::WAIT_DURATION)?;
             Ok(())
         }
     }
@@ -366,28 +441,33 @@ pub mod builtins {
         name: &'static str,
     }
 
-    impl SceneConstruct for FormulaSheetScene {
-        fn name(&self) -> &str {
-            self.name
-        }
+    impl FormulaSheetScene {
+        /// Duration of the first formula's movement.
+        pub const PLAY_DURATION: f64 = 0.25;
+        /// Duration of the closing hold, rounded as its own native segment.
+        pub const WAIT_DURATION: f64 = 0.125;
 
-        fn tex_preflight(&self) -> Vec<TypesetRequest<'_>> {
-            FORMULA_SHEET
-                .iter()
-                .map(|source| TypesetRequest::math(source))
-                .collect()
-        }
-
-        fn construct(&mut self, stage: &mut Stage<'_>) -> crate::Result<()> {
+        /// Build the original formula grid without playback. Returns the first
+        /// formula to animate and each formula's native source-span record.
+        /// The caller supplies the resolved, preflighted native math engine.
+        ///
+        /// # Errors
+        /// Preserves typesetting, scene-rooting, and span-collection failures.
+        pub fn populate(
+            &self,
+            stage: &mut crate::mobject::Stage,
+            engine: &crate::tex::TexEngine,
+        ) -> crate::Result<(Option<Mob>, Vec<crate::library::SpanRecord>)> {
             const COLUMNS: usize = 4;
             const CELL_WIDTH: f64 = 3.4;
             const CELL_HEIGHT: f64 = 1.45;
             let mut first = None;
+            let mut collector = crate::library::SpanCollector::default();
             for (index, source) in FORMULA_SHEET.iter().enumerate() {
-                let formula = Tex::new(source)
-                    .font_size(26.0)
-                    .build(stage.tex_engine()?)?;
-                let formula = stage.add(formula.vmob)?;
+                let formula = Tex::new(source).font_size(26.0).build(engine)?;
+                let spans = formula.span_map();
+                let formula = add_builtin_mobject(stage, formula.vmob)?;
+                collector.record(stage, formula, spans)?;
                 let width = stage.get_width(formula);
                 if width > CELL_WIDTH - 0.3 {
                     stage.scale(formula, (CELL_WIDTH - 0.3) / width);
@@ -404,18 +484,45 @@ pub mod builtins {
                 );
                 first.get_or_insert(formula);
             }
+            Ok((first, collector.into_records()))
+        }
+
+        /// Build the original first-formula movement at its segment boundary.
+        ///
+        /// # Errors
+        /// Preserves the fluent builder's argument-validation errors.
+        pub fn animation(
+            first: Mob,
+        ) -> Result<crate::mobject::AnimBuilder, crate::mobject::AnimateError> {
+            first
+                .animate()
+                .set_anim_args(AnimateArgs {
+                    run_time: Some(Self::PLAY_DURATION),
+                    rate_func: Some(crate::core::rate::linear),
+                    ..AnimateArgs::default()
+                })?
+                .shift([0.0, 0.2, 0.0])
+        }
+    }
+
+    impl SceneConstruct for FormulaSheetScene {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn tex_preflight(&self) -> Vec<TypesetRequest<'_>> {
+            FORMULA_SHEET
+                .iter()
+                .map(|source| TypesetRequest::math(source))
+                .collect()
+        }
+
+        fn construct(&mut self, stage: &mut Stage<'_>) -> crate::Result<()> {
+            let (first, _) = self.populate(stage.scene.stage_mut(), stage.typesetting.engine()?)?;
             if let Some(first) = first {
-                let builder = first
-                    .animate()
-                    .set_anim_args(AnimateArgs {
-                        run_time: Some(0.25),
-                        rate_func: Some(crate::core::rate::linear),
-                        ..AnimateArgs::default()
-                    })?
-                    .shift([0.0, 0.2, 0.0])?;
-                stage.play(builder)?;
+                stage.play(Self::animation(first)?)?;
             }
-            stage.wait(0.125)?;
+            stage.wait(Self::WAIT_DURATION)?;
             Ok(())
         }
     }
@@ -526,19 +633,22 @@ pub mod builtins {
 
     /// Fill `mob` (and its family when `family`) with one opaque colour and
     /// no stroke, so its pixels carry exactly that colour.
-    fn paint_solid(stage: &mut Stage<'_>, mob: Mob, color: [u8; 3], family: bool) {
+    fn paint_solid(stage: &mut crate::mobject::Stage, mob: Mob, color: [u8; 3], family: bool) {
         stage.set_fill(mob, Some(witness_color(color)), Some(1.0), None, family);
         stage.set_stroke(mob, None, Some(0.0), None, None, family);
     }
 
     /// Paint the point-bearing members of `root`, in family order, one
     /// colour each; the member count must match.
-    fn paint_glyphs(stage: &mut Stage<'_>, root: Mob, colors: &[[u8; 3]]) -> crate::Result<()> {
-        let arena = stage.arena();
-        let glyphs: Vec<Mob> = arena
+    fn paint_glyphs(
+        stage: &mut crate::mobject::Stage,
+        root: Mob,
+        colors: &[[u8; 3]],
+    ) -> crate::Result<()> {
+        let glyphs: Vec<Mob> = stage
             .family(root)
             .into_iter()
-            .filter(|&member| arena.get_points(member).is_some_and(|p| !p.is_empty()))
+            .filter(|&member| stage.get_points(member).is_some_and(|p| !p.is_empty()))
             .collect();
         if glyphs.len() != colors.len() {
             return Err(SceneError::Integration(IntegrationError::new(
@@ -553,6 +663,55 @@ pub mod builtins {
         Ok(())
     }
 
+    impl SemanticWitnessScene {
+        /// The authored hold after the semantic witness has been constructed.
+        pub const WAIT_DURATION: f64 = 0.25;
+
+        /// Build the original asymmetric geometry and text without playback.
+        /// Returns native source-span records for the text and math roots.
+        ///
+        /// # Errors
+        /// Preserves geometry, typesetting, glyph-count, rooting, and span errors.
+        pub fn populate(
+            &self,
+            stage: &mut crate::mobject::Stage,
+            engine: &crate::tex::TexEngine,
+        ) -> crate::Result<Vec<crate::library::SpanRecord>> {
+            let mut collector = crate::library::SpanCollector::default();
+            let triangle = add_builtin_mobject(stage, Polygon::new(witness::TRIANGLE_VERTICES))?;
+            paint_solid(stage, triangle, witness::TRIANGLE, true);
+            let f_shape = add_builtin_mobject(stage, Polygon::new(witness::F_VERTICES))?;
+            paint_solid(stage, f_shape, witness::F_SHAPE, true);
+            for (center, color) in [
+                (witness::UP_DOT_CENTER, witness::UP_DOT),
+                (witness::LEFT_DOT_CENTER, witness::LEFT_DOT),
+            ] {
+                let dot = add_builtin_mobject(
+                    stage,
+                    Dot::new().point(center).radius(witness::DOT_RADIUS),
+                )?;
+                paint_solid(stage, dot, color, true);
+            }
+            let text = Text::new(witness::TEXT)
+                .font_size(witness::FONT_SIZE)
+                .build(&FontBook::bundled().map_err(crate::library::TextMobjectError::Text)?)?;
+            let text_spans = text.span_map();
+            let text = add_builtin_mobject(stage, text.vmob)?;
+            collector.record(stage, text, text_spans)?;
+            stage.move_to(text, witness::TEXT_CENTER, ORIGIN);
+            paint_glyphs(stage, text, &[witness::TEXT_A, witness::TEXT_B])?;
+            let tex = Tex::new(witness::TEX)
+                .font_size(witness::FONT_SIZE)
+                .build(engine)?;
+            let tex_spans = tex.span_map();
+            let tex = add_builtin_mobject(stage, tex.vmob)?;
+            collector.record(stage, tex, tex_spans)?;
+            stage.move_to(tex, witness::TEX_CENTER, ORIGIN);
+            paint_glyphs(stage, tex, &[witness::TEX_BASE, witness::TEX_SUPERSCRIPT])?;
+            Ok(collector.into_records())
+        }
+    }
+
     impl SceneConstruct for SemanticWitnessScene {
         fn name(&self) -> &str {
             self.name
@@ -563,32 +722,10 @@ pub mod builtins {
         }
 
         fn construct(&mut self, stage: &mut Stage<'_>) -> crate::Result<()> {
-            let triangle = stage.add(Polygon::new(witness::TRIANGLE_VERTICES))?;
-            paint_solid(stage, triangle, witness::TRIANGLE, true);
-            let f_shape = stage.add(Polygon::new(witness::F_VERTICES))?;
-            paint_solid(stage, f_shape, witness::F_SHAPE, true);
-            for (center, color) in [
-                (witness::UP_DOT_CENTER, witness::UP_DOT),
-                (witness::LEFT_DOT_CENTER, witness::LEFT_DOT),
-            ] {
-                let dot = stage.add(Dot::new().point(center).radius(witness::DOT_RADIUS))?;
-                paint_solid(stage, dot, color, true);
-            }
-            let text = Text::new(witness::TEXT)
-                .font_size(witness::FONT_SIZE)
-                .build(&FontBook::bundled().map_err(crate::library::TextMobjectError::Text)?)?;
-            let text = stage.add(text.vmob)?;
-            stage.move_to(text, witness::TEXT_CENTER, ORIGIN);
-            paint_glyphs(stage, text, &[witness::TEXT_A, witness::TEXT_B])?;
-            let tex = Tex::new(witness::TEX)
-                .font_size(witness::FONT_SIZE)
-                .build(stage.tex_engine()?)?;
-            let tex = stage.add(tex.vmob)?;
-            stage.move_to(tex, witness::TEX_CENTER, ORIGIN);
-            paint_glyphs(stage, tex, &[witness::TEX_BASE, witness::TEX_SUPERSCRIPT])?;
+            self.populate(stage.scene.stage_mut(), stage.typesetting.engine()?)?;
             // A short hold so every route emits real frames: the CLI refuses
             // a generation with none.
-            stage.wait(0.25)?;
+            stage.wait(Self::WAIT_DURATION)?;
             Ok(())
         }
     }
@@ -604,6 +741,11 @@ pub mod builtins {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct InteractiveCanvas;
 
+    impl InteractiveCanvas {
+        /// Duration of the original canvas's authored hold.
+        pub const WAIT_DURATION: f64 = 2.0;
+    }
+
     impl SceneConstruct for InteractiveCanvas {
         fn name(&self) -> &str {
             INTERACTIVE_SCENE_NAME
@@ -611,7 +753,7 @@ pub mod builtins {
 
         fn construct(&mut self, stage: &mut Stage<'_>) -> crate::Result<()> {
             populate_interactive_canvas(stage.arena_mut())?;
-            stage.wait(2.0)?;
+            stage.wait(Self::WAIT_DURATION)?;
             Ok(())
         }
     }
@@ -703,6 +845,129 @@ pub mod builtins {
             // The only remaining corpus index is 24, the layered polygon.
             _ => Mobject::try_from(RegularPolygon::new(7).radius(0.56).color(color))?,
         })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn native_builtin_population_has_no_playback_side_effects() {
+            for name in PRIMITIVE_SCENE_NAMES {
+                let builtin = primitive_scene(name).unwrap();
+                let mut scene = Scene::new(RuntimeConfig::default(), 42).unwrap();
+                let main = builtin.populate(scene.stage_mut()).unwrap();
+                assert_eq!(scene.time().frames(), 0, "{name}");
+                assert_eq!(scene.play_count(), 0, "{name}");
+                assert_eq!(scene.stage().time(), 0.0, "{name}");
+                assert_eq!(scene.mobjects().len(), 2, "{name}");
+                assert_eq!(scene.mobjects()[1], main, "{name}");
+                assert_eq!(scene.stage().z_index(scene.mobjects()[0]), -1, "{name}");
+
+                let before = scene.stage().snapshot().to_bytes().unwrap();
+                let _builder = builtin.animation(main).unwrap();
+                assert_eq!(
+                    scene.stage().snapshot().to_bytes().unwrap(),
+                    before,
+                    "{name}"
+                );
+            }
+
+            let mut scene = Scene::new(RuntimeConfig::default(), 42).unwrap();
+            let sound = sound_scene(SOUND_CUE_SCENE_NAME).unwrap();
+            let main = sound.populate(scene.stage_mut()).unwrap();
+            assert_eq!(scene.mobjects(), &[main]);
+            assert_eq!(scene.time().frames(), 0);
+            assert_eq!(scene.play_count(), 0);
+            assert!(scene.sound_requests().is_empty());
+        }
+
+        #[test]
+        fn native_builtin_animation_prepares_from_the_current_edited_geometry() {
+            let builtin = primitive_scene("circle_shift.v1").unwrap();
+            let mut stage = crate::mobject::Stage::new();
+            let main = builtin.populate(&mut stage).unwrap();
+            let builder = builtin.animation(main).unwrap();
+            // An editor action after registration must survive preparation.
+            stage.shift(main, [3.25, -1.5, 0.0]);
+            let edited = stage.get_center(main);
+            let mut animation = prepare_animation(builder, &mut stage).unwrap();
+            animation.begin(&mut stage).unwrap();
+            for (actual, expected) in stage.get_center(main).into_iter().zip(edited) {
+                assert!((actual - expected).abs() < 1e-6);
+            }
+            animation.finish(&mut stage);
+            let final_center = stage.get_center(main);
+            assert!((final_center[0] - edited[0] - 1.0).abs() < 1e-6);
+            assert!((final_center[1] - edited[1] - 0.18).abs() < 1e-6);
+            assert!((final_center[2] - edited[2]).abs() < 1e-6);
+        }
+
+        fn check_spans(stage: &crate::mobject::Stage, records: &[crate::library::SpanRecord]) {
+            for record in records {
+                let root = stage.roots()[record.root_ordinal];
+                let children = stage.get(root).unwrap().submobjects();
+                assert_eq!(record.entries.len(), children.len());
+                assert!(!record.entries.is_empty());
+                for span in &record.entries {
+                    assert!(
+                        record
+                            .source
+                            .get(span.start..span.end)
+                            .is_some_and(|s| !s.is_empty())
+                    );
+                }
+            }
+        }
+
+        fn stage_with_existing_root() -> crate::mobject::Stage {
+            let mut stage = crate::mobject::Stage::new();
+            let root = stage.add(Mobject::new());
+            stage.add_to_scene(root).unwrap();
+            stage
+        }
+
+        #[test]
+        fn native_builtin_span_records_bind_actual_roots_and_child_order() {
+            let session = TexSession::default();
+            let engine = session.engine().unwrap();
+
+            let mut stage = stage_with_existing_root();
+            let mut text = tex_span_scene(TEX_SPAN_SCENE_NAME).unwrap();
+            let roots = text.populate(&mut stage, engine).unwrap();
+            let records = text.into_span_records();
+            assert_eq!(&stage.roots()[1..], &roots);
+            assert_eq!(records.len(), 2);
+            assert_eq!(records[0].root_ordinal, 1);
+            assert_eq!(records[1].root_ordinal, 2);
+            assert_eq!(&*records[0].source, r"\frac{x}{y}");
+            assert_eq!(&*records[1].source, "hello");
+            check_spans(&stage, &records);
+
+            let mut stage = stage_with_existing_root();
+            let formula = formula_sheet_scene(FORMULA_SHEET_SCENE_NAME).unwrap();
+            let (first, records) = formula.populate(&mut stage, engine).unwrap();
+            assert_eq!(first, Some(stage.roots()[1]));
+            assert_eq!(stage.roots().len(), 21);
+            assert_eq!(records.len(), 20);
+            for (index, record) in records.iter().enumerate() {
+                assert_eq!(record.root_ordinal, index + 1);
+                assert_eq!(&*record.source, FORMULA_SHEET[index]);
+            }
+            check_spans(&stage, &records);
+
+            let mut stage = stage_with_existing_root();
+            let records = SemanticWitnessScene::new()
+                .populate(&mut stage, engine)
+                .unwrap();
+            assert_eq!(stage.roots().len(), 7);
+            assert_eq!(records.len(), 2);
+            assert_eq!(records[0].root_ordinal, 5);
+            assert_eq!(records[1].root_ordinal, 6);
+            assert_eq!(&*records[0].source, "AB");
+            assert_eq!(&*records[1].source, "x^2");
+            check_spans(&stage, &records);
+        }
     }
 }
 

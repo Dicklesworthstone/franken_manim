@@ -291,8 +291,8 @@ mod tests {
     }
 
     #[test]
-    fn unrequested_settings_keep_the_exact_legacy_argv() {
-        let expected = "-hide_banner -loglevel error -f rawvideo -pix_fmt nv12 -video_size 64x36 -framerate 30000/1001 -i - -c:v libx264 -pix_fmt yuv420p -movflags +faststart -color_primaries bt709 -color_trc bt709 -colorspace bt709 -color_range tv -y /out.mp4";
+    fn unrequested_settings_keep_the_exact_default_quality_argv() {
+        let expected = "-hide_banner -loglevel error -f rawvideo -pix_fmt nv12 -video_size 64x36 -framerate 30000/1001 -color_primaries bt709 -color_trc bt709 -colorspace bt709 -color_range tv -i - -c:v libx264 -pix_fmt yuv420p -movflags +faststart -color_primaries bt709 -color_trc bt709 -colorspace bt709 -color_range tv -y /out.mp4";
         for choice in [EncoderChoice::Auto, EncoderChoice::Named("libx264".into())] {
             let mut job = job("libx264");
             job.encoder = choice;
