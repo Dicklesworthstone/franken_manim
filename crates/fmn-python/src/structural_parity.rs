@@ -56,6 +56,73 @@ pub fn run_portal_gauntlet_class_sweep() -> Result<StructuralParityReport, Strin
     )
 }
 
+/// One minimized corpus construct checked against the pinned Reference.
+#[derive(Debug)]
+pub struct CorpusRegressionCase {
+    /// The bead that fixed it.
+    pub bead: String,
+    /// The construct, as source.
+    pub construct: String,
+    /// What the embedded portal shows.
+    pub observed: String,
+    /// What the pinned Reference showed.
+    pub expected: String,
+    /// Where `expected` comes from (Reference file and function, measured).
+    pub provenance: String,
+}
+
+/// Minimized constructs from corpus scenes the portal once refused or
+/// rendered differently (`tests/reference_corpus_regressions.py`), each
+/// checked against what the pinned Reference showed.
+///
+/// # Errors
+/// A case whose observation differs from its expectation, or no cases.
+pub fn run_portal_gauntlet_reference_corpus_regressions()
+-> Result<Vec<CorpusRegressionCase>, String> {
+    crate::with_python_test_module("reference corpus regressions", |py, _module, globals| {
+        let code = std::ffi::CString::new(include_str!("../tests/reference_corpus_regressions.py"))
+            .map_err(|error| error.to_string())?;
+        py.run(code.as_c_str(), Some(globals), Some(globals))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        let records = globals
+            .get_item("run_reference_corpus_regressions")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "corpus regressions entry point is absent".to_owned())?
+            .call0()
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        let mut cases = Vec::new();
+        for record in records.try_iter().map_err(|error| error.to_string())? {
+            let record = record.map_err(|error| error.to_string())?;
+            let text = |key: &str| -> Result<String, String> {
+                record
+                    .get_item(key)
+                    .and_then(|value| value.extract())
+                    .map_err(|error| format!("{key}: {error}"))
+            };
+            let case = CorpusRegressionCase {
+                bead: text("bead")?,
+                construct: text("construct")?,
+                observed: text("observed")?,
+                expected: text("expected")?,
+                provenance: text("provenance")?,
+            };
+            if case.observed != case.expected {
+                return Err(format!(
+                    "{} {}: observed {:?}, the Reference showed {:?}",
+                    case.bead, case.construct, case.observed, case.expected
+                ));
+            }
+            cases.push(case);
+        }
+        if cases.is_empty() {
+            return Err("no corpus regression cases ran".to_owned());
+        }
+        Ok(cases)
+    })
+}
+
 /// What the envelope drill observed.
 #[derive(Debug)]
 pub struct EnvelopeDrillReport {

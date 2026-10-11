@@ -100,7 +100,9 @@ class DecimalAuthoringTests(unittest.TestCase):
             if bound:
                 scene.add(m.VGroup(mob))
             before = snapshot(mob)
-            for value in (float("nan"), complex(0, float("nan")),
+            # A real NaN is now a display token (fm-5wq.30); complex
+            # nonfinite components still refuse.
+            for value in (complex(0, float("nan")),
                           complex(float("inf"), 0), complex(1, float("inf")), "seven", object()):
                 with self.subTest(bound=bound, value=value):
                     with self.assertRaises((ValueError, TypeError)):

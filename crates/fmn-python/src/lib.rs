@@ -42,8 +42,9 @@ mod structural_parity;
 pub use portal_texture::{run_portal_gauntlet_surface_lifecycle, run_portal_gauntlet_textures};
 #[cfg(feature = "gauntlet")]
 pub use structural_parity::{
-    EnvelopeDrillReport, StructuralParityReport, run_portal_gauntlet_class_sweep,
-    run_portal_gauntlet_envelope_drill, run_portal_gauntlet_structural_facts,
+    CorpusRegressionCase, EnvelopeDrillReport, StructuralParityReport,
+    run_portal_gauntlet_class_sweep, run_portal_gauntlet_envelope_drill,
+    run_portal_gauntlet_reference_corpus_regressions, run_portal_gauntlet_structural_facts,
 };
 mod portal_provenance;
 mod report;

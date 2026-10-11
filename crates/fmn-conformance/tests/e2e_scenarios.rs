@@ -2820,6 +2820,27 @@ fn python_structural_envelope_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenar
     Ok(RunOutcome::ok().with_counter("envelope_violations_detected", 1))
 }
 
+/// Reference corpus regressions (fm-5wq.30 first; fm-5wq.27..29 and
+/// fm-sq8.10 add their cases): minimized constructs from corpus scenes the
+/// portal once refused or rendered differently, each checked against what the
+/// pinned Reference showed. One log event per case; a zero-case run fails.
+fn python_reference_corpus_regressions_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let cases = manimlib::run_portal_gauntlet_reference_corpus_regressions()
+        .map_err(|error| fail(format!("Reference corpus regressions: {error}")))?;
+    for case in &cases {
+        ctx.event(
+            LogEvent::new("e2e.python.reference_corpus_regression")
+                .field("bead", case.bead.as_str())
+                .field("construct", case.construct.as_str())
+                .field("observed", case.observed.as_str())
+                .field("expected", case.expected.as_str())
+                .field("provenance", case.provenance.as_str())
+                .field("verdict", "pass"),
+        );
+    }
+    Ok(RunOutcome::ok().with_counter("corpus_regression_cases", cases.len() as u64))
+}
+
 fn python_svg_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let report = manimlib::run_portal_gauntlet_svg()
         .map_err(|error| fail(format!("Python native SVG: {error}")))?;
@@ -8022,6 +8043,23 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "parity.reference_corpus_regressions.v1",
+        ScenarioClass::ParityDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_reference_corpus_regressions_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("corpus_regression_cases", 4),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.reference_corpus_regression",
+            vec![
+                FieldPred::str_eq("bead", "fm-5wq.30"),
+                FieldPred::str_eq("verdict", "pass"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.python_svg.v1",
         ScenarioClass::RenderMatrix,
         Surface::PythonInProcess,
@@ -9813,6 +9851,16 @@ fn python_structural_envelope_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "parity.structural_envelope.v1")
         .expect("structural envelope scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn python_reference_corpus_regressions_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "parity.reference_corpus_regressions.v1")
+        .expect("Reference corpus regressions scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

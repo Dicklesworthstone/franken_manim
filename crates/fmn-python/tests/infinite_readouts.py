@@ -1,4 +1,4 @@
-"""Real infinity display over finite native glyph records (fm-5wq.30).
+"""Real infinity and NaN display over finite native glyph records (fm-5wq.30).
 
 No extended-real interpolation or NaN-geometry policy is introduced here.
 """
@@ -140,10 +140,27 @@ class InfiniteReadoutTests(unittest.TestCase):
         number.set_value(3.5)
         self.assertEqual(number.get_tex(), '3.50')
 
-    def test_nan_and_complex_nonfinite_values_still_refuse_before_publication(self):
+    def test_real_nan_is_a_display_token_like_infinity(self):
+        # The pinned Reference formats NaN through the public formatter
+        # (`nan`, `+nan`), as _2023/clt/wordy_scenes.py AverageDiceValues shows.
+        for kwargs, expected, glyphs in ((dict(), 'nan', 3), (dict(include_sign=True), '+nan', 4),
+                                         (dict(unit='m'), 'nan', 4)):
+            with self.subTest(**kwargs):
+                number = m.DecimalNumber(math.nan, **kwargs)
+                self.assertEqual(number.get_tex(), expected)
+                self.assertTrue(math.isnan(number.get_value()))
+                self.assertEqual(len(number.family_members_with_points()), glyphs)
+                self.assert_finite_geometry(number)
+        number = m.DecimalNumber(1.5)
+        number.set_value(math.nan)
+        self.assertEqual(number.get_tex(), 'nan')
+        number.set_value(2.25)
+        self.assertEqual(number.get_tex(), '2.25')
+
+    def test_complex_nonfinite_values_still_refuse_before_publication(self):
         number = m.DecimalNumber(math.inf)
         before = snapshot(number)
-        for value in (math.nan, complex(math.inf, 0), complex(0, math.inf), complex(0, math.nan)):
+        for value in (complex(math.inf, 0), complex(0, math.inf), complex(0, math.nan)):
             with self.subTest(value=value):
                 with self.assertRaises(ValueError): number.set_value(value)
                 self.assertEqual(snapshot(number), before)
@@ -154,6 +171,10 @@ class InfiniteReadoutTests(unittest.TestCase):
         with self.assertRaises(OverflowError): number.set_value(math.inf)
         self.assertEqual(snapshot(number), before)
         with self.assertRaises(OverflowError): m.Integer(math.inf)
+        # The Reference's int(nan): ValueError, as int(inf) is OverflowError.
+        with self.assertRaises(ValueError): number.set_value(math.nan)
+        self.assertEqual(snapshot(number), before)
+        with self.assertRaises(ValueError): m.Integer(math.nan)
 
     def test_nonfinite_geometry_is_not_admitted_as_a_side_effect(self):
         obj = m.VMobject().set_points_as_corners([[0, 0, 0], [1, 1, 0]])
