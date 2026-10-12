@@ -49,9 +49,9 @@ fnp-ndarray = { git = "https://github.com/Dicklesworthstone/franken_numpy", rev 
 fnp-io = { git = "https://github.com/Dicklesworthstone/franken_numpy", rev = "a15d5c32e9330b555b0a653058bcfcff22fcb4ec" }
 fnp-random-core = { git = "https://github.com/Dicklesworthstone/franken_numpy", rev = "a15d5c32e9330b555b0a653058bcfcff22fcb4ec" }
 franken_markdown = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "126a5304e8d94eaea62b1b8e13bbe9c40918ac72" }
-fsci-integrate = { git = "https://github.com/Dicklesworthstone/frankenscipy", rev = "ed84bdd15e75e1257c624d12f90d1436f51e12d5" }
-fsci-linalg = { git = "https://github.com/Dicklesworthstone/frankenscipy", rev = "ed84bdd15e75e1257c624d12f90d1436f51e12d5" }
-fsci-opt = { git = "https://github.com/Dicklesworthstone/frankenscipy", rev = "ed84bdd15e75e1257c624d12f90d1436f51e12d5" }
+fsci-integrate = { git = "https://github.com/Dicklesworthstone/frankenscipy", rev = "ae52b65454841cd4976f6fbac907be0539508d9b" }
+fsci-linalg = { git = "https://github.com/Dicklesworthstone/frankenscipy", rev = "ae52b65454841cd4976f6fbac907be0539508d9b" }
+fsci-opt = { git = "https://github.com/Dicklesworthstone/frankenscipy", rev = "ae52b65454841cd4976f6fbac907be0539508d9b" }
 fnx-classes = { git = "https://github.com/Dicklesworthstone/franken_networkx", rev = "9d710b1c33e99412c94de7fa4de2f7ce4954110f" }
 fp-types = { git = "https://github.com/Dicklesworthstone/frankenpandas", rev = "da85cf65df48965e027b2f5aa21b7d0ce6a7e29c", default-features = false }
 fp-frame = { git = "https://github.com/Dicklesworthstone/frankenpandas", rev = "da85cf65df48965e027b2f5aa21b7d0ce6a7e29c", default-features = false }

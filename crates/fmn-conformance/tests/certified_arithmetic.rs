@@ -1207,12 +1207,11 @@ const SUITE_KNOWN_LEAKS: &[(&str, &str, &str, usize, &str)] = &[
         "frankenscipy/crates/fsci-linalg",
         "lib.rs",
         "mul_add",
-        13,
-        "fm-bp82 (12): SPD blocked-Cholesky panel TRSM/SYRK kernels, run only for symmetric \
-         systems of n >= 128; fmn's one dense solve (closed smoothing) never builds a symmetric \
-         matrix, pinned by fmn-geom's closed_smoothing_matrix_is_never_symmetric. fm-7qx3 (1): \
-         two_prod's exact error term in the solve certificate's residual, which fmn never reads; \
-         frankenscipy ae52b6545 (fm-g1ey) drops it, and the count falls to 12 at fm-7qx3's bump",
+        12,
+        "fm-bp82: SPD blocked-Cholesky panel TRSM/SYRK kernels, run only for symmetric systems of \
+         n >= 128; fmn's one dense solve (closed smoothing) never builds a symmetric matrix, \
+         pinned by fmn-geom's closed_smoothing_matrix_is_never_symmetric. (The certificate's \
+         two_prod left with frankenscipy ae52b6545, fm-g1ey, at fm-7qx3's repin.)",
     ),
 ];
 
