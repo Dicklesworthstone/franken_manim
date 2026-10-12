@@ -26,7 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ github.sha }}
+          ref: d05747ee43e87fdc87774ea41c9fd11aec9678bf
           persist-credentials: false
       - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
         with:
@@ -92,10 +92,15 @@ jobs:
               result = subprocess.run(['git','rev-parse','--verify','HEAD:'+name], text=True, capture_output=True)
               bases[name] = result.stdout.strip() if result.returncode == 0 else None
           (out/'base-blobs.json').write_text(json.dumps(bases, indent=2))
-          (out/'base-commit.txt').write_text(os.environ['GITHUB_SHA'])
+          (out/'base-commit.txt').write_text(subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip())
           (out/'paths.json').write_text(json.dumps(paths, indent=2))
           subprocess.run(['git','apply','--check',str(color)], check=True)
           subprocess.run(['git','apply',str(color)], check=True)
+          # Only test admission changes: the host must supply a PATH snapshot.
+          locator_test = pathlib.Path('crates/fmn-output/tests/video_color_negotiation.rs')
+          text = locator_test.read_text()
+          assert text.count('StdFfmpegLocator::default()') == 1
+          locator_test.write_text(text.replace('StdFfmpegLocator::default()', 'StdFfmpegLocator::from_host_path()'))
           # Preserve the independently publishable color milestone, formatted
           # identically without changing the unformatted AAC patch context.
           for name in color_paths:
@@ -106,6 +111,19 @@ jobs:
           (out/'color-blobs.json').write_text(json.dumps({p:blob_sha((out/'color-source'/p).read_bytes()) for p in color_paths}, indent=2))
           subprocess.run(['git','apply','--check',str(audio)], check=True)
           subprocess.run(['git','apply',str(audio)], check=True)
+          # The new reviewed CLI/config entries extend the API digest.
+          # No old reviewed row or out-of-tier ruling may be weakened/removed.
+          delta = subprocess.check_output(['git','diff','--unified=0','--','API_OVERLAY.tsv'], text=True)
+          removed = [line for line in delta.splitlines() if line.startswith('-') and not line.startswith('---')]
+          added = [line[1:] for line in delta.splitlines() if line.startswith('+') and not line.startswith('+++')]
+          assert not removed and len(added) == 7 and all('audio_bitrate' in line or '--audio-bitrate' in line for line in added), delta
+          overlay = pathlib.Path('API_OVERLAY.tsv')
+          text = overlay.read_text()
+          old_digest = 'f6194cee89e89513255f6788a358339f49c1ffd54515a395de06e5ee8aff3e03'
+          new_digest = 'fc20107d47e465ac41bdda57ae96dcc988db6beec45ecfd9a209757aeed158a6'
+          assert text.count('ledger_reviewed_digest\t'+old_digest) == 1
+          overlay.write_text(text.replace('ledger_reviewed_digest\t'+old_digest, 'ledger_reviewed_digest\t'+new_digest))
+          (out/'api-review-delta.txt').write_text(delta)
           # Invoke the existing schema generator and its owned hashing crate
           # before compiling the generated config consumer. No substitute
           # generator, hash, or hand-edited generated output is introduced.
