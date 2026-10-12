@@ -59,7 +59,10 @@ fn native_nv12_encoders_are_not_forced_through_planar_chroma() {
                 let format = argv.iter().position(|arg| arg == "-pix_fmt").unwrap();
                 assert!(format < input);
                 assert!(argv.windows(2).any(|pair| pair == ["-c:v", name]));
-                assert!(argv.windows(2).any(|pair| pair == ["-framerate", "60000/1001"]));
+                assert!(
+                    argv.windows(2)
+                        .any(|pair| pair == ["-framerate", "60000/1001"])
+                );
                 assert!(argv.windows(2).any(|pair| pair == ["-color_range", "tv"]));
                 assert!(!argv.iter().any(|arg| matches!(
                     arg.as_str(),

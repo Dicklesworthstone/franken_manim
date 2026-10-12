@@ -118,10 +118,7 @@ fn world_space_placement_edits_refresh_including_nonuniform_scale_and_shear() {
 #[test]
 fn point_writes_and_locked_field_writes_refresh_the_table() {
     let (mut stage, path, moving, mut animation) = setup();
-    for (index, values) in [[3.0, 8.0, 2.0], [-4.0, -5.0, 1.0]]
-        .into_iter()
-        .enumerate()
-    {
+    for (index, values) in [[3.0, 8.0, 2.0], [-4.0, -5.0, 1.0]].into_iter().enumerate() {
         stage
             .get_mut(path)
             .unwrap()
