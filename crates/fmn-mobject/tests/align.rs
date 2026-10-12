@@ -79,6 +79,52 @@ fn childless_side_pads_with_center_point_copies() {
 }
 
 #[test]
+fn childless_pads_are_leaves() {
+    // The Reference sets `n` copies of one `null_mob`, so every pad is a
+    // leaf. Copying the parent after attaching a pad used to nest it.
+    let mut stage = Stage::new();
+    let leaf = base(&mut stage, &[[0.0; 3], [4.0, 0.0, 0.0]]);
+    stage.add_n_more_submobjects(leaf, 3).unwrap();
+    let pads = stage.get(leaf).unwrap().submobjects().to_vec();
+    assert_eq!(pads.len(), 3);
+    for pad in pads {
+        assert!(stage.get(pad).unwrap().submobjects().is_empty());
+    }
+}
+
+#[test]
+fn padding_copies_record_their_source_and_copies_of_them_do_not() {
+    // fm-b97z: the binding tier publishes a padding member with its
+    // source's class, so the engine records which member each copies.
+    let mut stage = Stage::new();
+    let parent = base(&mut stage, &[[0.0; 3]]);
+    let glyph = base(&mut stage, &[[1.0, 0.0, 0.0]]);
+    let dot = base(&mut stage, &[[1.5, 0.0, 0.0]]);
+    stage.attach(parent, glyph).unwrap();
+    stage.attach(glyph, dot).unwrap();
+    stage.add_n_more_submobjects(parent, 2).unwrap();
+    let children = stage.get(parent).unwrap().submobjects().to_vec();
+    assert_eq!(children.len(), 3);
+    assert_eq!(children[0], glyph);
+    assert_eq!(stage.padding_source(glyph), None);
+    assert_eq!(stage.padding_source(dot), None);
+    for &ghost in &children[1..] {
+        assert_eq!(stage.padding_source(ghost), Some(glyph));
+        let inner = stage.get(ghost).unwrap().submobjects().to_vec();
+        assert_eq!(inner.len(), 1);
+        assert_eq!(stage.padding_source(inner[0]), Some(dot));
+    }
+    let copy = stage.copy_family(children[1]).unwrap();
+    assert_eq!(stage.padding_source(copy), None, "a copy is not a pad");
+
+    let leaf = base(&mut stage, &[[3.0; 3]]);
+    stage.add_n_more_submobjects(leaf, 2).unwrap();
+    for pad in stage.get(leaf).unwrap().submobjects().to_vec() {
+        assert_eq!(stage.padding_source(pad), Some(leaf));
+    }
+}
+
+#[test]
 fn ghost_distribution_follows_repeat_indices() {
     let mut stage = Stage::new();
     // a has 3 children, b has 1 → b pads by splitting its child into

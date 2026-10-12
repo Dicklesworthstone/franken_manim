@@ -134,15 +134,6 @@
       "reason": "The Reference builds each Annulus circle with quadratic_bezier_points_for_arc(TAU), whose default is 8 components (35 points). FrankenManim applies BN-09's one arc-density rule, 16 components for a full circle (67 points). bbox stays compared."
     },
     {
-      "id": "fm-b97z-padding-class",
-      "kind": "open-bead",
-      "ref": "fm-b97z",
-      "scope": ["scenes"],
-      "class": "VMobjectFromSVGPath",
-      "fact": ["class", "mro"],
-      "reason": "Glyphs are VMobjectFromSVGPath since fm-15k9, but padding members that native family alignment creates during Scene.play are published as plain VMobject, while the Reference's invisible_copy keeps the source's class (one corpus scene: a Transform between Tex selections of different glyph counts)."
-    },
-    {
       "id": "fm-6l2i-camera-frame-root",
       "kind": "open-bead",
       "ref": "fm-6l2i",

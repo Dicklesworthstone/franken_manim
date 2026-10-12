@@ -13,9 +13,16 @@ from creation_protocol_support import BOOTSTRAP
 
 def environment():
     g = {"_copy": copy, "_FamilyCycleError": ValueError}
-    wanted = {"_family_preorder", "_copy_mobject_graph"}
-    nodes = [node for node in ast.parse(BOOTSTRAP.read_text()).body
-             if isinstance(node, ast.FunctionDef) and node.name in wanted]
+    wanted = {"_family_preorder", "_copy_mobject_graph", "_copy_member_state",
+              "_COPY_RELATIONSHIP_ATTRIBUTES"}
+
+    def lifted(node):
+        if isinstance(node, ast.FunctionDef):
+            return node.name in wanted
+        return isinstance(node, ast.Assign) and any(
+            getattr(target, "id", None) in wanted for target in node.targets)
+
+    nodes = [node for node in ast.parse(BOOTSTRAP.read_text()).body if lifted(node)]
     exec(compile(ast.Module(nodes, []), str(BOOTSTRAP), "exec"), g)
 
     def install(node):

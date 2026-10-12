@@ -307,6 +307,7 @@ fn project(
                 tracker: None,
                 target: None,
                 saved_state: None,
+                padding_source: None,
                 pins: 0,
                 pending_delete: false,
                 uniforms: source.uniforms,

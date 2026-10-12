@@ -239,6 +239,42 @@ class StringLeafClasses(unittest.TestCase):
         text.become(m.Text('cd'))
         self.assertTrue(all(type(leaf) is m.VMobjectFromSVGPath for leaf in text))
 
+    def test_glyph_pads_of_a_played_transform_keep_the_glyph_class(self):
+        # fm-b97z: Transform pads the smaller family with invisible copies.
+        # The Reference's invisible_copy keeps the copied glyph's class; on
+        # the native play path the engine pads, and the projection publishes
+        # each pad with its source's class and Python state.
+        scene = m.Scene()
+        eq1, eq2 = m.Tex('4'), m.Tex('3.5')
+        scene.add(eq1, eq2)
+        source = eq1['4']
+        scene.play(m.Transform(source, eq2['3.5']), run_time=1 / 30)
+        self.assertTrue(any(root is source for root in scene.mobjects))
+        leaves = [mob for mob in source.get_family() if not mob.submobjects]
+        self.assertEqual([type(leaf).__name__ for leaf in leaves],
+                         ['VMobjectFromSVGPath'] * 3)
+
+    def test_pads_remap_references_only_within_their_own_family(self):
+        # copy() remaps a reference only when it points into the copied
+        # family, so a pad keeps pointing at another family's original.
+        scene = m.Scene()
+        a, c = m.Square(), m.Circle()
+        a.partner, c.partner = c, a
+        left, right = m.VGroup(a), m.VGroup(c)
+        scene.add(left, right)
+        scene.play(m.Transform(left, m.VGroup(*[m.Square() for _ in range(3)])),
+                   m.Transform(right, m.VGroup(*[m.Circle() for _ in range(2)])),
+                   run_time=1 / 30)
+        roots = scene.mobjects
+        self.assertTrue(any(root is left for root in roots))
+        pads = {'Square': left.submobjects[1:], 'Circle': right.submobjects[1:]}
+        self.assertEqual([len(pads['Square']), len(pads['Circle'])], [2, 1])
+        for cls, members in pads.items():
+            for pad in members:
+                with self.subTest(cls=cls):
+                    self.assertEqual(type(pad).__name__, cls)
+                    self.assertIs(pad.partner, c if cls == 'Square' else a)
+
 
 class TextChannelColors(unittest.TestCase):
     def test_explicit_channels_win_independently_at_every_text_front_door(self):
