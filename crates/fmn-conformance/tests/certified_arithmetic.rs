@@ -943,10 +943,11 @@ const SUITE_CERTIFIED: &[SuiteCrate] = &[
     SuiteCrate {
         repo: "frankenscipy",
         dir: "crates/fsci-opt",
-        modules: &[],
         // fsci-integrate's api.rs imports brentq and the RootOptions struct
-        // (built as a literal) and nothing else; by name, its `new` and
-        // `default` calls would enter every optimizer.
+        // (built as a literal) and nothing else. brentq's own calls are all
+        // defined in root.rs and types.rs; by name, its `new` and `min` would
+        // enter every optimizer, so only those two files are read.
+        modules: &["root.rs", "types.rs"],
         entry_points: &["brentq"],
         entered_from: &[],
         reason: "solve_ivp's event location (brentq), on fmn's StreamLines path",
@@ -1205,63 +1206,13 @@ const SUITE_KNOWN_LEAKS: &[(&str, &str, &str, usize, &str)] = &[
     (
         "frankenscipy/crates/fsci-linalg",
         "lib.rs",
-        "log10",
-        1,
-        "fm-pexg: solve's policy signal condition_signal_from_rcond; decides FailClosed/FullValidate \
-         at thresholds, never the solution values. Fixed upstream in frankenscipy d00db63ac \
-         (fm-wi8l); it leaves with fm-pexg's pin bump",
-    ),
-    (
-        "frankenscipy/crates/fsci-runtime",
-        "policy.rs",
-        "exp",
-        1,
-        "fm-pexg: the solve policy's softmax, whose posterior picks FailClosed/FullValidate. \
-         Fixed upstream in frankenscipy d00db63ac (fm-wi8l); it leaves with fm-pexg's pin bump",
-    ),
-    (
-        "frankenscipy/crates/fsci-runtime",
-        "lib.rs",
-        "log10",
-        2,
-        "fm-pexg: the solve portfolio's rcond map (condition_posterior) and outcome row \
-         (rcond_decade). Fixed upstream in frankenscipy d00db63ac (fm-wi8l); they leave with \
-         fm-pexg's pin bump",
-    ),
-    (
-        "frankenscipy/crates/fsci-linalg",
-        "lib.rs",
         "mul_add",
         13,
         "fm-bp82 (12): SPD blocked-Cholesky panel TRSM/SYRK kernels, run only for symmetric \
          systems of n >= 128; fmn's one dense solve (closed smoothing) never builds a symmetric \
-         matrix, pinned by fmn-geom's closed_smoothing_matrix_is_never_symmetric. fm-g1ey (1): \
-         two_prod's exact error term in the solve certificate's residual, which fmn never reads",
-    ),
-    (
-        "crates.io/nalgebra",
-        "svd.rs",
-        "hypot",
-        2,
-        "fm-pexg: at the 85edd7a9 pin fsci-linalg estimates rcond for n <= 4 from this SVD's \
-         singular values, on every 2- and 3-anchor closed smoothing solve; the rcond only steers \
-         decisions, far from their thresholds there. simba's f64 hypot is the platform libm's. \
-         frankenscipy ed84bdd15 (fm-dboe) drops that use; after fm-pexg's bump only the SVD \
-         fallback, pinned unreachable for fmn (fm-77rt), still calls it",
-    ),
-    (
-        "crates.io/nalgebra",
-        "svd2.rs",
-        "atan2",
-        2,
-        "fm-pexg: the 2x2 SVD inside that n <= 4 rcond estimate (see svd.rs)",
-    ),
-    (
-        "crates.io/nalgebra",
-        "svd2.rs",
-        "sin_cos",
-        2,
-        "fm-pexg: the 2x2 SVD inside that n <= 4 rcond estimate (see svd.rs)",
+         matrix, pinned by fmn-geom's closed_smoothing_matrix_is_never_symmetric. fm-7qx3 (1): \
+         two_prod's exact error term in the solve certificate's residual, which fmn never reads; \
+         frankenscipy ae52b6545 (fm-g1ey) drops it, and the count falls to 12 at fm-7qx3's bump",
     ),
 ];
 
@@ -1306,10 +1257,28 @@ const SUITE_UNREACHABLE_FILES: &[(&str, &str, &str)] = &[
         "complex integration: no fmn call site",
     ),
     (
-        "frankenscipy/crates/fsci-opt",
-        "gsa.rs",
-        "generalized simulated annealing: brentq reaches it only through the constructor \
-         name `new` (its visiting distribution's)",
+        "frankenscipy/crates/fsci-integrate",
+        "lsoda.rs",
+        "ODEPACK's LSODA: fmn uses SolverKind::Rk45 only",
+    ),
+    (
+        "frankenscipy/crates/fsci-linalg",
+        "complex.rs",
+        "complex-valued LAPACK ports (getrf, geqr2, dznrm2, dlapy3): fmn's solves are real f64, \
+         and the by-name walk reaches this file only through the names solve, qr and norm \
+         (solve_qr calls nalgebra's .qr())",
+    ),
+    (
+        "crates.io/nalgebra",
+        "svd.rs",
+        "fsci-linalg reaches this SVD only through its fallback (solve_svd_fallback), which \
+         fmn-geom's closed_smoothing_solves_never_leave_lu pins as unreachable for fmn (fm-77rt); \
+         its n <= 4 rcond is one-sided Jacobi since frankenscipy ed84bdd15 (fm-dboe)",
+    ),
+    (
+        "crates.io/nalgebra",
+        "svd2.rs",
+        "the 2x2 SVD inside svd.rs's, argued out with it",
     ),
     (
         "frankenscipy/crates/fsci-runtime",
@@ -1323,14 +1292,23 @@ const SUITE_UNREACHABLE_FILES: &[(&str, &str, &str)] = &[
 /// a name collision, with the argument: (label, file, function, reason). The
 /// reachability walk neither counts nor enters them, and an entry naming a
 /// function that no longer exists fails.
-const SUITE_UNREACHABLE_FUNCTIONS: &[(&str, &str, &str, &str)] = &[(
-    "franken_networkx/crates/fnx-runtime",
-    "lib.rs",
-    "fit",
-    "BayesianGpdEstimator::fit, called only by BayesianGpdEstimator::observe; only \
-     fnx-runtime's own tests construct the estimator. Two other fnx-runtime types define \
-     `observe`, and the runtime policy fnx-classes uses calls theirs",
-)];
+const SUITE_UNREACHABLE_FUNCTIONS: &[(&str, &str, &str, &str)] = &[
+    (
+        "franken_networkx/crates/fnx-runtime",
+        "lib.rs",
+        "fit",
+        "BayesianGpdEstimator::fit, called only by BayesianGpdEstimator::observe; only \
+         fnx-runtime's own tests construct the estimator. Two other fnx-runtime types define \
+         `observe`, and the runtime policy fnx-classes uses calls theirs",
+    ),
+    (
+        "frankenscipy/crates/fsci-integrate",
+        "api.rs",
+        "LsodaSolver::dense_output_at",
+        "the LSODA stepper's Nordsieck dense output (lsoda.rs is argued out); fmn's solve_ivp \
+         runs Rk45, whose dense output is RkSolver's",
+    ),
+];
 
 /// The pinned revision of a suite repository, from SUITE.lock.
 fn suite_rev(repo: &str) -> Result<String, String> {
@@ -1545,9 +1523,102 @@ fn suite_files() -> Result<Vec<SuiteGroup>, String> {
 struct SuiteFn {
     file: PathBuf,
     name: String,
+    /// The self type of the `impl` block the function is in, if any.
+    owner: Option<String>,
     /// First and last line of the body, 1-based and inclusive.
     lines: (usize, usize),
     callees: Vec<String>,
+}
+
+/// Whether `function` is what an argued-out `pattern` names: `name`, any
+/// function of that name in the file, or `Type::name`, only the one in
+/// `Type`'s `impl` blocks.
+fn function_matches(function: &SuiteFn, pattern: &str) -> bool {
+    match pattern.rsplit_once("::") {
+        Some((owner, name)) => function.name == name && function.owner.as_deref() == Some(owner),
+        None => function.name == pattern,
+    }
+}
+
+/// The `impl` blocks of a `code_only` source: (body open, body close, self
+/// type). Only an `impl` that starts its line (after an optional `unsafe`)
+/// counts, so a `-> impl Trait` return type is not taken for one.
+fn impl_blocks(code: &str) -> Vec<(usize, usize, String)> {
+    let bytes = code.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(found) = code[i..].find("impl") {
+        let at = i + found;
+        i = at + 4;
+        let line_start = code[..at].rfind('\n').map_or(0, |newline| newline + 1);
+        let lead = code[line_start..at].trim();
+        if !(lead.is_empty() || lead == "unsafe")
+            || bytes.get(at + 4).is_some_and(|&byte| is_ident_byte(byte))
+        {
+            continue;
+        }
+        let mut nesting = 0usize;
+        let mut open = None;
+        for (k, &byte) in bytes.iter().enumerate().skip(at + 4) {
+            match byte {
+                b'(' | b'[' => nesting += 1,
+                b')' | b']' => nesting = nesting.saturating_sub(1),
+                b'{' if nesting == 0 => {
+                    open = Some(k);
+                    break;
+                }
+                b';' if nesting == 0 => break,
+                _ => {}
+            }
+        }
+        let Some(open) = open else {
+            continue;
+        };
+        let mut depth = 0usize;
+        let mut close = open;
+        for (k, &byte) in bytes.iter().enumerate().skip(open) {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = k;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        // `impl<G> Trait for Type<G> where ...`: the self type is after
+        // `for` when there is one, past the impl's own generic parameters.
+        let header = code[at + 4..open]
+            .split(" where ")
+            .next()
+            .unwrap_or_default();
+        let mut self_type = header.rsplit(" for ").next().unwrap_or_default().trim();
+        if self_type.starts_with('<') {
+            let mut angle = 0usize;
+            for (k, ch) in self_type.char_indices() {
+                match ch {
+                    '<' => angle += 1,
+                    '>' => {
+                        angle -= 1;
+                        if angle == 0 {
+                            self_type = self_type[k + 1..].trim();
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let path = self_type.split('<').next().unwrap_or_default().trim();
+        let name = path.rsplit("::").next().unwrap_or(path);
+        if !name.is_empty() {
+            out.push((open, close, name.to_owned()));
+        }
+    }
+    out
 }
 
 fn is_ident_byte(byte: u8) -> bool {
@@ -1560,6 +1631,7 @@ fn suite_functions(files: &[PathBuf]) -> Result<Vec<SuiteFn>, String> {
     let mut out = Vec::new();
     for file in files {
         let code = code_only(&read_rust_source(file)?);
+        let impls = impl_blocks(&code);
         let bytes = code.as_bytes();
         let line_of = |offset: usize| bytes[..offset].iter().filter(|&&b| b == b'\n').count() + 1;
         let mut i = 0;
@@ -1643,9 +1715,16 @@ fn suite_functions(files: &[PathBuf]) -> Result<Vec<SuiteFn>, String> {
                     k += 1;
                 }
             }
+            // The innermost impl block holding the `fn`.
+            let owner = impls
+                .iter()
+                .filter(|(start, end, _)| *start < at && at < *end)
+                .max_by_key(|(start, _, _)| *start)
+                .map(|(_, _, owner)| owner.clone());
             out.push(SuiteFn {
                 file: file.clone(),
                 name,
+                owner,
                 lines: (line_of(open), line_of(close)),
                 callees,
             });
@@ -1728,7 +1807,7 @@ fn unreachable_function(label: &str, function: &SuiteFn) -> bool {
     let file = file_name(&function.file);
     SUITE_UNREACHABLE_FUNCTIONS
         .iter()
-        .any(|(l, f, name, _)| *l == label && *f == file && function.name == *name)
+        .any(|(l, f, pattern, _)| *l == label && *f == file && function_matches(function, pattern))
 }
 
 /// Scan the suite, split into (offences, known-leak counts, lines read,
@@ -1751,14 +1830,19 @@ fn suite_sweep(
             if *l == label
                 && !functions
                     .iter()
-                    .any(|f| f.name == *name && file_name(&f.file) == *file)
+                    .any(|f| function_matches(f, name) && file_name(&f.file) == *file)
             {
                 return Err(format!(
                     "{label}: unreachable-function entry {file}::{name} names no function"
                 ));
             }
         }
-        let skip = |function: &SuiteFn| unreachable_function(&label, function);
+        // An argued-out function or file neither counts nor carries the walk
+        // on: none of its functions run, so what they call is not reached
+        // through them.
+        let skip = |function: &SuiteFn| {
+            unreachable_function(&label, function) || unreachable_file(&label, &function.file)
+        };
         let reached = if !krate.entered_from.is_empty() {
             if !krate.entry_points.is_empty() {
                 return Err(format!(
@@ -1807,21 +1891,31 @@ fn suite_sweep(
                 .map(|f| (f.file.clone(), f.lines))
                 .collect()
         });
+        // Argued-out functions drop out even where every function counts.
+        let excluded: Vec<LineRange> = functions
+            .iter()
+            .filter(|f| unreachable_function(&label, f))
+            .map(|f| (f.file.clone(), f.lines))
+            .collect();
+        let within = |ranges: &[LineRange], file: &Path, line: usize| {
+            ranges
+                .iter()
+                .any(|(path, (first, last))| path == file && (*first..=*last).contains(&line))
+        };
         for file in files {
             if unreachable_file(&label, &file) {
                 continue;
             }
             let mut found = Vec::new();
             scanned += scan(&file, &label, needles, &mut found)?;
-            if let Some(ranges) = &ranges {
-                let before = found.len();
-                found.retain(|offence| {
-                    ranges.iter().any(|(path, (first, last))| {
-                        *path == file && (*first..=*last).contains(&offence.line)
-                    })
-                });
-                unreachable += before - found.len();
-            }
+            let before = found.len();
+            found.retain(|offence| {
+                ranges
+                    .as_deref()
+                    .is_none_or(|ranges| within(ranges, &file, offence.line))
+                    && !within(&excluded, &file, offence.line)
+            });
+            unreachable += before - found.len();
             offences.extend(found);
         }
     }
@@ -2076,6 +2170,49 @@ fn reachability_keeps_calls_an_entry_point_reaches_and_drops_the_rest() {
         reachable_ranges(&functions, &["missing"]).is_err(),
         "an entry point that does not exist is an error, not an empty (clean) scope"
     );
+}
+
+#[test]
+fn an_argued_out_function_can_name_its_impl_type() {
+    // `Lsoda::dense` names one of two same-named methods; a bare name names
+    // both; a `-> impl Trait` return type is not an impl block, so the free
+    // function after it has no owner.
+    let dir = std::env::temp_dir().join(format!("fmn-suite-owner-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let file = dir.join("api.rs");
+    std::fs::write(
+        &file,
+        "pub fn adapter(x: f64) -> impl Fn(f64) -> f64 { move |y| x * y }\n\
+         impl Rk45 {\n    pub fn dense(&self, t: f64) -> f64 { t }\n}\n\
+         impl<T: Copy> Solver for Lsoda<T>\nwhere\n    T: Into<f64>,\n{\n    \
+         fn dense(&self, t: f64) -> f64 { t.powf(2.0) }\n}\n\
+         fn free(t: f64) -> f64 { t }\n",
+    )
+    .expect("write planted source");
+    let functions = suite_functions(std::slice::from_ref(&file)).expect("index functions");
+    let owners: Vec<(&str, Option<&str>)> = functions
+        .iter()
+        .map(|f| (f.name.as_str(), f.owner.as_deref()))
+        .collect();
+    assert_eq!(
+        owners,
+        [
+            ("adapter", None),
+            ("dense", Some("Rk45")),
+            ("dense", Some("Lsoda")),
+            ("free", None)
+        ]
+    );
+    let named = |pattern: &str| -> Vec<Option<&str>> {
+        functions
+            .iter()
+            .filter(|f| function_matches(f, pattern))
+            .map(|f| f.owner.as_deref())
+            .collect()
+    };
+    assert_eq!(named("Lsoda::dense"), [Some("Lsoda")]);
+    assert_eq!(named("dense"), [Some("Rk45"), Some("Lsoda")]);
+    assert!(named("Missing::dense").is_empty());
 }
 
 #[test]

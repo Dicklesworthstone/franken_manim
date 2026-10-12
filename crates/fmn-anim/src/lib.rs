@@ -46,6 +46,7 @@
 #![forbid(unsafe_code)]
 
 pub mod animation;
+pub mod apply_method;
 pub mod bundle;
 pub mod clock;
 pub mod composition;
@@ -68,6 +69,7 @@ pub use animation::{
     DEFAULT_ANIMATION_RUN_TIME, IntoAnimation, IntoAnimations, MethodAnimation, RateFunc,
     prepare_animation, prepare_animations, sub_alpha, time_spanned_alpha,
 };
+pub use apply_method::ApplyMethod;
 pub use bundle::{
     PATH_STRAIGHT_TAG, bundle_sub_alpha, interpolate_between, path_from_tag, path_tag,
     rate_from_tag, rate_tag,
