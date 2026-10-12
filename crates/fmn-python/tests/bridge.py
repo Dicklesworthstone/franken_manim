@@ -10579,6 +10579,21 @@ quarter_arc.rotate(math.pi / 2.0, about_point=quarter_arc.get_arc_center())
 assert math.isclose(quarter_arc.get_start_angle(), math.pi / 2.0, abs_tol=1e-6)
 assert math.isclose(quarter_arc.get_stop_angle(), math.pi, abs_tol=1e-6)
 
+# A tip trims an arc's shaft by true arc length (BN-03) and rebuilds it on its
+# circle, so no component is zero-length and the arc keeps its own centre
+# whichever end is tipped. The centre is read from f32 records, which bound
+# its precision near 1e-5 for any arc
+# (fm-arc-start-tip-degenerate-component-izct).
+for _tip_ends in ((True,), (False,), (True, False)):
+    _tipped_arc = geometry.Arc(radius=1.5, angle=2.0, arc_center=[1.0, -1.0, 0.0])
+    for _at_start in _tip_ends:
+        _tipped_arc.add_tip(at_start=_at_start)
+    assert np.allclose(_tipped_arc.get_arc_center(), [1.0, -1.0, 0.0], rtol=0, atol=5e-5), (
+        _tip_ends, _tipped_arc.get_arc_center())
+    _shaft = _tipped_arc.get_points()
+    assert all(np.linalg.norm(_shaft[i + 2] - _shaft[i]) > 1e-3
+               for i in range(0, len(_shaft) - 2, 2)), _tip_ends
+
 between = geometry.ArcBetweenPoints(
     [-2.0, -0.5, 0.0],
     [2.0, -0.5, 0.0],

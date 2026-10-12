@@ -62,7 +62,12 @@ tip from the final control handle and then shortens the shaft by applying
 component-local approximation while the shaft is chord-rescaled away from
 its original curve. FrankenManim aims the head along the true terminal
 quadratic derivative and cuts the shaft back by true arc length, preserving
-the remaining curve. Straight shafts are unchanged. Scenes that deliberately
+the remaining curve. A cut through a circular-arc component is rebuilt on
+that circle, and the components the cut removes are dropped rather than
+kept as zero-length points, so a tipped arc keeps its own centre:
+`Arc(angle=2).add_tip(at_start=True).get_arc_center()` is the origin, where
+the Reference's rescaled shaft reports (0.112, 0.175)
+(fm-arc-start-tip-degenerate-component-izct). Straight shafts are unchanged. Scenes that deliberately
 compensated for the classic curved-tip tilt or rescaling should remove that
 compensation; custom `ArrowTip` subclasses keep their Python identity and
 style while the native placement algebra transforms their point run.
