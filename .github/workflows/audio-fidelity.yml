@@ -22,7 +22,7 @@ jobs:
       PYO3_PYTHON: python
       FMN_REQUIRE_FFMPEG: '1'
       FMN_REAL_FFMPEG: '1'
-      FMN_AUDIO_FIXTURE_DIR: ${{ runner.temp }}/audio-fixtures
+      FMN_AUDIO_FIXTURE_DIR: /tmp/fmn-audio-fixtures-${{ github.run_id }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
