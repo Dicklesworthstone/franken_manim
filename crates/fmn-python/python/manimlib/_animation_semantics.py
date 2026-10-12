@@ -173,6 +173,24 @@ def install(native, subsystems=True):
                 mobject2.uniforms[key],
                 alpha,
             )
+        # C-33: a family without points has a degenerate box, its position.
+        # The Reference interpolates that box along path_func
+        # (mobject.py:1837) but leaves its refresh flag set, so whether it
+        # moves depends on an earlier read; here it always moves. A box over
+        # points follows the points, so only point-free families need this.
+        if len(data) == 0:
+            pending, point_free = list(self.submobjects), True
+            while pending and point_free:
+                member = pending.pop()
+                point_free = not member.has_points()
+                pending.extend(member.submobjects)
+            if point_free:
+                box = path_func(
+                    np.asarray(mobject1.get_bounding_box(), dtype=float),
+                    np.asarray(mobject2.get_bounding_box(), dtype=float),
+                    alpha,
+                )
+                self._set_point_free_anchor(tuple(float(value) for value in box[1]))
         return self
 
     def validate_input_type(self, mobject):
@@ -437,7 +455,20 @@ def install(native, subsystems=True):
             self.target_copy = self.target_mobject
         else:
             self.target_copy = self.target_mobject.copy()
+        # C-33: alignment resizes point records, and a resize refreshes a
+        # point-less box to the origin (fm-fc53). The Reference's interpolate
+        # still reads the box cached before that refresh, so keep each
+        # point-free member's position through the alignment; the box then
+        # interpolates between the endpoints' positions.
+        kept = []
+        if not isinstance(self.mobject, g["CameraFrame"]):
+            for root in (self.mobject, self.target_copy):
+                free = g["_point_free_family_ids"](root)
+                kept.extend((member, tuple(member.get_center()))
+                            for member in root.get_family() if id(member) in free)
         self.mobject.align_data_and_family(self.target_copy)
+        for member, center in kept:
+            member._set_point_free_anchor(center)
         Animation.begin(self)
         # Equal endpoint records do not imply a constant authored path: a
         # closed excursion may leave and return to the very same points.

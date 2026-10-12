@@ -1,6 +1,6 @@
-# BN-07 — Corrected mobject behavior (C-5, C-6, C-14, C-15, C-17, C-18, C-19, C-20, C-21, C-23, C-24, C-26, C-29, C-30, C-31, C-32)
+# BN-07 — Corrected mobject behavior (C-5, C-6, C-14, C-15, C-17, C-18, C-19, C-20, C-21, C-23, C-24, C-26, C-29, C-30, C-31, C-32, C-33)
 
-**Status:** Draft (W3, fm-yra; W10, fm-23ev, fm-5wq.4.39, fm-easc, and fm-gm0v). Consumed by Choreo (§9.1's
+**Status:** Draft (W3, fm-yra; W10, fm-23ev, fm-5wq.4.39, fm-easc, fm-gm0v, and fm-pointless-box-interpolation-hccu). Consumed by Choreo (§9.1's
 `suspend_mobject_updating` interaction), fmn-python (whose `manimlib`
 surface presents these semantics), and the Parity Ledger.
 
@@ -386,3 +386,37 @@ Locked by `test_copy_remaps_every_family_internal_reference` in
 **Migration:** none needed for a scene that uses its copy on its own. A
 scene that relied on a copied member still naming an original (itself, or a
 sibling) names that original explicitly.
+
+## C-33 — a point-less box interpolates along the path
+
+A mobject whose family has no points keeps its position in its cached box
+(fm-fc53). The Reference's `Mobject.interpolate` writes that box along
+`path_func` (`mobject.py:1837`) but leaves `_needs_new_bounding_box` set,
+so the next read recomputes the box at the origin unless something read it
+since the last refresh. The result of one interpolation therefore depends
+on earlier reads:
+
+| code | Reference `get_center()` |
+|---|---|
+| `scene.play(Transform(VGroup(), VGroup().shift(3*UP)))` | origin |
+| `g.generate_target(); g.target.shift(LEFT); scene.play(MoveToTarget(g))` | origin |
+| `g.get_center(); g.interpolate(VGroup(), VGroup().shift(4*RIGHT), 0.25)` | (1, 0, 0) |
+| the same `interpolate` without the read | origin |
+
+**FrankenManim:** the box lands where the path puts it, whatever was read
+before: the Transform ends at (0, 3, 0), MoveToTarget at (−1, 0, 0), and
+both `interpolate` calls at (1, 0, 0). An arced path moves it along the
+arc. Each family member's box interpolates on its own, as in the
+Reference; a box over points follows the points. A Transform keeps its
+endpoints' point-less positions through family alignment. A resize still
+refreshes a point-less box to the origin (fm-fc53), and the Reference's
+interpolate reads the box cached before that refresh.
+
+Locked by `PointFreeInterpolation` in
+`crates/fmn-python/tests/point_free_positions.py` (detached and
+scene-bound) and `point_less_box_interpolates_along_the_path` in
+`crates/fmn-anim/tests/transform.rs` (Choreo's `interpolate_fields`).
+
+**Migration:** none needed. A scene that animated an empty group and then
+positioned things relative to it gets the animated position, not the
+origin.

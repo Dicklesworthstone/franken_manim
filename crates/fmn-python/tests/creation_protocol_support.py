@@ -81,6 +81,13 @@ def environment():
             return result
         def family_members_with_points(self):
             return [mob for mob in self.get_family() if len(mob.data)]
+        def has_points(self):
+            return len(self.data) > 0
+        def get_bounding_box(self):
+            return np.array([getattr(self, "anchor", (0., 0., 0.))] * 3)
+        def _set_point_free_anchor(self, point):
+            self.anchor = tuple(point)
+            return True
         def copy(self):
             result = copy.deepcopy(self, {id(self._scene): self._scene})
             return result
