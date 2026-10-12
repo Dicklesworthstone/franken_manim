@@ -802,52 +802,87 @@ def _copy_mobject_graph(root, deep, memo=None, detach_bound=False):
         memo[id(old)] = new
         _install_live_state(new)
 
-    # Reference copy() temporarily stashes these relationship pointers and
-    # installs None on the copy; generate_target/save_state reconnect only
-    # their one prescribed cross-link afterward.
-    internal = {
-        "submobjects",
-        "uniforms",
-        "updaters",
-        "parents",
-        "_scene",
-        "target",
-        "saved_state",
-    }
     for old, new in pairs:
         mapped_children = [mapping[child] for child in old.submobjects]
         new.submobjects.extend(mapped_children)
-
-        attributes = {
-            key: value
-            for key, value in old.__dict__.items()
-            if key not in internal
-        }
-        if deep:
-            attributes = _copy.deepcopy(attributes, memo)
-        else:
-            attributes = {
-                key: mapping.get(value, value)
-                if isinstance(value, _BridgeMobject)
-                else value
-                for key, value in attributes.items()
-            }
-        new.__dict__.update(attributes)
-
-        extras = old.uniforms._extras
-        # Reference Mobject.copy copies every ndarray uniform, so writing a
-        # copy's array in place (a vector ValueTracker) leaves the source.
-        new.uniforms._extras = (
-            _copy.deepcopy(extras, memo) if deep else {
-                key: value.copy() if isinstance(value, _np.ndarray) else value
-                for key, value in extras.items()
-            }
-        )
-        # Function objects remain shared even under deepcopy, while the list is
-        # independent, matching manim's updater copy rule.
-        new.updaters = list(old.updaters)
+        _copy_member_state(old, new, mapping, deep, memo)
 
     return mapping[root]
+
+
+# Reference copy() temporarily stashes these relationship pointers and
+# installs None on the copy; generate_target/save_state reconnect only their
+# one prescribed cross-link afterward.
+_COPY_RELATIONSHIP_ATTRIBUTES = frozenset({
+    "submobjects",
+    "uniforms",
+    "updaters",
+    "parents",
+    "_scene",
+    "target",
+    "saved_state",
+})
+
+
+def _copy_member_state(old, new, mapping, deep, memo):
+    """Give `new`, a copy of `old`, the Python state Reference copy() gives it.
+
+    Every attribute but the relationship pointers is copied, with bridge
+    references remapped through `mapping` when shallow. The uniform extras
+    and the updater list are copied too.
+    """
+    attributes = {
+        key: value
+        for key, value in old.__dict__.items()
+        if key not in _COPY_RELATIONSHIP_ATTRIBUTES
+    }
+    if deep:
+        attributes = _copy.deepcopy(attributes, memo)
+    else:
+        attributes = {
+            key: mapping.get(value, value)
+            if isinstance(value, _BridgeMobject)
+            else value
+            for key, value in attributes.items()
+        }
+    new.__dict__.update(attributes)
+
+    extras = old.uniforms._extras
+    # Reference Mobject.copy copies every ndarray uniform, so writing a
+    # copy's array in place (a vector ValueTracker) leaves the source.
+    new.uniforms._extras = (
+        _copy.deepcopy(extras, memo) if deep else {
+            key: value.copy() if isinstance(value, _np.ndarray) else value
+            for key, value in extras.items()
+        }
+    )
+    # Function objects remain shared even under deepcopy, while the list is
+    # independent, matching manim's updater copy rule.
+    new.updaters = list(old.updaters)
+
+
+def _adopt_padding_ghosts(pairs):
+    """Install the Python state of members the engine padded a family with.
+
+    fm-b97z: the Reference pads with `invisible_copy()`, a shallow `copy()`,
+    so each pad keeps its source's class (the projection already made it a
+    bare proxy of that class) and takes its source's Python state.
+    References inside one padded family are remapped to their copies, and
+    only those, as `copy()` remaps only within the copied family. `pairs`
+    lists (source, pad) in family order, so each pad starts at its root: a
+    source seen again, or one outside the current root's family, starts the
+    next pad.
+    """
+    groups = []
+    for old, new in pairs:
+        if not groups or old in groups[-1][1] or id(old) not in groups[-1][0]:
+            groups.append(({id(member) for member in old.get_family()}, {}))
+        groups[-1][1][old] = new
+    for _family, mapping in groups:
+        for new in mapping.values():
+            _install_live_state(new)
+        for old, new in mapping.items():
+            _copy_member_state(old, new, mapping, False, None)
 
 
 def _restore_mobject_shell(cls, engine_state):
@@ -5422,8 +5457,14 @@ class Circle(Arc):
         self.stretch((self.get_height() + 2 * buff) / self.get_height(), 1)
         return self
 
+    # geometry.py measures from the public, overridable get_start (tip-aware)
+    # to get_center, the family box centre, so a child or an override moves
+    # the result as in the Reference (fm-circle-get-radius-family-center-tkiz).
     def get_radius(self):
-        return self._circle_radius()
+        return _space_get_norm(
+            _np.asarray(self.get_start(), dtype=float)
+            - _np.asarray(self.get_center(), dtype=float)
+        )
 
     # geometry.py measures from the public, overridable get_start_angle (the
     # tip-aware angle of fm-8pj7) and walks the overridable
@@ -15595,7 +15636,7 @@ class Scene(_SceneCore):
 
     @property
     def mobjects(self):
-        return self._engine_roots(_native_scene_shell_factory)
+        return self._engine_roots(_native_scene_shell_factory, _adopt_padding_ghosts)
 
     def get_time(self):
         return self.time

@@ -1335,6 +1335,9 @@ impl Snapshot {
                     tracker,
                     target,
                     saved_state,
+                    // Transient, not persisted (fm-b97z): a restored padding
+                    // member publishes as a plain shell.
+                    padding_source: None,
                     pins,
                     pending_delete,
                     uniforms,

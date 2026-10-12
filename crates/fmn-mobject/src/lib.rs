@@ -33,6 +33,7 @@ pub mod dynamics;
 pub mod mobject;
 pub mod numpy;
 pub mod order;
+pub mod path_sampling;
 pub mod persist;
 pub mod placement;
 pub mod positional;

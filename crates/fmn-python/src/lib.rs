@@ -3949,15 +3949,6 @@ impl BridgeMobject {
         })
     }
 
-    /// `Circle.get_radius` over this entry's current world-space points.
-    fn _circle_radius(slf: &Bound<'_, Self>) -> PyResult<f64> {
-        crossing::record(CrossingClass::Other);
-        with_stage(slf, |stage, mob| {
-            let points = stage.get_points(mob).unwrap_or_default();
-            fmn_library::arc::radius_of(&fmn_library::VMobject::from_points(points))
-        })
-    }
-
     /// `Stage::put_start_and_end_on` over the Stage-visible family.
     fn _put_start_and_end_on(
         slf: &Bound<'_, Self>,
@@ -8809,9 +8800,16 @@ impl PyScene {
             .collect()
     }
 
+    /// The scene's root proxies, after projecting the native family into
+    /// Python. A member with no proxy gets one from `shell_factory`, except
+    /// a padding copy whose source has one (fm-b97z): it takes the source's
+    /// class, as the Reference's `invisible_copy` does, and `ghost_adopter`
+    /// receives every such `(source, copy)` pair to copy Python state across.
+    #[pyo3(signature = (shell_factory, ghost_adopter = None))]
     fn _engine_roots<'py>(
         slf: &Bound<'py, Self>,
         shell_factory: &Bound<'py, PyAny>,
+        ghost_adopter: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Vec<Py<PyAny>>> {
         let py = slf.py();
         // fm-5wq.31: this projection walks the whole scene family, and
@@ -8838,12 +8836,13 @@ impl PyScene {
         // Choreo can create composition containers without a Python proxy.
         // Snapshot the native graph first, then release the Stage borrow
         // before allocating shells or touching Python family/back edges.
-        let (roots, graph) = {
+        let (roots, graph, padding) = {
             let runtime = engine.borrow();
             let stage = runtime.stage();
             let roots = stage.roots().to_vec();
             let mut seen: HashSet<Mob, ByAddress> = HashSet::default();
             let mut graph = Vec::new();
+            let mut padding: HashMap<Mob, Mob, ByAddress> = HashMap::default();
             for root in &roots {
                 for mob in stage.family(*root) {
                     if seen.insert(mob) {
@@ -8856,15 +8855,32 @@ impl PyScene {
                             entry.submobjects().to_vec(),
                             entry.children_epoch(),
                         ));
+                        if let Some(source) = stage.padding_source(mob) {
+                            padding.insert(mob, source);
+                        }
                     }
                 }
             }
-            (roots, graph)
+            (roots, graph, padding)
         };
         let mut proxies: HashMap<Mob, Bound<'py, PyAny>, ByAddress> =
             HashMap::with_capacity_and_hasher(graph.len(), ByAddress::default());
+        let mut ghosts: Vec<(Bound<'py, PyAny>, Bound<'py, PyAny>)> = Vec::new();
         for (mob, vector_records, _, _) in &graph {
+            // A padding copy's source precedes it in family order, so the
+            // source's proxy is already projected when it has one. Without an
+            // adopter to install its Python state, a ghost gets a plain shell.
+            let source_proxy = ghost_adopter.and(padding.get(mob)).and_then(|source| {
+                proxies
+                    .get(source)
+                    .cloned()
+                    .or_else(|| live_proxy(py, slf, *source))
+            });
             let proxy = if let Some(proxy) = live_proxy(py, slf, *mob) {
+                proxy
+            } else if let Some(source_proxy) = source_proxy {
+                let proxy = new_bound_proxy(py, slf, &source_proxy, &engine, *mob)?;
+                ghosts.push((source_proxy, proxy.clone()));
                 proxy
             } else {
                 let proxy = shell_factory.call1((*vector_records,))?;
@@ -8886,6 +8902,11 @@ impl PyScene {
                 proxy
             };
             proxies.insert(*mob, proxy);
+        }
+        if let Some(adopter) = ghost_adopter
+            && !ghosts.is_empty()
+        {
+            adopter.call1((PyList::new(py, ghosts)?,))?;
         }
         for (mob, _, children, _) in &graph {
             let submobjects = proxies[mob].getattr("submobjects")?;

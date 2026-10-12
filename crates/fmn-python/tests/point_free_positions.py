@@ -8,8 +8,10 @@ nursery stages and Python family graph) and on scene-bound ones (one Stage).
 
 Scope: shift/move_to/next_to/align_to/to_edge/to_corner, scale/stretch/
 rotate about points, the getters, families, copies and the box refreshes
-(point edits, family edits, non-box-preserving maps). Interpolation of a
-point-less box during animations is not covered (fm-fc53 follow-up).
+(point edits, family edits, non-box-preserving maps). Interpolating a
+point-less box is ruled by Appendix C-33 rather than measured, because the
+Reference's result there depends on an earlier read (PointFreeInterpolation
+below).
 """
 import copy
 import unittest
@@ -478,8 +480,134 @@ class PointFreePositionTests(unittest.TestCase):
                                            [[-1, 0, 0], [0, 1, 0], [1, 2, 0]], atol=1e-6)
 
 
-_suite = unittest.defaultTestLoader.loadTestsFromTestCase(PointFreePositionTests)
-assert _suite.countTestCases() == 5, "point-free position inventory changed"
+# C-33 (fm-pointless-box-interpolation-hccu): a point-less family's box is
+# its position, and interpolating it follows the path whatever was read
+# before. The Reference interpolates the box but leaves its refresh flag set,
+# so its results depend on an earlier read. Measured there with this script:
+# the origin for the three played rows and the unread interpolate, (1, 0, 0)
+# after a read, and origin then (0, 2, 0) for the stepped Transform. These
+# are the ruled values, the same in both proxy states.
+RULED_INTERPOLATION = {
+    'transform_played': [0.0, 3.0, 0.0],
+    'move_to_target_played': [-1.0, 0.0, 0.0],
+    'animate_shift_played': [2.0, 0.0, 0.0],
+    'interpolate_after_read': [1.0, 0.0, 0.0],
+    'interpolate_unread': [1.0, 0.0, 0.0],
+    'interpolate_after_shift': [1.0, 0.0, 0.0],
+    'transform_stepped': [[0.0, 1.0, 0.0], [0.0, 2.0, 0.0]],
+    'nested_family': {"root": [0.0, 0.0, 0.0], "child": [1.0, 0.0, 0.0]},
+    'points_bearing_control': [1.0, 0.0, 0.0],
+}
+
+
+def interpolation_cases(bind, scene):
+    def fresh():
+        return bind(m.VGroup())
+
+    def play(*animations):
+        scene.play(*animations, run_time=1 / 15)
+
+    out = {}
+
+    def case(fn):
+        out[fn.__name__] = fn
+        return fn
+
+    @case
+    def transform_played():
+        a = fresh(); play(m.Transform(a, m.VGroup().shift(3 * m.UP))); return r(a.get_center())
+
+    @case
+    def move_to_target_played():
+        g = fresh(); g.generate_target(); g.target.shift(m.LEFT)
+        play(m.MoveToTarget(g)); return r(g.get_center())
+
+    @case
+    def animate_shift_played():
+        g = fresh(); play(g.animate.shift(2 * m.RIGHT)); return r(g.get_center())
+
+    @case
+    def interpolate_after_read():
+        g = fresh(); g.get_center()
+        g.interpolate(m.VGroup(), m.VGroup().shift(4 * m.RIGHT), 0.25); return r(g.get_center())
+
+    @case
+    def interpolate_unread():
+        g = fresh(); g.interpolate(m.VGroup(), m.VGroup().shift(4 * m.RIGHT), 0.25)
+        return r(g.get_center())
+
+    @case
+    def interpolate_after_shift():
+        # The shift installs a cached box; the interpolated position wins.
+        g = fresh(); g.shift(3 * m.LEFT)
+        g.interpolate(m.VGroup(), m.VGroup().shift(4 * m.RIGHT), 0.25); return r(g.get_center())
+
+    @case
+    def transform_stepped():
+        a = fresh(); animation = m.Transform(a, m.VGroup().shift(2 * m.UP))
+        animation.begin(); animation.interpolate(0.5); half = r(a.get_center())
+        animation.finish(); return [half, r(a.get_center())]
+
+    def stepped(start, target, alpha):
+        animation = m.Transform(bind(start), target, rate_func=m.linear)
+        animation.begin()
+        animation.interpolate(alpha)
+        return start
+
+    # Mobject.interpolate moves only its receiver; Transform interpolates
+    # every family member.
+    @case
+    def nested_family():
+        g = stepped(m.VGroup(m.VGroup()), m.VGroup(m.VGroup().shift(4 * m.RIGHT)), 0.25)
+        return {"root": r(g.get_center()), "child": r(g[0].get_center())}
+
+    @case
+    def points_bearing_control():
+        g = stepped(m.VGroup(m.Square()), m.VGroup(m.Square().shift(2 * m.RIGHT)), 0.5)
+        return r(g.get_center())
+
+    return out
+
+
+class PointFreeInterpolation(unittest.TestCase):
+    maxDiff = None
+    assertMatchesReference = PointFreePositionTests.assertMatchesReference
+
+    def check_interpolation(self, bind, scene):
+        constructions = interpolation_cases(bind, scene)
+        self.assertEqual(sorted(constructions), sorted(RULED_INTERPOLATION))
+        for name, build in constructions.items():
+            with self.subTest(case=name):
+                self.assertMatchesReference(name, build(), RULED_INTERPOLATION[name])
+
+    def test_detached_follows_the_ruling(self):
+        self.check_interpolation(detached, m.Scene())
+
+    def test_scene_bound_follows_the_ruling(self):
+        scene = m.Scene()
+
+        def scene_bound(mob):
+            scene.add(mob)
+            return mob
+
+        self.check_interpolation(scene_bound, scene)
+
+    def test_path_arc_moves_a_point_less_box_off_the_straight_line(self):
+        start, end = np.array([1.0, 0.0, 0.0]), np.array([-1.0, 0.0, 0.0])
+        expected = m.path_along_arc(m.PI)(np.array([start]), np.array([end]), 0.5)[0]
+        self.assertGreater(abs(expected[1]), 0.5)
+        a = m.VGroup().shift(start)
+        animation = m.Transform(a, m.VGroup().shift(end), path_arc=m.PI)
+        animation.begin()
+        animation.interpolate(0.5)
+        self.assertMatchesReference("path_arc_half", r(a.get_center()), r(expected))
+
+
+_suite = unittest.TestSuite([
+    unittest.defaultTestLoader.loadTestsFromTestCase(PointFreePositionTests),
+    unittest.defaultTestLoader.loadTestsFromTestCase(PointFreeInterpolation),
+])
+assert _suite.countTestCases() == 8, "point-free position inventory changed"
 _result = unittest.TextTestRunner(verbosity=2).run(_suite)
 if not _result.wasSuccessful():
     raise AssertionError("point-free position acceptance failed")

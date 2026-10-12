@@ -29,8 +29,14 @@ def environment(install=True):
             self.locked_data_keys, self.locked_uniform_keys, self.const_data_keys = set(), set(), set()
             self.pointlike_data_keys, self.dirty = ("point",), 0
             self.setter_calls = []
+            self.submobjects, self.anchor = [], (0.0, 0.0, 0.0)
         def init_uniforms(self):
             pass
+        def get_bounding_box(self):
+            return np.array([self.anchor] * 3)
+        def _set_point_free_anchor(self, point):
+            self.anchor = point
+            return True
         def _init_value_tracker(self, kind, value, im):
             self.native_kind = kind
             self.lanes = [math.log(value) if kind == 1 else value, im]

@@ -143,6 +143,14 @@
       "reason": "Glyphs are VMobjectFromSVGPath since fm-15k9, but padding members that native family alignment creates during Scene.play are published as plain VMobject, while the Reference's invisible_copy keeps the source's class (one corpus scene: a Transform between Tex selections of different glyph counts)."
     },
     {
+      "id": "fm-6l2i-camera-frame-root",
+      "kind": "open-bead",
+      "ref": "fm-6l2i",
+      "scope": "scenes",
+      "fact": "camera_frame_roots",
+      "reason": "The Reference's scene.mobjects starts with the CameraFrame; the portal's does not."
+    },
+    {
       "id": "bn02-frame-count",
       "kind": "behavior-note",
       "ref": "BN-02",

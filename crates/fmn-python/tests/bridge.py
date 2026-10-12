@@ -10825,6 +10825,21 @@ class _ProportionReportingCircle(geometry.Circle):
 assert np.allclose(_QuarterStartCircle(radius=2.0).point_at_angle(math.pi / 2.0), [2.0, 0.0, 0.0])
 assert np.allclose(_ProportionReportingCircle().point_at_angle(math.pi), [0.5, 9.0, 0.0])
 
+
+# geometry.py Circle.get_radius is get_norm(self.get_start() - self.get_center()):
+# a child moves the family centre, and an overridden get_start is honored.
+# Values measured in the pinned Reference (fm-circle-get-radius-family-center-tkiz).
+class _FarStartCircle(geometry.Circle):
+    def get_start(self):
+        return np.array([5.0, 0.0, 0.0])
+
+
+_dotted_circle = geometry.Circle(radius=1.0)
+_dotted_circle.add(manimlib.Dot(3.0 * manimlib.RIGHT))
+assert np.allclose(_dotted_circle.get_center(), [1.04, 0.0, 0.0])
+assert math.isclose(_dotted_circle.get_radius(), 0.04, abs_tol=1e-6)
+assert math.isclose(_FarStartCircle(radius=1.0).get_radius(), 5.0, abs_tol=1e-9)
+
 ellipse = geometry.Ellipse(
     width=4.0,
     height=1.5,

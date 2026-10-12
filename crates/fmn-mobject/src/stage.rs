@@ -275,6 +275,12 @@ pub struct Entry {
     /// The `save_state` copy (§8.3) that `restore_mobject` becomes.
     /// Cleared on every copy, like `target`.
     saved_state: Option<Mob>,
+    /// The family member this one is an invisible padding copy of, set by
+    /// [`Stage::add_n_more_submobjects`] (the Reference's `invisible_copy`).
+    /// The binding tier publishes such a member with its source's class and
+    /// Python state (fm-b97z). Transient: cleared on every copy and move,
+    /// and not persisted.
+    padding_source: Option<Mob>,
     pins: usize,
     pending_delete: bool,
     /// Per-object typed uniform state (§8.4): scene code reads and writes this
@@ -319,6 +325,7 @@ impl Entry {
             tracker: None,
             target: None,
             saved_state: None,
+            padding_source: None,
             pins: 0,
             pending_delete: false,
             uniforms: Uniforms::default(),
@@ -364,6 +371,7 @@ impl Entry {
             tracker: self.tracker,
             target: None,
             saved_state: None,
+            padding_source: None,
             pins: 0,
             pending_delete: false,
             uniforms: self.uniforms,
@@ -548,6 +556,7 @@ pub(crate) struct SnapshotEntry {
     pub(crate) tracker: Option<crate::dynamics::Tracker>,
     pub(crate) target: Option<Mob>,
     pub(crate) saved_state: Option<Mob>,
+    pub(crate) padding_source: Option<Mob>,
     pub(crate) pins: usize,
     pub(crate) pending_delete: bool,
     pub(crate) uniforms: Uniforms,
@@ -1384,6 +1393,23 @@ impl Stage {
         Ok(target)
     }
 
+    /// The family member `mob` is an invisible padding copy of, if
+    /// [`Stage::add_n_more_submobjects`] made it one (fm-b97z). A plain
+    /// handle: the source may since have been deleted.
+    #[must_use]
+    pub fn padding_source(&self, mob: Mob) -> Option<Mob> {
+        self.get(mob).and_then(|e| e.padding_source)
+    }
+
+    /// Record each member of a padding copy as a copy of its source member.
+    pub(crate) fn mark_padding(&mut self, copy: &CopyMap) {
+        for &(source, member) in copy.pairs() {
+            if let Some(entry) = self.get_mut(member) {
+                entry.padding_source = Some(source);
+            }
+        }
+    }
+
     /// The current `generate_target` copy, if one was generated. The link
     /// is a plain handle: deleting the target leaves it stale, a defined
     /// state.
@@ -1675,6 +1701,7 @@ impl Stage {
             self.free.push(old.index);
             entry.target = None;
             entry.saved_state = None;
+            entry.padding_source = None;
             entry.pins = 0;
             entry.pending_delete = false;
             entry.family_cache = RefCell::new(None);
@@ -2320,6 +2347,7 @@ impl Stage {
                                 tracker: entry.tracker,
                                 target: entry.target,
                                 saved_state: entry.saved_state,
+                                padding_source: entry.padding_source,
                                 pins: entry.pins,
                                 pending_delete: entry.pending_delete,
                                 uniforms: entry.uniforms,
@@ -2366,6 +2394,7 @@ impl Stage {
                     tracker: e.tracker,
                     target: e.target,
                     saved_state: e.saved_state,
+                    padding_source: e.padding_source,
                     pins: e.pins,
                     pending_delete: e.pending_delete,
                     uniforms: e.uniforms,

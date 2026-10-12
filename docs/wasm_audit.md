@@ -1,6 +1,20 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-run, 2026-10-11, against `Cargo.lock` `2f4e99d5` and `SUITE.lock`
+**Status:** re-run, 2026-10-12, against `Cargo.lock` `a6dfd97a` and `SUITE.lock`
+`e5995b50`, for the frankenscipy repin from `ed84bdd1` to `ae52b654` (fm-7qx3).
+fsci-linalg's solve-certificate two_prod drops its fused multiply-add
+(fm-g1ey); that one function is the whole upstream delta. No package version
+changes: the four locks move only the fsci revs.
+**The release package gate still FAILS at its size budget** (fm-8j70), so this
+audit does not claim a passing package.
+
+- **VERIFIED (mechanical):** `cargo build --locked -p fmn-wasm --target
+  wasm32-unknown-unknown` passes through rch. `wasm-smoke/run.sh` reports
+  `wasm-smoke OK` with the unchanged Node digest `1f248a71347b82aa` and semantic
+  oracle masks `111111` and `101000`.
+- `scripts/check_wasm_package.sh` was not re-run: the wasm graph is unchanged.
+
+Earlier re-run, 2026-10-11, against `Cargo.lock` `2f4e99d5` and `SUITE.lock`
 `385b7677`, for the frankenscipy repin from `85edd7a9` to `ed84bdd1` (fm-pexg).
 That repin brings the libm-free solve policy, solver portfolio and n <= 4 rcond
 (fm-wi8l, fm-dboe). fsci-linalg, fsci-runtime and fsci-fft are in this graph,
@@ -307,9 +321,9 @@ The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
-- `SUITE.lock` SHA-256: `385b7677d18ace5b6ebb903ed1877c79f04ec1423a91f258d758e83d8024e61b`
-- `Cargo.lock` SHA-256: `2f4e99d55d825853f0b78e9aa988868f4cf68256afa3d15469c82c23c54c0f9a`
-- Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `c7b24794a2fbd620b8788c81968bf66bce7ad8ac52329f38167e65a4e84333cd`
+- `SUITE.lock` SHA-256: `e5995b5078e10cee368b331fd5b16328949e67dd8489da0e536e82d74f825553`
+- `Cargo.lock` SHA-256: `a6dfd97aecdf9f0addd4ae700a98116cc452d484843c4c6bdcc7edb532f6b53c`
+- Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `b1fac18569682e3d2888881883f8b37e4abfb10884ed34a6f2e1eb7a4da942b5`
 
 The 0.5.0 release bump re-bound both lock identities above. That bump changed
 only the lockstep workspace package versions (0.4.0 -> 0.5.0, path packages

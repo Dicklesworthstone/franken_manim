@@ -524,3 +524,33 @@ fn apply_pointwise_function_to_center_moves_to_mapped_center() {
     let center = stage.get_center(mob);
     assert!((center[0] - 12.0).abs() < 1e-5);
 }
+
+// ---------------------------------------------------- point-less box (C-33)
+
+/// C-33: a family without points has a degenerate box, its position.
+/// Interpolation puts that box where the path does, whatever was read
+/// before (the Reference's result depends on a stale refresh flag).
+#[test]
+fn point_less_box_interpolates_along_the_path() {
+    let mut stage = Stage::new();
+    let live = stage.add(Mobject::new());
+    let from = stage.add(Mobject::new());
+    let to = stage.add(Mobject::new());
+    stage.set_point_free_anchor(to, [4.0, 0.0, 0.0]).unwrap();
+    fmn_anim::interpolate_fields(&mut stage, live, from, to, 0.25, PathFunc::Straight);
+    assert_eq!(stage.get_center(live), [1.0, 0.0, 0.0]);
+
+    let arc = PathFunc::from_path_arc(std::f64::consts::PI, [0.0, 0.0, 1.0]);
+    stage.set_point_free_anchor(from, [1.0, 0.0, 0.0]).unwrap();
+    stage.set_point_free_anchor(to, [-1.0, 0.0, 0.0]).unwrap();
+    fmn_anim::interpolate_fields(&mut stage, live, from, to, 0.5, arc);
+    let expected = arc.eval([1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], 0.5);
+    let center = stage.get_center(live);
+    for (got, want) in center.iter().zip(expected) {
+        assert!((got - want).abs() < 1e-12, "{center:?} vs {expected:?}");
+    }
+    assert!(
+        center[1].abs() > 0.5,
+        "the arc leaves the straight line: {center:?}"
+    );
+}

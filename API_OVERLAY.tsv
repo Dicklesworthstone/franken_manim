@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	8b78fb1c5f1073b01966f02e1be246b25deb12f9cf21dfe0a1adeed557aa7bf7
+ledger_reviewed_digest	f6194cee89e89513255f6788a358339f49c1ffd54515a395de06e5ee8aff3e03
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -1049,7 +1049,7 @@ manimlib.mobject.geometry:ArrowTip.get_tip_point	same	scripts/manim_ref/manimlib
 manimlib.mobject.geometry:ArrowTip.get_vector	improved	BN-03	crates/fmn-python/tests/bridge.py	returns the live tip point minus the true-length base vector
 manimlib.mobject.geometry:Circle	improved	BN-09	crates/fmn-python/tests/bridge.py	is the authored Arc subclass over Atlas's checked full-turn geometry and one governed density rule
 manimlib.mobject.geometry:Circle.__init__	improved	BN-09	crates/fmn-python/tests/bridge.py	preserves the exact start-angle stroke and keyword surface while building the native full-turn path
-manimlib.mobject.geometry:Circle.get_radius	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	measures the live transformed first anchor from the current bounding-box center
+manimlib.mobject.geometry:Circle.get_radius	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	measures the overridable get_start() from get_center(), the family bounding-box center
 manimlib.mobject.geometry:Circle.point_at_angle	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	walks the current circle path from its live derived start angle
 manimlib.mobject.geometry:Circle.surround	same	scripts/manim_ref/manimlib/mobject/geometry.py	crates/fmn-python/tests/bridge.py	replaces and buffers both dimensions through live family geometry while preserving fluent identity style and uniforms
 manimlib.mobject.geometry:CubicBezier	improved	BN-13	crates/fmn-library/src/poly.rs#tests	is an authored VMobject subclass whose cubic controls enter Chisel's one error-bounded shared-anchor quadratic converter
