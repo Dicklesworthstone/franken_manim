@@ -846,6 +846,12 @@ def _copy_member_state(old, new, mapping, deep, memo):
             for key, value in attributes.items()
         }
     new.__dict__.update(attributes)
+    # A CameraFrame's pose lives in its camera core. A shallow attribute copy
+    # would share it, so a saved copy would move with the live frame; give
+    # the copy its own, as CameraFrame.copy does (fm-rgr0).
+    core = old.__dict__.get("_core")
+    if core is not None and new.__dict__.get("_core") is core:
+        new.__dict__["_core"] = _copy.copy(core)
 
     extras = old.uniforms._extras
     # Reference Mobject.copy copies every ndarray uniform, so writing a
@@ -3193,6 +3199,10 @@ class Mobject(_BridgeMobject):
                 )
             elif "_data_defaults" in receiver.__dict__:
                 receiver.__dict__.pop("_data_defaults", None)
+            # A frame's pose is in its camera core, not its records, so the
+            # data copy above leaves it; take it explicitly (fm-rgr0).
+            if isinstance(receiver, CameraFrame) and isinstance(source, CameraFrame):
+                receiver._take_pose(source)
         if match_updaters:
             # Reference become (mobject.py:742) also copies the host-side
             # updater list onto the aligned root; the native call above only
@@ -14966,6 +14976,16 @@ class CameraFrame(Mobject):
         if getattr(result, "_core", None) is self._core:
             result.__dict__["_core"] = _copy.copy(self._core)
         return result
+
+    def _take_pose(self, source):
+        # The Reference's become copies the frame's points and uniforms, so
+        # it takes the source's center, shape, orientation and field of view;
+        # here they live in the camera core (fm-rgr0).
+        core = source._core
+        self._core.set_center(core.center())
+        self._core.set_shape(core.shape())
+        self._core.set_orientation(core.orientation())
+        self._core.set_field_of_view(core.field_of_view())
 
     # -- the positional primitives, routed to the engine camera state
 

@@ -41,10 +41,11 @@ def _camera_callbacks(g, scene, animations):
             continue
         if animation.mobject is not scene.frame:
             raise ValueError("Camera animation must target this Scene.frame")
-        if (getattr(animation, "remover", False)
-                or getattr(animation, "replace_mobject_with_target_in_scene", False)):
+        # A remover only drops the frame from the scene list (fm-5wwt);
+        # replacing it would change the camera's identity.
+        if getattr(animation, "replace_mobject_with_target_in_scene", False):
             raise NotImplementedError(
-                "Camera animation cannot remove or replace the scene's camera identity"
+                "Camera animation cannot replace the scene's camera identity"
             )
         native_kind = getattr(animation, "_native_kind", None)
         if native_kind and not isinstance(animation, supported):

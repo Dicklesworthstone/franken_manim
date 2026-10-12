@@ -164,14 +164,14 @@ class CameraCallbackTests(unittest.TestCase):
             self.g["_fmn_make_camera_driver"](self.g["Scene"](), animation)
         self.assertTrue(animation._fmn_allow_camera_callback)
 
-    def test_removal_and_replacement_are_refused_before_callbacks(self):
-        for attribute in ("remover", "replace_mobject_with_target_in_scene"):
-            with self.subTest(attribute=attribute):
-                animation = self.move(4.)
-                setattr(animation, attribute, True)
-                with self.assertRaisesRegex(NotImplementedError, "remove or replace"):
-                    self.scene.play(animation)
-                self.assert_unmarked(animation)
+    def test_replacement_is_refused_before_callbacks(self):
+        # A remover only drops the frame from the scene list (fm-5wwt);
+        # replacing it would change the camera's identity.
+        animation = self.move(4.)
+        animation.replace_mobject_with_target_in_scene = True
+        with self.assertRaisesRegex(NotImplementedError, "replace the scene's camera identity"):
+            self.scene.play(animation)
+        self.assert_unmarked(animation)
         self.assertEqual(self.scene.calls, [])
 
     def test_native_only_drawable_effect_cannot_be_misclassified_as_camera_callback(self):

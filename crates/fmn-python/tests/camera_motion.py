@@ -163,7 +163,6 @@ def foreign_helpers_and_destructive_camera_operations_are_refused():
     other.add(path, dot)
     for animation in (m.MoveAlongPath(scene.frame, path),
                       m.MaintainPositionRelativeTo(scene.frame, dot),
-                      m.Rotate(scene.frame, remover=True),
                       m.Rotate(scene.frame.copy())):
         before = scene.frame.copy()
         try:
@@ -272,6 +271,64 @@ def final_camera_motion_changes_real_native_pixels():
     assert images[0][:8] == b"\x89PNG\r\n\x1a\n"
 
 
+def removers_drop_the_frame_from_the_scene_list_and_keep_the_camera():
+    # Since the frame joined Scene.mobjects (fm-6l2i), a remover animation of
+    # it drops it from the scene list, as in the Reference, where
+    # FadeOut(Group(*self.mobjects)) fades it with everything else.
+    # Scene.frame stays the camera (fm-5wwt). The lists and frame values
+    # were measured in the pinned Reference.
+    scene = m.Scene()
+    scene.add(m.Square())
+    width = scene.frame.get_width()
+    scene.play(m.LaggedStartMap(m.FadeOut, m.Group(*scene.mobjects)), run_time=2 / 30)
+    assert scene.mobjects == [], scene.mobjects
+    close(scene.frame.get_center(), m.ORIGIN)
+    assert math.isclose(scene.frame.get_width(), width)
+    scene.add(m.Circle())
+    assert [type(mob).__name__ for mob in scene.mobjects] == ["Circle"]
+    scene = m.Scene()
+    scene.play(m.FadeOut(scene.frame), run_time=2 / 30)
+    assert scene.mobjects == [], scene.mobjects
+    plain, removed = m.Scene(), m.Scene()
+    plain.play(m.Rotate(plain.frame, m.PI / 2), run_time=2 / 30)
+    removed.play(m.Rotate(removed.frame, m.PI / 2, remover=True), run_time=2 / 30)
+    assert plain.mobjects == [plain.frame] and removed.mobjects == []
+    close(removed.frame.get_orientation(), plain.frame.get_orientation())
+
+
+def become_and_restore_take_the_source_frame_pose():
+    # The Reference's become copies a frame's points and uniforms, so restore()
+    # and become(target) move the camera at once; the pose lives in the core
+    # here (fm-rgr0). Values measured in the pinned Reference.
+    scene = m.Scene()
+    frame = scene.frame
+    width = frame.get_width()
+    frame.save_state()
+    frame.shift(m.RIGHT).set_width(20).reorient(30, 40)
+    frame.restore()
+    close(frame.get_center(), m.ORIGIN)
+    assert math.isclose(frame.get_width(), width)
+    close(frame.get_euler_angles(), [0, 0, 0])
+    target = frame.copy()
+    target.reorient(10, 20).shift(m.UP)
+    frame.become(target)
+    close(frame.get_center(), m.UP)
+    close(frame.get_euler_angles(), [10 * m.DEG, 20 * m.DEG, 0])
+    # A group over the scene list includes the frame (fm-6l2i), so restoring
+    # it restores the camera too.
+    scene = m.Scene()
+    square = m.Square()
+    scene.add(square)
+    everything = m.Group(*scene.mobjects)
+    everything.save_state()
+    scene.frame.shift(m.RIGHT).set_width(20)
+    square.shift(m.UP)
+    everything.restore()
+    close(scene.frame.get_center(), m.ORIGIN)
+    assert math.isclose(scene.frame.get_width(), width)
+    close(square.get_center(), m.ORIGIN)
+
+
 _CASES = (rotation_is_absolute_at_every_native_sample,
           rotation_obeys_live_rates_windows_and_final_alpha,
           succession_captures_predecessor_camera_orientation,
@@ -280,6 +337,8 @@ _CASES = (rotation_is_absolute_at_every_native_sample,
           tracking_uses_construction_offset_and_current_sibling_state,
           tracking_samples_authored_centers_exactly_once_at_construction,
           foreign_helpers_and_destructive_camera_operations_are_refused,
+          removers_drop_the_frame_from_the_scene_list_and_keep_the_camera,
+          become_and_restore_take_the_source_frame_pose,
           authored_rotation_dispatch_preserves_live_receiver,
           authored_rates_observe_restored_pose_and_may_edit_it,
           authored_rotation_owns_axis_interpretation,
