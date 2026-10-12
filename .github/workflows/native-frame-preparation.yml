@@ -36,7 +36,7 @@ jobs:
           restore-keys: |
             cargo-${{ runner.os }}-${{ runner.arch }}-portable-
             fmtl-rates-${{ runner.os }}-${{ runner.arch }}-
-      - name: Verify and apply native pipeline candidate
+      - name: Verify and apply native pipeline and camera candidates
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -44,29 +44,39 @@ jobs:
           import base64, gzip, hashlib, json, os, pathlib, subprocess, urllib.request
           out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'native-prepare'
           out.mkdir()
-          sha = '910f528ef983d6b572b38d93a746141806898a46'
-          expected = '42617a799fda81f5502f9a7defaab5d745f1392f9d3a031be035808750f5d2c1'
-          request = urllib.request.Request(
-              f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{sha}',
-              headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN']})
-          with urllib.request.urlopen(request, timeout=60) as response:
-              content = base64.b64decode(json.load(response)['content'])
-          assert hashlib.sha1(b'blob '+str(len(content)).encode()+b'\0'+content).hexdigest() == sha
-          patch = gzip.decompress(base64.b64decode(content, validate=True))
-          assert hashlib.sha256(patch).hexdigest() == expected
-          path = out / 'candidate.patch'
-          path.write_bytes(patch)
+          candidates = [
+              ('910f528ef983d6b572b38d93a746141806898a46', '42617a799fda81f5502f9a7defaab5d745f1392f9d3a031be035808750f5d2c1'),
+              ('2edf5665aeb7f337c355e0ca705dcb80237daf9f', '158530940196026ffd5ec76019ba76dbef818b80a59f9127e063747fa869ae93'),
+          ]
           allowed = {
               'crates/fmn/src/rendering/pipeline.rs', 'crates/fmn/src/rendering.rs',
               'crates/fmn/tests/native_preparation.rs',
               'crates/fmn-cli/src/offline_cpu.rs', 'crates/fmn-cli/src/lib.rs',
+              'crates/fmn-mobject/src/dynamics.rs', 'crates/fmn-mobject/src/stage.rs',
+              'crates/fmn-mobject/tests/snapshot_reads.rs',
+              'crates/fmn-scene/src/camera_rig.rs', 'crates/fmn-scene/tests/camera_snapshot.rs',
+              'crates/fmn/src/rendering/camera_animation.rs',
           }
-          stats = subprocess.check_output(['git','apply','--numstat',str(path)], text=True)
-          paths = {line.split('\t',2)[2] for line in stats.splitlines()}
-          assert paths == allowed, paths
-          subprocess.run(['git','apply','--check',str(path)], check=True)
-          subprocess.run(['git','apply',str(path)], check=True)
-          paths = sorted(paths)
+          names = set()
+          for index, (sha, expected) in enumerate(candidates):
+              request = urllib.request.Request(
+                  f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{sha}',
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN']})
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  content = base64.b64decode(json.load(response)['content'])
+              assert hashlib.sha1(b'blob '+str(len(content)).encode()+b'\0'+content).hexdigest() == sha
+              patch = gzip.decompress(base64.b64decode(content, validate=True))
+              assert hashlib.sha256(patch).hexdigest() == expected
+              path = out / f'candidate-{index}.patch'
+              path.write_bytes(patch)
+              stats = subprocess.check_output(['git','apply','--numstat',str(path)], text=True)
+              paths = {line.split('\t',2)[2] for line in stats.splitlines()}
+              assert paths and paths <= allowed, paths
+              subprocess.run(['git','apply','--check',str(path)], check=True)
+              subprocess.run(['git','apply',str(path)], check=True)
+              names |= paths
+          assert names == allowed, names
+          paths = sorted(names)
           subprocess.run(['rustfmt','--edition','2024','--config','skip_children=true',*paths], check=True)
           subprocess.run(['git','add','-N','--',*paths], check=True)
           subprocess.run(['git','diff','--check'], check=True)
@@ -78,12 +88,16 @@ jobs:
           (out / 'paths.json').write_text(json.dumps(paths))
           (out / 'base.txt').write_text(subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip())
           (out / 'validation-commit.txt').write_text(os.environ['GITHUB_SHA'])
-          (out / 'patch-sha256.txt').write_text(expected)
+          (out / 'patches.json').write_text(json.dumps(candidates))
           PY
-      - name: Test snapshot ownership and animation integration
+      - name: Test snapshot ownership and camera sampling
         run: |
           set -o pipefail
-          cargo test --locked -p fmn-mobject -p fmn-anim --all-targets --no-fail-fast 2>&1 | tee "$RUNNER_TEMP/native-prepare/ownership-tests.log"
+          {
+            cargo test --locked -p fmn-mobject --test snapshot_reads --test frozen_render &&
+            cargo test --locked -p fmn-anim --test render_handoff --test frame_order &&
+            cargo test --locked -p fmn-scene --test camera_snapshot
+          } 2>&1 | tee "$RUNNER_TEMP/native-prepare/ownership-tests.log"
       - name: Test native rendering and frame pipeline
         if: ${{ !cancelled() }}
         run: |
@@ -103,7 +117,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           set -o pipefail
-          cargo clippy --locked -p fmn -p fmn-cli --features fmn-cli/cli,fmn-cli/batch --all-targets -- -D warnings 2>&1 | tee "$RUNNER_TEMP/native-prepare/clippy.log"
+          cargo clippy --locked -p fmn-mobject -p fmn-scene -p fmn -p fmn-cli --features fmn-cli/cli,fmn-cli/batch --all-targets -- -D warnings 2>&1 | tee "$RUNNER_TEMP/native-prepare/clippy.log"
       - name: Archive exact validated source blobs
         env:
           GH_TOKEN: ${{ github.token }}
@@ -122,7 +136,7 @@ jobs:
               with urllib.request.urlopen(request, timeout=60) as response:
                   assert json.load(response)['sha'] == expected
               entries.append({'path':name,'mode':'100644','type':'blob','sha':expected})
-          manifest = {'base':(out / 'base.txt').read_text(), 'validation_commit':os.environ['GITHUB_SHA'], 'patch_sha256':(out / 'patch-sha256.txt').read_text(), 'files':entries}
+          manifest = {'base':(out / 'base.txt').read_text(), 'validation_commit':os.environ['GITHUB_SHA'], 'patches':json.loads((out / 'patches.json').read_text()), 'files':entries}
           (out / 'validated-blobs.json').write_text(json.dumps(manifest, indent=2))
           print(json.dumps(manifest, indent=2))
           PY
