@@ -482,6 +482,28 @@ class Envelopes(unittest.TestCase):
         moved = sf.diff_subject(ref, self.square(lambda x, y, z: (x + 0.08, y, z)), rows)
         self.assertEqual(moved["first_difference"]["envelope_violation"]["center_offset"], 0.08)
 
+    def test_a_layout_cascade_is_explained_and_a_planted_misplacement_is_not(self):
+        # fm-5wq.59: a second square sits below the first, its top-left at the
+        # first's bottom-left (next_to(first, DOWN, aligned_edge=LEFT)).
+        rows = [self.note(envelope={"size_rel": 0.5, "center_abs": 0.05})]
+
+        def scene(first_scale, second_shift=(0.0, 0.0)):
+            first = Square([(first_scale * x, first_scale * y, z) for x, y, z in SQUARE])
+            left, top = -first_scale + second_shift[0], -first_scale - 0.25 + second_shift[1]
+            second = Square([(left + 1 + x, top - 1 + y, z) for x, y, z in SQUARE])
+            return facts([first, second])
+
+        ref = scene(1.0)
+        # The first square grows 20% (inside its envelope), and the second
+        # follows its bottom-left corner: a cascade, anchored on root 0.
+        grown = sf.diff_subject(ref, scene(1.2), rows)["envelope_violations"]
+        self.assertEqual([v["path"] for v in grown], ["1"])
+        self.assertEqual(grown[0]["cascade"]["anchor"], "0")
+        # The same second square moved on its own: a placement bug, unexplained.
+        planted = sf.diff_subject(ref, scene(1.0, (0.3, 0.1)), rows)["envelope_violations"]
+        self.assertEqual([v["path"] for v in planted], ["1"])
+        self.assertIsNone(planted[0]["cascade"])
+
     def test_a_behavior_note_without_an_envelope_fails_validation_and_check(self):
         row = self.note()
         del row["envelope"]

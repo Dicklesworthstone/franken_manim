@@ -698,6 +698,58 @@ def _member_differences(ref, portal):
             yield "points_sha256", ref.get("points_sha256"), portal.get("points_sha256")
 
 
+_BOX_ROWS = ("min", "mid", "max")
+
+
+def cascade_anchor(path, ref_boxes, portal_boxes):
+    """How a member's displacement follows a nearby object's, or None (fm-5wq.59).
+
+    Scenes place objects relative to others (next_to, align_to, get_bottom), so a
+    size difference in one object (BN-05) moves the next by the same amount. The
+    member's violation is cascade-explained when one of its 27 box points (min, mid
+    or max per axis) moved exactly as one of its anchor's box points did, by a
+    displacement larger than the quantization slack, so a translated member still
+    counts as unexplained. The anchor is the parent or the nearest preceding sibling;
+    for a root, that is the preceding root.
+    """
+    def triples(b):
+        return isinstance(b, list) and len(b) == 3 and all(
+            isinstance(p, list) and len(p) == 3 and all(isinstance(v, int) for v in p) for p in b)
+
+    def moves(p):
+        ref, portal = ref_boxes.get(p), portal_boxes.get(p)
+        if not (triples(ref) and triples(portal)):
+            return None
+        return {(i, j, k): tuple(portal[r][axis] - ref[r][axis] for axis, r in enumerate((i, j, k)))
+                for i in range(3) for j in range(3) for k in range(3)}
+
+    def label(point):
+        return ",".join(f"{axis}:{_BOX_ROWS[r]}" for axis, r in zip("xyz", point))
+
+    own = moves(path)
+    if own is None:
+        return None
+    parts = path.split(".")
+    anchors = []
+    if parts[-1].isdigit() and int(parts[-1]) > 0:
+        anchors.append(".".join([*parts[:-1], str(int(parts[-1]) - 1)]))
+    if len(parts) > 1:
+        anchors.append(".".join(parts[:-1]))
+    slack = 2 * TOLERANCE_QUANTA
+    for anchor in anchors:
+        theirs = moves(anchor)
+        if theirs is None:
+            continue
+        for anchor_point, shift in theirs.items():
+            if max(abs(v) for v in shift) <= slack:
+                continue
+            for member_point, own_shift in own.items():
+                if all(abs(a - b) <= slack for a, b in zip(own_shift, shift)):
+                    return {"anchor": anchor, "member_point": label(member_point),
+                            "anchor_point": label(anchor_point)}
+    return None
+
+
 def diff_subject(ref: dict, portal: dict, exclusions=(), limit: int = 50,
                  ignore=frozenset()) -> dict:
     """Compare one subject's facts. Differences are reported in depth-first path order.
@@ -731,6 +783,8 @@ def diff_subject(ref: dict, portal: dict, exclusions=(), limit: int = 50,
         return counts
 
     ref_drawn, portal_drawn = drawn(ref), drawn(portal)
+    ref_boxes = {m["path"]: m.get("bbox") for m in ref.get("members", ())}
+    portal_boxes = {m["path"]: m.get("bbox") for m in portal.get("members", ())}
 
     def ancestors(path):
         parts = path.split(".")
@@ -748,6 +802,7 @@ def diff_subject(ref: dict, portal: dict, exclusions=(), limit: int = 50,
             return
         if violation is not None:
             violation["family"] = [ref_drawn.get(path, 0), portal_drawn.get(path, 0)]
+            violation["cascade"] = cascade_anchor(path, ref_boxes, portal_boxes)
             if len(violations) < limit:
                 violations.append({"path": path, "class": member_class, **violation})
         if len(differences) < limit:
