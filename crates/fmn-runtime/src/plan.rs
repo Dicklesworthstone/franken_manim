@@ -518,21 +518,51 @@ impl ExecutionPlan {
         let requested_slots = request
             .max_frames_in_flight
             .map_or(requested_slots, |limit| requested_slots.min(limit));
-        let bytes_per_frame = estimated_frame_bytes(
-            request.surface,
-            request.output_format,
-            render_teams
+        let largest_scratch = |teams: &[TeamPlan]| {
+            teams
                 .iter()
                 .map(TeamPlan::scratch_bytes)
                 .max()
-                .unwrap_or(scratch_per_worker),
+                .unwrap_or(scratch_per_worker)
+        };
+        let mut bytes_per_frame = estimated_frame_bytes(
+            request.surface,
+            request.output_format,
+            largest_scratch(&render_teams),
         )
         .ok_or(PlanError::SizeOverflow)?;
         let memory_slots = memory_slot_cap(topology.total_memory_bytes, bytes_per_frame);
-        let frames_in_flight = requested_slots.min(memory_slots).max(1);
+        let mut frames_in_flight = requested_slots.min(memory_slots).max(1);
 
         // A team without a possible simultaneous frame only consumes cores and
-        // scratch. Truncation preserves processor-group-local chunks.
+        // scratch. With more teams than frames, re-split only the cores that
+        // full-size teams for those frames can use (Preview on 36 cores keeps
+        // 16 + 16 rather than two teams of 12), then re-check the memory cap
+        // against the larger teams. Truncation preserves
+        // processor-group-local chunks.
+        if render_teams.len() > frames_in_flight {
+            let used = representatives
+                .len()
+                .min(frames_in_flight.saturating_mul(target_threads.max(1)));
+            render_teams = build_render_teams(
+                topology,
+                &representatives[..used],
+                target_threads,
+                scratch_per_worker,
+            );
+            bytes_per_frame = estimated_frame_bytes(
+                request.surface,
+                request.output_format,
+                largest_scratch(&render_teams),
+            )
+            .ok_or(PlanError::SizeOverflow)?;
+            frames_in_flight = frames_in_flight
+                .min(memory_slot_cap(
+                    topology.total_memory_bytes,
+                    bytes_per_frame,
+                ))
+                .max(1);
+        }
         render_teams.truncate(frames_in_flight);
         if render_teams.is_empty() {
             render_teams = build_render_teams(
@@ -779,9 +809,30 @@ fn build_render_teams(
         by_group.entry(group).or_default().push(cpu);
     }
 
+    // Frames go round-robin and emit in order, so the smallest team sets the
+    // pace for every team. Within a group: the fewest teams of at most
+    // `target_threads`, sized within one thread of each other (36 cores in
+    // chunks of 32 gave 32 + 4).
+    let mut chunks = Vec::new();
+    for cpus in by_group.values() {
+        let count = cpus.len().div_ceil(target_threads.max(1));
+        let base = cpus.len() / count;
+        let larger = cpus.len() % count;
+        let mut rest = cpus.as_slice();
+        for team in 0..count {
+            let (chunk, tail) = rest.split_at(base + usize::from(team < larger));
+            chunks.push(chunk);
+            rest = tail;
+        }
+    }
+    // Across groups no team may straddle a boundary, so a small group (65
+    // cores split 64 + 1) would form a starved team. A team under half the
+    // largest is not planned; its cores stay free for scene, output and
+    // encoder work.
+    let largest = chunks.iter().map(|chunk| chunk.len()).max().unwrap_or(0);
     let mut teams = Vec::new();
-    for cpus in by_group.into_values() {
-        for chunk in cpus.chunks(target_threads.max(1)) {
+    for chunk in chunks {
+        if chunk.len() * 2 >= largest {
             let index = teams.len();
             teams.push(TeamPlan {
                 role: TeamRole::Render(index),
@@ -1030,6 +1081,61 @@ mod tests {
                 .len(),
             96
         );
+    }
+
+    fn team_threads(plan: &ExecutionPlan) -> Vec<usize> {
+        plan.render_teams.iter().map(TeamPlan::threads).collect()
+    }
+
+    /// fm-pdso: 36 cores used to plan render teams of 32 and 4. Frames go
+    /// round-robin and emit in order, so the 4-thread team set the pace.
+    /// `fallback` splits 65 CPUs into groups of 64 and 1; the lone CPU is not
+    /// a team.
+    #[test]
+    fn remainder_cores_never_form_a_starved_render_team() {
+        for (cores, expected) in [
+            (33_u32, &[17, 16][..]),
+            (36, &[18, 18]),
+            (40, &[20, 20]),
+            (64, &[32, 32]),
+            (65, &[32, 32]),
+            (96, &[32, 32, 32]),
+            (128, &[32, 32, 32, 32]),
+        ] {
+            let plan = ExecutionPlan::derive(offline(), &HardwareTopology::fallback(cores), None)
+                .expect("plan");
+            let sizes = team_threads(&plan);
+            assert_eq!(sizes, expected, "{cores} cores");
+            let largest = sizes.iter().copied().max().expect("a render team");
+            assert!(
+                sizes.iter().all(|&threads| threads * 2 >= largest),
+                "{cores} cores: {sizes:?}"
+            );
+        }
+    }
+
+    /// With fewer frames in flight than teams, the kept teams are full size,
+    /// and the memory estimate covers them rather than the dropped split.
+    #[test]
+    fn fewer_frames_than_teams_keep_full_size_teams() {
+        let topology = HardwareTopology::fallback(36);
+        let preview =
+            PlanRequest::standard(RenderIntent::Preview, surface(), OutputPixelFormat::Rgba8);
+        let plan = ExecutionPlan::derive(preview, &topology, None).expect("plan");
+        assert_eq!(plan.frames_in_flight, 2);
+        assert_eq!(team_threads(&plan), [16, 16]);
+
+        let plan = ExecutionPlan::derive(offline().with_max_frames_in_flight(1), &topology, None)
+            .expect("plan");
+        assert_eq!(plan.frames_in_flight, 1);
+        assert_eq!(team_threads(&plan), [32]);
+        let full_team = estimated_frame_bytes(
+            surface(),
+            OutputPixelFormat::Rgba8,
+            32 * DEFAULT_SCRATCH_PER_WORKER,
+        )
+        .expect("bytes");
+        assert_eq!(plan.estimated_in_flight_bytes, full_team);
     }
 
     /// fm-hyqz: an encoder-bound output stage may use every planned CPU
