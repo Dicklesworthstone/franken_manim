@@ -43,7 +43,7 @@ jobs:
           restore-keys: |
             cargo-${{ runner.os }}-${{ runner.arch }}-portable-
             fmtl-rates-${{ runner.os }}-${{ runner.arch }}-
-      - name: Resume the exact previously executed candidate without relaxing any check
+      - name: Resume the tested runtime and repair only test locator admission
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -51,7 +51,6 @@ jobs:
           import hashlib, io, json, os, pathlib, subprocess, urllib.error, urllib.request, zipfile
           out = pathlib.Path(os.environ['RUNNER_TEMP'])/'video-fidelity'
           out.mkdir()
-          # Do not forward the API credential to the signed artifact host.
           class NoRedirect(urllib.request.HTTPRedirectHandler):
               def redirect_request(self, request, fp, code, msg, headers, newurl):
                   return None
@@ -84,13 +83,22 @@ jobs:
           bases = json.loads((old/'base-blobs.json').read_text())
           for name in paths:
               assert subprocess.check_output(['git','rev-parse','HEAD:'+name], text=True).strip() == bases[name]
-              pathlib.Path(name).write_bytes((old/'source'/name).read_bytes())
+              content = (old/'source'/name).read_text()
+              if name == 'crates/fmn-output/tests/video_color_negotiation.rs':
+                  assert content.count('StdFfmpegLocator::default()') == 1
+                  content = content.replace('StdFfmpegLocator::default()', 'StdFfmpegLocator::from_host_path()')
+              pathlib.Path(name).write_text(content)
+          subprocess.run(['rustfmt','--edition','2024','--config','skip_children=true','crates/fmn-output/tests/video_color_negotiation.rs'], check=True)
+          for name in paths:
+              target = out/'source'/name
+              target.parent.mkdir(parents=True, exist_ok=True)
+              target.write_bytes(pathlib.Path(name).read_bytes())
           for name in ['base-blobs.json','base-commit.txt','paths.json']:
               (out/name).write_bytes((old/name).read_bytes())
           subprocess.run(['git','diff','--check'], check=True)
           subprocess.run(['python3','crates/fmn-output/tests/make_audio_fixtures.py',os.environ['FMN_AUDIO_FIXTURE_DIR']], check=True)
           PY
-      - name: Complete broad output suite with required real fixtures
+      - name: Run every output test and strict fixture-feature Clippy
         run: |
           python3 - <<'PY'
           import json, os, pathlib, subprocess
@@ -107,7 +115,7 @@ jobs:
               (out/'results.json').write_text(json.dumps(results, indent=2))
           assert all(code == 0 for code in results.values()), results
           PY
-      - name: Store immutable blobs only after the complete validation succeeds
+      - name: Store exact tested immutable blobs without any commit or ref update
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -117,7 +125,7 @@ jobs:
           result = {}
           for name in json.loads((out/'paths.json').read_text()):
               content = pathlib.Path(name).read_bytes()
-              assert content == (out/'previous'/'source'/name).read_bytes(), name
+              assert content == (out/'source'/name).read_bytes(), name
               expected = hashlib.sha1(b'blob '+str(len(content)).encode()+b'\0'+content).hexdigest()
               request = urllib.request.Request(f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs', data=json.dumps({'content':base64.b64encode(content).decode(),'encoding':'base64'}).encode(), headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Content-Type':'application/json'}, method='POST')
               with urllib.request.urlopen(request, timeout=60) as response:
