@@ -18,6 +18,9 @@ use std::path::Path;
 
 use fmn_frame::{ColorRange, PixelFormat};
 
+mod audio_quality;
+pub use audio_quality::AudioQuality;
+
 mod quality;
 pub use quality::{EncoderPreset, EncoderTune, VideoQuality};
 
@@ -392,12 +395,35 @@ pub fn encode_argv(job: &VideoJob, out: &Path) -> Result<Vec<String>, Negotiatio
 /// the audio to AAC.
 #[must_use]
 pub fn mux_argv(video: &Path, audio: &Path, out: &Path) -> Vec<String> {
+    build_mux_argv(video, audio, out, AudioQuality::default())
+}
+
+/// Mux a native soundtrack using an explicit AAC target, retaining stream-copy
+/// video and the normal mappings. With no override this is exactly [`mux_argv`].
+///
+/// # Errors
+/// Refuses an invalid AAC target before building process arguments.
+pub fn mux_argv_with_quality(
+    video: &Path,
+    audio: &Path,
+    out: &Path,
+    quality: AudioQuality,
+) -> Result<Vec<String>, NegotiationError> {
+    quality.validate()?;
+    Ok(build_mux_argv(video, audio, out, quality))
+}
+
+fn build_mux_argv(video: &Path, audio: &Path, out: &Path, quality: AudioQuality) -> Vec<String> {
     let mut argv = base_argv();
     push(&mut argv, &["-i"]);
     argv.push(video.display().to_string());
     push(&mut argv, &["-i"]);
     argv.push(audio.display().to_string());
     push(&mut argv, &["-c:v", "copy", "-c:a", "aac"]);
+    if let Some(bitrate) = quality.bitrate {
+        argv.push("-b:a".into());
+        argv.push(bitrate.to_string());
+    }
     push(&mut argv, &["-map", "0:v:0", "-map", "1:a:0"]);
     argv.push("-y".into());
     argv.push(out.display().to_string());

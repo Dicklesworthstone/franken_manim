@@ -709,7 +709,10 @@ impl PortalFrameSession {
                     },
                 )
                 .map_err(native_error)?;
-                let sink = sink.with_no_clobber();
+                let sink = sink
+                    .with_no_clobber()
+                    .with_audio_quality(video.audio_quality)
+                    .map_err(native_error)?;
                 let (sink, completion) = sink.with_deferred_soundtrack().map_err(native_error)?;
                 soundtrack = Some(completion);
                 let (binding, receipt) = sink.into_binding("python-ffmpeg-video");

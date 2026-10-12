@@ -28,6 +28,7 @@ fmn.cli.global	--threads	threads	cli_flag	0	action=store;nargs=-;type=usize;defa
 fmn.cli.global	-h,--help	help	cli_flag	0	action=store_true;nargs=-;type=-;default=False	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Show command help and exit
 fmn.cli.global	-q,--quiet	quiet	cli_flag	0	action=store_true;nargs=-;type=-;default=False	same	-	crates/fmn-cli/src/lib.rs#tests	suppress human decoration only
 fmn.cli.global	-v,--version	version	cli_flag	0	action=store_true;nargs=-;type=-;default=False	same	-	crates/fmn-cli/src/lib.rs#tests	stable version report
+fmn.cli.render	--audio-bitrate	audio_bitrate	cli_flag	0	action=store;nargs=-;type=u64;default=-	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Set soundtrack AAC bitrate in bits per second (video is stream-copied)
 fmn.cli.render	--autoreload	autoreload	cli_flag	0	action=store_true;nargs=-;type=-;default=False	tiered	OOT-CLI-AUTORELOAD	crates/fmn-cli/src/lib.rs#tests	re-specified as supervised Studio worker reload
 fmn.cli.render	--crf	crf	cli_flag	0	action=store;nargs=-;type=u64;default=-	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Set libx264/libx265 constant rate factor (0 through 51)
 fmn.cli.render	--engine	engine	cli_flag	0	action=store;nargs=-;type=engine;default=-	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Select the CPU engine or a standard-only accelerator annex
@@ -159,6 +160,7 @@ fmn.config	embed	embed	config_key	0	kind=map;default=-	same	crates/fmn-config/sr
 fmn.config	embed.autoreload	embed.autoreload	config_key	0	kind=bool;default=False	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	controls scene autoreload behavior on file modification
 fmn.config	embed.exception_mode	embed.exception_mode	config_key	0	kind=string;default="Verbose"	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	specifies exception verbosity mode during interactive embed
 fmn.config	file_writer	file_writer	config_key	0	kind=map;default=-	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the video and frame output configuration namespace
+fmn.config	file_writer.audio_bitrate	file_writer.audio_bitrate	config_key	0	kind=int;default=-	improved	BN-15	crates/fmn-output/tests/audio_quality.rs	sets the second-stage AAC bitrate without re-encoding video or changing native PCM
 fmn.config	file_writer.ffmpeg_bin	file_writer.ffmpeg_bin	config_key	0	kind=string;default="ffmpeg"	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the ffmpeg binary executable name or path
 fmn.config	file_writer.gamma	file_writer.gamma	config_key	0	kind=float;default=1.0	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the display gamma correction factor
 fmn.config	file_writer.pixel_format	file_writer.pixel_format	config_key	0	kind=string;default="yuv420p"	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the output video pixel format string

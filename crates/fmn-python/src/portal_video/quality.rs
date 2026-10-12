@@ -77,6 +77,12 @@ pub(super) fn from_writer(writer: &Bound<'_, PyAny>) -> PyResult<VideoQuality> {
     })
 }
 
+pub(super) fn audio_from_writer(writer: &Bound<'_, PyAny>) -> PyResult<fmn_output::AudioQuality> {
+    Ok(fmn_output::AudioQuality {
+        bitrate: unsigned(writer, "audio_bitrate", 1, u32::MAX)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

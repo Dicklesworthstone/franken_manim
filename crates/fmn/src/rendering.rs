@@ -68,7 +68,7 @@ pub use ffmpeg_limits::{
 pub use pipeline::{NativeFrameError, NativeFramePipeline};
 pub use soundtrack::{PreparedSceneSoundtrack, SoundtrackInput, SoundtrackTimeline};
 
-pub use fmn_output::negotiate::{EncoderPreset, EncoderTune, VideoQuality};
+pub use fmn_output::negotiate::{AudioQuality, EncoderPreset, EncoderTune, VideoQuality};
 pub use fmn_output::{EmitterReport, JobLimits, NativeArtifactReport};
 pub use fmn_render::{CameraConfig, CameraFrame};
 pub use fmn_runtime::ExecutionPlan;
@@ -223,6 +223,8 @@ pub struct RenderArtifact {
     /// policy means encoder defaults, not an inferred CRF or measured quality.
     /// The exact emitted flags also remain in the ffmpeg invocation provenance.
     pub video_quality: Option<VideoQuality>,
+    /// Effective AAC policy for video outputs; exact mux argv appears in ffmpeg receipts.
+    pub audio_quality: Option<AudioQuality>,
     /// The soundtrack muxed into a video artifact; `None` when the scene
     /// authored no sound or the format carries no audio.
     pub soundtrack: Option<SoundtrackReport>,
@@ -255,6 +257,7 @@ impl RenderArtifact {
             audio_decodes: Vec::new(),
             ffmpeg_limits: None,
             video_quality: None,
+            audio_quality: None,
             soundtrack: None,
         })
     }
@@ -274,6 +277,7 @@ impl RenderArtifact {
             audio_decodes: Vec::new(),
             ffmpeg_limits: None,
             video_quality: None,
+            audio_quality: None,
             soundtrack,
         }
     }
@@ -340,6 +344,9 @@ pub struct RenderOptions {
     /// refused before tool discovery rather than dropped. Never changes raw
     /// frame rendering, frame sampling, or certified artifact semantics.
     pub video_quality: VideoQuality,
+    /// Opt-in AAC target for the second-stage soundtrack mux. Overrides the
+    /// corresponding file_writer key, and never changes the native WAV mix.
+    pub audio_quality: AudioQuality,
 }
 
 impl RenderOptions {
@@ -362,6 +369,7 @@ impl RenderOptions {
             ffmpeg: None,
             ffmpeg_limits: ffmpeg_limits::default_job_limits(),
             video_quality: VideoQuality::default(),
+            audio_quality: AudioQuality::default(),
         })
     }
 
@@ -376,6 +384,21 @@ impl RenderOptions {
         let mut options = Self::new(output)?;
         options.format = format;
         Ok(options)
+    }
+
+    /// Resolve and validate the AAC target without process access.
+    ///
+    /// # Errors
+    /// Zero bitrate is refused even when ffmpeg is absent.
+    pub fn effective_audio_quality(&self) -> Result<AudioQuality, RenderError> {
+        let quality = AudioQuality {
+            bitrate: self
+                .audio_quality
+                .bitrate
+                .or(self.config.file_writer.audio_bitrate),
+        };
+        quality.validate().map_err(RenderError::Negotiation)?;
+        Ok(quality)
     }
 
     /// Resolve configuration and explicit video overrides without tool access.
@@ -689,6 +712,7 @@ struct VideoSession {
     job_limits: JobLimits,
     max_input_bytes: u64,
     video_quality: VideoQuality,
+    audio_quality: AudioQuality,
     timeline: SoundtrackTimeline,
     audio_decodes: Vec<InvocationReport>,
 }
@@ -735,6 +759,16 @@ impl RenderSink {
                 "video_quality requires an opaque MP4/MOV output",
             ));
         }
+        if !options.format.is_video() && !options.audio_quality.is_default() {
+            return Err(RenderError::InvalidOptions(
+                "audio_quality requires MP4/MOV output",
+            ));
+        }
+        let audio_quality = if options.format.is_video() {
+            options.effective_audio_quality()?
+        } else {
+            AudioQuality::default()
+        };
         let limits = SinkLimits::new(
             options.max_frames,
             options.max_resident_bytes,
@@ -1002,6 +1036,8 @@ impl RenderSink {
                 )
                 .map_err(RenderError::Sink)?
                 .with_no_clobber()
+                .with_audio_quality(audio_quality)
+                .map_err(RenderError::Sink)?
                 .with_deferred_soundtrack()
                 .map_err(RenderError::Sink)?;
                 video = Some(VideoSession {
@@ -1013,6 +1049,7 @@ impl RenderSink {
                     job_limits,
                     max_input_bytes: options.max_output_bytes,
                     video_quality,
+                    audio_quality,
                     timeline: SoundtrackTimeline::default(),
                     audio_decodes: Vec::new(),
                 });
@@ -1143,6 +1180,7 @@ impl RenderSink {
             .as_ref()
             .map(|video| FfmpegLimitsReport::new(&video.job_limits, video.max_input_bytes));
         artifact.video_quality = self.video.as_ref().map(|video| video.video_quality);
+        artifact.audio_quality = self.video.as_ref().map(|video| video.audio_quality);
         if let Some(video) = self.video.as_mut() {
             artifact.audio_decodes = std::mem::take(&mut video.audio_decodes);
         }

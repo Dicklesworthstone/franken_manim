@@ -67,6 +67,7 @@ pub(crate) fn config_from_value(root: Value) -> Result<Config, ConfigError> {
             video_preset: cx.opt_string("file_writer.video_preset")?,
             video_tune: cx.opt_string("file_writer.video_tune")?,
             video_bitrate: cx.opt_u32("file_writer.video_bitrate")?,
+            audio_bitrate: cx.opt_u32("file_writer.audio_bitrate")?,
             saturation: cx.f64("file_writer.saturation")?,
             gamma: cx.f64("file_writer.gamma")?,
         },

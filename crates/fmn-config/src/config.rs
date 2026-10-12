@@ -160,6 +160,8 @@ pub struct FileWriterConfig {
     pub video_tune: Option<String>,
     /// Optional target video bitrate in bits per second.
     pub video_bitrate: Option<u32>,
+    /// Optional target AAC soundtrack bitrate in bits per second. Native PCM is unchanged.
+    pub audio_bitrate: Option<u32>,
     /// Saturation adjustment.
     pub saturation: f64,
     /// Gamma adjustment.

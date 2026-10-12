@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	f6194cee89e89513255f6788a358339f49c1ffd54515a395de06e5ee8aff3e03
+ledger_reviewed_digest	fc20107d47e465ac41bdda57ae96dcc988db6beec45ecfd9a209757aeed158a6
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -111,6 +111,7 @@ file_writer.video_crf	int	0
 file_writer.video_preset	string	0
 file_writer.video_tune	string	0
 file_writer.video_bitrate	int	0
+file_writer.audio_bitrate	int	0
 
 # ---------------------------------------------------------------------------
 # [config_binding] — the kwargs displacement (§15.1, D-05 adjacency).
@@ -152,6 +153,7 @@ file_writer.video_crf	FileWriterConfig	video_crf	opt_u32
 file_writer.video_preset	FileWriterConfig	video_preset	opt_string
 file_writer.video_tune	FileWriterConfig	video_tune	opt_string
 file_writer.video_bitrate	FileWriterConfig	video_bitrate	opt_u32
+file_writer.audio_bitrate	FileWriterConfig	audio_bitrate	opt_u32
 file_writer.saturation	FileWriterConfig	saturation	f64
 file_writer.gamma	FileWriterConfig	gamma	f64
 scene.show_animation_progress	SceneConfig	show_animation_progress	bool
@@ -291,6 +293,7 @@ file_writer.video_crf	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	sets the ne
 file_writer.video_preset	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	selects a typed x264/x265 encoder preset after configuration layering
 file_writer.video_tune	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	selects one typed tune admitted for the requested video encoder
 file_writer.video_bitrate	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	sets the target video bitrate and is exclusive with constant rate factor
+file_writer.audio_bitrate	improved	BN-15	crates/fmn-output/tests/audio_quality.rs	sets the second-stage AAC bitrate without re-encoding video or changing native PCM
 file_writer.saturation	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the color saturation adjustment factor
 file_writer.video_codec	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	is the video compression codec name
 ignore_manimlib_modules_on_reload	same	crates/fmn-config/src/generated.rs	crates/fmn-config/tests/config.rs	controls whether manimlib internal modules are skipped during reload
@@ -2744,6 +2747,7 @@ scene_names	same	-	render	scene_names	crates/fmn-cli/src/lib.rs#tests	explicit s
 --preset	store	-	-	-	render	preset	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Set the x264/x265 compression-speed preset
 --tune	store	-	-	-	render	tune	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Set one supported video encoder tune
 --video-bitrate	store	-	-	u64	render	video_bitrate	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Set target video bitrate in bits per second (exclusive with CRF)
+--audio-bitrate	store	-	-	u64	render	audio_bitrate	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Set soundtrack AAC bitrate in bits per second (video is stream-copied)
 --ffmpeg-timeout	store	-	-	u64	render	ffmpeg_timeout	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Set positive ffmpeg wall-clock seconds per video encode (default 86400)
 --ffmpeg-max-log-bytes	store	-	-	u64	render	ffmpeg_max_log_bytes	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Bound captured bytes per ffmpeg stdout/stderr stream (default 1048576)
 --ffmpeg-max-artifact-bytes	store	-	-	u64	render	ffmpeg_max_artifact_bytes	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Bound encoded video bytes, capped by the input allowance (default 8589934592)
@@ -2813,6 +2817,7 @@ crf-writes	implies	crf|write_file	-	--crf implies video output
 preset-writes	implies	preset|write_file	-	--preset implies video output
 tune-writes	implies	tune|write_file	-	--tune implies video output
 video-bitrate-writes	implies	video_bitrate|write_file	-	--video-bitrate implies video output
+audio-bitrate-writes	implies	audio_bitrate|write_file	-	--audio-bitrate implies video output
 ffmpeg-timeout-writes	implies	ffmpeg_timeout|write_file	-	--ffmpeg-timeout implies video output
 ffmpeg-log-limit-writes	implies	ffmpeg_max_log_bytes|write_file	-	--ffmpeg-max-log-bytes implies video output
 ffmpeg-artifact-limit-writes	implies	ffmpeg_max_artifact_bytes|write_file	-	--ffmpeg-max-artifact-bytes implies video output
@@ -2828,10 +2833,12 @@ native-format-vs-crf	conflicts	format=png,png_sequence,gif,y4m,wav,svg|crf	usage
 native-format-vs-preset	conflicts	format=png,png_sequence,gif,y4m,wav,svg|preset	usage	--preset applies only to ffmpeg video output
 native-format-vs-tune	conflicts	format=png,png_sequence,gif,y4m,wav,svg|tune	usage	--tune applies only to ffmpeg video output
 native-format-vs-video-bitrate	conflicts	format=png,png_sequence,gif,y4m,wav,svg|video_bitrate	usage	--video-bitrate applies only to ffmpeg video output
+native-format-vs-audio-bitrate	conflicts	format=png,png_sequence,gif,y4m,wav,svg|audio_bitrate	usage	--audio-bitrate applies only to ffmpeg video output
 gif-vs-crf	conflicts	gif|crf	usage	--crf applies only to ffmpeg video output
 gif-vs-preset	conflicts	gif|preset	usage	--preset applies only to ffmpeg video output
 gif-vs-tune	conflicts	gif|tune	usage	--tune applies only to ffmpeg video output
 gif-vs-video-bitrate	conflicts	gif|video_bitrate	usage	--video-bitrate applies only to ffmpeg video output
+gif-vs-audio-bitrate	conflicts	gif|audio_bitrate	usage	--audio-bitrate applies only to ffmpeg video output
 native-format-vs-ffmpeg-timeout	conflicts	format=png,png_sequence,gif,y4m,wav,svg|ffmpeg_timeout	usage	ffmpeg resource limits apply only to video output
 native-format-vs-ffmpeg-log-limit	conflicts	format=png,png_sequence,gif,y4m,wav,svg|ffmpeg_max_log_bytes	usage	ffmpeg resource limits apply only to video output
 native-format-vs-ffmpeg-artifact-limit	conflicts	format=png,png_sequence,gif,y4m,wav,svg|ffmpeg_max_artifact_bytes	usage	ffmpeg resource limits apply only to video output

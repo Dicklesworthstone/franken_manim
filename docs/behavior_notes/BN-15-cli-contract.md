@@ -131,4 +131,28 @@ The same overrides reach named batches, `--write_all`, subdivisions, and video
 primaries paired with a final PNG, without injecting scene constructor kwargs
 or rerunning the scene. Actual encoder argv remains in each native receipt.
 See [Python video quality](../PYTHON_VIDEO_QUALITY.md) for usage and permanent
-parser/extension tests. AAC-bitrate control remains a separate extension.
+parser/extension tests. AAC-bitrate is independently configured as described below.
+
+## AAC soundtrack bitrate
+
+`--audio-bitrate BPS` is available in both console front doors. It sets the
+second-stage AAC encoder's target in integer bits per second, independently of
+CRF, video bitrate, preset and tune. `file_writer.audio_bitrate` supplies a
+layered optional default; `RenderOptions.audio_quality.bitrate` overrides that
+key in native Rust. Missing/None preserves ffmpeg's AAC default, not a guessed
+bitrate. A target is not a promised output size or measured quality improvement.
+
+Zero, non-integer and out-of-range targets are refused before scene execution
+or encoder startup. PNG, GIF, Y4M, WAV and SVG refuse an explicit AAC CLI option;
+native WAV mixing is never compressed. Alpha-preserving MOV accepts an AAC
+target without changing its video codec. Python console overrides reach named
+batches, subdivisions and paired-final-frame exports through the existing
+writer owner. The video stream is always copied during muxing; native PCM,
+frame sampling, and raw rendered pixels are unaffected.
+
+The exact `-b:a` argument appears only on the mux invocation in provenance.
+Lower-level callers use `Boundary::with_audio_quality` or
+`FfmpegSink::with_audio_quality`; their existing constructors and defaults are
+unchanged. Tests in `fmn-output/tests/audio_quality.rs`, the native video tests,
+and the portal quality suites cover real process arguments, unchanged native
+PCM, actual AAC decode, and byte-identical H.264 streams across AAC targets.

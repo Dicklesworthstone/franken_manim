@@ -619,3 +619,51 @@ fn the_config_template_key_resolves_through_the_registry() {
         other => panic!("expected the named refusal, got {other:?}"),
     }
 }
+
+#[test]
+fn aac_bitrate_layers_clears_and_is_part_of_configuration_identity() {
+    let default = Config::resolve(&[], None).unwrap().config;
+    assert_eq!(default.file_writer.audio_bitrate, None);
+    let layers = [Layer {
+        name: "audio.yml",
+        text: "file_writer:\n  audio_bitrate: 96000\n",
+    }];
+    let configured = Config::resolve(&layers, None).unwrap().config;
+    assert_eq!(configured.file_writer.audio_bitrate, Some(96_000));
+    assert_ne!(
+        configured.canonical_bytes().unwrap(),
+        default.canonical_bytes().unwrap()
+    );
+    let override_config = Config::resolve(
+        &layers,
+        Some(overlay([(
+            "file_writer.audio_bitrate",
+            Value::Int(192_000),
+        )])),
+    )
+    .unwrap()
+    .config;
+    assert_eq!(override_config.file_writer.audio_bitrate, Some(192_000));
+    let cleared = Config::resolve(
+        &layers,
+        Some(overlay([("file_writer.audio_bitrate", Value::Null)])),
+    )
+    .unwrap()
+    .config;
+    assert_eq!(cleared.file_writer.audio_bitrate, None);
+    for value in ["-1", "4294967296", "true", "1.5", "96k"] {
+        let text = format!("file_writer:\n  audio_bitrate: {value}\n");
+        let err = Config::resolve(
+            &[Layer {
+                name: "bad-audio.yml",
+                text: &text,
+            }],
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("file_writer.audio_bitrate"),
+            "{err}"
+        );
+    }
+}

@@ -68,6 +68,7 @@ The Reference's `manimlib/config.py` declares 34 options. Every row has exactly 
 | `--preset` | render | `preset` | improved | BN-15 | store | — | Set the x264/x265 compression-speed preset |
 | `--tune` | render | `tune` | improved | BN-15 | store | — | Set one supported video encoder tune |
 | `--video-bitrate` | render | `video_bitrate` | improved | BN-15 | store | — | Set target video bitrate in bits per second (exclusive with CRF) |
+| `--audio-bitrate` | render | `audio_bitrate` | improved | BN-15 | store | — | Set soundtrack AAC bitrate in bits per second (video is stream-copied) |
 | `--ffmpeg-timeout` | render | `ffmpeg_timeout` | improved | BN-15 | store | — | Set positive ffmpeg wall-clock seconds per video encode (default 86400) |
 | `--ffmpeg-max-log-bytes` | render | `ffmpeg_max_log_bytes` | improved | BN-15 | store | — | Bound captured bytes per ffmpeg stdout/stderr stream (default 1048576) |
 | `--ffmpeg-max-artifact-bytes` | render | `ffmpeg_max_artifact_bytes` | improved | BN-15 | store | — | Bound encoded video bytes, capped by the input allowance (default 8589934592) |
@@ -128,6 +129,7 @@ These rules are emitted into the parser artifact and executed after token collec
 | `preset-writes` | implies | `preset`, `write_file` | — | --preset implies video output |
 | `tune-writes` | implies | `tune`, `write_file` | — | --tune implies video output |
 | `video-bitrate-writes` | implies | `video_bitrate`, `write_file` | — | --video-bitrate implies video output |
+| `audio-bitrate-writes` | implies | `audio_bitrate`, `write_file` | — | --audio-bitrate implies video output |
 | `ffmpeg-timeout-writes` | implies | `ffmpeg_timeout`, `write_file` | — | --ffmpeg-timeout implies video output |
 | `ffmpeg-log-limit-writes` | implies | `ffmpeg_max_log_bytes`, `write_file` | — | --ffmpeg-max-log-bytes implies video output |
 | `ffmpeg-artifact-limit-writes` | implies | `ffmpeg_max_artifact_bytes`, `write_file` | — | --ffmpeg-max-artifact-bytes implies video output |
@@ -143,10 +145,12 @@ These rules are emitted into the parser artifact and executed after token collec
 | `native-format-vs-preset` | conflicts | `format=png,png_sequence,gif,y4m,wav,svg`, `preset` | usage | --preset applies only to ffmpeg video output |
 | `native-format-vs-tune` | conflicts | `format=png,png_sequence,gif,y4m,wav,svg`, `tune` | usage | --tune applies only to ffmpeg video output |
 | `native-format-vs-video-bitrate` | conflicts | `format=png,png_sequence,gif,y4m,wav,svg`, `video_bitrate` | usage | --video-bitrate applies only to ffmpeg video output |
+| `native-format-vs-audio-bitrate` | conflicts | `format=png,png_sequence,gif,y4m,wav,svg`, `audio_bitrate` | usage | --audio-bitrate applies only to ffmpeg video output |
 | `gif-vs-crf` | conflicts | `gif`, `crf` | usage | --crf applies only to ffmpeg video output |
 | `gif-vs-preset` | conflicts | `gif`, `preset` | usage | --preset applies only to ffmpeg video output |
 | `gif-vs-tune` | conflicts | `gif`, `tune` | usage | --tune applies only to ffmpeg video output |
 | `gif-vs-video-bitrate` | conflicts | `gif`, `video_bitrate` | usage | --video-bitrate applies only to ffmpeg video output |
+| `gif-vs-audio-bitrate` | conflicts | `gif`, `audio_bitrate` | usage | --audio-bitrate applies only to ffmpeg video output |
 | `native-format-vs-ffmpeg-timeout` | conflicts | `format=png,png_sequence,gif,y4m,wav,svg`, `ffmpeg_timeout` | usage | ffmpeg resource limits apply only to video output |
 | `native-format-vs-ffmpeg-log-limit` | conflicts | `format=png,png_sequence,gif,y4m,wav,svg`, `ffmpeg_max_log_bytes` | usage | ffmpeg resource limits apply only to video output |
 | `native-format-vs-ffmpeg-artifact-limit` | conflicts | `format=png,png_sequence,gif,y4m,wav,svg`, `ffmpeg_max_artifact_bytes` | usage | ffmpeg resource limits apply only to video output |

@@ -645,6 +645,18 @@ pub const FLAG_SPECS: &[FlagSpec] = &[
         help: "Set target video bitrate in bits per second (exclusive with CRF)",
     },
     FlagSpec {
+        options: &["--audio-bitrate"],
+        binding: "audio_bitrate",
+        command: CommandScope::Render,
+        action: FlagAction::Store,
+        arity: FlagArity::One,
+        default: None,
+        value_type: Some("u64"),
+        status: FlagStatus::Improved,
+        source: FlagSource::Native,
+        help: "Set soundtrack AAC bitrate in bits per second (video is stream-copied)",
+    },
+    FlagSpec {
         options: &["--ffmpeg-timeout"],
         binding: "ffmpeg_timeout",
         command: CommandScope::Render,
@@ -1014,6 +1026,13 @@ pub const INTERACTION_SPECS: &[InteractionSpec] = &[
         message: "--video-bitrate implies video output",
     },
     InteractionSpec {
+        id: "audio-bitrate-writes",
+        kind: InteractionKind::Implies,
+        operands: &["audio_bitrate", "write_file"],
+        exit_code: None,
+        message: "--audio-bitrate implies video output",
+    },
+    InteractionSpec {
         id: "ffmpeg-timeout-writes",
         kind: InteractionKind::Implies,
         operands: &["ffmpeg_timeout", "write_file"],
@@ -1119,6 +1138,13 @@ pub const INTERACTION_SPECS: &[InteractionSpec] = &[
         message: "--video-bitrate applies only to ffmpeg video output",
     },
     InteractionSpec {
+        id: "native-format-vs-audio-bitrate",
+        kind: InteractionKind::Conflicts,
+        operands: &["format=png,png_sequence,gif,y4m,wav,svg", "audio_bitrate"],
+        exit_code: Some("usage"),
+        message: "--audio-bitrate applies only to ffmpeg video output",
+    },
+    InteractionSpec {
         id: "gif-vs-crf",
         kind: InteractionKind::Conflicts,
         operands: &["gif", "crf"],
@@ -1145,6 +1171,13 @@ pub const INTERACTION_SPECS: &[InteractionSpec] = &[
         operands: &["gif", "video_bitrate"],
         exit_code: Some("usage"),
         message: "--video-bitrate applies only to ffmpeg video output",
+    },
+    InteractionSpec {
+        id: "gif-vs-audio-bitrate",
+        kind: InteractionKind::Conflicts,
+        operands: &["gif", "audio_bitrate"],
+        exit_code: Some("usage"),
+        message: "--audio-bitrate applies only to ffmpeg video output",
     },
     InteractionSpec {
         id: "native-format-vs-ffmpeg-timeout",

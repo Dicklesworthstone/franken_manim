@@ -19,6 +19,7 @@ use crate::{CapabilityError, PortalFrameFormat, PyRuntimeError, PyScene, PyValue
 pub(crate) struct PortalVideoConfig {
     pub(crate) ffmpeg_bin: String,
     pub(crate) job: VideoJob,
+    pub(crate) audio_quality: fmn_output::AudioQuality,
 }
 
 impl PortalVideoConfig {
@@ -83,6 +84,7 @@ impl PortalVideoConfig {
             ));
         }
         let quality = quality::from_writer(&writer)?;
+        let audio_quality = quality::audio_from_writer(&writer)?;
         let job = video_job(
             format,
             width,
@@ -98,7 +100,11 @@ impl PortalVideoConfig {
         // Python getters may adopt mobjects, advance time, or recursively
         // acquire a generation. Never replace that state or probe an encoder
         // against the now-stale preflight in begin_portal_render.
-        Ok(Self { ffmpeg_bin, job })
+        Ok(Self {
+            ffmpeg_bin,
+            job,
+            audio_quality,
+        })
     }
 }
 

@@ -61,7 +61,10 @@ use fmn_platform::process::{
     ProcessSpec, ProcessStdinLimits, ProcessTermination, RunningProcess,
 };
 
-use crate::negotiate::{NegotiationError, VideoJob, encode_argv, mux_argv, transcode_audio_argv};
+use crate::negotiate::{
+    AudioQuality, Container, NegotiationError, VideoJob, encode_argv, mux_argv_with_quality,
+    transcode_audio_argv,
+};
 
 /// The message every "ffmpeg is missing" error carries: the named
 /// native alternative (D2 — a capability error, never a substitution).
@@ -1227,6 +1230,7 @@ pub struct Boundary {
     runner: Arc<dyn ProcessRunner>,
     limits: JobLimits,
     next_job: AtomicU64,
+    audio_quality: AudioQuality,
 }
 
 impl Boundary {
@@ -1258,7 +1262,19 @@ impl Boundary {
             runner,
             limits,
             next_job: AtomicU64::new(0),
+            audio_quality: AudioQuality::default(),
         })
+    }
+
+    /// Set the second-stage AAC policy. Every encode begun through this
+    /// boundary snapshots it; native WAV data and video encoding are unchanged.
+    ///
+    /// # Errors
+    /// Invalid AAC targets are refused without starting a process.
+    pub fn with_audio_quality(mut self, quality: AudioQuality) -> Result<Self, NegotiationError> {
+        quality.validate()?;
+        self.audio_quality = quality;
+        Ok(self)
     }
 
     /// The resolved tool.
@@ -1287,6 +1303,10 @@ impl Boundary {
         cancellation: ProcessCancellation,
         stdin_limits: ProcessStdinLimits,
     ) -> Result<StreamingEncode, BoundaryError> {
+        self.audio_quality.validate()?;
+        if !self.audio_quality.is_default() && job.container == Container::Gif {
+            return Err(NegotiationError("AAC quality requires MP4 or MOV output").into());
+        }
         let encoder = job.resolved_encoder()?;
         if let Some(name) = &encoder
             && !caps.offers(name)
@@ -1356,6 +1376,7 @@ impl Boundary {
             destination: destination.to_path_buf(),
             video_artifact,
             audio,
+            audio_quality: self.audio_quality,
             encoder,
             video_argv: argv,
             process: Some(process),
@@ -1664,6 +1685,7 @@ pub struct StreamingEncode {
     destination: PathBuf,
     video_artifact: PathBuf,
     audio: Option<PathBuf>,
+    audio_quality: AudioQuality,
     encoder: Option<String>,
     video_argv: Vec<String>,
     process: Option<Box<dyn RunningProcess>>,
@@ -1787,7 +1809,8 @@ impl StreamingEncode {
                 "muxed.{}",
                 extension_or_default(&self.video_artifact)
             ));
-            let argv = mux_argv(&self.video_artifact, audio, &muxed);
+            let argv =
+                mux_argv_with_quality(&self.video_artifact, audio, &muxed, self.audio_quality)?;
             self.workdir.verify_current("start audio mux")?;
             self.bound_tool.verify_current(&self.tool)?;
             let spec = ProcessSpec {

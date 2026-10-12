@@ -372,6 +372,8 @@ pub struct RenderCommand {
     pub pix_fmt: Option<String>,
     /// Explicit video encoder overrides, layered above `file_writer` settings.
     pub video_quality: VideoQuality,
+    /// Optional AAC target, independent of the compressed-video rate mode.
+    pub audio_bitrate: Option<u32>,
     /// Explicit ffmpeg wall-clock and byte budgets for video rendering.
     pub ffmpeg_limits: FfmpegLimitOptions,
     /// Output format.
@@ -743,6 +745,7 @@ fn typed_consumer_scope(binding: &str) -> Option<CommandScope> {
         | "preset"
         | "tune"
         | "video_bitrate"
+        | "audio_bitrate"
         | "ffmpeg_timeout"
         | "ffmpeg_max_log_bytes"
         | "ffmpeg_max_artifact_bytes"
@@ -1259,6 +1262,7 @@ fn build_render(values: Collected, common: CommonOptions) -> Result<RenderComman
                 .map_err(|error| usage(format!("--tune: {error}")))?,
             bitrate: parse_optional_positive(&values, "video_bitrate")?,
         },
+        audio_bitrate: parse_optional_positive(&values, "audio_bitrate")?,
         ffmpeg_limits: FfmpegLimitOptions {
             timeout_seconds: parse_optional_positive(&values, "ffmpeg_timeout")?,
             max_log_bytes: parse_optional_positive(&values, "ffmpeg_max_log_bytes")?,
@@ -1525,6 +1529,12 @@ pub fn resolve_render_config(
                 .map_or(fmn_config::Value::Null, |bitrate| {
                     fmn_config::Value::Int(i64::from(bitrate))
                 }),
+        ));
+    }
+    if let Some(bitrate) = command.audio_bitrate {
+        pairs.push((
+            "file_writer.audio_bitrate",
+            fmn_config::Value::Int(i64::from(bitrate)),
         ));
     }
     if let Some(preset) = command.video_quality.preset {
@@ -2661,6 +2671,7 @@ struct FfmpegRenderContext {
     tool: FfmpegTool,
     capabilities: EncoderCapabilities,
     job: VideoJob,
+    audio_quality: fmn_output::AudioQuality,
     workdir_root: PathBuf,
     job_limits: JobLimits,
     max_input_bytes: u64,
@@ -4362,6 +4373,8 @@ impl RenderSink {
                 )
                 .map_err(output_adapter_error)?
                 .with_no_clobber()
+                .with_audio_quality(context.audio_quality)
+                .map_err(output_adapter_error)?
                 .with_deferred_soundtrack()
                 .map_err(output_adapter_error)?;
                 soundtrack = Some(completion);
@@ -5266,6 +5279,11 @@ fn requested_render_format(command: &RenderCommand) -> Result<RequestedRenderFor
     {
         return Err(usage("ffmpeg resource limits require video output"));
     }
+    if command.audio_bitrate.is_some()
+        && !matches!(command.format, OutputFormat::Auto | OutputFormat::Video)
+    {
+        return Err(usage("--audio-bitrate requires ffmpeg video output"));
+    }
     if !command.video_quality.is_default()
         && !matches!(command.format, OutputFormat::Auto | OutputFormat::Video)
     {
@@ -5289,6 +5307,7 @@ fn requested_render_format(command: &RenderCommand) -> Result<RequestedRenderFor
             if command.vcodec.is_some()
                 || command.pix_fmt.is_some()
                 || !command.video_quality.is_default()
+                || command.audio_bitrate.is_some()
                 || command.ffmpeg_limits.has_overrides() =>
         {
             Ok(RequestedRenderFormat::Video)
@@ -5860,8 +5879,12 @@ fn prepare_ffmpeg_context(
     locator: &dyn fmn_platform::process::FfmpegLocator,
     configured: &Path,
     job: VideoJob,
+    audio_quality: fmn_output::AudioQuality,
     requested_limits: &FfmpegLimitOptions,
 ) -> Result<FfmpegRenderContext, CliError> {
+    audio_quality
+        .validate()
+        .map_err(|error| CliError::new("config", error.to_string()))?;
     let (job_limits, max_input_bytes) = requested_limits.effective_limits()?;
     let executable = locator.locate_ffmpeg(configured).map_err(|error| {
         CliError::new(
@@ -5902,6 +5925,7 @@ fn prepare_ffmpeg_context(
         tool,
         capabilities,
         job,
+        audio_quality,
         workdir_root,
         job_limits,
         max_input_bytes,
@@ -6308,6 +6332,9 @@ fn execute_native_render_with_cancellation(
                 locator,
                 Path::new(&config.file_writer.ffmpeg_bin),
                 job,
+                fmn_output::AudioQuality {
+                    bitrate: config.file_writer.audio_bitrate,
+                },
                 &command.ffmpeg_limits,
             )?))
         }
@@ -9444,6 +9471,41 @@ mod tests {
             assert_eq!(tags.len(), 2);
             assert!(tags.iter().all(|pair| pair[1] == "iec61966-2-1"));
         }
+    }
+
+    #[test]
+    fn audio_quality_cli_is_independent_of_video_rate_control_and_reaches_config() {
+        let fs = VirtualFs::new();
+        for bitrate in [1, 96_000, 192_000, u32::MAX] {
+            let text = bitrate.to_string();
+            let command = render(parse_args(["--audio-bitrate", &text, "--crf", "16"]).unwrap());
+            assert!(command.write_file);
+            assert_eq!(command.audio_bitrate, Some(bitrate));
+            assert_eq!(
+                requested_render_format(&command).unwrap(),
+                RequestedRenderFormat::Video
+            );
+            let config = resolve_render_config(&fs, &command).unwrap();
+            assert_eq!(config.file_writer.audio_bitrate, Some(bitrate));
+            assert_eq!(config.file_writer.video_crf, Some(16));
+            assert_eq!(
+                config.raw.get_path("file_writer.audio_bitrate"),
+                Some(&fmn_config::Value::Int(i64::from(bitrate)))
+            );
+        }
+        for text in ["0", "-1", "1.5", "192k", "4294967296"] {
+            assert!(parse_args(["--audio-bitrate", text]).is_err());
+        }
+        for format in ["png", "png_sequence", "gif", "y4m", "wav", "svg"] {
+            assert!(parse_args(["--format", format, "--audio-bitrate", "192000"]).is_err());
+        }
+        // Audio quality does not impose an opaque video codec on alpha MOV.
+        let command = render(parse_args(["--audio-bitrate", "192000", "--transparent"]).unwrap());
+        let config = resolve_render_config(&fs, &command).unwrap();
+        assert_eq!(
+            ffmpeg_video_job(&command, &config).unwrap().container,
+            Container::MovTransparent
+        );
     }
 
     #[test]

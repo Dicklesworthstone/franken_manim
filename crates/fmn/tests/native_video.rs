@@ -291,3 +291,89 @@ fn mp4_and_mov_encode_through_the_boundary_with_a_muxed_soundtrack() {
     assert_eq!(handlers, vec![*b"vide"]);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn native_audio_quality_is_layered_and_refused_before_scene_or_process() {
+    let mut request = options("/movie.mp4", RenderFormat::Mp4);
+    assert_eq!(
+        request.effective_audio_quality().unwrap(),
+        fmn_output::AudioQuality::default()
+    );
+    request.config.file_writer.audio_bitrate = Some(96_000);
+    assert_eq!(
+        request.effective_audio_quality().unwrap().bitrate,
+        Some(96_000)
+    );
+    request.audio_quality.bitrate = Some(192_000);
+    assert_eq!(
+        request.effective_audio_quality().unwrap().bitrate,
+        Some(192_000)
+    );
+    request.audio_quality.bitrate = Some(0);
+    assert_refused(request, "AAC bitrate must be nonzero");
+    let mut request = options("/movie.mp4", RenderFormat::Mp4);
+    request.config.file_writer.audio_bitrate = Some(0);
+    assert_refused(request, "AAC bitrate must be nonzero");
+    let mut request = options("/movie.mp4", RenderFormat::PngSequence);
+    request.audio_quality.bitrate = Some(192_000);
+    assert_refused(request, "audio_quality requires MP4/MOV output");
+}
+
+#[test]
+fn native_audio_quality_reaches_mux_without_changing_native_soundtrack() {
+    let Some(capability) = host_capability() else {
+        fmn_core::test_inputs::skip_or_fail(
+            "native_audio_quality_reaches_mux_without_changing_native_soundtrack",
+            "ffmpeg on PATH",
+        );
+        return;
+    };
+    let root = scratch("aac-quality");
+    let audio = root.join("tone.wav");
+    std::fs::write(&audio, tone_wav()).unwrap();
+    let mut reference_wav = None;
+    for (index, bitrate) in [None, Some(96_000), Some(192_000)].into_iter().enumerate() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let destination = root.join(format!("aac-{index}-{nonce}.mp4"));
+        let mut request = options(&destination, RenderFormat::Mp4);
+        request.ffmpeg = Some(capability.clone());
+        request.ffmpeg_limits.keep_workdir = true;
+        request.audio_quality.bitrate = bitrate;
+        let report = render_with_fs(
+            &mut Chime {
+                sound: Some(audio.clone()),
+            },
+            request,
+            Arc::new(StdFs),
+        )
+        .unwrap();
+        assert_eq!(report.artifact.audio_quality.unwrap().bitrate, bitrate);
+        assert_eq!(report.artifact.ffmpeg.len(), 2);
+        let encode = &report.artifact.ffmpeg[0].provenance.argv;
+        let mux = &report.artifact.ffmpeg[1].provenance.argv;
+        assert!(!encode.iter().any(|arg| arg == "-b:a"));
+        assert!(mux.windows(2).any(|p| p == ["-c:v", "copy"]));
+        let actual = mux
+            .iter()
+            .position(|arg| arg == "-b:a")
+            .map(|at| mux[at + 1].parse::<u32>().unwrap());
+        assert_eq!(actual, bitrate);
+        let inputs: Vec<_> = mux
+            .windows(2)
+            .filter(|p| p[0] == "-i")
+            .map(|p| &p[1])
+            .collect();
+        assert_eq!(inputs.len(), 2);
+        let wav = std::fs::read(inputs[1]).unwrap();
+        if let Some(reference) = &reference_wav {
+            assert_eq!(&wav, reference);
+        } else {
+            reference_wav = Some(wav);
+        }
+        let handlers = handler_types(&std::fs::read(&destination).unwrap());
+        assert!(handlers.contains(b"vide") && handlers.contains(b"soun"));
+    }
+}
