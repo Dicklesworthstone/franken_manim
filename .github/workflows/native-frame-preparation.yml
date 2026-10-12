@@ -4,7 +4,7 @@ on:
     branches: [main]
     paths: ['.github/workflows/native-frame-preparation.yml']
   workflow_dispatch:
-# Validate immutable candidates; only the GitHub connector publishes refs.
+# Store immutable tested source blobs; only the connector publishes commits.
 permissions:
   contents: write
 concurrency:
@@ -20,12 +20,25 @@ jobs:
       CARGO_TERM_COLOR: never
       CARGO_TARGET_DIR: target/portable
       CARGO_BUILD_JOBS: '2'
+      PYO3_PYTHON: python
+      FMN_REQUIRE_FFMPEG: '1'
+      FMN_REAL_FFMPEG: '1'
+      FMN_AUDIO_FIXTURE_DIR: /tmp/fmn-prepare-fixtures-${{ github.run_id }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: 3a09cee2743559ebf96dafd155f41d06678005f1
+          ref: 26c352a97e24b0db8f9eb26766bedd9bd19f1283
           persist-credentials: false
-      - run: rustup show active-toolchain
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: '3.13'
+      - name: Install pinned toolchain and real media capabilities
+        run: |
+          rustup show active-toolchain
+          python -m pip install 'numpy==2.5.2'
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+          python crates/fmn-output/tests/make_audio_fixtures.py "$FMN_AUDIO_FIXTURE_DIR"
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
@@ -34,116 +47,145 @@ jobs:
             target/portable
           key: native-prepare-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: |
+            audio-fidelity-${{ runner.os }}-${{ runner.arch }}-
+            video-fidelity-${{ runner.os }}-${{ runner.arch }}-
             cargo-${{ runner.os }}-${{ runner.arch }}-portable-
-            fmtl-rates-${{ runner.os }}-${{ runner.arch }}-
-      - name: Verify and apply native pipeline and camera candidates
+      - name: Verify immutable implementation and install camera milestone
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          python3 - <<'PY'
+          python - <<'PY'
           import base64, gzip, hashlib, json, os, pathlib, subprocess, urllib.request
-          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'native-prepare'
-          out.mkdir()
-          candidates = [
-              ('910f528ef983d6b572b38d93a746141806898a46', '42617a799fda81f5502f9a7defaab5d745f1392f9d3a031be035808750f5d2c1'),
-              ('2edf5665aeb7f337c355e0ca705dcb80237daf9f', '158530940196026ffd5ec76019ba76dbef818b80a59f9127e063747fa869ae93'),
-          ]
-          allowed = {
-              'crates/fmn/src/rendering/pipeline.rs', 'crates/fmn/src/rendering.rs',
-              'crates/fmn/tests/native_preparation.rs',
-              'crates/fmn-cli/src/offline_cpu.rs', 'crates/fmn-cli/src/lib.rs',
-              'crates/fmn-mobject/src/dynamics.rs', 'crates/fmn-mobject/src/stage.rs',
-              'crates/fmn-mobject/tests/snapshot_reads.rs',
-              'crates/fmn-scene/src/camera_rig.rs', 'crates/fmn-scene/tests/camera_snapshot.rs',
-              'crates/fmn/src/rendering/camera_animation.rs',
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])/'native-prepare'
+          root.mkdir()
+          candidates = {
+              'camera': ('faa5fa89faafff353e42141664dce3def67b5053', 'f91a95609cc141cc218cb624380b482370628e9812c441a5e813c9a8b6702496', '''crates/fmn-mobject/src/dynamics.rs crates/fmn-mobject/src/stage.rs crates/fmn-mobject/tests/snapshot_reads.rs crates/fmn-scene/src/camera_rig.rs crates/fmn-scene/tests/camera_snapshot.rs crates/fmn/src/exporting/camera.rs'''.split()),
+              'prepare': ('b4954f2aa2e6fdf9085b96b804cf4eb57ae6efd0', '75bea7a004f444223407204f7d8a41ba59c7a7e960b441ac5d89e0207e90576e', '''crates/fmn-cli/src/lib.rs crates/fmn-cli/src/offline_cpu.rs crates/fmn/src/rendering.rs crates/fmn/src/rendering/camera_animation.rs crates/fmn/src/rendering/pipeline.rs crates/fmn/tests/native_preparation.rs'''.split()),
           }
-          names = set()
-          for index, (sha, expected) in enumerate(candidates):
-              request = urllib.request.Request(
-                  f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{sha}',
-                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN']})
+          for name, (sha, digest, allowed) in candidates.items():
+              out = root/name
+              out.mkdir()
+              request = urllib.request.Request(f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{sha}', headers={'Authorization':'Bearer '+os.environ['GH_TOKEN']})
               with urllib.request.urlopen(request, timeout=60) as response:
                   content = base64.b64decode(json.load(response)['content'])
               assert hashlib.sha1(b'blob '+str(len(content)).encode()+b'\0'+content).hexdigest() == sha
               patch = gzip.decompress(base64.b64decode(content, validate=True))
-              assert hashlib.sha256(patch).hexdigest() == expected
-              path = out / f'candidate-{index}.patch'
-              path.write_bytes(patch)
-              stats = subprocess.check_output(['git','apply','--numstat',str(path)], text=True)
-              paths = {line.split('\t',2)[2] for line in stats.splitlines()}
-              assert paths and paths <= allowed, paths
-              subprocess.run(['git','apply','--check',str(path)], check=True)
-              subprocess.run(['git','apply',str(path)], check=True)
-              names |= paths
-          assert names == allowed, names
-          paths = sorted(names)
+              assert hashlib.sha256(patch).hexdigest() == digest
+              (out/'candidate.patch').write_bytes(patch)
+              paths = [line.split('\t',2)[2] for line in subprocess.check_output(['git','apply','--numstat',str(out/'candidate.patch')], text=True).splitlines()]
+              assert set(paths) == set(allowed), paths
+              (out/'paths.json').write_text(json.dumps(paths))
+              (out/'base.txt').write_text(subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip())
+          out = root/'camera'
+          subprocess.run(['git','apply','--check',str(out/'candidate.patch')], check=True)
+          subprocess.run(['git','apply',str(out/'candidate.patch')], check=True)
+          paths = json.loads((out/'paths.json').read_text())
           subprocess.run(['rustfmt','--edition','2024','--config','skip_children=true',*paths], check=True)
           subprocess.run(['git','add','-N','--',*paths], check=True)
           subprocess.run(['git','diff','--check'], check=True)
-          assert set(subprocess.check_output(['git','diff','--name-only'], text=True).splitlines()) == allowed
-          for name in paths:
-              target = out / 'candidate-source' / name
+          for path in paths:
+              target = out/'source'/path
               target.parent.mkdir(parents=True, exist_ok=True)
-              target.write_bytes(pathlib.Path(name).read_bytes())
-          (out / 'paths.json').write_text(json.dumps(paths))
-          (out / 'base.txt').write_text(subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip())
-          (out / 'validation-commit.txt').write_text(os.environ['GITHUB_SHA'])
-          (out / 'patches.json').write_text(json.dumps(candidates))
+              target.write_bytes(pathlib.Path(path).read_bytes())
           PY
-      - name: Test snapshot ownership and camera sampling
+      - name: Test camera snapshot reads and real native camera export
         run: |
           set -o pipefail
           {
             cargo test --locked -p fmn-mobject --test snapshot_reads --test frozen_render &&
-            cargo test --locked -p fmn-anim --test render_handoff --test frame_order &&
-            cargo test --locked -p fmn-scene --test camera_snapshot
-          } 2>&1 | tee "$RUNNER_TEMP/native-prepare/ownership-tests.log"
-      - name: Test native rendering and frame pipeline
-        if: ${{ !cancelled() }}
-        run: |
-          set -o pipefail
-          cargo test --locked -p fmn --all-targets --no-fail-fast 2>&1 | tee "$RUNNER_TEMP/native-prepare/native-tests.log"
-      - name: Test real CLI CPU camera and compiled pipelines
-        if: ${{ !cancelled() }}
-        run: |
-          set -o pipefail
-          cargo test --locked -p fmn-cli --features cli,batch --lib --test cpu_pipeline --test camera_pipeline --test compiled_pipeline --no-fail-fast 2>&1 | tee "$RUNNER_TEMP/native-prepare/cli-tests.log"
-      - name: Check workspace integration
-        if: ${{ !cancelled() }}
-        run: |
-          set -o pipefail
-          cargo check --locked --workspace 2>&1 | tee "$RUNNER_TEMP/native-prepare/workspace-check.log"
-      - name: Clippy for changed production crates and tests
-        if: ${{ !cancelled() }}
-        run: |
-          set -o pipefail
-          cargo clippy --locked -p fmn-mobject -p fmn-scene -p fmn -p fmn-cli --features fmn-cli/cli,fmn-cli/batch --all-targets -- -D warnings 2>&1 | tee "$RUNNER_TEMP/native-prepare/clippy.log"
-      - name: Archive exact validated source blobs
+            cargo test --locked -p fmn-scene --test camera_snapshot --test camera_recording &&
+            cargo test --locked -p fmn --test native_camera_export --test native_camera_pipeline &&
+            cargo clippy --locked -p fmn-mobject -p fmn-scene -p fmn --all-targets -- -D warnings
+          } 2>&1 | tee "$RUNNER_TEMP/native-prepare/camera/tests.log"
+      - name: Store validated camera blobs without publishing refs
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          python3 - <<'PY'
+          python - <<'PY'
           import base64, hashlib, json, os, pathlib, urllib.request
-          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'native-prepare'
-          entries = []
-          for name in json.loads((out / 'paths.json').read_text()):
+          out = pathlib.Path(os.environ['RUNNER_TEMP'])/'native-prepare'/'camera'
+          result = {}
+          for name in json.loads((out/'paths.json').read_text()):
               content = pathlib.Path(name).read_bytes()
+              assert content == (out/'source'/name).read_bytes()
               expected = hashlib.sha1(b'blob '+str(len(content)).encode()+b'\0'+content).hexdigest()
-              request = urllib.request.Request(
-                  f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs',
-                  data=json.dumps({'encoding':'base64','content':base64.b64encode(content).decode()}).encode(),
-                  headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'], 'Content-Type':'application/json'}, method='POST')
+              request = urllib.request.Request(f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs', data=json.dumps({'encoding':'base64','content':base64.b64encode(content).decode()}).encode(), headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Content-Type':'application/json'}, method='POST')
               with urllib.request.urlopen(request, timeout=60) as response:
                   assert json.load(response)['sha'] == expected
-              entries.append({'path':name,'mode':'100644','type':'blob','sha':expected})
-          manifest = {'base':(out / 'base.txt').read_text(), 'validation_commit':os.environ['GITHUB_SHA'], 'patches':json.loads((out / 'patches.json').read_text()), 'files':entries}
-          (out / 'validated-blobs.json').write_text(json.dumps(manifest, indent=2))
-          print(json.dumps(manifest, indent=2))
+              result[name] = expected
+          (out/'validated-blobs.json').write_text(json.dumps(result, indent=2))
+          print(json.dumps(result, indent=2))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: native-camera-${{ github.run_id }}
+          path: ${{ runner.temp }}/native-prepare/camera
+          retention-days: 7
+          if-no-files-found: error
+      - name: Install owner-to-worker preparation milestone
+        run: |
+          python - <<'PY'
+          import json, os, pathlib, subprocess
+          out = pathlib.Path(os.environ['RUNNER_TEMP'])/'native-prepare'/'prepare'
+          subprocess.run(['git','apply','--check',str(out/'candidate.patch')], check=True)
+          subprocess.run(['git','apply',str(out/'candidate.patch')], check=True)
+          paths = json.loads((out/'paths.json').read_text())
+          subprocess.run(['rustfmt','--edition','2024','--config','skip_children=true',*paths], check=True)
+          subprocess.run(['git','add','-N','--',*paths], check=True)
+          subprocess.run(['git','diff','--check'], check=True)
+          for path in paths:
+              target = out/'source'/path
+              target.parent.mkdir(parents=True, exist_ok=True)
+              target.write_bytes(pathlib.Path(path).read_bytes())
+          PY
+      - name: Test bounded preparation and all shipping CPU paths
+        run: |
+          python - <<'PY'
+          import json, os, pathlib, subprocess
+          out = pathlib.Path(os.environ['RUNNER_TEMP'])/'native-prepare'/'prepare'
+          commands = [
+              ('ownership', ['cargo','test','--locked','-p','fmn-mobject','--tests','--no-fail-fast']),
+              ('handoff', ['cargo','test','--locked','-p','fmn-anim','--test','render_handoff','--test','frame_order']),
+              ('native', ['cargo','test','--locked','-p','fmn','--all-targets','--no-fail-fast']),
+              ('cli', ['cargo','test','--locked','-p','fmn-cli','--features','cli,batch','--lib','--test','cpu_pipeline','--test','camera_pipeline','--test','compiled_pipeline','--no-fail-fast']),
+              ('goldens', ['cargo','test','--locked','-p','fmn-conformance','--test','self_goldens','--test','scene_goldens','--test','look_gallery']),
+              ('workspace', ['cargo','check','--locked','--workspace']),
+              ('clippy', ['cargo','clippy','--locked','-p','fmn-mobject','-p','fmn-scene','-p','fmn','-p','fmn-cli','--features','fmn-cli/cli,fmn-cli/batch','--all-targets','--','-D','warnings']),
+          ]
+          results = {}
+          for name, command in commands:
+              print('RUN', name, flush=True)
+              with (out/(name+'.log')).open('w') as log:
+                  result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
+              results[name] = result.returncode
+              (out/'results.json').write_text(json.dumps(results, indent=2))
+              print((out/(name+'.log')).read_text()[-16000:], flush=True)
+          assert all(code == 0 for code in results.values()), results
+          PY
+      - name: Store validated preparation blobs without publishing refs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import base64, hashlib, json, os, pathlib, urllib.request
+          out = pathlib.Path(os.environ['RUNNER_TEMP'])/'native-prepare'/'prepare'
+          result = {}
+          for name in json.loads((out/'paths.json').read_text()):
+              content = pathlib.Path(name).read_bytes()
+              assert content == (out/'source'/name).read_bytes()
+              expected = hashlib.sha1(b'blob '+str(len(content)).encode()+b'\0'+content).hexdigest()
+              request = urllib.request.Request(f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs', data=json.dumps({'encoding':'base64','content':base64.b64encode(content).decode()}).encode(), headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Content-Type':'application/json'}, method='POST')
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  assert json.load(response)['sha'] == expected
+              result[name] = expected
+          (out/'validated-blobs.json').write_text(json.dumps(result, indent=2))
+          print(json.dumps(result, indent=2))
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
           name: native-preparation-${{ github.run_id }}
-          path: ${{ runner.temp }}/native-prepare
-          if-no-files-found: error
+          path: ${{ runner.temp }}/native-prepare/prepare
           retention-days: 7
+          if-no-files-found: error
