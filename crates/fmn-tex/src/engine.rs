@@ -490,10 +490,16 @@ impl TexEngine {
                         return Ok(hit);
                     }
                     // A checksum-valid envelope with a foreign payload is
-                    // never trusted either: count it, then recompute.
+                    // never trusted either: count it, remove it while it
+                    // still holds these bytes, then recompute. The put below
+                    // then republishes instead of losing to the incumbent
+                    // with KeyConflict on every run
+                    // (fm-typeset-foreign-payload-never-healed-8w0y). A
+                    // failed removal surfaces as that put's store error.
                     _ => {
                         self.persistent_payload_rejections
                             .fetch_add(1, Ordering::Relaxed);
+                        let _ = ns.evict_rejected(&key, &bytes);
                     }
                 },
                 Ok(None) => {}

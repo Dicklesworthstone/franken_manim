@@ -2117,6 +2117,49 @@ impl Namespace {
         Ok(value)
     }
 
+    /// Remove a keyed entry whose verified payload the caller rejected, so
+    /// the next [`Namespace::put`] republishes instead of losing to it with
+    /// [`CacheError::KeyConflict`]. A payload can verify and still be wrong
+    /// for the caller: it may not decode, or it may describe another value.
+    ///
+    /// Compare-and-remove: the entry goes only while it still holds exactly
+    /// `rejected`, or an envelope that no longer verifies. An entry that
+    /// another producer republished since is left alone. Two removers can
+    /// race, so one may remove an entry the other just republished; that
+    /// costs a recompute, never a wrong read, since every read verifies.
+    /// Returns whether this call removed the entry.
+    ///
+    /// # Errors
+    /// [`CacheError::Storage`] for real filesystem failures (not absence).
+    pub fn evict_rejected(&self, key: &CacheKey, rejected: &[u8]) -> Result<bool, CacheError> {
+        let digest = key.digest();
+        let path = self.object_path(digest);
+        let bytes = match self.inner.read_file(&path) {
+            Ok(bytes) => bytes,
+            Err(CacheError::Storage(FsError::NotFound { .. })) => {
+                self.forget(digest);
+                return Ok(false);
+            }
+            Err(err) => return Err(err),
+        };
+        let holds_rejected =
+            entry::decode(&bytes, EntryKind::Keyed, digest, self.inner.entry_limits)
+                .map_or(true, |payload| payload == rejected);
+        if !holds_rejected {
+            return Ok(false);
+        }
+        match self.inner.remove_file(&path) {
+            Ok(()) => {}
+            Err(CacheError::Storage(FsError::NotFound { .. })) => {
+                self.forget(digest);
+                return Ok(false);
+            }
+            Err(err) => return Err(err),
+        }
+        self.forget(digest);
+        Ok(true)
+    }
+
     // ------------------------------------------------------------------
     // Blob (content-addressed) entries
     // ------------------------------------------------------------------
