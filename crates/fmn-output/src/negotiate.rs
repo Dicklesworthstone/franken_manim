@@ -109,13 +109,34 @@ pub struct ColorDescription {
 }
 
 impl ColorDescription {
-    /// The ordinary 8-bit video description: BT.709, limited range.
+    /// The description of pixels already transferred with BT.709, limited range.
+    /// Do not use this for Lumen output: its native converters apply sRGB.
+    /// Use [`Self::for_native_wire`] for those bytes instead.
     #[must_use]
     pub const fn video_bt709() -> Self {
         Self {
             primaries: Primaries::Bt709,
             transfer: Transfer::Bt709,
             range: ColorRange::Limited,
+        }
+    }
+
+    /// Describe the bytes emitted by fmn-frame's native Lumen converters.
+    ///
+    /// Both the 8-bit and direct 10-bit YUV paths apply the sRGB transfer
+    /// before a BT.709 *matrix*. The matrix does not change the transfer:
+    /// declaring those samples BT.709 would change their displayed luminance.
+    /// RGB wires carry full-range samples; native NV12/P010 use limited range.
+    /// This is metadata only; it neither transforms nor requantizes a frame.
+    #[must_use]
+    pub const fn for_native_wire(wire: WireFormat) -> Self {
+        Self {
+            primaries: Primaries::Bt709,
+            transfer: Transfer::Srgb,
+            range: match wire {
+                WireFormat::Rgba8 | WireFormat::Bgra8 => ColorRange::Full,
+                WireFormat::Nv12 | WireFormat::P010 => ColorRange::Limited,
+            },
         }
     }
 

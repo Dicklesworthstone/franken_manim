@@ -173,11 +173,7 @@ fn video_job(
         height,
         fps: (fps, 1),
         wire,
-        color: if wire.has_alpha() {
-            ColorDescription::srgb_full()
-        } else {
-            ColorDescription::video_bt709()
-        },
+        color: ColorDescription::for_native_wire(wire),
         container: if transparent {
             Container::MovTransparent
         } else if format == PortalFrameFormat::Mov {
@@ -246,6 +242,16 @@ mod tests {
         ] {
             let job = video_job(PortalFrameFormat::Mp4, 96, 54, 8, "libx264", name, false).unwrap();
             assert_eq!(job.wire, expected);
+            assert_eq!(job.color.transfer, fmn_output::Transfer::Srgb);
+            assert_eq!(job.color.primaries, fmn_output::Primaries::Bt709);
+            assert_eq!(
+                job.color.range,
+                if expected.has_alpha() {
+                    ColorRange::Full
+                } else {
+                    ColorRange::Limited
+                }
+            );
             assert_eq!(job.resolved_encoder().unwrap().as_deref(), Some("libx264"));
             assert_eq!(job.container, Container::Mp4);
         }
