@@ -21,6 +21,8 @@ jobs:
       CARGO_BUILD_JOBS: '2'
       PYO3_PYTHON: python
       FMN_REQUIRE_FFMPEG: '1'
+      FMN_REAL_FFMPEG: '1'
+      FMN_AUDIO_FIXTURE_DIR: ${{ runner.temp }}/audio-fixtures
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -35,6 +37,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg
           ffmpeg -version
+          python crates/fmn-output/tests/make_audio_fixtures.py "$FMN_AUDIO_FIXTURE_DIR"
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
@@ -103,16 +106,18 @@ jobs:
           (out/'color-blobs.json').write_text(json.dumps({p:blob_sha((out/'color-source'/p).read_bytes()) for p in color_paths}, indent=2))
           subprocess.run(['git','apply','--check',str(audio)], check=True)
           subprocess.run(['git','apply',str(audio)], check=True)
-          # The existing generator is std-only. Invoke it directly to generate
-          # the typed config initializer before compiling its consuming crate.
-          # This is NOT a duplicate generator or hand-edit of generated output.
+          # Invoke the existing schema generator and its owned hashing crate
+          # before compiling the generated config consumer. No substitute
+          # generator, hash, or hand-edited generated output is introduced.
           module = pathlib.Path('crates/fmn-conformance/src/schema.rs').resolve()
           driver = out/'generate.rs'
           source = '#[path='+json.dumps(str(module))+'] mod schema;\nfn main() {\nlet schema = schema::Schema::parse(&std::fs::read_to_string("API_SCHEMA.tsv").unwrap(), &std::fs::read_to_string("API_OVERLAY.tsv").unwrap()).unwrap();\n'
           for name, function in generated.items():
               source += f'std::fs::write({json.dumps(name)}, schema::{function}(&schema)).unwrap();\n'
           driver.write_text(source+'}\n')
-          subprocess.run(['rustc','--edition=2024',str(driver),'-o',str(out/'generate')], check=True)
+          library = out/'libfmn_hash.rlib'
+          subprocess.run(['rustc','--edition=2024','--crate-name','fmn_hash','--crate-type','rlib','crates/fmn-hash/src/lib.rs','-o',str(library)], check=True)
+          subprocess.run(['rustc','--edition=2024',str(driver),'--extern','fmn_hash='+str(library),'-o',str(out/'generate')], check=True)
           subprocess.run([str(out/'generate')], check=True)
           authored = sorted(set(color_paths + audio_paths))
           subprocess.run(['rustfmt','--edition','2024','--config','skip_children=true',*[p for p in authored if p.endswith('.rs')]], check=True)
