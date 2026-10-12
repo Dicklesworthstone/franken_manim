@@ -1,6 +1,6 @@
-# BN-07 — Corrected mobject behavior (C-5, C-6, C-14, C-15, C-17, C-18, C-19, C-20, C-21, C-23, C-24, C-26, C-29, C-30, C-31)
+# BN-07 — Corrected mobject behavior (C-5, C-6, C-14, C-15, C-17, C-18, C-19, C-20, C-21, C-23, C-24, C-26, C-29, C-30, C-31, C-32)
 
-**Status:** Draft (W3, fm-yra; W10, fm-23ev, fm-5wq.4.39, and fm-easc). Consumed by Choreo (§9.1's
+**Status:** Draft (W3, fm-yra; W10, fm-23ev, fm-5wq.4.39, fm-easc, and fm-gm0v). Consumed by Choreo (§9.1's
 `suspend_mobject_updating` interaction), fmn-python (whose `manimlib`
 surface presents these semantics), and the Parity Ledger.
 
@@ -359,3 +359,30 @@ Excluded from the structural diff by the `bn07-c31-point-less-match-style` row.
 
 **Migration:** none needed. The dashes keep the source's style in both
 engines; only the point-less root's getters differ.
+
+## C-32 — `copy()` remaps every family-internal reference
+
+The Reference's `Mobject.copy()` remaps an attribute that names a member of
+the copied family (`mobject.py:696-700`), with two leaks. It skips
+`value is not self`, so a mobject that names itself keeps naming the
+original. And it copies each submobject with that submobject's own `copy()`
+(`mobject.py:685`), whose remap sees only the submobject's family, so a
+child's reference to a sibling keeps naming the original sibling. A copied
+group is then wired to the original's members: copying `VGroup(a, b)` with
+`a.partner = b` gives a copy whose first member points at the original `b`.
+The Reference's own `deepcopy()` (`copy.deepcopy`) remaps both, and so does
+`copy()` for a reference held by the copied root.
+
+**FrankenManim:** `copy()`, `copy.copy` and the padding copies that align a
+Transform's families (`invisible_copy`, fm-b97z) remap every reference into
+the copied family, as `deepcopy()` does. A reference outside the copied
+family stays shared, as in the Reference.
+
+Locked by `test_copy_remaps_every_family_internal_reference` in
+`crates/fmn-python/tests/copying_semantics.py` and
+`test_pads_remap_references_only_within_their_own_family` in
+`crates/fmn-python/tests/string_lifecycle.py`.
+
+**Migration:** none needed for a scene that uses its copy on its own. A
+scene that relied on a copied member still naming an original (itself, or a
+sibling) names that original explicitly.
