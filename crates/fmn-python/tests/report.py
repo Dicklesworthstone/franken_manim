@@ -5,8 +5,11 @@ per-class counters, the phase breakdown, and the callback-heavy verdict
 on a scene whose Python callbacks dominate the frame by construction
 (busy-spinning updater bodies against a trivial native advance). The
 golden byte-locked format lives in report.rs's Rust tests; this suite
-pins the live getter's behavior. No wall-clock values are asserted — only
-counts, format, and a verdict the workload decides by orders of magnitude.
+pins the live getter's behavior. No wall-clock values are asserted, only
+counts, format, and the verdict as the declared rule over the reported
+values. Which way the verdict falls depends on measured phase time, so the
+rule's outcomes on fixed phase times are tested in report.rs
+(fm-report-timing-assertion-load-flake-fpi5).
 """
 
 import manimlib
@@ -98,10 +101,12 @@ assert python_ns + native_ns == int(rows[("phase", "total_ns")])
 share = rows[("share", "python_callback_ppm")]
 expected_share = str(python_ns * 1_000_000 // (python_ns + native_ns)) if python_ns + native_ns else "-"
 assert share == expected_share, (share, expected_share)
-# The workload decides the verdict by orders of magnitude, not by a margin:
-# thousands of Python operations per frame against an empty native advance.
-assert python_ns > native_ns * 100, (python_ns, native_ns)
-assert rows[("detection", "callback_heavy")] == "true", rows
+# The phase seam timed the updater bodies. Their share against the native
+# advance is wall clock, which host load moves (a 52x ratio at load average
+# 140), so the verdict is checked as the rule over these rows.
+assert python_ns > 0, rows
+heavy = int(rows[("crossing", "updater_call")]) > 0 and int(share) >= 500_000
+assert rows[("detection", "callback_heavy")] == ("true" if heavy else "false"), rows
 
 # Reset restores the empty report.
 manimlib._crossing_stats_reset()
