@@ -1,0 +1,148 @@
+name: Native video fidelity
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/video-fidelity.yml']
+  workflow_dispatch:
+# Contents write is used only to store immutable Git blobs after all checks.
+# No commit, branch, PR or ref is created/updated by this job.
+permissions:
+  contents: write
+concurrency:
+  group: video-fidelity-${{ github.run_id }}
+  cancel-in-progress: false
+jobs:
+  validate:
+    if: github.repository == 'Dicklesworthstone/franken_manim' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+      CARGO_TERM_COLOR: never
+      CARGO_TARGET_DIR: target/portable
+      CARGO_BUILD_JOBS: '2'
+      PYO3_PYTHON: python
+      FMN_REQUIRE_FFMPEG: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: '3.13'
+      - run: |
+          rustup show active-toolchain
+          python -m pip install 'numpy==2.5.2'
+          ffmpeg -version
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/portable
+          key: video-fidelity-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-portable-
+            fmtl-rates-${{ runner.os }}-${{ runner.arch }}-
+      - name: Materialize and verify exact candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import base64, gzip, hashlib, json, os, pathlib, subprocess, urllib.request
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'video-fidelity'
+          out.mkdir()
+          sha = '8cd8e12befc3a18cc1a8a255697610e7bfbbe2f2'
+          request = urllib.request.Request(f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{sha}', headers={'Authorization': 'Bearer '+os.environ['GH_TOKEN']})
+          with urllib.request.urlopen(request, timeout=60) as response:
+              content = base64.b64decode(json.load(response)['content'])
+          assert hashlib.sha1(b'blob '+str(len(content)).encode()+b'\0'+content).hexdigest() == sha
+          patch = gzip.decompress(base64.b64decode(content, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == '4216ce65910e7c89f130864d6ce7b6ea98980a07c8076c96cf47165d3e954915'
+          path = out / 'candidate.patch'
+          path.write_bytes(patch)
+          paths = [line.split('\t',2)[2] for line in subprocess.check_output(['git','apply','--numstat',str(path)], text=True).splitlines()]
+          allowed = {'crates/fmn-output/src/negotiate.rs','crates/fmn-output/tests/video_color_negotiation.rs','crates/fmn/src/rendering.rs','crates/fmn/tests/native_video.rs','crates/fmn-cli/src/lib.rs','crates/fmn-python/src/portal_video.rs','crates/fmn-python/tests/video_options.py'}
+          assert set(paths) == allowed, paths
+          bases = {name: subprocess.check_output(['git','rev-parse','HEAD:'+name], text=True).strip() for name in paths}
+          (out/'base-blobs.json').write_text(json.dumps(bases, indent=2))
+          (out/'base-commit.txt').write_text(os.environ['GITHUB_SHA'])
+          (out/'paths.json').write_text(json.dumps(paths))
+          subprocess.run(['git','apply','--check',str(path)], check=True)
+          subprocess.run(['git','apply',str(path)], check=True)
+          subprocess.run(['rustfmt','--edition','2024','--config','skip_children=true',*[p for p in paths if p.endswith('.rs')]], check=True)
+          subprocess.run(['git','diff','--check'], check=True)
+          for name in paths:
+              target = out/'source'/name
+              target.parent.mkdir(parents=True, exist_ok=True)
+              target.write_bytes(pathlib.Path(name).read_bytes())
+          PY
+      - name: Prove regression detects the previous transfer declaration
+        run: |
+          python - <<'PY'
+          import os, pathlib, subprocess
+          out = pathlib.Path(os.environ['RUNNER_TEMP'])/'video-fidelity'
+          path = pathlib.Path('crates/fmn/src/rendering.rs')
+          original = path.read_bytes()
+          source = original.decode()
+          assert source.count('ColorDescription::for_native_wire(wire)') == 1
+          try:
+              path.write_text(source.replace('ColorDescription::for_native_wire(wire)', 'if wire.has_alpha() { ColorDescription::srgb_full() } else { ColorDescription::video_bt709() }'))
+              result = subprocess.run(['cargo','test','--locked','-p','fmn','--lib','native_video_transfer_is_srgb_for_every_wire_and_camera_route','--','--nocapture'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+              (out/'negative.log').write_text(result.stdout)
+              print(result.stdout[-16000:])
+              assert result.returncode != 0 and 'panicked at' in result.stdout and 'native_video_transfer_is_srgb_for_every_wire_and_camera_route ... FAILED' in result.stdout, 'baseline must fail the color assertion, not compilation'
+          finally:
+              path.write_bytes(original)
+          PY
+      - name: Test native source and real encoded outputs
+        run: |
+          python - <<'PY'
+          import json, os, pathlib, subprocess
+          out = pathlib.Path(os.environ['RUNNER_TEMP'])/'video-fidelity'
+          commands = [
+              ('output', ['cargo','test','--locked','-p','fmn-output','--features','ffmpeg-test-fixture','--tests']),
+              ('native-color', ['cargo','test','--locked','-p','fmn','--lib','native_video_transfer']),
+              ('native-output', ['cargo','test','--locked','-p','fmn','--test','native_video','--test','native_video_quality','--test','native_cpu_pipeline','--test','native_render']),
+              ('cli-color', ['cargo','test','--locked','-p','fmn-cli','--lib','native_video_transfer']),
+              ('portal-video', ['cargo','test','--locked','-p','fmn-python','--lib','portal_video::','--','--nocapture']),
+              ('clippy', ['cargo','clippy','--locked','-p','fmn-output','-p','fmn','-p','fmn-cli','-p','fmn-python','--all-targets','--','-D','warnings']),
+          ]
+          results = {}
+          for name, command in commands:
+              print('RUN', name, flush=True)
+              with (out/(name+'.log')).open('w') as log:
+                  result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
+              results[name] = result.returncode
+              print((out/(name+'.log')).read_text()[-16000:], flush=True)
+              (out/'results.json').write_text(json.dumps(results, indent=2))
+          assert all(code == 0 for code in results.values()), results
+          PY
+      - name: Store tested immutable blobs without changing any ref
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import base64, hashlib, json, os, pathlib, urllib.request
+          out = pathlib.Path(os.environ['RUNNER_TEMP'])/'video-fidelity'
+          result = {}
+          for name in json.loads((out/'paths.json').read_text()):
+              content = pathlib.Path(name).read_bytes()
+              assert content == (out/'source'/name).read_bytes(), name
+              expected = hashlib.sha1(b'blob '+str(len(content)).encode()+b'\0'+content).hexdigest()
+              request = urllib.request.Request(f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs', data=json.dumps({'content':base64.b64encode(content).decode(),'encoding':'base64'}).encode(), headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Content-Type':'application/json'}, method='POST')
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  actual = json.load(response)['sha']
+              assert actual == expected
+              result[name] = actual
+          (out/'validated-blobs.json').write_text(json.dumps(result, indent=2))
+          print(json.dumps(result, indent=2))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: video-fidelity-${{ github.run_id }}
+          path: ${{ runner.temp }}/video-fidelity
+          retention-days: 7
+          if-no-files-found: warn
