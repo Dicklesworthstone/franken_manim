@@ -296,6 +296,16 @@ mod tests {
     }
 
     #[test]
+    fn embedded_portal_matches_the_reference_corpus_regressions() {
+        let cases = super::run_portal_gauntlet_reference_corpus_regressions().unwrap();
+        assert!(cases.len() >= 4, "{cases:?}");
+        for case in &cases {
+            assert!(case.bead.starts_with("fm-"), "{case:?}");
+            assert!(case.provenance.contains("manimlib/"), "{case:?}");
+        }
+    }
+
+    #[test]
     fn embedded_portal_matches_the_reference_class_sweep() {
         let report = super::run_portal_gauntlet_class_sweep().unwrap();
         assert_eq!(report.compared, 288, "{}", report.summary);

@@ -32,9 +32,9 @@ fn codes(frame: &FrameBuffer, plane: usize) -> Vec<u16> {
     frame
         .plane(plane)
         .chunks_exact(layout.stride(plane))
-        .flat_map(|row| row[..payload].chunks_exact(2))
+        .flat_map(|row| row[..payload].as_chunks::<2>().0)
         .map(|bytes| {
-            let word = u16::from_le_bytes([bytes[0], bytes[1]]);
+            let word = u16::from_le_bytes(*bytes);
             assert_eq!(word & 63, 0, "P010 samples are MSB-aligned");
             word >> 6
         })
