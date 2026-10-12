@@ -25,7 +25,10 @@ fn set_pixel(frame: &mut FrameBuffer, x: usize, y: usize, channels: [u16; 4]) {
 
 fn codes(frame: &FrameBuffer, plane: usize) -> Vec<u16> {
     let layout = frame.layout();
-    let payload = layout.format().min_row_bytes(layout.width(), plane).unwrap();
+    let payload = layout
+        .format()
+        .min_row_bytes(layout.width(), plane)
+        .unwrap();
     frame
         .plane(plane)
         .chunks_exact(layout.stride(plane))
@@ -58,7 +61,13 @@ fn portal_p010_retains_more_than_eight_bits_of_gray() {
     // This is the old production route, retained here as a planted negative:
     // widening its 8-bit samples cannot recover the discarded gray levels.
     rgba16f_to_rgba8(&source, &mut scratch).unwrap();
-    rgba_to_p010(&scratch, &mut legacy, ColorRange::Limited, ChromaSiting::Left).unwrap();
+    rgba_to_p010(
+        &scratch,
+        &mut legacy,
+        ColorRange::Limited,
+        ChromaSiting::Left,
+    )
+    .unwrap();
     let actual_codes = codes(&actual, 0);
     let distinct = actual_codes.iter().copied().collect::<BTreeSet<_>>();
     let legacy_distinct = codes(&legacy, 0).into_iter().collect::<BTreeSet<_>>();
@@ -66,7 +75,11 @@ fn portal_p010_retains_more_than_eight_bits_of_gray() {
     assert!(distinct.len() > 800, "only {} luma codes", distinct.len());
     assert_eq!(actual_codes[0], 64);
     assert_eq!(actual_codes[width - 1], 940);
-    assert!(actual_codes[..width].windows(2).all(|pair| pair[0] <= pair[1]));
+    assert!(
+        actual_codes[..width]
+            .windows(2)
+            .all(|pair| pair[0] <= pair[1])
+    );
     assert!(codes(&actual, 1).iter().all(|code| *code == 512));
 }
 
@@ -91,7 +104,13 @@ fn portal_eight_bit_wires_preserve_legacy_bytes_for_all_half_patterns() {
             PixelFormat::Rgba8 => rgba16f_to_rgba8(&source, &mut expected).unwrap(),
             PixelFormat::Bgra8 => swap_rb8(&rgba, &mut expected).unwrap(),
             PixelFormat::Nv12 => {
-                rgba_to_nv12(&rgba, &mut expected, ColorRange::Limited, ChromaSiting::Left).unwrap();
+                rgba_to_nv12(
+                    &rgba,
+                    &mut expected,
+                    ColorRange::Limited,
+                    ChromaSiting::Left,
+                )
+                .unwrap();
             }
             _ => unreachable!(),
         }
