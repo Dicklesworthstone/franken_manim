@@ -83,6 +83,21 @@ def updater_restoration():
     np.testing.assert_array_equal(square.uniforms["state_array"], [2., 4.])
 
 
+def constructor_z_index_sets_the_root_and_orders_scene_add():
+    # Mobject.__init__ takes z_index (mobject.py:89) and sets it on the root
+    # only; Scene.add sorts roots by it. Values measured in the pinned
+    # Reference (fm-constructor-z-index-4mq7).
+    square, circle = m.Square(z_index=2), m.Circle(z_index=-1)
+    dot = m.Dot()
+    group = m.VGroup(dot, z_index=1)
+    assert (square.z_index, circle.z_index, group.z_index, dot.z_index) == (2, -1, 1, 0)
+    assert [mob.z_index for mob in m.Text("ab", z_index=3).get_family()] == [3, 0, 0]
+    scene = m.Scene()
+    scene.add(square, circle, group)
+    assert [type(mob).__name__ for mob in scene.mobjects] == [
+        "CameraFrame", "Circle", "VGroup", "Square"]
+
+
 def ordered_roots():
     scene = m.Scene()
     left, right = m.Square(), m.Circle()
@@ -571,7 +586,8 @@ def ignored_camera_keeps_its_authored_attributes():
 
 CASES = (
     captured_families_styles_and_arrays, shared_child_identity, updater_restoration,
-    ordered_roots, scene_mobjects_follow_every_structural_change,
+    ordered_roots, constructor_z_index_sets_the_root_and_orders_scene_add,
+    scene_mobjects_follow_every_structural_change,
     native_only_edits_reach_python_through_scene_mobjects,
     projection_rereads_only_moved_child_lists,
     camera_pose_and_callbacks, native_clock_and_bytes,
@@ -587,7 +603,7 @@ CASES = (
     capture_refusal_preserves_history_and_native_arena,
     ignored_camera_keeps_its_authored_attributes,
 )
-assert len(CASES) == 24
+assert len(CASES) == 25
 for case in CASES:
     case()
     print("scene snapshot acceptance:", case.__name__)

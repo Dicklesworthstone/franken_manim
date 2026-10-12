@@ -959,6 +959,13 @@ class Mobject(_BridgeMobject):
         for key, value in kwargs.items():
             setattr(self, key, value)
         self._engine_init()
+        if "z_index" in kwargs:
+            # The root's own z_index (mobject.py:96) is the engine's sort key
+            # that Scene.add orders by, so write it there, without dispatching
+            # an authored set_z_index mid-construction
+            # (fm-constructor-z-index-4mq7).
+            self._set_z_index(int(kwargs["z_index"]))
+            vars(self).pop("z_index", None)
 
     def _ingest_args(self, *args):
         # Reference Group._ingest_args (mobject.py:2201) verbatim: a single
@@ -4421,6 +4428,7 @@ def _apply_vmobject_style_kwargs(mob, kwargs, recurse=True):
     scale_stroke_with_zoom = kwargs.pop("scale_stroke_with_zoom", None)
     depth_test = kwargs.pop("depth_test", None)
     fixed_in_frame = kwargs.pop("is_fixed_in_frame", None)
+    z_index = kwargs.pop("z_index", None)
     if kwargs:
         raise TypeError(
             "unexpected keyword arguments: " + ", ".join(sorted(kwargs))
@@ -4487,9 +4495,15 @@ def _apply_vmobject_style_kwargs(mob, kwargs, recurse=True):
     if fixed_in_frame is not None:
         method = mob.fix_in_frame if fixed_in_frame else mob.unfix_from_frame
         method(recurse=recurse)
+    # Mobject.__init__ (mobject.py:96) sets the root's z_index only; members
+    # keep their own (fm-constructor-z-index-4mq7).
+    if z_index is not None:
+        mob.set_z_index(z_index, recurse=False)
     return mob
 
 
+# The VMobject and Mobject constructor keywords a native build applies
+# afterwards: the style keywords, plus Mobject.__init__'s z_index.
 _NATIVE_VMOBJECT_STYLE_KEYS = frozenset(
     {
         "color",
@@ -4507,6 +4521,7 @@ _NATIVE_VMOBJECT_STYLE_KEYS = frozenset(
         "scale_stroke_with_zoom",
         "depth_test",
         "is_fixed_in_frame",
+        "z_index",
     }
 )
 
@@ -4523,6 +4538,8 @@ def _preflight_vmobject_style_kwargs(kwargs):
         width = float(kwargs["anti_alias_width"])
         if not _math.isfinite(width) or width < 0:
             raise ValueError("anti_alias_width must be finite and non-negative")
+    if "z_index" in kwargs:
+        int(kwargs["z_index"])  # set_z_index's sort key; refuse before building
 
 
 
