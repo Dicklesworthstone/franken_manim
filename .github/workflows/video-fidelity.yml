@@ -22,7 +22,7 @@ jobs:
       CARGO_BUILD_JOBS: '2'
       FMN_REQUIRE_FFMPEG: '1'
       FMN_REAL_FFMPEG: '1'
-      FMN_AUDIO_FIXTURE_DIR: ${{ runner.temp }}/video-audio-fixtures
+      FMN_AUDIO_FIXTURE_DIR: /tmp/fmn-video-audio-fixtures-${{ github.run_id }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
