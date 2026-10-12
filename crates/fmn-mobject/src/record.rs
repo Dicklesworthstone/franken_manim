@@ -43,7 +43,7 @@
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use fnp_ndarray::NdLayout;
 
@@ -417,6 +417,16 @@ impl RecordBuffer {
     #[must_use]
     pub fn storage_id(&self) -> usize {
         Arc::as_ptr(&self.storage) as usize
+    }
+
+    /// A non-owning witness of this buffer's storage generation.
+    ///
+    /// This can identify replacement storage even when its revisions and
+    /// address would otherwise repeat. It neither exports a view nor retains
+    /// the record cells, and does not force copy-on-write on the next edit.
+    #[must_use]
+    pub fn storage_identity(&self) -> StorageIdentity {
+        StorageIdentity(Arc::downgrade(&self.storage))
     }
 
     /// Live views attached to the current generation.
@@ -1254,6 +1264,27 @@ impl Drop for RecordView {
             }
         }
         self.storage.views.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// A non-owning allocation identity for revision-keyed native observations.
+///
+/// Obtain this through [`RecordBuffer::storage_identity`]. Revisions identify
+/// edits within one generation; this witness distinguishes entire replacement
+/// buffers even if their revision values coincide. Keeping the weak allocation
+/// alive prevents address reuse without retaining the record cells, registering
+/// a live view, or changing copy-on-write ownership.
+#[derive(Debug, Clone)]
+pub struct StorageIdentity(Weak<Storage>);
+
+impl StorageIdentity {
+    /// Whether `buffer` still uses this exact storage generation.
+    ///
+    /// This does not establish that its values are unchanged: consumers must
+    /// also check field revisions, record count, and writable view admission.
+    #[must_use]
+    pub fn matches(&self, buffer: &RecordBuffer) -> bool {
+        std::ptr::eq(self.0.as_ptr(), Arc::as_ptr(&buffer.storage))
     }
 }
 

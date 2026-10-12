@@ -29,6 +29,8 @@ use fmn_mobject::{Mob, Stage};
 
 use crate::animation::{AnimConfig, AnimError, AnimState, Animation, RateFunc};
 
+mod path_cache;
+
 // -------------------------------------------------------------- Homotopy
 
 /// `Homotopy` (movement.py:17): an `(x, y, z, t) → (x', y', z')` map
@@ -254,6 +256,7 @@ impl Animation for PhaseFlow {
 pub struct MoveAlongPath {
     state: AnimState,
     path: Mob,
+    path_cache: path_cache::PathCache,
 }
 
 impl MoveAlongPath {
@@ -267,7 +270,21 @@ impl MoveAlongPath {
         Self {
             state: AnimState::new(mobject, config),
             path,
+            path_cache: path_cache::PathCache::default(),
         }
+    }
+
+    /// Successful world-space path/table builds performed by this animation.
+    ///
+    /// Repeated samples of an unchanged path reuse one observation. Point,
+    /// storage, or placement changes rebuild it; writable point views force a
+    /// fresh observation each time. Style-only edits do not normally rebuild.
+    /// This diagnostic is not serialized and resets when the animation is
+    /// cloned. Finishing or aborting releases cached geometry but keeps the
+    /// count for inspection. It is a work counter, not a timing estimate.
+    #[must_use]
+    pub fn path_materializations(&self) -> u64 {
+        self.path_cache.materializations()
     }
 
     /// Replace the animation config.
@@ -292,12 +309,14 @@ impl Animation for MoveAlongPath {
     fn setup(&mut self, stage: &mut Stage) -> Result<(), AnimError> {
         let mobject = self.state.mobject();
         if !stage.contains(mobject) {
+            self.path_cache.clear();
             return Err(AnimError::StaleHandle(mobject));
         }
         if !stage.contains(self.path) {
+            self.path_cache.clear();
             return Err(AnimError::StaleHandle(self.path));
         }
-        if stage.point_from_proportion(self.path, 0.0).is_err() {
+        if self.path_cache.sample(stage, self.path, 0.0).is_err() {
             return Err(AnimError::EmptyMobject);
         }
         Ok(())
@@ -312,9 +331,13 @@ impl Animation for MoveAlongPath {
     /// time-span), and the sample point is taken by true arc length.
     fn interpolate(&mut self, stage: &mut Stage, alpha: f64) {
         let rated = self.state.config.rate_func.eval(alpha);
-        if let Ok(point) = stage.point_from_proportion(self.path, rated) {
+        if let Ok(point) = self.path_cache.sample(stage, self.path, rated) {
             stage.move_to(self.state.mobject(), point, [0.0, 0.0, 0.0]);
         }
+    }
+
+    fn teardown(&mut self, _stage: &mut Stage) {
+        self.path_cache.clear();
     }
 
     fn interpolate_submobject(&mut self, _stage: &mut Stage, _mobs: &[Mob], _sub_alpha: f64) {
