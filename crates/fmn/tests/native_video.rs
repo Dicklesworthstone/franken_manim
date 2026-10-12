@@ -248,6 +248,22 @@ fn mp4_and_mov_encode_through_the_boundary_with_a_muxed_soundtrack() {
                 .len()
                 == 64)
         );
+        let encode_argv = &report.artifact.ffmpeg[0].provenance.argv;
+        let transfer_tags: Vec<_> = encode_argv
+            .windows(2)
+            .filter(|pair| pair[0] == "-color_trc")
+            .collect();
+        assert_eq!(transfer_tags.len(), 2);
+        assert!(transfer_tags.iter().all(|pair| pair[1] == "iec61966-2-1"));
+        // Read the ISO color-description payload in the published, muxed file:
+        // primaries 1 (BT.709), transfer 13 (sRGB), matrix 1 (BT.709).
+        // MP4 uses nclx, MOV nclc. An argv-only assertion cannot prove mux retention.
+        assert!(
+            bytes.windows(14).any(|window| (&window[..8] == b"colrnclx"
+                || &window[..8] == b"colrnclc")
+                && window[8..14] == [0, 1, 0, 13, 0, 1]),
+            "mux lost the native sRGB description"
+        );
         let soundtrack = report.artifact.soundtrack.as_ref().unwrap();
         assert_eq!(soundtrack.cues_mixed, 1);
         assert_eq!(soundtrack.clipped_samples, 0);

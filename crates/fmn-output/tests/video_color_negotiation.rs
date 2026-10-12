@@ -66,15 +66,13 @@ fn every_wire_describes_its_color_on_both_sides_of_the_input_boundary() {
                 let matrix = values(&argv, "-colorspace");
                 assert_eq!(matrix.len(), 2);
                 assert!(matrix[0].0 < input && matrix[1].0 > input + 1);
-                assert_eq!(
-                    matrix[0].1,
-                    if wire.has_alpha() { "rgb" } else { "bt709" }
-                );
+                assert_eq!(matrix[0].1, if wire.has_alpha() { "rgb" } else { "bt709" });
                 assert_eq!(matrix[1].1, "bt709");
-                assert!(!argv.iter().any(|arg| matches!(
-                    arg.as_str(),
-                    "-vf" | "-filter:v" | "-filter_complex"
-                )));
+                assert!(
+                    !argv
+                        .iter()
+                        .any(|arg| matches!(arg.as_str(), "-vf" | "-filter:v" | "-filter_complex"))
+                );
             }
         }
     }
@@ -116,7 +114,7 @@ fn real_ffmpeg_lossless_nv12_preserves_native_codes_without_a_hidden_matrix_tran
         StdProcessRunner,
     };
 
-    let executable = match StdFfmpegLocator::default().locate_ffmpeg(Path::new("ffmpeg")) {
+    let executable = match StdFfmpegLocator::from_host_path().locate_ffmpeg(Path::new("ffmpeg")) {
         Ok(executable) => executable,
         Err(FfmpegLocatorError::NotFound) => {
             assert_ne!(std::env::var("FMN_REQUIRE_FFMPEG").as_deref(), Ok("1"));
@@ -129,17 +127,20 @@ fn real_ffmpeg_lossless_nv12_preserves_native_codes_without_a_hidden_matrix_tran
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let root = Path::new("/tmp")
-        .canonicalize()
-        .unwrap()
-        .join(format!("fmn-color-roundtrip-{}-{unique}", std::process::id()));
+    let root = Path::new("/tmp").canonicalize().unwrap().join(format!(
+        "fmn-color-roundtrip-{}-{unique}",
+        std::process::id()
+    ));
     std::fs::create_dir(&root).unwrap();
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
     let runner = Arc::new(StdProcessRunner);
     let tool = FfmpegTool::resolve(executable, runner.as_ref(), &root).unwrap();
     let program = tool.path().to_path_buf();
     let caps = EncoderCapabilities::probe(&tool, runner.as_ref()).unwrap();
-    assert!(caps.offers("libx264"), "real color roundtrip requires libx264");
+    assert!(
+        caps.offers("libx264"),
+        "real color roundtrip requires libx264"
+    );
     let boundary = Boundary::new(tool, runner.clone(), JobLimits::default(), root.clone()).unwrap();
     let color = ColorDescription {
         range: ColorRange::Limited,
@@ -212,4 +213,32 @@ fn real_ffmpeg_lossless_nv12_preserves_native_codes_without_a_hidden_matrix_tran
     );
     // Retain the small encoded witness; do not delete shared or user files.
     eprintln!("real color roundtrip witness: {}", output.display());
+}
+
+#[test]
+fn native_wire_metadata_describes_srgb_samples_without_retagging_external_bt709() {
+    for wire in [
+        WireFormat::Rgba8,
+        WireFormat::Bgra8,
+        WireFormat::Nv12,
+        WireFormat::P010,
+    ] {
+        let color = ColorDescription::for_native_wire(wire);
+        assert_eq!(color.transfer, fmn_output::Transfer::Srgb);
+        assert_eq!(color.primaries, fmn_output::Primaries::Bt709);
+        assert_eq!(
+            color.range,
+            if wire.has_alpha() {
+                ColorRange::Full
+            } else {
+                ColorRange::Limited
+            }
+        );
+    }
+    // External callers may legitimately supply already-BT.709-transferred
+    // samples. Their explicit description must not be globally rewritten.
+    assert_eq!(
+        ColorDescription::video_bt709().transfer,
+        fmn_output::Transfer::Bt709
+    );
 }

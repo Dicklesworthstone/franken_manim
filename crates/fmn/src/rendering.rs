@@ -1273,11 +1273,7 @@ fn negotiate_video(
         height,
         fps: (config.camera.fps, 1),
         wire,
-        color: if wire.has_alpha() {
-            ColorDescription::srgb_full()
-        } else {
-            ColorDescription::video_bt709()
-        },
+        color: ColorDescription::for_native_wire(wire),
         container: match (format, transparent) {
             (_, true) => Container::MovTransparent,
             (RenderFormat::Mov, false) => Container::Mov,
@@ -1346,6 +1342,40 @@ impl Drop for RenderSink {
         // Join output abort cleanup before returning, including on scene panic.
         if let Some(emitter) = self.emitter.take() {
             let _ = emitter.finish();
+        }
+    }
+}
+
+#[cfg(test)]
+mod native_video_color_tests {
+    use super::*;
+
+    #[test]
+    fn native_video_transfer_is_srgb_for_every_wire_and_camera_route() {
+        for format in [RenderFormat::Mp4, RenderFormat::Mov] {
+            for wire in ["rgba", "bgra", "nv12", "p010le"] {
+                let mut options = RenderOptions::with_format("/color.mp4", format).unwrap();
+                options.config.camera.resolution = (64, 36);
+                options.config.file_writer.pixel_format = wire.to_owned();
+                let job = negotiate_video(format, &options.config, None).unwrap();
+                assert_eq!(job.color.transfer, fmn_output::Transfer::Srgb, "{wire}");
+                assert_eq!(job.color.primaries, fmn_output::Primaries::Bt709);
+                assert_eq!(
+                    job.color.range,
+                    if job.wire.has_alpha() {
+                        fmn_frame::ColorRange::Full
+                    } else {
+                        fmn_frame::ColorRange::Limited
+                    }
+                );
+                let camera = options.camera_config().unwrap();
+                assert_eq!(
+                    negotiate_video(format, &options.config, Some(&camera))
+                        .unwrap()
+                        .color,
+                    job.color
+                );
+            }
         }
     }
 }

@@ -5828,11 +5828,7 @@ fn ffmpeg_video_job(
         height: config.camera.resolution.1,
         fps: (config.camera.fps, 1),
         wire,
-        color: if wire.has_alpha() {
-            ColorDescription::srgb_full()
-        } else {
-            ColorDescription::video_bt709()
-        },
+        color: ColorDescription::for_native_wire(wire),
         container: if command.transparent {
             Container::MovTransparent
         } else {
@@ -9429,6 +9425,25 @@ mod tests {
             requested_render_format(&command).expect("codec implies video"),
             RequestedRenderFormat::Video
         );
+    }
+
+    #[test]
+    fn native_video_transfer_matches_converted_pixels_on_every_cli_wire() {
+        let fs = VirtualFs::new();
+        for wire in ["rgba", "bgra", "nv12", "p010le"] {
+            let command = render(parse_args(["--format", "video", "--pix_fmt", wire]).unwrap());
+            let config = resolve_render_config(&fs, &command).unwrap();
+            let job = ffmpeg_video_job(&command, &config).unwrap();
+            assert_eq!(job.color.transfer, fmn_output::Transfer::Srgb, "{wire}");
+            assert_eq!(job.color.primaries, fmn_output::Primaries::Bt709);
+            let argv = fmn_output::negotiate::encode_argv(&job, Path::new("/color.mp4")).unwrap();
+            let tags: Vec<_> = argv
+                .windows(2)
+                .filter(|pair| pair[0] == "-color_trc")
+                .collect();
+            assert_eq!(tags.len(), 2);
+            assert!(tags.iter().all(|pair| pair[1] == "iec61966-2-1"));
+        }
     }
 
     #[test]
