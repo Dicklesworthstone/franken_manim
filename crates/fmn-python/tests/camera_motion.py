@@ -329,6 +329,17 @@ def become_and_restore_take_the_source_frame_pose():
     close(square.get_center(), m.ORIGIN)
 
 
+def frame_rotation_ends_at_its_angle_whatever_the_frame_count():
+    # C-34: the Reference's Rotate resets only point data between samples,
+    # so a frame's orientation (a uniform) accumulates them. It ends at
+    # pi, -3pi/4, pi/2 or pi/4 for these run times. Here every run time ends
+    # at the animation's angle (fm-k8e3).
+    for run_time in (1 / 30, 1 / 15, 0.5, 1.0):
+        scene = m.Scene()
+        scene.play(m.Rotate(scene.frame, m.PI / 2), run_time=run_time)
+        close(scene.frame.get_euler_angles(), [m.PI / 2, 0, 0])
+
+
 _CASES = (rotation_is_absolute_at_every_native_sample,
           rotation_obeys_live_rates_windows_and_final_alpha,
           succession_captures_predecessor_camera_orientation,
@@ -339,6 +350,7 @@ _CASES = (rotation_is_absolute_at_every_native_sample,
           foreign_helpers_and_destructive_camera_operations_are_refused,
           removers_drop_the_frame_from_the_scene_list_and_keep_the_camera,
           become_and_restore_take_the_source_frame_pose,
+          frame_rotation_ends_at_its_angle_whatever_the_frame_count,
           authored_rotation_dispatch_preserves_live_receiver,
           authored_rates_observe_restored_pose_and_may_edit_it,
           authored_rotation_owns_axis_interpretation,
