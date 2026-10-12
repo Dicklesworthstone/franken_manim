@@ -217,8 +217,10 @@ def environment():
                     self.roots.remove(value)
         def get_mobject_family_members(self):
             # Scene.get_mobject_family_members: scene_play keeps roots that
-            # are already present in draw order (fm-kpvx).
-            return [member for root in self.roots for member in root.get_family()]
+            # are already present in draw order (fm-kpvx). The frame heads
+            # the scene list (fm-6l2i), so it is present too, though never
+            # adopted as a drawable root.
+            return [self.frame, *(member for root in self.roots for member in root.get_family())]
         def _native_animation_driver(self, spec):
             core = NativeCore(self, spec)
             self.cores.append(core)
