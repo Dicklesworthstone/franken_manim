@@ -3869,15 +3869,6 @@ impl BridgeMobject {
         })
     }
 
-    /// `Circle.get_radius` over this entry's current world-space points.
-    fn _circle_radius(slf: &Bound<'_, Self>) -> PyResult<f64> {
-        crossing::record(CrossingClass::Other);
-        with_stage(slf, |stage, mob| {
-            let points = stage.get_points(mob).unwrap_or_default();
-            fmn_library::arc::radius_of(&fmn_library::VMobject::from_points(points))
-        })
-    }
-
     /// `Stage::put_start_and_end_on` over the Stage-visible family.
     fn _put_start_and_end_on(
         slf: &Bound<'_, Self>,

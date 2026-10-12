@@ -5457,8 +5457,14 @@ class Circle(Arc):
         self.stretch((self.get_height() + 2 * buff) / self.get_height(), 1)
         return self
 
+    # geometry.py measures from the public, overridable get_start (tip-aware)
+    # to get_center, the family box centre, so a child or an override moves
+    # the result as in the Reference (fm-circle-get-radius-family-center-tkiz).
     def get_radius(self):
-        return self._circle_radius()
+        return _space_get_norm(
+            _np.asarray(self.get_start(), dtype=float)
+            - _np.asarray(self.get_center(), dtype=float)
+        )
 
     # geometry.py measures from the public, overridable get_start_angle (the
     # tip-aware angle of fm-8pj7) and walks the overridable
