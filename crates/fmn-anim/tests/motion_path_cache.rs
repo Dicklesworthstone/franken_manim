@@ -2,7 +2,6 @@
 #![forbid(unsafe_code)]
 
 use fmn_anim::{AnimError, Animation, MoveAlongPath, RateFunc};
-use fmn_geom::QuadPath;
 use fmn_mobject::record::{RecordBuffer, RecordSchema};
 use fmn_mobject::{Mob, Mobject, Placement, Stage};
 
@@ -39,9 +38,8 @@ fn check(stage: &mut Stage, path: Mob, moving: Mob, animation: &mut MoveAlongPat
     // Independent observation: no MoveAlongPath/cache call in the oracle.
     // Use the same public move_to operation so even translation rounding is
     // compared, rather than silently assuming move_to stores an exact point.
-    let fresh = QuadPath::from_points(stage.get_points(path).unwrap()).unwrap();
     let rated = animation.state().config.rate_func.eval(alpha);
-    let destination = fresh.point_from_proportion(rated).unwrap();
+    let destination = stage.point_from_proportion(path, rated).unwrap();
     let mut expected = stage.snapshot().materialize();
     expected.move_to(moving, destination, [0.0; 3]);
     animation.interpolate(stage, alpha);
@@ -73,11 +71,16 @@ fn static_path_reuses_one_table_without_pinning_views_or_forcing_cow() {
     assert_eq!(stage.get(path).unwrap().buffer.storage_id(), storage);
     check(&mut stage, path, moving, &mut animation, 0.3);
     assert_eq!(animation.path_materializations(), 1);
-    let fresh = QuadPath::from_points(stage.get_points(path).unwrap()).unwrap();
-    assert_ne!(
-        fresh.point_from_proportion(0.3),
-        fresh.quick_point_from_proportion(0.3)
-    );
+    // The old equal-curve approximation would evaluate the first quadratic
+    // at local t = 0.9. This independent negative must differ from true length.
+    let points = stage.get_points(path).unwrap();
+    let t = 0.9;
+    let quick: [f64; 3] = std::array::from_fn(|lane| {
+        (1.0 - t) * (1.0 - t) * points[0][lane]
+            + 2.0 * (1.0 - t) * t * points[1][lane]
+            + t * t * points[2][lane]
+    });
+    assert_ne!(stage.point_from_proportion(path, 0.3).unwrap(), quick);
 }
 
 #[test]
