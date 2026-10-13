@@ -1,6 +1,20 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-run, 2026-10-12, against `Cargo.lock` `5457a108` and `SUITE.lock`
+**Status:** re-run, 2026-10-13, against `Cargo.lock` `0e45e58e` and `SUITE.lock`
+`3dcc60a9`, for the franken_markdown repin from `e0dd66e7` to `29385b3c`
+(fm-tex-layout-oracle-bkbc). No package version changes. The three lock files move
+only the three franken_markdown packages' rev, and no fmd or franken_markdown
+package is in this graph.
+**The release package gate still FAILS at its size budget** (fm-8j70), so this
+audit does not claim a passing package.
+
+- **VERIFIED (mechanical):** `cargo tree -p fmn-wasm --target
+  wasm32-unknown-unknown --edges normal --locked` is unchanged at 134 lines, with
+  no fmd or franken_markdown package.
+- The `--locked` wasm32 build and wasm-smoke were not re-run: no package in the
+  wasm graph changed since the run below.
+
+Earlier re-run, 2026-10-12, against `Cargo.lock` `5457a108` and `SUITE.lock`
 `bd9bb2e0`, for the franken_markdown repin from `126a5304` to `e0dd66e7`
 (fm-5wq.58). No package version changes. The three lock files move only the
 three franken_markdown packages' rev, and no fmd or franken_markdown package
@@ -336,8 +350,8 @@ The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
-- `SUITE.lock` SHA-256: `bd9bb2e04a724155fa9762bc882db0bbd99855381b7d74ceeff4ccd250e6b84f`
-- `Cargo.lock` SHA-256: `5457a108b384d30e8334e8c69a02ba972dd76540632563fd7a99807425db59e5`
+- `SUITE.lock` SHA-256: `3dcc60a9b53c2dadd28c9795cc68b525596290e294d046f5e5dca4e21879d993`
+- `Cargo.lock` SHA-256: `0e45e58e64e6020bcff631434153d0b1a74df6d464d5f9411b5ae175f360a8b9`
 - Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `b1fac18569682e3d2888881883f8b37e4abfb10884ed34a6f2e1eb7a4da942b5`
 
 The 0.5.0 release bump re-bound both lock identities above. That bump changed

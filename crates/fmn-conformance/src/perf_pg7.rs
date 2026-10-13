@@ -1194,7 +1194,7 @@ mod tests {
         assert!(cold.to_tsv().contains("timed_layer\tlayout\n"));
         assert_eq!(
             cold.digest().to_string(),
-            "b61c1dac49591952394c24381cc4f685a63b9df8ee5591183bfdd81b86274fde"
+            "32fdae85410b777519c67b4d9796aea7157f69989895d9908819c8801f03afea"
         );
 
         let cached = Pg7Definition::new(Pg7Scenario::FormulaCached).expect("cached definition");
