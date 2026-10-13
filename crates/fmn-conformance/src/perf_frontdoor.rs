@@ -1736,8 +1736,12 @@ mod tests {
             // (fm-sq8.9, +Y up the frame); then for begin-time targets,
             // since FadeIn (3e3bc154) and fixed-method transforms (a6ad13e3)
             // no longer allocate construction-time copies. All 30 certified
-            // frames are byte-identical across both re-pins.
-            "939ab39bae8d220314f89dc97a94c71968a7e0ba5105abf1b94e44bbe78786a0"
+            // frames are byte-identical across both re-pins. Then for the
+            // NumberPlane axes' fill, which since 7825f9b7 (fm-78b6) keeps
+            // NumberLine's DEFAULT_LIGHT_COLOR at opacity 0 instead of white:
+            // two members' fill_rgba change, and all 30 certified frames
+            // are byte-identical (fm-bbpz).
+            "d00df553c4edbcdce1270254bdcc0dfef71730b5bc2f7626266641dc504cc8bd"
         );
         let opening = TimelineBundle::from_bytes(&opening_a).expect("decode opening fixture");
         assert_eq!(opening.fps(), 30);
