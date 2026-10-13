@@ -1,6 +1,21 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-run, 2026-10-12, against `Cargo.lock` `a6dfd97a` and `SUITE.lock`
+**Status:** re-run, 2026-10-12, against `Cargo.lock` `5457a108` and `SUITE.lock`
+`bd9bb2e0`, for the franken_markdown repin from `126a5304` to `e0dd66e7`
+(fm-5wq.58). No package version changes. The three lock files move only the
+three franken_markdown packages' rev, and no fmd or franken_markdown package
+is in this graph.
+**The release package gate still FAILS at its size budget** (fm-8j70), so this
+audit does not claim a passing package.
+
+- **VERIFIED (mechanical):** `cargo tree -p fmn-wasm --target
+  wasm32-unknown-unknown --edges normal --locked` is unchanged at 134 lines, with
+  no fmd or franken_markdown package. `wasm-smoke/Cargo.lock` has no
+  franken_markdown entry.
+- The `--locked` wasm32 build and wasm-smoke were not re-run: no package in the
+  wasm graph changed since the run below.
+
+Earlier re-run, 2026-10-12, against `Cargo.lock` `a6dfd97a` and `SUITE.lock`
 `e5995b50`, for the frankenscipy repin from `ed84bdd1` to `ae52b654` (fm-7qx3).
 fsci-linalg's solve-certificate two_prod drops its fused multiply-add
 (fm-g1ey); that one function is the whole upstream delta. No package version
@@ -321,8 +336,8 @@ The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
-- `SUITE.lock` SHA-256: `e5995b5078e10cee368b331fd5b16328949e67dd8489da0e536e82d74f825553`
-- `Cargo.lock` SHA-256: `a6dfd97aecdf9f0addd4ae700a98116cc452d484843c4c6bdcc7edb532f6b53c`
+- `SUITE.lock` SHA-256: `bd9bb2e04a724155fa9762bc882db0bbd99855381b7d74ceeff4ccd250e6b84f`
+- `Cargo.lock` SHA-256: `5457a108b384d30e8334e8c69a02ba972dd76540632563fd7a99807425db59e5`
 - Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `b1fac18569682e3d2888881883f8b37e4abfb10884ed34a6f2e1eb7a4da942b5`
 
 The 0.5.0 release bump re-bound both lock identities above. That bump changed

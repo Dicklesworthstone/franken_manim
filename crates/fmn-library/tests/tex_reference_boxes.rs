@@ -16,11 +16,13 @@ use fmn_library::{Tex, TexEngine, TexText};
 /// TeX's `\ldots` and amsmath's `\pmod` (a3578a0, fm-y5fl), 43 after TeX's
 /// null delimiters around fractions (e4e8e2e), 44 with TeX's accent geometry,
 /// \big sizes and array struts (bd00a24), 49 with TeX's \scriptspace,
-/// cmsy's prime character and LaTeX's brace fills (3ed1d33). Raise it when
-/// layout improves; never lower it to land a change.
-const WITHIN_5_PERCENT_FLOOR: usize = 49;
-/// The same at ±10%: 57, then 60, then 65, then 67, then 70, then 73, then 75.
-const WITHIN_10_PERCENT_FLOOR: usize = 75;
+/// cmsy's prime character and LaTeX's brace fills (3ed1d33), 50 with
+/// delimiters at the sizes TeX's variant search sets (e0dd66e). Raise it
+/// when layout improves; never lower it to land a change.
+const WITHIN_5_PERCENT_FLOOR: usize = 50;
+/// The same at ±10%: 57, then 60, then 65, then 67, then 70, then 73, then 75,
+/// then 77.
+const WITHIN_10_PERCENT_FLOOR: usize = 77;
 
 struct Row {
     width: f64,

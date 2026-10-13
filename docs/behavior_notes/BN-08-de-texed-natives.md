@@ -106,7 +106,12 @@ three-stage by construction: a natural glyph when it covers the target,
 uniform scaling up to the 1.25× ceiling, and the parametric drawn-path
 construction beyond it. Past the ceiling the bracket is *generated* — the
 same precedent the drawn `Brace` set — so a 12-row matrix's brackets keep
-their proportions instead of thickening into rails. The scaling stages are
+their proportions instead of thickening into rails. Every stage draws at
+the size TeX's own variant search would set: cmex10's 1.2, 1.8, 2.4 and
+3.0 em successors, then the extensible bracket in 0.6 em steps from 3.6 em.
+So the stretch starts from a bracket as tall as the one the Reference
+stretches; its stem and foot weights are the drawn construction's
+(`fm-u5sb`). The scaling stages are
 load-bearing and tested at row counts 1 through 8, glyph stage to drawn
 stage, with bracket height equal to grid height plus `v_buff` to 1e-9.
 
