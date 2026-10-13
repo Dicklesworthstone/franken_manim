@@ -271,7 +271,8 @@ fn as_exact_arc(original: &[Vec3], window: &[Vec3]) -> Option<Vec<Vec3>> {
     if !circular {
         return None;
     }
-    let angle = |p: Vec3| (p[1] - center[1]).atan2(p[0] - center[0]);
+    // fmn-dmath's transcendentals, never the platform libm (ADR-0010).
+    let angle = |p: Vec3| fmn_dmath::atan2(p[1] - center[1], p[0] - center[0]);
     // Each component turns under a half turn, so its wrapped turn is exact.
     let turn = |c: &[Vec3; 3]| (angle(c[2]) - angle(c[0]) + PI).rem_euclid(TAU) - PI;
     let sweep: f64 = components(window).iter().map(turn).sum();
@@ -283,8 +284,8 @@ fn as_exact_arc(original: &[Vec3], window: &[Vec3]) -> Option<Vec<Vec3>> {
     let step = sweep / curves as f64;
     let at = |theta: f64, distance: f64| {
         [
-            center[0] + distance * theta.cos(),
-            center[1] + distance * theta.sin(),
+            center[0] + distance * fmn_dmath::cos(theta),
+            center[1] + distance * fmn_dmath::sin(theta),
             center[2],
         ]
     };
@@ -292,7 +293,10 @@ fn as_exact_arc(original: &[Vec3], window: &[Vec3]) -> Option<Vec<Vec3>> {
     points.push(at(start, radius));
     for k in 0..curves {
         let k = k as f64;
-        points.push(at(start + step * (k + 0.5), radius / (step / 2.0).cos()));
+        points.push(at(
+            start + step * (k + 0.5),
+            radius / fmn_dmath::cos(step / 2.0),
+        ));
         points.push(at(start + step * (k + 1.0), radius));
     }
     Some(points)
