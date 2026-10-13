@@ -8259,11 +8259,11 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         Invocation::new(python_class_sweep_run),
         vec![
             Assertion::ExitCode(0),
-            counter_eq("class_sweep_subjects", 288),
+            counter_eq("class_sweep_subjects", 289),
         ],
         vec![LogExpect::span_present(
             "e2e.python.class_sweep",
-            vec![FieldPred::u64_eq("compared", 288)],
+            vec![FieldPred::u64_eq("compared", 289)],
         )],
     ));
     specs.push(spec(
