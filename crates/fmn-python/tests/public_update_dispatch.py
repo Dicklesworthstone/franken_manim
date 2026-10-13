@@ -378,6 +378,8 @@ class PublicUpdateTests(unittest.TestCase):
         # plain getattr only for classes whose lookup is object's own. A
         # member whose class authors __getattribute__ or __getattr__ is
         # decided without calling either, and still needs the public path.
+        # fm-siot: that includes the first scan after a topology change,
+        # whose Scene.mobjects projection reads each member's submobjects.
         calls = []
 
         class Intercepting(m.Square):
@@ -394,10 +396,6 @@ class PublicUpdateTests(unittest.TestCase):
             with self.subTest(cls.__name__):
                 scene = m.Scene()
                 scene.add(m.VGroup(m.Square(), cls()))
-                # Projecting the new roots reads each member's `submobjects`
-                # by ordinary attribute access; that happens once per
-                # topology change. This pins the scan itself.
-                scene.mobjects
                 calls.clear()
                 self.assertTrue(scene._fmn_requires_public_scene_update())
                 self.assertEqual(calls, [])

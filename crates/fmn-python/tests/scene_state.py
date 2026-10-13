@@ -180,17 +180,21 @@ def projection_rereads_only_moved_child_lists():
     # fm-5wq.31 work counter: after an edge change among already-projected
     # members, Scene.mobjects reads the moved list only. The previous
     # projection read every member's `submobjects` on every such read.
+    # The projection takes each list from the member's own instance dict
+    # (fm-siot), so the reads are counted through a property kept under
+    # another key: with no `submobjects` entry in the dict, ordinary access
+    # is the projection's only way to the list.
     reads = []
 
     class Counted(m.VGroup):
         @property
         def submobjects(self):
             reads.append(self)
-            return self.__dict__["submobjects"]
+            return self.__dict__["_counted_submobjects"]
 
         @submobjects.setter
         def submobjects(self, value):
-            self.__dict__["submobjects"] = value
+            self.__dict__["_counted_submobjects"] = value
 
     leaves = [Counted() for _ in range(40)]
     root = Counted(*leaves)
@@ -201,6 +205,42 @@ def projection_rereads_only_moved_child_lists():
     reads.clear()
     scene.mobjects
     assert reads == [leaves[3]], len(reads)
+
+
+def projection_runs_no_authored_submobjects_getter():
+    # fm-siot: Scene.mobjects runs inside per-frame admission, which must
+    # run no authored code. A member's list is read from its own instance
+    # dict, so neither a `submobjects` property over that entry nor an
+    # authored __getattribute__ runs when the projection re-reads it.
+    reads = []
+
+    class Property(m.VGroup):
+        @property
+        def submobjects(self):
+            reads.append("property")
+            return self.__dict__["submobjects"]
+
+        @submobjects.setter
+        def submobjects(self, value):
+            self.__dict__["submobjects"] = value
+
+    class Intercepting(m.VGroup):
+        def __getattribute__(self, name):
+            if name == "submobjects":
+                reads.append("__getattribute__")
+            return object.__getattribute__(self, name)
+
+    for cls in (Property, Intercepting):
+        parents = [cls(m.Square()) for _ in range(3)]
+        scene = m.Scene()
+        scene.add(*parents)
+        scene.mobjects
+        parents[1].add(m.Circle())  # an edge change, so the list is re-read
+        reads.clear()
+        roots = [mob for mob in scene.mobjects if mob is not scene.frame]
+        assert len(roots) == 3 and all(a is b for a, b in zip(roots, parents))
+        assert reads == [], (cls.__name__, reads)
+        assert len(parents[1].submobjects) == 2
 
 
 def camera_pose_and_callbacks():
@@ -590,6 +630,7 @@ CASES = (
     scene_mobjects_follow_every_structural_change,
     native_only_edits_reach_python_through_scene_mobjects,
     projection_rereads_only_moved_child_lists,
+    projection_runs_no_authored_submobjects_getter,
     camera_pose_and_callbacks, native_clock_and_bytes,
     repeated_history, history_branch_and_limit, rejected_checkpoint_preserves_history,
     foreign_owner_refusal, ignored_camera, rendered_restore,
@@ -603,7 +644,7 @@ CASES = (
     capture_refusal_preserves_history_and_native_arena,
     ignored_camera_keeps_its_authored_attributes,
 )
-assert len(CASES) == 25
+assert len(CASES) == 26
 for case in CASES:
     case()
     print("scene snapshot acceptance:", case.__name__)

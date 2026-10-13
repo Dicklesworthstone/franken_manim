@@ -1562,6 +1562,33 @@ fn proxy_children<'py>(proxy: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, PyA
     children.try_iter()?.collect()
 }
 
+/// A scene member's live `submobjects` list for the `Scene.mobjects`
+/// projection (fm-siot). Per-frame admission reads `Scene.mobjects`, and
+/// admission must run no authored getter, so the list comes from the
+/// member's own instance dict through `object.__getattribute__`, as the
+/// admission scan reads own state. A member whose dict holds no
+/// `submobjects` entry (an authored property, say) is read through ordinary
+/// attribute access.
+fn projected_children<'py>(proxy: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    static OBJECT_GETATTRIBUTE: pyo3::sync::PyOnceLock<Py<PyAny>> = pyo3::sync::PyOnceLock::new();
+    let py = proxy.py();
+    let submobjects = pyo3::intern!(py, "submobjects");
+    let generic = OBJECT_GETATTRIBUTE
+        .get_or_try_init(py, || {
+            py.get_type::<PyAny>()
+                .getattr("__getattribute__")
+                .map(Bound::unbind)
+        })?
+        .bind(py);
+    if let Ok(own) = generic.call1((proxy, pyo3::intern!(py, "__dict__")))
+        && let Ok(own) = own.cast_into::<PyDict>()
+        && let Some(list) = own.get_item(submobjects)?
+    {
+        return Ok(list);
+    }
+    proxy.getattr(submobjects)
+}
+
 fn collect_proxy_graph<'py>(root: &Bound<'py, PyAny>) -> PyResult<Vec<Py<PyAny>>> {
     fn visit<'py>(
         proxy: &Bound<'py, PyAny>,
@@ -1785,7 +1812,6 @@ fn reproject_moved<'py>(
         };
         root_proxies.push(found);
     }
-    let submobjects = pyo3::intern!(py, "submobjects");
     for (mob, children) in &moved {
         let Some(owner) = proxy(*mob) else {
             return Ok(None);
@@ -1797,7 +1823,7 @@ fn reproject_moved<'py>(
             };
             expected.push(found);
         }
-        let live = owner.getattr(submobjects)?;
+        let live = projected_children(&owner)?;
         if let Ok(current) = live.cast::<PyList>()
             && current.len() == expected.len()
             && current
@@ -8912,7 +8938,7 @@ impl PyScene {
             adopter.call1((PyList::new(py, ghosts)?,))?;
         }
         for (mob, _, children, _) in &graph {
-            let submobjects = proxies[mob].getattr("submobjects")?;
+            let submobjects = projected_children(&proxies[mob])?;
             // Re-projecting a list that already holds exactly these proxies
             // in this order clears and re-extends the same items with no
             // back-edge change. Skip that call: this walk covers the whole
