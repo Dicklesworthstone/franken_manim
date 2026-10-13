@@ -22,8 +22,8 @@ use fmn_library::{Tex, TexEngine, TexText};
 /// lower it to land a change.
 const WITHIN_5_PERCENT_FLOOR: usize = 52;
 /// The same at ±10%: 57, then 60, then 65, then 67, then 70, then 73, then 75,
-/// then 77, then 80.
-const WITHIN_10_PERCENT_FLOOR: usize = 80;
+/// then 77, then 80, then 84 with big operators' cmex10 widths (80cbadc).
+const WITHIN_10_PERCENT_FLOOR: usize = 84;
 
 struct Row {
     width: f64,

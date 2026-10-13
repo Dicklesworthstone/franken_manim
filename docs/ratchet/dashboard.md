@@ -11,9 +11,9 @@ real 3b1b formula corpus typesets natively. The denominator is **frozen**
 |---|---|---|
 | **Parse** | 99.994 % | 99.989 % |
 | **Parse + typeset returned Ok** | 99.994 % | 99.989 % |
-| **Layout within 5% of real TeX (oracle)** | 25.927 % | 3.226 % |
+| **Layout within 5% of real TeX (oracle)** | 26.046 % | 3.269 % |
 
-"Typeset returned Ok" means fmd-math produced a layout without an error. It does not show that the layout is right. The corpus TeX box oracle (fm-tex-layout-oracle-bkbc) lays out 585 strings, sampled by construct class and occurrence (6847 occurrences), and compares each box with real TeX's: 299 are within 5% and 437 within 10%, covering 4592 occurrences within 5%. The oracle row counts only those verified strings against the whole corpus; unsampled strings count as unverified.
+"Typeset returned Ok" means fmd-math produced a layout without an error. It does not show that the layout is right. The corpus TeX box oracle (fm-tex-layout-oracle-bkbc) lays out 585 strings, sampled by construct class and occurrence (6847 occurrences), and compares each box with real TeX's: 303 are within 5% and 444 within 10%, covering 4613 occurrences within 5%. The oracle row counts only those verified strings against the whole corpus; unsampled strings count as unverified.
 
 ## Pending constructs (parse plane)
 
