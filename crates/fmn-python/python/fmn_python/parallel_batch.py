@@ -51,10 +51,21 @@ def _render_source_job(job):
         from .scene_loading import SceneSource
         from .batch_rendering import render_scenes
 
+        options = dict(job["options"])
+        reproducible = options.get("reproducible", False)
+        from .effect_audit import recording
+        snapshot = None
+        if reproducible:
+            from .parallel_provenance import worker_runtime
+
+            snapshot = worker_runtime(native, job["runtime_identities"])
         source = Path(job["source"])
         if _source_digest(source) != job["source_digest"]:
             raise RuntimeError("scene entry source changed after batch planning")
-        with SceneSource(source, native.Scene, entry_digest=job["source_digest"]) as loaded:
+        # Capture import-time effects too. The parent does NOT record its
+        # orchestration subprocesses as though they were authored scene effects.
+        with (recording(reproducible),
+              SceneSource(source, native.Scene, entry_digest=job["source_digest"]) as loaded):
             # SceneSource owns exact compilation bytes. Check those, not a
             # second disk read that could miss an edit during source loading.
             compiled = loaded._source_bytes.get(source)
@@ -63,10 +74,15 @@ def _render_source_job(job):
             name = job["name"]
             if name not in loaded.scenes:
                 raise ValueError(f"no locally declared Scene named {name!r} in {source}")
+            if reproducible:
+                from .parallel_provenance import executed_sources
+
+                options.update(sources=lambda: executed_sources(loaded, job),
+                               runtime_identities=snapshot.identities)
             try:
                 report = render_scenes(
                     {name: loaded.scenes[name]}, job["directory"],
-                    continue_on_error=True, **job["options"],
+                    continue_on_error=True, **options,
                 )
             except BaseException as error:
                 # Cancellation can follow already published clips. Return the
@@ -75,7 +91,13 @@ def _render_source_job(job):
                 report = getattr(error, "render_batch_result", None)
                 if not isinstance(report, BatchRenderResult) or len(report.outcomes) != 1:
                     raise
-            return report.outcomes[0].as_dict()
+            row = report.outcomes[0].as_dict()
+            if reproducible and row["status"] == "succeeded":
+                from .parallel_provenance import worker_proof
+
+                row["provenance"] = worker_proof(snapshot, job["source_digest"],
+                                                 report.outcomes[0].result)
+            return row
 
 
 def _outcome(name, destination, row, *, format=None, subdivide=False,
@@ -121,6 +143,7 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
                          max_jobs=1024, animation_range=None, job_timeout=None,
                          checkpoint=None, resume=False, resume_key=None,
                          subdivide=False, max_segments=10_000, save_last_frame=False,
+                         reproducible=False,
                          _output_options=None, _expected_source_digest=None,
                          _working_directory=None):
     """Render explicitly named local Scene classes in bounded fresh processes.
@@ -130,7 +153,8 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
     of live Scenes, a source path and class names can be reconstructed safely.
     Source module side effects run once PER scene; interpreter globals, cwd,
     native proxies and random state are not shared between jobs. Imported
-    helpers/assets are live inputs, not a frozen or certified input closure.
+    helpers/assets are live inputs. In reproducible mode the existing guarded
+    native session captures each scene's executed imports and supported reads.
 
     Receipts retain input order; on_result runs in completion order in the
     parent. Fail-fast stops new admission and lets in-flight scenes finish.
@@ -140,8 +164,13 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
 
     workers is bounded to 64. threads defaults to ONE native thread per worker
     to avoid multiplying two automatic CPU budgets. job_timeout optionally
-    bounds each worker, including startup. This path deliberately does not
-    claim certification or accept live instances.
+    bounds each worker, including startup. This path does not accept live
+    instances. reproducible=True supports fresh PNG stills/sequences and WAV:
+    workers must match one measured installed runtime, each runs the existing
+    effect-audited session, and each returns its own native FMNP sidecar. The
+    aggregate stays uncertified; all_scenes_certified requires every scene's
+    complete receipt. No checkpoint, paired or subdivided certification is
+    implied. Runtime/sidecar checks precede admission; failures preserve outputs.
 
     subdivide=True emits one native clip per selected play/wait; completed
     clips survive later failures and interruptions in each outcome's result.
@@ -181,6 +210,15 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
         max_segments = positive_integer(max_segments, "max_segments", 100_000)
     elif max_segments != 10_000:
         raise ValueError("max_segments requires subdivide=True")
+    if not isinstance(reproducible, bool):
+        raise TypeError("reproducible must be bool")
+    if reproducible:
+        native = importlib.import_module("manimlib")
+        from .batch_provenance import validate_batch_mode
+
+        validate_batch_mode(native, format, True, checkpoint)
+        if subdivide or save_last_frame:
+            raise RuntimeError("CAPABILITY: reproducible parallel batches exclude paired output and subdivision")
     if subdivide or save_last_frame:
         native = importlib.import_module("manimlib")
         from .paired_output import companion_png_path, validate_paired_mode
@@ -231,8 +269,15 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
         for parent in destination.parents:
             if parent.exists() and not parent.is_dir():
                 raise NotADirectoryError(str(parent))
+    provenance = None
+    if reproducible:
+        from .parallel_provenance import ParallelProvenance
+
+        provenance = ParallelProvenance(native, format, destinations, digest)
     options = dict(format=format, resolution=resolution, fps=fps, threads=threads,
                    animation_range=selection, _output_options=_output_options)
+    if reproducible:
+        options["reproducible"] = True
     # Keep existing single-artifact checkpoint plans byte-compatible. Only an
     # explicitly selected output mode adds new plan fields.
     if subdivide:
@@ -244,6 +289,9 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
     options = json.loads(json.dumps(options, allow_nan=False))
     jobs = [dict(source=str(source), source_digest=digest, directory=str(root),
                  name=name, options=options, working_directory=str(working_directory)) for name in names]
+    if provenance is not None:
+        for job in jobs:
+            job["runtime_identities"] = provenance.identities
     owner = (contextlib.nullcontext(None) if checkpoint is None else
              BatchCheckpoint(checkpoint, resume=resume, key=resume_key))
     if checkpoint is not None:
@@ -259,6 +307,8 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
         completed = {} if journal is None else journal.completed
 
         def restore(name, path, row):
+            if provenance is not None and row["status"] == "succeeded":
+                return provenance.restore(name, path, row)
             return _outcome(name, path, row, format=format, subdivide=subdivide,
                             save_last_frame=save_last_frame, max_segments=max_segments)
 
@@ -269,7 +319,8 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
         reused = tuple(name for name in names if name in completed)
 
         def report():
-            return ParallelBatchRenderResult(tuple(outcomes), workers=workers, reused=reused)
+            return ParallelBatchRenderResult(tuple(outcomes), reproducible=reproducible,
+                                             workers=workers, reused=reused)
 
         def record():
             if journal is not None:
@@ -284,6 +335,10 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
             record()
             if on_result is not None:
                 on_result(outcomes[index])
+            if provenance is not None:
+                # An observer may edit installed files. Stop before admitting
+                # another worker, while preserving already published receipts.
+                provenance.verify()
 
         try:
             record()
