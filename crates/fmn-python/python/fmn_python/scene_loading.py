@@ -154,6 +154,7 @@ class SceneSource:
     def __init__(
         self, source: str | Path, scene_type: type, *,
         source_inputs: Mapping[str | Path, str] | None = None,
+        entry_digest: str | None = None,
     ) -> None:
         self.path = Path(source).resolve()
         if self.path.suffix.lower() not in (".py", ".pyw"):
@@ -163,6 +164,15 @@ class SceneSource:
         if not isinstance(scene_type, type):
             raise TypeError("scene_type must be a Scene class")
         self.scene_type = scene_type
+        # Unlike source_inputs, this pins only the entry point: ordinary local
+        # and lazy helper imports remain allowed. Check the exact compilation
+        # bytes BEFORE authored module code executes, not a later disk read.
+        if entry_digest is not None and (
+            not isinstance(entry_digest, str) or len(entry_digest) != 64
+            or any(char not in "0123456789abcdef" for char in entry_digest)
+        ):
+            raise ValueError("entry_digest must be a lowercase SHA-256 digest")
+        self._entry_digest = entry_digest
         parts = []
         root = self.path.parent
         while (root / "__init__.py").is_file():
@@ -261,6 +271,8 @@ class SceneSource:
             )
 
     def _check_source(self, path: Path, digest: str) -> None:
+        if path == self.path and self._entry_digest is not None and digest != self._entry_digest:
+            raise RuntimeError("scene entry source changed after planning")
         if self._source_inputs is None:
             return
         expected = self._source_inputs.get(path)

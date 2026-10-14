@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import contextlib
 from functools import partial as _partial_call
-import hashlib
 import os
 from pathlib import Path
 import sys
@@ -296,8 +295,13 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
     try:
         # A certified invocation records scene effects from before its
         # module loads: import-time reads are inputs of every render.
-        with (redirect, recording_effects(bool(options.get("reproducible"))),
-              SceneSource(source_path, native.Scene) as loaded):
+        if parallel:
+            from .parallel_discovery import discovery_source
+            loading = discovery_source(source_path, working_directory=invocation_directory,
+                                       job_timeout=parallel.get("job_timeout"))
+        else:
+            loading = SceneSource(source_path, native.Scene)
+        with (redirect, recording_effects(bool(options.get("reproducible"))), loading as loaded):
             scenes = loaded.scenes
             names = sorted(scenes)
             if batch:
@@ -309,16 +313,17 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                     raise ValueError("selected scenes were not declared by " + source + ": " + ", ".join(missing))
                 destination = default_root if destination is None else destination
                 phase = "batch"
-                render_batch = render_scenes
-                batch_args = ({name: scenes[name] for name in requested}, destination)
                 if parallel:
                     from .parallel_batch import render_source_scenes
                     render_batch = _partial_call(
                         render_source_scenes, source_path, scene_names=requested,
-                        _expected_source_digest=hashlib.sha256(loaded._source_bytes[source_path]).hexdigest(),
+                        _expected_source_digest=loaded.source_digest,
                         _working_directory=invocation_directory, **parallel,
                     )
                     batch_args = (destination,)
+                else:
+                    render_batch = render_scenes
+                    batch_args = ({name: scenes[name] for name in requested}, destination)
                 report = render_batch(
                     *batch_args,
                     format=options["format"], resolution=(width, height), fps=fps, threads=threads,

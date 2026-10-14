@@ -51,8 +51,15 @@ if __name__ == "__main__":
 ```
 
 Use `resume=False` on the first run. A preexisting checkpoint is an error
-without explicit resume. In the CLI, source imports still run for discovery;
-reused scenes do not start workers or run their constructors.
+without explicit resume. In the CLI, source imports run in a disposable discovery
+worker, never in the coordinator; reused scenes do not start render workers or
+run their constructors. `--job-timeout` also bounds discovery, including native
+initialization. Discovery crashes and import errors become structured scene-load
+errors; a child interrupt retains exit 130. Dynamic locally declared classes and
+package-relative imports still use the ordinary `SceneSource` loader. Entry-source
+bytes are checked before compilation so an edit during package import cannot
+silently execute a different entry point. This is robustness isolation, not a
+sandbox: authored filesystem effects and spawned processes retain host authority.
 
 ## Recovery contract
 

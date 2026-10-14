@@ -58,7 +58,7 @@ def _render_source_job(job):
         source = Path(job["source"])
         if _source_digest(source) != job["source_digest"]:
             raise RuntimeError("scene entry source changed after batch planning")
-        with SceneSource(source, native.Scene) as loaded:
+        with SceneSource(source, native.Scene, entry_digest=job["source_digest"]) as loaded:
             # SceneSource owns exact compilation bytes. Check those, not a
             # second disk read that could miss an edit during source loading.
             compiled = loaded._source_bytes.get(source)

@@ -52,6 +52,8 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
         self.source.write_text("# stable source\n", encoding="utf-8")
         self.loads, self.calls, self.parsed, self.emitted = [], [], [], []
         self.chdir_on_load = False
+        self.discovery_calls = []
+        self.discovery_error = None
         case = self
 
         class Source:
@@ -132,7 +134,21 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
         exec(compile(tree, "console_rendering.py", "exec"), self.g)
         self.parallel = types.ModuleType("fmn_python.parallel_batch")
         self.parallel.render_source_scenes = render("parallel")
-        self.modules = patch.dict(sys.modules, {"fmn_python.parallel_batch": self.parallel})
+        discovery = types.ModuleType("fmn_python.parallel_discovery")
+        @contextlib.contextmanager
+        def discover(path, **options):
+            case.discovery_calls.append((path, options))
+            if case.discovery_error is not None:
+                raise case.discovery_error
+            yield types.SimpleNamespace(
+                scenes=("First", "Second"),
+                source_digest=hashlib.sha256(path.read_bytes()).hexdigest(),
+            )
+        discovery.discovery_source = discover
+        self.modules = patch.dict(sys.modules, {
+            "fmn_python.parallel_batch": self.parallel,
+            "fmn_python.parallel_discovery": discovery,
+        })
         self.modules.start()
 
     def tearDown(self):
@@ -191,6 +207,21 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
         self.assertEqual(options["_working_directory"], self.cwd)
         self.assertEqual(options["_expected_source_digest"], hashlib.sha256(b"# stable source\n").hexdigest())
 
+    def test_parallel_discovery_is_isolated_and_receives_the_timeout(self):
+        self.assertEqual(self.run_cli("-a", "--workers=2", "--job-timeout=5"), 0)
+        self.assertFalse(self.loads)
+        self.assertEqual(self.discovery_calls, [(self.source, {
+            "working_directory": self.cwd, "job_timeout": 5.0,
+        })])
+
+    def test_discovery_failure_never_admits_render_jobs(self):
+        self.discovery_error = RuntimeError("discovery worker crashed")
+        self.assertEqual(self.run_cli("-a", "--workers=2", "--robot"), 5)
+        self.assertFalse(self.loads)
+        self.assertFalse(self.calls)
+        self.assertEqual(self.emitted[-1][2], "scene-load-failed")
+        self.assertIn("discovery worker crashed", self.emitted[-1][3])
+
     def test_parallel_recovery_uses_existing_parser_and_forwards_frozen_options(self):
         checkpoint = self.root / "progress.json"
         self.assertEqual(self.run_cli("--write_all", "--workers=2", "--robot", "--checkpoint",
@@ -231,7 +262,8 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
         options = self.calls[0][2]
         self.assertEqual(options["checkpoint"], self.cwd / "progress.json")
         self.assertEqual(options["_working_directory"], self.cwd)
-        self.assertEqual(Path.cwd(), self.root)
+        self.assertEqual(Path.cwd(), self.cwd)
+        self.assertFalse(self.loads)
 
     def test_sequential_recovery_keeps_its_original_dispatch(self):
         checkpoint = self.root / "sequential.json"

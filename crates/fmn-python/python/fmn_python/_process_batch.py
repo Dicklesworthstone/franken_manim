@@ -12,6 +12,7 @@ from multiprocessing.connection import wait
 import operator
 import os
 import signal
+import sys
 import time
 
 _MAX_RECEIPT_BYTES = 8 * 1024 * 1024
@@ -49,6 +50,13 @@ def failure(error, status="failed"):
 def _child(connection, worker, job):
     try:
         try:
+            # The result travels over its private pipe. Keep fd-level output
+            # from native libraries and authored os.write/subprocess calls off
+            # the coordinator's robot stdout too, not only Python print().
+            # Redirect before flushing any buffered startup message too.
+            os.dup2(2, 1)
+            if sys.stdout is not None:
+                sys.stdout.flush()
             row = worker(job)
             if not isinstance(row, dict) or row.get("status") not in {"succeeded", "failed", "cancelled"}:
                 raise ValueError("worker must return a terminal outcome")

@@ -11,11 +11,11 @@ PARALLEL_HELP = """Isolated parallel scene batches:
 --workers 1..64 opts into fresh spawned interpreters, one per scene. Without
 it, the existing sequential path is unchanged. --threads defaults to 1 per
 worker; an explicit --threads N still controls each native renderer. Source
-code is imported for discovery and again in each worker; global state is not
-shared. Robot stdout remains one ordered batch receipt; scene output streams
+code is imported in a disposable discovery worker and again in each render
+worker; no scene code runs in the coordinator and global state is not shared. Robot stdout remains one ordered batch receipt; scene output streams
 to stderr. --keep-going admits later jobs after ordinary failures. Fail-fast
 stops new jobs while already running scenes finish. Optional --job-timeout
-bounds each worker including startup. Crashed/timed-out outputs are never
+bounds discovery and each render worker including startup. Crashed/timed-out outputs are never
 removed or silently reused, and may exist without a complete receipt.
 Add --checkpoint PATH --resume-key INPUTS to save durable per-scene progress;
 add --resume to verify and reuse completed outputs without starting workers
