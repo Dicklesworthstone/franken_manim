@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib
 import os
+from pathlib import Path
 from typing import Any
 
 from .render_selection import animation_range as _animation_range
@@ -91,7 +92,15 @@ def render_subdivided_scene(
         raise ValueError("clip resume and resume_key require a checkpoint path")
     if checkpoint is not None:
         from .clip_checkpoint import ClipCheckpoint
-        ClipCheckpoint(checkpoint, resume=resume, key=resume_key)  # Validate before construction.
+        journal = ClipCheckpoint(checkpoint, resume=resume, key=resume_key)
+        checkpoint = journal.path
+        text = os.fspath(destination)
+        if not isinstance(text, str) or not text or "\0" in text:
+            raise ValueError("clip destination must be a nonempty text path without NUL")
+        destination = Path(text).absolute()
+        destination = destination.parent.resolve() / destination.name
+        journal.validate_destinations([destination])
+        # Constructors may chdir; neither publication nor the journal follows.
     selection = _animation_range(animation_range)
     identity = None
     if checkpoint is not None:
@@ -159,8 +168,13 @@ Use one or more named scenes, or --write_all, with a supported clip format.
 an output root containing <Scene>/clips/. Source ranges retain original call
 indices and apply to each scene; nested AnimationGroups remain one clip.
 --keep-going preserves partial clips and proceeds after ordinary scene failures.
---skip_animations, checkpoint recovery and certified output are not combined
-with subdivision. Audio-bearing formats require the matching native capability.
+--skip_animations, batch --checkpoint recovery and certified output do not
+combine with subdivision. For recovery WITHIN one named scene, use
+--subdivide --clip-checkpoint JOURNAL --resume-key INPUTS, adding --resume on
+later attempts. The journal must be outside the clip directory. Python code
+and updates replay; verified prefix clips do not render again. This mode does
+not combine with --workers, --write_all or --save-last-frame.
+Audio-bearing formats require the matching native capability.
 Completed clips survive later failures. Robot output includes per-scene
 completed/partial collection receipts; interruptions preserve batch progress.
 """

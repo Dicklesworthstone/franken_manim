@@ -82,8 +82,12 @@ def main():
     from .studio import try_studio_cli
     from .project_editor import try_edit_cli
     from .bundle_cli import try_bundle_cli
+    from .clip_recovery_cli import try_clip_recovery_cli
 
     arguments = list(sys.argv[1:])
+    result = try_clip_recovery_cli(_native, arguments)
+    if result is not None:
+        return result
     result = try_edit_cli(_native, arguments)
     if result is not None:
         return result
