@@ -17,6 +17,9 @@ from unittest.mock import patch
 
 PYTHON = Path(__file__).resolve().parents[1] / "python"
 sys.path.insert(0, str(PYTHON))
+from fmn_python.batch_provenance import validate_batch_mode
+from fmn_python.paired_output import validate_paired_mode
+from fmn_python.subdivision_rendering import validate_subdivided_mode
 from fmn_python.checkpoint_cli import CHECKPOINT_VALUES, take_checkpoint_options
 from fmn_python.parallel_cli_options import PARALLEL_VALUES, take_parallel_options
 
@@ -54,11 +57,13 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
         self.chdir_on_load = False
         self.discovery_calls = []
         self.discovery_error = None
+        self.effect_scopes = []
         case = self
 
         class Source:
             def __init__(self, path, scene_type):
                 self._source_bytes = {path: path.read_bytes()}
+                self.sources = {path.name: path.read_bytes()}
                 self.scenes = {"Second": type("Second", (), {}), "First": type("First", (), {})}
             def __enter__(self):
                 case.loads.append(self)
@@ -98,7 +103,9 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
             return [value for value in args if value != name], name in args
 
         self.native = types.SimpleNamespace(Scene=object, _portal_cli_render_arguments=parse,
-                                            _portal_cli_emit=emit)
+                                            _portal_cli_emit=emit, _portal_publish_manifest=lambda: None,
+                                            _portal_prepare_recording_scene=lambda: None,
+                                            _CameraCapture=types.SimpleNamespace(prepare_png=lambda: None))
         values = {"--threads", "--format", "--fps", "--resolution", "--video_dir", "--vcodec",
                   "--pix_fmt", "--ffmpeg_bin", "-n"} | PARALLEL_VALUES | CHECKPOINT_VALUES
         self.g = {
@@ -119,12 +126,12 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
                                                   if key in {"vcodec", "pix_fmt", "ffmpeg_bin"}},
             "_positive_integer": lambda value, name: value,
             "_name_key": lambda name: name.casefold(),
-            "validate_batch_mode": lambda *args: None,
-            "validate_paired_mode": lambda *args, **kwargs: None,
-            "validate_subdivided_mode": lambda *args, **kwargs: None,
+            "validate_batch_mode": validate_batch_mode,
+            "validate_paired_mode": validate_paired_mode,
+            "validate_subdivided_mode": validate_subdivided_mode,
             "_error_fields": lambda error: (type(error).__name__, str(error)),
             "_error_notes": lambda error: (), "_partial_output": lambda *args: {},
-            "recording_effects": lambda enabled: contextlib.nullcontext(),
+            "recording_effects": lambda enabled: (self.effect_scopes.append(enabled) or contextlib.nullcontext()),
             "SceneSource": Source, "render_scenes": render("sequential"),
             "BatchRenderResult": Result, "BatchRenderError": type("BatchError", (Exception,), {}),
             "_emit_result": lambda native, report, robot, source, destination, **kwargs:
@@ -191,12 +198,33 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
         self.assertNotIn("workers", options)
 
     def test_incompatible_modes_refuse_before_source_load(self):
-        for flags in (("--reproducible",), ("--subdivide", "--reproducible"),
-                      ("--save-last-frame", "--reproducible")):
+        for flags in (("--format", "gif"), ("--format", "png_sequence", "--subdivide"),
+                      ("--format", "png_sequence", "--save-last-frame"),
+                      ("--checkpoint", "progress.json", "--resume-key", "inputs")):
             with self.subTest(flags=flags):
-                self.assertEqual(self.run_cli("--write_all", "--workers=2", *flags), 4)
+                self.assertEqual(self.run_cli("--write_all", "--workers=2", "--reproducible", *flags), 4)
                 self.assertFalse(self.loads)
                 self.assertFalse(self.calls)
+
+    def test_certification_uses_worker_sources_and_keeps_coordinator_outside_effect_audit(self):
+        self.assertEqual(self.run_cli("Second", "First", "--workers=2", "--reproducible"), 0)
+        mode, _, options = self.calls[0]
+        self.assertEqual(mode, "parallel")
+        self.assertIs(options["reproducible"], True)
+        self.assertNotIn("sources", options, "discovery has names, not render compilation bytes")
+        self.assertEqual(self.effect_scopes, [False])
+        self.assertFalse(self.loads)
+        self.assertEqual(len(self.discovery_calls), 1)
+
+    def test_sequential_certification_still_uses_live_source_provider_and_import_scope(self):
+        self.assertEqual(self.run_cli("--write_all", "--reproducible"), 0)
+        mode, _, options = self.calls[0]
+        self.assertEqual(mode, "sequential")
+        self.assertIs(options["reproducible"], True)
+        self.assertEqual(options["sources"](), {"scenes.py": b"# stable source\n"})
+        self.assertEqual(self.effect_scopes, [True])
+        self.assertEqual(len(self.loads), 1)
+        self.assertFalse(self.discovery_calls)
 
     def test_parallel_output_modes_reach_the_shared_worker_owner(self):
         self.assertEqual(self.run_cli("Second", "First", "--workers=2", "--format", "gif",

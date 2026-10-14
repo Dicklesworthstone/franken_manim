@@ -220,8 +220,6 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
         options.update(video_options)
         output_options = _output_overrides(options)
         if parallel:
-            if options.get("reproducible"):
-                raise RuntimeError("CAPABILITY: parallel batches do not support certification; omit --workers")
             if "--threads" not in native_options:
                 threads = 1
         if paired:
@@ -292,15 +290,15 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
     phase, session, report = "load", None, None
     redirect = contextlib.redirect_stdout(sys.stderr) if robot else contextlib.nullcontext()
     try:
-        # A certified invocation records scene effects from before its
-        # module loads: import-time reads are inputs of every render.
+        # Sequential source effects start before import. Parallel workers own
+        # their own capture; coordinator discovery/spawn is not a scene effect.
         if parallel:
             from .parallel_discovery import discovery_source
             loading = discovery_source(source_path, working_directory=invocation_directory,
                                        job_timeout=parallel.get("job_timeout"))
         else:
             loading = SceneSource(source_path, native.Scene)
-        with (redirect, recording_effects(bool(options.get("reproducible"))), loading as loaded):
+        with (redirect, recording_effects(bool(options.get("reproducible")) and not parallel), loading as loaded):
             scenes = loaded.scenes
             names = sorted(scenes)
             if batch:
@@ -323,6 +321,11 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                 else:
                     render_batch = render_scenes
                     batch_args = ({name: scenes[name] for name in requested}, destination)
+                certification_options = {}
+                if options.get("reproducible"):
+                    certification_options["reproducible"] = True
+                    if not parallel:
+                        certification_options["sources"] = lambda: loaded.sources
                 report = render_batch(
                     *batch_args,
                     format=options["format"], resolution=(width, height), fps=fps, threads=threads,
@@ -331,8 +334,7 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                     **({"save_last_frame": True} if paired else {}),
                     **({} if selection is None else {"animation_range": selection}),
                     **({} if not output_options else {"_output_options": output_options}),
-                    **({"reproducible": True, "sources": lambda: loaded.sources}
-                       if options.get("reproducible") else {}),
+                    **certification_options,
                     **recovery,
                     on_result=lambda outcome: print(
                         f"fmn-python: {outcome.name}: {outcome.status}: {outcome.destination}",

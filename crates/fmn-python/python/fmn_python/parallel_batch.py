@@ -358,6 +358,11 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
             # observer. Merge those receipts through the pending-index map, not
             # the full scene list: resumed successes must never be overwritten.
             for index, row in zip(pending, getattr(error, "process_batch_outcomes", ())):
+                if provenance is not None and outcomes[index].status == "succeeded":
+                    # This receipt was already verified before its observer.
+                    # A later runtime edit stops admission, not time-travels
+                    # into a failure of an earlier certified publication.
+                    continue
                 try:
                     outcomes[index] = restore(names[index], destinations[index], row)
                 except Exception as receipt_error:

@@ -26,8 +26,12 @@ plans are not interchangeable. --save-last-frame adds a final PNG from the
 same scene execution; non-subdivided pairs support verified checkpoint reuse.
 --subdivide emits per-play/wait clips, retaining partial collection receipts
 on failure or interruption, and composes with --save-last-frame. Subdivided
-collections do not support checkpoint recovery. --reproducible still requires
-the sequential path; omit --workers for certified output.
+collections do not support checkpoint recovery.
+--reproducible supports fresh png, png_sequence and wav outputs with a native
+manifest per scene. Each worker captures imports/reads through the guarded
+session and must match the parent's installed runtime. The aggregate remains
+uncertified; all_scenes_certified requires every scene's complete receipt.
+Certification cannot combine with recovery, paired output or subdivision.
 """
 
 
