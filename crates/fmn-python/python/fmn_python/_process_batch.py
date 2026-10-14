@@ -26,6 +26,17 @@ def positive_integer(value, name, maximum):
     return value
 
 
+def validate_job_timeout(job_timeout):
+    """Validate even when a resumed batch has no jobs left to launch."""
+    if job_timeout is not None:
+        if isinstance(job_timeout, bool):
+            raise TypeError("job_timeout must be a positive finite number")
+        job_timeout = float(job_timeout)
+        if not math.isfinite(job_timeout) or job_timeout <= 0:
+            raise ValueError("job_timeout must be a positive finite number")
+    return job_timeout
+
+
 def failure(error, status="failed"):
     try:
         message = str(error)
@@ -115,12 +126,7 @@ def run_process_jobs(jobs, worker, *, workers, continue_on_error=False,
         raise TypeError("on_result must be callable or None")
     if not callable(worker):
         raise TypeError("worker must be callable")
-    if job_timeout is not None:
-        if isinstance(job_timeout, bool):
-            raise TypeError("job_timeout must be a positive finite number")
-        job_timeout = float(job_timeout)
-        if not math.isfinite(job_timeout) or job_timeout <= 0:
-            raise ValueError("job_timeout must be a positive finite number")
+    job_timeout = validate_job_timeout(job_timeout)
     # Freeze plain job data before launching anything, including nested values.
     jobs = json.loads(json.dumps(jobs, allow_nan=False))
     context = mp.get_context("spawn")

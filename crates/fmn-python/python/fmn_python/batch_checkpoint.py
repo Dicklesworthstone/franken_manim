@@ -1,4 +1,4 @@
-"""Crash-recoverable receipts for sequential Python batches, not a render cache.
+"""Crash-recoverable receipts for Python batches, not a render cache.
 
 Only completed native publications may be reused. The caller's resume_key
 identifies authored scene/asset inputs; hashes below verify output integrity,
@@ -257,6 +257,33 @@ class BatchCheckpoint:
                           "scene": _scene_identity(job.scene),
                           "scene_kwargs": _constructor_values(dict(job.scene_kwargs or {}))}
                          for job, path in zip(jobs, destinations)], "options": options}
+        self._prepare_plan(plan, [job.name for job in jobs], destinations, options)
+
+    def prepare_sources(self, names, destinations, options, *, source,
+                        source_digest, working_directory):
+        """Bind data-only worker identities without importing a Scene class.
+
+        Entry-source bytes and invocation cwd are part of this plan, unlike a
+        sequential live-class plan. Helpers/assets still require the caller's
+        resume_key. Worker count, timeout and failure policy are scheduling
+        choices: they may change when retrying unfinished jobs.
+        """
+        if not 1 <= len(names) == len(destinations) <= 65536:
+            raise ValueError("checkpoint source jobs must match their destinations")
+        if (not isinstance(source_digest, str) or len(source_digest) != 64
+                or any(char not in "0123456789abcdef" for char in source_digest)):
+            raise ValueError("checkpoint source requires its SHA-256 digest")
+        plan = {"constructor_inputs": "source-file-v1",
+                "source": {"path": str(source), "sha256": source_digest,
+                           "working_directory": str(working_directory)},
+                "jobs": [{"name": name, "destination": str(path),
+                          "scene": {"qualname": name}, "scene_kwargs": {}}
+                         for name, path in zip(names, destinations)],
+                "options": options}
+        self._prepare_plan(plan, names, destinations, options)
+
+    def _prepare_plan(self, plan, names, destinations, options):
+        # Both entry points share the same receipt and artifact verifier.
         self.plan = json.loads(_json(plan))
         if self.document is None:
             return
@@ -266,13 +293,13 @@ class BatchCheckpoint:
         if _json(self.document.get("plan")) != _json(self.plan):
             raise ValueError("checkpoint scene plan or render options do not match")
         rows = self.document.get("outcomes")
-        if not isinstance(rows, list) or len(rows) != len(jobs):
+        if not isinstance(rows, list) or len(rows) != len(names):
             raise ValueError("checkpoint outcomes do not match the scene plan")
         artifacts = self.document.get("artifacts")
         if not isinstance(artifacts, dict):
             raise ValueError("invalid checkpoint artifact inventory")
-        for job, destination, row in zip(jobs, destinations, rows):
-            if not isinstance(row, dict) or row.get("name") != job.name or row.get("destination") != str(destination):
+        for name, destination, row in zip(names, destinations, rows):
+            if not isinstance(row, dict) or row.get("name") != name or row.get("destination") != str(destination):
                 raise ValueError("checkpoint outcome identity does not match the scene plan")
             status = row.get("status")
             if status not in {"succeeded", "failed", "cancelled", "not_run"}:
@@ -282,10 +309,10 @@ class BatchCheckpoint:
                 if options.get("save_last_frame") is True:
                     from .paired_checkpoint import pair_inventory
                     actual = pair_inventory(receipt, destination, options)
-                    if _json(artifacts.get(job.name)) != _json(actual):
+                    if _json(artifacts.get(name)) != _json(actual):
                         raise ValueError(f"checkpoint output pair is missing or modified: {destination}")
-                    self.artifacts[job.name] = actual
-                    self.completed[job.name] = row
+                    self.artifacts[name] = actual
+                    self.completed[name] = row
                     continue
                 if options["format"] == "fmtl":
                     from .bundle_checkpoint import restore_bundle_receipt
@@ -296,12 +323,12 @@ class BatchCheckpoint:
                         raise ValueError("invalid checkpoint publication receipt")
                     size, digest = receipt.get("bytes"), receipt.get("digest")
                 actual = _inventory(destination)
-                if artifacts.get(job.name) != actual:
+                if artifacts.get(name) != actual:
                     raise ValueError(f"checkpoint artifact is missing or modified: {destination}")
                 if options["format"] != "png_sequence" and (len(actual) != 1 or actual[0]["bytes"] != size or actual[0]["sha256"] != digest):
                     raise ValueError("checkpoint artifact does not match its native receipt")
-                self.artifacts[job.name] = actual
-                self.completed[job.name] = row
+                self.artifacts[name] = actual
+                self.completed[name] = row
 
     def constructor_kwargs(self, index: int) -> dict[str, Any]:
         """Return an isolated invocation of the already admitted constructor."""

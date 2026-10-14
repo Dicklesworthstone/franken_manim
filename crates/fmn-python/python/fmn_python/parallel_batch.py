@@ -10,12 +10,14 @@ import contextlib
 from dataclasses import dataclass
 import hashlib
 import importlib
+import json
 from itertools import islice
 import os
 from pathlib import Path
 import sys
 
-from ._process_batch import positive_integer, run_process_jobs
+from ._process_batch import positive_integer, run_process_jobs, validate_job_timeout
+from .batch_checkpoint import BatchCheckpoint
 from .batch_rendering import (
     BatchRenderError, BatchRenderResult, SceneRenderOutcome, _name_key, _restored_outcome,
 )
@@ -28,10 +30,11 @@ _MAX_SOURCE_BYTES = 16 * 1024 * 1024
 @dataclass(frozen=True)
 class ParallelBatchRenderResult(BatchRenderResult):
     workers: int = 1
+    reused: tuple[str, ...] = ()
 
     def as_dict(self):
         result = super().as_dict()
-        result.update(execution="spawn", workers=self.workers)
+        result.update(execution="spawn", workers=self.workers, reused=list(self.reused))
         return result
 
 
@@ -92,6 +95,7 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
                          format="png_sequence", resolution=None, fps=None,
                          threads=1, continue_on_error=False, on_result=None,
                          max_jobs=1024, animation_range=None, job_timeout=None,
+                         checkpoint=None, resume=False, resume_key=None,
                          _output_options=None, _expected_source_digest=None,
                          _working_directory=None):
     """Render explicitly named local Scene classes in bounded fresh processes.
@@ -112,11 +116,27 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
     workers is bounded to 64. threads defaults to ONE native thread per worker
     to avoid multiplying two automatic CPU budgets. job_timeout optionally
     bounds each worker, including startup. This path deliberately does not
-    claim certification or accept checkpoint/resume, live instances, paired
-    output or subdivision; those remain available through render_scenes.
+    claim certification or accept live instances, paired output or subdivision;
+    those remain available through render_scenes.
+
+    checkpoint uses the same locked, atomic journal and artifact verifier as
+    render_scenes, owned ONLY by the parent. Each completed receipt is recorded
+    before on_result runs. resume=True verifies every completed artifact before
+    spawning anything and runs only unfinished scenes. Reused receipts are
+    delivered to on_result in input order before new jobs; report.reused names
+    them explicitly. Entry-source digest, absolute paths, cwd, selected names
+    and native render options must match. Worker count and timeout may change.
+    Supply resume_key for helper/asset versions, as in sequential recovery:
+    this is explicit reuse, not source-closure certification or a render cache.
+    An output without a completed journal receipt still fails no-clobber.
     """
     workers = positive_integer(workers, "workers", 64)
     maximum = positive_integer(max_jobs, "max_jobs", 65536)
+    job_timeout = validate_job_timeout(job_timeout)
+    if not isinstance(resume, bool):
+        raise TypeError("resume must be bool")
+    if checkpoint is None and (resume or resume_key is not None):
+        raise ValueError("resume and resume_key require a checkpoint path")
     if not isinstance(continue_on_error, bool):
         raise TypeError("continue_on_error must be bool")
     if on_result is not None and not callable(on_result):
@@ -155,44 +175,93 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
     destinations = [root / name / "frames" if format == "png_sequence"
                     else root / (name + "." + format) for name in names]
     for destination in destinations:
-        if os.path.lexists(destination):
-            raise FileExistsError(f"render destination already exists: {destination}")
         for parent in destination.parents:
             if parent.exists() and not parent.is_dir():
                 raise NotADirectoryError(str(parent))
     options = dict(format=format, resolution=resolution, fps=fps, threads=threads,
                    animation_range=selection, _output_options=_output_options)
+    # Freeze exactly the JSON data that the process scheduler will transmit,
+    # before opening a journal or calling an observer that can mutate options.
+    options = json.loads(json.dumps(options, allow_nan=False))
     jobs = [dict(source=str(source), source_digest=digest, directory=str(root),
                  name=name, options=options, working_directory=str(working_directory)) for name in names]
-    outcomes = [SceneRenderOutcome(name, path, "not_run") for name, path in zip(names, destinations)]
+    owner = (contextlib.nullcontext(None) if checkpoint is None else
+             BatchCheckpoint(checkpoint, resume=resume, key=resume_key))
+    if checkpoint is not None:
+        owner.validate_destinations(destinations)
+    with owner as journal:
+        existing = set() if journal is None else journal.existing_destinations
+        for destination in destinations:
+            if os.path.lexists(destination) and destination not in existing:
+                raise FileExistsError(f"render destination already exists: {destination}")
+        if journal is not None:
+            journal.prepare_sources(names, destinations, options, source=source,
+                                    source_digest=digest, working_directory=working_directory)
+        completed = {} if journal is None else journal.completed
+        outcomes = [_outcome(name, path, completed[name]) if name in completed else
+                    SceneRenderOutcome(name, path, "not_run")
+                    for name, path in zip(names, destinations)]
+        pending = [index for index, name in enumerate(names) if name not in completed]
+        reused = tuple(name for name in names if name in completed)
 
-    def accept(index, row):
-        outcomes[index] = _outcome(names[index], destinations[index], row)
-        if on_result is not None:
-            on_result(outcomes[index])
+        def report():
+            return ParallelBatchRenderResult(tuple(outcomes), workers=workers, reused=reused)
 
-    try:
-        rows = run_process_jobs(jobs, _render_source_job, workers=workers,
-                                continue_on_error=continue_on_error, on_result=accept,
-                                job_timeout=job_timeout)
-    except BaseException as error:
-        for index, row in enumerate(getattr(error, "process_batch_outcomes", ())):
+        def record():
+            if journal is not None:
+                journal.record(outcomes)
+
+        def accept(local_index, row):
+            index = pending[local_index]
+            outcomes[index] = _outcome(names[index], destinations[index], row)
+            # Checkpoint publication precedes arbitrary observer code. Only the
+            # parent hashes artifacts and writes the journal; children never
+            # acquire its lock or receive its path.
+            record()
+            if on_result is not None:
+                on_result(outcomes[index])
+
+        try:
+            record()
+            if on_result is not None:
+                for index, name in enumerate(names):
+                    if name in completed:
+                        on_result(outcomes[index])
+            if pending:
+                rows = run_process_jobs([jobs[index] for index in pending], _render_source_job,
+                                        workers=workers, continue_on_error=continue_on_error,
+                                        on_result=accept, job_timeout=job_timeout)
+                for index, row in zip(pending, rows):
+                    outcomes[index] = _outcome(names[index], destinations[index], row)
+            record()
+        except BaseException as error:
+            # The scheduler drains in-flight workers on interruption or a failed
+            # observer. Merge those receipts through the pending-index map, not
+            # the full scene list: resumed successes must never be overwritten.
+            for index, row in zip(pending, getattr(error, "process_batch_outcomes", ())):
+                try:
+                    outcomes[index] = _outcome(names[index], destinations[index], row)
+                except Exception as receipt_error:
+                    outcomes[index] = SceneRenderOutcome(names[index], destinations[index], "failed",
+                        error_type=type(receipt_error).__name__, message=str(receipt_error),
+                        notes=("Invalid worker receipt; outputs may already exist.",))
             try:
-                outcomes[index] = _outcome(names[index], destinations[index], row)
-            except Exception as receipt_error:
-                # Keep earlier valid receipts even when a different worker's
-                # result is malformed. Preserve the original interruption.
-                outcomes[index] = SceneRenderOutcome(names[index], destinations[index], "failed",
-                    error_type=type(receipt_error).__name__, message=str(receipt_error),
-                    notes=("Invalid worker receipt; outputs may already exist.",))
-        error.render_batch_result = ParallelBatchRenderResult(tuple(outcomes), workers=workers)
-        raise
-    report = ParallelBatchRenderResult(tuple(_outcome(name, path, row)
-        for name, path, row in zip(names, destinations, rows)), workers=workers)
-    if any(item.status == "cancelled" for item in report.outcomes):
-        error = KeyboardInterrupt("parallel scene worker interrupted")
-        error.render_batch_result = report
-        raise error
-    if not report.ok and not continue_on_error:
-        raise BatchRenderError(report)
-    return report
+                record()
+            except BaseException as reporting_error:
+                try:
+                    error.add_note("parallel batch checkpoint also failed: " + str(reporting_error))
+                except BaseException:
+                    pass
+            try:
+                error.render_batch_result = report()
+            except BaseException:
+                pass
+            raise
+        result = report()
+        if any(item.status == "cancelled" for item in result.outcomes):
+            error = KeyboardInterrupt("parallel scene worker interrupted")
+            error.render_batch_result = result
+            raise error
+        if not result.ok and not continue_on_error:
+            raise BatchRenderError(result)
+        return result
