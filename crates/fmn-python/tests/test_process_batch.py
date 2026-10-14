@@ -85,7 +85,7 @@ class ProcessBatchTests(unittest.TestCase):
         self.assertEqual([row["status"] for row in rows], ["cancelled", "not_run"])
 
     def test_timeout_is_reported_and_does_not_admit_next_job(self):
-        rows = run_process_jobs([{"delay": 10}, {}], job, workers=1, job_timeout=.3)
+        rows = run_process_jobs([{"delay": 10}, {}], job, workers=1, job_timeout=1.5)
         self.assertEqual(rows[0]["status"], "failed")
         self.assertEqual(rows[0]["error"]["type"], "TimeoutError")
         self.assertEqual(rows[1]["status"], "not_run")

@@ -135,4 +135,8 @@ def __getattr__(name):
         from . import batch_rendering
 
         return getattr(batch_rendering, name)
+    if name in {"ParallelBatchRenderResult", "render_source_scenes"}:
+        from . import parallel_batch
+
+        return getattr(parallel_batch, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

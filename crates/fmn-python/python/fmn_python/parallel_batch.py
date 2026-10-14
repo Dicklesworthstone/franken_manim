@@ -47,6 +47,7 @@ def _render_source_job(job):
     # Include native initialization and source import in redirection. Scene
     # output is streamed, never retained as an unbounded in-memory log.
     with contextlib.redirect_stdout(sys.stderr):
+        os.chdir(job["working_directory"])
         native = importlib.import_module("manimlib")
         from .scene_loading import SceneSource
         from .batch_rendering import render_scenes
@@ -91,7 +92,8 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
                          format="png_sequence", resolution=None, fps=None,
                          threads=1, continue_on_error=False, on_result=None,
                          max_jobs=1024, animation_range=None, job_timeout=None,
-                         _output_options=None):
+                         _output_options=None, _expected_source_digest=None,
+                         _working_directory=None):
     """Render explicitly named local Scene classes in bounded fresh processes.
 
     Use this API under ``if __name__ == '__main__':`` in Python scripts. The
@@ -145,6 +147,11 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
             raise ValueError(label + " must be a nonempty text path without NUL")
     source, root = Path(source).resolve(), Path(directory).resolve()
     digest = _source_digest(source)
+    if _expected_source_digest is not None and digest != _expected_source_digest:
+        raise RuntimeError("scene entry source changed after discovery")
+    working_directory = Path.cwd() if _working_directory is None else Path(_working_directory).resolve()
+    if not working_directory.is_dir():
+        raise NotADirectoryError(str(working_directory))
     destinations = [root / name / "frames" if format == "png_sequence"
                     else root / (name + "." + format) for name in names]
     for destination in destinations:
@@ -156,7 +163,7 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
     options = dict(format=format, resolution=resolution, fps=fps, threads=threads,
                    animation_range=selection, _output_options=_output_options)
     jobs = [dict(source=str(source), source_digest=digest, directory=str(root),
-                 name=name, options=options) for name in names]
+                 name=name, options=options, working_directory=str(working_directory)) for name in names]
     outcomes = [SceneRenderOutcome(name, path, "not_run") for name, path in zip(names, destinations)]
 
     def accept(index, row):

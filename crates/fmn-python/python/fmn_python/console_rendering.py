@@ -7,6 +7,8 @@ imports available and robot stdout reserved for the terminal receipt.
 from __future__ import annotations
 
 import contextlib
+from functools import partial as _partial_call
+import hashlib
 import os
 from pathlib import Path
 import sys
@@ -40,7 +42,9 @@ from .video_cli import (
     VIDEO_HELP, VIDEO_VALUE_FLAGS, VIDEO_WRITER_OPTIONS, take_video_options, validate_video_format,
 )
 
-_VALUE_FLAGS = _VALUE_FLAGS | CHECKPOINT_VALUES | VIDEO_VALUE_FLAGS
+from .parallel_cli_options import PARALLEL_HELP, PARALLEL_VALUES, take_parallel_options
+
+_VALUE_FLAGS = _VALUE_FLAGS | CHECKPOINT_VALUES | VIDEO_VALUE_FLAGS | PARALLEL_VALUES
 
 _CONTROL_FLAGS = frozenset({"--version", "--list-scenes", "--construct-only", "--audit-parity"})
 _SELECTION_FLAGS = frozenset({"--robot", "--write_all", "-a", "--keep-going"})
@@ -190,13 +194,17 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
         ).replace("Certified output, opener flags, and Studio", "Certified output and opener flags")
         from .studio import _HELP as _STUDIO_HELP
         text += "\n\n" + _BATCH_HELP + "\n" + _SELECTION_HELP + "\n" + PLAYBACK_HELP + "\n" + _OUTPUT_HELP + "\n" + SUBDIVISION_HELP + "\n" + PAIRED_HELP + "\n" + CHECKPOINT_HELP + "\n" + _STUDIO_HELP
-        text += "\n" + VIDEO_HELP
+        text += "\n" + VIDEO_HELP + "\n" + PARALLEL_HELP
         if robot:
             return native._portal_cli_emit(0, "success", "help", "fmn-python usage", True, help=text)
         print(text)
         return 0
     batch = bool(write_all or len(raw_positionals) > 2)
     try:
+        invocation_directory = Path.cwd()
+        native_options, parallel = take_parallel_options(native_options, _VALUE_FLAGS)
+        if parallel and not batch:
+            raise ValueError("--workers requires multiple scene names or --write_all")
         native_options, video_options = take_video_options(native_options, _VALUE_FLAGS)
         native_options, paired = take_last_frame_option(native_options, _VALUE_FLAGS)
         native_options, subdivide = take_subdivision_option(native_options, _VALUE_FLAGS)
@@ -212,6 +220,12 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
         options = select_still_format(options, native_options, still)
         options.update(video_options)
         output_options = _output_overrides(options)
+        if parallel:
+            if paired or subdivide or recovery or options.get("reproducible"):
+                raise RuntimeError("CAPABILITY: parallel batches do not support certification, "
+                                   "checkpoint/resume, paired output or subdivision; omit --workers")
+            if "--threads" not in native_options:
+                threads = 1
         if paired:
             if still:
                 raise ValueError("--save-last-frame cannot be combined with --skip_animations/-s")
@@ -295,8 +309,18 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                     raise ValueError("selected scenes were not declared by " + source + ": " + ", ".join(missing))
                 destination = default_root if destination is None else destination
                 phase = "batch"
-                report = render_scenes(
-                    {name: scenes[name] for name in requested}, destination,
+                render_batch = render_scenes
+                batch_args = ({name: scenes[name] for name in requested}, destination)
+                if parallel:
+                    from .parallel_batch import render_source_scenes
+                    render_batch = _partial_call(
+                        render_source_scenes, source_path, scene_names=requested,
+                        _expected_source_digest=hashlib.sha256(loaded._source_bytes[source_path]).hexdigest(),
+                        _working_directory=invocation_directory, **parallel,
+                    )
+                    batch_args = (destination,)
+                report = render_batch(
+                    *batch_args,
                     format=options["format"], resolution=(width, height), fps=fps, threads=threads,
                     continue_on_error=bool(keep_going), max_jobs=_MAX_SELECTED_SCENES,
                     **({"subdivide": True} if subdivide else {}),
