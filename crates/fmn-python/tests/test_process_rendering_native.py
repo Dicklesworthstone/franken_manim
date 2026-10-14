@@ -3,6 +3,7 @@ import hashlib
 from pathlib import Path
 import sys
 import tempfile
+import time
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
@@ -24,10 +25,22 @@ def render_job(job):
         def construct(self):
             raise RuntimeError("native scene failed deliberately")
 
-    scene = Broken if job.get("fail") else Motion
-    report = render_scenes({job["name"]: scene}, job["directory"],
-        format="png_sequence", resolution=(64, 48), fps=10, threads=1,
-        continue_on_error=True)
+    class InterruptedClips(m.Scene):
+        def construct(self):
+            self.add(m.Square(fill_opacity=1))
+            self.wait(0.1)
+            time.sleep(30)  # One clip has already been published.
+
+    scene = InterruptedClips if job.get("clips") else Broken if job.get("fail") else Motion
+    try:
+        report = render_scenes({job["name"]: scene}, job["directory"],
+            format="gif" if job.get("clips") else "png_sequence",
+            resolution=(64, 48), fps=10, threads=1,
+            subdivide=bool(job.get("clips")), continue_on_error=True)
+    except BaseException as error:
+        report = getattr(error, "render_batch_result", None)
+        if report is None:
+            raise
     return report.outcomes[0].as_dict()
 
 
@@ -52,6 +65,23 @@ class NativeProcessRenderingTests(unittest.TestCase):
                 self.assertEqual(row["result"]["frame_count"], len(frames))
                 self.assertEqual([path.read_bytes() for path in frames], expected)
                 self.assertTrue(all(data.startswith(b"\x89PNG\r\n\x1a\n") for data in expected))
+
+    def test_native_partial_clip_receipt_survives_cooperative_timeout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            rows = run_process_jobs([dict(name="Clips", directory=directory, clips=True)],
+                                    render_job, workers=1, job_timeout=3)
+            row = rows[0]
+            self.assertEqual(row["status"], "failed")
+            self.assertEqual(row["error"]["type"], "TimeoutError")
+            collection = row["result"]
+            self.assertEqual(collection["schema"], "fmn.subdivided-render")
+            self.assertIs(collection["completed"], False)
+            self.assertEqual(len(collection["segments"]), 1)
+            receipt = collection["segments"][0]["render"]
+            data = Path(receipt["destination"]).read_bytes()
+            self.assertTrue(data.startswith((b"GIF87a", b"GIF89a")))
+            self.assertEqual(hashlib.sha256(data).hexdigest(), receipt["digest"])
+            self.assertEqual(len(data), receipt["bytes"])
 
     def test_observer_failure_retains_already_published_native_output(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -17,6 +17,7 @@ import time
 
 from ._process_receipt import (
     MAX_RECEIPT_BYTES as _MAX_RECEIPT_BYTES, receipt_channel, send_receipt,
+    send_group_ready,
 )
 
 
@@ -52,6 +53,13 @@ def failure(error, status="failed"):
 def _child(connection, worker, job):
     try:
         try:
+            # A disposable worker owns its ordinary descendants, never the
+            # caller's process group. Acknowledgement precedes authored code.
+            # Windows retains direct-worker termination; this is not a sandbox
+            # against descendants deliberately creating another session/group.
+            if os.name == "posix":
+                os.setsid()
+                send_group_ready(connection)
             # The result travels over its private result channel. Keep fd-level output
             # from native libraries and authored os.write/subprocess calls off
             # the coordinator's robot stdout too, not only Python print().
@@ -89,6 +97,7 @@ def _receive(connection, *, exited=False):
             raise ValueError("invalid worker outcome")
         return row
     except (EOFError, OSError, ValueError, RecursionError) as error:
+        connection.failed = True
         return failure(RuntimeError("worker exited without a complete receipt: " + str(error)))
 
 
@@ -96,39 +105,93 @@ def _invalid_constant(value):
     raise ValueError("worker receipt contains nonfinite JSON: " + value)
 
 
-def _stop(active):
-    """Give native session contexts a chance to cancel before forced shutdown."""
-    for process, _, _ in active.values():
-        if process.is_alive():
-            try:
-                if os.name == "posix":
-                    os.kill(process.pid, signal.SIGINT)
-                else:
-                    process.terminate()
-            except ProcessLookupError:
-                pass
-    deadline = time.monotonic() + 2.0
-    while time.monotonic() < deadline and any(item[0].is_alive() for item in active.values()):
-        # Drain large receipts while workers shut down; joining before reading
-        # can deadlock a sender whose receipt exceeds the pipe buffer.
-        for item in active.values():
-            if item[2] is None:
-                item[2] = _receive(item[1])
-        time.sleep(0.01)
-    for item in active.values():
-        process, connection, _ = item
-        if process.is_alive():
-            process.terminate()
-        process.join(timeout=0.5)
-        if process.is_alive():
-            process.kill()
-            process.join()
-        # Drain any complete buffered publication even after the process has
-        # exited. Each read is nonblocking and the total is capped at 8 MiB.
-        while item[2] is None:
-            item[2] = _receive(connection, exited=True)
-            if not connection.budget_exhausted:
-                break
+def _signal_worker(item, action):
+    """Signal only a created worker, or its acknowledged private POSIX group."""
+    process, reader, _ = item
+    try:
+        if os.name == "posix":
+            sig = {"interrupt": signal.SIGINT, "terminate": signal.SIGTERM,
+                   "kill": signal.SIGKILL}[action]
+            if reader.group_started:
+                # The id comes from Process, not JSON. Never fall back to the
+                # caller's group when a child has not completed setsid.
+                if process.pid <= 1 or process.pid == os.getpgrp():
+                    raise RuntimeError("refusing to signal the caller's process group")
+                os.killpg(process.pid, sig)
+            elif process.is_alive():
+                os.kill(process.pid, sig)
+        elif process.is_alive():
+            (process.kill if action == "kill" else process.terminate)()
+    except ProcessLookupError:
+        pass  # The owned process/group has already gone away.
+
+
+def _begin_cancel(item):
+    _signal_worker(item, "interrupt")
+    return [time.monotonic() + 2.0, 0]
+
+
+def _advance_cancel(item, state):
+    """Advance a nonblocking escalation clock shared by normal/error cleanup."""
+    if not item[0].is_alive():
+        # The owner is gone and cannot clean up any remaining descendants.
+        _signal_worker(item, "kill")
+        return True
+    if time.monotonic() >= state[0]:
+        action = "interrupt" if state[1] < 0 else "terminate" if state[1] == 0 else "kill"
+        _signal_worker(item, action)
+        state[:] = [time.monotonic() + (2.0 if state[1] < 0 else 0.5), state[1] + 1]
+    return False
+
+
+def _drain_exited(item):
+    # Never await EOF from an inherited descriptor after its owner exits.
+    # Continue only when a bounded read left bytes; at most 8 MiB in total.
+    while item[2] is None:
+        item[2] = _receive(item[1], exited=True)
+        if not item[1].budget_exhausted:
+            break
+
+
+def _stop(active, *, cancelling=None):
+    """Cancel concurrently while continuing to collect published receipts.
+
+    Grace periods belong to each worker, not a blocking join inside a loop:
+    64 uncooperative jobs must not multiply a two-second cleanup allowance.
+    """
+    cancelling = {} if cancelling is None else dict(cancelling)
+    for index in active:
+        cancelling.setdefault(index, [0.0, -1])
+    while cancelling:
+        try:
+            for index, state in list(cancelling.items()):
+                item = active[index]
+                if item[2] is None:
+                    item[2] = _receive(item[1])
+                if _advance_cancel(item, state):
+                    item[0].join()
+                    _drain_exited(item)
+                    del cancelling[index]
+            if cancelling:
+                time.sleep(0.01)
+        except KeyboardInterrupt:
+            # A second Ctrl-C escalates all remaining workers instead of
+            # abandoning cleanup and masking the original exception with a
+            # Process.close() error. No caller signal handler is replaced.
+            for state in cancelling.values():
+                state[:] = [0.0, 1]
+
+
+def _timeout_outcome(item, duration):
+    if item[2] is not None and item[2]["status"] == "succeeded":
+        return  # A complete native publication remains a complete publication.
+    timeout = failure(TimeoutError(f"scene job exceeded {duration:g} seconds"))
+    timeout["error"]["notes"].append("Timed-out outputs were not removed; inspect before retrying.")
+    if item[2] is None:
+        item[2] = timeout
+    else:
+        # Cooperative cancellation may return valuable partial publications.
+        item[2].update(status=timeout["status"], error=timeout["error"])
 
 
 def run_process_jobs(jobs, worker, *, workers, continue_on_error=False,
@@ -139,6 +202,9 @@ def run_process_jobs(jobs, worker, *, workers, continue_on_error=False,
     stops admission, but lets already running jobs finish and keeps receipts.
     Timeout is per job (including interpreter startup), not a batch deadline.
     Interrupt/observer exceptions carry process_batch_outcomes after cleanup.
+    Cancellation escalates concurrently while other workers remain supervised.
+    On POSIX, crashed/cancelled workers' acknowledged private groups are stopped;
+    deliberately detached descendants and Windows process trees are not covered.
     This function is for importable worker functions, not lambdas or closures.
     """
     workers = positive_integer(workers, "workers", 64)
@@ -155,11 +221,13 @@ def run_process_jobs(jobs, worker, *, workers, continue_on_error=False,
     jobs = json.loads(json.dumps(jobs, allow_nan=False))
     context = mp.get_context("spawn")
     rows = [{"status": "not_run", "result": None, "error": None} for _ in jobs]
-    active, started = {}, {}
+    active, started, cancelling = {}, {}, {}
+    timed_out = set()
     next_job, stopped = 0, False
     try:
         while active or (not stopped and next_job < len(jobs)):
-            while not stopped and next_job < len(jobs) and len(active) < workers:
+            while (not stopped and (continue_on_error or not timed_out)
+                   and next_job < len(jobs) and len(active) < workers):
                 index = next_job
                 receive, send = receipt_channel()
                 process = context.Process(target=_child, args=(send, worker, jobs[index]))
@@ -185,26 +253,30 @@ def run_process_jobs(jobs, worker, *, workers, continue_on_error=False,
                 if row is not None and (row["status"] == "cancelled" or
                                         (row["status"] != "succeeded" and not continue_on_error)):
                     stopped = True
-                if job_timeout is not None and time.monotonic() - started[index] >= job_timeout and process.is_alive():
-                    # Timeout is an explicit caller policy. It cannot roll back
-                    # native publication or imply a force-stopped output is absent.
-                    _stop({index: item})
-                    if item[2] is None or item[2]["status"] != "succeeded":
-                        timeout = failure(TimeoutError(f"scene job exceeded {job_timeout:g} seconds"))
-                        timeout["error"]["notes"].append("Timed-out outputs were not removed; inspect before retrying.")
-                        # Cooperative cancellation may have returned valuable
-                        # partial publications. Retain that data while making
-                        # the timeout (not success/cancellation) authoritative.
-                        if item[2] is None:
-                            item[2] = timeout
-                        else:
-                            item[2].update(status=timeout["status"], error=timeout["error"])
+                if (index not in cancelling and job_timeout is not None
+                        and time.monotonic() - started[index] >= job_timeout and process.is_alive()):
+                    cancelling[index] = _begin_cancel(item)
+                    # Pause fail-fast admission while cleanup determines the
+                    # outcome. A successful publication followed by stalled
+                    # interpreter teardown must not strand later jobs as
+                    # not_run with no failed outcome for BatchRenderError.
+                    timed_out.add(index)
+                elif index not in cancelling and connection.failed:
+                    # Invalid framing is a broken worker protocol, not an
+                    # invitation to wait indefinitely for interpreter teardown.
+                    cancelling[index] = _begin_cancel(item)
+                if index in cancelling and not _advance_cancel(item, cancelling[index]):
+                    continue
                 if not process.is_alive():
                     process.join()
                     if item[2] is None:
                         item[2] = _receive(connection, exited=True)
                         if item[2] is None:
                             continue  # A bounded drain left buffered bytes.
+                    if index in timed_out:
+                        _timeout_outcome(item, job_timeout)
+                    if item[2]["status"] != "succeeded" and index not in cancelling:
+                        _signal_worker(item, "kill")
                     rows[index] = item[2]
                     if rows[index]["status"] == "cancelled" or (
                             rows[index]["status"] != "succeeded" and not continue_on_error):
@@ -213,6 +285,8 @@ def run_process_jobs(jobs, worker, *, workers, continue_on_error=False,
                     connection.close()
                     process.close()
                     del active[index]
+                    cancelling.pop(index, None)
+                    timed_out.discard(index)
             # First collect every ready receipt, then call observers. A failing
             # observer cannot discard another job's already reported success.
             for index in completed:
@@ -220,9 +294,12 @@ def run_process_jobs(jobs, worker, *, workers, continue_on_error=False,
                     on_result(index, rows[index])
     except BaseException as error:
         try:
-            _stop(active)
+            _stop(active, cancelling=cancelling)
         finally:
-            for index, (process, connection, row) in active.items():
+            for index, item in active.items():
+                if index in timed_out:
+                    _timeout_outcome(item, job_timeout)
+                process, connection, row = item
                 rows[index] = row if row is not None else failure(
                     RuntimeError("worker stopped without a receipt; outputs may exist"), "cancelled")
                 connection.close()
