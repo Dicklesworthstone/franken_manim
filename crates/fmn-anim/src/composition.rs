@@ -135,10 +135,21 @@ fn assemble(
             existing
         }
         None => {
-            // The Reference's `VGroup(*remove_list_redundancies(mobs))` —
-            // one fresh container over the distinct animated mobjects, in
-            // first-appearance order.
-            let container = stage.add(Mobject::new());
+            // The Reference's `VGroup(*remove_list_redundancies(mobs))` when
+            // every animated mobject is a VMobject, `Group(...)` otherwise
+            // (composition.py:44-51): one fresh container over the distinct
+            // animated mobjects, in first-appearance order. A vector record
+            // schema is what makes a mobject a VMobject here.
+            let all_vector = animations.iter().all(|animation| {
+                stage
+                    .get(animation.state().mobject())
+                    .is_some_and(|entry| entry.buffer.schema().offset("fill_rgba").is_some())
+            });
+            let container = stage.add(if all_vector {
+                Mobject::vector_from_points(&[])
+            } else {
+                Mobject::new()
+            });
             let mut seen: Vec<Mob> = Vec::with_capacity(animations.len());
             for animation in animations {
                 let mob = animation.state().mobject();

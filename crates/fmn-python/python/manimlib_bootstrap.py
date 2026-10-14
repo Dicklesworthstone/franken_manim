@@ -4402,8 +4402,14 @@ def _native_shell_factory():
     return shell
 
 
-def _native_scene_shell_factory(vector_records):
-    cls = VMobject if vector_records else Group
+def _native_scene_shell_factory(vector_records, group=False):
+    # A native point-less container over VMobjects (Choreo's composition
+    # group) is the Reference's VGroup; one over any other mobject is a Group
+    # (fm-3jw2, composition.py:44-51).
+    if vector_records:
+        cls = VGroup if group else VMobject
+    else:
+        cls = Group
     shell = cls.__new__(cls)
     _install_live_state(shell)
     return shell

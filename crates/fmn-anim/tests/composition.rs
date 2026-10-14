@@ -1518,3 +1518,43 @@ fn a_hollow_group_time_span_is_refused_at_begin() {
         })
     );
 }
+
+#[test]
+fn the_container_is_a_vgroup_over_vmobjects_and_a_group_otherwise() {
+    // composition.py:44-51: `VGroup(*mobs)` when every animated mobject is a
+    // VMobject, `Group(*mobs)` otherwise. A vector record schema is what
+    // makes a mobject a VMobject here (fm-3jw2).
+    let is_vector = |stage: &Stage, mob: Mob| {
+        stage
+            .get(mob)
+            .expect("live container")
+            .buffer
+            .schema()
+            .offset("fill_rgba")
+            .is_some()
+    };
+    let mut stage = Stage::new();
+    let triangle = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]];
+    let a = stage.add(Mobject::vector_from_points(&triangle));
+    let b = stage.add(Mobject::vector_from_points(&triangle));
+    let both_vector = vec![
+        move_to_x(&mut stage, a, 1.0, 1.0),
+        move_to_x(&mut stage, b, 2.0, 1.0),
+    ];
+    let group = AnimationGroup::with_lag_ratio(&mut stage, both_vector, 0.0).expect("group");
+    let container = group.state().mobject();
+    assert!(is_vector(&stage, container));
+    assert_eq!(stage.get(container).expect("container").buffer.len(), 0);
+    assert_eq!(
+        stage.get(container).expect("container").submobjects(),
+        &[a, b]
+    );
+
+    let plain = square(&mut stage);
+    let mixed = vec![
+        move_to_x(&mut stage, a, 0.0, 1.0),
+        move_to_x(&mut stage, plain, 1.0, 1.0),
+    ];
+    let mixed = AnimationGroup::with_lag_ratio(&mut stage, mixed, 0.0).expect("mixed group");
+    assert!(!is_vector(&stage, mixed.state().mobject()));
+}

@@ -8878,9 +8878,14 @@ impl PyScene {
                         let entry = stage.get(mob).ok_or_else(|| {
                             StaleHandleError::new_err("scene family contains a stale handle")
                         })?;
+                        // A point-less vector member with children is a
+                        // native group (Choreo's composition container over
+                        // VMobjects): the Reference's VGroup (fm-3jw2).
+                        let vector = entry.buffer.schema().offset("fill_rgba").is_some();
+                        let group = entry.buffer.is_empty() && !entry.submobjects().is_empty();
                         graph.push((
                             mob,
-                            entry.buffer.schema().offset("fill_rgba").is_some(),
+                            (vector, group),
                             entry.submobjects().to_vec(),
                             entry.children_epoch(),
                         ));
@@ -8895,7 +8900,7 @@ impl PyScene {
         let mut proxies: HashMap<Mob, Bound<'py, PyAny>, ByAddress> =
             HashMap::with_capacity_and_hasher(graph.len(), ByAddress::default());
         let mut ghosts: Vec<(Bound<'py, PyAny>, Bound<'py, PyAny>)> = Vec::new();
-        for (mob, vector_records, _, _) in &graph {
+        for (mob, (vector_records, group), _, _) in &graph {
             // A padding copy's source precedes it in family order, so the
             // source's proxy is already projected when it has one. Without an
             // adopter to install its Python state, a ghost gets a plain shell.
@@ -8912,7 +8917,7 @@ impl PyScene {
                 ghosts.push((source_proxy, proxy.clone()));
                 proxy
             } else {
-                let proxy = shell_factory.call1((*vector_records,))?;
+                let proxy = shell_factory.call1((*vector_records, *group))?;
                 {
                     let bridge = proxy.cast::<BridgeMobject>()?;
                     let mut cell = bridge.borrow_mut();
