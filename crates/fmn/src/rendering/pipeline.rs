@@ -8,6 +8,7 @@ use fmn_frame::convert::{
     rgba16f_to_bgra8, rgba16f_to_nv12_threaded, rgba16f_to_p010_threaded, rgba16f_to_rgba8,
 };
 use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameError, PixelFormat};
+use fmn_mobject::FrozenRenderState;
 use fmn_output::{EmitterError, EmitterHandle, FrameReservation};
 use fmn_render::{
     Camera, CameraConfig, EngineIdentity, FrameArena, OwnedVectorFrame, PixelTileCache,
@@ -30,7 +31,7 @@ thread_local! {
     static COMPILED_ENDPOINTS: RefCell<TimelineFrameCache> = RefCell::default();
 }
 
-/// A failure in worker-owned rasterization, conversion, or publication.
+/// A failure in worker-owned preparation, rasterization, conversion, or publication.
 #[derive(Debug)]
 pub enum NativeFrameError {
     /// A validated compiled frame refused reconstruction on its worker.
@@ -84,10 +85,28 @@ pub(super) enum NativeFrame {
     },
 }
 
+/// Captured data is callback-free; compilation stays on the ordered prepare worker.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "bounded frame inputs move once; boxing would allocate per captured frame"
+)]
+pub(super) enum NativeFrameInput {
+    Frozen {
+        state: FrozenRenderState,
+        camera: Option<Camera>,
+    },
+    Ready(NativeFrame),
+}
+
 pub(super) struct NativeFrameJob {
-    pub frame: NativeFrame,
+    pub frame: NativeFrameInput,
     // Reserve on the scene owner, in capture order, not on raster workers.
     pub output: FrameReservation,
+}
+
+pub(super) struct PreparedFrameJob {
+    frame: NativeFrame,
+    output: FrameReservation,
 }
 
 #[derive(Default)]
@@ -133,14 +152,19 @@ impl VectorWorker {
 }
 
 pub(super) struct NativeFrameStages {
+    // FrameStream invokes prepare in source order on its single preparation
+    // worker. The mutex satisfies PipelineStages' shared-reference contract;
+    // raster teams never acquire it. Only one retained compiler is allocated.
+    compiler: Mutex<NativeCompiler>,
     // One independent arena/cache per real render team. No global raster lock:
     // nonconsecutive frame contents and cache identities decide reuse.
     workers: Vec<Mutex<VectorWorker>>,
 }
 
 impl NativeFrameStages {
-    pub fn new(render_teams: usize) -> Self {
+    fn new(render_teams: usize, compiler: NativeCompiler) -> Self {
         Self {
+            compiler: Mutex::new(compiler),
             workers: (0..render_teams)
                 .map(|_| Mutex::new(VectorWorker::default()))
                 .collect(),
@@ -150,23 +174,51 @@ impl NativeFrameStages {
 
 impl PipelineStages for NativeFrameStages {
     type Frame = NativeFrameJob;
-    type Prepared = NativeFrameJob;
+    type Prepared = PreparedFrameJob;
     // Converted on the render team that rasterized it (see `convert`).
     type Rasterized = FrameReservation;
     type Output = FrameReservation;
     type Error = NativeFrameError;
 
-    fn prepare(&self, frame: NativeFrameJob, _: &TeamPlan) -> Result<NativeFrameJob, Self::Error> {
-        // All live scene access has finished on its serial owner.
-        Ok(frame)
+    fn prepare(&self, job: NativeFrameJob, _: &TeamPlan) -> Result<PreparedFrameJob, Self::Error> {
+        let NativeFrameJob { frame, output } = job;
+        let frame = match frame {
+            NativeFrameInput::Ready(frame) => frame,
+            NativeFrameInput::Frozen { state, camera } => {
+                // Materialization moves the frozen buffers and graph vectors.
+                // It installs no callbacks and drops no owner-thread updaters.
+                let stage = state.materialize();
+                let mut compiler = self.compiler.lock().map_err(|_| {
+                    NativeFrameError::WorkerState("frame preparation compiler was poisoned")
+                })?;
+                match (&mut *compiler, camera.as_ref()) {
+                    (NativeCompiler::Vector(compiler), None) => NativeFrame::Vector(
+                        compiler
+                            .capture(&stage, 0)
+                            .map_err(NativeFrameError::Renderer)?,
+                    ),
+                    (NativeCompiler::Camera(renderer), Some(camera)) => NativeFrame::Camera(
+                        renderer
+                            .prepare_with_camera(&stage, camera)
+                            .map_err(NativeFrameError::Renderer)?,
+                    ),
+                    _ => {
+                        return Err(NativeFrameError::WorkerState(
+                            "frozen camera policy does not match the retained compiler",
+                        ));
+                    }
+                }
+            }
+        };
+        Ok(PreparedFrameJob { frame, output })
     }
 
     fn rasterize(
         &self,
-        job: NativeFrameJob,
+        job: PreparedFrameJob,
         team: &TeamPlan,
     ) -> Result<Self::Rasterized, Self::Error> {
-        let NativeFrameJob { frame, mut output } = job;
+        let PreparedFrameJob { frame, mut output } = job;
         match frame {
             NativeFrame::Camera(frame) => {
                 let raster = frame
@@ -317,19 +369,23 @@ fn convert_into(
 /// Shared CPU capture-to-output pipeline for native front doors.
 ///
 /// The caller owns the `OrderedEmitter` and its final artifact publication.
-/// This adapter owns serial scene-to-IR capture, bounded raster/conversion
-/// work on every planned render team, and worker-local retained tile caches.
+/// The scene owner freezes callback-free data after admission. The existing
+/// in-order preparation worker materializes and compiles it while the owner
+/// advances the next frame. Raster/conversion work uses every planned render
+/// team and their worker-local retained tile caches.
 /// The output ring capacity must equal `plan.frames_in_flight`.
 /// Call `finish` successfully BEFORE finishing the emitter. Dropping an
 /// unfinished adapter cancels the emitter before joining all pipeline workers.
 ///
 /// Pixel admission must include one retained RGBA16F cache per affine render
-/// team (or a retained camera frame on the owner and each compiled-camera
-/// render team), in addition to the plan's in-flight surfaces. Output
-/// conversion runs directly from the RGBA16F raster into the reserved output
-/// slot; no per-frame intermediate surface is allocated.
+/// team (or a retained camera frame on the preparation worker and each
+/// compiled-camera render team), in addition to the plan's in-flight surfaces.
+/// Output conversion runs directly from the RGBA16F raster into the reserved output
+/// slot; no per-frame intermediate surface is allocated. Frozen graph/record
+/// storage is additional to that pixel budget, with at most one input per
+/// admitted pipeline slot. Caller-retained replay packets have their own lifetime.
 pub struct NativeFramePipeline {
-    compiler: NativeCompiler,
+    camera: Option<Camera>,
     stream: Option<FrameStream<NativeFrameJob, NativeFrameError>>,
     output: EmitterHandle,
     output_format: PixelFormat,
@@ -339,10 +395,7 @@ pub struct NativeFramePipeline {
 
 enum NativeCompiler {
     Vector(VectorFrameCompiler),
-    Camera {
-        renderer: Box<RetainedFrameRenderer>,
-        camera: Camera,
-    },
+    Camera(Box<RetainedFrameRenderer>),
 }
 
 impl NativeFramePipeline {
@@ -413,24 +466,21 @@ impl NativeFramePipeline {
                 "camera dimensions and certified CPU identity must match the plan",
             ));
         }
-        let compiler = match camera {
-            Some(camera) => NativeCompiler::Camera {
-                renderer: Box::new(
-                    RetainedFrameRenderer::new(config).map_err(RenderError::Renderer)?,
-                ),
-                camera,
-            },
+        let compiler = match &camera {
+            Some(_) => NativeCompiler::Camera(Box::new(
+                RetainedFrameRenderer::new(config).map_err(RenderError::Renderer)?,
+            )),
             None => NativeCompiler::Vector(
                 VectorFrameCompiler::new(config).map_err(RenderError::Renderer)?,
             ),
         };
-        let stages = NativeFrameStages::new(plan.render_teams.len());
+        let stages = NativeFrameStages::new(plan.render_teams.len(), compiler);
         let stream = FrameStream::new(plan, stages, |_, output| {
             output.publish().map_err(NativeFrameError::Emitter)
         })
         .map_err(RenderError::Pipeline)?;
         Ok(Self {
-            compiler,
+            camera,
             stream: Some(stream),
             output,
             output_format,
@@ -460,7 +510,7 @@ impl NativeFramePipeline {
         if stream.cancellation_token().is_cancelled() {
             return Err(RenderError::Pipeline(FrameStreamError::Closed));
         }
-        let NativeCompiler::Camera { camera, .. } = &mut self.compiler else {
+        let Some(camera) = &mut self.camera else {
             return Err(RenderError::InvalidOptions(
                 "camera updates require a camera pipeline",
             ));
@@ -495,18 +545,48 @@ impl NativeFramePipeline {
         Ok(())
     }
 
-    /// Admit and freeze one captured scene, without running callbacks on workers.
+    /// Admit and freeze one captured scene without transferring callbacks.
     ///
-    /// Sequences must be reserved in increasing output order. Admission precedes
-    /// IR freezing, including for a one-slot plan; no extra frozen queue exists.
+    /// Sequences must be reserved in increasing output order. Both pipeline
+    /// and output capacity are acquired BEFORE freezing, including with one
+    /// slot. The in-order preparation worker materializes and compiles the
+    /// frozen state; the scene owner may advance while this work runs.
     ///
     /// # Errors
-    /// Refuses invalid scene data, closed/cancelled work, or output admission.
-    /// A closed stream's detailed stage error is recovered by `finish`.
+    /// Refuses closed/cancelled work or output admission immediately. Invalid
+    /// scene data and compilation failures are asynchronous stage errors,
+    /// recovered by `finish`; a later admission can first report a closed stream.
     pub fn capture(
         &mut self,
         stage: &fmn_mobject::Stage,
         sequence: u64,
+    ) -> Result<(), RenderError> {
+        self.capture_with(sequence, || stage.freeze_render_state())
+    }
+
+    /// Consume an already observed frame without materializing another arena
+    /// or cloning its snapshot metadata on the scene owner.
+    ///
+    /// Admission precedes conversion into the callback-free render projection.
+    /// Updater references from the packet are released only on this calling
+    /// thread. A packet retained by a journal keeps its full replay state.
+    /// The packet's exact capture time, records and handle domain survive;
+    /// `sequence` is the independent ordered output index.
+    ///
+    /// # Errors
+    /// As [`Self::capture`]. Compilation errors are recovered by `finish`.
+    pub fn capture_packet(
+        &mut self,
+        packet: fmn_anim::FramePacket,
+        sequence: u64,
+    ) -> Result<(), RenderError> {
+        self.capture_with(sequence, || packet.into_render_state())
+    }
+
+    fn capture_with(
+        &mut self,
+        sequence: u64,
+        freeze: impl FnOnce() -> FrozenRenderState,
     ) -> Result<(), RenderError> {
         let stream = self
             .stream
@@ -526,15 +606,9 @@ impl NativeFramePipeline {
                 "output ring layout must match the frame execution plan",
             ));
         }
-        let frame = match &mut self.compiler {
-            NativeCompiler::Vector(compiler) => {
-                NativeFrame::Vector(compiler.capture(stage, 0).map_err(RenderError::Renderer)?)
-            }
-            NativeCompiler::Camera { renderer, camera } => NativeFrame::Camera(
-                renderer
-                    .prepare_with_camera(stage, camera)
-                    .map_err(RenderError::Renderer)?,
-            ),
+        let frame = NativeFrameInput::Frozen {
+            state: freeze(),
+            camera: self.camera.clone(),
         };
         permit
             .submit(sequence, NativeFrameJob { frame, output })
@@ -563,7 +637,7 @@ impl NativeFramePipeline {
         job: TimelineFrameJob,
         sequence: u64,
     ) -> Result<(), RenderError> {
-        if job.has_camera_track() && matches!(&self.compiler, NativeCompiler::Vector(_)) {
+        if job.has_camera_track() && self.camera.is_none() {
             return Err(RenderError::Capability(
                 "camera-bearing FMTL requires a camera-aware CPU execution plan",
             ));
@@ -586,15 +660,12 @@ impl NativeFramePipeline {
                 "output ring layout must match the frame execution plan",
             ));
         }
-        let camera = match &self.compiler {
-            NativeCompiler::Camera { camera, .. } => Some(camera.clone()),
-            NativeCompiler::Vector(_) => None,
-        };
-        let frame = NativeFrame::Compiled {
+        let camera = self.camera.clone();
+        let frame = NativeFrameInput::Ready(NativeFrame::Compiled {
             job,
             config: self.renderer_config,
             camera,
-        };
+        });
         permit
             .submit(sequence, NativeFrameJob { frame, output })
             .map_err(|_| RenderError::Pipeline(FrameStreamError::Closed))
@@ -646,5 +717,20 @@ impl Drop for NativeFramePipeline {
             self.output.cancel();
             let _ = stream.cancel();
         }
+    }
+}
+
+#[cfg(test)]
+mod handoff_tests {
+    use super::*;
+
+    #[test]
+    fn preparation_inputs_never_carry_owner_thread_callbacks() {
+        fn send<T: Send + 'static>() {}
+        fn sync<T: Sync>() {}
+        send::<NativeFrameJob>();
+        send::<PreparedFrameJob>();
+        send::<NativeCompiler>();
+        sync::<NativeFrameStages>();
     }
 }
