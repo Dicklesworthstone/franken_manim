@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 PYTHON = Path(__file__).resolve().parents[1] / "python"
 sys.path.insert(0, str(PYTHON))
+from fmn_python.checkpoint_cli import CHECKPOINT_VALUES, take_checkpoint_options
 from fmn_python.parallel_cli_options import PARALLEL_VALUES, take_parallel_options
 
 
@@ -94,17 +95,10 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
         def switch(args, name):
             return [value for value in args if value != name], name in args
 
-        def recovery(args, flags):
-            args = list(args)
-            if "--checkpoint" not in args:
-                return args, {}
-            index = args.index("--checkpoint")
-            return args[:index] + args[index + 2:], {"checkpoint": args[index + 1]}
-
         self.native = types.SimpleNamespace(Scene=object, _portal_cli_render_arguments=parse,
                                             _portal_cli_emit=emit)
         values = {"--threads", "--format", "--fps", "--resolution", "--video_dir", "--vcodec",
-                  "--pix_fmt", "--ffmpeg_bin", "--checkpoint", "-n"} | PARALLEL_VALUES
+                  "--pix_fmt", "--ffmpeg_bin", "-n"} | PARALLEL_VALUES | CHECKPOINT_VALUES
         self.g = {
             "__name__": "fmn_python._console_contract_test", "__package__": "fmn_python",
             "Any": object, "Path": Path, "os": os, "sys": sys, "contextlib": contextlib,
@@ -116,7 +110,7 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
             "take_video_options": lambda args, flags: (args, {}),
             "take_last_frame_option": lambda args, flags: switch(args, "--save-last-frame"),
             "take_subdivision_option": lambda args, flags: switch(args, "--subdivide"),
-            "take_checkpoint_options": recovery,
+            "take_checkpoint_options": take_checkpoint_options,
             "take_playback_options": lambda args: (args, None, False),
             "select_still_format": lambda options, args, still: options,
             "_output_overrides": lambda options: {key: value for key, value in options.items()
@@ -179,8 +173,7 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
         self.assertNotIn("workers", options)
 
     def test_incompatible_modes_refuse_before_source_load(self):
-        for flags in (("--reproducible",), ("--subdivide",), ("--save-last-frame",),
-                      ("--checkpoint", "journal.json")):
+        for flags in (("--reproducible",), ("--subdivide",), ("--save-last-frame",)):
             with self.subTest(flags=flags):
                 self.assertEqual(self.run_cli("--write_all", "--workers=2", *flags), 4)
                 self.assertFalse(self.loads)
@@ -197,6 +190,61 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
         options = self.calls[0][2]
         self.assertEqual(options["_working_directory"], self.cwd)
         self.assertEqual(options["_expected_source_digest"], hashlib.sha256(b"# stable source\n").hexdigest())
+
+    def test_parallel_recovery_uses_existing_parser_and_forwards_frozen_options(self):
+        checkpoint = self.root / "progress.json"
+        self.assertEqual(self.run_cli("--write_all", "--workers=2", "--robot", "--checkpoint",
+                                     str(checkpoint), "--resume-key", "assets-v1", "--resume"), 0)
+        mode, _, options = self.calls[0]
+        self.assertEqual(mode, "parallel")
+        self.assertEqual(options["checkpoint"], checkpoint)
+        self.assertEqual(options["resume_key"], "assets-v1")
+        self.assertIs(options["resume"], True)
+        self.assertEqual((options["workers"], options["threads"]), (2, 1))
+        for token in ("--workers=2", "--checkpoint", "--resume-key", "--resume", "assets-v1", str(checkpoint)):
+            self.assertNotIn(token, self.parsed[0])
+
+    def test_incomplete_and_repeated_recovery_flags_refuse_before_loading(self):
+        cases = [("--resume",), ("--checkpoint", "progress.json"), ("--resume-key", "inputs"),
+                 ("--checkpoint",),
+                 ("--checkpoint", "a.json", "--resume-key", "inputs", "--resume", "--resume"),
+                 ("--checkpoint", "a.json", "--checkpoint", "b.json", "--resume-key", "inputs")]
+        for flags in cases:
+            with self.subTest(flags=flags):
+                self.assertEqual(self.run_cli("--write_all", "--workers=2", *flags), 2)
+                self.assertFalse(self.loads)
+                self.assertFalse(self.calls)
+
+    def test_recovery_values_resembling_parallel_flags_are_not_consumed(self):
+        self.assertEqual(self.run_cli("--write_all", "--checkpoint", "--workers",
+                                     "--resume-key", "--workers=7", "--workers=2"), 0)
+        options = self.calls[0][2]
+        self.assertEqual(options["checkpoint"], self.cwd / "--workers")
+        self.assertEqual(options["resume_key"], "--workers=7")
+        self.assertEqual(options["workers"], 2)
+        self.assertIs(options["resume"], False)
+
+    def test_checkpoint_path_stays_bound_before_discovery_changes_cwd(self):
+        self.chdir_on_load = True
+        self.assertEqual(self.run_cli("--write_all", "--workers=2", "--checkpoint", "progress.json",
+                                     "--resume-key", "inputs"), 0)
+        options = self.calls[0][2]
+        self.assertEqual(options["checkpoint"], self.cwd / "progress.json")
+        self.assertEqual(options["_working_directory"], self.cwd)
+        self.assertEqual(Path.cwd(), self.root)
+
+    def test_sequential_recovery_keeps_its_original_dispatch(self):
+        checkpoint = self.root / "sequential.json"
+        self.assertEqual(self.run_cli("Second", "First", "--checkpoint", str(checkpoint),
+                                     "--resume-key", "inputs", "--resume"), 0)
+        mode, args, options = self.calls[0]
+        self.assertEqual(mode, "sequential")
+        self.assertEqual(list(args[0]), ["Second", "First"])
+        self.assertEqual(options["checkpoint"], checkpoint)
+        self.assertEqual(options["resume_key"], "inputs")
+        self.assertIs(options["resume"], True)
+        self.assertEqual(options["threads"], 8)
+        self.assertNotIn("workers", options)
 
 
 if __name__ == "__main__":

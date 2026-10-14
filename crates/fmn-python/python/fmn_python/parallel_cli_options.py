@@ -17,8 +17,13 @@ to stderr. --keep-going admits later jobs after ordinary failures. Fail-fast
 stops new jobs while already running scenes finish. Optional --job-timeout
 bounds each worker including startup. Crashed/timed-out outputs are never
 removed or silently reused, and may exist without a complete receipt.
-Parallel batches do not support --reproducible, checkpoint/resume, paired
-output or subdivision. Omit --workers to use those sequential capabilities.
+Add --checkpoint PATH --resume-key INPUTS to save durable per-scene progress;
+add --resume to verify and reuse completed outputs without starting workers
+for them. Keep source bytes, cwd, scene selection and native render options
+unchanged. --workers and --job-timeout may change between attempts. Robot
+receipts name reused scenes explicitly. Sequential and parallel checkpoint
+plans are not interchangeable. Parallel batches do not support --reproducible,
+paired output or subdivision; omit --workers for those sequential capabilities.
 """
 
 

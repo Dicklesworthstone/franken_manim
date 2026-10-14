@@ -1,4 +1,5 @@
 """Native wheel smoke tests; never substitute a fake renderer for pixels."""
+import hashlib
 import importlib.util
 from importlib.machinery import ExtensionFileLoader, PathFinder
 from pathlib import Path
@@ -61,6 +62,78 @@ class Broken(Scene):
                 self.assertEqual(row.result.destination, row.destination)
             with self.assertRaises(FileExistsError):
                 render_source_scenes(source, root / "output", ["First"], workers=1, format="png")
+
+    def test_checkpoint_resume_reuses_native_png_and_retries_only_failed_scene(self):
+        from fmn_python import render_source_scenes
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source = root / "scenes.py"
+            source.write_text('''from pathlib import Path
+from manimlib import Scene, Square
+
+root = Path(__file__).parent
+
+def attempt(name):
+    with (root / (name + ".attempts")).open("a") as stream:
+        stream.write("constructed\\n")
+
+class First(Scene):
+    def __init__(self, *args, **kwargs):
+        attempt("First")
+        super().__init__(*args, **kwargs)
+    def construct(self):
+        self.add(Square())
+        self.wait(0.1)
+
+class Transient(Scene):
+    def __init__(self, *args, **kwargs):
+        attempt("Transient")
+        super().__init__(*args, **kwargs)
+    def construct(self):
+        if not (root / "allow-retry").exists():
+            raise RuntimeError("transient scene failure")
+        self.add(Square().shift((1, 0, 0)))
+        self.wait(0.1)
+''', encoding="utf-8")
+            options = dict(format="png", resolution=(64, 48), fps=10,
+                           checkpoint=root / "progress.json", resume_key="stable-scene-assets-v1",
+                           continue_on_error=True)
+            names = ["First", "Transient"]
+
+            def counts():
+                return [len((root / (name + ".attempts")).read_text().splitlines()) for name in names]
+
+            initial = render_source_scenes(source, root / "output", names, workers=2, **options)
+            self.assertEqual([row.status for row in initial.outcomes], ["succeeded", "failed"])
+            first_path = initial.outcomes[0].destination
+            first_bytes, first_mtime = first_path.read_bytes(), first_path.stat().st_mtime_ns
+            self.assertEqual(counts(), [1, 1])
+            # Resolve the transient failure without changing the entry source
+            # or any input of the already-completed First scene.
+            (root / "allow-retry").write_text("ready", encoding="utf-8")
+            resumed = render_source_scenes(source, root / "output", names, workers=1,
+                                           resume=True, **options)
+            self.assertTrue(resumed.ok)
+            self.assertEqual(resumed.reused, ("First",))
+            self.assertEqual(resumed.as_dict()["reused"], ["First"])
+            self.assertEqual(counts(), [1, 2])
+            self.assertEqual(first_path.read_bytes(), first_bytes)
+            self.assertEqual(first_path.stat().st_mtime_ns, first_mtime)
+            for row in resumed.outcomes:
+                data = row.destination.read_bytes()
+                self.assertEqual(data[:8], b"\x89PNG\r\n\x1a\n")
+                self.assertEqual(row.result.bytes, len(data))
+                self.assertEqual(row.result.digest, hashlib.sha256(data).hexdigest())
+            complete = render_source_scenes(source, root / "output", names, workers=3,
+                                            resume=True, **options)
+            self.assertEqual(complete.reused, tuple(names))
+            self.assertEqual(counts(), [1, 2])
+            first_path.write_bytes(first_bytes + b"tampered")
+            with self.assertRaisesRegex(ValueError, "missing or modified"):
+                render_source_scenes(source, root / "output", names, workers=2,
+                                     resume=True, **options)
+            self.assertEqual(counts(), [1, 2])
+            self.assertEqual(first_path.read_bytes(), first_bytes + b"tampered")
 
 
 if __name__ == "__main__":

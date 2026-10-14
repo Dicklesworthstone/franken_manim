@@ -19,6 +19,10 @@ With --save-last-frame, non-subdivided batches checkpoint the primary and final
 PNG together. Both must still match before a completed scene is skipped. Keep
 the journal and its lock outside BOTH outputs. Paired and single-output plans
 are distinct; --subdivide and --reproducible still do not support recovery.
+With --workers, the parent owns the same durable journal and verifies every
+completed artifact before launching pending jobs. Entry-source bytes and cwd
+must also match; worker count and timeout may change. Reused scene names appear
+in the robot receipt. Sequential and parallel checkpoint plans are distinct.
 """
 
 
