@@ -67,7 +67,7 @@ The parent holds the exclusive checkpoint lock for the batch. Before starting
 any pending worker it validates the complete saved plan and hash-verifies every
 completed artifact, including the entire inventory of a PNG-sequence directory.
 Only jobs without a completed receipt are scheduled. An all-completed resume
-starts no workers.
+starts no render workers.
 
 The plan binds entry-source SHA-256, absolute source/output paths, initial
 working directory, scene names/order and native render options. The caller's
@@ -93,8 +93,39 @@ workers start. Keep the journal and its persistent lock file outside all
 published artifacts. A journal write failure preserves existing outputs but
 does not imply that they are recoverable from the saved checkpoint.
 
-Parallel batches still exclude `--reproducible`, paired output and subdivision.
-Those capabilities remain on their supported sequential routes.
+## Multiple outputs per scene
+
+`--save-last-frame` adds a native final RGBA PNG without running the scene
+again. A file primary uses its stem plus `.png`; a PNG-sequence directory uses
+an adjacent `frames.png`. All primary and companion destinations are checked
+before any render worker starts. Non-subdivided pairs support checkpoint/resume:
+**both** publications must still match, and the journal/lock must be outside
+both outputs. A late PNG collision retains an already published primary and
+returns an incomplete pair, not a reusable success.
+
+`--subdivide` emits one native clip per selected top-level `play()` or `wait()`
+into `<Scene>/clips/`. Clip names retain their original play indices, including
+with `-n` range selection. Completed clips survive later errors or interrupts;
+the failed/cancelled outcome contains their typed partial collection receipt.
+`--save-last-frame` can also add one adjacent `clips.png` to that collection.
+No extra scene execution, frame clock, renderer or publication mechanism is
+introduced. Each native artifact remains independently atomic, not the pair
+or collection as a whole.
+
+```sh
+fmn-python scenes.py First Second --workers 2 --format gif \
+  --subdivide --save-last-frame --video_dir rendered --keep-going --robot
+```
+
+The programmatic equivalents are `subdivide=True`, `save_last_frame=True`,
+and `max_segments=N` on `render_source_scenes`. The segment limit applies per
+scene and defaults to 10,000. Still-only formats cannot be subdivided or paired.
+Clip collections cannot use checkpoint/resume; a partial collection is evidence
+of published work, not permission to rerun into its existing directory.
+
+Parallel batches still exclude `--reproducible`. Certified outputs remain on
+their supported sequential routes. A process crash or forced timeout before a
+receipt returns may leave unreceipted files; those are never silently adopted.
 
 ## Validation scope
 
@@ -104,3 +135,9 @@ native raster validation. `test_parallel_cli.py` checks the production console
 functions and checkpoint parser with a reduced native table.
 `test_parallel_batch_native.py` separately exercises actual native PNG receipts,
 fresh scene state and checkpoint recovery when the FrankenManim wheel is built.
+
+`test_parallel_outputs_native.py` exercises real GIF/PNG pairs, PNG-sequence
+recovery, per-play clips, range selection, cancellation and late collisions.
+It compares parallel and sequential PNG bytes from the same native engine.
+`test_parallel_output_receipts.py` separately rejects malformed or misbound
+transport receipts; transport admission alone is not artifact verification.

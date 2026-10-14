@@ -174,8 +174,15 @@ def run_process_jobs(jobs, worker, *, workers, continue_on_error=False,
                     # native publication or imply a force-stopped output is absent.
                     _stop({index: item})
                     if item[2] is None or item[2]["status"] != "succeeded":
-                        item[2] = failure(TimeoutError(f"scene job exceeded {job_timeout:g} seconds"))
-                        item[2]["error"]["notes"].append("Timed-out outputs were not removed; inspect before retrying.")
+                        timeout = failure(TimeoutError(f"scene job exceeded {job_timeout:g} seconds"))
+                        timeout["error"]["notes"].append("Timed-out outputs were not removed; inspect before retrying.")
+                        # Cooperative cancellation may have returned valuable
+                        # partial publications. Retain that data while making
+                        # the timeout (not success/cancellation) authoritative.
+                        if item[2] is None:
+                            item[2] = timeout
+                        else:
+                            item[2].update(status=timeout["status"], error=timeout["error"])
                 if not process.is_alive():
                     process.join()
                     if item[2] is None:

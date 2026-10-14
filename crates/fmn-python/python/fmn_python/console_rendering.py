@@ -220,9 +220,8 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
         options.update(video_options)
         output_options = _output_overrides(options)
         if parallel:
-            if paired or subdivide or options.get("reproducible"):
-                raise RuntimeError("CAPABILITY: parallel batches do not support certification, "
-                                   "paired output or subdivision; omit --workers")
+            if options.get("reproducible"):
+                raise RuntimeError("CAPABILITY: parallel batches do not support certification; omit --workers")
             if "--threads" not in native_options:
                 threads = 1
         if paired:

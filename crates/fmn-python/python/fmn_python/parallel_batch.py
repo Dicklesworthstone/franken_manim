@@ -24,8 +24,6 @@ from .batch_rendering import (
 from .render_selection import animation_range as _animation_range
 from .rendering import _FORMATS
 
-_MAX_SOURCE_BYTES = 16 * 1024 * 1024
-
 
 @dataclass(frozen=True)
 class ParallelBatchRenderResult(BatchRenderResult):
@@ -39,11 +37,9 @@ class ParallelBatchRenderResult(BatchRenderResult):
 
 
 def _source_digest(path):
-    with path.open("rb") as stream:
-        data = stream.read(_MAX_SOURCE_BYTES + 1)
-    if len(data) > _MAX_SOURCE_BYTES:
-        raise ValueError("scene entry source exceeds its 16 MiB budget")
-    return hashlib.sha256(data).hexdigest()
+    from .parallel_discovery import _entry_digest
+
+    return _entry_digest(path)
 
 
 def _render_source_job(job):
@@ -67,14 +63,42 @@ def _render_source_job(job):
             name = job["name"]
             if name not in loaded.scenes:
                 raise ValueError(f"no locally declared Scene named {name!r} in {source}")
-            report = render_scenes(
-                {name: loaded.scenes[name]}, job["directory"],
-                continue_on_error=True, **job["options"],
-            )
+            try:
+                report = render_scenes(
+                    {name: loaded.scenes[name]}, job["directory"],
+                    continue_on_error=True, **job["options"],
+                )
+            except BaseException as error:
+                # Cancellation can follow already published clips. Return the
+                # owned batch's data-only outcome rather than discarding its
+                # partial receipts in the generic process exception envelope.
+                report = getattr(error, "render_batch_result", None)
+                if not isinstance(report, BatchRenderResult) or len(report.outcomes) != 1:
+                    raise
             return report.outcomes[0].as_dict()
 
 
-def _outcome(name, destination, row):
+def _outcome(name, destination, row, *, format=None, subdivide=False,
+             save_last_frame=False, max_segments=10_000):
+    if subdivide or save_last_frame:
+        from .parallel_output import restore_output
+
+        data = row.get("result")
+        receipt = None
+        if data is not None:
+            if row.get("name") != name or row.get("destination") != str(destination):
+                raise ValueError("worker receipt does not identify its planned scene destination")
+            receipt = restore_output(data, destination=destination, format=format,
+                                     subdivide=subdivide, save_last_frame=save_last_frame,
+                                     max_segments=max_segments)
+            if receipt.completed != (row["status"] == "succeeded"):
+                raise ValueError("worker output completeness disagrees with its scene outcome")
+        elif row["status"] == "succeeded":
+            raise ValueError("successful worker omitted its output collection receipt")
+        error = row.get("error") or {}
+        return SceneRenderOutcome(name, destination, row["status"], result=receipt,
+                                  error_type=error.get("type"), message=error.get("message"),
+                                  notes=tuple(error.get("notes", ())))
     if row["status"] == "succeeded":
         # Restore the same native receipt type used by sequential batches;
         # never unpickle a worker-supplied Scene or arbitrary exception.
@@ -96,6 +120,7 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
                          threads=1, continue_on_error=False, on_result=None,
                          max_jobs=1024, animation_range=None, job_timeout=None,
                          checkpoint=None, resume=False, resume_key=None,
+                         subdivide=False, max_segments=10_000, save_last_frame=False,
                          _output_options=None, _expected_source_digest=None,
                          _working_directory=None):
     """Render explicitly named local Scene classes in bounded fresh processes.
@@ -116,8 +141,15 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
     workers is bounded to 64. threads defaults to ONE native thread per worker
     to avoid multiplying two automatic CPU budgets. job_timeout optionally
     bounds each worker, including startup. This path deliberately does not
-    claim certification or accept live instances, paired output or subdivision;
-    those remain available through render_scenes.
+    claim certification or accept live instances.
+
+    subdivide=True emits one native clip per selected play/wait; completed
+    clips survive later failures and interruptions in each outcome's result.
+    save_last_frame=True adds a final PNG without executing a scene twice.
+    Both compose in each worker through render_scenes, retaining the shared
+    clock, recording and publication owners. Every primary/companion path is
+    preflighted before spawning. Checkpoint/resume verifies non-subdivided
+    pairs as a unit; subdivided collections do not support recovery.
 
     checkpoint uses the same locked, atomic journal and artifact verifier as
     render_scenes, owned ONLY by the parent. Each completed receipt is recorded
@@ -143,6 +175,21 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
         raise TypeError("on_result must be callable or None")
     if not isinstance(format, str) or format not in _FORMATS:
         raise ValueError("unsupported parallel batch render format")
+    if not isinstance(subdivide, bool) or not isinstance(save_last_frame, bool):
+        raise TypeError("subdivide and save_last_frame must be bool")
+    if subdivide:
+        max_segments = positive_integer(max_segments, "max_segments", 100_000)
+    elif max_segments != 10_000:
+        raise ValueError("max_segments requires subdivide=True")
+    if subdivide or save_last_frame:
+        native = importlib.import_module("manimlib")
+        from .paired_output import companion_png_path, validate_paired_mode
+        from .subdivision_rendering import validate_subdivided_mode
+
+        if subdivide:
+            validate_subdivided_mode(native, format, checkpoint=checkpoint)
+        if save_last_frame:
+            validate_paired_mode(native, format, checkpoint=checkpoint)
     selection = _animation_range(animation_range)
     if resolution is not None:
         try:
@@ -151,6 +198,8 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
             raise ValueError("render resolution must contain width and height") from None
         resolution = [positive_integer(width, "width", (1 << 32) - 1),
                       positive_integer(height, "height", (1 << 32) - 1)]
+    if subdivide and resolution is not None and resolution[0] * resolution[1] > 16_777_216:
+        raise ValueError("subdivision requires at most 16777216 pixels")
     fps = None if fps is None else positive_integer(fps, "fps", (1 << 32) - 1)
     threads = positive_integer(1 if threads is None else threads, "threads", 96)
     if isinstance(scene_names, (str, bytes)):
@@ -172,14 +221,24 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
     working_directory = Path.cwd() if _working_directory is None else Path(_working_directory).resolve()
     if not working_directory.is_dir():
         raise NotADirectoryError(str(working_directory))
-    destinations = [root / name / "frames" if format == "png_sequence"
-                    else root / (name + "." + format) for name in names]
-    for destination in destinations:
+    destinations = [root / name / "clips" if subdivide else
+                    root / name / "frames" if format == "png_sequence" else
+                    root / (name + "." + format) for name in names]
+    still_destinations = ([companion_png_path(path, format, subdivide=subdivide) for path in destinations]
+                          if save_last_frame else [])
+    all_destinations = [*destinations, *still_destinations]
+    for destination in all_destinations:
         for parent in destination.parents:
             if parent.exists() and not parent.is_dir():
                 raise NotADirectoryError(str(parent))
     options = dict(format=format, resolution=resolution, fps=fps, threads=threads,
                    animation_range=selection, _output_options=_output_options)
+    # Keep existing single-artifact checkpoint plans byte-compatible. Only an
+    # explicitly selected output mode adds new plan fields.
+    if subdivide:
+        options.update(subdivide=True, max_segments=max_segments)
+    if save_last_frame:
+        options["save_last_frame"] = True
     # Freeze exactly the JSON data that the process scheduler will transmit,
     # before opening a journal or calling an observer that can mutate options.
     options = json.loads(json.dumps(options, allow_nan=False))
@@ -188,17 +247,22 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
     owner = (contextlib.nullcontext(None) if checkpoint is None else
              BatchCheckpoint(checkpoint, resume=resume, key=resume_key))
     if checkpoint is not None:
-        owner.validate_destinations(destinations)
+        owner.validate_destinations(all_destinations)
     with owner as journal:
         existing = set() if journal is None else journal.existing_destinations
-        for destination in destinations:
+        for destination in all_destinations:
             if os.path.lexists(destination) and destination not in existing:
                 raise FileExistsError(f"render destination already exists: {destination}")
         if journal is not None:
             journal.prepare_sources(names, destinations, options, source=source,
                                     source_digest=digest, working_directory=working_directory)
         completed = {} if journal is None else journal.completed
-        outcomes = [_outcome(name, path, completed[name]) if name in completed else
+
+        def restore(name, path, row):
+            return _outcome(name, path, row, format=format, subdivide=subdivide,
+                            save_last_frame=save_last_frame, max_segments=max_segments)
+
+        outcomes = [restore(name, path, completed[name]) if name in completed else
                     SceneRenderOutcome(name, path, "not_run")
                     for name, path in zip(names, destinations)]
         pending = [index for index, name in enumerate(names) if name not in completed]
@@ -213,7 +277,7 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
 
         def accept(local_index, row):
             index = pending[local_index]
-            outcomes[index] = _outcome(names[index], destinations[index], row)
+            outcomes[index] = restore(names[index], destinations[index], row)
             # Checkpoint publication precedes arbitrary observer code. Only the
             # parent hashes artifacts and writes the journal; children never
             # acquire its lock or receive its path.
@@ -232,7 +296,7 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
                                         workers=workers, continue_on_error=continue_on_error,
                                         on_result=accept, job_timeout=job_timeout)
                 for index, row in zip(pending, rows):
-                    outcomes[index] = _outcome(names[index], destinations[index], row)
+                    outcomes[index] = restore(names[index], destinations[index], row)
             record()
         except BaseException as error:
             # The scheduler drains in-flight workers on interruption or a failed
@@ -240,7 +304,7 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
             # the full scene list: resumed successes must never be overwritten.
             for index, row in zip(pending, getattr(error, "process_batch_outcomes", ())):
                 try:
-                    outcomes[index] = _outcome(names[index], destinations[index], row)
+                    outcomes[index] = restore(names[index], destinations[index], row)
                 except Exception as receipt_error:
                     outcomes[index] = SceneRenderOutcome(names[index], destinations[index], "failed",
                         error_type=type(receipt_error).__name__, message=str(receipt_error),

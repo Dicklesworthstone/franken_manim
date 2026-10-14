@@ -120,6 +120,8 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
             "_positive_integer": lambda value, name: value,
             "_name_key": lambda name: name.casefold(),
             "validate_batch_mode": lambda *args: None,
+            "validate_paired_mode": lambda *args, **kwargs: None,
+            "validate_subdivided_mode": lambda *args, **kwargs: None,
             "_error_fields": lambda error: (type(error).__name__, str(error)),
             "_error_notes": lambda error: (), "_partial_output": lambda *args: {},
             "recording_effects": lambda enabled: contextlib.nullcontext(),
@@ -189,11 +191,34 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
         self.assertNotIn("workers", options)
 
     def test_incompatible_modes_refuse_before_source_load(self):
-        for flags in (("--reproducible",), ("--subdivide",), ("--save-last-frame",)):
+        for flags in (("--reproducible",), ("--subdivide", "--reproducible"),
+                      ("--save-last-frame", "--reproducible")):
             with self.subTest(flags=flags):
                 self.assertEqual(self.run_cli("--write_all", "--workers=2", *flags), 4)
                 self.assertFalse(self.loads)
                 self.assertFalse(self.calls)
+
+    def test_parallel_output_modes_reach_the_shared_worker_owner(self):
+        self.assertEqual(self.run_cli("Second", "First", "--workers=2", "--format", "gif",
+                                     "--subdivide", "--save-last-frame"), 0)
+        mode, _, options = self.calls[0]
+        self.assertEqual(mode, "parallel")
+        self.assertIs(options["subdivide"], True)
+        self.assertIs(options["save_last_frame"], True)
+        self.assertEqual(options["scene_names"], ["Second", "First"])
+        self.assertFalse(self.loads)
+
+    def test_parallel_pair_recovery_is_supported_but_clip_recovery_refuses_before_discovery(self):
+        flags = ("--write_all", "--workers=2", "--format", "gif", "--save-last-frame",
+                 "--checkpoint", str(self.root / "pair.json"), "--resume-key", "inputs", "--resume")
+        self.assertEqual(self.run_cli(*flags), 0)
+        self.assertIs(self.calls[0][2]["save_last_frame"], True)
+        self.assertIs(self.calls[0][2]["resume"], True)
+        self.calls.clear()
+        self.discovery_calls.clear()
+        self.assertEqual(self.run_cli(*flags, "--subdivide"), 2)
+        self.assertFalse(self.calls)
+        self.assertFalse(self.discovery_calls)
 
     def test_single_scene_and_invalid_workers_refuse_before_source_load(self):
         self.assertEqual(self.run_cli("First", "--workers=2"), 2)
