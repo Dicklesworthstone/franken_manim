@@ -15,7 +15,9 @@ import signal
 import sys
 import time
 
-_MAX_RECEIPT_BYTES = 8 * 1024 * 1024
+from ._process_receipt import (
+    MAX_RECEIPT_BYTES as _MAX_RECEIPT_BYTES, receipt_channel, send_receipt,
+)
 
 
 def positive_integer(value, name, maximum):
@@ -50,7 +52,7 @@ def failure(error, status="failed"):
 def _child(connection, worker, job):
     try:
         try:
-            # The result travels over its private pipe. Keep fd-level output
+            # The result travels over its private result channel. Keep fd-level output
             # from native libraries and authored os.write/subprocess calls off
             # the coordinator's robot stdout too, not only Python print().
             # Redirect before flushing any buffered startup message too.
@@ -69,19 +71,29 @@ def _child(connection, worker, job):
             # no artifact exists or remove it to make the failure look atomic.
             row["error"]["notes"].append("Worker failed before returning a complete receipt; outputs were not removed.")
             data = json.dumps(row).encode("utf-8")
-        connection.send_bytes(data)
+        send_receipt(connection, data)
     finally:
         connection.close()
 
 
-def _receive(connection):
+def _receive(connection, *, exited=False):
     try:
-        row = json.loads(connection.recv_bytes(_MAX_RECEIPT_BYTES))
-        if not isinstance(row, dict) or row.get("status") not in {"succeeded", "failed", "cancelled"}:
+        data = connection.drain()
+        if data is None:
+            if exited and not connection.budget_exhausted:
+                raise EOFError("worker exited before sending its full receipt")
+            return None
+        row = json.loads(data, parse_constant=_invalid_constant)
+        if (not isinstance(row, dict) or not isinstance(row.get("status"), str)
+                or row["status"] not in {"succeeded", "failed", "cancelled"}):
             raise ValueError("invalid worker outcome")
         return row
-    except (EOFError, OSError, ValueError) as error:
+    except (EOFError, OSError, ValueError, RecursionError) as error:
         return failure(RuntimeError("worker exited without a complete receipt: " + str(error)))
+
+
+def _invalid_constant(value):
+    raise ValueError("worker receipt contains nonfinite JSON: " + value)
 
 
 def _stop(active):
@@ -100,7 +112,7 @@ def _stop(active):
         # Drain large receipts while workers shut down; joining before reading
         # can deadlock a sender whose receipt exceeds the pipe buffer.
         for item in active.values():
-            if item[2] is None and item[1].poll():
+            if item[2] is None:
                 item[2] = _receive(item[1])
         time.sleep(0.01)
     for item in active.values():
@@ -111,8 +123,12 @@ def _stop(active):
         if process.is_alive():
             process.kill()
             process.join()
-        if item[2] is None and connection.poll():
-            item[2] = _receive(connection)
+        # Drain any complete buffered publication even after the process has
+        # exited. Each read is nonblocking and the total is capped at 8 MiB.
+        while item[2] is None:
+            item[2] = _receive(connection, exited=True)
+            if not connection.budget_exhausted:
+                break
 
 
 def run_process_jobs(jobs, worker, *, workers, continue_on_error=False,
@@ -145,7 +161,7 @@ def run_process_jobs(jobs, worker, *, workers, continue_on_error=False,
         while active or (not stopped and next_job < len(jobs)):
             while not stopped and next_job < len(jobs) and len(active) < workers:
                 index = next_job
-                receive, send = context.Pipe(duplex=False)
+                receive, send = receipt_channel()
                 process = context.Process(target=_child, args=(send, worker, jobs[index]))
                 try:
                     process.start()
@@ -186,7 +202,9 @@ def run_process_jobs(jobs, worker, *, workers, continue_on_error=False,
                 if not process.is_alive():
                     process.join()
                     if item[2] is None:
-                        item[2] = _receive(connection)
+                        item[2] = _receive(connection, exited=True)
+                        if item[2] is None:
+                            continue  # A bounded drain left buffered bytes.
                     rows[index] = item[2]
                     if rows[index]["status"] == "cancelled" or (
                             rows[index]["status"] != "succeeded" and not continue_on_error):
