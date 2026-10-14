@@ -151,12 +151,15 @@ def _inventory(destination: Path) -> list[dict[str, Any]]:
     return sorted(files, key=lambda item: item["path"])
 
 
-class BatchCheckpoint:
+class _CheckpointFile:
     """An exclusive, process-scoped journal owner. Lock files intentionally persist.
 
     Kernel locks release on process exit, including crashes, so resume does not
     need stale-lock deletion. Artifact publication remains exclusively native.
     """
+
+    schema = _SCHEMA
+    version = _VERSION
 
     def __init__(self, path: os.PathLike[str] | str, *, resume: bool, key: str):
         text = os.fspath(path)
@@ -204,8 +207,8 @@ class BatchCheckpoint:
                 raise ValueError("checkpoint cannot be a symlink")
             if self.resume:
                 document = _read_document(self.path)
-                if (not isinstance(document, dict) or document.get("schema") != _SCHEMA
-                        or type(document.get("version")) is not int or document["version"] != _VERSION):
+                if (not isinstance(document, dict) or document.get("schema") != self.schema
+                        or type(document.get("version")) is not int or document["version"] != self.version):
                     raise ValueError("unsupported batch checkpoint schema/version")
                 if document.get("key") != self.key:
                     raise ValueError("checkpoint resume_key does not match")
@@ -222,6 +225,39 @@ class BatchCheckpoint:
             # Closing releases both flock and Windows byte-range locks.
             self.lock.close()
             self.lock = None
+
+    def validate_destinations(self, destinations):
+        for destination in destinations:
+            for own_path in (self.path, self.lock_path):
+                if (own_path == destination or destination in own_path.parents
+                        or own_path in destination.parents):
+                    raise ValueError("checkpoint and its lock must be outside published artifacts")
+
+    def _publish(self, payload):
+        if self.lock is None:
+            raise RuntimeError("checkpoint must be opened before publication")
+        if len(payload) > _MAX_BYTES:
+            raise ValueError("checkpoint exceeds its byte budget")
+        descriptor, temporary = tempfile.mkstemp(prefix=self.path.name + ".", suffix=".tmp", dir=self.path.parent)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.path)
+            if os.name != "nt":
+                descriptor = os.open(self.path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+
+class BatchCheckpoint(_CheckpointFile):
+    """Per-scene plans over the shared locked, atomic checkpoint file owner."""
 
     @property
     def existing_destinations(self) -> set[Path]:
@@ -240,13 +276,6 @@ class BatchCheckpoint:
             return destinations
         except (KeyError, TypeError) as error:
             raise ValueError("invalid checkpoint outcomes") from error
-
-    def validate_destinations(self, destinations):
-        for destination in destinations:
-            for own_path in (self.path, self.lock_path):
-                if (own_path == destination or destination in own_path.parents
-                        or own_path in destination.parents):
-                    raise ValueError("checkpoint and its lock must be outside published artifacts")
 
     def prepare(self, jobs, destinations, options):
         # resume_key is an explicit caller assertion about source/assets. Keep
@@ -359,21 +388,4 @@ class BatchCheckpoint:
                 self.artifacts[outcome.name] = files
         payload = _json({"schema": _SCHEMA, "version": _VERSION, "key": self.key,
                          "plan": self.plan, "outcomes": rows, "artifacts": self.artifacts})
-        if len(payload) > _MAX_BYTES:
-            raise ValueError("checkpoint exceeds its byte budget")
-        descriptor, temporary = tempfile.mkstemp(prefix=self.path.name + ".", suffix=".tmp", dir=self.path.parent)
-        try:
-            with os.fdopen(descriptor, "wb") as stream:
-                stream.write(payload)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, self.path)
-            if os.name != "nt":
-                descriptor = os.open(self.path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-                try:
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
+        self._publish(payload)

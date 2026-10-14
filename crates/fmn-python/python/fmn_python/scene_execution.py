@@ -351,8 +351,10 @@ def install_scene_execution(native: Any) -> None:
                     namespace = vars(writer.scene)
                     collection = namespace.get("_fmn_subdivision_session")
                     recording = getattr(collection, "_current", None)
-                    if (recording is not None
-                            and namespace.get("_fmn_owned_render_session") is recording):
+                    replaying = (getattr(collection, "_replaying_segment", False)
+                                 and namespace.get("_fmn_owned_render_session") is None)
+                    if (recording is not None and (replaying
+                            or namespace.get("_fmn_owned_render_session") is recording)):
                         return None
                 return original(writer)
             return hook
