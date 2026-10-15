@@ -1604,6 +1604,19 @@ pub(crate) struct SegmentAccountingSink<'a> {
 }
 
 impl SceneSink for SegmentAccountingSink<'_> {
+    fn accepts_pure_segments(&self) -> bool {
+        self.inner.accepts_pure_segments()
+    }
+
+    fn capture_pure_segment(
+        &mut self,
+        segment: &fmn_anim::pure_frame::PureSegment,
+    ) -> std::result::Result<(), IntegrationError> {
+        // Accounting observes lifecycle boundaries, not individual pixels.
+        // Preserve the inner sink's explicit worker-program capability.
+        self.inner.capture_pure_segment(segment)
+    }
+
     fn event(&mut self, event: LifecycleEvent) -> std::result::Result<(), IntegrationError> {
         match event.phase {
             // The one-shot preflight point precedes the first capture.

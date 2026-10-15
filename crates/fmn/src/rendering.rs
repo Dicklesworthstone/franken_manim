@@ -1105,12 +1105,12 @@ impl RenderSink {
         };
         // A closed admission stream can hide the original worker failure.
         // Wake output waiters before joining raster/conversion workers.
-        if matches!(&error, RenderError::Pipeline(_)) {
+        if matches!(&error, RenderError::Pipeline(_) | RenderError::Emitter(_)) {
             if let Some(emitter) = &self.emitter {
                 emitter.cancel();
             }
             if let Some(pipeline) = self.pipeline.take() {
-                pipeline.finish()?;
+                return Err(compiled::admission_failure(error, pipeline.finish()));
             }
         }
         Err(error)
@@ -1353,6 +1353,39 @@ impl SceneSink for RenderSink {
         Ok(())
     }
 
+    fn accepts_pure_segments(&self) -> bool {
+        self.failure.is_none() && self.pipeline.is_some()
+    }
+
+    fn capture_pure_segment(
+        &mut self,
+        segment: &fmn_anim::pure_frame::PureSegment,
+    ) -> Result<(), IntegrationError> {
+        if let Some(error) = &self.failure {
+            return Err(IntegrationError::new("native-render", error.to_string()));
+        }
+        let result = (|| {
+            for frame in 1..=segment.frame_count() {
+                if self.next_sequence >= self.max_frames {
+                    return Err(RenderError::InvalidOptions("scene exceeded max_frames"));
+                }
+                let job = segment.job(frame).map_err(|_| {
+                    RenderError::InvalidOptions("pure segment lost its nominal sample")
+                })?;
+                self.pipeline.as_mut()
+                    .ok_or(RenderError::Pipeline(FrameStreamError::Closed))?
+                    .capture_pure(job, self.next_sequence)?;
+                self.next_sequence += 1;
+            }
+            Ok(())
+        })();
+        result.map_err(|error: RenderError| {
+            let message = error.to_string();
+            self.failure = Some(error);
+            IntegrationError::new("native-render", message)
+        })
+    }
+
     fn capture(
         &mut self,
         _reason: CaptureReason,
@@ -1361,8 +1394,17 @@ impl SceneSink for RenderSink {
         if let Some(error) = &self.failure {
             return Err(IntegrationError::new("native-render", error.to_string()));
         }
-        let stage = packet.materialize_stage();
-        self.render_stage(&stage).map_err(|error| {
+        let result = if self.next_sequence >= self.max_frames {
+            Err(RenderError::InvalidOptions("scene exceeded max_frames"))
+        } else {
+            self.pipeline.as_mut()
+                .ok_or(RenderError::Pipeline(FrameStreamError::Closed))
+                .and_then(|pipeline| pipeline.capture_packet(packet, self.next_sequence))
+        };
+        if result.is_ok() {
+            self.next_sequence += 1;
+        }
+        result.map_err(|error| {
             let message = error.to_string();
             self.failure = Some(error);
             IntegrationError::new("native-render", message)

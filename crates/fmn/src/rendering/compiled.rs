@@ -121,7 +121,7 @@ pub fn render_bundle_with_fs(
 // Cancellation caused by dropping an unsubmitted source permit is cleanup,
 // not an explanation of the original admission refusal. A real worker failure
 // discovered while joining, however, carries the root cause and drain counters.
-fn admission_failure(
+pub(super) fn admission_failure(
     admission: RenderError,
     joined: Result<PipelineStats, RenderError>,
 ) -> RenderError {
