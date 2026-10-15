@@ -542,6 +542,13 @@ impl EventInbox {
         self.len() == 0
     }
 
+    // With a sole handle and no queued payload, no external producer can
+    // appear during a borrowed Scene::play. Empty alone would be insufficient:
+    // another thread could submit its first event after admission.
+    pub(crate) fn is_exclusive_empty(&self) -> bool {
+        Arc::strong_count(&self.queue) == 1 && self.is_empty()
+    }
+
     pub(crate) fn drain_if_at_most(
         &self,
         capacity: u128,
