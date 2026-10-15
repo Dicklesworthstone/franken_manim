@@ -2,6 +2,7 @@
 
 use fmn_anim::RationalFrameClock;
 use fmn_platform::fs::{FileSystem, StdFs};
+use fmn_runtime::{FrameStreamError, PipelineError, PipelineStats};
 use fmn_scene::SceneRunReport;
 use fmn_scene::timeline_bundle::TimelineBundle;
 use std::sync::Arc;
@@ -92,15 +93,18 @@ pub fn render_bundle_with_fs(
             "compiled pipeline was already finalized",
         ))?;
         if let Err(error) = pipeline.capture_compiled(job, u64::from(index)) {
-            if matches!(&error, RenderError::Pipeline(_)) {
-                if let Some(emitter) = &sink.emitter {
-                    emitter.cancel();
-                }
-                if let Some(pipeline) = sink.pipeline.take() {
-                    pipeline.finish()?;
-                }
+            // A failed raster job drops its output reservation before the
+            // coordinator necessarily observes the stage failure. Admission
+            // can therefore first fail at EmitterHandle::reserve, not only at
+            // FrameStream::reserve. Always drain before selecting the error.
+            // Private outputs must never be published after either refusal.
+            if let Some(emitter) = &sink.emitter {
+                emitter.cancel();
             }
-            return Err(error);
+            return Err(match sink.pipeline.take() {
+                Some(pipeline) => admission_failure(error, pipeline.finish()),
+                None => error,
+            });
         }
     }
     let finished = sink.finish(None)?;
@@ -112,4 +116,22 @@ pub fn render_bundle_with_fs(
         frame_pipeline: finished.frame_pipeline,
         typesetting: fmn_tex::TypesetSessionReport::default(),
     })
+}
+
+// Cancellation caused by dropping an unsubmitted source permit is cleanup,
+// not an explanation of the original admission refusal. A real worker failure
+// discovered while joining, however, carries the root cause and drain counters.
+fn admission_failure(
+    admission: RenderError,
+    joined: Result<PipelineStats, RenderError>,
+) -> RenderError {
+    match joined {
+        Err(RenderError::Pipeline(FrameStreamError::Pipeline(failure)))
+            if matches!(&failure.error, PipelineError::Cancelled) =>
+        {
+            admission
+        }
+        Err(error) => error,
+        Ok(_) => admission,
+    }
 }
