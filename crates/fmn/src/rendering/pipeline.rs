@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::fmt;
 use std::sync::Mutex;
 
+use fmn_anim::pure_frame::PureFrameJob;
 use fmn_frame::convert::{
     rgba16f_to_bgra8, rgba16f_to_nv12_threaded, rgba16f_to_p010_threaded, rgba16f_to_rgba8,
 };
@@ -80,6 +81,11 @@ pub(super) enum NativeFrame {
     Vector(OwnedVectorFrame),
     Compiled {
         job: TimelineFrameJob,
+        config: RetainedFrameRendererConfig,
+        camera: Option<Camera>,
+    },
+    Pure {
+        job: PureFrameJob,
         config: RetainedFrameRendererConfig,
         camera: Option<Camera>,
     },
@@ -172,6 +178,68 @@ impl NativeFrameStages {
     }
 }
 
+impl NativeFrameStages {
+    fn rasterize_reconstructed(
+        &self,
+        stage: &fmn_mobject::Stage,
+        config: RetainedFrameRendererConfig,
+        camera: Option<Camera>,
+        team: &TeamPlan,
+        output: &mut FrameReservation,
+    ) -> Result<(), NativeFrameError> {
+        let TeamRole::Render(index) = team.role else {
+            return Err(NativeFrameError::WorkerState(
+                "compiled frame requires a render team",
+            ));
+        };
+        let mut worker = self
+            .workers
+            .get(index)
+            .ok_or(NativeFrameError::WorkerState(
+                "compiled frame has no worker state",
+            ))?
+            .lock()
+            .map_err(|_| {
+                NativeFrameError::WorkerState("compiled worker state was poisoned")
+            })?;
+        if let Some(camera) = camera {
+            if worker.compiled_camera.is_none() {
+                worker.compiled_camera = Some(
+                    RetainedFrameRenderer::new(config)
+                        .map_err(NativeFrameError::Renderer)?,
+                );
+            }
+            let raster = worker
+                .compiled_camera
+                .as_mut()
+                .ok_or(NativeFrameError::WorkerState(
+                    "missing compiled camera renderer",
+                ))?
+                .prepare_with_camera(stage, &camera)
+                .map_err(NativeFrameError::Renderer)?
+                .render(team.threads())
+                .map_err(NativeFrameError::Renderer)?;
+            convert_into(&raster, output.frame_mut(), team.threads())?;
+        } else {
+            if worker.compiled_vector.is_none() {
+                worker.compiled_vector = Some(
+                    VectorFrameCompiler::new(config).map_err(NativeFrameError::Renderer)?,
+                );
+            }
+            let frame = worker
+                .compiled_vector
+                .as_mut()
+                .ok_or(NativeFrameError::WorkerState(
+                    "missing compiled vector compiler",
+                ))?
+                .capture(stage, 0)
+                .map_err(NativeFrameError::Renderer)?;
+            worker.render_vector(&frame, team.threads(), output.frame_mut())?;
+        }
+        Ok(())
+    }
+}
+
 impl PipelineStages for NativeFrameStages {
     type Frame = NativeFrameJob;
     type Prepared = PreparedFrameJob;
@@ -243,55 +311,14 @@ impl PipelineStages for NativeFrameStages {
                     })
                     .map_err(NativeFrameError::Bundle)?;
                 let camera = recorded_camera.or(camera);
-                let TeamRole::Render(index) = team.role else {
-                    return Err(NativeFrameError::WorkerState(
-                        "compiled frame requires a render team",
-                    ));
-                };
-                let mut worker = self
-                    .workers
-                    .get(index)
-                    .ok_or(NativeFrameError::WorkerState(
-                        "compiled frame has no worker state",
-                    ))?
-                    .lock()
-                    .map_err(|_| {
-                        NativeFrameError::WorkerState("compiled worker state was poisoned")
-                    })?;
-                if let Some(camera) = camera {
-                    if worker.compiled_camera.is_none() {
-                        worker.compiled_camera = Some(
-                            RetainedFrameRenderer::new(config)
-                                .map_err(NativeFrameError::Renderer)?,
-                        );
-                    }
-                    let raster = worker
-                        .compiled_camera
-                        .as_mut()
-                        .ok_or(NativeFrameError::WorkerState(
-                            "missing compiled camera renderer",
-                        ))?
-                        .prepare_with_camera(&stage, &camera)
-                        .map_err(NativeFrameError::Renderer)?
-                        .render(team.threads())
-                        .map_err(NativeFrameError::Renderer)?;
-                    convert_into(&raster, output.frame_mut(), team.threads())?;
-                } else {
-                    if worker.compiled_vector.is_none() {
-                        worker.compiled_vector = Some(
-                            VectorFrameCompiler::new(config).map_err(NativeFrameError::Renderer)?,
-                        );
-                    }
-                    let frame = worker
-                        .compiled_vector
-                        .as_mut()
-                        .ok_or(NativeFrameError::WorkerState(
-                            "missing compiled vector compiler",
-                        ))?
-                        .capture(&stage, 0)
-                        .map_err(NativeFrameError::Renderer)?;
-                    worker.render_vector(&frame, team.threads(), output.frame_mut())?;
-                }
+                self.rasterize_reconstructed(&stage, config, camera, team, &mut output)?;
+            }
+            NativeFrame::Pure { job, config, camera } => {
+                // Only a closed prepared native program crosses here. Its
+                // per-frame animation and arena are created on this render
+                // team, not on the ordered preparation worker or scene owner.
+                let stage = job.materialize();
+                self.rasterize_reconstructed(&stage, config, camera, team, &mut output)?;
             }
             NativeFrame::Vector(frame) => {
                 let TeamRole::Render(index) = team.role else {
@@ -642,6 +669,39 @@ impl NativeFramePipeline {
                 "camera-bearing FMTL requires a camera-aware CPU execution plan",
             ));
         }
+        let frame = NativeFrame::Compiled {
+            job,
+            config: self.renderer_config,
+            camera: self.camera.clone(),
+        };
+        self.capture_ready(frame, sequence)
+    }
+
+    /// Queue one native pure-play sample for interpolation on its render team.
+    ///
+    /// The job shares a callback-free begin program, never a live scene or
+    /// trait object. Sampling, interpolation, compilation and rasterization
+    /// stay under the same in-flight permit and ordered output reservation.
+    /// Camera pose is frozen at admission; the worker uses the same Lumen
+    /// compiler and conversion kernels as compiled replay. Program/record
+    /// storage is additional to the existing pixel-only memory budget.
+    ///
+    /// # Errors
+    /// As `capture_compiled`; worker failures are recovered by `finish`.
+    pub fn capture_pure(
+        &mut self,
+        job: PureFrameJob,
+        sequence: u64,
+    ) -> Result<(), RenderError> {
+        let frame = NativeFrame::Pure {
+            job,
+            config: self.renderer_config,
+            camera: self.camera.clone(),
+        };
+        self.capture_ready(frame, sequence)
+    }
+
+    fn capture_ready(&mut self, frame: NativeFrame, sequence: u64) -> Result<(), RenderError> {
         let stream = self
             .stream
             .as_mut()
@@ -660,12 +720,7 @@ impl NativeFramePipeline {
                 "output ring layout must match the frame execution plan",
             ));
         }
-        let camera = self.camera.clone();
-        let frame = NativeFrameInput::Ready(NativeFrame::Compiled {
-            job,
-            config: self.renderer_config,
-            camera,
-        });
+        let frame = NativeFrameInput::Ready(frame);
         permit
             .submit(sequence, NativeFrameJob { frame, output })
             .map_err(|_| RenderError::Pipeline(FrameStreamError::Closed))

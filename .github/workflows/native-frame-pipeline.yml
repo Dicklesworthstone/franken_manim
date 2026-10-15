@@ -53,6 +53,9 @@ jobs:
       - name: Native pure interpolation worker ownership
         if: ${{ !cancelled() }}
         run: cargo test --locked -p fmn-anim --test pure_frame
+      - name: Live pure program pipeline and publication
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p fmn --test native_pure_pipeline
       - name: CLI unit and shipping binary camera and compiled-playback regressions
         if: ${{ !cancelled() }}
         run: cargo test --locked -p fmn-cli --features cli,batch --tests
