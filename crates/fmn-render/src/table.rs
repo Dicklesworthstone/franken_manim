@@ -36,6 +36,11 @@
 //! path and N instances — and the same mechanism serves dots, arrow tips,
 //! repeated graph nodes and copied decorations.
 
+mod shared;
+
+pub(crate) use shared::SharedRows;
+use shared::SharedIndex;
+
 use crate::hint::Hint;
 use crate::texture::{SamplerPolicy, Texture, TextureEncoding, TextureWrap};
 use fmn_cache::CacheKey;
@@ -403,10 +408,13 @@ impl Default for Style {
 }
 
 /// Deduplicated styles, and the index that made them unique.
+///
+/// Cloned frame generations share both until a new style is inserted.
+/// Exact-bit interning and public row indices are unchanged.
 #[derive(Debug, Clone, Default)]
 pub struct StyleTable {
-    rows: Vec<Style>,
-    index: HashMap<Vec<u64>, u32>,
+    rows: SharedRows<Style>,
+    index: SharedIndex<Vec<u64>, u32>,
     profile_knots: usize,
 }
 
@@ -788,10 +796,14 @@ pub struct Instance {
 /// in one type because an instance without its shape is not a thing, and because
 /// the dedup statistic — N occurrences, M compiled shapes — is the number this
 /// mechanism exists to move and should be readable in one place.
+///
+/// Cloning shares compiled outlines, arc-length tables and the dedup index.
+/// Painter-ordered instances remain private to each frame generation; changing
+/// placement or style never copies the shared geometry.
 #[derive(Debug, Clone, Default)]
 pub struct ShapeTable {
-    shapes: Vec<Shape>,
-    by_digest: HashMap<Digest, u32>,
+    shapes: SharedRows<Shape>,
+    by_digest: SharedIndex<Digest, u32>,
     instances: Vec<Instance>,
 }
 
@@ -1049,7 +1061,8 @@ pub fn compile_shape(
         let len = lengths.get(i).copied().unwrap_or(0.0);
         if breaks.contains(&(2 * i)) {
             // Not a drawn piece: dropping it is what keeps a stroked annulus
-            // from growing a radial spoke between its two rings.
+            // from growing a radial spoke between its two rings to its
+            // inner one.
             opens_subpath = true;
             continue;
         }

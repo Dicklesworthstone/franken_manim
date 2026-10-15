@@ -576,7 +576,15 @@ mod tests {
                 2 => {
                     stage.shift(front, [1.0, 0.0, 0.0]);
                 }
-                3 => stage.set_z_index(front, 1, false),
+                3 => {
+                    // z_index takes effect on the next scene add, not at
+                    // assignment. Exercise a real painter reorder here.
+                    assert_eq!(stage.draw_plan().items()[0].mob, front);
+                    stage.set_z_index(front, 1, false);
+                    assert_eq!(stage.draw_plan().items()[0].mob, front);
+                    stage.add_to_scene(front).unwrap();
+                    assert_eq!(stage.draw_plan().items()[0].mob, back);
+                }
                 _ => {}
             }
             frames.push(compiler.capture(&stage, 0).unwrap());
@@ -602,6 +610,82 @@ mod tests {
                     .render_cached(threads, &mut arena, &mut cache)
                     .unwrap();
                 assert_eq!(pixels.as_bytes(), expected[index]);
+            }
+        }
+    }
+
+    #[test]
+    fn changing_frames_share_interned_outlines_and_detach_only_written_tables() {
+        let mut stage = Stage::new();
+        let mob = stage.add(vector());
+        stage.add_to_scene(mob).unwrap();
+        let mut compiler = VectorFrameCompiler::new(config()).unwrap();
+        let first = compiler.capture(&stage, 0).unwrap();
+        let shape_rows = first.plan.shapes().shapes().as_ptr();
+        let style_rows = first.plan.styles().rows().as_ptr();
+        let lengths = first.plan.shapes().shapes()[0]
+            .arc_length
+            .curve_lengths()
+            .as_ptr();
+        let mut frames = vec![first];
+        let mut expected = Vec::new();
+        let mut serial = RetainedFrameRenderer::new(config()).unwrap();
+        serial.render(&stage, 0).unwrap();
+        expected.push(serial.frame().as_bytes().to_vec());
+
+        for step in 0..6 {
+            stage.shift(mob, [0.125, 0.0, 0.0]);
+            if step == 3 {
+                assert!(stage.get_mut(mob).unwrap().buffer.write_range(
+                    "fill_rgba",
+                    0,
+                    &[0.1, 0.8, 0.2, 0.7].repeat(3),
+                ));
+            }
+            let frame = compiler.capture(&stage, 0).unwrap();
+            assert!(!Arc::ptr_eq(&frames.last().unwrap().plan, &frame.plan));
+            assert_eq!(frame.plan.shapes().shapes().as_ptr(), shape_rows);
+            assert_eq!(
+                frame.plan.shapes().shapes()[0]
+                    .arc_length
+                    .curve_lengths()
+                    .as_ptr(),
+                lengths
+            );
+            if step < 3 {
+                assert_eq!(frame.plan.styles().rows().as_ptr(), style_rows);
+            } else {
+                assert_ne!(frame.plan.styles().rows().as_ptr(), style_rows);
+            }
+            assert_eq!(compiler.stats().shapes_compiled, 0);
+            frames.push(frame);
+            serial.render(&stage, 0).unwrap();
+            expected.push(serial.frame().as_bytes().to_vec());
+        }
+        // A geometry miss detaches the shape table without rewriting any
+        // earlier frame's rows or their arc-length storage.
+        assert!(
+            stage
+                .get_mut(mob)
+                .unwrap()
+                .buffer
+                .write_range("point", 1, &[0.0, 2.5, 0.0])
+        );
+        let changed = compiler.capture(&stage, 0).unwrap();
+        assert_ne!(changed.plan.shapes().shapes().as_ptr(), shape_rows);
+        assert_eq!(compiler.stats().shapes_compiled, 1);
+        frames.push(changed);
+        serial.render(&stage, 0).unwrap();
+        expected.push(serial.frame().as_bytes().to_vec());
+        assert_ne!(expected[0], *expected.last().unwrap());
+        for threads in [1, 4, 16] {
+            let mut arena = FrameArena::new();
+            let mut cache = PixelTileCache::new();
+            for index in (0..frames.len()).rev() {
+                let (actual, _) = frames[index]
+                    .render_cached(threads, &mut arena, &mut cache)
+                    .unwrap();
+                assert_eq!(actual.as_bytes(), expected[index]);
             }
         }
     }
