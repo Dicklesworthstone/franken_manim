@@ -63,12 +63,16 @@ impl SharedMonoTable {
 
 /// Serial retained compiler whose captured frames own immutable IR generations.
 ///
-/// Compiled shapes/styles retain their normal revision-based reuse. An IR
-/// generation is copied only when a subsequent capture mutates it while an
-/// earlier worker still holds it; no live arena or callback is made `Send`.
+/// An unshared plan is synchronized in place. With in-flight readers, static
+/// captures retain one mutable working plan and reuse the immutable generation
+/// instead of cloning its geometry and compiler scratch on every capture.
+/// Changed captures publish that working plan by moving it, not copying it
+/// again. Every capture still synchronizes live views and revision metadata;
+/// no live arena or callback is made `Send`.
 #[derive(Debug)]
 pub struct VectorFrameCompiler {
     plan: Arc<RenderPlan>,
+    working: Option<RenderPlan>,
     mono: Option<Arc<SharedMonoTable>>,
     config: RetainedFrameRendererConfig,
 }
@@ -85,6 +89,7 @@ impl VectorFrameCompiler {
         config.frame.layout()?;
         Ok(Self {
             plan: Arc::new(RenderPlan::new()),
+            working: None,
             mono: None,
             config,
         })
@@ -112,7 +117,27 @@ impl VectorFrameCompiler {
                 program: item.key.program,
             });
         }
-        Arc::make_mut(&mut self.plan).sync(stage, camera_revision)?;
+        if let Some(plan) = Arc::get_mut(&mut self.plan) {
+            // Once the last worker releases this generation, reclaim the
+            // authoritative compiler state without copying either plan.
+            if let Some(working) = self.working.take() {
+                *plan = working;
+            }
+            plan.sync(stage, camera_revision)?;
+        } else {
+            let working = self
+                .working
+                .get_or_insert_with(|| self.plan.as_ref().clone());
+            working.sync(stage, camera_revision)?;
+            // Content identity alone omits cache volatility, revision folds
+            // and inspector handles. Preserve all instance metadata too.
+            if working.identity() != self.plan.identity()
+                || working.epoch() != self.plan.epoch()
+                || working.shapes().instances() != self.plan.shapes().instances()
+            {
+                self.plan = Arc::new(self.working.take().expect("synchronized working plan"));
+            }
+        }
         let map = self.config.frame.map;
         let mono = self
             .mono
@@ -131,7 +156,10 @@ impl VectorFrameCompiler {
     /// Work counters from the authoritative retained-plan synchronization.
     #[must_use]
     pub fn stats(&self) -> SyncStats {
-        self.plan.stats()
+        match &self.working {
+            Some(working) => working.stats(),
+            None => self.plan.stats(),
+        }
     }
 }
 
@@ -340,6 +368,120 @@ mod tests {
         let (after, stats) = second.render_cached(4, &mut arena, &mut cache).unwrap();
         assert_eq!(before.as_bytes(), after.as_bytes());
         assert!(stats.cache.hits > 0);
+    }
+
+    #[test]
+    fn static_captures_share_ir_and_move_working_storage_on_the_next_edit() {
+        let mut stage = Stage::new();
+        let mob = stage.add(vector());
+        stage.add_to_scene(mob).unwrap();
+        let mut compiler = VectorFrameCompiler::new(config()).unwrap();
+        let first = compiler.capture(&stage, 0).unwrap();
+        let second = compiler.capture(&stage, 0).unwrap();
+        assert!(Arc::ptr_eq(&first.plan, &second.plan));
+        let storage = compiler.working.as_ref().unwrap().segments().as_ptr();
+        for _ in 0..4 {
+            let frame = compiler.capture(&stage, 0).unwrap();
+            assert!(Arc::ptr_eq(&first.plan, &frame.plan));
+            assert_eq!(compiler.stats().shapes_compiled, 0);
+            assert_eq!(compiler.stats().shapes_reused, 1);
+            assert_eq!(compiler.working.as_ref().unwrap().segments().as_ptr(), storage);
+        }
+        stage.shift(mob, [1.0, 0.0, 0.0]);
+        let changed = compiler.capture(&stage, 0).unwrap();
+        assert!(!Arc::ptr_eq(&first.plan, &changed.plan));
+        assert!(compiler.working.is_none());
+        assert_eq!(changed.plan.segments().as_ptr(), storage, "publish must move");
+        let mut serial = RetainedFrameRenderer::new(config()).unwrap();
+        serial.render(&stage, 0).unwrap();
+        let (actual, _) = changed
+            .render_cached(4, &mut FrameArena::new(), &mut PixelTileCache::new())
+            .unwrap();
+        assert_eq!(actual.as_bytes(), serial.frame().as_bytes());
+    }
+
+    #[test]
+    fn unshared_captures_reclaim_working_state_without_an_ir_copy() {
+        let mut stage = Stage::new();
+        let mob = stage.add(vector());
+        stage.add_to_scene(mob).unwrap();
+        let mut compiler = VectorFrameCompiler::new(config()).unwrap();
+        let first = compiler.capture(&stage, 0).unwrap();
+        let generation = Arc::as_ptr(&first.plan);
+        drop(first);
+        stage.shift(mob, [0.5, 0.0, 0.0]);
+        let second = compiler.capture(&stage, 0).unwrap();
+        assert_eq!(Arc::as_ptr(&second.plan), generation);
+        assert!(compiler.working.is_none());
+        let third = compiler.capture(&stage, 0).unwrap();
+        let storage = compiler.working.as_ref().unwrap().segments().as_ptr();
+        drop(second);
+        drop(third);
+        let reclaimed = compiler.capture(&stage, 0).unwrap();
+        assert_eq!(Arc::as_ptr(&reclaimed.plan), generation);
+        assert_eq!(reclaimed.plan.segments().as_ptr(), storage);
+        assert!(compiler.working.is_none());
+    }
+
+    #[test]
+    fn writable_style_views_preserve_cache_volatility_and_observe_every_edit() {
+        let mut stage = Stage::new();
+        let mob = stage.add(vector());
+        stage.add_to_scene(mob).unwrap();
+        let mut compiler = VectorFrameCompiler::new(config()).unwrap();
+        let first = compiler.capture(&stage, 0).unwrap();
+        let view = stage
+            .get_mut(mob)
+            .unwrap()
+            .buffer
+            .export_field_view("fill_rgba", true)
+            .unwrap();
+        let volatile = compiler.capture(&stage, 0).unwrap();
+        assert!(!Arc::ptr_eq(&first.plan, &volatile.plan));
+        assert!(!first.plan.shapes().instances()[0].volatile);
+        assert!(volatile.plan.shapes().instances()[0].volatile);
+        let repeated = compiler.capture(&stage, 0).unwrap();
+        assert!(Arc::ptr_eq(&volatile.plan, &repeated.plan));
+        assert_eq!(compiler.stats().styles_rebuilt, 1);
+
+        for index in 0..3 {
+            assert!(view.write(index, "fill_rgba", &[1.0, 0.1, 0.2, 0.9]));
+        }
+        let edited = compiler.capture(&stage, 0).unwrap();
+        assert!(!Arc::ptr_eq(&volatile.plan, &edited.plan));
+        assert!(edited.plan.shapes().instances()[0].volatile);
+        let mut serial = RetainedFrameRenderer::new(config()).unwrap();
+        serial.render(&stage, 0).unwrap();
+        let mut arena = FrameArena::new();
+        let mut cache = PixelTileCache::new();
+        let (old, _) = first.render_cached(1, &mut arena, &mut cache).unwrap();
+        let (actual, _) = edited.render_cached(4, &mut arena, &mut cache).unwrap();
+        assert_eq!(actual.as_bytes(), serial.frame().as_bytes());
+        assert_ne!(actual.as_bytes(), old.as_bytes());
+
+        drop(view);
+        let detached = compiler.capture(&stage, 0).unwrap();
+        assert!(!Arc::ptr_eq(&edited.plan, &detached.plan));
+        assert!(!detached.plan.shapes().instances()[0].volatile);
+        let (after, _) = detached.render_cached(4, &mut arena, &mut cache).unwrap();
+        assert_eq!(after.as_bytes(), actual.as_bytes());
+    }
+
+    #[test]
+    fn identical_replacement_geometry_keeps_the_new_instance_handle() {
+        let mut stage = Stage::new();
+        let old = stage.add(vector());
+        stage.add_to_scene(old).unwrap();
+        let mut compiler = VectorFrameCompiler::new(config()).unwrap();
+        let first = compiler.capture(&stage, 0).unwrap();
+        stage.remove_from_scene(old);
+        let new = stage.add(vector());
+        stage.add_to_scene(new).unwrap();
+        let replacement = compiler.capture(&stage, 0).unwrap();
+        assert!(!Arc::ptr_eq(&first.plan, &replacement.plan));
+        assert_eq!(first.plan.shapes().instances()[0].mob, old);
+        assert_eq!(replacement.plan.shapes().instances()[0].mob, new);
+        assert!(Arc::ptr_eq(&first.mono, &replacement.mono));
     }
 
     #[test]
