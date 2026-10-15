@@ -23,6 +23,7 @@ use std::cell::RefCell;
 /// It is NOT a rollback checkpoint or permission to evaluate animations on a
 /// worker: materialization intentionally installs no updater registrations.
 /// Use [`Snapshot`] for undo/replay, where retaining those callbacks matters.
+#[derive(Clone)]
 pub struct FrozenRenderState {
     stage_id: u64,
     next_updater_id: u64,
@@ -52,6 +53,32 @@ struct FrozenRenderEntry {
     render_primitive: RenderPrimitive,
     image: Option<ImageResource>,
     image_revision: u64,
+}
+
+impl Clone for FrozenRenderEntry {
+    fn clone(&self) -> Self {
+        Self {
+            buffer: self.buffer.snapshot_clone(),
+            placement: self.placement,
+            placement_revision: self.placement_revision,
+            submobjects: self.submobjects.clone(),
+            parents: self.parents.clone(),
+            updating_suspended: self.updating_suspended,
+            is_animating: self.is_animating,
+            tracker: self.tracker,
+            target: self.target,
+            saved_state: self.saved_state,
+            padding_source: self.padding_source,
+            pins: self.pins,
+            pending_delete: self.pending_delete,
+            uniforms: self.uniforms,
+            z_index: self.z_index,
+            shape: self.shape,
+            render_primitive: self.render_primitive,
+            image: self.image.clone(),
+            image_revision: self.image_revision,
+        }
+    }
 }
 
 impl FrozenRenderEntry {

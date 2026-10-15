@@ -936,6 +936,17 @@ pub trait Animation {
         AnimationSignature::Unclassified
     }
 
+    /// Freeze a closed native interpolation mechanism after `begin`.
+    ///
+    /// This is a stronger capability than `effect_signature`: arbitrary
+    /// trait objects and their callbacks never cross to a frame worker.
+    /// Custom animations default to the serial path. Implementations must
+    /// describe the exact prepared interpolation, without running lifecycle
+    /// hooks again; the segment additionally checks updaters and aliasing.
+    fn freeze_interpolation(&self) -> Option<crate::pure_frame::FrozenAnimation> {
+        None
+    }
+
     /// Whether interpolation can be sampled again after restoring this
     /// animation's prepared output family, while its existing begin-time
     /// copies remain live. The caller must also rule out updater-owned state.

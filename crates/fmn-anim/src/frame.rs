@@ -447,6 +447,15 @@ impl OpenSegment {
         self.stepped
     }
 
+    pub(crate) fn is_at_begin(&self) -> bool {
+        self.stepped == 0
+            && self.current_sample.is_none()
+            && self.prepared.is_none()
+            && self.next_animation == 0
+            && !self.animations_finished
+            && !self.final_updaters_completed
+    }
+
     /// Mark the prepared frame's whole scene-updater phase as completed by
     /// an unborrowed host. Completion still dispatches events and captures.
     ///
@@ -1064,25 +1073,29 @@ pub fn play_segment_with_boundary(
     boundary: &mut dyn FnMut(&mut Stage, RationalTime),
     emit: &mut dyn FnMut(FramePacket),
 ) -> Result<SegmentReport, AnimError> {
-    let prologue = play_prologue(stage, clock, animations, skip)?;
-    let segment = prologue.segment;
-    let report = prologue.report(SegmentKind::Play);
-    // Once the prologue succeeds, the finish/cleanup phase runs EXACTLY once
-    // in both modes, error or not (fm-tqy4): the segment body's earliest
-    // driver/deferred error is captured — never `?`-propagated past
-    // `finish_animations` — so a failing composition is still unmarked from
-    // animating, removers apply, and the final zero-dt updater pass runs
-    // before the same error surfaces that skip mode reports.
-    let mut open = OpenSegment {
-        report: report.clone(),
-        segment,
-        stepped: 0,
-        current_sample: None,
-        next_animation: 0,
-        prepared: None,
-        animations_finished: false,
-        final_updaters_completed: false,
-    };
+    let open = open_play_with_mode(stage, clock, animations, skip)?;
+    drive_open_play(stage, clock, rng, animations, skip, boundary, emit, open)
+}
+
+// Shared serial continuation, including failure cleanup, for ordinary play and
+// a pure-dispatch refusal AFTER begin. Never repeat begin or lose a deferred
+// composition error merely because a sink declined compact frame jobs.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn drive_open_play(
+    stage: &mut Stage,
+    clock: &mut RationalFrameClock,
+    rng: &RngRoot,
+    animations: &mut [Box<dyn Animation>],
+    skip: bool,
+    boundary: &mut dyn FnMut(&mut Stage, RationalTime),
+    emit: &mut dyn FnMut(FramePacket),
+    mut open: OpenSegment,
+) -> Result<SegmentReport, AnimError> {
+    let report = open.report.clone();
+    let segment = open.segment;
+    // Once begin succeeds, finish/cleanup runs EXACTLY once, error or not.
+    // In particular a deferred failure during partial preparation must not be
+    // returned past the epilogue (fm-tqy4).
     // Both modes use the exact same stepped driver. Skip changes one thing:
     // `complete_play_frame` suppresses capture/emission. In particular, a
     // composition's deferred error is observed before the same clock advance
@@ -1116,7 +1129,7 @@ pub fn play_segment_with_boundary(
 /// under skip (the Reference's `override_skip_animations`) — capture stays
 /// off while skipping. Returns the segment's [`SegmentReport`]; a stop
 /// condition demotes to stateful by vocabulary (its callback reads
-/// per-frame state and decides the segment's length).
+/// per-frame state and decides the segment's length dynamically).
 ///
 /// # Errors
 /// [`AnimError::Clock`] for a non-finite or oversized duration.
