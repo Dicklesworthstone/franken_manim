@@ -70,6 +70,8 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           cargo test --locked -p fmn-render --lib vector_frame
+          cargo test --locked -p fmn-render --lib table::shared
+          cargo test --locked -p fmn-render --lib plan::generation
           cargo test --locked -p fmn-render --lib retained
       - name: Native executable examples
         if: ${{ !cancelled() }}

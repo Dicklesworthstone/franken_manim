@@ -84,6 +84,14 @@ impl<T: Clone> SharedRows<T> {
     pub(crate) fn push(&mut self, row: T) {
         Arc::make_mut(&mut self.0).push(row);
     }
+
+    pub(crate) fn append(&mut self, rows: &mut Vec<T>) {
+        // Empty compiled shapes carry no segments and must not detach an
+        // otherwise shared table. Nonempty appends follow try_reserve_exact.
+        if !rows.is_empty() {
+            Arc::make_mut(&mut self.0).append(rows);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -153,10 +161,13 @@ mod tests {
         let frozen = rows.clone();
         rows.try_reserve(0).unwrap();
         rows.try_reserve_exact(0).unwrap();
+        rows.append(&mut Vec::new());
         assert!(Arc::ptr_eq(&rows.0, &frozen.0));
         rows.try_reserve_exact(1).unwrap();
         assert!(!Arc::ptr_eq(&rows.0, &frozen.0));
-        rows.push(40);
+        let mut pending = vec![40];
+        rows.append(&mut pending);
+        assert!(pending.is_empty());
         assert_eq!(&*rows, &[10, 20, 30, 40]);
         assert_eq!(&*frozen, &[10, 20, 30]);
         rows.clear();

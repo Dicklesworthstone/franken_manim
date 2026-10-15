@@ -25,10 +25,12 @@
 //! `MirrorSet::materializations` and `CachedArcLength::rebuilds` are the same
 //! idea one layer down, and the same reason.
 
+mod generation;
+
 use crate::hint::Hint;
 use crate::revision::{Axis, Dependency, Revisions};
 use crate::table::{
-    ImageTable, Instance, Segment, Shape, ShapeTable, Style, StyleTable, TableError,
+    ImageTable, Instance, Segment, Shape, ShapeTable, SharedRows, Style, StyleTable, TableError,
     check_row_count, compile_shape, shape_digest,
 };
 use fmn_core::types::Vec3;
@@ -426,9 +428,13 @@ struct Retained {
 }
 
 /// The compiled, backend-neutral render IR for a scene, retained across frames.
-#[derive(Debug, Clone)]
+///
+/// Clones share immutable geometry and interned styles until insertion. They
+/// copy frame-specific instances and revision dependencies, but not compiler
+/// scratch. Updating or compacting one generation cannot modify another.
+#[derive(Debug)]
 pub struct RenderPlan {
-    segments: Vec<Segment>,
+    segments: SharedRows<Segment>,
     styles: StyleTable,
     shapes: ShapeTable,
     images: ImageTable,
@@ -476,7 +482,7 @@ impl Default for PlanIdentity {
 impl Default for RenderPlan {
     fn default() -> Self {
         let mut plan = Self {
-            segments: Vec::new(),
+            segments: SharedRows::default(),
             styles: StyleTable::default(),
             shapes: ShapeTable::default(),
             images: ImageTable::default(),
@@ -1175,7 +1181,7 @@ impl RenderPlan {
         let mut hash = IdentityHasher::new(b"fmn-render/geometry-identity/v1");
 
         hash.u64(self.segments.len() as u64);
-        for segment in &self.segments {
+        for segment in self.segments.iter() {
             for point in [segment.p0, segment.p1, segment.p2] {
                 for component in point {
                     hash.f64(component);
