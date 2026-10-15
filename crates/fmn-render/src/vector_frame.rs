@@ -9,11 +9,50 @@ use std::sync::{Arc, Mutex, OnceLock};
 use fmn_frame::{FrameBuffer, FrameError, FrameLayout};
 use fmn_mobject::{ProgramKind, Stage};
 
-use crate::plan::GeometryIdentity;
+use crate::plan::{GeometryIdentity, PlanIdentity};
 use crate::{
-    Binning, CachedRenderStats, FrameArena, FrameJob, MonoTable, MonoTableError, PixelTileCache,
-    RenderPlan, RetainedFrameRendererConfig, RetainedFrameRendererError, ScreenMap, SyncStats,
+    Binning, BinningError, CachedRenderStats, FrameArena, FrameJob, MonoTable, MonoTableError,
+    PixelTileCache, RenderPlan, RetainedFrameRendererConfig, RetainedFrameRendererError, ScreenMap,
+    SyncStats,
 };
+
+/// A single successful preparation shared by concurrent readers. Failed builds
+/// leave the cell empty and retryable; initialized readers never take the lock.
+#[derive(Debug)]
+struct LazyTable<T> {
+    value: OnceLock<T>,
+    building: Mutex<()>,
+}
+
+impl<T> LazyTable<T> {
+    fn new() -> Self {
+        Self {
+            value: OnceLock::new(),
+            building: Mutex::new(()),
+        }
+    }
+
+    fn get(&self) -> Option<&T> {
+        self.value.get()
+    }
+
+    fn get_or_try_init<E>(&self, build: impl FnOnce() -> Result<T, E>) -> Result<&T, E> {
+        if let Some(table) = self.get() {
+            return Ok(table);
+        }
+        // Only initialization is guarded. A panic cannot corrupt a partially
+        // published table: the complete value is moved into the cell below.
+        let _building = self
+            .building
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(table) = self.get() {
+            return Ok(table);
+        }
+        let table = build()?;
+        Ok(self.value.get_or_init(|| table))
+    }
+}
 
 /// One lazily prepared fill table shared by frames with identical geometry.
 ///
@@ -25,8 +64,7 @@ use crate::{
 struct SharedMonoTable {
     geometry: GeometryIdentity,
     map: ScreenMap,
-    table: OnceLock<MonoTable>,
-    building: Mutex<()>,
+    table: LazyTable<MonoTable>,
 }
 
 impl SharedMonoTable {
@@ -34,8 +72,7 @@ impl SharedMonoTable {
         Self {
             geometry: plan.geometry_identity(),
             map,
-            table: OnceLock::new(),
-            building: Mutex::new(()),
+            table: LazyTable::new(),
         }
     }
 
@@ -44,20 +81,43 @@ impl SharedMonoTable {
     }
 
     fn get(&self, plan: &RenderPlan) -> Result<&MonoTable, MonoTableError> {
-        if let Some(table) = self.table.get() {
-            return Ok(table);
+        self.table.get_or_try_init(|| MonoTable::build(plan, self.map))
+    }
+}
+
+/// Painter-ordered tile commands depend on the full plan, unlike fill geometry.
+/// In particular, changing opacity must invalidate prior occlusion pruning.
+#[derive(Debug)]
+struct SharedBinning {
+    plan: PlanIdentity,
+    config: RetainedFrameRendererConfig,
+    table: LazyTable<Binning>,
+}
+
+impl SharedBinning {
+    fn new(plan: &RenderPlan, config: RetainedFrameRendererConfig) -> Self {
+        Self {
+            plan: plan.identity(),
+            config,
+            table: LazyTable::new(),
         }
-        // The mutex protects initialization only; readers of a published table
-        // never lock. There is no mutable payload to recover after a panic.
-        let _building = self
-            .building
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if let Some(table) = self.table.get() {
-            return Ok(table);
-        }
-        let table = MonoTable::build(plan, self.map)?;
-        Ok(self.table.get_or_init(|| table))
+    }
+
+    fn matches(&self, plan: &RenderPlan, config: RetainedFrameRendererConfig) -> bool {
+        self.plan == plan.identity() && self.config == config
+    }
+
+    fn get(&self, plan: &RenderPlan) -> Result<&Binning, BinningError> {
+        self.table.get_or_try_init(|| {
+            let mut binning = Binning::build(
+                plan,
+                self.config.frame.viewport,
+                self.config.tiling,
+                self.config.frame.map,
+            )?;
+            binning.prune_occluded(plan)?;
+            Ok(binning)
+        })
     }
 }
 
@@ -74,6 +134,7 @@ pub struct VectorFrameCompiler {
     plan: Arc<RenderPlan>,
     working: Option<RenderPlan>,
     mono: Option<Arc<SharedMonoTable>>,
+    binning: Option<Arc<SharedBinning>>,
     config: RetainedFrameRendererConfig,
 }
 
@@ -91,6 +152,7 @@ impl VectorFrameCompiler {
             plan: Arc::new(RenderPlan::new()),
             working: None,
             mono: None,
+            binning: None,
             config,
         })
     }
@@ -145,9 +207,16 @@ impl VectorFrameCompiler {
         if !mono.matches(&self.plan, map) {
             *mono = Arc::new(SharedMonoTable::new(&self.plan, map));
         }
+        let binning = self
+            .binning
+            .get_or_insert_with(|| Arc::new(SharedBinning::new(&self.plan, self.config)));
+        if !binning.matches(&self.plan, self.config) {
+            *binning = Arc::new(SharedBinning::new(&self.plan, self.config));
+        }
         Ok(OwnedVectorFrame {
             plan: Arc::clone(&self.plan),
             mono: Arc::clone(mono),
+            binning: Arc::clone(binning),
             config: self.config,
             camera_revision,
         })
@@ -168,11 +237,13 @@ impl VectorFrameCompiler {
 /// The scheduler owns the number of these in flight. Geometry is governed by
 /// `RenderPlan`'s existing limits, separately from pixel-storage admission.
 /// Frames with unchanged geometry share a lazily built monotone fill table;
-/// the compiler retains only its latest generation, plus any in-flight owners.
+/// frames with unchanged draw content also share pruned tile-command lists.
+/// Each cache retains only its latest generation, plus any in-flight owners.
 #[derive(Debug, Clone)]
 pub struct OwnedVectorFrame {
     plan: Arc<RenderPlan>,
     mono: Arc<SharedMonoTable>,
+    binning: Arc<SharedBinning>,
     config: RetainedFrameRendererConfig,
     camera_revision: u64,
 }
@@ -234,18 +305,12 @@ impl OwnedVectorFrame {
             return Err(RetainedFrameRendererError::InvalidThreads);
         }
         let mono = self.mono.get(&self.plan)?;
-        let mut binning = Binning::build(
-            &self.plan,
-            self.config.frame.viewport,
-            self.config.tiling,
-            self.config.frame.map,
-        )?;
-        binning.prune_occluded(&self.plan)?;
+        let binning = self.binning.get(&self.plan)?;
         let job = FrameJob::with_identity_in(
             arena,
             &self.plan,
             mono,
-            &binning,
+            binning,
             self.config.frame,
             self.config.engine,
         )?;
@@ -256,9 +321,12 @@ impl OwnedVectorFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EngineIdentity, FrameConfig, RetainedFrameRenderer, ScreenMap, Tiling, Viewport};
+    use crate::{
+        BinningLimits, EngineIdentity, FrameConfig, RetainedFrameRenderer, ScreenMap, Tiling,
+        Viewport,
+    };
     use fmn_core::color::LinearRgba;
-    use fmn_mobject::{Mobject, RecordBuffer, RecordSchema, RenderPrimitive};
+    use fmn_mobject::{Mobject, RecordBuffer, RecordSchema, RenderPrimitive, ShapeTag};
 
     fn config() -> RetainedFrameRendererConfig {
         RetainedFrameRendererConfig {
@@ -360,9 +428,11 @@ mod tests {
         let mut cache = PixelTileCache::new();
         let first = compiler.capture(&stage, 0).unwrap();
         assert!(first.mono.table.get().is_none(), "capture must stay lazy");
+        assert!(first.binning.table.get().is_none());
         let (before, _) = first.render_cached(1, &mut arena, &mut cache).unwrap();
         let second = compiler.capture(&stage, 0).unwrap();
         assert!(Arc::ptr_eq(&first.mono, &second.mono));
+        assert!(Arc::ptr_eq(&first.binning, &second.binning));
         assert_eq!(compiler.stats().shapes_compiled, 0);
         assert_eq!(compiler.stats().shapes_reused, 1);
         let (after, stats) = second.render_cached(4, &mut arena, &mut cache).unwrap();
@@ -516,6 +586,10 @@ mod tests {
         for frame in &frames {
             assert!(Arc::ptr_eq(&frames[0].mono, &frame.mono));
             assert!(frame.mono.table.get().is_none());
+            assert!(frame.binning.table.get().is_none());
+        }
+        for pair in frames.windows(2) {
+            assert!(!Arc::ptr_eq(&pair[0].binning, &pair[1].binning));
         }
         assert_ne!(expected[0], expected[1]);
         assert_ne!(expected[1], expected[2]);
@@ -580,7 +654,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_frames_initialize_one_shared_fill_table() {
+    fn concurrent_frames_initialize_shared_preparation() {
         let mut stage = Stage::new();
         let mob = stage.add(vector());
         stage.add_to_scene(mob).unwrap();
@@ -590,6 +664,7 @@ mod tests {
         serial.render(&stage, 0).unwrap();
         let expected = serial.frame().as_bytes().to_vec();
         assert!(frames[0].mono.table.get().is_none());
+        assert!(frames[0].binning.table.get().is_none());
         let barrier = std::sync::Barrier::new(frames.len());
         std::thread::scope(|scope| {
             let workers: Vec<_> = frames
@@ -602,16 +677,151 @@ mod tests {
                         let (pixels, _) = frame
                             .render_cached(1, &mut FrameArena::new(), &mut PixelTileCache::new())
                             .unwrap();
-                        (table, pixels)
+                        (table, frame.binning.table.get().unwrap(), pixels)
                     })
                 })
                 .collect();
             for worker in workers {
-                let (table, pixels) = worker.join().unwrap();
+                let (table, binning, pixels) = worker.join().unwrap();
                 assert!(std::ptr::eq(table, frames[0].mono.table.get().unwrap()));
+                assert!(std::ptr::eq(binning, frames[0].binning.table.get().unwrap()));
                 assert_eq!(pixels.as_bytes(), expected);
             }
         });
+    }
+
+    #[test]
+    fn failed_preparation_is_retryable_and_success_is_published_once() {
+        let table = LazyTable::new();
+        let plan = RenderPlan::new();
+        let config = config();
+        let rejected = table.get_or_try_init(|| {
+            Binning::build_with_limits(
+                &plan,
+                config.frame.viewport,
+                config.tiling,
+                config.frame.map,
+                BinningLimits {
+                    max_tiles: 0,
+                    ..BinningLimits::default()
+                },
+            )
+        });
+        assert!(matches!(rejected, Err(BinningError::LimitExceeded { .. })));
+        assert!(table.get().is_none());
+        let prepared = table
+            .get_or_try_init(|| {
+                Binning::build(&plan, config.frame.viewport, config.tiling, config.frame.map)
+            })
+            .unwrap();
+        let reused = table
+            .get_or_try_init::<BinningError>(|| panic!("published tables must not be rebuilt"))
+            .unwrap();
+        assert!(std::ptr::eq(prepared, reused));
+    }
+
+    #[test]
+    fn opacity_changes_restore_commands_pruned_by_an_opaque_foreground() {
+        let mut stage = Stage::new();
+        let back = stage.add(vector());
+        stage.add_to_scene(back).unwrap();
+        let points = [
+            [-10.0, -10.0, 0.0],
+            [0.0, -10.0, 0.0],
+            [10.0, -10.0, 0.0],
+            [10.0, 0.0, 0.0],
+            [10.0, 10.0, 0.0],
+            [0.0, 10.0, 0.0],
+            [-10.0, 10.0, 0.0],
+            [-10.0, 0.0, 0.0],
+            [-10.0, -10.0, 0.0],
+        ];
+        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len()).unwrap();
+        for (index, point) in points.iter().enumerate() {
+            assert!(buffer.write(index, "point", point));
+            assert!(buffer.write(index, "fill_rgba", &[1.0, 0.1, 0.1, 1.0]));
+        }
+        let front = stage.add(Mobject::from_buffer(buffer));
+        stage.set_shape(
+            front,
+            ShapeTag::Rect {
+                center: [0.0, 0.0, 0.0],
+                width: 20.0,
+                height: 20.0,
+            },
+        );
+        stage.add_to_scene(front).unwrap();
+        let mut compiler = VectorFrameCompiler::new(config()).unwrap();
+        let mut serial = RetainedFrameRenderer::new(config()).unwrap();
+        let opaque = compiler.capture(&stage, 0).unwrap();
+        serial.render(&stage, 0).unwrap();
+        let before = serial.frame().as_bytes().to_vec();
+        let unpruned = Binning::build(
+            &opaque.plan,
+            config().frame.viewport,
+            config().tiling,
+            config().frame.map,
+        )
+        .unwrap();
+        let pruned = opaque.binning.get(&opaque.plan).unwrap();
+        assert!(pruned.draws().len() < unpruned.draws().len());
+
+        assert!(stage.get_mut(front).unwrap().buffer.write_range(
+            "fill_rgba",
+            0,
+            &[1.0, 0.1, 0.1, 0.25].repeat(points.len()),
+        ));
+        let translucent = compiler.capture(&stage, 0).unwrap();
+        assert!(Arc::ptr_eq(&opaque.mono, &translucent.mono));
+        assert!(!Arc::ptr_eq(&opaque.binning, &translucent.binning));
+        let restored = translucent.binning.get(&translucent.plan).unwrap();
+        assert!(restored.draws().len() > pruned.draws().len());
+        serial.render(&stage, 0).unwrap();
+        let after = serial.frame().as_bytes().to_vec();
+        assert_ne!(before, after);
+        let mut arena = FrameArena::new();
+        let mut cache = PixelTileCache::new();
+        for (frame, expected) in [(&translucent, &after), (&opaque, &before)] {
+            let (pixels, _) = frame.render_cached(4, &mut arena, &mut cache).unwrap();
+            assert_eq!(pixels.as_bytes(), expected);
+        }
+    }
+
+    #[test]
+    fn callback_free_production_handoffs_reuse_static_preparation_on_a_worker() {
+        let mut stage = Stage::new();
+        let mob = stage.add(vector());
+        stage.add_to_scene(mob).unwrap();
+        let first = stage.freeze_render_state();
+        let second = stage.freeze_render_state();
+        let mut serial = RetainedFrameRenderer::new(config()).unwrap();
+        serial.render(&stage, 0).unwrap();
+        let before = serial.frame().as_bytes().to_vec();
+        stage.shift(mob, [1.0, 0.0, 0.0]);
+        let third = stage.freeze_render_state();
+        serial.render(&stage, 0).unwrap();
+        let after = serial.frame().as_bytes().to_vec();
+        drop(stage);
+        let frames: Vec<_> = std::thread::spawn(move || {
+            let mut compiler = VectorFrameCompiler::new(config()).unwrap();
+            [first, second, third]
+                .into_iter()
+                .map(|state| compiler.capture(&state.materialize(), 0).unwrap())
+                .collect::<Vec<_>>()
+        })
+        .join()
+        .unwrap();
+        assert!(Arc::ptr_eq(&frames[0].plan, &frames[1].plan));
+        assert!(Arc::ptr_eq(&frames[0].binning, &frames[1].binning));
+        assert!(!Arc::ptr_eq(&frames[1].binning, &frames[2].binning));
+        assert!(Arc::ptr_eq(&frames[0].mono, &frames[2].mono));
+        assert_ne!(before, after);
+        let mut arena = FrameArena::new();
+        let mut cache = PixelTileCache::new();
+        for (index, expected) in [(2, &after), (0, &before), (1, &before)] {
+            let (pixels, _) = frames[index].render_cached(4, &mut arena, &mut cache).unwrap();
+            assert_eq!(pixels.as_bytes(), expected);
+        }
     }
 
     #[test]
