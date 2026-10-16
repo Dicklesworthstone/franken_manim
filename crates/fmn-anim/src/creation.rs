@@ -489,6 +489,10 @@ pub(crate) fn match_style_from(stage: &mut Stage, mobject: Mob, source: Mob) {
 }
 
 impl Animation for DrawBorderThenFill {
+    fn freeze_interpolation(&self) -> Option<crate::pure_frame::FrozenAnimation> {
+        crate::pure_frame::FrozenAnimation::border_fill(self.clone())
+    }
+
     fn state(&self) -> &AnimState {
         &self.state
     }
@@ -552,16 +556,34 @@ impl Animation for DrawBorderThenFill {
             return; // rows are triples once begin has run
         };
         let (index, subalpha) = integer_interpolate(2, sub_alpha);
-        if index == 1 && !self.crossed.contains(&submob) {
-            // First crossing: submob.set_data(outline.data).
-            let source = match stage.get(outline) {
-                Some(entry) => entry.buffer.snapshot_clone(),
+        // Partial reveal only replaces points and joint angles. On a reverse
+        // crossing it must also restore outline style, otherwise the previous
+        // fill sample leaks into the drawing half and interpolation is history
+        // dependent. Forward-only playback retains its original first-crossing
+        // copy; revisiting either half resets exactly once at that boundary.
+        let was_filling = self.crossed.contains(&submob);
+        if (index == 1) != was_filling {
+            let (source, uniforms) = match stage.get(outline) {
+                Some(entry) => (entry.buffer.snapshot_clone(), *entry.uniforms()),
                 None => return,
             };
+            let tracker = stage.tracker(outline);
             if let Some(entry) = stage.get_mut(submob) {
                 entry.buffer.assign_from(&source);
+                if index == 0 {
+                    // Even lerping identical numeric uniforms can round by one
+                    // bit. Do not retain that fill-phase rounding in a reveal.
+                    *entry.uniforms_mut() = uniforms;
+                }
             }
-            self.crossed.push(submob);
+            if index == 0 {
+                let _ = stage.set_tracker_state(submob, tracker);
+            }
+            if index == 1 {
+                self.crossed.push(submob);
+            } else {
+                self.crossed.retain(|mob| *mob != submob);
+            }
         }
         if index == 0 {
             let _ = stage.pointwise_become_partial(submob, outline, 0.0, subalpha);
