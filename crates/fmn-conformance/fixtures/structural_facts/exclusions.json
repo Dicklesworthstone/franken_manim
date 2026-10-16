@@ -134,14 +134,6 @@
       "reason": "The Reference builds each Annulus circle with quadratic_bezier_points_for_arc(TAU), whose default is 8 components (35 points). FrankenManim applies BN-09's one arc-density rule, 16 components for a full circle (67 points). bbox stays compared."
     },
     {
-      "id": "fm-6l2i-camera-frame-root",
-      "kind": "open-bead",
-      "ref": "fm-6l2i",
-      "scope": "scenes",
-      "fact": "camera_frame_roots",
-      "reason": "The Reference's scene.mobjects starts with the CameraFrame; the portal's does not."
-    },
-    {
       "id": "bn02-frame-count",
       "kind": "behavior-note",
       "ref": "BN-02",

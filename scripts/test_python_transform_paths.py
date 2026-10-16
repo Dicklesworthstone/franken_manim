@@ -22,6 +22,8 @@ def fixture():
         pointlike_data_keys = ("point",)
 
         def __init__(self, point=(0, 0, 0)):
+            self.submobjects = []
+            self.anchor = (0.0, 0.0, 0.0)
             self.data = np.zeros(1, dtype=[("point", float, (3,)), ("rgba", float, (4,))])
             self.data["point"] = point
             self.uniforms = {"opacity": 1.0}
@@ -37,6 +39,23 @@ def fixture():
 
         def get_family(self):
             return [self]
+
+        def has_points(self):
+            return len(self.data) > 0
+
+        def get_bounding_box(self):
+            if len(self.data):
+                pts = self.data["point"]
+                low, high = pts.min(axis=0), pts.max(axis=0)
+                return np.array([low, 0.5 * (low + high), high], dtype=float)
+            return np.array([self.anchor] * 3, dtype=float)
+
+        def get_center(self):
+            return self.get_bounding_box()[1]
+
+        def _set_point_free_anchor(self, point):
+            self.anchor = tuple(float(v) for v in point)
+            return True
 
         def is_aligned_with(self, other):
             return self.data.shape == other.data.shape

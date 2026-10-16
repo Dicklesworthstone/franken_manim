@@ -11,6 +11,8 @@ from unittest.mock import patch
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT / "python") not in sys.path:
+    sys.path.insert(0, str(ROOT / "python"))
 PATH = ROOT / "python/fmn_python/animation_updaters.py"
 SPEC = importlib.util.spec_from_file_location("fmn_python.animation_updaters", PATH)
 adapter = importlib.util.module_from_spec(SPEC)

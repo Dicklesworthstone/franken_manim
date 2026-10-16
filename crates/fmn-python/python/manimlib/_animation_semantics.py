@@ -461,9 +461,24 @@ def install(native, subsystems=True):
         # point-free member's position through the alignment; the box then
         # interpolates between the endpoints' positions.
         kept = []
+        point_free_ids = g.get("_point_free_family_ids")
         if not isinstance(self.mobject, g["CameraFrame"]):
             for root in (self.mobject, self.target_copy):
-                free = g["_point_free_family_ids"](root)
+                if point_free_ids is not None:
+                    free = point_free_ids(root)
+                else:
+                    has_pts = {}
+
+                    def _visit(mob):
+                        marker = id(mob)
+                        if marker not in has_pts:
+                            children = [_visit(c) for c in getattr(mob, "submobjects", ())]
+                            own = mob.has_points() if hasattr(mob, "has_points") else len(getattr(mob, "data", ())) > 0
+                            has_pts[marker] = bool(own) or any(children)
+                        return has_pts[marker]
+
+                    _visit(root)
+                    free = {m for m, v in has_pts.items() if not v}
                 kept.extend((member, tuple(member.get_center()))
                             for member in root.get_family() if id(member) in free)
         self.mobject.align_data_and_family(self.target_copy)
