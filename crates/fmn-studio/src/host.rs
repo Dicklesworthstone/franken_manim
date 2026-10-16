@@ -2940,6 +2940,14 @@ mod tests {
         assert!(std::error::Error::source(&error).is_some());
     }
 
+    fn shutdown_socket(stream: &TcpStream, how: std::net::Shutdown) {
+        match stream.shutdown(how) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotConnected => {}
+            Err(error) => panic!("unexpected socket shutdown error: {error}"),
+        }
+    }
+
     #[test]
     fn client_handle_storage_refusal_leaves_the_listener_blocking() {
         let config = StudioHostConfig {
@@ -2976,7 +2984,7 @@ mod tests {
             client
                 .write_all(b"BAD / HTTP/1.1\r\nHost: localhost\r\n\r\n")
                 .unwrap();
-            client.shutdown(std::net::Shutdown::Write).unwrap();
+            shutdown_socket(&client, std::net::Shutdown::Write);
             let mut response = Vec::new();
             client.read_to_end(&mut response).unwrap();
             assert!(response.starts_with(b"HTTP/1.1 400 Bad Request\r\n"));
@@ -3016,7 +3024,7 @@ mod tests {
             client
                 .write_all(b"BAD / HTTP/1.1\r\nHost: localhost\r\n\r\n")
                 .unwrap();
-            client.shutdown(std::net::Shutdown::Write).unwrap();
+            shutdown_socket(&client, std::net::Shutdown::Write);
             let mut response = Vec::new();
             client.read_to_end(&mut response).unwrap();
             assert!(response.starts_with(b"HTTP/1.1 400 Bad Request\r\n"));
@@ -3057,7 +3065,7 @@ mod tests {
             client
                 .write_all(b"BAD / HTTP/1.1\r\nHost: localhost\r\n\r\n")
                 .unwrap();
-            client.shutdown(std::net::Shutdown::Write).unwrap();
+            shutdown_socket(&client, std::net::Shutdown::Write);
             let mut response = Vec::new();
             client.read_to_end(&mut response).unwrap();
             assert!(response.starts_with(b"HTTP/1.1 400 Bad Request\r\n"));
@@ -3100,7 +3108,7 @@ mod tests {
         };
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
         let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        client.shutdown(std::net::Shutdown::Write).unwrap();
+        shutdown_socket(&client, std::net::Shutdown::Write);
         let (mut server, _) = listener.accept().unwrap();
 
         std::thread::scope(|scope| {
@@ -3561,8 +3569,8 @@ mod tests {
             })
         ));
         assert!(handler.frames.latest().is_none());
-        client.shutdown(std::net::Shutdown::Both).unwrap();
-        server.shutdown(std::net::Shutdown::Both).unwrap();
+        shutdown_socket(&client, std::net::Shutdown::Both);
+        shutdown_socket(&server, std::net::Shutdown::Both);
         drop(client);
     }
 
