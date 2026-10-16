@@ -326,7 +326,7 @@ fn stale_consumed_rows_are_caught() {
     let lock = must_parse_lock(&lock_text);
     let allowlist = must_parse_allowlist(
         "fmn-core\t0.1.0\tworkspace\t-\t-\tMIT\tno\tno\tno\tno\tforbid\tworkspace\tsubstrate\tfm\tw\n\
-         ghost-crate\t1.0\tcrates-io\tcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\t-\tMIT\tno\tno\tno\tno\tpending\truntime\tgone\tfm\tw\n",
+         ghost-crate\t1.0\tcrates-io\tcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\t-\tMIT\tno\tno\tno\tno\tforbid\truntime\tgone\tfm\tw\n",
     );
     let violations = audit(&lock, &allowlist);
     assert!(
@@ -334,6 +334,31 @@ fn stale_consumed_rows_are_caught() {
             .iter()
             .any(|v| matches!(v, Violation::StaleRow { name } if name == "ghost-crate")),
         "stale consumed row not flagged: {violations:?}"
+    );
+}
+
+#[test]
+fn runtime_or_consumed_row_with_pending_unsafe_audit_is_rejected() {
+    let runtime_pending = "demo\t1.0.0\tcrates-io\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\t-\tMIT\tno\tno\tno\tno\tpending\truntime\treason\tfm\tpolicy\n";
+    let err = parse_allowlist(runtime_pending)
+        .expect_err("a runtime row with unsafe_audit=pending must be rejected");
+    assert!(
+        err.to_string()
+            .contains("only a pending row may defer its `unsafe_audit` as `pending`"),
+        "unexpected error: {err}"
+    );
+
+    let fuzz_pending = "demo\t1.0.0\tcrates-io\taaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\t-\tMIT\tno\tno\tno\tno\tpending\tfuzz\treason\tfm\tpolicy\n";
+    assert!(
+        parse_allowlist(fuzz_pending).is_err(),
+        "a consumed fuzz row with unsafe_audit=pending must be rejected"
+    );
+
+    let preauthorized_pending =
+        "demo\t1.0.0\tcrates-io\tTBD\t-\tMIT\tno\tno\tno\tno\tpending\tpending\treason\tfm\tpolicy\n";
+    assert!(
+        parse_allowlist(preauthorized_pending).is_ok(),
+        "an unconsumed class=pending row may defer unsafe_audit until consumption"
     );
 }
 

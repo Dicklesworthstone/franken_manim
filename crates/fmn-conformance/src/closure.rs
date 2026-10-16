@@ -619,6 +619,13 @@ fn validate_allowlist_vocabulary(
             "only a pending row may defer its checksum as `TBD`",
         ));
     }
+    if unsafe_audit == "pending" && class != "pending" {
+        return Err(syntax_error(
+            ALLOWLIST_FILE,
+            line,
+            "only a pending row may defer its `unsafe_audit` as `pending`",
+        ));
+    }
     Ok(())
 }
 
