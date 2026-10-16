@@ -747,6 +747,26 @@ pub struct OpenWait {
 }
 
 impl OpenWait {
+    pub(crate) fn report(&self) -> &SegmentReport {
+        &self.report
+    }
+
+    pub(crate) fn segment(&self) -> FrameSegment {
+        self.segment
+    }
+
+    pub(crate) fn is_at_begin(&self) -> bool {
+        self.stepped == 0 && self.prepared.is_none()
+    }
+
+    pub(crate) fn finish_pure(mut self) -> Result<SegmentReport, AnimError> {
+        if !self.is_at_begin() || !self.report.purity.is_pure() {
+            return Err(AnimError::InvalidFramePhase("pure wait no longer at begin"));
+        }
+        self.stepped = self.segment.n_frames();
+        finish_open_wait(self)
+    }
+
     /// Mark the prepared wait frame's whole scene-updater phase complete.
     ///
     /// # Errors

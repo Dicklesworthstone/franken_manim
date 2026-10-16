@@ -426,7 +426,7 @@ pub trait SceneSink {
         packet: FramePacket,
     ) -> Result<(), IntegrationError>;
 
-    /// Opt in to callback-free native play programs. Interactive, recording
+    /// Opt in to callback-free native play and static-wait programs. Interactive, recording
     /// and custom sinks remain on the ordinary per-frame path by default.
     fn accepts_pure_segments(&self) -> bool {
         false
@@ -1303,13 +1303,7 @@ impl Scene {
         // Admission is after preflight and lifecycle events: those hooks may
         // install an event producer. A live but currently empty inbox clone
         // still requires every owner-thread boundary to run.
-        let allow_pure = !skipping
-            && !self.config.windowed
-            && !self.config.presenter_mode
-            && self.event_dispatcher.listener_count() == 0
-            && self.event_inbox.is_exclusive_empty()
-            && self.queued_events.is_empty()
-            && self.event_error.is_none();
+        let allow_pure = self.allows_pure_dispatch();
         let report = {
             let Scene {
                 stage,
@@ -1335,7 +1329,7 @@ impl Scene {
                     time,
                 );
             };
-            let mut capture = parallel::NativePlayCapture::new(sink, &mut sink_error);
+            let mut capture = parallel::NativeSegmentCapture::new(sink, &mut sink_error);
             fmn_anim::pure_frame::play_segment_with_pure_dispatch(
                 stage,
                 clock,
@@ -1567,6 +1561,7 @@ impl Scene {
         } else {
             let mut sink_error = None;
             let skipping = self.skipping;
+            let allow_pure = self.allows_pure_dispatch();
             let report = {
                 let Scene {
                     stage,
@@ -1592,23 +1587,22 @@ impl Scene {
                         time,
                     );
                 };
-                let mut emit = |packet| {
-                    if sink_error.is_none()
-                        && let Err(error) = sink.capture(CaptureReason::Segment, packet)
-                    {
-                        sink_error = Some(error);
-                    }
-                };
-                wait_segment_with_boundary(
-                    stage,
-                    clock,
-                    rng_root,
-                    duration,
-                    stop_condition,
-                    skipping,
-                    &mut boundary,
-                    &mut emit,
-                )?
+                let mut capture = parallel::NativeSegmentCapture::new(sink, &mut sink_error);
+                if let Some(stop_condition) = stop_condition {
+                    // A stop callback observes owner state after each emitted
+                    // frame. Never offer its wait to the compact program path.
+                    wait_segment_with_boundary(
+                        stage, clock, rng_root, duration, Some(stop_condition), skipping,
+                        &mut boundary, &mut |packet| {
+                            fmn_anim::pure_frame::PlayCapture::capture(&mut capture, packet);
+                        },
+                    )?
+                } else {
+                    fmn_anim::pure_frame::wait_segment_with_pure_dispatch(
+                        stage, clock, rng_root, duration, skipping, allow_pure,
+                        &mut boundary, &mut capture,
+                    )?
+                }
             };
             self.sync_stage_time();
             if let Some(error) = sink_error {

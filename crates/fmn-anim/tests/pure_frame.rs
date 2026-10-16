@@ -520,3 +520,134 @@ fn pair_mechanisms_never_admit_an_authored_rate_callback() {
         finish_open_play(&mut stage, &mut animations, open).unwrap();
     }
 }
+
+#[test]
+fn static_wait_jobs_keep_exact_clocks_rng_and_storage_after_owner_mutation() {
+    use fmn_anim::pure_frame::{PlayCapture, wait_segment_with_pure_dispatch};
+    #[derive(Default)]
+    struct Sink {
+        accept: bool,
+        offered: usize,
+        packets: Vec<(i64, (Vec<Vec<Mob>>, Vec<u64>, Vec<String>), u64)>,
+        jobs: Vec<PureFrameJob>,
+    }
+    impl PlayCapture for Sink {
+        fn accepts_pure_segments(&self) -> bool { true }
+        fn capture(&mut self, packet: fmn_anim::FramePacket) {
+            self.packets.push((packet.time().frames(), facts(&packet.materialize_stage()),
+                packet.rng_fork("wait").next_u64()));
+        }
+        fn capture_pure_segment(&mut self, segment: &PureSegment) -> bool {
+            self.offered += 1;
+            if !self.accept { return false; }
+            self.jobs.extend((1..=segment.frame_count()).map(|i| segment.job(i).unwrap()));
+            true
+        }
+    }
+    for duration in [0.0, 0.2, 0.5] {
+        let mut initial = Stage::new();
+        let mob = vector_curve(&mut initial, 0.0);
+        let begin = initial.snapshot();
+        let mut outcomes = Vec::new();
+        for (allow, accept) in [(false, true), (true, false), (true, true)] {
+            let mut stage = begin.materialize();
+            let mut clock = RationalFrameClock::new(30).unwrap();
+            clock.advance_frames(11).unwrap();
+            stage.set_time_from_clock(clock.now().to_f64());
+            let mut sink = Sink { accept, ..Sink::default() };
+            let mut boundaries = 0;
+            let report = wait_segment_with_pure_dispatch(&mut stage, &mut clock,
+                &RngRoot::from_seed(729), duration, false, allow,
+                &mut |_, _| boundaries += 1, &mut sink).unwrap();
+            assert_eq!(report.kind, fmn_anim::SegmentKind::Wait);
+            assert_eq!(sink.offered, usize::from(allow && report.n_frames > 0));
+            assert_eq!(boundaries, sink.packets.len());
+            assert_eq!(clock.now().frames(), 11 + report.n_frames);
+            let final_facts = facts(&stage);
+            stage.shift(mob, [100.0, 0.0, 0.0]);
+            // Jobs still own their pre-mutation static frame. Evaluate on a
+            // worker in reverse order after the sink and program have returned.
+            if !sink.jobs.is_empty() {
+                sink.packets = std::thread::spawn(move || sink.jobs.into_iter().rev().map(|job| {
+                    (job.time().frames(), facts(&job.materialize()), job.rng_fork("wait").next_u64())
+                }).collect()).join().unwrap();
+                sink.packets.sort_by_key(|(frame, _, _)| *frame);
+            }
+            outcomes.push((sink.packets, final_facts, report.n_frames));
+        }
+        assert_eq!(outcomes[0], outcomes[1], "sink refusal at duration {duration}");
+        assert_eq!(outcomes[0], outcomes[2], "worker path at duration {duration}");
+    }
+}
+
+#[test]
+fn wait_dispatch_keeps_the_initial_zero_dt_and_every_stateful_skip_step() {
+    use std::cell::RefCell;
+    use fmn_anim::pure_frame::{PlayCapture, wait_segment_with_pure_dispatch};
+    #[derive(Default)]
+    struct Sink(usize);
+    impl PlayCapture for Sink {
+        fn accepts_pure_segments(&self) -> bool { true }
+        fn capture(&mut self, _: fmn_anim::FramePacket) { self.0 += 1; }
+        fn capture_pure_segment(&mut self, _: &PureSegment) -> bool {
+            panic!("an updater-driven wait cannot become a static worker program")
+        }
+    }
+    for duration in [0.0, 0.5] {
+        for skip in [false, true] {
+            let mut outcomes = Vec::new();
+            for dispatch in [false, true] {
+                let mut stage = Stage::new();
+                let mob = square(&mut stage, 0.0);
+                let calls = Rc::new(RefCell::new(Vec::new()));
+                let recorded = Rc::clone(&calls);
+                stage.add_dt_updater(mob, move |stage, mob, dt| {
+                    recorded.borrow_mut().push(dt.to_bits());
+                    let x = stage.get_center(mob)[0];
+                    stage.shift(mob, [(x + 1.0) * dt, 0.0, 0.0]);
+                }, false).unwrap();
+                let mut clock = RationalFrameClock::new(8).unwrap();
+                let mut sink = Sink::default();
+                let report = if dispatch {
+                    wait_segment_with_pure_dispatch(&mut stage, &mut clock, &RngRoot::from_seed(0),
+                        duration, skip, true, &mut |_, _| {}, &mut sink).unwrap()
+                } else {
+                    fmn_anim::wait_segment(&mut stage, &mut clock, &RngRoot::from_seed(0),
+                        duration, None, skip, &mut |packet| sink.capture(packet)).unwrap()
+                };
+                assert!(!report.purity.is_pure());
+                assert_eq!(calls.borrow().len() as i64, report.n_frames + 1);
+                assert_eq!(calls.borrow()[0], 0.0_f64.to_bits());
+                outcomes.push((stage.get_center(mob).map(f64::to_bits), clock.now(),
+                    calls.borrow().clone(), sink.0));
+            }
+            assert_eq!(outcomes[0], outcomes[1]);
+        }
+    }
+}
+
+#[test]
+fn waits_with_live_views_or_open_host_phases_refuse_compact_jobs() {
+    for kind in 0..4 {
+        let mut stage = Stage::new();
+        let mob = vector_curve(&mut stage, 0.0);
+        let view = (kind == 0).then(|| stage.get_mut(mob).unwrap().buffer.export_view(true));
+        let mut clock = RationalFrameClock::new(8).unwrap();
+        let mut open = if kind == 1 {
+            fmn_anim::open_wait_after_updaters(&mut stage, &clock, 0.5, false).unwrap()
+        } else {
+            fmn_anim::open_wait(&mut stage, &clock, 0.5, kind == 2).unwrap()
+        };
+        if kind == 3 {
+            fmn_anim::prepare_wait_frame(&mut stage, &mut clock, &mut open).unwrap();
+        }
+        let refusal = PureSegment::freeze_wait(&stage, &clock, &RngRoot::from_seed(0), &open)
+            .unwrap_err();
+        if kind == 0 {
+            assert_eq!(refusal, PureFrameRefusal::LiveView(mob));
+        } else {
+            assert_eq!(refusal, PureFrameRefusal::NotAtPureBegin);
+        }
+        drop(view);
+    }
+}

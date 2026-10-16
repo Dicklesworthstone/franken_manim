@@ -1,4 +1,4 @@
-//! Callback-free native interpolation jobs for live, pure play segments (§9.5).
+//! Callback-free native jobs for live, pure play and wait segments (§9.5).
 //!
 //! Purity alone does not make `dyn Animation` transferable. This module admits
 //! only closed native mechanisms, freezes their **prepared** state, and invokes
@@ -14,8 +14,8 @@ use fmn_core::rng::{Pcg64Dxsm, RngRoot};
 use fmn_mobject::{FrozenRenderState, Mob, Stage};
 
 use crate::{
-    AnimError, AnimState, Animation, FrameSample, FrameSegment, OpenSegment, RateFunc,
-    RationalFrameClock, RationalTime, Rotating, SegmentReport, ShowPartial, Transform,
+    AnimError, AnimState, Animation, FrameSample, FrameSegment, OpenSegment, OpenWait, RateFunc,
+    RationalFrameClock, RationalTime, Rotating, SegmentKind, SegmentReport, ShowPartial, Transform,
     VFade, finish_open_play,
 };
 
@@ -129,7 +129,7 @@ impl FrozenAnimation {
 /// not a scene error and not a weakening of its existing purity report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PureFrameRefusal {
-    /// No unskipped pure begin snapshot, or the play has already been stepped.
+    /// No unskipped pure begin snapshot, or the segment has already been stepped.
     NotAtPureBegin,
     /// The Stage/clock does not belong to the opened segment.
     DifferentBegin,
@@ -161,6 +161,7 @@ impl std::fmt::Display for PureFrameRefusal {
 impl std::error::Error for PureFrameRefusal {}
 
 struct SegmentData {
+    kind: SegmentKind,
     begin: FrozenRenderState,
     animations: Vec<FrozenAnimation>,
     grid: FrameSegment,
@@ -168,10 +169,10 @@ struct SegmentData {
     rng_seed: u64,
 }
 
-/// An immutable native play program shared by all of its bounded frame jobs.
+/// An immutable native program shared by all of its bounded frame jobs.
 ///
-/// Construct immediately after `open_play`, before any frame is stepped or
-/// authored state is changed. The caller must separately rule out external
+/// Construct immediately after `open_play` or `open_wait`, before any frame is
+/// stepped or authored state is changed. The caller must separately rule out external
 /// event listeners, source inboxes and per-frame host hooks. The normal Scene
 /// integration must do this and sinks must opt in; recording/interactive sinks
 /// continue to receive every ordinary FramePacket.
@@ -183,6 +184,7 @@ pub struct PureSegment {
 impl std::fmt::Debug for PureSegment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PureSegment")
+            .field("kind", &self.data.kind)
             .field("base_frame", &self.data.base_frame)
             .field("frames", &self.frame_count())
             .field("animations", &self.data.animations.len())
@@ -248,6 +250,7 @@ impl PureSegment {
         }
         Ok(Self {
             data: Arc::new(SegmentData {
+                kind: SegmentKind::Play,
                 begin: begin.render_state(clock.now().to_f64()),
                 animations: frozen,
                 grid: open.segment(),
@@ -255,6 +258,77 @@ impl PureSegment {
                 rng_seed: rng.seed(),
             }),
         })
+    }
+
+    /// Freeze a static wait after its one initial zero-dt updater pass.
+    /// A wait with updaters, a live view or an external host-updater boundary
+    /// remains serial. Stop-condition waits must never enter this API.
+    ///
+    /// # Errors
+    /// A refusal retains the already-opened wait's ordinary stepped driver.
+    pub fn freeze_wait(
+        stage: &Stage,
+        clock: &RationalFrameClock,
+        rng: &RngRoot,
+        open: &OpenWait,
+    ) -> Result<Self, PureFrameRefusal> {
+        let report = open.report();
+        let begin = report.begin_state.as_ref().filter(|_| {
+            open.is_at_begin() && report.purity.is_pure() && report.n_frames > 0
+                && crate::classify_wait(stage, false).is_pure()
+        }).ok_or(PureFrameRefusal::NotAtPureBegin)?;
+        if !stage.can_restore(begin)
+            || clock.now().frames() != report.base_frame
+            || clock.fps() != open.segment().end_time().fps()
+        {
+            return Err(PureFrameRefusal::DifferentBegin);
+        }
+        for &root in stage.roots() {
+            for mob in stage.family(root) {
+                let entry = stage.get(mob).ok_or(PureFrameRefusal::DifferentBegin)?;
+                if entry.buffer.live_view_count() != 0 {
+                    return Err(PureFrameRefusal::LiveView(mob));
+                }
+            }
+        }
+        Ok(Self {
+            data: Arc::new(SegmentData {
+                kind: SegmentKind::Wait,
+                begin: begin.render_state(clock.now().to_f64()),
+                animations: Vec::new(),
+                grid: open.segment(),
+                base_frame: report.base_frame,
+                rng_seed: rng.seed(),
+            }),
+        })
+    }
+
+    /// Advance the original wait owner once after consuming its immutable jobs.
+    /// No final updater pass is invented: ordinary waits have only the initial
+    /// zero-dt pass and the per-sample passes that purity proved were inert.
+    ///
+    /// # Errors
+    /// A different program kind, opened wait or clock is refused before advance.
+    pub fn finish_wait_on_owner(
+        &self,
+        stage: &mut Stage,
+        clock: &mut RationalFrameClock,
+        open: OpenWait,
+    ) -> Result<SegmentReport, AnimError> {
+        if self.data.kind != SegmentKind::Wait
+            || !open.is_at_begin()
+            || !open.report().purity.is_pure()
+            || open.report().base_frame != self.data.base_frame
+            || open.report().n_frames != self.frame_count()
+            || clock.now().frames() != self.data.base_frame
+            || clock.fps() != self.data.grid.end_time().fps()
+            || open.report().begin_state.as_ref().is_none_or(|begin| !stage.can_restore(begin))
+        {
+            return Err(AnimError::InvalidFramePhase("pure wait no longer at its begin boundary"));
+        }
+        clock.advance_frames(self.frame_count()).map_err(AnimError::Clock)?;
+        stage.set_time_from_clock(clock.now().to_f64());
+        open.finish_pure()
     }
 
     /// Number of nominal samples; no alpha-zero frame is invented.
@@ -266,7 +340,7 @@ impl PureSegment {
     /// Create a constant-size frame job; geometry is shared, not captured again.
     ///
     /// # Errors
-    /// [`AnimError::SeekOutOfRange`] outside this play's 1-based frame range.
+    /// [`AnimError::SeekOutOfRange`] outside this segment's 1-based frame range.
     pub fn job(&self, frame: i64) -> Result<PureFrameJob, AnimError> {
         let sample = self.data.grid.sample(frame).ok_or(AnimError::SeekOutOfRange {
             frame,
@@ -292,7 +366,8 @@ impl PureSegment {
         animations: &mut [Box<dyn Animation>],
         open: OpenSegment,
     ) -> Result<SegmentReport, AnimError> {
-        if !open.is_at_begin()
+        if self.data.kind != SegmentKind::Play
+            || !open.is_at_begin()
             || animations.len() != self.data.animations.len()
             || open.report().base_frame != self.data.base_frame
             || open.report().n_frames != self.frame_count()
@@ -312,7 +387,7 @@ impl PureSegment {
     }
 }
 
-/// One sample of a live native pure play. Safe to execute out of order on any
+/// One sample of a live native pure segment. Safe to execute out of order on any
 /// worker; both mutable animation carriers and the materialized Stage are local.
 #[derive(Clone)]
 pub struct PureFrameJob {
@@ -360,7 +435,7 @@ impl PureFrameJob {
     }
 }
 
-/// An opt-in consumer for closed native play programs. Ordinary consumers
+/// An opt-in consumer for closed native frame programs. Ordinary consumers
 /// implement only `capture`; their per-frame observations remain serial.
 pub trait PlayCapture {
     /// Consume an ordinary owner-thread capture.
@@ -411,4 +486,36 @@ pub fn play_segment_with_pure_dispatch(
         stage, clock, rng, animations, skip, boundary,
         &mut |packet| capture.capture(packet), open,
     )
+}
+
+/// Drive a wait with the same frame jobs as pure plays. The caller must exclude
+/// observers and stop conditions; stateful waits and admission refusals retain
+/// every nominal updater/capture boundary. Sink refusal never repeats the
+/// already-completed initial zero-dt updater pass.
+///
+/// # Errors
+/// Ordinary duration, clock or frame-phase failures.
+#[allow(clippy::too_many_arguments)]
+pub fn wait_segment_with_pure_dispatch(
+    stage: &mut Stage,
+    clock: &mut RationalFrameClock,
+    rng: &RngRoot,
+    duration: f64,
+    skip: bool,
+    allow_pure: bool,
+    boundary: &mut dyn FnMut(&mut Stage, RationalTime),
+    capture: &mut dyn PlayCapture,
+) -> Result<SegmentReport, AnimError> {
+    let mut open = crate::open_wait(stage, clock, duration, skip)?;
+    if allow_pure && !skip && capture.accepts_pure_segments()
+        && let Ok(segment) = PureSegment::freeze_wait(stage, clock, rng, &open)
+        && capture.capture_pure_segment(&segment)
+    {
+        return segment.finish_wait_on_owner(stage, clock, open);
+    }
+    while crate::prepare_wait_frame(stage, clock, &mut open)?.is_some() {
+        crate::complete_wait_frame(stage, clock, rng, &mut open, !skip, boundary,
+            &mut |packet| capture.capture(packet))?;
+    }
+    crate::finish_open_wait(open)
 }

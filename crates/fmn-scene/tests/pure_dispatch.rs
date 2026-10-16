@@ -150,3 +150,90 @@ fn releasing_an_empty_inbox_restores_admission_but_skips_never_offload() {
         assert_eq!(scene.time().frames(), 4);
     }
 }
+
+#[test]
+fn static_wait_dispatch_preserves_lifecycle_and_owner_time() {
+    let mut outcomes = Vec::new();
+    for opt_in in [false, true] {
+        let mut scene = Scene::new(RuntimeConfig { fps: 8, ..RuntimeConfig::default() }, 19).unwrap();
+        let _ = animation(&mut scene);
+        let mut sink = Sink { opt_in, ..Sink::default() };
+        let report = scene.wait(Some(0.5), &mut sink).unwrap();
+        assert_eq!(report.kind, fmn_anim::SegmentKind::Wait);
+        assert!(report.purity.is_pure());
+        assert_eq!(sink.programs, usize::from(opt_in));
+        assert_eq!(sink.packets, if opt_in { 0 } else { 4 });
+        assert_eq!(scene.play_count(), 1);
+        assert_eq!(scene.time().frames(), 4);
+        outcomes.push((sink.frames, sink.events, center(scene.stage())));
+    }
+    assert_eq!(outcomes[0], outcomes[1]);
+}
+
+#[test]
+fn wait_observers_and_stop_conditions_never_lose_their_serial_boundaries() {
+    for kind in 0..7 {
+        let mut scene = Scene::new(RuntimeConfig {
+            fps: 8, windowed: kind == 5, ..RuntimeConfig::default()
+        }, 2).unwrap();
+        let (mob, _) = animation(&mut scene);
+        let mut inbox = None;
+        let mut view = None;
+        match kind {
+            0 => inbox = Some(scene.event_inbox()),
+            1 => { scene.event_dispatcher_mut().add_listener(EventListener::new(
+                EventType::MousePress, EventTarget::Global,
+                |_, _, _, _| EventPropagation::Continue,
+            )).unwrap(); }
+            2 => { scene.queue_event(press()).unwrap(); }
+            3 => view = Some(scene.stage_mut().get_mut(mob).unwrap().buffer.export_view(false)),
+            4 => { scene.stage_mut().add_dt_updater(mob, |stage, mob, dt| {
+                stage.shift(mob, [dt, 0.0, 0.0]);
+            }, false).unwrap(); }
+            _ => {}
+        }
+        let mut sink = Sink { opt_in: true, ..Sink::default() };
+        let mut stop_calls = 0;
+        let report = if kind == 6 {
+            scene.wait_until(0.5, &mut |_| {
+                stop_calls += 1;
+                stop_calls == 2
+            }, &mut sink).unwrap()
+        } else {
+            scene.wait(Some(0.5), &mut sink).unwrap()
+        };
+        assert_eq!(sink.programs, 0, "observer {kind}");
+        assert_eq!(sink.packets as i64, report.n_frames, "observer {kind}");
+        assert_eq!(report.n_frames, if kind == 6 { 2 } else { i64::from(scene.fps()) / 2 });
+        assert_eq!(stop_calls, if kind == 6 { 2 } else { 0 });
+        drop(view);
+        drop(inbox);
+    }
+}
+
+#[test]
+fn wait_sink_failure_never_replays_a_program_and_zero_or_skipped_waits_emit_nothing() {
+    for opt_in in [false, true] {
+        let mut scene = Scene::new(RuntimeConfig { fps: 8, ..RuntimeConfig::default() }, 0).unwrap();
+        let _ = animation(&mut scene);
+        let mut sink = Sink { opt_in, fail: true, ..Sink::default() };
+        let error = scene.wait(Some(0.5), &mut sink).unwrap_err();
+        assert!(error.to_string().contains("capture failed"));
+        assert_eq!(sink.programs, usize::from(opt_in));
+        assert_eq!(sink.packets, usize::from(!opt_in));
+        assert_eq!(scene.play_count(), 1);
+        assert_eq!(scene.time().frames(), 4);
+    }
+    for (duration, skip) in [(0.0, false), (0.5, true)] {
+        let mut scene = Scene::new(RuntimeConfig {
+            fps: 8, skip_animations: skip, preview_while_skipping: false,
+            ..RuntimeConfig::default()
+        }, 0).unwrap();
+        let _ = animation(&mut scene);
+        let mut sink = Sink { opt_in: true, ..Sink::default() };
+        let report = scene.wait(Some(duration), &mut sink).unwrap();
+        assert_eq!((sink.programs, sink.packets), (0, 0));
+        assert_eq!(scene.time().frames(), report.n_frames);
+        assert_eq!(report.n_frames, if skip { 4 } else { 0 });
+    }
+}

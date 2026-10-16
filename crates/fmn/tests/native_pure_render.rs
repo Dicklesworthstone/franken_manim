@@ -12,6 +12,18 @@ use fmn_render::{Camera, EngineIdentity, FrameConfig, RetainedFrameRenderer,
     RetainedFrameRendererConfig, ScreenMap, Tiling, Viewport};
 use fmn_scene::{CaptureReason, IntegrationError, RuntimeConfig, SceneSink};
 
+
+fn assert_pixels(actual: &[Vec<u8>], expected: &[Vec<u8>], window: usize, threads: u32, camera: bool) {
+    assert_eq!(actual.len(), expected.len());
+    for (frame, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+        assert_eq!(actual.len(), expected.len());
+        if let Some(byte) = actual.iter().zip(expected).position(|(a, b)| a != b) {
+            let changed = actual.iter().zip(expected).filter(|(a, b)| a != b).count();
+            panic!("frame {frame}, byte {byte}: {} != {}; {changed} differing bytes; window {window}, threads {threads}, camera {camera}", actual[byte], expected[byte]);
+        }
+    }
+}
+
 fn options(path: &str, window: usize, threads: u32) -> RenderOptions {
     let mut options = RenderOptions::new(path).unwrap();
     options.config.camera.resolution = (48, 32);
@@ -98,7 +110,7 @@ fn public_pure_stateful_pure_exports_match_serial_pixels_with_and_without_camera
                 camera: reference_camera, frames: Vec::new(),
             };
             fmn::run_scene(&mut Mixed, runtime, seed, &mut serial).unwrap();
-            assert_eq!(pixels, serial.frames);
+            assert_pixels(&pixels, &serial.frames, window, threads, camera);
             assert_ne!(pixels[0], pixels[3]);
             assert_ne!(pixels[3], pixels[5]);
             if let Some(first) = &first { assert_eq!(&bytes, first); } else { first = Some(bytes); }
@@ -164,6 +176,7 @@ impl SceneConstruct for DrawFadeRotate {
         stage.play_prepared(vec![Box::new(
             fmn_anim::show_creation(mob).with_config(config.clone()),
         )])?;
+        stage.wait(0.25)?;
         stage.play_prepared(vec![Box::new(
             fmn_anim::v_fade_out(mob).with_config(AnimConfig {
                 remover: true, ..config.clone()
@@ -205,9 +218,9 @@ fn public_drawing_fading_and_rotation_admit_every_nominal_job() {
     let mut jobs = Jobs::default();
     let completed = fmn::run_scene(&mut DrawFadeRotate,
         RuntimeConfig { fps: 8, ..RuntimeConfig::default() }, 42, &mut jobs).unwrap();
-    assert_eq!(jobs.0, (1..=12).collect::<Vec<_>>());
-    assert_eq!(completed.report().play_count, 3);
-    assert_eq!(completed.report().time.frames(), 12);
+    assert_eq!(jobs.0, (1..=14).collect::<Vec<_>>());
+    assert_eq!(completed.report().play_count, 4);
+    assert_eq!(completed.report().time.frames(), 14);
 }
 
 #[test]
@@ -223,10 +236,10 @@ fn public_drawing_fading_and_rotation_match_serial_pngs_across_worker_counts() {
         let aa = options.config.render.aa;
         let report = render_with_fs(&mut DrawFadeRotate, options, fs.clone()).unwrap();
         let stats = report.frame_pipeline.as_ref().unwrap();
-        assert_eq!((stats.submitted, stats.emitted, stats.outstanding_slots), (12, 12, 0));
+        assert_eq!((stats.submitted, stats.emitted, stats.outstanding_slots), (14, 14, 0));
         assert!(stats.max_in_flight <= report.execution_plan.frames_in_flight);
         assert!(stats.render_team_frames.iter().all(|count| *count > 0));
-        let bytes = (0..12).map(|i| fs.read(&Path::new("/mechanisms")
+        let bytes = (0..14).map(|i| fs.read(&Path::new("/mechanisms")
             .join(format!("frame_{i:06}.png"))).unwrap()).collect::<Vec<_>>();
         let pixels = bytes.iter().map(|bytes| decode_png(bytes, &PngLimits::default())
             .unwrap().rgba).collect::<Vec<_>>();
@@ -242,8 +255,10 @@ fn public_drawing_fading_and_rotation_match_serial_pngs_across_worker_counts() {
             camera: None, frames: Vec::new(),
         };
         fmn::run_scene(&mut DrawFadeRotate, runtime, seed, &mut serial).unwrap();
-        assert_eq!(pixels, serial.frames);
-        for start in [0, 4, 8] {
+        assert_pixels(&pixels, &serial.frames, window, threads, false);
+        assert_eq!(pixels[3], pixels[4]);
+        assert_eq!(pixels[4], pixels[5]);
+        for start in [0, 6, 10] {
             assert_ne!(pixels[start], pixels[start + 3], "mechanism at frame {start}");
         }
         if let Some(previous) = &previous {
