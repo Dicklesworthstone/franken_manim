@@ -11,7 +11,7 @@
 //! embarrassingly parallel across frames: worker *k* reconstructs frame
 //! state from the snapshot plus α(k) and the keyed per-frame RNG fork
 //! (§6.5), which [`reconstruct_pure_frame`] implements and the
-//! equivalence tests hold to bit-identity against the serial path. The
+//! equivalence tests hold it to bit-identity against the serial path. The
 //! actual multi-worker dispatch (render teams, the ordered emitter's
 //! thread plumbing) is fmn-runtime's (fm-3df); the classifier, the
 //! journal vocabulary, and the reconstruction contract live here.
@@ -145,7 +145,13 @@ pub fn classify_play(stage: &Stage, animations: &[Box<dyn Animation>]) -> Purity
         }
         // Animation-owned mobjects (starting/target) tick every frame
         // through update_mobjects even when unrooted.
-        for mob in animation.all_mobjects() {
+        for mob in animation
+            .all_mobjects()
+            .into_iter()
+            .chain(animation.preflight_mobjects())
+        {
+            // Authored inputs may be absent from the alpha-zero draw list.
+            // Inspecting them must not add extra updater executions.
             scan_family(stage, mob, &mut effects);
         }
     }

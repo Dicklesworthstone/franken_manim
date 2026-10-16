@@ -38,6 +38,7 @@ enum FrozenMechanism {
     Transform(Transform),
     Partial(ShowPartial),
     BorderFill(crate::DrawBorderThenFill),
+    Subsets(crate::ShowIncreasingSubsets),
     VectorFade(VFade),
     Rotation(Rotating),
     Group(FrozenGroup),
@@ -106,6 +107,12 @@ impl FrozenAnimation {
         })
     }
 
+    pub(crate) fn subsets(animation: crate::ShowIncreasingSubsets) -> Option<Self> {
+        Some(Self {
+            mechanism: FrozenMechanism::Subsets(Self::prepare(animation, 2)?),
+        })
+    }
+
     pub(crate) fn vector_fade(fade: VFade) -> Option<Self> {
         Some(Self {
             mechanism: FrozenMechanism::VectorFade(Self::prepare(fade, 2)?),
@@ -154,6 +161,7 @@ impl FrozenAnimation {
             FrozenMechanism::Transform(animation) => animation.state(),
             FrozenMechanism::Partial(animation) => animation.state(),
             FrozenMechanism::BorderFill(animation) => animation.state(),
+            FrozenMechanism::Subsets(animation) => animation.state(),
             FrozenMechanism::VectorFade(animation) => animation.state(),
             FrozenMechanism::Rotation(animation) => animation.state(),
             FrozenMechanism::Group(group) => &group.state,
@@ -176,6 +184,7 @@ impl FrozenAnimation {
             FrozenMechanism::Transform(animation) => evaluate(animation, stage, alpha),
             FrozenMechanism::Partial(animation) => evaluate(animation, stage, alpha),
             FrozenMechanism::BorderFill(animation) => evaluate(animation, stage, alpha),
+            FrozenMechanism::Subsets(animation) => evaluate(animation, stage, alpha),
             FrozenMechanism::VectorFade(animation) => evaluate(animation, stage, alpha),
             FrozenMechanism::Rotation(animation) => evaluate(animation, stage, alpha),
             FrozenMechanism::Group(group) => {
@@ -311,6 +320,7 @@ impl PureSegment {
                 reads.extend(endpoints.iter().copied());
             }
             observed.extend(animation.all_mobjects());
+            observed.extend(animation.preflight_mobjects());
             frozen.push(carrier);
         }
         for endpoint in reads {

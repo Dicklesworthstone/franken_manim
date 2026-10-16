@@ -727,10 +727,21 @@ impl Animation for ShowIncreasingSubsets {
         &mut self.state
     }
 
-    // Deliberately Unclassified (the default made explicit): the frame
-    // writes are structural (arena child-list rewiring), and until the
-    // scene runtime's membership rules land (fm-5xm) the conservative
-    // R20 demotion is the correct classification.
+    // The captured child inventory and rated alpha determine membership.
+    // Hidden children are still animation-owned inputs, not absent effects.
+    fn effect_signature(&self) -> AnimationSignature {
+        AnimationSignature::Pure
+    }
+
+    fn freeze_interpolation(&self) -> Option<crate::pure_frame::FrozenAnimation> {
+        crate::pure_frame::FrozenAnimation::subsets(self.clone())
+    }
+
+    fn preflight_mobjects(&self) -> Vec<Mob> {
+        let mut out = vec![self.state.mobject()];
+        out.extend(self.all_submobs.iter().copied());
+        out
+    }
 
     /// The Reference overrides `interpolate_mobject` (creation.py:190):
     /// the rate function applies to the raw alpha, and the lag/time-span
