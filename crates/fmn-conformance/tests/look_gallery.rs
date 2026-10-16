@@ -448,7 +448,33 @@ fn corrupt_manifests_are_named_errors() {
         ),
         (with_row(swapped), "invalid reference_sha256"),
         (
+            "# fmn-look-gallery v2\n# revision: 1\n# release: git:0123456789abcdef0123456789abcdef01234567+dirty:deadbeefdeadbeef\n".to_string(),
+            "invalid release identity",
+        ),
+        (
+            "# fmn-look-gallery v2\n# revision: 1\n# release: git:unknown\n".to_string(),
+            "invalid release identity",
+        ),
+        (
             with_row(row("panel", "regression", "note").replace(RELEASE, "git dirty")),
+            "invalid build_id",
+        ),
+        (
+            with_row(row("panel", "regression", "note").replace(
+                RELEASE,
+                "git:0123456789abcdef0123456789abcdef01234567+dirty:0123456789abcdef",
+            )),
+            "invalid build_id",
+        ),
+        (
+            with_row(row("panel", "regression", "note").replace(
+                RELEASE,
+                "git:0123456789abcdef0123456789abcdef01234567+unverified",
+            )),
+            "invalid build_id",
+        ),
+        (
+            with_row(row("panel", "regression", "note").replace(RELEASE, "git:unknown")),
             "invalid build_id",
         ),
         (
@@ -944,3 +970,74 @@ fn smoke_alarm_over_the_real_pairs() {
         );
     }
 }
+
+#[test]
+fn top_level_reference_captures_match_provenance_when_present() {
+    let root = repo_root().join("gallery/reference_captures");
+    let provenance_path = root.join("PROVENANCE.json");
+    if !provenance_path.is_file() {
+        fmn_core::test_inputs::skip_or_fail(
+            "fmn-conformance::top_level_reference_captures_match_provenance_when_present",
+            &format!("Reference capture provenance {}", provenance_path.display()),
+        );
+        return;
+    }
+    let provenance_text = std::fs::read_to_string(&provenance_path)
+        .expect("read gallery/reference_captures/PROVENANCE.json");
+    let mut expected = std::collections::BTreeMap::new();
+    let mut in_digest_map = false;
+    for raw_line in provenance_text.lines() {
+        let line = raw_line.trim();
+        if line == "\"captures\": {" || line == "\"recaptured\": {" {
+            in_digest_map = true;
+            continue;
+        }
+        if in_digest_map {
+            if line.starts_with('}') {
+                in_digest_map = false;
+                continue;
+            }
+            let Some((key, value)) = line.split_once(':') else {
+                continue;
+            };
+            let panel = key.trim().trim_matches('"');
+            let hex = value.trim().trim_end_matches(',').trim_matches('"');
+            assert_eq!(
+                hex.len(),
+                64,
+                "invalid SHA-256 hex for {panel} in PROVENANCE.json: {hex}"
+            );
+            expected.insert(panel.to_string(), hex.to_string());
+        }
+    }
+    assert!(
+        !expected.is_empty(),
+        "PROVENANCE.json must declare expected capture digests"
+    );
+    for entry in std::fs::read_dir(&root).expect("read gallery/reference_captures") {
+        let entry = entry.expect("dir entry");
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|s| s.to_str()) != Some("png") {
+            continue;
+        }
+        let panel = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .expect("png file stem");
+        let Some(expected_hex) = expected.get(panel) else {
+            panic!(
+                "unrecorded top-level Reference capture {} not listed in PROVENANCE.json",
+                path.display()
+            );
+        };
+        let bytes = std::fs::read(&path).expect("read capture png");
+        let actual_hex = fmn_hash::sha256(&bytes).to_hex();
+        assert_eq!(
+            &actual_hex,
+            expected_hex,
+            "top-level Reference capture {} drifted from PROVENANCE.json",
+            path.display()
+        );
+    }
+}
+

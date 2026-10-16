@@ -456,6 +456,17 @@ include stroke extent, so shapes can sit a few pixels off. This is an aesthetic
 comparison, never a pixel gate (D-16), and a few pixels of placement does not
 affect any constant decided above.
 
+**Relationship to the production Look Gallery (`fm-5wq.50`).** The `docs/g0/g0-2-renders/`
+stills above are the historical G0-2 calibration artifacts produced by the
+`g0_2_look` spike binary against `gallery/reference_captures/*.png`
+(`gallery/reference_captures/PROVENANCE.json`). The ongoing release Look Gallery
+is governed by `crates/fmn-conformance/fixtures/look_gallery.tsv` (format v2, 29
+panels across `gallery/scenes/{primitives,math_sheet,readme}.py`) and
+`crates/fmn-conformance/fixtures/look_gallery_owner_verdicts.tsv`, with committed
+production renders in `gallery/renders/*.png` compared against private panel
+captures in `gallery/reference_captures/panels/*.png` as documented in
+`docs/look_gallery/CAPTURE_INVENTORY.md`.
+
 ---
 
 ## 7. Decisions recorded

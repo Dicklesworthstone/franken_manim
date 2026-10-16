@@ -38,15 +38,18 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCENES = ROOT / "gallery" / "scenes"
 RENDERS = ROOT / "gallery" / "renders"
+REFERENCE_CAPTURES_ROOT = ROOT / "gallery" / "reference_captures"
+PROVENANCE = REFERENCE_CAPTURES_ROOT / "PROVENANCE.json"
 # Regeneration captures live apart from the original capture set (capture_reference_imagery.py,
 # PROVENANCE.json) one level up, so this tool can never overwrite it.
-CAPTURES = ROOT / "gallery" / "reference_captures" / "panels"
+CAPTURES = REFERENCE_CAPTURES_ROOT / "panels"
 MANIFEST = ROOT / "crates" / "fmn-conformance" / "fixtures" / "look_gallery.tsv"
 HEADER = "# fmn-look-gallery v2"
 COLUMNS = ("panel", "source", "reference", "reference_sha256", "render", "render_sha256",
            "build_id", "advisory_verdict", "changed")
 # fmn-cli/src/build_identity.rs compose_build_identity: git:<commit>[+dirty:<digest>|+unverified].
 BUILD_ID = re.compile(rb"git:[0-9a-f]{40}(?:\+dirty:[0-9a-f]{16,64}|\+unverified)?")
+CLEAN_BUILD_ID = re.compile(r"^git:[0-9a-f]{40}$")
 
 PRIMITIVES = ("gradient_fills:GradientFills", "self_intersections:SelfIntersections",
               "joints_and_caps:JointsAndCaps", "glow:Glow", "lighting_3d:Lighting3D",
@@ -72,6 +75,29 @@ def panels():
 
 def sha256(path: pathlib.Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def verify_reference_capture_set(root: pathlib.Path = REFERENCE_CAPTURES_ROOT,
+                                 provenance_path: pathlib.Path = PROVENANCE) -> dict[str, str]:
+    """Verify that top-level gallery/reference_captures/*.png match PROVENANCE.json."""
+    if not provenance_path.is_file():
+        return {}
+    data = json.loads(provenance_path.read_text(encoding="utf-8"))
+    expected = dict(data.get("captures", {}))
+    for supplement in data.get("supplements", []):
+        expected.update(supplement.get("recaptured", {}))
+    observed = {}
+    for png in sorted(root.glob("*.png")):
+        panel = png.stem
+        digest = sha256(png)
+        if panel not in expected:
+            raise RuntimeError(f"unrecorded top-level Reference capture {png} (not in {provenance_path})")
+        if digest != expected[panel]:
+            raise RuntimeError(
+                f"Reference capture {png} digest mismatch: expected {expected[panel]}, got {digest}"
+            )
+        observed[panel] = digest
+    return observed
 
 
 def render_portal(fmn_python, source, scene, resolution, work):
@@ -129,12 +155,21 @@ def main(argv=None) -> int:
     parser.add_argument("--reference-root", type=pathlib.Path, default=ROOT / "scripts" / "manim_ref")
     parser.add_argument("--resolution", default="1920x1080")
     parser.add_argument("--panel", action="append", default=[], help="regenerate only this panel (repeatable)")
+    parser.add_argument("--recapture-reference", action="store_true",
+                        help="allow replacing an existing gallery/reference_captures/panels/<panel>.png")
+    parser.add_argument("--allow-dirty-calibration", action="store_true",
+                        help="allow +dirty/+unverified build_id for local scratch inspection (never writes look_gallery.tsv)")
     args = parser.parse_args(argv)
     if not re.fullmatch(r"\d{2,5}x\d{2,5}", args.resolution):
         parser.error("--resolution must be WIDTHxHEIGHT")
     chosen = [p for p in panels() if not args.panel or p[0] in args.panel]
     if args.panel and len(chosen) != len(set(args.panel)):
         parser.error(f"unknown panel among {args.panel}")
+    try:
+        pre_captures = verify_reference_capture_set()
+    except RuntimeError as error:
+        print(json.dumps({"status": "error", "error": str(error)}), file=sys.stderr)
+        return 1
     reference_commit = subprocess.run(["git", "-C", str(args.reference_root), "rev-parse", "HEAD"],
                                       capture_output=True, text=True, check=True).stdout.strip()
     revision, previous = parse_manifest(MANIFEST.read_text(encoding="utf-8"))
@@ -151,11 +186,23 @@ def main(argv=None) -> int:
                 failures.append({"panel": panel, "error": str(error)})
                 print(json.dumps({"panel": panel, "status": "error", "error": str(error)}), flush=True)
                 continue
+            if not CLEAN_BUILD_ID.fullmatch(build) and not args.allow_dirty_calibration:
+                err = (f"refusing non-clean build_id {build!r}: commit and reinstall fmn-python from a clean tree, "
+                       "or pass --allow-dirty-calibration for scratch inspection without writing look_gallery.tsv")
+                failures.append({"panel": panel, "error": err})
+                print(json.dumps({"panel": panel, "status": "error", "error": err}), flush=True)
+                continue
             render = RENDERS / f"{panel}.png"
             shutil.copyfile(png, render)
             capture, reason = CAPTURES / f"{panel}.png", None
             old = previous.get(panel, {})
             if args.reference_python:
+                if capture.exists() and not args.recapture_reference:
+                    failures.append({
+                        "panel": panel,
+                        "error": f"refusing to overwrite existing {capture} without --recapture-reference",
+                    })
+                    continue
                 ref_png, reason = render_reference(args.reference_python, args.reference_root, source, scene,
                                                    args.resolution, work)
                 # Captures are private data: replace only a file this tool recorded.
@@ -181,15 +228,30 @@ def main(argv=None) -> int:
                            render_digest, build, verdict, note)
             print(json.dumps({"panel": panel, "status": "ok", "build_id": build, "captured": captured,
                               "reference_note": reason}), flush=True)
+    try:
+        post_captures = verify_reference_capture_set()
+        if post_captures != pre_captures:
+            raise RuntimeError("top-level gallery/reference_captures/*.png changed during regeneration")
+    except RuntimeError as error:
+        print(json.dumps({"status": "error", "error": str(error)}), file=sys.stderr)
+        return 1
     if failures:
         print(json.dumps({"status": "error", "failed_panels": failures}), file=sys.stderr)
         return 1
     if len(builds) > 1:
         print(json.dumps({"status": "error", "error": f"panels came from {len(builds)} builds"}), file=sys.stderr)
         return 1
+    release = next(iter(builds))
+    if args.allow_dirty_calibration:
+        print(json.dumps({
+            "status": "calibration_only",
+            "release": release,
+            "panels": len(rows),
+            "manifest_written": False,
+        }))
+        return 0
     if args.panel:
         # A partial run keeps the other rows, so it must come from the release already under review.
-        release = next(iter(builds))
         stale = [p for p, row in previous.items() if p not in rows and row.get("build_id") != release]
         if stale:
             print(json.dumps({"status": "error", "error": "other panels are from another build", "panels": stale}),
@@ -197,7 +259,6 @@ def main(argv=None) -> int:
             return 1
         for panel, row in previous.items():
             rows.setdefault(panel, tuple(row[c] for c in COLUMNS))
-    release = next(iter(builds))
     text = "\n".join([HEADER, f"# revision: {revision + 1}", f"# release: {release}",
                       f"# reference: 3b1b/manim@{reference_commit}", "# columns: " + "\t".join(COLUMNS),
                       *("\t".join(rows[p]) for p in sorted(rows))]) + "\n"

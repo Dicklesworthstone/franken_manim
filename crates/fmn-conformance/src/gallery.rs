@@ -818,13 +818,27 @@ fn valid_sha256(digest: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
-/// A build or Reference identity: short printable ASCII without separators,
-/// e.g. `git:<commit>`, `git:<commit>+dirty:<digest>` or `3b1b/manim@<commit>`.
+/// A Reference identity: short printable ASCII without separators,
+/// e.g. `3b1b/manim@<commit>`.
 fn valid_identity(identity: &str) -> bool {
     (1..=200).contains(&identity.len())
         && identity.bytes().all(|b| {
             b.is_ascii_alphanumeric() || matches!(b, b':' | b'+' | b'.' | b'_' | b'-' | b'/' | b'@')
         })
+}
+
+/// A clean FrankenManim build identity (`git:<40 lowercase hex>`).
+///
+/// Dirty worktrees (`+dirty:...`), unverified trees (`+unverified`), and
+/// unknown commits (`git:unknown`) are refused in committed Look Gallery
+/// manifests so every reviewed panel is traceable to an exact commit.
+fn valid_clean_build_id(identity: &str) -> bool {
+    identity.strip_prefix("git:").is_some_and(|commit| {
+        commit.len() == 40
+            && commit
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
 }
 
 /// A scene source: a repo path and a Python class name, `path.py:SceneClass`.
@@ -924,25 +938,37 @@ impl GalleryManifest {
             });
         }
 
-        let mut identity = |line: usize, prefix: &str, what: &str| {
-            let text = lines
-                .next()
-                .and_then(|(_, text)| text.strip_prefix(prefix))
-                .ok_or_else(|| GalleryError::Corrupt {
-                    line,
-                    detail: format!("line {line} must start with {prefix:?}"),
-                })?;
-            if valid_identity(text) {
-                Ok(text.to_string())
-            } else {
-                Err(GalleryError::Corrupt {
-                    line,
-                    detail: format!("invalid {what} identity {text:?}"),
-                })
-            }
-        };
-        let release = identity(3, MANIFEST_RELEASE_PREFIX, "release")?;
-        let reference_identity = identity(4, MANIFEST_REFERENCE_PREFIX, "reference")?;
+        let release_text = lines
+            .next()
+            .and_then(|(_, text)| text.strip_prefix(MANIFEST_RELEASE_PREFIX))
+            .ok_or_else(|| GalleryError::Corrupt {
+                line: 3,
+                detail: format!("line 3 must start with {MANIFEST_RELEASE_PREFIX:?}"),
+            })?;
+        if !valid_clean_build_id(release_text) {
+            return Err(GalleryError::Corrupt {
+                line: 3,
+                detail: format!(
+                    "invalid release identity {release_text:?}: expected clean git:<40-hex> commit without +dirty or +unverified"
+                ),
+            });
+        }
+        let release = release_text.to_string();
+
+        let reference_text = lines
+            .next()
+            .and_then(|(_, text)| text.strip_prefix(MANIFEST_REFERENCE_PREFIX))
+            .ok_or_else(|| GalleryError::Corrupt {
+                line: 4,
+                detail: format!("line 4 must start with {MANIFEST_REFERENCE_PREFIX:?}"),
+            })?;
+        if !valid_identity(reference_text) {
+            return Err(GalleryError::Corrupt {
+                line: 4,
+                detail: format!("invalid reference identity {reference_text:?}"),
+            });
+        }
+        let reference_identity = reference_text.to_string();
 
         let Some((_, columns)) = lines.next() else {
             return Err(GalleryError::Corrupt {
@@ -1042,8 +1068,10 @@ impl GalleryManifest {
                     "invalid render_sha256 {render_sha256:?}: lowercase SHA-256 hex"
                 )));
             }
-            if !valid_identity(build_id) {
-                return Err(corrupt(format!("invalid build_id {build_id:?}")));
+            if !valid_clean_build_id(build_id) {
+                return Err(corrupt(format!(
+                    "invalid build_id {build_id:?}: expected clean git:<40-hex> commit without +dirty or +unverified"
+                )));
             }
             let verdict = Verdict::from_token(verdict).ok_or_else(|| {
                 corrupt(format!(
