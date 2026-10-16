@@ -1,5 +1,7 @@
 //! Coordinate maps read from live native axes, including affine animation.
 
+mod calculus;
+
 use fmn_geom::space_ops::{cross, dot};
 use fmn_mobject::{CopyMap, Mob, Stage};
 
@@ -46,6 +48,8 @@ pub enum CoordinateFrameError {
     DegenerateBasis,
     /// A live conversion received or produced non-finite coordinates.
     NonFiniteCoordinates,
+    /// A graph, style, or geometric request cannot define the requested construction.
+    InvalidGeometry(&'static str),
     /// The requested construction needs a different coordinate dimension.
     DimensionMismatch {
         /// Required number of coordinate axes.
@@ -78,6 +82,7 @@ impl std::fmt::Display for CoordinateFrameError {
             }
             Self::DegenerateBasis => f.write_str("coordinate axes have no stable affine inverse"),
             Self::NonFiniteCoordinates => f.write_str("coordinate conversion is not finite"),
+            Self::InvalidGeometry(reason) => write!(f, "invalid coordinate geometry: {reason}"),
             Self::DimensionMismatch { expected, actual } => {
                 write!(
                     f,
