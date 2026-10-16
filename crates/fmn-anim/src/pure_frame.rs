@@ -39,6 +39,9 @@ enum FrozenMechanism {
     Partial(ShowPartial),
     BorderFill(crate::DrawBorderThenFill),
     Subsets(crate::ShowIncreasingSubsets),
+    CrossFade(crate::FadeTransform),
+    Wiggle(crate::WiggleOutThenIn),
+    StrokeFlash(crate::VShowPassingFlash),
     VectorFade(VFade),
     Rotation(Rotating),
     Group(FrozenGroup),
@@ -113,6 +116,24 @@ impl FrozenAnimation {
         })
     }
 
+    pub(crate) fn cross_fade(animation: crate::FadeTransform) -> Option<Self> {
+        Some(Self {
+            mechanism: FrozenMechanism::CrossFade(Self::prepare(animation, 3)?),
+        })
+    }
+
+    pub(crate) fn wiggle(animation: crate::WiggleOutThenIn) -> Option<Self> {
+        Some(Self {
+            mechanism: FrozenMechanism::Wiggle(Self::prepare(animation, 2)?),
+        })
+    }
+
+    pub(crate) fn stroke_flash(animation: crate::VShowPassingFlash) -> Option<Self> {
+        Some(Self {
+            mechanism: FrozenMechanism::StrokeFlash(Self::prepare(animation, 2)?),
+        })
+    }
+
     pub(crate) fn vector_fade(fade: VFade) -> Option<Self> {
         Some(Self {
             mechanism: FrozenMechanism::VectorFade(Self::prepare(fade, 2)?),
@@ -162,6 +183,9 @@ impl FrozenAnimation {
             FrozenMechanism::Partial(animation) => animation.state(),
             FrozenMechanism::BorderFill(animation) => animation.state(),
             FrozenMechanism::Subsets(animation) => animation.state(),
+            FrozenMechanism::StrokeFlash(animation) => animation.state(),
+            FrozenMechanism::Wiggle(animation) => animation.state(),
+            FrozenMechanism::CrossFade(animation) => animation.state(),
             FrozenMechanism::VectorFade(animation) => animation.state(),
             FrozenMechanism::Rotation(animation) => animation.state(),
             FrozenMechanism::Group(group) => &group.state,
@@ -185,6 +209,9 @@ impl FrozenAnimation {
             FrozenMechanism::Partial(animation) => evaluate(animation, stage, alpha),
             FrozenMechanism::BorderFill(animation) => evaluate(animation, stage, alpha),
             FrozenMechanism::Subsets(animation) => evaluate(animation, stage, alpha),
+            FrozenMechanism::StrokeFlash(animation) => evaluate(animation, stage, alpha),
+            FrozenMechanism::Wiggle(animation) => evaluate(animation, stage, alpha),
+            FrozenMechanism::CrossFade(animation) => evaluate(animation, stage, alpha),
             FrozenMechanism::VectorFade(animation) => evaluate(animation, stage, alpha),
             FrozenMechanism::Rotation(animation) => evaluate(animation, stage, alpha),
             FrozenMechanism::Group(group) => {

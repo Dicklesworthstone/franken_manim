@@ -354,6 +354,10 @@ impl FadeTransform {
 }
 
 impl Animation for FadeTransform {
+    fn freeze_interpolation(&self) -> Option<crate::pure_frame::FrozenAnimation> {
+        crate::pure_frame::FrozenAnimation::cross_fade(self.clone())
+    }
+
     fn state(&self) -> &AnimState {
         &self.state
     }

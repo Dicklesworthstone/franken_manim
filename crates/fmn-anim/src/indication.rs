@@ -143,6 +143,8 @@ pub fn turn_inside_out(
 /// rock by the `wiggle` rate — absolute pose per frame. Reference
 /// defaults: `scale_value = 1.1`, `rotation_angle = 0.01·TAU`,
 /// `n_wiggles = 6`, `run_time = 2`.
+/// Default pivots use the starting family center, so scrubbing and native
+/// worker reconstruction produce the same pose at the same alpha.
 #[derive(Debug, Clone)]
 pub struct WiggleOutThenIn {
     state: AnimState,
@@ -216,6 +218,10 @@ impl WiggleOutThenIn {
 }
 
 impl Animation for WiggleOutThenIn {
+    fn freeze_interpolation(&self) -> Option<crate::pure_frame::FrozenAnimation> {
+        crate::pure_frame::FrozenAnimation::wiggle(self.clone())
+    }
+
     fn state(&self) -> &AnimState {
         &self.state
     }
@@ -224,8 +230,8 @@ impl Animation for WiggleOutThenIn {
         &mut self.state
     }
 
-    /// Pure: restore-then-transform about pivots that are functions of
-    /// the begin state (the default pivots read the restored center).
+    /// Pure: restore-then-transform about explicit pivots or the immutable
+    /// starting family center, never a partially restored live-family box.
     fn effect_signature(&self) -> AnimationSignature {
         AnimationSignature::Pure
     }
@@ -246,7 +252,10 @@ impl Animation for WiggleOutThenIn {
             return; // rows are pairs once begin has run
         };
         stage.match_points(submob, start);
-        let mobject = self.state.mobject();
+        // match_points restores only this member; live siblings can still
+        // carry the preceding frame. Their partially restored box must not
+        // become the default pivot. The starting family's box is immutable.
+        let mobject = self.state.starting_mobject().unwrap_or(start);
         let scale_pivot = self
             .scale_about_point
             .unwrap_or_else(|| stage.get_center(mobject));
@@ -330,6 +339,10 @@ impl VShowPassingFlash {
 }
 
 impl Animation for VShowPassingFlash {
+    fn freeze_interpolation(&self) -> Option<crate::pure_frame::FrozenAnimation> {
+        crate::pure_frame::FrozenAnimation::stroke_flash(self.clone())
+    }
+
     fn state(&self) -> &AnimState {
         &self.state
     }
