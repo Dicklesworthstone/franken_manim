@@ -35,23 +35,23 @@ The eight criteria are quoted from `fm-i1q` (plan §20.3).
 | (2) Span map drives isolate / t2c / slicing / TransformMatchingTex end-to-end | `crates/fmn-library/src/tex.rs` (isolate/t2c by source identity), `crates/fmn-anim/src/transform_matching.rs` (native span keys), portal binds `8ec3b03`/`d7fab57`/`511f7f1`; the portal gate suites `matching_transform_semantics`, `matching_authoring`, `live_tex` and `bridge` exercise them (`scripts/check_portal_runtime.sh`) | **Green** |
 | (3) De-TeX'd classes native (W7DETEX) | `fm-y69` and `fm-ebl` closed; `crates/fmn-library/src/brace.rs`, `numbers.rs` (DecimalNumber), `matchers.rs`/`controls.rs` (Checkmark/Exmark, controls), matrix delimiters from the extensible-delimiter engine | **Green** |
 | (4) SVGMobject works for user files (W2SVG) | `fm-6nm` and `fm-5wq.4.50` closed: portal `SVGMobject` builds a VMobject family through Chisel's hardened processor (`crates/fmn-geom/src/svg.rs`), covered by `crates/fmn-python/tests/bridge.py` | **Green** |
-| (5) Typeset caching live (W6TEX + W8CACHE) | All three front doors attach the persistent typeset store at the one resolved root: standalone `fmn` (`0126fd51`), `fmn::render` (`a89eaee9`) and `fmn-python` (`59807496`, plus `directories.cache` from the config). Cache keys name the bundled faces' SHA-256s and the pinned `franken_markdown` rev. Fresh-process acceptance passes on Linux (`crates/fmn-cli/tests/typeset_cache.rs`): a warm second run serves 21/21 layouts from disk with byte-identical `--reproducible` frames; a corrupt entry is detected and recomputed; `--clear-cache` empties the store. Static strings are preflighted on the worker pool before `construct` (the formula sheet: 21 layouts before construct, 0 in construct, 0 in play): native scenes from a declared manifest, portal scenes from literal `Tex`/`TexText` calls found in their source. The same tests pass on macOS arm64, and the portal suites pass on a fresh wheel. PG-7's formula workloads time real layouts and verified store hits since `a362dcec` (`fm-a87y`); open: a qualified PG-7 observation (`fm-inr.1`); native scenes need a declared manifest (`fm-typeset-cache-preflight-wiring-1sn0`) | **Partial** |
+| (5) Typeset caching live (W6TEX + W8CACHE) | All three front doors attach the persistent typeset store at the one resolved root (`fm-typeset-cache-preflight-wiring-1sn0`, closed): standalone `fmn` (`0126fd51`), `fmn::render` (`a89eaee9`) and `fmn-python` (`59807496`, plus `directories.cache` from the config, with store read/write error counting `c21d049e`). Cache keys name the bundled faces' SHA-256s, the `fmn-tex` version and the pinned `franken_markdown` rev. Fresh-process acceptance passes on Linux and macOS arm64 (`crates/fmn-cli/tests/typeset_cache.rs`, 8/8; `crates/fmn-tex/tests/memory_cache.rs`, 9/9; `crates/fmn-python` `typesetting::tests`, 3/3; e2e `lifecycle.typeset_cache_warm_second_run.v1` and `lifecycle.typeset_preflight_before_first_play.v1`): a warm second run serves 21/21 layouts from disk with byte-identical `--reproducible` frames; a corrupt entry is detected and recomputed; `--clear-cache` empties the store. Static strings are preflighted on the worker pool before `construct` (the formula sheet: 21 layouts before construct, 0 in construct, 0 in play): native scenes from `SceneConstruct::tex_preflight`, portal scenes from literal `Tex`/`TexText` calls found across the MRO. PG-7's formula workloads time real layouts and verified store hits since `a362dcec` (`fm-a87y`, closed); open: a qualified PG-7 observation (`fm-inr.1`) | **Partial (pending PG-7 observation `fm-inr.1`)** |
 | (6) Coverage-ratchet dashboard public and live (W6RATCHET) | `docs/ratchet/dashboard.md`, regenerated at the `68fe29b8` pin (`8e6d7372`): frozen G0-4 denominator, CI-enforced pin/ratchet lockstep, and honest columns ("typeset returned Ok" apart from "checked by an oracle"). Recomputing it needs the private corpus, which exists only on the project host | **Green** |
 | (7) fmd renders `$…$` in HTML/PDF via the same crates | Re-measured at the `f059cac6` pin (see "Cross-repo payoff"): PDF inline and display math both go through fmd-math `Layout` (`fm-djcw`, UPSTREAM_LEDGER row 21). HTML emits MathML from the fmd-math parse tree and the browser lays it out; this packet records that as **not** using the shared layout | **PDF GREEN; HTML NOT GREEN (MathML; owner decision on whether it satisfies "via the same crates")** |
 | (8) PG-1(G2) and PG-7 enforced and blocking | Policy rows are `blocking` in `docs/performance/PERF_GATES.tsv` and the rig is in-tree (`crates/fmn-conformance/src/perf_pg7.rs`, `perf_frontdoor.rs`, `bin/fmn-perf.rs`). ADR-0024 makes host qualification satisfiable (`fm-5wq.8` closed), but no pinned-host observation is committed (`fm-inr.1`), and the Reference side of PG-1 is still a calibration capture (`fm-5wq.17`) | **NOT GREEN** |
 
 ## Dependency closure
 
-Of `fm-i1q`'s 25 blockers, 18 are closed and 7 are open.
+Of `fm-i1q`'s 25 blockers, 20 are closed and 5 are open.
 
 - **Closed:** `fm-hk9`, `fm-wgl`, `fm-ydw`, `fm-fjq`, `fm-7dw`, `fm-u1u`,
   `fm-70s`, `fm-kg9`, `fm-ebl`, `fm-fw6`, `fm-y69`, `fm-mol`, `fm-6nm`,
-  `fm-6ppv`, `fm-5wq.8`, `fm-djcw`, this packet's own bead
+  `fm-6ppv`, `fm-5wq.8`, `fm-djcw`, `fm-tex-display-style-nclg`,
+  `fm-typeset-cache-preflight-wiring-1sn0`, this packet's own bead
   `fm-fmd-repin-g2-truth-y3gr`, and the prerequisite gate `fm-o3j` (G1
   passed 2026-08-20, `f1248b6`).
 - **Open, by criterion:**
-  - (1) `fm-tex-display-style-nclg` (in progress), `fm-tex-metrics-glyphs-ru72`, `fm-5wq.50`;
-  - (5) `fm-typeset-cache-preflight-wiring-1sn0`;
+  - (1) `fm-tex-metrics-glyphs-ru72`, `fm-5wq.50`;
   - (7) `fm-mmzl` (the HTML ruling, `agent:claim:manual`);
   - (8) `fm-inr` (in progress), `fm-5wq.17`.
 
@@ -367,13 +367,13 @@ HOLD, but it is also not a pass, and G2 makes these gates blocking.
 ## What still blocks G2
 
 1. **Criterion 1, layout correctness and beauty.**
-   - The display-style all-rows tolerance (`fm-tex-display-style-nclg`).
    - The metric and glyph misses the box oracle names (`fm-tex-metrics-glyphs-ru72`).
    - A corpus-wide layout oracle (`fm-tex-layout-oracle-bkbc`).
-   - A Look Gallery regenerated from production entry points with an owner verdict lane (`fm-5wq.50`).
+   - Owner verdict review on the regenerated Look Gallery (`fm-5wq.50`).
 2. **Criterion 5:** a qualified PG-7 observation (`fm-inr.1`); the producer
-   now times real layouts and store hits (`fm-a87y`, `a362dcec`); native preflight
-   without a declared manifest (`fm-typeset-cache-preflight-wiring-1sn0`).
+   now times real layouts and store hits (`fm-a87y`, `a362dcec`), and persistent
+   typeset caching + preflight are wired across `fmn`, `fmn::render`, and
+   `fmn-python` (`fm-typeset-cache-preflight-wiring-1sn0`).
 3. **Criterion 7:** PDF is done (`fm-djcw`). HTML math is browser-laid-out
    MathML from the fmd-math parser; whether criterion 7 requires fmd-math
    `Layout` for HTML too is an owner ruling (`fm-mmzl`).
