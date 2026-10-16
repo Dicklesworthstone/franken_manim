@@ -26,6 +26,8 @@
 //! idea one layer down, and the same reason.
 
 mod generation;
+#[cfg(test)]
+mod allocation;
 
 use crate::hint::Hint;
 use crate::revision::{Axis, Dependency, Revisions};
@@ -36,6 +38,7 @@ use crate::table::{
 use fmn_core::types::Vec3;
 use fmn_geom::{GeomError, quadpath::QuadPath};
 use fmn_hash::{Digest, Sha256};
+use fmn_mobject::record::StorageIdentity;
 use fmn_mobject::{Mob, Placement, ProgramKind, RecordBuffer, Stage};
 use std::collections::{HashMap, HashSet};
 
@@ -416,8 +419,13 @@ pub struct SyncStats {
 }
 
 /// One renderable's retained compilation.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Retained {
+    // Revision axes include a storage address. Keep its weak allocation
+    // identity alive while the observation is retained: a destroyed worker
+    // Stage must not let a new buffer reuse that address with equal counters.
+    // A weak witness owns no cells, exports no view and does not cause CoW.
+    storage: StorageIdentity,
     shape_dep: Dependency,
     style_dep: Dependency,
     shape: u32,
@@ -828,33 +836,34 @@ impl RenderPlan {
 
             let previous = next_retained
                 .get(&mob)
-                .copied()
-                .or_else(|| self.retained.get(&mob).copied());
-            if let Some(retained) = previous {
-                next_retained.entry(mob).or_insert(retained);
+                .cloned()
+                .or_else(|| self.retained.get(&mob).cloned());
+            if let Some(retained) = &previous {
+                next_retained.entry(mob).or_insert_with(|| retained.clone());
             }
 
             let Some(entry_placement) = stage.placement(mob) else {
                 continue;
             };
-            let entry = stage.get(mob);
-            let (hint_unsafe, style_unsafe) = entry.map_or((false, false), |entry| {
-                (
-                    writable_view_affects_any(&entry.buffer, &SHAPE_VIEW_FIELDS),
-                    writable_view_affects_any(&entry.buffer, &STYLE_VIEW_FIELDS),
-                )
-            });
+            let Some(entry) = stage.get(mob) else {
+                continue;
+            };
+            let same_storage = previous
+                .as_ref()
+                .is_some_and(|retained| retained.storage.matches(&entry.buffer));
+            let hint_unsafe = writable_view_affects_any(&entry.buffer, &SHAPE_VIEW_FIELDS);
+            let style_unsafe = writable_view_affects_any(&entry.buffer, &STYLE_VIEW_FIELDS);
 
             let (shape, local_origin) = match &previous {
-                Some(retained) if !hint_unsafe && !retained.shape_dep.is_stale(&now) => {
+                Some(retained)
+                    if same_storage && !hint_unsafe && !retained.shape_dep.is_stale(&now) =>
+                {
                     stats.shapes_reused += 1;
                     (retained.shape, retained.local_origin)
                 }
                 _ => {
-                    let counted_from_schema = entry.and_then(|entry| {
-                        (entry.buffer.schema().field_width("point") == Some(3))
-                            .then_some(entry.buffer.len())
-                    });
+                    let counted_from_schema = (entry.buffer.schema().field_width("point") == Some(3))
+                        .then_some(entry.buffer.len());
                     if let Some(point_count) = counted_from_schema {
                         let curves = count_u64(point_count.saturating_sub(1) / 2);
                         input_curves =
@@ -981,11 +990,14 @@ impl RenderPlan {
             // measurable profile. Collapse removes stations, not dependency on
             // geometry. Reuse this per-object metadata without reading paint on
             // unchanged frames, including when style rows are shared.
-            let previous_profiled =
-                previous.is_some_and(|old| old.style_dep.axes().contains(&Axis::Geometry));
+            let previous_profiled = previous
+                .as_ref()
+                .is_some_and(|old| old.style_dep.axes().contains(&Axis::Geometry));
             let style_unsafe = style_unsafe || (previous_profiled && hint_unsafe);
             let (style, profiled) = match &previous {
-                Some(retained) if !style_unsafe && !retained.style_dep.is_stale(&now) => {
+                Some(retained)
+                    if same_storage && !style_unsafe && !retained.style_dep.is_stale(&now) =>
+                {
                     (retained.style, previous_profiled)
                 }
                 _ => {
@@ -1073,6 +1085,7 @@ impl RenderPlan {
             next_retained.insert(
                 mob,
                 Retained {
+                    storage: entry.buffer.storage_identity(),
                     shape_dep: Dependency::new(now, &SHAPE_AXES),
                     style_dep: Dependency::new(
                         now,
