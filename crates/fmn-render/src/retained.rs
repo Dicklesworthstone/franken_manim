@@ -13,10 +13,10 @@ use fmn_frame::{FrameBuffer, FrameError};
 use fmn_mobject::{Mob, Placement, ProgramKind, RenderPrimitive, Stage};
 
 use crate::{
-    Binning, BinningError, CachedRenderError, CachedRenderStats, Camera, EngineIdentity,
-    FrameArena, FrameConfig, FrameJob, FrameJobError, MonoTable, MonoTableError, PixelTileCache,
-    RenderPlan, SurfaceDraw, SurfaceMaterial, SurfaceMesh, SurfaceVertex, SyncError, ThreeDDraw,
-    ThreeDError, ThreeDJob, Tiling, TrueDotDraw, VectorDraw,
+    AllocStats, Binning, BinningError, CachedRenderError, CachedRenderStats, Camera,
+    EngineIdentity, FrameArena, FrameConfig, FrameJob, FrameJobError, MonoTable, MonoTableError,
+    PixelTileCache, RenderPlan, SurfaceDraw, SurfaceMaterial, SurfaceMesh, SurfaceVertex,
+    SyncError, ThreeDDraw, ThreeDError, ThreeDJob, Tiling, TrueDotDraw, VectorDraw,
 };
 
 /// Immutable policy for one retained CPU renderer.
@@ -171,9 +171,13 @@ impl From<CachedRenderError> for RetainedFrameRendererError {
 pub struct RetainedFrameRenderer {
     config: RetainedFrameRendererConfig,
     plan: RenderPlan,
+    mono: MonoTable,
+    binning: Binning,
     arena: FrameArena,
     cache: PixelTileCache,
     frame: FrameBuffer,
+    last_cache_serial: Option<u64>,
+    scratch_draw_items: Vec<fmn_mobject::DrawItem>,
 }
 
 impl RetainedFrameRenderer {
@@ -191,9 +195,13 @@ impl RetainedFrameRenderer {
         Ok(Self {
             config,
             plan: RenderPlan::new(),
+            mono: MonoTable::default(),
+            binning: Binning::default(),
             arena: FrameArena::new(),
             cache: PixelTileCache::new(),
             frame,
+            last_cache_serial: None,
+            scratch_draw_items: Vec::new(),
         })
     }
 
@@ -203,7 +211,8 @@ impl RetainedFrameRenderer {
     pub fn set_background(&mut self, background: LinearRgba) {
         if self.config.frame.background != background {
             self.config.frame.background = background;
-            self.cache = PixelTileCache::new();
+            self.cache.clear();
+            self.last_cache_serial = None;
         }
     }
 
@@ -216,9 +225,9 @@ impl RetainedFrameRenderer {
         stage: &Stage,
         camera_revision: u64,
     ) -> Result<CachedRenderStats, RetainedFrameRendererError> {
-        if let Some(item) = stage
-            .draw_plan()
-            .items()
+        stage.draw_plan_into(&mut self.scratch_draw_items);
+        if let Some(item) = self
+            .scratch_draw_items
             .iter()
             .find(|item| item.key.program != ProgramKind::Vector)
         {
@@ -227,28 +236,38 @@ impl RetainedFrameRenderer {
             });
         }
         self.plan.sync(stage, camera_revision)?;
-        let mono = MonoTable::build(&self.plan, self.config.frame.map)?;
-        let mut binning = Binning::build(
-            &self.plan,
-            self.config.frame.viewport,
-            self.config.tiling,
-            self.config.frame.map,
-        )?;
-        binning.prune_occluded(&self.plan)?;
-        Ok(FrameJob::with_identity_in(
+        self.mono
+            .rebuild_in_place(&self.plan, self.config.frame.map)?;
+        if !self.binning.matches_plan(&self.plan)
+            || self.binning.viewport() != self.config.frame.viewport
+            || self.binning.tiling() != self.config.tiling
+            || self.binning.map() != self.config.frame.map
+        {
+            self.binning.rebuild_in_place(
+                &self.plan,
+                self.config.frame.viewport,
+                self.config.tiling,
+                self.config.frame.map,
+            )?;
+            self.binning.prune_occluded(&self.plan)?;
+        }
+        let stats = FrameJob::with_identity_in(
             &mut self.arena,
             &self.plan,
-            &mono,
-            &binning,
+            &self.mono,
+            &self.binning,
             self.config.frame,
             self.config.engine,
         )?
-        .render_into_cached(
+        .render_into_cached_resuming(
             self.config.threads,
             &mut self.frame,
             camera_revision,
             &mut self.cache,
-        )?)
+            self.last_cache_serial,
+        )?;
+        self.last_cache_serial = Some(self.cache.serial());
+        Ok(stats)
     }
 
     /// Synchronize vector records, rebuild camera-bound surface/dot commands,
@@ -262,6 +281,7 @@ impl RetainedFrameRenderer {
         stage: &Stage,
         camera: &Camera,
     ) -> Result<(), RetainedFrameRendererError> {
+        self.last_cache_serial = None;
         let scene = prepare_camera_scene(&mut self.plan, stage, camera)?;
         render_camera_scene(
             &self.plan,
@@ -322,6 +342,12 @@ impl RetainedFrameRenderer {
     #[must_use]
     pub const fn cache(&self) -> &PixelTileCache {
         &self.cache
+    }
+
+    /// The PG-6 per-frame allocation ledger for the most recent 2D frame.
+    #[must_use]
+    pub fn allocation_stats(&self) -> AllocStats {
+        self.arena.stats()
     }
 }
 
@@ -1352,6 +1378,60 @@ mod tests {
             })
         ));
         assert_eq!(renderer.frame().as_bytes(), before);
+    }
+
+    #[test]
+    fn steady_state_static_and_translating_renders_allocate_nothing() {
+        let mut stage = Stage::new();
+        let mob = stage.add(vector());
+        stage.add_to_scene(mob).expect("live root");
+        let mut renderer = RetainedFrameRenderer::new(config(4)).expect("valid renderer");
+
+        // Frame 1: warm-up sizes the retained plan, monotone table, binning,
+        // arena pools, worker scratch, and tile cache.
+        let warm_cache = renderer.render(&stage, 0).expect("warm render");
+        let warm_allocs = renderer.allocation_stats();
+        let warm_mirrors = renderer.plan().mirror_materializations();
+        assert!(warm_allocs.heap_allocs_this_frame > 0);
+        assert!(warm_cache.cache.misses > 0);
+
+        // Frame 2: static Wait() frame — 100% tile reuse, zero allocations,
+        // zero shape recompiles, zero SoA mirror rematerializations.
+        let wait_cache = renderer.render(&stage, 0).expect("wait render");
+        let wait_allocs = renderer.allocation_stats();
+        assert_eq!(wait_allocs.heap_allocs_this_frame, 0);
+        assert_eq!(wait_allocs.arena_buffer_bytes, warm_allocs.arena_buffer_bytes);
+        assert_eq!(wait_allocs.pool_slots, warm_allocs.pool_slots);
+        assert_eq!(renderer.plan().stats().shapes_compiled, 0);
+        assert_eq!(renderer.plan().stats().styles_rebuilt, 0);
+        assert_eq!(renderer.plan().mirror_materializations(), warm_mirrors);
+        assert_eq!(wait_cache.cache.misses, 0);
+        assert_eq!(wait_cache.cache.hits, warm_cache.cache.misses);
+
+        // Frames 3..=5: affine translation — placement moves every frame,
+        // binning rebuilds in-place, monotone split is skipped, and Arena + SoA
+        // mirrors allocate nothing after the first moving frame warms the draw
+        // pool.
+        stage.shift(mob, [0.25, 0.1, 0.0]);
+        let _ = renderer.render(&stage, 0).expect("first translated frame");
+        let warm_moving_allocs = renderer.allocation_stats();
+        for step in 0..3 {
+            stage.shift(mob, [0.25, -0.05 * f64::from(step), 0.0]);
+            let moving_cache = renderer.render(&stage, 0).expect("steady translated frame");
+            let moving_allocs = renderer.allocation_stats();
+            assert_eq!(
+                moving_allocs.heap_allocs_this_frame, 0,
+                "translated steady-state step {step} allocated"
+            );
+            assert_eq!(
+                moving_allocs.arena_buffer_bytes,
+                warm_moving_allocs.arena_buffer_bytes
+            );
+            assert_eq!(renderer.plan().stats().shapes_compiled, 0);
+            assert_eq!(renderer.plan().stats().styles_rebuilt, 0);
+            assert_eq!(renderer.plan().mirror_materializations(), warm_mirrors);
+            assert!(moving_cache.cache.misses > 0);
+        }
     }
 }
 

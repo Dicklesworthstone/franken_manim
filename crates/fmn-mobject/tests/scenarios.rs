@@ -297,30 +297,53 @@ fn generational_safety() {
 fn snapshot_cost_is_o_touched() {
     let mut stage = Stage::new();
     let mobs: Vec<Mob> = (0..16).map(|_| stage.add(square())).collect();
+    for &m in &mobs {
+        let child = stage.add(square());
+        stage.attach(m, child).unwrap();
+        stage.add_updater(m, |_, _| {}, false).unwrap();
+    }
     let ids_before: Vec<usize> = mobs
         .iter()
         .map(|m| stage.get(*m).unwrap().buffer.storage_id())
         .collect();
+    let meta_before: Vec<(usize, usize, usize, usize)> = mobs
+        .iter()
+        .map(|m| stage.get(*m).unwrap().metadata_storage_id())
+        .collect();
 
-    let _snapshot = stage.snapshot();
-    // Taking the snapshot copied nothing (no live views anywhere).
-    for (m, id) in mobs.iter().zip(&ids_before) {
+    let snapshot = stage.snapshot();
+    // Taking the snapshot copied nothing (no live views anywhere) and shared
+    // CoW metadata vectors across the snapshot boundary.
+    for ((m, id), meta) in mobs.iter().zip(&ids_before).zip(&meta_before) {
         assert_eq!(stage.get(*m).unwrap().buffer.storage_id(), *id);
+        assert_eq!(stage.get(*m).unwrap().metadata_storage_id(), *meta);
     }
 
-    // Touch exactly one entry.
+    // Touch exactly one entry's buffer and metadata.
     stage
         .get_mut(mobs[3])
         .unwrap()
         .buffer
         .write(0, "point", &[5.0, 5.0, 5.0]);
-    for (i, (m, id)) in mobs.iter().zip(&ids_before).enumerate() {
+    let extra_child = stage.add(square());
+    stage.attach(mobs[3], extra_child).unwrap();
+    stage.add_updater(mobs[3], |_, _| {}, false).unwrap();
+    for (i, ((m, id), meta)) in mobs.iter().zip(&ids_before).zip(&meta_before).enumerate() {
         let now = stage.get(*m).unwrap().buffer.storage_id();
+        let meta_now = stage.get(*m).unwrap().metadata_storage_id();
         if i == 3 {
             assert_ne!(now, *id, "touched entry must have unshared");
+            assert_ne!(meta_now.0, meta.0, "touched submobjects must have unshared");
+            assert_ne!(meta_now.2, meta.2, "touched updaters must have unshared");
         } else {
             assert_eq!(now, *id, "untouched entry must still share");
+            assert_eq!(meta_now, *meta, "untouched entry metadata must still share");
         }
+    }
+
+    let restored = snapshot.materialize();
+    for (m, meta) in mobs.iter().zip(&meta_before) {
+        assert_eq!(restored.get(*m).unwrap().metadata_storage_id(), *meta);
     }
 }
 

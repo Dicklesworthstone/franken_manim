@@ -75,7 +75,7 @@ impl Default for ThreeDPreparationLimits {
             max_projected_curves: 1 << 22,
             max_fill_pieces: 1 << 22,
             max_raster_triangles: 1 << 22,
-            max_working_bytes: 512 * 1024 * 1024,
+            max_working_bytes: 2 * 1024 * 1024 * 1024,
         }
     }
 }
@@ -556,7 +556,7 @@ impl PreparationBudget {
         additional: usize,
     ) -> Result<(), ThreeDError> {
         let (requested, working_bytes) = self.admitted::<T>(resource, additional)?;
-        output.try_reserve_exact(additional).map_err(|_| {
+        output.try_reserve(additional).map_err(|_| {
             ThreeDError::PreparationAllocationFailed {
                 resource: resource.resource(),
                 requested,
@@ -607,7 +607,7 @@ impl PreparationBudget {
             .checked_add(additional)
             .and_then(|value| u64::try_from(value).ok())
             .unwrap_or(u64::MAX);
-        output.try_reserve_exact(additional).map_err(|_| {
+        output.try_reserve(additional).map_err(|_| {
             ThreeDError::PreparationAllocationFailed {
                 resource,
                 requested,
@@ -1912,17 +1912,24 @@ fn compile_vector<'a>(
         }
     }
 
-    let mut screen_segments = Vec::new();
-    reserve_temporary(
-        budget,
-        &mut screen_segments,
-        "projected screen segments",
-        curves.len(),
-    )?;
-    for piece in &curves {
-        screen_segments.push(piece.screen);
-    }
-    let mut joins = build_join_wedges(&screen_segments, &curve_starts, &style, budget)?;
+    let mut joins = if matches!(
+        style.joint_type,
+        fmn_mobject::JointType::Auto | fmn_mobject::JointType::NoJoint
+    ) {
+        Vec::new()
+    } else {
+        let mut screen_segments = Vec::new();
+        reserve_temporary(
+            budget,
+            &mut screen_segments,
+            "projected screen segments",
+            curves.len(),
+        )?;
+        for piece in &curves {
+            screen_segments.push(piece.screen);
+        }
+        build_join_wedges(&screen_segments, &curve_starts, &style, budget)?
+    };
     for join in &mut joins {
         if let Some(curve) = curves.iter().min_by(|a, b| {
             let distance = |piece: &ProjectedCurvePiece| {
@@ -2091,6 +2098,12 @@ fn points_close(a: Vec3, b: Vec3) -> bool {
 
 fn segment_s_at(segment: &Segment, t: f64) -> f64 {
     let t = t.clamp(0.0, 1.0);
+    if t == 0.0 {
+        return segment.s0;
+    }
+    if t == 1.0 && (segment.p0 != segment.p1 || segment.p1 != segment.p2) {
+        return segment.s0 + (segment.s1 - segment.s0);
+    }
     let total = fmn_geom::arclength::quadratic_arc_length(segment.p0, segment.p1, segment.p2);
     if total <= 0.0 {
         return segment.s0;

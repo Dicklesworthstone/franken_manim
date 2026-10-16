@@ -23,6 +23,7 @@ use crate::{
 pub struct VectorFrameCompiler {
     plan: Arc<RenderPlan>,
     config: RetainedFrameRendererConfig,
+    scratch_draw_items: Vec<fmn_mobject::DrawItem>,
 }
 
 impl VectorFrameCompiler {
@@ -38,6 +39,7 @@ impl VectorFrameCompiler {
         Ok(Self {
             plan: Arc::new(RenderPlan::new()),
             config,
+            scratch_draw_items: Vec::new(),
         })
     }
 
@@ -53,9 +55,9 @@ impl VectorFrameCompiler {
         stage: &Stage,
         camera_revision: u64,
     ) -> Result<OwnedVectorFrame, RetainedFrameRendererError> {
-        if let Some(item) = stage
-            .draw_plan()
-            .items()
+        stage.draw_plan_into(&mut self.scratch_draw_items);
+        if let Some(item) = self
+            .scratch_draw_items
             .iter()
             .find(|item| item.key.program != ProgramKind::Vector)
         {

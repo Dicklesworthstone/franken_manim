@@ -272,28 +272,19 @@ impl crate::Style {
 }
 
 /// Whether any record's stroke paint differs from the first.
-pub(crate) fn has_varying_paint(stage: &fmn_mobject::Stage, mob: fmn_mobject::Mob) -> bool {
+pub(crate) fn has_varying_paint(
+    stage: &fmn_mobject::Stage,
+    mob: fmn_mobject::Mob,
+    mirror: &mut fmn_mobject::MirrorSet,
+) -> bool {
     let Some(entry) = stage.get(mob) else {
         return false;
     };
     let buffer = &entry.buffer;
-    let count = buffer.len();
-    if count == 0 {
+    if buffer.is_empty() {
         return false;
     }
-    let paint = |index: usize| {
-        let width = buffer
-            .read(index, "stroke_width")
-            .and_then(|v| v.first().copied())
-            .unwrap_or(0.0);
-        let color = buffer
-            .read(index, "stroke_rgba")
-            .and_then(|v| <[f32; 4]>::try_from(v.as_slice()).ok())
-            .unwrap_or([0.0; 4]);
-        (width, color)
-    };
-    let first = paint(0);
-    (1..count).any(|i| paint(i) != first)
+    !mirror.is_constant(buffer, "stroke_width") || !mirror.is_constant(buffer, "stroke_rgba")
 }
 
 /// Derive record knots through Chisel's path layout and true arc lengths.
@@ -301,6 +292,7 @@ pub(crate) fn has_varying_paint(stage: &fmn_mobject::Stage, mob: fmn_mobject::Mo
 pub(crate) fn from_records(
     stage: &fmn_mobject::Stage,
     mob: fmn_mobject::Mob,
+    mirror: &mut fmn_mobject::MirrorSet,
     decode: impl Fn([f32; 4]) -> [f32; 4],
 ) -> Result<Option<StrokeProfile>, crate::plan::SyncError> {
     use crate::plan::SyncError;
@@ -312,19 +304,7 @@ pub(crate) fn from_records(
     if count == 0 {
         return Ok(None);
     }
-    let paint = |index: usize| {
-        let width = buffer
-            .read(index, "stroke_width")
-            .and_then(|v| v.first().copied())
-            .unwrap_or(0.0);
-        let color = buffer
-            .read(index, "stroke_rgba")
-            .and_then(|v| <[f32; 4]>::try_from(v.as_slice()).ok())
-            .unwrap_or([0.0; 4]);
-        (width, color)
-    };
-    let first = paint(0);
-    if (1..count).all(|i| paint(i) == first) {
+    if mirror.is_constant(buffer, "stroke_width") && mirror.is_constant(buffer, "stroke_rgba") {
         return Ok(None);
     }
     if count > MAX_STROKE_PROFILE_KNOTS {
@@ -334,13 +314,14 @@ pub(crate) fn from_records(
             limit: MAX_STROKE_PROFILE_KNOTS as u64,
         });
     }
-    let stations = record_stations(stage, mob)?;
+    let stations = record_stations(stage, mob, mirror)?;
     if stations.is_empty() {
         return Ok(None);
     }
     let mut knots = Vec::new();
     for (index, s) in stations {
-        let (width, rgba) = paint(index);
+        let width = mirror.read_scalar(buffer, "stroke_width", index);
+        let rgba = mirror.read_rgba(buffer, "stroke_rgba", index);
         let knot = StrokeKnot {
             s,
             width,
@@ -360,17 +341,45 @@ pub(crate) fn from_records(
 pub(crate) fn record_stations(
     stage: &fmn_mobject::Stage,
     mob: fmn_mobject::Mob,
+    mirror: &mut fmn_mobject::MirrorSet,
 ) -> Result<Vec<(usize, f64)>, crate::plan::SyncError> {
     use crate::plan::SyncError;
     use fmn_geom::{arclength::ArcLengthTable, quadpath::QuadPath};
-    let Some(points) = stage.get_object_points(mob) else {
+    let Some(entry) = stage.get(mob) else {
         return Ok(Vec::new());
     };
-    let origin = points.first().copied().unwrap_or([0.0; 3]);
-    let local: Vec<_> = points
-        .iter()
-        .map(|p| std::array::from_fn(|i| p[i] - origin[i]))
-        .collect();
+    let local: Vec<[f64; 3]> = if entry.buffer.schema().field_width("point") == Some(3) {
+        let len = entry.buffer.len();
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        let Some(lanes) = mirror.sync(&entry.buffer, "point") else {
+            return Ok(Vec::new());
+        };
+        let origin = [
+            f64::from(lanes[0]),
+            f64::from(lanes[len]),
+            f64::from(lanes[2 * len]),
+        ];
+        (0..len)
+            .map(|i| {
+                [
+                    f64::from(lanes[i]) - origin[0],
+                    f64::from(lanes[len + i]) - origin[1],
+                    f64::from(lanes[2 * len + i]) - origin[2],
+                ]
+            })
+            .collect()
+    } else {
+        let Some(points) = stage.get_object_points(mob) else {
+            return Ok(Vec::new());
+        };
+        let origin = points.first().copied().unwrap_or([0.0; 3]);
+        points
+            .iter()
+            .map(|p| std::array::from_fn(|i| p[i] - origin[i]))
+            .collect()
+    };
     let path = QuadPath::from_points(local)
         .map_err(|source| SyncError::InvalidGeometry { mob, source })?;
     let original = ArcLengthTable::for_path(&path);

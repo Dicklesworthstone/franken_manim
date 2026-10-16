@@ -1326,10 +1326,10 @@ impl Snapshot {
                     buffer,
                     placement: Placement::IDENTITY,
                     placement_revision: 0,
-                    submobjects,
-                    parents,
-                    updaters: Vec::new(),       // callables never serialize
-                    updater_states: Vec::new(), // replay owns executable state
+                    submobjects: submobjects.into(),
+                    parents: parents.into(),
+                    updaters: crate::stage::RcVec::new(), // callables never serialize
+                    updater_states: crate::stage::RcVec::new(), // replay owns executable state
                     updating_suspended,
                     is_animating,
                     tracker,
@@ -1346,6 +1346,7 @@ impl Snapshot {
                     render_primitive: RenderPrimitive::Vector,
                     image: None,
                     image_revision: 0,
+                    family_cache: None,
                 })
             } else {
                 None
@@ -1508,8 +1509,8 @@ impl Snapshot {
             stage_id,
             next_updater_id,
             slots,
-            free,
-            roots,
+            free: free.into(),
+            roots: roots.into(),
         };
         validate_decoded_arena(&snapshot, &mut budget)?;
         Ok(DecodedSnapshot {

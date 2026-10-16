@@ -174,47 +174,33 @@ impl crate::Style {
 }
 
 /// Whether any record's fill paint differs from the first.
-pub(crate) fn has_varying_paint(stage: &fmn_mobject::Stage, mob: fmn_mobject::Mob) -> bool {
+pub(crate) fn has_varying_paint(
+    stage: &fmn_mobject::Stage,
+    mob: fmn_mobject::Mob,
+    mirror: &mut fmn_mobject::MirrorSet,
+) -> bool {
     let Some(entry) = stage.get(mob) else {
         return false;
     };
-    let count = entry.buffer.len();
-    if count == 0 {
+    if entry.buffer.is_empty() {
         return false;
     }
-    let paint = |i| {
-        entry
-            .buffer
-            .read(i, "fill_rgba")
-            .and_then(|v| <[f32; 4]>::try_from(v.as_slice()).ok())
-            .unwrap_or([0.0; 4])
-    };
-    let first = paint(0);
-    (1..count).any(|i| paint(i) != first)
+    !mirror.is_constant(&entry.buffer, "fill_rgba")
 }
 
 pub(crate) fn from_records(
     stage: &fmn_mobject::Stage,
     mob: fmn_mobject::Mob,
+    mirror: &mut fmn_mobject::MirrorSet,
     decode: impl Fn([f32; 4]) -> [f32; 4],
 ) -> Result<Option<FillProfile>, crate::plan::SyncError> {
     use crate::plan::SyncError;
     let Some(entry) = stage.get(mob) else {
         return Ok(None);
     };
-    let count = entry.buffer.len();
-    if count == 0 {
-        return Ok(None);
-    }
-    let paint = |i| {
-        entry
-            .buffer
-            .read(i, "fill_rgba")
-            .and_then(|v| <[f32; 4]>::try_from(v.as_slice()).ok())
-            .unwrap_or([0.0; 4])
-    };
-    let first = paint(0);
-    if (1..count).all(|i| paint(i) == first) {
+    let buffer = &entry.buffer;
+    let count = buffer.len();
+    if count == 0 || mirror.is_constant(buffer, "fill_rgba") {
         return Ok(None);
     }
     if count > MAX_FILL_PROFILE_KNOTS {
@@ -226,13 +212,18 @@ pub(crate) fn from_records(
     }
     // Validate even connector records; a nonfinite authored lane must not be
     // silently discarded by a zero-length curve or a subsequent color decode.
-    if (0..count).any(|i| paint(i).iter().any(|v| !v.is_finite())) {
+    if (0..count).any(|i| {
+        mirror
+            .read_rgba(buffer, "fill_rgba", i)
+            .iter()
+            .any(|v| !v.is_finite())
+    }) {
         return Err(SyncError::InvalidFillProfile {
             mob,
             source: FillProfileError::Paint,
         });
     }
-    let stations = crate::stroke_profile::record_stations(stage, mob)?;
+    let stations = crate::stroke_profile::record_stations(stage, mob, mirror)?;
     if stations.is_empty() {
         return Ok(None);
     }
@@ -240,7 +231,7 @@ pub(crate) fn from_records(
     for (index, s) in stations {
         let knot = FillKnot {
             s,
-            rgba: decode(paint(index)),
+            rgba: decode(mirror.read_rgba(buffer, "fill_rgba", index)),
         };
         // Do not erase an interior station just because its paint equals its
         // neighbor: boundary geometry is independent of style edits.

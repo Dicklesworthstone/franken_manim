@@ -214,47 +214,33 @@ impl DrawPlan {
 }
 
 impl Stage {
-    /// The scene's draw sequence (§8.5): the two-level model above, applied
-    /// to the current scene list.
-    ///
-    /// Pure — no revision is touched, nothing is cached here. The retained
-    /// render plan (§10.8, fm-gw7) is what caches this; keeping the model
-    /// itself a pure function of scene state is what lets the cache be
-    /// checked against it.
-    #[must_use]
-    pub fn draw_plan(&self) -> DrawPlan {
-        let roots = self.roots().to_vec();
-        // Level 1: adjacent scene members sharing (program, key, z_index)
-        // form one render group.
-        let mut groups: Vec<Vec<Mob>> = Vec::new();
+    /// Populate `items` in-place with the scene's draw sequence (§8.5) and
+    /// return `(group_count, batch_count)` without allocating intermediate
+    /// root/group vectors or cloning cached family lists.
+    pub fn draw_plan_into(&self, items: &mut Vec<DrawItem>) -> (usize, usize) {
+        items.clear();
+        let mut groups = 0usize;
+        let mut batches = 0usize;
         let mut previous: Option<(BatchKey, i32)> = None;
-        for root in roots {
-            let Some(key) = BatchKey::of(self, root) else {
+        let mut open: Option<BatchKey> = None;
+
+        for &root in self.roots() {
+            let Some(root_key) = BatchKey::of(self, root) else {
                 continue;
             };
             let z = self.z_index(root);
-            let current = (key, z);
+            let current = (root_key, z);
             let continues = previous
                 .as_ref()
                 .is_some_and(|(pk, pz)| *pk == current.0 && *pz == current.1);
-            if continues {
-                groups.last_mut().expect("a group exists").push(root);
-            } else {
-                groups.push(vec![root]);
+            if !continues {
+                groups += 1;
+                open = None;
+                previous = Some(current);
             }
-            previous = Some(current);
-        }
-
-        // Level 2: each group draws its members' families, depth-first,
-        // pointless members skipped, adjacent equal keys batched — and a
-        // batch never crosses a group boundary.
-        let mut items = Vec::new();
-        let mut batches = 0usize;
-        for (group_index, group) in groups.iter().enumerate() {
-            // A batch never crosses a group boundary.
-            let mut open: Option<BatchKey> = None;
-            for &root in group {
-                for mob in self.family(root) {
+            let group_index = groups - 1;
+            self.with_family_slice(root, |family| {
+                for &mob in family {
                     let Some(entry) = self.get(mob) else { continue };
                     if entry.buffer.is_empty() {
                         continue; // family_members_with_points
@@ -286,12 +272,26 @@ impl Stage {
                         },
                     });
                 }
-            }
+            });
         }
+        (groups, batches)
+    }
+
+    /// The scene's draw sequence (§8.5): the two-level model above, applied
+    /// to the current scene list.
+    ///
+    /// Pure — no revision is touched, nothing is cached here. The retained
+    /// render plan (§10.8, fm-gw7) is what caches this; keeping the model
+    /// itself a pure function of scene state is what lets the cache be
+    /// checked against it.
+    #[must_use]
+    pub fn draw_plan(&self) -> DrawPlan {
+        let mut items = Vec::new();
+        let (groups, batches) = self.draw_plan_into(&mut items);
         DrawPlan {
-            groups: groups.len(),
-            batches,
             items,
+            groups,
+            batches,
         }
     }
 }

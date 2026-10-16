@@ -298,10 +298,10 @@ fn project(
                 buffer,
                 placement: source.placement,
                 placement_revision: 0,
-                submobjects: children,
-                parents: Vec::new(),
-                updaters: Vec::new(),
-                updater_states: Vec::new(),
+                submobjects: children.into(),
+                parents: crate::stage::ArcVec::new(),
+                updaters: crate::stage::RcVec::new(),
+                updater_states: crate::stage::RcVec::new(),
                 updating_suspended: false,
                 is_animating: false,
                 tracker: None,
@@ -316,6 +316,7 @@ fn project(
                 render_primitive: source.render_primitive,
                 image: source.image.clone(),
                 image_revision: u64::from(source.image.is_some()),
+                family_cache: None,
             }),
         ));
     }
@@ -328,7 +329,7 @@ fn project(
                 .1
                 .as_mut()
                 .ok_or(RenderSnapshotError::Graph(StageError::StaleHandle))?;
-            budget.reserve(&mut target.parents, 1, "parent links")?;
+            budget.reserve(target.parents.vec_mut(), 1, "parent links")?;
             target.parents.push(remap(parent)?);
         }
     }
@@ -341,8 +342,8 @@ fn project(
         stage_id: snapshot.stage_id,
         next_updater_id: 1,
         slots,
-        free: Vec::new(),
-        roots,
+        free: crate::stage::ArcVec::new(),
+        roots: roots.into(),
     })
 }
 

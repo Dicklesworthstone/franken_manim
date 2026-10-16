@@ -6,7 +6,7 @@
 //! Handles, generations, roots, DAG edges and rendering revisions are retained;
 //! unlike durable render projection, this does not renumber the live chart.
 
-use super::{Entry, Mob, Slot, Snapshot, SnapshotEntry, Stage, fresh_epoch};
+use super::{ArcVec, Entry, Mob, RcVec, Slot, Snapshot, SnapshotEntry, Stage, fresh_epoch};
 use crate::bbox::BboxCache;
 use crate::mobject::{ImageResource, RenderPrimitive};
 use crate::placement::Placement;
@@ -14,6 +14,7 @@ use crate::record::RecordBuffer;
 use crate::shape::ShapeSlot;
 use crate::uniforms::Uniforms;
 use std::cell::RefCell;
+use std::sync::Arc;
 
 /// A callback-free, Send + Sync image of an already-observed scene.
 ///
@@ -27,8 +28,8 @@ pub struct FrozenRenderState {
     stage_id: u64,
     next_updater_id: u64,
     slots: Vec<(u32, Option<FrozenRenderEntry>)>,
-    free: Vec<u32>,
-    roots: Vec<Mob>,
+    free: ArcVec<u32>,
+    roots: ArcVec<Mob>,
     time: f64,
 }
 
@@ -36,8 +37,8 @@ struct FrozenRenderEntry {
     buffer: RecordBuffer,
     placement: Placement,
     placement_revision: u64,
-    submobjects: Vec<Mob>,
-    parents: Vec<Mob>,
+    submobjects: ArcVec<Mob>,
+    parents: ArcVec<Mob>,
     updating_suspended: bool,
     is_animating: bool,
     tracker: Option<crate::dynamics::Tracker>,
@@ -52,6 +53,7 @@ struct FrozenRenderEntry {
     render_primitive: RenderPrimitive,
     image: Option<ImageResource>,
     image_revision: u64,
+    family_cache: Option<Arc<Vec<Mob>>>,
 }
 
 impl FrozenRenderEntry {
@@ -85,6 +87,7 @@ impl FrozenRenderEntry {
             z_index: entry.z_index,
             render_primitive: entry.render_primitive,
             image_revision: entry.image_revision,
+            family_cache: entry.family_cache.borrow().clone(),
         }
     }
 
@@ -109,6 +112,7 @@ impl FrozenRenderEntry {
             z_index: entry.z_index,
             render_primitive: entry.render_primitive,
             image_revision: entry.image_revision,
+            family_cache: entry.family_cache.clone(),
         }
     }
 
@@ -135,6 +139,7 @@ impl FrozenRenderEntry {
             render_primitive: entry.render_primitive,
             image: entry.image,
             image_revision: entry.image_revision,
+            family_cache: entry.family_cache,
         }
     }
 
@@ -159,10 +164,10 @@ impl FrozenRenderEntry {
             render_primitive: self.render_primitive,
             image: self.image,
             image_revision: self.image_revision,
-            updaters: Vec::new(),
-            updater_states: Vec::new(),
+            updaters: RcVec::new(),
+            updater_states: RcVec::new(),
             children_epoch: fresh_epoch(),
-            family_cache: RefCell::new(None),
+            family_cache: RefCell::new(self.family_cache),
             bbox: RefCell::new(BboxCache::default()),
         }
     }

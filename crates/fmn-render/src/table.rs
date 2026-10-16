@@ -989,6 +989,34 @@ pub fn shape_digest(points: &[Vec3]) -> Digest {
     })
 }
 
+/// [`shape_digest`] directly over a 3-lane SoA `point` mirror (`lanes[lane * len + i]`).
+#[must_use]
+pub(crate) fn shape_digest_soa_points(lanes: &[f32], len: usize) -> Digest {
+    let origin = if len == 0 {
+        [0.0; 3]
+    } else {
+        [
+            f64::from(lanes[0]),
+            f64::from(lanes[len]),
+            f64::from(lanes[2 * len]),
+        ]
+    };
+    let point_count = u64::try_from(len).unwrap_or(u64::MAX);
+    framed_shape_digest(point_count, |document| {
+        for i in 0..len {
+            let point = [
+                f64::from(lanes[i]),
+                f64::from(lanes[len + i]),
+                f64::from(lanes[2 * len + i]),
+            ];
+            for coordinate in 0..3 {
+                let relative = canonicalize_f64(point[coordinate] - origin[coordinate]);
+                document.update(&relative.to_bits().to_le_bytes());
+            }
+        }
+    })
+}
+
 /// Build a [`Shape`] from an object-space path.
 ///
 /// The compile step §10.8 wants to happen once per *outline* rather than once

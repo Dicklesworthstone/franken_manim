@@ -29,12 +29,12 @@ use crate::hint::Hint;
 use crate::revision::{Axis, Dependency, Revisions};
 use crate::table::{
     ImageTable, Instance, Segment, Shape, ShapeTable, Style, StyleTable, TableError,
-    check_row_count, compile_shape, shape_digest,
+    check_row_count, compile_shape, shape_digest_soa_points,
 };
 use fmn_core::types::Vec3;
 use fmn_geom::{GeomError, quadpath::QuadPath};
 use fmn_hash::{Digest, Sha256};
-use fmn_mobject::{Mob, Placement, ProgramKind, RecordBuffer, Stage};
+use fmn_mobject::{DrawItem, MirrorSet, Mob, Placement, ProgramKind, RecordBuffer, Stage};
 use std::collections::{HashMap, HashSet};
 
 /// The axes a compiled outline depends on.
@@ -103,11 +103,11 @@ impl Default for RenderPlanLimits {
     fn default() -> Self {
         Self {
             max_instances: 1 << 20,
-            max_input_curves: 1 << 20,
-            max_retained_segments: 1 << 20,
+            max_input_curves: 1 << 22,
+            max_retained_segments: 1 << 22,
             max_retained_shapes: 1 << 20,
             max_retained_styles: 1 << 20,
-            max_retained_profile_knots: 1 << 20,
+            max_retained_profile_knots: 1 << 22,
             max_unreachable_segments: 1 << 16,
             max_unreachable_shapes: 1 << 12,
             max_unreachable_styles: 1 << 12,
@@ -433,6 +433,8 @@ pub struct RenderPlan {
     shapes: ShapeTable,
     images: ImageTable,
     retained: HashMap<Mob, Retained>,
+    mirrors: HashMap<Mob, MirrorSet>,
+    scratch_draw_items: Vec<DrawItem>,
     scratch_instances: Vec<Instance>,
     scratch_retained: HashMap<Mob, Retained>,
     scratch_seen: HashSet<Mob>,
@@ -481,6 +483,8 @@ impl Default for RenderPlan {
             shapes: ShapeTable::default(),
             images: ImageTable::default(),
             retained: HashMap::new(),
+            mirrors: HashMap::new(),
+            scratch_draw_items: Vec::new(),
             scratch_instances: Vec::new(),
             scratch_retained: HashMap::new(),
             scratch_seen: HashSet::new(),
@@ -648,6 +652,7 @@ impl RenderPlan {
 
         let mut replacement = RenderPlan::new();
         replacement.epoch = to_epoch;
+        replacement.mirrors = self.mirrors.clone();
         let mut stats = replacement.sync_append_only(stage, camera, limits)?;
         stats.dropped = self
             .retained
@@ -726,15 +731,16 @@ impl RenderPlan {
         camera: u64,
         limits: RenderPlanLimits,
     ) -> Result<SyncStats, SyncError> {
-        let plan = stage.draw_plan();
-        let vector_items = plan
-            .items()
+        stage.draw_plan_into(&mut self.scratch_draw_items);
+        let total_draw_items = self.scratch_draw_items.len();
+        let vector_items = self
+            .scratch_draw_items
             .iter()
             .filter(|item| item.key.program == ProgramKind::Vector)
             .count();
         let draw_items = count_u64(vector_items);
         check_limit("instances", draw_items, limits.max_instances)?;
-        check_row_count("instance rows", plan.items().len())?;
+        check_row_count("instance rows", total_draw_items)?;
         check_limit(
             "retained segments",
             count_u64(self.segments.len()),
@@ -761,7 +767,7 @@ impl RenderPlan {
         // it before materializing any changed point column so one malformed
         // renderable cannot make earlier valid outlines pay compilation work
         // before the atomic refusal.
-        for item in plan.items() {
+        for item in &self.scratch_draw_items {
             if item.key.program != ProgramKind::Vector {
                 continue;
             }
@@ -809,7 +815,8 @@ impl RenderPlan {
         let mut input_curves = 0u64;
         let mut stats = SyncStats::default();
 
-        for (order, item) in plan.items().iter().enumerate() {
+        for order in 0..total_draw_items {
+            let item = self.scratch_draw_items[order];
             if item.key.program != ProgramKind::Vector {
                 continue;
             }
@@ -861,25 +868,53 @@ impl RenderPlan {
                                 })?;
                         check_limit("input curves", input_curves, limits.max_input_curves)?;
                     }
-                    let Some(object_points) = stage.get_object_points(mob) else {
-                        continue;
-                    };
-                    if object_points.is_empty() {
-                        continue;
-                    }
-                    let local_origin = object_points[0];
-                    let mut local = Vec::new();
-                    try_reserve_exact(&mut local, "shape-local points", object_points.len())?;
-                    local.extend(object_points.iter().map(|point| {
-                        [
-                            point[0] - local_origin[0],
-                            point[1] - local_origin[1],
-                            point[2] - local_origin[2],
-                        ]
-                    }));
-                    let path = QuadPath::from_points(local)
-                        .map_err(|source| SyncError::InvalidGeometry { mob, source })?;
-                    if counted_from_schema.is_none() {
+                    let (local_origin, path, digest) = if let Some(entry) = entry
+                        && counted_from_schema.is_some()
+                    {
+                        let mirror = self.mirrors.entry(mob).or_default();
+                        let n = entry.buffer.len();
+                        if n == 0 || entry.buffer.schema().field_width("point") != Some(3) {
+                            continue;
+                        }
+                        let Some(lanes) = mirror.sync(&entry.buffer, "point") else {
+                            continue;
+                        };
+                        let xs = &lanes[0..n];
+                        let ys = &lanes[n..2 * n];
+                        let zs = &lanes[2 * n..3 * n];
+                        let local_origin = [f64::from(xs[0]), f64::from(ys[0]), f64::from(zs[0])];
+                        let mut local = Vec::new();
+                        try_reserve_exact(&mut local, "shape-local points", n)?;
+                        for i in 0..n {
+                            local.push([
+                                f64::from(xs[i]) - local_origin[0],
+                                f64::from(ys[i]) - local_origin[1],
+                                f64::from(zs[i]) - local_origin[2],
+                            ]);
+                        }
+                        let digest = shape_digest_soa_points(lanes, n);
+                        let path = QuadPath::from_points(local)
+                            .map_err(|source| SyncError::InvalidGeometry { mob, source })?;
+                        (local_origin, path, digest)
+                    } else {
+                        let Some(object_points) = stage.get_object_points(mob) else {
+                            continue;
+                        };
+                        if object_points.is_empty() {
+                            continue;
+                        }
+                        let local_origin = object_points[0];
+                        let mut local = Vec::new();
+                        try_reserve_exact(&mut local, "shape-local points", object_points.len())?;
+                        local.extend(object_points.iter().map(|point| {
+                            [
+                                point[0] - local_origin[0],
+                                point[1] - local_origin[1],
+                                point[2] - local_origin[2],
+                            ]
+                        }));
+                        let path = QuadPath::from_points(local)
+                            .map_err(|source| SyncError::InvalidGeometry { mob, source })?;
                         input_curves = input_curves
                             .checked_add(count_u64(path.num_curves()))
                             .ok_or(SyncError::LimitExceeded {
@@ -888,9 +923,9 @@ impl RenderPlan {
                                 limit: limits.max_input_curves,
                             })?;
                         check_limit("input curves", input_curves, limits.max_input_curves)?;
-                    }
-
-                    let digest = shape_digest(&object_points);
+                        let digest = crate::table::shape_digest(&object_points);
+                        (local_origin, path, digest)
+                    };
                     let shape = if let Some(index) = self.shapes.shape_index(digest) {
                         stats.shapes_shared += 1;
                         index
@@ -984,14 +1019,17 @@ impl RenderPlan {
                 }
                 _ => {
                     stats.styles_rebuilt += 1;
-                    let has_varying_paint = crate::stroke_profile::has_varying_paint(stage, mob)
-                        || crate::fill_profile::has_varying_paint(stage, mob);
-                    let mut row = read_style(stage, mob);
+                    let mirror = self.mirrors.entry(mob).or_default();
+                    let has_varying_paint =
+                        crate::stroke_profile::has_varying_paint(stage, mob, mirror)
+                            || crate::fill_profile::has_varying_paint(stage, mob, mirror);
+                    let mut row = read_style(stage, mob, mirror);
                     row.stroke_profile =
-                        crate::stroke_profile::from_records(stage, mob, decode_rgba)?
+                        crate::stroke_profile::from_records(stage, mob, mirror, decode_rgba)?
                             .map(std::sync::Arc::new);
-                    row.fill_profile = crate::fill_profile::from_records(stage, mob, decode_rgba)?
-                        .map(std::sync::Arc::new);
+                    row.fill_profile =
+                        crate::fill_profile::from_records(stage, mob, mirror, decode_rgba)?
+                            .map(std::sync::Arc::new);
                     let key = row.bits();
                     let style = if let Some(index) = self.styles.index_of(&row) {
                         index
@@ -1089,13 +1127,15 @@ impl RenderPlan {
             .filter(|mob| !seen.contains(mob))
             .count();
 
-        self.segments
-            .try_reserve_exact(pending_segments)
-            .map_err(|_| SyncError::AllocationFailed {
-                resource: "segment rows",
-                requested: count_u64(self.segments.len())
-                    .saturating_add(count_u64(pending_segments)),
-            })?;
+        if pending_segments > 0 {
+            self.segments
+                .try_reserve_exact(pending_segments)
+                .map_err(|_| SyncError::AllocationFailed {
+                    resource: "segment rows",
+                    requested: count_u64(self.segments.len())
+                        .saturating_add(count_u64(pending_segments)),
+                })?;
+        }
         self.styles.reserve_additional(pending_styles.len())?;
         self.shapes.reserve_shapes(pending_shapes.len())?;
 
@@ -1116,6 +1156,7 @@ impl RenderPlan {
         std::mem::swap(&mut self.retained, &mut next_retained);
         next_retained.clear();
         self.scratch_retained = next_retained;
+        self.mirrors.retain(|mob, _| seen.contains(mob));
         seen.clear();
         self.scratch_seen = seen;
         self.stats = stats;
@@ -1125,6 +1166,21 @@ impl RenderPlan {
         }
         self.plan_key = self.compute_identity(self.geometry_key);
         Ok(stats)
+    }
+
+    /// Total §8.2 SoA mirror materializations across every retained mobject.
+    ///
+    /// A second sync with unchanged records must add zero materializations,
+    /// and a style-only edit must not rematerialize the `point` mirror.
+    #[must_use]
+    pub fn mirror_materializations(&self) -> u64 {
+        self.mirrors.values().map(MirrorSet::materializations).sum()
+    }
+
+    /// Total §8.2 SoA mirror materializations for one mobject.
+    #[must_use]
+    pub fn mirror_materializations_for(&self, mob: Mob) -> u64 {
+        self.mirrors.get(&mob).map_or(0, MirrorSet::materializations)
     }
 
     /// The segment table.
@@ -1260,54 +1316,61 @@ impl RenderPlan {
             hash.bool(instance.hint_unsafe);
         }
 
-        // Preserve the legacy identity domain for endpoint-only plans.
-        let profiles: Vec<_> = instances
+        // Preserve the legacy identity domain for endpoint-only plans without
+        // allocating temporary Vecs on every frame.
+        let profile_count = instances
             .iter()
-            .enumerate()
-            .filter_map(|(i, instance)| {
+            .filter(|instance| {
                 self.styles
-                    .get(instance.style)?
-                    .stroke_profile
-                    .as_ref()
-                    .map(|p| (i, p))
+                    .get(instance.style)
+                    .is_some_and(|style| style.stroke_profile.is_some())
             })
-            .collect();
-        if !profiles.is_empty() {
+            .count();
+        if profile_count > 0 {
             hash.bytes(b"fmn-render/stroke-profiles/v1");
-            hash.u64(profiles.len() as u64);
-            for (index, profile) in profiles {
-                hash.u64(index as u64);
-                hash.u64(profile.knots().len() as u64);
-                for knot in profile.knots() {
-                    hash.f64(knot.s);
-                    hash.f32(knot.width);
-                    for component in knot.rgba {
-                        hash.f32(component);
+            hash.u64(profile_count as u64);
+            for (index, instance) in instances.iter().enumerate() {
+                if let Some(profile) = self
+                    .styles
+                    .get(instance.style)
+                    .and_then(|style| style.stroke_profile.as_ref())
+                {
+                    hash.u64(index as u64);
+                    hash.u64(profile.knots().len() as u64);
+                    for knot in profile.knots() {
+                        hash.f64(knot.s);
+                        hash.f32(knot.width);
+                        for component in knot.rgba {
+                            hash.f32(component);
+                        }
                     }
                 }
             }
         }
-        let fills: Vec<_> = instances
+        let fill_count = instances
             .iter()
-            .enumerate()
-            .filter_map(|(i, instance)| {
+            .filter(|instance| {
                 self.styles
-                    .get(instance.style)?
-                    .fill_profile
-                    .as_ref()
-                    .map(|p| (i, p))
+                    .get(instance.style)
+                    .is_some_and(|style| style.fill_profile.is_some())
             })
-            .collect();
-        if !fills.is_empty() {
+            .count();
+        if fill_count > 0 {
             hash.bytes(b"fmn-render/fill-profiles/v1");
-            hash.u64(fills.len() as u64);
-            for (index, profile) in fills {
-                hash.u64(index as u64);
-                hash.u64(profile.knots().len() as u64);
-                for knot in profile.knots() {
-                    hash.f64(knot.s);
-                    for component in knot.rgba {
-                        hash.f32(component);
+            hash.u64(fill_count as u64);
+            for (index, instance) in instances.iter().enumerate() {
+                if let Some(profile) = self
+                    .styles
+                    .get(instance.style)
+                    .and_then(|style| style.fill_profile.as_ref())
+                {
+                    hash.u64(index as u64);
+                    hash.u64(profile.knots().len() as u64);
+                    for knot in profile.knots() {
+                        hash.f64(knot.s);
+                        for component in knot.rgba {
+                            hash.f32(component);
+                        }
                     }
                 }
             }
@@ -1407,13 +1470,14 @@ fn decode_rgba(rgba: [f32; 4]) -> [f32; 4] {
     ]
 }
 
-/// Read one renderable's style row out of its record buffer.
+/// Read one renderable's style row out of its record buffer via its §8.2
+/// [`MirrorSet`].
 ///
 /// The Reference stores these per point; this reads the ramp's endpoints, which
 /// is the subset [`Style`] documents. A point-less mobject yields the default
 /// row rather than an error — a group with no geometry of its own is normal, and
 /// it simply contributes no instance.
-fn read_style(stage: &Stage, mob: Mob) -> Style {
+fn read_style(stage: &Stage, mob: Mob, mirror: &mut MirrorSet) -> Style {
     let mut row = Style::default();
     let Some(entry) = stage.get(mob) else {
         return row;
@@ -1424,25 +1488,13 @@ fn read_style(stage: &Stage, mob: Mob) -> Style {
         return row.with_uniforms(entry.uniforms());
     }
     let last = n - 1;
-    let rgba = |index: usize, field: &str| -> [f32; 4] {
-        buffer
-            .read(index, field)
-            .and_then(|v| <[f32; 4]>::try_from(v.as_slice()).ok())
-            .unwrap_or([0.0; 4])
-    };
-    let scalar = |index: usize, field: &str| -> f32 {
-        buffer
-            .read(index, field)
-            .and_then(|v| v.first().copied())
-            .unwrap_or(0.0)
-    };
-    row.stroke_rgba = decode_rgba(rgba(0, "stroke_rgba"));
-    row.stroke_rgba_end = decode_rgba(rgba(last, "stroke_rgba"));
-    row.fill_rgba = decode_rgba(rgba(0, "fill_rgba"));
-    row.fill_rgba_end = decode_rgba(rgba(last, "fill_rgba"));
-    row.stroke_width = scalar(0, "stroke_width");
-    row.stroke_width_end = scalar(last, "stroke_width");
-    row.fill_border_width = scalar(0, "fill_border_width");
+    row.stroke_rgba = decode_rgba(mirror.read_rgba(buffer, "stroke_rgba", 0));
+    row.stroke_rgba_end = decode_rgba(mirror.read_rgba(buffer, "stroke_rgba", last));
+    row.fill_rgba = decode_rgba(mirror.read_rgba(buffer, "fill_rgba", 0));
+    row.fill_rgba_end = decode_rgba(mirror.read_rgba(buffer, "fill_rgba", last));
+    row.stroke_width = mirror.read_scalar(buffer, "stroke_width", 0);
+    row.stroke_width_end = mirror.read_scalar(buffer, "stroke_width", last);
+    row.fill_border_width = mirror.read_scalar(buffer, "fill_border_width", 0);
     row.with_uniforms(entry.uniforms())
 }
 
@@ -2457,4 +2509,67 @@ mod tests {
         assert_eq!(stats.shapes_compiled, 0);
         assert_eq!(plan.shapes().instances().len(), 0);
     }
+
+    #[test]
+    fn soa_mirrors_materialize_lazily_per_field_revision() {
+        let (mut stage, mobs) = staged(1);
+        let mob = mobs[0];
+        let mut plan = RenderPlan::new();
+
+        // First sync materializes `point` + the 4 style fields (`stroke_rgba`,
+        // `stroke_width`, `fill_rgba`, `fill_border_width`) = 5 materializations.
+        sync_valid(&mut plan, &stage, 0);
+        assert_eq!(plan.mirror_materializations_for(mob), 5);
+        assert_eq!(plan.mirror_materializations(), 5);
+
+        // Steady-state sync reads no fields and materializes 0 mirrors.
+        sync_valid(&mut plan, &stage, 0);
+        assert_eq!(plan.mirror_materializations_for(mob), 5);
+
+        // Affine placement shift does not touch record storage -> 0 new mirror
+        // materializations.
+        stage.shift(mob, [2.0, 1.0, 0.0]);
+        sync_valid(&mut plan, &stage, 0);
+        assert_eq!(plan.mirror_materializations_for(mob), 5);
+
+        // Mutating only `stroke_width` rebuilds style and rematerializes only
+        // the `stroke_width` mirror (+1 = 6); `point`, `stroke_rgba`,
+        // `fill_rgba`, and `fill_border_width` stay warm.
+        stage
+            .get_mut(mob)
+            .expect("live")
+            .buffer
+            .write(0, "stroke_width", &[6.0]);
+        sync_valid(&mut plan, &stage, 0);
+        assert_eq!(plan.mirror_materializations_for(mob), 6);
+
+        // Mutating `point` rebuilds only geometry and rematerializes only the
+        // `point` mirror (+1 = 7); style mirrors are not touched.
+        stage
+            .get_mut(mob)
+            .expect("live")
+            .buffer
+            .write(2, "point", &[3.0, 0.25, 0.0]);
+        sync_valid(&mut plan, &stage, 0);
+        assert_eq!(plan.mirror_materializations_for(mob), 7);
+    }
+
+    #[test]
+    fn default_render_plan_limits_cover_koch_zoom_and_match_three_d_caps() {
+        let limits = RenderPlanLimits::default();
+        let koch_zoom_curves = 3_145_727_u64;
+        assert_eq!(limits.max_input_curves, 1 << 22);
+        assert_eq!(limits.max_retained_segments, 1 << 22);
+        assert_eq!(limits.max_retained_profile_knots, 1 << 22);
+        assert!(
+            limits.max_input_curves > koch_zoom_curves,
+            "default planar input-curve cap ({}) must admit KochZoom ({koch_zoom_curves})",
+            limits.max_input_curves
+        );
+        assert_eq!(
+            limits.max_input_curves,
+            crate::three_d::ThreeDPreparationLimits::default().max_projected_curves
+        );
+    }
 }
+

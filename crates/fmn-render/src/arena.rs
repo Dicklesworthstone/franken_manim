@@ -233,6 +233,27 @@ impl<T> Pool<T> {
         self.range_from(resource, start)
     }
 
+    /// Append `len` copies of `value` in one reserve+resize pass, returning
+    /// the range they landed in.
+    pub(crate) fn fill_range(
+        &mut self,
+        resource: &'static str,
+        len: usize,
+        value: T,
+    ) -> Result<PoolRange, PoolRangeError>
+    where
+        T: Copy,
+    {
+        let start = self.buf.len();
+        self.try_reserve(len).map_err(|_| PoolRangeError {
+            resource,
+            start: u64::try_from(start).unwrap_or(u64::MAX),
+            len: u64::try_from(len).unwrap_or(u64::MAX),
+        })?;
+        self.buf.resize(start + len, value);
+        self.range_from(resource, start)
+    }
+
     /// The range `[start, len)` — the second half of every "record, append,
     /// range" construction.
     pub(crate) fn range_from(
@@ -344,6 +365,10 @@ pub struct FrameArena {
     pub(crate) pieces: Pool<MonoPiece>,
     /// Per-draw prepared stroke segments (slabs and arc lengths).
     pub(crate) stroke_segments: Pool<PreparedSegment>,
+    /// Per-draw fine-tile CSR start offsets for large strokes.
+    pub(crate) stroke_bin_starts: Pool<u32>,
+    /// Per-draw fine-tile CSR segment indices for large strokes.
+    pub(crate) stroke_bin_entries: Pool<u32>,
     /// Gradient station positions.
     pub(crate) gradient_points: Pool<[f64; 2]>,
     /// Gradient station parameters.
@@ -358,6 +383,8 @@ pub struct FrameArena {
     pub(crate) join_pairs: Pool<(usize, usize)>,
     /// Construction scratch for `pieces_for_segments_into`'s control points.
     pub(crate) piece_curves: Pool<[[f64; 2]; 3]>,
+    /// Construction scratch for `build_stroke_bins_into`'s per-segment tile bounds.
+    pub(crate) stroke_bin_ranges: Pool<[u32; 4]>,
     /// Worker row scratch, keyed on kernel and maximum covered row width. Sized
     /// by use: a render team of `t` threads converges to exactly `t` slots after
     /// the warm-up frame, which is how the execution plan's team geometry
@@ -372,6 +399,8 @@ impl Default for FrameArena {
             segments: Pool::default(),
             pieces: Pool::default(),
             stroke_segments: Pool::default(),
+            stroke_bin_starts: Pool::default(),
+            stroke_bin_entries: Pool::default(),
             gradient_points: Pool::default(),
             gradient_params: Pool::default(),
             gradient_next: Pool::default(),
@@ -379,6 +408,7 @@ impl Default for FrameArena {
             draws: Pool::default(),
             join_pairs: Pool::default(),
             piece_curves: Pool::default(),
+            stroke_bin_ranges: Pool::default(),
             workers: WorkerPool::new(),
         }
     }
@@ -398,6 +428,8 @@ impl FrameArena {
         self.segments.begin_frame();
         self.pieces.begin_frame();
         self.stroke_segments.begin_frame();
+        self.stroke_bin_starts.begin_frame();
+        self.stroke_bin_entries.begin_frame();
         self.gradient_points.begin_frame();
         self.gradient_params.begin_frame();
         self.gradient_next.begin_frame();
@@ -405,6 +437,7 @@ impl FrameArena {
         self.draws.begin_frame();
         self.join_pairs.begin_frame();
         self.piece_curves.begin_frame();
+        self.stroke_bin_ranges.begin_frame();
         self.workers.begin_frame();
     }
 
@@ -415,26 +448,32 @@ impl FrameArena {
             + self.segments.allocs()
             + self.pieces.allocs()
             + self.stroke_segments.allocs()
+            + self.stroke_bin_starts.allocs()
+            + self.stroke_bin_entries.allocs()
             + self.gradient_points.allocs()
             + self.gradient_params.allocs()
             + self.gradient_next.allocs()
             + self.gradient_edge_params.allocs()
             + self.draws.allocs()
             + self.join_pairs.allocs()
-            + self.piece_curves.allocs();
+            + self.piece_curves.allocs()
+            + self.stroke_bin_ranges.allocs();
         AllocStats {
             heap_allocs_this_frame: pool_allocs + self.workers.allocs(),
             arena_buffer_bytes: self.joins.buffer_bytes()
                 + self.segments.buffer_bytes()
                 + self.pieces.buffer_bytes()
                 + self.stroke_segments.buffer_bytes()
+                + self.stroke_bin_starts.buffer_bytes()
+                + self.stroke_bin_entries.buffer_bytes()
                 + self.gradient_points.buffer_bytes()
                 + self.gradient_params.buffer_bytes()
                 + self.gradient_next.buffer_bytes()
                 + self.gradient_edge_params.buffer_bytes()
                 + self.draws.buffer_bytes()
                 + self.join_pairs.buffer_bytes()
-                + self.piece_curves.buffer_bytes(),
+                + self.piece_curves.buffer_bytes()
+                + self.stroke_bin_ranges.buffer_bytes(),
             pool_slots: self.workers.slots(),
         }
     }

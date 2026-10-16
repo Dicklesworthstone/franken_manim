@@ -163,7 +163,7 @@ pub fn interpolate_fields(
             interpolate_linear_column(&a, &b, alpha)
         };
         if let Some(entry) = stage.get_mut(submob)
-            && entry.buffer.read_column(&field).as_deref() != Some(out.as_slice())
+            && !entry.buffer.column_slice_eq(&field, &out)
         {
             entry.buffer.write_range(&field, 0, &out);
         }
@@ -245,7 +245,7 @@ fn lock_matching_data(stage: &mut Stage, mobject: Mob, m1: Mob, m2: Mob) {
             .fields()
             .iter()
             .map(|f| f.name.clone())
-            .filter(|name| ea.buffer.read_column(name) == eb.buffer.read_column(name))
+            .filter(|name| ea.buffer.column_eq(&eb.buffer, name))
             .collect();
         if let Some(entry) = stage.get_mut(sub) {
             entry.buffer.lock_data(matching.iter().map(String::as_str));

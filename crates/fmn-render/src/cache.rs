@@ -48,10 +48,63 @@
 
 use crate::bin::{Binning, ScreenMap, Viewport};
 use crate::plan::RenderPlan;
-use crate::revision::{Mixer, mix};
+use crate::revision::mix;
 use fmn_frame::{FrameBuffer, PixelFormat};
 use fmn_hash::Digest;
-use std::collections::HashMap;
+
+/// Word-at-a-time 128-bit mixer for process-local [`TileKey`] streams.
+///
+/// Unlike [`crate::revision::Mixer`] (which is byte-wise FNV-1a over 64 bits,
+/// costing 8 dependent multiplies per `u64`), `TileHasher` folds each 64-bit
+/// word with a single `64×64 -> 128` widening multiply across two coupled
+/// 64-bit lanes. The 128-bit state and output provide a $2^{-128}$ uniform
+/// collision bound (birthday bound $2^{64}$ tiles vs $2^{32}$ for 64-bit
+/// FNV-1a), while cutting per-word hashing work to one widening multiply.
+#[derive(Debug, Clone, Copy)]
+struct TileHasher {
+    lo: u64,
+    hi: u64,
+    words: u64,
+}
+
+impl TileHasher {
+    const SECRET_A: u64 = 0x2d35_8dcc_aa6c_78a5;
+    const SECRET_B: u64 = 0x8bb8_4b93_962e_acc9;
+    const SECRET_C: u64 = 0x4b33_a62e_d433_d4a3;
+    const SECRET_D: u64 = 0x4d5a_2da5_1de1_aa47;
+
+    #[inline]
+    const fn new(seed: u64) -> Self {
+        Self {
+            lo: seed ^ Self::SECRET_A,
+            hi: seed.rotate_left(32) ^ Self::SECRET_B,
+            words: 0,
+        }
+    }
+
+    #[inline]
+    fn fold(a: u64, b: u64) -> (u64, u64) {
+        let product = u128::from(a).wrapping_mul(u128::from(b));
+        let lo = product as u64;
+        let hi = (product >> 64) as u64;
+        (lo ^ hi, lo.wrapping_add(hi))
+    }
+
+    #[inline]
+    fn write_u64(&mut self, word: u64) {
+        let (m0, m1) = Self::fold(word ^ self.lo, Self::SECRET_C ^ self.words);
+        self.lo = m0 ^ self.hi;
+        self.hi = self.hi.rotate_left(27).wrapping_add(m1) ^ Self::SECRET_D;
+        self.words = self.words.wrapping_add(1);
+    }
+
+    #[inline]
+    fn finish(self) -> u128 {
+        let (f0, f1) = Self::fold(self.lo ^ self.words, self.hi ^ Self::SECRET_A);
+        let (g0, g1) = Self::fold(f0 ^ Self::SECRET_B, f1 ^ self.words);
+        (u128::from(g1) << 64) | u128::from(g0)
+    }
+}
 
 /// Everything about the output that can change a tile's bytes without changing
 /// the scene.
@@ -95,10 +148,10 @@ impl OutputTransform {
 /// moved — the difference between a diagnosable reuse regression and a mystery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TileKey {
-    /// The tile's command run and its class words.
-    pub commands: u64,
-    /// A fold of every listed instance's seven revision axes.
-    pub revisions: u64,
+    /// The tile's command run and its class words (128-bit folded digest).
+    pub commands: u128,
+    /// A fold of every listed instance's seven revision axes (128-bit folded digest).
+    pub revisions: u128,
     /// The camera revision.
     pub camera: u64,
     /// The output transform.
@@ -133,8 +186,8 @@ impl TileKey {
         let flags = binning.tile_flags(tile)?;
         let instances = plan.shapes().instances();
 
-        let mut commands = Mixer::new();
-        let mut revisions = Mixer::new();
+        let mut commands = TileHasher::new(0x636f_6d6d_616e_6473);
+        let mut revisions = TileHasher::new(0x7265_7669_7369_6f6e);
         for (k, &d) in draws.iter().enumerate() {
             let inst = instances.get(d as usize)?;
             if inst.volatile {
@@ -144,8 +197,7 @@ impl TileKey {
             // an object inserted earlier in the scene shifts every later index
             // without changing what this tile draws, and a key that moved for
             // that would defeat reuse on every insertion.
-            commands.write_u64(u64::from(inst.shape));
-            commands.write_u64(u64::from(inst.style));
+            commands.write_u64((u64::from(inst.shape) << 32) | u64::from(inst.style));
             commands.write_u64(u64::from(*flags.get(k)?));
             for coefficient in inst.placement.coefficients() {
                 commands.write_u64(coefficient.to_bits());
@@ -221,11 +273,19 @@ impl CacheStats {
     }
 }
 
-/// A retained tile cache over an engine-supplied payload.
-#[derive(Debug, Clone, Default)]
+/// A retained tile cache over an engine-supplied payload, indexed directly by
+/// dense fine-tile index.
+#[derive(Debug, Clone)]
 pub struct TileCache<T> {
-    entries: HashMap<usize, (TileKey, T)>,
+    entries: Vec<Option<(TileKey, T)>>,
+    retained: usize,
     stats: CacheStats,
+}
+
+impl<T> Default for TileCache<T> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// What compositing one tile needs to do.
@@ -266,10 +326,16 @@ impl std::error::Error for TilePlanError {}
 impl<T> TileCache<T> {
     /// An empty cache.
     #[must_use]
-    pub fn new() -> TileCache<T> {
+    pub const fn new() -> TileCache<T> {
         TileCache {
-            entries: HashMap::new(),
-            stats: CacheStats::default(),
+            entries: Vec::new(),
+            retained: 0,
+            stats: CacheStats {
+                hits: 0,
+                misses: 0,
+                poisoned: 0,
+                empty: 0,
+            },
         }
     }
 
@@ -299,6 +365,18 @@ impl<T> TileCache<T> {
         camera: u64,
         output: OutputTransform,
     ) -> Result<TileWork, TilePlanError> {
+        self.plan_tile_recycling(binning, plan, tile, camera, output)
+            .map(|(work, _)| work)
+    }
+
+    pub(crate) fn plan_tile_recycling(
+        &mut self,
+        binning: &Binning,
+        plan: &RenderPlan,
+        tile: usize,
+        camera: u64,
+        output: OutputTransform,
+    ) -> Result<(TileWork, Option<T>), TilePlanError> {
         let tile_count = binning.tile_count();
         if tile >= tile_count {
             return Err(TilePlanError { tile, tile_count });
@@ -310,23 +388,23 @@ impl<T> TileCache<T> {
             // An empty tile is not a cache entry: it has no contents to reuse,
             // and keeping one would let a stale payload outlive the commands
             // that produced it.
-            self.entries.remove(&tile);
+            let evicted = self.take_payload(tile);
             self.stats.empty += 1;
-            return Ok(TileWork::Empty);
+            return Ok((TileWork::Empty, evicted));
         }
         let Some(key) = TileKey::build(binning, plan, tile, camera, output) else {
-            self.entries.remove(&tile);
+            let evicted = self.take_payload(tile);
             self.stats.poisoned += 1;
-            return Ok(TileWork::RasterizeUncached);
+            return Ok((TileWork::RasterizeUncached, evicted));
         };
-        match self.entries.get(&tile) {
+        match self.entries.get(tile).and_then(Option::as_ref) {
             Some((cached, _)) if *cached == key => {
                 self.stats.hits += 1;
-                Ok(TileWork::Reuse)
+                Ok((TileWork::Reuse, None))
             }
             _ => {
                 self.stats.misses += 1;
-                Ok(TileWork::Rasterize(key))
+                Ok((TileWork::Rasterize(key), None))
             }
         }
     }
@@ -339,19 +417,30 @@ impl<T> TileCache<T> {
     ///
     /// [`plan_tile`]: TileCache::plan_tile
     pub fn store(&mut self, tile: usize, key: TileKey, payload: T) {
-        self.entries.insert(tile, (key, payload));
+        if tile >= self.entries.len() {
+            self.entries.resize_with(tile + 1, || None);
+        }
+        if self.entries[tile].replace((key, payload)).is_none() {
+            self.retained += 1;
+        }
     }
 
     /// The cached payload for a tile, if any.
     #[must_use]
     pub fn get(&self, tile: usize) -> Option<&T> {
-        self.entries.get(&tile).map(|(_, payload)| payload)
+        self.entries
+            .get(tile)
+            .and_then(Option::as_ref)
+            .map(|(_, payload)| payload)
     }
 
     /// The key a tile is currently cached under.
     #[must_use]
     pub fn key(&self, tile: usize) -> Option<TileKey> {
-        self.entries.get(&tile).map(|(k, _)| *k)
+        self.entries
+            .get(tile)
+            .and_then(Option::as_ref)
+            .map(|(k, _)| *k)
     }
 
     /// This frame's counters.
@@ -363,24 +452,48 @@ impl<T> TileCache<T> {
     /// How many tiles are retained.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.retained
     }
 
     /// Is the cache empty?
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.retained == 0
     }
 
     /// Forget everything — a resolution change, an engine swap, a new scene.
     pub fn clear(&mut self) {
-        self.entries.clear();
+        for slot in &mut self.entries {
+            *slot = None;
+        }
+        self.retained = 0;
     }
 
     /// Remove one retained payload so a concrete cache can reuse its storage
     /// under a replacement key.
     fn take_payload(&mut self, tile: usize) -> Option<T> {
-        self.entries.remove(&tile).map(|(_, payload)| payload)
+        let slot = self.entries.get_mut(tile)?;
+        let (_, payload) = slot.take()?;
+        self.retained = self.retained.saturating_sub(1);
+        Some(payload)
+    }
+
+    fn reserve_tiles(&mut self, additional: usize) -> Result<(), std::collections::TryReserveError> {
+        let target = self.retained.saturating_add(additional);
+        if target > self.entries.len() {
+            self.entries.try_reserve(target - self.entries.len())?;
+            self.entries.resize_with(target, || None);
+        }
+        Ok(())
+    }
+
+    fn drain_payloads(&mut self, dst: &mut Vec<T>) {
+        for slot in &mut self.entries {
+            if let Some((_, payload)) = slot.take() {
+                dst.push(payload);
+            }
+        }
+        self.retained = 0;
     }
 }
 
@@ -445,8 +558,15 @@ impl From<TilePlanError> for PixelTileCacheError {
 #[derive(Debug, Default)]
 pub struct PixelTileCache {
     tiles: TileCache<Vec<u8>>,
+    recycled_payloads: Vec<Vec<u8>>,
     work: Vec<TileWork>,
     render_state: Option<Digest>,
+    last_journal_inputs: Option<(
+        crate::engine::EngineIdentity,
+        crate::engine::FrameConfig,
+        crate::bin::Tiling,
+    )>,
+    fresh_render_state: bool,
     // Bumped when a render starts and again when it succeeds, so only the
     // surface of the last *completed* render can present the current value.
     serial: u64,
@@ -479,9 +599,13 @@ impl PixelTileCache {
 
     /// Forget all pixels and renderer identity.
     pub fn clear(&mut self) {
-        self.tiles.clear();
+        let count = self.tiles.len();
+        let _ = self.recycled_payloads.try_reserve(count);
+        self.tiles.drain_payloads(&mut self.recycled_payloads);
         self.work.clear();
         self.render_state = None;
+        self.last_journal_inputs = None;
+        self.fresh_render_state = false;
         self.serial = self.serial.wrapping_add(1);
     }
 
@@ -506,6 +630,26 @@ impl PixelTileCache {
         self.serial = self.serial.wrapping_add(1);
     }
 
+    pub(crate) fn prepare_frame_with_inputs(
+        &mut self,
+        binning: &Binning,
+        plan: &RenderPlan,
+        camera: u64,
+        identity: crate::engine::EngineIdentity,
+        config: crate::engine::FrameConfig,
+    ) -> Result<(), PixelTileCacheError> {
+        let tiling = binning.tiling();
+        let render_state = match (self.last_journal_inputs, self.render_state) {
+            (Some(prev), Some(digest)) if prev == (identity, config, tiling) => digest,
+            _ => {
+                let digest = crate::engine::journal_digest(identity, &config, tiling);
+                self.last_journal_inputs = Some((identity, config, tiling));
+                digest
+            }
+        };
+        self.prepare_frame(binning, plan, camera, render_state)
+    }
+
     pub(crate) fn prepare_frame(
         &mut self,
         binning: &Binning,
@@ -517,15 +661,23 @@ impl PixelTileCache {
         // tiling all affect raw bytes but are intentionally not scene
         // revisions. The engine's journal digest already names that complete
         // closure; changing any part invalidates every retained payload.
+        let tile_count = binning.tile_count();
         if self.render_state != Some(render_state) {
-            self.tiles.clear();
+            self.recycled_payloads
+                .try_reserve(tile_count.saturating_sub(self.recycled_payloads.len()))
+                .map_err(|_| PixelTileCacheError::TooLarge)?;
+            self.tiles.drain_payloads(&mut self.recycled_payloads);
+            self.tiles
+                .reserve_tiles(tile_count.saturating_sub(self.tiles.len()))
+                .map_err(|_| PixelTileCacheError::TooLarge)?;
             self.render_state = Some(render_state);
+            self.fresh_render_state = true;
         }
 
         self.tiles.begin_frame();
         self.work.clear();
         self.work
-            .try_reserve(binning.tile_count())
+            .try_reserve(tile_count)
             .map_err(|_| PixelTileCacheError::TooLarge)?;
         let output = OutputTransform {
             viewport: binning.viewport(),
@@ -534,9 +686,14 @@ impl PixelTileCache {
             // therefore the intended representation (see OutputTransform).
             pixel_format: transient_format_id(PixelFormat::Rgba16F),
         };
-        for tile in 0..binning.tile_count() {
-            self.work
-                .push(self.tiles.plan_tile(binning, plan, tile, camera, output)?);
+        for tile in 0..tile_count {
+            let (work, evicted) = self
+                .tiles
+                .plan_tile_recycling(binning, plan, tile, camera, output)?;
+            if let Some(payload) = evicted {
+                self.recycled_payloads.push(payload);
+            }
+            self.work.push(work);
         }
         Ok(())
     }
@@ -627,6 +784,9 @@ impl PixelTileCache {
         let cols = width.div_ceil(tile_edge);
         let stride = frame.layout().stride(0);
         let plane = frame.plane(0);
+        let full_tile_bytes = rgba16f_row_bytes(tile_edge)?
+            .checked_mul(usize::try_from(tile_edge).map_err(|_| PixelTileCacheError::TooLarge)?)
+            .ok_or(PixelTileCacheError::TooLarge)?;
 
         for tile in 0..self.work.len() {
             let Some(TileWork::Rasterize(key)) = self.work.get(tile).copied() else {
@@ -640,9 +800,14 @@ impl PixelTileCache {
                     usize::try_from(tile_height).map_err(|_| PixelTileCacheError::TooLarge)?,
                 )
                 .ok_or(PixelTileCacheError::TooLarge)?;
-            let mut payload = self.tiles.take_payload(tile).unwrap_or_default();
+            let mut payload = self
+                .tiles
+                .take_payload(tile)
+                .or_else(|| self.recycled_payloads.pop())
+                .unwrap_or_default();
+            let reserve_target = full_tile_bytes.max(payload_len);
             payload
-                .try_reserve(payload_len.saturating_sub(payload.len()))
+                .try_reserve(reserve_target.saturating_sub(payload.len()))
                 .map_err(|_| PixelTileCacheError::TooLarge)?;
             payload.resize(payload_len, 0);
             for row in 0..usize::try_from(tile_height).map_err(|_| PixelTileCacheError::TooLarge)? {
@@ -674,6 +839,18 @@ impl PixelTileCache {
                 destination.copy_from_slice(source);
             }
             self.tiles.store(tile, key, payload);
+        }
+        if self.fresh_render_state {
+            self.fresh_render_state = false;
+            let spare_target = (self.tiles.len().saturating_add(64))
+                .min(binning.tile_count().saturating_sub(self.tiles.len()));
+            while self.recycled_payloads.len() < spare_target {
+                let mut spare = Vec::new();
+                spare
+                    .try_reserve_exact(full_tile_bytes)
+                    .map_err(|_| PixelTileCacheError::TooLarge)?;
+                self.recycled_payloads.push(spare);
+            }
         }
         Ok(())
     }
@@ -820,6 +997,14 @@ mod tests {
         (stage, mobs)
     }
 
+    fn mix_128(seed: u64, words: &[u64]) -> u128 {
+        let mut h = TileHasher::new(seed);
+        for &word in words {
+            h.write_u64(word);
+        }
+        h.finish()
+    }
+
     fn legacy_tile_key(
         binning: &Binning,
         plan: &RenderPlan,
@@ -840,7 +1025,7 @@ mod tests {
         let instances = plan.shapes().instances();
         let command_capacity = draws
             .len()
-            .checked_mul(15)
+            .checked_mul(14)
             .expect("small legacy-oracle fixture");
         let mut commands = Vec::with_capacity(command_capacity);
         let mut revisions = Vec::with_capacity(draws.len());
@@ -849,8 +1034,7 @@ mod tests {
             if instance.volatile {
                 return None;
             }
-            commands.push(u64::from(instance.shape));
-            commands.push(u64::from(instance.style));
+            commands.push((u64::from(instance.shape) << 32) | u64::from(instance.style));
             commands.push(u64::from(*flags.get(index)?));
             commands.extend(
                 instance
@@ -863,8 +1047,8 @@ mod tests {
         }
 
         Some(TileKey {
-            commands: mix(&commands),
-            revisions: mix(&revisions),
+            commands: mix_128(0x636f_6d6d_616e_6473, &commands),
+            revisions: mix_128(0x7265_7669_7369_6f6e, &revisions),
             camera,
             output: output.fold(),
         })
@@ -1401,6 +1585,219 @@ mod tests {
             stats.hits + stats.misses + stats.poisoned + stats.empty,
             binning.tile_count(),
             "every tile must be accounted for exactly once"
+        );
+    }
+
+    #[test]
+    fn tile_hasher_avalanches_both_64_bit_lanes_and_separates_packed_shape_style() {
+        const SEED: u64 = 0x636f_6d6d_616e_6473;
+        let base_words = [
+            (1u64 << 32) | 2u64,
+            3u64,
+            1.0f64.to_bits(),
+            0.0f64.to_bits(),
+            0.0f64.to_bits(),
+            0.0f64.to_bits(),
+            1.0f64.to_bits(),
+            0.0f64.to_bits(),
+            0.0f64.to_bits(),
+            0.0f64.to_bits(),
+            1.0f64.to_bits(),
+            4.0f64.to_bits(),
+            (-2.0f64).to_bits(),
+            0.0f64.to_bits(),
+        ];
+        let base = mix_128(SEED, &base_words);
+        let base_lo = base as u64;
+        let base_hi = (base >> 64) as u64;
+        assert_ne!(base_lo, 0);
+        assert_ne!(base_hi, 0);
+        assert_ne!(base_lo, base_hi);
+
+        for word_idx in 0..base_words.len() {
+            for bit in [0u32, 1, 31, 32, 63] {
+                let mut mutated = base_words;
+                mutated[word_idx] ^= 1u64 << bit;
+                let digest = mix_128(SEED, &mutated);
+                assert_ne!(digest as u64, base_lo, "low lane static at word {word_idx} bit {bit}");
+                assert_ne!(
+                    (digest >> 64) as u64,
+                    base_hi,
+                    "high lane static at word {word_idx} bit {bit}"
+                );
+            }
+        }
+
+        // Swapping shape and style in the packed word must change both lanes.
+        let mut swapped = base_words;
+        swapped[0] = (2u64 << 32) | 1u64;
+        let swapped_digest = mix_128(SEED, &swapped);
+        assert_ne!(swapped_digest as u64, base_lo);
+        assert_ne!((swapped_digest >> 64) as u64, base_hi);
+    }
+
+    #[test]
+    #[ignore = "paired 4K benchmark; run with --release -- --ignored --nocapture"]
+    fn profile_paired_tile_cache_4k() {
+        use crate::revision::Mixer;
+        use std::collections::HashMap;
+        use std::hint::black_box;
+
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        struct IncumbentTileKey {
+            commands: u64,
+            revisions: u64,
+            camera: u64,
+            output: u64,
+        }
+
+        fn build_incumbent_key(
+            binning: &Binning,
+            plan: &RenderPlan,
+            tile: usize,
+            camera: u64,
+            output: OutputTransform,
+        ) -> Option<IncumbentTileKey> {
+            if tile >= binning.tile_count()
+                || !binning.matches_plan(plan)
+                || binning.viewport() != output.viewport
+                || binning.map() != output.map
+            {
+                return None;
+            }
+            let draws = binning.tile(tile)?;
+            let flags = binning.tile_flags(tile)?;
+            let instances = plan.shapes().instances();
+            let mut commands = Mixer::new();
+            let mut revisions = Mixer::new();
+            for (k, &d) in draws.iter().enumerate() {
+                let inst = instances.get(d as usize)?;
+                if inst.volatile {
+                    return None;
+                }
+                commands.write_u64(u64::from(inst.shape));
+                commands.write_u64(u64::from(inst.style));
+                commands.write_u64(u64::from(*flags.get(k)?));
+                for c in inst.placement.coefficients() {
+                    commands.write_u64(c.to_bits());
+                }
+                revisions.write_u64(inst.revisions);
+            }
+            Some(IncumbentTileKey {
+                commands: commands.finish(),
+                revisions: revisions.finish(),
+                camera,
+                output: output.fold(),
+            })
+        }
+
+        let vp = Viewport {
+            width: 3840,
+            height: 2160,
+        };
+        let out = OutputTransform {
+            viewport: vp,
+            map: ScreenMap::default(),
+            pixel_format: 0,
+        };
+        let mut stage = Stage::new();
+        for i in 0..16 {
+            let offset = f64::from(i) * 40.0;
+            let mob = stage.add(rect_mobject(1920.0, 1080.0, 3600.0 - offset, 2000.0 - offset));
+            stage.add_to_scene(mob).expect("live");
+        }
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, 0).expect("valid 4K plan");
+        let binning =
+            Binning::build(&plan, vp, Tiling::default(), out.map).expect("valid 4K binning");
+
+        let mut new_cache = TileCache::<u32>::new();
+        for (t, w) in plan_frame(&mut new_cache, &binning, &plan, 0, out)
+            .expect("warm new cache")
+            .into_iter()
+            .enumerate()
+        {
+            if let TileWork::Rasterize(k) = w {
+                new_cache.store(t, k, t as u32);
+            }
+        }
+        let mut incumbent_map: HashMap<usize, (IncumbentTileKey, u32)> = HashMap::new();
+        for t in 0..binning.tile_count() {
+            if !binning.tile(t).unwrap_or_default().is_empty()
+                && let Some(k) = build_incumbent_key(&binning, &plan, t, 0, out)
+            {
+                incumbent_map.insert(t, (k, t as u32));
+            }
+        }
+
+        const FRAMES: usize = 50;
+        let mut incumbent_ns = Vec::new();
+        let mut new_ns = Vec::new();
+        for sample in 0..7 {
+            let run_incumbent = |map: &mut HashMap<usize, (IncumbentTileKey, u32)>| {
+                let start = std::time::Instant::now();
+                let mut hits = 0usize;
+                for _ in 0..FRAMES {
+                    for t in 0..binning.tile_count() {
+                        if binning.tile(t).unwrap_or_default().is_empty() {
+                            let _ = map.remove(&t);
+                            continue;
+                        }
+                        if let Some(k) = build_incumbent_key(&binning, &plan, t, 0, out)
+                            && map.get(&t).is_some_and(|(old, _)| *old == k)
+                        {
+                            hits += 1;
+                        }
+                    }
+                }
+                black_box(hits);
+                start.elapsed().as_nanos()
+            };
+            let run_new = |cache: &mut TileCache<u32>| {
+                let start = std::time::Instant::now();
+                let mut hits = 0usize;
+                for _ in 0..FRAMES {
+                    cache.begin_frame();
+                    for t in 0..binning.tile_count() {
+                        if matches!(
+                            cache.plan_tile(&binning, &plan, t, 0, out),
+                            Ok(TileWork::Reuse)
+                        ) {
+                            hits += 1;
+                        }
+                    }
+                }
+                black_box(hits);
+                start.elapsed().as_nanos()
+            };
+            let (inc, nw) = if sample % 2 == 0 {
+                (
+                    run_incumbent(&mut incumbent_map),
+                    run_new(&mut new_cache),
+                )
+            } else {
+                let nw = run_new(&mut new_cache);
+                let inc = run_incumbent(&mut incumbent_map);
+                (inc, nw)
+            };
+            incumbent_ns.push(inc);
+            new_ns.push(nw);
+            println!(
+                "tile_cache_4k sample={sample} frames={FRAMES} incumbent_ms={:.3} new_ms={:.3} speedup={:.2}x",
+                inc as f64 / 1e6,
+                nw as f64 / 1e6,
+                inc as f64 / nw as f64
+            );
+        }
+        incumbent_ns.sort_unstable();
+        new_ns.sort_unstable();
+        let med_inc = incumbent_ns[incumbent_ns.len() / 2];
+        let med_new = new_ns[new_ns.len() / 2];
+        println!(
+            "tile_cache_4k_median frames={FRAMES} incumbent_ms={:.3} new_ms={:.3} speedup={:.2}x",
+            med_inc as f64 / 1e6,
+            med_new as f64 / 1e6,
+            med_inc as f64 / med_new as f64
         );
     }
 }

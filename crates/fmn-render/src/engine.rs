@@ -1930,11 +1930,12 @@ impl<'a> FrameJob<'a> {
             return Err(FrameError::DimensionMismatch.into());
         }
         let resumed = cache.begin_render(resume);
-        cache.prepare_frame(
+        cache.prepare_frame_with_inputs(
             self.binning,
             self.plan,
             camera_revision,
-            self.journal_digest(),
+            self.identity,
+            self.config,
         )?;
         if !resumed {
             cache.restore_reused_tiles(dst, self.binning)?;

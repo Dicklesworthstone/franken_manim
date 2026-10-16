@@ -346,6 +346,11 @@ impl Storage {
     }
 }
 
+fn empty_locked_set() -> Arc<HashSet<usize>> {
+    static EMPTY: std::sync::OnceLock<Arc<HashSet<usize>>> = std::sync::OnceLock::new();
+    Arc::clone(EMPTY.get_or_init(|| Arc::new(HashSet::new())))
+}
+
 /// Interleaved f32 records under the view protocol.
 #[derive(Debug)]
 pub struct RecordBuffer {
@@ -356,11 +361,11 @@ pub struct RecordBuffer {
     /// writes land in while the buffer has no points, and that growth from
     /// zero adopts wholesale (`resize_points`, mobject.py). Schema-generic:
     /// exactly one stride of lanes, never counted by [`Self::len`].
-    defaults: Option<Box<[f32]>>,
+    defaults: Option<Arc<Vec<f32>>>,
     /// `locked_data_keys` (field indices): the copy-elision markers the
     /// animation engine consults (`lock_matching_data` skips these in
     /// `interpolate`, fm-cye). State only — locking never gates access.
-    locked: HashSet<usize>,
+    locked: Arc<HashSet<usize>>,
 }
 
 impl RecordBuffer {
@@ -378,7 +383,7 @@ impl RecordBuffer {
             storage: Storage::new(vec![0.0; lanes].into_boxed_slice(), n_fields),
             len,
             defaults: None,
-            locked: HashSet::new(),
+            locked: empty_locked_set(),
         })
     }
 
@@ -550,6 +555,25 @@ impl RecordBuffer {
         })
     }
 
+    /// Compare one record-major field against a flat slice without allocating a
+    /// temporary column.
+    #[must_use]
+    pub fn column_slice_eq(&self, field: &str, values: &[f32]) -> bool {
+        let (Some(off), Some(width)) = (self.schema.offset(field), self.schema.field_width(field))
+        else {
+            return false;
+        };
+        if self.len.checked_mul(width) != Some(values.len()) {
+            return false;
+        }
+        let stride = self.schema.stride();
+        let cells = self.storage.cells.read().expect("storage lock poisoned");
+        (0..self.len).all(|record| {
+            let start = record * stride + off;
+            cells[start..start + width] == values[record * width..(record + 1) * width]
+        })
+    }
+
     /// Write `field` of record `index` (unsharing from snapshots first,
     /// V5), bumping global + field revisions (V4) and the dirty span.
     pub fn write(&mut self, index: usize, field: &str, values: &[f32]) -> bool {
@@ -628,9 +652,10 @@ impl RecordBuffer {
             return;
         }
         let stride = self.schema.stride();
-        let row = self
-            .defaults
-            .get_or_insert_with(|| vec![0.0; stride].into_boxed_slice());
+        let row = Arc::make_mut(
+            self.defaults
+                .get_or_insert_with(|| Arc::new(vec![0.0; stride])),
+        );
         row[off..off + width].copy_from_slice(value);
     }
 
@@ -715,7 +740,7 @@ impl RecordBuffer {
     /// The phantom record's full lane run, stride-long when present.
     #[must_use]
     pub fn defaults_row(&self) -> Option<&[f32]> {
-        self.defaults.as_deref()
+        self.defaults.as_deref().map(Vec::as_slice)
     }
 
     /// Install a phantom record read back from a snapshot. The row must be
@@ -725,7 +750,7 @@ impl RecordBuffer {
         if row.len() != self.schema.stride() {
             return;
         }
-        self.defaults = Some(row.to_vec().into_boxed_slice());
+        self.defaults = Some(Arc::new(row.to_vec()));
     }
 
     /// Take (and clear) the dirty span of `field`: the inclusive record
@@ -749,15 +774,22 @@ impl RecordBuffer {
     /// state — access is never gated. (The `has_updaters` guard lives at
     /// the mobject layer with fm-yra, as in the Reference.)
     pub fn lock_data<'k>(&mut self, keys: impl IntoIterator<Item = &'k str>) {
-        self.locked = keys
+        let set: HashSet<usize> = keys
             .into_iter()
             .filter_map(|k| self.schema.index_of(k))
             .collect();
+        self.locked = if set.is_empty() {
+            empty_locked_set()
+        } else {
+            Arc::new(set)
+        };
     }
 
     /// `unlock_data`.
     pub fn unlock_data(&mut self) {
-        self.locked.clear();
+        if !self.locked.is_empty() {
+            self.locked = empty_locked_set();
+        }
     }
 
     /// Whether `field` is currently locked.
@@ -1291,7 +1323,7 @@ impl StorageIdentity {
 // ---------------------------------------------------------------- mirrors
 
 /// One field's lane-major (SoA) mirror: `lanes[lane * len + record]`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct FieldMirror {
     lanes: Vec<f32>,
     len: usize,
@@ -1303,7 +1335,7 @@ struct FieldMirror {
 /// loops read instead of the interleaved buffer. Owned by the render side
 /// (one set per renderable object), synchronized at most once per
 /// observation, and only when the field actually changed.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct MirrorSet {
     fields: std::collections::HashMap<String, FieldMirror>,
     materializations: u64,
@@ -1331,26 +1363,39 @@ impl MirrorSet {
     /// contract, not a mirror bypass.
     pub fn sync<'a>(&'a mut self, buffer: &RecordBuffer, field: &str) -> Option<&'a [f32]> {
         let revision = buffer.field_revision(field)?;
+        let off = buffer.schema().offset(field)?;
         let width = buffer.schema().field_width(field)?;
+        let stride = buffer.schema().stride();
+        let len = buffer.len();
         let storage = buffer.storage_id();
         let forced = buffer.writable_view_affects(field);
-        let stale = match self.fields.get(field) {
-            Some(mirror) => {
-                mirror.seen_revision != revision
-                    || mirror.seen_storage != storage
-                    || mirror.len != buffer.len()
-                    || forced
+
+        if let Some(mirror) = self.fields.get_mut(field) {
+            if mirror.seen_revision != revision
+                || mirror.seen_storage != storage
+                || mirror.len != len
+                || forced
+            {
+                let cells = buffer.storage.cells.read().expect("storage lock poisoned");
+                mirror.lanes.resize(len * width, 0.0);
+                for record in 0..len {
+                    let start = record * stride + off;
+                    for lane in 0..width {
+                        mirror.lanes[lane * len + record] = cells[start + lane];
+                    }
+                }
+                mirror.len = len;
+                mirror.seen_revision = revision;
+                mirror.seen_storage = storage;
+                self.materializations += 1;
             }
-            None => true,
-        };
-        if stale {
-            let column = buffer.read_column(field)?;
-            let len = buffer.len();
-            // Transpose record-major column into lane-major SoA.
-            let mut lanes = vec![0.0f32; column.len()];
+        } else {
+            let cells = buffer.storage.cells.read().expect("storage lock poisoned");
+            let mut lanes = vec![0.0f32; len * width];
             for record in 0..len {
+                let start = record * stride + off;
                 for lane in 0..width {
-                    lanes[lane * len + record] = column[record * width + lane];
+                    lanes[lane * len + record] = cells[start + lane];
                 }
             }
             self.fields.insert(
@@ -1366,4 +1411,67 @@ impl MirrorSet {
         }
         self.fields.get(field).map(|m| m.lanes.as_slice())
     }
+
+    /// Read one 3-lane `point` record in `f64` from the synchronized SoA mirror.
+    pub fn read_point(&mut self, buffer: &RecordBuffer, index: usize) -> Option<[f64; 3]> {
+        let len = buffer.len();
+        if index >= len || buffer.schema().field_width("point") != Some(3) {
+            return None;
+        }
+        let lanes = self.sync(buffer, "point")?;
+        Some([
+            f64::from(lanes[index]),
+            f64::from(lanes[len + index]),
+            f64::from(lanes[2 * len + index]),
+        ])
+    }
+
+    /// Read one 4-lane RGBA record from the synchronized SoA mirror.
+    pub fn read_rgba(&mut self, buffer: &RecordBuffer, field: &str, index: usize) -> [f32; 4] {
+        let len = buffer.len();
+        if index >= len || buffer.schema().field_width(field) != Some(4) {
+            return [0.0; 4];
+        }
+        let Some(lanes) = self.sync(buffer, field) else {
+            return [0.0; 4];
+        };
+        [
+            lanes[index],
+            lanes[len + index],
+            lanes[2 * len + index],
+            lanes[3 * len + index],
+        ]
+    }
+
+    /// Read one 1-lane scalar record from the synchronized SoA mirror.
+    pub fn read_scalar(&mut self, buffer: &RecordBuffer, field: &str, index: usize) -> f32 {
+        let len = buffer.len();
+        if index >= len || buffer.schema().field_width(field) != Some(1) {
+            return 0.0;
+        }
+        let Some(lanes) = self.sync(buffer, field) else {
+            return 0.0;
+        };
+        lanes[index]
+    }
+
+    /// Whether every record of `field` has identical lane values to record 0.
+    pub fn is_constant(&mut self, buffer: &RecordBuffer, field: &str) -> bool {
+        let len = buffer.len();
+        if len <= 1 {
+            return true;
+        }
+        let Some(width) = buffer.schema().field_width(field) else {
+            return true;
+        };
+        let Some(lanes) = self.sync(buffer, field) else {
+            return true;
+        };
+        (0..width).all(|lane| {
+            let slice = &lanes[lane * len..(lane + 1) * len];
+            let first = slice[0];
+            slice[1..].iter().all(|&v| v == first)
+        })
+    }
 }
+

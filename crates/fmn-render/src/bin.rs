@@ -467,6 +467,52 @@ fn span_cells(span: (u32, u32, u32, u32)) -> Result<u64, BinningError> {
     checked_product("tile references", cols, rows)
 }
 
+#[derive(Debug, Clone, Default)]
+struct BinningScratch {
+    boxes: Vec<Option<[f64; 4]>>,
+    macro_counts: Vec<usize>,
+    macro_offsets: Vec<usize>,
+    macro_cursors: Vec<usize>,
+    macro_members_flat: Vec<u32>,
+    fine_counts: Vec<usize>,
+    instance_offsets: Vec<usize>,
+    instance_cursors: Vec<usize>,
+    per_instance_flat: Vec<u32>,
+    tile_counts: Vec<u32>,
+    tile_cursors: Vec<u32>,
+}
+
+impl PartialEq for BinningScratch {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+fn reuse_filled<T: Clone>(
+    values: &mut Vec<T>,
+    resource: &'static str,
+    requested: usize,
+    value: T,
+    slack: usize,
+) -> Result<(), BinningError> {
+    if values.capacity() < requested {
+        let target = requested.max(slack);
+        let additional = target.saturating_sub(values.len());
+        if values.try_reserve(additional).is_err() {
+            let exact = requested.saturating_sub(values.len());
+            values
+                .try_reserve_exact(exact)
+                .map_err(|_| BinningError::AllocationFailed {
+                    resource,
+                    requested: u64::try_from(requested).unwrap_or(u64::MAX),
+                })?;
+        }
+    }
+    values.clear();
+    values.resize(requested, value);
+    Ok(())
+}
+
 /// Per-fine-tile command lists in CSR form, with §10.4's class per command.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Binning {
@@ -491,6 +537,7 @@ pub struct Binning {
     /// is just a slower one-level scheme.
     macro_hits: usize,
     macro_count: usize,
+    scratch: BinningScratch,
 }
 
 impl Binning {
@@ -521,6 +568,412 @@ impl Binning {
         limits: BinningLimits,
     ) -> Result<Binning, BinningError> {
         Binning::build_partitioned_with_limits(plan, viewport, tiling, map, 1, limits)
+    }
+
+    /// Rebuild this single-partition binning in-place, reusing all retained CSR
+    /// and scratch buffers across frames once warmed.
+    pub fn rebuild_in_place(
+        &mut self,
+        plan: &RenderPlan,
+        viewport: Viewport,
+        tiling: Tiling,
+        map: ScreenMap,
+    ) -> Result<(), BinningError> {
+        let limits = BinningLimits::default();
+        let fine = Grid::new(viewport, tiling.fine_tile, "fine tiles", limits)?;
+        let coarse = Grid::new(
+            viewport,
+            tiling.macro_tile.max(tiling.fine_tile),
+            "macro tiles",
+            limits,
+        )?;
+        let instances = plan.shapes().instances();
+        let instance_count = u64::try_from(instances.len()).unwrap_or(u64::MAX);
+        check_limit("instances", instance_count, limits.max_instances)?;
+        check_limit("instances", instance_count, u64::from(u32::MAX))?;
+        let fine_count = u64::try_from(fine.count()).unwrap_or(u64::MAX);
+        check_limit("partition cells", fine_count, limits.max_partition_cells)?;
+
+        let mut initial_bytes = 0u64;
+        add_table_bytes::<Option<[f64; 4]>>(&mut initial_bytes, "screen bounds", instance_count)?;
+        add_table_bytes::<usize>(
+            &mut initial_bytes,
+            "macrotile counts",
+            u64::try_from(coarse.count()).unwrap_or(u64::MAX),
+        )?;
+        check_limit("working bytes", initial_bytes, limits.max_working_bytes)?;
+
+        if self.scratch.boxes.capacity() < instances.len() {
+            let target = instances.len().max(64);
+            let additional = target.saturating_sub(self.scratch.boxes.len());
+            if self.scratch.boxes.try_reserve(additional).is_err() {
+                let exact = instances.len().saturating_sub(self.scratch.boxes.len());
+                self.scratch.boxes.try_reserve_exact(exact).map_err(|_| {
+                    BinningError::AllocationFailed {
+                        resource: "screen bounds",
+                        requested: instance_count,
+                    }
+                })?;
+            }
+        }
+        self.scratch.boxes.clear();
+        self.scratch
+            .boxes
+            .extend(instances.iter().map(|inst| screen_aabb(plan, inst, map)));
+
+        reuse_filled(
+            &mut self.scratch.macro_counts,
+            "macrotile counts",
+            coarse.count(),
+            0usize,
+            coarse.count(),
+        )?;
+        let mut macro_reference_count = 0u64;
+        for aabb in &self.scratch.boxes {
+            let Some(aabb) = aabb else { continue };
+            let Some((x0, y0, x1, y1)) = coarse.span(*aabb) else {
+                continue;
+            };
+            macro_reference_count = checked_sum(
+                "macrotile references",
+                macro_reference_count,
+                span_cells((x0, y0, x1, y1))?,
+            )?;
+            check_limit(
+                "macrotile references",
+                macro_reference_count,
+                limits.max_tile_references,
+            )?;
+            for ty in y0..=y1 {
+                for tx in x0..=x1 {
+                    let index = ty as usize * coarse.cols as usize + tx as usize;
+                    self.scratch.macro_counts[index] = self.scratch.macro_counts[index]
+                        .checked_add(1)
+                        .ok_or(BinningError::CountOverflow {
+                            resource: "macrotile member count",
+                        })?;
+                }
+            }
+        }
+        let macro_hits = self
+            .scratch
+            .macro_counts
+            .iter()
+            .filter(|&&count| count != 0)
+            .count();
+
+        let mut preliminary_bytes = initial_bytes;
+        add_table_bytes::<Vec<u32>>(
+            &mut preliminary_bytes,
+            "macrotile rows",
+            u64::try_from(coarse.count()).unwrap_or(u64::MAX),
+        )?;
+        add_table_bytes::<u32>(
+            &mut preliminary_bytes,
+            "macrotile references",
+            macro_reference_count,
+        )?;
+        check_limit("working bytes", preliminary_bytes, limits.max_working_bytes)?;
+
+        let macro_offset_count =
+            coarse
+                .count()
+                .checked_add(1)
+                .ok_or(BinningError::CountOverflow {
+                    resource: "macrotile rows",
+                })?;
+        reuse_filled(
+            &mut self.scratch.macro_offsets,
+            "macrotile rows",
+            macro_offset_count,
+            0usize,
+            macro_offset_count,
+        )?;
+        reuse_filled(
+            &mut self.scratch.macro_cursors,
+            "macrotile rows",
+            coarse.count(),
+            0usize,
+            coarse.count(),
+        )?;
+        let mut macro_running = 0usize;
+        for m in 0..coarse.count() {
+            self.scratch.macro_offsets[m] = macro_running;
+            self.scratch.macro_cursors[m] = macro_running;
+            macro_running = macro_running
+                .checked_add(self.scratch.macro_counts[m])
+                .ok_or(BinningError::CountOverflow {
+                    resource: "macrotile references",
+                })?;
+        }
+        self.scratch.macro_offsets[coarse.count()] = macro_running;
+        let macro_slack = instances.len().saturating_mul(coarse.count().max(1)).max(64);
+        reuse_filled(
+            &mut self.scratch.macro_members_flat,
+            "macrotile references",
+            macro_running,
+            0u32,
+            macro_slack,
+        )?;
+        for (i, aabb) in self.scratch.boxes.iter().enumerate() {
+            let Some(aabb) = aabb else { continue };
+            let Some((x0, y0, x1, y1)) = coarse.span(*aabb) else {
+                continue;
+            };
+            let instance = u32::try_from(i).map_err(|_| BinningError::AddressSpace {
+                resource: "instance index",
+                requested: u64::try_from(i).unwrap_or(u64::MAX),
+            })?;
+            for ty in y0..=y1 {
+                for tx in x0..=x1 {
+                    let index = ty as usize * coarse.cols as usize + tx as usize;
+                    let slot = self.scratch.macro_cursors[index];
+                    self.scratch.macro_members_flat[slot] = instance;
+                    self.scratch.macro_cursors[index] += 1;
+                }
+            }
+        }
+
+        let mut counting_bytes = preliminary_bytes;
+        add_table_bytes::<usize>(&mut counting_bytes, "instance tile counts", instance_count)?;
+        check_limit("working bytes", counting_bytes, limits.max_working_bytes)?;
+        reuse_filled(
+            &mut self.scratch.fine_counts,
+            "instance tile counts",
+            instances.len(),
+            0usize,
+            instances.len().max(64),
+        )?;
+        let mut fine_reference_count = 0u64;
+        for m in 0..coarse.count() {
+            let m_lo = self.scratch.macro_offsets[m];
+            let m_hi = self.scratch.macro_offsets[m + 1];
+            if m_lo == m_hi {
+                continue;
+            }
+            let mrect = coarse.rect(m, viewport);
+            let fx0 = (mrect[0] / f64::from(fine.tile)).floor() as u32;
+            let fy0 = (mrect[1] / f64::from(fine.tile)).floor() as u32;
+            let fx1 = (((mrect[2] - 1.0).max(mrect[0]) / f64::from(fine.tile)).floor() as u32)
+                .min(fine.cols.saturating_sub(1));
+            let fy1 = (((mrect[3] - 1.0).max(mrect[1]) / f64::from(fine.tile)).floor() as u32)
+                .min(fine.rows.saturating_sub(1));
+            for &i in &self.scratch.macro_members_flat[m_lo..m_hi] {
+                let Some(aabb) = self.scratch.boxes[i as usize] else {
+                    continue;
+                };
+                let Some((x0, y0, x1, y1)) = fine.span(aabb) else {
+                    continue;
+                };
+                let span = (x0.max(fx0), y0.max(fy0), x1.min(fx1), y1.min(fy1));
+                if span.0 > span.2 || span.1 > span.3 {
+                    continue;
+                }
+                let cells = span_cells(span)?;
+                fine_reference_count =
+                    checked_sum("fine tile references", fine_reference_count, cells)?;
+                check_limit(
+                    "fine tile references",
+                    fine_reference_count,
+                    limits.max_tile_references,
+                )?;
+                let index = i as usize;
+                self.scratch.fine_counts[index] = self.scratch.fine_counts[index]
+                    .checked_add(checked_usize("fine tile references", cells)?)
+                    .ok_or(BinningError::CountOverflow {
+                        resource: "instance tile count",
+                    })?;
+            }
+        }
+        check_limit(
+            "fine tile references",
+            fine_reference_count,
+            u64::from(u32::MAX),
+        )?;
+
+        let mut working_bytes = counting_bytes;
+        add_table_bytes::<Vec<u32>>(&mut working_bytes, "instance tile rows", instance_count)?;
+        add_table_bytes::<u32>(
+            &mut working_bytes,
+            "fine tile references",
+            fine_reference_count,
+        )?;
+        add_table_bytes::<(usize, usize)>(&mut working_bytes, "partition ranges", 1)?;
+        add_table_bytes::<Vec<u32>>(&mut working_bytes, "partition count rows", 1)?;
+        add_table_bytes::<u32>(&mut working_bytes, "partition count cells", fine_count)?;
+        add_table_bytes::<Vec<u32>>(&mut working_bytes, "partition cursor rows", 1)?;
+        add_table_bytes::<u32>(&mut working_bytes, "partition cursor cells", fine_count)?;
+        add_table_bytes::<u32>(
+            &mut working_bytes,
+            "tile offsets",
+            checked_sum("tile offsets", fine_count, 1)?,
+        )?;
+        add_table_bytes::<u32>(&mut working_bytes, "draw indices", fine_reference_count)?;
+        add_table_bytes::<u32>(&mut working_bytes, "class flags", fine_reference_count)?;
+        check_limit("working bytes", working_bytes, limits.max_working_bytes)?;
+
+        let inst_offset_count =
+            instances
+                .len()
+                .checked_add(1)
+                .ok_or(BinningError::CountOverflow {
+                    resource: "instance tile rows",
+                })?;
+        reuse_filled(
+            &mut self.scratch.instance_offsets,
+            "instance tile rows",
+            inst_offset_count,
+            0usize,
+            inst_offset_count.max(65),
+        )?;
+        reuse_filled(
+            &mut self.scratch.instance_cursors,
+            "instance tile rows",
+            instances.len(),
+            0usize,
+            instances.len().max(64),
+        )?;
+        let mut fine_running = 0usize;
+        for i in 0..instances.len() {
+            self.scratch.instance_offsets[i] = fine_running;
+            self.scratch.instance_cursors[i] = fine_running;
+            fine_running = fine_running
+                .checked_add(self.scratch.fine_counts[i])
+                .ok_or(BinningError::CountOverflow {
+                    resource: "fine tile references",
+                })?;
+        }
+        self.scratch.instance_offsets[instances.len()] = fine_running;
+        let fine_slack = instances.len().saturating_mul(64).max(fine.count()).max(64);
+        reuse_filled(
+            &mut self.scratch.per_instance_flat,
+            "fine tile references",
+            fine_running,
+            0u32,
+            fine_slack,
+        )?;
+        for m in 0..coarse.count() {
+            let m_lo = self.scratch.macro_offsets[m];
+            let m_hi = self.scratch.macro_offsets[m + 1];
+            if m_lo == m_hi {
+                continue;
+            }
+            let mrect = coarse.rect(m, viewport);
+            let fx0 = (mrect[0] / f64::from(fine.tile)).floor() as u32;
+            let fy0 = (mrect[1] / f64::from(fine.tile)).floor() as u32;
+            let fx1 = (((mrect[2] - 1.0).max(mrect[0]) / f64::from(fine.tile)).floor() as u32)
+                .min(fine.cols.saturating_sub(1));
+            let fy1 = (((mrect[3] - 1.0).max(mrect[1]) / f64::from(fine.tile)).floor() as u32)
+                .min(fine.rows.saturating_sub(1));
+            for &i in &self.scratch.macro_members_flat[m_lo..m_hi] {
+                let Some(aabb) = self.scratch.boxes[i as usize] else {
+                    continue;
+                };
+                let Some((x0, y0, x1, y1)) = fine.span(aabb) else {
+                    continue;
+                };
+                for ty in y0.max(fy0)..=y1.min(fy1) {
+                    for tx in x0.max(fx0)..=x1.min(fx1) {
+                        let tile = u64::from(ty) * u64::from(fine.cols) + u64::from(tx);
+                        let slot = self.scratch.instance_cursors[i as usize];
+                        self.scratch.per_instance_flat[slot] =
+                            u32::try_from(tile).map_err(|_| BinningError::AddressSpace {
+                                resource: "fine tile index",
+                                requested: tile,
+                            })?;
+                        self.scratch.instance_cursors[i as usize] += 1;
+                    }
+                }
+            }
+        }
+
+        let n = fine.count();
+        reuse_filled(
+            &mut self.scratch.tile_counts,
+            "partition count cells",
+            n,
+            0u32,
+            n,
+        )?;
+        for &t in &self.scratch.per_instance_flat {
+            self.scratch.tile_counts[t as usize] = self.scratch.tile_counts[t as usize]
+                .checked_add(1)
+                .ok_or(BinningError::CountOverflow {
+                    resource: "commands per partition tile",
+                })?;
+        }
+
+        let offset_count = n.checked_add(1).ok_or(BinningError::CountOverflow {
+            resource: "tile offsets",
+        })?;
+        reuse_filled(&mut self.offsets, "tile offsets", offset_count, 0u32, offset_count)?;
+        reuse_filled(
+            &mut self.scratch.tile_cursors,
+            "partition cursor cells",
+            n,
+            0u32,
+            n,
+        )?;
+        let mut running = 0u32;
+        self.offsets[0] = 0;
+        for t in 0..n {
+            self.scratch.tile_cursors[t] = running;
+            running = running
+                .checked_add(self.scratch.tile_counts[t])
+                .ok_or(BinningError::CountOverflow {
+                    resource: "CSR command count",
+                })?;
+            self.offsets[t + 1] = running;
+        }
+
+        let draw_count = usize::try_from(running).map_err(|_| BinningError::AddressSpace {
+            resource: "draw indices",
+            requested: u64::from(running),
+        })?;
+        reuse_filled(&mut self.draws, "draw indices", draw_count, 0u32, fine_slack)?;
+        for i in 0..instances.len() {
+            let instance = u32::try_from(i).map_err(|_| BinningError::AddressSpace {
+                resource: "instance index",
+                requested: u64::try_from(i).unwrap_or(u64::MAX),
+            })?;
+            let f_lo = self.scratch.instance_offsets[i];
+            let f_hi = self.scratch.instance_offsets[i + 1];
+            for &t in &self.scratch.per_instance_flat[f_lo..f_hi] {
+                let slot = self.scratch.tile_cursors[t as usize] as usize;
+                self.draws[slot] = instance;
+                self.scratch.tile_cursors[t as usize] = self.scratch.tile_cursors[t as usize]
+                    .checked_add(1)
+                    .ok_or(BinningError::CountOverflow {
+                        resource: "partition cursor",
+                    })?;
+            }
+        }
+
+        reuse_filled(
+            &mut self.flags,
+            "class flags",
+            draw_count,
+            CLASS_PARTIAL,
+            fine_slack,
+        )?;
+        for t in 0..n {
+            let rect = fine.rect(t, viewport);
+            for k in self.offsets[t] as usize..self.offsets[t + 1] as usize {
+                let inst = &instances[self.draws[k] as usize];
+                if covers_tile(plan, inst, map, rect) {
+                    self.flags[k] = CLASS_INTERIOR;
+                }
+            }
+        }
+
+        self.tiling = tiling;
+        self.viewport = viewport;
+        self.map = map;
+        self.plan = plan.identity();
+        self.fine = fine;
+        self.macro_hits = macro_hits;
+        self.macro_count = coarse.count();
+        Ok(())
     }
 
     /// Bin a synchronized plan as if across `partitions` workers.
@@ -889,6 +1342,7 @@ impl Binning {
             flags,
             macro_hits,
             macro_count: coarse.count(),
+            scratch: BinningScratch::default(),
         })
     }
 
@@ -900,20 +1354,20 @@ impl Binning {
 
     /// The exact viewport this binning covered.
     #[must_use]
-    pub(crate) fn viewport(&self) -> Viewport {
+    pub fn viewport(&self) -> Viewport {
         self.viewport
     }
 
     /// The exact object-to-screen mapping used to classify and scatter draws.
     #[must_use]
-    pub(crate) fn map(&self) -> ScreenMap {
+    pub fn map(&self) -> ScreenMap {
         self.map
     }
 
     /// Whether every command index and class word still names the same
     /// painter-ordered draw.
     #[must_use]
-    pub(crate) fn matches_plan(&self, plan: &RenderPlan) -> bool {
+    pub fn matches_plan(&self, plan: &RenderPlan) -> bool {
         self.plan == plan.identity()
     }
 
@@ -1016,14 +1470,13 @@ impl Binning {
             after: 0,
             tiles_touched: 0,
         };
-        let mut offsets = try_with_capacity("pruned tile offsets", self.offsets.len())?;
-        let mut draws = try_with_capacity("pruned draw indices", self.draws.len())?;
-        let mut flags = try_with_capacity("pruned class flags", self.flags.len())?;
-        offsets.push(0u32);
+        let mut write_cursor = 0usize;
+        let mut prev_hi = 0usize;
 
         for t in 0..self.fine.count() {
-            let lo = self.offsets[t] as usize;
+            let lo = prev_hi;
             let hi = self.offsets[t + 1] as usize;
+            prev_hi = hi;
             let mut start = lo;
             for k in lo..hi {
                 if self.flags[k] == CLASS_INTERIOR
@@ -1035,20 +1488,22 @@ impl Binning {
             if start > lo {
                 report.tiles_touched += 1;
             }
-            draws.extend_from_slice(&self.draws[start..hi]);
-            flags.extend_from_slice(&self.flags[start..hi]);
-            offsets.push(
-                u32::try_from(draws.len()).map_err(|_| BinningError::AddressSpace {
+            let len = hi - start;
+            if write_cursor != start && len > 0 {
+                self.draws.copy_within(start..hi, write_cursor);
+                self.flags.copy_within(start..hi, write_cursor);
+            }
+            write_cursor += len;
+            self.offsets[t + 1] =
+                u32::try_from(write_cursor).map_err(|_| BinningError::AddressSpace {
                     resource: "pruned draw indices",
-                    requested: u64::try_from(draws.len()).unwrap_or(u64::MAX),
-                })?,
-            );
+                    requested: u64::try_from(write_cursor).unwrap_or(u64::MAX),
+                })?;
         }
 
-        report.after = draws.len();
-        self.offsets = offsets;
-        self.draws = draws;
-        self.flags = flags;
+        self.draws.truncate(write_cursor);
+        self.flags.truncate(write_cursor);
+        report.after = write_cursor;
         Ok(report)
     }
 }

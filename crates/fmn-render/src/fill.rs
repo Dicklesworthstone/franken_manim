@@ -330,8 +330,8 @@ pub struct MonoTableLimits {
 impl Default for MonoTableLimits {
     fn default() -> Self {
         Self {
-            max_pieces: 1 << 22,
-            max_table_bytes: 1 << 28,
+            max_pieces: 1 << 24,
+            max_table_bytes: 1 << 30,
         }
     }
 }
@@ -488,12 +488,34 @@ fn check_table_bytes(bytes: usize, limits: MonoTableLimits) -> Result<(), MonoTa
 /// compiled **geometry** identity and the exact [`ScreenMap`]. A colour or
 /// painter-order change must not rebuild it. A pan does, because this
 /// representation stores the map origin directly in every piece.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Default)]
 pub struct MonoTable {
     pieces: Vec<MonoPiece>,
     ranges: Vec<(u32, u32)>,
+    curves: crate::arena::Pool<[[f64; 2]; 3]>,
     map: ScreenMap,
     geometry: GeometryIdentity,
+}
+
+impl Clone for MonoTable {
+    fn clone(&self) -> Self {
+        Self {
+            pieces: self.pieces.clone(),
+            ranges: self.ranges.clone(),
+            curves: crate::arena::Pool::default(),
+            map: self.map,
+            geometry: self.geometry,
+        }
+    }
+}
+
+impl PartialEq for MonoTable {
+    fn eq(&self, other: &Self) -> bool {
+        self.pieces == other.pieces
+            && self.ranges == other.ranges
+            && self.map == other.map
+            && self.geometry == other.geometry
+    }
 }
 
 impl MonoTable {
@@ -587,6 +609,34 @@ impl MonoTable {
         map: ScreenMap,
         limits: MonoTableLimits,
     ) -> Result<MonoTable, MonoTableError> {
+        let mut table = MonoTable::default();
+        table.rebuild_in_place_with_limits(plan, map, limits)?;
+        Ok(table)
+    }
+
+    /// Rebuild this table in place, reusing piece, range, and subpath scratch
+    /// allocations across frames.
+    ///
+    /// If `self` already matches `plan.geometry_identity()` and `map`, this is
+    /// an `O(1)` no-op.
+    pub fn rebuild_in_place(
+        &mut self,
+        plan: &RenderPlan,
+        map: ScreenMap,
+    ) -> Result<(), MonoTableError> {
+        self.rebuild_in_place_with_limits(plan, map, MonoTableLimits::default())
+    }
+
+    /// Rebuild this table in place under explicit limits.
+    pub fn rebuild_in_place_with_limits(
+        &mut self,
+        plan: &RenderPlan,
+        map: ScreenMap,
+        limits: MonoTableLimits,
+    ) -> Result<(), MonoTableError> {
+        if self.matches_plan(plan) && self.map == map && self.ranges.len() == plan.shapes().shapes().len() {
+            return Ok(());
+        }
         let shapes = plan.shapes().shapes();
         let segments = plan.segments();
         check_shape_count(shapes.len())?;
@@ -604,34 +654,34 @@ impl MonoTable {
         check_piece_count(total_pieces, limits)?;
         check_table_bytes(logical_table_bytes(total_pieces, shapes.len())?, limits)?;
 
-        let mut pieces = Vec::new();
-        pieces
-            .try_reserve_exact(total_pieces)
+        self.pieces
+            .try_reserve(total_pieces.saturating_sub(self.pieces.len()))
             .map_err(|_| MonoTableError::AllocationFailed {
                 resource: "monotone pieces",
                 requested: total_pieces,
             })?;
-        let mut ranges = Vec::new();
-        ranges
-            .try_reserve_exact(shapes.len())
+        self.ranges
+            .try_reserve(shapes.len().saturating_sub(self.ranges.len()))
             .map_err(|_| MonoTableError::AllocationFailed {
                 resource: "monotone shape ranges",
                 requested: shapes.len(),
             })?;
-        let mut curves = crate::arena::Pool::default();
-        curves
+        self.curves
             .try_reserve(max_subpath_segments)
             .map_err(|_| MonoTableError::AllocationFailed {
                 resource: "monotone subpath scratch",
                 requested: max_subpath_segments,
             })?;
 
+        self.pieces.clear();
+        self.ranges.clear();
         for shape in shapes {
-            let first =
-                u32::try_from(pieces.len()).map_err(|_| MonoTableError::IndexCapacityExceeded {
+            let first = u32::try_from(self.pieces.len()).map_err(|_| {
+                MonoTableError::IndexCapacityExceeded {
                     resource: "monotone pieces",
-                    requested: pieces.len(),
-                })?;
+                    requested: self.pieces.len(),
+                }
+            })?;
             let lo = (shape.first_segment as usize).min(segments.len());
             let hi = (lo + shape.segment_count as usize).min(segments.len());
             let own = &segments[lo..hi];
@@ -642,24 +692,27 @@ impl MonoTable {
             // continuity: reconstructing them is almost right and silently wrong
             // when one subpath happens to begin exactly where the previous one
             // ended.
-            let start = pieces.len();
-            Self::append_segments(&mut pieces, &mut curves, own, &shape.subpath_starts, map);
-            debug_assert_eq!(pieces.len() - start, layout.pieces);
-            let count = u32::try_from(pieces.len() - start).map_err(|_| {
+            let start = self.pieces.len();
+            Self::append_segments(
+                &mut self.pieces,
+                &mut self.curves,
+                own,
+                &shape.subpath_starts,
+                map,
+            );
+            debug_assert_eq!(self.pieces.len() - start, layout.pieces);
+            let count = u32::try_from(self.pieces.len() - start).map_err(|_| {
                 MonoTableError::IndexCapacityExceeded {
                     resource: "monotone shape range",
-                    requested: pieces.len() - start,
+                    requested: self.pieces.len() - start,
                 }
             })?;
-            ranges.push((first, count));
+            self.ranges.push((first, count));
         }
-        debug_assert_eq!(pieces.len(), total_pieces);
-        Ok(MonoTable {
-            pieces,
-            ranges,
-            map,
-            geometry: plan.geometry_identity(),
-        })
+        debug_assert_eq!(self.pieces.len(), total_pieces);
+        self.map = map;
+        self.geometry = plan.geometry_identity();
+        Ok(())
     }
 
     fn append_segments(

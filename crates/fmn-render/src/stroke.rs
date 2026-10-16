@@ -292,17 +292,201 @@ impl ChordStrip {
 ///
 /// The struct is a *view*: the segment storage lives in the caller's buffer —
 /// the frame arena's typed pool in the engine, a plain `Vec` in tests — so the
+/// Minimum segment count before a planar stroke builds a fine-tile CSR index.
+pub(crate) const STROKE_BIN_MIN_SEGMENTS: usize = 64;
+
+/// Hard cap on CSR entry count for a single stroke draw so pathological full-frame
+/// slabs fall back to linear scan rather than blowing up the arena.
+const MAX_STROKE_BIN_ENTRIES: usize = 1 << 24;
+
+/// Borrowed fine-tile CSR index over a draw's [`PreparedSegment`] slice.
+///
+/// Entries within each tile are stored in strictly ascending segment index
+/// order so [`PreparedStroke::row_span_in_tile`] and
+/// [`PreparedStroke::shade_in_tile`] visit candidate segments in the exact
+/// same order as the unbinned scan.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StrokeBins<'a> {
+    starts: &'a [u32],
+    entries: &'a [u32],
+}
+
+impl<'a> StrokeBins<'a> {
+    #[must_use]
+    pub(crate) fn new(starts: &'a [u32], entries: &'a [u32]) -> Self {
+        Self { starts, entries }
+    }
+
+    #[inline]
+    fn tile_entries(&self, tile: usize) -> &'a [u32] {
+        let Some(&lo) = self.starts.get(tile) else {
+            return &[];
+        };
+        let Some(&hi) = self.starts.get(tile + 1) else {
+            return &[];
+        };
+        let (lo, hi) = (lo as usize, hi as usize);
+        if lo <= hi && hi <= self.entries.len() {
+            &self.entries[lo..hi]
+        } else {
+            &[]
+        }
+    }
+}
+
+/// Build a fine-tile CSR index for `prepared_segments` into `starts_pool` and
+/// `entries_pool`, using `ranges_scratch` as construction-only temporary storage.
+pub(crate) fn build_stroke_bins_into(
+    starts_pool: &mut crate::arena::Pool<u32>,
+    entries_pool: &mut crate::arena::Pool<u32>,
+    ranges_scratch: &mut crate::arena::Pool<[u32; 4]>,
+    prepared_segments: &[PreparedSegment],
+    viewport: crate::plan::Viewport,
+    fine_tile: u32,
+) -> Result<
+    Option<(crate::arena::PoolRange, crate::arena::PoolRange)>,
+    crate::arena::PoolRangeError,
+> {
+    if prepared_segments.len() < STROKE_BIN_MIN_SEGMENTS
+        || viewport.width == 0
+        || viewport.height == 0
+        || u32::try_from(prepared_segments.len()).is_err()
+    {
+        return Ok(None);
+    }
+    let tile = fine_tile.max(1);
+    let cols = viewport.width.div_ceil(tile);
+    let rows = viewport.height.div_ceil(tile);
+    let Ok(tile_count) = usize::try_from(u64::from(cols) * u64::from(rows)) else {
+        return Ok(None);
+    };
+    let Some(starts_len) = tile_count.checked_add(1) else {
+        return Ok(None);
+    };
+
+    ranges_scratch.clear();
+    let _ = ranges_scratch.fill_range(
+        "stroke bin ranges scratch",
+        prepared_segments.len(),
+        [1, 0, 1, 0],
+    )?;
+    let starts_range = starts_pool.fill_range("stroke bin starts", starts_len, 0)?;
+
+    let tile_f = f64::from(tile);
+    let width_f = f64::from(viewport.width);
+    let height_f = f64::from(viewport.height);
+    let max_col = f64::from(cols - 1);
+    let max_row = f64::from(rows - 1);
+
+    let mut total_entries = 0usize;
+    {
+        let starts = starts_pool.slice_mut(starts_range);
+        let ranges = &mut ranges_scratch.slice_mut(crate::arena::PoolRange {
+            start: 0,
+            #[allow(clippy::cast_possible_truncation)]
+            len: prepared_segments.len() as u32,
+        });
+        for (prepared, range) in prepared_segments.iter().zip(ranges.iter_mut()) {
+            let slab = prepared.slab;
+            if !slab.iter().all(|v| v.is_finite())
+                || slab[2] < 0.0
+                || slab[3] < 0.0
+                || slab[0] > width_f
+                || slab[1] > height_f
+                || slab[0] > slab[2]
+                || slab[1] > slab[3]
+            {
+                continue;
+            }
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let (x0, y0, x1, y1) = (
+                (slab[0] / tile_f).floor().clamp(0.0, max_col) as u32,
+                (slab[1] / tile_f).floor().clamp(0.0, max_row) as u32,
+                (slab[2] / tile_f).floor().clamp(0.0, max_col) as u32,
+                (slab[3] / tile_f).floor().clamp(0.0, max_row) as u32,
+            );
+            *range = [x0, y0, x1, y1];
+            let span_tiles = (x1 - x0 + 1) as usize * (y1 - y0 + 1) as usize;
+            let Some(next_total) = total_entries.checked_add(span_tiles) else {
+                return Ok(None);
+            };
+            if next_total > MAX_STROKE_BIN_ENTRIES {
+                return Ok(None);
+            }
+            total_entries = next_total;
+            for ty in y0..=y1 {
+                let row_base = (ty * cols) as usize;
+                for tx in x0..=x1 {
+                    starts[row_base + tx as usize + 1] += 1;
+                }
+            }
+        }
+        for i in 1..starts.len() {
+            starts[i] = starts[i].saturating_add(starts[i - 1]);
+        }
+    }
+
+    let entries_range = entries_pool.fill_range("stroke bin entries", total_entries, 0)?;
+    if total_entries > 0 {
+        let starts = starts_pool.slice_mut(starts_range);
+        let entries = entries_pool.slice_mut(entries_range);
+        let ranges = &ranges_scratch[..prepared_segments.len()];
+        for (index, &[x0, y0, x1, y1]) in ranges.iter().enumerate() {
+            if x0 > x1 || y0 > y1 {
+                continue;
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            let index = index as u32;
+            for ty in y0..=y1 {
+                let row_base = (ty * cols) as usize;
+                for tx in x0..=x1 {
+                    let tile_index = row_base + tx as usize;
+                    let slot = starts[tile_index] as usize;
+                    entries[slot] = index;
+                    starts[tile_index] += 1;
+                }
+            }
+        }
+        for i in (1..starts.len()).rev() {
+            starts[i] = starts[i - 1];
+        }
+        starts[0] = 0;
+    }
+
+    Ok(Some((starts_range, entries_range)))
+}
+
 /// per-frame path allocates nothing once the arena is warm.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PreparedStroke<'a> {
     segments: &'a [PreparedSegment],
     slab: [f64; 4],
+    bins: Option<StrokeBins<'a>>,
 }
 
 impl<'a> PreparedStroke<'a> {
     /// The view over caller-owned prepared segments and their aggregate slab.
+    #[cfg(test)]
     pub(crate) fn from_parts(segments: &'a [PreparedSegment], slab: [f64; 4]) -> Self {
-        Self { segments, slab }
+        Self {
+            segments,
+            slab,
+            bins: None,
+        }
+    }
+
+    /// The view over caller-owned prepared segments, their aggregate slab, and
+    /// an optional fine-tile CSR index.
+    pub(crate) fn from_parts_binned(
+        segments: &'a [PreparedSegment],
+        slab: [f64; 4],
+        bins: Option<StrokeBins<'a>>,
+    ) -> Self {
+        Self {
+            segments,
+            slab,
+            bins,
+        }
     }
 
     /// Derive every segment's slab and total arc length into `out`, returning
@@ -389,6 +573,38 @@ impl<'a> PreparedStroke<'a> {
         (lo <= hi).then_some((lo, hi))
     }
 
+    /// Tile-scoped counterpart to [`Self::row_span`]: when a fine-tile CSR
+    /// index is present, only segments overlapping `tile` are inspected.
+    #[must_use]
+    pub(crate) fn row_span_in_tile(&self, tile: usize, y0: f64) -> Option<(f64, f64)> {
+        let Some(bins) = self.bins else {
+            return self.row_span(y0);
+        };
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for &index in bins.tile_entries(tile) {
+            let Some(prepared) = self.segments.get(index as usize) else {
+                continue;
+            };
+            let slab = prepared.slab;
+            if slab[3] < y0 || slab[1] > y0 + 1.0 {
+                continue;
+            }
+            let (mut a, mut b) = (slab[0], slab[2]);
+            if let Some((strip_lo, strip_hi)) =
+                prepared.strip.and_then(|strip| strip.row_interval(y0))
+            {
+                a = a.max(strip_lo);
+                b = b.min(strip_hi);
+            }
+            if a <= b {
+                lo = lo.min(a);
+                hi = hi.max(b);
+            }
+        }
+        (lo <= hi).then_some((lo, hi))
+    }
+
     fn nearest(
         &self,
         segments: &[Segment],
@@ -435,6 +651,66 @@ impl<'a> PreparedStroke<'a> {
         admitted.then_some((best, best_s))
     }
 
+    fn nearest_in_tile(
+        &self,
+        tile: usize,
+        segments: &[Segment],
+        style: &Style,
+        map: ScreenMap,
+        translate: [f64; 2],
+        p: [f64; 2],
+    ) -> Option<(f64, f64)> {
+        let Some(bins) = self.bins else {
+            return self.nearest(segments, style, map, translate, p);
+        };
+        let scale = map.scale;
+        if scale == 0.0 || segments.is_empty() || segments.len() != self.segments.len() {
+            return None;
+        }
+        let entries = bins.tile_entries(tile);
+        if entries.is_empty() {
+            return None;
+        }
+        let [ox, oy] = map.to_object(p, translate);
+        let obj = [ox, oy, 0.0];
+        let mut best = f64::INFINITY;
+        let mut best_s = 0.0;
+        let mut admitted = false;
+        for &index in entries {
+            let idx = index as usize;
+            let (Some(segment), Some(prepared)) = (segments.get(idx), self.segments.get(idx))
+            else {
+                continue;
+            };
+            if p[0] < prepared.slab[0]
+                || p[0] > prepared.slab[2]
+                || p[1] < prepared.slab[1]
+                || p[1] > prepared.slab[3]
+            {
+                continue;
+            }
+            admitted = true;
+            let (excess, s) = if prepared.line {
+                line_segment_excess_and_s(segment, style, map, obj)
+            } else if prepared.station {
+                segment_excess_and_s(segment, prepared.total_arc_length, style, map, obj)
+            } else if prepared
+                .cull_distance_squared
+                .is_some_and(|threshold| hull_distance_squared(segment, [ox, oy]) >= threshold)
+            {
+                (zero_coverage_excess(style), segment.s0)
+            } else {
+                uniform_segment_excess(segment, style, map, obj)
+            };
+            if excess < best {
+                best = excess;
+                best_s = s;
+            }
+        }
+        admitted.then_some((best, best_s))
+    }
+
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn shade(
         &self,
@@ -449,6 +725,32 @@ impl<'a> PreparedStroke<'a> {
             return (0.0, 0.0);
         }
         match self.nearest(segments, style, map, translate, p) {
+            Some((round, s)) => (
+                aa_coverage(
+                    apply_joins(round, joins, style.joint_type, p),
+                    f64::from(style.anti_alias_width),
+                ),
+                s,
+            ),
+            None => (0.0, 0.0),
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn shade_in_tile(
+        &self,
+        tile: usize,
+        segments: &[Segment],
+        joins: &[JoinWedge],
+        style: &Style,
+        map: ScreenMap,
+        translate: [f64; 2],
+        p: [f64; 2],
+    ) -> (f64, f64) {
+        if style.maximum_stroke_width() <= 0.0 {
+            return (0.0, 0.0);
+        }
+        match self.nearest_in_tile(tile, segments, style, map, translate, p) {
             Some((round, s)) => (
                 aa_coverage(
                     apply_joins(round, joins, style.joint_type, p),

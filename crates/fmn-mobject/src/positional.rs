@@ -171,14 +171,16 @@ impl Stage {
         const PRIME: u64 = 0x0000_0100_0000_01b3;
         let mut h = OFFSET;
         let mut mix = |v: u64| h = (h ^ v).wrapping_mul(PRIME);
-        for m in self.family(mob) {
-            mix(m.bits());
-            if let Some(e) = self.get(m) {
-                mix(e.buffer.field_revision("point").unwrap_or(0));
-                mix(e.placement_revision());
-                mix(e.buffer.len() as u64);
+        self.with_family_slice(mob, |family| {
+            for &m in family {
+                mix(m.bits());
+                if let Some(e) = self.get(m) {
+                    mix(e.buffer.field_revision("point").unwrap_or(0));
+                    mix(e.placement_revision());
+                    mix(e.buffer.len() as u64);
+                }
             }
-        }
+        });
         h
     }
 
@@ -189,22 +191,24 @@ impl Stage {
     fn compute_bounding_box(&self, mob: Mob) -> BoundingBox {
         let mut acc = BoxAccum::new();
         let mut has_points = false;
-        for m in self.family(mob) {
-            if let Some(e) = self.get(m)
-                && let Some(col) = e.buffer.read_column("point")
-            {
-                let placement = e.placement();
-                let (tris, _rem) = col.as_chunks::<3>();
-                for tri in tris {
-                    has_points = true;
-                    acc.push(placement.apply_point([
-                        f64::from(tri[0]),
-                        f64::from(tri[1]),
-                        f64::from(tri[2]),
-                    ]));
+        self.with_family_slice(mob, |family| {
+            for &m in family {
+                if let Some(e) = self.get(m)
+                    && let Some(col) = e.buffer.read_column("point")
+                {
+                    let placement = e.placement();
+                    let (tris, _rem) = col.as_chunks::<3>();
+                    for tri in tris {
+                        has_points = true;
+                        acc.push(placement.apply_point([
+                            f64::from(tri[0]),
+                            f64::from(tri[1]),
+                            f64::from(tri[2]),
+                        ]));
+                    }
                 }
             }
-        }
+        });
         if !has_points && let Some(entry) = self.get(mob) {
             acc.push(entry.placement().apply_point(ORIGIN));
         }
@@ -212,9 +216,11 @@ impl Stage {
     }
 
     fn bbox_has_writable_point_view(&self, mob: Mob) -> bool {
-        self.family(mob).into_iter().any(|member| {
-            self.get(member)
-                .is_some_and(|entry| entry.buffer.writable_view_affects("point"))
+        self.with_family_slice(mob, |family| {
+            family.iter().any(|&member| {
+                self.get(member)
+                    .is_some_and(|entry| entry.buffer.writable_view_affects("point"))
+            })
         })
     }
 
@@ -700,26 +706,47 @@ impl Stage {
         Ok(())
     }
 
+    fn apply_affine_member(&mut self, member: Mob, affine: Placement) {
+        let has_live_view = self.get(member).is_some_and(|entry| {
+            !entry.buffer.is_empty() && entry.buffer.live_view_count() > 0
+        });
+        if has_live_view {
+            let _ = self.map_world_pointlikes(member, |point| affine.apply_point(point));
+            return;
+        }
+        if let Some(entry) = self.get_mut(member) {
+            entry.set_placement(affine.compose(entry.placement()));
+        }
+    }
+
     fn apply_affine_many(&mut self, mobs: &[Mob], affine: Placement) -> &mut Self {
-        let mut members = Vec::new();
-        for &mob in mobs {
-            for member in self.family(mob) {
-                if !members.contains(&member) {
-                    members.push(member);
+        if let &[mob] = mobs {
+            let Some(entry) = self.get(mob) else {
+                return self;
+            };
+            if entry.submobjects().is_empty() {
+                self.apply_affine_member(mob, affine);
+                return self;
+            }
+            if let Some(family) = self.family_arc(mob) {
+                for &member in family.iter() {
+                    self.apply_affine_member(member, affine);
                 }
             }
+            return self;
+        }
+        let mut members = Vec::new();
+        for &mob in mobs {
+            self.with_family_slice(mob, |family| {
+                for &member in family {
+                    if !members.contains(&member) {
+                        members.push(member);
+                    }
+                }
+            });
         }
         for member in members {
-            let has_live_view = self.get(member).is_some_and(|entry| {
-                !entry.buffer.is_empty() && entry.buffer.live_view_count() > 0
-            });
-            if has_live_view {
-                let _ = self.map_world_pointlikes(member, |point| affine.apply_point(point));
-                continue;
-            }
-            if let Some(entry) = self.get_mut(member) {
-                entry.set_placement(affine.compose(entry.placement()));
-            }
+            self.apply_affine_member(member, affine);
         }
         self
     }
@@ -737,11 +764,14 @@ impl Stage {
 
     /// Every transitive parent of `mob`, each once.
     fn ancestors(&self, mob: Mob) -> Vec<Mob> {
+        let Some(entry) = self.get(mob) else {
+            return Vec::new();
+        };
+        if entry.parents().is_empty() {
+            return Vec::new();
+        }
         let mut out: Vec<Mob> = Vec::new();
-        let mut pending: Vec<Mob> = self
-            .get(mob)
-            .map(|entry| entry.parents().to_vec())
-            .unwrap_or_default();
+        let mut pending: Vec<Mob> = entry.parents().to_vec();
         while let Some(current) = pending.pop() {
             if out.contains(&current) {
                 continue;
@@ -777,16 +807,28 @@ impl Stage {
         recurse_down: bool,
         recurse_up: bool,
     ) -> &mut Self {
-        let mut members = if recurse_down {
-            self.family(mob)
-        } else {
-            vec![mob]
+        let Some(entry) = self.get(mob) else {
+            return self;
         };
-        if recurse_up {
-            members.extend(self.ancestors(mob));
+        let has_children = recurse_down && !entry.submobjects().is_empty();
+        let has_parents = recurse_up && !entry.parents().is_empty();
+        if !has_children && !has_parents {
+            self.reset_point_free_anchor(mob);
+            return self;
         }
-        for member in members {
-            self.reset_point_free_anchor(member);
+        if has_children {
+            if let Some(family) = self.family_arc(mob) {
+                for &member in family.iter() {
+                    self.reset_point_free_anchor(member);
+                }
+            }
+        } else {
+            self.reset_point_free_anchor(mob);
+        }
+        if has_parents {
+            for ancestor in self.ancestors(mob) {
+                self.reset_point_free_anchor(ancestor);
+            }
         }
         self
     }
@@ -794,6 +836,9 @@ impl Stage {
     /// The Reference's `for parent in self.parents: parent.refresh_bounding_box()`
     /// after a box-preserving map (mobject.py:306).
     fn refresh_ancestor_boxes(&mut self, mob: Mob) -> &mut Self {
+        if self.get(mob).is_none_or(|e| e.parents().is_empty()) {
+            return self;
+        }
         for ancestor in self.ancestors(mob) {
             self.reset_point_free_anchor(ancestor);
         }

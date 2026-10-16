@@ -331,18 +331,22 @@ pub fn measure_pg6(
     for case in SCENES {
         let built = (case.build)(corpus);
         let mut plan = RenderPlan::new();
-        plan.sync(&built.stage, 0)
-            .map_err(|error| Pg6Error::Fixture(format!("{} render plan: {error}", case.name)))?;
-        let mono = MonoTable::build(&plan, config.map)
-            .map_err(|error| Pg6Error::Fixture(format!("{} monotone table: {error}", case.name)))?;
-        let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
-            .map_err(|error| Pg6Error::Fixture(error.to_string()))?;
-        binning
-            .prune_occluded(&plan)
-            .map_err(|error| Pg6Error::Fixture(error.to_string()))?;
-
+        let mut mono = MonoTable::default();
+        let mut binning = Binning::default();
         let mut arena = FrameArena::new();
-        let (mut frame, warm_frame_digest, warm) = {
+
+        let (mut frame, warm_frame_digest, warm, warm_mirrors) = {
+            plan.sync(&built.stage, 0)
+                .map_err(|error| Pg6Error::Fixture(format!("{} render plan: {error}", case.name)))?;
+            mono.rebuild_in_place(&plan, config.map).map_err(|error| {
+                Pg6Error::Fixture(format!("{} monotone table: {error}", case.name))
+            })?;
+            binning
+                .rebuild_in_place(&plan, config.viewport, TILING, config.map)
+                .map_err(|error| Pg6Error::Fixture(error.to_string()))?;
+            binning
+                .prune_occluded(&plan)
+                .map_err(|error| Pg6Error::Fixture(error.to_string()))?;
             let job = FrameJob::with_identity_in(
                 &mut arena,
                 &plan,
@@ -358,10 +362,27 @@ pub fn measure_pg6(
             let stats = job.allocation_stats();
             let digest =
                 frame_digest(&frame).map_err(|error| Pg6Error::Render(error.to_string()))?;
-            (frame, digest, stats)
+            (frame, digest, stats, plan.mirror_materializations())
         };
 
         let (measured_frame_digest, measured) = {
+            plan.sync(&built.stage, 0)
+                .map_err(|error| Pg6Error::Fixture(format!("{} render plan: {error}", case.name)))?;
+            mono.rebuild_in_place(&plan, config.map).map_err(|error| {
+                Pg6Error::Fixture(format!("{} monotone table: {error}", case.name))
+            })?;
+            if !binning.matches_plan(&plan)
+                || binning.viewport() != config.viewport
+                || binning.tiling() != TILING
+                || binning.map() != config.map
+            {
+                binning
+                    .rebuild_in_place(&plan, config.viewport, TILING, config.map)
+                    .map_err(|error| Pg6Error::Fixture(error.to_string()))?;
+                binning
+                    .prune_occluded(&plan)
+                    .map_err(|error| Pg6Error::Fixture(error.to_string()))?;
+            }
             let job = FrameJob::with_identity_in(
                 &mut arena,
                 &plan,
@@ -378,6 +399,19 @@ pub fn measure_pg6(
                 frame_digest(&frame).map_err(|error| Pg6Error::Render(error.to_string()))?;
             (digest, stats)
         };
+        if plan.stats().shapes_compiled != 0
+            || plan.stats().styles_rebuilt != 0
+            || plan.mirror_materializations() != warm_mirrors
+        {
+            return Err(Pg6Error::Render(format!(
+                "{} steady-state frame recompiled retained state: shapes_compiled={}, styles_rebuilt={}, mirrors {} -> {}",
+                case.name,
+                plan.stats().shapes_compiled,
+                plan.stats().styles_rebuilt,
+                warm_mirrors,
+                plan.mirror_materializations()
+            )));
+        }
         // ubs:ignore — public deterministic frame identity, not authentication material.
         if measured_frame_digest != warm_frame_digest {
             return Err(Pg6Error::Render(format!(

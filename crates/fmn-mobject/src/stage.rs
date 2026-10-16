@@ -24,6 +24,7 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::StageError;
@@ -37,6 +38,263 @@ use crate::uniforms::Uniforms;
 
 mod frozen_render;
 pub use frozen_render::FrozenRenderState;
+
+/// Copy-on-write `Arc`-backed vector that allocates nothing when empty and
+/// clones in O(1) across [`Snapshot`]s and [`FrozenRenderState`]s.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ArcVec<T>(Option<Arc<Vec<T>>>);
+
+impl<T> Clone for ArcVec<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<T> Default for ArcVec<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> ArcVec<T> {
+    #[must_use]
+    pub(crate) const fn new() -> Self {
+        Self(None)
+    }
+
+    #[must_use]
+    pub(crate) fn storage_id(&self) -> usize {
+        self.0.as_ref().map_or(0, |arc| Arc::as_ptr(arc) as usize)
+    }
+}
+
+impl<T: Clone> ArcVec<T> {
+    pub(crate) fn vec_mut(&mut self) -> &mut Vec<T> {
+        let arc = self.0.get_or_insert_with(|| Arc::new(Vec::new()));
+        Arc::make_mut(arc)
+    }
+
+    pub(crate) fn push(&mut self, value: T) {
+        self.vec_mut().push(value);
+    }
+
+    pub(crate) fn pop(&mut self) -> Option<T> {
+        self.0.as_mut().and_then(|arc| Arc::make_mut(arc).pop())
+    }
+
+    pub(crate) fn retain(&mut self, f: impl FnMut(&T) -> bool) {
+        if let Some(arc) = self.0.as_mut() {
+            Arc::make_mut(arc).retain(f);
+        }
+    }
+
+    pub(crate) fn retain_mut(&mut self, f: impl FnMut(&mut T) -> bool) {
+        if let Some(arc) = self.0.as_mut() {
+            Arc::make_mut(arc).retain_mut(f);
+        }
+    }
+
+    pub(crate) fn extend_from_slice(&mut self, other: &[T]) {
+        if !other.is_empty() {
+            self.vec_mut().extend_from_slice(other);
+        }
+    }
+
+    pub(crate) fn splice<R, I>(&mut self, range: R, replace_with: I)
+    where
+        R: std::ops::RangeBounds<usize>,
+        I: IntoIterator<Item = T>,
+    {
+        let _ = self.vec_mut().splice(range, replace_with);
+    }
+
+    pub(crate) fn iter_mut(&mut self) -> std::slice::IterMut<'_, T> {
+        match self.0.as_mut() {
+            Some(arc) => Arc::make_mut(arc).iter_mut(),
+            None => [].iter_mut(),
+        }
+    }
+}
+
+impl<T: PartialEq, const N: usize> PartialEq<[T; N]> for ArcVec<T> {
+    fn eq(&self, other: &[T; N]) -> bool {
+        (**self) == other[..]
+    }
+}
+
+impl<T: PartialEq> PartialEq<[T]> for ArcVec<T> {
+    fn eq(&self, other: &[T]) -> bool {
+        &(**self) == other
+    }
+}
+
+impl<T: PartialEq> PartialEq<&[T]> for ArcVec<T> {
+    fn eq(&self, other: &&[T]) -> bool {
+        &(**self) == *other
+    }
+}
+
+impl<T> std::ops::Deref for ArcVec<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_deref().map_or(&[], Vec::as_slice)
+    }
+}
+
+impl<T> std::ops::Index<usize> for ArcVec<T> {
+    type Output = T;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &(**self)[index]
+    }
+}
+
+impl<T: Clone> std::ops::IndexMut<usize> for ArcVec<T> {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        &mut self.vec_mut()[index]
+    }
+}
+
+impl<T> From<Vec<T>> for ArcVec<T> {
+    fn from(value: Vec<T>) -> Self {
+        if value.is_empty() {
+            Self(None)
+        } else {
+            Self(Some(Arc::new(value)))
+        }
+    }
+}
+
+impl<'a, T> IntoIterator for &'a ArcVec<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a, T: Clone> IntoIterator for &'a mut ArcVec<T> {
+    type Item = &'a mut T;
+    type IntoIter = std::slice::IterMut<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+
+impl<T: Clone> IntoIterator for ArcVec<T> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        match self.0 {
+            Some(arc) => Arc::unwrap_or_clone(arc).into_iter(),
+            None => Vec::new().into_iter(),
+        }
+    }
+}
+
+/// Copy-on-write `Rc`-backed vector for non-`Send` updater slots and states.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct RcVec<T>(Option<Rc<Vec<T>>>);
+
+impl<T> Clone for RcVec<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl<T> Default for RcVec<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> RcVec<T> {
+    #[must_use]
+    pub(crate) const fn new() -> Self {
+        Self(None)
+    }
+
+    #[must_use]
+    pub(crate) fn storage_id(&self) -> usize {
+        self.0.as_ref().map_or(0, |rc| Rc::as_ptr(rc) as usize)
+    }
+}
+
+impl<T: Clone> RcVec<T> {
+    pub(crate) fn vec_mut(&mut self) -> &mut Vec<T> {
+        let rc = self.0.get_or_insert_with(|| Rc::new(Vec::new()));
+        Rc::make_mut(rc)
+    }
+
+    pub(crate) fn push(&mut self, value: T) {
+        self.vec_mut().push(value);
+    }
+
+    pub(crate) fn insert(&mut self, index: usize, value: T) {
+        self.vec_mut().insert(index, value);
+    }
+
+    pub(crate) fn retain(&mut self, f: impl FnMut(&T) -> bool) {
+        if let Some(rc) = self.0.as_mut() {
+            Rc::make_mut(rc).retain(f);
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        if let Some(rc) = self.0.as_mut() {
+            Rc::make_mut(rc).clear();
+        }
+    }
+
+    pub(crate) fn iter_mut(&mut self) -> std::slice::IterMut<'_, T> {
+        match self.0.as_mut() {
+            Some(rc) => Rc::make_mut(rc).iter_mut(),
+            None => [].iter_mut(),
+        }
+    }
+}
+
+impl<T> std::ops::Deref for RcVec<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_deref().map_or(&[], Vec::as_slice)
+    }
+}
+
+impl<'a, T> IntoIterator for &'a RcVec<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a, T: Clone> IntoIterator for &'a mut RcVec<T> {
+    type Item = &'a mut T;
+    type IntoIter = std::slice::IterMut<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+
+impl<T: Clone> IntoIterator for RcVec<T> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        match self.0 {
+            Some(rc) => Rc::unwrap_or_clone(rc).into_iter(),
+            None => Vec::new().into_iter(),
+        }
+    }
+}
 
 static NEXT_STAGE_ID: AtomicU64 = AtomicU64::new(1);
 /// Source of [`Stage::topology_epoch`] values, shared by every stage so that
@@ -251,12 +509,12 @@ pub struct Entry {
     pub buffer: RecordBuffer,
     placement: Placement,
     placement_revision: u64,
-    submobjects: Vec<Mob>,
+    submobjects: ArcVec<Mob>,
     /// [`Entry::children_epoch`]: moves whenever `submobjects` changes.
     children_epoch: u64,
-    parents: Vec<Mob>,
-    updaters: Vec<UpdaterSlot>,
-    updater_states: Vec<(UpdaterId, NativeUpdaterState)>,
+    parents: ArcVec<Mob>,
+    updaters: RcVec<UpdaterSlot>,
+    updater_states: RcVec<(UpdaterId, NativeUpdaterState)>,
     /// `suspend_updating` state: while set, [`Stage::update`] prunes this
     /// entry's whole subtree (the Reference's early return).
     updating_suspended: bool,
@@ -302,7 +560,7 @@ pub struct Entry {
     image_revision: u64,
     /// Cached family flattening (§1.1 API surface), invalidated on any
     /// structural change in the subtree.
-    family_cache: RefCell<Option<Vec<Mob>>>,
+    family_cache: RefCell<Option<Arc<Vec<Mob>>>>,
     /// Lazily recomputed bounding box, keyed by a subtree signature so any
     /// point write or structural change invalidates it automatically, through
     /// any channel (fm-jru).
@@ -315,11 +573,11 @@ impl Entry {
             buffer,
             placement: Placement::IDENTITY,
             placement_revision: 0,
-            submobjects: Vec::new(),
+            submobjects: ArcVec::new(),
             children_epoch: fresh_epoch(),
-            parents: Vec::new(),
-            updaters: Vec::new(),
-            updater_states: Vec::new(),
+            parents: ArcVec::new(),
+            updaters: RcVec::new(),
+            updater_states: RcVec::new(),
             updating_suspended: false,
             is_animating: false,
             tracker: None,
@@ -500,6 +758,18 @@ impl Entry {
     pub fn pins(&self) -> usize {
         self.pins
     }
+
+    /// Identity of the CoW metadata storage backing `(submobjects, parents, updaters, updater_states)`.
+    /// Equal values across a [`Snapshot`] prove that untouched entries share metadata storage.
+    #[must_use]
+    pub fn metadata_storage_id(&self) -> (usize, usize, usize, usize) {
+        (
+            self.submobjects.storage_id(),
+            self.parents.storage_id(),
+            self.updaters.storage_id(),
+            self.updater_states.storage_id(),
+        )
+    }
 }
 
 struct Slot {
@@ -513,8 +783,8 @@ pub struct Snapshot {
     pub(crate) stage_id: u64,
     pub(crate) next_updater_id: u64,
     pub(crate) slots: Vec<(u32, Option<SnapshotEntry>)>,
-    pub(crate) free: Vec<u32>,
-    pub(crate) roots: Vec<Mob>,
+    pub(crate) free: ArcVec<u32>,
+    pub(crate) roots: ArcVec<Mob>,
 }
 
 impl Snapshot {
@@ -532,8 +802,8 @@ impl Snapshot {
         let mut stage = Stage {
             id: self.stage_id,
             slots: Vec::new(),
-            free: Vec::new(),
-            roots: Vec::new(),
+            free: ArcVec::new(),
+            roots: ArcVec::new(),
             time: 0.0,
             next_updater_id: self.next_updater_id,
             topology_epoch: fresh_epoch(),
@@ -547,10 +817,10 @@ pub(crate) struct SnapshotEntry {
     pub(crate) buffer: RecordBuffer,
     pub(crate) placement: Placement,
     pub(crate) placement_revision: u64,
-    pub(crate) submobjects: Vec<Mob>,
-    pub(crate) parents: Vec<Mob>,
-    pub(crate) updaters: Vec<UpdaterSlot>,
-    pub(crate) updater_states: Vec<(UpdaterId, NativeUpdaterState)>,
+    pub(crate) submobjects: ArcVec<Mob>,
+    pub(crate) parents: ArcVec<Mob>,
+    pub(crate) updaters: RcVec<UpdaterSlot>,
+    pub(crate) updater_states: RcVec<(UpdaterId, NativeUpdaterState)>,
     pub(crate) updating_suspended: bool,
     pub(crate) is_animating: bool,
     pub(crate) tracker: Option<crate::dynamics::Tracker>,
@@ -565,6 +835,7 @@ pub(crate) struct SnapshotEntry {
     pub(crate) render_primitive: RenderPrimitive,
     pub(crate) image: Option<ImageResource>,
     pub(crate) image_revision: u64,
+    pub(crate) family_cache: Option<Arc<Vec<Mob>>>,
 }
 
 /// The stable old-handle → new-handle map a family copy produces — the
@@ -616,8 +887,8 @@ impl CopyMap {
 pub struct Stage {
     id: u64,
     slots: Vec<Slot>,
-    free: Vec<u32>,
-    roots: Vec<Mob>,
+    free: ArcVec<u32>,
+    roots: ArcVec<Mob>,
     time: f64,
     next_updater_id: u64,
     topology_epoch: u64,
@@ -635,8 +906,8 @@ impl Stage {
         Self {
             id: NEXT_STAGE_ID.fetch_add(1, Ordering::Relaxed),
             slots: Vec::new(),
-            free: Vec::new(),
-            roots: Vec::new(),
+            free: ArcVec::new(),
+            roots: ArcVec::new(),
             time: 0.0,
             next_updater_id: 1,
             topology_epoch: fresh_epoch(),
@@ -863,7 +1134,11 @@ impl Stage {
         let mut order: Vec<usize> = (0..self.roots.len()).collect();
         // Stable by construction: ties keep their position index.
         order.sort_by_key(|&i| (keys[i], i));
-        self.roots = order.into_iter().map(|i| self.roots[i]).collect();
+        self.roots = order
+            .into_iter()
+            .map(|i| self.roots[i])
+            .collect::<Vec<_>>()
+            .into();
     }
 
     /// Remove from the draw list — the Reference's `Scene.remove`
@@ -906,7 +1181,7 @@ impl Stage {
         }
         let roots = std::mem::take(&mut self.roots);
         let (kept, _) = self.recursive_remove(&roots, &targets, &ancestors);
-        self.roots = kept;
+        self.roots = kept.into();
         self.touch_topology();
     }
 
@@ -1058,7 +1333,7 @@ impl Stage {
         if !self.contains(parent) || !self.contains(child) {
             return Err(StageError::StaleHandle);
         }
-        if parent == child || self.family(child).contains(&parent) {
+        if parent == child || self.with_family_slice(child, |f| f.contains(&parent)) {
             return Err(StageError::CycleDetected);
         }
         {
@@ -1103,7 +1378,7 @@ impl Stage {
             }
             // Removing the parent's own edges cannot open or close a path
             // from `child` back to it, so this is attach's check as is.
-            if parent == child || self.family(child).contains(&parent) {
+            if parent == child || self.with_family_slice(child, |f| f.contains(&parent)) {
                 return Err(StageError::CycleDetected);
             }
             if seen.insert(child) {
@@ -1113,9 +1388,9 @@ impl Stage {
         let old = {
             let entry = self.get_mut(parent).expect("checked above");
             entry.children_epoch = fresh_epoch();
-            std::mem::replace(&mut entry.submobjects, unique.clone())
+            std::mem::replace(&mut entry.submobjects, unique.clone().into())
         };
-        for child in old {
+        for &child in &old {
             if let Some(entry) = self.get_mut(child) {
                 entry.parents.retain(|m| *m != parent);
             }
@@ -1144,16 +1419,41 @@ impl Stage {
         self.touch_topology();
     }
 
-    /// The family under `mob` in depth-first order, each member exactly
-    /// once even through diamond composition. Cached per entry; any
-    /// structural change in the subtree invalidates every ancestor's cache.
-    #[must_use]
-    pub fn family(&self, mob: Mob) -> Vec<Mob> {
+    /// Visit the deduplicated depth-first family slice under `mob` without
+    /// cloning a `Vec<Mob>` on every probe.
+    pub(crate) fn with_family_slice<R>(&self, mob: Mob, f: impl FnOnce(&[Mob]) -> R) -> R {
+        let Some(entry) = self.get(mob) else {
+            return f(&[]);
+        };
+        if entry.submobjects.is_empty() {
+            return f(std::slice::from_ref(&mob));
+        }
+        if let Some(cached) = entry.family_cache.borrow().as_ref() {
+            return f(cached.as_slice());
+        }
+        let arc = Arc::new(self.compute_family_vec(mob));
+        *entry.family_cache.borrow_mut() = Some(Arc::clone(&arc));
+        f(arc.as_slice())
+    }
+
+    /// Return the cached `Arc<Vec<Mob>>` for a non-leaf family without cloning
+    /// the underlying `Vec<Mob>`.
+    pub(crate) fn family_arc(&self, mob: Mob) -> Option<Arc<Vec<Mob>>> {
+        let entry = self.get(mob)?;
+        if let Some(cached) = entry.family_cache.borrow().as_ref() {
+            return Some(Arc::clone(cached));
+        }
+        let arc = Arc::new(self.compute_family_vec(mob));
+        *entry.family_cache.borrow_mut() = Some(Arc::clone(&arc));
+        Some(arc)
+    }
+
+    fn compute_family_vec(&self, mob: Mob) -> Vec<Mob> {
         let Some(entry) = self.get(mob) else {
             return Vec::new();
         };
-        if let Some(cached) = entry.family_cache.borrow().as_ref() {
-            return cached.clone();
+        if entry.submobjects.is_empty() {
+            return vec![mob];
         }
         // Membership through a set: a linear `out.contains` made each cache
         // miss quadratic, ~60 ms for a 19K-member family (fm-5wq.31).
@@ -1171,8 +1471,15 @@ impl Stage {
                 }
             }
         }
-        *entry.family_cache.borrow_mut() = Some(out.clone());
         out
+    }
+
+    /// The family under `mob` in depth-first order, each member exactly
+    /// once even through diamond composition. Cached per entry; any
+    /// structural change in the subtree invalidates every ancestor's cache.
+    #[must_use]
+    pub fn family(&self, mob: Mob) -> Vec<Mob> {
+        self.with_family_slice(mob, <[Mob]>::to_vec)
     }
 
     /// Clear the family cache of `start` and every (transitive) ancestor.
@@ -1241,13 +1548,13 @@ impl Stage {
         let children = entry.submobjects.clone();
         // Ancestors' cached families mention this entry.
         self.invalidate_family_caches(mob);
-        for parent in parents {
+        for &parent in &parents {
             if let Some(p) = self.get_mut(parent) {
                 p.submobjects.retain(|m| *m != mob);
                 p.children_epoch = fresh_epoch();
             }
         }
-        for child in children {
+        for &child in &children {
             if let Some(c) = self.get_mut(child) {
                 c.parents.retain(|m| *m != mob);
             }
@@ -2071,9 +2378,11 @@ impl Stage {
     /// Whether `mob` or anything in its family has updaters.
     #[must_use]
     pub fn has_updaters_in_family(&self, mob: Mob) -> bool {
-        self.family(mob)
-            .iter()
-            .any(|m| self.get(*m).is_some_and(|e| !e.updaters.is_empty()))
+        self.with_family_slice(mob, |family| {
+            family
+                .iter()
+                .any(|m| self.get(*m).is_some_and(|e| !e.updaters.is_empty()))
+        })
     }
 
     /// `(non_dt, dt)` updater counts across `mob`'s whole family — the
@@ -2081,19 +2390,21 @@ impl Stage {
     /// demote a segment for different recorded reasons).
     #[must_use]
     pub fn family_updater_kinds(&self, mob: Mob) -> (usize, usize) {
-        let mut non_dt = 0;
-        let mut dt = 0;
-        for member in self.family(mob) {
-            if let Some(entry) = self.get(member) {
-                for slot in &entry.updaters {
-                    match slot.func {
-                        UpdaterFn::NonDt(_) => non_dt += 1,
-                        UpdaterFn::Dt(_) => dt += 1,
+        self.with_family_slice(mob, |family| {
+            let mut non_dt = 0;
+            let mut dt = 0;
+            for &member in family {
+                if let Some(entry) = self.get(member) {
+                    for slot in &entry.updaters {
+                        match slot.func {
+                            UpdaterFn::NonDt(_) => non_dt += 1,
+                            UpdaterFn::Dt(_) => dt += 1,
+                        }
                     }
                 }
             }
-        }
-        (non_dt, dt)
+            (non_dt, dt)
+        })
     }
 
     /// Whether updating is suspended on `mob` itself.
@@ -2126,11 +2437,9 @@ impl Stage {
                 continue;
             }
             targets.push(parent);
-            pending.extend(
-                self.get(parent)
-                    .map(|e| e.parents().to_vec())
-                    .unwrap_or_default(),
-            );
+            if let Some(entry) = self.get(parent) {
+                pending.extend_from_slice(entry.parents());
+            }
         }
         for target in targets {
             if let Some(entry) = self.get_mut(target) {
@@ -2229,11 +2538,9 @@ impl Stage {
             if let Some(entry) = self.get_mut(parent) {
                 entry.updating_suspended = false;
             }
-            pending.extend(
-                self.get(parent)
-                    .map(|e| e.parents().to_vec())
-                    .unwrap_or_default(),
-            );
+            if let Some(entry) = self.get(parent) {
+                pending.extend_from_slice(entry.parents());
+            }
         }
         if call_updater {
             self.update_mob(mob, 0.0);
@@ -2253,9 +2560,9 @@ impl Stage {
         }
         let children = self
             .get(mob)
-            .map(|e| e.submobjects().to_vec())
+            .map(|e| e.submobjects.clone())
             .unwrap_or_default();
-        for child in children {
+        for &child in &children {
             self.update_mob(child, dt);
         }
         self.update_mob_self(mob, dt);
@@ -2271,8 +2578,8 @@ impl Stage {
             .get(mob)
             .map(|e| e.updaters.clone())
             .unwrap_or_default();
-        for slot in updaters {
-            match slot.func {
+        for slot in &updaters {
+            match &slot.func {
                 UpdaterFn::NonDt(f) => f.borrow_mut()(self, mob),
                 UpdaterFn::Dt(f) => f.borrow_mut()(self, mob, dt),
             }
@@ -2287,7 +2594,8 @@ impl Stage {
     /// six-step order is Choreo's; the arena provides the execution slot.
     pub fn update(&mut self, dt: f64) {
         self.time += dt;
-        for root in self.roots.clone() {
+        let roots = self.roots.clone();
+        for &root in &roots {
             self.update_mob(root, dt);
         }
     }
@@ -2301,7 +2609,8 @@ impl Stage {
     /// to use [`Stage::update`].
     pub fn update_at_time(&mut self, dt: f64, time: f64) {
         self.set_time_from_clock(time);
-        for root in self.roots.clone() {
+        let roots = self.roots.clone();
+        for &root in &roots {
             self.update_mob(root, dt);
         }
     }
@@ -2355,6 +2664,7 @@ impl Stage {
                                 render_primitive: entry.render_primitive,
                                 image: entry.image.clone(),
                                 image_revision: entry.image_revision,
+                                family_cache: entry.family_cache.borrow().clone(),
                             }
                         }),
                     )
@@ -2403,7 +2713,7 @@ impl Stage {
                     render_primitive: e.render_primitive,
                     image: e.image.clone(),
                     image_revision: e.image_revision,
-                    family_cache: RefCell::new(None),
+                    family_cache: RefCell::new(e.family_cache.clone()),
                     bbox: RefCell::new(BboxCache::default()),
                 }),
             })
@@ -2431,7 +2741,7 @@ pub struct FamilyCheckpoint {
 struct FamilyCheckpointEntry {
     buffer: RecordBuffer,
     placement: Placement,
-    submobjects: Vec<Mob>,
+    submobjects: ArcVec<Mob>,
     updating_suspended: bool,
     is_animating: bool,
     tracker: Option<crate::dynamics::Tracker>,
