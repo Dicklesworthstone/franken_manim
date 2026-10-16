@@ -181,6 +181,11 @@ impl Animation for ShowPartial {
         AnimationSignature::Pure
     }
 
+    /// Freeze the prepared reveal rule; schema validation remains in begin.
+    fn freeze_interpolation(&self) -> Option<crate::pure_frame::FrozenAnimation> {
+        crate::pure_frame::FrozenAnimation::partial(self.clone())
+    }
+
     /// Validate the selected typed geometry up front, so interpolation can
     /// never silently skip a schema or grid mismatch.
     fn setup(&mut self, stage: &mut Stage) -> Result<(), AnimError> {

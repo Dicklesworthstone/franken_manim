@@ -1,7 +1,7 @@
 //! Callback-free native interpolation jobs for live, pure play segments (§9.5).
 //!
 //! Purity alone does not make `dyn Animation` transferable. This module admits
-//! only a closed native mechanism, freezes its **prepared** state, and invokes
+//! only closed native mechanisms, freezes their **prepared** state, and invokes
 //! its existing interpolation on a worker-local Stage. No begin, finish, target
 //! recipe, updater or host callback is replayed there. Unknown mechanisms,
 //! unknown rate functions, aliased endpoints and live views remain serial.
@@ -14,18 +14,30 @@ use fmn_core::rng::{Pcg64Dxsm, RngRoot};
 use fmn_mobject::{FrozenRenderState, Mob, Stage};
 
 use crate::{
-    AnimError, Animation, FrameSample, FrameSegment, OpenSegment, RateFunc,
-    RationalFrameClock, RationalTime, SegmentReport, Transform, finish_open_play,
+    AnimError, AnimState, Animation, FrameSample, FrameSegment, OpenSegment, RateFunc,
+    RationalFrameClock, RationalTime, Rotating, SegmentReport, ShowPartial, Transform,
+    VFade, finish_open_play,
 };
 
 /// A closed, prepared interpolation mechanism. Fields and constructors are
 /// private to Choreo: a custom callback cannot be wrapped in this type.
 ///
-/// Transform's fade/grow/indication parameterizations use the same mechanism;
-/// their preparation and cleanup still run exactly once on the scene owner.
+/// Transform's fade/grow/indication parameterizations, partial reveals,
+/// vector-opacity fades and absolute rotations reuse their native mechanisms.
+/// Their preparation and cleanup still run exactly once on the scene owner.
 #[derive(Debug, Clone)]
 pub struct FrozenAnimation {
-    transform: Transform,
+    mechanism: FrozenMechanism,
+}
+
+// Keep this closed: a trait object would let a host callback or a stateful
+// animation cross the owner boundary merely by claiming a pure signature.
+#[derive(Debug, Clone)]
+enum FrozenMechanism {
+    Transform(Transform),
+    Partial(ShowPartial),
+    VectorFade(VFade),
+    Rotation(Rotating),
 }
 
 // Replace recognized Base rates with their data identity. A failed recognition
@@ -50,25 +62,66 @@ fn freeze_rate(rate: &RateFunc) -> Option<RateFunc> {
 }
 
 impl FrozenAnimation {
-    pub(crate) fn transform(mut transform: Transform) -> Option<Self> {
-        let state = transform.state();
+    fn prepare<A: Animation>(mut animation: A, row_width: usize) -> Option<A> {
+        let state = animation.state();
         if state.starting_mobject().is_none()
-            || state.families().iter().any(|row| row.len() != 3)
+            || state.families().iter().any(|row| row.len() != row_width)
         {
             return None;
         }
         let rate = freeze_rate(&state.config.rate_func)?;
-        transform.state_mut().config.rate_func = rate;
-        Some(Self { transform })
+        animation.state_mut().config.rate_func = rate;
+        Some(animation)
+    }
+
+    pub(crate) fn transform(transform: Transform) -> Option<Self> {
+        Some(Self {
+            mechanism: FrozenMechanism::Transform(Self::prepare(transform, 3)?),
+        })
+    }
+
+    pub(crate) fn partial(partial: ShowPartial) -> Option<Self> {
+        Some(Self {
+            mechanism: FrozenMechanism::Partial(Self::prepare(partial, 2)?),
+        })
+    }
+
+    pub(crate) fn vector_fade(fade: VFade) -> Option<Self> {
+        Some(Self {
+            mechanism: FrozenMechanism::VectorFade(Self::prepare(fade, 2)?),
+        })
+    }
+
+    pub(crate) fn rotation(rotation: Rotating) -> Option<Self> {
+        Some(Self {
+            mechanism: FrozenMechanism::Rotation(Self::prepare(rotation, 2)?),
+        })
+    }
+
+    fn state(&self) -> &AnimState {
+        match &self.mechanism {
+            FrozenMechanism::Transform(animation) => animation.state(),
+            FrozenMechanism::Partial(animation) => animation.state(),
+            FrozenMechanism::VectorFade(animation) => animation.state(),
+            FrozenMechanism::Rotation(animation) => animation.state(),
+        }
     }
 
     fn interpolate(&self, stage: &mut Stage, time: f64) {
         // Clone only the prepared native carrier; never construct or begin it.
         // This intentionally calls the ordinary interpolation implementation,
         // including lag, time_span, locks, placements, uniforms and trackers.
-        let mut animation = self.transform.clone();
-        let alpha = time / animation.state().config.run_time;
-        animation.interpolate(stage, alpha);
+        fn evaluate<A: Animation + Clone>(animation: &A, stage: &mut Stage, time: f64) {
+            let mut animation = animation.clone();
+            let alpha = time / animation.state().config.run_time;
+            animation.interpolate(stage, alpha);
+        }
+        match &self.mechanism {
+            FrozenMechanism::Transform(animation) => evaluate(animation, stage, time),
+            FrozenMechanism::Partial(animation) => evaluate(animation, stage, time),
+            FrozenMechanism::VectorFade(animation) => evaluate(animation, stage, time),
+            FrozenMechanism::Rotation(animation) => evaluate(animation, stage, time),
+        }
     }
 }
 
@@ -168,14 +221,14 @@ impl PureSegment {
         for (index, animation) in animations.iter().enumerate() {
             let carrier = animation.freeze_interpolation()
                 .ok_or(PureFrameRefusal::UnsupportedAnimation(index))?;
-            for row in carrier.transform.state().families() {
-                let [output, start, target] = row.as_slice() else {
+            for row in carrier.state().families() {
+                let Some((output, endpoints)) = row.split_first() else {
                     return Err(PureFrameRefusal::UnsupportedAnimation(index));
                 };
                 if !writes.insert(*output) {
                     return Err(PureFrameRefusal::OverlappingOutput(*output));
                 }
-                reads.extend([*start, *target]);
+                reads.extend(endpoints.iter().copied());
             }
             observed.extend(animation.all_mobjects());
             frozen.push(carrier);

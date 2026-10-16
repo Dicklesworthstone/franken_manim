@@ -98,6 +98,10 @@ impl Animation for Rotating {
         AnimationSignature::Pure
     }
 
+    fn freeze_interpolation(&self) -> Option<crate::pure_frame::FrozenAnimation> {
+        crate::pure_frame::FrozenAnimation::rotation(self.clone())
+    }
+
     fn setup(&mut self, stage: &mut Stage) -> Result<(), AnimError> {
         let mobject = self.state.mobject();
         if !stage.contains(mobject) {

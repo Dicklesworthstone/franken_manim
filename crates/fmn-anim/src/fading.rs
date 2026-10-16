@@ -164,6 +164,11 @@ impl Animation for VFade {
         AnimationSignature::Pure
     }
 
+    /// Freeze only the prepared, absolute-opacity interpolation mechanism.
+    fn freeze_interpolation(&self) -> Option<crate::pure_frame::FrozenAnimation> {
+        crate::pure_frame::FrozenAnimation::vector_fade(self.clone())
+    }
+
     /// "VFadeIn and VFadeOut only work for VMobjects" (fading.py:154) —
     /// enforced up front, by name.
     fn setup(&mut self, stage: &mut Stage) -> Result<(), AnimError> {

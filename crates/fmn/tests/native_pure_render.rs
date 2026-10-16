@@ -153,3 +153,103 @@ fn public_typesetting_wrapper_forwards_native_pure_programs() {
     assert_eq!(completed.report().play_count, 3);
     assert_eq!(completed.report().time.frames(), 10);
 }
+
+struct DrawFadeRotate;
+impl SceneConstruct for DrawFadeRotate {
+    fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+        let mob = stage.add(Circle::new().radius(0.4).color(BLUE))?;
+        stage.set_fill(mob, Some(BLUE), Some(0.8), None, true);
+        let config = AnimConfig { run_time: 0.5, rate_func: RateFunc::linear(),
+            ..AnimConfig::default() };
+        stage.play_prepared(vec![Box::new(
+            fmn_anim::show_creation(mob).with_config(config.clone()),
+        )])?;
+        stage.play_prepared(vec![Box::new(
+            fmn_anim::v_fade_out(mob).with_config(AnimConfig {
+                remover: true, ..config.clone()
+            }),
+        )])?;
+        let rotor = stage.add(Circle::new().radius(0.4).color(BLUE))?;
+        stage.set_fill(rotor, Some(BLUE), Some(0.8), None, true);
+        stage.play_prepared(vec![Box::new(
+            fmn_anim::Rotating::new(rotor).with_angle(1.2)
+                .with_about_point([0.7, 0.0, 0.0]).with_config(config),
+        )])?;
+        Ok(())
+    }
+}
+
+#[test]
+fn public_drawing_fading_and_rotation_admit_every_nominal_job() {
+    #[derive(Default)]
+    struct Jobs(Vec<i64>);
+    impl SceneSink for Jobs {
+        fn accepts_pure_segments(&self) -> bool { true }
+        fn capture_pure_segment(
+            &mut self, segment: &fmn_anim::pure_frame::PureSegment,
+        ) -> Result<(), IntegrationError> {
+            for frame in 1..=segment.frame_count() {
+                let job = segment.job(frame).unwrap();
+                self.0.push(job.time().frames());
+                let time = job.time().to_f64();
+                // No owner or animation value is borrowed while this frame runs.
+                let observed = std::thread::spawn(move || job.materialize().time()).join().unwrap();
+                assert_eq!(observed.to_bits(), time.to_bits());
+            }
+            Ok(())
+        }
+        fn capture(&mut self, _: CaptureReason, _: FramePacket) -> Result<(), IntegrationError> {
+            panic!("a supported pure mechanism unexpectedly used serial capture")
+        }
+    }
+    let mut jobs = Jobs::default();
+    let completed = fmn::run_scene(&mut DrawFadeRotate,
+        RuntimeConfig { fps: 8, ..RuntimeConfig::default() }, 42, &mut jobs).unwrap();
+    assert_eq!(jobs.0, (1..=12).collect::<Vec<_>>());
+    assert_eq!(completed.report().play_count, 3);
+    assert_eq!(completed.report().time.frames(), 12);
+}
+
+#[test]
+fn public_drawing_fading_and_rotation_match_serial_pngs_across_worker_counts() {
+    let mut previous = None;
+    for (window, threads) in [(1, 1), (2, 4), (4, 16)] {
+        let fs = Arc::new(VirtualFs::new());
+        let options = options("/mechanisms", window, threads);
+        let runtime = RuntimeConfig::from_config(&options.config);
+        let seed = options.config.determinism.seed;
+        let background = fmn_core::color::Srgb::from_hex(&options.config.camera.background_color)
+            .unwrap().to_linear(options.config.camera.background_opacity);
+        let aa = options.config.render.aa;
+        let report = render_with_fs(&mut DrawFadeRotate, options, fs.clone()).unwrap();
+        let stats = report.frame_pipeline.as_ref().unwrap();
+        assert_eq!((stats.submitted, stats.emitted, stats.outstanding_slots), (12, 12, 0));
+        assert!(stats.max_in_flight <= report.execution_plan.frames_in_flight);
+        assert!(stats.render_team_frames.iter().all(|count| *count > 0));
+        let bytes = (0..12).map(|i| fs.read(&Path::new("/mechanisms")
+            .join(format!("frame_{i:06}.png"))).unwrap()).collect::<Vec<_>>();
+        let pixels = bytes.iter().map(|bytes| decode_png(bytes, &PngLimits::default())
+            .unwrap().rgba).collect::<Vec<_>>();
+        let mut serial = Serial {
+            renderer: RetainedFrameRenderer::new(RetainedFrameRendererConfig {
+                frame: FrameConfig::new(Viewport { width: 48, height: 32 },
+                    ScreenMap { scale: 8.0, origin: [24.0, 16.0], y_up: true }, background)
+                    .with_aa_policy(aa),
+                tiling: Tiling { macro_tile: report.execution_plan.macro_tile,
+                    fine_tile: report.execution_plan.fine_tile },
+                engine: EngineIdentity::certified(), threads: 1,
+            }).unwrap(),
+            camera: None, frames: Vec::new(),
+        };
+        fmn::run_scene(&mut DrawFadeRotate, runtime, seed, &mut serial).unwrap();
+        assert_eq!(pixels, serial.frames);
+        for start in [0, 4, 8] {
+            assert_ne!(pixels[start], pixels[start + 3], "mechanism at frame {start}");
+        }
+        if let Some(previous) = &previous {
+            assert_eq!(&bytes, previous);
+        } else {
+            previous = Some(bytes);
+        }
+    }
+}

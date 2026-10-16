@@ -14,6 +14,35 @@ use fmn_core::rate::CatalogRate;
 use fmn_core::rng::RngRoot;
 use fmn_mobject::{Mob, Mobject, Stage};
 
+fn vector_curve(stage: &mut Stage, x: f32) -> Mob {
+    use fmn_mobject::{RecordBuffer, RecordSchema};
+    let mob = stage.add(Mobject::new());
+    let entry = stage.get_mut(mob).unwrap();
+    entry.buffer = RecordBuffer::new(RecordSchema::vmobject(), 5).unwrap();
+    entry.buffer.write_range("point", 0, &[
+        x, 0.0, 0.0, x + 0.5, 1.0, 0.0, x + 1.0, 0.0, 0.0,
+        x + 1.5, -0.5, 0.0, x + 2.0, 0.5, 0.0,
+    ]);
+    for field in ["fill_rgba", "stroke_rgba"] {
+        entry.buffer.write_range(field, 0, &[0.2, 0.4, 0.8, 0.75].repeat(5));
+    }
+    stage.add_to_scene(mob).unwrap();
+    mob
+}
+
+fn extra_mechanism(kind: usize, mob: Mob) -> Box<dyn Animation> {
+    match kind {
+        0 => Box::new(fmn_anim::show_creation(mob)),
+        1 => Box::new(fmn_anim::show_passing_flash(mob, 0.35)),
+        2 => Box::new(fmn_anim::v_fade_in(mob)),
+        3 => Box::new(fmn_anim::v_fade_out(mob)),
+        4 => Box::new(fmn_anim::v_fade_in_then_out(mob)),
+        _ => Box::new(fmn_anim::Rotating::new(mob)
+            .with_angle(1.3).with_axis([0.3, 0.5, 1.0])
+            .with_about_edge([1.0, 0.0, 0.0])),
+    }
+}
+
 fn square(stage: &mut Stage, x: f64) -> Mob {
     let mob = stage.add(Mobject::from_points(&[
         [x, 0.0, 0.0], [x + 1.0, 0.0, 0.0],
@@ -369,4 +398,125 @@ fn dispatch_and_sink_refusal_keep_one_begin_and_the_same_serial_epilogue() {
     }
     assert_eq!(outputs[0], outputs[1]);
     assert_eq!(outputs[0], outputs[2]);
+}
+
+#[test]
+fn reveal_vector_fade_and_rotation_use_native_pair_interpolation_on_workers() {
+    for kind in 0..6 {
+        let mut stage = Stage::new();
+        let root = stage.add(Mobject::new());
+        let first = vector_curve(&mut stage, -1.0);
+        let second = vector_curve(&mut stage, 1.0);
+        stage.attach(root, first).unwrap();
+        stage.attach(root, second).unwrap();
+        stage.add_to_scene(root).unwrap();
+        stage.shift(root, [0.2, 0.3, 0.4]);
+        let mut animation = extra_mechanism(kind, root);
+        animation.state_mut().config.run_time = 0.5;
+        animation.state_mut().config.time_span = Some((0.03125, 0.4375));
+        animation.state_mut().config.lag_ratio = 0.3;
+        // Force a backwards traversal as well as forward and endpoint samples;
+        // rebuilding a worker from begin must not depend on prior phase visits.
+        animation.state_mut().config.rate_func = RateFunc::Sampled(
+            Arc::from([0.0, 0.9, 0.1, 0.65, 1.0]),
+        );
+        assert_parallel_matches_serial(stage, vec![animation]);
+    }
+}
+
+#[test]
+fn additional_mechanisms_keep_owner_final_alpha_removal_and_flash_restoration() {
+    for kind in 0..6 {
+        let mut initial = Stage::new();
+        let mob = vector_curve(&mut initial, -1.0);
+        let begin = initial.snapshot();
+        let mut outcomes = Vec::new();
+        for offload in [false, true] {
+            let mut stage = begin.materialize();
+            let mut clock = RationalFrameClock::new(8).unwrap();
+            clock.advance_frames(3).unwrap();
+            let rng = RngRoot::from_seed(912);
+            let mut animation = extra_mechanism(kind, mob);
+            animation.state_mut().config.run_time = 0.5;
+            animation.state_mut().config.final_alpha_value = 0.375;
+            let mut animations = vec![animation];
+            let report = if offload {
+                let open = open_play(&mut stage, &clock, &mut animations).unwrap();
+                let program = PureSegment::freeze(&stage, &clock, &rng, &animations, &open).unwrap();
+                program.finish_on_owner(&mut stage, &mut clock, &mut animations, open).unwrap()
+            } else {
+                fmn_anim::play_segment(&mut stage, &mut clock, &rng, &mut animations,
+                    false, &mut |_| {}).unwrap()
+            };
+            assert!(!stage.is_animating(mob));
+            assert!(!stage.is_updating_suspended(mob));
+            assert_eq!(clock.now().frames(), 7);
+            // Compare removed objects too: the visible roots alone cannot prove
+            // that passing-flash teardown restored its full source geometry.
+            let entry = stage.get(mob).unwrap();
+            outcomes.push((facts(&stage), stage.get_points(mob),
+                entry.placement().coefficients().map(f64::to_bits),
+                entry.buffer.read_column("fill_rgba"),
+                entry.buffer.read_column("stroke_rgba"), report.n_frames));
+        }
+        assert_eq!(outcomes[0], outcomes[1], "mechanism {kind}");
+    }
+}
+
+#[test]
+fn pair_mechanisms_refuse_live_views_updaters_and_cross_mechanism_aliases() {
+    for kind in 0..6 {
+        for effect in 0..3 {
+            let mut stage = Stage::new();
+            let mob = vector_curve(&mut stage, 0.0);
+            let mut view = None;
+            if effect == 0 {
+                stage.add_dt_updater(mob, |_, _, _| {}, false).unwrap();
+            } else if effect == 1 {
+                view = Some(stage.get_mut(mob).unwrap().buffer.export_view(true));
+            }
+            let mut animations = vec![extra_mechanism(kind, mob)];
+            if effect == 2 {
+                let target = stage.copy_family(mob).unwrap();
+                stage.shift(target, [2.0, 0.0, 0.0]);
+                animations.push(Box::new(Transform::new(mob, target)));
+            }
+            let clock = RationalFrameClock::new(8).unwrap();
+            let open = open_play(&mut stage, &clock, &mut animations).unwrap();
+            let error = PureSegment::freeze(&stage, &clock, &RngRoot::from_seed(7),
+                &animations, &open).unwrap_err();
+            match effect {
+                0 => assert_eq!(error, PureFrameRefusal::NotAtPureBegin),
+                1 => assert!(matches!(error, PureFrameRefusal::LiveView(_))),
+                _ => assert_eq!(error, PureFrameRefusal::OverlappingOutput(mob)),
+            }
+            finish_open_play(&mut stage, &mut animations, open).unwrap();
+            drop(view);
+        }
+    }
+}
+
+static PAIR_RATE_CALLS: AtomicUsize = AtomicUsize::new(0);
+fn pair_authored_rate(t: f64) -> f64 {
+    PAIR_RATE_CALLS.fetch_add(1, Ordering::SeqCst);
+    t * t
+}
+
+#[test]
+fn pair_mechanisms_never_admit_an_authored_rate_callback() {
+    for kind in 0..6 {
+        let mut stage = Stage::new();
+        let mob = vector_curve(&mut stage, 0.0);
+        let mut animation = extra_mechanism(kind, mob);
+        animation.state_mut().config.rate_func = RateFunc::Base(pair_authored_rate)
+            .squish(0.1, 0.9).not_quite_there(0.8);
+        let mut animations = vec![animation];
+        let clock = RationalFrameClock::new(8).unwrap();
+        let open = open_play(&mut stage, &clock, &mut animations).unwrap();
+        let calls = PAIR_RATE_CALLS.load(Ordering::SeqCst);
+        assert_eq!(PureSegment::freeze(&stage, &clock, &RngRoot::from_seed(0),
+            &animations, &open).unwrap_err(), PureFrameRefusal::UnsupportedAnimation(0));
+        assert_eq!(PAIR_RATE_CALLS.load(Ordering::SeqCst), calls);
+        finish_open_play(&mut stage, &mut animations, open).unwrap();
+    }
 }
