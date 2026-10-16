@@ -42,6 +42,34 @@ opaque wire, CRF on a non-CRF encoder, an encoder the installed
 ffmpeg does not offer, a payload that is not a whole number of
 frames, zero dimensions or frame rate.
 
+### 1.1 Native transfer ruling, 10-bit P010, and NV12 passthrough
+
+- **Native transfer ruling (`ColorDescription::for_native_wire`).** Native
+  renders convert linear-light `RGBA16F` rasters using the sRGB transfer curve
+  (`rgba16f_to_nv12`, `rgba16f_to_p010`, `rgba16f_to_rgba8`,
+  `rgba16f_to_bgra8`). Both sides of `-i -` therefore declare
+  `-color_primaries bt709 -color_trc iec61966-2-1`, with `-color_range tv` and
+  `-colorspace bt709` for `nv12`/`p010le` wires and `-color_range pc` (plus
+  input `-colorspace rgb`) for alpha-bearing `rgba`/`bgra` wires. Tagging both
+  sides prevents `ffmpeg` from inserting an implicit color-matrix or transfer
+  conversion when input and output tags would otherwise differ. External
+  callers with already-BT.709-transferred samples retain explicit
+  `ColorDescription::video_bt709()` (`-color_trc bt709`).
+- **Direct 10-bit P010 (`rgba16f_to_p010`).** 10-bit output converts linear
+  half-float channels through a 16-bit sRGB LUT before applying the BT.709
+  matrix and rounding to 10-bit limited-range codes (`64..=940` luma, `512`
+  neutral chroma, MSB-aligned in little-endian `u16`), retaining >800 distinct
+  gray levels across a half-float ramp with zero per-frame heap scratch
+  allocations.
+- **Capability-driven NV12 passthrough.** For `Mp4`/`Mov` jobs on an `nv12`
+  wire, `encode_argv` emits `-pix_fmt yuv420p` only for the pinned `libx264`
+  software default. For named encoders (`h264_nvenc`, `hevc_nvenc`,
+  `av1_nvenc`, `h264_videotoolbox`, `hevc_videotoolbox`, `libx265`, etc.),
+  omitting redundant output `-pix_fmt` lets `ffmpeg` negotiate against the
+  encoder's `Supported pixel formats` (`EncoderCapabilities::probe_pixel_formats`),
+  keeping native `nv12` without an extra per-frame `swscale` chroma de-interleave
+  pass whenever the encoder accepts `nv12`.
+
 ## 2. The D2 invocation protocol
 
 Offline native video requests use the finite render policy described in

@@ -791,6 +791,46 @@ impl EncoderCapabilities {
             .map(|s| (*s).to_string())
             .collect()
     }
+
+    /// Probe `-h encoder=<encoder>` and parse its `Supported pixel formats:` line.
+    ///
+    /// # Errors
+    /// [`BoundaryError`] when the encoder is not offered or the probe fails.
+    pub fn probe_pixel_formats(
+        &self,
+        tool: &FfmpegTool,
+        runner: &dyn ProcessRunner,
+        encoder: &str,
+    ) -> Result<std::collections::BTreeSet<String>, BoundaryError> {
+        if !self.offers(encoder) {
+            return Err(BoundaryError::UnknownEncoder {
+                requested: encoder.to_string(),
+                hardware_available: self.hardware(),
+            });
+        }
+        let selector = format!("encoder={encoder}");
+        let outcome = tool.run_bound_probe(runner, &["-hide_banner", "-h", &selector])?;
+        if !outcome.success() {
+            return Err(BoundaryError::ProbeFailed("-h encoder exited nonzero"));
+        }
+        Ok(Self::parse_pixel_formats(&String::from_utf8_lossy(
+            &outcome.stdout,
+        )))
+    }
+
+    /// Parse `Supported pixel formats: ...` from `ffmpeg -h encoder=<name>` output.
+    #[must_use]
+    pub fn parse_pixel_formats(help_output: &str) -> std::collections::BTreeSet<String> {
+        let mut formats = std::collections::BTreeSet::new();
+        for line in help_output.lines() {
+            if let Some(rest) = line.trim().strip_prefix("Supported pixel formats:") {
+                for token in rest.split_whitespace() {
+                    formats.insert(token.to_string());
+                }
+            }
+        }
+        formats
+    }
 }
 
 /// Per-job resource bounds.

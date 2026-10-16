@@ -56,13 +56,39 @@ impl SceneConstruct for MustNotRun {
     }
 }
 
+fn has_admissible_workdir_ancestors(path: &Path) -> bool {
+    let Ok(canonical) = std::fs::canonicalize(path) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        for ancestor in canonical.ancestors() {
+            let Ok(metadata) = std::fs::metadata(ancestor) else {
+                return false;
+            };
+            let mode = metadata.permissions().mode();
+            if mode & 0o022 != 0 && mode & 0o1000 == 0 {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 fn host_capability() -> Option<FfmpegCapability> {
     let locator = StdFfmpegLocator::from_host_path();
     locator.locate_ffmpeg(Path::new("ffmpeg")).ok()?;
+    let temp = std::env::temp_dir();
+    let workdir_root = if has_admissible_workdir_ancestors(&temp) {
+        temp
+    } else {
+        PathBuf::from("/tmp")
+    };
     Some(FfmpegCapability {
         runner: Arc::new(StdProcessRunner),
         locator: Arc::new(locator),
-        workdir_root: std::env::temp_dir(),
+        workdir_root,
     })
 }
 
@@ -96,10 +122,14 @@ fn video_without_a_process_capability_is_a_named_refusal() {
 
 #[test]
 fn certified_video_is_refused_instead_of_mislabelled() {
-    let mut options = options("/movie.mp4", RenderFormat::Mp4);
-    options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
-    options.ffmpeg = host_capability();
-    assert_refused(options, "outside the certified artifact set");
+    let mut without_capability = options("/movie.mp4", RenderFormat::Mp4);
+    without_capability.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+    assert_refused(without_capability, "outside the certified artifact set");
+
+    let mut with_capability = options("/movie.mp4", RenderFormat::Mp4);
+    with_capability.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+    with_capability.ffmpeg = host_capability();
+    assert_refused(with_capability, "outside the certified artifact set");
 }
 
 #[test]

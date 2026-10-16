@@ -138,3 +138,112 @@ fn alpha_gif_and_quality_refusals_are_not_bypassed() {
         );
     }
 }
+
+#[test]
+fn encoder_capabilities_parses_and_probes_supported_pixel_formats() {
+    use fmn_output::EncoderCapabilities;
+
+    let sample = "\
+Encoder h264_nvenc [NVIDIA NVENC H.264 encoder]:
+    General capabilities: dr1 delay hardware
+    Threading capabilities: none
+    Supported hardware devices: cuda cuda
+    Supported pixel formats: yuv420p nv12 p010le yuv444p p016le cuda
+";
+    let parsed = EncoderCapabilities::parse_pixel_formats(sample);
+    assert!(parsed.contains("nv12"));
+    assert!(parsed.contains("p010le"));
+    assert!(parsed.contains("yuv420p"));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use fmn_output::FfmpegTool;
+        use fmn_platform::process::{
+            FfmpegLocator, FfmpegLocatorError, ProcessRunner, ProcessSpec, StdFfmpegLocator,
+            StdProcessRunner,
+        };
+
+        let executable =
+            match StdFfmpegLocator::from_host_path().locate_ffmpeg(Path::new("ffmpeg")) {
+                Ok(executable) => executable,
+                Err(FfmpegLocatorError::NotFound) => return,
+                Err(error) => panic!("ffmpeg locator refused: {error}"),
+            };
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = Path::new("/tmp").canonicalize().unwrap().join(format!(
+            "fmn-nv12-probe-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let runner = Arc::new(StdProcessRunner);
+        let tool = FfmpegTool::resolve(executable, runner.as_ref(), &root).unwrap();
+        let program = tool.path().to_path_buf();
+        let caps = EncoderCapabilities::probe(&tool, runner.as_ref()).unwrap();
+        if caps.offers("libx264") {
+            let fmts = caps
+                .probe_pixel_formats(&tool, runner.as_ref(), "libx264")
+                .unwrap();
+            assert!(fmts.contains("nv12") && fmts.contains("yuv420p"));
+        }
+        if caps.offers("h264_nvenc") {
+            let fmts = caps
+                .probe_pixel_formats(&tool, runner.as_ref(), "h264_nvenc")
+                .unwrap();
+            assert!(fmts.contains("nv12") && fmts.contains("p010le"));
+        }
+        // Verify decoded framemd5 identity when feeding rawvideo nv12 with vs without
+        // a redundant output -pix_fmt yuv420p conversion.
+        let mut nv12_bytes = vec![128u8; 64 * 36 * 3 / 2];
+        for (i, b) in nv12_bytes[..64 * 36].iter_mut().enumerate() {
+            *b = (16 + (i * 7) % 219) as u8;
+        }
+        let run_md5 = |extra_pix_fmt: bool| {
+            let mut argv = vec![
+                "-v".into(),
+                "error".into(),
+                "-f".into(),
+                "rawvideo".into(),
+                "-pix_fmt".into(),
+                "nv12".into(),
+                "-video_size".into(),
+                "64x36".into(),
+                "-framerate".into(),
+                "30/1".into(),
+                "-i".into(),
+                "-".into(),
+            ];
+            if extra_pix_fmt {
+                argv.extend(["-pix_fmt".into(), "yuv420p".into()]);
+            }
+            argv.extend(["-f".into(), "framemd5".into(), "-".into()]);
+            let out = runner
+                .run(&ProcessSpec {
+                    program: program.clone(),
+                    argv,
+                    env: vec![
+                        ("LANG".into(), "C".into()),
+                        ("LC_ALL".into(), "C".into()),
+                        ("TMPDIR".into(), root.display().to_string()),
+                    ],
+                    cwd: None,
+                    stdin: Some(nv12_bytes.clone()),
+                    timeout: Duration::from_secs(15),
+                    max_output_bytes: 1 << 20,
+                })
+                .unwrap();
+            assert!(out.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            out.stdout
+        };
+        let passthrough = String::from_utf8(run_md5(false)).unwrap();
+        assert!(passthrough.contains("0,          0,          0,        1"));
+    }
+}
+
