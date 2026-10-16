@@ -38,6 +38,18 @@ enum FrozenMechanism {
     Partial(ShowPartial),
     VectorFade(VFade),
     Rotation(Rotating),
+    Group(FrozenGroup),
+}
+
+/// An eagerly begun composition, with the same interval table and timeline
+/// mapping as its owner. Succession is deliberately excluded: later members
+/// require lifecycle work and do not yet have prepared immutable endpoints.
+#[derive(Debug, Clone)]
+struct FrozenGroup {
+    state: AnimState,
+    animations: Vec<FrozenAnimation>,
+    timings: Vec<crate::composition::Interval>,
+    max_end_time: f64,
 }
 
 // Replace recognized Base rates with their data identity. A failed recognition
@@ -45,9 +57,9 @@ enum FrozenMechanism {
 fn freeze_rate(rate: &RateFunc) -> Option<RateFunc> {
     Some(match rate {
         RateFunc::Catalog(rate) => RateFunc::Catalog(*rate),
-        RateFunc::Base(function) => RateFunc::Catalog(CatalogRate::from_tag(
-            fmn_core::rate::tag_of(*function)?,
-        )?),
+        RateFunc::Base(function) => {
+            RateFunc::Catalog(CatalogRate::from_tag(fmn_core::rate::tag_of(*function)?)?)
+        }
         RateFunc::Sampled(samples) => RateFunc::Sampled(Arc::clone(samples)),
         RateFunc::Squish { inner, a, b } => RateFunc::Squish {
             inner: Box::new(freeze_rate(inner)?),
@@ -98,29 +110,74 @@ impl FrozenAnimation {
         })
     }
 
+    pub(crate) fn group(group: &crate::AnimationGroup) -> Option<Self> {
+        let mut state = group.state().clone();
+        state.config.rate_func = freeze_rate(&state.config.rate_func)?;
+        let animations = group
+            .animations()
+            .iter()
+            .map(|animation| animation.freeze_interpolation())
+            .collect::<Option<Vec<_>>>()?;
+        Some(Self {
+            mechanism: FrozenMechanism::Group(FrozenGroup {
+                state,
+                animations,
+                timings: group.timings().to_vec(),
+                max_end_time: group.max_end_time(),
+            }),
+        })
+    }
+
+    // Composition containers have no zipped families. Admission must inspect
+    // every leaf, including aliases crossing a nested group boundary.
+    fn leaf_states(&self) -> Vec<&AnimState> {
+        match &self.mechanism {
+            FrozenMechanism::Group(group) => group
+                .animations
+                .iter()
+                .flat_map(Self::leaf_states)
+                .collect(),
+            _ => vec![self.state()],
+        }
+    }
+
     fn state(&self) -> &AnimState {
         match &self.mechanism {
             FrozenMechanism::Transform(animation) => animation.state(),
             FrozenMechanism::Partial(animation) => animation.state(),
             FrozenMechanism::VectorFade(animation) => animation.state(),
             FrozenMechanism::Rotation(animation) => animation.state(),
+            FrozenMechanism::Group(group) => &group.state,
         }
     }
 
     fn interpolate(&self, stage: &mut Stage, time: f64) {
+        self.interpolate_alpha(stage, time / self.state().config.run_time);
+    }
+
+    fn interpolate_alpha(&self, stage: &mut Stage, alpha: f64) {
         // Clone only the prepared native carrier; never construct or begin it.
         // This intentionally calls the ordinary interpolation implementation,
         // including lag, time_span, locks, placements, uniforms and trackers.
-        fn evaluate<A: Animation + Clone>(animation: &A, stage: &mut Stage, time: f64) {
+        fn evaluate<A: Animation + Clone>(animation: &A, stage: &mut Stage, alpha: f64) {
             let mut animation = animation.clone();
-            let alpha = time / animation.state().config.run_time;
             animation.interpolate(stage, alpha);
         }
         match &self.mechanism {
-            FrozenMechanism::Transform(animation) => evaluate(animation, stage, time),
-            FrozenMechanism::Partial(animation) => evaluate(animation, stage, time),
-            FrozenMechanism::VectorFade(animation) => evaluate(animation, stage, time),
-            FrozenMechanism::Rotation(animation) => evaluate(animation, stage, time),
+            FrozenMechanism::Transform(animation) => evaluate(animation, stage, alpha),
+            FrozenMechanism::Partial(animation) => evaluate(animation, stage, alpha),
+            FrozenMechanism::VectorFade(animation) => evaluate(animation, stage, alpha),
+            FrozenMechanism::Rotation(animation) => evaluate(animation, stage, alpha),
+            FrozenMechanism::Group(group) => {
+                let time = crate::composition::timeline_position(
+                    &group.state.config,
+                    alpha,
+                    group.max_end_time,
+                );
+                for (animation, interval) in group.animations.iter().zip(&group.timings) {
+                    animation.interpolate_alpha(stage, interval.sub_alpha(time));
+                }
+            }
         }
     }
 }
@@ -206,10 +263,16 @@ impl PureSegment {
         open: &OpenSegment,
     ) -> Result<Self, PureFrameRefusal> {
         let report = open.report();
-        let begin = report.begin_state.as_ref().filter(|_| {
-            report.purity.is_pure() && open.is_at_begin() && report.n_frames > 0
-                && crate::classify_play(stage, animations).is_pure()
-        }).ok_or(PureFrameRefusal::NotAtPureBegin)?;
+        let begin = report
+            .begin_state
+            .as_ref()
+            .filter(|_| {
+                report.purity.is_pure()
+                    && open.is_at_begin()
+                    && report.n_frames > 0
+                    && crate::classify_play(stage, animations).is_pure()
+            })
+            .ok_or(PureFrameRefusal::NotAtPureBegin)?;
         if !stage.can_restore(begin)
             || clock.now().frames() != report.base_frame
             || clock.fps() != open.segment().end_time().fps()
@@ -221,9 +284,14 @@ impl PureSegment {
         let mut reads = Vec::new();
         let mut observed: Vec<Mob> = stage.roots().to_vec();
         for (index, animation) in animations.iter().enumerate() {
-            let carrier = animation.freeze_interpolation()
+            let carrier = animation
+                .freeze_interpolation()
                 .ok_or(PureFrameRefusal::UnsupportedAnimation(index))?;
-            for row in carrier.state().families() {
+            for row in carrier
+                .leaf_states()
+                .into_iter()
+                .flat_map(AnimState::families)
+            {
                 let Some((output, endpoints)) = row.split_first() else {
                     return Err(PureFrameRefusal::UnsupportedAnimation(index));
                 };
@@ -273,10 +341,16 @@ impl PureSegment {
         open: &OpenWait,
     ) -> Result<Self, PureFrameRefusal> {
         let report = open.report();
-        let begin = report.begin_state.as_ref().filter(|_| {
-            open.is_at_begin() && report.purity.is_pure() && report.n_frames > 0
-                && crate::classify_wait(stage, false).is_pure()
-        }).ok_or(PureFrameRefusal::NotAtPureBegin)?;
+        let begin = report
+            .begin_state
+            .as_ref()
+            .filter(|_| {
+                open.is_at_begin()
+                    && report.purity.is_pure()
+                    && report.n_frames > 0
+                    && crate::classify_wait(stage, false).is_pure()
+            })
+            .ok_or(PureFrameRefusal::NotAtPureBegin)?;
         if !stage.can_restore(begin)
             || clock.now().frames() != report.base_frame
             || clock.fps() != open.segment().end_time().fps()
@@ -322,11 +396,19 @@ impl PureSegment {
             || open.report().n_frames != self.frame_count()
             || clock.now().frames() != self.data.base_frame
             || clock.fps() != self.data.grid.end_time().fps()
-            || open.report().begin_state.as_ref().is_none_or(|begin| !stage.can_restore(begin))
+            || open
+                .report()
+                .begin_state
+                .as_ref()
+                .is_none_or(|begin| !stage.can_restore(begin))
         {
-            return Err(AnimError::InvalidFramePhase("pure wait no longer at its begin boundary"));
+            return Err(AnimError::InvalidFramePhase(
+                "pure wait no longer at its begin boundary",
+            ));
         }
-        clock.advance_frames(self.frame_count()).map_err(AnimError::Clock)?;
+        clock
+            .advance_frames(self.frame_count())
+            .map_err(AnimError::Clock)?;
         stage.set_time_from_clock(clock.now().to_f64());
         open.finish_pure()
     }
@@ -342,11 +424,18 @@ impl PureSegment {
     /// # Errors
     /// [`AnimError::SeekOutOfRange`] outside this segment's 1-based frame range.
     pub fn job(&self, frame: i64) -> Result<PureFrameJob, AnimError> {
-        let sample = self.data.grid.sample(frame).ok_or(AnimError::SeekOutOfRange {
-            frame,
-            total: self.frame_count(),
-        })?;
-        Ok(PureFrameJob { data: Arc::clone(&self.data), sample })
+        let sample = self
+            .data
+            .grid
+            .sample(frame)
+            .ok_or(AnimError::SeekOutOfRange {
+                frame,
+                total: self.frame_count(),
+            })?;
+        Ok(PureFrameJob {
+            data: Arc::clone(&self.data),
+            sample,
+        })
     }
 
     /// Complete an admitted play on its original owner, without restoring a
@@ -374,14 +463,18 @@ impl PureSegment {
             || clock.now().frames() != self.data.base_frame
             || clock.fps() != self.data.grid.end_time().fps()
         {
-            return Err(AnimError::InvalidFramePhase("pure play no longer at its begin boundary"));
+            return Err(AnimError::InvalidFramePhase(
+                "pure play no longer at its begin boundary",
+            ));
         }
         let last = self.data.grid.end_time().to_f64();
         for animation in animations.iter_mut() {
             let alpha = last / animation.state().config.run_time;
             animation.interpolate(stage, alpha);
         }
-        clock.advance_frames(self.frame_count()).map_err(AnimError::Clock)?;
+        clock
+            .advance_frames(self.frame_count())
+            .map_err(AnimError::Clock)?;
         stage.set_time_from_clock(clock.now().to_f64());
         finish_open_play(stage, animations, open)
     }
@@ -397,7 +490,9 @@ pub struct PureFrameJob {
 
 impl std::fmt::Debug for PureFrameJob {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PureFrameJob").field("time", &self.time()).finish_non_exhaustive()
+        f.debug_struct("PureFrameJob")
+            .field("time", &self.time())
+            .finish_non_exhaustive()
     }
 }
 
@@ -417,7 +512,8 @@ impl PureFrameJob {
     /// The same named frame-indexed RNG fork supplied by FramePacket.
     #[must_use]
     pub fn rng_fork(&self, substream: &str) -> Pcg64Dxsm {
-        RngRoot::from_seed(self.data.rng_seed).substream(substream)
+        RngRoot::from_seed(self.data.rng_seed)
+            .substream(substream)
             .fork_frame(self.time().frames().cast_unsigned())
     }
 
@@ -476,15 +572,23 @@ pub fn play_segment_with_pure_dispatch(
     capture: &mut dyn PlayCapture,
 ) -> Result<SegmentReport, AnimError> {
     let open = crate::open_play_with_mode(stage, clock, animations, skip)?;
-    if allow_pure && !skip && capture.accepts_pure_segments()
+    if allow_pure
+        && !skip
+        && capture.accepts_pure_segments()
         && let Ok(segment) = PureSegment::freeze(stage, clock, rng, animations, &open)
         && capture.capture_pure_segment(&segment)
     {
         return segment.finish_on_owner(stage, clock, animations, open);
     }
     crate::frame::drive_open_play(
-        stage, clock, rng, animations, skip, boundary,
-        &mut |packet| capture.capture(packet), open,
+        stage,
+        clock,
+        rng,
+        animations,
+        skip,
+        boundary,
+        &mut |packet| capture.capture(packet),
+        open,
     )
 }
 
@@ -507,15 +611,24 @@ pub fn wait_segment_with_pure_dispatch(
     capture: &mut dyn PlayCapture,
 ) -> Result<SegmentReport, AnimError> {
     let mut open = crate::open_wait(stage, clock, duration, skip)?;
-    if allow_pure && !skip && capture.accepts_pure_segments()
+    if allow_pure
+        && !skip
+        && capture.accepts_pure_segments()
         && let Ok(segment) = PureSegment::freeze_wait(stage, clock, rng, &open)
         && capture.capture_pure_segment(&segment)
     {
         return segment.finish_wait_on_owner(stage, clock, open);
     }
     while crate::prepare_wait_frame(stage, clock, &mut open)?.is_some() {
-        crate::complete_wait_frame(stage, clock, rng, &mut open, !skip, boundary,
-            &mut |packet| capture.capture(packet))?;
+        crate::complete_wait_frame(
+            stage,
+            clock,
+            rng,
+            &mut open,
+            !skip,
+            boundary,
+            &mut |packet| capture.capture(packet),
+        )?;
     }
     crate::finish_open_wait(open)
 }

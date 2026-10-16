@@ -168,7 +168,7 @@ fn assemble(
 /// The composition's own alpha → a position on its internal timeline: the
 /// one normalized-alpha pipeline (`time_span` re-window, then the rate
 /// curve), scaled by `max_end_time`.
-fn timeline_position(config: &AnimConfig, alpha: f64, max_end_time: f64) -> f64 {
+pub(crate) fn timeline_position(config: &AnimConfig, alpha: f64, max_end_time: f64) -> f64 {
     let spanned = time_spanned_alpha(alpha, config.run_time, config.time_span);
     config.rate_func.eval(spanned) * max_end_time
 }
@@ -388,6 +388,10 @@ macro_rules! composite_common {
 
 impl Animation for AnimationGroup {
     composite_common!();
+
+    fn freeze_interpolation(&self) -> Option<crate::pure_frame::FrozenAnimation> {
+        crate::pure_frame::FrozenAnimation::group(self)
+    }
 
     fn prepare_interpolation_replay(&mut self) {
         for animation in &mut self.animations {
