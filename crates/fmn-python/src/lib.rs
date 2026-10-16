@@ -28,7 +28,9 @@ mod portal_audio;
 mod portal_console;
 mod portal_network;
 #[cfg(feature = "gauntlet")]
-pub use portal_console::run_portal_gauntlet_console;
+pub use portal_console::{
+    run_portal_gauntlet_console, run_portal_gauntlet_parallel_batch_checkpoint,
+};
 mod portal_playback;
 mod portal_readback;
 mod portal_recording;

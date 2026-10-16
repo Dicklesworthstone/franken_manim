@@ -156,3 +156,34 @@ Lower-level callers use `Boundary::with_audio_quality` or
 unchanged. Tests in `fmn-output/tests/audio_quality.rs`, the native video tests,
 and the portal quality suites cover real process arguments, unchanged native
 PCM, actual AAC decode, and byte-identical H.264 streams across AAC targets.
+
+## Python portal batch, checkpoint, and inspection extensions
+
+Because `fmn-python` runs inside a host CPython interpreter rather than the
+standalone Rust subcommand tree (`fmn render|batch|doctor|studio`), its console
+front door exposes a bounded set of portal-specific extension flags governed by
+this Behavior Note and enforced by `crates/fmn-conformance/tests/api_schema.rs`:
+
+- **Process-isolated parallel scene batches (`--workers`, `--job-timeout`).**
+  `--workers 1..64` spawns one fresh CPython worker subprocess per selected
+  scene (paired with `--write_all` or multiple scene names), corresponding to
+  standalone `fmn batch --max-scenes`. `--job-timeout SECONDS` bounds each
+  worker's wall-clock lifetime (corresponding to `fmn batch --budget-ms`).
+  Without `--threads`, each worker defaults to `--threads 1` so total CPU
+  oversubscription stays bounded.
+- **Durable batch checkpointing and recovery (`--checkpoint`, `--resume-key`, `--resume`).**
+  `--checkpoint PATH` and `--resume-key INPUTS` record per-scene artifact digests
+  and provenance; adding `--resume` verifies existing completed artifacts and
+  skips re-executing their scenes (see [parallel batch recovery](../PARALLEL_BATCH_RECOVERY.md)).
+- **Ordered batch continuation (`--keep-going`).** Continues a multi-scene
+  portal batch after ordinary scene failures (the inverse of standalone
+  `fmn batch --fail-fast`).
+- **Companion final-frame PNG (`--save-last-frame`, `--save_last_frame`).**
+  Emits a companion final-state PNG alongside the primary render output without
+  re-running `construct()`.
+- **Portal inspection, bundle, and tool-path switches (`--list-scenes`, `--construct-only`, `--audit-parity`, `--bundle-camera`, `--ffmpeg_bin`).**
+  `--list-scenes`, `--construct-only`, and `--audit-parity` provide
+  portal-specific scene discovery and parity-audit queries; `--bundle-camera`
+  includes the camera track in FMTL bundle exports; `--ffmpeg_bin` is the
+  portal's config-matching spelling for `--ffmpeg`.
+

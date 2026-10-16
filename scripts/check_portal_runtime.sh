@@ -178,6 +178,10 @@ python3 crates/fmn-python/tests/test_solid_lifecycle_protocol.py
 # These unittest suites include native geometry/clock and failure-recovery cases.
 FMN_TEST_NATIVE=1 python3 crates/fmn-python/tests/test_speed.py
 FMN_TEST_NATIVE=1 python3 crates/fmn-python/tests/test_speed_updaters.py
+python3 crates/fmn-python/tests/test_process_batch.py
+python3 crates/fmn-python/tests/test_parallel_cli.py
+python3 crates/fmn-python/tests/test_parallel_checkpoint.py
+FMN_TEST_NATIVE=1 python3 crates/fmn-python/tests/test_parallel_batch_native.py
 
 # Every protocol suite, not only the ones named above, so a fake Scene or
 # lifted namespace that falls behind production code fails here (fm-fmgv:

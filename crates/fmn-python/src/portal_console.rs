@@ -25,10 +25,108 @@ pub fn run_portal_gauntlet_console() -> Result<u64, String> {
     })
 }
 
+/// Exercise portal parallel-batch CLI option parsing and multi-scene checkpoint resume.
+///
+/// # Errors
+/// Returns the actual Python/native acceptance failure.
+pub fn run_portal_gauntlet_parallel_batch_checkpoint(
+    root: &std::path::Path,
+) -> Result<(u64, u64), String> {
+    let root_str = root
+        .to_str()
+        .ok_or_else(|| "batch checkpoint root is not valid UTF-8".to_owned())?
+        .to_owned();
+    crate::with_python_test_module("parallel batch checkpoint", move |py, _module, globals| {
+        let repo_python = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("python");
+        globals
+            .set_item("_FMN_REPO_PYTHON", repo_python.to_string_lossy().as_ref())
+            .map_err(|error| error.to_string())?;
+        globals
+            .set_item("_FMN_BATCH_ROOT", &root_str)
+            .map_err(|error| error.to_string())?;
+        let script = r#"
+import sys
+from pathlib import Path
+if _FMN_REPO_PYTHON not in sys.path:
+    sys.path.insert(0, _FMN_REPO_PYTHON)
+import manimlib
+from fmn_python import render_scenes
+from fmn_python.parallel_cli_options import take_parallel_options
+from fmn_python.checkpoint_cli import take_checkpoint_options
+
+def _run_parallel_batch_checkpoint_gauntlet():
+    rem, par = take_parallel_options(
+        ["scene.py", "--write_all", "--workers", "2", "--job-timeout", "15"],
+        frozenset(),
+    )
+    assert rem == ["scene.py", "--write_all"] and par == {"workers": 2, "job_timeout": 15.0}
+    rem2, chk = take_checkpoint_options(
+        ["scene.py", "--write_all", "--checkpoint", "progress.json", "--resume-key", "e2e-v1", "--resume"],
+        frozenset(),
+    )
+    assert rem2 == ["scene.py", "--write_all"]
+    assert chk["resume"] is True and chk["resume_key"] == "e2e-v1"
+
+    root = Path(_FMN_BATCH_ROOT)
+    calls = []
+    class First(manimlib.Scene):
+        def construct(self):
+            calls.append("first")
+            self.add(manimlib.Square(side_length=1.0, fill_opacity=1.0))
+    class Second(manimlib.Scene):
+        def construct(self):
+            calls.append("second")
+            self.add(manimlib.Circle(radius=0.5, fill_opacity=1.0))
+
+    jobs = {"first": First, "second": Second}
+    opts = dict(
+        format="png",
+        resolution=(64, 36),
+        fps=8,
+        threads=1,
+        checkpoint=root / "progress.json",
+        resume_key="e2e-v1",
+    )
+    initial = render_scenes(jobs, root / "output", **opts)
+    assert initial.ok and calls == ["first", "second"]
+    calls.clear()
+    resumed = render_scenes(jobs, root / "output", resume=True, **opts)
+    assert resumed.ok and calls == []
+    return (len(initial.outcomes), len(calls))
+"#;
+        let source = std::ffi::CString::new(script).map_err(|error| error.to_string())?;
+        py.run(source.as_c_str(), Some(globals), Some(globals))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        globals
+            .get_item("_run_parallel_batch_checkpoint_gauntlet")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "parallel batch checkpoint entry point is absent".to_owned())?
+            .call0()
+            .inspect_err(|error| error.print(py))
+            .and_then(|value| value.extract::<(u64, u64)>())
+            .map_err(|error| error.to_string())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
     fn native_scene_console_acceptance() {
         assert_eq!(super::run_portal_gauntlet_console().unwrap(), 7);
     }
+
+    #[test]
+    fn parallel_batch_checkpoint_acceptance() {
+        let root = std::env::temp_dir().join(format!(
+            "fmn-portal-batch-checkpoint-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let result = super::run_portal_gauntlet_parallel_batch_checkpoint(&root);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(result.unwrap(), (2, 0));
+    }
 }
+

@@ -705,3 +705,93 @@ fn the_ledger_carries_every_surface_and_its_review_contract() {
         "every Ledger row must belong to exactly one semantic tier"
     );
 }
+
+#[test]
+fn portal_cli_flags_are_governed_by_schema_or_bn15_portal_contract() {
+    let schema = schema();
+    let mut schema_flags = std::collections::BTreeSet::new();
+    for flag in &schema.flags {
+        for opt in flag.options.split(',') {
+            let trimmed = opt.trim();
+            if trimmed.starts_with("--") {
+                schema_flags.insert(trimmed.to_owned());
+            }
+        }
+    }
+    for flag in &schema.native_flags {
+        for opt in flag.options.split(',') {
+            let trimmed = opt.trim();
+            if trimmed.starts_with("--") {
+                schema_flags.insert(trimmed.to_owned());
+            }
+        }
+    }
+
+    let bn15 = repo_file("docs/behavior_notes/BN-15-cli-contract.md");
+    const PORTAL_BN15_EXTENSION_FLAGS: &[&str] = &[
+        "--audit-parity",
+        "--bundle-camera",
+        "--checkpoint",
+        "--construct-only",
+        "--ffmpeg_bin",
+        "--job-timeout",
+        "--keep-going",
+        "--list-scenes",
+        "--resume",
+        "--resume-key",
+        "--save-last-frame",
+        "--save_last_frame",
+        "--workers",
+    ];
+    for &ext in PORTAL_BN15_EXTENSION_FLAGS {
+        assert!(
+            bn15.contains(ext),
+            "portal CLI extension flag `{ext}` must be documented in docs/behavior_notes/BN-15-cli-contract.md"
+        );
+    }
+
+    const PORTAL_CLI_MODULES: &[&str] = &[
+        "crates/fmn-python/python/fmn_python/console_rendering.py",
+        "crates/fmn-python/python/fmn_python/parallel_cli_options.py",
+        "crates/fmn-python/python/fmn_python/checkpoint_cli.py",
+        "crates/fmn-python/python/fmn_python/video_cli.py",
+        "crates/fmn-python/python/fmn_python/paired_output.py",
+        "crates/fmn-python/python/fmn_python/subdivision_rendering.py",
+        "crates/fmn-python/python/fmn_python/render_selection.py",
+        "crates/fmn-python/python/fmn_python/batch_cli.py",
+        "crates/fmn-python/python/fmn_python/bundle_cli.py",
+    ];
+    let governed_extensions: std::collections::BTreeSet<&str> =
+        PORTAL_BN15_EXTENSION_FLAGS.iter().copied().collect();
+    let mut undeclared = Vec::new();
+    for module in PORTAL_CLI_MODULES {
+        let source = repo_file(module);
+        for quote in ['"', '\''] {
+            let mut rest = source.as_str();
+            let prefix = format!("{quote}--");
+            while let Some(pos) = rest.find(&prefix) {
+                let after_quote = &rest[pos + 1..];
+                if let Some(end) = after_quote.find(quote) {
+                    let candidate = &after_quote[..end];
+                    if candidate.len() > 2
+                        && candidate[2..]
+                            .bytes()
+                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+                        && !schema_flags.contains(candidate)
+                        && !governed_extensions.contains(candidate)
+                    {
+                        undeclared.push(format!("{module}:{candidate}"));
+                    }
+                    rest = &after_quote[end + 1..];
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    assert!(
+        undeclared.is_empty(),
+        "undeclared portal CLI flags found outside API_OVERLAY.tsv and BN-15: {undeclared:?}"
+    );
+}
+

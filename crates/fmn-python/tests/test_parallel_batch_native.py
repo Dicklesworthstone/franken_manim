@@ -2,22 +2,30 @@
 import hashlib
 import importlib.util
 from importlib.machinery import ExtensionFileLoader, PathFinder
+import os
 from pathlib import Path
 import sys
 import tempfile
 import unittest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
+_SOURCE_PYTHON = str(Path(__file__).resolve().parents[1] / "python")
+if _SOURCE_PYTHON not in sys.path:
+    sys.path.append(_SOURCE_PYTHON)
 
 
 def native_wheel_available():
-    package = importlib.util.find_spec("manimlib")
-    if package is None or package.submodule_search_locations is None:
-        return False
-    # Do not import a source-only package just to discover that its private
-    # extension has not been built; do not mistake Reference Manim for FMN.
-    extension = PathFinder.find_spec("manimlib.manimlib", package.submodule_search_locations)
-    return extension is not None and isinstance(extension.loader, ExtensionFileLoader)
+    for entry in sys.path:
+        if Path(entry).resolve() == Path(_SOURCE_PYTHON).resolve():
+            continue
+        package = PathFinder.find_spec("manimlib", [entry])
+        if package is None or package.submodule_search_locations is None:
+            continue
+        extension = PathFinder.find_spec("manimlib.manimlib", package.submodule_search_locations)
+        if extension is not None and isinstance(extension.loader, ExtensionFileLoader):
+            return True
+    if os.environ.get("FMN_TEST_NATIVE") == "1":
+        raise RuntimeError("FMN_TEST_NATIVE=1 requires the built FrankenManim native wheel")
+    return False
 
 
 @unittest.skipUnless(native_wheel_available(),
