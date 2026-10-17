@@ -152,3 +152,24 @@ executes updaters. A family already suspended before begin remains suspended.
 Evidence: `fmn-anim/tests/reveal_lifecycle.rs` and the real public scene path
 in `fmn/tests/reveal_lifecycle.rs`, plus the existing native/serial PNG
 comparisons for all subset reveal parameterizations.
+
+## Collapsed wave domains
+
+`ApplyWave` assigns the midpoint phase to a family with zero horizontal
+width. A vertical curve or point-sized family receives one simultaneous
+finite pulse instead of NaN coordinates from division by zero. Nonzero-width
+wave formulas and construction-time bounds are unchanged. This does not
+change the animation's native-dispatch eligibility or callback contract.
+Evidence: `fmn-anim/tests/wave_domains.rs`.
+
+## Broadcast options control playback
+
+`broadcast` now constructs its interval table with the supplied lag ratio.
+Previously it built a 5-percent `LaggedStart` table and changed only the
+reported config afterward, so the requested delays never reached playback.
+A true `remover` option is applied to the supplied animation members, because
+AnimationGroup cleanup is member-owned. False preserves each member's own
+removal policy. Group cleanup semantics themselves are unchanged.
+Evidence: `fmn-anim/tests/broadcast_timing.rs` checks both the analytical
+intervals and actual intermediate positions for unequal member durations,
+plus scene membership after completion.

@@ -479,7 +479,13 @@ pub fn apply_wave(stage: &Stage, mobject: Mob, direction: Vec3, amplitude: f64) 
     ];
     let mut anim = Homotopy::new(
         move |x, y, z, t| {
-            let alpha = (x - left_x) / (right_x - left_x);
+            // A vertical or point-sized family has no left/right phase.
+            // Use its midpoint rather than passing 0/0 into the wave map.
+            let alpha = if left_x == right_x {
+                0.5
+            } else {
+                (x - left_x) / (right_x - left_x)
+            };
             let power = fmn_dmath::exp(2.0 * (alpha - 0.5));
             let nudge = rate::there_and_back(fmn_dmath::pow(t, power));
             [
@@ -605,12 +611,21 @@ pub fn show_creation_then_fade_around(
 /// reported while assembling the member container.
 pub fn broadcast(
     stage: &mut Stage,
-    restores: Vec<Box<dyn Animation>>,
+    mut restores: Vec<Box<dyn Animation>>,
     run_time: f64,
     lag_ratio: f64,
     remover: bool,
 ) -> Result<AnimationGroup, AnimError> {
-    let mut group = crate::composition::lagged_start(stage, restores)?;
+    // Group cleanup delegates to members. Apply the requested removal to
+    // those lifetimes, instead of leaving an inert flag on the container.
+    if remover {
+        for animation in &mut restores {
+            animation.state_mut().config.remover = true;
+        }
+    }
+    // The interval table is built at construction, not from the display
+    // config during playback. Spend the caller's lag here, exactly once.
+    let mut group = AnimationGroup::with_lag_ratio(stage, restores, lag_ratio)?;
     group.state_mut().config.name = "Broadcast".to_owned();
     group.state_mut().config.run_time = run_time;
     group.state_mut().config.lag_ratio = lag_ratio;
