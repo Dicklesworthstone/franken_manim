@@ -673,6 +673,28 @@ impl ShowIncreasingSubsets {
         self
     }
 
+    /// Release the family captured at begin, not only the children still
+    /// visible after a reveal. Hidden descendants must be reusable afterward.
+    /// Only the final visible family receives the ordinary resume callback;
+    /// abort never executes an updater or changes the revealed membership.
+    fn release_lifetime(&self, stage: &mut Stage, call_updater: bool) {
+        let root = self.state.mobject();
+        let resume =
+            self.state.config.suspend_mobject_updating && self.state.mobject_was_updating();
+        for row in self.state.families() {
+            if let Some(&member) = row.first() {
+                stage.set_animating_status(member, false, false);
+                if resume {
+                    stage.resume_updating(member, false, false);
+                }
+            }
+        }
+        stage.set_animating_status(root, false, true);
+        if resume {
+            stage.resume_updating(root, true, call_updater);
+        }
+    }
+
     /// creation.py:196 / creation.py:207 `update_submobject_list`.
     fn update_submobject_list(&self, stage: &mut Stage, index: i64) {
         let n = self.all_submobs.len();
@@ -680,10 +702,10 @@ impl ShowIncreasingSubsets {
             return;
         }
         let desired: Vec<Mob> = if self.one_by_one {
-            // index = int(clip(index, 0, n - 1)); 0 → empty, else the
-            // single (index-1)-th child.
+            // Index zero is the empty start; 1..=n selects child index-1.
+            // Clipping to n-1 made the last child unreachable (BN-12).
             #[allow(clippy::cast_sign_loss)]
-            let idx = index.clamp(0, n as i64 - 1) as usize;
+            let idx = index.clamp(0, n as i64) as usize;
             if idx == 0 {
                 Vec::new()
             } else {
@@ -719,6 +741,15 @@ impl ShowIncreasingSubsets {
 }
 
 impl Animation for ShowIncreasingSubsets {
+    fn finish(&mut self, stage: &mut Stage) {
+        self.interpolate(stage, self.state.config.final_alpha_value);
+        self.release_lifetime(stage, true);
+    }
+
+    fn abort(&mut self, stage: &mut Stage) {
+        self.release_lifetime(stage, false);
+    }
+
     fn state(&self) -> &AnimState {
         &self.state
     }
