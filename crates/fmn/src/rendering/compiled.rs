@@ -96,30 +96,23 @@ pub fn render_bundle_with_fs(
             let minimum = u64::try_from(minimum).map_err(|_| {
                 RenderError::InvalidOptions("negative compiled soundtrack duration")
             })?;
-            let config = fmn_output::MixerConfig {
-                sample_rate,
-                channels,
-                max_output_frames: (fmn_scene::DEFAULT_MAX_BUNDLE_BYTES / 4 / usize::from(channels))
-                    as u64,
-            };
-            let mut mixer = fmn_output::SoundMixer::new(config)
-                .map_err(RenderError::Sound)?
-                .with_timeline_frames(minimum);
-            mixer
-                .add(fmn_output::SoundCue::new(
-                    fmn_codec::WavAudio {
-                        channels,
-                        sample_rate,
-                        format: fmn_codec::SampleFormat::F32,
-                        samples: pcm.into_samples(),
-                    },
-                    0,
-                    bundle.fps(),
-                ))
-                .map_err(RenderError::Sound)?;
-            // Stored PCM is one already-mixed cue: no source reopens, second gain,
-            // resampling or decoder invocation. Padding uses the picture clock.
-            mixer.mix(1).map_err(RenderError::Sound)
+            let pcm = pcm
+                .pad_to(minimum, fmn_scene::DEFAULT_MAX_BUNDLE_BYTES)
+                .map_err(RenderError::Bundle)?;
+            // PCM was mixed at export. Transfer it directly: no f32 -> f64 ->
+            // f32 remix, gain, resampling, decoder or scene callback on replay.
+            Ok(fmn_output::MixReport {
+                audio: fmn_codec::WavAudio {
+                    channels,
+                    sample_rate,
+                    format: fmn_codec::SampleFormat::F32,
+                    samples: pcm.into_samples(),
+                },
+                clipped_samples: 0,
+                cues_mixed: 1,
+                workers_used: 0,
+                kernel: fmn_output::MixKernel::Scalar,
+            })
         })
         .transpose()?;
     let shared = bundle.into_shared().map_err(RenderError::Bundle)?;

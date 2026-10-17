@@ -81,11 +81,104 @@ impl BundleSoundtrack {
     pub fn samples(&self) -> &[f32] {
         &self.samples
     }
+    /// Copy exactly one half-open interval of the absolute sample-frame grid.
+    ///
+    /// The result starts at the requested sample, with silence where the source
+    /// has ended. Only the requested interval is allocated, never its elapsed
+    /// prefix. Channel order and every stored sample bit remain unchanged.
+    /// `max_pcm_bytes` bounds the destination PCM, independently of the loaded
+    /// source and container. No mix, resampling, quantization or clock executes.
+    /// Convert picture boundaries with the caller's established rational clock.
+    ///
+    /// # Errors
+    /// Refuses overflowing intervals, output above the smaller of the explicit
+    /// PCM budget and the production ceiling, or a failed destination allocation.
+    pub fn sample_window(
+        &self,
+        start: u64,
+        frames: u64,
+        max_pcm_bytes: usize,
+    ) -> Result<Self, BundleReadError> {
+        start
+            .checked_add(frames)
+            .ok_or_else(|| invalid("PCM window end overflow"))?;
+        let count = pcm_sample_count(frames, self.channels, max_pcm_bytes)?;
+        let mut samples = Vec::new();
+        samples
+            .try_reserve_exact(count)
+            .map_err(|_| BundleReadError::AllocationFailed {
+                context: "soundtrack window",
+                requested: count,
+            })?;
+        if start < self.sample_frames() {
+            let first = usize::try_from(start)
+                .map_err(|_| invalid("PCM offset exceeds host width"))?
+                .checked_mul(usize::from(self.channels))
+                .ok_or_else(|| invalid("PCM offset exceeds host width"))?;
+            let available = (self.samples.len() - first).min(count);
+            samples.extend_from_slice(&self.samples[first..first + available]);
+        }
+        samples.resize(count, 0.0);
+        Ok(Self {
+            sample_rate: self.sample_rate,
+            channels: self.channels,
+            samples,
+        })
+    }
+
+    /// Extend this owned soundtrack with silence to at least `minimum_frames`.
+    ///
+    /// Existing tails and sample bits survive. An already-long-enough buffer is
+    /// transferred unchanged, without allocation or remapping through a mixer.
+    /// The PCM budget applies to the complete result even when no padding is
+    /// necessary. This is not a bound on other retained scene/container storage.
+    ///
+    /// # Errors
+    /// Refuses the same size/allocation failures as [`Self::sample_window`].
+    pub fn pad_to(
+        mut self,
+        minimum_frames: u64,
+        max_pcm_bytes: usize,
+    ) -> Result<Self, BundleReadError> {
+        let count = pcm_sample_count(
+            minimum_frames.max(self.sample_frames()),
+            self.channels,
+            max_pcm_bytes,
+        )?;
+        self.samples
+            .try_reserve_exact(count - self.samples.len())
+            .map_err(|_| BundleReadError::AllocationFailed {
+                context: "soundtrack padding",
+                requested: count,
+            })?;
+        self.samples.resize(count, 0.0);
+        Ok(self)
+    }
+
     /// Transfer PCM ownership to an audio-aware consumer without a second copy.
     #[must_use]
     pub fn into_samples(self) -> Vec<f32> {
         self.samples
     }
+}
+
+fn pcm_sample_count(
+    frames: u64,
+    channels: u16,
+    max_pcm_bytes: usize,
+) -> Result<usize, BundleReadError> {
+    let limit = max_pcm_bytes.min(DEFAULT_MAX_BUNDLE_BYTES);
+    let needed = frames
+        .checked_mul(u64::from(channels))
+        .and_then(|count| count.checked_mul(4))
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .unwrap_or(usize::MAX);
+    if needed > limit {
+        return Err(BundleReadError::Malformed(
+            fmn_hash::SerialError::SizeLimit { needed, limit },
+        ));
+    }
+    Ok(needed / 4)
 }
 
 fn invalid(reason: &'static str) -> BundleReadError {
