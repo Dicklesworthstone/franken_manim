@@ -31,8 +31,8 @@ use fmn_anim::{
     Purity, RateFunc, RationalFrameClock, RationalTime, SceneUpdaterBoundary, SegmentKind,
     SegmentReport, abort_open_play, abort_open_wait, complete_play_frame, complete_wait_frame,
     finish_open_play, finish_open_play_animations, finish_open_wait, open_play_with_mode,
-    open_wait, open_wait_after_updaters, prepare_play_animation,
-    prepare_play_frame, prepare_wait_frame, validate_play, wait_segment_with_boundary,
+    open_wait, open_wait_after_updaters, prepare_play_animation, prepare_play_frame,
+    prepare_wait_frame, validate_play, wait_segment_with_boundary,
 };
 use fmn_core::rng::{Pcg64Dxsm, RngRoot};
 use fmn_hash::SerialError;
@@ -440,7 +440,10 @@ pub trait SceneSink {
         &mut self,
         _segment: &fmn_anim::pure_frame::PureSegment,
     ) -> Result<(), IntegrationError> {
-        Err(IntegrationError::new("scene-sink", "pure segments are not supported"))
+        Err(IntegrationError::new(
+            "scene-sink",
+            "pure segments are not supported",
+        ))
     }
 }
 
@@ -1592,15 +1595,27 @@ impl Scene {
                     // A stop callback observes owner state after each emitted
                     // frame. Never offer its wait to the compact program path.
                     wait_segment_with_boundary(
-                        stage, clock, rng_root, duration, Some(stop_condition), skipping,
-                        &mut boundary, &mut |packet| {
+                        stage,
+                        clock,
+                        rng_root,
+                        duration,
+                        Some(stop_condition),
+                        skipping,
+                        &mut boundary,
+                        &mut |packet| {
                             fmn_anim::pure_frame::PlayCapture::capture(&mut capture, packet);
                         },
                     )?
                 } else {
                     fmn_anim::pure_frame::wait_segment_with_pure_dispatch(
-                        stage, clock, rng_root, duration, skipping, allow_pure,
-                        &mut boundary, &mut capture,
+                        stage,
+                        clock,
+                        rng_root,
+                        duration,
+                        skipping,
+                        allow_pure,
+                        &mut boundary,
+                        &mut capture,
                     )?
                 }
             };

@@ -9,7 +9,10 @@ pub(super) struct NativeSegmentCapture<'a> {
 }
 
 impl<'a> NativeSegmentCapture<'a> {
-    pub(super) fn new(sink: &'a mut dyn SceneSink, error: &'a mut Option<IntegrationError>) -> Self {
+    pub(super) fn new(
+        sink: &'a mut dyn SceneSink,
+        error: &'a mut Option<IntegrationError>,
+    ) -> Self {
         Self { sink, error }
     }
 }

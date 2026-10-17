@@ -81,7 +81,8 @@ impl SharedMonoTable {
     }
 
     fn get(&self, plan: &RenderPlan) -> Result<&MonoTable, MonoTableError> {
-        self.table.get_or_try_init(|| MonoTable::build(plan, self.map))
+        self.table
+            .get_or_try_init(|| MonoTable::build(plan, self.map))
     }
 }
 
@@ -455,13 +456,20 @@ mod tests {
             assert!(Arc::ptr_eq(&first.plan, &frame.plan));
             assert_eq!(compiler.stats().shapes_compiled, 0);
             assert_eq!(compiler.stats().shapes_reused, 1);
-            assert_eq!(compiler.working.as_ref().unwrap().segments().as_ptr(), storage);
+            assert_eq!(
+                compiler.working.as_ref().unwrap().segments().as_ptr(),
+                storage
+            );
         }
         stage.shift(mob, [1.0, 0.0, 0.0]);
         let changed = compiler.capture(&stage, 0).unwrap();
         assert!(!Arc::ptr_eq(&first.plan, &changed.plan));
         assert!(compiler.working.is_none());
-        assert_eq!(changed.plan.segments().as_ptr(), storage, "publish must move");
+        assert_eq!(
+            changed.plan.segments().as_ptr(),
+            storage,
+            "publish must move"
+        );
         let mut serial = RetainedFrameRenderer::new(config()).unwrap();
         serial.render(&stage, 0).unwrap();
         let (actual, _) = changed
@@ -731,7 +739,11 @@ mod tests {
 
         let mut arena = FrameArena::new();
         let mut cache = PixelTileCache::new();
-        for (frame, expected) in [(&moved, &moved_expected), (&second, &after), (&first, &before)] {
+        for (frame, expected) in [
+            (&moved, &moved_expected),
+            (&second, &after),
+            (&first, &before),
+        ] {
             let (pixels, _) = frame.render_cached(4, &mut arena, &mut cache).unwrap();
             assert_eq!(pixels.as_bytes(), expected);
         }
@@ -743,7 +755,9 @@ mod tests {
         let mob = stage.add(vector());
         stage.add_to_scene(mob).unwrap();
         let mut compiler = VectorFrameCompiler::new(config()).unwrap();
-        let frames: Vec<_> = (0..4).map(|_| compiler.capture(&stage, 0).unwrap()).collect();
+        let frames: Vec<_> = (0..4)
+            .map(|_| compiler.capture(&stage, 0).unwrap())
+            .collect();
         let mut serial = RetainedFrameRenderer::new(config()).unwrap();
         serial.render(&stage, 0).unwrap();
         let expected = serial.frame().as_bytes().to_vec();
@@ -768,7 +782,10 @@ mod tests {
             for worker in workers {
                 let (table, binning, pixels) = worker.join().unwrap();
                 assert!(std::ptr::eq(table, frames[0].mono.table.get().unwrap()));
-                assert!(std::ptr::eq(binning, frames[0].binning.table.get().unwrap()));
+                assert!(std::ptr::eq(
+                    binning,
+                    frames[0].binning.table.get().unwrap()
+                ));
                 assert_eq!(pixels.as_bytes(), expected);
             }
         });
@@ -795,7 +812,12 @@ mod tests {
         assert!(table.get().is_none());
         let prepared = table
             .get_or_try_init(|| {
-                Binning::build(&plan, config.frame.viewport, config.tiling, config.frame.map)
+                Binning::build(
+                    &plan,
+                    config.frame.viewport,
+                    config.tiling,
+                    config.frame.map,
+                )
             })
             .unwrap();
         let reused = table
@@ -903,7 +925,9 @@ mod tests {
         let mut arena = FrameArena::new();
         let mut cache = PixelTileCache::new();
         for (index, expected) in [(2, &after), (0, &before), (1, &before)] {
-            let (pixels, _) = frames[index].render_cached(4, &mut arena, &mut cache).unwrap();
+            let (pixels, _) = frames[index]
+                .render_cached(4, &mut arena, &mut cache)
+                .unwrap();
             assert_eq!(pixels.as_bytes(), expected);
         }
     }

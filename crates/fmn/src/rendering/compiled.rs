@@ -7,7 +7,7 @@ use fmn_scene::SceneRunReport;
 use fmn_scene::timeline_bundle::TimelineBundle;
 use std::sync::Arc;
 
-use super::{RenderError, RenderOptions, RenderReport, RenderSink};
+use super::{RenderError, RenderFormat, RenderOptions, RenderReport, RenderSink};
 
 /// Render a validated FMTL artifact through the native bounded CPU pipeline.
 ///
@@ -18,7 +18,10 @@ use super::{RenderError, RenderOptions, RenderReport, RenderSink};
 /// that arbitrary live native scenes have become frame-parallel.
 ///
 /// `options.config.camera.fps` must equal the artifact's frame rate. No frame
-/// resampling, alpha-zero insertion or terminal still is performed. An empty
+/// resampling or alpha-zero insertion is performed. [`RenderFormat::Png`]
+/// publishes only the final recorded sample, retaining the bundle's full
+/// scene time and play count. It cannot reconstruct unrecorded teardown edits.
+/// An empty
 /// compiled artifact is rejected before creating an output sink. `options.camera`
 /// selects the existing fixed-camera path for surfaces, images and dot clouds.
 /// Camera-bearing minor-1 bundles instead select the native camera route
@@ -131,13 +134,19 @@ pub fn render_bundle_with_fs(
             .map_err(|_| RenderError::InvalidOptions("compiled segment count exceeds u64"))?,
         time: clock.now(),
     };
+    let final_only = options.format == RenderFormat::Png;
     let mut sink = RenderSink::new(options, fs)?;
-    for index in 0..shared.frame_count() {
+    let first = if final_only {
+        shared.frame_count() - 1
+    } else {
+        0
+    };
+    for (sequence, index) in (first..shared.frame_count()).enumerate() {
         let job = shared.frame_job(index).map_err(RenderError::Bundle)?;
         let pipeline = sink.pipeline.as_mut().ok_or(RenderError::InvalidOptions(
             "compiled pipeline was already finalized",
         ))?;
-        if let Err(error) = pipeline.capture_compiled(job, u64::from(index)) {
+        if let Err(error) = pipeline.capture_compiled(job, sequence as u64) {
             // A failed raster job drops its output reservation before the
             // coordinator necessarily observes the stage failure. Admission
             // can therefore first fail at EmitterHandle::reserve, not only at

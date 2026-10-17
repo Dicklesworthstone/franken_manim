@@ -95,8 +95,10 @@ fn convert_reference(frame: &FrameBuffer, format: PixelFormat) -> Vec<u8> {
     output.as_bytes().to_vec()
 }
 
-use fmn_anim::{AnimConfig, Animation, RateFunc, RationalFrameClock, Transform, open_play, advance_play};
 use fmn_anim::pure_frame::PureSegment;
+use fmn_anim::{
+    AnimConfig, Animation, RateFunc, RationalFrameClock, Transform, advance_play, open_play,
+};
 use fmn_core::rng::RngRoot;
 
 #[test]
@@ -113,22 +115,40 @@ fn live_programs_match_serial_lumen_on_every_wire_and_team() {
         let received = Arc::new(Mutex::new(Vec::new()));
         let output = received.clone();
         let emitter = OrderedEmitter::new(
-            EmitterConfig::new(FrameLayout::tight(format, 32, 24).unwrap(), plan.frames_in_flight, 0).unwrap(),
-            vec![SinkBinding::reliable("record", move |sequence, frame: &FrameBuffer| {
-                output.lock().unwrap().push((sequence, frame.as_bytes().to_vec()));
-                Ok(SinkWrite::Consumed)
-            })],
-        ).unwrap();
-        let mut pipeline = NativeFramePipeline::new(plan.clone(), config, None, emitter.handle()).unwrap();
+            EmitterConfig::new(
+                FrameLayout::tight(format, 32, 24).unwrap(),
+                plan.frames_in_flight,
+                0,
+            )
+            .unwrap(),
+            vec![SinkBinding::reliable(
+                "record",
+                move |sequence, frame: &FrameBuffer| {
+                    output
+                        .lock()
+                        .unwrap()
+                        .push((sequence, frame.as_bytes().to_vec()));
+                    Ok(SinkWrite::Consumed)
+                },
+            )],
+        )
+        .unwrap();
+        let mut pipeline =
+            NativeFramePipeline::new(plan.clone(), config, None, emitter.handle()).unwrap();
         let mut stage = Stage::new();
         let mob = stage.add(shape());
         stage.add_to_scene(mob).unwrap();
         let target = stage.copy_family(mob).unwrap();
         stage.shift(target, [2.0, 0.25, 0.0]);
-        let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(Transform::new(mob, target)
-            .with_path_arc(0.8, [0.0, 0.0, 1.0]).with_config(AnimConfig {
-                run_time: 1.5, rate_func: RateFunc::linear(), ..AnimConfig::default()
-            }))];
+        let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(
+            Transform::new(mob, target)
+                .with_path_arc(0.8, [0.0, 0.0, 1.0])
+                .with_config(AnimConfig {
+                    run_time: 1.5,
+                    rate_func: RateFunc::linear(),
+                    ..AnimConfig::default()
+                }),
+        )];
         let rng = RngRoot::from_seed(92);
         let mut clock = RationalFrameClock::new(8).unwrap();
         clock.advance_frames(6).unwrap();
@@ -137,11 +157,22 @@ fn live_programs_match_serial_lumen_on_every_wire_and_team() {
         let program = PureSegment::freeze(&stage, &clock, &rng, &animations, &open).unwrap();
         let mut serial = RetainedFrameRenderer::new(config).unwrap();
         let mut expected = Vec::new();
-        advance_play(&mut stage, &mut clock, &rng, &mut animations, &mut open,
-            program.frame_count(), &mut |packet| {
+        advance_play(
+            &mut stage,
+            &mut clock,
+            &rng,
+            &mut animations,
+            &mut open,
+            program.frame_count(),
+            &mut |packet| {
                 serial.render(&packet.materialize_stage(), 0).unwrap();
-                expected.push((expected.len() as u64, convert_reference(serial.frame(), format)));
-            }).unwrap();
+                expected.push((
+                    expected.len() as u64,
+                    convert_reference(serial.frame(), format),
+                ));
+            },
+        )
+        .unwrap();
         // An earlier ordinary capture can coexist with a pure generation;
         // leave it off this comparison so no extra sample is inserted.
         drop(stage);
@@ -174,9 +205,17 @@ fn pure_job_cancellation_releases_all_output_reservations() {
     let plan = plan(OutputPixelFormat::Rgba8);
     let config = config(&plan);
     let emitter = OrderedEmitter::new(
-        EmitterConfig::new(FrameLayout::tight(PixelFormat::Rgba8, 32, 24).unwrap(), plan.frames_in_flight, 0).unwrap(),
-        vec![SinkBinding::reliable("record", |_, _: &FrameBuffer| Ok(SinkWrite::Consumed))],
-    ).unwrap();
+        EmitterConfig::new(
+            FrameLayout::tight(PixelFormat::Rgba8, 32, 24).unwrap(),
+            plan.frames_in_flight,
+            0,
+        )
+        .unwrap(),
+        vec![SinkBinding::reliable("record", |_, _: &FrameBuffer| {
+            Ok(SinkWrite::Consumed)
+        })],
+    )
+    .unwrap();
     let handle = emitter.handle();
     let mut pipeline = NativeFramePipeline::new(plan, config, None, handle.clone()).unwrap();
     let mut stage = Stage::new();
@@ -187,7 +226,8 @@ fn pure_job_cancellation_releases_all_output_reservations() {
     let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(Transform::new(mob, target))];
     let clock = RationalFrameClock::new(8).unwrap();
     let open = open_play(&mut stage, &clock, &mut animations).unwrap();
-    let program = PureSegment::freeze(&stage, &clock, &RngRoot::from_seed(3), &animations, &open).unwrap();
+    let program =
+        PureSegment::freeze(&stage, &clock, &RngRoot::from_seed(3), &animations, &open).unwrap();
     pipeline.capture_pure(program.job(1).unwrap(), 0).unwrap();
     emitter.cancel();
     let _ = pipeline.capture_pure(program.job(2).unwrap(), 1);

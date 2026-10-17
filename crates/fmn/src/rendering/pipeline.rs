@@ -199,15 +199,11 @@ impl NativeFrameStages {
                 "compiled frame has no worker state",
             ))?
             .lock()
-            .map_err(|_| {
-                NativeFrameError::WorkerState("compiled worker state was poisoned")
-            })?;
+            .map_err(|_| NativeFrameError::WorkerState("compiled worker state was poisoned"))?;
         if let Some(camera) = camera {
             if worker.compiled_camera.is_none() {
-                worker.compiled_camera = Some(
-                    RetainedFrameRenderer::new(config)
-                        .map_err(NativeFrameError::Renderer)?,
-                );
+                worker.compiled_camera =
+                    Some(RetainedFrameRenderer::new(config).map_err(NativeFrameError::Renderer)?);
             }
             let raster = worker
                 .compiled_camera
@@ -222,9 +218,8 @@ impl NativeFrameStages {
             convert_into(&raster, output.frame_mut(), team.threads())?;
         } else {
             if worker.compiled_vector.is_none() {
-                worker.compiled_vector = Some(
-                    VectorFrameCompiler::new(config).map_err(NativeFrameError::Renderer)?,
-                );
+                worker.compiled_vector =
+                    Some(VectorFrameCompiler::new(config).map_err(NativeFrameError::Renderer)?);
             }
             let frame = worker
                 .compiled_vector
@@ -313,7 +308,11 @@ impl PipelineStages for NativeFrameStages {
                 let camera = recorded_camera.or(camera);
                 self.rasterize_reconstructed(&stage, config, camera, team, &mut output)?;
             }
-            NativeFrame::Pure { job, config, camera } => {
+            NativeFrame::Pure {
+                job,
+                config,
+                camera,
+            } => {
                 // Only a closed prepared native program crosses here. Its
                 // per-frame animation and arena are created on this render
                 // team, not on the ordered preparation worker or scene owner.
@@ -688,11 +687,7 @@ impl NativeFramePipeline {
     ///
     /// # Errors
     /// As `capture_compiled`; worker failures are recovered by `finish`.
-    pub fn capture_pure(
-        &mut self,
-        job: PureFrameJob,
-        sequence: u64,
-    ) -> Result<(), RenderError> {
+    pub fn capture_pure(&mut self, job: PureFrameJob, sequence: u64) -> Result<(), RenderError> {
         let frame = NativeFrame::Pure {
             job,
             config: self.renderer_config,

@@ -137,7 +137,11 @@ impl<K: Eq + Hash + Clone, V: Clone> SharedIndex<K, V> {
         }
         let mut index = HashMap::new();
         index.try_reserve(total).map_err(|_| ReserveError)?;
-        index.extend(self.0.iter().map(|(key, value)| (key.clone(), value.clone())));
+        index.extend(
+            self.0
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
         self.0 = Arc::new(index);
         Ok(())
     }

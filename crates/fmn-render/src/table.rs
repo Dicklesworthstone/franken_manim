@@ -38,8 +38,8 @@
 
 mod shared;
 
-pub(crate) use shared::SharedRows;
 use shared::SharedIndex;
+pub(crate) use shared::SharedRows;
 
 use crate::hint::Hint;
 use crate::texture::{SamplerPolicy, Texture, TextureEncoding, TextureWrap};

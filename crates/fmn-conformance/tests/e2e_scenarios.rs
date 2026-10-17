@@ -1367,8 +1367,8 @@ fn native_matching_workers_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioE
                 .into());
             }
 
-            let book = fmn_library::FontBook::bundled()
-                .map_err(fmn_library::TextMobjectError::Text)?;
+            let book =
+                fmn_library::FontBook::bundled().map_err(fmn_library::TextMobjectError::Text)?;
             let from = fmn_library::Text::new("AB CD")
                 .font("IBM Plex Sans")
                 .font_size(32.0)
@@ -1466,7 +1466,9 @@ fn native_matching_workers_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioE
         || completed.report().play_count != 2
         || completed.report().time.frames() != 8
     {
-        return Err(fail("native matching lost pure programs or nominal samples"));
+        return Err(fail(
+            "native matching lost pure programs or nominal samples",
+        ));
     }
 
     let mut first_frames: Option<Vec<Vec<u8>>> = None;
@@ -1505,7 +1507,9 @@ fn native_matching_workers_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioE
             );
         }
         if frames[0] == frames[3] || frames[4] == frames[7] {
-            return Err(fail("native equation or string transition did not change pixels"));
+            return Err(fail(
+                "native equation or string transition did not change pixels",
+            ));
         }
         if let Some(first) = &first_frames {
             if *first != frames {
@@ -1536,6 +1540,137 @@ fn native_matching_workers_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioE
         .with_counter("native_matching_owner_captures", jobs.owner_captures)
         .with_counter("native_matching_thread_counts", thread_counts)
         .with_counter("native_matching_rendered_frames", rendered_frames))
+}
+
+/// The native still-image route executes every updater tick and captures
+/// construction's final edits. An independently authored static scene rendered
+/// through the existing sequence route supplies the expected artifact.
+fn native_final_png_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct Animated {
+        ticks: Arc<AtomicU64>,
+    }
+    impl fmn::SceneConstruct for Animated {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let circle = stage.add(Circle::new().radius(0.4).color(RED_C))?;
+            stage.set_fill(circle, Some(RED_C), Some(1.0), None, true);
+            stage.set_stroke(circle, None, Some(0.0), None, None, true);
+            let ticks = self.ticks.clone();
+            let updater = stage.arena_mut().add_dt_updater(
+                circle,
+                move |stage, mob, dt| {
+                    if dt > 0.0 {
+                        ticks.fetch_add(1, Ordering::SeqCst);
+                    }
+                    stage.shift(mob, [dt, 0.0, 0.0]);
+                },
+                false,
+            )?;
+            stage.wait(0.25)?;
+            stage.arena_mut().remove_updater(circle, updater);
+            stage.shift(circle, [1.0, 1.0, 0.0]);
+            stage.set_fill(circle, Some(BLUE_C), Some(1.0), None, true);
+            Ok(())
+        }
+    }
+
+    struct Expected;
+    impl fmn::SceneConstruct for Expected {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let circle = stage.add(Circle::new().radius(0.4).color(BLUE_C))?;
+            stage.set_fill(circle, Some(BLUE_C), Some(1.0), None, true);
+            stage.set_stroke(circle, None, Some(0.0), None, None, true);
+            stage.shift(circle, [1.25, 1.0, 0.0]);
+            Ok(())
+        }
+    }
+
+    let options = |path: &str, format: fmn::RenderFormat, threads| {
+        let mut options = fmn::RenderOptions::with_format(path, format)
+            .map_err(|error| fail(format!("native final PNG options: {error}")))?;
+        options.config.camera.resolution = (64, 48);
+        options.config.camera.fps = 8;
+        options.config.sizes.frame_height = 4.0;
+        options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+        Ok::<_, ScenarioError>(options)
+    };
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    fmn::render_with_fs(
+        &mut Expected,
+        options("/expected-final", fmn::RenderFormat::PngSequence, 1)?,
+        fs.clone(),
+    )
+    .map_err(|error| fail(format!("independent final geometry: {error}")))?;
+    let expected = fs
+        .read(std::path::Path::new("/expected-final/frame_000000.png"))
+        .map_err(|error| fail(format!("expected final PNG: {error}")))?;
+    let decoded = fmn_codec::decode_png(&expected, &fmn_codec::PngLimits::default())
+        .map_err(|error| fail(format!("expected PNG decode: {error}")))?;
+    if !decoded
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .windows(2)
+        .any(|pair| pair[0] != pair[1])
+    {
+        return Err(fail(
+            "the independently authored final circle is not visible",
+        ));
+    }
+
+    let mut checked = 0;
+    let mut total_ticks = 0;
+    let mut published_frames = 0;
+    let mut first_png = None;
+    for threads in [1, 4, 16] {
+        let path = format!("/native-final-{threads}.png");
+        let ticks = Arc::new(AtomicU64::new(0));
+        let report = fmn::render_with_fs(
+            &mut Animated {
+                ticks: ticks.clone(),
+            },
+            options(&path, fmn::RenderFormat::Png, threads)?,
+            fs.clone(),
+        )
+        .map_err(|error| fail(format!("native final PNG at {threads} threads: {error}")))?;
+        let png = fs
+            .read(std::path::Path::new(&path))
+            .map_err(|error| fail(format!("published final PNG: {error}")))?;
+        let observed_ticks = ticks.load(Ordering::SeqCst);
+        if png != expected
+            || report.artifact.frame_count != 1
+            || report.emission.stats.emitted != 1
+            || report.scene.play_count != 1
+            || report.scene.time.frames() != 2
+            || observed_ticks != 2
+        {
+            return Err(fail(format!(
+                "final PNG lost final geometry or lifecycle at {threads} threads"
+            )));
+        }
+        checked += 1;
+        total_ticks += observed_ticks;
+        published_frames += report.artifact.frame_count;
+        if first_png.is_none() {
+            first_png = Some(png);
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_final_png")
+            .field("thread_counts", checked)
+            .field("nominal_ticks", total_ticks)
+            .field("published_frames", published_frames),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact(
+            "native-final.png",
+            first_png.ok_or_else(|| fail("no final PNG was rendered"))?,
+        )
+        .with_counter("native_final_png_thread_counts", checked)
+        .with_counter("native_final_png_nominal_ticks", total_ticks)
+        .with_counter("native_final_png_published_frames", published_frames))
 }
 
 /// The facade's MP4 request with no ffmpeg capability is a named capability
@@ -7723,6 +7858,26 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.native_final_png.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_final_png_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("native_final_png_thread_counts", 3),
+            counter_eq("native_final_png_nominal_ticks", 6),
+            counter_eq("native_final_png_published_frames", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_final_png",
+            vec![
+                FieldPred::u64_eq("thread_counts", 3),
+                FieldPred::u64_eq("nominal_ticks", 6),
+                FieldPred::u64_eq("published_frames", 3),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.coordinate_placement.v1",
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
@@ -9778,6 +9933,16 @@ fn native_matching_workers_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.native_matching_workers.v1")
         .expect("native matching workers scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn native_final_png_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.native_final_png.v1")
+        .expect("native final PNG scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

@@ -31,8 +31,8 @@ impl Clone for RenderPlan {
 mod tests {
     use super::*;
     use crate::{
-        Binning, FrameConfig, FrameJob, MonoTable, RenderPlanLimits, ScreenMap, SyncError,
-        Tiling, Viewport,
+        Binning, FrameConfig, FrameJob, MonoTable, RenderPlanLimits, ScreenMap, SyncError, Tiling,
+        Viewport,
     };
     use fmn_core::color::LinearRgba;
     use fmn_mobject::{Mob, Mobject, RecordBuffer, RecordSchema, Stage};
@@ -164,7 +164,10 @@ mod tests {
         changed.sync(&stage, 0).unwrap();
         assert_ne!(changed.segments().as_ptr(), segments);
         assert!(changed.segments().len() > plan.segments().len());
-        assert_eq!(&changed.segments()[..plan.segments().len()], plan.segments());
+        assert_eq!(
+            &changed.segments()[..plan.segments().len()],
+            plan.segments()
+        );
         generations.push(changed);
         expected.push(fresh_pixels(&stage));
         assert_ne!(expected[0], *expected.last().unwrap());

@@ -25,9 +25,9 @@
 //! `MirrorSet::materializations` and `CachedArcLength::rebuilds` are the same
 //! idea one layer down, and the same reason.
 
-mod generation;
 #[cfg(test)]
 mod allocation;
+mod generation;
 
 use crate::hint::Hint;
 use crate::revision::{Axis, Dependency, Revisions};
@@ -862,8 +862,9 @@ impl RenderPlan {
                     (retained.shape, retained.local_origin)
                 }
                 _ => {
-                    let counted_from_schema = (entry.buffer.schema().field_width("point") == Some(3))
-                        .then_some(entry.buffer.len());
+                    let counted_from_schema = (entry.buffer.schema().field_width("point")
+                        == Some(3))
+                    .then_some(entry.buffer.len());
                     if let Some(point_count) = counted_from_schema {
                         let curves = count_u64(point_count.saturating_sub(1) / 2);
                         input_curves =

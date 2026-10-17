@@ -196,6 +196,31 @@ fn camera_orbit_zoom_fov_and_light_match_serial_snapshots_at_every_window() {
 }
 
 #[test]
+fn final_png_samples_the_completed_camera_rig_once() {
+    let fs = Arc::new(VirtualFs::new());
+    let sequence = render_camera_with_fs(factory, options("/orbit", 2), fs.clone()).unwrap();
+    let mut still = options("/orbit.png", 4);
+    still.format = RenderFormat::Png;
+    let report = render_camera_with_fs(factory, still, fs.clone()).unwrap();
+    assert_eq!(report.scene, sequence.scene);
+    assert_eq!(report.artifact.frame_count, 1);
+    let stats = report.frame_pipeline.unwrap();
+    assert_eq!((stats.submitted, stats.emitted), (1, 1));
+    assert_eq!(
+        fs.read(Path::new("/orbit.png")).unwrap(),
+        fs.read(Path::new("/orbit/frame_000003.png")).unwrap(),
+    );
+    let mut limited = options("/limited.png", 1);
+    limited.format = RenderFormat::Png;
+    limited.max_frames = 3;
+    assert!(matches!(
+        render_camera_with_fs(factory, limited, fs.clone()),
+        Err(RenderError::InvalidOptions("scene exceeded max_frames"))
+    ));
+    assert!(!fs.exists(Path::new("/limited.png")));
+}
+
+#[test]
 fn non_send_camera_updaters_execute_on_scene_owner_and_affect_the_same_capture() {
     struct Wait;
     impl SceneConstruct for Wait {

@@ -9145,6 +9145,7 @@ mod tests {
             "preset" => "slow",
             "tune" => "animation",
             "video_bitrate" => "2000000",
+            "audio_bitrate" => "192000",
             "ffmpeg_timeout" => "21600",
             "ffmpeg_max_log_bytes" => "1048576",
             "ffmpeg_max_artifact_bytes" | "ffmpeg_max_input_bytes" => "68719476736",
