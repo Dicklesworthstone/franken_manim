@@ -10,24 +10,288 @@
 //!   every same-shape pair from the piece product, then the leftovers —
 //!   sources fade out to the target's center, targets fade in from the
 //!   source's center (the `FadeOutToPoint`/`FadeInFromPoint` calls at
-//!   transform_matching_parts.py:57). Grouping (`run_time = 2`,
-//!   `lag_ratio = 0`) is the composition bead's (fm-hfe), which wraps the
-//!   returned list — the same seam [`crate::transform::cyclic_replace`]
-//!   established. Scene-side cleanup (remove the pieces, add the real
-//!   target) is fm-5xm's, per the remover flags carried on the fades.
-//! - `TransformMatchingShapes` is the Reference's literal alias — same
-//!   function, same defaults.
+//!   transform_matching_parts.py:57).
+//! - [`TransformMatchingParts`] owns the complete native animation:
+//!   grouping (`run_time = 2`, `lag_ratio = 0`), lifecycle delegation,
+//!   and replacement of the source and temporary group by the original
+//!   target. Its prepared group can run on native frame workers while
+//!   begin, finish and cleanup remain on the scene owner.
+//! - [`TransformMatchingShapes`] is the Reference's literal alias — same
+//!   animation, same defaults.
 //!
 //! [`transform_matching_keys`] is the string/Tex seam. Scribe supplies one
 //! semantic key per pointful native-span primitive; Choreo pairs equal keys
 //! in stable occurrence order and fades the leftovers. It never shape-matches
 //! Tex and never reconstructs provenance from rendered geometry (D-09).
 
-use fmn_mobject::{Mob, Stage};
+use std::collections::HashSet;
 
-use crate::animation::{AnimError, Animation};
+use fmn_mobject::{Mob, Stage, StageError};
+
+use crate::animation::{AnimError, AnimState, Animation, AnimationSignature, RateFunc};
+use crate::composition::AnimationGroup;
 use crate::fading::{fade_in_from_point, fade_out_to_point};
 use crate::transform::Transform;
+
+/// Timing for a complete shape-matching replacement.
+#[derive(Debug, Clone)]
+pub struct MatchingPartsConfig {
+    /// Wall-clock duration of the complete replacement, in seconds.
+    pub run_time: f64,
+    /// Overlap between successive matched transforms and unmatched fades.
+    pub lag_ratio: f64,
+    /// Rate curve applied to the group's internal timeline.
+    pub rate_func: RateFunc,
+}
+
+impl Default for MatchingPartsConfig {
+    fn default() -> Self {
+        Self {
+            run_time: 2.0,
+            lag_ratio: 0.0,
+            rate_func: RateFunc::linear(),
+        }
+    }
+}
+
+/// The plan binds every family member, including point-free containers.
+/// Moving and restyling pieces is valid; regrouping or adding new pieces
+/// requires a new matching plan before any animation begins.
+struct MatchingFamily {
+    root: Mob,
+    layout: Vec<(Mob, Vec<Mob>, bool)>,
+}
+
+impl MatchingFamily {
+    fn read(stage: &Stage, root: Mob) -> Result<Self, AnimError> {
+        if !stage.contains(root) {
+            return Err(AnimError::StaleHandle(root));
+        }
+        let layout = stage
+            .family(root)
+            .into_iter()
+            .map(|mob| {
+                let entry = stage.get(mob).ok_or(AnimError::StaleHandle(mob))?;
+                Ok((mob, entry.submobjects().to_vec(), entry.buffer.is_empty()))
+            })
+            .collect::<Result<Vec<_>, AnimError>>()?;
+        Ok(Self { root, layout })
+    }
+
+    fn validate(&self, stage: &Stage) -> Result<(), AnimError> {
+        for (mob, children, empty) in &self.layout {
+            let entry = stage.get(*mob).ok_or(AnimError::StaleHandle(*mob))?;
+            if entry.submobjects() != children.as_slice() || entry.buffer.is_empty() != *empty {
+                return Err(AnimError::Stage(StageError::FamilyShapeMismatch));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Match shapes, transform paired pieces, fade the leftovers and publish
+/// the original target when the animation completes.
+///
+/// Explicit pairs claim point-bearing family members first; otherwise the
+/// normalized shape probe decides the pairs. The source and target must
+/// have disjoint families. Their topology is checked again at begin, so a
+/// delayed play cannot silently animate a stale matching plan.
+pub struct TransformMatchingParts {
+    group: AnimationGroup,
+    source: MatchingFamily,
+    target: MatchingFamily,
+    begun: bool,
+    finished: bool,
+    cleaned: bool,
+    error: Option<AnimError>,
+}
+
+/// The Reference's literal alias for [`TransformMatchingParts`].
+pub type TransformMatchingShapes = TransformMatchingParts;
+
+impl TransformMatchingParts {
+    /// Match both families with the default two-second simultaneous timing.
+    ///
+    /// # Errors
+    /// [`AnimError::StaleHandle`] for a dead operand,
+    /// [`AnimError::AliasedMatchingFamilies`] for shared family members, or
+    /// [`AnimError::Stage`] if the matching group cannot be assembled.
+    pub fn new(stage: &mut Stage, source: Mob, target: Mob) -> Result<Self, AnimError> {
+        Self::with_config(stage, source, target, &[], MatchingPartsConfig::default())
+    }
+
+    /// Give explicit pairs first claim on the available point-bearing
+    /// members, preserving [`transform_matching_parts`]'s skip semantics
+    /// for unavailable or previously claimed members.
+    ///
+    /// # Errors
+    /// As [`Self::new`].
+    pub fn with_matched_pairs(
+        stage: &mut Stage,
+        source: Mob,
+        target: Mob,
+        matched_pairs: &[(Mob, Mob)],
+    ) -> Result<Self, AnimError> {
+        Self::with_config(
+            stage,
+            source,
+            target,
+            matched_pairs,
+            MatchingPartsConfig::default(),
+        )
+    }
+
+    /// Build a replacement with explicit pairs and composition timing.
+    /// Empty families are valid and still complete the replacement lifecycle.
+    ///
+    /// # Errors
+    /// As [`Self::new`]. Both operand families are checked before the
+    /// constructor allocates or attaches any animation-owned mobject.
+    pub fn with_config(
+        stage: &mut Stage,
+        source: Mob,
+        target: Mob,
+        matched_pairs: &[(Mob, Mob)],
+        config: MatchingPartsConfig,
+    ) -> Result<Self, AnimError> {
+        let source = MatchingFamily::read(stage, source)?;
+        let target = MatchingFamily::read(stage, target)?;
+        let source_members: HashSet<_> = source.layout.iter().map(|(mob, _, _)| *mob).collect();
+        if target
+            .layout
+            .iter()
+            .any(|(mob, _, _)| source_members.contains(mob))
+        {
+            return Err(AnimError::AliasedMatchingFamilies);
+        }
+        let animations = transform_matching_parts(stage, source.root, target.root, matched_pairs)?;
+        let group = AnimationGroup::with_lag_ratio(stage, animations, config.lag_ratio)?
+            .with_run_time(config.run_time)
+            .with_rate_func(config.rate_func)
+            .with_name("TransformMatchingParts");
+        Ok(Self {
+            group,
+            source,
+            target,
+            begun: false,
+            finished: false,
+            cleaned: false,
+            error: None,
+        })
+    }
+
+    /// The actual Transform/fade plan, in composition order.
+    #[must_use]
+    pub fn animations(&self) -> &[Box<dyn Animation>] {
+        self.group.animations()
+    }
+
+    /// The original target, published on successful cleanup.
+    #[must_use]
+    pub fn target(&self) -> Mob {
+        self.target.root
+    }
+
+    fn inventory(&self, mut members: Vec<Mob>) -> Vec<Mob> {
+        for mob in [self.source.root, self.target.root] {
+            if !members.contains(&mob) {
+                members.push(mob);
+            }
+        }
+        members
+    }
+}
+
+impl Animation for TransformMatchingParts {
+    fn state(&self) -> &AnimState {
+        self.group.state()
+    }
+    fn state_mut(&mut self) -> &mut AnimState {
+        self.group.state_mut()
+    }
+    fn all_mobjects(&self) -> Vec<Mob> {
+        self.inventory(self.group.all_mobjects())
+    }
+    fn preflight_mobjects(&self) -> Vec<Mob> {
+        self.inventory(self.group.preflight_mobjects())
+    }
+    fn validate_begin(&self, stage: &Stage) -> Result<(), AnimError> {
+        self.source.validate(stage)?;
+        self.target.validate(stage)?;
+        self.group.validate_begin(stage)
+    }
+    fn begin(&mut self, stage: &mut Stage) -> Result<(), AnimError> {
+        self.validate_begin(stage)?;
+        self.begun = false;
+        self.finished = false;
+        self.cleaned = false;
+        self.error = None;
+        self.group.begin(stage)?;
+        self.begun = true;
+        Ok(())
+    }
+    fn interpolate_submobject(&mut self, _stage: &mut Stage, _mobs: &[Mob], _alpha: f64) {}
+    fn interpolate(&mut self, stage: &mut Stage, alpha: f64) {
+        self.group.interpolate(stage, alpha);
+    }
+    fn update_mobjects(&mut self, stage: &mut Stage, dt: f64) {
+        self.group.update_mobjects(stage, dt);
+    }
+    fn finish(&mut self, stage: &mut Stage) {
+        if self.begun && !self.finished {
+            self.group.finish(stage);
+            self.finished = true;
+        }
+    }
+    fn abort(&mut self, stage: &mut Stage) {
+        self.group.abort(stage);
+        self.begun = false;
+        self.finished = false;
+    }
+    fn clean_up_from_scene(&mut self, stage: &mut Stage) {
+        if self.cleaned || self.deferred_error().is_some() {
+            return;
+        }
+        if !self.finished {
+            self.error = Some(AnimError::InvalidFramePhase(
+                "shape matching must finish before scene cleanup",
+            ));
+            return;
+        }
+        if !stage.contains(self.target.root) {
+            self.error = Some(AnimError::StaleHandle(self.target.root));
+            return;
+        }
+        self.group.clean_up_from_scene(stage);
+        stage.remove_many_from_scene(&[self.state().mobject(), self.source.root]);
+        if let Err(error) = stage.add_to_scene(self.target.root) {
+            self.error = Some(AnimError::Stage(error));
+            return;
+        }
+        self.cleaned = true;
+    }
+    fn deferred_error(&self) -> Option<AnimError> {
+        self.error.clone().or_else(|| self.group.deferred_error())
+    }
+    fn collect_resumed_updater_mobjects(&self, out: &mut Vec<Mob>) {
+        self.group.collect_resumed_updater_mobjects(out);
+    }
+    fn effect_signature(&self) -> AnimationSignature {
+        self.group.effect_signature()
+    }
+    fn freeze_interpolation(&self) -> Option<crate::pure_frame::FrozenAnimation> {
+        if !self.begun || self.finished || self.cleaned || self.deferred_error().is_some() {
+            return None;
+        }
+        self.group.freeze_interpolation()
+    }
+    fn can_replay_interpolation(&self) -> bool {
+        self.group.can_replay_interpolation()
+    }
+    fn prepare_interpolation_replay(&mut self) {
+        self.group.prepare_interpolation_replay();
+    }
+}
 
 /// The family members with points, in family order (mobject.py:435).
 fn pieces_of(stage: &Stage, mob: Mob) -> Vec<Mob> {
@@ -92,8 +356,8 @@ pub fn has_same_shape_as(stage: &Stage, a: Mob, b: Mob) -> bool {
 /// `TransformMatchingParts` (transform_matching_parts.py:21) /
 /// `TransformMatchingShapes` (its literal alias): the matched-pair
 /// animation list. `matched_pairs` claims first (in order), the
-/// same-shape product second, and the leftovers fade. The composition
-/// bead (fm-hfe) wraps the list at `run_time = 2`, `lag_ratio = 0`.
+/// same-shape product second, and the leftovers fade. Use
+/// [`TransformMatchingParts`] for grouping, timing and scene replacement.
 ///
 /// # Errors
 /// [`AnimError::StaleHandle`] / [`AnimError::Stage`].

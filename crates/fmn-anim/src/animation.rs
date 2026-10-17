@@ -396,6 +396,9 @@ pub enum AnimError {
     InvalidFramePhase(&'static str),
     /// A non-finite point-path parameter, rejected before Stage mutation.
     InvalidPath(&'static str),
+    /// A matching replacement shares source and target family members.
+    /// Such a plan could mutate the endpoint it promises to publish.
+    AliasedMatchingFamilies,
     /// A succession's time moved backward through stateful interpolation or
     /// updater-owned history. Those effects cannot be undone by restoring
     /// mobject content; use Timeline seek's checkpoint-and-replay route.
@@ -455,6 +458,10 @@ impl std::fmt::Display for AnimError {
                 )
             }
             Self::InvalidPath(message) => write!(f, "invalid animation path: {message}"),
+            Self::AliasedMatchingFamilies => write!(
+                f,
+                "shape matching requires disjoint source and target families; copy the target first"
+            ),
             Self::StatefulSuccessionRewind => write!(
                 f,
                 "Succession cannot reverse stateful or updater-driven members; \

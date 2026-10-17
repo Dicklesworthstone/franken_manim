@@ -57,8 +57,8 @@ pub mod growing;
 pub mod indication;
 pub mod ladder;
 pub mod movement;
-pub mod purity;
 pub mod pure_frame;
+pub mod purity;
 pub mod rotation;
 pub mod timeline;
 pub mod transform;
@@ -124,6 +124,7 @@ pub use transform::{
     transform_from_copy,
 };
 pub use transform_matching::{
-    has_same_shape_as, transform_matching_keys, transform_matching_parts,
+    MatchingPartsConfig, TransformMatchingParts, TransformMatchingShapes, has_same_shape_as,
+    transform_matching_keys, transform_matching_parts,
 };
 pub use update::{MaintainPositionRelativeTo, UpdateFromFunc};

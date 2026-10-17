@@ -1673,6 +1673,212 @@ fn native_final_png_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         .with_counter("native_final_png_published_frames", published_frames))
 }
 
+/// A complete shape replacement crosses the native authoring facade, runs
+/// prepared frames on workers, and leaves only the untouched original target.
+fn native_shape_matching_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    struct Shapes {
+        final_only: bool,
+    }
+    impl fmn::SceneConstruct for Shapes {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let source = stage.arena_mut().add(fmn_mobject::Mobject::new());
+            let circle = stage.arena_mut().add(Circle::new().radius(0.35));
+            let square = stage
+                .arena_mut()
+                .add(fmn_library::Square::new().side_length(0.65));
+            stage.arena_mut().attach(source, circle)?;
+            stage.arena_mut().attach(source, square)?;
+            stage.shift(circle, [-0.8, 0.55, 0.0]);
+            stage.shift(square, [-0.8, -0.55, 0.0]);
+            stage.set_fill(source, Some(RED_C), Some(1.0), None, true);
+            stage.set_stroke(source, None, Some(0.0), None, None, true);
+
+            let target = stage.arena_mut().add(fmn_mobject::Mobject::new());
+            let circle = stage.arena_mut().add(Circle::new().radius(0.35));
+            let triangle = stage.arena_mut().add(fmn_library::triangle().radius(0.4));
+            stage.arena_mut().attach(target, circle)?;
+            stage.arena_mut().attach(target, triangle)?;
+            stage.shift(circle, [0.8, 0.55, 0.0]);
+            stage.shift(triangle, [0.8, -0.55, 0.0]);
+            stage.set_fill(target, Some(BLUE_C), Some(1.0), None, true);
+            stage.set_stroke(target, None, Some(0.0), None, None, true);
+            if self.final_only {
+                stage.arena_mut().add_to_scene(target)?;
+                return Ok(());
+            }
+            stage.arena_mut().add_to_scene(source)?;
+            let matching: fmn_anim::TransformMatchingShapes =
+                fmn_anim::TransformMatchingParts::with_config(
+                    stage.arena_mut(),
+                    source,
+                    target,
+                    &[],
+                    fmn_anim::MatchingPartsConfig {
+                        run_time: 0.5,
+                        lag_ratio: 0.15,
+                        ..fmn_anim::MatchingPartsConfig::default()
+                    },
+                )?;
+            let plan: Vec<_> = matching
+                .animations()
+                .iter()
+                .map(|animation| animation.state().config.name.as_str())
+                .collect();
+            if plan != ["Transform", "FadeOutToPoint", "FadeInFromPoint"] {
+                return Err(fmn::SceneError::InvalidLifecycle(
+                    "shape replacement lost matching or unmatched-piece fades",
+                )
+                .into());
+            }
+            stage.play_prepared(vec![Box::new(matching)])?;
+            if stage.roots() != [target] {
+                return Err(fmn::SceneError::InvalidLifecycle(
+                    "shape replacement did not publish the original target exactly once",
+                )
+                .into());
+            }
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct Jobs {
+        programs: u64,
+        frames: u64,
+    }
+    impl fmn_scene::SceneSink for Jobs {
+        fn accepts_pure_segments(&self) -> bool {
+            true
+        }
+        fn capture_pure_segment(
+            &mut self,
+            segment: &fmn_anim::pure_frame::PureSegment,
+        ) -> Result<(), IntegrationError> {
+            self.programs += 1;
+            for index in 1..=segment.frame_count() {
+                let job = segment
+                    .job(index)
+                    .map_err(|error| IntegrationError::new("shape-matching", error.to_string()))?;
+                let expected = job.time().to_f64().to_bits();
+                let observed = std::thread::spawn(move || job.materialize().time().to_bits())
+                    .join()
+                    .map_err(|_| IntegrationError::new("shape-matching", "worker panicked"))?;
+                if observed != expected {
+                    return Err(IntegrationError::new(
+                        "shape-matching",
+                        "worker changed nominal time",
+                    ));
+                }
+                self.frames += 1;
+            }
+            Ok(())
+        }
+        fn capture(
+            &mut self,
+            _: fmn_scene::CaptureReason,
+            _: FramePacket,
+        ) -> Result<(), IntegrationError> {
+            Err(IntegrationError::new(
+                "shape-matching",
+                "unexpected owner capture",
+            ))
+        }
+    }
+    let mut jobs = Jobs::default();
+    fmn::run_scene(
+        &mut Shapes { final_only: false },
+        RuntimeConfig {
+            fps: 8,
+            ..RuntimeConfig::default()
+        },
+        42,
+        &mut jobs,
+    )
+    .map_err(|error| fail(format!("shape worker lifecycle: {error}")))?;
+    if jobs.programs != 1 || jobs.frames != 4 {
+        return Err(fail(
+            "shape matching did not submit its complete prepared segment",
+        ));
+    }
+    let options = |path: &str, format: fmn::RenderFormat, threads| {
+        let mut options = fmn::RenderOptions::with_format(path, format)
+            .map_err(|error| fail(format!("shape render options: {error}")))?;
+        options.config.camera.resolution = (48, 32);
+        options.config.camera.fps = 8;
+        options.config.sizes.frame_height = 4.0;
+        options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+        Ok::<_, ScenarioError>(options)
+    };
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    fmn::render_with_fs(
+        &mut Shapes { final_only: true },
+        options("/shape-expected", fmn::RenderFormat::PngSequence, 1)?,
+        fs.clone(),
+    )
+    .map_err(|error| fail(format!("independent shape target: {error}")))?;
+    let expected = fs
+        .read(std::path::Path::new("/shape-expected/frame_000000.png"))
+        .map_err(|error| fail(format!("independent shape target bytes: {error}")))?;
+    let mut baseline = None;
+    let mut checked = 0;
+    for threads in [1, 4, 16] {
+        let path = format!("/shape-frames-{threads}");
+        let report = fmn::render_with_fs(
+            &mut Shapes { final_only: false },
+            options(&path, fmn::RenderFormat::PngSequence, threads)?,
+            fs.clone(),
+        )
+        .map_err(|error| fail(format!("shape animation render: {error}")))?;
+        if report.artifact.frame_count != 4 || report.scene.time.frames() != 4 {
+            return Err(fail("shape animation changed the nominal frame count"));
+        }
+        let frames: Vec<_> = (0..4)
+            .map(|index| {
+                fs.read(&PathBuf::from(&path).join(format!("frame_{index:06}.png")))
+                    .map_err(|error| fail(format!("shape frame: {error}")))
+            })
+            .collect::<Result<_, _>>()?;
+        if frames[0] == frames[3] {
+            return Err(fail("shape replacement did not change rendered pixels"));
+        }
+        if baseline.as_ref().is_some_and(|first| first != &frames) {
+            return Err(fail("shape animation PNG bytes depend on worker count"));
+        }
+        if baseline.is_none() {
+            baseline = Some(frames);
+        }
+        let path = format!("/shape-final-{threads}.png");
+        fmn::render_with_fs(
+            &mut Shapes { final_only: false },
+            options(&path, fmn::RenderFormat::Png, threads)?,
+            fs.clone(),
+        )
+        .map_err(|error| fail(format!("shape replacement final state: {error}")))?;
+        if fs
+            .read(std::path::Path::new(&path))
+            .map_err(|error| fail(format!("shape final PNG: {error}")))?
+            != expected
+        {
+            return Err(fail(
+                "shape replacement left altered target geometry or temporary pieces",
+            ));
+        }
+        checked += 1;
+    }
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_shape_matching")
+            .field("programs", jobs.programs)
+            .field("jobs", jobs.frames)
+            .field("thread_counts", checked),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("shape-matching-final.png", expected)
+        .with_counter("native_shape_matching_programs", jobs.programs)
+        .with_counter("native_shape_matching_jobs", jobs.frames)
+        .with_counter("native_shape_matching_thread_counts", checked))
+}
+
 /// The facade's MP4 request with no ffmpeg capability is a named capability
 /// refusal (D2) that runs no scene code and publishes nothing; a native
 /// format from the same options still renders.
@@ -7878,6 +8084,26 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.native_shape_matching.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_shape_matching_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("native_shape_matching_programs", 1),
+            counter_eq("native_shape_matching_jobs", 4),
+            counter_eq("native_shape_matching_thread_counts", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_shape_matching",
+            vec![
+                FieldPred::u64_eq("programs", 1),
+                FieldPred::u64_eq("jobs", 4),
+                FieldPred::u64_eq("thread_counts", 3),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.coordinate_placement.v1",
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
@@ -9943,6 +10169,16 @@ fn native_final_png_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.native_final_png.v1")
         .expect("native final PNG scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn native_shape_matching_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.native_shape_matching.v1")
+        .expect("native shape matching scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }
