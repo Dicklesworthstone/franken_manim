@@ -1,4 +1,5 @@
 //! Projection guides and checked graph queries in a single affine chart.
+mod differential;
 use super::{
     CoordinateFrame, CoordinateFrameError, CoordinateSystem, CoordsError, LiveCoordinateSystem,
     Vec3, add, dot, max_abs, scale, sub,

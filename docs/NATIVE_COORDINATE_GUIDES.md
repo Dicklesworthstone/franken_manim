@@ -66,3 +66,51 @@ Tests: `fmn-library/tests/live_guides.rs` uses affine and Euclidean geometric
 oracles, extreme unit scales, frozen snapshots and admission negatives.
 `fmn/tests/live_guides.rs` compares production PNG output with independently
 constructed sheared guides at 1, 4, and 16 render threads.
+
+
+## Tangents and secant slope diagrams
+
+`get_tangent_line(x, &function, length)` constructs a line centered on
+`c2p(x, function(x))`, with length measured in world units. Its direction
+is the finite difference between numeric x and x + EPSILON (the existing
+coordinate-system default, 1e-8). Use
+`tangent_line_styled(x, &function, length, dx, style)` to choose the probe
+increment and line style. Live methods additionally take `&Stage` first.
+
+Unlike constructing a line from an XY angle, this line retains the full
+three-dimensional direction after a chart rotates out of the screen plane.
+The difference is formed in numeric coordinates before applying the linear
+basis, avoiding cancellation from subtracting nearby points at a large
+world-space origin. This does not eliminate cancellation inside the authored
+function itself: a finite-difference estimate is not an exact symbolic or
+automatic derivative. Choose a suitable dx for the function's numeric scale.
+
+`tangent_direction(x, &function, dx)` returns the unit world-space direction.
+Negative dx reverses that direction. `angle_of_tangent`,
+`angle_of_tangent_dx`, and `slope_of_tangent` describe the **world XY
+projection**, consistent with the detached Axes angle/slope convention, not
+the derivative in numeric chart units. An absent XY projection or non-finite
+projected slope is refused instead of manufacturing zero or infinity.
+
+`get_secant_slope_group(x, &function, dx, secant_length)` returns three line
+children in the fixed order **numeric run, numeric rise, secant**. Their
+colors are YELLOW, GREEN, and RED, with stroke width 2. The run joins
+`(x, f(x))` to `(x + dx, f(x))`; the rise joins that corner to
+`(x + dx, f(x + dx))`. Both legs use the current chart basis, so a sheared
+chart deliberately produces a non-right triangle in world space.
+`None` gives the exact chord between graph points. `Some(length)` extends
+the secant symmetrically about that chord's midpoint to a world-space length.
+
+Successful differential queries evaluate the function exactly twice. Invalid
+x/dx, a probe that cannot advance x, invalid lengths/styles, or insufficient
+point budgets are refused first. A non-finite first callback result stops
+before the second callback; no partial group is returned. Tangents require
+three record points, and a complete secant group requires nine. Existing
+frame snapshots remain immutable and all helpers can be rebuilt from the
+ordinary native updater path during a Transform.
+
+Tests: `fmn-library/tests/live_differential.rs` covers affine analytic
+geometry, callback/refusal boundaries, translated probes, out-of-plane
+charts, and real Transform samples. `fmn/tests/live_differential.rs` compares
+production PNGs with a separately authored 3-4-5 geometric construction at
+1, 4, and 16 workers.
