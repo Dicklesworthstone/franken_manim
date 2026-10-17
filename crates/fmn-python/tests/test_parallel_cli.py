@@ -22,6 +22,8 @@ from fmn_python.paired_output import validate_paired_mode
 from fmn_python.subdivision_rendering import validate_subdivided_mode
 from fmn_python.checkpoint_cli import CHECKPOINT_VALUES, take_checkpoint_options
 from fmn_python.parallel_cli_options import PARALLEL_VALUES, take_parallel_options
+from fmn_python.video_cli import VIDEO_VALUE_FLAGS, take_video_options
+from fmn_python.console_rendering import _output_overrides
 
 
 class ParallelOptionsTests(unittest.TestCase):
@@ -107,7 +109,7 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
                                             _portal_prepare_recording_scene=lambda: None,
                                             _CameraCapture=types.SimpleNamespace(prepare_png=lambda: None))
         values = {"--threads", "--format", "--fps", "--resolution", "--video_dir", "--vcodec",
-                  "--pix_fmt", "--ffmpeg_bin", "-n"} | PARALLEL_VALUES | CHECKPOINT_VALUES
+                  "--pix_fmt", "--ffmpeg_bin", "-n"} | PARALLEL_VALUES | CHECKPOINT_VALUES | VIDEO_VALUE_FLAGS
         self.g = {
             "__name__": "fmn_python._console_contract_test", "__package__": "fmn_python",
             "Any": object, "Path": Path, "os": os, "sys": sys, "contextlib": contextlib,
@@ -116,14 +118,13 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
             "_CONTROL_FLAGS": {"--version", "--list-scenes", "--construct-only", "--audit-parity"},
             "_SELECTION_FLAGS": {"--robot", "--write_all", "-a", "--keep-going"},
             "_MAX_SELECTED_SCENES": 1024, "take_parallel_options": take_parallel_options,
-            "take_video_options": lambda args, flags: (args, {}),
+            "take_video_options": take_video_options,
             "take_last_frame_option": lambda args, flags: switch(args, "--save-last-frame"),
             "take_subdivision_option": lambda args, flags: switch(args, "--subdivide"),
             "take_checkpoint_options": take_checkpoint_options,
             "take_playback_options": lambda args: (args, None, False),
             "select_still_format": lambda options, args, still: options,
-            "_output_overrides": lambda options: {key: value for key, value in options.items()
-                                                  if key in {"vcodec", "pix_fmt", "ffmpeg_bin"}},
+            "_output_overrides": _output_overrides,
             "_positive_integer": lambda value, name: value,
             "_name_key": lambda name: name.casefold(),
             "validate_batch_mode": validate_batch_mode,
@@ -170,14 +171,20 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
 
     def test_write_all_selects_parallel_and_preserves_native_output_options(self):
         code = self.run_cli("--write_all", "--workers", "2", "--robot", "--keep-going",
-                            "--format", "mp4", "--vcodec", "libx264", "--pix_fmt", "rgba")
+                            "--format", "mp4", "--vcodec", "libx264", "--pix_fmt", "rgba",
+                            "--ffmpeg-timeout=37", "--ffmpeg-max-log-bytes", "131072",
+                            "--ffmpeg-max-artifact-bytes=1048576", "--ffmpeg-max-input-bytes=2097152")
         self.assertEqual(code, 0)
         mode, args, options = self.calls[0]
         self.assertEqual(mode, "parallel")
         self.assertEqual(options["scene_names"], ["First", "Second"])
         self.assertEqual(options["workers"], 2)
         self.assertEqual(options["threads"], 1)
-        self.assertEqual(options["_output_options"], {"vcodec": "libx264", "pix_fmt": "rgba"})
+        self.assertEqual(options["_output_options"], {
+            "vcodec": "libx264", "pix_fmt": "rgba", "ffmpeg_timeout": 37,
+            "ffmpeg_max_log_bytes": 131072, "ffmpeg_max_artifact_bytes": 1048576,
+            "ffmpeg_max_input_bytes": 2097152,
+        })
         self.assertTrue(options["continue_on_error"])
         self.assertNotIn("--workers", self.parsed[0])
         self.assertEqual(args, (self.source, self.root / "out"))

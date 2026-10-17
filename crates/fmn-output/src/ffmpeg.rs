@@ -52,7 +52,7 @@ use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use fmn_hash::{Digest, Sha256};
 use fmn_platform::process::{
@@ -816,6 +816,89 @@ impl Default for JobLimits {
             max_artifact_bytes: 8 << 30,
             keep_workdir: false,
         }
+    }
+}
+
+/// Finite allowance for an offline encoder, including scene construction.
+pub const DEFAULT_RENDER_FFMPEG_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Resource bounds shared by every offline render front door.
+/// Tool probes and the low-level boundary keep their separate short deadlines.
+#[must_use]
+pub fn default_render_ffmpeg_limits() -> JobLimits {
+    JobLimits {
+        timeout: DEFAULT_RENDER_FFMPEG_TIMEOUT,
+        ..JobLimits::default()
+    }
+}
+
+/// Validate offline resource policy without probing a tool or reserving output.
+/// The artifact ceiling is intersected with the independent input ceiling.
+///
+/// # Errors
+/// Refuses zero bounds and deadlines outside the host monotonic clock range.
+pub fn admit_render_ffmpeg_limits(
+    limits: &JobLimits,
+    max_input_bytes: u64,
+) -> Result<JobLimits, &'static str> {
+    if limits.timeout.is_zero() {
+        return Err("ffmpeg timeout must be nonzero");
+    }
+    if Instant::now().checked_add(limits.timeout).is_none() {
+        return Err("ffmpeg timeout exceeds the monotonic clock range");
+    }
+    if limits.max_log_bytes == 0 {
+        return Err("ffmpeg max_log_bytes must be nonzero");
+    }
+    if limits.max_artifact_bytes == 0 || max_input_bytes == 0 {
+        return Err("ffmpeg artifact and input byte limits must be nonzero");
+    }
+    let mut admitted = limits.clone();
+    admitted.max_artifact_bytes = admitted.max_artifact_bytes.min(max_input_bytes);
+    Ok(admitted)
+}
+
+/// Effective policy attached to a published render receipt.
+/// Audio decoding can impose additional format-specific ceilings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FfmpegLimitsReport {
+    /// Wall-clock allowance per encode, mux, or media-decode invocation.
+    pub timeout: Duration,
+    /// Captured stdout/stderr ceiling, independently for each stream.
+    pub max_log_bytes: u64,
+    /// Artifact ceiling, intersected with raw-input budgets for video output.
+    pub max_artifact_bytes: u64,
+    /// Independent raw-frame ceiling, or source-byte ceiling for audio-only decode.
+    pub max_input_bytes: u64,
+    /// Whether work directories are retained for diagnosis.
+    pub keep_workdir: bool,
+}
+
+impl FfmpegLimitsReport {
+    /// Record an admitted policy and the independently enforced input ceiling.
+    #[must_use]
+    pub fn new(limits: &JobLimits, max_input_bytes: u64) -> Self {
+        Self {
+            timeout: limits.timeout,
+            max_log_bytes: limits.max_log_bytes,
+            max_artifact_bytes: limits.max_artifact_bytes,
+            max_input_bytes,
+            keep_workdir: limits.keep_workdir,
+        }
+    }
+
+    /// Stable JSON with exact seconds/nanoseconds, without float rounding.
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        format!(
+            "{{\"timeout_seconds\":{},\"timeout_nanoseconds\":{},\"max_log_bytes\":{},\"max_artifact_bytes\":{},\"max_input_bytes\":{},\"keep_workdir\":{}}}",
+            self.timeout.as_secs(),
+            self.timeout.subsec_nanos(),
+            self.max_log_bytes,
+            self.max_artifact_bytes,
+            self.max_input_bytes,
+            self.keep_workdir,
+        )
     }
 }
 

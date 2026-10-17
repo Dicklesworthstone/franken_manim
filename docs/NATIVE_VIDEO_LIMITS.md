@@ -78,13 +78,52 @@ permits a longer stream without retaining its frames in memory.
 The `--robot` render record contains `ffmpeg_limits` with the effective policy.
 The same stable policy enters the video manifest's C9 capability record. Native
 artifact manifests retain their existing contract. Flags travel with native
-scene, compiled FMTL, batch, and subdivision video requests. The Python portal's
-limit adapter remains separate.
+scene, compiled FMTL, batch, and subdivision video requests.
 
-The shared Rust functions `default_render_ffmpeg_limits()` and
-`admit_render_ffmpeg_limits()` allow other front doors to use the same defaults,
-validation, and cap intersection. The existing `RenderOptions` method delegates
-to that admission function.
+## Python portal
+
+`fmn-python` uses the same finite 24-hour default and shared native admission
+function. It accepts the same four flag spellings for MP4/MOV, including
+transparent MOV, and for compressed sound decoding during WAV output:
+
+```sh
+fmn-python lecture.py Lecture --format mp4 --ffmpeg-timeout 21600 \
+  --ffmpeg-max-artifact-bytes 17179869184 \
+  --ffmpeg-max-input-bytes 274877906944 --video_dir lecture.mp4
+```
+
+The corresponding optional attributes on `scene.file_writer` are
+`ffmpeg_timeout` (whole seconds), `ffmpeg_max_log_bytes`,
+`ffmpeg_max_artifact_bytes`, and `ffmpeg_max_input_bytes`. Set them before
+starting `render_scene`, a `render_session`, or a live recording. Missing or
+`None` attributes select defaults. Positive integers are required; booleans,
+fractional seconds, zero, and deadlines beyond the monotonic clock range fail
+before tool discovery or output reservation. Authored descriptor exceptions
+propagate, and configuration getters cannot steal another output generation.
+
+The portal retains its existing maximum of 1,000,000 frames and derives its
+default raw-input ceiling from that count and the actual negotiated frame
+layout. An explicit input cap intersects that bound; it does not widen the
+frame-count guard. This preserves long-form and high-resolution input capacity.
+The artifact cap defaults to 8 GiB and is intersected with the admitted input
+ceiling. WAV/compressed-audio decoding additionally retains its native 64 MiB
+source and decoded-sample budgets. For WAV output, compressed-source bytes
+and decoded PCM artifact bytes remain independent: a small compressed source
+is allowed to expand up to the decoded-sample and artifact ceilings.
+
+One admitted policy reaches the live encoder, lazy compressed sound decodes,
+and the final stream-copy audio mux. The same options travel through named
+batches, `--write_all`, subdivision, paired video/PNG export, and checkpoint
+receipts. Every successful video/WAV `RenderResult` exposes `ffmpeg_limits`;
+`as_dict()` and robot output include the same exact policy. During a generation,
+`scene._render_ffmpeg_limits` also makes the admitted bounds available for
+diagnosing a timeout. PNG, GIF, Y4M, SVG, and FMTL requests reject explicit
+ffmpeg resource flags. Tool probes keep their separate short deadlines.
+
+The shared Rust functions `fmn_output::default_render_ffmpeg_limits()` and
+`fmn_output::admit_render_ffmpeg_limits()` let every front door use the same
+defaults, validation, and cap intersection. Existing facade paths and the
+`RenderOptions` method remain available and delegate to the same policy.
 
 The process/negotiation rules are specified in [FFMPEG_PROTOCOL.md](FFMPEG_PROTOCOL.md).
 
@@ -95,6 +134,8 @@ cargo test --locked -p fmn --lib rendering::ffmpeg_limits
 cargo test --locked -p fmn --test native_video_limits
 cargo test --locked -p fmn-cli --lib ffmpeg_limit
 cargo test --locked -p fmn-conformance --test e2e_scenarios cli_ffmpeg_limit_admission_scenario_passes
+python crates/fmn-python/tests/video_cli_unit.py
+FMN_REQUIRE_FFMPEG=1 cargo test --locked -p fmn-python --lib portal_video_quality -- --test-threads=1
 ```
 
 The real encode/mux checks require a supported host ffmpeg and honor
@@ -103,3 +144,8 @@ The CLI process-boundary regression records the actual streaming `ProcessSpec`
 and stdin budget through a scripted process capability, then verifies that its
 intentional start failure publishes neither video nor a sidecar. It does not
 claim to measure a real encoder's elapsed timeout.
+The Python extension suite exercises the real encoder: a one-second allowance
+fails during a delayed scene with no publication, and the same scene succeeds
+with a sixty-second allowance. It also checks cumulative-input and artifact
+refusals, compressed-audio expansion caps, and resource receipts across console
+output owners.

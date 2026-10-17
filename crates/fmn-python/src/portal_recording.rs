@@ -230,6 +230,7 @@ fn begin_recording(
         _ => None,
     };
     let mut audio = portal_audio::PortalAudio::from_scene(scene, &format, video.as_ref())?;
+    let ffmpeg_limits = audio.ffmpeg_limits.clone();
     // Authored descriptors above may have run arbitrary Python. Recheck before
     // opening output; never steal a recursively acquired generation.
     check_available(scene)?;
@@ -287,6 +288,7 @@ fn begin_recording(
         let mut owner = scene.borrow_mut();
         owner.render_invocations.clear();
         owner.render_audio_inputs.clear();
+        owner.render_ffmpeg_limits = ffmpeg_limits;
     }
     *output = Some(session);
     Ok(start_frame)

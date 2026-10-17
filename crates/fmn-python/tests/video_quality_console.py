@@ -29,6 +29,18 @@ def invocations(value):
             yield from invocations(child)
 
 
+def resource_policies(value):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key == "ffmpeg_limits":
+                yield child
+            else:
+                yield from resource_policies(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from resource_policies(child)
+
+
 def assert_quality(report, encodes, soundtrack_muxes, crf=16):
     """Each published clip is exactly one libx264 encode carrying the console
     quality flags. A subdivided MP4/MOV clip also muxes its scene-window
@@ -112,6 +124,12 @@ with tempfile.TemporaryDirectory(prefix="fmn-video-quality-console-") as directo
         ("--format", "wav", "--tune=animation"),
         ("--format", "mov", "-t", "--crf=16"),
         ("--format", "mp4", "--crf"),
+        ("--format", "mp4", "--ffmpeg-timeout=0"),
+        ("--format", "mp4", "--ffmpeg-timeout=1.5"),
+        ("--format", "mp4", "--ffmpeg-timeout=1", "--ffmpeg-timeout=2"),
+        ("--format", "mp4", "--ffmpeg-max-input-bytes=0"),
+        ("--format", "mp4", "--ffmpeg-max-artifact-bytes=18446744073709551616"),
+        ("--format", "png", "--ffmpeg-max-log-bytes=1048576"),
     ]
     for args in failures:
         code, report = console("First", "--video_dir", str(target), *args)
@@ -154,9 +172,17 @@ with tempfile.TemporaryDirectory(prefix="fmn-video-quality-console-") as directo
             destination = root / name
             code, report = console(*selectors, "--video_dir", str(destination),
                                    "--ffmpeg_bin", ffmpeg,
+                                   "--ffmpeg-timeout=37", "--ffmpeg-max-log-bytes", "131072",
+                                   "--ffmpeg-max-artifact-bytes=1048576", "--ffmpeg-max-input-bytes=2097152",
                                    "--crf=16", "--preset", "slow", "--tune=animation", "--audio-bitrate=192000")
             assert code == 0, report
             assert_quality(report, encodes, muxes)
+            policies = list(resource_policies(report))
+            assert len(policies) == encodes, report
+            for policy in policies:
+                assert policy == dict(timeout_seconds=37, timeout_nanoseconds=0,
+                                      max_log_bytes=131072, max_artifact_bytes=1048576,
+                                      max_input_bytes=2097152, keep_workdir=False), report
             assert constructed.read_text().splitlines() == expected_constructors, report
             if "--save-last-frame" in selectors:
                 still = (destination.with_name(destination.name + ".png") if "--subdivide" in selectors

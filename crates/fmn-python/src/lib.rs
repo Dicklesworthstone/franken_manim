@@ -559,16 +559,22 @@ impl PortalFrameSession {
         } else {
             PORTAL_MAX_RENDER_FRAMES
         };
-        let max_stream_bytes = frame_bytes
+        let mut max_stream_bytes = frame_bytes
             .checked_mul(max_frames)
             .ok_or_else(|| PyOverflowError::new_err("render stream budget exceeds u64"))?;
+        if let Some(video) = &video {
+            max_stream_bytes = max_stream_bytes.min(video.max_input_bytes);
+        }
         let max_resident_bytes = frame_bytes
             .checked_mul(3)
             .and_then(|bytes| bytes.checked_add(4 * 1024 * 1024))
             .ok_or_else(|| PyOverflowError::new_err("render resident budget exceeds u64"))?;
-        let max_artifact_bytes = max_stream_bytes
+        let mut max_artifact_bytes = max_stream_bytes
             .checked_mul(2)
             .ok_or_else(|| PyOverflowError::new_err("render artifact budget exceeds u64"))?;
+        if let Some(video) = &video {
+            max_artifact_bytes = max_artifact_bytes.min(video.job_limits.max_artifact_bytes);
+        }
         let limits = SinkLimits::new(
             max_frames,
             max_resident_bytes,
@@ -702,7 +708,7 @@ impl PortalFrameSession {
                         audio: None,
                         destination,
                         workdir_root,
-                        job_limits: fmn_output::JobLimits::default(),
+                        job_limits: video.job_limits,
                         first_sequence: 0,
                         limits,
                         profile: None,
@@ -1039,6 +1045,7 @@ struct PyScene {
     render: Arc<Mutex<Option<PortalRenderSession>>>,
     render_invocations: Vec<fmn_output::InvocationReport>,
     render_audio_inputs: Vec<portal_audio::PortalAudioInput>,
+    render_ffmpeg_limits: Option<fmn_output::FfmpegLimitsReport>,
     /// The last render's frame routes (fm-sq8.11).
     render_routes: PortalRoutes,
 }
@@ -1704,6 +1711,7 @@ pub(crate) fn install_pristine_arena(
         owner.engine = Rc::clone(&replacement);
         owner.render_invocations.clear();
         owner.render_audio_inputs.clear();
+        owner.render_ffmpeg_limits = None;
     }
     if let (Some((proxy, _)), Some((old_mob, new_mob))) = (frame, carried) {
         {
@@ -8276,6 +8284,7 @@ fn begin_portal_render(slf: &Bound<'_, PyScene>, request: PortalRenderRequest) -
         _ => None,
     };
     let audio = portal_audio::PortalAudio::from_scene(slf, &format, video.as_ref())?;
+    let ffmpeg_limits = audio.ffmpeg_limits.clone();
     portal_video::check_scene_ownership(slf)?;
     let (session, runtime_config) = PortalRenderSession::new(
         PathBuf::from(destination),
@@ -8314,7 +8323,11 @@ fn begin_portal_render(slf: &Bound<'_, PyScene>, request: PortalRenderRequest) -
         session.abort();
         return Err(error);
     }
-    slf.borrow_mut().render_routes = PortalRoutes::default();
+    {
+        let mut owner = slf.borrow_mut();
+        owner.render_routes = PortalRoutes::default();
+        owner.render_ffmpeg_limits = ffmpeg_limits;
+    }
     *render = Some(session);
     Ok(())
 }
@@ -8334,6 +8347,7 @@ impl PyScene {
             render: Arc::new(Mutex::new(None)),
             render_invocations: Vec::new(),
             render_audio_inputs: Vec::new(),
+            render_ffmpeg_limits: None,
             render_routes: PortalRoutes::default(),
         })
     }
@@ -8584,6 +8598,23 @@ impl PyScene {
     #[getter]
     fn _render_audio_inputs(slf: &Bound<'_, Self>) -> PyResult<Py<PyList>> {
         portal_audio::input_facts(slf)
+    }
+
+    /// Admitted resource policy for the current or most recent output generation.
+    #[getter]
+    fn _render_ffmpeg_limits(slf: &Bound<'_, Self>) -> PyResult<Option<Py<PyDict>>> {
+        let owner = slf.borrow();
+        let Some(limits) = &owner.render_ffmpeg_limits else {
+            return Ok(None);
+        };
+        let fact = PyDict::new(slf.py());
+        fact.set_item("timeout_seconds", limits.timeout.as_secs())?;
+        fact.set_item("timeout_nanoseconds", limits.timeout.subsec_nanos())?;
+        fact.set_item("max_log_bytes", limits.max_log_bytes)?;
+        fact.set_item("max_artifact_bytes", limits.max_artifact_bytes)?;
+        fact.set_item("max_input_bytes", limits.max_input_bytes)?;
+        fact.set_item("keep_workdir", limits.keep_workdir)?;
+        Ok(Some(fact.unbind()))
     }
 
     #[getter]

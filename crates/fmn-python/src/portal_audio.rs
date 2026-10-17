@@ -21,6 +21,7 @@ pub(crate) struct PortalAudio {
     scene_window: bool,
     minimum_window_frames: i64,
     pub(crate) inputs: Vec<PortalAudioInput>,
+    pub(crate) ffmpeg_limits: Option<fmn_output::FfmpegLimitsReport>,
 }
 
 impl PortalAudio {
@@ -29,17 +30,22 @@ impl PortalAudio {
         format: &PortalOutputFormat,
         video: Option<&portal_video::PortalVideoConfig>,
     ) -> PyResult<Box<Self>> {
-        let executable = if let Some(video) = video {
-            Some(video.ffmpeg_bin.clone())
+        let (executable, policy) = if let Some(video) = video {
+            (
+                Some(video.ffmpeg_bin.clone()),
+                Some((video.job_limits.clone(), video.max_input_bytes)),
+            )
         } else if matches!(format, PortalOutputFormat::Wav) {
-            Some(
-                scene
-                    .getattr("file_writer")?
-                    .getattr("ffmpeg_bin")?
-                    .extract::<String>()?,
+            let writer = scene.getattr("file_writer")?;
+            (
+                Some(writer.getattr("ffmpeg_bin")?.extract::<String>()?),
+                Some(portal_video::limits_from_writer(
+                    &writer,
+                    AudioDecodeLimits::default().max_input_bytes,
+                )?),
             )
         } else {
-            None
+            (None, None)
         };
         if executable
             .as_ref()
@@ -49,15 +55,28 @@ impl PortalAudio {
                 "file_writer.ffmpeg_bin must be nonempty and contain no NUL",
             ));
         }
-        let decoder =
-            AudioDecoder::new(AudioDecodeLimits::default(), executable.map(PathBuf::from))
+        let mut decode_limits = AudioDecodeLimits::default();
+        if let Some((_, max_input_bytes)) = &policy {
+            decode_limits.max_input_bytes = decode_limits.max_input_bytes.min(*max_input_bytes);
+        }
+        let mut decoder = AudioDecoder::new(decode_limits, executable.map(PathBuf::from))
+            .map_err(decode_error)?;
+        let ffmpeg_limits = policy.map(|(limits, max_input_bytes)| {
+            let report = fmn_output::FfmpegLimitsReport::new(&limits, max_input_bytes);
+            (limits, report)
+        });
+        if let Some((limits, _)) = &ffmpeg_limits {
+            decoder = decoder
+                .with_job_limits(limits.clone())
                 .map_err(decode_error)?;
+        }
         Ok(Box::new(Self {
             decoder,
             first_request: 0,
             scene_window: false,
             minimum_window_frames: i64::from(video.is_some()),
             inputs: Vec::new(),
+            ffmpeg_limits: ffmpeg_limits.map(|(_, report)| report),
         }))
     }
 
@@ -124,11 +143,17 @@ impl PortalAudio {
             .with_timeline_frames(u64::try_from(timeline_frames).map_err(native_error)?);
         self.inputs.clear();
         let fs = fmn_platform::fs::StdFs;
+        let max_input_bytes = self
+            .ffmpeg_limits
+            .as_ref()
+            .map_or(64 * 1024 * 1024, |limits| {
+                limits.max_input_bytes.min(64 * 1024 * 1024) as usize
+            });
         for request in requests {
             let bytes = fmn_platform::fs::FileSystem::read_bounded(
                 &fs,
                 &request.sound_file,
-                64 * 1024 * 1024,
+                max_input_bytes,
             )
             .map_err(|error| {
                 PyOSError::new_err(format!(

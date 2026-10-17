@@ -43,6 +43,18 @@ class ParallelOutputReceiptTests(unittest.TestCase):
         self.assertFalse(result.primary.completed)
         self.assertEqual(result.primary.segments, self.collection.segments)
 
+    def test_ffmpeg_policy_survives_worker_receipt_transport(self):
+        destination = self.path / "segment-000002.mp4"
+        policy = dict(timeout_seconds=37, timeout_nanoseconds=0, max_log_bytes=131072,
+                      max_artifact_bytes=1048576, max_input_bytes=2097152, keep_workdir=False)
+        render = RenderResult(destination, "mp4", (64, 48), 10, 1, "test-receipt",
+                              100, "a" * 64, 2, None, 0, ffmpeg_limits=policy)
+        collection = SubdividedRenderResult(self.path, (RenderSegment(2, "play", 3, 5, render),), True)
+        restored = restore_output(collection.as_dict(), destination=self.path, format="mp4",
+                                  subdivide=True, save_last_frame=False, max_segments=10)
+        self.assertEqual(restored.segments[0].render.ffmpeg_limits, policy)
+        self.assertEqual(restored, collection)
+
     def test_wrong_paths_and_certification_are_never_admitted(self):
         for key, value in (("destination", str(self.root / "foreign.gif")), ("format", "mp4"),
                            ("certified", True), ("schema", "fmn.paired-render"), ("manifest", {})):

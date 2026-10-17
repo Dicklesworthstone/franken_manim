@@ -47,11 +47,15 @@ frames, zero dimensions or frame rate.
 Offline native video requests use the finite render policy described in
 [native video limits](NATIVE_VIDEO_LIMITS.md): a 24-hour default watchdog,
 explicit timeout/log/artifact/input budgets, and the same admission function
-for the Rust API and standalone CLI. The streaming encoder's wall clock
+for the Rust API, standalone CLI, and Python portal. The streaming encoder's wall clock
 includes scene construction and frame rendering. CLI overrides are
 `--ffmpeg-timeout`, `--ffmpeg-max-log-bytes`, `--ffmpeg-max-artifact-bytes`, and
 `--ffmpeg-max-input-bytes`. The resolved limits enter the video receipt and CLI
-provenance; they do not alter tool-probe deadlines or the low-level boundary's
+provenance. The Python console accepts the same flags, forwards one policy to
+encode, mux, and compressed-audio decode, and records it as `ffmpeg_limits` in
+render receipts. Python writers expose the matching `ffmpeg_timeout`,
+`ffmpeg_max_log_bytes`, `ffmpeg_max_artifact_bytes`, and `ffmpeg_max_input_bytes`
+attributes. These controls do not alter tool-probe deadlines or the low-level boundary's
 short-job defaults. [Video quality](VIDEO_ENCODING_QUALITY.md) documents the
 separate negotiated CRF/preset/tune/bitrate controls.
 

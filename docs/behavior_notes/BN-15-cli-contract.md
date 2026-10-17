@@ -111,6 +111,16 @@ the raw-input allowance. Both the robot render receipt and C9 provenance record
 the admitted policy. Tool probes keep their own short deadlines. See
 [native video limits](../NATIVE_VIDEO_LIMITS.md) for defaults and usage.
 
+The Python `fmn-python` console accepts the same four flags in separate-value
+or `--flag=value` form. They apply to MP4/MOV (including transparent MOV) and
+compressed-audio decode for WAV output; native image/vector formats reject
+them. The portal shares the native 24-hour watchdog and admission function,
+keeps its existing frame-count-derived raw-input allowance, and forwards the
+admitted policy through video encode, audio decode, and stream-copy mux. Numeric
+and format syntax failures precede source import; native range/ownership
+checks precede tool discovery and output reservation. Batch, subdivision,
+paired output, live recording, and robot receipts all carry the policy.
+
 ## Python portal video-quality extension
 
 `fmn-python` additionally accepts `--crf`, `--preset`, `--tune`, and

@@ -235,7 +235,9 @@ class ResumableSubdivisionSession(SubdividedRecordingSession):
             config = self._configuration
             writer = self.scene.file_writer
             names = ("vcodec", "pix_fmt", "ffmpeg_bin", "transparent", "video_crf",
-                     "video_preset", "video_tune", "video_bitrate", "audio_bitrate")
+                     "video_preset", "video_tune", "video_bitrate", "audio_bitrate",
+                     "ffmpeg_timeout", "ffmpeg_max_log_bytes", "ffmpeg_max_artifact_bytes",
+                     "ffmpeg_max_input_bytes")
             writer_options = {name: getattr(writer, name, None) for name in names}
             if isinstance(writer_options["ffmpeg_bin"], os.PathLike):
                 writer_options["ffmpeg_bin"] = os.fspath(writer_options["ffmpeg_bin"])
