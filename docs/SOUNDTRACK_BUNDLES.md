@@ -50,6 +50,74 @@ The camera equivalents are `export_camera_bundle_with_soundtrack_bytes` and
 factory and CameraConfig as the established camera export API. The factory
 must not run playback before returning its program and rig.
 
+## Python-authored scenes
+
+The Python API can export the same portable sound-bearing format with explicit
+`audio=True`. A matching native wheel must expose both soundtrack acquisition
+and finalization before the API constructs a Scene class. Planar and camera
+recordings use the same native recorder and mixer as their respective paths.
+
+```python
+from manimlib import Scene, Square, RIGHT
+from fmn_python import export_bundle
+
+class NarratedScene(Scene):
+    def construct(self):
+        square = Square(fill_opacity=1)
+        self.add(square)
+        self.add_sound("narration.wav", gain=-3.0)
+        self.play(square.animate.shift(RIGHT), run_time=2)
+
+receipt = export_bundle(NarratedScene, "narrated.fmtl", audio=True,
+                        camera=True, resolution=(1280, 720), fps=30)
+print(receipt.as_dict())
+```
+
+`narration.wav` must exist, and the destination must not. Relative cue paths
+are anchored at the native `add_sound` call. Playback needs neither Python nor
+these original audio assets. Open the artifact in the local browser player or
+use the native `render_bundle` video API described below.
+
+Defaults are `audio_sample_rate=48000`, `audio_channels=2`, `audio_threads=1`,
+and `max_audio_bytes=64*1024*1024`. Rates 1..384000, mono/stereo, 1..64 workers,
+and 8 bytes..256 MiB budgets are accepted; incompatible options are rejected
+before Scene class construction. Nondefault audio settings require `audio=True`.
+Browser audio devices may support fewer sample rates than the native export.
+
+The byte setting independently caps cumulative unique source bytes, cached
+Float32 PCM, prepared Float64 cue samples, and final Float32 PCM. One transient
+channel-mapping buffer has the same cap; these are separate bounded pools, not
+a total process-RSS ceiling. Each new source's decode receives the *remaining*
+decoded-sample allowance before allocating. Repeated paths are read/decoded
+once, but each cue's prepared buffer is charged separately. Exports admit at
+most 4096 cues. The complete pictures-plus-sound file still obeys
+`max_output_bytes`, and nothing is published until capture, mix and validation
+succeed. A competing destination writer is never overwritten.
+
+Native supported WAV inputs require no ffmpeg process. Compressed audio is
+an explicit capability refusal in this export API, even when ffmpeg is installed.
+Scene setup/construct/tear-down run once; audio capture does not rerun Python
+callbacks. Offsets, gains, ducking and resampling are performed by the existing
+native mixer. Short cues pad through the picture grid; long tails are retained.
+Static scenes get one terminal still without advancing authored time.
+`show()` captures do not advance Scene time and are refused for audible exports
+rather than silently moving later cues. Skip/range/presenter modes remain
+unsupported. Use ordinary play/wait playback for audible bundles.
+
+No-cue exports retain the exact minor-0/minor-1 bytes and existing receipt keys,
+even with `audio=True`. A sound-bearing receipt adds `fmtl_minor=2` and a
+`soundtrack` object containing sample rate, channels and sample-frame count;
+`receipt.soundtrack` exposes the corresponding immutable attributes. The
+snapshot is not certification of arbitrary Python source effects. CLI and batch
+soundtrack-option wiring remain separate from this Python single-scene API.
+
+The native acceptance fixture `fmn-python/tests/soundtrack_bundle_export.py`
+compares analytic PCM, direct WAV output, planar/camera replay at 1/4/16 workers,
+source-independent replay, exact budgets and failure/publication ownership.
+Run it through `cargo test -p fmn-python --lib portal_studio::bundle::tests`.
+Host-protocol tests use explicit native-boundary spies and are separate from
+that real-engine evidence.
+
 ## Timing, mixing and bounds
 
 The original Scene sound requests are fed to PreparedSceneSoundtrack and

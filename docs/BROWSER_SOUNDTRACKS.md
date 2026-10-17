@@ -29,6 +29,11 @@ The example refuses an existing destination. Its 1.75-second audio tail extends
 past the 1.5-second picture grid; an audio host should hold the final picture
 instead of dropping the tail. No source-media dependency is stored in the file.
 
+Python-authored recordings can also include sound with
+`fmn_python.export_bundle(SceneClass, "scene.fmtl", audio=True, camera=True)`;
+see [portable export](SOUNDTRACK_BUNDLES.md) for native WAV inputs and bounds.
+The browser consumes the same FMTL bytes and never executes Python.
+
 The CPU renderer and recorded frame indices are unchanged. Browser/device audio
 resampling and scheduling are presentation behavior, not certified PCM or
 encoded-output determinism. The Rust tests compare exact channel samples,

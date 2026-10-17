@@ -226,6 +226,161 @@ pub(crate) fn input_facts(scene: &Bound<'_, PyScene>) -> PyResult<Py<PyList>> {
     Ok(facts.unbind())
 }
 
+/// Native-only portable export policy. Each byte cap bounds one preparation
+/// pool, not process RSS; the final container has its separate combined cap.
+#[derive(Clone, Copy)]
+pub(crate) struct BundleAudioOptions {
+    pub(crate) sample_rate: u32,
+    pub(crate) channels: u16,
+    pub(crate) workers: usize,
+    pub(crate) max_bytes: usize,
+}
+
+impl BundleAudioOptions {
+    pub(crate) fn validate(self) -> PyResult<Self> {
+        if !(1..=384_000).contains(&self.sample_rate)
+            || !matches!(self.channels, 1 | 2)
+            || !(1..=64).contains(&self.workers)
+            || !(8..=fmn_hash::serial::Limits::DEFAULT.max_total).contains(&self.max_bytes)
+        {
+            return Err(PyValueError::new_err(
+                "bundle audio requires rate 1..384000, channels 1 or 2, workers 1..64 and 8..256 MiB bytes",
+            ));
+        }
+        Ok(self)
+    }
+
+    /// Compose the real Scene requests through Reel's decoder and mixer.
+    /// No Python descriptor, transcoder, alternate resampler or file writer
+    /// runs here. Repeated paths are frozen once for this export generation.
+    pub(crate) fn mix(
+        self,
+        scene: &Scene,
+        picture_frames: u32,
+        remaining_bytes: usize,
+    ) -> PyResult<Option<fmn_scene::timeline_bundle::BundleSoundtrack>> {
+        use fmn_output::{MixerConfig, SoundCue, SoundMixer, frames_to_samples};
+        use fmn_platform::fs::{FileSystem, StdFs};
+        use std::collections::{BTreeMap, btree_map::Entry};
+        self.validate()?;
+        let requests = scene.sound_requests();
+        if requests.is_empty() {
+            return Ok(None);
+        }
+        if requests.len() > 4096 {
+            return Err(PyRuntimeError::new_err(
+                "bundle soundtrack exceeds 4096 cues",
+            ));
+        }
+        let time = scene.time();
+        // Explicit show() adds pictures without advancing the Scene clock.
+        // Refuse that unmodelled time mapping rather than shifting later cues.
+        // A frameless program's one terminal still is the only exception.
+        if i64::from(picture_frames) != time.frames()
+            && !(picture_frames == 1 && time.frames() == 0)
+        {
+            return Err(CapabilityError::new_err(
+                "soundtrack export cannot retime explicit show captures; use play/wait or a terminal still",
+            ));
+        }
+        let config = MixerConfig {
+            sample_rate: self.sample_rate,
+            channels: self.channels,
+            max_output_frames: (remaining_bytes.min(self.max_bytes)
+                / 4
+                / usize::from(self.channels)) as u64,
+        };
+        let minimum = frames_to_samples(i64::from(picture_frames), time.fps(), self.sample_rate)
+            .map_err(native_error)?;
+        let minimum = u64::try_from(minimum).map_err(native_error)?;
+        if config.max_output_frames == 0 || minimum > config.max_output_frames {
+            return Err(PyRuntimeError::new_err(
+                "bundle soundtrack output budget exhausted",
+            ));
+        }
+        let mut mixer = SoundMixer::new(config)
+            .map_err(native_error)?
+            .with_timeline_frames(minimum);
+        let mut cache = BTreeMap::new();
+        let mut source_bytes = 0;
+        let mut decoded_bytes = 0;
+        let mut prepared_bytes = 0;
+        for request in requests {
+            let audio = match cache.entry(request.sound_file.clone()) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    let raw_budget = (self.max_bytes - source_bytes).min(64 * 1024 * 1024);
+                    let sample_budget = (self.max_bytes - decoded_bytes) / 4;
+                    if raw_budget == 0 || sample_budget == 0 {
+                        return Err(PyRuntimeError::new_err(
+                            "bundle soundtrack source/decode budget exhausted",
+                        ));
+                    }
+                    let bytes = StdFs
+                        .read_bounded(&request.sound_file, raw_budget)
+                        .map_err(|e| {
+                            PyOSError::new_err(format!(
+                                "sound cue {}: {e}",
+                                request.sound_file.display()
+                            ))
+                        })?;
+                    source_bytes += bytes.len();
+                    let mut decoder = AudioDecoder::new(
+                        AudioDecodeLimits {
+                            max_input_bytes: raw_budget as u64,
+                            max_samples: sample_budget as u64,
+                        },
+                        None,
+                    )
+                    .map_err(decode_error)?;
+                    let decoded = decoder.decode(&bytes).map_err(|e| {
+                        decode_message(
+                            &e,
+                            format!("sound cue {}: {e}", request.sound_file.display()),
+                        )
+                    })?;
+                    decoded_bytes += decoded.audio.samples.len() * 4;
+                    entry.insert(decoded.audio)
+                }
+            };
+            // Admission arithmetic only; Reel owns mapping/resampling and
+            // placement. Charge each retained f64 cue before cloning its PCM.
+            let frames = audio.samples.len() / usize::from(audio.channels);
+            let mapped = (frames as u128) * u128::from(self.channels) * 8;
+            let prepared = ((frames as u128) * u128::from(self.sample_rate))
+                .div_ceil(u128::from(audio.sample_rate))
+                * u128::from(self.channels)
+                * 8;
+            if mapped > self.max_bytes as u128
+                || prepared > (self.max_bytes - prepared_bytes) as u128
+            {
+                return Err(PyRuntimeError::new_err(
+                    "bundle soundtrack prepared-sample budget exhausted",
+                ));
+            }
+            prepared_bytes += prepared as usize;
+            mixer
+                .add(SoundCue {
+                    audio: audio.clone(),
+                    frame: request.time.frames(),
+                    fps: request.time.fps(),
+                    time_offset: request.time_offset,
+                    gain: request.gain,
+                    gain_to_background: request.gain_to_background,
+                })
+                .map_err(native_error)?;
+        }
+        let mixed = mixer.mix(self.workers).map_err(native_error)?;
+        fmn_scene::timeline_bundle::BundleSoundtrack::new(
+            mixed.audio.sample_rate,
+            mixed.audio.channels,
+            mixed.audio.samples,
+        )
+        .map(Some)
+        .map_err(native_error)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use pyo3::types::PyDictMethods as _;
