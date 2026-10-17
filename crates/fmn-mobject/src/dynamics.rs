@@ -24,11 +24,10 @@
 //!
 //! `always_redraw(f)` binds a rebuild closure into the clock: every
 //! [`Stage::update`] tick replaces the returned mobject's content with a
-//! fresh `f()` result. The Reference does this via `become`; pending the
-//! full W3 copy-semantics surface (fm-ncq), the mechanism here is a
-//! container whose children are swapped per tick — positionally and
-//! structurally equivalent for consumers, and the closure-into-clock
-//! binding (the §8.6 deliverable) is identical. `f_always` is the
+//! fresh `f()` result. The returned handle is a stable container whose
+//! children are swapped per tick, allowing the rebuilt family to change
+//! shape. Replaced private content is reclaimed after the new family is
+//! installed; shared, rooted, and reused content stays alive. `f_always` is the
 //! named-parity form of a non-dt updater: in Rust a closure already closes
 //! over its argument generators.
 //!
@@ -42,7 +41,8 @@
 
 use crate::StageError;
 use crate::mobject::Mobject;
-use crate::stage::{Mob, Stage, UpdaterId};
+use crate::stage::{IdBuildHasher, Mob, Stage, UpdaterId};
+use std::collections::HashSet;
 
 /// Which tracker encoding a mobject carries.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -221,31 +221,85 @@ impl Stage {
     /// every update tick. The returned handle is stable across rebuilds
     /// (it is the container whose content is swapped); attach it, position
     /// it, and play against it freely.
+    ///
+    /// The factory runs while the previous content is alive. After a
+    /// successful replacement, old members are reclaimed unless they belong
+    /// to the new family, remain scene roots, or have parents outside the
+    /// replaced family. Retained members keep their complete descendants.
+    /// A cached raw [`Mob`] alone does not retain retired content; pinned
+    /// retired members follow [`Stage::delete`]'s deferred destruction rules.
+    ///
+    /// # Panics
+    /// Panics with a [`StageError`] if the factory returns a stale handle or
+    /// a replacement would create a cycle, or updater registration fails.
+    /// A refused replacement leaves the published children unchanged; the
+    /// factory's own mutations are not rolled back.
     pub fn always_redraw(&mut self, f: impl Fn(&mut Stage) -> Mob + 'static) -> Mob {
-        let container = self.add(Mobject::new());
         let first = f(self);
-        let _ = self.attach(container, first);
-        let _ = self.add_updater(
+        self.try_get(first)
+            .unwrap_or_else(|error| std::panic::panic_any(error));
+        let container = self.add(Mobject::new());
+        self.attach(container, first)
+            .unwrap_or_else(|error| std::panic::panic_any(error));
+        self.add_updater(
             container,
             move |stage, me| {
-                let old = stage
-                    .get(me)
-                    .map(|e| e.submobjects().to_vec())
-                    .unwrap_or_default();
-                for child in old {
-                    stage.detach(me, child);
-                    // Drop the replaced content: without this, a rebuild
-                    // per tick would grow the arena without bound. Pinned
-                    // entries defer per the lifetime rules.
-                    for member in stage.family(child) {
-                        let _ = stage.delete(member);
+                // Capture before the factory: it may reuse descendants and
+                // remove their old wrapper while building the replacement.
+                let old: Vec<_> = stage.family(me).into_iter().skip(1).collect();
+                let old_members: HashSet<Mob, IdBuildHasher> = old.iter().copied().collect();
+                let fresh = f(stage);
+                stage
+                    .replace_children(me, &[fresh])
+                    .unwrap_or_else(|error| std::panic::panic_any(error));
+
+                let mut pending: Vec<_> = stage
+                    .roots()
+                    .iter()
+                    .copied()
+                    .filter(|root| old_members.contains(root))
+                    .collect();
+                pending.push(fresh);
+                for &member in &old {
+                    if stage.get(member).is_some_and(|entry| {
+                        entry
+                            .parents()
+                            .iter()
+                            .any(|parent| !old_members.contains(parent))
+                    }) {
+                        pending.push(member);
                     }
                 }
-                let fresh = f(stage);
-                let _ = stage.attach(me, fresh);
+                let mut retained: HashSet<Mob, IdBuildHasher> = HashSet::default();
+                while let Some(member) = pending.pop() {
+                    if !retained.insert(member) {
+                        continue;
+                    }
+                    if let Some(entry) = stage.get(member) {
+                        pending.extend_from_slice(entry.submobjects());
+                    }
+                }
+
+                // Decide retention before deleting anything: a diamond or
+                // a pinned, doomed parent must not keep private descendants
+                // alive merely because its other edge still exists.
+                for member in old {
+                    if !retained.contains(&member) && stage.contains(member) {
+                        // Deletion also removes a whole family from the
+                        // scene. Sever outgoing edges first so a retired
+                        // wrapper cannot hide a retained shared descendant.
+                        stage
+                            .replace_children(member, &[])
+                            .unwrap_or_else(|error| std::panic::panic_any(error));
+                        stage
+                            .delete(member)
+                            .unwrap_or_else(|error| std::panic::panic_any(error));
+                    }
+                }
             },
             false,
-        );
+        )
+        .unwrap_or_else(|error| std::panic::panic_any(error));
         container
     }
 

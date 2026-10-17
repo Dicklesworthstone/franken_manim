@@ -11,6 +11,7 @@ _VIDEO_FLAGS = {
     "--preset": "video_preset",
     "--tune": "video_tune",
     "--video-bitrate": "video_bitrate",
+    "--audio-bitrate": "audio_bitrate",
 }
 VIDEO_VALUE_FLAGS = frozenset(_VIDEO_FLAGS)
 VIDEO_WRITER_OPTIONS = tuple(_VIDEO_FLAGS.values())
@@ -19,10 +20,12 @@ VIDEO_HELP = """Compressed video quality (fmn-python):
   --preset NAME           Software x264/x265 compression-speed preset.
   --tune NAME             One native-validated encoder tune, e.g. animation.
   --video-bitrate BPS     Positive integer bits/second, instead of CRF.
+  --audio-bitrate BPS     AAC soundtrack bits/second; video is stream-copied.
 
 Both --flag value and --flag=value are accepted; each setting is specified once.
 Applies to MP4/MOV, including named batches, --write_all and --subdivide.
-Native outputs and transparent MOV refuse these controls. The shared native
+Native outputs refuse these controls; transparent MOV accepts only audio bitrate.
+The shared native
 negotiator rejects software-only controls on hardware encoders and unsupported
 tunes. Omitting these options preserves encoder defaults; no quality or speed
 improvement is inferred from a setting. Actual arguments appear in receipts.
@@ -30,7 +33,7 @@ improvement is inferred from a setting. Actual arguments appear in receipts.
 
 
 def _value(flag: str, text: str):
-    if flag in {"--crf", "--video-bitrate"}:
+    if flag in {"--crf", "--video-bitrate", "--audio-bitrate"}:
         # Bound before int(): huge decimal strings are not a parser workload.
         if not text or len(text) > 10 or any(char not in "0123456789" for char in text):
             raise ValueError(f"{flag} requires an unsigned decimal integer")
@@ -81,7 +84,8 @@ def validate_video_format(format: str, options, *, transparent: bool = False) ->
         return
     if format not in {"mp4", "mov"}:
         raise ValueError("video quality controls require mp4 or mov output")
-    if transparent:
+    if transparent and any(options.get(name) is not None for name in VIDEO_WRITER_OPTIONS
+                           if name != "audio_bitrate"):
         raise ValueError("video quality controls require opaque MP4/MOV, not transparent MOV")
 
 

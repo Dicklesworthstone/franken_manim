@@ -33,6 +33,15 @@ def image(color=RED, *, shape=(2, 3)):
     return m.ImageMobject(pixels(color, shape), height=2)
 
 
+def bare_like(mob):
+    """A plain Mobject with `mob`'s record schema, not its class. The
+    Reference's Mobject takes no data_dtype keyword; a subclass declares it
+    (fm-5wq.20)."""
+    class Bare(m.Mobject):
+        data_dtype = mob.data_dtype
+    return Bare().become(mob)
+
+
 def capture(obj):
     return m.Camera(resolution=(48, 32), background_opacity=0).capture_snapshot(obj)
 
@@ -79,8 +88,7 @@ class RasterTransformTests(unittest.TestCase):
         self.assertNotEqual(capture(self.a).png(),frozen)
 
     def test_direct_mobject_interpolation_has_native_resource_not_class_semantics(self):
-        a=m.Mobject(data_dtype=self.a.data_dtype).become(self.a)
-        b=m.Mobject(data_dtype=self.b.data_dtype).become(self.b)
+        a, b = bare_like(self.a), bare_like(self.b)
         result=a.copy()
         self.assertIs(result.interpolate(mobject1=a,mobject2=b,alpha=.5),result)
         self.assertEqual(m._read_raster_image(result).pixels(),pixels(PURPLE).tobytes())

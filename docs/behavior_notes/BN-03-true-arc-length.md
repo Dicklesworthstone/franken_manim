@@ -49,13 +49,25 @@ arc-length fraction.
 overestimates curved paths (its outer polygon dominates). Dash counts and
 tip placements derived from it move accordingly — by design.
 
+Points sampled with `point_from_proportion` move as well, and a decision
+taken on them can flip near its threshold. `_2021/bertrands_paradox.py`
+`CompareFirstTwoMethods` builds random chords from `circle.pfp(random())` and
+colors those longer than the inscribed triangle's side. One chord in a
+thousand changes color (corpus differential row
+`bn03-chord-length-threshold`).
+
 Tip attachment also follows the actual curve. Classic manim aims a curved
 tip from the final control handle and then shortens the shaft by applying
 `put_start_and_end_on` to the whole path. The head can therefore follow a
 component-local approximation while the shaft is chord-rescaled away from
 its original curve. FrankenManim aims the head along the true terminal
 quadratic derivative and cuts the shaft back by true arc length, preserving
-the remaining curve. Straight shafts are unchanged. Scenes that deliberately
+the remaining curve. A cut through a circular-arc component is rebuilt on
+that circle, and the components the cut removes are dropped rather than
+kept as zero-length points, so a tipped arc keeps its own centre:
+`Arc(angle=2).add_tip(at_start=True).get_arc_center()` is the origin, where
+the Reference's rescaled shaft reports (0.112, 0.175)
+(fm-arc-start-tip-degenerate-component-izct). Straight shafts are unchanged. Scenes that deliberately
 compensated for the classic curved-tip tilt or rescaling should remove that
 compensation; custom `ArrowTip` subclasses keep their Python identity and
 style while the native placement algebra transforms their point run.

@@ -803,8 +803,9 @@ outsider = Mobject()
 parent.add(child)
 assert parent.family_size() == 2
 scene.add(parent, outsider)
-assert scene.root_count() == 2
-assert scene.mobjects[0] is parent
+# The scene list starts with the camera frame (fm-6l2i).
+assert scene.root_count() == 3
+assert scene.mobjects[0] is scene.frame and scene.mobjects[1] is parent
 assert parent.family_size() == 2
 parent.submobjects.clear()
 assert parent.family_size() == 1
@@ -981,9 +982,9 @@ assert family_add_root.submobjects == [family_add_a]
 # recurse=False touches only the selected root.  Shared descendants retain
 # their Python identity while both parent edges are edited independently.
 family_remove_shared = Mobject()
-family_remove_left = Mobject(family_remove_shared)
-family_remove_right = Mobject(family_remove_shared)
-family_remove_root = Mobject(family_remove_left, family_remove_right)
+family_remove_left = Mobject().add(family_remove_shared)
+family_remove_right = Mobject().add(family_remove_shared)
+family_remove_root = Mobject().add(family_remove_left, family_remove_right)
 assert family_remove_root.remove(family_remove_shared) is family_remove_root
 assert family_remove_left.submobjects == []
 assert family_remove_right.submobjects == []
@@ -1074,13 +1075,16 @@ order_middle = Mobject()
 order_front = Mobject()
 order_scene.add(order_back, order_middle, order_front)
 assert order_scene.bring_to_front(order_back) is order_scene
-assert order_scene.mobjects == [order_middle, order_front, order_back]
+order_frame = order_scene.frame  # first in the list, z_index -1 (fm-6l2i)
+assert order_scene.mobjects == [order_frame, order_middle, order_front, order_back]
 assert order_scene.bring_to_back(order_back, order_front) is order_scene
-assert order_scene.mobjects == [order_back, order_front, order_middle]
+assert order_scene.mobjects == [order_back, order_front, order_frame, order_middle]
 
 detached_back = Mobject()
 assert order_scene.bring_to_back(detached_back) is order_scene
-assert order_scene.mobjects == [detached_back, order_back, order_front, order_middle]
+assert order_scene.mobjects == [
+    detached_back, order_back, order_front, order_frame, order_middle,
+]
 assert order_scene.mobjects[0] is detached_back
 
 order_before_refusal = list(order_scene.mobjects)
@@ -1119,27 +1123,34 @@ assert replace_scene.replace(
     replacement_right,
 ) is replace_scene
 assert replace_scene.mobjects == [
+    replace_scene.frame,
     replace_back,
     replacement_left,
     replacement_right,
     replace_front,
 ]
-assert replace_scene.mobjects[1] is replacement_left
-assert replace_scene.mobjects[2] is replacement_right
+assert replace_scene.mobjects[2] is replacement_left
+assert replace_scene.mobjects[3] is replacement_right
 
 assert replace_scene.replace(replacement_left) is replace_scene
-assert replace_scene.mobjects == [replace_back, replacement_right, replace_front]
+assert replace_scene.mobjects == [
+    replace_scene.frame, replace_back, replacement_right, replace_front,
+]
 
 detached_source = Mobject()
 detached_replacement = Mobject()
 assert replace_scene.replace(detached_source, detached_replacement) is replace_scene
-assert replace_scene.mobjects == [replace_back, replacement_right, replace_front]
+assert replace_scene.mobjects == [
+    replace_scene.frame, replace_back, replacement_right, replace_front,
+]
 assert not detached_source._is_bound()
 assert not detached_replacement._is_bound()
 
 nonmobject_replacement = Mobject()
 assert replace_scene.replace(object(), nonmobject_replacement) is replace_scene
-assert replace_scene.mobjects == [replace_back, replacement_right, replace_front]
+assert replace_scene.mobjects == [
+    replace_scene.frame, replace_back, replacement_right, replace_front,
+]
 assert not nonmobject_replacement._is_bound()
 
 family_scene = Scene()
@@ -1149,7 +1160,7 @@ family_root.submobjects.append(family_child)
 family_scene.add(family_root)
 nonroot_replacement = Mobject()
 assert family_scene.replace(family_child, nonroot_replacement) is family_scene
-assert family_scene.mobjects == [family_root]
+assert family_scene.mobjects == [family_scene.frame, family_root]
 assert not nonroot_replacement._is_bound()
 
 replace_before_refusal = list(replace_scene.mobjects)
@@ -1189,11 +1200,18 @@ membership_old = Mobject()
 membership_front = Mobject().set_z_index(1)
 membership_scene.add(membership_old, membership_front, membership_back)
 membership_snapshot = membership_scene.get_mobjects()
-assert membership_snapshot == [membership_back, membership_old, membership_front]
+# The frame's z_index of -1 ties with membership_back; it was listed first
+# (fm-6l2i). remove_all_except() below clears the list, frame included.
+membership_frame = membership_scene.frame
+assert membership_snapshot == [
+    membership_frame, membership_back, membership_old, membership_front,
+]
 assert membership_snapshot is not membership_scene.get_mobjects()
-assert membership_snapshot[0] is membership_back
+assert membership_snapshot[1] is membership_back
 membership_snapshot.clear()
-assert membership_scene.mobjects == [membership_back, membership_old, membership_front]
+assert membership_scene.mobjects == [
+    membership_frame, membership_back, membership_old, membership_front,
+]
 
 membership_detached = Mobject()
 assert membership_scene.remove_all_except(
@@ -1251,7 +1269,7 @@ mixed_group = group_scene.get_group(group_vmobject, group_mobject)
 assert type(mixed_group) is manimlib.Group
 assert list(mixed_group.submobjects) == [group_vmobject, group_mobject]
 assert type(group_scene.get_group()) is manimlib.VGroup
-assert group_scene.get_mobjects() == []
+assert group_scene.get_mobjects() == [group_scene.frame]
 
 
 # Python-owned Scene collection helpers filter arbitrary iterables before
@@ -1274,8 +1292,8 @@ def among_values():
 
 assert among_scene.add_mobjects_among(among_values()) is among_scene
 assert len(among_seen) == 5
-assert among_scene.mobjects == [among_back, among_front]
-assert among_scene.mobjects[1] is among_front
+assert among_scene.mobjects == [among_scene.frame, among_back, among_front]
+assert among_scene.mobjects[2] is among_front
 
 among_failed = Mobject()
 
@@ -1319,9 +1337,9 @@ assert among_scene.get_mobjects() == among_before_failure
 family_shared = VMobject().set_points_as_corners(
     [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]
 )
-family_left = Mobject(family_shared)
-family_right = Mobject(family_shared)
-family_root = Mobject(family_left, family_right)
+family_left = Mobject().add(family_shared)
+family_right = Mobject().add(family_shared)
+family_root = Mobject().add(family_left, family_right)
 family_expected = [
     family_root,
     family_left,
@@ -1376,7 +1394,7 @@ assert np.allclose(
 assert family_root.refresh_bounding_box() is family_root
 assert family_root.refresh_bounding_box(True, False) is family_root
 
-empty_spatial = Mobject(Mobject())
+empty_spatial = Mobject().add(Mobject())
 assert empty_spatial.get_all_points().shape == (0, 3)
 assert np.array_equal(empty_spatial.compute_bounding_box(), np.zeros((3, 3)))
 
@@ -1432,7 +1450,7 @@ assert np.allclose(
         [2.5, 3.5, 0.5],
     ],
 )
-dot_group = Mobject(dot_spatial)
+dot_group = Mobject().add(dot_spatial)
 assert np.allclose(dot_group.get_bounding_box(), dot_box)
 dot_scene = Scene()
 dot_scene.add(dot_group)
@@ -2191,12 +2209,12 @@ captured = state_scene.get_state()
 assert isinstance(captured, scene_module.SceneState)
 assert captured._checkpoint == state_scene._checkpoint_bytes()
 assert scene_module.SceneState(state_scene, ignore=[])._checkpoint is not None
-assert list(captured.mobjects_to_copies) == [state_square, state_circle]
+assert list(captured.mobjects_to_copies) == [state_scene.frame, state_square, state_circle]
 assert captured.n_changes(captured) == 0
 state_square.shift(manimlib.RIGHT)
 assert captured.n_changes(captured) == 1
 ignored = scene_module.SceneState(state_scene, ignore=[state_circle])
-assert list(ignored.mobjects_to_copies) == [state_square]
+assert list(ignored.mobjects_to_copies) == [state_scene.frame, state_square]
 state_scene.restore_state(captured)
 assert np.allclose(state_square.get_center(), origin)
 restored_state_roots = state_scene.get_mobjects()
@@ -2213,9 +2231,10 @@ print(
         for root in restored_state_roots
     ],
     "expected:",
-    [(id(state_square), "Square"), (id(state_circle), "Circle")],
+    [(id(state_scene.frame), "CameraFrame"), (id(state_square), "Square"),
+     (id(state_circle), "Circle")],
 )
-assert restored_state_roots == [state_square, state_circle]
+assert restored_state_roots == [state_scene.frame, state_square, state_circle]
 assert state_scene._checkpoint_bytes() == captured._checkpoint
 failed_state = scene_module.SceneState.__new__(scene_module.SceneState)
 try:
@@ -2309,14 +2328,19 @@ family_scene.add(
 )
 family_roots_before = family_scene.get_mobjects()
 top_level = family_scene.get_top_level_mobjects()
-assert len(top_level) == 2
-assert top_level[0] is family_root
-assert top_level[1] is family_isolated
+# The frame is listed first and is top level, as in the Reference (fm-6l2i).
+assert len(top_level) == 3
+assert top_level[0] is family_scene.frame
+assert top_level[1] is family_root
+assert top_level[2] is family_isolated
+
 assert family_scene.get_top_level_mobjects() is not top_level
 
 scene_family_expected = [
+    family_scene.frame,
     family_root,
     family_left,
+
     family_shared,
     family_right,
     family_shared,
@@ -2394,7 +2418,14 @@ copy_scene = Scene()
 copy_scene.add(copy_source, copy_source)
 copy_roots_before = copy_scene.get_mobjects()
 scene_copies = copy_scene.get_mobject_copies()
-assert len(scene_copies) == 2
+# One copy per listed mobject; the list starts with the frame (fm-6l2i).
+assert len(scene_copies) == 3
+frame_copy = scene_copies[0]
+assert type(frame_copy) is type(copy_scene.frame)
+assert frame_copy is not copy_scene.frame
+assert all(frame_copy is not root for root in copy_scene.get_mobjects())
+scene_copies = scene_copies[1:]
+
 assert scene_copies[0] is not copy_source
 assert scene_copies[1] is not copy_source
 assert scene_copies[0] is not scene_copies[1]
@@ -2456,7 +2487,7 @@ utility_a = utility_marker(2.0, "a")
 utility_b = utility_marker(-1.0, "b")
 utility_c = utility_marker(1.0, "c")
 utility_d = utility_marker(1.0, "d")
-utility_group = Mobject(utility_a, utility_b)
+utility_group = Mobject().add(utility_a, utility_b)
 utility_scene = Scene()
 utility_scene.add(utility_group)
 
@@ -2480,9 +2511,9 @@ assert [mob.name for mob in utility_group.submobjects] == ["a", "b", "c", "d"]
 assert [mob.name for mob in utility_group.copy().submobjects] == ["a", "b", "c", "d"]
 
 shuffle_child_members = [utility_marker(i, f"inner-{i}") for i in range(3)]
-shuffle_child = Mobject(*shuffle_child_members)
+shuffle_child = Mobject().add(*shuffle_child_members)
 shuffle_leaf = utility_marker(5.0, "outer-leaf")
-shuffle_root = Mobject(shuffle_child, shuffle_leaf)
+shuffle_root = Mobject().add(shuffle_child, shuffle_leaf)
 shuffle_seed = 1729
 shuffle_rng = manimlib.random.Random(shuffle_seed)
 expected_inner = list(shuffle_child_members)
@@ -2495,7 +2526,7 @@ assert list(shuffle_child.submobjects) == expected_inner
 assert list(shuffle_root.submobjects) == expected_outer
 
 detached_restore_child = utility_marker(0.0, "detached-restore")
-detached_restore_group = Mobject(detached_restore_child)
+detached_restore_group = Mobject().add(detached_restore_child)
 detached_restore_group.named_child = detached_restore_child
 detached_restore_group.save_state()
 detached_restore_group.named_child = utility_marker(8.0, "wrong-detached-alias")
@@ -2505,7 +2536,7 @@ assert np.allclose(detached_restore_child.get_center(), [0.0, 0.0, 0.0])
 assert detached_restore_group.named_child is detached_restore_child
 
 bound_restore_child = utility_marker(0.0, "bound-restore")
-bound_restore_group = Mobject(bound_restore_child)
+bound_restore_group = Mobject().add(bound_restore_child)
 bound_restore_group.named_child = bound_restore_child
 bound_restore_scene = Scene()
 bound_restore_scene.add(bound_restore_group)
@@ -2524,7 +2555,7 @@ except Exception as error:
 else:
     raise AssertionError("restore without save_state did not refuse")
 
-shape_restore_group = Mobject(Mobject())
+shape_restore_group = Mobject().add(Mobject())
 shape_restore_group.resize(1)
 shape_restore_group.save_state()
 shape_restore_group.set_field("point", 0, [4.0, 0.0, 0.0])
@@ -2537,7 +2568,7 @@ assert shape_restore_group.restore() is shape_restore_group
 assert shape_restore_group.get_field("point", 0) == [0.0, 0.0, 0.0]
 assert len(shape_restore_group.submobjects) == 2
 
-schema_restore_group = Mobject(Mobject())
+schema_restore_group = Mobject().add(Mobject())
 schema_restore_group.resize(1)
 schema_restore_group.save_state()
 schema_restore_group.set_field("point", 0, [7.0, 0.0, 0.0])
@@ -2552,7 +2583,7 @@ assert schema_restore_group.get_field("point", 0) == [7.0, 0.0, 0.0]
 
 spacing_left = utility_marker(1.0, "spacing-left")
 spacing_right = utility_marker(3.0, "spacing-right")
-spacing_group = Mobject(spacing_left, spacing_right)
+spacing_group = Mobject().add(spacing_left, spacing_right)
 spacing_widths = [mob.get_width() for mob in spacing_group.submobjects]
 assert (
     spacing_group.space_out_submobjects(2.0, about_point=[1.0, 0.0, 0.0])
@@ -2654,7 +2685,7 @@ assert np.allclose(
 # Every member keeps its directly transformed Reference box until a later
 # member revision invalidates that family of caches.
 box_child = manimlib.Square().shift(3 * manimlib.RIGHT)
-box_family = Mobject(manimlib.Square(), box_child)
+box_family = Mobject().add(manimlib.Square(), box_child)
 family_box_before = box_family.get_bounding_box().copy()
 box_family.apply_points_function(
     nonlinear_box_map,
@@ -2668,7 +2699,7 @@ box_child.shift(manimlib.RIGHT)
 assert np.allclose(box_family.get_right(), [6.0, 0.0, 0.0])
 
 detached_matrix_child = manimlib.Square().shift(manimlib.RIGHT)
-detached_matrix_family = Mobject(detached_matrix_child)
+detached_matrix_family = Mobject().add(detached_matrix_child)
 detached_before = detached_matrix_child.get_center().copy()
 assert detached_matrix_family.apply_matrix([[2.0, 0.0], [0.0, 3.0]]) is (
     detached_matrix_family
@@ -2677,7 +2708,7 @@ assert np.allclose(detached_matrix_child.get_center(), [2.0, 0.0, 0.0])
 assert not np.allclose(detached_matrix_child.get_center(), 4.0 * detached_before)
 
 bound_matrix_child = manimlib.Square().shift(manimlib.RIGHT)
-bound_matrix_family = Mobject(bound_matrix_child)
+bound_matrix_family = Mobject().add(bound_matrix_child)
 bound_matrix_scene = Scene()
 bound_matrix_scene.add(bound_matrix_family)
 assert bound_matrix_family.apply_matrix(
@@ -2704,7 +2735,9 @@ family_walker_override.apply_matrix([[2.0, 0.0], [0.0, 3.0]])
 assert family_walker_override.matrix_family_walker_calls == 1
 
 shared_matrix_leaf = manimlib.Square().shift(manimlib.RIGHT)
-shared_matrix_family = Mobject(Mobject(shared_matrix_leaf), Mobject(shared_matrix_leaf))
+shared_matrix_family = Mobject().add(
+    Mobject().add(shared_matrix_leaf), Mobject().add(shared_matrix_leaf)
+)
 shared_matrix_family.apply_matrix([[2.0, 0.0], [0.0, 1.0]])
 assert np.allclose(shared_matrix_leaf.get_center(), [4.0, 0.0, 0.0])
 
@@ -2736,7 +2769,7 @@ assert np.isclose(position_mapped.get_width(), position_width)
 
 positions_left = manimlib.Square().shift(manimlib.LEFT)
 positions_right = manimlib.Square().shift(manimlib.RIGHT)
-positions_group = Mobject(positions_left, positions_right)
+positions_group = Mobject().add(positions_left, positions_right)
 assert positions_group.apply_function_to_submobject_positions(
     lambda point: point + [0.0, 2.0, 0.0]
 ) is positions_group
@@ -2749,7 +2782,7 @@ assert complex_mapped.apply_complex_function(lambda value: value * (1.0 + 1.0j))
 )
 assert np.allclose(complex_mapped.get_center(), [-1.0, 3.0, 3.0])
 
-callback_partial = Mobject(
+callback_partial = Mobject().add(
     manimlib.Square().shift(manimlib.LEFT),
     manimlib.Square().shift(manimlib.RIGHT),
 )
@@ -2832,7 +2865,7 @@ assert np.allclose(style_target.get_shading(), style_source.get_shading())
 fade_child = Mobject()
 fade_child.resize(1)
 fade_child.set_opacity(0.25)
-fade_parent = Mobject(fade_child)
+fade_parent = Mobject().add(fade_child)
 fade_parent.resize(1)
 fade_parent.set_opacity(0.8, recurse=False)
 assert fade_parent.fade(0.1, recurse=False) is None
@@ -2852,7 +2885,7 @@ assert str(inspect.signature(Mobject.set_color_by_gradient)) == "(self, *colors)
 assert str(inspect.signature(Mobject.set_submobject_colors_by_gradient)) == (
     "(self, *colors, interp_by_hsl=False)"
 )
-gradient_group = Mobject(manimlib.Square(), manimlib.Square(), manimlib.Square())
+gradient_group = Mobject().add(manimlib.Square(), manimlib.Square(), manimlib.Square())
 assert (
     gradient_group.set_submobject_colors_by_gradient("#FF0000", "#0000FF")
     is gradient_group
@@ -2900,7 +2933,7 @@ point_gradient_colors = point_gradient.get_fill_colors()
 assert point_gradient_colors[0] == "#FF0000"
 assert point_gradient_colors[-1] == "#0000FF"
 
-pointless_gradient = Mobject(*[manimlib.Square() for _ in range(3)])
+pointless_gradient = Mobject().add(*[manimlib.Square() for _ in range(3)])
 assert pointless_gradient.set_color_by_gradient("#FF0000", "#0000FF") is pointless_gradient
 assert [mob.get_color() for mob in pointless_gradient.submobjects] == [
     "#FF0000",
@@ -2972,7 +3005,8 @@ reference = weakref.ref(clone)
 assert reference() is clone
 identity_map = {parent: "parent", child: "child"}
 assert identity_map[parent] == "parent"
-assert identity_map[scene.mobjects[0]] == "parent"
+assert identity_map[scene.mobjects[1]] == "parent"  # [0] is the frame (fm-6l2i)
+
 del clone
 gc.collect()
 assert reference() is None
@@ -5043,21 +5077,21 @@ assert len(textbox.updaters) == 1
 assert len(textbox.text.updaters) == 1
 
 text_proxy = textbox.text
-seed_points = text_proxy.get_points().copy()
+seed_points = text_proxy.get_all_points().copy()
 assert textbox.set_value("committed") is textbox
 assert textbox.get_value() == "committed"
 assert textbox.text is text_proxy
-committed_points = text_proxy.get_points().copy()
+committed_points = text_proxy.get_all_points().copy()
 assert not np.array_equal(committed_points, seed_points)
 
 assert textbox.update_text("preview") is None
 assert textbox.get_value() == "committed"
 assert textbox.text is text_proxy
-preview_points = text_proxy.get_points().copy()
+preview_points = text_proxy.get_all_points().copy()
 assert not np.array_equal(preview_points, committed_points)
 
 atomic_value = textbox.get_value()
-atomic_points = textbox.text.get_points().copy()
+atomic_points = textbox.text.get_all_points().copy()
 atomic_children = list(textbox.submobjects)
 try:
     textbox.set_value("\U0001f980")
@@ -5068,7 +5102,7 @@ else:
 assert textbox.get_value() == atomic_value
 assert textbox.text is text_proxy
 assert list(textbox.submobjects) == atomic_children
-assert np.array_equal(textbox.text.get_points(), atomic_points)
+assert np.array_equal(textbox.text.get_all_points(), atomic_points)
 
 failed_textbox = interactive.Textbox.__new__(interactive.Textbox)
 try:
@@ -5546,16 +5580,37 @@ assert str(inspect.signature(point_cloud_mobjects.PGroup)) == (
 )
 pgroup_left = manimlib.DotCloud([(-1.0, 0.0, 0.0)])
 pgroup_right = manimlib.DotCloud([(1.0, 0.0, 0.0)])
-pgroup = point_cloud_mobjects.PGroup(
-    pgroup_left,
-    pgroup_right,
-    pgroup_left,
-    marker="native",
-)
+pgroup = point_cloud_mobjects.PGroup(pgroup_left, pgroup_right, pgroup_left)
 assert list(pgroup.submobjects) == [pgroup_left, pgroup_right]
 assert pgroup.submobjects[0] is pgroup_left
 assert pgroup.submobjects[1] is pgroup_right
-assert pgroup.marker == "native"
+# fm-5wq.20: the Reference's Mobject.__init__ takes a fixed signature, so an
+# unknown keyword is Python's TypeError, not a stored attribute. A keyword the
+# Reference accepts but the native builder does not route yet still refuses
+# by name.
+for unknown_keyword_case in (
+    lambda: point_cloud_mobjects.PGroup(pgroup_left, marker="native"),
+    lambda: Mobject(shape=1),
+    lambda: VMobject(shape=1),
+    lambda: manimlib.Group(shape=1),
+    lambda: manimlib.VGroup(shape=1),
+    lambda: manimlib.SGroup(shape=(8, 8)),
+):
+    try:
+        unknown_keyword_case()
+    except TypeError as error:
+        assert str(error).startswith("Mobject.__init__() got an unexpected keyword argument"), error
+    else:
+        raise AssertionError("an unknown Mobject keyword was accepted")
+try:
+    manimlib.SurfaceMesh(manimlib.Sphere(), color=manimlib.BLUE)
+except NotImplementedError as error:
+    assert "not yet routed" in str(error), error
+else:
+    raise AssertionError("an unrouted Reference keyword was silently accepted")
+# Mobject's parameters are positional in the Reference's order: a bare
+# Mobject holds no members (Group does), and Mobject(RED) is its color.
+assert Mobject(manimlib.RED).color == manimlib.RED and len(Mobject(manimlib.RED)) == 0
 assert pgroup.get_num_points() == 0
 assert pgroup.data.dtype.names == ("point", "rgba")
 pgroup.shift(manimlib.UP)
@@ -5623,7 +5678,7 @@ assert np.array_equal(color_dest.data["rgba"], before_rgba)
 back_surface = manimlib.Surface(resolution=(2, 2), z_index=-1)
 front_surface = manimlib.Surface(resolution=(2, 2), z_index=1)
 surface_order_scene = Scene().add(front_surface, back_surface)
-assert surface_order_scene.get_mobjects() == [back_surface, front_surface]
+assert surface_order_scene.get_mobjects() == [surface_order_scene.frame, back_surface, front_surface]
 
 failed_pgroup = point_cloud_mobjects.PGroup.__new__(
     point_cloud_mobjects.PGroup
@@ -6356,11 +6411,11 @@ bound_plate_scene.add(bound_plate_target)
 assert bound_plate_target.add_background_rectangle(buff=0.1) is bound_plate_target
 assert bound_plate_target.background_rectangle._is_bound()
 assert bound_plate_target.submobjects[0] is bound_plate_target.background_rectangle
-assert bound_plate_scene.get_mobjects()[0] is bound_plate_target
+assert bound_plate_scene.get_mobjects()[1] is bound_plate_target
 
 immediate_a = geometry.Square(side_length=0.5)
 immediate_b = geometry.Square(side_length=0.75)
-immediate_group = Mobject(immediate_a, immediate_b)
+immediate_group = Mobject().add(immediate_a, immediate_b)
 bound_plate_scene.add(immediate_group)
 assert immediate_group.add_background_rectangle_to_submobjects(opacity=0.4) is immediate_group
 for immediate in (immediate_a, immediate_b):
@@ -6370,8 +6425,8 @@ for immediate in (immediate_a, immediate_b):
 
 family_point_a = geometry.Square(side_length=0.5)
 family_point_b = geometry.Square(side_length=0.75)
-family_point_container = Mobject(family_point_b)
-family_plate_root = Mobject(family_point_a, family_point_container)
+family_point_container = Mobject().add(family_point_b)
+family_plate_root = Mobject().add(family_point_a, family_point_container)
 bound_plate_scene.add(family_plate_root)
 assert (
     family_plate_root.add_background_rectangle_to_family_members_with_points(
@@ -7626,7 +7681,7 @@ grow_point_scene.play(
     rate_func=manimlib.linear,
 )
 assert id(grow_point_source) == grow_point_identity
-assert grow_point_scene.get_mobjects()[0] is grow_point_source
+assert grow_point_scene.get_mobjects()[1] is grow_point_source
 # The pinned Reference fires copied updaters on the animation's helper
 # copies each frame (Animation.update_mobjects: starting mobject, then
 # target copy), then on the source in the scene pass, and once more after
@@ -10402,7 +10457,7 @@ bound_tip_scene.add(bound_tippable)
 bound_tippable_identity = id(bound_tippable)
 assert bound_tippable.add_tip(length=0.3) is bound_tippable
 assert id(bound_tippable) == bound_tippable_identity
-assert bound_tip_scene.get_mobjects()[0] is bound_tippable
+assert bound_tip_scene.get_mobjects()[1] is bound_tippable
 assert bound_tippable.tip._is_bound()
 assert bound_tippable.submobjects == [bound_tippable.tip]
 assert bound_tippable.family_size() == 2
@@ -10523,6 +10578,21 @@ assert np.allclose(quarter_arc.get_arc_center(), [3.0, 2.0, 0.0], atol=1e-9)
 quarter_arc.rotate(math.pi / 2.0, about_point=quarter_arc.get_arc_center())
 assert math.isclose(quarter_arc.get_start_angle(), math.pi / 2.0, abs_tol=1e-6)
 assert math.isclose(quarter_arc.get_stop_angle(), math.pi, abs_tol=1e-6)
+
+# A tip trims an arc's shaft by true arc length (BN-03) and rebuilds it on its
+# circle, so no component is zero-length and the arc keeps its own centre
+# whichever end is tipped. The centre is read from f32 records, which bound
+# its precision near 1e-5 for any arc
+# (fm-arc-start-tip-degenerate-component-izct).
+for _tip_ends in ((True,), (False,), (True, False)):
+    _tipped_arc = geometry.Arc(radius=1.5, angle=2.0, arc_center=[1.0, -1.0, 0.0])
+    for _at_start in _tip_ends:
+        _tipped_arc.add_tip(at_start=_at_start)
+    assert np.allclose(_tipped_arc.get_arc_center(), [1.0, -1.0, 0.0], rtol=0, atol=5e-5), (
+        _tip_ends, _tipped_arc.get_arc_center())
+    _shaft = _tipped_arc.get_points()
+    assert all(np.linalg.norm(_shaft[i + 2] - _shaft[i]) > 1e-3
+               for i in range(0, len(_shaft) - 2, 2)), _tip_ends
 
 between = geometry.ArcBetweenPoints(
     [-2.0, -0.5, 0.0],
@@ -10687,7 +10757,7 @@ assert bound_rectangle._is_bound()
 assert bound_rectangle.surround(circle_target, buff=0.05) is bound_rectangle
 assert id(bound_rectangle) == bound_rectangle_identity
 assert bound_rectangle._is_bound()
-assert bound_primitive_scene.mobjects == [bound_rectangle]
+assert bound_primitive_scene.mobjects == [bound_primitive_scene.frame, bound_rectangle]
 assert np.allclose(
     [bound_rectangle.get_width(), bound_rectangle.get_height()],
     [2.1, 1.1],
@@ -10752,6 +10822,38 @@ assert np.allclose(circle_query.point_at_angle(math.pi / 2.0), [1.0, 1.0, 0.0])
 circle_query.scale(1.5)
 assert math.isclose(circle_query.get_radius(), 3.0, abs_tol=1e-6)
 assert np.allclose(circle_query.point_at_angle(math.pi), [-2.0, -1.0, 0.0])
+
+
+# geometry.py Circle.point_at_angle measures from self.get_start_angle() and
+# walks self.point_from_proportion(), so a subclass overriding either one is
+# honored, as it is in the Reference.
+class _QuarterStartCircle(geometry.Circle):
+    def get_start_angle(self):
+        return math.tau / 4.0
+
+
+class _ProportionReportingCircle(geometry.Circle):
+    def point_from_proportion(self, alpha):
+        return np.array([alpha, 9.0, 0.0])
+
+
+assert np.allclose(_QuarterStartCircle(radius=2.0).point_at_angle(math.pi / 2.0), [2.0, 0.0, 0.0])
+assert np.allclose(_ProportionReportingCircle().point_at_angle(math.pi), [0.5, 9.0, 0.0])
+
+
+# geometry.py Circle.get_radius is get_norm(self.get_start() - self.get_center()):
+# a child moves the family centre, and an overridden get_start is honored.
+# Values measured in the pinned Reference (fm-circle-get-radius-family-center-tkiz).
+class _FarStartCircle(geometry.Circle):
+    def get_start(self):
+        return np.array([5.0, 0.0, 0.0])
+
+
+_dotted_circle = geometry.Circle(radius=1.0)
+_dotted_circle.add(manimlib.Dot(3.0 * manimlib.RIGHT))
+assert np.allclose(_dotted_circle.get_center(), [1.04, 0.0, 0.0])
+assert math.isclose(_dotted_circle.get_radius(), 0.04, abs_tol=1e-6)
+assert math.isclose(_FarStartCircle(radius=1.0).get_radius(), 5.0, abs_tol=1e-9)
 
 ellipse = geometry.Ellipse(
     width=4.0,
@@ -11086,7 +11188,7 @@ assert bound_line.set_points_by_ends(
     path_arc=math.pi / 3.0,
 ) is bound_line
 assert id(bound_line) == bound_line_identity
-assert bound_line_scene.get_mobjects()[0] is bound_line
+assert bound_line_scene.get_mobjects()[1] is bound_line
 assert bound_line.get_arc_length() > bound_line.get_length()
 assert bound_line.reset_points_around_ends() is bound_line
 
@@ -11569,6 +11671,8 @@ assert np.allclose(vectorized_point.get_location(), [1.5, -2.0, 0.25])
 assert np.allclose(vectorized_point.get_start(), vectorized_point.get_end())
 assert vectorized_point.get_stroke_width() == 0.0
 assert vectorized_point.get_fill_opacity() == 0.0
+# fm-78b6: VMobject's stroke opacity default, as the pinned Reference reports.
+assert vectorized_point.get_stroke_opacity() == 1.0
 vectorized_point.shift([0.5, 1.0, -0.25])
 assert np.allclose(vectorized_point.get_location(), [2.0, -1.0, 0.0])
 
@@ -11687,6 +11791,16 @@ assert partial_plane.background_lines[0].get_stroke_width() == 3
 # the Reference's point_from_proportion asserts.
 flat_arc = manimlib.Arc(angle=0, radius=0.5)
 assert np.allclose(flat_arc.pfp(0.3), flat_arc.get_start())
+# Appendix C-29: restore() brings back a point-less member's style too. The
+# Reference's become() copies point data only, so a faded Integer root stays
+# faded after restore while its glyphs come back.
+saved_bits = manimlib.VGroup(manimlib.Integer(0), manimlib.Integer(1))
+saved_bits[1].set_opacity(0)
+saved_bits.save_state()
+saved_bits.set_fill(opacity=0)
+saved_bits.restore()
+assert [m.get_fill_opacity() for m in saved_bits] == [1.0, 0.0]
+assert saved_bits[0][0].get_fill_opacity() == 1.0
 
 single_insert = topology.insert_n_curves_to_point_list(
     2, np.array([[2.0, 3.0, 0.0]], dtype=np.float32)
@@ -13120,10 +13234,10 @@ assert sphere.n_records() == 15
 
 failed_sphere = three_dimensions.Sphere.__new__(three_dimensions.Sphere)
 try:
-    three_dimensions.Sphere.__init__(failed_sphere, bogus=True)
+    three_dimensions.Sphere.__init__(failed_sphere, texture_paths={})
 except NotImplementedError as error:
     assert str(error) == (
-        "Sphere() keyword(s) not yet routed to the native builder: bogus"
+        "Sphere() keyword(s) not yet routed to the native builder: texture_paths"
     )
 else:
     raise AssertionError("an unrouted Sphere keyword reached the native builder")
@@ -13175,14 +13289,14 @@ assert default_cylinder.n_records() == 101 * 11
 back_cylinder = three_dimensions.Cylinder(resolution=(3, 3), z_index=-1)
 front_cylinder = three_dimensions.Cylinder(resolution=(3, 3), z_index=1)
 cylinder_order_scene = Scene().add(front_cylinder, back_cylinder)
-assert cylinder_order_scene.get_mobjects() == [back_cylinder, front_cylinder]
+assert cylinder_order_scene.get_mobjects() == [cylinder_order_scene.frame, back_cylinder, front_cylinder]
 
 failed_cylinder = three_dimensions.Cylinder.__new__(three_dimensions.Cylinder)
 try:
-    three_dimensions.Cylinder.__init__(failed_cylinder, bogus=True)
+    three_dimensions.Cylinder.__init__(failed_cylinder, texture_paths={})
 except NotImplementedError as error:
     assert str(error) == (
-        "Cylinder() keyword(s) not yet routed to the native builder: bogus"
+        "Cylinder() keyword(s) not yet routed to the native builder: texture_paths"
     )
 else:
     raise AssertionError("an unrouted Cylinder keyword reached the native builder")
@@ -13240,7 +13354,7 @@ assert default_torus.n_records() == 101 * 101
 back_torus = three_dimensions.Torus(resolution=(3, 3), z_index=-1)
 front_torus = three_dimensions.Torus(resolution=(3, 3), z_index=1)
 torus_order_scene = Scene().add(front_torus, back_torus)
-assert torus_order_scene.get_mobjects() == [back_torus, front_torus]
+assert torus_order_scene.get_mobjects() == [torus_order_scene.frame, back_torus, front_torus]
 
 sphere_mesh = three_dimensions.SurfaceMesh(sphere, resolution=(4, 3))
 assert len(sphere_mesh.submobjects) == 7
@@ -13313,14 +13427,14 @@ assert default_cone.n_records() == 101 * 11
 back_cone = three_dimensions.Cone(resolution=(3, 3), z_index=-1)
 front_cone = three_dimensions.Cone(resolution=(3, 3), z_index=1)
 cone_order_scene = Scene().add(front_cone, back_cone)
-assert cone_order_scene.get_mobjects() == [back_cone, front_cone]
+assert cone_order_scene.get_mobjects() == [cone_order_scene.frame, back_cone, front_cone]
 
 failed_cone = three_dimensions.Cone.__new__(three_dimensions.Cone)
 try:
-    three_dimensions.Cone.__init__(failed_cone, bogus=True)
+    three_dimensions.Cone.__init__(failed_cone, texture_paths={})
 except NotImplementedError as error:
     assert str(error) == (
-        "Cone() keyword(s) not yet routed to the native builder: bogus"
+        "Cone() keyword(s) not yet routed to the native builder: texture_paths"
     )
 else:
     raise AssertionError("an unrouted Cone keyword reached the native builder")
@@ -13362,7 +13476,7 @@ front_line3d = three_dimensions.Line3D(
     z_index=1,
 )
 line3d_order_scene = Scene().add(front_line3d, back_line3d)
-assert line3d_order_scene.get_mobjects() == [back_line3d, front_line3d]
+assert line3d_order_scene.get_mobjects() == [line3d_order_scene.frame, back_line3d, front_line3d]
 
 failed_line3d = three_dimensions.Line3D.__new__(three_dimensions.Line3D)
 try:
@@ -13370,11 +13484,11 @@ try:
         failed_line3d,
         manimlib.LEFT,
         manimlib.RIGHT,
-        bogus=True,
+        texture_paths={},
     )
 except NotImplementedError as error:
     assert str(error) == (
-        "Line3D() keyword(s) not yet routed to the native builder: bogus"
+        "Line3D() keyword(s) not yet routed to the native builder: texture_paths"
     )
 else:
     raise AssertionError("an unrouted Line3D keyword reached the native builder")
@@ -13398,14 +13512,14 @@ assert default_disk3d.n_records() == 2 * 100
 back_disk3d = three_dimensions.Disk3D(resolution=(2, 5), z_index=-1)
 front_disk3d = three_dimensions.Disk3D(resolution=(2, 5), z_index=1)
 disk3d_order_scene = Scene().add(front_disk3d, back_disk3d)
-assert disk3d_order_scene.get_mobjects() == [back_disk3d, front_disk3d]
+assert disk3d_order_scene.get_mobjects() == [disk3d_order_scene.frame, back_disk3d, front_disk3d]
 
 failed_disk3d = three_dimensions.Disk3D.__new__(three_dimensions.Disk3D)
 try:
-    three_dimensions.Disk3D.__init__(failed_disk3d, bogus=True)
+    three_dimensions.Disk3D.__init__(failed_disk3d, texture_paths={})
 except NotImplementedError as error:
     assert str(error) == (
-        "Disk3D() keyword(s) not yet routed to the native builder: bogus"
+        "Disk3D() keyword(s) not yet routed to the native builder: texture_paths"
     )
 else:
     raise AssertionError("an unrouted Disk3D keyword reached the native builder")
@@ -13434,21 +13548,23 @@ assert default_square3d.n_records() == 2 * 2
 back_square3d = three_dimensions.Square3D(z_index=-1)
 front_square3d = three_dimensions.Square3D(z_index=1)
 square3d_order_scene = Scene().add(front_square3d, back_square3d)
-assert square3d_order_scene.get_mobjects() == [back_square3d, front_square3d]
+assert square3d_order_scene.get_mobjects() == [
+    square3d_order_scene.frame, back_square3d, front_square3d,
+]
 
 failed_square3d = three_dimensions.Square3D.__new__(three_dimensions.Square3D)
 try:
-    three_dimensions.Square3D.__init__(failed_square3d, bogus=True)
+    three_dimensions.Square3D.__init__(failed_square3d, texture_paths={})
 except NotImplementedError as error:
     assert str(error) == (
-        "Square3D() keyword(s) not yet routed to the native builder: bogus"
+        "Square3D() keyword(s) not yet routed to the native builder: texture_paths"
     )
 else:
     raise AssertionError("an unrouted Square3D keyword reached the native builder")
 assert not hasattr(failed_square3d, "submobjects")
 
 solid_scene = Scene().add(torus, cone, line3d, disk3d, square3d)
-assert solid_scene.get_mobjects() == [torus, cone, line3d, disk3d, square3d]
+assert solid_scene.get_mobjects() == [solid_scene.frame, torus, cone, line3d, disk3d, square3d]
 
 cube_face = three_dimensions.Square3D(side_length=2.0)
 cube_faces = three_dimensions.square_to_cube_faces(cube_face)
@@ -13469,14 +13585,14 @@ assert all(face.n_records() == 3 * 4 for face in dense_cube.submobjects)
 back_cube = three_dimensions.Cube(z_index=-1)
 front_cube = three_dimensions.Cube(z_index=1)
 cube_order_scene = Scene().add(front_cube, back_cube)
-assert cube_order_scene.get_mobjects() == [back_cube, front_cube]
+assert cube_order_scene.get_mobjects() == [cube_order_scene.frame, back_cube, front_cube]
 
 failed_cube = three_dimensions.Cube.__new__(three_dimensions.Cube)
 try:
-    three_dimensions.Cube.__init__(failed_cube, bogus=True)
+    three_dimensions.Cube.__init__(failed_cube, texture_paths={})
 except NotImplementedError as error:
     assert str(error) == (
-        "Cube() keyword(s) not yet routed to the native builder: bogus"
+        "Cube() keyword(s) not yet routed to the native builder: texture_paths"
     )
 else:
     raise AssertionError("an unrouted Cube keyword reached the native builder")
@@ -13556,14 +13672,14 @@ assert np.allclose(
 back_prism = three_dimensions.Prism(z_index=-1)
 front_prism = three_dimensions.Prism(z_index=1)
 prism_order_scene = Scene().add(front_prism, back_prism)
-assert prism_order_scene.get_mobjects() == [back_prism, front_prism]
+assert prism_order_scene.get_mobjects() == [prism_order_scene.frame, back_prism, front_prism]
 
 failed_prism = three_dimensions.Prism.__new__(three_dimensions.Prism)
 try:
-    three_dimensions.Prism.__init__(failed_prism, bogus=True)
+    three_dimensions.Prism.__init__(failed_prism, texture_paths={})
 except NotImplementedError as error:
     assert str(error) == (
-        "Prism() keyword(s) not yet routed to the native builder: bogus"
+        "Prism() keyword(s) not yet routed to the native builder: texture_paths"
     )
 else:
     raise AssertionError("an unrouted Prism keyword reached the native builder")
@@ -13604,7 +13720,7 @@ assert np.allclose(
 back_vcube = three_dimensions.VCube(z_index=-1)
 front_vcube = three_dimensions.VCube(z_index=1)
 vcube_order_scene = Scene().add(front_vcube, back_vcube)
-assert vcube_order_scene.get_mobjects() == [back_vcube, front_vcube]
+assert vcube_order_scene.get_mobjects() == [vcube_order_scene.frame, back_vcube, front_vcube]
 
 failed_vcube = three_dimensions.VCube.__new__(three_dimensions.VCube)
 try:
@@ -13643,7 +13759,7 @@ assert np.allclose(
 back_vprism = three_dimensions.VPrism(z_index=-1)
 front_vprism = three_dimensions.VPrism(z_index=1)
 vprism_order_scene = Scene().add(front_vprism, back_vprism)
-assert vprism_order_scene.get_mobjects() == [back_vprism, front_vprism]
+assert vprism_order_scene.get_mobjects() == [vprism_order_scene.frame, back_vprism, front_vprism]
 
 failed_vprism = three_dimensions.VPrism.__new__(three_dimensions.VPrism)
 try:
@@ -13678,6 +13794,7 @@ back_dodecahedron = three_dimensions.Dodecahedron(z_index=-1)
 front_dodecahedron = three_dimensions.Dodecahedron(z_index=1)
 dodecahedron_order_scene = Scene().add(front_dodecahedron, back_dodecahedron)
 assert dodecahedron_order_scene.get_mobjects() == [
+    dodecahedron_order_scene.frame,
     back_dodecahedron,
     front_dodecahedron,
 ]
@@ -13728,7 +13845,7 @@ vector_solid_scene = Scene().add(
     vector_group, vcube, vprism, dodecahedron, prismified
 )
 assert vector_solid_scene.get_mobjects() == [
-    vector_group, vcube, vprism, dodecahedron, prismified
+    vector_solid_scene.frame, vector_group, vcube, vprism, dodecahedron, prismified
 ]
 
 failed_vcube = three_dimensions.VCube.__new__(three_dimensions.VCube)
@@ -14228,10 +14345,10 @@ else:
 
 failed_torus = three_dimensions.Torus.__new__(three_dimensions.Torus)
 try:
-    three_dimensions.Torus.__init__(failed_torus, bogus=True)
+    three_dimensions.Torus.__init__(failed_torus, texture_paths={})
 except NotImplementedError as error:
     assert str(error) == (
-        "Torus() keyword(s) not yet routed to the native builder: bogus"
+        "Torus() keyword(s) not yet routed to the native builder: texture_paths"
     )
 else:
     raise AssertionError("an unrouted Torus keyword reached the native builder")
@@ -15335,8 +15452,8 @@ def verify_portal_console_scene():
     assert elbow_receipt[5] == 1
     assert_white_stroke_witness(elbow_destination)
 
-    # The camera frame is intentionally not a drawable Stage root, but the
-    # Reference places it first in Scene.mobjects for updater dispatch.  Both
+    # The camera frame is the scene list's first member, as in the
+    # Reference (fm-6l2i), so updater dispatch reaches it first.  Both
     # crossing rungs, wait, ordinary play, and camera-only play must preserve
     # frame-before-root ordering.  The camera-only observation also proves
     # frame interpolation lands before the updater phase rather than inside
@@ -17392,15 +17509,9 @@ imag_number.set_value(2j)
 assert imag_number.get_value() == 2j
 assert imag_number.get_tex() == "2.00i"
 
-# Named errors for NaN and non-numeric values. Real infinities render as
-# readout text since 31f0a52d; NaN stays a named refusal until fm-5wq.30 rules
-# (the pinned Reference renders it as the text "nan").
-try:
-    manimlib.DecimalNumber(float("nan"))
-except ValueError as error:
-    assert "non-NaN" in str(error), str(error)
-else:
-    raise AssertionError("DecimalNumber accepted nan")
+# Real infinities render as readout text since 31f0a52d, and a real NaN reads
+# "nan" as in the pinned Reference (fm-5wq.30). Non-numeric values refuse.
+assert manimlib.DecimalNumber(float("nan")).get_tex() == "nan"
 
 try:
     manimlib.DecimalNumber("seven")
@@ -17660,11 +17771,19 @@ func_tail_widths = np.asarray(
 ).reshape(-1)
 assert func_tail_widths[0] < func_tail_widths[-1]
 
-# The mobject-traced native path still constructs against a bound target.
+# The native path seeds history against a bound target but publishes no
+# geometry until its first positive scene update.
 tail_traced_dot = manimlib.Dot()
 func_tail_scene.add(tail_traced_dot)
 mobject_tail = manimlib.TracingTail(tail_traced_dot)
-assert mobject_tail.get_num_points() > 0
+assert mobject_tail.get_num_points() == 0
+func_tail_scene.add(mobject_tail)
+func_tail_scene.update_frame(0)
+assert mobject_tail.get_num_points() == 0
+tail_traced_dot.shift(manimlib.RIGHT)
+func_tail_scene.update_frame(1.0 / 15)
+assert np.allclose(mobject_tail.get_start(), manimlib.ORIGIN)
+assert np.allclose(mobject_tail.get_end(), manimlib.RIGHT)
 
 # Named negative: neither a Mobject nor a callable.
 try:
@@ -18458,10 +18577,10 @@ else:
     raise AssertionError("element_to_mobject accepted a non-Matrix self")
 
 # fm-5wq.4.123: TracingTail's leftover constructor kwargs — the schema's
-# TracedPath chain carries time_per_anchor (stored-but-inert for the callable
-# path, exactly like TracedPath's own) and VMobject style keys; the native
-# tail routes that cadence into its constructor prefill, and unknown keys
-# stay named TypeErrors.
+# TracedPath chain carries time_per_anchor and VMobject style keys. The
+# native tail uses that cadence for its temporal grid after the first
+# positive update; construction and zero-dt updates publish no geometry.
+# Unknown keys stay named TypeErrors.
 tail_kw_func = manimlib.TracingTail(
     lambda: (0.0, 0.0, 0.0),
     time_per_anchor=1.0 / 30,
@@ -18474,13 +18593,28 @@ tail_kw_dot = manimlib.Dot()
 tail_kw_scene.add(tail_kw_dot)
 tail_kw_native = manimlib.TracingTail(tail_kw_dot, fill_opacity=0.0)
 assert tail_kw_native.time_per_anchor == 1.0 / 15
-assert tail_kw_native.get_num_points() == 29
+assert tail_kw_native.get_num_points() == 0
 tail_kw_native_30hz = manimlib.TracingTail(
     tail_kw_dot,
     time_per_anchor=1.0 / 30,
 )
 assert tail_kw_native_30hz.time_per_anchor == 1.0 / 30
-assert tail_kw_native_30hz.get_num_points() == 59
+assert tail_kw_native_30hz.get_num_points() == 0
+tail_kw_scene.add(tail_kw_native, tail_kw_native_30hz)
+tail_kw_scene.update_frame(0)
+assert tail_kw_native.get_num_points() == 0
+assert tail_kw_native_30hz.get_num_points() == 0
+tail_kw_dot.shift(manimlib.RIGHT)
+tail_kw_scene.update_frame(1.0 / 15)
+# One second contains 15 or 30 complete anchor intervals, with both
+# endpoints present. Each smoothed interval contributes two quad points.
+assert tail_kw_native.get_num_points() == 31
+assert tail_kw_native_30hz.get_num_points() == 61
+for updated_native_tail in (tail_kw_native, tail_kw_native_30hz):
+    assert np.allclose(updated_native_tail.get_start(), manimlib.ORIGIN)
+    assert np.allclose(updated_native_tail.get_end(), manimlib.RIGHT)
+    assert updated_native_tail.get_stroke_widths()[0] < updated_native_tail.get_stroke_widths()[-1]
+    assert updated_native_tail.get_stroke_opacities()[0] < updated_native_tail.get_stroke_opacities()[-1]
 
 for invalid_time_per_anchor in (0.0, -1.0, float("inf"), float("nan")):
     try:
@@ -19438,8 +19572,8 @@ assert holder.submobjects == [first, replacement]
 # A shared descendant legally records every parent; detaching from one keeps
 # the other edge intact.
 shared = Mobject()
-family_a = Mobject(shared)
-family_b = Mobject(shared)
+family_a = Mobject().add(shared)
+family_b = Mobject().add(shared)
 assert shared.parents == [family_a, family_b]
 family_a.remove(shared)
 assert shared.parents == [family_b]
@@ -19449,7 +19583,7 @@ top, mid, leaf = _chain()
 assert leaf.get_ancestors() == [top, mid]
 assert mid.get_ancestors() == [top]
 assert top.get_ancestors() == []
-outside = Mobject(leaf)
+outside = Mobject().add(leaf)
 assert top not in outside.get_family(recurse=False)
 extended = leaf.get_ancestors(extended=True)
 # Reference extended traversal starts from the downward family only, so
@@ -19858,7 +19992,7 @@ z_mob = Mobject()
 z_mob.move_to([1.0, 2.0, 3.0])
 assert np.allclose(z_mob.get_z_index_reference_point(), z_mob.get_center())
 z_group = Mobject()
-z_member = Mobject(z_group)
+z_member = Mobject().add(z_group)
 z_member.z_index_group = z_group
 z_group.move_to([9.0, 9.0, 9.0])
 assert np.allclose(z_member.get_z_index_reference_point(), z_group.get_center())
@@ -20273,7 +20407,7 @@ assert base_wrapper.surround(base_wrapped, buff=1.0) is base_wrapper
 assert np.allclose(base_wrapper.get_center(), [3.0, 2.0, 0.0])
 assert np.allclose([base_wrapper.get_width(), base_wrapper.get_height()], [5.0, 5.0])
 assert base_wrapper._is_bound()
-assert base_scene.mobjects == [base_wrapped, base_wrapper]
+assert base_scene.mobjects == [base_scene.frame, base_wrapped, base_wrapper]
 assert base_wrapper.surround(base_wrapped, dim_to_match=1, stretch=True, buff=0.5) is base_wrapper
 assert np.allclose([base_wrapper.get_width(), base_wrapper.get_height()], [5.0, 2.5])
 assert np.allclose(base_wrapped.get_points(), [[1.0, 1.0, 0.0], [5.0, 3.0, 0.0]])
@@ -21409,9 +21543,9 @@ _ra, _rb, _rc = manimlib.Dot(), manimlib.Dot(), manimlib.Dot()
 _never_added = manimlib.VGroup(_ra, _rb)
 _remove_scene.add(manimlib.VGroup(_ra, _rb, _rc))
 _remove_scene.remove(_never_added)
-assert len(_remove_scene.mobjects) == 1 and _remove_scene.mobjects[0] is _rc
+assert _remove_scene.mobjects == [_remove_scene.frame, _rc]
 _remove_scene.remove(manimlib.Square())
-assert len(_remove_scene.mobjects) == 1
+assert _remove_scene.mobjects == [_remove_scene.frame, _rc]
 _foreign_scene = manimlib.Scene()
 _foreign = manimlib.Dot()
 _foreign_scene.add(_foreign)
@@ -21923,14 +22057,46 @@ assert np.allclose(
 
 failed_surface = surface_types.Surface.__new__(surface_types.Surface)
 try:
-    surface_types.Surface.__init__(failed_surface, bogus=True)
+    surface_types.Surface.__init__(failed_surface, texture_paths={})
 except NotImplementedError as error:
     assert str(error) == (
-        "Surface() keyword(s) not yet routed to the native builder: bogus"
+        "Surface() keyword(s) not yet routed to the native builder: texture_paths"
     )
 else:
     raise AssertionError("an unrouted Surface keyword reached the native builder")
 assert not hasattr(failed_surface, "submobjects")
+
+# fm-c1up: a keyword outside the Reference's Surface/Mobject chain is the
+# Reference's own TypeError (Cone(direction=RIGHT) raises it at 6199a00d),
+# never the unrouted-routing refusal, and it fails before any state exists.
+for solid, arguments in (
+    (surface_types.Surface, ()),
+    (three_dimensions.Sphere, ()),
+    (three_dimensions.Torus, ()),
+    (three_dimensions.Cylinder, ()),
+    (three_dimensions.Cone, ()),
+    (three_dimensions.Line3D, (manimlib.LEFT, manimlib.RIGHT)),
+    (three_dimensions.Disk3D, ()),
+    (three_dimensions.Square3D, ()),
+    (three_dimensions.Cube, ()),
+    (three_dimensions.Prism, ()),
+):
+    unknown_solid = solid.__new__(solid)
+    try:
+        solid.__init__(unknown_solid, *arguments, direction=manimlib.RIGHT, bogus=True)
+    except TypeError as error:
+        assert str(error) == (
+            "Mobject.__init__() got an unexpected keyword argument 'direction'"
+        ), (solid.__name__, error)
+    else:
+        raise AssertionError(solid.__name__ + " accepted an unknown keyword")
+    assert not hasattr(unknown_solid, "submobjects"), solid.__name__
+try:
+    three_dimensions.Cone(direction=manimlib.RIGHT)
+except TypeError as error:
+    assert "unexpected keyword argument 'direction'" in str(error), error
+else:
+    raise AssertionError("Cone accepted direction=")
 
 left_sheet = surface_types.ParametricSurface(
     lambda u, v: [u, v, 0.0],
@@ -22847,7 +23013,7 @@ except TypeError:
 _check("textbox refuses non-string writes", _tbx_str_refused)
 _tbx.set_value("world")
 _check("textbox set value rewrites text",
-       _tbx.get_value() == "world" and _tbx.text.has_points())
+       _tbx.get_value() == "world" and len(_tbx.text.get_all_points()) > 0)
 _tbx_nonstr_update = False
 try:
     _tbx.update_text(None)

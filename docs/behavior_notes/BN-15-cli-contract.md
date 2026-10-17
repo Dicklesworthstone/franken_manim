@@ -82,6 +82,35 @@ while the file kept its configured rate, so `-f --fps 60` wrote 12 frames into a
   separation, doctor, cache lifecycle, and exhaustive interaction tests.
 - `docs/api/cli_flags.md`: generated user-facing flag and command tables.
 
+## Native video-quality controls
+
+The standalone Rust `fmn` command accepts `--crf`, `--preset`, `--tune`, and
+`--video-bitrate` through the generated contract. These select compressed-video
+policy independently of scene-resolution presets and imply video output.
+The optional `file_writer.video_crf`, `video_preset`, `video_tune`, and
+`video_bitrate` configuration keys supply defaults for video requests.
+
+Explicit CLI fields override file settings. Selecting CRF clears a configured
+bitrate and selecting bitrate clears a configured CRF; specifying both explicit
+modes is a usage error. Native output formats (including `--gif`) reject the
+flags. Shared Reel negotiation checks encoder compatibility before discovery
+or scene execution. The resolved configuration and actual encoder argv remain
+in provenance. Existing callers that supply no controls keep encoder defaults.
+See [video encoding quality](../VIDEO_ENCODING_QUALITY.md) for catalogs,
+examples, and the matching Rust API precedence rules.
+
+## Long-render ffmpeg budgets
+
+The standalone native CLI uses the render API's finite 24-hour ffmpeg watchdog
+instead of the boundary's ten-minute short-job default. Its four explicit
+controls are `--ffmpeg-timeout` (whole seconds), `--ffmpeg-max-log-bytes`,
+`--ffmpeg-max-artifact-bytes`, and `--ffmpeg-max-input-bytes`. These select video
+output, reject zero/invalid bounds and native formats, and preserve the existing
+frame-count/resident-memory safeguards. The artifact cap is intersected with
+the raw-input allowance. Both the robot render receipt and C9 provenance record
+the admitted policy. Tool probes keep their own short deadlines. See
+[native video limits](../NATIVE_VIDEO_LIMITS.md) for defaults and usage.
+
 ## Python portal video-quality extension
 
 `fmn-python` additionally accepts `--crf`, `--preset`, `--tune`, and
@@ -102,5 +131,28 @@ The same overrides reach named batches, `--write_all`, subdivisions, and video
 primaries paired with a final PNG, without injecting scene constructor kwargs
 or rerunning the scene. Actual encoder argv remains in each native receipt.
 See [Python video quality](../PYTHON_VIDEO_QUALITY.md) for usage and permanent
-parser/extension tests. This extension does not claim standalone Rust `fmn`
-CLI/config-file or AAC-bitrate support; those remain separate adapters.
+parser/extension tests. AAC-bitrate is independently configured as described below.
+
+## AAC soundtrack bitrate
+
+`--audio-bitrate BPS` is available in both console front doors. It sets the
+second-stage AAC encoder's target in integer bits per second, independently of
+CRF, video bitrate, preset and tune. `file_writer.audio_bitrate` supplies a
+layered optional default; `RenderOptions.audio_quality.bitrate` overrides that
+key in native Rust. Missing/None preserves ffmpeg's AAC default, not a guessed
+bitrate. A target is not a promised output size or measured quality improvement.
+
+Zero, non-integer and out-of-range targets are refused before scene execution
+or encoder startup. PNG, GIF, Y4M, WAV and SVG refuse an explicit AAC CLI option;
+native WAV mixing is never compressed. Alpha-preserving MOV accepts an AAC
+target without changing its video codec. Python console overrides reach named
+batches, subdivisions and paired-final-frame exports through the existing
+writer owner. The video stream is always copied during muxing; native PCM,
+frame sampling, and raw rendered pixels are unaffected.
+
+The exact `-b:a` argument appears only on the mux invocation in provenance.
+Lower-level callers use `Boundary::with_audio_quality` or
+`FfmpegSink::with_audio_quality`; their existing constructors and defaults are
+unchanged. Tests in `fmn-output/tests/audio_quality.rs`, the native video tests,
+and the portal quality suites cover real process arguments, unchanged native
+PCM, actual AAC decode, and byte-identical H.264 streams across AAC targets.

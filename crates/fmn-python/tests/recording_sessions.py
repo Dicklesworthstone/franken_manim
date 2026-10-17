@@ -37,7 +37,10 @@ def repeated_contexts(root):
         check(clip.result)
         assert clip.result.frame_count == 4
         assert (clip.start_frame, clip.end_frame) == (4 + index * 4, 8 + index * 4)
-        assert scene.mobjects[0] is square and scene.camera is camera
+        # The list starts with the frame, as in the Reference (fm-6l2i).
+        assert scene.mobjects[0] is scene.frame and scene.mobjects[1] is square
+        assert scene.camera is camera
+
         assert camera.get_pixel_shape() == shape
     with record_scene(scene, root / "static.gif", resolution=(96, 54), threads=1) as clip:
         pass
@@ -86,7 +89,8 @@ def errors_preserve_existing_scene(root):
     except ValueError as error:
         assert str(error) == "authored"
     assert not (root / "failure.y4m").exists()
-    assert scene.mobjects[0] is square and m._portal_scene_clock(scene) == (30, 8)
+    assert scene.mobjects[1] is square and m._portal_scene_clock(scene) == (30, 8)
+
     with record_scene(scene, root / "recovered.y4m", resolution=(96, 54), threads=1) as clip:
         scene.wait(0.125)
     check(clip.result)

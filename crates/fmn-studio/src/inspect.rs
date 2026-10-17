@@ -345,7 +345,8 @@ pub struct InspectorNode {
 ///
 /// Frame indices are preview ordinals, not durable mobject identities or the
 /// scene's potentially discontinuous clock frame. Coordinates use Lumen's
-/// actual screen map: `origin + world.xy * scale`, with no extra Y inversion.
+/// actual screen map: `origin + [world.x * scale, world.y * y_scale]`, where
+/// `y_scale` is `-scale` for a Y-up map and `scale` for a Y-down map.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct InspectorView {
     /// Current preview frame ordinal.
@@ -362,6 +363,8 @@ pub struct InspectorView {
     pub scale: f64,
     /// Pixel position of world-space `[0, 0]`.
     pub origin: [f64; 2],
+    /// Whether object-space +Y points up the top-row-first preview image.
+    pub y_up: bool,
     /// Whether the selected worker implements live input events.
     pub input_events: bool,
     pub input_revision: Option<u64>,
@@ -393,6 +396,7 @@ impl InspectorView {
             height: viewport.height,
             scale: map.scale,
             origin: map.origin,
+            y_up: map.y_up,
             input_events,
             input_revision: None,
             live_advance: false,
@@ -633,6 +637,8 @@ impl InspectorSnapshot {
             push_f64(&mut out, view.scale)?;
             out.push_str(",\"origin\":")?;
             push_f64_array(&mut out, &view.origin)?;
+            out.push_str(",\"y_up\":")?;
+            push_bool(&mut out, view.y_up)?;
             out.push_str(",\"input_events\":")?;
             push_bool(&mut out, view.input_events)?;
             if view.live_advance {

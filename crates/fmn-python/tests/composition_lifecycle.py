@@ -1,7 +1,10 @@
 """Real-extension acceptance for authored AnimationGroup lifecycles."""
 import unittest
 import numpy as np
-from manimlib import AnimationGroup, Flash, Scene, Square, Succession, Transform, VGroup
+from manimlib import (
+    LEFT, RIGHT, AnimationGroup, Circle, FadeIn, Flash, Group, LaggedStart, Line, Point, Scene,
+    ShowCreation, Square, Succession, Transform, VGroup,
+)
 
 
 class RecordingGroup(AnimationGroup):
@@ -154,8 +157,22 @@ class CompositionLifecycleAcceptance(unittest.TestCase):
         self.assertFalse(any(mobject is flash.lines for mobject in scene.mobjects))
         np.testing.assert_allclose(source.get_center(), [2, 1, 0], atol=1e-6)
 
+    def test_played_groups_are_vgroups_over_vmobjects(self):
+        # fm-3jw2, composition.py:44-51: the group a play adds is a VGroup
+        # when every animated mobject is a VMobject, a Group otherwise. The
+        # pinned Reference's roots for these plays are CameraFrame, VGroup,
+        # VGroup, Group (the portal used Group for all three).
+        scene = Scene()
+        scene.play(LaggedStart(ShowCreation(Line(LEFT, RIGHT)), FadeIn(Square()), lag_ratio=0.5),
+                   run_time=2 / 30)
+        scene.play(AnimationGroup(FadeIn(Circle()), FadeIn(Square())), run_time=2 / 30)
+        scene.play(AnimationGroup(FadeIn(Circle()), FadeIn(Point())), run_time=2 / 30)
+        roots = [mobject for mobject in scene.mobjects if mobject is not scene.frame]
+        self.assertEqual([type(root) for root in roots], [VGroup, VGroup, Group])
+        self.assertEqual([len(root.submobjects) for root in roots], [2, 2, 2])
+
 
 suite = unittest.defaultTestLoader.loadTestsFromTestCase(CompositionLifecycleAcceptance)
 result = unittest.TextTestRunner(verbosity=2).run(suite)
-if result.testsRun != 9 or not result.wasSuccessful():
+if result.testsRun != 10 or not result.wasSuccessful():
     raise AssertionError("Native composition lifecycle acceptance failed")

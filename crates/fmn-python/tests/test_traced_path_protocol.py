@@ -15,7 +15,7 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
 
-def environment():
+def environment(native_tail_initializer=None):
     class Mobject:
         def __init__(self, **kwargs):
             self.updaters, self.kwargs = [], kwargs
@@ -44,6 +44,10 @@ def environment():
         pass
     class TracingTail(VMobject):
         pass
+    if native_tail_initializer is not None:
+        TracingTail.__init__ = native_tail_initializer
+        TracingTail._init_native_tracer = lambda self: None
+
     native = SimpleNamespace(Mobject=Mobject, VMobject=VMobject, TracedPath=TracedPath,
                              TracingTail=TracingTail, _np=np, _WHITE="white")
     module.install_traced_path(native)
@@ -181,19 +185,70 @@ class TemporalTracingTests(unittest.TestCase):
         mob = self.native.Mobject()
         tail = self.native.TracingTail(mob, time_traced=.4, time_per_anchor=.1)
         self.assertIsInstance(tail, self.native.TracedPath)
-        self.assertEqual(tail.stroke["width"], (0, 3))
-        self.assertEqual(tail.stroke["opacity"], (0, 1))
+        self.assertEqual(tail.stroke_config["width"], (0, 3))
+        self.assertEqual(tail.stroke_config["opacity"], (0, 1))
         mob.position[:] = (1, 0, 0)
         tail.update(.1)
+        self.assertEqual(tail.stroke["width"], (0, 3))
+        self.assertEqual(tail.stroke["opacity"], (0, 1))
         np.testing.assert_allclose(tail.points[-1], mob.position)
         np.testing.assert_allclose(tail.points[0], [0, 0, 0])
+    def test_tail_seeds_history_without_initial_geometry_or_style(self):
+        position = np.zeros(3)
+        calls = []
+        def source():
+            calls.append("source")
+            return position
+
+        class Authored(self.native.TracingTail):
+            def set_points_smoothly(self, points):
+                calls.append("geometry")
+                return super().set_points_smoothly(points)
+            def set_stroke(self, **kwargs):
+                calls.append("style")
+                return super().set_stroke(**kwargs)
+        tail = Authored(source, time_traced=.45, time_per_anchor=.1)
+        self.assertEqual(calls, ["source"])
+        self.assertEqual(len(tail.points), 0)
+        self.assertFalse(hasattr(tail, "stroke"))
+        self.assertEqual(len(tail.traced_points), 4)
+        self.assertTrue(all(
+            not np.shares_memory(a, b)
+            for a, b in zip(tail.traced_points, tail.traced_points[1:])
+        ))
+        tail.update(0)
+        self.assertEqual(calls, ["source"])
+        self.assertEqual(len(tail.points), 0)
+        position[:] = (1, 0, 0)
+        tail.update(.1)
+        self.assertEqual(calls, ["source", "source", "geometry", "style"])
+        np.testing.assert_allclose(tail.points[0], [0, 0, 0])
+        np.testing.assert_allclose(tail.points[-1], position)
     def test_tail_callable_and_zero_length_work(self):
         tail = self.native.TracingTail(lambda: [1, 2, 3], time_traced=0)
+        self.assertEqual(len(tail.points), 0)
+        self.assertEqual(tail.traced_points, [])
         tail.update(.1)
         np.testing.assert_allclose(tail.points, [[1, 2, 3]])
     def test_tail_rejects_infinite_history(self):
         with self.assertRaises(ValueError):
             self.native.TracingTail(lambda: [0, 0, 0], time_traced=np.inf)
+    def test_native_tail_route_cannot_bypass_initial_history_validation(self):
+        calls = []
+        def initialize_native(tail, source, **kwargs):
+            calls.append(kwargs)
+        native = environment(native_tail_initializer=initialize_native)
+        mob = native.Mobject()
+        mob._is_bound = lambda: True
+        for kwargs in ({"time_traced": -1}, {"time_traced": float("inf")},
+                       {"time_traced": float("nan")}, {"time_traced": 1, "time_per_anchor": 1e-12}):
+            with self.assertRaises(ValueError):
+                native.TracingTail(mob, **kwargs)
+        self.assertEqual(calls, [])
+        native.TracingTail(mob, time_traced=.5, time_per_anchor=.125)
+        self.assertEqual(len(calls), 1, "valid bound source lost the native route")
+        self.assertEqual(calls[0]["time_traced"], .5)
+        self.assertEqual(calls[0]["time_per_anchor"], .125)
     def test_trace_geometry_and_style_overrides_remain_virtual(self):
         parent = self.native.TracedPath
         calls = []

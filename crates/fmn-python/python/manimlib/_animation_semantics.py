@@ -173,6 +173,24 @@ def install(native, subsystems=True):
                 mobject2.uniforms[key],
                 alpha,
             )
+        # C-33: a family without points has a degenerate box, its position.
+        # The Reference interpolates that box along path_func
+        # (mobject.py:1837) but leaves its refresh flag set, so whether it
+        # moves depends on an earlier read; here it always moves. A box over
+        # points follows the points, so only point-free families need this.
+        if len(data) == 0:
+            pending, point_free = list(self.submobjects), True
+            while pending and point_free:
+                member = pending.pop()
+                point_free = not member.has_points()
+                pending.extend(member.submobjects)
+            if point_free:
+                box = path_func(
+                    np.asarray(mobject1.get_bounding_box(), dtype=float),
+                    np.asarray(mobject2.get_bounding_box(), dtype=float),
+                    alpha,
+                )
+                self._set_point_free_anchor(tuple(float(value) for value in box[1]))
         return self
 
     def validate_input_type(self, mobject):
@@ -437,7 +455,20 @@ def install(native, subsystems=True):
             self.target_copy = self.target_mobject
         else:
             self.target_copy = self.target_mobject.copy()
+        # C-33: alignment resizes point records, and a resize refreshes a
+        # point-less box to the origin (fm-fc53). The Reference's interpolate
+        # still reads the box cached before that refresh, so keep each
+        # point-free member's position through the alignment; the box then
+        # interpolates between the endpoints' positions.
+        kept = []
+        if not isinstance(self.mobject, g["CameraFrame"]):
+            for root in (self.mobject, self.target_copy):
+                free = g["_point_free_family_ids"](root)
+                kept.extend((member, tuple(member.get_center()))
+                            for member in root.get_family() if id(member) in free)
         self.mobject.align_data_and_family(self.target_copy)
+        for member, center in kept:
+            member._set_point_free_anchor(center)
         Animation.begin(self)
         # Equal endpoint records do not imply a constant authored path: a
         # closed excursion may leave and return to the very same points.
@@ -705,6 +736,13 @@ def _install_matching_parts(g):
         # CameraFrame is a native pose, never a drawable Stage family member.
         if isinstance(animation.mobject, g["CameraFrame"]):
             return []
+        if getattr(animation, "_fmn_unstaged_root", False):
+            # A group holding the scene's frame is never staged (fm-5wwt);
+            # its members' own animations stage what they animate.
+            return unique(
+                obj for member in animation.animations
+                for obj in animated_mobjects(member)
+            )
         if isinstance(animation.mobject, Mobject):
             return unique([animation.mobject, *getattr(animation, "_native_extra_mobjects", ())])
         if isinstance(animation, AnimationGroup):
@@ -864,7 +902,8 @@ def _install_matching_parts(g):
             animation._ensure_runtime_defaults()
             if not isinstance(animation.mobject, Mobject):
                 raise TypeError("A Python matching animation must animate a Mobject")
-            if not animation.mobject._is_bound():
+            if not (animation.mobject._is_bound()
+                    or getattr(animation, "_fmn_unstaged_root", False)):
                 scene._adopt(animation.mobject)
             return PythonLeaf(animation)
         if isinstance(animation, AnimationGroup):
@@ -1369,7 +1408,7 @@ def _install_composition_lifecycle(g):
             scene = next((obj._scene for obj in root.get_family() if obj._is_bound()), None)
         if scene is None:
             raise RuntimeError("AnimationGroup.begin requires a scene-bound group or member; use Scene.play(group)")
-        if not root._is_bound():
+        if not (root._is_bound() or getattr(self, "_fmn_unstaged_root", False)):
             scene._adopt(root)
         self._ensure_runtime_defaults()
         # The existing driver owns the interval algebra, eager simultaneous
@@ -1744,8 +1783,12 @@ def _install_camera_choreography(g):
             return
         if animation.mobject is not scene.frame:
             raise ValueError("Camera animation must target this Scene.frame")
-        if animation.remover or getattr(animation, "replace_mobject_with_target_in_scene", False):
-            raise NotImplementedError("Camera animation cannot remove or replace the scene's camera identity")
+        # A remover only drops the frame from the scene list, as in the
+        # Reference (FadeOut(Group(*self.mobjects)) fades it with the rest);
+        # Scene.frame stays the camera (fm-6l2i, fm-5wwt). Replacing it would
+        # change the camera's identity.
+        if getattr(animation, "replace_mobject_with_target_in_scene", False):
+            raise NotImplementedError("Camera animation cannot replace the scene's camera identity")
         if not getattr(animation, "_native_kind", None):
             raise NotImplementedError(
                 "Python-callback animations of the camera frame await the "
@@ -1996,18 +2039,43 @@ def _install_camera_choreography(g):
             for animation in nodes:
                 if isinstance(animation, AnimationGroup):
                     root = g["_fmn_ensure_composition_root"](animation)
-                    if any(isinstance(member, CameraFrame) for member in root.get_family()):
-                        raise ValueError("A composition's drawable group cannot contain CameraFrame")
+                    cameras = [member for member in root.get_family() if isinstance(member, CameraFrame)]
+                    if cameras:
+                        # A group over the scene list holds the frame (fm-6l2i),
+                        # as in LaggedStartMap(FadeOut, Group(*self.mobjects)).
+                        # The camera has no Stage owner, so the group is not
+                        # staged; each member's own animation drives it, the
+                        # frame's on the camera track (fm-5wwt).
+                        if any(camera is not self.frame or camera not in root.submobjects
+                               for camera in cameras):
+                            raise ValueError("A composition's drawable group cannot contain CameraFrame")
+                        contexts.append((animation, "_fmn_unstaged_root",
+                                         getattr(animation, "_fmn_unstaged_root", False)))
+                        animation._fmn_unstaged_root = True
                     for name in ("_composition_scene", "_matching_scene"):
                         contexts.append((animation, name, getattr(animation, name, None)))
                         setattr(animation, name, self)
             # Keep the camera itself detached. Adopt ordinary animated roots
             # through the existing arena path; the private point-free slot
             # is removed before every user callback/updater and at teardown.
+            # Like the Reference's begin_animations, add only roots not yet
+            # in the scene: `add` re-appends, which would move a present
+            # root to the top of the draw order (fm-kpvx).
+            present = set(self.get_mobject_family_members())
             for animation in animations:
                 if drawable[id(animation)]:
                     for root in g["_fmn_animated_mobjects"](animation):
-                        self.add(root)
+                        if root not in present:
+                            self.add(root)
+                            present.update(root.get_family())
+                elif (isinstance(animation.mobject, CameraFrame)
+                      and animation.mobject not in present):
+                    # The frame is a member of the scene list (fm-6l2i); once
+                    # clear() or remove() dropped it, animating it adds it
+                    # back, as begin_animations does. Its pose stays on the
+                    # camera track; the slot below carries no frame state.
+                    self.add(animation.mobject)
+                    present.add(animation.mobject)
                 children.append(make_driver(self, animation))
             self._adopt(slot)
             clock = ClockDriver(self, slot, children, animations)

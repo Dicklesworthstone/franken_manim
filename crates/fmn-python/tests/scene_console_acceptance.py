@@ -20,7 +20,10 @@ def run_console_acceptance():
         console.run_cell("# later\nbox.shift(3 * RIGHT)")
         assert not np.array_equal(first, scene.camera.get_pixel_array())
         console.run_cell("# move\nbox.shift(RIGHT)")
-        assert scene.mobjects[0] is box
+        # The checkpoint replay restores the list with the frame first, as
+        # the Reference's restore_state does (fm-6l2i).
+        assert scene.mobjects[0] is scene.frame and scene.mobjects[1] is box
+
         np.testing.assert_allclose(box.get_points(), origin + m.RIGHT, atol=1e-6)
         np.testing.assert_array_equal(first, scene.camera.get_pixel_array())
         assert list(console.checkpoint_manager.checkpoint_states) == ["# move"]

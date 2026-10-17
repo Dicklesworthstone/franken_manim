@@ -6,7 +6,10 @@
 
 mod quality;
 
-use fmn_frame::convert::{rgba_to_nv12, rgba_to_p010, rgba16f_to_rgba8, swap_rb8};
+#[cfg(test)]
+mod conversion_tests;
+
+use fmn_frame::convert::{rgba16f_to_bgra8, rgba16f_to_nv12, rgba16f_to_p010, rgba16f_to_rgba8};
 use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameError, PixelFormat};
 use fmn_output::{ColorDescription, Container, EncoderChoice, VideoJob, WireFormat};
 use pyo3::prelude::*;
@@ -16,6 +19,7 @@ use crate::{CapabilityError, PortalFrameFormat, PyRuntimeError, PyScene, PyValue
 pub(crate) struct PortalVideoConfig {
     pub(crate) ffmpeg_bin: String,
     pub(crate) job: VideoJob,
+    pub(crate) audio_quality: fmn_output::AudioQuality,
 }
 
 impl PortalVideoConfig {
@@ -80,6 +84,7 @@ impl PortalVideoConfig {
             ));
         }
         let quality = quality::from_writer(&writer)?;
+        let audio_quality = quality::audio_from_writer(&writer)?;
         let job = video_job(
             format,
             width,
@@ -95,11 +100,18 @@ impl PortalVideoConfig {
         // Python getters may adopt mobjects, advance time, or recursively
         // acquire a generation. Never replace that state or probe an encoder
         // against the now-stale preflight in begin_portal_render.
-        Ok(Self { ffmpeg_bin, job })
+        Ok(Self {
+            ffmpeg_bin,
+            job,
+            audio_quality,
+        })
     }
 }
 
 pub(crate) fn check_scene_ownership(scene: &Bound<'_, PyScene>) -> PyResult<()> {
+    // A fresh scene's arena holds its own listed camera frame (fm-6l2i), a
+    // point-less entry the arena replacement carries across.
+    let frame = crate::scene_frame_entry(scene)?.map(|(_, mob)| mob);
     let scene = scene.try_borrow()?;
     if scene
         .render
@@ -111,8 +123,9 @@ pub(crate) fn check_scene_ownership(scene: &Bound<'_, PyScene>) -> PyResult<()> 
             "a portal render generation is already active",
         ));
     }
-    if !scene.proxies.borrow().is_empty()
-        || !scene.engine.borrow().stage().roots().is_empty()
+    let only_frame = |mob: &fmn_mobject::Mob| Some(*mob) == frame;
+    if !scene.proxies.borrow().keys().all(only_frame)
+        || !scene.engine.borrow().stage().roots().iter().all(only_frame)
         || scene.engine.borrow().stage().time() != 0.0
         || !scene.engine.borrow().sound_requests().is_empty()
     {
@@ -166,11 +179,7 @@ fn video_job(
         height,
         fps: (fps, 1),
         wire,
-        color: if wire.has_alpha() {
-            ColorDescription::srgb_full()
-        } else {
-            ColorDescription::video_bt709()
-        },
+        color: ColorDescription::for_native_wire(wire),
         container: if transparent {
             Container::MovTransparent
         } else if format == PortalFrameFormat::Mov {
@@ -192,25 +201,28 @@ fn video_job(
     Ok(job)
 }
 
-/// Use only the shared native conversion kernels. No ffmpeg filters, channel
-/// reinterpretation, changed orientation, or hidden alpha-dropping wire.
+/// Convert from Lumen's linear-light frame directly to the negotiated wire.
+/// P010 must not pass through RGBA8: doing so irreversibly discards the extra
+/// precision before the 10-bit encoder ever sees it. The fused 8-bit kernels
+/// retain the existing RGBA/BGRA/NV12 bytes, orientation and alpha policy.
+///
+/// The legacy session scratch argument is retained for existing callers, but
+/// is never read or written. The destination format, not scratch presence,
+/// determines the conversion, and none of these paths allocates frame scratch.
 pub(crate) fn convert_frame(
     source: &FrameBuffer,
     destination: &mut FrameBuffer,
-    scratch: Option<&mut FrameBuffer>,
+    _scratch: Option<&mut FrameBuffer>,
 ) -> Result<(), FrameError> {
-    let Some(rgba8) = scratch else {
-        return rgba16f_to_rgba8(source, destination);
-    };
-    rgba16f_to_rgba8(source, rgba8)?;
     match destination.layout().format() {
+        PixelFormat::Rgba8 => rgba16f_to_rgba8(source, destination),
+        PixelFormat::Bgra8 => rgba16f_to_bgra8(source, destination),
         PixelFormat::Nv12 => {
-            rgba_to_nv12(rgba8, destination, ColorRange::Limited, ChromaSiting::Left)
+            rgba16f_to_nv12(source, destination, ColorRange::Limited, ChromaSiting::Left)
         }
         PixelFormat::P010 => {
-            rgba_to_p010(rgba8, destination, ColorRange::Limited, ChromaSiting::Left)
+            rgba16f_to_p010(source, destination, ColorRange::Limited, ChromaSiting::Left)
         }
-        PixelFormat::Bgra8 => swap_rb8(rgba8, destination),
         _ => Err(FrameError::UnsupportedConversion(
             "unsupported portal output wire",
         )),
@@ -236,6 +248,16 @@ mod tests {
         ] {
             let job = video_job(PortalFrameFormat::Mp4, 96, 54, 8, "libx264", name, false).unwrap();
             assert_eq!(job.wire, expected);
+            assert_eq!(job.color.transfer, fmn_output::Transfer::Srgb);
+            assert_eq!(job.color.primaries, fmn_output::Primaries::Bt709);
+            assert_eq!(
+                job.color.range,
+                if expected.has_alpha() {
+                    ColorRange::Full
+                } else {
+                    ColorRange::Limited
+                }
+            );
             assert_eq!(job.resolved_encoder().unwrap().as_deref(), Some("libx264"));
             assert_eq!(job.container, Container::Mp4);
         }

@@ -48,7 +48,7 @@ def rotation_is_absolute_at_every_native_sample():
                 close(frame.get_orientation(), start.copy().rotate(angle, axis=(0, 2, 1)).get_orientation())
                 close(frame.get_shape(), start.get_shape())
                 assert frame.get_field_of_view() == 0.9
-                assert frame._core is core and scene.mobjects == [] and not frame._is_bound()
+                assert frame._core is core and scene.mobjects == [frame] and frame._is_bound()
 
 
 def rotation_obeys_live_rates_windows_and_final_alpha():
@@ -85,7 +85,7 @@ def succession_captures_predecessor_camera_orientation():
     expected = initial.copy().rotate(0.7, axis=m.RIGHT)
     close(second.starting_mobject.get_orientation(), expected.get_orientation())
     close(frame.get_orientation(), expected.rotate(-1.3, axis=m.UP).get_orientation())
-    assert not frame._is_bound() and scene.mobjects == []
+    assert frame._is_bound() and scene.mobjects == [frame]
 
 
 def path_uses_true_length_and_preserves_optical_pose():
@@ -101,7 +101,7 @@ def path_uses_true_length_and_preserves_optical_pose():
         close(quaternion, orientation)
     close(scene.frame.get_shape(), shape)
     assert scene.frame.get_field_of_view() == 0.8
-    assert not path._is_bound() and scene.mobjects == []
+    assert not path._is_bound() and scene.mobjects == [scene.frame]
 
 
 def simultaneous_path_and_rotation_keep_native_play_order():
@@ -119,7 +119,7 @@ def simultaneous_path_and_rotation_keep_native_play_order():
         close(center, (index, 0, 0))
         close(quaternion, start.copy().rotate(1.2 * index / 4).get_orientation())
     close(square.get_center(), 2 * m.UP)
-    assert scene.mobjects == [square] and not scene.frame._is_bound()
+    assert scene.mobjects == [scene.frame, square] and scene.frame._is_bound()
 
 
 def tracking_uses_construction_offset_and_current_sibling_state():
@@ -134,7 +134,7 @@ def tracking_uses_construction_offset_and_current_sibling_state():
     samples = camera_samples(scene)
     scene.play(dot.animate(rate_func=m.linear).shift(4 * m.RIGHT), follower, run_time=4 / 30)
     close([sample[0] for sample in samples], [(4, 1, 0), (5, 1, 0), (6, 1, 0), (7, 1, 0)])
-    assert scene.mobjects == [dot] and not scene.frame._is_bound()
+    assert scene.mobjects == [scene.frame, dot] and scene.frame._is_bound()
 
 
 def tracking_samples_authored_centers_exactly_once_at_construction():
@@ -163,7 +163,6 @@ def foreign_helpers_and_destructive_camera_operations_are_refused():
     other.add(path, dot)
     for animation in (m.MoveAlongPath(scene.frame, path),
                       m.MaintainPositionRelativeTo(scene.frame, dot),
-                      m.Rotate(scene.frame, remover=True),
                       m.Rotate(scene.frame.copy())):
         before = scene.frame.copy()
         try:
@@ -174,9 +173,9 @@ def foreign_helpers_and_destructive_camera_operations_are_refused():
             raise AssertionError("invalid camera motion was accepted")
         close(scene.frame.get_center(), before.get_center())
         close(scene.frame.get_orientation(), before.get_orientation())
-        assert scene.time == 0 and scene.mobjects == []
-        assert not scene.frame._is_updating_suspended() and not scene.frame._is_bound()
-    assert other.mobjects == [path, dot]
+        assert scene.time == 0 and scene.mobjects == [scene.frame]
+        assert not scene.frame._is_updating_suspended() and scene.frame._is_bound()
+    assert other.mobjects == [other.frame, path, dot]
 
 
 def authored_rotation_dispatch_preserves_live_receiver():
@@ -272,6 +271,75 @@ def final_camera_motion_changes_real_native_pixels():
     assert images[0][:8] == b"\x89PNG\r\n\x1a\n"
 
 
+def removers_drop_the_frame_from_the_scene_list_and_keep_the_camera():
+    # Since the frame joined Scene.mobjects (fm-6l2i), a remover animation of
+    # it drops it from the scene list, as in the Reference, where
+    # FadeOut(Group(*self.mobjects)) fades it with everything else.
+    # Scene.frame stays the camera (fm-5wwt). The lists and frame values
+    # were measured in the pinned Reference.
+    scene = m.Scene()
+    scene.add(m.Square())
+    width = scene.frame.get_width()
+    scene.play(m.LaggedStartMap(m.FadeOut, m.Group(*scene.mobjects)), run_time=2 / 30)
+    assert scene.mobjects == [], scene.mobjects
+    close(scene.frame.get_center(), m.ORIGIN)
+    assert math.isclose(scene.frame.get_width(), width)
+    scene.add(m.Circle())
+    assert [type(mob).__name__ for mob in scene.mobjects] == ["Circle"]
+    scene = m.Scene()
+    scene.play(m.FadeOut(scene.frame), run_time=2 / 30)
+    assert scene.mobjects == [], scene.mobjects
+    plain, removed = m.Scene(), m.Scene()
+    plain.play(m.Rotate(plain.frame, m.PI / 2), run_time=2 / 30)
+    removed.play(m.Rotate(removed.frame, m.PI / 2, remover=True), run_time=2 / 30)
+    assert plain.mobjects == [plain.frame] and removed.mobjects == []
+    close(removed.frame.get_orientation(), plain.frame.get_orientation())
+
+
+def become_and_restore_take_the_source_frame_pose():
+    # The Reference's become copies a frame's points and uniforms, so restore()
+    # and become(target) move the camera at once; the pose lives in the core
+    # here (fm-rgr0). Values measured in the pinned Reference.
+    scene = m.Scene()
+    frame = scene.frame
+    width = frame.get_width()
+    frame.save_state()
+    frame.shift(m.RIGHT).set_width(20).reorient(30, 40)
+    frame.restore()
+    close(frame.get_center(), m.ORIGIN)
+    assert math.isclose(frame.get_width(), width)
+    close(frame.get_euler_angles(), [0, 0, 0])
+    target = frame.copy()
+    target.reorient(10, 20).shift(m.UP)
+    frame.become(target)
+    close(frame.get_center(), m.UP)
+    close(frame.get_euler_angles(), [10 * m.DEG, 20 * m.DEG, 0])
+    # A group over the scene list includes the frame (fm-6l2i), so restoring
+    # it restores the camera too.
+    scene = m.Scene()
+    square = m.Square()
+    scene.add(square)
+    everything = m.Group(*scene.mobjects)
+    everything.save_state()
+    scene.frame.shift(m.RIGHT).set_width(20)
+    square.shift(m.UP)
+    everything.restore()
+    close(scene.frame.get_center(), m.ORIGIN)
+    assert math.isclose(scene.frame.get_width(), width)
+    close(square.get_center(), m.ORIGIN)
+
+
+def frame_rotation_ends_at_its_angle_whatever_the_frame_count():
+    # C-34: the Reference's Rotate resets only point data between samples,
+    # so a frame's orientation (a uniform) accumulates them. It ends at
+    # pi, -3pi/4, pi/2 or pi/4 for these run times. Here every run time ends
+    # at the animation's angle (fm-k8e3).
+    for run_time in (1 / 30, 1 / 15, 0.5, 1.0):
+        scene = m.Scene()
+        scene.play(m.Rotate(scene.frame, m.PI / 2), run_time=run_time)
+        close(scene.frame.get_euler_angles(), [m.PI / 2, 0, 0])
+
+
 _CASES = (rotation_is_absolute_at_every_native_sample,
           rotation_obeys_live_rates_windows_and_final_alpha,
           succession_captures_predecessor_camera_orientation,
@@ -280,6 +348,9 @@ _CASES = (rotation_is_absolute_at_every_native_sample,
           tracking_uses_construction_offset_and_current_sibling_state,
           tracking_samples_authored_centers_exactly_once_at_construction,
           foreign_helpers_and_destructive_camera_operations_are_refused,
+          removers_drop_the_frame_from_the_scene_list_and_keep_the_camera,
+          become_and_restore_take_the_source_frame_pose,
+          frame_rotation_ends_at_its_angle_whatever_the_frame_count,
           authored_rotation_dispatch_preserves_live_receiver,
           authored_rates_observe_restored_pose_and_may_edit_it,
           authored_rotation_owns_axis_interpretation,

@@ -16,7 +16,7 @@
 //! sits on the actual end of the actual curve and points the way the curve
 //! is going. Behaviour Note BN-03 covers the difference.
 
-use fmn_core::constants::PI;
+use fmn_core::constants::{PI, TAU};
 use fmn_core::types::Vec3;
 use fmn_geom::{ArcLengthTable, QuadPath, space_ops};
 
@@ -177,7 +177,15 @@ fn trim_to(shape: VMobject, base: Vec3, end: TipEnd) -> VMobject {
         }
     };
     match QuadPath::partial_points(path.points(), to_index(a), to_index(b)) {
-        Some((points, _, _)) => {
+        Some((points, first, last)) => {
+            let points = trimmed_window(
+                path.points(),
+                &points,
+                first,
+                last,
+                path.tolerance_for_point_equality(),
+            )
+            .unwrap_or(points);
             let style = shape.style();
             let children: Vec<VMobject> = shape.children().to_vec();
             VMobject::from_points(points)
@@ -186,6 +194,112 @@ fn trim_to(shape: VMobject, base: Vec3, end: TipEnd) -> VMobject {
         }
         None => shape,
     }
+}
+
+/// The window `[first, last)` of `partial` that a trim keeps, as a shaft.
+///
+/// `partial_points` keeps the point count by collapsing the cut-off part
+/// into zero-length components, and cuts each boundary component by
+/// de Casteljau. Both are right for a reveal. A trimmed shaft must not start
+/// (or end) on a zero-length component, a cut anchor off the circle, or a
+/// sliver, or `get_arc_center`, which reads the first component, misses the
+/// arc's centre (fm-arc-start-tip-degenerate-component-izct). An arc of one
+/// circle is rebuilt exactly from its cut ends; any other shaft keeps the
+/// window without sub-tolerance components. `None` when nothing but
+/// collapsed components remains.
+fn trimmed_window(
+    original: &[Vec3],
+    partial: &[Vec3],
+    first: usize,
+    last: usize,
+    tolerance: f64,
+) -> Option<Vec<Vec3>> {
+    let window = partial.get(first..last)?;
+    if let Some(arc) = as_exact_arc(original, window) {
+        return Some(arc);
+    }
+    let same = |p: Vec3, q: Vec3| (0..3).all(|i| (p[i] - q[i]).abs() < tolerance);
+    let mut kept = vec![*window.first()?];
+    for component in window.windows(3).step_by(2) {
+        if same(component[0], component[1]) && same(component[1], component[2]) {
+            // Keep the run continuous through a sub-tolerance component.
+            *kept.last_mut().expect("seeded") = component[2];
+        } else {
+            kept.extend_from_slice(&component[1..]);
+        }
+    }
+    (kept.len() >= 3).then_some(kept)
+}
+
+/// When every component of `original` is a circular-arc quadratic of one
+/// circle in a plane of constant z (an `Arc`'s shaft), the arc from the
+/// window's start to its end, rebuilt with `original`'s component count:
+/// anchors on the circle at equal angular steps and each handle at its
+/// anchors' tangent intersection, as the arc constructors place them.
+fn as_exact_arc(original: &[Vec3], window: &[Vec3]) -> Option<Vec<Vec3>> {
+    let components = |points: &[Vec3]| -> Vec<[Vec3; 3]> {
+        points
+            .windows(3)
+            .step_by(2)
+            .map(|c| [c[0], c[1], c[2]])
+            .collect()
+    };
+    let originals = components(original);
+    let chord = |c: &[Vec3; 3]| space_ops::get_norm(sub(c[2], c[0]));
+    // The longest component locates the centre best from f32-rounded records.
+    let widest = originals
+        .iter()
+        .max_by(|a, b| chord(a).total_cmp(&chord(b)))?;
+    let center = crate::arc::arc_center_of(widest)?;
+    let radius = space_ops::get_norm(sub(widest[0], center));
+    if radius.is_nan() || radius <= 0.0 {
+        return None;
+    }
+    let tolerance = 1e-4 * radius;
+    let on_circle = |p: Vec3| (space_ops::get_norm(sub(p, center)) - radius).abs() <= tolerance;
+    let circular = originals.iter().all(|[start, handle, end]| {
+        [start, handle, end]
+            .iter()
+            .all(|p| (p[2] - center[2]).abs() <= tolerance)
+            && on_circle(*start)
+            && on_circle(*end)
+            && (space_ops::get_norm(sub(*handle, *start)) - space_ops::get_norm(sub(*handle, *end)))
+                .abs()
+                <= tolerance
+            && chord(&[*start, *handle, *end]) > tolerance
+    });
+    if !circular {
+        return None;
+    }
+    // fmn-dmath's transcendentals, never the platform libm (ADR-0010).
+    let angle = |p: Vec3| fmn_dmath::atan2(p[1] - center[1], p[0] - center[0]);
+    // Each component turns under a half turn, so its wrapped turn is exact.
+    let turn = |c: &[Vec3; 3]| (angle(c[2]) - angle(c[0]) + PI).rem_euclid(TAU) - PI;
+    let sweep: f64 = components(window).iter().map(turn).sum();
+    let curves = originals.len();
+    if sweep.abs() <= tolerance / radius {
+        return None;
+    }
+    let start = angle(*window.first()?);
+    let step = sweep / curves as f64;
+    let at = |theta: f64, distance: f64| {
+        [
+            center[0] + distance * fmn_dmath::cos(theta),
+            center[1] + distance * fmn_dmath::sin(theta),
+            center[2],
+        ]
+    };
+    let mut points = Vec::with_capacity(2 * curves + 1);
+    points.push(at(start, radius));
+    for k in 0..curves {
+        let k = k as f64;
+        points.push(at(
+            start + step * (k + 0.5),
+            radius / fmn_dmath::cos(step / 2.0),
+        ));
+        points.push(at(start + step * (k + 1.0), radius));
+    }
+    Some(points)
 }
 
 /// The Reference's `get_length`: the straight distance between the ends.
@@ -364,5 +478,54 @@ mod tests {
         let shaft = straight([0.0; 3], [3.0, 4.0, 0.0]);
         assert!(close(end_to_end_length(&shaft), 5.0, 1e-12));
         assert_eq!(end_to_end_length(&VMobject::new()), 0.0);
+    }
+
+    #[test]
+    fn a_tipped_arc_stays_on_its_circle_without_zero_length_components() {
+        // get_arc_center reads the first component, so a trim may neither
+        // collapse it nor move its cut anchor off the circle
+        // (fm-arc-start-tip-degenerate-component-izct).
+        for center in [[0.0; 3], [1.0, -1.0, 0.0]] {
+            let arc = || {
+                crate::arc::Arc::new()
+                    .angle(2.0)
+                    .radius(1.5)
+                    .arc_center(center)
+                    .build()
+                    .expect("the fixture arc is valid")
+            };
+            let both = attach_tip(
+                attach_tip(arc(), ArrowTip::new(), TipEnd::Start),
+                ArrowTip::new(),
+                TipEnd::End,
+            );
+            for (label, shaft) in [
+                ("start", attach_tip(arc(), ArrowTip::new(), TipEnd::Start)),
+                ("end", attach_tip(arc(), ArrowTip::new(), TipEnd::End)),
+                ("both", both),
+            ] {
+                let points = shaft.points();
+                for component in points.windows(3).step_by(2) {
+                    assert!(
+                        space_ops::get_norm(sub(component[2], component[0])) > 1e-9,
+                        "{label}: zero-length component {component:?}"
+                    );
+                    for anchor in [component[0], component[2]] {
+                        let r = space_ops::get_norm(sub(anchor, center));
+                        assert!(close(r, 1.5, 1e-12), "{label}: anchor off the circle: {r}");
+                    }
+                }
+                let reversed: Vec<Vec3> = points.iter().rev().copied().collect();
+                for found in [
+                    crate::arc::arc_center_of(points),
+                    crate::arc::arc_center_of(&reversed),
+                ] {
+                    let found = found.expect("an arc centre");
+                    for (got, want) in found.iter().zip(center) {
+                        assert!(close(*got, want, 1e-9), "{label}: centre {found:?}");
+                    }
+                }
+            }
+        }
     }
 }

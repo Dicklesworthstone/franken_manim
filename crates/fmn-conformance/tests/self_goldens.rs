@@ -17,7 +17,9 @@
 //!   (12,012 bytes). It passes unchanged on macos-aarch64 (Darwin, M4 Pro,
 //!   native, `--release`) and on linux-aarch64 (static musl ELF cross-compiled
 //!   with `--release`, run under binfmt/qemu on the dev box). One lock, three
-//!   certified platforms, two profiles.
+//!   certified platforms, two profiles. Unchanged at frankenscipy `ed84bdd1`
+//!   (fm-pexg, linux-x86_64): the libm-free solve policy and rcond change no
+//!   bit here.
 //!
 //! Snapshots are serialized through fmn-hash's canonical Writer (versioned
 //! schema, defined field order, float canonicalization, trailing checksum),

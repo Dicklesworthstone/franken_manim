@@ -245,6 +245,10 @@ fn review_frame(case: &fmn_conformance::scene_goldens::SceneCase) -> Vec<u8> {
 ///    bottom, before | after, through
 ///    [`side_by_side_png`], and written as the lock's artefact under
 ///    `REBLESS_ARTEFACT_DIR`, named for the blessed lock's digest.
+///    When `<before>` also holds the old `scene_goldens.certified.lock`, a
+///    scene whose lock row moved with an unchanged frame (a geometry-only
+///    change) joins the panel too, so a lock at a new digest always carries
+///    its side-by-side.
 ///
 /// Neither switch set: nothing to do (an ordinary gate run).
 #[test]
@@ -262,6 +266,20 @@ fn rebless_review_frames_and_panel() {
         return;
     };
     let before_dir = std::path::PathBuf::from(before_dir);
+    let lock = "scene_goldens.certified.lock";
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let current_lock = std::fs::read(manifest.join("goldens").join(lock)).expect("lock");
+    let before_lock = match std::fs::read_to_string(before_dir.join(lock)) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => panic!("before lock: {error}"),
+    };
+    let lock_row = |text: &str, name: &str| {
+        text.lines()
+            .find(|line| line.split('\t').next() == Some(name))
+            .map(str::to_owned)
+    };
+    let current_text = String::from_utf8(current_lock.clone()).expect("the lock is UTF-8");
     let (mut before, mut after) = (Vec::new(), Vec::new());
     let mut rows = 0u32;
     for case in SCENES {
@@ -273,7 +291,10 @@ fn rebless_review_frames_and_panel() {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => (new.clone(), true),
             Err(error) => panic!("{}: before frame: {error}", case.name),
         };
-        if added || old != new {
+        let lock_moved = before_lock
+            .as_deref()
+            .is_some_and(|text| lock_row(text, case.name) != lock_row(&current_text, case.name));
+        if added || old != new || lock_moved {
             before.extend_from_slice(&old);
             after.extend_from_slice(&new);
             rows += 1;
@@ -281,7 +302,7 @@ fn rebless_review_frames_and_panel() {
     }
     assert!(
         rows > 0,
-        "no scene frame changed; there is nothing to re-bless"
+        "no scene frame or lock row changed; there is nothing to re-bless"
     );
     let config = frame_config();
     let panel = side_by_side_png(
@@ -291,11 +312,7 @@ fn rebless_review_frames_and_panel() {
         &after,
     )
     .expect("same-size before/after stacks");
-    let lock = "scene_goldens.certified.lock";
-    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let digest =
-        fmn_hash::sha256(&std::fs::read(manifest.join("goldens").join(lock)).expect("lock"))
-            .to_hex();
+    let digest = fmn_hash::sha256(&current_lock).to_hex();
     let out = manifest.join("../..").join(REBLESS_ARTEFACT_DIR);
     std::fs::create_dir_all(&out).expect("re-bless artefact directory");
     std::fs::write(out.join(rebless_artefact_name(lock, &digest)), panel).expect("panel written");

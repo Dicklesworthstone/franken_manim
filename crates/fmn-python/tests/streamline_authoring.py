@@ -68,7 +68,7 @@ class StreamlineAuthoringTests(unittest.TestCase):
         lines.func = lambda xs: np.tile([2., 0.], (len(xs), 1))
         lines.stroke_opacity = .25
         self.assertIsNone(lines.init_style())
-        self.assertIs(scene.mobjects[0], lines)
+        self.assertIs(scene.mobjects[1], lines)
         self.assertEqual(tuple(lines), children)
         for line, view, original, paint in zip(lines, views, points, paints):
             np.testing.assert_array_equal(view, original)

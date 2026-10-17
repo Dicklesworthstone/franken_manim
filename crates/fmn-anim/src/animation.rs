@@ -148,11 +148,14 @@ pub(crate) fn interpolate_linear_column(a: &[f32], b: &[f32], alpha: f64) -> Vec
 /// inspectable, which is what lets the replay journal and the API schema
 /// name the rate curve of any animation.
 ///
-/// Capturing closures (the Python front door's lambdas) join this type with
-/// fmn-python's bridge work; every non-capturing `fn(f64) -> f64` — the
-/// entire native catalog — fits [`RateFunc::Base`] today.
+/// Known catalog entries retain their validated identity in
+/// [`RateFunc::Catalog`], including when decoded from FMTL. Arbitrary
+/// non-capturing `fn(f64) -> f64` callbacks fit [`RateFunc::Base`].
 #[derive(Clone, Debug)]
 pub enum RateFunc {
+    /// A known catalog rate, whose wire identity survives cloning and
+    /// optimized cross-crate calls without function-pointer comparisons.
+    Catalog(rate::CatalogRate),
     /// A plain rate function (any `fn(f64) -> f64`, e.g. the fmn-core
     /// catalog).
     Base(fn(f64) -> f64),
@@ -191,7 +194,7 @@ pub enum RateFunc {
 impl Default for RateFunc {
     /// The Reference's default: `smooth`.
     fn default() -> Self {
-        Self::Base(rate::smooth)
+        Self::smooth()
     }
 }
 
@@ -199,13 +202,13 @@ impl RateFunc {
     /// `smooth` — the constructor-surface default.
     #[must_use]
     pub fn smooth() -> Self {
-        Self::Base(rate::smooth)
+        Self::Catalog(rate::CatalogRate::Smooth)
     }
 
     /// `linear`.
     #[must_use]
     pub fn linear() -> Self {
-        Self::Base(rate::linear)
+        Self::Catalog(rate::CatalogRate::Linear)
     }
 
     /// Wrap in `squish_rate_func(self, a, b)`.
@@ -231,6 +234,7 @@ impl RateFunc {
     #[must_use]
     pub fn eval(&self, t: f64) -> f64 {
         match self {
+            Self::Catalog(rate) => rate.function()(t),
             Self::Base(f) => f(t),
             Self::Sampled(samples) => match samples.len() {
                 0 => t,
@@ -392,6 +396,10 @@ pub enum AnimError {
     InvalidFramePhase(&'static str),
     /// A non-finite point-path parameter, rejected before Stage mutation.
     InvalidPath(&'static str),
+    /// A succession's time moved backward through stateful interpolation or
+    /// updater-owned history. Those effects cannot be undone by restoring
+    /// mobject content; use Timeline seek's checkpoint-and-replay route.
+    StatefulSuccessionRewind,
 }
 
 impl std::fmt::Display for AnimError {
@@ -447,6 +455,11 @@ impl std::fmt::Display for AnimError {
                 )
             }
             Self::InvalidPath(message) => write!(f, "invalid animation path: {message}"),
+            Self::StatefulSuccessionRewind => write!(
+                f,
+                "Succession cannot reverse stateful or updater-driven members; \
+                 use Timeline seek to replay from a checkpoint"
+            ),
             Self::InvalidFramePhase(message) => {
                 write!(f, "invalid resumable frame phase: {message}")
             }
@@ -922,6 +935,38 @@ pub trait Animation {
     fn effect_signature(&self) -> AnimationSignature {
         AnimationSignature::Unclassified
     }
+
+    /// Freeze a closed native interpolation mechanism after `begin`.
+    ///
+    /// This is a stronger capability than `effect_signature`: arbitrary
+    /// trait objects and their callbacks never cross to a frame worker.
+    /// Custom animations default to the serial path. Implementations must
+    /// describe the exact prepared interpolation, without running lifecycle
+    /// hooks again; the segment additionally checks updaters and aliasing.
+    fn freeze_interpolation(&self) -> Option<crate::pure_frame::FrozenAnimation> {
+        None
+    }
+
+    /// Whether interpolation can be sampled again after restoring this
+    /// animation's prepared output family, while its existing begin-time
+    /// copies remain live. The caller must also rule out updater-owned state.
+    ///
+    /// Pure leaves satisfy this narrower local contract. A just-in-time
+    /// composition may support it through its own initialized-member cache
+    /// while still requiring serial frame reconstruction: it is not enough
+    /// to declare the whole segment [`AnimationSignature::Pure`]. No setup,
+    /// teardown, or other authored lifecycle callback is replayed by this
+    /// capability.
+    fn can_replay_interpolation(&self) -> bool {
+        matches!(self.effect_signature(), AnimationSignature::Pure)
+    }
+
+    /// Notify a locally replayable animation that its parent restored its
+    /// prepared output family. Leaves keep their existing begin-time inputs;
+    /// just-in-time compositions must restore their own initialized members
+    /// before the next sample. This never repeats a lifecycle callback and
+    /// does not make a stateful segment eligible for pure-frame reconstruction.
+    fn prepare_interpolation_replay(&mut self) {}
 }
 
 /// The canonical, non-mutating begin checks shared by leaf animations and

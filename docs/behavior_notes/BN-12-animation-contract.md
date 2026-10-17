@@ -6,7 +6,7 @@
 > Ledger's `BN-08` evidence cells all point at the de-TeX'd natives — so the
 > renumbering changed one heading and one filename. Numbers are never reused.
 
-**Status:** Draft (W4, fm-67a). Consumed by Choreo's mechanism families
+**Status:** Draft (W4, fm-67a; W10, fm-k8e3). Consumed by Choreo's mechanism families
 (fm-cye), composition operators (fm-hfe), fmn-python (whose `manimlib`
 surface presents these semantics), and the Parity Ledger.
 
@@ -102,6 +102,26 @@ path as before.
 `None` for an arc given only by `path_arc`. Call `anim.init_path_func()`
 first if the callable itself is needed.
 
+## 7. Rotating the camera frame turns it by the animation's angle (C-34)
+
+The Reference's `Rotate.interpolate_mobject` resets only the pointlike data
+of `family_members_with_points` from the starting copy, then rotates the
+mobject by `rate(alpha) * angle` (`rotation.py:42-55`). A `CameraFrame`
+keeps its orientation in uniforms, which are never reset, so each sample's
+rotation adds to the last, and the result depends on the frame count:
+`Rotate(frame, PI/2)` ends at Euler angle π, −3π/4, π/2 or π/4 for run times
+of 1/30, 1/15, 0.5 and 1 s. Mobjects with points rotate correctly in the
+Reference.
+
+FrankenManim rotates the frame on the camera track from its starting pose,
+so it ends at the animation's angle at any frame rate.
+
+Locked by `frame_rotation_ends_at_its_angle_whatever_the_frame_count` in
+`crates/fmn-python/tests/camera_motion.py` (fm-k8e3).
+
+**Migration:** none needed for scenes that meant the angle they wrote. A scene
+tuned to the Reference's accumulated result rotates by its written angle.
+
 ## Complete native method transforms
 
 Native `.animate` recordings use the same Transform implementation as explicit
@@ -110,3 +130,46 @@ field locks, tracker/uniform interpolation, and host-view materialization.
 The former staging refusals `PathArcUnsupported` and `UnalignedFamilies` remain
 as enum variants for source compatibility, but the method carrier no longer
 emits them. A diverged target is aligned privately rather than mutated.
+
+## Complete one-by-one reveals and balanced hidden lifetimes
+
+`ShowSubmobjectsOneByOne` now selects child `ceil(alpha * n) - 1` for
+positive indices clamped to `1..=n`; index zero is the empty initial frame.
+The pinned Reference clips the index to `n - 1` before subtracting one,
+which makes the last child unreachable and every one-child group invisible.
+This off-by-one is corrected rather than reproduced. Migration: a scene
+that intentionally stopped on the penultimate child should use an explicit
+final alpha such as `(n - 1) / n`, or omit that last child from its input.
+
+Subset, word, letter, and one-by-one reveals release animation flags and any
+animation-owned updater suspension over the family captured at begin,
+even when the final alpha hides some descendants. This repairs permanently
+paused objects when authors re-add hidden members later. The final visible
+family receives its usual single resume-updater pass. Hidden members receive
+no synthetic updater call; abort neither advances to the final alpha nor
+executes updaters. A family already suspended before begin remains suspended.
+
+Evidence: `fmn-anim/tests/reveal_lifecycle.rs` and the real public scene path
+in `fmn/tests/reveal_lifecycle.rs`, plus the existing native/serial PNG
+comparisons for all subset reveal parameterizations.
+
+## Collapsed wave domains
+
+`ApplyWave` assigns the midpoint phase to a family with zero horizontal
+width. A vertical curve or point-sized family receives one simultaneous
+finite pulse instead of NaN coordinates from division by zero. Nonzero-width
+wave formulas and construction-time bounds are unchanged. This does not
+change the animation's native-dispatch eligibility or callback contract.
+Evidence: `fmn-anim/tests/wave_domains.rs`.
+
+## Broadcast options control playback
+
+`broadcast` now constructs its interval table with the supplied lag ratio.
+Previously it built a 5-percent `LaggedStart` table and changed only the
+reported config afterward, so the requested delays never reached playback.
+A true `remover` option is applied to the supplied animation members, because
+AnimationGroup cleanup is member-owned. False preserves each member's own
+removal policy. Group cleanup semantics themselves are unchanged.
+Evidence: `fmn-anim/tests/broadcast_timing.rs` checks both the analytical
+intervals and actual intermediate positions for unequal member durations,
+plus scene membership after completion.

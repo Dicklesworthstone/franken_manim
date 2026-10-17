@@ -112,7 +112,7 @@ class CopiedStringRegenerationTests(unittest.TestCase):
         clone.init_points()
         self.assertEqual(len(clone), 2)
         self.assertEqual(fingerprint(source), before)
-        self.assertEqual(scene.mobjects, [source])
+        self.assertEqual(scene.mobjects, [scene.frame, source])
 
     def test_typesetter_failure_does_not_change_copy_or_original(self):
         source = DecoratedText('ab')

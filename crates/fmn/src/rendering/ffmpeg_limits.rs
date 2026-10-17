@@ -16,11 +16,61 @@ use super::{JobLimits, RenderError, RenderOptions};
 /// allowance explicitly. This is wall time, not movie duration or idle time.
 pub const DEFAULT_RENDER_FFMPEG_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
-pub(super) fn default_job_limits() -> JobLimits {
+/// Default resource bounds shared by native render entry points.
+///
+/// Encoding remains open while the scene produces frames, so its watchdog
+/// allows 24 hours. The low-level boundary's log/artifact bounds and workdir
+/// retention policy are preserved. Tool probes keep their separate deadlines.
+#[must_use]
+pub fn default_render_ffmpeg_limits() -> JobLimits {
     JobLimits {
         timeout: DEFAULT_RENDER_FFMPEG_TIMEOUT,
         ..JobLimits::default()
     }
+}
+
+pub(super) fn default_job_limits() -> JobLimits {
+    default_render_ffmpeg_limits()
+}
+
+/// Admit a render's ffmpeg policy before locating or launching a tool.
+///
+/// The artifact ceiling is intersected with the independently enforced raw
+/// input ceiling. All other bounds and the caller's policy remain unchanged.
+/// Use the returned limits for encode, mux, and media-decode jobs; decoders
+/// may impose additional format-specific ceilings.
+///
+/// # Errors
+/// Rejects zero timeout/log/artifact/input bounds and a timeout that cannot
+/// be represented by this host's monotonic clock. There is no unlimited
+/// sentinel.
+pub fn admit_render_ffmpeg_limits(
+    limits: &JobLimits,
+    max_input_bytes: u64,
+) -> Result<JobLimits, RenderError> {
+    if limits.timeout.is_zero() {
+        return Err(RenderError::InvalidOptions(
+            "ffmpeg timeout must be nonzero",
+        ));
+    }
+    if Instant::now().checked_add(limits.timeout).is_none() {
+        return Err(RenderError::InvalidOptions(
+            "ffmpeg timeout exceeds the monotonic clock range",
+        ));
+    }
+    if limits.max_log_bytes == 0 {
+        return Err(RenderError::InvalidOptions(
+            "ffmpeg max_log_bytes must be nonzero",
+        ));
+    }
+    if limits.max_artifact_bytes == 0 || max_input_bytes == 0 {
+        return Err(RenderError::InvalidOptions(
+            "ffmpeg artifact and input byte limits must be nonzero",
+        ));
+    }
+    let mut admitted = limits.clone();
+    admitted.max_artifact_bytes = admitted.max_artifact_bytes.min(max_input_bytes);
+    Ok(admitted)
 }
 
 impl RenderOptions {
@@ -37,29 +87,7 @@ impl RenderOptions {
     /// be represented by this host's monotonic clock. There is no unlimited
     /// sentinel. Native PNG/GIF/Y4M rendering does not consult this policy.
     pub fn effective_ffmpeg_limits(&self) -> Result<JobLimits, RenderError> {
-        let mut limits = self.ffmpeg_limits.clone();
-        if limits.timeout.is_zero() {
-            return Err(RenderError::InvalidOptions(
-                "ffmpeg timeout must be nonzero",
-            ));
-        }
-        if Instant::now().checked_add(limits.timeout).is_none() {
-            return Err(RenderError::InvalidOptions(
-                "ffmpeg timeout exceeds the monotonic clock range",
-            ));
-        }
-        if limits.max_log_bytes == 0 {
-            return Err(RenderError::InvalidOptions(
-                "ffmpeg max_log_bytes must be nonzero",
-            ));
-        }
-        if limits.max_artifact_bytes == 0 || self.max_output_bytes == 0 {
-            return Err(RenderError::InvalidOptions(
-                "ffmpeg artifact and input byte limits must be nonzero",
-            ));
-        }
-        limits.max_artifact_bytes = limits.max_artifact_bytes.min(self.max_output_bytes);
-        Ok(limits)
+        admit_render_ffmpeg_limits(&self.ffmpeg_limits, self.max_output_bytes)
     }
 }
 
@@ -120,11 +148,16 @@ mod tests {
     fn offline_default_keeps_a_watchdog_without_the_ten_minute_ceiling() {
         let options = RenderOptions::new("movie.mp4").unwrap();
         let limits = options.effective_ffmpeg_limits().unwrap();
+        let shared_default = default_render_ffmpeg_limits();
         assert_eq!(limits.timeout, Duration::from_secs(86_400));
         assert_eq!(JobLimits::default().timeout, Duration::from_secs(600));
         assert_eq!(limits.max_artifact_bytes, 8 << 30);
         assert_eq!(limits.max_log_bytes, 1 << 20);
         assert!(!limits.keep_workdir);
+        assert_eq!(
+            FfmpegLimitsReport::new(&limits, options.max_output_bytes),
+            FfmpegLimitsReport::new(&shared_default, options.max_output_bytes),
+        );
     }
 
     #[test]
@@ -137,12 +170,69 @@ mod tests {
             options.ffmpeg_limits.max_artifact_bytes = job_cap;
             options.max_output_bytes = sink_cap;
             let effective = options.effective_ffmpeg_limits().unwrap();
+            let direct = admit_render_ffmpeg_limits(&options.ffmpeg_limits, sink_cap).unwrap();
             assert_eq!(effective.max_artifact_bytes, expected);
             assert_eq!(effective.timeout, Duration::new(1_801, 123_456_789));
             assert_eq!(effective.max_log_bytes, 17);
             assert!(effective.keep_workdir);
             assert_eq!(options.ffmpeg_limits.max_artifact_bytes, job_cap);
             assert_eq!(options.max_output_bytes, sink_cap);
+            assert_eq!(
+                FfmpegLimitsReport::new(&direct, sink_cap),
+                FfmpegLimitsReport::new(&effective, sink_cap),
+            );
+        }
+    }
+
+    #[test]
+    fn shared_admission_and_facade_refuse_every_invalid_resource_bound() {
+        let defaults = default_render_ffmpeg_limits();
+        for (limits, input_cap, message) in [
+            (
+                JobLimits {
+                    timeout: Duration::ZERO,
+                    ..defaults.clone()
+                },
+                1,
+                "ffmpeg timeout must be nonzero",
+            ),
+            (
+                JobLimits {
+                    timeout: Duration::MAX,
+                    ..defaults.clone()
+                },
+                1,
+                "ffmpeg timeout exceeds the monotonic clock range",
+            ),
+            (
+                JobLimits {
+                    max_log_bytes: 0,
+                    ..defaults.clone()
+                },
+                1,
+                "ffmpeg max_log_bytes must be nonzero",
+            ),
+            (
+                JobLimits {
+                    max_artifact_bytes: 0,
+                    ..defaults.clone()
+                },
+                1,
+                "ffmpeg artifact and input byte limits must be nonzero",
+            ),
+            (
+                defaults,
+                0,
+                "ffmpeg artifact and input byte limits must be nonzero",
+            ),
+        ] {
+            let direct = admit_render_ffmpeg_limits(&limits, input_cap).unwrap_err();
+            let mut options = RenderOptions::new("movie.mp4").unwrap();
+            options.ffmpeg_limits = limits;
+            options.max_output_bytes = input_cap;
+            let facade = options.effective_ffmpeg_limits().unwrap_err();
+            assert!(matches!(direct, RenderError::InvalidOptions(reason) if reason == message));
+            assert!(matches!(facade, RenderError::InvalidOptions(reason) if reason == message));
         }
     }
 

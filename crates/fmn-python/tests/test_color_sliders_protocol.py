@@ -148,6 +148,69 @@ def environment(install=True):
     return native
 
 
+def typed_background_environment():
+    """Real scalar-color/fill methods over explicit record and grid doubles."""
+    native = environment(False)
+    source = SOURCE.parents[1] / "manimlib_bootstrap.py"
+    tree = ast.parse(source.read_text())
+    definitions = {node.name: node for node in tree.body
+                   if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
+    selected = [definitions[name] for name in (
+        "_listify", "_array_is_constant", "_resize_with_interpolation",
+        "_ColorValue", "_color_to_rgb",
+    )]
+    for owner, names in (
+        ("Mobject", ("_style_data", "set_rgba_array_by_color")),
+        ("VMobject", ("set_fill",)),
+    ):
+        methods = {node.name: node for node in definitions[owner].body
+                   if isinstance(node, ast.FunctionDef)}
+        selected.extend(methods[name] for name in names)
+    namespace = {"_np": np, "_family_preorder": lambda root: root.get_family()}
+    exec(compile(ast.Module(selected, type_ignores=[]), str(source), "exec"), namespace)  # ubs:ignore -- fixed definitions from this repository's bootstrap; no external input
+
+    class Records(native.Mobject):
+        def __init__(self):
+            super().__init__()
+            self.rows = np.zeros(9, dtype=[("fill_rgba", float, (4,))])
+        @property
+        def data(self):
+            return self.rows
+        def n_records(self):
+            return len(self.rows)
+        def _fill_rgba_lanes(self, *args):
+            # Storage is explicitly doubled, so use the shipping view-write
+            # fallback rather than claiming native lane-fill acceptance.
+            return False
+    namespace["Mobject"] = Records
+    Records._style_data = namespace["_style_data"]
+    Records.set_rgba_array_by_color = namespace["set_rgba_array_by_color"]
+    Records.set_fill = namespace["set_fill"]
+
+    class Grid(native.Group):
+        def __iter__(self):
+            return iter(self.submobjects)
+        def stretch_to_fit_width(self, width):
+            self.width = width
+            return self
+        def stretch_to_fit_height(self, height):
+            self.height = height
+            return self
+    class Square(Records):
+        def __init__(self, length):
+            super().__init__()
+            self.length = length
+        def get_grid(self, *, n_rows, n_cols, buff):
+            return Grid(*(type(self)(self.length) for _ in range(n_rows * n_cols)))
+        def set_stroke(self, **kwargs):
+            self.style.update(kwargs)
+            return self
+    native.Square, native.Rectangle, native.VGroup = Square, Square, Grid
+    native._ColorValue = namespace["_ColorValue"]
+    module.install_color_sliders(native)
+    return native
+
+
 class ColorSliderTests(unittest.TestCase):
     def setUp(self):
         self.n = environment()
@@ -268,6 +331,30 @@ class ColorSliderTests(unittest.TestCase):
         self.assertTrue(first.native_grid)
         self.assertTrue(first.fixed)
         np.testing.assert_equal(first.point, bank.selected_color_box.point)
+    def test_typed_background_preserves_scalar_rgb_precision_and_opacity(self):
+        native = typed_background_environment()
+        bank = native.ColorSliders.__new__(native.ColorSliders)
+        native.Mobject.__init__(bank)
+        bank.rect_kwargs = {"width": 1., "height": .5}
+        bank.background_grid_kwargs = {"single_square_len": .25}
+        colors = np.array([[.123456789, .345678912, .789123456],
+                           [.876543219, .654321987, .210987654]])
+        bank._background_grid_colors = tuple(tuple(color) for color in colors)
+        bank.selected_color_box = native.Mobject().shift(np.array([2., 3., 0.]))
+        first, second = bank.get_background(), bank.get_background()
+        self.assertIsNot(first, second)
+        for background in (first, second):
+            self.assertIs(type(background), native.VGroup)
+            self.assertEqual(len(background.submobjects), 10)
+            np.testing.assert_array_equal(background.point, bank.selected_color_box.point)
+            for index, square in enumerate(background):
+                self.assertIs(type(square), native.Square)
+                rgba = square.data["fill_rgba"]
+                np.testing.assert_allclose(rgba[:, :3],
+                                           np.tile(colors[index % 2], (len(rgba), 1)),
+                                           rtol=0, atol=1e-12)
+                np.testing.assert_array_equal(rgba[:, 3], np.ones(len(rgba)))
+                self.assertTrue(square.fixed)
     def test_background_override_controls_constructor_product(self):
         Base = self.n.ColorSliders
         chosen = self.n.Mobject()

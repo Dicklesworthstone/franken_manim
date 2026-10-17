@@ -33,6 +33,7 @@ pub mod dynamics;
 pub mod mobject;
 pub mod numpy;
 pub mod order;
+pub mod path_sampling;
 pub mod persist;
 pub mod placement;
 pub mod positional;
@@ -62,8 +63,8 @@ pub use record::{FieldSpec, MirrorSet, RecordBuffer, RecordError, RecordSchema, 
 pub use render_snapshot::{RenderSnapshotError, RenderSnapshotLimits};
 pub use shape::ShapeTag;
 pub use stage::{
-    CopyMap, Entry, IdBuildHasher, IdHasher, Mob, Snapshot, Stage, UpdaterFn, UpdaterId,
-    UpdaterSlot,
+    CopyMap, Entry, FamilyCheckpoint, FrozenRenderState, IdBuildHasher, IdHasher, Mob, Snapshot,
+    Stage, UpdaterFn, UpdaterId, UpdaterSlot,
 };
 pub use uniforms::{JointType, Uniforms};
 

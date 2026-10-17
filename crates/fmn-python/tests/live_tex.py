@@ -271,8 +271,10 @@ class LiveTexAcceptance(unittest.TestCase):
         self.assertEqual(list(tex.get_part_by_tex("12")), list(tex[:2]))
         self.assertEqual(list(tex.get_part_by_tex(r"\over")), [tex[2]])
         self.assertEqual(list(tex.get_part_by_tex("34")), list(tex[3:]))
-        self.assertEqual(tex._string_sub_spans, [(0, 1), (1, 2), (9, 10), (10, 11), (3, 8)])
-        self.assertEqual(tex._string_sub_paths, [[0], [1], [3], [4], [2]])
+        # Native primitives follow TeX's emission order since the 3ed1d332
+        # repin (fm-aia1): numerator, bar, denominator.
+        self.assertEqual(tex._string_sub_spans, [(0, 1), (1, 2), (3, 8), (9, 10), (10, 11)])
+        self.assertEqual(tex._string_sub_paths, [[0], [1], [2], [3], [4]])
         self.assert_map(tex)
 
     def test_nested_infix_fraction_rules_are_inserted_at_their_own_denominators(self):

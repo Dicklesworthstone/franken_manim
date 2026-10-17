@@ -113,7 +113,9 @@ class LiveStreamlineTests(unittest.TestCase):
         lines.add_updater(updater, call=False)
         lines.func = lambda rows: np.tile([0., 1.], (len(rows), 1))
         self.assertIsNone(lines.draw_lines())
-        self.assertEqual(scene.mobjects, [lines, unrelated])
+        # The list starts with the frame, as in the Reference (fm-6l2i).
+        self.assertEqual(scene.mobjects, [scene.frame, lines, unrelated])
+
         self.assertIn(updater, lines.updaters)
         self.assertTrue(all(new is not old for new, old in zip(lines, old_children)))
         for line, view, before in zip(lines, views, old_points):

@@ -25,6 +25,24 @@ class VideoCliTests(unittest.TestCase):
             self.assertEqual(v.take_video_options(["--video-bitrate", str(value)])[1],
                              {"video_bitrate": value})
 
+    def test_audio_bitrate_is_separate_and_allowed_with_alpha(self):
+        for value in (1, 96000, 192000, (1 << 32) - 1):
+            tokens = [f"--audio-bitrate={value}", "--crf=16"]
+            self.assertEqual(v.take_video_options(tokens)[1], {"audio_bitrate": value, "video_crf": 16})
+            writer = SimpleNamespace(video_crf=28)
+            v.apply_video_options(SimpleNamespace(file_writer=writer), {"audio_bitrate": value})
+            self.assertEqual(writer.audio_bitrate, value)
+            self.assertEqual(writer.video_crf, 28)
+        v.validate_video_format("mov", {"audio_bitrate": 192000}, transparent=True)
+        for value in ("0", "-1", "1.5", "4294967296", "192k", "1" * 1000):
+            with self.assertRaises(ValueError):
+                v.take_video_options(["--audio-bitrate", value])
+        with self.assertRaises(ValueError):
+            v.take_video_options(["--audio-bitrate=96000", "--audio-bitrate=192000"])
+        for format in ("png", "gif", "y4m", "wav", "fmtl"):
+            with self.assertRaises(ValueError):
+                v.validate_video_format(format, {"audio_bitrate": 192000})
+
     def test_mixed_forms_keep_native_option_values_verbatim(self):
         original = ["--ffmpeg_bin", "--crf", "--preset=slow", "--file_name", "--tune",
                     "--format", "mov", "--crf", "0", "--tune", "animation"]

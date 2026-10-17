@@ -83,6 +83,21 @@ def updater_restoration():
     np.testing.assert_array_equal(square.uniforms["state_array"], [2., 4.])
 
 
+def constructor_z_index_sets_the_root_and_orders_scene_add():
+    # Mobject.__init__ takes z_index (mobject.py:89) and sets it on the root
+    # only; Scene.add sorts roots by it. Values measured in the pinned
+    # Reference (fm-constructor-z-index-4mq7).
+    square, circle = m.Square(z_index=2), m.Circle(z_index=-1)
+    dot = m.Dot()
+    group = m.VGroup(dot, z_index=1)
+    assert (square.z_index, circle.z_index, group.z_index, dot.z_index) == (2, -1, 1, 0)
+    assert [mob.z_index for mob in m.Text("ab", z_index=3).get_family()] == [3, 0, 0]
+    scene = m.Scene()
+    scene.add(square, circle, group)
+    assert [type(mob).__name__ for mob in scene.mobjects] == [
+        "CameraFrame", "Circle", "VGroup", "Square"]
+
+
 def ordered_roots():
     scene = m.Scene()
     left, right = m.Square(), m.Circle()
@@ -92,8 +107,10 @@ def ordered_roots():
     scene.add(right, left)
     assert not state.mobjects_match(scene.get_state())
     state.restore_scene(scene)
-    assert len(scene.mobjects) == 2
-    assert scene.mobjects[0] is left and scene.mobjects[1] is right
+    # clear() dropped the frame; the state restores it first (fm-6l2i).
+    assert len(scene.mobjects) == 3
+    assert scene.mobjects[0] is scene.frame
+    assert scene.mobjects[1] is left and scene.mobjects[2] is right
 
 
 def scene_mobjects_follow_every_structural_change():
@@ -106,37 +123,40 @@ def scene_mobjects_follow_every_structural_change():
         return [id(mob) for mob in scene.mobjects]
 
     scene = m.Scene()
+    frame = id(scene.frame)  # the list starts with the frame (fm-6l2i)
     a, b, c = m.Square(), m.Circle(), m.Dot()
     group = m.Group(a)
     scene.add(group, b)
-    assert roots(scene) == [id(group), id(b)] == roots(scene)
+    assert roots(scene) == [frame, id(group), id(b)] == roots(scene)
     assert all(x is y for x, y in zip(scene.mobjects, scene.mobjects))
     scene.remove(b)
-    assert roots(scene) == [id(group)]
+    assert roots(scene) == [frame, id(group)]
     scene.add(c)
-    assert roots(scene) == [id(group), id(c)]
+    assert roots(scene) == [frame, id(group), id(c)]
     scene.bring_to_back(c)
-    assert roots(scene) == [id(c), id(group)]
+    assert roots(scene) == [id(c), frame, id(group)]
     group.add(b)
-    assert roots(scene) == [id(c), id(group)]
+    assert roots(scene) == [id(c), frame, id(group)]
     assert [id(x) for x in group.submobjects] == [id(a), id(b)]
     group.set_submobjects([b, a])
-    assert [id(x) for x in scene.mobjects[1].submobjects] == [id(b), id(a)]
+    assert [id(x) for x in scene.mobjects[2].submobjects] == [id(b), id(a)]
     group.remove(b)
-    assert [id(x) for x in scene.mobjects[1].submobjects] == [id(a)]
+    assert [id(x) for x in scene.mobjects[2].submobjects] == [id(a)]
     # Removing a rooted member ungroups its ancestor in place.
     scene.remove(a)
-    assert roots(scene) == [id(c)]
+    assert roots(scene) == [id(c), frame]
     # A root whose proxy may die with its last Python reference: the next
     # read must still project it, then reuse whatever proxy it projected.
     scene.add(m.Square())
     gc.collect()
     shells = scene.mobjects
-    assert len(shells) == 2 and shells[0] is c and isinstance(shells[1], m.Mobject)
-    kept = shells[1]
+    # add() re-sorts by z_index, which returns the frame (-1) ahead of c.
+    assert len(shells) == 3 and shells[0] is scene.frame and shells[1] is c
+    assert isinstance(shells[2], m.Mobject)
+    kept = shells[2]
     del shells
     gc.collect()
-    assert scene.mobjects[1] is kept
+    assert scene.mobjects[2] is kept
 
 
 def native_only_edits_reach_python_through_scene_mobjects():
@@ -160,17 +180,21 @@ def projection_rereads_only_moved_child_lists():
     # fm-5wq.31 work counter: after an edge change among already-projected
     # members, Scene.mobjects reads the moved list only. The previous
     # projection read every member's `submobjects` on every such read.
+    # The projection takes each list from the member's own instance dict
+    # (fm-siot), so the reads are counted through a property kept under
+    # another key: with no `submobjects` entry in the dict, ordinary access
+    # is the projection's only way to the list.
     reads = []
 
     class Counted(m.VGroup):
         @property
         def submobjects(self):
             reads.append(self)
-            return self.__dict__["submobjects"]
+            return self.__dict__["_counted_submobjects"]
 
         @submobjects.setter
         def submobjects(self, value):
-            self.__dict__["submobjects"] = value
+            self.__dict__["_counted_submobjects"] = value
 
     leaves = [Counted() for _ in range(40)]
     root = Counted(*leaves)
@@ -181,6 +205,42 @@ def projection_rereads_only_moved_child_lists():
     reads.clear()
     scene.mobjects
     assert reads == [leaves[3]], len(reads)
+
+
+def projection_runs_no_authored_submobjects_getter():
+    # fm-siot: Scene.mobjects runs inside per-frame admission, which must
+    # run no authored code. A member's list is read from its own instance
+    # dict, so neither a `submobjects` property over that entry nor an
+    # authored __getattribute__ runs when the projection re-reads it.
+    reads = []
+
+    class Property(m.VGroup):
+        @property
+        def submobjects(self):
+            reads.append("property")
+            return self.__dict__["submobjects"]
+
+        @submobjects.setter
+        def submobjects(self, value):
+            self.__dict__["submobjects"] = value
+
+    class Intercepting(m.VGroup):
+        def __getattribute__(self, name):
+            if name == "submobjects":
+                reads.append("__getattribute__")
+            return object.__getattribute__(self, name)
+
+    for cls in (Property, Intercepting):
+        parents = [cls(m.Square()) for _ in range(3)]
+        scene = m.Scene()
+        scene.add(*parents)
+        scene.mobjects
+        parents[1].add(m.Circle())  # an edge change, so the list is re-read
+        reads.clear()
+        roots = [mob for mob in scene.mobjects if mob is not scene.frame]
+        assert len(roots) == 3 and all(a is b for a, b in zip(roots, parents))
+        assert reads == [], (cls.__name__, reads)
+        assert len(parents[1].submobjects) == 2
 
 
 def camera_pose_and_callbacks():
@@ -213,7 +273,7 @@ def camera_pose_and_callbacks():
     restored_default.to_default_state()
     close(restored_default.orientation(), (0., 0., 1., 0.))
     assert len(frame.updaters) == 1 and frame.updaters[0] is rotate
-    assert all(obj is not frame for obj in scene.mobjects)
+    assert scene.mobjects == [frame]
 
 
 def native_clock_and_bytes():
@@ -311,7 +371,7 @@ def foreign_owner_refusal():
         raise AssertionError("a checkpoint cannot be restored into another arena")
     close(a.get_center(), m.ORIGIN)
     close(b.get_center(), 3 * m.RIGHT)
-    assert source.mobjects[0] is a and target.mobjects[0] is b
+    assert source.mobjects[1] is a and target.mobjects[1] is b
 
 
 def ignored_camera():
@@ -326,6 +386,9 @@ def ignored_camera():
     close(scene.frame.get_center(), 2 * m.RIGHT)
     close(square.get_center(), m.ORIGIN)
     assert scene.get_time() == state.time
+    # The ignored frame was not saved, so the restore leaves it unlisted; the
+    # Reference's list after this restore is [Square] (fm-6l2i).
+    assert scene.mobjects == [square]
 
 
 def rendered_restore():
@@ -563,9 +626,11 @@ def ignored_camera_keeps_its_authored_attributes():
 
 CASES = (
     captured_families_styles_and_arrays, shared_child_identity, updater_restoration,
-    ordered_roots, scene_mobjects_follow_every_structural_change,
+    ordered_roots, constructor_z_index_sets_the_root_and_orders_scene_add,
+    scene_mobjects_follow_every_structural_change,
     native_only_edits_reach_python_through_scene_mobjects,
     projection_rereads_only_moved_child_lists,
+    projection_runs_no_authored_submobjects_getter,
     camera_pose_and_callbacks, native_clock_and_bytes,
     repeated_history, history_branch_and_limit, rejected_checkpoint_preserves_history,
     foreign_owner_refusal, ignored_camera, rendered_restore,
@@ -579,7 +644,7 @@ CASES = (
     capture_refusal_preserves_history_and_native_arena,
     ignored_camera_keeps_its_authored_attributes,
 )
-assert len(CASES) == 24
+assert len(CASES) == 26
 for case in CASES:
     case()
     print("scene snapshot acceptance:", case.__name__)

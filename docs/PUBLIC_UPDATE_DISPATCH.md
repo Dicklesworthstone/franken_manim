@@ -20,14 +20,19 @@ with a mobject.
 
 ## Public scene updates
 
-`Scene.update_mobjects(dt)` updates the actual `scene.frame` first, followed by
-the drawable roots captured at the start of the call. Camera callbacks can edit
-scene membership, but those changes affect the next root snapshot. The frame
-is not part of the drawable Stage and is not inserted into it for this purpose.
-Camera suspension does not suspend unrelated drawable roots.
+`Scene.update_mobjects(dt)` updates the roots of `scene.mobjects` captured at
+the start of the call, in list order. As in the Reference, the list starts as
+`[scene.frame]` and the frame's `z_index` of -1 keeps it ahead of default
+content, so its callbacks run first; once `clear()` or `remove()` drops the
+frame, its callbacks stop until it is listed again (fm-6l2i). The frame is a
+point-less root and draws nothing. Camera callbacks can edit scene membership,
+but those changes affect the next root snapshot. Camera suspension does not
+suspend unrelated drawable roots.
 
-`Scene.should_update_mobjects()` checks the camera and the recursive public
-`has_updaters()` query on each root; callbacks on deep descendants are not lost.
+`Scene.should_update_mobjects()` checks the recursive public `has_updaters()`
+query on each root, the listed frame included; callbacks on deep descendants
+are not lost.
+
 `always_update_mobjects` short-circuits that query. The existing public
 `update_frame(dt)` retains its order: advance scene time, update objects, then
 perform its normal capture/interaction policy, including its skip-mode policy.

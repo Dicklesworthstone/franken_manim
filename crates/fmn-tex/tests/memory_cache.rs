@@ -233,6 +233,33 @@ fn an_attached_store_that_can_neither_read_nor_write_counts_every_failure() {
 }
 
 #[test]
+fn a_layout_over_the_store_ceiling_bypasses_retention_without_a_store_error() {
+    let source = "q^7+z";
+    let expected = engine().typeset(MATH, source).unwrap().to_bytes().unwrap();
+    // The store's per-entry ceiling sits one byte below this layout: the
+    // documented retention bypass, not a store that failed to write.
+    let store = Store::open(
+        Arc::new(VirtualFs::new()),
+        Arc::new(FakeClock::new()),
+        ROOT,
+        StoreConfig {
+            max_entry_bytes: expected.len() - 1,
+            ..StoreConfig::default()
+        },
+    )
+    .unwrap();
+    let e = engine().with_cache(&store).unwrap();
+    assert_eq!(
+        e.typeset(MATH, source).unwrap().to_bytes().unwrap(),
+        expected
+    );
+    assert_eq!(e.persistent_store_errors(), 0);
+    assert_eq!(e.persistent_bytes_written(), 0);
+    assert_eq!(e.persistent_rejected_entries(), 0);
+    assert_eq!(e.layout_computations(), 1);
+}
+
+#[test]
 fn corrupt_or_wrong_source_disk_documents_recompute_and_warm_memory() {
     let store = store();
     let e = engine().with_cache(&store).unwrap();
@@ -248,12 +275,14 @@ fn corrupt_or_wrong_source_disk_documents_recompute_and_warm_memory() {
     let other_source = engine().typeset(MATH, "z").unwrap().to_bytes().unwrap();
     ns.put(&x_key, &other_source).unwrap();
     ns.put(&y_key, b"not a typeset document").unwrap();
+    let mut written = 0;
     for source in ["x", "y"] {
         let result = e.typeset(MATH, source).unwrap();
         assert_eq!(result.source, source);
         assert_eq!(result.layout.glyphs.len(), 1);
         assert_eq!(result.layout.glyphs[0].ch.to_string(), source);
         let expected = result.to_bytes().unwrap();
+        written += expected.len() as u64;
         assert_eq!(
             e.typeset(MATH, source).unwrap().to_bytes().unwrap(),
             expected
@@ -262,11 +291,20 @@ fn corrupt_or_wrong_source_disk_documents_recompute_and_warm_memory() {
     let stats = e.memory_cache_stats();
     assert_eq!((stats.hits, stats.misses, stats.entries), (2, 2, 2));
     // Both foreign documents sit in checksum-valid envelopes, so each was
-    // rejected once, and the store refused to replace either incumbent with
-    // the recomputed payload: a write failure, reported, never silent.
+    // rejected once, removed, and replaced by the recomputed payload
+    // (fm-typeset-foreign-payload-never-healed-8w0y).
     assert_eq!(e.persistent_rejected_entries(), 2);
-    assert_eq!(e.persistent_store_errors(), 2);
-    assert_eq!(e.persistent_bytes_written(), 0);
+    assert_eq!(e.persistent_store_errors(), 0);
+    assert_eq!(e.persistent_bytes_written(), written);
+    // The next run (a fresh engine, so memory cannot answer) reads verified
+    // hits: the keys are healed.
+    let next = engine().with_cache(&store).unwrap();
+    for source in ["x", "y"] {
+        assert_eq!(next.typeset(MATH, source).unwrap().source, source);
+    }
+    assert_eq!(next.persistent_cache_hits(), 2);
+    assert_eq!(next.persistent_rejected_entries(), 0);
+    assert_eq!(next.persistent_store_errors(), 0);
 }
 
 #[test]

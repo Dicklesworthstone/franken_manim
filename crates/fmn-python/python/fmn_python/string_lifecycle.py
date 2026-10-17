@@ -6,10 +6,18 @@ No SVG parser, second typesetter, or substitute interpolation is introduced.
 """
 from __future__ import annotations
 
-from bisect import bisect_left
-
+import abc
 from .coordinate_lifecycle import _bind
 from .copying import FamilyRefs
+
+
+# The Reference's StringMobject (an ABC) declares these render-twice steps
+# abstract; Tex and MarkupText implement them.
+_ABSTRACT_STRING_STEPS = (
+    "get_attr_dict_from_command_pair", "get_command_flag", "get_command_matches",
+    "get_command_string", "get_configured_items", "get_content_prefix_and_suffix",
+    "get_svg_string_by_content", "replace_for_content", "replace_for_matching",
+)
 
 
 def explicit_channel_colors(style):
@@ -46,6 +54,34 @@ def initialize_string(g, obj, style):
     g["_init_native_vmobject"](obj, options)
 
 
+def _reclass_leaves(g, candidate, paths):
+    """Give each typeset leaf the Reference's class (fm-15k9).
+
+    The Reference builds strings through SVGMobject: every glyph is a
+    VMobjectFromSVGPath, and every TeX rule (fraction bar, radical
+    overline) is the Rectangle of dvisvgm's <rect>. Native storage is
+    unchanged; only the leaf's Python class moves. A rule's contour runs
+    from its bottom-right corner, so its start anchors are the Reference's
+    vertices. Strings without kinds (Text, MarkupText) are all glyphs.
+    """
+    kinds = getattr(candidate, "_string_sub_kinds", None) or ["glyph"] * len(paths)
+    if len(kinds) != len(paths):
+        raise ValueError("native string kinds do not match its span paths")
+    glyph_class, rule_class = g["VMobjectFromSVGPath"], g["Rectangle"]
+    for path, kind in zip(paths, kinds):
+        leaf = candidate
+        for index in path:
+            leaf = leaf.submobjects[index]
+        if kind == "rule":
+            leaf.__class__ = rule_class
+            leaf.vertices = leaf.get_start_anchors()
+            leaf.width, leaf.height = leaf.get_width(), leaf.get_height()
+        else:
+            leaf.__class__ = glyph_class
+            leaf.transform_cache = None
+            leaf.path_obj = None
+
+
 def _publish(g, obj, candidate, specs):
     g["_hang_native_children"](candidate, specs)
     spans = list(candidate._string_sub_spans)
@@ -56,6 +92,7 @@ def _publish(g, obj, candidate, specs):
     offset = len(retained)
     if any(not path or not 0 <= path[0] < len(children) for path in paths):
         raise ValueError("native string span paths do not identify glyph children")
+    _reclass_leaves(g, candidate, paths)
     # Rebase only the first component: TeX parts retain their nested structure.
     paths = [[path[0] + offset, *path[1:]] for path in paths]
     # Plain tuples keep shallow references under the public copy contract.
@@ -69,67 +106,6 @@ def _publish(g, obj, candidate, specs):
     return obj
 
 
-def _order_infix_fraction_rules(candidate, source):
-    """Place infix fraction bars before denominator ink in the public family.
-
-    Scribe's primitive tables keep glyphs, rules and paths in separate lanes.
-    Their ordinals (and cache/wire representations) remain unchanged. Only the
-    freshly built Python family is reordered; the existing source paths are
-    remapped with it. The native span map identifies an actual ``\\over`` rule,
-    so this does not parse TeX, infer glyphs from their outlines, or typeset a
-    second expression. Prefix fractions and other constructs retain their
-    existing native ordering.
-    """
-    spans, paths = candidate._string_sub_spans, candidate._string_sub_paths
-    payload = source.encode("utf-8")
-    groups = {}
-    for span, path in zip(spans, paths):
-        groups.setdefault(tuple(path[:-1]), []).append((path[-1], span))
-    # Freeze original parents before any permutation changes their paths.
-    parents = {(): candidate}
-    for path in groups:
-        for depth, index in enumerate(path):
-            parents.setdefault(path[:depth + 1], parents[path[:depth]].submobjects[index])
-    remaps = {}
-    for parent_path, entries in groups.items():
-        rules = {index for index, (start, end) in entries if payload[start:end] == b"\\over"}
-        if not rules:
-            continue
-        # Source order is not necessarily glyph emission order (scripts), so
-        # query the earliest native sibling to the right of each keyword.
-        # Suffix minima avoid an O(rules * glyphs) scan on large formulas.
-        following = sorted((span[0], index) for index, span in entries if index not in rules)
-        starts = [start for start, _ in following]
-        minima = [index for _, index in following]
-        for i in range(len(minima) - 2, -1, -1):
-            minima[i] = min(minima[i], minima[i + 1])
-        before = {}
-        for index, (start, end) in entries:
-            if index not in rules:
-                continue
-            position = bisect_left(starts, end)
-            if position < len(minima):
-                anchor = minima[position]
-                if anchor < index:
-                    before.setdefault(anchor, []).append((start, index))
-        if not before:
-            continue
-        parent = parents[parent_path]
-        old = tuple(parent.submobjects)
-        moved = {index for rows in before.values() for _, index in rows}
-        order = []
-        for index in range(len(old)):
-            order.extend(rule for _, rule in sorted(before.get(index, ())))
-            if index not in moved:
-                order.append(index)
-        parent.set_submobjects([old[index] for index in order])
-        remaps[parent_path] = {old_index: new_index for new_index, old_index in enumerate(order)}
-    candidate._string_sub_paths = [
-        [remaps.get(tuple(path[:i]), {}).get(index, index) for i, index in enumerate(path)]
-        for path in paths
-    ]
-
-
 def install_string_lifecycle(native):
     g = vars(native)
     if g.get("_FMN_STRING_LIFECYCLE_INSTALLED", False):
@@ -137,6 +113,11 @@ def install_string_lifecycle(native):
     Markup, Tex = g["MarkupText"], g["Tex"]
 
     def init_colors(self):
+        # The Reference's StringMobject passes no fill opacity and a zero
+        # stroke width to its own VMobject init, so its point-less root
+        # reports 0 for both while the glyphs carry the paint (fm-78b6).
+        self.set_fill(opacity=0.0, recurse=False)
+        self.set_stroke(width=0.0, recurse=False)
         # Only explicit caller styles override the native per-glyph paints.
         # Give the mutating style adapter a fresh dictionary on every call.
         g["_apply_vmobject_style_kwargs"](self, dict(self._fmn_string_style))
@@ -171,10 +152,6 @@ def install_string_lifecycle(native):
             bool(self._native_group_single_part), self.template, self.additional_preamble,
             g["_tex_line_align"](self.alignment, bool(self._native_text_mode)),
         )
-        if "\\over" in self.string:
-            g["_hang_native_children"](candidate, specs)
-            _order_infix_fraction_rules(candidate, self.string)
-            specs = ()
         return _publish(g, self, candidate, specs)
 
     def tex_init(self, *tex_strings, font_size=48, alignment="\\centering", template="",
@@ -221,4 +198,13 @@ def install_string_lifecycle(native):
         return init_colors(self)
     _bind(Markup, "init_colors", text_colors)
     _bind(Tex, "init_colors", tex_colors)
+    # StringMobject() raises the Reference's TypeError, and a direct subclass
+    # must implement these steps, as with the Reference's ABC. The portal's
+    # by-name refusers stay their bodies. MarkupText, Tex and their portal
+    # subclasses keep the empty abstract sets they were created with.
+    base = g["StringMobject"]
+    for name in _ABSTRACT_STRING_STEPS:
+        member = vars(base)[name]
+        getattr(member, "__func__", member).__isabstractmethod__ = True
+    abc.update_abstractmethods(base)
     g["_FMN_STRING_LIFECYCLE_INSTALLED"] = True

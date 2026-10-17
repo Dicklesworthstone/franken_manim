@@ -132,6 +132,10 @@ impl RigSink {
 }
 
 impl fmn_scene::SceneSink for RigSink {
+    fn event(&mut self, event: fmn_scene::LifecycleEvent) -> Result<(), IntegrationError> {
+        fmn_scene::SceneSink::event(&mut self.inner, event)
+    }
+
     fn capture(&mut self, _: CaptureReason, packet: FramePacket) -> Result<(), IntegrationError> {
         if let Some(error) = &self.inner.failure {
             return Err(IntegrationError::new("native-camera", error.to_string()));

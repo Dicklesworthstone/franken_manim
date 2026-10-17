@@ -120,6 +120,34 @@ fn keyed_objects_are_immutable_and_identical_republication_is_idempotent() {
 }
 
 #[test]
+fn a_rejected_keyed_payload_is_removed_only_while_it_is_still_there() {
+    // fm-typeset-foreign-payload-never-healed-8w0y: a verified payload the
+    // consumer cannot use is removed, so its recompute republishes instead
+    // of losing to it with KeyConflict.
+    let (_fs, _clock, store) = fresh();
+    let n = ns(&store, None);
+    let k = key("poisoned-key");
+    let foreign = b"verified but foreign";
+    let good = b"the value the consumer computes";
+
+    n.put(&k, foreign).unwrap();
+    assert!(matches!(n.put(&k, good), Err(CacheError::KeyConflict(_))));
+    assert!(
+        n.evict_rejected(&k, foreign).unwrap(),
+        "the rejected bytes go"
+    );
+    assert_eq!(n.get(&k).unwrap(), None);
+    n.put(&k, good).expect("the recompute republishes");
+    assert_eq!(n.get(&k).unwrap().as_deref(), Some(good.as_slice()));
+
+    // Compare-and-remove: bytes republished since are not the rejected ones.
+    assert!(!n.evict_rejected(&k, foreign).unwrap());
+    assert_eq!(n.get(&k).unwrap().as_deref(), Some(good.as_slice()));
+    // An absent entry is nothing to remove.
+    assert!(!n.evict_rejected(&key("never-written"), foreign).unwrap());
+}
+
+#[test]
 fn blob_round_trip_is_self_addressed() {
     let (_fs, _clock, store) = fresh();
     let n = ns(&store, None);

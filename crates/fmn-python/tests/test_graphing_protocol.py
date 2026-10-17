@@ -184,14 +184,30 @@ class LiveGraphTests(unittest.TestCase):
     def bind(self, function=lambda xs: xs * xs, **kwargs):
         return self.axes.bind_graph_to_func(self.graph, function, **kwargs)
 
-    def test_binding_installs_one_callback_without_eager_author_effects(self):
+    def test_binding_evaluates_once_and_installs_one_callback(self):
+        # fm-skpp: the Reference binds through add_updater(call=True), so the
+        # function shapes the graph at bind time; frames then update it.
         calls = []
         result = self.bind(lambda xs: calls.append(xs.copy()) or xs)
         self.assertIs(result, self.graph)
-        self.assertEqual(calls, [])
-        self.graph.update()
         self.assertEqual(len(calls), 1)
+        self.graph.update()
+        self.assertEqual(len(calls), 2)
         self.assertEqual(len(self.graph.updaters), 1)
+
+    def test_a_failing_first_evaluation_leaves_the_graph_unbound(self):
+        author = lambda current: None
+        self.graph.add_updater(author)
+        previous = self.graph.points.copy()
+        failure = LookupError("first evaluation failed")
+        def function(xs):
+            raise failure
+        with self.assertRaises(LookupError) as raised:
+            self.bind(function)
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(self.graph.updaters, [author])
+        self.assertNotIn(graphing._BINDING, vars(self.graph))
+        np.testing.assert_array_equal(self.graph.points, previous)
 
     def test_updates_keep_full_domain_as_discontinuities_move(self):
         position = [0.]
@@ -225,6 +241,7 @@ class LiveGraphTests(unittest.TestCase):
 
     def test_smoothing_occurs_per_disconnected_path(self):
         self.bind(lambda xs: np.sign(xs), get_discontinuities=lambda: [0.])
+        self.native.smooth_calls.clear()  # the bind's own evaluation smoothed too
         self.graph.update()
         self.assertEqual(len(self.native.smooth_calls), 2)
         for points, options in self.native.smooth_calls:
@@ -290,11 +307,11 @@ class LiveGraphTests(unittest.TestCase):
                          lambda xs: xs.astype(complex), lambda xs: np.nan,
                          lambda xs: ["bad"] * len(xs), lambda xs: np.inf * xs]:
             with self.subTest(function=function):
-                self.bind(function)
                 previous = self.graph.points.copy()
                 with np.errstate(invalid="ignore"), self.assertRaises((TypeError, ValueError)):
-                    self.graph.update()
+                    self.bind(function)
                 np.testing.assert_array_equal(self.graph.points, previous)
+                self.assertEqual(self.graph.updaters, [])
 
     def test_coordinate_failure_preserves_geometry(self):
         self.bind()
@@ -361,7 +378,7 @@ class LiveGraphTests(unittest.TestCase):
         self.assertIs(self.graph.style, style)
         self.assertIs(self.graph.submobjects[0], child)
         self.assertIs(self.graph.updaters[0], author)
-        self.assertEqual(self.graph.matches, 1)
+        self.assertEqual(self.graph.matches, 2)  # the bind's evaluation, then the update
 
     def test_rebinding_replaces_only_the_owned_updater_and_preserves_grid(self):
         calls = []
@@ -374,7 +391,9 @@ class LiveGraphTests(unittest.TestCase):
         self.assertEqual(len(self.graph.updaters), 2)
         self.assertIs(vars(self.graph)[graphing._BINDING].samples, baseline)
         self.graph.update()
-        self.assertEqual(calls, ["old", "author", "new"])
+        # Each bind evaluates its own function once; the author's updater
+        # waits for an update, and the old function never runs again.
+        self.assertEqual(calls, ["old", "old", "new", "author", "new"])
         self.assertEqual(len(self.graph.get_subpaths()), 1)
 
     def test_unbind_retains_geometry_but_stops_future_function_updates(self):
@@ -397,23 +416,22 @@ class LiveGraphTests(unittest.TestCase):
     def test_reentry_and_rebind_during_callback_refuse_and_recover(self):
         for operation in (lambda: self.graph.update(), lambda: self.bind(),
                           lambda: self.axes.unbind_graph_from_func(self.graph)):
-            self.bind(lambda xs: operation())
+            # The bind's own first evaluation already re-enters.
             with self.assertRaises(RuntimeError):
-                self.graph.update()
+                self.bind(lambda xs: operation())
             self.assertFalse(graphing._GRAPH_UPDATES.busy(self.graph))
+            self.assertEqual(self.graph.updaters, [])
         self.bind()
         self.graph.update()
 
     def test_count_budgets_stop_infinite_discontinuity_iterables(self):
-        self.bind(get_discontinuities=lambda: itertools.repeat(0.))
         with self.assertRaisesRegex(ValueError, "budget"):
-            self.graph.update()
+            self.bind(get_discontinuities=lambda: itertools.repeat(0.))
         self.assertEqual(self.graph.matches, 0)
 
     def test_nonfinite_discontinuity_and_oversized_sample_refuse(self):
-        self.bind(get_discontinuities=lambda: [np.nan])
         with self.assertRaises(ValueError):
-            self.graph.update()
+            self.bind(get_discontinuities=lambda: [np.nan])
         with patch.object(graphing, "_MAX_SAMPLES", 2), self.assertRaisesRegex(ValueError, "budget"):
             graphing._segments(np.arange(5.), [], 1e-6, np)
 

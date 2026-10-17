@@ -38,6 +38,10 @@ def install_camera_frame_lifecycle(native):
         self._core.set_shape((2.0, 2.0))
         self._core.set_center((0.0, 0.0, 0.0))
         super(Frame, self).__init__(z_index=z_index, **kwargs)
+        # The Reference's Scene.add sorts its list by z_index, where the
+        # frame's -1 keeps it ahead of default content (fm-6l2i). Write the
+        # engine sort key, not only the instance attribute.
+        self.set_z_index(z_index)
 
         # The Reference installs a unit frame and camera uniforms AFTER base
         # hooks, then calls these public sizing/placement methods. Preserve

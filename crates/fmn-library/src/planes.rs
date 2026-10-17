@@ -55,9 +55,10 @@
 //!   transforms are the animation tier's (W9), and a built [`VMobject`]
 //!   here is plain detached geometry.
 //!
-//! `ThreeDAxes.get_graph` / `get_parametric_surface` are likewise
-//! omitted: they build `ParametricSurface`s, which land with the 3D
-//! solids (fm-2u6).
+//! Built charts support owning placement and native graph/surface construction.
+//! Their coordinate maps move with every axis, grid line, and attached label.
+
+mod placement;
 
 use fmn_core::color::Srgb;
 use fmn_core::constants::{
@@ -144,10 +145,12 @@ impl Default for FadedLineStyle {
 }
 
 /// The Reference's `NumberPlane.default_axis_config`: white 2-width
-/// stroke, no ticks, no tip, number labels `DL` at `SMALL_BUFF`.
+/// stroke, no ticks, no tip, number labels `DL` at `SMALL_BUFF`. Only the
+/// stroke is white; the fill keeps `NumberLine`'s `DEFAULT_LIGHT_COLOR`
+/// (fm-78b6).
 fn number_plane_axis_config() -> AxisConfig {
     AxisConfig {
-        color: Some(DEFAULT_MOBJECT_COLOR),
+        stroke_color: Some(DEFAULT_MOBJECT_COLOR),
         stroke_width: Some(2.0),
         include_ticks: Some(false),
         include_tip: Some(false),
@@ -512,8 +515,19 @@ impl CoordinateSystem for ThreeDAxes {
         self.num_sampled_graph_points_per_tick
     }
 
+    fn graph_sampling_budget(&self) -> SamplingBudget {
+        self.sampling_budget
+    }
+
     fn dimension(&self) -> usize {
         3
+    }
+}
+
+impl ThreeDAxes {
+    pub(crate) fn coordinate_axes(&self) -> Option<[&NumberLine; 3]> {
+        let built = self.built.as_ref()?;
+        Some([built.axes.x_axis(), built.axes.y_axis(), &built.z_axis])
     }
 }
 
@@ -872,6 +886,17 @@ impl CoordinateSystem for NumberPlane {
     fn num_sampled_graph_points_per_tick(&self) -> f64 {
         self.num_sampled_graph_points_per_tick
     }
+
+    fn graph_sampling_budget(&self) -> SamplingBudget {
+        self.sampling_budget
+    }
+}
+
+impl NumberPlane {
+    pub(crate) fn coordinate_axes(&self) -> Option<[&NumberLine; 2]> {
+        let built = self.built.as_ref()?;
+        Some([built.axes.x_axis(), built.axes.y_axis()])
+    }
 }
 
 /// `ComplexPlane` — a [`NumberPlane`] whose coordinate labels are
@@ -1163,6 +1188,16 @@ impl CoordinateSystem for ComplexPlane {
     fn num_sampled_graph_points_per_tick(&self) -> f64 {
         CoordinateSystem::num_sampled_graph_points_per_tick(&self.plane)
     }
+
+    fn graph_sampling_budget(&self) -> SamplingBudget {
+        self.plane.graph_sampling_budget()
+    }
+}
+
+impl ComplexPlane {
+    pub(crate) fn coordinate_axes(&self) -> Option<[&NumberLine; 2]> {
+        self.plane.coordinate_axes()
+    }
 }
 
 /// Like [`Axes`], a built plane is added to a stage directly.
@@ -1433,6 +1468,19 @@ mod tests {
             assert_eq!(style.stroke_color, BLUE_D);
             assert!((style.stroke_width - 1.0).abs() < 1e-12);
             assert!((style.stroke_opacity - 0.25).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn number_plane_axes_stroke_white_and_keep_the_number_line_fill() {
+        // The Reference's NumberPlane.default_axis_config sets only
+        // stroke_color, so each axis keeps NumberLine's DEFAULT_LIGHT_COLOR
+        // fill (fm-78b6: get_fill_color() is #BBBBBB on the Reference).
+        let plane = NumberPlane::new().build(&book()).expect("build");
+        for axis in [plane.x_axis(), plane.y_axis()] {
+            let style = axis.vmob().style();
+            assert_eq!(style.stroke_color, WHITE);
+            assert_eq!(style.fill_color, fmn_core::constants::DEFAULT_LIGHT_COLOR);
         }
     }
 

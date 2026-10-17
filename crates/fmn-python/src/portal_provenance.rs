@@ -241,6 +241,53 @@ pub(crate) fn publish_manifest_generation(
     Ok(destination.join("manifest.fmnp"))
 }
 
+/// The configuration a certified portal render resolves, as closure item C4
+/// states it: the defaults overlaid with the render's own settings, exactly as
+/// the native CLI overlays its flags (`resolve_render_config`).
+///
+/// `Config::canonical_bytes` serializes the merged configuration document, so
+/// typed fields assigned after resolution never reach C4: before fm-arog, every
+/// certified portal render published the defaults document, and two `fps`
+/// values produced different frames under one closure digest.
+/// `render.threads` is recorded but canonicalized to its inert marker, so the
+/// scheduler width leaves the digest unchanged.
+///
+/// Run as a preflight before rendering and again at publication. A seed the
+/// configuration cannot state (its integers are signed 64-bit) is refused
+/// before any frame exists.
+pub(crate) fn certified_render_config(
+    resolution: (u32, u32),
+    fps: u32,
+    threads: usize,
+    seed: u64,
+) -> PyResult<fmn_config::Config> {
+    use fmn_config::Value;
+    let (width, height) = resolution;
+    let seed = i64::try_from(seed).map_err(|_| {
+        CapabilityError::new_err(format!(
+            "CAPABILITY: certified rendering states the seed in its resolved configuration \
+             (closure item C4), whose integers are signed 64-bit; seed {seed} exceeds {}",
+            i64::MAX
+        ))
+    })?;
+    let threads = i64::try_from(threads)
+        .map_err(|_| PyValueError::new_err("render thread count exceeds a 64-bit integer"))?;
+    let overlay = fmn_config::config::overlay([
+        ("camera.fps", Value::Int(i64::from(fps))),
+        (
+            "camera.resolution",
+            Value::Str(format!("({width}, {height})")),
+        ),
+        ("determinism.mode", Value::Str("certified".to_owned())),
+        ("determinism.seed", Value::Int(seed)),
+        ("render.engine", Value::Str("cpu".to_owned())),
+        ("render.threads", Value::Int(threads)),
+    ]);
+    Ok(fmn_config::Config::resolve(&[], Some(overlay))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?
+        .config)
+}
+
 #[allow(clippy::too_many_arguments)]
 #[pyfunction]
 #[pyo3(signature = (
@@ -400,13 +447,7 @@ pub(crate) fn _portal_publish_manifest(
     .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
     let (width, height) = resolution;
-    let mut config = fmn_config::Config::resolve(&[], None)
-        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?
-        .config;
-    config.camera.resolution = (width, height);
-    config.camera.fps = fps;
-    config.determinism.seed = seed;
-    config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+    let config = certified_render_config(resolution, fps, threads, seed)?;
     let config_bytes = config
         .canonical_bytes()
         .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
@@ -700,5 +741,47 @@ mod tests {
         }
         assert!(scene_read_items(vec![named("data.csv"), named("data.csv")]).is_err());
         assert!(scene_read_items(vec![named("data.csv"); MAX_SCENE_READS + 1]).is_err());
+    }
+
+    fn c4_bytes(resolution: (u32, u32), fps: u32, threads: usize, seed: u64) -> Vec<u8> {
+        certified_render_config(resolution, fps, threads, seed)
+            .expect("statable certified configuration")
+            .canonical_bytes()
+            .expect("canonical configuration bytes")
+    }
+
+    #[test]
+    fn certified_config_states_the_render_settings_fm_arog() {
+        use fmn_config::config::{DeterminismMode, Engine, ThreadPolicy};
+        let config = certified_render_config((64, 36), 20, 4, 7).expect("resolves");
+        assert_eq!(config.camera.resolution, (64, 36));
+        assert_eq!(config.camera.fps, 20);
+        assert_eq!(config.determinism.seed, 7);
+        assert_eq!(config.determinism.mode, DeterminismMode::Certified);
+        assert_eq!(config.render.engine, Engine::Cpu);
+        assert_eq!(config.render.threads, ThreadPolicy::Fixed(4));
+        // The bytes C4 hashes move with every closure-relevant setting...
+        let base = c4_bytes((64, 36), 10, 1, 0);
+        assert_ne!(c4_bytes((64, 36), 20, 1, 0), base, "fps");
+        assert_ne!(c4_bytes((96, 54), 10, 1, 0), base, "resolution");
+        assert_ne!(c4_bytes((64, 36), 10, 1, 1), base, "seed");
+        // ...and differ from the defaults document every render used to publish.
+        let defaults = fmn_config::Config::resolve(&[], None)
+            .expect("defaults")
+            .config
+            .canonical_bytes()
+            .expect("defaults bytes");
+        assert_ne!(base, defaults);
+        // The scheduler width is recorded but proven inert.
+        assert_eq!(c4_bytes((64, 36), 10, 4, 0), base, "threads");
+        assert_eq!(c4_bytes((64, 36), 10, 96, 0), base, "threads");
+    }
+
+    #[test]
+    fn certified_config_refuses_a_seed_it_cannot_state() {
+        let largest = u64::try_from(i64::MAX).expect("positive");
+        assert!(certified_render_config((64, 36), 10, 1, largest).is_ok());
+        assert!(certified_render_config((64, 36), 10, 1, largest + 1).is_err());
+        assert!(certified_render_config((64, 36), 10, 1, u64::MAX).is_err());
     }
 }

@@ -126,7 +126,7 @@ class NativeArrowLifecycle(unittest.TestCase):
                 self.assertAlmostEqual(obj.get_stroke_width(), 3, places=6)
                 self.assertEqual(obj.uniforms["author_uniform"], 4.0)
                 if bound:
-                    self.assertIs(scene.mobjects[0], obj)
+                    self.assertIs(scene.mobjects[1], obj)
                     scene.wait(1/30)
                     self.assertTrue(ticks)
 

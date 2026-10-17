@@ -79,6 +79,32 @@ fn source() -> Vec<u8> {
     .bundle
     .bytes
 }
+
+fn legacy_source() -> Vec<u8> {
+    struct MovingSurface;
+    impl SceneConstruct for MovingSurface {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            let cube = stage.add(Cube::new(1.6).color(BLUE))?;
+            stage.play(
+                cube.animate()
+                    .set_anim_args(AnimateArgs {
+                        run_time: Some(0.5),
+                        rate_func: Some(fmn_core::rate::linear),
+                        ..AnimateArgs::default()
+                    })?
+                    .shift([0.5, 0.0, 0.0])?,
+            )?;
+            Ok(())
+        }
+    }
+    let mut options = BundleExportOptions::new().unwrap();
+    options.config.camera.fps = 8;
+    options.config.camera.resolution = SIZE;
+    export_bundle_bytes(&mut MovingSurface, options)
+        .unwrap()
+        .bundle
+        .bytes
+}
 fn command(path: &str, threads: &str) -> StudioCommand {
     let Invocation::Studio(command) = parse_args([
         "studio",
@@ -113,6 +139,12 @@ fn expected(source: &[u8]) -> Vec<Vec<u8>> {
     options.config.camera.resolution = SIZE;
     options.config.camera.fps = 8;
     options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(1);
+    if !fmn_scene::TimelineBundle::from_bytes(source)
+        .unwrap()
+        .has_camera_track()
+    {
+        options.camera = Some(options.camera_config().unwrap());
+    }
     render_bundle_with_fs(source, options, fs.clone()).unwrap();
     (0..4)
         .map(|index| {
@@ -169,7 +201,12 @@ fn fixture() -> PathBuf {
     panic!("fixture allocation exhausted")
 }
 
-fn exchange(root: &Path, requests: Vec<SupervisorRequest>, threads: &str) -> Vec<WorkerResponse> {
+fn exchange(
+    root: &Path,
+    requests: Vec<SupervisorRequest>,
+    threads: &str,
+    builtin: Option<&str>,
+) -> Vec<WorkerResponse> {
     let limits = ProtocolLimits::default();
     let mut encoded = Vec::new();
     let all = std::iter::once(SupervisorRequest::Hello {
@@ -194,18 +231,22 @@ fn exchange(root: &Path, requests: Vec<SupervisorRequest>, threads: &str) -> Vec
     }
     // This is the actual worker subprocess owned by fmn studio, not an engine
     // substitute. No executable search path or interpreter is available to it.
-    let mut child = Command::new(env!("CARGO_BIN_EXE_fmn"))
-        .arg(fmn_cli::INTERNAL_STUDIO_WORKER_ARG)
-        .args([
-            "studio",
-            "--resolution",
-            "64x40",
-            "--fps",
-            "8",
-            "--threads",
-            threads,
-        ])
-        .arg(root.join("CameraStudio.fmtl"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_fmn"));
+    command.arg(fmn_cli::INTERNAL_STUDIO_WORKER_ARG).args([
+        "studio",
+        "--resolution",
+        "64x40",
+        "--fps",
+        "8",
+        "--threads",
+        threads,
+    ]);
+    if let Some(name) = builtin {
+        command.args(["@builtin", name]);
+    } else {
+        command.arg(root.join("CameraStudio.fmtl"));
+    }
+    let mut child = command
         .current_dir(root)
         .env_clear()
         .env("PATH", "")
@@ -283,6 +324,7 @@ fn camera_studio_shipping_worker_roundtrips_frames_and_cold_recovers_without_sou
             SupervisorRequest::Inspect { scene: NAME.into() },
         ],
         "1",
+        None,
     );
     let WorkerResponse::Frame(frame) = &responses[1] else {
         panic!("frame")
@@ -319,6 +361,7 @@ fn camera_studio_shipping_worker_roundtrips_frames_and_cold_recovers_without_sou
             },
         ],
         "4",
+        None,
     );
     assert!(matches!(
         recovered[1],
@@ -332,4 +375,119 @@ fn camera_studio_shipping_worker_roundtrips_frames_and_cold_recovers_without_sou
         std::fs::read(root.join("CameraStudio.fmtl")).unwrap(),
         source
     );
+}
+
+#[test]
+fn studio_shipping_worker_renders_legacy_surfaces_with_its_explicit_fixed_camera() {
+    let root = fixture();
+    let source = legacy_source();
+    let expected = expected(&source);
+    assert_ne!(pixels(&expected[0]), pixels(&expected[3]));
+    std::fs::write(root.join("CameraStudio.fmtl"), &source).unwrap();
+    for threads in ["1", "4"] {
+        let responses = exchange(
+            &root,
+            vec![
+                SupervisorRequest::Scrub {
+                    scene: NAME.into(),
+                    frame: 3,
+                },
+                SupervisorRequest::Scrub {
+                    scene: NAME.into(),
+                    frame: 0,
+                },
+                SupervisorRequest::Inspect { scene: NAME.into() },
+            ],
+            threads,
+            None,
+        );
+        for (response, index) in [(1, 3), (2, 0)] {
+            let WorkerResponse::Frame(frame) = &responses[response] else {
+                panic!("legacy frame")
+            };
+            assert_eq!(pixels(frame_bytes(frame)), pixels(&expected[index]));
+        }
+        let WorkerResponse::StudioData { bytes, .. } = &responses[3] else {
+            panic!("legacy inspector")
+        };
+        let info = String::from_utf8(bytes.clone()).unwrap();
+        assert!(info.contains("\"fps\":8"));
+        assert!(info.contains("\"frame_count\":4"));
+    }
+}
+
+#[test]
+fn studio_shipping_mixed_camera_builtin_uses_native_steps_and_recovers_across_thread_caps() {
+    const BUILTIN: &str = "mixed_camera.v1";
+    let root = fixture();
+    let responses = exchange(
+        &root,
+        vec![
+            SupervisorRequest::Scrub {
+                scene: BUILTIN.into(),
+                frame: 0,
+            },
+            SupervisorRequest::Scrub {
+                scene: BUILTIN.into(),
+                frame: 8,
+            },
+            SupervisorRequest::Play {
+                scene: BUILTIN.into(),
+                command: studio_seek_command(BUILTIN, 8).unwrap(),
+            },
+            SupervisorRequest::Inspect {
+                scene: BUILTIN.into(),
+            },
+        ],
+        "1",
+        Some(BUILTIN),
+    );
+    let WorkerResponse::Frame(initial) = &responses[1] else {
+        panic!("initial native frame")
+    };
+    let WorkerResponse::Frame(last) = &responses[2] else {
+        panic!("last native frame")
+    };
+    assert_ne!(pixels(frame_bytes(initial)), pixels(frame_bytes(last)));
+    let WorkerResponse::JournalSegment { journal, .. } = &responses[3] else {
+        panic!("native journal")
+    };
+    let entries = fmn_scene::Journal::from_bytes(journal).unwrap();
+    assert!(
+        entries.entries()[0]
+            .reads
+            .iter()
+            .any(|read| read.path == "native/camera-capture-policy")
+    );
+    let WorkerResponse::StudioData { bytes, .. } = &responses[4] else {
+        panic!("native inspector")
+    };
+    let info = String::from_utf8(bytes.clone()).unwrap();
+    assert!(info.contains("\"fps\":30"));
+    assert!(info.contains("\"frame_count\":9"));
+    let recovered = exchange(
+        &root,
+        vec![
+            SupervisorRequest::ReplayJournal(JournalReplay {
+                scene: BUILTIN.into(),
+                from_entry: 0,
+                through_entry: 1,
+                journal: journal.clone(),
+            }),
+            SupervisorRequest::Scrub {
+                scene: BUILTIN.into(),
+                frame: 8,
+            },
+        ],
+        "4",
+        Some(BUILTIN),
+    );
+    assert!(matches!(
+        recovered[1],
+        WorkerResponse::ReplayComplete { .. }
+    ));
+    let WorkerResponse::Frame(frame) = &recovered[2] else {
+        panic!("recovered native frame")
+    };
+    assert_eq!(pixels(frame_bytes(frame)), pixels(frame_bytes(last)));
 }

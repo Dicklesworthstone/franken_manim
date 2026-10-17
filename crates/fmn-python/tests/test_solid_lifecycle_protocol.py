@@ -123,9 +123,13 @@ def portal():
         if flags:
             raise TypeError(where + ': unexpected keyword')
 
+    def refuse_surface_keywords(where, kwargs):
+        refuse(where, list(kwargs))
+
     native = SimpleNamespace(Mobject=Mobject, Surface=Surface,
         ParametricSurface=ParametricSurface, Torus=Torus, Sphere=Sphere, _np=np, GREY='grey',
-        _refuse_unrouted=refuse, _install_live_state=install_live,
+        _refuse_unrouted=refuse, _refuse_surface_keywords=refuse_surface_keywords,
+        _install_live_state=install_live,
         _initialize_surface_grid=publish, _native_surface_shell_factory=None)
     install_surface_lifecycle(native)
     install_solid_lifecycle(native)

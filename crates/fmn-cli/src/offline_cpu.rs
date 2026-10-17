@@ -188,7 +188,7 @@ mod tests {
             sink.render_compiled(shared.frame_job(index).unwrap())
                 .unwrap();
         }
-        let finished = sink.finish().unwrap();
+        let finished = sink.finish(None).unwrap();
         assert_eq!(finished.backend.route, "compiled-cpu");
         let stats = finished.backend.pipeline.unwrap();
         assert_eq!(
@@ -221,7 +221,7 @@ mod tests {
         // Ordinary affine capture refuses Cube before queueing. The compiled
         // route must admit its input and let the worker discover that refusal.
         sink.render_compiled(shared.frame_job(0).unwrap()).unwrap();
-        assert!(sink.finish().is_err());
+        assert!(sink.finish(None).is_err());
         assert!(!fs.exists(Path::new("/refused")));
     }
 
@@ -263,7 +263,7 @@ mod tests {
                 stage.shift(mob, [0.1, 0.0, 0.0]);
             }
             drop(stage);
-            let finished = sink.finish().unwrap();
+            let finished = sink.finish(None).unwrap();
             let stats = finished.backend.pipeline.unwrap();
             assert_eq!((stats.submitted, stats.emitted), (12, 12));
             assert_eq!(stats.outstanding_slots, 0);
@@ -306,7 +306,7 @@ mod tests {
                     sink.render_stage(&stage, index).unwrap();
                     stage.shift(mob, [0.1, 0.0, 0.0]);
                 }
-                let finished = sink.finish().unwrap();
+                let finished = sink.finish(None).unwrap();
                 assert_eq!(finished.backend.pipeline.unwrap().emitted, 8);
                 let bytes = fs.read(Path::new("/movie")).unwrap();
                 if let Some(expected) = &expected {
@@ -347,7 +347,7 @@ mod tests {
                 if competing {
                     fs.insert("/movie", b"foreign generation".to_vec());
                 }
-                assert!(sink.finish().is_err());
+                assert!(sink.finish(None).is_err());
                 assert_eq!(fs.read(Path::new("/movie")).unwrap(), b"foreign generation");
             }
         }
@@ -385,7 +385,7 @@ mod tests {
             )
             .unwrap();
             retry.render_stage(&Stage::new(), 0).unwrap();
-            assert_eq!(retry.finish().unwrap().backend.frames, 1);
+            assert_eq!(retry.finish(None).unwrap().backend.frames, 1);
         }
     }
 }

@@ -125,6 +125,11 @@ with tempfile.TemporaryDirectory(prefix="fmn-video-options-") as directory:
             argv = invocation["argv"]
             formats = [argv[i + 1] for i, word in enumerate(argv[:-1]) if word == "-pix_fmt"]
             assert formats == [wire, "yuv420p10le" if wire == "p010le" else "yuv420p"], formats
+            transfer_tags = [argv[i + 1] for i, word in enumerate(argv[:-1]) if word == "-color_trc"]
+            assert transfer_tags == ["iec61966-2-1", "iec61966-2-1"], (wire, transfer_tags)
+            # Actual MP4 colr/nclx payload: BT.709 primaries, sRGB transfer,
+            # BT.709 matrix. Test the encoded product, not only our requested argv.
+            assert b"colrnclx\x00\x01\x00\x0d\x00\x01" in target.read_bytes(), wire
             frames = decode(target)
             assert len(frames) == 2 and np.all(frames[:, :, :, 3] == 255)
             assert frames[0, :, :, 0].max() >= 240, f"wire={wire}, codec={codec}, max={frames[0, :, :, 0].max()}"

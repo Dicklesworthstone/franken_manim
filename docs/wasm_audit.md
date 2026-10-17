@@ -1,17 +1,80 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-run against `Cargo.lock` `726da0b5` and `SUITE.lock`
-`a6e3520b`, for the franken_markdown repin from `798de11b` to `bd00a247`
-(fm-tex-layout-oracle-bkbc). No package version changes in this graph.
+**Status:** re-run, 2026-10-13, against `Cargo.lock` `558c0348` and `SUITE.lock`
+`c7030d6c`, for the franken_markdown repin from `e0dd66e7` to `80cbadcd`
+(fm-tex-layout-oracle-bkbc). No package version changes. The three lock files move
+only the three franken_markdown packages' rev, and no fmd or franken_markdown
+package is in this graph.
 **The release package gate still FAILS at its size budget** (fm-8j70), so this
 audit does not claim a passing package.
 
 - **VERIFIED (mechanical):** `cargo tree -p fmn-wasm --target
-  wasm32-unknown-unknown --edges normal --locked` is unchanged at 134 lines with
-  no fmd or franken_markdown package. The lock change moves only the three
-  franken_markdown packages' rev, none of which is in that graph.
+  wasm32-unknown-unknown --edges normal --locked` is unchanged at 134 lines, with
+  no fmd or franken_markdown package.
 - The `--locked` wasm32 build and wasm-smoke were not re-run: no package in the
   wasm graph changed since the run below.
+
+Earlier re-run, 2026-10-12, against `Cargo.lock` `5457a108` and `SUITE.lock`
+`bd9bb2e0`, for the franken_markdown repin from `126a5304` to `e0dd66e7`
+(fm-5wq.58). No package version changes. The three lock files move only the
+three franken_markdown packages' rev, and no fmd or franken_markdown package
+is in this graph.
+**The release package gate still FAILS at its size budget** (fm-8j70), so this
+audit does not claim a passing package.
+
+- **VERIFIED (mechanical):** `cargo tree -p fmn-wasm --target
+  wasm32-unknown-unknown --edges normal --locked` is unchanged at 134 lines, with
+  no fmd or franken_markdown package. `wasm-smoke/Cargo.lock` has no
+  franken_markdown entry.
+- The `--locked` wasm32 build and wasm-smoke were not re-run: no package in the
+  wasm graph changed since the run below.
+
+Earlier re-run, 2026-10-12, against `Cargo.lock` `a6dfd97a` and `SUITE.lock`
+`e5995b50`, for the frankenscipy repin from `ed84bdd1` to `ae52b654` (fm-7qx3).
+fsci-linalg's solve-certificate two_prod drops its fused multiply-add
+(fm-g1ey); that one function is the whole upstream delta. No package version
+changes: the four locks move only the fsci revs.
+**The release package gate still FAILS at its size budget** (fm-8j70), so this
+audit does not claim a passing package.
+
+- **VERIFIED (mechanical):** `cargo build --locked -p fmn-wasm --target
+  wasm32-unknown-unknown` passes through rch. `wasm-smoke/run.sh` reports
+  `wasm-smoke OK` with the unchanged Node digest `1f248a71347b82aa` and semantic
+  oracle masks `111111` and `101000`.
+- `scripts/check_wasm_package.sh` was not re-run: the wasm graph is unchanged.
+
+Earlier re-run, 2026-10-11, against `Cargo.lock` `2f4e99d5` and `SUITE.lock`
+`385b7677`, for the frankenscipy repin from `85edd7a9` to `ed84bdd1` (fm-pexg).
+That repin brings the libm-free solve policy, solver portfolio and n <= 4 rcond
+(fm-wi8l, fm-dboe). fsci-linalg, fsci-runtime and fsci-fft are in this graph,
+so the build and smoke were re-run.
+**The release package gate still FAILS at its size budget** (fm-8j70), so this
+audit does not claim a passing package.
+
+- **VERIFIED (mechanical):** `cargo tree -p fmn-wasm --target
+  wasm32-unknown-unknown --edges normal --locked` is 134 lines, the same graph
+  once the fsci entries' version (0.2.0 -> 0.3.0) and rev are normalized. The
+  root lock change is those six fsci packages plus rand 0.10.2 -> 0.10.3, and
+  rand is not in this graph. `wasm-smoke/Cargo.lock` moves only its three fsci
+  entries.
+- **VERIFIED (mechanical):** `cargo build --locked -p fmn-wasm --target
+  wasm32-unknown-unknown` passes through rch. `wasm-smoke/run.sh` reports
+  `wasm-smoke OK` with the unchanged Node digest `1f248a71347b82aa` and semantic
+  oracle masks `111111` (witness) and `101000` (planted mirror).
+- `scripts/check_wasm_package.sh` was not re-run: the wasm graph is unchanged.
+
+Earlier re-run, 2026-10-10, against `Cargo.lock` `d5593dcf` and `SUITE.lock`
+`e4758123`, for the franken_markdown repin from `3ed1d332` to `126a5304`
+(fm-15k9, fm-tex-layout-oracle-bkbc): the same mechanical check, unchanged at 134
+lines. The `--locked` wasm32 build and wasm-smoke were not re-run then.
+
+Earlier re-run, 2026-10-09, against `Cargo.lock` `0d6dfdaa` and `SUITE.lock`
+`af634982`, for the franken_markdown repin from `bd00a247` to `3ed1d332`
+(fm-tex-layout-oracle-bkbc, fm-aia1): the same mechanical check, unchanged at 134 lines.
+
+Earlier re-run, 2026-10-09, against `Cargo.lock` `726da0b5` and `SUITE.lock`
+`a6e3520b`, for the franken_markdown repin from `798de11b` to `bd00a247`
+(fm-tex-layout-oracle-bkbc): the same mechanical check, unchanged at 134 lines.
 
 Earlier re-run, 2026-10-09, against `Cargo.lock` `7fcc7866` and `SUITE.lock`
 `4385c9af`, for the franken_markdown repin from `e4e8e2ee` to `798de11b`
@@ -287,9 +350,9 @@ The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
-- `SUITE.lock` SHA-256: `a6e3520b0fc1e4135c5eb13a81c18f63d3ff776ca5b1cda19f281a2bea7fe10d`
-- `Cargo.lock` SHA-256: `726da0b5f5b8c166a6ee80a85688840fb2a9e65a12c75c1296411a56132e2873`
-- Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `4c58a1bb52b3e6e833fcc0cc50cfbf086a3b8889e4790480c291b64b44382f1a`
+- `SUITE.lock` SHA-256: `c7030d6c1f7721090a21029dbcbfaaa258d938e847231071e3974688f0c30455`
+- `Cargo.lock` SHA-256: `558c034848a46c5333bcb94644f9f69cd1ed17019f5ec777a2d0bc00f1cd5d30`
+- Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `b1fac18569682e3d2888881883f8b37e4abfb10884ed34a6f2e1eb7a4da942b5`
 
 The 0.5.0 release bump re-bound both lock identities above. That bump changed
 only the lockstep workspace package versions (0.4.0 -> 0.5.0, path packages

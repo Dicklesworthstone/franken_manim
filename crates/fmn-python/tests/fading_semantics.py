@@ -33,7 +33,7 @@ def native_play_cleanup():
     scene.play(FadeTransform(source, target), run_time=.125)
     assert target in scene.mobjects and source not in scene.mobjects
     near(source.get_points(), before)
-    assert len(scene.mobjects) == 1
+    assert scene.mobjects == [scene.frame, target]
 
 
 def ghost_hook_and_nested_timing():

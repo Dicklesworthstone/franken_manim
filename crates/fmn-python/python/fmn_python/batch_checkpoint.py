@@ -1,4 +1,4 @@
-"""Crash-recoverable receipts for sequential Python batches, not a render cache.
+"""Crash-recoverable receipts for Python batches, not a render cache.
 
 Only completed native publications may be reused. The caller's resume_key
 identifies authored scene/asset inputs; hashes below verify output integrity,
@@ -151,12 +151,15 @@ def _inventory(destination: Path) -> list[dict[str, Any]]:
     return sorted(files, key=lambda item: item["path"])
 
 
-class BatchCheckpoint:
+class _CheckpointFile:
     """An exclusive, process-scoped journal owner. Lock files intentionally persist.
 
     Kernel locks release on process exit, including crashes, so resume does not
     need stale-lock deletion. Artifact publication remains exclusively native.
     """
+
+    schema = _SCHEMA
+    version = _VERSION
 
     def __init__(self, path: os.PathLike[str] | str, *, resume: bool, key: str):
         text = os.fspath(path)
@@ -204,8 +207,8 @@ class BatchCheckpoint:
                 raise ValueError("checkpoint cannot be a symlink")
             if self.resume:
                 document = _read_document(self.path)
-                if (not isinstance(document, dict) or document.get("schema") != _SCHEMA
-                        or type(document.get("version")) is not int or document["version"] != _VERSION):
+                if (not isinstance(document, dict) or document.get("schema") != self.schema
+                        or type(document.get("version")) is not int or document["version"] != self.version):
                     raise ValueError("unsupported batch checkpoint schema/version")
                 if document.get("key") != self.key:
                     raise ValueError("checkpoint resume_key does not match")
@@ -222,6 +225,39 @@ class BatchCheckpoint:
             # Closing releases both flock and Windows byte-range locks.
             self.lock.close()
             self.lock = None
+
+    def validate_destinations(self, destinations):
+        for destination in destinations:
+            for own_path in (self.path, self.lock_path):
+                if (own_path == destination or destination in own_path.parents
+                        or own_path in destination.parents):
+                    raise ValueError("checkpoint and its lock must be outside published artifacts")
+
+    def _publish(self, payload):
+        if self.lock is None:
+            raise RuntimeError("checkpoint must be opened before publication")
+        if len(payload) > _MAX_BYTES:
+            raise ValueError("checkpoint exceeds its byte budget")
+        descriptor, temporary = tempfile.mkstemp(prefix=self.path.name + ".", suffix=".tmp", dir=self.path.parent)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.path)
+            if os.name != "nt":
+                descriptor = os.open(self.path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+
+class BatchCheckpoint(_CheckpointFile):
+    """Per-scene plans over the shared locked, atomic checkpoint file owner."""
 
     @property
     def existing_destinations(self) -> set[Path]:
@@ -241,13 +277,6 @@ class BatchCheckpoint:
         except (KeyError, TypeError) as error:
             raise ValueError("invalid checkpoint outcomes") from error
 
-    def validate_destinations(self, destinations):
-        for destination in destinations:
-            for own_path in (self.path, self.lock_path):
-                if (own_path == destination or destination in own_path.parents
-                        or own_path in destination.parents):
-                    raise ValueError("checkpoint and its lock must be outside published artifacts")
-
     def prepare(self, jobs, destinations, options):
         # resume_key is an explicit caller assertion about source/assets. Keep
         # constructor parameters JSON-only when checkpointing so changes are
@@ -257,6 +286,33 @@ class BatchCheckpoint:
                           "scene": _scene_identity(job.scene),
                           "scene_kwargs": _constructor_values(dict(job.scene_kwargs or {}))}
                          for job, path in zip(jobs, destinations)], "options": options}
+        self._prepare_plan(plan, [job.name for job in jobs], destinations, options)
+
+    def prepare_sources(self, names, destinations, options, *, source,
+                        source_digest, working_directory):
+        """Bind data-only worker identities without importing a Scene class.
+
+        Entry-source bytes and invocation cwd are part of this plan, unlike a
+        sequential live-class plan. Helpers/assets still require the caller's
+        resume_key. Worker count, timeout and failure policy are scheduling
+        choices: they may change when retrying unfinished jobs.
+        """
+        if not 1 <= len(names) == len(destinations) <= 65536:
+            raise ValueError("checkpoint source jobs must match their destinations")
+        if (not isinstance(source_digest, str) or len(source_digest) != 64
+                or any(char not in "0123456789abcdef" for char in source_digest)):
+            raise ValueError("checkpoint source requires its SHA-256 digest")
+        plan = {"constructor_inputs": "source-file-v1",
+                "source": {"path": str(source), "sha256": source_digest,
+                           "working_directory": str(working_directory)},
+                "jobs": [{"name": name, "destination": str(path),
+                          "scene": {"qualname": name}, "scene_kwargs": {}}
+                         for name, path in zip(names, destinations)],
+                "options": options}
+        self._prepare_plan(plan, names, destinations, options)
+
+    def _prepare_plan(self, plan, names, destinations, options):
+        # Both entry points share the same receipt and artifact verifier.
         self.plan = json.loads(_json(plan))
         if self.document is None:
             return
@@ -266,13 +322,13 @@ class BatchCheckpoint:
         if _json(self.document.get("plan")) != _json(self.plan):
             raise ValueError("checkpoint scene plan or render options do not match")
         rows = self.document.get("outcomes")
-        if not isinstance(rows, list) or len(rows) != len(jobs):
+        if not isinstance(rows, list) or len(rows) != len(names):
             raise ValueError("checkpoint outcomes do not match the scene plan")
         artifacts = self.document.get("artifacts")
         if not isinstance(artifacts, dict):
             raise ValueError("invalid checkpoint artifact inventory")
-        for job, destination, row in zip(jobs, destinations, rows):
-            if not isinstance(row, dict) or row.get("name") != job.name or row.get("destination") != str(destination):
+        for name, destination, row in zip(names, destinations, rows):
+            if not isinstance(row, dict) or row.get("name") != name or row.get("destination") != str(destination):
                 raise ValueError("checkpoint outcome identity does not match the scene plan")
             status = row.get("status")
             if status not in {"succeeded", "failed", "cancelled", "not_run"}:
@@ -282,10 +338,10 @@ class BatchCheckpoint:
                 if options.get("save_last_frame") is True:
                     from .paired_checkpoint import pair_inventory
                     actual = pair_inventory(receipt, destination, options)
-                    if _json(artifacts.get(job.name)) != _json(actual):
+                    if _json(artifacts.get(name)) != _json(actual):
                         raise ValueError(f"checkpoint output pair is missing or modified: {destination}")
-                    self.artifacts[job.name] = actual
-                    self.completed[job.name] = row
+                    self.artifacts[name] = actual
+                    self.completed[name] = row
                     continue
                 if options["format"] == "fmtl":
                     from .bundle_checkpoint import restore_bundle_receipt
@@ -296,12 +352,12 @@ class BatchCheckpoint:
                         raise ValueError("invalid checkpoint publication receipt")
                     size, digest = receipt.get("bytes"), receipt.get("digest")
                 actual = _inventory(destination)
-                if artifacts.get(job.name) != actual:
+                if artifacts.get(name) != actual:
                     raise ValueError(f"checkpoint artifact is missing or modified: {destination}")
                 if options["format"] != "png_sequence" and (len(actual) != 1 or actual[0]["bytes"] != size or actual[0]["sha256"] != digest):
                     raise ValueError("checkpoint artifact does not match its native receipt")
-                self.artifacts[job.name] = actual
-                self.completed[job.name] = row
+                self.artifacts[name] = actual
+                self.completed[name] = row
 
     def constructor_kwargs(self, index: int) -> dict[str, Any]:
         """Return an isolated invocation of the already admitted constructor."""
@@ -332,21 +388,4 @@ class BatchCheckpoint:
                 self.artifacts[outcome.name] = files
         payload = _json({"schema": _SCHEMA, "version": _VERSION, "key": self.key,
                          "plan": self.plan, "outcomes": rows, "artifacts": self.artifacts})
-        if len(payload) > _MAX_BYTES:
-            raise ValueError("checkpoint exceeds its byte budget")
-        descriptor, temporary = tempfile.mkstemp(prefix=self.path.name + ".", suffix=".tmp", dir=self.path.parent)
-        try:
-            with os.fdopen(descriptor, "wb") as stream:
-                stream.write(payload)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, self.path)
-            if os.name != "nt":
-                descriptor = os.open(self.path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-                try:
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
+        self._publish(payload)

@@ -104,34 +104,42 @@ fn certified_video_is_refused_instead_of_mislabelled() {
 
 #[test]
 fn incompatible_video_profiles_fail_before_any_process() {
+    // These pure refusals must also work when no ffmpeg capability exists.
     // Odd dimensions cannot be 4:2:0.
     let mut odd = options("/movie.mp4", RenderFormat::Mp4);
     odd.config.camera.resolution = (65, 36);
-    odd.ffmpeg = host_capability();
     assert_refused(odd, "even width and height");
+
+    let mut empty = options("/movie.mp4", RenderFormat::Mp4);
+    empty.config.camera.resolution = (0, 36);
+    assert_refused(empty, "zero frame dimensions");
+
+    let mut stopped = options("/movie.mp4", RenderFormat::Mp4);
+    stopped.config.camera.fps = 0;
+    assert_refused(stopped, "fps must be nonzero");
 
     // A translucent background needs the alpha-preserving MOV route.
     let mut translucent = options("/movie.mp4", RenderFormat::Mp4);
     translucent.config.camera.background_opacity = 0.5;
-    translucent.ffmpeg = host_capability();
     assert_refused(translucent, "RenderFormat::Mov");
 
     // Color transforms would need ffmpeg filters, which D2 forbids.
     let mut graded = options("/movie.mp4", RenderFormat::Mp4);
     graded.config.file_writer.gamma = 1.2;
-    graded.ffmpeg = host_capability();
     assert_refused(graded, "ffmpeg filters are forbidden");
 
     // Encoder names are argv tokens, never shell fragments.
     let mut hostile = options("/movie.mp4", RenderFormat::Mp4);
     hostile.config.file_writer.video_codec = "libx264 -vf eq".to_owned();
-    hostile.ffmpeg = host_capability();
     assert_refused(hostile, "video_codec");
 
     let mut unknown_wire = options("/movie.mp4", RenderFormat::Mp4);
     unknown_wire.config.file_writer.pixel_format = "yuv444p".to_owned();
-    unknown_wire.ffmpeg = host_capability();
     assert_refused(unknown_wire, "pixel_format");
+
+    let mut invalid_quality = options("/movie.mp4", RenderFormat::Mp4);
+    invalid_quality.config.file_writer.video_crf = Some(52);
+    assert_refused(invalid_quality, "file_writer.video_crf must lie in 0..=51");
 }
 
 /// Read an MP4/MOV box tree far enough to list top-level and `moov` track
@@ -240,6 +248,22 @@ fn mp4_and_mov_encode_through_the_boundary_with_a_muxed_soundtrack() {
                 .len()
                 == 64)
         );
+        let encode_argv = &report.artifact.ffmpeg[0].provenance.argv;
+        let transfer_tags: Vec<_> = encode_argv
+            .windows(2)
+            .filter(|pair| pair[0] == "-color_trc")
+            .collect();
+        assert_eq!(transfer_tags.len(), 2);
+        assert!(transfer_tags.iter().all(|pair| pair[1] == "iec61966-2-1"));
+        // Read the ISO color-description payload in the published, muxed file:
+        // primaries 1 (BT.709), transfer 13 (sRGB), matrix 1 (BT.709).
+        // MP4 uses nclx, MOV nclc. An argv-only assertion cannot prove mux retention.
+        assert!(
+            bytes.windows(14).any(|window| (&window[..8] == b"colrnclx"
+                || &window[..8] == b"colrnclc")
+                && window[8..14] == [0, 1, 0, 13, 0, 1]),
+            "mux lost the native sRGB description"
+        );
         let soundtrack = report.artifact.soundtrack.as_ref().unwrap();
         assert_eq!(soundtrack.cues_mixed, 1);
         assert_eq!(soundtrack.clipped_samples, 0);
@@ -266,4 +290,90 @@ fn mp4_and_mov_encode_through_the_boundary_with_a_muxed_soundtrack() {
     let handlers = handler_types(&std::fs::read(&silent).unwrap());
     assert_eq!(handlers, vec![*b"vide"]);
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn native_audio_quality_is_layered_and_refused_before_scene_or_process() {
+    let mut request = options("/movie.mp4", RenderFormat::Mp4);
+    assert_eq!(
+        request.effective_audio_quality().unwrap(),
+        fmn_output::AudioQuality::default()
+    );
+    request.config.file_writer.audio_bitrate = Some(96_000);
+    assert_eq!(
+        request.effective_audio_quality().unwrap().bitrate,
+        Some(96_000)
+    );
+    request.audio_quality.bitrate = Some(192_000);
+    assert_eq!(
+        request.effective_audio_quality().unwrap().bitrate,
+        Some(192_000)
+    );
+    request.audio_quality.bitrate = Some(0);
+    assert_refused(request, "AAC bitrate must be nonzero");
+    let mut request = options("/movie.mp4", RenderFormat::Mp4);
+    request.config.file_writer.audio_bitrate = Some(0);
+    assert_refused(request, "AAC bitrate must be nonzero");
+    let mut request = options("/movie.mp4", RenderFormat::PngSequence);
+    request.audio_quality.bitrate = Some(192_000);
+    assert_refused(request, "audio_quality requires MP4/MOV output");
+}
+
+#[test]
+fn native_audio_quality_reaches_mux_without_changing_native_soundtrack() {
+    let Some(capability) = host_capability() else {
+        fmn_core::test_inputs::skip_or_fail(
+            "native_audio_quality_reaches_mux_without_changing_native_soundtrack",
+            "ffmpeg on PATH",
+        );
+        return;
+    };
+    let root = scratch("aac-quality");
+    let audio = root.join("tone.wav");
+    std::fs::write(&audio, tone_wav()).unwrap();
+    let mut reference_wav = None;
+    for (index, bitrate) in [None, Some(96_000), Some(192_000)].into_iter().enumerate() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let destination = root.join(format!("aac-{index}-{nonce}.mp4"));
+        let mut request = options(&destination, RenderFormat::Mp4);
+        request.ffmpeg = Some(capability.clone());
+        request.ffmpeg_limits.keep_workdir = true;
+        request.audio_quality.bitrate = bitrate;
+        let report = render_with_fs(
+            &mut Chime {
+                sound: Some(audio.clone()),
+            },
+            request,
+            Arc::new(StdFs),
+        )
+        .unwrap();
+        assert_eq!(report.artifact.audio_quality.unwrap().bitrate, bitrate);
+        assert_eq!(report.artifact.ffmpeg.len(), 2);
+        let encode = &report.artifact.ffmpeg[0].provenance.argv;
+        let mux = &report.artifact.ffmpeg[1].provenance.argv;
+        assert!(!encode.iter().any(|arg| arg == "-b:a"));
+        assert!(mux.windows(2).any(|p| p == ["-c:v", "copy"]));
+        let actual = mux
+            .iter()
+            .position(|arg| arg == "-b:a")
+            .map(|at| mux[at + 1].parse::<u32>().unwrap());
+        assert_eq!(actual, bitrate);
+        let inputs: Vec<_> = mux
+            .windows(2)
+            .filter(|p| p[0] == "-i")
+            .map(|p| &p[1])
+            .collect();
+        assert_eq!(inputs.len(), 2);
+        let wav = std::fs::read(inputs[1]).unwrap();
+        if let Some(reference) = &reference_wav {
+            assert_eq!(&wav, reference);
+        } else {
+            reference_wav = Some(wav);
+        }
+        let handlers = handler_types(&std::fs::read(&destination).unwrap());
+        assert!(handlers.contains(b"vide") && handlers.contains(b"soun"));
+    }
 }

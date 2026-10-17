@@ -104,9 +104,10 @@ class GraphConstructionTests(unittest.TestCase):
         graph = self.axes.get_graph(lambda x: x)
         calls = []
         self.axes.bind_graph_to_func(graph, lambda xs: calls.append(xs) or xs * 2)
+        self.assertEqual(len(calls), 1)  # the bind's own evaluation (fm-skpp)
         graph.update()
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0].ndim, 1)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all(call.ndim == 1 for call in calls))
 
     def test_scalar_failure_is_not_retried_in_another_call_mode(self):
         failure = RuntimeError('scalar branch failed')

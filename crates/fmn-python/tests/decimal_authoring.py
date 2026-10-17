@@ -100,7 +100,9 @@ class DecimalAuthoringTests(unittest.TestCase):
             if bound:
                 scene.add(m.VGroup(mob))
             before = snapshot(mob)
-            for value in (float("nan"), complex(0, float("nan")),
+            # A real NaN is now a display token (fm-5wq.30); complex
+            # nonfinite components still refuse.
+            for value in (complex(0, float("nan")),
                           complex(float("inf"), 0), complex(1, float("inf")), "seven", object()):
                 with self.subTest(bound=bound, value=value):
                     with self.assertRaises((ValueError, TypeError)):
@@ -166,13 +168,13 @@ class DecimalAuthoringTests(unittest.TestCase):
         scene.play(m.ChangeDecimalToValue(mob, -3j), run_time=0.5)
         self.assertEqual(mob.get_value(), -3j)
         self.assertGreater(len(set(seen)), 1)
-        self.assertEqual(list(scene.mobjects), [parent])
+        self.assertEqual(list(scene.mobjects), [scene.frame, parent])
         self.assertIs(parent[0][0], mob)
         self.assertEqual(len(mob), len(mob.num_string))
         scene.play(m.ChangingDecimal(mob, lambda alpha: 5 * alpha), run_time=0.25)
         self.assertEqual(mob.get_value(), 5)
         self.assertEqual(mob.get_tex(), "5.00")
-        self.assertEqual(list(scene.mobjects), [parent])
+        self.assertEqual(list(scene.mobjects), [scene.frame, parent])
 
     def test_authored_string_and_scalar_formatter_control_actual_glyphs(self):
         calls = []
@@ -237,14 +239,14 @@ class DecimalAuthoringTests(unittest.TestCase):
         self.assertTrue(all(child is not template for child in number))
         self.assertTrue(all(abs(child.get_width() - 1) < 1e-6 for child in number))
         np.testing.assert_array_equal(template.get_points(), before)
-        self.assertEqual(list(owner.mobjects), [template])
+        self.assertEqual(list(owner.mobjects), [owner.frame, template])
         number.set_value(3)
         self.assertEqual(calls, list("12.003.00"))
         np.testing.assert_array_equal(template.get_points(), before)
         destination = m.Scene()
         destination.add(number)
-        self.assertEqual(list(destination.mobjects), [number])
-        self.assertEqual(list(owner.mobjects), [template])
+        self.assertEqual(list(destination.mobjects), [destination.frame, number])
+        self.assertEqual(list(owner.mobjects), [owner.frame, template])
 
     def test_formatter_configuration_hook_controls_native_text(self):
         class Precision(m.DecimalNumber):
@@ -322,7 +324,7 @@ class DecimalAuthoringTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "authored missing glyph"):
             number.set_value(129)
         self.assertEqual(snapshot(number), before)
-        self.assertEqual(list(scene.mobjects), [parent])
+        self.assertEqual(list(scene.mobjects), [scene.frame, parent])
         for result in ("x" * 4097, 123):
             number.get_num_string = MethodType(lambda self, value, result=result: result, number)
             with self.assertRaises((ValueError, TypeError)):

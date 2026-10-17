@@ -13,6 +13,8 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 #[cfg(test)]
+mod catalog_rate_identity;
+#[cfg(test)]
 mod corpus;
 mod crossing;
 mod ladder;
@@ -42,8 +44,9 @@ mod structural_parity;
 pub use portal_texture::{run_portal_gauntlet_surface_lifecycle, run_portal_gauntlet_textures};
 #[cfg(feature = "gauntlet")]
 pub use structural_parity::{
-    EnvelopeDrillReport, StructuralParityReport, run_portal_gauntlet_class_sweep,
-    run_portal_gauntlet_envelope_drill, run_portal_gauntlet_structural_facts,
+    CorpusRegressionCase, EnvelopeDrillReport, StructuralParityReport,
+    run_portal_gauntlet_class_sweep, run_portal_gauntlet_envelope_drill,
+    run_portal_gauntlet_reference_corpus_regressions, run_portal_gauntlet_structural_facts,
 };
 mod portal_provenance;
 mod report;
@@ -706,7 +709,10 @@ impl PortalFrameSession {
                     },
                 )
                 .map_err(native_error)?;
-                let sink = sink.with_no_clobber();
+                let sink = sink
+                    .with_no_clobber()
+                    .with_audio_quality(video.audio_quality)
+                    .map_err(native_error)?;
                 let (sink, completion) = sink.with_deferred_soundtrack().map_err(native_error)?;
                 soundtrack = Some(completion);
                 let (binding, receipt) = sink.into_binding("python-ffmpeg-video");
@@ -1556,6 +1562,33 @@ fn proxy_children<'py>(proxy: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, PyA
     children.try_iter()?.collect()
 }
 
+/// A scene member's live `submobjects` list for the `Scene.mobjects`
+/// projection (fm-siot). Per-frame admission reads `Scene.mobjects`, and
+/// admission must run no authored getter, so the list comes from the
+/// member's own instance dict through `object.__getattribute__`, as the
+/// admission scan reads own state. A member whose dict holds no
+/// `submobjects` entry (an authored property, say) is read through ordinary
+/// attribute access.
+fn projected_children<'py>(proxy: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    static OBJECT_GETATTRIBUTE: pyo3::sync::PyOnceLock<Py<PyAny>> = pyo3::sync::PyOnceLock::new();
+    let py = proxy.py();
+    let submobjects = pyo3::intern!(py, "submobjects");
+    let generic = OBJECT_GETATTRIBUTE
+        .get_or_try_init(py, || {
+            py.get_type::<PyAny>()
+                .getattr("__getattribute__")
+                .map(Bound::unbind)
+        })?
+        .bind(py);
+    if let Ok(own) = generic.call1((proxy, pyo3::intern!(py, "__dict__")))
+        && let Ok(own) = own.cast_into::<PyDict>()
+        && let Some(list) = own.get_item(submobjects)?
+    {
+        return Ok(list);
+    }
+    proxy.getattr(submobjects)
+}
+
 fn collect_proxy_graph<'py>(root: &Bound<'py, PyAny>) -> PyResult<Vec<Py<PyAny>>> {
     fn visit<'py>(
         proxy: &Bound<'py, PyAny>,
@@ -1601,6 +1634,86 @@ fn register_proxy(
     scene
         .proxy_generation
         .set(scene.proxy_generation.get().wrapping_add(1));
+    Ok(())
+}
+
+/// The camera frame Scene construction listed, and its handle, while it is
+/// bound to this scene's current engine (fm-6l2i). Construction lists the frame
+/// as the Reference's `self.mobjects = [self.camera.frame]` does, so a fresh
+/// scene's arena holds exactly this one point-less entry. Reassigning
+/// `scene.frame` later does not unlist it, as in the Reference.
+pub(crate) fn scene_frame_entry<'py>(
+    scene: &Bound<'py, PyScene>,
+) -> PyResult<Option<(Bound<'py, BridgeMobject>, Mob)>> {
+    // A bare `_SceneCore` has no constructed frame.
+    let Some(frame) = scene
+        .getattr("_fmn_construction_frame")
+        .ok()
+        .and_then(|frame| frame.cast_into::<BridgeMobject>().ok())
+    else {
+        return Ok(None);
+    };
+    let engine = Rc::clone(&scene.borrow().engine);
+    let mob = {
+        let cell = frame.borrow();
+        match (&cell.engine, cell.mob) {
+            (Some(owner), Some(mob)) if same_engine(owner, &engine) => Some(mob),
+            _ => None,
+        }
+    };
+    Ok(mob.map(|mob| (frame, mob)))
+}
+
+/// Install a replacement arena for a pristine scene, carrying the scene's own
+/// camera frame across (fm-6l2i): it moves into the new Stage, is re-listed
+/// first if it was listed, and its proxy is re-registered there. Rendering,
+/// recording, Studio and FMTL bundle generations replace the arena to select
+/// the clock and seed; without this the frame would stay bound to the
+/// discarded one.
+pub(crate) fn install_pristine_arena(
+    scene: &Bound<'_, PyScene>,
+    replacement: Engine,
+) -> PyResult<()> {
+    let py = scene.py();
+    let frame = scene_frame_entry(scene)?;
+    let carried = match &frame {
+        Some((_, old_mob)) => {
+            let old = Rc::clone(&scene.borrow().engine);
+            let listed = old.borrow().stage().roots().contains(old_mob);
+            let new_mob = {
+                let mut source = old.borrow_mut();
+                let mut target = replacement.borrow_mut();
+                let new_mob = source
+                    .stage_mut()
+                    .move_into(*old_mob, target.stage_mut())
+                    .map_err(stage_error)?;
+                target.stage_mut().pin(new_mob).map_err(stage_error)?;
+                if listed {
+                    target
+                        .add(&[new_mob])
+                        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+                }
+                new_mob
+            };
+            Some((*old_mob, new_mob))
+        }
+        None => None,
+    };
+    {
+        let mut owner = scene.try_borrow_mut()?;
+        owner.engine = Rc::clone(&replacement);
+        owner.render_invocations.clear();
+        owner.render_audio_inputs.clear();
+    }
+    if let (Some((proxy, _)), Some((old_mob, new_mob))) = (frame, carried) {
+        {
+            let mut cell = proxy.borrow_mut();
+            cell.engine = Some(Rc::clone(&replacement));
+            cell.mob = Some(new_mob);
+        }
+        scene.borrow().proxies.borrow_mut().remove(&old_mob);
+        register_proxy(py, scene, new_mob, proxy.as_any())?;
+    }
     Ok(())
 }
 
@@ -1699,7 +1812,6 @@ fn reproject_moved<'py>(
         };
         root_proxies.push(found);
     }
-    let submobjects = pyo3::intern!(py, "submobjects");
     for (mob, children) in &moved {
         let Some(owner) = proxy(*mob) else {
             return Ok(None);
@@ -1711,7 +1823,7 @@ fn reproject_moved<'py>(
             };
             expected.push(found);
         }
-        let live = owner.getattr(submobjects)?;
+        let live = projected_children(&owner)?;
         if let Ok(current) = live.cast::<PyList>()
             && current.len() == expected.len()
             && current
@@ -2681,6 +2793,25 @@ impl BridgeMobject {
         with_stage(slf, |stage, mob| {
             stage.to_edge(mob, direction, buff);
         })
+    }
+
+    /// `Stage::refresh_bounding_box` without the upward walk: return this
+    /// entry (and, with `recurse_down`, its Stage family) to the origin when
+    /// it has no point records (fm-fc53). The bootstrap walks parents over
+    /// the Python graph, which also spans detached owners.
+    fn _refresh_point_free_anchors(slf: &Bound<'_, Self>, recurse_down: bool) -> PyResult<()> {
+        crossing::record(CrossingClass::Other);
+        with_stage(slf, |stage, mob| {
+            stage.refresh_bounding_box(mob, recurse_down, false);
+        })
+    }
+
+    /// `Stage::set_point_free_anchor`: place a point-less entry's degenerate
+    /// box at `point` (the Reference's `works_on_bounding_box=True` map of
+    /// its cached box). A no-op returning `False` for an entry with records.
+    fn _set_point_free_anchor(slf: &Bound<'_, Self>, point: [f64; 3]) -> PyResult<bool> {
+        crossing::record(CrossingClass::FieldWrite);
+        with_stage(slf, |stage, mob| stage.set_point_free_anchor(mob, point))?.map_err(stage_error)
     }
 
     /// The frame half-extents `(FRAME_X_RADIUS, FRAME_Y_RADIUS)` the border
@@ -3845,25 +3976,6 @@ impl BridgeMobject {
         .ok_or_else(|| {
             PyValueError::new_err("an arc center requires at least one quadratic component")
         })
-    }
-
-    /// `Circle.get_radius` over this entry's current world-space points.
-    fn _circle_radius(slf: &Bound<'_, Self>) -> PyResult<f64> {
-        crossing::record(CrossingClass::Other);
-        with_stage(slf, |stage, mob| {
-            let points = stage.get_points(mob).unwrap_or_default();
-            fmn_library::arc::radius_of(&fmn_library::VMobject::from_points(points))
-        })
-    }
-
-    /// `Circle.point_at_angle` over its current world-space path.
-    fn _circle_point_at_angle(slf: &Bound<'_, Self>, angle: f64) -> PyResult<[f64; 3]> {
-        crossing::record(CrossingClass::Other);
-        with_stage(slf, |stage, mob| {
-            let points = stage.get_points(mob).unwrap_or_default();
-            fmn_library::arc::point_at_angle(&fmn_library::VMobject::from_points(points), angle)
-        })?
-        .ok_or_else(|| PyValueError::new_err("point_at_angle requires a nonempty circle path"))
     }
 
     /// `Stage::put_start_and_end_on` over the Stage-visible family.
@@ -7275,6 +7387,20 @@ impl BridgeMobject {
             .iter()
             .map(|sub| (sub.span.start, sub.span.end))
             .collect();
+        // Which primitive each sub is, parallel to the spans: the portal
+        // classes glyphs and paths as the Reference's VMobjectFromSVGPath
+        // and rules as its Rectangle (dvisvgm's <rect>) (fm-15k9).
+        let kinds: Vec<&str> = built
+            .typeset
+            .subs
+            .iter()
+            .map(|sub| match sub.prim {
+                fmn_library::TexPrim::Glyph(_) => "glyph",
+                fmn_library::TexPrim::Rule(_) => "rule",
+                fmn_library::TexPrim::Path(_) => "path",
+            })
+            .collect();
+        slf.as_any().setattr("_string_sub_kinds", kinds)?;
         if parts.is_empty() || (parts.len() == 1 && !group_single_part) {
             let paths: Vec<Vec<usize>> = (0..spans.len()).map(|index| vec![index]).collect();
             slf.as_any().setattr("_string_sub_spans", spans)?;
@@ -7955,14 +8081,6 @@ fn update_targets(scene: &Bound<'_, PyScene>) -> Vec<Mob> {
     targets
 }
 
-/// The Reference keeps the camera frame at the head of `Scene.mobjects`, so
-/// its host-language updaters run before every drawable-root updater.  The
-/// portal deliberately keeps CameraFrame out of Marionette's drawable Stage;
-/// recover that same update ordering through the real Python frame object.
-fn camera_frame<'py>(scene: &Bound<'py, PyScene>) -> PyResult<Bound<'py, PyAny>> {
-    scene.getattr("frame")
-}
-
 fn run_proxy_updaters(proxy: &Bound<'_, PyAny>, dt: f64) -> PyResult<()> {
     let py = proxy.py();
     crossing::record(CrossingClass::Other);
@@ -7985,11 +8103,14 @@ fn run_proxy_updaters(proxy: &Bound<'_, PyAny>, dt: f64) -> PyResult<()> {
 /// Run the portal half of Scene.update_mobjects with no Scene/Stage borrow
 /// live. Choreo's stepped play releases exactly at this call site; ordinary
 /// `Scene.update(dt)` uses the same helper before its native updater pass.
+///
+/// The camera frame is a scene root like any other (fm-6l2i): first while it
+/// is listed, as in the Reference's `Scene.mobjects`, and not updated once
+/// `clear()`/`remove()` has dropped it.
 fn run_python_updaters(scene: &Bound<'_, PyScene>, dt: f64) -> PyResult<u64> {
     let targets = update_targets(scene);
     let py = scene.py();
     let python_start = Instant::now();
-    run_proxy_updaters(&camera_frame(scene)?, dt)?;
     for target in targets {
         let Some(proxy) = live_proxy(py, scene, target) else {
             continue;
@@ -8025,9 +8146,6 @@ fn run_resumed_python_updaters(scene: &Bound<'_, PyScene>, roots: &[Mob]) -> PyR
 
 fn has_python_updaters(scene: &Bound<'_, PyScene>) -> PyResult<bool> {
     let py = scene.py();
-    if camera_frame(scene)?.getattr("updaters")?.is_truthy()? {
-        return Ok(true);
-    }
     for target in update_targets(scene) {
         if let Some(proxy) = live_proxy(py, scene, target)
             && proxy.getattr("updaters")?.is_truthy()?
@@ -8140,6 +8258,8 @@ fn begin_portal_render(slf: &Bound<'_, PyScene>, request: PortalRenderRequest) -
     }
     if reproducible {
         portal_provenance::certified_build_check()?;
+        // C4 must be statable before any frame exists (fm-arog).
+        portal_provenance::certified_render_config((width, height), fps, threads, seed)?;
     }
     portal_video::check_scene_ownership(slf)?;
     let render_slot = Arc::clone(&slf.borrow().render);
@@ -8190,13 +8310,11 @@ fn begin_portal_render(slf: &Bound<'_, PyScene>, request: PortalRenderRequest) -
             "a portal render generation is already active",
         ));
     }
-    {
-        let mut scene = slf.borrow_mut();
-        scene.engine = replacement;
-        scene.render_invocations.clear();
-        scene.render_audio_inputs.clear();
-        scene.render_routes = PortalRoutes::default();
+    if let Err(error) = install_pristine_arena(slf, replacement) {
+        session.abort();
+        return Err(error);
     }
+    slf.borrow_mut().render_routes = PortalRoutes::default();
     *render = Some(session);
     Ok(())
 }
@@ -8711,9 +8829,16 @@ impl PyScene {
             .collect()
     }
 
+    /// The scene's root proxies, after projecting the native family into
+    /// Python. A member with no proxy gets one from `shell_factory`, except
+    /// a padding copy whose source has one (fm-b97z): it takes the source's
+    /// class, as the Reference's `invisible_copy` does, and `ghost_adopter`
+    /// receives every such `(source, copy)` pair to copy Python state across.
+    #[pyo3(signature = (shell_factory, ghost_adopter = None))]
     fn _engine_roots<'py>(
         slf: &Bound<'py, Self>,
         shell_factory: &Bound<'py, PyAny>,
+        ghost_adopter: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Vec<Py<PyAny>>> {
         let py = slf.py();
         // fm-5wq.31: this projection walks the whole scene family, and
@@ -8740,36 +8865,59 @@ impl PyScene {
         // Choreo can create composition containers without a Python proxy.
         // Snapshot the native graph first, then release the Stage borrow
         // before allocating shells or touching Python family/back edges.
-        let (roots, graph) = {
+        let (roots, graph, padding) = {
             let runtime = engine.borrow();
             let stage = runtime.stage();
             let roots = stage.roots().to_vec();
             let mut seen: HashSet<Mob, ByAddress> = HashSet::default();
             let mut graph = Vec::new();
+            let mut padding: HashMap<Mob, Mob, ByAddress> = HashMap::default();
             for root in &roots {
                 for mob in stage.family(*root) {
                     if seen.insert(mob) {
                         let entry = stage.get(mob).ok_or_else(|| {
                             StaleHandleError::new_err("scene family contains a stale handle")
                         })?;
+                        // A point-less vector member with children is a
+                        // native group (Choreo's composition container over
+                        // VMobjects): the Reference's VGroup (fm-3jw2).
+                        let vector = entry.buffer.schema().offset("fill_rgba").is_some();
+                        let group = entry.buffer.is_empty() && !entry.submobjects().is_empty();
                         graph.push((
                             mob,
-                            entry.buffer.schema().offset("fill_rgba").is_some(),
+                            (vector, group),
                             entry.submobjects().to_vec(),
                             entry.children_epoch(),
                         ));
+                        if let Some(source) = stage.padding_source(mob) {
+                            padding.insert(mob, source);
+                        }
                     }
                 }
             }
-            (roots, graph)
+            (roots, graph, padding)
         };
         let mut proxies: HashMap<Mob, Bound<'py, PyAny>, ByAddress> =
             HashMap::with_capacity_and_hasher(graph.len(), ByAddress::default());
-        for (mob, vector_records, _, _) in &graph {
+        let mut ghosts: Vec<(Bound<'py, PyAny>, Bound<'py, PyAny>)> = Vec::new();
+        for (mob, (vector_records, group), _, _) in &graph {
+            // A padding copy's source precedes it in family order, so the
+            // source's proxy is already projected when it has one. Without an
+            // adopter to install its Python state, a ghost gets a plain shell.
+            let source_proxy = ghost_adopter.and(padding.get(mob)).and_then(|source| {
+                proxies
+                    .get(source)
+                    .cloned()
+                    .or_else(|| live_proxy(py, slf, *source))
+            });
             let proxy = if let Some(proxy) = live_proxy(py, slf, *mob) {
                 proxy
+            } else if let Some(source_proxy) = source_proxy {
+                let proxy = new_bound_proxy(py, slf, &source_proxy, &engine, *mob)?;
+                ghosts.push((source_proxy, proxy.clone()));
+                proxy
             } else {
-                let proxy = shell_factory.call1((*vector_records,))?;
+                let proxy = shell_factory.call1((*vector_records, *group))?;
                 {
                     let bridge = proxy.cast::<BridgeMobject>()?;
                     let mut cell = bridge.borrow_mut();
@@ -8789,8 +8937,13 @@ impl PyScene {
             };
             proxies.insert(*mob, proxy);
         }
+        if let Some(adopter) = ghost_adopter
+            && !ghosts.is_empty()
+        {
+            adopter.call1((PyList::new(py, ghosts)?,))?;
+        }
         for (mob, _, children, _) in &graph {
-            let submobjects = proxies[mob].getattr("submobjects")?;
+            let submobjects = projected_children(&proxies[mob])?;
             // Re-projecting a list that already holds exactly these proxies
             // in this order clears and re-extends the same items with no
             // back-edge change. Skip that call: this walk covers the whole
@@ -8844,8 +8997,7 @@ impl PyScene {
     fn update_batched(slf: &Bound<'_, Self>, dt: f64) -> PyResult<()> {
         let targets = update_targets(slf);
         let py = slf.py();
-        let mut batch = Vec::with_capacity(targets.len() + 1);
-        batch.push(camera_frame(slf)?);
+        let mut batch = Vec::with_capacity(targets.len());
         for target in targets {
             if let Some(proxy) = live_proxy(py, slf, target) {
                 batch.push(proxy);
@@ -9264,12 +9416,22 @@ impl PyScene {
     /// root count, total family membership, and the aggregate family bbox
     /// (zero boxes skipped) — measured on the Stage directly, so the
     /// numbers never depend on Python proxy liveness or GC timing.
+    ///
+    /// The facts describe the scene's content. The listed camera frame
+    /// (fm-6l2i) is left out, as the structural-facts oracle drops it from
+    /// the roots and counts it in its own `camera_frame_roots` fact.
     #[allow(clippy::type_complexity)]
     fn _engine_facts(slf: &Bound<'_, Self>) -> PyResult<(usize, usize, [f64; 3], [f64; 3])> {
+        let frame = scene_frame_entry(slf)?.map(|(_, mob)| mob);
         let engine = Rc::clone(&slf.borrow().engine);
         let scene = engine.borrow();
         let stage = scene.stage();
-        let roots = stage.roots().to_vec();
+        let roots: Vec<Mob> = stage
+            .roots()
+            .iter()
+            .copied()
+            .filter(|&root| Some(root) != frame)
+            .collect();
         let mut family_total = 0usize;
         let mut low = [f64::INFINITY; 3];
         let mut high = [f64::NEG_INFINITY; 3];
@@ -10321,15 +10483,16 @@ fn rate_func_from_py(value: &Bound<'_, PyAny>) -> PyResult<fmn_anim::RateFunc> {
 }
 
 fn named_rate_func(name: &str) -> PyResult<fmn_anim::RateFunc> {
-    let function: fn(f64) -> f64 = match name {
-        "linear" => fmn_core::rate::linear,
-        "smooth" => fmn_core::rate::smooth,
-        "rush_into" => fmn_core::rate::rush_into,
-        "rush_from" => fmn_core::rate::rush_from,
-        "slow_into" => fmn_core::rate::slow_into,
-        "double_smooth" => fmn_core::rate::double_smooth,
-        "there_and_back" => fmn_core::rate::there_and_back,
-        "lingering" => fmn_core::rate::lingering,
+    use fmn_core::rate::CatalogRate;
+    let rate = match name {
+        "linear" => CatalogRate::Linear,
+        "smooth" => CatalogRate::Smooth,
+        "rush_into" => CatalogRate::RushInto,
+        "rush_from" => CatalogRate::RushFrom,
+        "slow_into" => CatalogRate::SlowInto,
+        "double_smooth" => CatalogRate::DoubleSmooth,
+        "there_and_back" => CatalogRate::ThereAndBack,
+        "lingering" => CatalogRate::Lingering,
         other => {
             return Err(PyValueError::new_err(format!(
                 "rate_func `{other}` is not in the engine's named catalog \
@@ -10339,7 +10502,7 @@ fn named_rate_func(name: &str) -> PyResult<fmn_anim::RateFunc> {
             )));
         }
     };
-    Ok(fmn_anim::RateFunc::Base(function))
+    Ok(fmn_anim::RateFunc::Catalog(rate))
 }
 
 fn lerp(a: f64, b: f64, t: f64) -> f64 {

@@ -3,6 +3,7 @@ from pathlib import Path
 import tempfile
 import inspect
 import copy
+import pickle
 import unittest
 
 import numpy as np
@@ -184,6 +185,95 @@ def assert_paints(test, obj, fill, stroke):
     for member in members:
         test.assertEqual(member.get_fill_color(), fill)
         test.assertEqual(member.get_stroke_color(), stroke)
+
+
+class StringRootStyle(unittest.TestCase):
+    def test_point_less_roots_report_the_reference_root_style(self):
+        # fm-78b6: the Reference's StringMobject root takes no fill opacity
+        # and a zero stroke width; the glyphs carry the paint.
+        for base, text in FRONT_DOORS:
+            with self.subTest(base=base.__name__):
+                obj = base(text)
+                self.assertFalse(obj.has_points())
+                self.assertEqual(obj.get_fill_opacity(), 0.0)
+                self.assertEqual(obj.get_stroke_width(), 0.0)
+                self.assertEqual(obj.family_members_with_points()[0].get_fill_opacity(), 1.0)
+
+    def test_caller_styles_still_reach_the_root(self):
+        self.assertEqual(m.Tex('ab', fill_opacity=0.5).get_fill_opacity(), 0.5)
+        self.assertEqual(m.Text('ab', stroke_width=2).get_stroke_width(), 2.0)
+
+
+class StringLeafClasses(unittest.TestCase):
+    # fm-15k9: the Reference builds strings through SVGMobject, so each glyph
+    # is a VMobjectFromSVGPath and each TeX rule is dvisvgm's <rect>, a
+    # Rectangle. Native storage is unchanged; only the leaf class moves.
+    def test_glyphs_are_svg_paths_at_every_front_door(self):
+        for base, text in FRONT_DOORS:
+            with self.subTest(base=base.__name__):
+                leaves = base(text).family_members_with_points()
+                self.assertTrue(leaves)
+                for leaf in leaves:
+                    self.assertIs(type(leaf), m.VMobjectFromSVGPath)
+                    self.assertEqual(type(leaf).__mro__[1:3], (m.VMobject, m.Mobject))
+
+    def test_a_fraction_bar_is_a_rectangle_with_the_reference_vertices(self):
+        tex = m.Tex(r'\frac{1}{2}')
+        self.assertEqual([type(leaf).__name__ for leaf in tex],
+                         ['VMobjectFromSVGPath', 'Rectangle', 'VMobjectFromSVGPath'])
+        bar = tex[1]
+        (x0, y0, _), (x1, y1, _) = bar.get_bounding_box()[[0, 2]]
+        # dvisvgm's <rect> as the Reference's Rectangle reports it: BR, TR, TL, BL.
+        np.testing.assert_allclose(bar.get_vertices(), [[x1, y0, 0], [x1, y1, 0],
+                                                        [x0, y1, 0], [x0, y0, 0]], atol=1e-6)
+        self.assertAlmostEqual(bar.width, x1 - x0)
+        self.assertAlmostEqual(bar.height, y1 - y0)
+
+    def test_classes_survive_copy_pickle_and_regeneration(self):
+        tex = m.Tex(r'\sqrt{x} = \frac{a}{b}')
+        expected = [type(leaf) for leaf in tex]
+        self.assertIn(m.Rectangle, expected)
+        for twin in (tex.copy(), copy.deepcopy(tex), pickle.loads(pickle.dumps(tex))):
+            self.assertEqual([type(leaf) for leaf in twin], expected)
+        text = m.Text('ab')
+        text.become(m.Text('cd'))
+        self.assertTrue(all(type(leaf) is m.VMobjectFromSVGPath for leaf in text))
+
+    def test_glyph_pads_of_a_played_transform_keep_the_glyph_class(self):
+        # fm-b97z: Transform pads the smaller family with invisible copies.
+        # The Reference's invisible_copy keeps the copied glyph's class; on
+        # the native play path the engine pads, and the projection publishes
+        # each pad with its source's class and Python state.
+        scene = m.Scene()
+        eq1, eq2 = m.Tex('4'), m.Tex('3.5')
+        scene.add(eq1, eq2)
+        source = eq1['4']
+        scene.play(m.Transform(source, eq2['3.5']), run_time=1 / 30)
+        self.assertTrue(any(root is source for root in scene.mobjects))
+        leaves = [mob for mob in source.get_family() if not mob.submobjects]
+        self.assertEqual([type(leaf).__name__ for leaf in leaves],
+                         ['VMobjectFromSVGPath'] * 3)
+
+    def test_pads_remap_references_only_within_their_own_family(self):
+        # copy() remaps a reference only when it points into the copied
+        # family, so a pad keeps pointing at another family's original.
+        scene = m.Scene()
+        a, c = m.Square(), m.Circle()
+        a.partner, c.partner = c, a
+        left, right = m.VGroup(a), m.VGroup(c)
+        scene.add(left, right)
+        scene.play(m.Transform(left, m.VGroup(*[m.Square() for _ in range(3)])),
+                   m.Transform(right, m.VGroup(*[m.Circle() for _ in range(2)])),
+                   run_time=1 / 30)
+        roots = scene.mobjects
+        self.assertTrue(any(root is left for root in roots))
+        pads = {'Square': left.submobjects[1:], 'Circle': right.submobjects[1:]}
+        self.assertEqual([len(pads['Square']), len(pads['Circle'])], [2, 1])
+        for cls, members in pads.items():
+            for pad in members:
+                with self.subTest(cls=cls):
+                    self.assertEqual(type(pad).__name__, cls)
+                    self.assertIs(pad.partner, c if cls == 'Square' else a)
 
 
 class TextChannelColors(unittest.TestCase):
@@ -553,6 +643,50 @@ class ModernTexFamilies(unittest.TestCase):
         self.assertEqual(len(target), 5)
         self.assertIs(target.select_part('ab')[1], target[4])
         self.assertTrue(all(child.has_points() for child in target))
+
+
+class StringMobjectAbstractness(unittest.TestCase):
+    # The Reference's StringMobject(SVGMobject, ABC) at 6199a00d: the class
+    # sweep records StringMobject() -> "TypeError: Can't instantiate abstract
+    # class StringMobject without an implementation for abstract methods
+    # 'get_attr_dict_from_command_pair', 'get_command_flag', ...".
+    STEPS = frozenset((
+        "get_attr_dict_from_command_pair", "get_command_flag", "get_command_matches",
+        "get_command_string", "get_configured_items", "get_content_prefix_and_suffix",
+        "get_svg_string_by_content", "replace_for_content", "replace_for_matching",
+    ))
+
+    def test_the_base_refuses_instantiation_like_the_reference(self):
+        for args in ((), ("x",)):
+            with self.assertRaises(TypeError) as caught:
+                m.StringMobject(*args)
+            self.assertTrue(str(caught.exception).startswith(
+                "Can't instantiate abstract class StringMobject without an "
+                "implementation for abstract methods 'get_attr_dict_from_command_pair', "
+                "'get_command_flag', 'get_command_matches', 'get_command_string', 'get_c"),
+                caught.exception)
+        self.assertEqual(m.StringMobject.__abstractmethods__, self.STEPS)
+
+    def test_a_direct_subclass_must_implement_every_step(self):
+        class Partial(m.StringMobject):
+            @staticmethod
+            def get_command_flag(match_obj):
+                return 0
+        self.assertEqual(Partial.__abstractmethods__, self.STEPS - {"get_command_flag"})
+        with self.assertRaises(TypeError):
+            Partial("x")
+
+    def test_concrete_string_classes_still_construct(self):
+        for build in (lambda: m.Text("x"), lambda: m.MarkupText("x"),
+                      lambda: m.Code("x = 1"), lambda: m.Tex("x"), lambda: m.TexText("x")):
+            mob = build()
+            self.assertIsInstance(mob, m.StringMobject)
+            self.assertFalse(type(mob).__abstractmethods__)
+            self.assertGreater(len(mob.get_all_points()), 0)
+        # The steps keep the portal's by-name render-twice refusal.
+        with self.assertRaises(Exception) as caught:
+            m.Text("x").get_command_flag(None)
+        self.assertIn("get_command_flag", str(caught.exception))
 
 
 if __name__=='__main__':unittest.main()

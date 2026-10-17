@@ -308,6 +308,7 @@ def write_dashboard(records, path, title):
         for v in r["geometry"]["envelope_violations"]:
             cluster = envelopes.setdefault((v["class"] or "(scene)", v["row"]),
                                            {"scenes": [], "members": 0, "same": 0, "sized": 0,
+                                            "cascade": 0, "unexplained": 0,
                                             "size": 0.0, "centre": 0.0})
             if not cluster["scenes"] or cluster["scenes"][-1] != f"{r['module']}:{r['scene']}":
                 cluster["scenes"].append(f"{r['module']}:{r['scene']}")
@@ -315,7 +316,12 @@ def write_dashboard(records, path, title):
             family = v.get("family")
             cluster["same"] += bool(family) and family[0] == family[1]
             size = v.get("size_rel")
-            cluster["sized"] += size is None or size > v["envelope"]["size_rel"]
+            sized = size is None or size > v["envelope"]["size_rel"]
+            cluster["sized"] += sized
+            if not sized:
+                # fm-5wq.59: a position-only violation whose displacement follows
+                # its anchor's is a layout cascade, not a misplaced object.
+                cluster["cascade" if v.get("cascade") else "unexplained"] += 1
             cluster["size"] = max(cluster["size"], float("inf") if size is None else size)
             cluster["centre"] = max(cluster["centre"], v.get("center_offset") or 0.0)
     lines += ["", "## Envelope violations by (class, broken envelope)", "",
@@ -324,15 +330,18 @@ def write_dashboard(records, path, title):
               "\"Same family\" counts violations whose member has as many point-bearing descendants in both "
               "engines: those compare like with like. A violation between families of different sizes may be "
               "a reshaped tree, such as a different glyph grouping inside a Tex. "
-              "\"Size\" counts violations whose own extent breaks the envelope; the rest are position-only, "
-              "which in scenes mostly inherit another object's size difference through next_to/align_to "
-              "layout (the minimized repros in fm-5wq.45 are of that kind).", "",
-              "| class | envelope row | scenes | members | size | same family | max size change "
-              "| max centre offset | example |",
-              "|---|---|---|---|---|---|---|---|---|"]
+              "\"Size\" counts violations whose own extent breaks the envelope; the rest are position-only. "
+              "A position-only violation is a cascade when one of the member's box points moved exactly as "
+              "a box point of its parent or preceding sibling did: next_to/align_to/get_bottom layout "
+              "carrying another object's size difference (fm-5wq.59). The unexplained ones are the "
+              "candidate placement bugs.", "",
+              "| class | envelope row | scenes | members | size | position: cascade | position: unexplained "
+              "| same family | max size change | max centre offset | example |",
+              "|---|---|---|---|---|---|---|---|---|---|---|"]
     for (cls, row), c in sorted(envelopes.items(), key=lambda kv: (-len(kv[1]["scenes"]), kv[0])):
         size = "unbounded" if c["size"] == float("inf") else f"{c['size']:.3f}"
-        lines.append(f"| {cls} | {row} | {len(c['scenes'])} | {c['members']} | {c['sized']} | {c['same']} | "
+        lines.append(f"| {cls} | {row} | {len(c['scenes'])} | {c['members']} | {c['sized']} | "
+                     f"{c['cascade']} | {c['unexplained']} | {c['same']} | "
                      f"{size} | {c['centre']:.3f} | `{c['scenes'][0]}` |")
     engines = sorted({r["engines"] for r in records if r.get("engines")})
     lines += ["", f"Engine identities: {', '.join(engines) or 'recorded per run'}.", ""]

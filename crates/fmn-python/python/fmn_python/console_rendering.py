@@ -7,6 +7,7 @@ imports available and robot stdout reserved for the terminal receipt.
 from __future__ import annotations
 
 import contextlib
+from functools import partial as _partial_call
 import os
 from pathlib import Path
 import sys
@@ -40,7 +41,9 @@ from .video_cli import (
     VIDEO_HELP, VIDEO_VALUE_FLAGS, VIDEO_WRITER_OPTIONS, take_video_options, validate_video_format,
 )
 
-_VALUE_FLAGS = _VALUE_FLAGS | CHECKPOINT_VALUES | VIDEO_VALUE_FLAGS
+from .parallel_cli_options import PARALLEL_HELP, PARALLEL_VALUES, take_parallel_options
+
+_VALUE_FLAGS = _VALUE_FLAGS | CHECKPOINT_VALUES | VIDEO_VALUE_FLAGS | PARALLEL_VALUES
 
 _CONTROL_FLAGS = frozenset({"--version", "--list-scenes", "--construct-only", "--audit-parity"})
 _SELECTION_FLAGS = frozenset({"--robot", "--write_all", "-a", "--keep-going"})
@@ -190,13 +193,17 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
         ).replace("Certified output, opener flags, and Studio", "Certified output and opener flags")
         from .studio import _HELP as _STUDIO_HELP
         text += "\n\n" + _BATCH_HELP + "\n" + _SELECTION_HELP + "\n" + PLAYBACK_HELP + "\n" + _OUTPUT_HELP + "\n" + SUBDIVISION_HELP + "\n" + PAIRED_HELP + "\n" + CHECKPOINT_HELP + "\n" + _STUDIO_HELP
-        text += "\n" + VIDEO_HELP
+        text += "\n" + VIDEO_HELP + "\n" + PARALLEL_HELP
         if robot:
             return native._portal_cli_emit(0, "success", "help", "fmn-python usage", True, help=text)
         print(text)
         return 0
     batch = bool(write_all or len(raw_positionals) > 2)
     try:
+        invocation_directory = Path.cwd()
+        native_options, parallel = take_parallel_options(native_options, _VALUE_FLAGS)
+        if parallel and not batch:
+            raise ValueError("--workers requires multiple scene names or --write_all")
         native_options, video_options = take_video_options(native_options, _VALUE_FLAGS)
         native_options, paired = take_last_frame_option(native_options, _VALUE_FLAGS)
         native_options, subdivide = take_subdivision_option(native_options, _VALUE_FLAGS)
@@ -212,6 +219,9 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
         options = select_still_format(options, native_options, still)
         options.update(video_options)
         output_options = _output_overrides(options)
+        if parallel:
+            if "--threads" not in native_options:
+                threads = 1
         if paired:
             if still:
                 raise ValueError("--save-last-frame cannot be combined with --skip_animations/-s")
@@ -280,10 +290,15 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
     phase, session, report = "load", None, None
     redirect = contextlib.redirect_stdout(sys.stderr) if robot else contextlib.nullcontext()
     try:
-        # A certified invocation records scene effects from before its
-        # module loads: import-time reads are inputs of every render.
-        with (redirect, recording_effects(bool(options.get("reproducible"))),
-              SceneSource(source_path, native.Scene) as loaded):
+        # Sequential source effects start before import. Parallel workers own
+        # their own capture; coordinator discovery/spawn is not a scene effect.
+        if parallel:
+            from .parallel_discovery import discovery_source
+            loading = discovery_source(source_path, working_directory=invocation_directory,
+                                       job_timeout=parallel.get("job_timeout"))
+        else:
+            loading = SceneSource(source_path, native.Scene)
+        with (redirect, recording_effects(bool(options.get("reproducible")) and not parallel), loading as loaded):
             scenes = loaded.scenes
             names = sorted(scenes)
             if batch:
@@ -295,16 +310,31 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                     raise ValueError("selected scenes were not declared by " + source + ": " + ", ".join(missing))
                 destination = default_root if destination is None else destination
                 phase = "batch"
-                report = render_scenes(
-                    {name: scenes[name] for name in requested}, destination,
+                if parallel:
+                    from .parallel_batch import render_source_scenes
+                    render_batch = _partial_call(
+                        render_source_scenes, source_path, scene_names=requested,
+                        _expected_source_digest=loaded.source_digest,
+                        _working_directory=invocation_directory, **parallel,
+                    )
+                    batch_args = (destination,)
+                else:
+                    render_batch = render_scenes
+                    batch_args = ({name: scenes[name] for name in requested}, destination)
+                certification_options = {}
+                if options.get("reproducible"):
+                    certification_options["reproducible"] = True
+                    if not parallel:
+                        certification_options["sources"] = lambda: loaded.sources
+                report = render_batch(
+                    *batch_args,
                     format=options["format"], resolution=(width, height), fps=fps, threads=threads,
                     continue_on_error=bool(keep_going), max_jobs=_MAX_SELECTED_SCENES,
                     **({"subdivide": True} if subdivide else {}),
                     **({"save_last_frame": True} if paired else {}),
                     **({} if selection is None else {"animation_range": selection}),
                     **({} if not output_options else {"_output_options": output_options}),
-                    **({"reproducible": True, "sources": lambda: loaded.sources}
-                       if options.get("reproducible") else {}),
+                    **certification_options,
                     **recovery,
                     on_result=lambda outcome: print(
                         f"fmn-python: {outcome.name}: {outcome.status}: {outcome.destination}",

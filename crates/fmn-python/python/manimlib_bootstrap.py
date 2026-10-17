@@ -741,6 +741,28 @@ def _family_preorder(root):
     return result
 
 
+def _point_free_family_ids(root):
+    """Ids of the members of `root`'s family whose own family has no points.
+
+    The Reference's box of such a member is its own cached degenerate box,
+    which a box-preserving map moves (fm-fc53).
+    """
+    _family_preorder(root)  # refuses a cycle before the walk below
+    has_points = {}
+
+    def visit(mobject):
+        marker = id(mobject)
+        if marker not in has_points:
+            # Visit every child (no short-circuit) so shared descendants are
+            # answered once and all of them are classified.
+            children = [visit(child) for child in mobject.submobjects]
+            has_points[marker] = bool(mobject.has_points()) or any(children)
+        return has_points[marker]
+
+    visit(root)
+    return {marker for marker, value in has_points.items() if not value}
+
+
 def _copy_mobject_graph(root, deep, memo=None, detach_bound=False):
     if memo is None:
         memo = {}
@@ -780,52 +802,93 @@ def _copy_mobject_graph(root, deep, memo=None, detach_bound=False):
         memo[id(old)] = new
         _install_live_state(new)
 
-    # Reference copy() temporarily stashes these relationship pointers and
-    # installs None on the copy; generate_target/save_state reconnect only
-    # their one prescribed cross-link afterward.
-    internal = {
-        "submobjects",
-        "uniforms",
-        "updaters",
-        "parents",
-        "_scene",
-        "target",
-        "saved_state",
-    }
     for old, new in pairs:
         mapped_children = [mapping[child] for child in old.submobjects]
         new.submobjects.extend(mapped_children)
-
-        attributes = {
-            key: value
-            for key, value in old.__dict__.items()
-            if key not in internal
-        }
-        if deep:
-            attributes = _copy.deepcopy(attributes, memo)
-        else:
-            attributes = {
-                key: mapping.get(value, value)
-                if isinstance(value, _BridgeMobject)
-                else value
-                for key, value in attributes.items()
-            }
-        new.__dict__.update(attributes)
-
-        extras = old.uniforms._extras
-        # Reference Mobject.copy copies every ndarray uniform, so writing a
-        # copy's array in place (a vector ValueTracker) leaves the source.
-        new.uniforms._extras = (
-            _copy.deepcopy(extras, memo) if deep else {
-                key: value.copy() if isinstance(value, _np.ndarray) else value
-                for key, value in extras.items()
-            }
-        )
-        # Function objects remain shared even under deepcopy, while the list is
-        # independent, matching manim's updater copy rule.
-        new.updaters = list(old.updaters)
+        _copy_member_state(old, new, mapping, deep, memo)
 
     return mapping[root]
+
+
+# Reference copy() temporarily stashes these relationship pointers and
+# installs None on the copy; generate_target/save_state reconnect only their
+# one prescribed cross-link afterward.
+_COPY_RELATIONSHIP_ATTRIBUTES = frozenset({
+    "submobjects",
+    "uniforms",
+    "updaters",
+    "parents",
+    "_scene",
+    "target",
+    "saved_state",
+})
+
+
+def _copy_member_state(old, new, mapping, deep, memo):
+    """Give `new`, a copy of `old`, the Python state Reference copy() gives it.
+
+    Every attribute but the relationship pointers is copied, with bridge
+    references remapped through `mapping` when shallow. The uniform extras
+    and the updater list are copied too.
+    """
+    attributes = {
+        key: value
+        for key, value in old.__dict__.items()
+        if key not in _COPY_RELATIONSHIP_ATTRIBUTES
+    }
+    if deep:
+        attributes = _copy.deepcopy(attributes, memo)
+    else:
+        attributes = {
+            key: mapping.get(value, value)
+            if isinstance(value, _BridgeMobject)
+            else value
+            for key, value in attributes.items()
+        }
+    new.__dict__.update(attributes)
+    # A CameraFrame's pose lives in its camera core. A shallow attribute copy
+    # would share it, so a saved copy would move with the live frame; give
+    # the copy its own, as CameraFrame.copy does (fm-rgr0).
+    core = old.__dict__.get("_core")
+    if core is not None and new.__dict__.get("_core") is core:
+        new.__dict__["_core"] = _copy.copy(core)
+
+    extras = old.uniforms._extras
+    # Reference Mobject.copy copies every ndarray uniform, so writing a
+    # copy's array in place (a vector ValueTracker) leaves the source.
+    new.uniforms._extras = (
+        _copy.deepcopy(extras, memo) if deep else {
+            key: value.copy() if isinstance(value, _np.ndarray) else value
+            for key, value in extras.items()
+        }
+    )
+    # Function objects remain shared even under deepcopy, while the list is
+    # independent, matching manim's updater copy rule.
+    new.updaters = list(old.updaters)
+
+
+def _adopt_padding_ghosts(pairs):
+    """Install the Python state of members the engine padded a family with.
+
+    fm-b97z: the Reference pads with `invisible_copy()`, a shallow `copy()`,
+    so each pad keeps its source's class (the projection already made it a
+    bare proxy of that class) and takes its source's Python state.
+    References inside one padded family are remapped to their copies, and
+    only those, as `copy()` remaps only within the copied family. `pairs`
+    lists (source, pad) in family order, so each pad starts at its root: a
+    source seen again, or one outside the current root's family, starts the
+    next pad.
+    """
+    groups = []
+    for old, new in pairs:
+        if not groups or old in groups[-1][1] or id(old) not in groups[-1][0]:
+            groups.append(({id(member) for member in old.get_family()}, {}))
+        groups[-1][1][old] = new
+    for _family, mapping in groups:
+        for new in mapping.values():
+            _install_live_state(new)
+        for old, new in mapping.items():
+            _copy_member_state(old, new, mapping, False, None)
 
 
 def _restore_mobject_shell(cls, engine_state):
@@ -867,6 +930,11 @@ class _NativeZIndex:
         return self if obj is None else obj._get_z_index()
 
 
+_MOBJECT_INIT_PARAMETERS = (
+    "color", "opacity", "shading", "texture_paths", "is_fixed_in_frame", "depth_test", "z_index",
+)
+
+
 class Mobject(_BridgeMobject):
     dim = 3
     data_dtype = [("point", 3), ("rgba", 4)]
@@ -875,13 +943,35 @@ class Mobject(_BridgeMobject):
     pointlike_data_keys = ["point"]
     render_primitive = 5  # moderngl.TRIANGLE_STRIP, without importing a renderer
 
-    def __init__(self, *submobjects, **kwargs):
+    def __init__(self, *args, **kwargs):
+        # Reference mobject.py:79: a fixed signature (color, opacity,
+        # shading, texture_paths, is_fixed_in_frame, depth_test, z_index),
+        # positional in that order, and Python's own TypeError for anything
+        # else (fm-5wq.20). Members belong to Group; subclasses set their own
+        # configuration before calling here. Only the passed seeds are set.
+        if len(args) > len(_MOBJECT_INIT_PARAMETERS):
+            raise TypeError(
+                "Mobject.__init__() takes from 1 to 8 positional arguments but "
+                f"{len(args) + 1} were given"
+            )
+        for name, value in zip(_MOBJECT_INIT_PARAMETERS, args):
+            if name in kwargs:
+                raise TypeError(f"Mobject.__init__() got multiple values for argument {name!r}")
+            kwargs[name] = value
+        for name in kwargs:
+            if name not in _MOBJECT_INIT_PARAMETERS:
+                raise TypeError(f"Mobject.__init__() got an unexpected keyword argument {name!r}")
         _install_live_state(self)
         for key, value in kwargs.items():
             setattr(self, key, value)
         self._engine_init()
-        if submobjects:
-            self._ingest_args(*submobjects)
+        if "z_index" in kwargs:
+            # The root's own z_index (mobject.py:96) is the engine's sort key
+            # that Scene.add orders by, so write it there, without dispatching
+            # an authored set_z_index mid-construction
+            # (fm-constructor-z-index-4mq7).
+            self._set_z_index(int(kwargs["z_index"]))
+            vars(self).pop("z_index", None)
 
     def _ingest_args(self, *args):
         # Reference Group._ingest_args (mobject.py:2201) verbatim: a single
@@ -1060,7 +1150,12 @@ class Mobject(_BridgeMobject):
             lows.append(low)
             highs.append(high)
         if not lows:
-            return _np.zeros((3, 3))
+            # A point-less family's box is the root's own (Reference
+            # compute_bounding_box ignores members without points): the
+            # degenerate box its positional operations moved, which the
+            # nursery keeps as the root's placement (fm-fc53).
+            low, mid, high = self._get_bbox()
+            return _np.array([low, mid, high])
         low = _np.min(_np.array(lows), axis=0)
         high = _np.max(_np.array(highs), axis=0)
         return _np.array([low, (low + high) / 2.0, high])
@@ -1086,6 +1181,9 @@ class Mobject(_BridgeMobject):
             about_point = self.get_bounding_box_point(about_edge)
         pivot = None if about_point is None else _np.array(_vec3(about_point))
         cached_boxes = []
+        # A point-less family's box is its own position, which the mapped
+        # rows move (fm-fc53); boxes over points stay cached rows only.
+        point_free = _point_free_family_ids(self) if works_on_bounding_box else ()
 
         def install_cached_boxes():
             # Install only after all writes observed so far, so each entry is
@@ -1093,6 +1191,10 @@ class Mobject(_BridgeMobject):
             # Reference's member-by-member partial state if a later callback
             # raises; the callback exception itself is never translated.
             for cached_mob, cached_box in cached_boxes:
+                if id(cached_mob) in point_free:
+                    cached_mob._set_point_free_anchor(
+                        tuple(float(component) for component in cached_box[1])
+                    )
                 cached_mob._cache_bbox_rows(
                     [
                         tuple(float(component) for component in row)
@@ -1100,8 +1202,9 @@ class Mobject(_BridgeMobject):
                     ]
                 )
 
+        family = self.get_family()
         try:
-            for mob in self.get_family():
+            for mob in family:
                 box = (
                     mob.get_bounding_box().copy()
                     if works_on_bounding_box
@@ -1143,6 +1246,14 @@ class Mobject(_BridgeMobject):
             raise
 
         install_cached_boxes()
+        # Reference mobject.py:303: a box-preserving map refreshes only the
+        # parents; any other map recomputes every box in the family. That is
+        # the family the loop above walked, so it is not walked again (an
+        # overridden get_family runs once, fm-5wq.4.10).
+        if not works_on_bounding_box:
+            for mob in family:
+                mob._refresh_point_free_anchors(False)
+        self._refresh_parent_boxes()
         return self
 
     def apply_function(self, function, **kwargs):
@@ -1212,6 +1323,7 @@ class Mobject(_BridgeMobject):
         native_edge = None if about_edge is None else _vec3(about_edge)
         for target in self._each_stage_target():
             target._apply_matrix(native_matrix, native_point, native_edge)
+        self._refresh_parent_boxes()
         return self
 
     def apply_complex_function(self, function, **kwargs):
@@ -1226,6 +1338,7 @@ class Mobject(_BridgeMobject):
         vector = _vec3(vector)
         for target in self._each_stage_target():
             target._shift(vector)
+        self._refresh_parent_boxes()
         return self
 
     def scale(
@@ -1248,6 +1361,7 @@ class Mobject(_BridgeMobject):
                 for dim, value in enumerate(values[:3]):
                     target._stretch_about(float(value), dim, pivot)
             side_effect_factor = values
+        self._refresh_parent_boxes()
         # The Reference's per-member hook (DecimalNumber tracks font_size
         # through it, mobject.py:955).
         for mob in _family_preorder(self):
@@ -1269,6 +1383,7 @@ class Mobject(_BridgeMobject):
             )
         for target in self._each_stage_target():
             target._stretch_about(float(factor), int(dim), pivot)
+        self._refresh_parent_boxes()
         return self
 
     def stretch_about_point(self, factor, dim, point):
@@ -1286,7 +1401,9 @@ class Mobject(_BridgeMobject):
             )
         axis = _vec3(axis)
         for target in self._each_stage_target():
+            # Native rotate recomputes each box it touches (fm-fc53).
             target._rotate_about(float(angle), axis, pivot)
+        self._refresh_parent_boxes()
         return self
 
     def rotate_about_origin(self, angle, axis=_OUT):
@@ -1302,6 +1419,7 @@ class Mobject(_BridgeMobject):
     def align_on_border(self, direction, buff=_DEFAULT_MOBJECT_TO_EDGE_BUFF):
         if self._is_bound():
             self._to_edge(_vec3(direction), float(buff))
+            self._refresh_parent_boxes()
             return self
         direction = _np.array(_vec3(direction))
         x_radius, y_radius = type(self)._frame_radii()
@@ -1835,11 +1953,30 @@ class Mobject(_BridgeMobject):
         return _np.array([mins, (mins + maxs) / 2, maxs])
 
     def refresh_bounding_box(self, recurse_down=False, recurse_up=True):
-        # RecordBuffer writes, live writable views, family edits, and retained
-        # placements all invalidate Marionette's box through their revision
-        # channels.  Accept the Reference cache-control surface while leaving
-        # invalidation to that existing authority.
-        del recurse_down, recurse_up
+        # Reference mobject.py:362. RecordBuffer writes, live writable views,
+        # family edits, and retained placements already invalidate
+        # Marionette's box over points through their revision channels. What
+        # a refresh still changes is a point-less member's box: its retained
+        # position returns to the origin, where the Reference's recomputed
+        # empty box is (fm-fc53). A bound member's Stage walks its own family
+        # in one call; parents are walked here, where the whole graph is.
+        if recurse_down and self._is_bound():
+            self._refresh_point_free_anchors(True)
+        else:
+            for mob in self.get_family(recurse_down):
+                mob._refresh_point_free_anchors(False)
+        if recurse_up:
+            for parent in self.parents:
+                parent.refresh_bounding_box()
+        return self
+
+    def _refresh_parent_boxes(self):
+        # The Reference's `for parent in self.parents:
+        # parent.refresh_bounding_box()` after a box-preserving map. A native
+        # map refreshes only its own Stage's ancestors; a detached family's
+        # graph lives here (fm-fc53).
+        for parent in self.parents:
+            parent.refresh_bounding_box()
         return self
 
     def get_bounding_box_point(self, direction):
@@ -1980,10 +2117,14 @@ class Mobject(_BridgeMobject):
         resized = resize_func(source, new_length)
         if new_length == len(data):
             data[:] = resized
-            return self
-        self.resize(new_length)
-        if new_length > 0:
-            self.data[:] = resized
+        else:
+            self.resize(new_length)
+            if new_length > 0:
+                self.data[:] = resized
+        # Reference resize_points closes with refresh_bounding_box(): a
+        # mobject left without points, and point-less ancestors, return to
+        # the origin (fm-fc53).
+        self.refresh_bounding_box()
         return self
 
     def set_points(self, points):
@@ -2025,6 +2166,9 @@ class Mobject(_BridgeMobject):
         target = self.data
         for key in self.pointlike_data_keys:
             target[key][:] = source[key]
+        # The Reference resizes through resize_points, which refreshes the
+        # box (fm-fc53).
+        self.refresh_bounding_box()
         return self
 
     # Color surface (fm-d3gt): Reference bodies over the live record views.
@@ -2472,10 +2616,13 @@ class Mobject(_BridgeMobject):
         return self
 
     def note_changed_family(self, only_changed_order=False):
-        # No Python-side family or bounding-box caches exist to drop (the
-        # engine derives both lazily from the live graph); preserve the
-        # upward recursion contract so callers stay Reference-shaped.
-        del only_changed_order
+        # No Python-side family cache exists to drop (the engine derives it
+        # lazily from the live graph). The Reference also refreshes the
+        # bounding box here (mobject.py:417), which returns a point-less
+        # family to the origin (fm-fc53); each parent's own call below
+        # refreshes the ancestors.
+        if not only_changed_order:
+            self.refresh_bounding_box(recurse_up=False)
         for parent in list(self.parents):
             parent.note_changed_family()
         return self
@@ -3052,6 +3199,10 @@ class Mobject(_BridgeMobject):
                 )
             elif "_data_defaults" in receiver.__dict__:
                 receiver.__dict__.pop("_data_defaults", None)
+            # A frame's pose is in its camera core, not its records, so the
+            # data copy above leaves it; take it explicitly (fm-rgr0).
+            if isinstance(receiver, CameraFrame) and isinstance(source, CameraFrame):
+                receiver._take_pose(source)
         if match_updaters:
             # Reference become (mobject.py:742) also copies the host-side
             # updater list onto the aligned root; the native call above only
@@ -4251,8 +4402,14 @@ def _native_shell_factory():
     return shell
 
 
-def _native_scene_shell_factory(vector_records):
-    cls = VMobject if vector_records else Group
+def _native_scene_shell_factory(vector_records, group=False):
+    # A native point-less container over VMobjects (Choreo's composition
+    # group) is the Reference's VGroup; one over any other mobject is a Group
+    # (fm-3jw2, composition.py:44-51).
+    if vector_records:
+        cls = VGroup if group else VMobject
+    else:
+        cls = Group
     shell = cls.__new__(cls)
     _install_live_state(shell)
     return shell
@@ -4287,6 +4444,7 @@ def _apply_vmobject_style_kwargs(mob, kwargs, recurse=True):
     scale_stroke_with_zoom = kwargs.pop("scale_stroke_with_zoom", None)
     depth_test = kwargs.pop("depth_test", None)
     fixed_in_frame = kwargs.pop("is_fixed_in_frame", None)
+    z_index = kwargs.pop("z_index", None)
     if kwargs:
         raise TypeError(
             "unexpected keyword arguments: " + ", ".join(sorted(kwargs))
@@ -4301,6 +4459,22 @@ def _apply_vmobject_style_kwargs(mob, kwargs, recurse=True):
         fill_opacity = opacity
     if stroke_opacity is None:
         stroke_opacity = opacity
+    # A native build never ran VMobject.__init__, which resolves an unset
+    # channel to the configured default (GREY_C fill, GREY_A stroke) on the
+    # mobject itself, before any submobject is added. Give such a root the
+    # same defaults; its children keep their own styles (fm-78b6). String
+    # and number classes are white in the Reference (their constructors pass
+    # their own colors), so they keep the native record.
+    if (
+        "fill_color" not in vars(mob)
+        and "stroke_color" not in vars(mob)
+        and not isinstance(mob, (StringMobject, DecimalNumber))
+    ):
+        defaults = _pinned_manim_config().vmobject
+        if stroke_color is None:
+            mob.set_stroke(color=defaults.default_stroke_color, recurse=False)
+        if fill_color is None:
+            mob.set_fill(color=defaults.default_fill_color, recurse=False)
     if any(
         value is not None
         for value in (stroke_color, stroke_width, stroke_opacity, stroke_behind, flat_stroke)
@@ -4337,9 +4511,15 @@ def _apply_vmobject_style_kwargs(mob, kwargs, recurse=True):
     if fixed_in_frame is not None:
         method = mob.fix_in_frame if fixed_in_frame else mob.unfix_from_frame
         method(recurse=recurse)
+    # Mobject.__init__ (mobject.py:96) sets the root's z_index only; members
+    # keep their own (fm-constructor-z-index-4mq7).
+    if z_index is not None:
+        mob.set_z_index(z_index, recurse=False)
     return mob
 
 
+# The VMobject and Mobject constructor keywords a native build applies
+# afterwards: the style keywords, plus Mobject.__init__'s z_index.
 _NATIVE_VMOBJECT_STYLE_KEYS = frozenset(
     {
         "color",
@@ -4357,6 +4537,7 @@ _NATIVE_VMOBJECT_STYLE_KEYS = frozenset(
         "scale_stroke_with_zoom",
         "depth_test",
         "is_fixed_in_frame",
+        "z_index",
     }
 )
 
@@ -4373,6 +4554,8 @@ def _preflight_vmobject_style_kwargs(kwargs):
         width = float(kwargs["anti_alias_width"])
         if not _math.isfinite(width) or width < 0:
             raise ValueError("anti_alias_width must be finite and non-negative")
+    if "z_index" in kwargs:
+        int(kwargs["z_index"])  # set_z_index's sort key; refuse before building
 
 
 
@@ -4489,6 +4672,9 @@ class VectorizedPoint(Point, VMobject):
         kwargs.setdefault("color", color)
         kwargs.setdefault("fill_opacity", fill_opacity)
         kwargs.setdefault("stroke_width", stroke_width)
+        # VMobject's own stroke opacity default, which the Reference's
+        # VectorizedPoint passes through (fm-78b6).
+        kwargs.setdefault("stroke_opacity", 1.0)
         _apply_vmobject_style_kwargs(self, kwargs)
 
 
@@ -5022,7 +5208,10 @@ class BackgroundRectangle(SurroundingRectangle):
         **kwargs,
     ):
         if color is None:
-            color = _pinned_manim_config().camera.background_color
+            # The Reference's manim_config.camera.background_color: the
+            # pinned default under the cwd custom_config.yml, the layer
+            # Scene's camera resolves too (fm-78b6).
+            color = _reference_camera_layer()["background_color"]
         super().__init__(
             mobject,
             color=color,
@@ -5301,11 +5490,22 @@ class Circle(Arc):
         self.stretch((self.get_height() + 2 * buff) / self.get_height(), 1)
         return self
 
+    # geometry.py measures from the public, overridable get_start (tip-aware)
+    # to get_center, the family box centre, so a child or an override moves
+    # the result as in the Reference (fm-circle-get-radius-family-center-tkiz).
     def get_radius(self):
-        return self._circle_radius()
+        return _space_get_norm(
+            _np.asarray(self.get_start(), dtype=float)
+            - _np.asarray(self.get_center(), dtype=float)
+        )
 
+    # geometry.py measures from the public, overridable get_start_angle (the
+    # tip-aware angle of fm-8pj7) and walks the overridable
+    # point_from_proportion, BN-03's true arclength here.
     def point_at_angle(self, angle):
-        return _np.array(self._circle_point_at_angle(float(angle)))
+        start_angle = self.get_start_angle()
+        alpha = ((float(angle) - start_angle) % _math.tau) / _math.tau
+        return self.point_from_proportion(alpha)
 
 
 class Dot(Circle):
@@ -7354,7 +7554,7 @@ class ThreeDAxes(Axes):
 
 class NumberPlane(Axes):
     default_axis_config = dict(
-        color=_WHITE,
+        stroke_color=_WHITE,
         stroke_width=2,
         include_ticks=False,
         include_tip=False,
@@ -7660,6 +7860,30 @@ def _refuse_unrouted(class_name, entries):
             + " keyword(s) not yet routed to the native builder: "
             + ", ".join(sorted(unrouted))
         )
+
+
+# Keywords the Reference's Surface.__init__ and Mobject.__init__ accept
+# through a solid's **kwargs (three_dimensions.py at 6199a00d).
+_SURFACE_CHAIN_KEYWORDS = frozenset((
+    "color", "opacity", "shading", "texture_paths", "is_fixed_in_frame",
+    "depth_test", "z_index", "u_range", "v_range", "resolution",
+    "preferred_creation_axis", "epsilon", "normal_nudge",
+))
+
+
+def _refuse_surface_keywords(class_name, kwargs):
+    """Leftover keywords of a Surface-family solid. A name the Reference's
+    Surface/Mobject chain accepts but Atlas does not route yet is the precise
+    unrouted refusal; any other name is the Reference's own TypeError from
+    Mobject.__init__."""
+    # Python names the first unexpected keyword in call order.
+    unknown = [name for name in kwargs if name not in _SURFACE_CHAIN_KEYWORDS]
+    if unknown:
+        raise TypeError(
+            "Mobject.__init__() got an unexpected keyword argument "
+            + repr(unknown[0])
+        )
+    _refuse_unrouted(class_name, [(name, True) for name in sorted(kwargs)])
 
 
 # tex_mobject.py's get_command_matches: a control word or control symbol, or
@@ -9198,6 +9422,10 @@ def _decorate_matrix_tex_entry(entry, source, font_size):
     # source unit; substring-granular selection is deliberately not claimed.
     entry._string_sub_spans = [(0, len(source.encode("utf-8")))]
     entry._string_sub_paths = [[]]
+    # A Reference Tex's point-less root has fill opacity 0 and stroke width
+    # 0; its glyphs carry the paint (fm-78b6, as in string_lifecycle).
+    entry.set_fill(opacity=0.0, recurse=False)
+    entry.set_stroke(width=0.0, recurse=False)
 
 
 def _decorate_matrix_decimal_entry(entry, value, font_size, places, style):
@@ -12357,10 +12585,7 @@ class Surface(Mobject):
     ):
         opacity = kwargs.pop("opacity", None)
         z_index = int(kwargs.pop("z_index", 0))
-        _refuse_unrouted(
-            type(self).__name__ + "()",
-            [(name, True) for name in sorted(kwargs)],
-        )
+        _refuse_surface_keywords(type(self).__name__ + "()", kwargs)
         _install_live_state(self)
         self.u_range = tuple(u_range)
         self.v_range = tuple(v_range)
@@ -12743,7 +12968,7 @@ class Sphere(Surface):
         preferred_creation_axis = kwargs.pop("preferred_creation_axis", 1)
         epsilon = kwargs.pop("epsilon", 0.001)
         normal_nudge = kwargs.pop("normal_nudge", 0.001)
-        _refuse_unrouted("Sphere()", [(name, True) for name in sorted(kwargs)])
+        _refuse_surface_keywords("Sphere()", kwargs)
         _install_live_state(self)
         self.radius = float(radius)
         self.clockwise = bool(clockwise)
@@ -12796,7 +13021,7 @@ class Torus(Surface):
         epsilon = kwargs.pop("epsilon", 0.001)
         normal_nudge = kwargs.pop("normal_nudge", 0.001)
         z_index = int(kwargs.pop("z_index", 0))
-        _refuse_unrouted("Torus()", [(name, True) for name in sorted(kwargs)])
+        _refuse_surface_keywords("Torus()", kwargs)
         _install_live_state(self)
         self.r1 = float(r1)
         self.r2 = float(r2)
@@ -12852,7 +13077,7 @@ class Cylinder(Surface):
         epsilon = kwargs.pop("epsilon", 0.001)
         normal_nudge = kwargs.pop("normal_nudge", 0.001)
         z_index = int(kwargs.pop("z_index", 0))
-        _refuse_unrouted("Cylinder()", [(name, True) for name in sorted(kwargs)])
+        _refuse_surface_keywords("Cylinder()", kwargs)
         _install_live_state(self)
         self.height = float(height)
         self.radius = float(radius)
@@ -12920,7 +13145,7 @@ class Cone(Cylinder):
         epsilon = kwargs.pop("epsilon", 0.001)
         normal_nudge = kwargs.pop("normal_nudge", 0.001)
         z_index = int(kwargs.pop("z_index", 0))
-        _refuse_unrouted("Cone()", [(name, True) for name in sorted(kwargs)])
+        _refuse_surface_keywords("Cone()", kwargs)
         _install_live_state(self)
         self.height = float(height)
         self.radius = float(radius)
@@ -12979,7 +13204,7 @@ class Line3D(Cylinder):
         epsilon = kwargs.pop("epsilon", 0.001)
         normal_nudge = kwargs.pop("normal_nudge", 0.001)
         z_index = int(kwargs.pop("z_index", 0))
-        _refuse_unrouted("Line3D()", [(name, True) for name in sorted(kwargs)])
+        _refuse_surface_keywords("Line3D()", kwargs)
         _install_live_state(self)
         start_point = _np.array(_vec3(start), dtype=float)
         end_point = _np.array(_vec3(end), dtype=float)
@@ -13035,7 +13260,7 @@ class Disk3D(Surface):
         epsilon = kwargs.pop("epsilon", 0.001)
         normal_nudge = kwargs.pop("normal_nudge", 0.001)
         z_index = int(kwargs.pop("z_index", 0))
-        _refuse_unrouted("Disk3D()", [(name, True) for name in sorted(kwargs)])
+        _refuse_surface_keywords("Disk3D()", kwargs)
         _install_live_state(self)
         self.radius = float(radius)
         self.u_range = tuple(u_range)
@@ -13083,7 +13308,7 @@ class Square3D(Surface):
         epsilon = kwargs.pop("epsilon", 0.001)
         normal_nudge = kwargs.pop("normal_nudge", 0.001)
         z_index = int(kwargs.pop("z_index", 0))
-        _refuse_unrouted("Square3D()", [(name, True) for name in sorted(kwargs)])
+        _refuse_surface_keywords("Square3D()", kwargs)
         _install_live_state(self)
         self.side_length = float(side_length)
         self.u_range = tuple(u_range)
@@ -13126,10 +13351,7 @@ class Cube(SGroup):
     ):
         depth_test = kwargs.pop("depth_test", True)
         z_index = int(kwargs.pop("z_index", 0))
-        _refuse_unrouted(
-            type(self).__name__ + "()",
-            [(name, True) for name in sorted(kwargs)],
-        )
+        _refuse_surface_keywords(type(self).__name__ + "()", kwargs)
         _install_live_state(self)
         self.resolution = (
             int(square_resolution[0]),
@@ -13161,7 +13383,7 @@ class Prism(Cube):
         shading = kwargs.pop("shading", None)
         depth_test = kwargs.pop("depth_test", True)
         z_index = int(kwargs.pop("z_index", 0))
-        _refuse_unrouted("Prism()", [(name, True) for name in sorted(kwargs)])
+        _refuse_surface_keywords("Prism()", kwargs)
         _install_live_state(self)
         self.resolution = (2, 2)
         self.preferred_creation_axis = 1
@@ -14741,6 +14963,10 @@ class CameraFrame(Mobject):
         **kwargs,
     ):
         super().__init__(z_index=z_index, **kwargs)
+        # The Reference's Scene.add sorts its list by z_index, where the
+        # frame's -1 keeps it ahead of default content (fm-6l2i). Write the
+        # engine sort key, not only the instance attribute.
+        self.set_z_index(z_index)
         self._core = _CameraFrameCore(
             (float(frame_shape[0]), float(frame_shape[1])),
             _vec3(center_point),
@@ -14756,6 +14982,16 @@ class CameraFrame(Mobject):
         if getattr(result, "_core", None) is self._core:
             result.__dict__["_core"] = _copy.copy(self._core)
         return result
+
+    def _take_pose(self, source):
+        # The Reference's become copies the frame's points and uniforms, so
+        # it takes the source's center, shape, orientation and field of view;
+        # here they live in the camera core (fm-rgr0).
+        core = source._core
+        self._core.set_center(core.center())
+        self._core.set_shape(core.shape())
+        self._core.set_orientation(core.orientation())
+        self._core.set_field_of_view(core.field_of_view())
 
     # -- the positional primitives, routed to the engine camera state
 
@@ -15307,13 +15543,18 @@ class Scene(_SceneCore):
         if self.random_seed is not None:
             getattr(_FMN_ROOT, "random").seed(self.random_seed)
             _np.random.seed(self.random_seed)
-        # Reference Scene.__init__ constructs the camera and puts its frame
-        # first in the update list immediately.  The portal keeps that frame
-        # out of the drawable Stage, but it must still exist before the first
-        # update crossing so initialization never contaminates frame work.
+        # Reference Scene.__init__ constructs the camera and starts the scene
+        # list as `[self.camera.frame]` (scene.py:117). The frame is an
+        # ordinary member of that list (fm-6l2i): Scene.add sorts it by its
+        # z_index of -1, clear() and remove() drop it, and only a listed
+        # frame's updaters run. It has no points, so Lumen draws nothing for
+        # it; the camera reads its engine core. The native add skips
+        # id_to_mobject_map, which the Reference fills only from add().
         self.frame = CameraFrame()
         self.frame.reorient(*self.default_frame_orientation)
         self.frame.make_orientation_default()
+        _SceneCore.add(self, self.frame)
+        self.__dict__["_fmn_construction_frame"] = self.frame
         self.num_plays = 0
         self.undo_stack = []
         self.redo_stack = []
@@ -15438,7 +15679,7 @@ class Scene(_SceneCore):
 
     @property
     def mobjects(self):
-        return self._engine_roots(_native_scene_shell_factory)
+        return self._engine_roots(_native_scene_shell_factory, _adopt_padding_ghosts)
 
     def get_time(self):
         return self.time
@@ -15520,6 +15761,15 @@ class Scene(_SceneCore):
         # Scene/Stage borrow survives the Python callback phase.
         if not proto_animations:
             return
+        for proto in proto_animations:
+            # Reference Scene.begin_animations adds an animated mobject that
+            # is not in the scene list. For the camera frame, which
+            # clear() and remove() drop, that puts it back first (fm-6l2i).
+            mobject = getattr(proto, "mobject", None)
+            if isinstance(mobject, CameraFrame) and not any(
+                listed is mobject for listed in self.mobjects
+            ):
+                self.add(mobject)
         def rate_payload(value, where, run_time_hint):
             if value is None or isinstance(value, str):
                 return value
@@ -16338,7 +16588,17 @@ class SceneState:
             raise TypeError("restore_scene expects a Scene")
         if scene is self._scene and self._checkpoint is not None:
             scene._restore_checkpoint_bytes(self._checkpoint)
-            scene._reseat_engine_roots(*self.mobjects_to_copies)
+            # The checkpoint holds every root listed at capture. A listed frame
+            # the state ignored is reseated with them, then unlisted: the
+            # Reference restores exactly the saved mobjects (fm-6l2i).
+            captured = getattr(self, "_checkpoint_roots", None)
+            if captured is None:
+                captured = tuple(self.mobjects_to_copies)
+            scene._reseat_engine_roots(*captured)
+            saved = {id(mobject) for mobject in self.mobjects_to_copies}
+            unsaved = [root for root in captured if id(root) not in saved]
+            if unsaved:
+                scene.remove(*unsaved)
             scene.num_plays = self.num_plays
             return
         restored = [
@@ -24212,18 +24472,21 @@ def _install_config_module():
         return config
 
     def initialize_manim_config():
+        # The Reference's default_config.yml at the pin, with the camera and
+        # directories sections under the cwd custom_config.yml, resolved by
+        # the one native config reader (no PyYAML). The camera section is
+        # the layer Scene's camera merges (fm-e661).
+        pinned = _pinned_manim_config()
+        sections = {
+            name: dict(vars(getattr(pinned, name)))
+            for name in ("sizes", "key_bindings", "vmobject", "mobject", "text", "tex")
+        }
         config = _ConfigDict(
             {
-                "camera": {
-                    "frame_rate": 30,
-                    "pixel_height": 1080,
-                    "pixel_width": 1920,
-                },
-                # Reference defaults merged with the cwd custom_config.yml,
-                # resolved by the one native config reader (no PyYAML).
+                **sections,
+                "colors": dict(pinned.colors),
+                "camera": _reference_camera_layer(),
                 "directories": _FMN_ROOT._resolved_directories(_cwd_custom_config()),
-                "tex": {"font_size_for_unit_height": 48},
-                "text": {"font_size_for_unit_height": 48},
                 "log_level": "INFO",
             }
         )

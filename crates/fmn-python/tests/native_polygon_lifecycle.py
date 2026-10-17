@@ -163,7 +163,7 @@ class NativePolygonLifecycle(unittest.TestCase):
         line.start = np.array([-3., 1, 0])
         line.end = np.array([3., 1, 0])
         line.init_points()
-        self.assertIs(scene.mobjects[1], line)
+        self.assertIs(scene.mobjects[2], line)
         np.testing.assert_allclose(line.get_start(), [-3, 1, 0], atol=1e-6)
         np.testing.assert_allclose(line.get_end(), [3, 1, 0], atol=1e-6)
 

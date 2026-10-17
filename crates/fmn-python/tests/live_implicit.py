@@ -40,7 +40,7 @@ class LiveImplicitTests(unittest.TestCase):
         obj.init_points()
         self.assertIs(obj._scene, scene)
         self.assertTrue(obj._is_bound())
-        self.assertEqual(tuple(scene.mobjects), (obj,))
+        self.assertEqual(tuple(scene.mobjects), (scene.frame, obj))
         self.assertIs(obj.submobjects[0], child)
         self.assertIs(obj.updaters[0], callback)
         self.assertEqual(scene.get_time(), before_time)

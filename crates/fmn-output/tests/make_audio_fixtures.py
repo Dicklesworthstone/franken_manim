@@ -14,6 +14,12 @@ import subprocess
 import sys
 import wave
 
+# Each subprocess encodes or decodes 1/8 s of audio, normally in well under a
+# second. The cap only makes a hung ffmpeg fail the run. It is wall clock, so
+# it must also hold on an overloaded shared build worker, where 30 s timed out
+# an MP3 decode during a suite that ran 2.4x slower than usual (fm-jjzd).
+FFMPEG_TIMEOUT_SECONDS = 300
+
 
 def make(root: Path) -> None:
     root.mkdir(parents=True, exist_ok=True)
@@ -43,11 +49,11 @@ def make(root: Path) -> None:
         target = root / f"{name}.asset"
         subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
                         "-i", str(root / source), "-c:a", codec, "-f", muxer, str(target)],
-                       check=True, timeout=30, capture_output=True)
+                       check=True, timeout=FFMPEG_TIMEOUT_SECONDS, capture_output=True)
         reference = subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin",
                                     "-threads", "1", "-i", str(target), "-map", "0:a:0",
                                     "-c:a", "pcm_f32le", "-f", "f32le", "pipe:1"],
-                                   check=True, timeout=30, capture_output=True).stdout
+                                   check=True, timeout=FFMPEG_TIMEOUT_SECONDS, capture_output=True).stdout
         assert reference and len(reference) % (channels * 4) == 0
         (root / f"{name}.f32").write_bytes(reference)
         rows.append(f"{name}.asset\t{name}.f32\t{channels}\t{rate}")

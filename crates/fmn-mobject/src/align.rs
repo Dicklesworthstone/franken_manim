@@ -156,11 +156,21 @@ impl Stage {
         let curr = children.len();
         let target = checked_aligned_submobject_count(curr, n)?;
         if curr == 0 {
+            // Every pad is a leaf copy of the childless `mob` (the Reference
+            // sets `n` copies of one `null_mob`), so all are made before any
+            // is attached: copying `mob` after attaching a pad would copy
+            // that pad along as a child.
             let center = self.get_center(mob);
+            let mut pads = Vec::with_capacity(target);
             for _ in 0..target {
-                let copy = self.copy_family(mob)?;
+                let copied = self.copy_family_mapped(mob)?;
+                self.mark_padding(&copied);
+                let copy = copied.root();
                 write_points(self, copy, &[center])?;
-                self.attach(mob, copy).expect("fresh leaf copy is acyclic");
+                pads.push(copy);
+            }
+            for pad in pads {
+                self.attach(mob, pad).expect("fresh leaf copy is acyclic");
             }
             return Ok(());
         }
@@ -172,7 +182,9 @@ impl Stage {
         for (&child, &sf) in children.iter().zip(split_factors.iter()) {
             new_children.push(child);
             for _ in 1..sf {
-                let ghost = self.copy_family(child)?;
+                let copied = self.copy_family_mapped(child)?;
+                self.mark_padding(&copied);
+                let ghost = copied.root();
                 self.set_family_opacity_zero(ghost);
                 new_children.push(ghost);
             }

@@ -1,0 +1,203 @@
+name: AAC soundtrack fidelity
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/audio-fidelity.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: audio-fidelity-${{ github.run_id }}
+  cancel-in-progress: false
+jobs:
+  validate:
+    if: github.repository == 'Dicklesworthstone/franken_manim' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+      CARGO_TERM_COLOR: never
+      CARGO_TARGET_DIR: target/portable
+      CARGO_BUILD_JOBS: '2'
+      PYO3_PYTHON: python
+      FMN_REQUIRE_FFMPEG: '1'
+      FMN_REAL_FFMPEG: '1'
+      FMN_AUDIO_FIXTURE_DIR: /tmp/fmn-audio-fixtures-${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: d05747ee43e87fdc87774ea41c9fd11aec9678bf
+          persist-credentials: false
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: '3.13'
+      - run: |
+          rustup show active-toolchain
+          python -m pip install 'numpy==2.5.2'
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+          ffmpeg -version
+          python crates/fmn-output/tests/make_audio_fixtures.py "$FMN_AUDIO_FIXTURE_DIR"
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/portable
+          key: audio-fidelity-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            video-fidelity-${{ runner.os }}-${{ runner.arch }}-
+            cargo-${{ runner.os }}-${{ runner.arch }}-portable-
+            fmtl-rates-${{ runner.os }}-${{ runner.arch }}-
+      - name: Materialize hash-verified feature stack and generate from the owned schema
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import base64, gzip, hashlib, json, os, pathlib, subprocess, urllib.request
+          out = pathlib.Path(os.environ['RUNNER_TEMP'])/'audio-fidelity'
+          out.mkdir()
+          def blob_sha(content):
+              return hashlib.sha1(b'blob '+str(len(content)).encode()+b'\0'+content).hexdigest()
+          def get_blob(sha):
+              request = urllib.request.Request(f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{sha}', headers={'Authorization':'Bearer '+os.environ['GH_TOKEN']})
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  content = base64.b64decode(json.load(response)['content'])
+              assert blob_sha(content) == sha
+              return content
+          def patch(name, shas, expected):
+              content = gzip.decompress(base64.b64decode(b''.join(get_blob(sha) for sha in shas), validate=True))
+              assert hashlib.sha256(content).hexdigest() == expected
+              path = out/(name+'.patch')
+              path.write_bytes(content)
+              paths = [line.split('\t',2)[2] for line in subprocess.check_output(['git','apply','--numstat',str(path)], text=True).splitlines()]
+              return path, paths
+          color, color_paths = patch('color', ['8cd8e12befc3a18cc1a8a255697610e7bfbbe2f2'], '4216ce65910e7c89f130864d6ce7b6ea98980a07c8076c96cf47165d3e954915')
+          audio, audio_paths = patch('audio', ['74b6a63cc5880d1353ca9c3154e9e0c3a6f808c9','b582411b413bc20449ee4ee5cebc592ded4de151'], '0642a9d40b7b5959587715bca1c8de3f77db45ee4c48588053f1a18a77654628')
+          expected_audio = '''API_OVERLAY.tsv crates/fmn-cli/src/lib.rs crates/fmn-config/src/config.rs crates/fmn-config/tests/config.rs crates/fmn-output/src/ffmpeg.rs crates/fmn-output/src/lib.rs crates/fmn-output/src/negotiate.rs crates/fmn-output/src/negotiate/audio_quality.rs crates/fmn-output/src/sinks.rs crates/fmn-output/tests/audio_quality.rs crates/fmn-python/python/fmn_python/video_cli.py crates/fmn-python/src/lib.rs crates/fmn-python/src/portal_video.rs crates/fmn-python/src/portal_video/quality.rs crates/fmn-python/tests/video_cli_unit.py crates/fmn-python/tests/video_quality.py crates/fmn-python/tests/video_quality_console.py crates/fmn/src/rendering.rs crates/fmn/tests/native_video.rs docs/behavior_notes/BN-15-cli-contract.md'''.split()
+          assert set(audio_paths) == set(expected_audio)
+          assert set(color_paths) == set('''crates/fmn-output/src/negotiate.rs crates/fmn-output/tests/video_color_negotiation.rs crates/fmn/src/rendering.rs crates/fmn/tests/native_video.rs crates/fmn-cli/src/lib.rs crates/fmn-python/src/portal_video.rs crates/fmn-python/tests/video_options.py'''.split())
+          generated = {
+              'crates/fmn-config/src/generated.rs':'generate_config_rs',
+              'crates/fmn-cli/src/generated.rs':'generate_cli_rs',
+              'docs/api/cli_flags.md':'generate_cli_table_md',
+              'docs/api/ledger.tsv':'generate_ledger_tsv',
+              'docs/api/out_of_tier.tsv':'generate_out_of_tier_tsv',
+              'docs/api/parity_coverage.svg':'generate_coverage_badge_svg',
+              'docs/api/schema.md':'generate_docs_md',
+          }
+          paths = sorted(set(color_paths + audio_paths + list(generated)))
+          bases = {}
+          for name in paths:
+              result = subprocess.run(['git','rev-parse','--verify','HEAD:'+name], text=True, capture_output=True)
+              bases[name] = result.stdout.strip() if result.returncode == 0 else None
+          (out/'base-blobs.json').write_text(json.dumps(bases, indent=2))
+          (out/'base-commit.txt').write_text(subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip())
+          (out/'paths.json').write_text(json.dumps(paths, indent=2))
+          subprocess.run(['git','apply','--check',str(color)], check=True)
+          subprocess.run(['git','apply',str(color)], check=True)
+          # Only test admission changes: the host must supply a PATH snapshot.
+          locator_test = pathlib.Path('crates/fmn-output/tests/video_color_negotiation.rs')
+          text = locator_test.read_text()
+          assert text.count('StdFfmpegLocator::default()') == 1
+          locator_test.write_text(text.replace('StdFfmpegLocator::default()', 'StdFfmpegLocator::from_host_path()'))
+          # Preserve the independently publishable color milestone, formatted
+          # identically without changing the unformatted AAC patch context.
+          for name in color_paths:
+              target = out/'color-source'/name
+              target.parent.mkdir(parents=True, exist_ok=True)
+              target.write_bytes(pathlib.Path(name).read_bytes())
+          subprocess.run(['rustfmt','--edition','2024','--config','skip_children=true',*[str(out/'color-source'/p) for p in color_paths if p.endswith('.rs')]], check=True)
+          (out/'color-blobs.json').write_text(json.dumps({p:blob_sha((out/'color-source'/p).read_bytes()) for p in color_paths}, indent=2))
+          subprocess.run(['git','apply','--check',str(audio)], check=True)
+          subprocess.run(['git','apply',str(audio)], check=True)
+          # The new reviewed CLI/config entries extend the API digest.
+          # No old reviewed row or out-of-tier ruling may be weakened/removed.
+          delta = subprocess.check_output(['git','diff','--unified=0','--','API_OVERLAY.tsv'], text=True)
+          removed = [line for line in delta.splitlines() if line.startswith('-') and not line.startswith('---')]
+          added = [line[1:] for line in delta.splitlines() if line.startswith('+') and not line.startswith('+++')]
+          assert not removed and len(added) == 7 and all('audio_bitrate' in line or '--audio-bitrate' in line for line in added), delta
+          overlay = pathlib.Path('API_OVERLAY.tsv')
+          text = overlay.read_text()
+          old_digest = 'f6194cee89e89513255f6788a358339f49c1ffd54515a395de06e5ee8aff3e03'
+          new_digest = 'fc20107d47e465ac41bdda57ae96dcc988db6beec45ecfd9a209757aeed158a6'
+          assert text.count('ledger_reviewed_digest\t'+old_digest) == 1
+          overlay.write_text(text.replace('ledger_reviewed_digest\t'+old_digest, 'ledger_reviewed_digest\t'+new_digest))
+          (out/'api-review-delta.txt').write_text(delta)
+          # Invoke the existing schema generator and its owned hashing crate
+          # before compiling the generated config consumer. No substitute
+          # generator, hash, or hand-edited generated output is introduced.
+          module = pathlib.Path('crates/fmn-conformance/src/schema.rs').resolve()
+          driver = out/'generate.rs'
+          source = '#[path='+json.dumps(str(module))+'] mod schema;\nfn main() {\nlet schema = schema::Schema::parse(&std::fs::read_to_string("API_SCHEMA.tsv").unwrap(), &std::fs::read_to_string("API_OVERLAY.tsv").unwrap()).unwrap();\n'
+          for name, function in generated.items():
+              source += f'std::fs::write({json.dumps(name)}, schema::{function}(&schema)).unwrap();\n'
+          driver.write_text(source+'}\n')
+          library = out/'libfmn_hash.rlib'
+          subprocess.run(['rustc','--edition=2024','--crate-name','fmn_hash','--crate-type','rlib','crates/fmn-hash/src/lib.rs','-o',str(library)], check=True)
+          subprocess.run(['rustc','--edition=2024',str(driver),'--extern','fmn_hash='+str(library),'-o',str(out/'generate')], check=True)
+          subprocess.run([str(out/'generate')], check=True)
+          authored = sorted(set(color_paths + audio_paths))
+          subprocess.run(['rustfmt','--edition','2024','--config','skip_children=true',*[p for p in authored if p.endswith('.rs')]], check=True)
+          subprocess.run(['git','add','-N','crates/fmn-output/src/negotiate/audio_quality.rs','crates/fmn-output/tests/audio_quality.rs'], check=True)
+          subprocess.run(['git','diff','--check'], check=True)
+          (out/'validated-source.patch').write_bytes(subprocess.check_output(['git','diff','--binary']))
+          for name in paths:
+              target = out/'source'/name
+              target.parent.mkdir(parents=True, exist_ok=True)
+              target.write_bytes(pathlib.Path(name).read_bytes())
+          PY
+      - name: Test actual AAC mux products and all front doors
+        run: |
+          python - <<'PY'
+          import json, os, pathlib, subprocess
+          out = pathlib.Path(os.environ['RUNNER_TEMP'])/'audio-fidelity'
+          commands = [
+              ('schema-drift', ['cargo','test','--locked','-p','fmn-conformance','--test','api_schema']),
+              ('output', ['cargo','test','--locked','-p','fmn-output','--features','ffmpeg-test-fixture','--tests','--no-fail-fast']),
+              ('config', ['cargo','test','--locked','-p','fmn-config']),
+              ('native-video', ['cargo','test','--locked','-p','fmn','--test','native_video','--test','native_video_quality','--test','native_cpu_pipeline','--test','native_render']),
+              ('native-color', ['cargo','test','--locked','-p','fmn','--lib','native_video_transfer']),
+              ('cli-audio', ['cargo','test','--locked','-p','fmn-cli','--lib','audio_quality']),
+              ('cli-color', ['cargo','test','--locked','-p','fmn-cli','--lib','native_video_transfer']),
+              ('portal-video', ['cargo','test','--locked','-p','fmn-python','--lib','portal_video::','--','--nocapture']),
+              ('python-cli', ['python','crates/fmn-python/tests/video_cli_unit.py']),
+              ('clippy', ['cargo','clippy','--locked','-p','fmn-output','-p','fmn-config','-p','fmn','-p','fmn-cli','-p','fmn-python','--all-targets','--','-D','warnings']),
+          ]
+          results = {}
+          for name, command in commands:
+              print('RUN', name, flush=True)
+              with (out/(name+'.log')).open('w') as log:
+                  result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
+              results[name] = result.returncode
+              print((out/(name+'.log')).read_text()[-18000:], flush=True)
+              (out/'results.json').write_text(json.dumps(results, indent=2))
+          assert all(code == 0 for code in results.values()), results
+          PY
+      - name: Store exact tested immutable blobs; no commit or ref changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python - <<'PY'
+          import base64, hashlib, json, os, pathlib, urllib.request
+          out = pathlib.Path(os.environ['RUNNER_TEMP'])/'audio-fidelity'
+          result = {}
+          for name in json.loads((out/'paths.json').read_text()):
+              content = pathlib.Path(name).read_bytes()
+              assert content == (out/'source'/name).read_bytes(), name
+              expected = hashlib.sha1(b'blob '+str(len(content)).encode()+b'\0'+content).hexdigest()
+              request = urllib.request.Request(f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs', data=json.dumps({'content':base64.b64encode(content).decode(),'encoding':'base64'}).encode(), headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Content-Type':'application/json'}, method='POST')
+              with urllib.request.urlopen(request, timeout=60) as response:
+                  actual = json.load(response)['sha']
+              assert actual == expected
+              result[name] = actual
+          (out/'validated-blobs.json').write_text(json.dumps(result, indent=2))
+          print(json.dumps(result, indent=2))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: audio-fidelity-${{ github.run_id }}
+          path: ${{ runner.temp }}/audio-fidelity
+          retention-days: 7
+          if-no-files-found: warn

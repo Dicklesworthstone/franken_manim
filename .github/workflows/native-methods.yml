@@ -1,0 +1,83 @@
+name: Native method animation
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/native-methods.yml'
+      - 'crates/fmn-anim/**'
+      - 'crates/fmn/src/prelude.rs'
+      - 'crates/fmn/tests/deferred_method_render.rs'
+      - 'crates/fmn-scene/tests/deferred_method_bundle.rs'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-method-animation
+  cancel-in-progress: true
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+      CARGO_TERM_COLOR: never
+      CARGO_TARGET_DIR: target/portable
+      CARGO_BUILD_JOBS: '2'
+      PYO3_PYTHON: python3
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/portable
+          key: native-methods-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            fmtl-rates-${{ runner.os }}-${{ runner.arch }}-
+            cargo-${{ runner.os }}-${{ runner.arch }}-portable-
+      - run: rustup show active-toolchain
+      - name: Check the published source, without applying patches
+        run: |
+          rustfmt --check --edition 2024 --config skip_children=true \
+            crates/fmn-anim/src/apply_method.rs crates/fmn-anim/src/lib.rs \
+            crates/fmn-anim/tests/apply_method.rs crates/fmn-anim/tests/apply_method_maps.rs \
+            crates/fmn-scene/tests/deferred_method_bundle.rs \
+            crates/fmn/src/prelude.rs crates/fmn/tests/deferred_method_render.rs
+      - name: Run native semantics, actual pixels and callback-free replay
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'native-methods'
+          out.mkdir()
+          (out/'source-commit.txt').write_text(os.environ['GITHUB_SHA']+'\n')
+          commands = [
+              ('focused', ['cargo','test','--locked','-p','fmn-anim','--test','apply_method','--test','apply_method_maps','--','--nocapture']),
+              ('bundle-replay', ['cargo','test','--locked','-p','fmn-scene','--test','deferred_method_bundle','--','--nocapture']),
+              ('actual-render', ['cargo','test','--locked','-p','fmn','--test','deferred_method_render','--','--nocapture']),
+              ('animation-scene-facade', ['cargo','test','--locked','-p','fmn-anim','-p','fmn-scene','-p','fmn','--no-fail-fast']),
+              ('release-method', ['cargo','test','--release','--locked','-p','fmn-anim','--test','apply_method','--test','apply_method_maps']),
+              ('release-render', ['cargo','test','--release','--locked','-p','fmn','--test','deferred_method_render']),
+              ('release-bundle', ['cargo','test','--release','--locked','-p','fmn-scene','--test','deferred_method_bundle']),
+              ('clippy', ['cargo','clippy','--locked','-p','fmn-anim','-p','fmn-scene','-p','fmn','--all-targets','--','-D','warnings']),
+              ('workspace-check', ['cargo','check','--locked','--workspace','--all-targets']),
+          ]
+          results = {}
+          for name, command in commands:
+              print('RUN', name, flush=True)
+              with (out/(name+'.log')).open('w') as log:
+                  result = subprocess.run(command,stdout=log,stderr=subprocess.STDOUT)
+              results[name] = result.returncode
+              (out/'results.json').write_text(json.dumps(results,indent=2))
+              print((out/(name+'.log')).read_text()[-14000:],flush=True)
+          subprocess.run(['git','diff','--exit-code'],check=True)
+          assert all(code == 0 for code in results.values()), results
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: native-methods-${{ github.run_id }}
+          path: ${{ runner.temp }}/native-methods
+          retention-days: 7

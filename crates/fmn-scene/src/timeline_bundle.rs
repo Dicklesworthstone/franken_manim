@@ -20,9 +20,10 @@
 //! [`fmn_anim::interpolate_between`] — the player's exact law, applied to
 //! the snapshots round-tripped through their canonical bytes, so the proof
 //! sees exactly what a player will decode — and requires bit-identity with
-//! the engine's own emitted frame over everything interpolation can write
-//! (record columns, placements, typed trackers, numeric uniforms), compared after the
-//! container's float canonicalization. The contract demands one
+//! the engine's own emitted frame over the complete rooted render state
+//! (record schemas and columns, placements, typed trackers, all uniforms,
+//! shape hints, renderer programs, image resources and exact family edges),
+//! compared after the container's float canonicalization. The contract demands one
 //! mid-segment frame; proving every frame is strictly stronger and costs
 //! only export time. Any mismatch, and the segment falls back to kind 1.
 //! Never guessed.
@@ -54,6 +55,9 @@ use fmn_hash::serial::{Limits, Reader, Schema, UnknownPolicy, Writer};
 use fmn_mobject::persist::PersistError;
 use fmn_mobject::{Snapshot, Stage};
 use fmn_render::engine::EngineIdentity;
+
+mod audio;
+pub use audio::{BundleSoundtrack, SOUNDTRACK_TIMELINE_BUNDLE_SCHEMA, attach_bundle_soundtrack};
 
 mod camera;
 pub use camera::CAMERA_TIMELINE_BUNDLE_SCHEMA;
@@ -139,6 +143,10 @@ impl BundleSegmentKind {
 /// Every refusal the FMTL/1 reader can produce.
 #[derive(Debug)]
 pub enum BundleReadError {
+    /// Invalid normalized PCM or soundtrack framing.
+    Soundtrack(&'static str),
+    /// The caller has not explicitly taken responsibility for the soundtrack.
+    SoundtrackRequired,
     /// Container framing, schema, version, checksum, or limit failure.
     Malformed(SerialError),
     /// A camera capture was invalid or malformed.
@@ -180,6 +188,8 @@ pub enum BundleReadError {
 impl std::fmt::Display for BundleReadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Soundtrack(reason) => write!(f, "invalid FMTL soundtrack: {reason}"),
+            Self::SoundtrackRequired => f.write_str("sound-bearing FMTL requires audio-aware playback; take the soundtrack explicitly before picture-only replay"),
             Self::Malformed(error) => write!(f, "malformed FMTL/1 container: {error}"),
             Self::Camera(error) => write!(f, "invalid FMTL camera capture: {error}"),
             Self::CameraTrackRequired => f.write_str(
@@ -245,6 +255,7 @@ pub struct TimelineBundle {
     frame_count: u32,
     engine_version: String,
     cameras: Option<Vec<fmn_render::camera::CameraSample>>,
+    soundtrack: Option<BundleSoundtrack>,
 }
 
 impl TimelineBundle {
@@ -259,11 +270,14 @@ impl TimelineBundle {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, BundleReadError> {
         let mut reader = Reader::open(
             bytes,
-            CAMERA_TIMELINE_BUNDLE_SCHEMA,
+            SOUNDTRACK_TIMELINE_BUNDLE_SCHEMA,
             Limits::DEFAULT,
             UnknownPolicy::Strict,
         )
         .map_err(BundleReadError::Malformed)?;
+        if reader.version().1 == 2 {
+            return audio::read_envelope(bytes);
+        }
         let wanted = reader
             .get_str()
             .map_err(BundleReadError::Malformed)?
@@ -385,6 +399,7 @@ impl TimelineBundle {
             frame_count,
             engine_version: found,
             cameras,
+            soundtrack: None,
         })
     }
 
@@ -508,6 +523,7 @@ impl TimelineBundle {
     }
 
     fn stage_at_inner(&self, index: u32) -> Result<Stage, BundleReadError> {
+        self.require_picture_only()?;
         let total = self.frame_count();
         let global = i64::from(index) + 1;
         let (segment_index, offset) = self
@@ -723,12 +739,13 @@ enum SegmentEntry {
 /// Curved method animations are pure for native reconstruction, but only
 /// qualify for this serialized law when the frame-by-frame proof succeeds;
 /// otherwise their actual captured frames are preserved as kind 1.
-fn nominate(step: &Step, report: &SegmentReport) -> Option<(PathFunc, RateFunc)> {
+fn nominate(step: &Step, report: &SegmentReport) -> Option<(PathFunc, u8)> {
     if !report.purity.is_pure() {
         return None;
     }
     match step {
-        Step::Wait(_) => Some((PathFunc::Straight, RateFunc::Base(fmn_core::rate::linear))),
+        // Wait is linear by construction; FMTL/1 assigns it tag zero.
+        Step::Wait(_) => Some((PathFunc::Straight, 0)),
         Step::Play(animations) => {
             let mut tag: Option<u8> = None;
             for animation in animations.iter() {
@@ -746,7 +763,7 @@ fn nominate(step: &Step, report: &SegmentReport) -> Option<(PathFunc, RateFunc)>
                     Some(_) => return None,
                 }
             }
-            Some((PathFunc::Straight, rate_from_tag(tag?)?))
+            Some((PathFunc::Straight, tag?))
         }
     }
 }
@@ -762,19 +779,24 @@ fn canonical_f64_equal(left: f64, right: f64) -> bool {
     canonicalize_f64(left).to_bits() == canonicalize_f64(right).to_bits()
 }
 
-/// Compare everything interpolation can write in two rooted forests without
-/// constructing whole-frame fingerprints. Handles and arena ordinals remain
-/// deliberately absent (they are process-local); record data, placements,
-/// numeric uniforms, z-order, roots, and family structure compare in their
-/// deterministic traversal order after container float canonicalization.
+/// Compare complete rooted render inputs without constructing whole-frame
+/// fingerprints. Both stages have been decoded against the SAME binding arena,
+/// so ordered handle equality is meaningful here: an equal-looking replacement
+/// must not stand in for an original shared child. Private animation copies and
+/// executable/restoration bookkeeping are deliberately outside this proof.
+///
+/// Purity says a frame depends only on begin state and alpha. It does not say
+/// that record interpolation can express changes to textures, programs, hints,
+/// boolean flags or family edges. Those inputs must match too, even though the
+/// player's interpolation does not write them.
 fn rooted_states_equal(left: &Stage, right: &Stage) -> bool {
-    if left.roots().len() != right.roots().len() {
+    if left.roots() != right.roots() {
         return false;
     }
     for (&left_root, &right_root) in left.roots().iter().zip(right.roots()) {
         let left_family = left.family(left_root);
         let right_family = right.family(right_root);
-        if left_family.len() != right_family.len() {
+        if left_family != right_family {
             return false;
         }
         for (left_mob, right_mob) in left_family.into_iter().zip(right_family) {
@@ -795,15 +817,14 @@ fn rooted_states_equal(left: &Stage, right: &Stage) -> bool {
                             .all(|(a, b)| canonical_f64_equal(a, b)) => {}
                 _ => return false,
             }
-            let left_fields = left_entry.buffer.schema().fields();
-            let right_fields = right_entry.buffer.schema().fields();
-            if left_fields.len() != right_fields.len() {
+            if left_entry.buffer.schema() != right_entry.buffer.schema()
+                || left_entry.buffer.len() != right_entry.buffer.len()
+            {
                 return false;
             }
+            let left_fields = left_entry.buffer.schema().fields();
+            let right_fields = right_entry.buffer.schema().fields();
             for (left_field, right_field) in left_fields.iter().zip(right_fields) {
-                if left_field != right_field {
-                    return false;
-                }
                 match (
                     left_entry.buffer.read_column(&left_field.name),
                     right_entry.buffer.read_column(&right_field.name),
@@ -843,8 +864,18 @@ fn rooted_states_equal(left: &Stage, right: &Stage) -> bool {
                     right_uniforms.anti_alias_width,
                 )
                 || left_uniforms.joint_type != right_uniforms.joint_type
+                || left_uniforms.flat_stroke != right_uniforms.flat_stroke
+                || left_uniforms.scale_stroke_with_zoom != right_uniforms.scale_stroke_with_zoom
+                || left_uniforms.stroke_behind != right_uniforms.stroke_behind
+                || left_uniforms.depth_test != right_uniforms.depth_test
+                || left_uniforms.use_winding_fill != right_uniforms.use_winding_fill
                 || left.z_index(left_mob) != right.z_index(right_mob)
-                || left_entry.submobjects().len() != right_entry.submobjects().len()
+                || left_entry.submobjects() != right_entry.submobjects()
+                || left_entry.render_primitive() != right_entry.render_primitive()
+                || left_entry.image_resource() != right_entry.image_resource()
+                || left.shape(left_mob) != right.shape(right_mob)
+                || left.primitive_hint(left_mob).is_some()
+                    != right.primitive_hint(right_mob).is_some()
             {
                 return false;
             }
@@ -924,18 +955,20 @@ fn classify_captured_segment(
     begin: Vec<u8>,
     mut frames: Vec<Vec<u8>>,
     path: PathFunc,
-    rate: &RateFunc,
+    rate_tag: u8,
     run_time: f64,
     fps: u32,
     budget: &mut CaptureBudget,
 ) -> Result<SegmentEntry, BundleError> {
     let path_tag =
         fmn_anim::path_tag(path).ok_or(BundleError::PlanDrift("nominated path is untaggable"))?;
-    let rate_tag = rate_tag(rate).ok_or(BundleError::PlanDrift("nominated rate is untaggable"))?;
+    // Nomination has established identity. Resolve it for the reconstruction
+    // proof, but do not infer the tag again from a compiled function address.
+    let rate = rate_from_tag(rate_tag).ok_or(BundleError::PlanDrift("nominated rate tag"))?;
 
     if frames.is_empty() {
         let end = clone_snapshot_bytes(&begin, budget, "frameless pure end snapshot")?;
-        return if prove_pure_segment(&begin, &end, path, rate, &frames, run_time, fps)? {
+        return if prove_pure_segment(&begin, &end, path, &rate, &frames, run_time, fps)? {
             Ok(SegmentEntry::Pure {
                 begin,
                 end,
@@ -951,7 +984,7 @@ fn classify_captured_segment(
         let end = frames.last().ok_or(BundleError::PlanDrift(
             "captured segment lost its last frame",
         ))?;
-        prove_pure_segment(&begin, end, path, rate, &frames, run_time, fps)?
+        prove_pure_segment(&begin, end, path, &rate, &frames, run_time, fps)?
     };
     if proven {
         let end = frames.pop().ok_or(BundleError::PlanDrift(
@@ -1084,7 +1117,7 @@ pub fn export_timeline_bundle_with_limits(
         }
 
         let entry = match nominate(step, &report) {
-            Some((path, rate)) => {
+            Some((path, rate_tag)) => {
                 let begin_bytes = report
                     .begin_state
                     .as_ref()
@@ -1097,7 +1130,7 @@ pub fn export_timeline_bundle_with_limits(
                         begin,
                         frames,
                         path,
-                        &rate,
+                        rate_tag,
                         planned.run_time,
                         fps,
                         &mut budget,

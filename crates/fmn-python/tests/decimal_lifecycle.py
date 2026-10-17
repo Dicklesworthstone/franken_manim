@@ -136,7 +136,8 @@ class DecimalLifecycleTests(unittest.TestCase):
             def init_data(self):
                 calls.append('data')
                 return super().init_data()
-        for options in ({'number': float('nan')}, {'num_decimal_places': 4097},
+        # A real NaN is a display token (`nan`, fm-5wq.30); a complex one refuses.
+        for options in ({'number': complex(float('nan'), 0)}, {'num_decimal_places': 4097},
                         {'font_size': 0}, {'edge_to_fix': [float('inf'), 0, 0]},
                         {'stroke_width': float('nan')}):
             with self.subTest(options=options), self.assertRaises((ValueError, TypeError)):

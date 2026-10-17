@@ -47,11 +47,12 @@ def assert_quality(report, encodes, soundtrack_muxes, crf=16):
         for flag, value in (("-crf", str(crf)), ("-preset", "slow"), ("-tune", "animation")):
             assert argv.count(flag) == 1 and argv.index(flag) > argv.index("-i") + 1, argv
             assert argv[argv.index(flag) + 1] == value, argv
-        assert "-b:v" not in argv and "-vf" not in argv, argv
+        assert "-b:v" not in argv and "-vf" not in argv and "-b:a" not in argv, argv
     for invocation in muxed:
         argv = invocation["argv"]
         assert argv.count("-c:v") == 1 and argv[argv.index("-c:v") + 1] == "copy", argv
         assert argv.count("-c:a") == 1 and argv[argv.index("-c:a") + 1] == "aac", argv
+        assert argv.count("-b:a") == 1 and argv[argv.index("-b:a") + 1] == "192000", argv
         for flag in ("-crf", "-preset", "-tune", "-b:v", "-vf"):
             assert flag not in argv, argv
 
@@ -101,6 +102,9 @@ with tempfile.TemporaryDirectory(prefix="fmn-video-quality-console-") as directo
         ("--format", "mp4", "--preset", "slow -vf eq"),
         ("--format", "mp4", "--preset=slow", "--preset", "slow"),
         ("--format", "mp4", "--video-bitrate=0"),
+        ("--format", "mp4", "--audio-bitrate=0"),
+        ("--format", "mp4", "--audio-bitrate=4294967296"),
+        ("--format", "wav", "--audio-bitrate=192000"),
         ("--format", "mp4", "--video-bitrate=4294967296"),
         ("--format", "mp4", "--crf=0", "--video-bitrate=12000000"),
         ("--format", "png", "--crf=16"),
@@ -150,7 +154,7 @@ with tempfile.TemporaryDirectory(prefix="fmn-video-quality-console-") as directo
             destination = root / name
             code, report = console(*selectors, "--video_dir", str(destination),
                                    "--ffmpeg_bin", ffmpeg,
-                                   "--crf=16", "--preset", "slow", "--tune=animation")
+                                   "--crf=16", "--preset", "slow", "--tune=animation", "--audio-bitrate=192000")
             assert code == 0, report
             assert_quality(report, encodes, muxes)
             assert constructed.read_text().splitlines() == expected_constructors, report

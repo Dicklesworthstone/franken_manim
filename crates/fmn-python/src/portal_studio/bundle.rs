@@ -269,10 +269,7 @@ fn begin_bundle(
             "a render generation is already active",
         ));
     }
-    let mut owner = scene.try_borrow_mut()?;
-    owner.engine = Rc::new(EngineState::new(replacement));
-    owner.render_invocations.clear();
-    owner.render_audio_inputs.clear();
+    crate::install_pristine_arena(scene, Rc::new(EngineState::new(replacement)))?;
     *slot = Some(PortalRenderSession::Preview(Box::new(capture)));
     Ok(())
 }

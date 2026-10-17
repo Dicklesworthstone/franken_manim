@@ -6,6 +6,7 @@ on:
       - '.github/workflows/native-frame-pipeline.yml'
       - 'crates/fmn-cli/**'
       - 'crates/fmn-runtime/**'
+      - 'crates/fmn-anim/**'
       - 'crates/fmn-render/**'
       - 'crates/fmn-scene/**'
       - 'crates/fmn-mobject/**'
@@ -49,7 +50,20 @@ jobs:
           key: cargo-${{ runner.os }}-${{ runner.arch }}-portable-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'SUITE.lock') }}
           restore-keys: |
             cargo-${{ runner.os }}-${{ runner.arch }}-portable-
+      - name: Native pure interpolation worker ownership
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p fmn-anim --test pure_frame
+      - name: Native scene pure dispatch and serial observer fallbacks
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p fmn-scene --test pure_dispatch
+      - name: Live pure program pipeline and publication
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test --locked -p fmn --test native_pure_pipeline
+          cargo test --locked -p fmn --test native_pure_render
+          cargo test --locked -p fmn --test native_vector_pipeline
       - name: CLI unit and shipping binary camera and compiled-playback regressions
+        if: ${{ !cancelled() }}
         run: cargo test --locked -p fmn-cli --features cli,batch --tests
       - name: Native camera motion, compiled replay and atomic publication
         if: ${{ !cancelled() }}
@@ -70,6 +84,8 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           cargo test --locked -p fmn-render --lib vector_frame
+          cargo test --locked -p fmn-render --lib table::shared
+          cargo test --locked -p fmn-render --lib plan::generation
           cargo test --locked -p fmn-render --lib retained
       - name: Native executable examples
         if: ${{ !cancelled() }}

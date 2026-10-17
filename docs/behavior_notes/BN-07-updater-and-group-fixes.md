@@ -1,6 +1,6 @@
-# BN-07 — Corrected mobject behavior (C-5, C-6, C-14, C-15, C-17, C-18, C-19, C-20, C-21, C-23, C-24, C-26)
+# BN-07 — Corrected mobject behavior (C-5, C-6, C-14, C-15, C-17, C-18, C-19, C-20, C-21, C-23, C-24, C-26, C-29, C-30, C-31, C-32, C-33)
 
-**Status:** Draft (W3, fm-yra; W10, fm-23ev, fm-5wq.4.39, and fm-easc). Consumed by Choreo (§9.1's
+**Status:** Draft (W3, fm-yra; W10, fm-23ev, fm-5wq.4.39, fm-easc, fm-gm0v, and fm-pointless-box-interpolation-hccu). Consumed by Choreo (§9.1's
 `suspend_mobject_updating` interaction), fmn-python (whose `manimlib`
 surface presents these semantics), and the Parity Ledger.
 
@@ -289,3 +289,134 @@ Locked by the C-26 assertions in `crates/fmn-python/tests/bridge.py`.
 
 **Migration:** none needed. Such calls could only have raised in the
 Reference.
+
+## C-29 — `restore()` and `become()` carry a point-less member's style
+
+A point-less Reference mobject keeps its colors in `_data_defaults`, not in
+`data` (`mobject.py:1329`, `vectorized_mobject.py:264`), and `become()`
+copies `data` only (`mobject.py:730`). So `restore()` leaves every point-less
+member of the family (an `Integer` root, the group inside it, a `VGroup`)
+with the style it had before the call, while members with points return to
+the saved state. `get_fill_opacity()` on such a member then reads the stale
+value: in `_2020/hamming.py` `OneGroupPerParityBit`, a grid of `Integer`
+bits is faded by subgroup and restored four times, and every root a fade
+ever reached stays at opacity 0, though its glyph is visible again.
+
+**FrankenManim:** `become()` and `restore()` carry each member's style,
+with or without points.
+
+Locked by the C-29 assertions in `crates/fmn-python/tests/bridge.py`. The
+same rule shows in `_2023/convolutions2/continuous.py` `RepeatedConvolution`
+(and its three subclasses). `prod_rhs = fg_label[6:]` is a sliced `VGroup`,
+and `prod_rhs.become(...)` leaves its point-less root grey in the Reference
+but carries the source's style in FrankenManim. The corpus differential
+excludes it by the `bn07-c29-become-point-less-style` row.
+
+**Migration:** none needed. A scene that reads a restored member's style
+gets the saved value, matching what is drawn.
+
+## C-30 — `BackgroundRectangle.get_fill_color()` reports the rectangle's color
+
+The Reference's `BackgroundRectangle.get_fill_color()` returns
+`Color(self.color)` (`shape_matchers.py:96`). `VMobject.__init__` consumes
+`color=` itself, so `self.color` is `Mobject`'s default white. The getter
+reports `Color("white")`, a `colour.Color` rather than a hex string, whatever
+the rectangle is filled with; by default that is the camera background,
+`#333333`.
+
+**FrankenManim:** the getter reports the rectangle's own color as a hex
+string: the constructor's `color=`, the camera background by default. That is
+the fill it draws until a `set_style` call forces black (the Reference's
+fixed style, kept).
+
+Excluded from the structural diff by the `bn07-c30-background-rectangle-fill-getter` row,
+pinned to the Reference's `<Color white>`.
+
+**Migration:** none needed. A scene that read this getter got white; it
+now gets the rectangle's color.
+
+## C-31 — `match_style` styles a point-less mobject
+
+The Reference's `VMobject.set_style` writes `fill_rgba` and `stroke_rgba`
+into `data` only (`vectorized_mobject.py:232`, `:242`). Every other color
+setter falls back to `_data_defaults` when there are no points
+(`mobject.py:1329`), so `set_fill` and `set_stroke` style a point-less
+mobject, but `match_style` (`vectorized_mobject.py:276`), which passes the
+source's arrays through `set_style`, is silently dropped. `DashedVMobject`
+calls `self.match_style(vmobject, recurse=False)` on its point-less root
+(`vectorized_mobject.py:1414`), which keeps VMobject's default colors, and
+`VGroup().match_style(Circle())` stays grey. `cube.match_style(square)` on a
+`VCube` restyles the faces but leaves the root's BLUE_D fill
+(`_2026/spheres_talk/random_puzzles.py` `SumOfTwoSquares`). A `match_style`
+inside a play leaves a `ThreeDAxes` tick group's root grey
+(`_2024/puzzles/max_rand.py` `VisualizeMaxOfPairCDF`, row
+`bn07-c31-axes-ticks-match-style`).
+
+**FrankenManim:** a point-less member takes the matched style, as C-29
+carries it through `become()` and `restore()`.
+
+Excluded from the structural diff by the `bn07-c31-point-less-match-style` row.
+
+**Migration:** none needed. The dashes keep the source's style in both
+engines; only the point-less root's getters differ.
+
+## C-32 — `copy()` remaps every family-internal reference
+
+The Reference's `Mobject.copy()` remaps an attribute that names a member of
+the copied family (`mobject.py:696-700`), with two leaks. It skips
+`value is not self`, so a mobject that names itself keeps naming the
+original. And it copies each submobject with that submobject's own `copy()`
+(`mobject.py:685`), whose remap sees only the submobject's family, so a
+child's reference to a sibling keeps naming the original sibling. A copied
+group is then wired to the original's members: copying `VGroup(a, b)` with
+`a.partner = b` gives a copy whose first member points at the original `b`.
+The Reference's own `deepcopy()` (`copy.deepcopy`) remaps both, and so does
+`copy()` for a reference held by the copied root.
+
+**FrankenManim:** `copy()`, `copy.copy` and the padding copies that align a
+Transform's families (`invisible_copy`, fm-b97z) remap every reference into
+the copied family, as `deepcopy()` does. A reference outside the copied
+family stays shared, as in the Reference.
+
+Locked by `test_copy_remaps_every_family_internal_reference` in
+`crates/fmn-python/tests/copying_semantics.py` and
+`test_pads_remap_references_only_within_their_own_family` in
+`crates/fmn-python/tests/string_lifecycle.py`.
+
+**Migration:** none needed for a scene that uses its copy on its own. A
+scene that relied on a copied member still naming an original (itself, or a
+sibling) names that original explicitly.
+
+## C-33 — a point-less box interpolates along the path
+
+A mobject whose family has no points keeps its position in its cached box
+(fm-fc53). The Reference's `Mobject.interpolate` writes that box along
+`path_func` (`mobject.py:1837`) but leaves `_needs_new_bounding_box` set,
+so the next read recomputes the box at the origin unless something read it
+since the last refresh. The result of one interpolation therefore depends
+on earlier reads:
+
+| code | Reference `get_center()` |
+|---|---|
+| `scene.play(Transform(VGroup(), VGroup().shift(3*UP)))` | origin |
+| `g.generate_target(); g.target.shift(LEFT); scene.play(MoveToTarget(g))` | origin |
+| `g.get_center(); g.interpolate(VGroup(), VGroup().shift(4*RIGHT), 0.25)` | (1, 0, 0) |
+| the same `interpolate` without the read | origin |
+
+**FrankenManim:** the box lands where the path puts it, whatever was read
+before: the Transform ends at (0, 3, 0), MoveToTarget at (−1, 0, 0), and
+both `interpolate` calls at (1, 0, 0). An arced path moves it along the
+arc. Each family member's box interpolates on its own, as in the
+Reference; a box over points follows the points. A Transform keeps its
+endpoints' point-less positions through family alignment. A resize still
+refreshes a point-less box to the origin (fm-fc53), and the Reference's
+interpolate reads the box cached before that refresh.
+
+Locked by `PointFreeInterpolation` in
+`crates/fmn-python/tests/point_free_positions.py` (detached and
+scene-bound) and `point_less_box_interpolates_along_the_path` in
+`crates/fmn-anim/tests/transform.rs` (Choreo's `interpolate_fields`).
+
+**Migration:** none needed. A scene that animated an empty group and then
+positioned things relative to it gets the animated position, not the
+origin.

@@ -111,7 +111,8 @@ def all_callback_phases_restore_real_roots():
                     assert len(ticks) == at_failure[-1], "unwinding invoked user updaters"
                     assert drawable.events.count("abort") <= 1, drawable.events
                     assert camera.events.count("abort") <= 1, camera.events
-                    assert not scene.frame._is_bound()
+                    # The frame is the scene list's first member (fm-6l2i).
+                    assert scene.frame._is_bound() and scene.mobjects[0] is scene.frame
                     assert scene.frame is scene.camera.frame
                     assert scene.num_plays == 0
                     assert "_fmn_scene_execution" not in vars(scene)
@@ -204,7 +205,7 @@ def public_camera_callbacks_follow_current_drawable_state():
     for actual, expected in seen:
         np.testing.assert_allclose(actual, expected)
     np.testing.assert_allclose(scene.frame.get_center(), square.get_center())
-    assert scene.mobjects == [square] and not scene.frame._is_bound()
+    assert scene.mobjects == [scene.frame, square] and scene.frame._is_bound()
     assert "_fmn_allow_camera_callback" not in vars(animation)
 
 
@@ -223,7 +224,7 @@ def nested_alpha_callbacks_keep_live_rates_and_native_camera_identity():
     assert alphas[0] == 0 and alphas[-1] == .25
     np.testing.assert_allclose(frame.get_center(), m.RIGHT)
     assert frame._core is core and frame is scene.camera.frame
-    assert not frame._is_bound() and scene.mobjects == [] and scene.num_plays == 1
+    assert frame._is_bound() and scene.mobjects == [frame] and scene.num_plays == 1
     assert "_fmn_allow_camera_callback" not in vars(animation)
 
 
@@ -239,13 +240,13 @@ def method_builders_keep_paths_windows_suspension_and_cleanup():
                run_time=1.)
     np.testing.assert_allclose(frame.get_center(), (2., 1., 0.))
     assert any(0 < alpha < 1 for alpha in samples)
-    assert not frame._is_updating_suspended() and not frame._is_bound()
+    assert not frame._is_updating_suspended() and frame._is_bound()
     square = m.Square()
     scene.add(square)
     scene.play(square.animate(remover=True, final_alpha_value=.5,
                               rate_func=m.linear).shift(4 * m.RIGHT), run_time=.125)
     np.testing.assert_allclose(square.get_center(), 2 * m.RIGHT)
-    assert scene.mobjects == []
+    assert scene.mobjects == [frame]
 
 
 def camera_callbacks_and_builders_agree_with_direct_native_pixels():

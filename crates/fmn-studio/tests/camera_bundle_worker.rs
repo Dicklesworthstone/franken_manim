@@ -20,7 +20,7 @@ use fmn_scene::{
     AssetRead, BundleExportLimits, CaptureReason, EffectClass, Entry, IntegrationError, Journal,
     LifecycleEvent, RuntimeConfig, Scene, SceneSink, TimelineBundle,
 };
-use fmn_studio::camera_bundle::CameraBundleWorker;
+use fmn_studio::camera_bundle::{CameraBundleView, CameraBundleWorker};
 use fmn_studio::protocol::studio_seek_command;
 use fmn_studio::{
     CURRENT_VERSION, DebugLayerSet, FramePayload, FrameStream, JournalReplay, ProtocolLimits,
@@ -210,8 +210,11 @@ fn worker(bytes: &[u8], threads: usize) -> CameraBundleWorker {
             digest: sha256(bytes),
         },
         TimelineBundle::from_bytes(bytes).unwrap(),
-        policy(threads),
-        19,
+        CameraBundleView {
+            renderer: policy(threads),
+            seed: 19,
+            fixed_camera: None,
+        },
     )
     .unwrap()
 }
@@ -275,6 +278,171 @@ fn replay(journal: &Journal, from: u64, through: u64) -> SupervisorRequest {
         through_entry: through,
         journal: journal.to_bytes().unwrap(),
     })
+}
+
+fn fixed_camera() -> Camera {
+    let mut config = CameraConfig {
+        resolution: SIZE,
+        fps: 8,
+        light_source_position: [4.0, 6.0, 3.0],
+        ..CameraConfig::default()
+    };
+    config.frame.set_width(5.0).unwrap();
+    config.frame.set_center([0.3, -0.2, 0.0]).unwrap();
+    config.frame.set_orientation([0.2, 0.3, 0.0, 1.0]).unwrap();
+    Camera::new(config).unwrap()
+}
+
+fn legacy_artifact(recorded: bool) -> Vec<u8> {
+    let mut stage = Stage::new();
+    let root = stage.add(geometry());
+    stage.add_to_scene(root).unwrap();
+    let mut timeline = fmn_anim::Timeline::new(8).unwrap();
+    if recorded {
+        stage
+            .add_dt_updater(
+                root,
+                |stage, mob, dt| {
+                    stage.shift(mob, [dt, 0.0, 0.0]);
+                },
+                false,
+            )
+            .unwrap();
+        timeline.wait(0.5).unwrap();
+    } else {
+        let animation = root
+            .animate()
+            .set_anim_args(fmn_mobject::AnimateArgs {
+                run_time: Some(0.5),
+                rate_func: Some(fmn_core::rate::linear),
+                ..Default::default()
+            })
+            .unwrap()
+            .shift([0.5, 0.0, 0.0])
+            .unwrap();
+        timeline
+            .play(vec![
+                fmn_anim::prepare_animation(animation, &mut stage).unwrap(),
+            ])
+            .unwrap();
+    }
+    fmn_scene::export_timeline_bundle(timeline, &mut stage, &fmn_core::rng::RngRoot::from_seed(19))
+        .unwrap()
+}
+
+fn fixed_worker(source: &[u8], camera: Camera, threads: usize) -> CameraBundleWorker {
+    CameraBundleWorker::new(
+        NAME.into(),
+        sha256(b"worker build"),
+        AssetRead {
+            path: "/recorded/legacy.fmtl".into(),
+            digest: sha256(source),
+        },
+        TimelineBundle::from_bytes(source).unwrap(),
+        CameraBundleView {
+            renderer: policy(threads),
+            seed: 19,
+            fixed_camera: Some(camera),
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn legacy_surface_bundles_use_the_explicit_view_for_pure_and_recorded_random_access() {
+    for recorded in [false, true] {
+        let source = legacy_artifact(recorded);
+        let bundle = TimelineBundle::from_bytes(&source).unwrap();
+        assert!(!bundle.has_camera_track());
+        assert!(bundle.requires_camera());
+        assert_eq!(
+            bundle.segment_kind(0),
+            Some(if recorded {
+                fmn_scene::timeline_bundle::BundleSegmentKind::Stateful
+            } else {
+                fmn_scene::timeline_bundle::BundleSegmentKind::Pure
+            })
+        );
+        let camera = fixed_camera();
+        let expected: Vec<_> = (0..bundle.frame_count())
+            .map(|index| png(&bundle.stage_at(index).unwrap(), &camera))
+            .collect();
+        assert!(expected.windows(2).all(|frames| frames[0] != frames[1]));
+        assert_ne!(expected[0], png(&Stage::new(), &camera));
+        for threads in [1, 4, 16] {
+            let mut worker = fixed_worker(&source, camera.clone(), threads);
+            for frame in [3, 0, 2, 1, 3] {
+                assert_eq!(bytes(&scrub(&mut worker, frame)), expected[frame as usize]);
+            }
+            assert!(inspect(&mut worker).contains("\"frame_count\":4"));
+            assert!(worker.journal_tail().is_empty());
+        }
+    }
+}
+
+#[test]
+fn fixed_camera_is_required_validated_and_bound_to_cold_recovery() {
+    let source = legacy_artifact(false);
+    let bundle = TimelineBundle::from_bytes(&source).unwrap();
+    let read = AssetRead {
+        path: "/recorded/legacy.fmtl".into(),
+        digest: sha256(&source),
+    };
+    let view = CameraBundleView {
+        renderer: policy(1),
+        seed: 19,
+        fixed_camera: Some(fixed_camera()),
+    };
+    let identity =
+        CameraBundleWorker::input_reads(sha256(b"build"), &read, &bundle, &view).unwrap();
+    let mut absent = view.clone();
+    absent.fixed_camera = None;
+    assert!(CameraBundleWorker::input_reads(sha256(b"build"), &read, &bundle, &absent).is_err());
+    let (recorded, _, _) = artifact(false);
+    let tracked = TimelineBundle::from_bytes(&recorded).unwrap();
+    assert!(CameraBundleWorker::input_reads(sha256(b"build"), &read, &tracked, &view).is_err());
+    let mut wrong_viewport = view.clone();
+    wrong_viewport.renderer.frame.viewport.width += 1;
+    assert!(
+        CameraBundleWorker::input_reads(sha256(b"build"), &read, &bundle, &wrong_viewport).is_err()
+    );
+    let mut wrong_fps = view.clone();
+    wrong_fps.fixed_camera = Some(
+        Camera::new(CameraConfig {
+            resolution: SIZE,
+            fps: 9,
+            ..CameraConfig::default()
+        })
+        .unwrap(),
+    );
+    assert!(CameraBundleWorker::input_reads(sha256(b"build"), &read, &bundle, &wrong_fps).is_err());
+    let mut original = fixed_worker(&source, fixed_camera(), 1);
+    let entry = commit(&mut original, 2, 0);
+    let mut journal = Journal::new();
+    journal.record(entry).unwrap();
+    let mut matching = fixed_worker(&source, fixed_camera(), 4);
+    matching.handle(replay(&journal, 0, 1)).unwrap();
+    assert_eq!(
+        bytes(&scrub(&mut matching, 2)),
+        bytes(&scrub(&mut original, 2))
+    );
+    let mut changed = fixed_camera();
+    changed.frame_mut().set_center([1.0, 0.0, 0.0]).unwrap();
+    let changed_view = CameraBundleView {
+        fixed_camera: Some(changed.clone()),
+        ..view
+    };
+    assert_ne!(
+        identity,
+        CameraBundleWorker::input_reads(sha256(b"build"), &read, &bundle, &changed_view).unwrap()
+    );
+    let mut foreign = fixed_worker(&source, changed, 1);
+    assert_eq!(
+        foreign.handle(replay(&journal, 0, 1)).unwrap_err().code,
+        WorkerErrorCode::ReplayFailed
+    );
+    assert!(foreign.last_state_hash().is_none());
+    assert!(foreign.journal_tail().is_empty());
 }
 
 #[test]
@@ -394,21 +562,28 @@ fn viewport_seed_and_engine_are_truthful_inputs_and_failures_leave_position_inta
         path: "/recorded/orbit.fmtl".into(),
         digest: sha256(&source),
     };
+    let view = CameraBundleView {
+        renderer: policy(1),
+        seed: 19,
+        fixed_camera: None,
+    };
     let identity =
-        CameraBundleWorker::input_reads(sha256(b"build"), &read, &bundle, policy(1), 19).unwrap();
-    let mut other = policy(1);
-    other.frame.viewport.width = 48;
+        CameraBundleWorker::input_reads(sha256(b"build"), &read, &bundle, &view).unwrap();
+    let mut other = view.clone();
+    other.renderer.frame.viewport.width = 48;
     assert_ne!(
         identity,
-        CameraBundleWorker::input_reads(sha256(b"build"), &read, &bundle, other, 19).unwrap()
+        CameraBundleWorker::input_reads(sha256(b"build"), &read, &bundle, &other).unwrap()
     );
+    other = view.clone();
+    other.seed = 20;
     assert_ne!(
         identity,
-        CameraBundleWorker::input_reads(sha256(b"build"), &read, &bundle, policy(1), 20).unwrap()
+        CameraBundleWorker::input_reads(sha256(b"build"), &read, &bundle, &other).unwrap()
     );
-    other = policy(1);
-    other.engine = EngineIdentity::fast();
-    assert!(CameraBundleWorker::input_reads(sha256(b"build"), &read, &bundle, other, 19).is_err());
+    other = view;
+    other.renderer.engine = EngineIdentity::fast();
+    assert!(CameraBundleWorker::input_reads(sha256(b"build"), &read, &bundle, &other).is_err());
     let mut worker = worker(&source, 1);
     scrub(&mut worker, 2);
     worker.begin_session(sha256(b"host"), 1).unwrap();

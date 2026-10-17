@@ -100,7 +100,10 @@ class FrontdoorTests(unittest.TestCase):
             self.assertIs(scene.camera.frame, camera)
         self.assertEqual(run.result.frame_count, 2)
         np.testing.assert_allclose(square.get_center(), [2, 0, 0], atol=1e-6)
-        self.assertIs(scene.mobjects[0], square)
+        # The list starts with the frame, as in the Reference (fm-6l2i).
+        self.assertIs(scene.mobjects[0], camera)
+        self.assertIs(scene.mobjects[1], square)
+
 
     def test_programmatic_range_reaches_real_endpoints_without_preroll_output(self):
         class Motion(m.Scene):
@@ -133,7 +136,9 @@ class FrontdoorTests(unittest.TestCase):
             self.assertFalse(destination.exists())
             self.assertEqual(m._portal_scene_clock(scene), clock)
             if not use_time:
-                self.assertIs(scene.mobjects[0], square)
+                self.assertIs(scene.mobjects[0], scene.frame)
+                self.assertIs(scene.mobjects[1], square)
+
 
     def test_native_preparation_cannot_steal_an_output_owner(self):
         scene = m.Scene()

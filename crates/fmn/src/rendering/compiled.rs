@@ -2,6 +2,7 @@
 
 use fmn_anim::RationalFrameClock;
 use fmn_platform::fs::{FileSystem, StdFs};
+use fmn_runtime::{FrameStreamError, PipelineError, PipelineStats};
 use fmn_scene::SceneRunReport;
 use fmn_scene::timeline_bundle::TimelineBundle;
 use std::sync::Arc;
@@ -47,7 +48,7 @@ pub fn render_bundle_with_fs(
     mut options: RenderOptions,
     fs: Arc<dyn FileSystem>,
 ) -> Result<RenderReport, RenderError> {
-    let bundle = TimelineBundle::from_bytes(bytes).map_err(RenderError::Bundle)?;
+    let mut bundle = TimelineBundle::from_bytes(bytes).map_err(RenderError::Bundle)?;
     if bundle.fps() != options.config.camera.fps {
         return Err(RenderError::InvalidOptions(
             "compiled frame rate must match export configuration",
@@ -73,6 +74,51 @@ pub fn render_bundle_with_fs(
         // supplies its exact captured pose/background/light, not this baseline.
         options.camera = Some(options.camera_config()?);
     }
+    if bundle.has_soundtrack() && !options.format.is_video() {
+        return Err(RenderError::InvalidOptions(
+            "sound-bearing FMTL requires MP4/MOV output; picture-only export must explicitly extract its soundtrack",
+        ));
+    }
+    let mix = bundle
+        .take_soundtrack()
+        .map(|pcm| {
+            let sample_rate = pcm.sample_rate();
+            let channels = pcm.channels();
+            let minimum = fmn_output::frames_to_samples(
+                i64::from(bundle.frame_count()),
+                bundle.fps(),
+                sample_rate,
+            )
+            .map_err(RenderError::Sound)?;
+            let minimum = u64::try_from(minimum).map_err(|_| {
+                RenderError::InvalidOptions("negative compiled soundtrack duration")
+            })?;
+            let config = fmn_output::MixerConfig {
+                sample_rate,
+                channels,
+                max_output_frames: (fmn_scene::DEFAULT_MAX_BUNDLE_BYTES / 4 / usize::from(channels))
+                    as u64,
+            };
+            let mut mixer = fmn_output::SoundMixer::new(config)
+                .map_err(RenderError::Sound)?
+                .with_timeline_frames(minimum);
+            mixer
+                .add(fmn_output::SoundCue::new(
+                    fmn_codec::WavAudio {
+                        channels,
+                        sample_rate,
+                        format: fmn_codec::SampleFormat::F32,
+                        samples: pcm.into_samples(),
+                    },
+                    0,
+                    bundle.fps(),
+                ))
+                .map_err(RenderError::Sound)?;
+            // Stored PCM is one already-mixed cue: no source reopens, second gain,
+            // resampling or decoder invocation. Padding uses the picture clock.
+            mixer.mix(1).map_err(RenderError::Sound)
+        })
+        .transpose()?;
     let shared = bundle.into_shared().map_err(RenderError::Bundle)?;
     let mut clock = RationalFrameClock::new(shared.fps())
         .map_err(|error| RenderError::Scene(fmn_anim::AnimError::Clock(error).into()))?;
@@ -92,18 +138,21 @@ pub fn render_bundle_with_fs(
             "compiled pipeline was already finalized",
         ))?;
         if let Err(error) = pipeline.capture_compiled(job, u64::from(index)) {
-            if matches!(&error, RenderError::Pipeline(_)) {
-                if let Some(emitter) = &sink.emitter {
-                    emitter.cancel();
-                }
-                if let Some(pipeline) = sink.pipeline.take() {
-                    pipeline.finish()?;
-                }
+            // A failed raster job drops its output reservation before the
+            // coordinator necessarily observes the stage failure. Admission
+            // can therefore first fail at EmitterHandle::reserve, not only at
+            // FrameStream::reserve. Always drain before selecting the error.
+            // Private outputs must never be published after either refusal.
+            if let Some(emitter) = &sink.emitter {
+                emitter.cancel();
             }
-            return Err(error);
+            return Err(match sink.pipeline.take() {
+                Some(pipeline) => admission_failure(error, pipeline.finish()),
+                None => error,
+            });
         }
     }
-    let finished = sink.finish(None)?;
+    let finished = sink.finish_with_soundtrack(None, mix)?;
     Ok(RenderReport {
         scene,
         artifact: finished.artifact,
@@ -112,4 +161,22 @@ pub fn render_bundle_with_fs(
         frame_pipeline: finished.frame_pipeline,
         typesetting: fmn_tex::TypesetSessionReport::default(),
     })
+}
+
+// Cancellation caused by dropping an unsubmitted source permit is cleanup,
+// not an explanation of the original admission refusal. A real worker failure
+// discovered while joining, however, carries the root cause and drain counters.
+pub(super) fn admission_failure(
+    admission: RenderError,
+    joined: Result<PipelineStats, RenderError>,
+) -> RenderError {
+    match joined {
+        Err(RenderError::Pipeline(FrameStreamError::Pipeline(failure)))
+            if matches!(&failure.error, PipelineError::Cancelled) =>
+        {
+            admission
+        }
+        Err(error) => error,
+        Ok(_) => admission,
+    }
 }

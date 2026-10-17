@@ -304,7 +304,8 @@
    "RoundedRectangle(width=3, height=1, corner_radius=0.5)"
   ],
   "Matrix": [
-   "Matrix([[1, 2], [3, 4]])"
+   "Matrix([[1, 2], [3, 4]])",
+   "Matrix([['a'], ['b'], ['c']], v_buff=0.6)"
   ],
   "DecimalMatrix": [
    "DecimalMatrix([[1.5, 2.25], [3.0, 4.125]])"

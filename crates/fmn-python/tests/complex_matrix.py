@@ -17,11 +17,11 @@ class ComplexMatrixTests(unittest.TestCase):
         self.assertIs(matrix.elements[0], circle)
         self.assertIs(matrix.elements[1], square)
         scene.add(matrix)
-        self.assertEqual(list(scene.mobjects), [matrix])
+        self.assertEqual(list(scene.mobjects), [scene.frame, matrix])
         before = circle.get_center().copy()
         scene.play(circle.animate.shift(m.UP), run_time=.25)
         np.testing.assert_allclose(circle.get_center(), before + m.UP, atol=1e-6)
-        self.assertEqual(list(scene.mobjects), [matrix])
+        self.assertEqual(list(scene.mobjects), [scene.frame, matrix])
         self.assertIs(matrix.get_row(0)[0], circle)
         self.assertIs(matrix.get_column(0)[0], circle)
 
@@ -63,11 +63,13 @@ class ComplexMatrixTests(unittest.TestCase):
         self.assertIsInstance(matrix.elements[3], m.Tex)
         self.assertLess(matrix.brackets[0].get_right()[0], matrix.get_entries().get_left()[0])
         self.assertGreater(matrix.brackets[1].get_left()[0], matrix.get_entries().get_right()[0])
-        # Conversion completes before moving a caller-owned object, even when
-        # the invalid entry is a real scalar rather than a complex component.
+        # A real NaN cell is a DecimalNumber reading `nan`, as in the pinned
+        # Reference (fm-5wq.30). Conversion still completes before moving a
+        # caller-owned object when a cell refuses (a complex NaN component).
+        self.assertEqual(m.Matrix([[m.Square(), float("nan")]]).elements[1].get_tex(), "nan")
         before = shape.get_points().copy()
         with self.assertRaises(ValueError):
-            m.Matrix([[shape, float("nan")]])
+            m.Matrix([[shape, complex(float("nan"), 0)]])
         np.testing.assert_array_equal(shape.get_points(), before)
 
     def test_geometry_matrix_motion_renders_without_duplicate_scene_roots(self):
@@ -77,7 +79,7 @@ class ComplexMatrixTests(unittest.TestCase):
                 matrix = m.Matrix([[shape, m.Tex("x")], [m.Square(side_length=.5), 1.25]])
                 self.add(matrix)
                 self.play(shape.animate.shift(.5 * m.UP), run_time=.5)
-                assert list(self.mobjects) == [matrix]
+                assert list(self.mobjects) == [self.frame, matrix]
                 assert matrix.get_row(0)[0] is shape
                 assert matrix.get_column(0)[0] is shape
         root = Path(tempfile.mkdtemp(prefix="fmn-geometry-matrix-"))
@@ -145,7 +147,7 @@ class ComplexMatrixTests(unittest.TestCase):
         scene.add(parent)
         scene.play(m.ChangeDecimalToValue(entries[0], -2j),
                    m.ChangeDecimalToValue(entries[1], 7), run_time=0.5)
-        self.assertEqual(list(scene.mobjects), [parent])
+        self.assertEqual(list(scene.mobjects), [scene.frame, parent])
         self.assertEqual(list(matrix.elements), entries)
         self.assertEqual(list(matrix.brackets), brackets)
         for index, expected in enumerate((-2j, 7)):

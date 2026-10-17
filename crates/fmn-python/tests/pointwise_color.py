@@ -144,7 +144,7 @@ class PointwiseColorTests(unittest.TestCase):
             mob.set_color_by_rgba_func(color)
         np.testing.assert_array_equal(points[:, 0], before[:, 0] + 1)
         np.testing.assert_array_equal(mob.get_points(), points)
-        self.assertIs(scene.mobjects[0], mob)
+        self.assertIs(scene.mobjects[1], mob)
         self.assert_lanes(mob, [1., 0., 0., 1.])
 
     def test_resizing_callback_rejects_the_obsolete_paint_plan(self):
@@ -239,7 +239,7 @@ class PointwiseColorTests(unittest.TestCase):
         mob.add_updater(update)
         scene.wait(.1)
         self.assertTrue(calls)
-        self.assertIs(scene.mobjects[0], mob)
+        self.assertIs(scene.mobjects[1], mob)
         self.assert_lanes(mob, [0., 1., 0., 1.])
         mob.clear_updaters()
 

@@ -23,6 +23,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 mod idle;
+mod parallel;
 pub use idle::IdleFrame;
 
 use fmn_anim::{
@@ -30,7 +31,7 @@ use fmn_anim::{
     Purity, RateFunc, RationalFrameClock, RationalTime, SceneUpdaterBoundary, SegmentKind,
     SegmentReport, abort_open_play, abort_open_wait, complete_play_frame, complete_wait_frame,
     finish_open_play, finish_open_play_animations, finish_open_wait, open_play_with_mode,
-    open_wait, open_wait_after_updaters, play_segment_with_boundary, prepare_play_animation,
+    open_wait, open_wait_after_updaters, prepare_play_animation,
     prepare_play_frame, prepare_wait_frame, validate_play, wait_segment_with_boundary,
 };
 use fmn_core::rng::{Pcg64Dxsm, RngRoot};
@@ -424,6 +425,23 @@ pub trait SceneSink {
         reason: CaptureReason,
         packet: FramePacket,
     ) -> Result<(), IntegrationError>;
+
+    /// Opt in to callback-free native play and static-wait programs. Interactive, recording
+    /// and custom sinks remain on the ordinary per-frame path by default.
+    fn accepts_pure_segments(&self) -> bool {
+        false
+    }
+
+    /// Consume every nominal sample through bounded worker jobs. The Scene
+    /// separately excludes event producers/listeners and host-observed plays.
+    /// Implementations latch failures just like `capture`; they must not fall
+    /// back after consuming part of a program. Finish/removal stays on Scene.
+    fn capture_pure_segment(
+        &mut self,
+        _segment: &fmn_anim::pure_frame::PureSegment,
+    ) -> Result<(), IntegrationError> {
+        Err(IntegrationError::new("scene-sink", "pure segments are not supported"))
+    }
 }
 
 /// A headless sink that discards captures and events.
@@ -1282,6 +1300,10 @@ impl Scene {
 
         let mut sink_error = None;
         let skipping = self.skipping;
+        // Admission is after preflight and lifecycle events: those hooks may
+        // install an event producer. A live but currently empty inbox clone
+        // still requires every owner-thread boundary to run.
+        let allow_pure = self.allows_pure_dispatch();
         let report = {
             let Scene {
                 stage,
@@ -1307,21 +1329,16 @@ impl Scene {
                     time,
                 );
             };
-            let mut emit = |packet| {
-                if sink_error.is_none()
-                    && let Err(error) = sink.capture(CaptureReason::Segment, packet)
-                {
-                    sink_error = Some(error);
-                }
-            };
-            play_segment_with_boundary(
+            let mut capture = parallel::NativeSegmentCapture::new(sink, &mut sink_error);
+            fmn_anim::pure_frame::play_segment_with_pure_dispatch(
                 stage,
                 clock,
                 rng_root,
                 &mut animations,
                 skipping,
+                allow_pure,
                 &mut boundary,
-                &mut emit,
+                &mut capture,
             )?
         };
         self.sync_stage_time();
@@ -1544,6 +1561,7 @@ impl Scene {
         } else {
             let mut sink_error = None;
             let skipping = self.skipping;
+            let allow_pure = self.allows_pure_dispatch();
             let report = {
                 let Scene {
                     stage,
@@ -1569,23 +1587,22 @@ impl Scene {
                         time,
                     );
                 };
-                let mut emit = |packet| {
-                    if sink_error.is_none()
-                        && let Err(error) = sink.capture(CaptureReason::Segment, packet)
-                    {
-                        sink_error = Some(error);
-                    }
-                };
-                wait_segment_with_boundary(
-                    stage,
-                    clock,
-                    rng_root,
-                    duration,
-                    stop_condition,
-                    skipping,
-                    &mut boundary,
-                    &mut emit,
-                )?
+                let mut capture = parallel::NativeSegmentCapture::new(sink, &mut sink_error);
+                if let Some(stop_condition) = stop_condition {
+                    // A stop callback observes owner state after each emitted
+                    // frame. Never offer its wait to the compact program path.
+                    wait_segment_with_boundary(
+                        stage, clock, rng_root, duration, Some(stop_condition), skipping,
+                        &mut boundary, &mut |packet| {
+                            fmn_anim::pure_frame::PlayCapture::capture(&mut capture, packet);
+                        },
+                    )?
+                } else {
+                    fmn_anim::pure_frame::wait_segment_with_pure_dispatch(
+                        stage, clock, rng_root, duration, skipping, allow_pure,
+                        &mut boundary, &mut capture,
+                    )?
+                }
             };
             self.sync_stage_time();
             if let Some(error) = sink_error {

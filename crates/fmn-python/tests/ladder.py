@@ -85,7 +85,10 @@ for callback_owns_anchor in (False, True):
 
 
 def scene_state(scene):
-    return [m._data_array(False).tobytes() for m in scene.mobjects]
+    # The content roots, in order; the list starts with the point-less
+    # camera frame, as in the Reference (fm-6l2i).
+    return [m._data_array(False).tobytes() for m in scene.mobjects if m is not scene.frame]
+
 
 
 # ---------------------------------------------------------------- rung 0
@@ -347,8 +350,10 @@ optin = build_rung2()
 kinds = [type(u).__name__ for m in optin.mobjects for u in m.updaters]
 assert kinds == ["_ArrayUpdater", "_ArrayUpdater", "_ArrayUpdater"], kinds
 grouped = build_reduction_rung1()
-assert type(grouped.mobjects[0].updaters[0]).__name__ == "_BatchedUpdater"
-assert grouped.mobjects[0].updaters[0].group_size() == REDUCTION_MOBS
+# mobjects[0] is the frame (fm-6l2i); the first content root holds the group.
+assert type(grouped.mobjects[1].updaters[0]).__name__ == "_BatchedUpdater"
+assert grouped.mobjects[1].updaters[0].group_size() == REDUCTION_MOBS
+
 
 # Construction validation is loud.
 try:

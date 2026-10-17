@@ -225,6 +225,80 @@ fn typed_extraction_diagnostics_are_golden() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn optional_video_quality_keys_layer_and_clear_without_changing_defaults() {
+    let defaults = Config::resolve(&[], None).unwrap().config;
+    assert_eq!(defaults.file_writer.video_crf, None);
+    assert_eq!(defaults.file_writer.video_preset, None);
+    assert_eq!(defaults.file_writer.video_tune, None);
+    assert_eq!(defaults.file_writer.video_bitrate, None);
+    for key in ["video_crf", "video_preset", "video_tune", "video_bitrate"] {
+        assert_eq!(defaults.raw.get_path(&format!("file_writer.{key}")), None);
+    }
+    let layers = [Layer {
+        name: "quality.yml",
+        text: "file_writer:\n  video_crf: 16\n  video_preset: slow\n  video_tune: animation\n",
+    }];
+    let configured = Config::resolve(&layers, None).unwrap().config;
+    assert_eq!(configured.file_writer.video_crf, Some(16));
+    assert_eq!(configured.file_writer.video_preset.as_deref(), Some("slow"));
+    assert_eq!(
+        configured.file_writer.video_tune.as_deref(),
+        Some("animation")
+    );
+    assert_ne!(
+        configured.canonical_bytes().unwrap(),
+        defaults.canonical_bytes().unwrap()
+    );
+
+    let switched = Config::resolve(
+        &layers,
+        Some(overlay([
+            ("file_writer.video_crf", Value::Null),
+            ("file_writer.video_bitrate", Value::Int(2_000_000)),
+            ("file_writer.video_tune", Value::Null),
+        ])),
+    )
+    .unwrap()
+    .config;
+    assert_eq!(switched.file_writer.video_crf, None);
+    assert_eq!(switched.file_writer.video_bitrate, Some(2_000_000));
+    assert_eq!(switched.file_writer.video_preset.as_deref(), Some("slow"));
+    assert_eq!(switched.file_writer.video_tune, None);
+    assert_ne!(
+        switched.canonical_bytes().unwrap(),
+        configured.canonical_bytes().unwrap()
+    );
+}
+
+#[test]
+fn optional_video_quality_keys_reject_wrong_types_and_integer_overflow() {
+    for (key, value) in [
+        ("video_crf", "-1"),
+        ("video_crf", "4294967296"),
+        ("video_crf", "true"),
+        ("video_bitrate", "-1"),
+        ("video_bitrate", "4294967296"),
+        ("video_bitrate", "2.5"),
+        ("video_preset", "16"),
+        ("video_tune", "false"),
+    ] {
+        let text = format!("file_writer:\n  {key}: {value}\n");
+        let error = Config::resolve(
+            &[Layer {
+                name: "bad-quality.yml",
+                text: &text,
+            }],
+            None,
+        )
+        .expect_err("invalid optional key must not disappear as if absent");
+        assert!(
+            error.to_string().contains(&format!("file_writer.{key}")),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn precedence_defaults_then_user_files_then_cli() {
     let user1 = "camera:\n  fps: 60\n  background_color: \"#101010\"\n";
     let user2 = "camera:\n  fps: 90\n"; // --config_file, later than custom_config.yml
@@ -543,5 +617,53 @@ fn the_config_template_key_resolves_through_the_registry() {
             assert!(reason.contains("CJK"), "{reason}");
         }
         other => panic!("expected the named refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn aac_bitrate_layers_clears_and_is_part_of_configuration_identity() {
+    let default = Config::resolve(&[], None).unwrap().config;
+    assert_eq!(default.file_writer.audio_bitrate, None);
+    let layers = [Layer {
+        name: "audio.yml",
+        text: "file_writer:\n  audio_bitrate: 96000\n",
+    }];
+    let configured = Config::resolve(&layers, None).unwrap().config;
+    assert_eq!(configured.file_writer.audio_bitrate, Some(96_000));
+    assert_ne!(
+        configured.canonical_bytes().unwrap(),
+        default.canonical_bytes().unwrap()
+    );
+    let override_config = Config::resolve(
+        &layers,
+        Some(overlay([(
+            "file_writer.audio_bitrate",
+            Value::Int(192_000),
+        )])),
+    )
+    .unwrap()
+    .config;
+    assert_eq!(override_config.file_writer.audio_bitrate, Some(192_000));
+    let cleared = Config::resolve(
+        &layers,
+        Some(overlay([("file_writer.audio_bitrate", Value::Null)])),
+    )
+    .unwrap()
+    .config;
+    assert_eq!(cleared.file_writer.audio_bitrate, None);
+    for value in ["-1", "4294967296", "true", "1.5", "96k"] {
+        let text = format!("file_writer:\n  audio_bitrate: {value}\n");
+        let err = Config::resolve(
+            &[Layer {
+                name: "bad-audio.yml",
+                text: &text,
+            }],
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("file_writer.audio_bitrate"),
+            "{err}"
+        );
     }
 }

@@ -111,7 +111,7 @@ for actual, target, before in zip(piece_source, piece_target, piece_targets):
     assert actual.get_fill_opacity() == actual.get_stroke_opacity() == 0
     assert np.array_equal(target.get_points(), before)
 
-root = Mobject(Mobject(), Mobject())
+root = Mobject().add(Mobject(), Mobject())
 square_rate = lambda value: value * value
 animation = AnimationProbe(
     root,
@@ -346,7 +346,7 @@ for composition_class, duration in ((AnimationGroup, 1.0), (LaggedStart, 1.05), 
     assert composition.get_run_time() == duration
     assert composition.animations == composition_children
     assert str(composition) == composition_class.__name__
-mapped_members = Mobject(Mobject(), Mobject())
+mapped_members = Mobject().add(Mobject(), Mobject())
 mapped = LaggedStartMap(Animation, mapped_members)
 assert [child.mobject for child in mapped.animations] == list(mapped_members)
 for cyclic_class in (CyclicReplace, Swap):
@@ -562,7 +562,7 @@ constructor_copy = copy_animation.mobject
 assert constructor_copy is not copy_source
 copy_scene = Scene().add(copy_source)
 copy_scene.play(copy_animation)
-assert copy_scene.mobjects == [copy_source, copy_target], copy_scene.mobjects
+assert copy_scene.mobjects == [copy_scene.frame, copy_source, copy_target], copy_scene.mobjects
 assert constructor_copy not in copy_scene.get_mobject_family_members()
 assert copy_scene._engine_facts()[:2] == (2, 6), copy_scene._engine_facts()
 assert np.allclose(copy_source.get_center(), [0.0, 0.5, 0.0])
@@ -610,20 +610,22 @@ def render_animation_lifecycle(destination, seed):
                 ),
             )
             assert np.allclose(square.get_center(), [-1.0, -1.0, 0.0], atol=1e-5)
+            # The frame is listed first, as in the Reference (fm-6l2i).
             roots = self.mobjects
-            assert len(roots) == 1, roots
-            root = roots[0]
+            assert len(roots) == 2 and roots[0] is self.frame, roots
+            root = roots[1]
             assert root.submobjects == [square, circle]
-            assert self.mobjects[0] is root
+            assert self.mobjects[1] is root
             assert root in square.parents and root in circle.parents
-            assert self.get_mobject_family_members() == [root, square, circle]
+            assert self.get_mobject_family_members() == [self.frame, root, square, circle]
             # A projected container is a live Stage identity: changing its
             # Python family must affect subsequent native captures too.
             root.remove(circle)
             assert root.submobjects == [square] and root not in circle.parents
-            assert self.get_mobject_family_members() == [root, square]
+            assert self.get_mobject_family_members() == [self.frame, root, square]
             root.add(circle)
-            assert self.get_mobject_family_members() == [root, square, circle]
+            assert self.get_mobject_family_members() == [self.frame, root, square, circle]
+
             # The published frames include a mixed, same-object succession;
             # the native second child must capture the Python endpoint.
             mixed_positions = []
@@ -775,7 +777,8 @@ def _assert_authored_transform_native_paths():
     temporary = copied.mobject
     scene = Scene().add(source)
     scene.play(copied)
-    assert scene.mobjects == [source, target], scene.mobjects
+    assert scene.mobjects == [scene.frame, source, target], scene.mobjects
+
     assert temporary not in scene.get_mobject_family_members()
     assert np.array_equal(source.get_points(), [[0, 0, 0]])
     assert np.array_equal(target.get_points(), [[4, 0, 0]])

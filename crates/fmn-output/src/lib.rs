@@ -68,8 +68,8 @@ pub use ffmpeg::{
     StreamingEncode,
 };
 pub use negotiate::{
-    ColorDescription, Container, EncoderChoice, NegotiationError, Primaries, Transfer, VideoJob,
-    WireFormat,
+    AudioQuality, ColorDescription, Container, EncoderChoice, NegotiationError, Primaries,
+    Transfer, VideoJob, WireFormat,
 };
 pub use provenance::{
     CLOSURE_SCHEMA, ClosureItem, ManifestComparison, ManifestError, ManifestIdentity, ManifestMode,

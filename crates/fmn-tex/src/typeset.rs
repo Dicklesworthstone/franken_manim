@@ -4,16 +4,15 @@
 //!
 //! # Submobject structure (the SingleStringTex conventions, span-first)
 //!
-//! A [`Typeset`] enumerates its primitives as ordered submobjects: every
-//! placed glyph (in emission order), then every rule, then every drawn
-//! path, each carrying its source span. The *span* is the compatibility
-//! surface — `isolate=`, `tex_to_color_map`, substring slicing, and
-//! `TransformMatchingTex` all match by source identity through
+//! A [`Typeset`] enumerates its primitives as ordered submobjects, glyphs,
+//! rules and drawn paths, each carrying its source span, in TeX's emission
+//! order (fmd-math's `Layout::order`). That is the order the Reference's
+//! SVG members follow, so scene code that indexes or slices a formula
+//! (`eq[0][4:7]`) reaches the same primitives (fm-aia1). The *span* is
+//! the matching surface: `isolate=`, `tex_to_color_map`, substring slicing
+//! and `TransformMatchingTex` all match by source identity through
 //! [`Typeset::occurrences`] (§11.3's consumption pattern; the Reference's
-//! render-twice-and-align hack is dead). Ordinal positions are stable and
-//! deterministic but deliberately **not** promised to match the Reference's
-//! SVG-document ordering — index-based poking ports via spans, per the
-//! Ledger.
+//! render-twice-and-align hack is dead).
 //!
 //! # Serialization
 //!
@@ -27,14 +26,15 @@
 //! a typed [`TypesetError`] (the cache treats every one as a miss), never a
 //! partial payload or a panic.
 
-use fmd_math::{Layout, PathContour, PathSeg, PlacedGlyph, PlacedPath, PlacedRule, Span};
+use fmd_math::{Layout, PathContour, PathSeg, Placed, PlacedGlyph, PlacedPath, PlacedRule, Span};
 use std::collections::TryReserveError;
 use std::fmt;
 use std::str::Utf8Error;
 
 /// The serialization format tag; bump on any layout change to the byte
-/// format (the cache namespace version rides this).
-pub const TYPESET_FORMAT_VERSION: u32 = 1;
+/// format (the cache namespace version rides this). Version 2 adds the
+/// emission-order table (fm-aia1).
+pub const TYPESET_FORMAT_VERSION: u32 = 2;
 
 /// Maximum encoded FMNTEX document size.
 ///
@@ -42,7 +42,8 @@ pub const TYPESET_FORMAT_VERSION: u32 = 1;
 /// layout remains usable, but deliberately goes uncached.
 pub const TYPESET_DOCUMENT_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 
-const MAGIC: &[u8; 8] = b"FMNTEX\x00\x01";
+// The last byte is TYPESET_FORMAT_VERSION.
+const MAGIC: &[u8; 8] = b"FMNTEX\x00\x02";
 const U32_BYTES: usize = 4;
 const F64_BYTES: usize = 8;
 const GLYPH_BYTES: usize = 44;
@@ -51,6 +52,8 @@ const PATH_MIN_BYTES: usize = 12;
 const CONTOUR_MIN_BYTES: usize = 20;
 const LINE_SEGMENT_BYTES: usize = 17;
 const QUAD_SEGMENT_BYTES: usize = 33;
+/// One emission-order entry: a primitive-kind tag and a u32 index.
+const ORDER_ENTRY_BYTES: usize = 5;
 
 /// Failure to construct, encode, or decode a [`Typeset`] document.
 #[derive(Debug)]
@@ -84,7 +87,7 @@ pub enum TypesetError {
         /// Allocator refusal.
         error: TryReserveError,
     },
-    /// The format magic/version tag is not FMNTEX v1.
+    /// The format magic/version tag is not FMNTEX v2.
     InvalidMagic,
     /// A fixed or declared field ran past the supplied document.
     UnexpectedEnd {
@@ -158,7 +161,7 @@ impl fmt::Display for TypesetError {
                 f,
                 "FMNTEX could not reserve {requested} units for {context}: {error}"
             ),
-            Self::InvalidMagic => f.write_str("not an FMNTEX v1 document"),
+            Self::InvalidMagic => f.write_str("not an FMNTEX v2 document"),
             Self::UnexpectedEnd {
                 requested,
                 remaining,
@@ -340,27 +343,7 @@ impl Typeset {
                 *span = keyword;
             }
         }
-        let sub_count = primitive_count(&layout)?;
-        let mut subs = Vec::new();
-        reserve_exact(&mut subs, sub_count, "submobject table")?;
-        for (i, g) in layout.glyphs.iter().enumerate() {
-            subs.push(Sub {
-                prim: Prim::Glyph(i),
-                span: g.span,
-            });
-        }
-        for (i, r) in layout.rules.iter().enumerate() {
-            subs.push(Sub {
-                prim: Prim::Rule(i),
-                span: r.span,
-            });
-        }
-        for (i, p) in layout.paths.iter().enumerate() {
-            subs.push(Sub {
-                prim: Prim::Path(i),
-                span: p.span,
-            });
-        }
+        let subs = submobject_table(&layout)?;
         Ok(Self {
             source,
             layout,
@@ -478,6 +461,16 @@ impl Typeset {
                 }
             }
         }
+        w.count(self.layout.order.len(), "emission order count")?;
+        for placed in &self.layout.order {
+            let (tag, index) = match *placed {
+                Placed::Glyph(i) => (0, i),
+                Placed::Rule(i) => (1, i),
+                Placed::Path(i) => (2, i),
+            };
+            w.0.push(tag);
+            w.count(index, "emission order index")?;
+        }
         // The submobject table is derivable from the layout; store only a
         // count for a structural cross-check on decode.
         w.count(self.subs.len(), "submobject count")?;
@@ -583,6 +576,24 @@ impl Typeset {
             }
             layout.paths.push(PlacedPath { contours, span });
         }
+        let order_count = r.count()?;
+        r.ensure_count("emission order", order_count, ORDER_ENTRY_BYTES)?;
+        reserve_exact(&mut layout.order, order_count, "decoded emission order")?;
+        for _ in 0..order_count {
+            let tag = r.take(1)?[0];
+            let index = r.count()?;
+            layout.order.push(match tag {
+                0 => Placed::Glyph(index),
+                1 => Placed::Rule(index),
+                2 => Placed::Path(index),
+                _ => {
+                    return Err(TypesetError::NonCanonical {
+                        field: "emission order",
+                        reason: "unknown primitive tag",
+                    });
+                }
+            });
+        }
         let encoded_subs = r.count()?;
         if r.remaining() != 0 {
             return Err(TypesetError::TrailingBytes {
@@ -607,6 +618,7 @@ impl Typeset {
         checked_u32("glyph count", self.layout.glyphs.len())?;
         checked_u32("rule count", self.layout.rules.len())?;
         checked_u32("path count", self.layout.paths.len())?;
+        checked_u32("emission order count", self.layout.order.len())?;
         checked_u32("submobject count", self.subs.len())?;
 
         let expected_subs = primitive_count(&self.layout)?;
@@ -617,46 +629,11 @@ impl Typeset {
                 actual: self.subs.len(),
             });
         }
-
-        let mut ord = 0;
-        for (index, glyph) in self.layout.glyphs.iter().enumerate() {
-            let expected = Sub {
-                prim: Prim::Glyph(index),
-                span: glyph.span,
-            };
-            if self.subs[ord] != expected {
-                return Err(TypesetError::NonCanonical {
-                    field: "submobject table",
-                    reason: "glyph entry differs from the derivable canonical table",
-                });
-            }
-            ord += 1;
-        }
-        for (index, rule) in self.layout.rules.iter().enumerate() {
-            let expected = Sub {
-                prim: Prim::Rule(index),
-                span: rule.span,
-            };
-            if self.subs[ord] != expected {
-                return Err(TypesetError::NonCanonical {
-                    field: "submobject table",
-                    reason: "rule entry differs from the derivable canonical table",
-                });
-            }
-            ord += 1;
-        }
-        for (index, path) in self.layout.paths.iter().enumerate() {
-            let expected = Sub {
-                prim: Prim::Path(index),
-                span: path.span,
-            };
-            if self.subs[ord] != expected {
-                return Err(TypesetError::NonCanonical {
-                    field: "submobject table",
-                    reason: "path entry differs from the derivable canonical table",
-                });
-            }
-            ord += 1;
+        if self.subs != submobject_table(&self.layout)? {
+            return Err(TypesetError::NonCanonical {
+                field: "submobject table",
+                reason: "differs from the table the emission order derives",
+            });
         }
         Ok(())
     }
@@ -693,6 +670,13 @@ impl Typeset {
                 }
             }
         }
+        add_size(&mut bytes, U32_BYTES, "encoded document")?;
+        add_product(
+            &mut bytes,
+            self.layout.order.len(),
+            ORDER_ENTRY_BYTES,
+            "emission order table",
+        )?;
         add_size(&mut bytes, U32_BYTES, "encoded document")?;
         Ok(bytes)
     }
@@ -818,6 +802,65 @@ fn primitive_count(layout: &Layout) -> Result<usize, TypesetError> {
         .ok_or(TypesetError::SizeOverflow {
             context: "submobject table",
         })
+}
+
+/// The submobject table: one entry per primitive, in the layout's emission
+/// order, which must name every primitive exactly once.
+fn submobject_table(layout: &Layout) -> Result<Vec<Sub>, TypesetError> {
+    let count = primitive_count(layout)?;
+    if layout.order.len() != count {
+        return Err(TypesetError::CountMismatch {
+            field: "emission order",
+            expected: count,
+            actual: layout.order.len(),
+        });
+    }
+    let mut seen = Vec::new();
+    reserve_exact(&mut seen, count, "emission order check")?;
+    seen.resize(count, false);
+    let mut subs = Vec::new();
+    reserve_exact(&mut subs, count, "submobject table")?;
+    let (glyphs, rules) = (layout.glyphs.len(), layout.rules.len());
+    for placed in &layout.order {
+        let (slot, sub) = match *placed {
+            Placed::Glyph(i) => (
+                i,
+                layout.glyphs.get(i).map(|g| Sub {
+                    prim: Prim::Glyph(i),
+                    span: g.span,
+                }),
+            ),
+            Placed::Rule(i) => (
+                glyphs + i,
+                layout.rules.get(i).map(|r| Sub {
+                    prim: Prim::Rule(i),
+                    span: r.span,
+                }),
+            ),
+            Placed::Path(i) => (
+                glyphs + rules + i,
+                layout.paths.get(i).map(|p| Sub {
+                    prim: Prim::Path(i),
+                    span: p.span,
+                }),
+            ),
+        };
+        let Some(sub) = sub else {
+            return Err(TypesetError::NonCanonical {
+                field: "emission order",
+                reason: "names a primitive the layout does not have",
+            });
+        };
+        if seen[slot] {
+            return Err(TypesetError::NonCanonical {
+                field: "emission order",
+                reason: "names a primitive twice",
+            });
+        }
+        seen[slot] = true;
+        subs.push(sub);
+    }
+    Ok(subs)
 }
 
 fn reserve_exact<T>(

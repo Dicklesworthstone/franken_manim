@@ -1758,6 +1758,7 @@ pub struct FfmpegSink {
     input_bytes: u64,
     receipt: SinkReceipt<FfmpegArtifactReport>,
     deferred_soundtrack: Option<Receiver<Option<MixReport>>>,
+    audio_quality: crate::AudioQuality,
     no_clobber: bool,
 }
 
@@ -1832,6 +1833,7 @@ impl FfmpegSink {
             input_bytes: 0,
             receipt: SinkReceipt::pending(),
             deferred_soundtrack: None,
+            audio_quality: crate::AudioQuality::default(),
             no_clobber: false,
         })
     }
@@ -1843,6 +1845,34 @@ impl FfmpegSink {
     pub fn with_no_clobber(mut self) -> Self {
         self.no_clobber = true;
         self
+    }
+
+    /// Configure AAC before the first frame. The setting applies equally to a
+    /// supplied WAV and to a deferred scene soundtrack; it never affects video.
+    ///
+    /// # Errors
+    /// Refuses zero bitrate, GIF output, or changing policy after frame intake.
+    pub fn with_audio_quality(
+        mut self,
+        quality: crate::AudioQuality,
+    ) -> Result<Self, SinkAdapterError> {
+        if self.stream.is_some() || self.state.lifecycle != AdapterLifecycle::Accepting {
+            return Err(SinkAdapterError::InvalidConfig(
+                "AAC quality requires a fresh sink",
+            ));
+        }
+        quality
+            .validate()
+            .map_err(|error| SinkAdapterError::Ffmpeg {
+                detail: error.to_string(),
+            })?;
+        if !quality.is_default() && self.config.job.container == crate::Container::Gif {
+            return Err(SinkAdapterError::InvalidConfig(
+                "AAC quality requires MP4 or MOV output",
+            ));
+        }
+        self.audio_quality = quality;
+        Ok(self)
     }
 
     /// Connect a soundtrack whose cues become known while frames are emitted.
@@ -1902,7 +1932,11 @@ impl FfmpegSink {
                 self.config.job_limits.clone(),
                 self.config.workdir_root.clone(),
             )
-            .map_err(boundary_error)?;
+            .map_err(boundary_error)?
+            .with_audio_quality(self.audio_quality)
+            .map_err(|error| SinkAdapterError::Ffmpeg {
+                detail: error.to_string(),
+            })?;
             self.stream = Some(
                 boundary
                     .start_encode(

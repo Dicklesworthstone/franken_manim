@@ -33,6 +33,8 @@ required-features = ["cli", "batch"]
 [dependencies]
 fmn-core.workspace = true
 fmn-config.workspace = true
+# Sound cue asset digests in the export provenance (d0324236).
+fmn-hash.workspace = true
 fmn-cache.workspace = true
 fmn-frame.workspace = true
 fmn-codec.workspace = true
@@ -48,10 +50,6 @@ asupersync = { workspace = true, optional = true }
 
 # The build identity's uncommitted-state digest (ADR-0025).
 [build-dependencies]
-fmn-hash.workspace = true
-
-# The same digest, for build_identity's unit tests in this crate.
-[dev-dependencies]
 fmn-hash.workspace = true
 
 [features]

@@ -133,8 +133,8 @@ pub use controls::{
     add_scalar_control,
 };
 pub use coords::{
-    Axes, AxisConfig, CoordinateSystem, CoordsError, NumberLine, RiemannConfig, Slider,
-    UnitInterval, create_axis,
+    Axes, AxisConfig, CoordinateFrame, CoordinateFrameError, CoordinateSystem, CoordsError,
+    LiveCoordinateSystem, NumberLine, RiemannConfig, Slider, UnitInterval, create_axis,
 };
 pub use data_mobjects::{BarChart, DataMobjectError, TableMobject};
 pub use fields::{
@@ -229,7 +229,7 @@ pub use fmn_geom::{
         rotation_matrix_transpose_from_quaternion, thick_diagonal, tri_area, z_to_vector,
     },
 };
-pub use fmn_tex::{TexEngine, TypesetRequest};
+pub use fmn_tex::{Prim as TexPrim, TexEngine, TypesetRequest};
 pub use fmn_text::{FontBook, bundled_faces};
 
 // The Scribe span-map seam: the composition root's translation data

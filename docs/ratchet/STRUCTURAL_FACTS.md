@@ -160,6 +160,15 @@ engines' own CLIs under `structural_facts.py run-scene`. `run-scene` wraps
 `Scene.tear_down` and records `scene.mobjects`; scene source is never edited.
 Both engines run in skip mode (`-s`, 320×180) from the corpus workdir.
 
+A scene's `time` fact is its clock at `tear_down`. Skipped, the Reference
+advances by each segment's `run_time` while played it ends on the frame at or
+after it (Appendix C-28), so for the Reference `run-scene` records the clock
+playback would reach, without changing what the Reference does. It also
+records `time_bn02`: the same segments counted by BN-02's rule, which can be
+one frame longer than `arange`'s count (`wait(0.1)` at 30 fps). A portal time
+equal to `time_bn02` is the fact `time.bn02`, which the `bn02-frame-count`
+row admits; any other time difference is a difference.
+
 Each scene gets two verdicts:
 - **structure**: the diff with `GEOMETRY_FACTS` ignored;
 - **geometry**: the full diff.

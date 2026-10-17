@@ -247,9 +247,25 @@ fn macos_m4_pro_sysctl_derives_ten_p_four_e_and_their_l2_clusters() {
     );
     // Apple's system-level cache is not reported as an L3.
     assert!(t.l3_domains.is_empty());
+    // REGEN_TOPOLOGY writes the committed snapshot from this code, so every
+    // fact it records is pinned here as well: CPUs in order, one package, one
+    // core per CPU (no SMT), and one NUMA node and one processor group that
+    // each hold all fourteen CPUs.
+    let all: Vec<u32> = (0..14).collect();
+    assert_eq!(
+        t.cpus
+            .iter()
+            .map(|cpu| (cpu.id, cpu.package_id, cpu.core_id))
+            .collect::<Vec<_>>(),
+        all.iter().map(|&i| (i, 0, i)).collect::<Vec<_>>()
+    );
     assert_eq!(t.numa_nodes.len(), 1);
-    assert_eq!(t.numa_nodes[0].cpus.len(), 14);
+    assert_eq!((t.numa_nodes[0].id, &t.numa_nodes[0].cpus), (0, &all));
     assert_eq!(t.processor_groups.len(), 1);
+    assert_eq!(
+        (t.processor_groups[0].id, &t.processor_groups[0].cpus),
+        (0, &all)
+    );
     assert_eq!(t.total_memory_bytes, Some(64 * 1024 * 1024 * 1024));
 
     // Planted negative: the L2 assertion reads the recorded cluster width.
@@ -420,6 +436,35 @@ fn macos_smt_levels_and_pre_perflevel_hosts() {
         HardwareTopology::detect_macos(&hollow),
         Err(TopologyError::Invalid { detail }) if detail.contains("performance level 1")
     ));
+}
+
+/// Darwin reports how many CPUs share a cache, never which ones. A width that
+/// does not divide a level cannot place the remainder, so no domain is
+/// recorded for it rather than a guessed short one.
+#[test]
+fn macos_cache_widths_that_do_not_divide_a_level_record_no_domain() {
+    let l2 = |size_mib: u64, cpus: std::ops::Range<u32>| CacheDomain {
+        level: 2,
+        size_bytes: Some(size_mib * 1024 * 1024),
+        cpus: cpus.collect(),
+    };
+
+    // The M4 Pro's own hw.cacheconfig says 4 CPUs share an L2, over 14 CPUs
+    // whose real clusters are 5 + 5 + 4. Read without its performance levels,
+    // that is no domain, not 4 + 4 + 4 + 2.
+    let flat = detect_m4_pro_with("hw.nperflevels: 2", "").expect("detect");
+    assert_eq!(flat.logical_cores(), 14);
+    assert!(flat.l2_domains.is_empty(), "{:?}", flat.l2_domains);
+
+    // A P-level width of 4 over its 10 CPUs: no P domain, the E cluster stays.
+    let ragged = detect_m4_pro_with("hw.perflevel0.cpusperl2: 5", "hw.perflevel0.cpusperl2: 4")
+        .expect("detect");
+    assert_eq!(ragged.l2_domains, vec![l2(4, 10..14)]);
+
+    // A width at least as wide as the level is one domain holding all of it.
+    let wider = detect_m4_pro_with("hw.perflevel0.cpusperl2: 5", "hw.perflevel0.cpusperl2: 12")
+        .expect("detect");
+    assert_eq!(wider.l2_domains, vec![l2(16, 0..10), l2(4, 10..14)]);
 }
 
 #[test]

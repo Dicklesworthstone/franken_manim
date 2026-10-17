@@ -83,7 +83,7 @@ pub fn indicate(
         color: color.unwrap_or(INDICATION_YELLOW),
     });
     t.state_mut().config.name = "Indicate".to_owned();
-    t.state_mut().config.rate_func = RateFunc::Base(rate::there_and_back);
+    t.state_mut().config.rate_func = RateFunc::Catalog(rate::CatalogRate::ThereAndBack);
     Ok(t)
 }
 
@@ -111,7 +111,7 @@ pub fn flash(
 pub fn circle_indicate(pre_circle: Mob, circle: Mob, remover: bool) -> Transform {
     let mut transform = Transform::new(pre_circle, circle);
     transform.state_mut().config.name = "CircleIndicate".to_owned();
-    transform.state_mut().config.rate_func = RateFunc::Base(rate::there_and_back);
+    transform.state_mut().config.rate_func = RateFunc::Catalog(rate::CatalogRate::ThereAndBack);
     transform.state_mut().config.remover = remover;
     transform
 }
@@ -143,6 +143,8 @@ pub fn turn_inside_out(
 /// rock by the `wiggle` rate — absolute pose per frame. Reference
 /// defaults: `scale_value = 1.1`, `rotation_angle = 0.01·TAU`,
 /// `n_wiggles = 6`, `run_time = 2`.
+/// Default pivots use the starting family center, so scrubbing and native
+/// worker reconstruction produce the same pose at the same alpha.
 #[derive(Debug, Clone)]
 pub struct WiggleOutThenIn {
     state: AnimState,
@@ -216,6 +218,10 @@ impl WiggleOutThenIn {
 }
 
 impl Animation for WiggleOutThenIn {
+    fn freeze_interpolation(&self) -> Option<crate::pure_frame::FrozenAnimation> {
+        crate::pure_frame::FrozenAnimation::wiggle(self.clone())
+    }
+
     fn state(&self) -> &AnimState {
         &self.state
     }
@@ -224,8 +230,8 @@ impl Animation for WiggleOutThenIn {
         &mut self.state
     }
 
-    /// Pure: restore-then-transform about pivots that are functions of
-    /// the begin state (the default pivots read the restored center).
+    /// Pure: restore-then-transform about explicit pivots or the immutable
+    /// starting family center, never a partially restored live-family box.
     fn effect_signature(&self) -> AnimationSignature {
         AnimationSignature::Pure
     }
@@ -246,7 +252,10 @@ impl Animation for WiggleOutThenIn {
             return; // rows are pairs once begin has run
         };
         stage.match_points(submob, start);
-        let mobject = self.state.mobject();
+        // match_points restores only this member; live siblings can still
+        // carry the preceding frame. Their partially restored box must not
+        // become the default pivot. The starting family's box is immutable.
+        let mobject = self.state.starting_mobject().unwrap_or(start);
         let scale_pivot = self
             .scale_about_point
             .unwrap_or_else(|| stage.get_center(mobject));
@@ -330,6 +339,10 @@ impl VShowPassingFlash {
 }
 
 impl Animation for VShowPassingFlash {
+    fn freeze_interpolation(&self) -> Option<crate::pure_frame::FrozenAnimation> {
+        crate::pure_frame::FrozenAnimation::stroke_flash(self.clone())
+    }
+
     fn state(&self) -> &AnimState {
         &self.state
     }
@@ -466,7 +479,13 @@ pub fn apply_wave(stage: &Stage, mobject: Mob, direction: Vec3, amplitude: f64) 
     ];
     let mut anim = Homotopy::new(
         move |x, y, z, t| {
-            let alpha = (x - left_x) / (right_x - left_x);
+            // A vertical or point-sized family has no left/right phase.
+            // Use its midpoint rather than passing 0/0 into the wave map.
+            let alpha = if left_x == right_x {
+                0.5
+            } else {
+                (x - left_x) / (right_x - left_x)
+            };
             let power = fmn_dmath::exp(2.0 * (alpha - 0.5));
             let nudge = rate::there_and_back(fmn_dmath::pow(t, power));
             [
@@ -592,12 +611,21 @@ pub fn show_creation_then_fade_around(
 /// reported while assembling the member container.
 pub fn broadcast(
     stage: &mut Stage,
-    restores: Vec<Box<dyn Animation>>,
+    mut restores: Vec<Box<dyn Animation>>,
     run_time: f64,
     lag_ratio: f64,
     remover: bool,
 ) -> Result<AnimationGroup, AnimError> {
-    let mut group = crate::composition::lagged_start(stage, restores)?;
+    // Group cleanup delegates to members. Apply the requested removal to
+    // those lifetimes, instead of leaving an inert flag on the container.
+    if remover {
+        for animation in &mut restores {
+            animation.state_mut().config.remover = true;
+        }
+    }
+    // The interval table is built at construction, not from the display
+    // config during playback. Spend the caller's lag here, exactly once.
+    let mut group = AnimationGroup::with_lag_ratio(stage, restores, lag_ratio)?;
     group.state_mut().config.name = "Broadcast".to_owned();
     group.state_mut().config.run_time = run_time;
     group.state_mut().config.lag_ratio = lag_ratio;

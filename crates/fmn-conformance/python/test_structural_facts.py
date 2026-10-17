@@ -312,6 +312,15 @@ class RowScoping(unittest.TestCase):
         c = dict(b, camera_frame_roots=1, time=2001)
         self.assertEqual(sf.diff_subject(a, c)["verdict"], "equal")
 
+    def test_a_time_equal_to_the_bn02_recount_is_only_that_fact(self):
+        rows = [{"id": "bn02", "kind": "behavior-note", "ref": "BN-02", "scope": "scenes",
+                 "fact": "time.bn02", "reason": "t"}]
+        ref = dict(facts([Square(SQUARE)]), time=3000, time_bn02=3067)
+        counted = sf.diff_subject(ref, dict(facts([Square(SQUARE)]), time=3067), rows)
+        self.assertEqual((counted["verdict"], counted["excluded"]), ("equal-with-exclusions", {"bn02": 1}))
+        other = sf.diff_subject(ref, dict(facts([Square(SQUARE)]), time=3100), rows)
+        self.assertEqual(other["first_difference"]["fact"], "time")
+
 
 class ClassSweep(unittest.TestCase):
     def test_sweep_lists_each_default_then_its_declared_calls(self):
@@ -472,6 +481,28 @@ class Envelopes(unittest.TestCase):
         # The same 0.08 as a pure translation is a position difference.
         moved = sf.diff_subject(ref, self.square(lambda x, y, z: (x + 0.08, y, z)), rows)
         self.assertEqual(moved["first_difference"]["envelope_violation"]["center_offset"], 0.08)
+
+    def test_a_layout_cascade_is_explained_and_a_planted_misplacement_is_not(self):
+        # fm-5wq.59: a second square sits below the first, its top-left at the
+        # first's bottom-left (next_to(first, DOWN, aligned_edge=LEFT)).
+        rows = [self.note(envelope={"size_rel": 0.5, "center_abs": 0.05})]
+
+        def scene(first_scale, second_shift=(0.0, 0.0)):
+            first = Square([(first_scale * x, first_scale * y, z) for x, y, z in SQUARE])
+            left, top = -first_scale + second_shift[0], -first_scale - 0.25 + second_shift[1]
+            second = Square([(left + 1 + x, top - 1 + y, z) for x, y, z in SQUARE])
+            return facts([first, second])
+
+        ref = scene(1.0)
+        # The first square grows 20% (inside its envelope), and the second
+        # follows its bottom-left corner: a cascade, anchored on root 0.
+        grown = sf.diff_subject(ref, scene(1.2), rows)["envelope_violations"]
+        self.assertEqual([v["path"] for v in grown], ["1"])
+        self.assertEqual(grown[0]["cascade"]["anchor"], "0")
+        # The same second square moved on its own: a placement bug, unexplained.
+        planted = sf.diff_subject(ref, scene(1.0, (0.3, 0.1)), rows)["envelope_violations"]
+        self.assertEqual([v["path"] for v in planted], ["1"])
+        self.assertIsNone(planted[0]["cascade"])
 
     def test_a_behavior_note_without_an_envelope_fails_validation_and_check(self):
         row = self.note()

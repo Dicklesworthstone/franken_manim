@@ -252,6 +252,10 @@ fmn --write_all --format png_sequence @builtin
 fmn --format video --resolution 640x360 @builtin circle_shift.v1
 fmn --format video --transparent --resolution 640x360 @builtin circle_shift.v1
 
+# The native audio demo resolves its cue asset from this directory.
+(cd crates/fmn/assets && fmn --format video --resolution 640x360 \
+  --video_dir ../../../media @builtin sound_cue.v1)
+
 # Certified artifacts stop before ffmpeg: canonical frames are the promised bits
 fmn --reproducible --format png_sequence @builtin circle_shift.v1
 
@@ -284,6 +288,17 @@ fmn-python scene.py SquareToCircle --format png --reproducible   # certified png
 fmn-python scene.py --write_all --format png_sequence      # every scene in the file
 fmn-python studio scene.py SquareToCircle                  # browser Studio: scrub, inspect, overlays
 ```
+
+Native CLI video exports mix live scene sound cues at 48 kHz stereo, then mux
+AAC while copying the encoded video stream. PCM WAV inputs decode natively;
+other supported audio containers use the same governed ffmpeg capability as
+video. Animation ranges remove skipped time from cue placement. `--subdivide`
+reuses the builtin's required counting pass and mixes each clip's absolute
+sample window, preserving sounds that cross clip boundaries and cropping cue
+tails to the clip. Whole-scene exports retain cue tails past the picture.
+Robot output reports the soundtrack, source and PCM hashes, all encode/mux
+invocations, and audio decode invocations separately. The same receipts enter
+the video manifest. See [BN-14](docs/behavior_notes/BN-14-sample-exact-sound.md).
 
 The portal commands below are the **1.0 target contract**, not shipped behavior:
 today they fail closed with capability exit 4, because their input-closure,

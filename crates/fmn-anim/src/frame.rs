@@ -158,6 +158,21 @@ impl FramePacket {
         stage
     }
 
+    /// Consume this packet into a callback-free, thread-transferable render state.
+    ///
+    /// Unshared packets move their geometry and graph metadata without first
+    /// materializing another Stage. Shared journal/preview packets retain their
+    /// full replay state and produce an isolated copy-on-write render projection.
+    /// Updater references are only dropped on this calling scene-owner thread.
+    #[must_use]
+    pub fn into_render_state(self) -> fmn_mobject::FrozenRenderState {
+        let time = self.time.to_f64();
+        match Rc::try_unwrap(self.state) {
+            Ok(state) => state.into_render_state(time),
+            Err(state) => state.render_state(time),
+        }
+    }
+
     /// The keyed per-frame fork of a named substream (§6.5): a pure
     /// function of `(seed, name, frame index)`, identical from any thread
     /// in any order — the property that makes frame parallelism
@@ -430,6 +445,15 @@ impl OpenSegment {
     #[must_use]
     pub fn stepped(&self) -> i64 {
         self.stepped
+    }
+
+    pub(crate) fn is_at_begin(&self) -> bool {
+        self.stepped == 0
+            && self.current_sample.is_none()
+            && self.prepared.is_none()
+            && self.next_animation == 0
+            && !self.animations_finished
+            && !self.final_updaters_completed
     }
 
     /// Mark the prepared frame's whole scene-updater phase as completed by
@@ -723,6 +747,26 @@ pub struct OpenWait {
 }
 
 impl OpenWait {
+    pub(crate) fn report(&self) -> &SegmentReport {
+        &self.report
+    }
+
+    pub(crate) fn segment(&self) -> FrameSegment {
+        self.segment
+    }
+
+    pub(crate) fn is_at_begin(&self) -> bool {
+        self.stepped == 0 && self.prepared.is_none()
+    }
+
+    pub(crate) fn finish_pure(mut self) -> Result<SegmentReport, AnimError> {
+        if !self.is_at_begin() || !self.report.purity.is_pure() {
+            return Err(AnimError::InvalidFramePhase("pure wait no longer at begin"));
+        }
+        self.stepped = self.segment.n_frames();
+        finish_open_wait(self)
+    }
+
     /// Mark the prepared wait frame's whole scene-updater phase complete.
     ///
     /// # Errors
@@ -1049,25 +1093,29 @@ pub fn play_segment_with_boundary(
     boundary: &mut dyn FnMut(&mut Stage, RationalTime),
     emit: &mut dyn FnMut(FramePacket),
 ) -> Result<SegmentReport, AnimError> {
-    let prologue = play_prologue(stage, clock, animations, skip)?;
-    let segment = prologue.segment;
-    let report = prologue.report(SegmentKind::Play);
-    // Once the prologue succeeds, the finish/cleanup phase runs EXACTLY once
-    // in both modes, error or not (fm-tqy4): the segment body's earliest
-    // driver/deferred error is captured — never `?`-propagated past
-    // `finish_animations` — so a failing composition is still unmarked from
-    // animating, removers apply, and the final zero-dt updater pass runs
-    // before the same error surfaces that skip mode reports.
-    let mut open = OpenSegment {
-        report: report.clone(),
-        segment,
-        stepped: 0,
-        current_sample: None,
-        next_animation: 0,
-        prepared: None,
-        animations_finished: false,
-        final_updaters_completed: false,
-    };
+    let open = open_play_with_mode(stage, clock, animations, skip)?;
+    drive_open_play(stage, clock, rng, animations, skip, boundary, emit, open)
+}
+
+// Shared serial continuation, including failure cleanup, for ordinary play and
+// a pure-dispatch refusal AFTER begin. Never repeat begin or lose a deferred
+// composition error merely because a sink declined compact frame jobs.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn drive_open_play(
+    stage: &mut Stage,
+    clock: &mut RationalFrameClock,
+    rng: &RngRoot,
+    animations: &mut [Box<dyn Animation>],
+    skip: bool,
+    boundary: &mut dyn FnMut(&mut Stage, RationalTime),
+    emit: &mut dyn FnMut(FramePacket),
+    mut open: OpenSegment,
+) -> Result<SegmentReport, AnimError> {
+    let report = open.report.clone();
+    let segment = open.segment;
+    // Once begin succeeds, finish/cleanup runs EXACTLY once, error or not.
+    // In particular a deferred failure during partial preparation must not be
+    // returned past the epilogue (fm-tqy4).
     // Both modes use the exact same stepped driver. Skip changes one thing:
     // `complete_play_frame` suppresses capture/emission. In particular, a
     // composition's deferred error is observed before the same clock advance
@@ -1101,7 +1149,7 @@ pub fn play_segment_with_boundary(
 /// under skip (the Reference's `override_skip_animations`) — capture stays
 /// off while skipping. Returns the segment's [`SegmentReport`]; a stop
 /// condition demotes to stateful by vocabulary (its callback reads
-/// per-frame state and decides the segment's length).
+/// per-frame state and decides the segment's length dynamically).
 ///
 /// # Errors
 /// [`AnimError::Clock`] for a non-finite or oversized duration.

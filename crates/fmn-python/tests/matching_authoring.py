@@ -138,7 +138,7 @@ def test_matching_implicitly_adopts_unadded_text_tex_and_group_pieces():
         assert not source._is_bound() and not target._is_bound()
         animation = animation_type(source, target, run_time=.125)
         scene.play(animation)
-        assert scene.mobjects == [unrelated, target]
+        assert scene.mobjects == [scene.frame, unrelated, target]
         assert animation._composition_driver is None
         scene.wait(.125)
 
@@ -204,11 +204,11 @@ def test_empty_shape_transitions_use_the_existing_fades_and_cleanup():
                             [ml.FadeInFromPoint] if final else [])
                 assert [type(child) for child in animation.animations] == expected
                 scene.play(animation)
-                assert scene.mobjects == [marker, target]
+                assert scene.mobjects == [scene.frame, marker, target]
                 assert np.isclose(scene.time, 4 / 30)
                 assert animation._composition_driver is None
                 animation.clean_up_from_scene(scene)
-                assert scene.mobjects == [marker, target], 'cleanup must be idempotent'
+                assert scene.mobjects == [scene.frame, marker, target], 'cleanup must be idempotent'
 
 
 def test_empty_strings_keep_native_span_metadata_without_fake_glyphs():
@@ -226,7 +226,7 @@ def test_empty_strings_keep_native_span_metadata_without_fake_glyphs():
             assert bool(params['target_keys']) == bool(final)
             scene = ml.Scene().add(source)
             scene.play(animation)
-            assert scene.mobjects == [target]
+            assert scene.mobjects == [scene.frame, target]
             assert [(list(obj._string_sub_spans), obj._string_sub_paths)
                     for obj in (source, target)] == old
             assert bool(target.family_members_with_points()) == bool(final)
@@ -239,7 +239,7 @@ def test_whitespace_and_invisible_tex_are_legitimate_zero_ink_operands():
         animation = ml.TransformMatchingStrings(source, empty, run_time=.125)
         scene = ml.Scene().add(source)
         scene.play(animation)
-        assert scene.mobjects == [empty]
+        assert scene.mobjects == [scene.frame, empty]
         assert not empty.family_members_with_points()
 
 
@@ -269,7 +269,7 @@ def test_empty_match_still_executes_public_planning_and_lifecycle_hooks():
     assert calls.count('begin') == calls.count('finish') == calls.count('cleanup') == 1
     assert any(isinstance(call, tuple) and call[0] == 'alpha' and 0 < call[1] < 1
                for call in calls), 'the empty transition was short-circuited instead of timed'
-    assert scene.mobjects == [target]
+    assert scene.mobjects == [scene.frame, target]
 
 
 def test_empty_matches_compose_with_native_succession_and_repeat():
@@ -298,7 +298,7 @@ def test_skipping_empty_matches_replaces_roots_without_rendering_ink():
         source, target = ml.Text(start), ml.Text(end)
         scene = ml.Scene(skip_animations=True).add(source)
         scene.play(ml.TransformMatchingStrings(source, target, run_time=.125))
-        assert scene.mobjects == [target]
+        assert scene.mobjects == [scene.frame, target]
         assert np.isclose(scene.time, 4 / 30)
 
 

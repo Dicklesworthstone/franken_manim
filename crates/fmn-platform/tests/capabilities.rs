@@ -1400,10 +1400,17 @@ mod std_runner {
         const CHUNK: usize = 1 << 20;
         const MAX_TOTAL: u64 = 1 << 30;
         const STALL: Duration = Duration::from_millis(500);
+        const FILL_DEADLINE: Duration = Duration::from_secs(20);
+        // The child outlives the fill deadline (it sleeps 30 s), and so must
+        // its supervisor timeout. At `spec`'s 10 s, a fill that took longer
+        // would end with the supervisor killing the child, and the write
+        // failing on the closed pipe before cancellation was ever sent.
+        let mut sleeper = spec(&host_bin("sleep"), &["30"]);
+        sleeper.timeout = Duration::from_secs(60);
         let cancellation = ProcessCancellation::new();
         let process = StdProcessRunner
             .start(
-                &spec(&host_bin("sleep"), &["30"]),
+                &sleeper,
                 cancellation.clone(),
                 ProcessStdinLimits::new(CHUNK as u64, MAX_TOTAL),
             )
@@ -1440,7 +1447,7 @@ mod std_runner {
 
         // A full pipe: the writer is running, has not returned, and has made
         // no progress for STALL.
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + FILL_DEADLINE;
         let mut seen = delivered.load(Ordering::Acquire);
         let mut unchanged_since = Instant::now();
         loop {

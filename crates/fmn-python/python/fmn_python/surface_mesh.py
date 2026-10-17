@@ -74,7 +74,10 @@ def install_surface_mesh(native):
         # Newly added wires inherit current per-axis styles, or this root seed.
         VMobject.set_stroke(self, color=g["GREY_A"] if stroke_color is None else stroke_color,
                            width=stroke_width, opacity=1, recurse=False)
-        VMobject.set_fill(self, opacity=0, recurse=False)
+        # The root fill is VMobject's default, as in the Reference (fm-78b6);
+        # fill_color= and color= are refused before this point.
+        VMobject.set_fill(self, color=g["_pinned_manim_config"]().vmobject.default_fill_color,
+                          opacity=0, recurse=False)
 
     def idle(members):
         if any(vars(member).get("_is_animating", False) or

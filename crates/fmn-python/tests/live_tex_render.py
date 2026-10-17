@@ -89,7 +89,8 @@ class LiveEquations(m.Scene):
         assert self.formula.get_part_by_tex(r"\decimalmob", 0)[0] is first
         assert self.formula.get_part_by_tex(r"\decimalmob", 1)[0] is second
         assert entry.get_part_by_tex(r"\decimalmob")[0] is third
-        assert list(self.mobjects) == [self.formula, self.matrix], "animated descendants became extra draw roots"
+        assert list(self.mobjects) == [self.frame, self.formula, self.matrix], \
+            "animated descendants became extra draw roots"
 
 
 def render_live_tex(destination, seed=0):

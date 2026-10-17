@@ -310,12 +310,66 @@ fn solve_banded(l: usize, u: usize, ab: &[Vec<f64>], b: &mut [f64]) -> Result<()
     Ok(())
 }
 
+/// The closed right-hand-side magnitude above which [`solve_dense`] solves at
+/// a power-of-two scale, 2^400 (fm-77rt).
+///
+/// fsci-linalg accepts an LU solution only if its backward error is at most
+/// 1e-8, and it computes that error from unscaled sums of squares of `A x - b`,
+/// `A`, `x` and `b`. The closed matrices have entries of at most 2, dimension
+/// at most 256 and `cond_inf` at most 8.2, so for `|b| <= 2^400` each sum stays
+/// below about 2^830. Past that point the sums overflow, the LU attempt reads
+/// as inaccurate, and fsci falls back to an SVD whose bits depend on the
+/// platform libm and the CPU's FMA.
+const CLOSED_RHS_SCALE_LIMIT: f64 = f64::from_bits((1023 + 400) << 52);
+
+/// 2^e, exactly, for e in [-1022, 1023].
+fn power_of_two(e: i32) -> f64 {
+    debug_assert!((-1022..=1023).contains(&e), "2^{e} is not a normal double");
+    f64::from_bits(u64::try_from(1023 + e).unwrap_or(0) << 52)
+}
+
+/// The power of two [`solve_dense`] scales `b` down by: 0 at or below
+/// [`CLOSED_RHS_SCALE_LIMIT`], else the exponent of `b`'s largest magnitude,
+/// at most 1022 so that 2^-exponent stays a normal double. Non-finite input
+/// is left as is, since Strict mode refuses it.
+fn closed_rhs_exponent(b: &[f64]) -> i32 {
+    let peak = b.iter().fold(0.0_f64, |acc, value| acc.max(value.abs()));
+    if peak.is_finite() && peak > CLOSED_RHS_SCALE_LIMIT {
+        i32::try_from((peak.to_bits() >> 52) & 0x7ff).map_or(0, |biased| (biased - 1023).min(1022))
+    } else {
+        0
+    }
+}
+
 /// Dense solve of `A x = b` through fsci-linalg, the solution written into
 /// `b`.
+///
+/// A right-hand side above [`CLOSED_RHS_SCALE_LIMIT`] is solved scaled down
+/// by a power of two, and the solution is scaled back. `x` is linear in `b`,
+/// and a power-of-two factor commutes with every rounding of the solve outside
+/// the subnormal range. Below the limit nothing is scaled, so those bits are
+/// unchanged. Above it, fsci's portfolio sizes (n < 128) fell back to the
+/// platform-dependent SVD, so there were no stable bits to keep. Every size
+/// now stays on LU and is the same on every platform. The result is exactly
+/// 2^k times the scaled-down solve, except where fsci's f32 refinement
+/// (n >= 128) rounds roundoff-level residuals through subnormals.
 fn solve_dense(m: &[Vec<f64>], b: &mut [f64]) -> Result<(), GeomError> {
+    let exponent = closed_rhs_exponent(b);
+    if exponent != 0 {
+        let down = power_of_two(-exponent);
+        for value in b.iter_mut() {
+            *value *= down;
+        }
+    }
     let solved =
         fsci_linalg::solve(m, b, fsci_linalg::SolveOptions::default()).map_err(solver_error)?;
     b.copy_from_slice(&solved.x);
+    if exponent != 0 {
+        let up = power_of_two(exponent);
+        for value in b.iter_mut() {
+            *value *= up;
+        }
+    }
     Ok(())
 }
 
@@ -364,6 +418,99 @@ mod tests {
         }
         let m = closed_smoothing_matrix(&smoothing_band(2), 2);
         assert_eq!(m, vec![vec![1.0, 1.0], vec![1.0, -2.0]]);
+    }
+
+    #[test]
+    fn closed_smoothing_solves_never_leave_lu() {
+        // fm-77rt: fsci_linalg::solve leaves its first factorization (LU, or
+        // LDL^T for the symmetric n = 2) for QR or an SVD only after that
+        // attempt fails or its backward error exceeds 1e-8. The SVD's bits
+        // depend on the platform libm (nalgebra's hypot, atan2, sin_cos) and
+        // on the CPU's FMA (matrixmultiply). The closed system depends on n
+        // alone, so every admissible dimension is solved here, as solve_dense
+        // solves it. Right-hand sides are at unit scale, at
+        // CLOSED_RHS_SCALE_LIMIT (the largest that is not scaled), and at the
+        // largest finite magnitude. A dimension of 128 or more takes fsci's
+        // blocked-LU fast path, which carries no certificate; a failed fast
+        // path would fall to the portfolio, whose certificate is then checked.
+        let dimensions = std::iter::once(2).chain((4..=MAX_CLOSED_SMOOTHING_DIMENSION).step_by(2));
+        for n in dimensions {
+            let m = closed_smoothing_matrix(&smoothing_band(n), n);
+            for magnitude in [1.0, CLOSED_RHS_SCALE_LIMIT, f64::MAX] {
+                let mut b: Vec<f64> = (0..n)
+                    .map(|i| {
+                        let t = (i as f64 * 0.618_033_988_749_895).fract();
+                        magnitude * if i % 3 == 0 { -t } else { t * 0.5 + 0.5 }
+                    })
+                    .collect();
+                let exponent = closed_rhs_exponent(&b);
+                if exponent != 0 {
+                    let down = power_of_two(-exponent);
+                    for value in &mut b {
+                        *value *= down;
+                    }
+                }
+                let solved = fsci_linalg::solve(&m, &b, fsci_linalg::SolveOptions::default())
+                    .unwrap_or_else(|error| panic!("n = {n}, |b| ~ {magnitude:e}: {error}"));
+                assert!(
+                    solved.backward_error.is_some_and(|omega| omega <= 1e-8),
+                    "n = {n}, |b| ~ {magnitude:e}: backward error {:?}",
+                    solved.backward_error
+                );
+                if let Some(certificate) = solved.certificate {
+                    let action = format!("{:?}", certificate.action);
+                    assert!(
+                        !certificate.fallback_active
+                            && matches!(action.as_str(), "DirectLU" | "SymmetricFastPath"),
+                        "n = {n}, |b| ~ {magnitude:e}: the solve left its factorization ({action}, \
+                         fallback {})",
+                        certificate.fallback_active
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn huge_closed_paths_smooth_as_their_scaled_down_copies() {
+        // fm-77rt: solve_dense scales an extreme right-hand side by a power of
+        // two. On fsci's f64 portfolio (n < 128) that commutes with every
+        // rounding, so the handles of a path scaled by 2^600 are exactly 2^600
+        // times its own. fsci's mixed-precision fast path (n >= 128) refines in
+        // f32, where roundoff-level residuals fall into the subnormal range and
+        // no longer scale exactly. There the handles agree to the solve's
+        // accuracy, measured against the path's largest handle.
+        let up = power_of_two(600);
+        for anchors_count in [3, 5, 40, 64, 65, 129] {
+            let n = 2 * (anchors_count - 1);
+            let anchors = zigzag_anchors(anchors_count, true);
+            let huge: Vec<Vec3> = anchors.iter().map(|&a| vec::scale(a, up)).collect();
+            let (h1, h2) = smooth_cubic_handles(&anchors).expect("unit-scale handles");
+            let (huge1, huge2) = smooth_cubic_handles(&huge).expect("huge handles");
+            let scale = h1
+                .iter()
+                .chain(&h2)
+                .flat_map(|handle| handle.iter())
+                .fold(0.0_f64, |acc, value| acc.max(value.abs()))
+                * up;
+            for (small, large) in h1.iter().chain(&h2).zip(huge1.iter().chain(&huge2)) {
+                let expected = vec::scale(*small, up);
+                if n < 128 {
+                    assert_eq!(
+                        large.map(f64::to_bits),
+                        expected.map(f64::to_bits),
+                        "{anchors_count} anchors: {large:?} vs {expected:?}"
+                    );
+                } else {
+                    for (got, want) in large.iter().zip(expected) {
+                        assert!(
+                            (got - want).abs() <= 1e-12 * scale,
+                            "{anchors_count} anchors: {large:?} vs {expected:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

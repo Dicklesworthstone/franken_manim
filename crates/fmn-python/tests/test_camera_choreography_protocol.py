@@ -215,6 +215,12 @@ def environment():
             for value in (root, *more):
                 if value in self.roots:
                     self.roots.remove(value)
+        def get_mobject_family_members(self):
+            # Scene.get_mobject_family_members: scene_play keeps roots that
+            # are already present in draw order (fm-kpvx). The frame heads
+            # the scene list (fm-6l2i), so it is present too, though never
+            # adopted as a drawable root.
+            return [self.frame, *(member for root in self.roots for member in root.get_family())]
         def _native_animation_driver(self, spec):
             core = NativeCore(self, spec)
             self.cores.append(core)
@@ -440,7 +446,7 @@ class CameraChoreographyTests(unittest.TestCase):
         self.assertEqual(self.scene.roots, [])
         self.assertEqual(self.scene.calls, [])
     def test_camera_replacement_is_named_not_silently_ignored(self):
-        with self.assertRaisesRegex(NotImplementedError, "remove or replace"):
+        with self.assertRaisesRegex(NotImplementedError, "replace the scene's camera identity"):
             self.scene.play(self.g["ReplacementTransform"](self.scene.frame, self.scene.frame.copy()))
     def test_nonfinite_runtime_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "finite"):
@@ -484,8 +490,11 @@ class CameraChoreographyTests(unittest.TestCase):
         self.assertIs(group.mobject, root)
         self.assertEqual(self.scene.roots, [root])
         self.assertFalse(self.scene.frame._is_bound())
-    def test_camera_in_explicit_drawable_root_is_rejected(self):
-        root = self.g["Group"](self.scene.frame)
+    def test_camera_nested_in_explicit_drawable_root_is_rejected(self):
+        # The scene's frame as a direct member is a group over the scene list
+        # (fm-6l2i), which plays unstaged (fm-5wwt; camera_motion.py). Nested
+        # deeper, it would have to be staged, so that still refuses.
+        root = self.g["Group"](self.g["Group"](self.scene.frame))
         group = self.Group(self.camera_move(4), group=root)
         with self.assertRaisesRegex(ValueError, "drawable group cannot contain"):
             self.scene.play(group)

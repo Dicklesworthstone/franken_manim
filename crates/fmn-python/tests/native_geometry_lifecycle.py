@@ -191,7 +191,7 @@ class NativeGeometryLifecycle(unittest.TestCase):
         before_parent = obj.parents.copy()
         obj.radius = 2
         self.assertIs(obj.init_points(), obj)
-        self.assertIs(scene.mobjects[0], obj)
+        self.assertIs(scene.mobjects[1], obj)
         self.assertIs(obj[0], child)
         self.assertEqual(obj.parents, before_parent)
         self.assertIs(obj.updaters[0], updater)

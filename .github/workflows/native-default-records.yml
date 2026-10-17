@@ -1,0 +1,118 @@
+name: Native default-record animation
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/native-default-records.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-default-record-core
+  cancel-in-progress: true
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+      CARGO_TERM_COLOR: never
+      CARGO_TARGET_DIR: target/portable
+      CARGO_BUILD_JOBS: '2'
+      PYO3_PYTHON: python3
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/portable
+          key: default-records-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock','rust-toolchain.toml') }}
+          restore-keys: |
+            native-methods-${{ runner.os }}-${{ runner.arch }}-
+            fmtl-rates-${{ runner.os }}-${{ runner.arch }}-
+      - run: rustup show active-toolchain
+      - name: Reproduce the missing native default interpolation then apply the exact fix
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, gzip, hashlib, json, os, pathlib, subprocess, urllib.request
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'default-records'
+          out.mkdir()
+          sha = 'fe3ed1025f0b85fdae6d356d5f02b65a0bfd0378'
+          req = urllib.request.Request(
+              f'https://api.github.com/repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{sha}',
+              headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'], 'User-Agent':'OpenAI File Downloader, XaiImageApiFetch/1.0'})
+          with urllib.request.urlopen(req, timeout=60) as response:
+              data = base64.b64decode(json.load(response)['content'])
+          assert hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest() == sha
+          candidate = json.loads(gzip.decompress(data))
+          test = 'crates/fmn-anim/tests/empty_record_interpolation.rs'
+          source = 'crates/fmn-anim/src/transform.rs'
+          assert set(candidate['tests']) == {test}
+          assert not pathlib.Path(test).exists()
+          pathlib.Path(test).write_text(candidate['tests'][test])
+          patch = out/'core.patch'
+          patch.write_text(candidate['patch'])
+          stats = subprocess.check_output(['git','apply','--numstat',str(patch)], text=True)
+          assert {line.split('\t')[2] for line in stats.splitlines()} == {source}
+          command = ['cargo','test','--locked','-p','fmn-anim','--test','empty_record_interpolation','--','--nocapture']
+          with (out/'baseline.log').open('w') as log:
+              result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
+          text = (out/'baseline.log').read_text()
+          print(text[-14000:])
+          assert result.returncode == 101 and 'test transform_blends_empty_style_and_custom_defaults_without_creating_points ... FAILED' in text, 'baseline must fail an executed behavioral assertion, not compilation'
+          subprocess.run(['git','apply','--check',str(patch)], check=True)
+          subprocess.run(['git','apply',str(patch)], check=True)
+          subprocess.run(['rustfmt','--edition','2024','--config','skip_children=true',source,test], check=True)
+          subprocess.run(['git','diff','--check'], check=True)
+          (out/'paths.json').write_text(json.dumps([source,test]))
+          (out/'source-commit.txt').write_text(os.environ['GITHUB_SHA']+'\n')
+          PY
+      - name: Check real native behavior and regressions
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, subprocess
+          out = pathlib.Path(os.environ['RUNNER_TEMP'])/'default-records'
+          commands = [
+              ('focused',['cargo','test','--locked','-p','fmn-anim','--test','empty_record_interpolation','--','--nocapture']),
+              ('release',['cargo','test','--release','--locked','-p','fmn-anim','--test','empty_record_interpolation']),
+              ('animation-scene-facade',['cargo','test','--locked','-p','fmn-anim','-p','fmn-scene','-p','fmn','--no-fail-fast']),
+              ('clippy',['cargo','clippy','--locked','-p','fmn-anim','-p','fmn-scene','-p','fmn','--all-targets','--','-D','warnings']),
+              ('workspace-check',['cargo','check','--locked','--workspace','--all-targets']),
+          ]
+          statuses = {}
+          for name, command in commands:
+              with (out/(name+'.log')).open('w') as log:
+                  result = subprocess.run(command,stdout=log,stderr=subprocess.STDOUT)
+              statuses[name] = result.returncode
+              (out/'results.json').write_text(json.dumps(statuses,indent=2))
+              print(name, result.returncode, (out/(name+'.log')).read_text()[-12000:],flush=True)
+          assert all(value == 0 for value in statuses.values()), statuses
+          PY
+      - name: Preserve exact candidate sources and hashes
+        if: ${{ !cancelled() }}
+        run: |
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib,subprocess
+          out=pathlib.Path(os.environ['RUNNER_TEMP'])/'default-records'
+          if (out/'paths.json').exists():
+              paths=json.loads((out/'paths.json').read_text())
+              assert set(subprocess.check_output(['git','diff','--name-only'],text=True).splitlines()) <= set(paths)
+              hashes={}
+              for path in paths:
+                  data=pathlib.Path(path).read_bytes()
+                  hashes[path]=hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+              (out/'blobs.json').write_text(json.dumps(hashes,indent=2))
+              subprocess.run(['tar','-czf',str(out/'sources.tar.gz'),*paths],check=True)
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: default-records-${{ github.run_id }}
+          path: ${{ runner.temp }}/default-records
+          retention-days: 7
+          if-no-files-found: error

@@ -212,7 +212,7 @@ class TexPreambleTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError, "multiple native occurrences"):
                         formula.make_number_changeable("1.00", replace_all=replace_all)
                     self.assertEqual(snapshot(), before)
-                    self.assertEqual(list(scene.mobjects), [formula])
+                    self.assertEqual(list(scene.mobjects), [scene.frame, formula])
 
 
 if __name__ in ("__main__", "<run_path>"):

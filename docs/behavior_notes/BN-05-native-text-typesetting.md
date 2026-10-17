@@ -80,3 +80,8 @@ ligature is one submobject), so scene code indexes identically.
 - Pango-only markup (arbitrary attributes, `<gravity>`, etc.) is out of
   the compatibility claim; the supported set is documented in
   `fmn_text::markup`.
+- `\!`, `\:` and `\;` in mathematics are TeX's −3, 4 and 5 mu spaces. The
+  Reference's default template loads `tipa`, which turns each into a
+  one-token box with no space (Appendix C-27): there `x\;y` sets as `xy`,
+  `x\;=y` loses the relation spacing around `=`, and `a\!\!b` does not
+  compile. A formula that asks for a space gets it.

@@ -726,12 +726,12 @@ dependencies = [
 [[package]]
 name = "fmd-font"
 version = "0.3.3"
-source = "git+https://github.com/Dicklesworthstone/franken_markdown?rev=bd00a2471566d4fe87229fbc2391c99ac47b9697#bd00a2471566d4fe87229fbc2391c99ac47b9697"
+source = "git+https://github.com/Dicklesworthstone/franken_markdown?rev=80cbadcd0d37c252cd2c46a9e533ebfa23ee825b#80cbadcd0d37c252cd2c46a9e533ebfa23ee825b"
 
 [[package]]
 name = "fmd-math"
 version = "0.1.2"
-source = "git+https://github.com/Dicklesworthstone/franken_markdown?rev=bd00a2471566d4fe87229fbc2391c99ac47b9697#bd00a2471566d4fe87229fbc2391c99ac47b9697"
+source = "git+https://github.com/Dicklesworthstone/franken_markdown?rev=80cbadcd0d37c252cd2c46a9e533ebfa23ee825b#80cbadcd0d37c252cd2c46a9e533ebfa23ee825b"
 dependencies = [
  "fmd-font",
 ]
@@ -1237,7 +1237,7 @@ dependencies = [
 [[package]]
 name = "franken_markdown"
 version = "0.5.0"
-source = "git+https://github.com/Dicklesworthstone/franken_markdown?rev=bd00a2471566d4fe87229fbc2391c99ac47b9697#bd00a2471566d4fe87229fbc2391c99ac47b9697"
+source = "git+https://github.com/Dicklesworthstone/franken_markdown?rev=80cbadcd0d37c252cd2c46a9e533ebfa23ee825b#80cbadcd0d37c252cd2c46a9e533ebfa23ee825b"
 dependencies = [
  "clap",
  "fmd-font",
@@ -1246,16 +1246,16 @@ dependencies = [
 
 [[package]]
 name = "fsci-fft"
-version = "0.2.0"
-source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=85edd7a99f2a6487ef35135e135b9959cc0010c1#85edd7a99f2a6487ef35135e135b9959cc0010c1"
+version = "0.3.0"
+source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=ae52b65454841cd4976f6fbac907be0539508d9b#ae52b65454841cd4976f6fbac907be0539508d9b"
 dependencies = [
  "fsci-runtime",
 ]
 
 [[package]]
 name = "fsci-integrate"
-version = "0.2.0"
-source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=85edd7a99f2a6487ef35135e135b9959cc0010c1#85edd7a99f2a6487ef35135e135b9959cc0010c1"
+version = "0.3.0"
+source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=ae52b65454841cd4976f6fbac907be0539508d9b#ae52b65454841cd4976f6fbac907be0539508d9b"
 dependencies = [
  "fsci-opt",
  "fsci-runtime",
@@ -1265,8 +1265,8 @@ dependencies = [
 
 [[package]]
 name = "fsci-linalg"
-version = "0.2.0"
-source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=85edd7a99f2a6487ef35135e135b9959cc0010c1#85edd7a99f2a6487ef35135e135b9959cc0010c1"
+version = "0.3.0"
+source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=ae52b65454841cd4976f6fbac907be0539508d9b#ae52b65454841cd4976f6fbac907be0539508d9b"
 dependencies = [
  "fsci-fft",
  "fsci-runtime",
@@ -1278,19 +1278,19 @@ dependencies = [
 
 [[package]]
 name = "fsci-opt"
-version = "0.2.0"
-source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=85edd7a99f2a6487ef35135e135b9959cc0010c1#85edd7a99f2a6487ef35135e135b9959cc0010c1"
+version = "0.3.0"
+source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=ae52b65454841cd4976f6fbac907be0539508d9b#ae52b65454841cd4976f6fbac907be0539508d9b"
 dependencies = [
  "fsci-runtime",
- "rand 0.10.2",
+ "rand 0.10.3",
  "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "fsci-runtime"
-version = "0.2.0"
-source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=85edd7a99f2a6487ef35135e135b9959cc0010c1#85edd7a99f2a6487ef35135e135b9959cc0010c1"
+version = "0.3.0"
+source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=ae52b65454841cd4976f6fbac907be0539508d9b#ae52b65454841cd4976f6fbac907be0539508d9b"
 dependencies = [
  "blake3",
  "serde",
@@ -1299,8 +1299,8 @@ dependencies = [
 
 [[package]]
 name = "fsci-sparse"
-version = "0.2.0"
-source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=85edd7a99f2a6487ef35135e135b9959cc0010c1#85edd7a99f2a6487ef35135e135b9959cc0010c1"
+version = "0.3.0"
+source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=ae52b65454841cd4976f6fbac907be0539508d9b#ae52b65454841cd4976f6fbac907be0539508d9b"
 dependencies = [
  "fsci-linalg",
  "fsci-runtime",
@@ -2092,9 +2092,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.10.2"
+version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7f5fa3a058cd35567ef9bfa5e75732bee0f9e4c55fa90477bef2dfcdbc4be80"
+checksum = "65c9fb96cbc91e3478eaae79a69fcd3f1ae4ad052e471fe6732fff548984b4af"
 dependencies = [
  "chacha20",
  "getrandom 0.4.3",

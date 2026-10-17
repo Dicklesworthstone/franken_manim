@@ -35,6 +35,9 @@ use std::time::Duration;
 #[cfg(feature = "batch")]
 use std::time::Instant;
 
+use fmn::rendering::{
+    FfmpegLimitsReport, PreparedSceneSoundtrack, SoundtrackReport, SoundtrackTimeline,
+};
 use fmn_codec::{SampleFormat, WavLimits, decode_wav};
 use fmn_core::color::Srgb;
 use fmn_core::rng::{RNG_LAYOUT_VERSION, RngRoot};
@@ -44,12 +47,14 @@ use fmn_frame::convert::swap_rb8;
 #[cfg(feature = "metal")]
 use fmn_frame::{ChromaSiting, ColorRange};
 use fmn_frame::{FrameBuffer, FrameLayout, PixelFormat};
+use fmn_output::negotiate::{EncoderPreset, EncoderTune, VideoQuality};
 use fmn_output::{
-    ArtifactDigest, ClosureItem, ColorDescription, Container, DitherPolicy, EmitterConfig,
-    EmitterHandle, EncoderCapabilities, EncoderChoice, FfmpegArtifactReport, FfmpegSink,
-    FfmpegSinkConfig, FfmpegTool, GifSink, GifSinkConfig, JobLimits, ManifestIdentity,
-    ManifestMode, ManifestOutput, NativeArtifactKind, NativeArtifactReport, OrderedEmitter,
-    PngSink, PngSinkConfig, PngTarget, ProvenanceManifest, SinkLimits, SinkReceipt,
+    ArtifactDigest, AudioDecodeLimits, AudioDecodeReport, AudioDecoder, Boundary, ClosureItem,
+    ColorDescription, Container, DitherPolicy, EmitterConfig, EmitterHandle, EncoderCapabilities,
+    EncoderChoice, FfmpegArtifactReport, FfmpegSink, FfmpegSinkConfig, FfmpegSoundtrack,
+    FfmpegTool, GifSink, GifSinkConfig, InvocationReport, JobLimits, ManifestIdentity,
+    ManifestMode, ManifestOutput, MixReport, MixerConfig, NativeArtifactKind, NativeArtifactReport,
+    OrderedEmitter, PngSink, PngSinkConfig, PngTarget, ProvenanceManifest, SinkLimits, SinkReceipt,
     StructuralField, SvgPublicationConfig, VideoJob, WavPublicationConfig, WireFormat, Y4mSink,
     Y4mSinkConfig, frames_to_samples, publish_svg_new, publish_wav_new,
 };
@@ -273,6 +278,53 @@ pub enum SceneSourceKind {
     Python,
 }
 
+/// Optional resource bounds for an offline ffmpeg video request.
+///
+/// Unspecified fields use the same finite defaults as the native render API.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FfmpegLimitOptions {
+    /// Wall-clock seconds for an encode, including time spent rendering frames.
+    pub timeout_seconds: Option<u64>,
+    /// Captured bytes per stdout/stderr stream.
+    pub max_log_bytes: Option<u64>,
+    /// Maximum encoded artifact bytes, also bounded by the input allowance.
+    pub max_artifact_bytes: Option<u64>,
+    /// Cumulative raw-frame bytes supplied to the encoder.
+    pub max_input_bytes: Option<u64>,
+}
+
+impl FfmpegLimitOptions {
+    fn has_overrides(&self) -> bool {
+        self.timeout_seconds.is_some()
+            || self.max_log_bytes.is_some()
+            || self.max_artifact_bytes.is_some()
+            || self.max_input_bytes.is_some()
+    }
+
+    /// Resolve and validate the policy before discovering or starting ffmpeg.
+    ///
+    /// Returns the admitted job limits and the independent raw-input ceiling.
+    ///
+    /// # Errors
+    /// Refuses zero bounds and deadlines outside the host monotonic clock range.
+    pub fn effective_limits(&self) -> Result<(JobLimits, u64), CliError> {
+        let mut limits = fmn::rendering::default_render_ffmpeg_limits();
+        if let Some(seconds) = self.timeout_seconds {
+            limits.timeout = std::time::Duration::from_secs(seconds);
+        }
+        if let Some(bytes) = self.max_log_bytes {
+            limits.max_log_bytes = bytes;
+        }
+        if let Some(bytes) = self.max_artifact_bytes {
+            limits.max_artifact_bytes = bytes;
+        }
+        let max_input_bytes = self.max_input_bytes.unwrap_or(64 * 1024 * 1024 * 1024);
+        let admitted = fmn::rendering::admit_render_ffmpeg_limits(&limits, max_input_bytes)
+            .map_err(|error| CliError::new("config", error.to_string()))?;
+        Ok((admitted, max_input_bytes))
+    }
+}
+
 /// Semantic render request after parsing and interaction application.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderCommand {
@@ -318,6 +370,12 @@ pub struct RenderCommand {
     pub vcodec: Option<String>,
     /// ffmpeg pixel format.
     pub pix_fmt: Option<String>,
+    /// Explicit video encoder overrides, layered above `file_writer` settings.
+    pub video_quality: VideoQuality,
+    /// Optional AAC target, independent of the compressed-video rate mode.
+    pub audio_bitrate: Option<u32>,
+    /// Explicit ffmpeg wall-clock and byte budgets for video rendering.
+    pub ffmpeg_limits: FfmpegLimitOptions,
     /// Output format.
     pub format: OutputFormat,
     /// Explicit fmd-math preamble pack; absent preserves user configuration.
@@ -683,6 +741,15 @@ fn typed_consumer_scope(binding: &str) -> Option<CommandScope> {
         | "subdivide"
         | "uhd"
         | "vcodec"
+        | "crf"
+        | "preset"
+        | "tune"
+        | "video_bitrate"
+        | "audio_bitrate"
+        | "ffmpeg_timeout"
+        | "ffmpeg_max_log_bytes"
+        | "ffmpeg_max_artifact_bytes"
+        | "ffmpeg_max_input_bytes"
         | "video_dir"
         | "write_all"
         | "background"
@@ -1151,6 +1218,10 @@ fn build_render(values: Collected, common: CommonOptions) -> Result<RenderComman
         OutputFormat::parse(values.value("format").unwrap_or("auto"))
             .ok_or_else(|| usage("unknown output format"))?
     };
+    let crf = parse_optional::<u8>(&values, "crf")?;
+    if crf.is_some_and(|value| value > 51) {
+        return Err(usage("--crf must lie in 0..=51"));
+    }
 
     Ok(RenderCommand {
         common,
@@ -1177,6 +1248,27 @@ fn build_render(values: Collected, common: CommonOptions) -> Result<RenderComman
         video_dir: values.explicit_value("video_dir").map(PathBuf::from),
         vcodec: values.explicit_value("vcodec").map(str::to_owned),
         pix_fmt: values.explicit_value("pix_fmt").map(str::to_owned),
+        video_quality: VideoQuality {
+            crf,
+            preset: values
+                .explicit_value("preset")
+                .map(str::parse::<EncoderPreset>)
+                .transpose()
+                .map_err(|error| usage(format!("--preset: {error}")))?,
+            tune: values
+                .explicit_value("tune")
+                .map(str::parse::<EncoderTune>)
+                .transpose()
+                .map_err(|error| usage(format!("--tune: {error}")))?,
+            bitrate: parse_optional_positive(&values, "video_bitrate")?,
+        },
+        audio_bitrate: parse_optional_positive(&values, "audio_bitrate")?,
+        ffmpeg_limits: FfmpegLimitOptions {
+            timeout_seconds: parse_optional_positive(&values, "ffmpeg_timeout")?,
+            max_log_bytes: parse_optional_positive(&values, "ffmpeg_max_log_bytes")?,
+            max_artifact_bytes: parse_optional_positive(&values, "ffmpeg_max_artifact_bytes")?,
+            max_input_bytes: parse_optional_positive(&values, "ffmpeg_max_input_bytes")?,
+        },
         format,
         math_pack: values.explicit_value("math_pack").map(str::to_owned),
         engine: values
@@ -1417,6 +1509,44 @@ pub fn resolve_render_config(
         pairs.push((
             "file_writer.pixel_format",
             fmn_config::Value::Str(pix_fmt.clone()),
+        ));
+    }
+    if command.video_quality.crf.is_some() || command.video_quality.bitrate.is_some() {
+        pairs.push((
+            "file_writer.video_crf",
+            command
+                .video_quality
+                .crf
+                .map_or(fmn_config::Value::Null, |crf| {
+                    fmn_config::Value::Int(i64::from(crf))
+                }),
+        ));
+        pairs.push((
+            "file_writer.video_bitrate",
+            command
+                .video_quality
+                .bitrate
+                .map_or(fmn_config::Value::Null, |bitrate| {
+                    fmn_config::Value::Int(i64::from(bitrate))
+                }),
+        ));
+    }
+    if let Some(bitrate) = command.audio_bitrate {
+        pairs.push((
+            "file_writer.audio_bitrate",
+            fmn_config::Value::Int(i64::from(bitrate)),
+        ));
+    }
+    if let Some(preset) = command.video_quality.preset {
+        pairs.push((
+            "file_writer.video_preset",
+            fmn_config::Value::Str(preset.as_str().to_owned()),
+        ));
+    }
+    if let Some(tune) = command.video_quality.tune {
+        pairs.push((
+            "file_writer.video_tune",
+            fmn_config::Value::Str(tune.as_str().to_owned()),
         ));
     }
     if let Some(math_pack) = &command.math_pack {
@@ -2541,7 +2671,10 @@ struct FfmpegRenderContext {
     tool: FfmpegTool,
     capabilities: EncoderCapabilities,
     job: VideoJob,
+    audio_quality: fmn_output::AudioQuality,
     workdir_root: PathBuf,
+    job_limits: JobLimits,
+    max_input_bytes: u64,
 }
 
 enum RenderTarget {
@@ -2587,11 +2720,77 @@ struct VideoArtifactReport {
     process_mechanism: String,
     process_policy_version: u32,
     argv: Vec<String>,
+    ffmpeg_limits: FfmpegLimitsReport,
+    /// Encode followed by the optional mux. Audio decodes have their own
+    /// receipt list because they can overlap the streaming video encoder.
+    ffmpeg_invocations: Vec<InvocationReport>,
+    audio_decodes: Vec<InvocationReport>,
+    audio_inputs: Vec<VideoAudioInput>,
+    soundtrack: Option<SoundtrackReport>,
+}
+
+struct VideoAudioInput {
+    path: PathBuf,
+    report: AudioDecodeReport,
+}
+
+impl VideoArtifactReport {
+    fn audio_inputs_json(&self) -> String {
+        let entries = self.audio_inputs.iter().map(|input| {
+            format!(
+                "{{\"path\":{},\"source_sha256\":{},\"pcm_sha256\":{},\"container\":{},\"decoder\":{}}}",
+                json_string(&input.path.to_string_lossy()),
+                json_string(&input.report.source_digest.to_hex()),
+                json_string(&input.report.pcm_digest.to_hex()),
+                json_string(input.report.format.demuxer()),
+                json_string(if input.report.invocation.is_some() { "ffmpeg" } else { "native-wav" }),
+            )
+        }).collect::<Vec<_>>();
+        format!("[{}]", entries.join(","))
+    }
+
+    fn soundtrack_json(&self) -> String {
+        self.soundtrack.as_ref().map_or_else(|| "null".to_owned(), |report| {
+            format!(
+                "{{\"cues_mixed\":{},\"sample_frames\":{},\"sample_rate\":{},\"channels\":{},\"clipped_samples\":{}}}",
+                report.cues_mixed,
+                report.sample_frames,
+                report.sample_rate,
+                report.channels,
+                report.clipped_samples,
+            )
+        })
+    }
+}
+
+fn ffmpeg_invocations_json(invocations: &[InvocationReport]) -> String {
+    let entries = invocations.iter().map(|invocation| {
+        let provenance = &invocation.provenance;
+        format!(
+            "{{\"path\":{},\"sha256\":{},\"version\":{},\"bound_path\":{},\"native_image_format\":{},\"native_image_architecture\":{},\"native_image_bytes\":{},\"native_image_policy_version\":{},\"encoder\":{},\"process_mechanism\":{},\"process_policy_version\":{},\"argv\":{},\"artifact\":{}}}",
+            json_string(&provenance.tool_path.to_string_lossy()),
+            json_string(&provenance.tool_sha256_hex),
+            json_string(&provenance.tool_version),
+            json_string(&provenance.bound_tool_path.to_string_lossy()),
+            json_string(native_image_format(provenance.native_image.format)),
+            json_string(native_image_architecture(provenance.native_image.architecture)),
+            provenance.native_image.file_bytes,
+            provenance.native_image.policy_version,
+            json_option(provenance.encoder.as_deref()),
+            json_string(&provenance.process_mechanism),
+            provenance.process_policy_version,
+            json_array(&provenance.argv),
+            json_string(&invocation.artifact.to_string_lossy()),
+        )
+    }).collect::<Vec<_>>();
+    format!("[{}]", entries.join(","))
 }
 
 enum RenderArtifactReport {
     Native(NativeArtifactReport),
-    Video(VideoArtifactReport),
+    // Boxed: the encoded-video report carries the ffmpeg and soundtrack
+    // provenance, far larger than the native one.
+    Video(Box<VideoArtifactReport>),
 }
 
 impl RenderArtifactReport {
@@ -2657,6 +2856,11 @@ struct CompletedRender {
 struct PreRunSummary {
     frames: u64,
     play_indices: Vec<u64>,
+}
+
+struct BuiltinPreRun {
+    summary: PreRunSummary,
+    sound_requests: Vec<fmn_scene::SoundRequest>,
 }
 
 impl PreRunSummary {
@@ -3061,7 +3265,7 @@ impl NativeStudioWorker {
                 if camera_route::builtin(&scene).is_some() {
                     return Err(CliError::new(
                         "capability",
-                        "camera registrations currently use offline render; Studio camera inspection is not yet registered",
+                        "this camera witness has no live Studio program; use offline render",
                     ));
                 }
                 let mut program = if let Some(scene) = fmn::builtins::tex_span_scene(&scene) {
@@ -3798,18 +4002,176 @@ struct RenderBackendReport {
 struct FinishedRender {
     artifact: RenderArtifactReport,
     backend: RenderBackendReport,
-    /// Decoded sound-cue assets backing a WAV publication; empty for every
-    /// other target. They enter the FMNP input closure as C1 byte inputs.
+    /// The exact source identities consumed by WAV or video composition.
+    /// They enter the FMNP input closure as C1 byte inputs.
     cue_assets: Vec<SoundCueAssetInput>,
 }
 
-/// One decoded sound-cue asset retained for FMNP provenance.
+/// One sound-cue source retained for FMNP provenance without retaining its
+/// bytes in every subdivision's completed report.
 #[derive(Clone, Debug)]
 struct SoundCueAssetInput {
     /// Composition-root-resolved virtual path.
     path: String,
-    /// The exact decoded bytes.
-    bytes: Vec<u8>,
+    /// SHA-256 of the exact bytes given to the audio decoder.
+    digest: fmn_hash::Digest,
+}
+
+enum RenderSoundtrack<'a> {
+    Scene {
+        fs: &'a dyn FileSystem,
+        context: &'a FfmpegRenderContext,
+        scene: &'a fmn_scene::Scene,
+        threads: usize,
+    },
+    Window {
+        prepared: &'a PreparedSceneSoundtrack,
+        start_frame: i64,
+        end_frame: i64,
+        fps: u32,
+        threads: usize,
+    },
+}
+
+struct MixedRenderSoundtrack {
+    mix: MixReport,
+    inputs: Vec<VideoAudioInput>,
+    decodes: Vec<InvocationReport>,
+}
+
+impl RenderSoundtrack<'_> {
+    fn compose(
+        self,
+        timeline: &SoundtrackTimeline,
+        frames_published: u64,
+        max_artifact_bytes: u64,
+    ) -> Result<Option<MixedRenderSoundtrack>, CliError> {
+        let prepared;
+        let (source, mix) = match self {
+            Self::Scene {
+                fs,
+                context,
+                scene,
+                threads,
+            } => {
+                if scene.sound_requests().is_empty() {
+                    return Ok(None);
+                }
+                let config = MixerConfig {
+                    // Account for the canonical S16 stereo WAV header before
+                    // admitting a whole-scene PCM allocation.
+                    max_output_frames: MixerConfig::default()
+                        .max_output_frames
+                        .min(max_artifact_bytes.saturating_sub(44) / 4),
+                    ..MixerConfig::default()
+                };
+                let time = scene.time();
+                let picture_frames = timeline
+                    .output_frame(time.frames())
+                    .map_err(native_render_error)?
+                    .max(i64::try_from(frames_published).map_err(|_| {
+                        CliError::new("budget", "soundtrack picture timeline overflow")
+                    })?);
+                let samples = frames_to_samples(picture_frames, time.fps(), config.sample_rate)
+                    .map_err(|error| CliError::new("render", error.to_string()))?;
+                let samples = u64::try_from(samples)
+                    .map_err(|_| internal("negative soundtrack picture timeline"))?;
+                prepared = prepare_video_soundtrack(
+                    fs,
+                    context,
+                    scene.sound_requests(),
+                    config,
+                    Some(timeline),
+                )?
+                .with_timeline_frames(samples);
+                let mix = prepared.mix(threads.max(1)).map_err(native_render_error)?;
+                (&prepared, mix)
+            }
+            Self::Window {
+                prepared,
+                start_frame,
+                end_frame,
+                fps,
+                threads,
+            } => {
+                let picture_frames = i64::try_from(frames_published)
+                    .map_err(|_| CliError::new("budget", "soundtrack clip length overflow"))?;
+                if end_frame.checked_sub(start_frame) != Some(picture_frames) {
+                    return Err(CliError::new(
+                        "capability",
+                        "video audio subdivision requires one contiguous scene interval matching its captured frames",
+                    ));
+                }
+                let start = frames_to_samples(start_frame, fps, SOUNDTRACK_SAMPLE_RATE)
+                    .map_err(|error| CliError::new("render", error.to_string()))?;
+                let end = frames_to_samples(end_frame, fps, SOUNDTRACK_SAMPLE_RATE)
+                    .map_err(|error| CliError::new("render", error.to_string()))?;
+                let start =
+                    u64::try_from(start).map_err(|_| internal("negative soundtrack clip start"))?;
+                let frames = u64::try_from(end)
+                    .ok()
+                    .and_then(|end| end.checked_sub(start))
+                    .ok_or_else(|| internal("soundtrack clip ends before it starts"))?;
+                let bytes = frames
+                    .checked_mul(4)
+                    .and_then(|bytes| bytes.checked_add(44))
+                    .ok_or_else(|| CliError::new("budget", "soundtrack clip byte overflow"))?;
+                if bytes > max_artifact_bytes {
+                    return Err(CliError::new(
+                        "budget",
+                        "soundtrack clip exceeds the ffmpeg artifact byte budget",
+                    ));
+                }
+                let mix = prepared
+                    .mix_window(start, frames, threads.max(1))
+                    .map_err(native_render_error)?;
+                (prepared, mix)
+            }
+        };
+        Ok(Some(MixedRenderSoundtrack {
+            mix,
+            inputs: source
+                .inputs()
+                .iter()
+                .map(|input| VideoAudioInput {
+                    path: input.path.clone(),
+                    report: input.report.clone(),
+                })
+                .collect(),
+            decodes: source.invocations(),
+        }))
+    }
+}
+
+fn prepare_video_soundtrack(
+    fs: &dyn FileSystem,
+    context: &FfmpegRenderContext,
+    requests: &[fmn_scene::SoundRequest],
+    config: MixerConfig,
+    timeline: Option<&SoundtrackTimeline>,
+) -> Result<PreparedSceneSoundtrack, CliError> {
+    let boundary = Boundary::new(
+        context.tool.clone(),
+        Arc::clone(&context.runner),
+        context.job_limits.clone(),
+        context.workdir_root.clone(),
+    )
+    .map_err(|error| CliError::new("render", error.to_string()))?;
+    let mut decoder = AudioDecoder::with_boundary(AudioDecodeLimits::default(), boundary)
+        .map_err(|error| CliError::new("render", error.to_string()))?;
+    PreparedSceneSoundtrack::new(fs, requests, &mut decoder, config, timeline)
+        .map_err(native_render_error)
+}
+
+fn native_render_error(error: fmn::rendering::RenderError) -> CliError {
+    let exit_name = match &error {
+        fmn::rendering::RenderError::Capability(_) => "capability",
+        fmn::rendering::RenderError::SoundAsset { .. }
+        | fmn::rendering::RenderError::SoundDecode { .. }
+        | fmn::rendering::RenderError::Sound(_) => "scene",
+        _ => "render",
+    };
+    CliError::new(exit_name, error.to_string())
 }
 
 struct RenderSink {
@@ -3821,6 +4183,9 @@ struct RenderSink {
     output_layout: FrameLayout,
     emitter: Option<OrderedEmitter>,
     receipt: RenderReceipt,
+    ffmpeg_limits: Option<FfmpegLimitsReport>,
+    soundtrack: Option<FfmpegSoundtrack>,
+    soundtrack_timeline: SoundtrackTimeline,
     next_sequence: u64,
 }
 
@@ -3871,6 +4236,25 @@ impl RenderSink {
         let output_layout = FrameLayout::tight(format, width, height)
             .map_err(|error| CliError::new("config", error.to_string()))?;
         let limits = render_sink_limits(&output_layout)?;
+        let (limits, ffmpeg_limits) = if let RenderTarget::Video(context) = target {
+            let limits = SinkLimits::new(
+                limits.max_frames(),
+                limits.max_resident_bytes(),
+                context.max_input_bytes,
+                context.job_limits.max_artifact_bytes,
+            )
+            .map_err(output_adapter_error)?;
+            let report = FfmpegLimitsReport {
+                timeout: context.job_limits.timeout,
+                max_log_bytes: context.job_limits.max_log_bytes,
+                max_artifact_bytes: context.job_limits.max_artifact_bytes,
+                max_input_bytes: context.max_input_bytes,
+                keep_workdir: context.job_limits.keep_workdir,
+            };
+            (limits, Some(report))
+        } else {
+            (limits, None)
+        };
         let frame_config = resolved_frame_config(config)?;
         if camera.as_ref().is_some_and(|camera| {
             plan.engine != fmn_runtime::ExecutionEngine::CertifiedCpu
@@ -3887,6 +4271,7 @@ impl RenderSink {
             macro_tile: plan.macro_tile,
             fine_tile: plan.fine_tile,
         };
+        let mut soundtrack = None;
         let (binding, receipt) = match target {
             RenderTarget::Native(NativeFrameFormat::Png | NativeFrameFormat::PngSequence) => {
                 let single = matches!(target, RenderTarget::Native(NativeFrameFormat::Png));
@@ -3971,7 +4356,7 @@ impl RenderSink {
                 ));
             }
             RenderTarget::Video(context) => {
-                let (binding, receipt) = FfmpegSink::new(
+                let (sink, completion) = FfmpegSink::new(
                     Arc::clone(&context.runner),
                     FfmpegSinkConfig {
                         tool: context.tool.clone(),
@@ -3980,7 +4365,7 @@ impl RenderSink {
                         audio: None,
                         destination,
                         workdir_root: context.workdir_root.clone(),
-                        job_limits: JobLimits::default(),
+                        job_limits: context.job_limits.clone(),
                         first_sequence: 0,
                         limits,
                         profile: None,
@@ -3988,7 +4373,12 @@ impl RenderSink {
                 )
                 .map_err(output_adapter_error)?
                 .with_no_clobber()
-                .into_binding("ffmpeg-video");
+                .with_audio_quality(context.audio_quality)
+                .map_err(output_adapter_error)?
+                .with_deferred_soundtrack()
+                .map_err(output_adapter_error)?;
+                soundtrack = Some(completion);
+                let (binding, receipt) = sink.into_binding("ffmpeg-video");
                 (binding, RenderReceipt::Video(receipt))
             }
         };
@@ -4081,6 +4471,9 @@ impl RenderSink {
             output_layout,
             emitter: Some(emitter),
             receipt,
+            ffmpeg_limits,
+            soundtrack,
+            soundtrack_timeline: SoundtrackTimeline::default(),
             next_sequence: 0,
         })
     }
@@ -4181,7 +4574,7 @@ impl RenderSink {
         Ok(())
     }
 
-    fn finish(mut self) -> Result<FinishedRender, CliError> {
+    fn finish(mut self, audio: Option<RenderSoundtrack<'_>>) -> Result<FinishedRender, CliError> {
         match &mut self.renderer {
             OfflineFrameRenderer::Cpu(renderer) => {
                 let stats = renderer.finish()?;
@@ -4197,6 +4590,50 @@ impl RenderSink {
             OfflineFrameRenderer::Metal { .. } => {}
         }
         let backend = self.backend.finish()?;
+        let audio = audio
+            .map(|source| {
+                let limits = self
+                    .ffmpeg_limits
+                    .as_ref()
+                    .ok_or_else(|| internal("soundtrack reached a native frame sink"))?;
+                source.compose(
+                    &self.soundtrack_timeline,
+                    self.next_sequence,
+                    limits.max_artifact_bytes,
+                )
+            })
+            .transpose()?
+            .flatten();
+        let (soundtrack_report, audio_inputs, audio_decodes, mix) = match audio {
+            Some(audio) => (
+                Some(SoundtrackReport {
+                    cues_mixed: audio.mix.cues_mixed,
+                    sample_frames: (audio.mix.audio.samples.len()
+                        / usize::from(audio.mix.audio.channels))
+                        as u64,
+                    sample_rate: audio.mix.audio.sample_rate,
+                    channels: audio.mix.audio.channels,
+                    clipped_samples: audio.mix.clipped_samples,
+                }),
+                audio.inputs,
+                audio.decodes,
+                Some(audio.mix),
+            ),
+            None => (None, Vec::new(), Vec::new(), None),
+        };
+        let cue_assets = audio_inputs
+            .iter()
+            .map(|input| SoundCueAssetInput {
+                path: input.path.to_string_lossy().into_owned(),
+                digest: input.report.source_digest,
+            })
+            .collect();
+        if let Some(completion) = self.soundtrack.take() {
+            // Complete the audio producer before the emitter prepares and
+            // publishes video. A decode/mix failure instead takes Drop's
+            // cancellation path, leaving no successful video generation.
+            completion.finish(mix).map_err(output_adapter_error)?;
+        }
         let emitter = self
             .emitter
             .take()
@@ -4219,7 +4656,7 @@ impl RenderSink {
                         "ffmpeg publication omitted invocation provenance",
                     )
                 })?;
-                RenderArtifactReport::Video(VideoArtifactReport {
+                RenderArtifactReport::Video(Box::new(VideoArtifactReport {
                     path: report.boundary.destination.clone(),
                     frame_count: report.frame_count,
                     input_bytes: report.input_bytes,
@@ -4240,13 +4677,20 @@ impl RenderSink {
                     process_mechanism: invocation.provenance.process_mechanism.clone(),
                     process_policy_version: invocation.provenance.process_policy_version,
                     argv: invocation.provenance.argv.clone(),
-                })
+                    ffmpeg_limits: self.ffmpeg_limits.clone().ok_or_else(|| {
+                        internal("ffmpeg publication omitted its admitted resource policy")
+                    })?,
+                    ffmpeg_invocations: report.boundary.invocations,
+                    audio_decodes,
+                    audio_inputs,
+                    soundtrack: soundtrack_report,
+                }))
             }
         };
         Ok(FinishedRender {
             artifact,
             backend,
-            cue_assets: Vec::new(),
+            cue_assets,
         })
     }
 }
@@ -4269,6 +4713,15 @@ impl Drop for RenderSink {
 }
 
 impl SceneSink for RenderSink {
+    fn event(&mut self, event: LifecycleEvent) -> Result<(), IntegrationError> {
+        if self.soundtrack.is_none() {
+            return Ok(());
+        }
+        self.soundtrack_timeline
+            .observe(event.time.frames(), event.skipping)
+            .map_err(|error| IntegrationError::new("soundtrack", error.to_string()))
+    }
+
     fn capture(
         &mut self,
         _reason: CaptureReason,
@@ -4338,6 +4791,7 @@ impl SceneSink for PreRunCounter {
 
 struct ActiveSubdivision {
     play_index: u64,
+    start_frame: i64,
     sink: RenderSink,
 }
 
@@ -4349,6 +4803,7 @@ struct SubdivisionContext<'a> {
     naming: &'a OutputNaming,
     cancellation: Option<&'a RenderCancellation>,
     camera: Option<&'a fmn_render::Camera>,
+    soundtrack: Option<&'a PreparedSceneSoundtrack>,
 }
 
 struct SubdividedRenderSink<'a> {
@@ -4383,7 +4838,7 @@ impl<'a> SubdividedRenderSink<'a> {
         })
     }
 
-    fn begin(&mut self, play_index: u64) -> Result<(), IntegrationError> {
+    fn begin(&mut self, play_index: u64, start_frame: i64) -> Result<(), IntegrationError> {
         if self.current.is_some() {
             return Err(IntegrationError::new(
                 "subdivide",
@@ -4412,12 +4867,16 @@ impl<'a> SubdividedRenderSink<'a> {
             cancellation.register_emitter(emitter);
             cancellation.scene_checkpoint()?;
         }
-        self.current = Some(ActiveSubdivision { play_index, sink });
+        self.current = Some(ActiveSubdivision {
+            play_index,
+            start_frame,
+            sink,
+        });
         self.final_packet = None;
         Ok(())
     }
 
-    fn finish_current(&mut self, play_index: u64) -> Result<(), IntegrationError> {
+    fn finish_current(&mut self, play_index: u64, end_frame: i64) -> Result<(), IntegrationError> {
         let mut active = self.current.take().ok_or_else(|| {
             IntegrationError::new("subdivide", "segment finished without an active output")
         })?;
@@ -4436,9 +4895,19 @@ impl<'a> SubdividedRenderSink<'a> {
             })?;
             active.sink.capture(CaptureReason::Segment, packet)?;
         }
+        let audio = self
+            .context
+            .soundtrack
+            .map(|prepared| RenderSoundtrack::Window {
+                prepared,
+                start_frame: active.start_frame,
+                end_frame,
+                fps: self.context.config.camera.fps,
+                threads: self.context.plan.output_team.threads(),
+            });
         let render = active
             .sink
-            .finish()
+            .finish(audio)
             .map_err(subdivision_integration_error)?;
         self.artifacts.push((play_index, render));
         Ok(())
@@ -4458,9 +4927,11 @@ impl<'a> SubdividedRenderSink<'a> {
 impl SceneSink for SubdividedRenderSink<'_> {
     fn event(&mut self, event: LifecycleEvent) -> Result<(), IntegrationError> {
         match event.phase {
-            LifecyclePhase::DriveSegment if !event.skipping => self.begin(event.play_index),
+            LifecyclePhase::DriveSegment if !event.skipping => {
+                self.begin(event.play_index, event.time.frames())
+            }
             LifecyclePhase::FinishSegment if !event.skipping => {
-                self.finish_current(event.play_index)
+                self.finish_current(event.play_index, event.time.frames())
             }
             _ => Ok(()),
         }
@@ -4655,7 +5126,7 @@ fn publish_scene_soundtrack(
             })?;
         cue_assets.push(SoundCueAssetInput {
             path: request.sound_file.to_string_lossy().into_owned(),
-            bytes,
+            digest: fmn_hash::sha256(&bytes),
         });
     }
     let mix = mixer
@@ -4803,6 +5274,23 @@ enum RequestedRenderFormat {
 }
 
 fn requested_render_format(command: &RenderCommand) -> Result<RequestedRenderFormat, CliError> {
+    if command.ffmpeg_limits.has_overrides()
+        && !matches!(command.format, OutputFormat::Auto | OutputFormat::Video)
+    {
+        return Err(usage("ffmpeg resource limits require video output"));
+    }
+    if command.audio_bitrate.is_some()
+        && !matches!(command.format, OutputFormat::Auto | OutputFormat::Video)
+    {
+        return Err(usage("--audio-bitrate requires ffmpeg video output"));
+    }
+    if !command.video_quality.is_default()
+        && !matches!(command.format, OutputFormat::Auto | OutputFormat::Video)
+    {
+        return Err(usage(
+            "--crf, --preset, --tune and --video-bitrate require ffmpeg video output",
+        ));
+    }
     match command.format {
         OutputFormat::Png => Ok(RequestedRenderFormat::Native(NativeFrameFormat::Png)),
         OutputFormat::PngSequence => Ok(RequestedRenderFormat::Native(
@@ -4815,7 +5303,13 @@ fn requested_render_format(command: &RenderCommand) -> Result<RequestedRenderFor
         OutputFormat::Gif => Ok(RequestedRenderFormat::Native(NativeFrameFormat::Gif)),
         OutputFormat::Y4m => Ok(RequestedRenderFormat::Native(NativeFrameFormat::Y4m)),
         OutputFormat::Video => Ok(RequestedRenderFormat::Video),
-        OutputFormat::Auto if command.vcodec.is_some() || command.pix_fmt.is_some() => {
+        OutputFormat::Auto
+            if command.vcodec.is_some()
+                || command.pix_fmt.is_some()
+                || !command.video_quality.is_default()
+                || command.audio_bitrate.is_some()
+                || command.ffmpeg_limits.has_overrides() =>
+        {
             Ok(RequestedRenderFormat::Video)
         }
         OutputFormat::Auto => Err(CliError::new(
@@ -5001,7 +5495,7 @@ struct ManifestContext<'a> {
     config: &'a fmn_config::Config,
     plan: &'a fmn_runtime::ExecutionPlan,
     backend: &'a RenderBackendReport,
-    /// Decoded sound-cue assets; empty unless the artifact is a WAV.
+    /// Source identities consumed by the native WAV or video soundtrack.
     cue_assets: &'a [SoundCueAssetInput],
 }
 
@@ -5162,6 +5656,11 @@ fn render_manifest(
         ),
         RenderArtifactReport::Video(report) => {
             let tool_path = report.tool_path.to_string_lossy();
+            let resource_policy = report.ffmpeg_limits.to_json();
+            let video_invocations = ffmpeg_invocations_json(&report.ffmpeg_invocations);
+            let audio_decodes = ffmpeg_invocations_json(&report.audio_decodes);
+            let audio_inputs = report.audio_inputs_json();
+            let soundtrack = report.soundtrack_json();
             ClosureItem::structural(
                 9,
                 "native capabilities plus audited ffmpeg boundary",
@@ -5179,6 +5678,11 @@ fn render_manifest(
                     StructuralField::Text(report.native_image_architecture),
                     StructuralField::U64(report.native_image_bytes),
                     StructuralField::U64(u64::from(report.native_image_policy_version)),
+                    StructuralField::Text(&resource_policy),
+                    StructuralField::Text(&video_invocations),
+                    StructuralField::Text(&audio_decodes),
+                    StructuralField::Text(&audio_inputs),
+                    StructuralField::Text(&soundtrack),
                 ],
             )
         }
@@ -5228,9 +5732,21 @@ fn render_manifest(
     // path, so the artifact digest is independent of request order in the
     // (already insertion-ordered) request list only through those digests.
     let mut cue_items = Vec::with_capacity(cue_assets.len());
+    let mut source_digests = BTreeMap::new();
     for asset in cue_assets {
+        if let Some(previous) = source_digests.insert(asset.path.as_str(), asset.digest) {
+            if previous != asset.digest {
+                return Err(CliError::new(
+                    "scene",
+                    format!("sound cue asset {} changed during composition", asset.path),
+                ));
+            }
+            // Reusing a cue is an ordered mixer operation, not a second
+            // source identity. FMNP requires each C1 path exactly once.
+            continue;
+        }
         cue_items.push(
-            ClosureItem::byte_input(1, asset.path.clone(), &asset.bytes, "scene sound-cue asset")
+            ClosureItem::digest_input(1, asset.path.clone(), asset.digest, "scene sound-cue asset")
                 .map_err(|error| internal(error.to_string()))?,
         );
     }
@@ -5331,11 +5847,7 @@ fn ffmpeg_video_job(
         height: config.camera.resolution.1,
         fps: (config.camera.fps, 1),
         wire,
-        color: if wire.has_alpha() {
-            ColorDescription::srgb_full()
-        } else {
-            ColorDescription::video_bt709()
-        },
+        color: ColorDescription::for_native_wire(wire),
         container: if command.transparent {
             Container::MovTransparent
         } else {
@@ -5344,6 +5856,12 @@ fn ffmpeg_video_job(
         encoder,
         crf: None,
     };
+    let job = job
+        .with_quality(
+            fmn::rendering::configured_video_quality(&config.file_writer)
+                .map_err(|error| CliError::new("config", error.to_string()))?,
+        )
+        .map_err(|error| CliError::new("config", error.to_string()))?;
     let resolved_encoder = job
         .resolved_encoder()
         .map_err(|error| CliError::new("config", error.to_string()))?;
@@ -5361,7 +5879,13 @@ fn prepare_ffmpeg_context(
     locator: &dyn fmn_platform::process::FfmpegLocator,
     configured: &Path,
     job: VideoJob,
+    audio_quality: fmn_output::AudioQuality,
+    requested_limits: &FfmpegLimitOptions,
 ) -> Result<FfmpegRenderContext, CliError> {
+    audio_quality
+        .validate()
+        .map_err(|error| CliError::new("config", error.to_string()))?;
+    let (job_limits, max_input_bytes) = requested_limits.effective_limits()?;
     let executable = locator.locate_ffmpeg(configured).map_err(|error| {
         CliError::new(
             "capability",
@@ -5401,7 +5925,10 @@ fn prepare_ffmpeg_context(
         tool,
         capabilities,
         job,
+        audio_quality,
         workdir_root,
+        job_limits,
+        max_input_bytes,
     })
 }
 
@@ -5619,10 +6146,10 @@ fn prerun_builtin_scene(
     config: &fmn_config::Config,
     cancellation: Option<&RenderCancellation>,
     typesetting: &BuiltinTypesetting,
-) -> Result<PreRunSummary, CliError> {
+) -> Result<BuiltinPreRun, CliError> {
     let mut scene = resolve_builtin_program(name)?;
     let mut counter = PreRunCounter::new(command.subdivide);
-    run_builtin_scene(
+    let completed = run_builtin_scene(
         &mut *scene,
         command,
         config,
@@ -5630,7 +6157,10 @@ fn prerun_builtin_scene(
         cancellation,
         typesetting,
     )?;
-    Ok(counter.finish())
+    Ok(BuiltinPreRun {
+        summary: counter.finish(),
+        sound_requests: completed.into_scene().sound_requests().to_vec(),
+    })
 }
 
 /// One builtin scene's typesetting: the persistent typeset cache at the
@@ -5802,6 +6332,10 @@ fn execute_native_render_with_cancellation(
                 locator,
                 Path::new(&config.file_writer.ffmpeg_bin),
                 job,
+                fmn_output::AudioQuality {
+                    bitrate: config.file_writer.audio_bitrate,
+                },
+                &command.ffmpeg_limits,
             )?))
         }
         _ => {
@@ -5892,15 +6426,16 @@ fn execute_native_render_with_cancellation(
                     cancellation.cli_checkpoint()?;
                 }
                 let typesetting = BuiltinTypesetting::new(&fs, &config, render_threads);
-                let summary = (command.prerun || command.subdivide)
+                let prerun = (command.prerun || command.subdivide)
                     .then(|| {
                         prerun_builtin_scene(&name, command, &config, cancellation, &typesetting)
                     })
                     .transpose()?;
                 if command.subdivide {
-                    let summary = summary.ok_or_else(|| {
+                    let prerun = prerun.ok_or_else(|| {
                         CliError::new("internal", "subdivision omitted its counting pass")
                     })?;
+                    let summary = prerun.summary;
                     for &play_index in &summary.play_indices {
                         let artifact_destination =
                             subdivided_destination(&naming, &name, play_index, &target);
@@ -5912,6 +6447,23 @@ fn execute_native_render_with_cancellation(
                             )?;
                         }
                     }
+                    // Subdivision already requires a deterministic counting
+                    // pass. Its completed cue list lets each offline clip
+                    // hear the corresponding whole-scene sample window,
+                    // including a later cue with a negative offset. Decode
+                    // once; every clip reuses the same input snapshot.
+                    let soundtrack = match &target {
+                        RenderTarget::Video(context) if !prerun.sound_requests.is_empty() => {
+                            Some(prepare_video_soundtrack(
+                                fs.as_ref(),
+                                context,
+                                &prerun.sound_requests,
+                                MixerConfig::default(),
+                                None,
+                            )?)
+                        }
+                        _ => None,
+                    };
                     let mut sink = SubdividedRenderSink::new(
                         Arc::clone(&fs),
                         SubdivisionContext {
@@ -5921,12 +6473,13 @@ fn execute_native_render_with_cancellation(
                             naming: &naming,
                             cancellation,
                             camera: scene_camera,
+                            soundtrack: soundtrack.as_ref(),
                         },
                         &name,
                         summary.segment_count(),
                     )?;
                     let mut scene = resolve_builtin_program(&name)?;
-                    run_builtin_scene(
+                    let completed = run_builtin_scene(
                         &mut *scene,
                         command,
                         &config,
@@ -5938,6 +6491,12 @@ fn execute_native_render_with_cancellation(
                         cancellation.cli_checkpoint()?;
                     }
                     let artifacts = sink.into_artifacts()?;
+                    if completed.into_scene().sound_requests() != prerun.sound_requests.as_slice() {
+                        return Err(CliError::new(
+                            "scene",
+                            "subdivision sound cues disagreed with the deterministic prerun",
+                        ));
+                    }
                     if artifacts.len() != summary.segment_count() {
                         return Err(CliError::new(
                             "internal",
@@ -5963,6 +6522,7 @@ fn execute_native_render_with_cancellation(
                     }
                     continue;
                 }
+                let summary = prerun.map(|prerun| prerun.summary);
                 if matches!(target, RenderTarget::Wav | RenderTarget::Svg) {
                     // Composition targets publish from scene state, not from
                     // a frame stream: play the scene through a discard sink
@@ -6058,7 +6618,7 @@ fn execute_native_render_with_cancellation(
                     cancellation.cli_checkpoint()?;
                 }
                 let mut scene = resolve_builtin_program(&name)?;
-                if command.skip_animations
+                let completed = if command.skip_animations
                     || matches!(target, RenderTarget::Native(NativeFrameFormat::Png))
                 {
                     let completed = run_builtin_scene(
@@ -6084,6 +6644,7 @@ fn execute_native_render_with_cancellation(
                         completed.show(&mut sink)
                     }
                     .map_err(|error| CliError::new("scene", error.to_string()))?;
+                    completed
                 } else {
                     run_builtin_scene(
                         &mut *scene,
@@ -6092,12 +6653,22 @@ fn execute_native_render_with_cancellation(
                         &mut sink,
                         cancellation,
                         &typesetting,
-                    )?;
-                }
+                    )?
+                    .into_scene()
+                };
                 if let Some(cancellation) = cancellation {
                     cancellation.cli_checkpoint()?;
                 }
-                let artifact = sink.finish()?;
+                let audio = match &target {
+                    RenderTarget::Video(context) => Some(RenderSoundtrack::Scene {
+                        fs: fs.as_ref(),
+                        context,
+                        scene: &completed,
+                        threads: plan.output_team.threads(),
+                    }),
+                    _ => None,
+                };
+                let artifact = sink.finish(audio)?;
                 let source_item = builtin_source_item(&name)?;
                 let mut report = complete(
                     RenderSourceReport::Builtin,
@@ -6274,7 +6845,7 @@ fn execute_native_render_with_cancellation(
                         sink.render_compiled(job)
                             .map_err(|error| CliError::new("render", error.to_string()))?;
                     }
-                    let artifact = sink.finish()?;
+                    let artifact = sink.finish(None)?;
                     reports.push(complete(
                         RenderSourceReport::Compiled(source.clone()),
                         source_item.clone(),
@@ -6334,7 +6905,7 @@ fn execute_native_render_with_cancellation(
                 RenderSourceReport::Compiled(source),
                 source_item,
                 name,
-                sink.finish()?,
+                sink.finish(None)?,
                 None,
                 command.prerun.then_some(summary),
             )?);
@@ -6641,6 +7212,15 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
                         json_string(&report.process_mechanism),
                         report.process_policy_version,
                         json_array(&report.argv),
+                    );
+                    let _ = write!(
+                        stdout,
+                        ",\"ffmpeg_limits\":{},\"ffmpeg_invocations\":{},\"audio_decodes\":{},\"audio_inputs\":{},\"soundtrack\":{}",
+                        report.ffmpeg_limits.to_json(),
+                        ffmpeg_invocations_json(&report.ffmpeg_invocations),
+                        ffmpeg_invocations_json(&report.audio_decodes),
+                        report.audio_inputs_json(),
+                        report.soundtrack_json(),
                     );
                     stdout.push_str(&backend_json);
                     stdout.push_str(&manifest_json);
@@ -7587,7 +8167,7 @@ pub fn run_internal_studio_worker_os(args: &[OsString]) -> RunOutput {
 fn studio_scene_name(fs: &dyn FileSystem, command: &RenderCommand) -> Result<String, CliError> {
     if studio_live::selected(command) {
         studio_live::validate_selection(command)?;
-        return Ok(fmn::builtins::INTERACTIVE_SCENE_NAME.to_owned());
+        return Ok(command.scene_names[0].clone());
     }
     match resolve_native_render_input(fs, command)? {
         NativeRenderInput::Builtin { mut names } => {
@@ -8561,6 +9141,13 @@ mod tests {
             "background" => "#112233",
             "vcodec" => "libx264",
             "pix_fmt" => "rgba",
+            "crf" => "16",
+            "preset" => "slow",
+            "tune" => "animation",
+            "video_bitrate" => "2000000",
+            "ffmpeg_timeout" => "21600",
+            "ffmpeg_max_log_bytes" => "1048576",
+            "ffmpeg_max_artifact_bytes" | "ffmpeg_max_input_bytes" => "68719476736",
             "format" => "png",
             "engine" => "cpu",
             "preview_codec" => "png",
@@ -8683,6 +9270,14 @@ mod tests {
             &["--reproducible"],
             &["--vcodec", "libx264"],
             &["--pix_fmt", "rgba"],
+            &["--crf", "16"],
+            &["--preset", "slow"],
+            &["--tune", "animation"],
+            &["--video-bitrate", "2000000"],
+            &["--ffmpeg-timeout", "21600"],
+            &["--ffmpeg-max-log-bytes", "1048576"],
+            &["--ffmpeg-max-artifact-bytes", "8589934592"],
+            &["--ffmpeg-max-input-bytes", "68719476736"],
             &["--subdivide"],
             &["--file_name", "out"],
             &["--video_dir", "/tmp/out"],
@@ -8860,6 +9455,421 @@ mod tests {
     }
 
     #[test]
+    fn native_video_transfer_matches_converted_pixels_on_every_cli_wire() {
+        let fs = VirtualFs::new();
+        for wire in ["rgba", "bgra", "nv12", "p010le"] {
+            let command = render(parse_args(["--format", "video", "--pix_fmt", wire]).unwrap());
+            let config = resolve_render_config(&fs, &command).unwrap();
+            let job = ffmpeg_video_job(&command, &config).unwrap();
+            assert_eq!(job.color.transfer, fmn_output::Transfer::Srgb, "{wire}");
+            assert_eq!(job.color.primaries, fmn_output::Primaries::Bt709);
+            let argv = fmn_output::negotiate::encode_argv(&job, Path::new("/color.mp4")).unwrap();
+            let tags: Vec<_> = argv
+                .windows(2)
+                .filter(|pair| pair[0] == "-color_trc")
+                .collect();
+            assert_eq!(tags.len(), 2);
+            assert!(tags.iter().all(|pair| pair[1] == "iec61966-2-1"));
+        }
+    }
+
+    #[test]
+    fn audio_quality_cli_is_independent_of_video_rate_control_and_reaches_config() {
+        let fs = VirtualFs::new();
+        for bitrate in [1, 96_000, 192_000, u32::MAX] {
+            let text = bitrate.to_string();
+            let command = render(parse_args(["--audio-bitrate", &text, "--crf", "16"]).unwrap());
+            assert!(command.write_file);
+            assert_eq!(command.audio_bitrate, Some(bitrate));
+            assert_eq!(
+                requested_render_format(&command).unwrap(),
+                RequestedRenderFormat::Video
+            );
+            let config = resolve_render_config(&fs, &command).unwrap();
+            assert_eq!(config.file_writer.audio_bitrate, Some(bitrate));
+            assert_eq!(config.file_writer.video_crf, Some(16));
+            assert_eq!(
+                config.raw.get_path("file_writer.audio_bitrate"),
+                Some(&fmn_config::Value::Int(i64::from(bitrate)))
+            );
+        }
+        for text in ["0", "-1", "1.5", "192k", "4294967296"] {
+            assert!(parse_args(["--audio-bitrate", text]).is_err());
+        }
+        for format in ["png", "png_sequence", "gif", "y4m", "wav", "svg"] {
+            assert!(parse_args(["--format", format, "--audio-bitrate", "192000"]).is_err());
+        }
+        // Audio quality does not impose an opaque video codec on alpha MOV.
+        let command = render(parse_args(["--audio-bitrate", "192000", "--transparent"]).unwrap());
+        let config = resolve_render_config(&fs, &command).unwrap();
+        assert_eq!(
+            ffmpeg_video_job(&command, &config).unwrap().container,
+            Container::MovTransparent
+        );
+    }
+
+    #[test]
+    fn video_quality_flags_reach_encoder_argv_and_record_resolved_configuration() {
+        let fs = VirtualFs::new();
+        let command = render(
+            parse_args(["--crf", "16", "--preset", "slow", "--tune", "animation"])
+                .expect("quality flags parse"),
+        );
+        assert!(command.write_file);
+        assert_eq!(
+            requested_render_format(&command).unwrap(),
+            RequestedRenderFormat::Video
+        );
+        let config = resolve_render_config(&fs, &command).unwrap();
+        let job = ffmpeg_video_job(&command, &config).unwrap();
+        assert_eq!(job.quality().unwrap(), command.video_quality);
+        let argv = fmn_output::negotiate::encode_argv(&job, Path::new("/quality.mp4")).unwrap();
+        let input = argv.iter().position(|arg| arg == "-i").unwrap();
+        for (flag, value) in [("-crf", "16"), ("-preset", "slow"), ("-tune", "animation")] {
+            let at = argv.iter().position(|arg| arg == flag).unwrap();
+            assert!(at > input + 1 && at + 1 < argv.len() - 1);
+            assert_eq!(argv[at + 1], value);
+            assert_eq!(argv.iter().filter(|arg| arg.as_str() == flag).count(), 1);
+        }
+        assert!(!argv.iter().any(|arg| arg == "-b:v"));
+        assert_eq!(
+            config.raw.get_path("file_writer.video_crf"),
+            Some(&fmn_config::Value::Int(16))
+        );
+        let defaults =
+            resolve_render_config(&fs, &render(parse_args(["--format", "video"]).unwrap()))
+                .unwrap();
+        assert_ne!(
+            config.canonical_bytes().unwrap(),
+            defaults.canonical_bytes().unwrap()
+        );
+        let changed =
+            resolve_render_config(&fs, &render(parse_args(["--crf", "28"]).unwrap())).unwrap();
+        assert_ne!(
+            config.canonical_bytes().unwrap(),
+            changed.canonical_bytes().unwrap()
+        );
+    }
+
+    #[test]
+    fn video_quality_cli_overrides_config_and_switches_rate_control_modes() {
+        let fs = VirtualFs::new();
+        fs.insert(
+            "/cfg/quality.yml",
+            b"file_writer:\n  video_crf: 28\n  video_preset: slow\n  video_tune: animation\n"
+                .to_vec(),
+        );
+        let configured =
+            render(parse_args(["--config_file", "/cfg/quality.yml", "--format", "video"]).unwrap());
+        let config = resolve_render_config(&fs, &configured).unwrap();
+        assert_eq!(
+            ffmpeg_video_job(&configured, &config)
+                .unwrap()
+                .quality()
+                .unwrap(),
+            VideoQuality {
+                crf: Some(28),
+                preset: Some(EncoderPreset::Slow),
+                tune: Some(EncoderTune::Animation),
+                bitrate: None,
+            }
+        );
+        let bitrate = render(
+            parse_args([
+                "--config_file",
+                "/cfg/quality.yml",
+                "--video-bitrate",
+                "2000000",
+                "--preset",
+                "fast",
+            ])
+            .unwrap(),
+        );
+        let config = resolve_render_config(&fs, &bitrate).unwrap();
+        let job = ffmpeg_video_job(&bitrate, &config).unwrap();
+        assert_eq!(
+            job.quality().unwrap(),
+            VideoQuality {
+                crf: None,
+                preset: Some(EncoderPreset::Fast),
+                tune: Some(EncoderTune::Animation),
+                bitrate: Some(2_000_000),
+            }
+        );
+        let argv = fmn_output::negotiate::encode_argv(&job, Path::new("/quality.mp4")).unwrap();
+        assert!(argv.windows(2).any(|pair| pair == ["-b:v", "2000000"]));
+        assert!(!argv.iter().any(|arg| arg == "-crf"));
+
+        fs.insert(
+            "/cfg/quality.yml",
+            b"file_writer:\n  video_bitrate: 2000000\n  video_preset: fast\n".to_vec(),
+        );
+        let crf = render(parse_args(["--config_file", "/cfg/quality.yml", "--crf", "0"]).unwrap());
+        let config = resolve_render_config(&fs, &crf).unwrap();
+        let job = ffmpeg_video_job(&crf, &config).unwrap();
+        assert_eq!(job.quality().unwrap().crf, Some(0));
+        assert_eq!(job.quality().unwrap().bitrate, None);
+        assert_eq!(job.quality().unwrap().preset, Some(EncoderPreset::Fast));
+
+        let mut conflicting = crf;
+        conflicting.video_quality.bitrate = Some(2_000_000);
+        let config = resolve_render_config(&fs, &conflicting).unwrap();
+        assert!(ffmpeg_video_job(&conflicting, &config).is_err());
+    }
+
+    #[test]
+    fn video_quality_rejects_invalid_flags_and_incompatible_outputs() {
+        for args in [
+            &["--crf", "52"][..],
+            &["--crf", "256"],
+            &["--crf=-1"],
+            &["--preset", "arbitrary"],
+            &["--tune", "film,grain"],
+            &["--video-bitrate", "0"],
+            &["--video-bitrate", "4294967296"],
+        ] {
+            assert_eq!(
+                parse_args(args.iter().copied()).unwrap_err().exit_name(),
+                "usage",
+                "{args:?}"
+            );
+        }
+        assert_eq!(
+            parse_args(["--crf", "16", "--video-bitrate", "2000000"])
+                .unwrap_err()
+                .rule(),
+            Some("video-rate-control-exclusive"),
+        );
+        for (flag, value) in [
+            ("--crf", "16"),
+            ("--preset", "slow"),
+            ("--tune", "animation"),
+            ("--video-bitrate", "2000000"),
+        ] {
+            for format in ["png", "png_sequence", "gif", "y4m", "wav", "svg"] {
+                assert_eq!(
+                    parse_args(["--format", format, flag, value])
+                        .unwrap_err()
+                        .exit_name(),
+                    "usage"
+                );
+            }
+            assert_eq!(
+                parse_args(["--gif", flag, value]).unwrap_err().exit_name(),
+                "usage"
+            );
+        }
+    }
+
+    #[test]
+    fn video_quality_incompatibilities_refuse_before_tool_discovery() {
+        let fs = Arc::new(VirtualFs::new());
+        let runner = Arc::new(fmn_platform::process::ScriptedRunner::new());
+        for args in [
+            &["--vcodec", "h264_nvenc", "--crf", "16"][..],
+            &["--vcodec", "h264_videotoolbox", "--preset", "slow"],
+            &["--vcodec", "libx265", "--tune", "film"],
+            &["--transparent", "--video-bitrate", "2000000"],
+        ] {
+            let output = run_with_capabilities(
+                args.iter()
+                    .copied()
+                    .chain(["--robot", BUILTIN_SCENE_SOURCE, "circle_shift.v1"]),
+                fs_capability(&fs),
+                runner.clone(),
+                &no_ffmpeg_locator(),
+            );
+            assert_eq!(
+                output.code,
+                exit_code("config"),
+                "{args:?}: {}",
+                output.stdout
+            );
+            assert!(output.stderr.is_empty());
+            assert_eq!(output.stdout.lines().count(), 1);
+            assert!(output.stdout.contains("\"exit_name\":\"config\""));
+        }
+    }
+
+    #[test]
+    fn ffmpeg_limit_flags_select_video_and_use_shared_admission() {
+        let command = render(
+            parse_args([
+                "--ffmpeg-timeout",
+                "21600",
+                "--ffmpeg-max-log-bytes",
+                "73",
+                "--ffmpeg-max-artifact-bytes",
+                "17179869184",
+                "--ffmpeg-max-input-bytes",
+                "8589934592",
+            ])
+            .unwrap(),
+        );
+        assert!(command.write_file);
+        assert_eq!(
+            requested_render_format(&command).unwrap(),
+            RequestedRenderFormat::Video
+        );
+        let (limits, input) = command.ffmpeg_limits.effective_limits().unwrap();
+        assert_eq!(limits.timeout, std::time::Duration::from_secs(21_600));
+        assert_eq!(limits.max_log_bytes, 73);
+        assert_eq!(limits.max_artifact_bytes, 8 << 30);
+        assert_eq!(input, 8 << 30);
+        assert!(!limits.keep_workdir);
+        assert_eq!(command.ffmpeg_limits.max_artifact_bytes, Some(16 << 30));
+        let (defaults, input) = FfmpegLimitOptions::default().effective_limits().unwrap();
+        assert_eq!(
+            defaults.timeout,
+            fmn::rendering::DEFAULT_RENDER_FFMPEG_TIMEOUT
+        );
+        assert_eq!(defaults.max_artifact_bytes, 8 << 30);
+        assert_eq!(defaults.max_log_bytes, 1 << 20);
+        assert_eq!(input, 64 << 30);
+    }
+
+    #[test]
+    fn ffmpeg_limits_reject_invalid_bounds_and_non_video_formats() {
+        for flag in [
+            "--ffmpeg-timeout",
+            "--ffmpeg-max-log-bytes",
+            "--ffmpeg-max-artifact-bytes",
+            "--ffmpeg-max-input-bytes",
+        ] {
+            for value in ["0", "-1", "1.5", "18446744073709551616"] {
+                assert_eq!(
+                    parse_args([format!("{flag}={value}")])
+                        .unwrap_err()
+                        .exit_name(),
+                    "usage"
+                );
+            }
+            for format in ["png", "png_sequence", "gif", "y4m", "wav", "svg"] {
+                assert_eq!(
+                    parse_args([flag, "1", "--format", format])
+                        .unwrap_err()
+                        .exit_name(),
+                    "usage"
+                );
+            }
+            assert_eq!(
+                parse_args([flag, "1", "--gif"]).unwrap_err().exit_name(),
+                "usage"
+            );
+        }
+        let command = render(parse_args(["--ffmpeg-timeout", "18446744073709551615"]).unwrap());
+        let error = command.ffmpeg_limits.effective_limits().unwrap_err();
+        assert_eq!(error.exit_name(), "config");
+        assert!(error.message().contains("monotonic clock"));
+        let output = run_with_capabilities(
+            [
+                "--robot",
+                "--ffmpeg-timeout",
+                "18446744073709551615",
+                BUILTIN_SCENE_SOURCE,
+                "circle_shift.v1",
+            ],
+            Arc::new(VirtualFs::new()),
+            Arc::new(fmn_platform::process::ScriptedRunner::new()),
+            &no_ffmpeg_locator(),
+        );
+        assert_eq!(output.code, exit_code("config"), "{}", output.stdout);
+        assert!(output.stdout.contains("monotonic clock"));
+        assert!(output.stderr.is_empty());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    #[test]
+    fn ffmpeg_limits_reach_the_streaming_process_and_failed_jobs_publish_nothing() {
+        use fmn_platform::process::{
+            ProcessCancellation, ProcessError, ProcessMechanism, ProcessOutcome, ProcessRunner,
+            ProcessSpec, ProcessStdinLimits, RunningProcess,
+        };
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct RecordLimits(Mutex<Vec<(std::time::Duration, u64, u64)>>);
+        impl ProcessRunner for RecordLimits {
+            fn mechanism(&self) -> ProcessMechanism {
+                ProcessMechanism::Scripted
+            }
+            fn run(&self, spec: &ProcessSpec) -> Result<ProcessOutcome, ProcessError> {
+                SuccessfulFfmpegProbeRunner.run(spec)
+            }
+            fn start(
+                &self,
+                spec: &ProcessSpec,
+                _: ProcessCancellation,
+                stdin: ProcessStdinLimits,
+            ) -> Result<Box<dyn RunningProcess>, ProcessError> {
+                self.0.lock().unwrap().push((
+                    spec.timeout,
+                    spec.max_output_bytes,
+                    stdin.max_total_bytes,
+                ));
+                Err(ProcessError::NotScripted {
+                    program: spec.program.clone(),
+                })
+            }
+        }
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("fmn-cli-limits-{}-{unique}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let executable = root.join("ffmpeg");
+        write_native_ffmpeg_fixture(&executable);
+        let output_dir = root.join("video");
+        let runner = Arc::new(RecordLimits::default());
+        let output = run_with_capabilities(
+            [
+                "--robot",
+                "--ffmpeg",
+                executable.to_str().unwrap(),
+                "--vcodec",
+                "h264_nvenc",
+                "--ffmpeg-timeout",
+                "21600",
+                "--ffmpeg-max-log-bytes",
+                "73",
+                "--ffmpeg-max-artifact-bytes",
+                "4096",
+                "--ffmpeg-max-input-bytes",
+                "8192",
+                "--video_dir",
+                output_dir.to_str().unwrap(),
+                "--resolution",
+                "16x16",
+                "--fps",
+                "2",
+                "--threads",
+                "1",
+                BUILTIN_SCENE_SOURCE,
+                "circle_shift.v1",
+            ],
+            Arc::new(fmn_platform::fs::StdFs),
+            runner.clone(),
+            &no_ffmpeg_locator(),
+        );
+        assert_ne!(
+            output.code, 0,
+            "the scripted encoder intentionally refuses to start"
+        );
+        assert_eq!(
+            *runner.0.lock().unwrap(),
+            vec![(std::time::Duration::from_secs(21_600), 73, 8192)],
+            "{}",
+            output.stdout
+        );
+        assert!(!output_dir.join("circle_shift.mp4").exists());
+        if output_dir.exists() {
+            assert!(std::fs::read_dir(&output_dir).unwrap().next().is_none());
+        }
+    }
+
+    #[test]
     fn certified_renders_require_a_build_that_names_its_sources() {
         let commit = "git:0123456789abcdef0123456789abcdef01234567";
         assert!(certified_build_check(commit).is_ok());
@@ -8875,6 +9885,322 @@ mod tests {
                 "{}",
                 error.message
             );
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    mod video_soundtrack {
+        use super::*;
+        use fmn_platform::process::{
+            ProcessCancellation, ProcessError, ProcessMechanism, ProcessOutcome, ProcessRunner,
+            ProcessSpec, ProcessStdinLimits, ProcessTermination, RunningProcess,
+        };
+        use std::sync::atomic::AtomicU64;
+
+        /// Only the process capability is scripted. Scene execution, native
+        /// raster/conversion, PCM decode/mix, both governed video stages,
+        /// no-clobber publication and FMNP sealing are production paths.
+        #[derive(Default)]
+        struct AudioRunner {
+            mux_inputs: Arc<Mutex<Vec<Vec<u8>>>>,
+            decodes: Mutex<Vec<ProcessSpec>>,
+            decoded_wav: Option<Vec<u8>>,
+            fail_mux: bool,
+        }
+
+        impl ProcessRunner for AudioRunner {
+            fn mechanism(&self) -> ProcessMechanism {
+                ProcessMechanism::Scripted
+            }
+
+            fn run(&self, spec: &ProcessSpec) -> Result<ProcessOutcome, ProcessError> {
+                if spec
+                    .argv
+                    .last()
+                    .is_some_and(|path| path.ends_with("decoded.wav"))
+                {
+                    let bytes = self.decoded_wav.as_ref().expect("scripted audio decode");
+                    std::fs::write(spec.argv.last().unwrap(), bytes).unwrap();
+                    self.decodes.lock().unwrap().push(spec.clone());
+                    return Ok(success());
+                }
+                SuccessfulFfmpegProbeRunner.run(spec)
+            }
+
+            fn start(
+                &self,
+                spec: &ProcessSpec,
+                cancellation: ProcessCancellation,
+                limits: ProcessStdinLimits,
+            ) -> Result<Box<dyn RunningProcess>, ProcessError> {
+                Ok(Box::new(AudioProcess {
+                    spec: spec.clone(),
+                    cancellation,
+                    limits,
+                    bytes: 0,
+                    mux_inputs: Arc::clone(&self.mux_inputs),
+                    fail_mux: self.fail_mux,
+                }))
+            }
+        }
+
+        struct AudioProcess {
+            spec: ProcessSpec,
+            cancellation: ProcessCancellation,
+            limits: ProcessStdinLimits,
+            bytes: u64,
+            mux_inputs: Arc<Mutex<Vec<Vec<u8>>>>,
+            fail_mux: bool,
+        }
+
+        fn success() -> ProcessOutcome {
+            ProcessOutcome {
+                termination: ProcessTermination::Exited(Some(0)),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            }
+        }
+
+        impl RunningProcess for AudioProcess {
+            fn write_stdin(&mut self, bytes: &[u8]) -> Result<(), ProcessError> {
+                assert!(!self.cancellation.is_cancelled());
+                assert!(bytes.len() as u64 <= self.limits.max_chunk_bytes);
+                self.bytes += bytes.len() as u64;
+                assert!(self.bytes <= self.limits.max_total_bytes);
+                Ok(())
+            }
+
+            fn finish(self: Box<Self>) -> Result<ProcessOutcome, ProcessError> {
+                if self.cancellation.is_cancelled() {
+                    return Ok(ProcessOutcome {
+                        termination: ProcessTermination::Cancelled,
+                        ..success()
+                    });
+                }
+                let mux = self
+                    .spec
+                    .argv
+                    .windows(2)
+                    .any(|pair| pair == ["-c:a", "aac"]);
+                if mux {
+                    assert!(
+                        self.spec
+                            .argv
+                            .windows(2)
+                            .any(|pair| pair == ["-c:v", "copy"])
+                    );
+                    let wav = self
+                        .spec
+                        .argv
+                        .windows(2)
+                        .find(|pair| pair[0] == "-i" && pair[1].ends_with("soundtrack.wav"))
+                        .expect("mux receives the staged native WAV");
+                    self.mux_inputs
+                        .lock()
+                        .unwrap()
+                        .push(std::fs::read(&wav[1]).unwrap());
+                    if self.fail_mux {
+                        return Ok(ProcessOutcome {
+                            termination: ProcessTermination::Exited(Some(9)),
+                            stderr: b"deliberate audio mux failure".to_vec(),
+                            ..success()
+                        });
+                    }
+                } else {
+                    assert!(self.bytes > 0, "video encoder received native frames");
+                }
+                std::fs::write(
+                    self.spec.argv.last().unwrap(),
+                    if mux {
+                        b"muxed-audio-video".as_slice()
+                    } else {
+                        b"silent-video".as_slice()
+                    },
+                )
+                .unwrap();
+                Ok(success())
+            }
+
+            fn cancel(self: Box<Self>) -> Result<(), ProcessError> {
+                self.cancellation.cancel();
+                Ok(())
+            }
+        }
+
+        fn render(
+            fs: &Arc<VirtualFs>,
+            runner: &Arc<AudioRunner>,
+            extra: &[&str],
+        ) -> (RunOutput, PathBuf) {
+            static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+            let root = std::env::temp_dir().join(format!(
+                "fmn-cli-audio-{}-{}",
+                std::process::id(),
+                SEQUENCE.fetch_add(1, Ordering::Relaxed),
+            ));
+            std::fs::create_dir(&root).unwrap();
+            let tool = root.join("ffmpeg");
+            write_native_ffmpeg_fixture(&tool);
+            let output = root.join("out");
+            let args = [
+                "--robot",
+                "--format",
+                "video",
+                "--vcodec",
+                "h264_nvenc",
+                "--resolution",
+                "16x16",
+                "--fps",
+                "8",
+                "--threads",
+                "1",
+                "--ffmpeg",
+                tool.to_str().unwrap(),
+                "--video_dir",
+                output.to_str().unwrap(),
+            ];
+            let result = run_with_capabilities(
+                args.into_iter()
+                    .chain(extra.iter().copied())
+                    .chain([BUILTIN_SCENE_SOURCE, fmn::builtins::SOUND_CUE_SCENE_NAME]),
+                fs_capability(fs),
+                runner.clone(),
+                &no_ffmpeg_locator(),
+            );
+            (result, output.join("sound_cue.mp4"))
+        }
+
+        fn source_wav() -> Vec<u8> {
+            // A 3/4-second cue starts at 1/2 second. The complete mix must
+            // preserve its tail past the one-second picture; partial clips
+            // must stop at their own boundaries.
+            fmn_codec::encode_wav(1, 48_000, SampleFormat::S16, &vec![0.25; 36_000])
+        }
+
+        #[test]
+        fn live_cli_video_muxes_audio_and_seals_all_input_and_process_receipts() {
+            let fs = Arc::new(VirtualFs::new());
+            let source = source_wav();
+            fs.insert(fmn::builtins::SOUND_CUE_ASSET_NAME, source.clone());
+            let runner = Arc::new(AudioRunner::default());
+            let (result, artifact) = render(&fs, &runner, &[]);
+            assert_eq!(result.code, 0, "{}{}", result.stdout, result.stderr);
+            assert_eq!(std::fs::read(&artifact).unwrap(), b"muxed-audio-video");
+            let inputs = runner.mux_inputs.lock().unwrap();
+            assert_eq!(inputs.len(), 1);
+            let mix = decode_wav(&inputs[0], &WavLimits::default()).unwrap();
+            assert_eq!((mix.sample_rate, mix.channels), (48_000, 2));
+            assert_eq!(mix.samples.len(), 60_000 * 2);
+            assert!(
+                mix.samples[..24_000 * 2]
+                    .iter()
+                    .all(|sample| *sample == 0.0)
+            );
+            assert!(
+                mix.samples[24_000 * 2..]
+                    .iter()
+                    .all(|sample| (*sample - 0.25).abs() < 0.0001)
+            );
+            assert!(
+                result
+                    .stdout
+                    .contains("\"cues_mixed\":1,\"sample_frames\":60000")
+            );
+            assert!(result.stdout.contains("\"audio_decodes\":[]"));
+            assert!(result.stdout.contains("\"decoder\":\"native-wav\""));
+            assert!(result.stdout.contains("\"-c:v\",\"copy\",\"-c:a\",\"aac\""));
+            let manifest = ProvenanceManifest::from_bytes(
+                &fs.read(
+                    &adjacent_manifest_destination(&artifact)
+                        .unwrap()
+                        .join("manifest.fmnp"),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert!(manifest.items.iter().any(|item| item.item_id == 1
+                && item.virtual_path.as_deref() == Some(fmn::builtins::SOUND_CUE_ASSET_NAME)
+                && item.digest == fmn_hash::sha256(&source)));
+            assert!(manifest.outputs.iter().all(|output| !output.certified));
+        }
+
+        #[test]
+        fn subdivided_cli_audio_crops_the_same_scene_mix_without_restarting_cues() {
+            let fs = Arc::new(VirtualFs::new());
+            fs.insert(fmn::builtins::SOUND_CUE_ASSET_NAME, source_wav());
+            let whole = Arc::new(AudioRunner::default());
+            let (result, _) = render(&fs, &whole, &[]);
+            assert_eq!(result.code, 0, "{}", result.stdout);
+            let full =
+                decode_wav(&whole.mux_inputs.lock().unwrap()[0], &WavLimits::default()).unwrap();
+            let clips = Arc::new(AudioRunner::default());
+            let (result, _) = render(&fs, &clips, &["--subdivide"]);
+            assert_eq!(result.code, 0, "{}{}", result.stdout, result.stderr);
+            assert_eq!(result.stdout.matches("\"kind\":\"render\"").count(), 2);
+            assert_eq!(result.stdout.matches("\"sample_frames\":24000").count(), 2);
+            let inputs = clips.mux_inputs.lock().unwrap();
+            assert_eq!(inputs.len(), 2);
+            let joined: Vec<f32> = inputs
+                .iter()
+                .flat_map(|wav| {
+                    let mix = decode_wav(wav, &WavLimits::default()).unwrap();
+                    assert_eq!(mix.samples.len(), 24_000 * 2);
+                    mix.samples
+                })
+                .collect();
+            assert_eq!(joined, full.samples[..48_000 * 2]);
+        }
+
+        #[test]
+        fn skipped_cues_need_no_asset_and_decode_or_mux_failures_publish_nothing() {
+            let empty = Arc::new(VirtualFs::new());
+            let silent = Arc::new(AudioRunner::default());
+            let (result, artifact) = render(&empty, &silent, &["-n", "1"]);
+            assert_eq!(result.code, 0, "{}{}", result.stdout, result.stderr);
+            assert_eq!(std::fs::read(&artifact).unwrap(), b"silent-video");
+            assert!(silent.mux_inputs.lock().unwrap().is_empty());
+            assert!(result.stdout.contains("\"soundtrack\":null"));
+            for (source, fail_mux) in [
+                (None, false),
+                (Some(b"invalid audio".to_vec()), false),
+                (Some(source_wav()), true),
+            ] {
+                let fs = Arc::new(VirtualFs::new());
+                if let Some(source) = source {
+                    fs.insert(fmn::builtins::SOUND_CUE_ASSET_NAME, source);
+                }
+                let runner = Arc::new(AudioRunner {
+                    fail_mux,
+                    ..AudioRunner::default()
+                });
+                let (result, artifact) = render(&fs, &runner, &[]);
+                assert_ne!(result.code, 0, "{}", result.stdout);
+                assert!(!result.stdout.contains("\"kind\":\"render\""));
+                assert!(!artifact.exists());
+                assert!(!fs.exists(&adjacent_manifest_destination(&artifact).unwrap()));
+            }
+        }
+
+        #[test]
+        fn compressed_cli_sound_cues_use_the_same_governed_decoder_and_keep_its_receipt() {
+            let fs = Arc::new(VirtualFs::new());
+            let source = b"fLaCscripted compressed audio input".to_vec();
+            fs.insert(fmn::builtins::SOUND_CUE_ASSET_NAME, source.clone());
+            let runner = Arc::new(AudioRunner {
+                decoded_wav: Some(source_wav()),
+                ..AudioRunner::default()
+            });
+            let (result, artifact) = render(&fs, &runner, &[]);
+            assert_eq!(result.code, 0, "{}{}", result.stdout, result.stderr);
+            assert_eq!(std::fs::read(&artifact).unwrap(), b"muxed-audio-video");
+            assert_eq!(runner.decodes.lock().unwrap().len(), 1);
+            assert!(result.stdout.contains("\"audio_decodes\":[{"));
+            assert!(
+                result
+                    .stdout
+                    .contains("\"container\":\"flac\",\"decoder\":\"ffmpeg\"")
+            );
+            assert!(result.stdout.contains(&fmn_hash::sha256(&source).to_hex()));
         }
     }
 
@@ -10125,7 +11451,7 @@ mod tests {
         ));
         let before = inspect(&mut worker);
         assert!(before.contains(
-            "\"view\":{\"frame_index\":0,\"frame_count\":12,\"fps\":30,\"width\":96,\"height\":54,\"scale\":9,\"origin\":[48,27],\"input_events\":false}"
+            "\"view\":{\"frame_index\":0,\"frame_count\":12,\"fps\":30,\"width\":96,\"height\":54,\"scale\":9,\"origin\":[48,27],\"y_up\":true,\"input_events\":false}"
         ), "{before}");
         assert!(before.contains("\"scene_time\":0.03333333333333333"));
         let frame_budget = worker.max_frame_bytes;

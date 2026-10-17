@@ -70,6 +70,26 @@ class NativeCopyingTests(unittest.TestCase):
         self.assertIs(other.shared, other[1].shared)
         self.assertIsNot(other.shared, shared)
 
+    def test_copy_remaps_every_family_internal_reference(self):
+        # C-32: the Reference's copy() leaves a self-reference and a child's
+        # reference to a sibling on the original; its deepcopy() remaps both.
+        for bound in (False, True):
+            for copier, shallow in ((lambda obj: obj.copy(), True), (copy.copy, True),
+                                    (copy.deepcopy, False)):
+                with self.subTest(bound=bound, copier=copier):
+                    _, root = self.root(bound)
+                    first, second = root[0], root[1]
+                    first.own, first.sibling, root.child = first, second, first
+                    other = copier(root)
+                    self.assertIs(other[0].own, other[0])
+                    self.assertIs(other[0].sibling, other[1])
+                    self.assertIs(other.child, other[0])
+                    single = copier(first)
+                    self.assertIs(single.own, single)
+                    # Outside the copied family: shared by a shallow copy,
+                    # copied along by deepcopy.
+                    self.assertIs(single.sibling is second, shallow)
+
     def test_object_array_remaps_family_members_but_not_external_objects(self):
         _, root = self.root(True)
         outsider, payload = m.Circle(), {"shared": True}
@@ -276,7 +296,7 @@ class NativeCopyingTests(unittest.TestCase):
 
 
 suite = unittest.defaultTestLoader.loadTestsFromTestCase(NativeCopyingTests)
-assert suite.countTestCases() == 19
+assert suite.countTestCases() == 20
 result = unittest.TextTestRunner(verbosity=2).run(suite)
 if not result.wasSuccessful():
     raise AssertionError("native mobject array-copy acceptance failed")

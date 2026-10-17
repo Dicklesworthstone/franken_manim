@@ -699,16 +699,16 @@ dependencies = [
 
 [[package]]
 name = "fsci-fft"
-version = "0.2.0"
-source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=85edd7a99f2a6487ef35135e135b9959cc0010c1#85edd7a99f2a6487ef35135e135b9959cc0010c1"
+version = "0.3.0"
+source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=ae52b65454841cd4976f6fbac907be0539508d9b#ae52b65454841cd4976f6fbac907be0539508d9b"
 dependencies = [
  "fsci-runtime",
 ]
 
 [[package]]
 name = "fsci-linalg"
-version = "0.2.0"
-source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=85edd7a99f2a6487ef35135e135b9959cc0010c1#85edd7a99f2a6487ef35135e135b9959cc0010c1"
+version = "0.3.0"
+source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=ae52b65454841cd4976f6fbac907be0539508d9b#ae52b65454841cd4976f6fbac907be0539508d9b"
 dependencies = [
  "fsci-fft",
  "fsci-runtime",
@@ -720,8 +720,8 @@ dependencies = [
 
 [[package]]
 name = "fsci-runtime"
-version = "0.2.0"
-source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=85edd7a99f2a6487ef35135e135b9959cc0010c1#85edd7a99f2a6487ef35135e135b9959cc0010c1"
+version = "0.3.0"
+source = "git+https://github.com/Dicklesworthstone/frankenscipy?rev=ae52b65454841cd4976f6fbac907be0539508d9b#ae52b65454841cd4976f6fbac907be0539508d9b"
 dependencies = [
  "blake3",
  "serde",

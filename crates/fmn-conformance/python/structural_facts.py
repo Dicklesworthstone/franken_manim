@@ -370,8 +370,56 @@ def scene_facts(scene, namespace=None, points_mode: str = "digest") -> dict:
     roots = [m for m in scene.mobjects if type(m).__name__ != "CameraFrame"]
     record = extract(type(scene).__name__, roots, namespace=namespace, points_mode=points_mode)
     record["camera_frame_roots"] = len(scene.mobjects) - len(roots)
-    record["time"] = quantize(getattr(scene, "time", None))
+    time = getattr(scene, "time", None)
+    record["time"] = quantize(
+        None if time is None else time + getattr(scene, "_fmn_skipped_frame_rounding", 0.0))
+    bn02 = getattr(scene, "_fmn_bn02_frame_rounding", None)
+    if time is not None and bn02 is not None:
+        record["time_bn02"] = quantize(time + bn02)
     return record
+
+
+def _observe_reference_playback_clock(manimlib):
+    """Make the Reference's `time` fact its playback clock under `-s`.
+
+    Played, the Reference advances a segment over `arange(0, run_time, 1/fps)
+    + 1/fps`, ending on the frame at or after `run_time` (scene.py:477).
+    Skipped, it advances by `run_time` itself (scene.py:474), so its clock
+    under `-s` differs from the same scene played: `wait(0.25)` at 30 fps is
+    0.2667 s played, 0.25 s skipped. The portal keeps one clock for both
+    (BN-02). This records, per skipped segment, the rounding playback would
+    add; the Reference's behavior is untouched.
+
+    It also records the same segments counted by BN-02's rule,
+    `ceil(run_time * fps)` frames on the exact value of the f64 duration
+    (`time_bn02`). `arange` can count one frame fewer when the f64 sits just
+    above a frame boundary (`wait(0.1)` at 30 fps: 3 frames, BN-02 4).
+    Returns the restorer.
+    """
+    from fractions import Fraction
+
+    import numpy as np
+
+    original = manimlib.Scene.get_time_progression
+
+    def get_time_progression(self, run_time, *args, **kwargs):
+        times = original(self, run_time, *args, **kwargs)
+        override = kwargs.get("override_skip_animations", args[2] if len(args) > 2 else False)
+        if self.skip_animations and not override:
+            fps = self.camera.fps
+            duration = float(run_time)  # exact for NumPy scalars too
+            played = np.arange(0, run_time, 1 / fps) + 1 / fps
+            if len(played):
+                self._fmn_skipped_frame_rounding = (
+                    getattr(self, "_fmn_skipped_frame_rounding", 0.0)
+                    + float(played[-1]) - duration)
+            frames = math.ceil(Fraction(duration) * Fraction(float(fps))) if duration > 0 else 0
+            self._fmn_bn02_frame_rounding = (
+                getattr(self, "_fmn_bn02_frame_rounding", 0.0) + frames / fps - duration)
+        return times
+
+    manimlib.Scene.get_time_progression = get_time_progression
+    return lambda: setattr(manimlib.Scene, "get_time_progression", original)
 
 
 def run_scene(facts_path: str, engine: str, engine_argv, points_mode: str = "digest") -> int:
@@ -397,6 +445,7 @@ def run_scene(facts_path: str, engine: str, engine_argv, points_mode: str = "dig
         return original(self)
 
     manimlib.Scene.tear_down = tear_down
+    restore_clock = _observe_reference_playback_clock(manimlib) if engine == "reference" else None
     code = 1
     try:
         if engine == "reference":
@@ -409,6 +458,8 @@ def run_scene(facts_path: str, engine: str, engine_argv, points_mode: str = "dig
         code = exit_.code if isinstance(exit_.code, int) else (0 if exit_.code is None else 1)
     finally:
         manimlib.Scene.tear_down = original
+        if restore_clock is not None:
+            restore_clock()
         if not records:
             records.append(extract_error("scene", RuntimeError("tear_down was never reached")))
         Path(facts_path).write_text("".join(canonical(r) + "\n" for r in records), encoding="utf-8")
@@ -647,6 +698,58 @@ def _member_differences(ref, portal):
             yield "points_sha256", ref.get("points_sha256"), portal.get("points_sha256")
 
 
+_BOX_ROWS = ("min", "mid", "max")
+
+
+def cascade_anchor(path, ref_boxes, portal_boxes):
+    """How a member's displacement follows a nearby object's, or None (fm-5wq.59).
+
+    Scenes place objects relative to others (next_to, align_to, get_bottom), so a
+    size difference in one object (BN-05) moves the next by the same amount. The
+    member's violation is cascade-explained when one of its 27 box points (min, mid
+    or max per axis) moved exactly as one of its anchor's box points did, by a
+    displacement larger than the quantization slack, so a translated member still
+    counts as unexplained. The anchor is the parent or the nearest preceding sibling;
+    for a root, that is the preceding root.
+    """
+    def triples(b):
+        return isinstance(b, list) and len(b) == 3 and all(
+            isinstance(p, list) and len(p) == 3 and all(isinstance(v, int) for v in p) for p in b)
+
+    def moves(p):
+        ref, portal = ref_boxes.get(p), portal_boxes.get(p)
+        if not (triples(ref) and triples(portal)):
+            return None
+        return {(i, j, k): tuple(portal[r][axis] - ref[r][axis] for axis, r in enumerate((i, j, k)))
+                for i in range(3) for j in range(3) for k in range(3)}
+
+    def label(point):
+        return ",".join(f"{axis}:{_BOX_ROWS[r]}" for axis, r in zip("xyz", point))
+
+    own = moves(path)
+    if own is None:
+        return None
+    parts = path.split(".")
+    anchors = []
+    if parts[-1].isdigit() and int(parts[-1]) > 0:
+        anchors.append(".".join([*parts[:-1], str(int(parts[-1]) - 1)]))
+    if len(parts) > 1:
+        anchors.append(".".join(parts[:-1]))
+    slack = 2 * TOLERANCE_QUANTA
+    for anchor in anchors:
+        theirs = moves(anchor)
+        if theirs is None:
+            continue
+        for anchor_point, shift in theirs.items():
+            if max(abs(v) for v in shift) <= slack:
+                continue
+            for member_point, own_shift in own.items():
+                if all(abs(a - b) <= slack for a, b in zip(own_shift, shift)):
+                    return {"anchor": anchor, "member_point": label(member_point),
+                            "anchor_point": label(anchor_point)}
+    return None
+
+
 def diff_subject(ref: dict, portal: dict, exclusions=(), limit: int = 50,
                  ignore=frozenset()) -> dict:
     """Compare one subject's facts. Differences are reported in depth-first path order.
@@ -680,6 +783,8 @@ def diff_subject(ref: dict, portal: dict, exclusions=(), limit: int = 50,
         return counts
 
     ref_drawn, portal_drawn = drawn(ref), drawn(portal)
+    ref_boxes = {m["path"]: m.get("bbox") for m in ref.get("members", ())}
+    portal_boxes = {m["path"]: m.get("bbox") for m in portal.get("members", ())}
 
     def ancestors(path):
         parts = path.split(".")
@@ -697,6 +802,7 @@ def diff_subject(ref: dict, portal: dict, exclusions=(), limit: int = 50,
             return
         if violation is not None:
             violation["family"] = [ref_drawn.get(path, 0), portal_drawn.get(path, 0)]
+            violation["cascade"] = cascade_anchor(path, ref_boxes, portal_boxes)
             if len(violations) < limit:
                 violations.append({"path": path, "class": member_class, **violation})
         if len(differences) < limit:
@@ -737,7 +843,10 @@ def diff_subject(ref: dict, portal: dict, exclusions=(), limit: int = 50,
         if key in ref or key in portal:
             a, b = ref.get(key, "absent"), portal.get(key, "absent")
             if not same(a, b):
-                note("", None, key, a, b)
+                # A time the Reference's segments reach under BN-02's frame
+                # count is the fact `time.bn02`, for that Behavior Note's row.
+                bn02 = key == "time" and "time_bn02" in ref and same(ref["time_bn02"], b)
+                note("", None, "time.bn02" if bn02 else key, a, b)
     shown = [d for d in differences if d is not None]
     verdict = "differs" if differences else ("equal-with-exclusions" if excluded else "equal")
     return {

@@ -51,3 +51,21 @@ Locked by the update-order corpus:
 running their dt-updaters at double speed or as one coarse integration step
 will now see the same terminal state as ordinary playback. There is no way to
 ask for either defective behavior.
+
+## The skipped clock (Appendix C-28)
+
+The Reference's clock also moves differently when skipping. A played segment
+advances over `arange(0, run_time, 1/fps) + 1/fps` and ends on the first frame
+at or after `run_time` (scene.py:477). A skipped one advances by `run_time`
+itself (scene.py:474). So `self.time` after `wait(0.25)` at 30 fps is 0.2667
+played and 0.25 under `-s`. Measured on `_2020/hamming.py`
+`PowerOfTwoPositions`, which waits 0.25 four times: 3.067 s played, 3.000 s
+skipped. FrankenManim's skipped segment lands on the same frame as playback
+(BN-02), so a scene's clock does not depend on `-s`.
+
+The corpus differential runs the Reference under `-s`. Its `time` fact is the
+Reference's playback clock: `structural_facts.py` adds, per skipped segment,
+the rounding playback would add, without changing the Reference's behavior.
+
+**Migration:** none. A scene that reads `self.time` sees the played value
+whether or not it is skipped.

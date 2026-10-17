@@ -54,8 +54,11 @@ class SubdivisionTests(unittest.TestCase):
             view["point"][:, 0] += .25
             scene.play(square.animate.shift(3 * m.RIGHT), run_time=.125, rate_func=m.linear)
             scene.wait(.125)
-        self.assertIs(scene.mobjects[0], square)
+        # The list starts with the frame, as in the Reference (fm-6l2i).
+        self.assertIs(scene.mobjects[0], scene.frame)
+        self.assertIs(scene.mobjects[1], square)
         np.testing.assert_allclose(square.get_center(), [1.25, 0, 0], atol=1e-6)
+
         self.assertEqual(m._portal_scene_clock(scene), (30, 12))
         self.assertEqual([(s.play_index, s.kind, s.start_frame, s.end_frame)
                           for s in run.segments], [(1, "play", 4, 8), (2, "wait", 8, 12)])

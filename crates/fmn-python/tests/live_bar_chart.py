@@ -120,7 +120,7 @@ class LiveBarChartTests(unittest.TestCase):
         obj.change_bar_values((0., -.5))
         obj.change_bar_values((.75, .5))
         self.assertEqual(tuple(obj.bars), bars)
-        self.assertEqual(tuple(scene.mobjects), (obj,))
+        self.assertEqual(tuple(scene.mobjects), (scene.frame, obj))
         self.assertIs(obj._scene, scene)
         self.assertIs(bars[0][0], dot)
         self.assertIs(bars[0].updaters[0], callback)

@@ -131,7 +131,9 @@ class NativeTerminalEditorTests(unittest.TestCase):
                         self.assertEqual(project.generation, 2)
                         self.assertIs(shell.user_ns['scene'], project.scene)
                         self.assertAlmostEqual(shell.user_ns['square'].get_center()[0], 2)
-                        self.assertAlmostEqual(old_scene.mobjects[0].get_center()[0], -2)
+                        # mobjects[0] is the frame, as in the Reference (fm-6l2i).
+                        self.assertAlmostEqual(old_scene.mobjects[1].get_center()[0], -2)
+
                         self.assertNotEqual(project.preview.png(), initial)
                     with patch.object(InteractiveShellEmbed, 'interact', interact), \
                             redirect_stdout(self.output), redirect_stderr(self.errors):
@@ -167,7 +169,8 @@ class NativeTerminalEditorTests(unittest.TestCase):
             self.assertEqual(images(stream.getvalue()), [png])
             self.assertEqual(project.scene.time, clock)
             self.assertEqual(project.generation, 1)
-            project.scene.mobjects[0].shift((1, 0, 0))
+            project.scene.mobjects[1].shift((1, 0, 0))  # [0] is the frame (fm-6l2i)
+
             self.assertEqual(snapshot.png(), png)
 
 

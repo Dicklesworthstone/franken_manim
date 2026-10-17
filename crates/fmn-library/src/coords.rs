@@ -47,7 +47,10 @@
 //! * **Invalid `input_sample_type` is a typed error** ([`CoordsError`]),
 //!   where the Reference raises a bare `Exception`.
 
+mod live;
 pub(crate) mod placement;
+
+pub use live::{CoordinateFrame, CoordinateFrameError, LiveCoordinateSystem};
 
 use fmn_core::color::{Srgb, color_gradient};
 use fmn_core::constants::{
@@ -102,6 +105,10 @@ pub trait CoordinateSystem {
     fn num_sampled_graph_points_per_tick(&self) -> f64 {
         5.0
     }
+    /// Resource limit carried into graphs sampled from this coordinate system.
+    fn graph_sampling_budget(&self) -> SamplingBudget {
+        SamplingBudget::default()
+    }
     /// The coordinate dimension (2 for `Axes`, 3 for `ThreeDAxes`).
     fn dimension(&self) -> usize {
         2
@@ -130,6 +137,8 @@ pub enum CoordsError {
     /// A Riemann range that decreases, has a non-positive step, or whose
     /// step cannot advance the bound (BN-20).
     InvalidRiemannRange(&'static str),
+    /// A live native chart no longer describes a finite affine frame.
+    LiveFrame(CoordinateFrameError),
 }
 
 impl std::fmt::Display for CoordsError {
@@ -146,6 +155,7 @@ impl std::fmt::Display for CoordsError {
             Self::Dash(e) => write!(f, "coordinate dash construction failed: {e}"),
             Self::Tex(e) => write!(f, "coordinate label failed to typeset: {e}"),
             Self::InvalidRiemannRange(reason) => write!(f, "invalid Riemann range: {reason}"),
+            Self::LiveFrame(e) => write!(f, "live coordinate frame failed: {e}"),
         }
     }
 }
@@ -157,6 +167,7 @@ impl std::error::Error for CoordsError {
             Self::Text(e) => Some(e),
             Self::Dash(e) => Some(e),
             Self::Tex(e) => Some(e),
+            Self::LiveFrame(e) => Some(e),
             Self::InvalidSampleType(_) | Self::InvalidRiemannRange(_) => None,
         }
     }
@@ -183,6 +194,12 @@ impl From<DashError> for CoordsError {
 impl From<TexMobjectError> for CoordsError {
     fn from(e: TexMobjectError) -> Self {
         Self::Tex(e)
+    }
+}
+
+impl From<CoordinateFrameError> for CoordsError {
+    fn from(e: CoordinateFrameError) -> Self {
+        Self::LiveFrame(e)
     }
 }
 
@@ -360,12 +377,17 @@ impl NumberLine {
     /// The Reference defaults: `unit_size=1`, ticks on at `0.1` with
     /// `1.5×` longer big ticks, no numbers, `line_to_number_direction=DOWN`,
     /// `buff=MED_SMALL_BUFF`, no tip, `num_decimal_places=0`,
-    /// `font_size=36`, stroke `DEFAULT_LIGHT_COLOR` at width 2.
+    /// `font_size=36`, `color=DEFAULT_LIGHT_COLOR` (fill and stroke, as the
+    /// Reference's `Line(color=...)` resolves it) and a 2-width stroke.
     #[must_use]
     pub fn new(x_range: [f64; 3]) -> Self {
         let mut line = Self {
             x_range,
-            style: Style::default().stroke(DEFAULT_LIGHT_COLOR, 2.0, 1.0),
+            style: Style::default().color(DEFAULT_LIGHT_COLOR).stroke(
+                DEFAULT_LIGHT_COLOR,
+                2.0,
+                1.0,
+            ),
             unit_size: 1.0,
             width: None,
             include_ticks: true,
@@ -1882,6 +1904,10 @@ impl CoordinateSystem for Axes {
 
     fn num_sampled_graph_points_per_tick(&self) -> f64 {
         self.num_sampled_graph_points_per_tick
+    }
+
+    fn graph_sampling_budget(&self) -> SamplingBudget {
+        self.sampling_budget
     }
 }
 

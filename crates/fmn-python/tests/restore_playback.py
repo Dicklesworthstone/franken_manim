@@ -85,7 +85,11 @@ def mixed_camera_restore():
                                  tuple(core.orientation())), initial):
         close(actual, expected)
     close(square.get_center(), m.UP)
-    assert frame not in scene.mobjects
+    # The frame stays the scene list's first member (fm-6l2i); restoring it
+    # does not duplicate or move it. The group then holds the square, as the
+    # Reference's list after this play is [CameraFrame, VGroup(Square)].
+    assert len(scene.mobjects) == 2 and scene.mobjects[0] is frame
+    assert list(scene.mobjects[1].submobjects) == [square]
 
 
 def partial_restoration():
@@ -133,7 +137,8 @@ def camera_authored_path_retains_pose_identity_and_partial_endpoint():
                           suspend_mobject_updating=True, final_alpha_value=.5, run_time=.125)
     scene.play(m.AnimationGroup(animation))
     close(frame.get_center(), [2, 1, 0])
-    assert frame is scene.frame and frame._core is core and not frame._is_bound()
+    assert frame is scene.frame and frame._core is core and frame._is_bound()
+    assert scene.mobjects == [frame]
     assert not frame._is_updating_suspended()
     assert animation.path_func is path and any(0 < a < 1 for a in alphas)
 

@@ -126,7 +126,7 @@ class FunctionalColorTests(unittest.TestCase):
         mob.set_color_by_rgb_func(self.field)
         np.testing.assert_allclose(view[:, :3], self.field(before), rtol=1e-6)
         np.testing.assert_array_equal(points, before)
-        self.assertIs(scene.mobjects[0], mob)
+        self.assertIs(scene.mobjects[1], mob)
         view[0, 0] = .1
         self.assertAlmostEqual(mob.data['fill_rgba'][0,0], .1)
 

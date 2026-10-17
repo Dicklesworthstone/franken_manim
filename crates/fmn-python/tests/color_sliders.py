@@ -209,6 +209,132 @@ class ColorSliderAcceptance(unittest.TestCase):
         self.assertIsNot(background, bank.background)
         np.testing.assert_allclose(background.get_center(), bank.selected_color_box.get_center(), atol=2e-6)
         self.assertGreater(len(background.get_family()), 2)
+    def test_swatch_and_checkerboard_use_public_rectangle_and_square_classes(self):
+        bank = self.bank(background_grid_kwargs={"colors": [m.RED, m.BLUE], "single_square_len": .2})
+        self.assertIs(type(bank.selected_color_box), m.Rectangle)
+        self.assertEqual(len(bank.selected_color_box.get_vertices()), 4)
+        self.assertIs(type(bank.background), m.VGroup)
+        self.assertFalse(bank.background.has_points())
+        self.assertEqual(len(bank.background), 22)
+        for index, square in enumerate(bank.background):
+            self.assertIs(type(square), m.Square)
+            self.assertEqual(len(square.get_vertices()), 4)
+            self.assertEqual(square.get_fill_color(), (m.RED, m.BLUE)[index % 2])
+            self.assertEqual(square.get_stroke_width(), 0.)
+        native, _, _ = bank._native_color_slider_parts((255.,255.,255.,1.), apply_value=False)
+        for square, template in zip(bank.background, native[0]):
+            np.testing.assert_allclose(square.get_bounding_box(), template.get_bounding_box(), atol=3e-6)
+    def test_custom_rgb_checkerboard_keeps_precision_when_regenerated(self):
+        colors = ((.123456789, .345678912, .789123456),
+                  (.876543219, .654321987, .210987654))
+        bank = self.bank(
+            rect_kwargs={"width": 1., "height": .5},
+            background_grid_kwargs={"colors": colors, "single_square_len": .25},
+        )
+        bank.shift(m.RIGHT + m.UP)
+        family = tuple(bank.get_family())
+        before = [square.data["fill_rgba"].copy() for square in bank.background]
+        regenerated = bank.get_background()
+        self.assertIsNot(regenerated, bank.background)
+        self.assertEqual(tuple(bank.get_family()), family)
+        np.testing.assert_allclose(regenerated.get_center(),
+                                   bank.selected_color_box.get_center(), atol=3e-6)
+        for background in (bank.background, regenerated):
+            self.assertIs(type(background), m.VGroup)
+            self.assertEqual(len(background), 10)
+            for index, square in enumerate(background):
+                self.assertIs(type(square), m.Square)
+                self.assertEqual(len(square.get_vertices()), 4)
+                rgba = np.asarray(square.data["fill_rgba"])
+                self.assertGreater(len(rgba), 0)
+                np.testing.assert_allclose(rgba[:, :3],
+                                           np.tile(colors[index % 2], (len(rgba), 1)),
+                                           rtol=0, atol=1e-7)
+                np.testing.assert_array_equal(rgba[:, 3], np.ones(len(rgba)))
+                self.assertTrue(square.is_fixed_in_frame())
+        for square, expected in zip(bank.background, before):
+            np.testing.assert_array_equal(square.data["fill_rgba"], expected)
+
+    def test_default_checkerboard_matches_the_reference_grid(self):
+        # The Reference's ColorSliders() (class-sweep facts at 6199a00d):
+        # 105 Square members in a 5x21 grid whose fills alternate GREY_A and
+        # GREY_C (53 and 52) behind zero-width, transparent strokes.
+        bank = self.bank()
+        self.assertEqual(len(bank.background), 105)
+        for index, square in enumerate(bank.background):
+            self.assertIs(type(square), m.Square)
+            self.assertEqual(square.get_fill_color(), (m.GREY_A, m.GREY_C)[index % 2])
+            self.assertEqual(square.get_fill_opacity(), 1.)
+            self.assertEqual(square.get_stroke_width(), 0.)
+            self.assertEqual(square.get_stroke_opacity(), 0.)
+        fills = [square.get_fill_color() for square in bank.background]
+        self.assertEqual((fills.count(m.GREY_A), fills.count(m.GREY_C)), (53, 52))
+        # A regenerated grid paints from the same validated authored colors.
+        fresh = bank.get_background()
+        self.assertEqual([square.get_fill_color() for square in fresh], fills)
+    def test_background_uses_public_square_hooks_without_recasting_authored_children(self):
+        original, calls = m.Square.init_points, []
+        def points(square):
+            original(square)
+            calls.append(square)
+            square.authored_marker = "public square"
+        m.Square.init_points = points
+        try:
+            bank = self.bank()
+        finally:
+            m.Square.init_points = original
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(all(square.authored_marker == "public square" for square in bank.background))
+        self.assertIs(type(bank.get_background()[0]), m.Square)
+    def test_typed_color_family_survives_copy_binding_and_channel_edits(self):
+        bank = self.bank()
+        duplicate = bank.copy()
+        self.owned.append(duplicate)
+        m.Scene().add(duplicate)
+        family = tuple(duplicate.get_family())
+        duplicate.set_value(20.,40.,60.,.5)
+        self.assertEqual(tuple(duplicate.get_family()), family)
+        self.assertIs(type(duplicate.selected_color_box), m.Rectangle)
+        self.assertTrue(all(type(square) is m.Square for square in duplicate.background))
+        self.assertAlmostEqual(bank.r_slider.get_value(), 255.)
+        swatch_matches(duplicate)
+    def test_panel_uses_typed_labels_rectangles_and_pointless_group_roots(self):
+        for content in (m.Checkbox(), self.bank()):
+            panel = m.ControlPanel(content, opener_text_kwargs={"text": "Settings", "font_size": 24})
+            self.owned.append(panel)
+            self.assertIs(type(panel.panel), m.Rectangle)
+            self.assertIs(type(panel.panel_opener_rect), m.Rectangle)
+            self.assertEqual(panel.panel_opener_rect.get_stroke_color(), m.GREY_A)
+            self.assertIs(type(panel.panel_opener), m.Group)
+            self.assertIs(type(panel.controls), m.Group)
+            self.assertIs(type(panel.panel_info_text), m.Text)
+            self.assertEqual(panel.panel_info_text.string, "Settings")
+            self.assertFalse(panel.panel_opener.has_points())
+            self.assertFalse(panel.controls.has_points())
+            self.assertFalse(panel.panel_info_text.has_points())
+            self.assertIs(panel.controls[0], content)
+            identities = panel.panel, panel.panel_opener, panel.panel_opener_rect, panel.panel_info_text, panel.controls
+            for operation in (panel.open_panel, panel.close_panel, panel.open_panel):
+                operation()
+                self.assertEqual((panel.panel, panel.panel_opener, panel.panel_opener_rect,
+                                  panel.panel_info_text, panel.controls), identities)
+                self.assertEqual(panel.panel_info_text.string, "Settings")
+                self.assertEqual(len(panel.panel.get_vertices()), 4)
+                np.testing.assert_allclose(panel.panel_info_text.get_center(),
+                                           panel.panel_opener_rect.get_center(), atol=3e-6)
+    def test_panel_label_runs_public_text_hooks_once_across_open_close(self):
+        original, calls = m.Text.init_points, []
+        def points(label):
+            original(label)
+            calls.append(label)
+        m.Text.init_points = points
+        try:
+            panel = m.ControlPanel(m.Checkbox())
+            self.owned.append(panel)
+            panel.open_panel().close_panel()
+        finally:
+            m.Text.init_points = original
+        self.assertEqual(calls, [panel.panel_info_text])
     def test_panel_contains_live_color_bank_and_accepts_late_composite_content(self):
         bank = self.bank()
         panel = m.ControlPanel(bank)

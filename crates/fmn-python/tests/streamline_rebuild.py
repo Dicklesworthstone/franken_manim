@@ -49,7 +49,7 @@ class StreamlineRebuildTests(unittest.TestCase):
         views, values = [line.get_points() for line in old], [line.get_points().copy() for line in old]
         lines.func = vertical
         lines.draw_lines()
-        self.assertIs(scene.mobjects[0], lines)
+        self.assertIs(scene.mobjects[1], lines)
         self.assertEqual(lines.updaters, [updater])
         self.assertTrue(lines._is_bound())
         self.assertTrue(all(line._is_bound() for line in lines))
@@ -97,7 +97,7 @@ class StreamlineRebuildTests(unittest.TestCase):
             np.testing.assert_array_equal(line.data, original)
         lines.func = vertical
         lines.draw_lines()
-        self.assertIs(scene.mobjects[0], lines)
+        self.assertIs(scene.mobjects[1], lines)
 
     def test_invalid_geometry_and_paint_controls_never_publish(self):
         lines = self.make()
@@ -156,7 +156,7 @@ class StreamlineRebuildTests(unittest.TestCase):
         lines.n_repeats = 1
         lines.draw_lines()
         self.assertEqual(len(lines), 9)
-        self.assertIs(scene.mobjects[0], lines)
+        self.assertIs(scene.mobjects[1], lines)
 
     def test_callback_family_edits_invalidate_the_candidate(self):
         lines = self.make()

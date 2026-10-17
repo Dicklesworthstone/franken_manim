@@ -144,6 +144,159 @@ def test_textbox_consumes_selection_shortcuts_without_origin_jump():
     np.testing.assert_allclose(text.text.get_center(), text.box.get_center(), atol=1e-6)
 
 
+def test_textbox_keeps_real_text_and_live_selectors_across_bound_edits():
+    widget = m.Textbox("seed", isInitiallyActive=True).shift(2 * m.RIGHT)
+    assert type(widget.box) is m.Rectangle
+    assert len(widget.box.get_vertices()) == 4
+    assert type(widget.text) is m.Text
+    assert widget.text.string == "seed"
+    assert not widget.text.has_points()
+    scene = m.Scene().add(widget)
+    label = widget.text
+    for value in ("native words", "x", "longer again", ""):
+        widget.set_value(value)
+        assert widget.text is label
+        assert label.text == label.string == widget.get_value() == value
+        assert not label.has_points()
+        assert list(label._fmn_string_children) == list(label.submobjects)
+        assert all(child.is_fixed_in_frame() for child in label.get_family())
+        if value:
+            selected = label.select_part(value)
+            assert selected.has_points() or selected.family_members_with_points()
+            selected.set_color(m.GREEN)
+            assert all(child.get_fill_color() == m.GREEN for child in selected.family_members_with_points())
+            np.testing.assert_allclose(label.get_center(), widget.box.get_center(), atol=2e-6)
+        assert widget in scene.mobjects
+    assert len(label.updaters) == 1
+
+
+def test_textbox_edits_fit_live_box_and_preserve_preview_value_distinction():
+    widget = m.Textbox("short", text_kwargs={"color": m.RED}, text_buff=.15)
+    label = widget.text
+    height = label.get_height()
+    widget.box.stretch(1.5, 0).shift(m.RIGHT)
+    widget.update_text("a deliberately long label that must fit")
+    assert widget.get_value() == "short"
+    assert label.string == "a deliberately long label that must fit"
+    assert label.get_width() <= widget.box.get_width() - .3 + 3e-6
+    assert label.get_height() <= height + 3e-6
+    assert label.get_fill_color() == m.RED
+    np.testing.assert_allclose(label.get_center(), widget.box.get_center(), atol=2e-6)
+    widget.unfix_from_frame()
+    widget.set_value("unfixed")
+    assert not any(part.is_fixed_in_frame() for part in label.get_family())
+
+
+def test_textbox_failed_native_typeset_preserves_value_text_family_and_spans():
+    widget = m.Textbox("valid")
+    m.Scene().add(widget)
+    label, children = widget.text, tuple(widget.text.submobjects)
+    points = label.get_all_points().copy()
+    spans = list(label._string_sub_spans)
+    try:
+        widget.set_value("\U0001f980")
+    except ValueError as error:
+        # The portal's Textbox refusal names the schema-level class and keeps
+        # Scribe's precise diagnostic (the native textbox_error spelling).
+        assert str(error).startswith("unmapped glyph: "), error
+        assert "U+1F980" in str(error) and "has no glyph" in str(error), error
+    else:
+        raise AssertionError("unmapped textbox glyph was accepted")
+    try:
+        widget.update_text("\U0001f980")
+    except ValueError as error:
+        assert str(error).startswith("unmapped glyph: "), error
+    else:
+        raise AssertionError("unmapped textbox preview glyph was accepted")
+    assert widget.text is label and tuple(label.submobjects) == children
+    assert widget.get_value() == label.string == "valid"
+    assert label._string_sub_spans == spans
+    np.testing.assert_array_equal(label.get_all_points(), points)
+    for invalid in (None, 17, ["text"]):
+        try:
+            widget.update_text(invalid)
+        except TypeError:
+            pass
+        else:
+            raise AssertionError("non-string textbox preview was accepted")
+    assert widget.get_value() == label.string == "valid"
+    assert tuple(label.submobjects) == children
+
+
+def test_textbox_copy_keeps_its_typed_label_attached_to_its_own_box():
+    import copy
+    source = m.Textbox("original")
+    for duplicate in (source.copy(), copy.deepcopy(source)):
+        assert type(duplicate.box) is m.Rectangle
+        assert type(duplicate.text) is m.Text
+        assert duplicate.text._fmn_textbox_box is duplicate.box
+        duplicate.box.shift(3 * m.RIGHT)
+        duplicate.update(0.)
+        duplicate.set_value("copy")
+        assert source.get_value() == source.text.string == "original"
+        assert duplicate.get_value() == duplicate.text.string == "copy"
+        np.testing.assert_allclose(duplicate.text.get_center(), duplicate.box.get_center(), atol=2e-6)
+        assert source.text.get_center()[0] < duplicate.text.get_center()[0] - 2
+
+
+def test_textbox_authored_errors_keep_identity_and_transactional_state():
+    widget = m.Textbox("valid")
+    m.Scene().add(widget)
+    label, family = widget.text, tuple(widget.get_family())
+    points = label.get_all_points().copy()
+    spans = list(label._string_sub_spans)
+    paths = [list(path) for path in label._string_sub_paths]
+    # Matching a native diagnostic's words must not recategorize a user error.
+    failure = ValueError("authored has no glyph failure")
+    original = m.Text.init_points
+    def authored_points(text):
+        raise failure
+    m.Text.init_points = authored_points
+    try:
+        for operation in (
+            lambda: m.Textbox("construction"),
+            lambda: widget.update_text("preview"),
+            lambda: widget.set_value("replacement"),
+        ):
+            try:
+                operation()
+            except ValueError as error:
+                assert error is failure
+                assert str(error) == "authored has no glyph failure"
+            else:
+                raise AssertionError("authored textbox error was swallowed")
+            assert widget.text is label and tuple(widget.get_family()) == family
+            assert widget.get_value() == label.string == "valid"
+            assert label._string_sub_spans == spans
+            assert label._string_sub_paths == paths
+            np.testing.assert_array_equal(label.get_all_points(), points)
+    finally:
+        m.Text.init_points = original
+
+
+def test_textbox_primitives_run_authored_hooks_before_control_initialization():
+    seen = []
+    rectangle_points, text_points = m.Rectangle.init_points, m.Text.init_points
+    def rectangle(self):
+        rectangle_points(self)
+        seen.append(("rectangle", self))
+    def text(self):
+        text_points(self)
+        seen.append(("text", self))
+    class Authored(m.Textbox):
+        def init_data(self):
+            assert [(name, child) for name, child in seen] == [("rectangle", self.box), ("text", self.text)]
+            seen.append(("control", self))
+            super().init_data()
+    m.Rectangle.init_points, m.Text.init_points = rectangle, text
+    try:
+        widget = Authored("label")
+    finally:
+        m.Rectangle.init_points, m.Text.init_points = rectangle_points, text_points
+    assert [name for name, _ in seen] == ["rectangle", "text", "control"]
+    assert widget.text.string == "label"
+
+
 def test_scene_membership_prevents_cross_scene_control_delivery():
     first, second = m.Checkbox(), m.Checkbox()
     one, two = m.Scene(), m.Scene()
@@ -387,7 +540,7 @@ def test_checkbox_copy_deepcopy_and_pickle_preserve_typed_native_families():
     import pickle
     source = m.Checkbox()
     source_points = source.box_content.get_all_points().copy()
-    for duplicate in (source.copy(), copy.deepcopy(source), pickle.loads(pickle.dumps(source))):
+    for duplicate in (source.copy(), copy.deepcopy(source), pickle.loads(pickle.dumps(source))):  # ubs:ignore -- round-trip of this test's own trusted object graph
         assert type(duplicate.box) is m.Rectangle
         assert type(duplicate.box_content) is m.VGroup
         assert all(type(child) is m.Line for child in duplicate.box_content)
@@ -479,6 +632,12 @@ def test_checkbox_render_matches_independent_native_line_composition():
 
 
 for case in (
+    test_textbox_keeps_real_text_and_live_selectors_across_bound_edits,
+    test_textbox_edits_fit_live_box_and_preserve_preview_value_distinction,
+    test_textbox_failed_native_typeset_preserves_value_text_family_and_spans,
+    test_textbox_copy_keeps_its_typed_label_attached_to_its_own_box,
+    test_textbox_authored_errors_keep_identity_and_transactional_state,
+    test_textbox_primitives_run_authored_hooks_before_control_initialization,
     test_checkbox_mark_replacements_keep_the_live_box_camera_lock,
     test_checkbox_uses_public_rectangle_and_two_native_lines,
     test_checkbox_factories_precede_tracker_hooks_and_retain_authored_objects,

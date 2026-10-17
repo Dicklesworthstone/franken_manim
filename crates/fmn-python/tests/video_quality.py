@@ -85,6 +85,9 @@ with tempfile.TemporaryDirectory(prefix="fmn-portal-quality-") as directory:
         ({"video_tune": "animation,grain"}, "video_tune"),
         ({"video_bitrate": 0}, "video_bitrate"),
         ({"video_bitrate": False}, "not bool"),
+        ({"audio_bitrate": 0}, "audio_bitrate"),
+        ({"audio_bitrate": False}, "not bool"),
+        ({"audio_bitrate": 1.5}, "integer"),
         ({"video_codec": "libx265", "video_tune": "film"}, "libx264"),
         ({"video_codec": "h264_nvenc", "video_crf": 18}, "crf"),
         ({"video_codec": "hevc_videotoolbox", "video_preset": "slow"}, "preset"),
@@ -152,6 +155,46 @@ with tempfile.TemporaryDirectory(prefix="fmn-portal-quality-") as directory:
                 assert f"crf={crf}.0" in words and "subme=8" in words, sei
                 assert any(word.startswith("psy_rd=0.40:") for word in words), sei
                 print(f"portal-quality {extension} crf={crf}: {sei}")
+
+        # The real native WAV mix is muxed at the selected AAC target; video
+        # remains stream-copy and carries the same H.264 bytes as the default-AAC run.
+        import math
+        import struct
+        import wave
+        tone = root / "audio-quality.wav"
+        with wave.open(str(tone), "wb") as stream:
+            stream.setparams((1, 2, 48000, 0, "NONE", "not compressed"))
+            stream.writeframes(b"".join(struct.pack("<h", int(12000 * math.sin(i * 2 * math.pi * 440 / 48000)))
+                                      for i in range(12000)))
+        class AudioPicture(QualityPicture):
+            def construct(self):
+                self.add_sound(str(tone))
+                super().construct()
+        reference_video = None
+        for index, bitrate in enumerate((None, 96000, 192000)):
+            scene = AudioPicture()
+            scene.file_writer.ffmpeg_bin = ffmpeg
+            scene.file_writer.audio_bitrate = bitrate
+            target = root / f"audio-quality-{index}.mp4"
+            report = render_scene(scene, target, resolution=(96, 54), fps=8, threads=1)
+            encode, mux = report.ffmpeg_invocations
+            assert "-b:a" not in encode["argv"]
+            args = mux["argv"]
+            assert args[args.index("-c:v") + 1] == "copy"
+            assert args[args.index("-c:a") + 1] == "aac"
+            actual = int(args[args.index("-b:a") + 1]) if "-b:a" in args else None
+            assert actual == bitrate, (actual, bitrate)
+            packets = subprocess.run([ffmpeg, "-v", "error", "-nostdin", "-i", str(target),
+                                      "-map", "0:v:0", "-c:v", "copy", "-bsf:v", "h264_mp4toannexb",
+                                      "-f", "h264", "pipe:1"], capture_output=True, check=True, timeout=30).stdout
+            assert packets
+            if reference_video is None:
+                reference_video = packets
+            else:
+                assert packets == reference_video, "AAC policy changed the encoded video stream"
+            pcm = subprocess.run([ffmpeg, "-v", "error", "-nostdin", "-i", str(target), "-map", "0:a:0",
+                                  "-f", "s16le", "pipe:1"], capture_output=True, check=True, timeout=30).stdout
+            assert len(pcm) >= 12000 * 2 and any(pcm), "published AAC soundtrack missing or silent"
 
         # CRF zero must not disappear through a truthiness check.
         report = render_scene(quality_scene(ffmpeg_bin=ffmpeg, video_crf=0),

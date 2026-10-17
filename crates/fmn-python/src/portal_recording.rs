@@ -71,13 +71,9 @@ fn _portal_prepare_recording_scene(
     config.determinism.mode = fmn_config::config::DeterminismMode::Standard;
     let replacement =
         Scene::new(RuntimeConfig::from_config(&config), seed).map_err(native_error)?;
-    // No Python descriptors or callbacks run while the new engine is installed.
-    // The same ownership check as ordinary rendering protects every live proxy.
-    let mut owner = scene.try_borrow_mut()?;
-    owner.engine = Rc::new(EngineState::new(replacement));
-    owner.render_invocations.clear();
-    owner.render_audio_inputs.clear();
-    Ok(())
+    // The same ownership check as ordinary rendering protects every live
+    // proxy; the scene's own camera frame is carried into the new engine.
+    crate::install_pristine_arena(scene, Rc::new(EngineState::new(replacement)))
 }
 
 pub(crate) fn check_available(scene: &Bound<'_, PyScene>) -> PyResult<()> {

@@ -50,7 +50,9 @@ def populated_scene_and_repeated_clips(root):
     view = square.data
     first = root / "first.y4m"
     assert begin(scene, first) == 4, manimlib._portal_scene_clock(scene)
-    assert scene.mobjects[0] is square
+    # The list starts with the frame, as in the Reference (fm-6l2i).
+    assert scene.mobjects[0] is scene.frame and scene.mobjects[1] is square
+
     view["point"][:, 0] += 0.25
     assert abs(square.get_center()[0] + 1.75) < 1e-5
     scene.play(square.animate.shift(3 * manimlib.RIGHT), run_time=0.125, rate_func=manimlib.linear)
@@ -67,7 +69,8 @@ def populated_scene_and_repeated_clips(root):
     assert finish(scene, second)[1] == 4
     xs = y4m_centers(second)
     assert all(b < a - 3 for a, b in zip(xs, xs[1:])), xs
-    assert scene.mobjects[0] is square
+    assert scene.mobjects[0] is scene.frame and scene.mobjects[1] is square
+
     assert manimlib._portal_scene_clock(scene) == (30, 16)
 
 
@@ -143,7 +146,8 @@ def cancellation_and_ownership(root):
         raise AssertionError("nested generation was admitted")
     scene._abort_render()
     assert not path.exists()
-    assert scene.mobjects[0] is square and manimlib._portal_scene_clock(scene) == (30, 8)
+    assert scene.mobjects[1] is square and manimlib._portal_scene_clock(scene) == (30, 8)
+
     after = root / "after-abort.y4m"
     begin(scene, after)
     scene.wait(0.125)

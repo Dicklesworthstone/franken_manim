@@ -22,7 +22,12 @@ samples receive `negative_color`. Zero-height rectangles are nonnegative.
 
 The Reference at `6199a00d4c1b1127ebe45cb629c3f22538b10e13` instead measures
 width and sign using world-space components, extends the sampling range, and
-does not act on `show_signed_area`. These are intentional corrections under
+does not act on `show_signed_area`. Its sign is
+`i2gp(sample, graph)[1] > c2p(sample, 0)[1]`, a curve-proportion lookup. Near a
+zero crossing that lookup can land on the other side of the axis:
+`_2022/borwein/main.py` `Graph15Case` gets `negative_color` on two rectangles
+that the data-coordinate sample makes positive. The corpus differential
+excludes them by the `bn20-riemann-sign` row. These are intentional corrections under
 the plan's correctness-first contract, not pixel-compatibility promises.
 
 ## Migration and bounds
@@ -87,3 +92,37 @@ the portal's `get_area_under_graph` to its `fill_color=BLUE`
 (`test_default_colors_are_the_references` in `live_graphing.py`). The native
 `get_area_under_graph` still cuts by curve index; it has not taken this note's
 data-coordinate clipping yet.
+
+## Native live charts
+
+`LiveCoordinateSystem` and its immutable `CoordinateFrame` now provide
+`get_riemann_rectangles` / `riemann_rectangles_styled` and
+`get_area_under_graph` / `area_under_graph_styled`. Bind a built chart to the
+registered axes, then construct these helpers after moving or animating it:
+
+```rust
+let root = stage.add(axes.clone());
+let live = axes.bind(&stage, root)?;
+stage.shift(root, [2.0, -1.0, 0.0]);
+let graph = live.get_graph(&stage, |x| x * x)?.build()?;
+let bars = live.get_riemann_rectangles(
+    &stage, &|x| x * x, Some([0.0, 2.0]), Some(0.2), "center",
+)?;
+let area = live.get_area_under_graph(&stage, &graph, Some([0.25, 1.75]))?;
+```
+
+The new live-area API takes no `graph_x_range`: it clips the drawn quadratic
+geometry at actual data-x bounds, including nonlinear parameterization,
+nonuniform sampling, reversed subpaths and gaps. Each continuous component
+closes to its own baseline. It uses the existing quadratic evaluation and
+restriction primitives, not a resampled approximation. The legacy detached
+`Axes` area method above still retains its curve-index signature and behavior.
+
+A frozen `CoordinateFrame` keeps its original chart; a new call through a live
+binding samples the current Stage. Returned mobjects are detached snapshots,
+not automatically registered updaters. Rebuild them explicitly during animation
+when a changing region is intended. Singular or disconnected axes, foldback or
+off-plane graphs, invalid styles and unrepresentable points are typed errors.
+Riemann range and style admission precede callback evaluation; source graphs
+and chart membership are never changed. Input/output area record counts and
+Riemann bin counts retain the chart's existing sampling budget.

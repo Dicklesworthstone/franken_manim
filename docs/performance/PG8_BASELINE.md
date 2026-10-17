@@ -16,6 +16,13 @@ same benchmark definitions on a declared pinned bare-metal profile after
 fm-inr.1's live attestation lands; fm-inr.4 publishes this table at that
 point without re-recording.
 
+Until 2026-10-11 the four `baseline.tsv` files claimed `bare_metal true` and
+`isolated true` for the same `pg8-shared-dev-host` profile (fm-5wq.32). They
+now say `false`, as the samples always did, and
+`perf_host::check_baseline_host_claims` refuses any committed baseline that
+claims either field for a `profile_id` without a reviewed profile in
+`crates/fmn-conformance/tests/artifacts/perf/hosts/`.
+
 The PyO3 0.26 identity above is intentionally historical: these committed
 samples were produced on that exact graph. The fm-kg6g security migration to
 PyO3 0.29.2 replays the bit-locked bundles and bridge state goldens but does

@@ -175,6 +175,11 @@ def install_traced_path(native: Any) -> None:
             anchor_dt = float(time_per_anchor)
             if not math.isfinite(anchor_dt) or anchor_dt <= 0:
                 raise ValueError("TracingTail time_per_anchor must be finite and positive")
+            # Validate before selecting the native route too: a bound source
+            # must not bypass the finite history/allocation contract.
+            window, spacing = _parameters(time_traced, anchor_dt)
+            if not math.isfinite(window):
+                raise ValueError("TracingTail requires a finite time_traced")
             if (
                 isinstance(mobject_or_func, g["Mobject"])
                 and hasattr(self, "_init_native_tracer")
@@ -184,7 +189,7 @@ def install_traced_path(native: Any) -> None:
                 return original_tail_init(
                     self,
                     mobject_or_func,
-                    time_traced=time_traced,
+                    time_traced=window,
                     stroke_color=stroke_color,
                     stroke_width=stroke_width,
                     stroke_opacity=stroke_opacity,
@@ -195,17 +200,17 @@ def install_traced_path(native: Any) -> None:
             # tracer. Normalize it to the already-supported live point callback;
             # do not adopt it early or capture a frozen construction-time center.
             source = mobject_or_func.get_center if isinstance(mobject_or_func, g["Mobject"]) else mobject_or_func
-            # A tail has a finite duration; an unbounded trace is TracedPath.
-            window, spacing = _parameters(time_traced, anchor_dt)
-            if not math.isfinite(window):
-                raise ValueError("TracingTail requires a finite time_traced")
             super(Tail, self).__init__(source, time_traced=window, time_per_anchor=anchor_dt, stroke_color=stroke_color,
                                       stroke_width=stroke_width, stroke_opacity=stroke_opacity, **kwargs)
             point = _point(np, self.traced_point_func())
             count = math.ceil(window / spacing)
             rows = tuple((-index * spacing, point) for index in range(count, -1, -1))
             self._trace_anchors, self._trace_previous = rows, (0.0, point)
-            self.traced_points = publish(self, _visible(rows, 0.0, point, window))
+            # Reference changing.py seeds sample history, not path geometry.
+            # Keep the native points and style untouched until a positive-dt
+            # update publishes the first trace. The timestamped anchor grid
+            # still retains the predecessor needed by the moving time window.
+            self.traced_points = [np.array(point) for _ in range(int(window / spacing))]
         if not issubclass(Tail, Trace):
             Tail.__bases__ = (Trace,)
         method(Tail, "__init__", tail_init)

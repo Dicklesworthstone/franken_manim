@@ -84,6 +84,7 @@ impl TimelineBundle {
     /// that grows when upgraded to the current schema can hit the byte ceiling
     /// even when its original input fitted; that refusal is explicit.
     pub fn into_shared(self) -> Result<SharedTimelineBundle, BundleReadError> {
+        self.require_picture_only()?;
         let mut segments = Vec::new();
         segments
             .try_reserve_exact(self.segments.len())

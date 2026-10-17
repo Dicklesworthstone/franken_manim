@@ -198,7 +198,7 @@ class VectorGroupProtocol(unittest.TestCase):
         scene.add(group)
         circle = m.Circle().shift(m.RIGHT)
         self.assertIs(group + circle, group)
-        self.assertEqual(list(scene.mobjects), [group])
+        self.assertEqual(list(scene.mobjects), [scene.frame, group])
         self.assertIs(group[1], circle)
         scene.play(group.animate.shift(m.UP), run_time=2/30, rate_func=m.linear)
         np.testing.assert_allclose(square.get_center(), m.UP, atol=1e-6)
@@ -213,7 +213,7 @@ class VectorGroupProtocol(unittest.TestCase):
         with self.assertRaises(Exception):
             group + square
         self.assertEqual(list(group), before)
-        self.assertEqual(list(foreign.mobjects), [square])
+        self.assertEqual(list(foreign.mobjects), [foreign.frame, square])
 
     def test_installation_is_idempotent(self):
         from fmn_python.grouping import install_grouping

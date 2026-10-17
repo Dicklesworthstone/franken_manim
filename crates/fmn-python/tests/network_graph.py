@@ -148,7 +148,7 @@ class NetworkSceneTests(unittest.TestCase):
         graph=self.graph(True);scene=m.Scene();scene.add(graph)
         before=graph.get_layout();state=scene.get_state()
         graph.change_layout('spring',seed=7);scene.restore_state(state)
-        graph=scene.mobjects[0];graph.refresh_edges();self.connected(graph)
+        graph=scene.mobjects[1];graph.refresh_edges();self.connected(graph)
         for name,p in before.items():np.testing.assert_allclose(graph.get_layout()[name],p,atol=2e-6)
 
     def test_bad_inputs_do_not_move_existing_vertices(self):
@@ -195,7 +195,7 @@ class NetworkSceneTests(unittest.TestCase):
         graph.set_vertex_positions({'b':(0,2)})
         np.testing.assert_allclose(view,edge.get_points(),atol=2e-6)
         self.assertIs(graph.vertices['d']._scene,scene)
-        self.assertEqual(tuple(scene.mobjects),(graph,));self.assertEqual(scene.get_time(),0)
+        self.assertEqual(tuple(scene.mobjects),(scene.frame,graph));self.assertEqual(scene.get_time(),0)
         self.connected(graph)
         graph.remove_vertices('c');graph.remove_edges(('b','a'))
         self.assertEqual(graph.node_names,('a','b','d'))
@@ -232,7 +232,7 @@ class NetworkSceneTests(unittest.TestCase):
         duplicate=graph.copy();duplicate.remove_vertices('a');duplicate.add_edges(('b','d'))
         self.assertEqual(graph.node_names,('a','b','c'));self.connected(graph);self.connected(duplicate)
         graph.remove_vertices('b');graph.add_edges(('a','d'))
-        scene.restore_state(state);restored=scene.mobjects[0]
+        scene.restore_state(state);restored=scene.mobjects[1]
         self.assertEqual(restored.node_names,('a','b','c'))
         self.assertEqual(restored.edge_pairs,(('a','b'),('b','c')))
         restored.refresh_edges();self.connected(restored)
