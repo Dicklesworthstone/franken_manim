@@ -1,6 +1,7 @@
 //! Coordinate maps read from live native axes, including affine animation.
 
 mod calculus;
+mod guides;
 
 use fmn_geom::space_ops::{cross, dot};
 use fmn_mobject::{CopyMap, Mob, Stage};
