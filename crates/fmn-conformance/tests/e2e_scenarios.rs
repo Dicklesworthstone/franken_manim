@@ -1879,6 +1879,98 @@ fn native_shape_matching_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
         .with_counter("native_shape_matching_thread_counts", checked))
 }
 
+/// Native scene cues reach canonical WAV bytes at every requested worker count.
+fn native_soundtrack_wav_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    struct Cues;
+    impl fmn::SceneConstruct for Cues {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            stage.scene_mut().add_sound("/pulse.wav", 0.0, None, None)?;
+            stage.wait(0.25)?;
+            stage
+                .scene_mut()
+                .add_sound("/pulse.wav", -0.125, None, None)?;
+            stage.wait(0.25)?;
+            Ok(())
+        }
+    }
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    let source = fmn_codec::encode_wav(1, 32, fmn_codec::SampleFormat::F32, &[0.25; 12]);
+    let source_bytes = source.len();
+    fs.insert("/pulse.wav", source);
+    // First cue occupies samples [0,12), the second [4,16): independently
+    // computed overlap on the 32 Hz sample grid, without invoking the mixer.
+    let mut expected_samples = vec![0.25_f32; 16];
+    expected_samples[4..12].fill(0.5);
+    let expected = fmn_codec::encode_wav(1, 32, fmn_codec::SampleFormat::S16, &expected_samples);
+    let mut checked = 0;
+    let mut total_cues = 0;
+    let mut total_samples = 0;
+    let mut first_wav = None;
+    for threads in [1, 4, 16] {
+        let path = format!("/native-soundtrack-{threads}.wav");
+        let mut options = fmn::SoundtrackRenderOptions::new(&path)
+            .map_err(|error| fail(format!("native soundtrack options: {error}")))?;
+        options.config.camera.fps = 8;
+        options.config.camera.resolution = (0, 0);
+        options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        options.mixer.sample_rate = 32;
+        options.mixer.channels = 1;
+        options.mixer.max_output_frames = 16;
+        options.threads = std::num::NonZeroUsize::new(threads)
+            .ok_or_else(|| fail("native soundtrack worker count is zero"))?;
+        options.max_scene_frames = 4;
+        options.max_output_bytes = expected.len() as u64;
+        options.preparation.max_cues = 2;
+        options.preparation.max_source_bytes = source_bytes;
+        options.preparation.max_decoded_samples = 12;
+        options.preparation.max_prepared_samples = 24;
+        options.typeset_cache = false;
+        let report = fmn::render_soundtrack_with_fs(&mut Cues, options, fs.clone())
+            .map_err(|error| fail(format!("native WAV at {threads} threads: {error}")))?;
+        let wav = fs
+            .read(std::path::Path::new(&path))
+            .map_err(|error| fail(format!("published native WAV: {error}")))?;
+        if wav != expected
+            || report.scene.time.frames() != 4
+            || report.scene.play_count != 2
+            || report.artifact.sample_frames != 16
+            || report.artifact.cues_mixed != 2
+            || report.artifact.clipped_samples != 0
+            || report.workers_used != threads
+            || report.inputs.len() != 2
+            || !Arc::ptr_eq(&report.inputs[0].bytes, &report.inputs[1].bytes)
+            || report
+                .inputs
+                .iter()
+                .any(|input| input.report.invocation.is_some())
+        {
+            return Err(fail(format!(
+                "native WAV lost cue timing, samples or receipts at {threads} threads"
+            )));
+        }
+        checked += 1;
+        total_cues += report.artifact.cues_mixed as u64;
+        total_samples += report.artifact.sample_frames;
+        if first_wav.is_none() {
+            first_wav = Some(wav);
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_soundtrack_wav")
+            .field("thread_counts", checked)
+            .field("cues_mixed", total_cues)
+            .field("sample_frames", total_samples),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact(
+            "native-soundtrack.wav",
+            first_wav.ok_or_else(|| fail("no native WAV was published"))?,
+        )
+        .with_counter("native_soundtrack_thread_counts", checked)
+        .with_counter("native_soundtrack_cues_mixed", total_cues)
+        .with_counter("native_soundtrack_sample_frames", total_samples))
+}
+
 /// The facade's MP4 request with no ffmpeg capability is a named capability
 /// refusal (D2) that runs no scene code and publishes nothing; a native
 /// format from the same options still renders.
@@ -8104,6 +8196,26 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.native_soundtrack_wav.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_soundtrack_wav_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("native_soundtrack_thread_counts", 3),
+            counter_eq("native_soundtrack_cues_mixed", 6),
+            counter_eq("native_soundtrack_sample_frames", 48),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_soundtrack_wav",
+            vec![
+                FieldPred::u64_eq("thread_counts", 3),
+                FieldPred::u64_eq("cues_mixed", 6),
+                FieldPred::u64_eq("sample_frames", 48),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.coordinate_placement.v1",
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
@@ -10179,6 +10291,16 @@ fn native_shape_matching_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.native_shape_matching.v1")
         .expect("native shape matching scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn native_soundtrack_wav_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.native_soundtrack_wav.v1")
+        .expect("native soundtrack WAV scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

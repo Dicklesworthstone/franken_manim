@@ -67,7 +67,8 @@ pub use ffmpeg_limits::{
 };
 pub use pipeline::{NativeFrameError, NativeFramePipeline};
 pub use soundtrack::{
-    PreparedSceneSoundtrack, SoundtrackInput, SoundtrackPreparationLimits, SoundtrackTimeline,
+    PreparedSceneSoundtrack, SoundtrackInput, SoundtrackPreparationLimits, SoundtrackRenderOptions,
+    SoundtrackRenderReport, SoundtrackTimeline, render_soundtrack, render_soundtrack_with_fs,
 };
 
 pub use fmn_output::negotiate::{AudioQuality, EncoderPreset, EncoderTune, VideoQuality};

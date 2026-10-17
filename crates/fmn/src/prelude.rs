@@ -10,8 +10,9 @@ pub use crate::exporting::{
 pub use crate::{
     BundleExportError, BundleExportOptions, BundleExportReport, CompletedScene, Error, ErrorKind,
     FfmpegCapability, LibraryError, RenderError, RenderFormat, RenderOptions, RenderReport,
-    SceneBundleExport, SceneConstruct, Stage, TexPreflightError, export_bundle,
-    export_bundle_bytes, export_bundle_with_fs, render, render_with_fs, run_scene,
+    SceneBundleExport, SceneConstruct, SoundtrackRenderOptions, SoundtrackRenderReport, Stage,
+    TexPreflightError, export_bundle, export_bundle_bytes, export_bundle_with_fs, render,
+    render_soundtrack, render_soundtrack_with_fs, render_with_fs, run_scene,
     run_scene_with_typesetting,
 };
 pub use fmn_anim::{
