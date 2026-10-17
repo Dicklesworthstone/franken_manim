@@ -41,6 +41,9 @@ use fmn_scene::{TIMELINE_BUNDLE_SCHEMA, bundle_engine_version};
 
 use crate::{render_stage_rgba8, render_stage_rgba8_into, rgba8_output_len};
 
+#[path = "audio_player.rs"]
+pub mod audio_player;
+
 #[path = "camera_player.rs"]
 mod camera_player;
 
