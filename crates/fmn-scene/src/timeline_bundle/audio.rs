@@ -265,3 +265,20 @@ impl TimelineBundle {
         }
     }
 }
+
+impl crate::recording::RecordedSceneBundle {
+    /// Attach final PCM and update the content digest without rebuilding scene
+    /// captures. The format writer validates pictures and the combined limit.
+    ///
+    /// # Errors
+    /// Preserves the shared soundtrack codec's named validation/resource errors.
+    pub fn with_soundtrack(
+        mut self,
+        soundtrack: &BundleSoundtrack,
+        max_bytes: usize,
+    ) -> Result<Self, BundleReadError> {
+        self.bytes = attach_bundle_soundtrack(&self.bytes, soundtrack, max_bytes)?;
+        self.digest = fmn_hash::sha256(&self.bytes);
+        Ok(self)
+    }
+}

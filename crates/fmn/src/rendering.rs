@@ -66,7 +66,9 @@ pub use ffmpeg_limits::{
     default_render_ffmpeg_limits,
 };
 pub use pipeline::{NativeFrameError, NativeFramePipeline};
-pub use soundtrack::{PreparedSceneSoundtrack, SoundtrackInput, SoundtrackTimeline};
+pub use soundtrack::{
+    PreparedSceneSoundtrack, SoundtrackInput, SoundtrackPreparationLimits, SoundtrackTimeline,
+};
 
 pub use fmn_output::negotiate::{AudioQuality, EncoderPreset, EncoderTune, VideoQuality};
 pub use fmn_output::{EmitterReport, JobLimits, NativeArtifactReport};
@@ -1118,8 +1120,21 @@ impl RenderSink {
 
     /// Join every frame stage, supply a video's soundtrack, drain the output
     /// and take the publication receipt — in that order. `scene` provides the
-    /// sound cues; compiled replay has none.
+    /// sound cues; compiled replay supplies its final PCM separately.
     fn finish(&mut self, scene: Option<&fmn_scene::Scene>) -> Result<FinishedRender, RenderError> {
+        self.finish_with_soundtrack(scene, None)
+    }
+
+    fn finish_with_soundtrack(
+        &mut self,
+        scene: Option<&fmn_scene::Scene>,
+        recorded_mix: Option<MixReport>,
+    ) -> Result<FinishedRender, RenderError> {
+        if recorded_mix.is_some() && (scene.is_some() || self.video.is_none()) {
+            return Err(RenderError::InvalidOptions(
+                "recorded audio needs exclusive audio-capable video output",
+            ));
+        }
         // Joining all raster/conversion work is a prerequisite to publication.
         let frame_pipeline = self
             .pipeline
@@ -1134,7 +1149,7 @@ impl RenderSink {
                         self.next_sequence,
                         self.plan.output_team.threads().max(1),
                     )?,
-                    None => None,
+                    None => recorded_mix,
                 };
                 let report = mix.as_ref().map(|mix| SoundtrackReport {
                     cues_mixed: mix.cues_mixed,
@@ -1372,7 +1387,8 @@ impl SceneSink for RenderSink {
                 let job = segment.job(frame).map_err(|_| {
                     RenderError::InvalidOptions("pure segment lost its nominal sample")
                 })?;
-                self.pipeline.as_mut()
+                self.pipeline
+                    .as_mut()
                     .ok_or(RenderError::Pipeline(FrameStreamError::Closed))?
                     .capture_pure(job, self.next_sequence)?;
                 self.next_sequence += 1;
@@ -1397,7 +1413,8 @@ impl SceneSink for RenderSink {
         let result = if self.next_sequence >= self.max_frames {
             Err(RenderError::InvalidOptions("scene exceeded max_frames"))
         } else {
-            self.pipeline.as_mut()
+            self.pipeline
+                .as_mut()
                 .ok_or(RenderError::Pipeline(FrameStreamError::Closed))
                 .and_then(|pipeline| pipeline.capture_packet(packet, self.next_sequence))
         };

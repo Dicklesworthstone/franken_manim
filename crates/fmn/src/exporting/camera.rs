@@ -59,6 +59,19 @@ where
     F: FnOnce(&mut Scene, &CameraConfig) -> crate::Result<(P, CameraRig)>,
     P: SceneConstruct,
 {
+    export_camera_bundle_bytes_inner(factory, camera, options, None)
+}
+
+pub(super) fn export_camera_bundle_bytes_inner<F, P>(
+    factory: F,
+    camera: CameraConfig,
+    options: BundleExportOptions,
+    audio: Option<(&super::soundtrack::BundleSoundtrackOptions, &dyn FileSystem)>,
+) -> Result<SceneBundleExport, BundleExportError>
+where
+    F: FnOnce(&mut Scene, &CameraConfig) -> crate::Result<(P, CameraRig)>,
+    P: SceneConstruct,
+{
     options.validate()?;
     let runtime = RuntimeConfig::from_config(&options.config);
     let fps = runtime.effective_fps();
@@ -108,9 +121,9 @@ where
             });
         }
     };
-    if !scene.sound_requests().is_empty() {
+    if audio.is_none() && !scene.sound_requests().is_empty() {
         return Err(BundleExportError::Capability(
-            "FMTL/1 cannot carry audio; use the audio-capable render/output path instead",
+            "picture-only export refuses audio; use exporting::soundtrack or the audio-capable render path",
         ));
     }
     if sink.recorder.frame_count() == 0 {
@@ -124,6 +137,7 @@ where
         .recorder
         .finish_with_max_bytes(options.max_output_bytes)
         .map_err(recording_error)?;
+    let bundle = super::soundtrack::finish_recording(bundle, &scene, &options, audio)?;
     Ok(SceneBundleExport {
         scene: report,
         bundle,

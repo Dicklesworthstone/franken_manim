@@ -97,6 +97,56 @@ pub struct SoundtrackInput {
     pub report: AudioDecodeReport,
 }
 
+/// Cumulative admission limits for retained audio preparation, independent of
+/// the final mixed duration. Repeated cues share source reads/decodes but each
+/// retains its own mapped/resampled f64 samples.
+#[derive(Clone, Copy, Debug)]
+pub struct SoundtrackPreparationLimits {
+    /// Insertion-ordered requests, checked before reading any source.
+    pub max_cues: usize,
+    /// Total bytes retained for distinct source paths, not repeated cues.
+    pub max_source_bytes: usize,
+    /// Total cached interleaved f32 samples; each decoder has its own limit too.
+    pub max_decoded_samples: usize,
+    /// Total mapped/resampled interleaved f64 samples, charged for every cue.
+    pub max_prepared_samples: usize,
+}
+
+impl SoundtrackPreparationLimits {
+    /// Preserve the original preparation API's per-source and mixer limits.
+    pub const UNBOUNDED: Self = Self {
+        max_cues: usize::MAX,
+        max_source_bytes: usize::MAX,
+        max_decoded_samples: usize::MAX,
+        max_prepared_samples: usize::MAX,
+    };
+}
+
+impl Default for SoundtrackPreparationLimits {
+    fn default() -> Self {
+        Self {
+            max_cues: 4096,
+            max_source_bytes: 256 * 1024 * 1024,
+            max_decoded_samples: 16 * 1024 * 1024,
+            max_prepared_samples: 32 * 1024 * 1024,
+        }
+    }
+}
+
+fn charge(
+    current: &mut usize,
+    additional: usize,
+    limit: usize,
+    message: &'static str,
+) -> Result<(), RenderError> {
+    let next = current
+        .checked_add(additional)
+        .filter(|&n| n <= limit)
+        .ok_or(RenderError::InvalidOptions(message))?;
+    *current = next;
+    Ok(())
+}
+
 /// One prepared, insertion-ordered native mix shared by complete renders and
 /// absolute sample windows. Decoding, channel mapping and resampling happen
 /// once; each window preserves source phase and background ducking.
@@ -128,6 +178,39 @@ impl PreparedSceneSoundtrack {
         config: MixerConfig,
         timeline: Option<&SoundtrackTimeline>,
     ) -> Result<Self, RenderError> {
+        Self::new_with_limits(
+            fs,
+            requests,
+            decoder,
+            config,
+            timeline,
+            SoundtrackPreparationLimits::UNBOUNDED,
+        )
+    }
+
+    /// Prepare through the same native mixer with cumulative source, decoded
+    /// and resampled storage bounds. Cue-count refusal precedes filesystem work;
+    /// raw reads use the remaining budget, and mapped storage is charged before
+    /// each cue is cloned/resampled. The decoder separately caps each decode.
+    ///
+    /// # Errors
+    /// The original typed asset/decode/mix failures or a named cumulative limit.
+    pub fn new_with_limits(
+        fs: &dyn FileSystem,
+        requests: &[SoundRequest],
+        decoder: &mut AudioDecoder,
+        config: MixerConfig,
+        timeline: Option<&SoundtrackTimeline>,
+        limits: SoundtrackPreparationLimits,
+    ) -> Result<Self, RenderError> {
+        if requests.len() > limits.max_cues {
+            return Err(RenderError::InvalidOptions(
+                "soundtrack cue-count budget exceeded",
+            ));
+        }
+        let mut source_bytes = 0;
+        let mut decoded_samples = 0;
+        let mut prepared_samples = 0;
         let mut mixer = SoundMixer::new(config).map_err(RenderError::Sound)?;
         let mut inputs = Vec::new();
         inputs
@@ -144,11 +227,20 @@ impl PreparedSceneSoundtrack {
                 Entry::Occupied(entry) => entry.into_mut(),
                 Entry::Vacant(entry) => {
                     let bytes = fs
-                        .read_bounded(&request.sound_file, MAX_SOUND_ASSET_BYTES)
+                        .read_bounded(
+                            &request.sound_file,
+                            MAX_SOUND_ASSET_BYTES.min(limits.max_source_bytes - source_bytes),
+                        )
                         .map_err(|error| RenderError::SoundAsset {
                             path: request.sound_file.clone(),
                             error,
                         })?;
+                    charge(
+                        &mut source_bytes,
+                        bytes.len(),
+                        limits.max_source_bytes,
+                        "soundtrack source-byte budget exceeded",
+                    )?;
                     let decoded =
                         decoder
                             .decode(&bytes)
@@ -156,6 +248,12 @@ impl PreparedSceneSoundtrack {
                                 path: request.sound_file.clone(),
                                 error,
                             })?;
+                    charge(
+                        &mut decoded_samples,
+                        decoded.audio.samples.len(),
+                        limits.max_decoded_samples,
+                        "soundtrack decoded-sample budget exceeded",
+                    )?;
                     if let Some(invocation) = decoded.report.invocation.clone() {
                         invocations.try_reserve(1).map_err(|_| {
                             RenderError::InvalidOptions("soundtrack invocation allocation failed")
@@ -165,6 +263,23 @@ impl PreparedSceneSoundtrack {
                     entry.insert((Arc::from(bytes), decoded))
                 }
             };
+            // Budget sizing only: the native mixer's resampler owns the actual
+            // channel mapping and samples. Its output uses ceil(n * out / in).
+            let input_frames = decoded.audio.samples.len() / usize::from(decoded.audio.channels);
+            let output_frames = ((input_frames as u128) * u128::from(config.sample_rate))
+                .div_ceil(u128::from(decoded.audio.sample_rate));
+            let count = output_frames
+                .checked_mul(u128::from(config.channels))
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or(RenderError::InvalidOptions(
+                    "soundtrack prepared-sample count overflow",
+                ))?;
+            charge(
+                &mut prepared_samples,
+                count,
+                limits.max_prepared_samples,
+                "soundtrack prepared-sample budget exceeded",
+            )?;
             mixer
                 .add(SoundCue {
                     audio: decoded.audio.clone(),

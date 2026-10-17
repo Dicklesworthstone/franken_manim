@@ -48,7 +48,7 @@ pub fn render_bundle_with_fs(
     mut options: RenderOptions,
     fs: Arc<dyn FileSystem>,
 ) -> Result<RenderReport, RenderError> {
-    let bundle = TimelineBundle::from_bytes(bytes).map_err(RenderError::Bundle)?;
+    let mut bundle = TimelineBundle::from_bytes(bytes).map_err(RenderError::Bundle)?;
     if bundle.fps() != options.config.camera.fps {
         return Err(RenderError::InvalidOptions(
             "compiled frame rate must match export configuration",
@@ -74,6 +74,51 @@ pub fn render_bundle_with_fs(
         // supplies its exact captured pose/background/light, not this baseline.
         options.camera = Some(options.camera_config()?);
     }
+    if bundle.has_soundtrack() && !options.format.is_video() {
+        return Err(RenderError::InvalidOptions(
+            "sound-bearing FMTL requires MP4/MOV output; picture-only export must explicitly extract its soundtrack",
+        ));
+    }
+    let mix = bundle
+        .take_soundtrack()
+        .map(|pcm| {
+            let sample_rate = pcm.sample_rate();
+            let channels = pcm.channels();
+            let minimum = fmn_output::frames_to_samples(
+                i64::from(bundle.frame_count()),
+                bundle.fps(),
+                sample_rate,
+            )
+            .map_err(RenderError::Sound)?;
+            let minimum = u64::try_from(minimum).map_err(|_| {
+                RenderError::InvalidOptions("negative compiled soundtrack duration")
+            })?;
+            let config = fmn_output::MixerConfig {
+                sample_rate,
+                channels,
+                max_output_frames: (fmn_scene::DEFAULT_MAX_BUNDLE_BYTES / 4 / usize::from(channels))
+                    as u64,
+            };
+            let mut mixer = fmn_output::SoundMixer::new(config)
+                .map_err(RenderError::Sound)?
+                .with_timeline_frames(minimum);
+            mixer
+                .add(fmn_output::SoundCue::new(
+                    fmn_codec::WavAudio {
+                        channels,
+                        sample_rate,
+                        format: fmn_codec::SampleFormat::F32,
+                        samples: pcm.into_samples(),
+                    },
+                    0,
+                    bundle.fps(),
+                ))
+                .map_err(RenderError::Sound)?;
+            // Stored PCM is one already-mixed cue: no source reopens, second gain,
+            // resampling or decoder invocation. Padding uses the picture clock.
+            mixer.mix(1).map_err(RenderError::Sound)
+        })
+        .transpose()?;
     let shared = bundle.into_shared().map_err(RenderError::Bundle)?;
     let mut clock = RationalFrameClock::new(shared.fps())
         .map_err(|error| RenderError::Scene(fmn_anim::AnimError::Clock(error).into()))?;
@@ -107,7 +152,7 @@ pub fn render_bundle_with_fs(
             });
         }
     }
-    let finished = sink.finish(None)?;
+    let finished = sink.finish_with_soundtrack(None, mix)?;
     Ok(RenderReport {
         scene,
         artifact: finished.artifact,
