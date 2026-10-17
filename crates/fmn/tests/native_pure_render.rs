@@ -268,3 +268,115 @@ fn public_drawing_fading_and_rotation_match_serial_pngs_across_worker_counts() {
         }
     }
 }
+
+/// Real Scribe provenance feeds both native matchers. The original targets
+/// remain detached until the owner completes each replacement lifecycle.
+struct MatchingText;
+impl SceneConstruct for MatchingText {
+    fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+        let source = Tex::new(r"a^2+b^2=c^2").font_size(36.0).build(stage.tex_engine()?)?;
+        let target = Tex::new(r"c^2=a^2+b^2").font_size(36.0).build(stage.tex_engine()?)?;
+        let (source_spans, target_spans) = (source.span_map(), target.span_map());
+        let source = stage.add(source)?;
+        let target = stage.arena_mut().add(target);
+        stage.move_to(source, [-0.4, 0.8, 0.0], ORIGIN);
+        stage.move_to(target, [0.3, 0.8, 0.0], ORIGIN);
+        let config = fmn::library::TextMatchingConfig {
+            run_time: 0.5,
+            lag_ratio: 0.2,
+            ..fmn::library::TextMatchingConfig::default()
+        };
+        let animation = fmn::library::TransformMatchingTex::with_config(
+            stage.arena_mut(), source, target, &source_spans, &target_spans, config.clone(),
+        )?;
+        stage.play(animation)?;
+        assert_eq!(stage.roots(), &[target]);
+
+        let book = fmn::library::FontBook::bundled().unwrap();
+        let before = Text::new("AB CD").font("IBM Plex Sans").font_size(32.0).build(&book)?;
+        let after = Text::new("CD AB!").font("IBM Plex Sans").font_size(32.0).build(&book)?;
+        let (before_spans, after_spans) = (before.span_map(), after.span_map());
+        let before = stage.add(before)?;
+        let after = stage.arena_mut().add(after);
+        stage.move_to(before, [-0.4, -0.8, 0.0], ORIGIN);
+        stage.move_to(after, [0.3, -0.8, 0.0], ORIGIN);
+        let animation = fmn::library::TransformMatchingStrings::with_config(
+            stage.arena_mut(), before, after, &before_spans, &after_spans, config,
+        )?;
+        stage.play(animation)?;
+        assert_eq!(stage.roots(), &[target, after]);
+        Ok(())
+    }
+}
+
+#[test]
+fn public_text_matching_offloads_every_frame_and_keeps_owner_cleanup() {
+    #[derive(Default)]
+    struct Jobs { programs: usize, frames: Vec<i64> }
+    impl SceneSink for Jobs {
+        fn accepts_pure_segments(&self) -> bool { true }
+        fn capture_pure_segment(
+            &mut self, segment: &fmn_anim::pure_frame::PureSegment,
+        ) -> Result<(), IntegrationError> {
+            self.programs += 1;
+            for index in 1..=segment.frame_count() {
+                let job = segment.job(index).unwrap();
+                self.frames.push(job.time().frames());
+                let expected = job.time().to_f64();
+                let actual = std::thread::spawn(move || job.materialize().time()).join().unwrap();
+                assert_eq!(actual.to_bits(), expected.to_bits());
+            }
+            Ok(())
+        }
+        fn capture(&mut self, _: CaptureReason, _: FramePacket) -> Result<(), IntegrationError> {
+            panic!("native text matching unexpectedly fell back to serial capture")
+        }
+    }
+    let mut jobs = Jobs::default();
+    let completed = fmn::run_scene(&mut MatchingText,
+        RuntimeConfig { fps: 8, ..RuntimeConfig::default() }, 42, &mut jobs).unwrap();
+    assert_eq!(jobs.programs, 2);
+    assert_eq!(jobs.frames, (1..=8).collect::<Vec<_>>());
+    assert_eq!(completed.report().play_count, 2);
+    assert_eq!(completed.report().time.frames(), 8);
+}
+
+#[test]
+fn public_text_matching_pngs_match_serial_scribe_and_lumen_across_workers() {
+    let mut previous = None;
+    for (window, threads) in [(1, 1), (2, 4), (4, 16)] {
+        let fs = Arc::new(VirtualFs::new());
+        let options = options("/matching", window, threads);
+        let runtime = RuntimeConfig::from_config(&options.config);
+        let seed = options.config.determinism.seed;
+        let background = fmn_core::color::Srgb::from_hex(&options.config.camera.background_color)
+            .unwrap().to_linear(options.config.camera.background_opacity);
+        let aa = options.config.render.aa;
+        let report = render_with_fs(&mut MatchingText, options, fs.clone()).unwrap();
+        let stats = report.frame_pipeline.as_ref().unwrap();
+        assert_eq!(report.artifact.frame_count, 8);
+        assert_eq!((stats.submitted, stats.emitted, stats.outstanding_slots), (8, 8, 0));
+        assert!(stats.render_team_frames.iter().all(|count| *count > 0));
+        let bytes = (0..8).map(|i| fs.read(&Path::new("/matching")
+            .join(format!("frame_{i:06}.png"))).unwrap()).collect::<Vec<_>>();
+        let pixels = bytes.iter().map(|bytes| decode_png(bytes, &PngLimits::default())
+            .unwrap().rgba).collect::<Vec<_>>();
+        let mut serial = Serial {
+            renderer: RetainedFrameRenderer::new(RetainedFrameRendererConfig {
+                frame: FrameConfig::new(Viewport { width: 48, height: 32 },
+                    ScreenMap { scale: 8.0, origin: [24.0, 16.0], y_up: true }, background)
+                    .with_aa_policy(aa),
+                tiling: Tiling { macro_tile: report.execution_plan.macro_tile,
+                    fine_tile: report.execution_plan.fine_tile },
+                engine: EngineIdentity::certified(), threads: 1,
+            }).unwrap(),
+            camera: None, frames: Vec::new(),
+        };
+        fmn::run_scene(&mut MatchingText, runtime, seed, &mut serial).unwrap();
+        assert_pixels(&pixels, &serial.frames, window, threads, false);
+        assert_ne!(pixels[0], pixels[3], "the equation transition must visibly move");
+        assert_ne!(pixels[4], pixels[7], "the string transition must visibly move");
+        if let Some(previous) = &previous { assert_eq!(&bytes, previous); }
+        else { previous = Some(bytes); }
+    }
+}

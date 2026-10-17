@@ -1,7 +1,11 @@
 //! Native matching uses source provenance and the ordinary Choreo lifecycle.
 use std::sync::Arc;
 
-use fmn_anim::{AnimError, Animation, RationalFrameClock, play_segment};
+use fmn_anim::pure_frame::{PureFrameRefusal, PureSegment};
+use fmn_anim::{
+    AnimError, Animation, RateFunc, RationalFrameClock, Transform, finish_open_play, open_play,
+    play_segment,
+};
 use fmn_core::rng::RngRoot;
 use fmn_library::{
     FontBook, SpanKindU8, SpanMapData, SpanMapEntry, Tex, TexEngine, Text, TextMatchingConfig,
@@ -293,13 +297,188 @@ fn explicit_timing_and_abort_use_shared_animation_lifecycle() {
     )
     .unwrap();
     assert_eq!(animation.get_run_time(), 0.5);
+    assert!(animation.freeze_interpolation().is_none());
     animation.begin(&mut stage).unwrap();
+    assert!(animation.freeze_interpolation().is_some());
     animation.interpolate(&mut stage, 0.25);
     animation.abort(&mut stage);
+    assert!(animation.freeze_interpolation().is_none());
     assert!(!stage.roots().contains(&target));
     animation.clean_up_from_scene(&mut stage);
     assert!(matches!(
         animation.deferred_error(),
         Some(AnimError::InvalidFramePhase(_))
     ));
+}
+
+/// Observe every rendered family field, placement and lifetime flag, not only
+/// its final center. A worker must reproduce the serial sample bit for bit.
+fn frame_facts(stage: &Stage) -> Vec<String> {
+    let mut facts = vec![format!("time {:x}, roots {:?}", stage.time().to_bits(), stage.roots())];
+    for &root in stage.roots() {
+        let family = stage.family(root);
+        facts.push(format!("family {family:?}"));
+        for mob in family {
+            let entry = stage.get(mob).unwrap();
+            facts.push(format!(
+                "{:?}/{:?}/{:?}",
+                entry.placement().coefficients().map(f64::to_bits),
+                entry.uniforms(),
+                (stage.is_animating(mob), stage.is_updating_suspended(mob))
+            ));
+            for field in entry.buffer.schema().fields() {
+                let values = entry.buffer.read_column(&field.name).unwrap();
+                let bits: Vec<_> = values.iter().map(|value| value.to_bits()).collect();
+                facts.push(format!("{}:{bits:?}", field.name));
+            }
+        }
+    }
+    facts
+}
+
+#[test]
+fn matching_workers_preserve_each_sample_and_owner_replacement_cleanup() {
+    for strings in [false, true] {
+        for (from, to) in [
+            ("ABXAB", "ABABY"),
+            ("ABCD X", "CDAB Y"),
+            ("", ""),
+            ("", "A"),
+            ("A", ""),
+        ] {
+            let mut initial = Stage::new();
+            let (other, _, _) = fixture(&mut initial, "keep", -10.0);
+            let (source, sm, _) = fixture(&mut initial, from, 0.0);
+            let (target, tm, _) = fixture(&mut initial, to, 10.0);
+            initial.add_many_to_scene(&[other, source]).unwrap();
+            initial.scale_about(source, 0.75, Some([0.2, 0.3, 0.4]), None);
+            initial.shift(target, [0.2, -0.5, 0.3]);
+            let baseline = initial.snapshot();
+            let rng = RngRoot::from_seed(71);
+            let mut expected = None;
+
+            for workers in [0, 1, 4, 16] {
+                let mut stage = baseline.materialize();
+                let config = TextMatchingConfig {
+                    run_time: 0.5,
+                    lag_ratio: 0.2,
+                    // Revisit earlier phases; a worker cannot rely on any
+                    // previously sampled animation or family state.
+                    rate_func: RateFunc::Sampled(Arc::from([0.0, 0.9, 0.1, 0.8, 1.0])),
+                };
+                let mut animation: Box<dyn Animation> = if strings {
+                    Box::new(TransformMatchingStrings::with_config(
+                        &mut stage, source, target, &sm, &tm, config,
+                    ).unwrap())
+                } else {
+                    Box::new(TransformMatchingTex::with_config(
+                        &mut stage, source, target, &sm, &tm, config,
+                    ).unwrap())
+                };
+                animation.state_mut().config.time_span = Some((0.03125, 0.4375));
+                animation.state_mut().config.final_alpha_value = 0.35;
+                assert!(animation.freeze_interpolation().is_none());
+                let mut animations = vec![animation];
+                let mut clock = RationalFrameClock::new(24).unwrap();
+                clock.advance_frames(5).unwrap();
+                stage.set_time_from_clock(clock.now().to_f64());
+                let frames = if workers == 0 {
+                    let mut frames = Vec::new();
+                    play_segment(&mut stage, &mut clock, &rng, &mut animations, false, &mut |packet| {
+                        frames.push(frame_facts(&packet.materialize_stage()));
+                    }).unwrap();
+                    frames
+                } else {
+                    let open = open_play(&mut stage, &clock, &mut animations).unwrap();
+                    let program = PureSegment::freeze(&stage, &clock, &rng, &animations, &open)
+                        .expect("prepared text matching must offload its native group");
+                    let owner_before = frame_facts(&stage);
+                    let mut indexed = std::thread::scope(|scope| {
+                        let handles: Vec<_> = (0..workers).map(|worker| {
+                            let program = &program;
+                            scope.spawn(move || {
+                                (worker..usize::try_from(program.frame_count()).unwrap())
+                                    .step_by(workers)
+                                    .rev()
+                                    .map(|index| {
+                                        let frame = i64::try_from(index + 1).unwrap();
+                                        (frame, frame_facts(&program.job(frame).unwrap().materialize()))
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                        }).collect();
+                        handles.into_iter().flat_map(|handle| handle.join().unwrap()).collect::<Vec<_>>()
+                    });
+                    assert_eq!(frame_facts(&stage), owner_before, "workers mutated the scene owner");
+                    indexed.sort_by_key(|(index, _)| *index);
+                    program.finish_on_owner(&mut stage, &mut clock, &mut animations, open).unwrap();
+                    indexed.into_iter().map(|(_, facts)| facts).collect()
+                };
+                assert_eq!(frames.len(), 12);
+                assert_eq!(clock.now().frames(), 17);
+                assert_eq!(stage.roots(), &[other, target]);
+                assert!(!stage.is_animating(source));
+                assert!(!stage.is_updating_suspended(source));
+                assert!(animations[0].freeze_interpolation().is_none());
+                let after = frame_facts(&stage);
+                animations[0].finish(&mut stage);
+                animations[0].clean_up_from_scene(&mut stage);
+                assert_eq!(frame_facts(&stage), after, "finish and cleanup repeat work");
+                let observed = (frames, after);
+                if let Some(expected) = &expected {
+                    assert_eq!(&observed, expected, "strings={strings}, {from:?}->{to:?}, workers={workers}");
+                } else {
+                    expected = Some(observed);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn matching_offload_retains_callback_view_and_alias_refusals() {
+    fn custom_rate(alpha: f64) -> f64 { alpha * alpha }
+    for case in 0..6 {
+        let mut stage = Stage::new();
+        let (source, sm, _) = fixture(&mut stage, "AB", 0.0);
+        // Equal object-space geometry keeps the actual target as the
+        // interpolation endpoint, so the alias case cannot be hidden by
+        // Transform's legitimate private geometry-baking copy.
+        let (target, tm, target_children) = fixture(&mut stage, "AB", 0.0);
+        stage.shift(target, [10.0, 0.0, 0.0]);
+        stage.add_to_scene(source).unwrap();
+        let mut view = None;
+        let mut config = TextMatchingConfig { run_time: 0.25, ..TextMatchingConfig::default() };
+        match case {
+            0 => { stage.add_dt_updater(source, |_, _, _| {}, false).unwrap(); }
+            1 => { stage.add_updater(target, |_, _| {}, false).unwrap(); }
+            2 => { view = Some(stage.get_mut(target).unwrap().buffer.export_view(false)); }
+            3 => { config.rate_func = RateFunc::Base(custom_rate); }
+            _ => {}
+        }
+        let animation = TransformMatchingTex::with_config(&mut stage, source, target, &sm, &tm, config).unwrap();
+        let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(animation)];
+        if case == 4 {
+            let changed = stage.copy_family(target_children[0]).unwrap();
+            stage.shift(changed, [1.0, 0.0, 0.0]);
+            animations.push(Box::new(Transform::new(target_children[0], changed)));
+        } else if case == 5 {
+            let source_child = stage.get(source).unwrap().submobjects()[0];
+            let changed = stage.copy_family(source_child).unwrap();
+            stage.shift(changed, [1.0, 0.0, 0.0]);
+            animations.push(Box::new(Transform::new(source_child, changed)));
+        }
+        let clock = RationalFrameClock::new(24).unwrap();
+        let open = open_play(&mut stage, &clock, &mut animations).unwrap();
+        let refusal = PureSegment::freeze(&stage, &clock, &RngRoot::from_seed(3), &animations, &open).unwrap_err();
+        match case {
+            0 | 1 => assert_eq!(refusal, PureFrameRefusal::NotAtPureBegin),
+            2 => assert_eq!(refusal, PureFrameRefusal::LiveView(target)),
+            3 => assert_eq!(refusal, PureFrameRefusal::UnsupportedAnimation(0)),
+            4 => assert_eq!(refusal, PureFrameRefusal::MutableEndpoint(target_children[0])),
+            _ => assert!(matches!(refusal, PureFrameRefusal::OverlappingOutput(_))),
+        }
+        drop(view);
+        finish_open_play(&mut stage, &mut animations, open).unwrap();
+    }
 }

@@ -13,6 +13,8 @@
 //! barriers: removing them would invent substrings that never existed.
 //! Both are ordinary Choreo animations: groups of Transform and directional
 //! fades, followed by removal of the source and publication of the real target.
+//! Their prepared interpolation can run on native frame workers; source/target
+//! validation, begin, finish and replacement cleanup stay on the scene owner.
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
@@ -538,6 +540,22 @@ macro_rules! matching_animation {
             }
             fn effect_signature(&self) -> AnimationSignature {
                 self.inner.group.effect_signature()
+            }
+            fn freeze_interpolation(&self) -> Option<fmn_anim::pure_frame::FrozenAnimation> {
+                if !self.inner.begun
+                    || self.inner.finished
+                    || self.inner.cleaned
+                    || self.inner.error.is_some()
+                    || self.inner.group.deferred_error().is_some()
+                {
+                    return None;
+                }
+                // All members began eagerly. Freeze their existing native
+                // interpolation; rebuilding the matching plan on a worker
+                // would repeat allocation and source/target lifecycle work.
+                // PureSegment still checks the full operand inventory for
+                // live views, updaters and aliases with other animations.
+                self.inner.group.freeze_interpolation()
             }
         }
     };

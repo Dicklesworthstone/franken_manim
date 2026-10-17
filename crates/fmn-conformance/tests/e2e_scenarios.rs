@@ -1329,6 +1329,215 @@ fn failure_cli_ffmpeg_limits_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenari
         .with_counter("cli_ffmpeg_admitted_input", input))
 }
 
+/// Native equation and reordered-string transitions cross the public facade,
+/// materialize on a worker, and retain both nominal sampling and owner cleanup.
+fn native_matching_workers_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    struct Matching;
+    impl fmn::SceneConstruct for Matching {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let from = fmn_library::Tex::new("a^2+b^2=c^2")
+                .font_size(36.0)
+                .build(stage.tex_engine()?)?;
+            let to = fmn_library::Tex::new("c^2=a^2+b^2")
+                .font_size(36.0)
+                .build(stage.tex_engine()?)?;
+            let (from_spans, to_spans) = (from.span_map(), to.span_map());
+            let source = stage.add(from)?;
+            let target = stage.arena_mut().add(to);
+            stage.shift(source, [-0.4, 0.8, 0.0]);
+            stage.shift(target, [0.3, 0.8, 0.0]);
+            let timing = fmn_library::TextMatchingConfig {
+                run_time: 0.5,
+                lag_ratio: 0.2,
+                ..fmn_library::TextMatchingConfig::default()
+            };
+            let matching = fmn_library::TransformMatchingTex::with_config(
+                stage.arena_mut(),
+                source,
+                target,
+                &from_spans,
+                &to_spans,
+                timing.clone(),
+            )?;
+            stage.play_prepared(vec![Box::new(matching)])?;
+            if stage.roots() != [target] {
+                return Err(fmn::SceneError::InvalidLifecycle(
+                    "native equation matching did not publish its original target",
+                )
+                .into());
+            }
+
+            let book = fmn_library::FontBook::bundled()
+                .map_err(fmn_library::TextMobjectError::Text)?;
+            let from = fmn_library::Text::new("AB CD")
+                .font("IBM Plex Sans")
+                .font_size(32.0)
+                .build(&book)?;
+            let to = fmn_library::Text::new("CD AB!")
+                .font("IBM Plex Sans")
+                .font_size(32.0)
+                .build(&book)?;
+            let (from_spans, to_spans) = (from.span_map(), to.span_map());
+            let source = stage.add(from)?;
+            let text_target = stage.arena_mut().add(to);
+            stage.shift(source, [-0.4, -0.8, 0.0]);
+            stage.shift(text_target, [0.3, -0.8, 0.0]);
+            let matching = fmn_library::TransformMatchingStrings::with_config(
+                stage.arena_mut(),
+                source,
+                text_target,
+                &from_spans,
+                &to_spans,
+                timing,
+            )?;
+            stage.play_prepared(vec![Box::new(matching)])?;
+            if stage.roots() != [target, text_target] {
+                return Err(fmn::SceneError::InvalidLifecycle(
+                    "native string matching lost target identity or unrelated roots",
+                )
+                .into());
+            }
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct Jobs {
+        programs: u64,
+        times: Vec<i64>,
+        owner_captures: u64,
+    }
+    impl fmn_scene::SceneSink for Jobs {
+        fn accepts_pure_segments(&self) -> bool {
+            true
+        }
+
+        fn capture_pure_segment(
+            &mut self,
+            segment: &fmn_anim::pure_frame::PureSegment,
+        ) -> Result<(), IntegrationError> {
+            self.programs += 1;
+            for frame in 1..=segment.frame_count() {
+                let job = segment
+                    .job(frame)
+                    .map_err(|error| IntegrationError::new("matching", error.to_string()))?;
+                self.times.push(job.time().frames());
+                let expected_time = job.time().to_f64();
+                let observed_time = std::thread::spawn(move || job.materialize().time())
+                    .join()
+                    .map_err(|_| IntegrationError::new("matching", "worker panicked"))?;
+                if observed_time.to_bits() != expected_time.to_bits() {
+                    return Err(IntegrationError::new(
+                        "matching",
+                        "worker did not retain its exact nominal time",
+                    ));
+                }
+            }
+            Ok(())
+        }
+
+        fn capture(
+            &mut self,
+            _: fmn_scene::CaptureReason,
+            _: FramePacket,
+        ) -> Result<(), IntegrationError> {
+            self.owner_captures += 1;
+            Err(IntegrationError::new(
+                "matching",
+                "native matching fell back to owner-thread capture",
+            ))
+        }
+    }
+
+    let mut jobs = Jobs::default();
+    let completed = fmn::run_scene(
+        &mut Matching,
+        RuntimeConfig {
+            fps: 8,
+            ..RuntimeConfig::default()
+        },
+        42,
+        &mut jobs,
+    )
+    .map_err(|error| fail(format!("native matching workers: {error}")))?;
+    if jobs.programs != 2
+        || jobs.times != (1..=8).collect::<Vec<_>>()
+        || jobs.owner_captures != 0
+        || completed.report().play_count != 2
+        || completed.report().time.frames() != 8
+    {
+        return Err(fail("native matching lost pure programs or nominal samples"));
+    }
+
+    let mut first_frames: Option<Vec<Vec<u8>>> = None;
+    let mut thread_counts = 0;
+    let mut rendered_frames = 0;
+    for (window, threads) in [(1, 1), (2, 4), (4, 16)] {
+        let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+        let mut options = fmn::RenderOptions::new("/matching")
+            .map_err(|error| fail(format!("native matching options: {error}")))?;
+        options.config.camera.resolution = (48, 32);
+        options.config.camera.fps = 8;
+        options.config.sizes.frame_height = 4.0;
+        options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+        options.frames_in_flight = window;
+        let report = fmn::render_with_fs(&mut Matching, options, fs.clone())
+            .map_err(|error| fail(format!("native matching render: {error}")))?;
+        let pipeline = report
+            .frame_pipeline
+            .as_ref()
+            .ok_or_else(|| fail("native matching did not use the frame pipeline"))?;
+        if report.artifact.frame_count != 8
+            || pipeline.submitted != 8
+            || pipeline.emitted != 8
+            || pipeline.outstanding_slots != 0
+            || pipeline.max_in_flight > report.execution_plan.frames_in_flight
+        {
+            return Err(fail("native matching lost bounded ordered publication"));
+        }
+        let mut frames = Vec::new();
+        for index in 0..8 {
+            let path = PathBuf::from("/matching").join(format!("frame_{index:06}.png"));
+            frames.push(
+                fs.read(&path)
+                    .map_err(|error| fail(format!("native matching frame: {error}")))?,
+            );
+        }
+        if frames[0] == frames[3] || frames[4] == frames[7] {
+            return Err(fail("native equation or string transition did not change pixels"));
+        }
+        if let Some(first) = &first_frames {
+            if *first != frames {
+                return Err(fail(format!(
+                    "native matching PNG bytes changed at {threads} threads"
+                )));
+            }
+        } else {
+            first_frames = Some(frames);
+        }
+        thread_counts += 1;
+        rendered_frames += report.artifact.frame_count;
+    }
+    let frames = first_frames.ok_or_else(|| fail("native matching rendered no frames"))?;
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_matching_workers")
+            .field("programs", jobs.programs)
+            .field("jobs", jobs.times.len() as u64)
+            .field("owner_captures", jobs.owner_captures)
+            .field("thread_counts", thread_counts)
+            .field("rendered_frames", rendered_frames),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("matching-first.png", frames[0].clone())
+        .with_artifact("matching-last.png", frames[7].clone())
+        .with_counter("native_matching_programs", jobs.programs)
+        .with_counter("native_matching_jobs", jobs.times.len() as u64)
+        .with_counter("native_matching_owner_captures", jobs.owner_captures)
+        .with_counter("native_matching_thread_counts", thread_counts)
+        .with_counter("native_matching_rendered_frames", rendered_frames))
+}
+
 /// The facade's MP4 request with no ffmpeg capability is a named capability
 /// refusal (D2) that runs no scene code and publishes nothing; a native
 /// format from the same options still renders.
@@ -7490,6 +7699,30 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         .tier(Tier::Fast),
     ];
     specs.push(spec(
+        "render_matrix.native_matching_workers.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_matching_workers_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("native_matching_programs", 2),
+            counter_eq("native_matching_jobs", 8),
+            counter_eq("native_matching_owner_captures", 0),
+            counter_eq("native_matching_thread_counts", 3),
+            counter_eq("native_matching_rendered_frames", 24),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_matching_workers",
+            vec![
+                FieldPred::u64_eq("programs", 2),
+                FieldPred::u64_eq("jobs", 8),
+                FieldPred::u64_eq("owner_captures", 0),
+                FieldPred::u64_eq("thread_counts", 3),
+                FieldPred::u64_eq("rendered_frames", 24),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.coordinate_placement.v1",
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
@@ -9535,6 +9768,16 @@ fn tracing_tail_lifecycle_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.tracing_tail_empty_until_update.v1")
         .expect("the tracing-tail lifecycle scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn native_matching_workers_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.native_matching_workers.v1")
+        .expect("native matching workers scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }
