@@ -93,12 +93,13 @@ resampling. Accordingly replay's SoundtrackReport counts one cue, not the
 number of original authored sound requests. Final audio encoding may be lossy;
 the portable PCM itself is not.
 
-PNG, GIF and Y4M replay refuses sound-bearing input before publication. The
-current standalone CLI, Studio and WASM adapters have not gained audio playback
-through this change: picture-only consumers fail closed. WASM refuses at load.
-An audio-aware host can explicitly `take_soundtrack()` from TimelineBundle and
-then dispatch visual jobs, accepting responsibility for synchronized sound.
-Simply loading the artifact never authorizes dropping its audio.
+PNG, GIF and Y4M replay refuses sound-bearing input before publication.
+Standalone CLI and Studio audio adapters remain separate work. The WASM
+picture-only constructor still refuses sound at load, while the explicit
+`FmnPlayer.from_bundle_with_audio` route and local browser player now support
+synchronized audio; see [Browser soundtracks](BROWSER_SOUNDTRACKS.md).
+An audio-aware host explicitly takes the soundtrack before dispatching visual
+jobs. Simply loading an artifact never authorizes dropping its audio.
 
 Validation: `fmn/tests/soundtrack_bundle.rs` compares generated PCM with an
 independently authored native mix, preserves observed geometry/camera captures,

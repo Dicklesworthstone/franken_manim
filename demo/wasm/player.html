@@ -35,7 +35,7 @@
     <label>Open recording <input id="bundleFile" type="file" accept=".fmtl" disabled></label>
     <button id="loadDemo" disabled>Load demo</button>
   </div>
-  <p class="hint">Local files stay in your browser. Camera-bearing recordings are supported; input limit: 256 MiB.</p>
+  <p class="hint">Local files stay in your browser. Camera and soundtrack recordings are supported. Press Play to enable audio; input limit: 256 MiB.</p>
   <div class="controls">
     <label>Frame <input id="scrub" type="range" min="0" max="0" value="0" disabled></label>
     <button id="play" disabled>Play</button>
@@ -47,7 +47,8 @@
 
 <script type="module">
   import { FramePlaybackClock } from "./playback.mjs";
-  import { TimelineSession, readLocalBundle } from "./player-session.mjs";
+  import { TimelineSession, readLocalBundle, MAX_BUNDLE_BYTES } from "./player-session.mjs";
+  import { prepareSoundtrack } from "./audio-playback.mjs";
 
   const canvas = document.getElementById("canvas");
   const ctx = canvas.getContext("2d");
@@ -103,7 +104,8 @@
     try {
       const index = clock.frameAt(now);
       if (index !== session.current.player.current_frame) show(index);
-      rafId = requestAnimationFrame(tick);
+      if (clock.playing) rafId = requestAnimationFrame(tick);
+      else playBtn.textContent = "Play";
     } catch (error) {
       stop();
       message(`Playback stopped: ${error}`, true);
@@ -119,7 +121,7 @@
       if (!await session.load(readBytes)) return; // superseded by another load
       stop();
       const { metadata } = session.current;
-      clock = new FramePlaybackClock(metadata.fps, metadata.frameCount);
+      clock = session.current.audio ?? new FramePlaybackClock(metadata.fps, metadata.frameCount);
       scrub.max = String(metadata.frameCount - 1);
       labels.replaceChildren();
       for (const { name: label, index } of metadata.labels) {
@@ -133,6 +135,7 @@
       message(`${name}: ${metadata.frameCount} frames @ ${metadata.fps} fps ` +
         `(${metadata.durationSeconds.toFixed(2)}s), ` +
         `${metadata.hasCameraTrack ? "recorded camera" : "planar viewport"}; ` +
+        (metadata.audio ? `${metadata.audio.channels}-channel sound @ ${metadata.audio.sampleRate} Hz; ` : "") +
         `engine ${metadata.engineVersion}`);
     } catch (error) {
       message(`${name}: ${error}. ` + (session.current
@@ -150,13 +153,24 @@
   }
 
   scrub.addEventListener("input", () => seek(Number(scrub.value)));
-  playBtn.addEventListener("click", () => {
+  playBtn.addEventListener("click", async () => {
     if (!clock || !session?.current) return;
-    if (clock.playing) { stop(); return; }
-    clock.seek(session.current.player.current_frame);
-    clock.play(performance.now());
-    playBtn.textContent = "Pause";
-    rafId = requestAnimationFrame(tick);
+    if (clock.playing || clock.starting) { stop(); return; }
+    const active = clock;
+    try {
+      // Audible pause retains its fractional sample-time position. Snapping
+      // back to the last displayed picture would repeat sound on every resume.
+      if (!session.current.audio) active.seek(session.current.player.current_frame);
+      playBtn.textContent = "Starting…";
+      const started = await active.play(performance.now());
+      if (clock !== active || started === false || !active.playing) return;
+      playBtn.textContent = "Pause";
+      rafId = requestAnimationFrame(tick);
+    } catch (error) {
+      if (clock !== active) return;
+      stop();
+      message(`Playback refused: ${error}`, true);
+    }
   });
   fileInput.addEventListener("change", () => {
     const file = fileInput.files?.[0];
@@ -164,6 +178,9 @@
     if (file) void loadBundle(() => readLocalBundle(file), file.name);
   });
   demoBtn.addEventListener("click", () => { void loadBundle(demoBytes, "bundle.fmtl"); });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) stop();
+  });
   window.addEventListener("pagehide", (event) => {
     stop();
     if (!event.persisted) session?.dispose();
@@ -174,7 +191,11 @@
     const { default: init, FmnPlayer } = await import("./pkg/fmn_wasm.js");
     await init();
     session = new TimelineSession(
-      (bytes) => FmnPlayer.from_bundle(bytes), canvas.width, canvas.height);
+      (bytes) => FmnPlayer.from_bundle_with_audio(bytes), canvas.width, canvas.height,
+      MAX_BUNDLE_BYTES, (player) => prepareSoundtrack(player, () => {
+        if (!globalThis.AudioContext) throw new Error("Web Audio is unavailable in this browser");
+        return new AudioContext();
+      }));
     fileInput.disabled = false;
     demoBtn.disabled = false;
     await loadBundle(demoBytes, "bundle.fmtl");
