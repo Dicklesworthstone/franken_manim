@@ -62,6 +62,15 @@ def fixture():
         def has_updaters(self):
             return False
 
+        def get_center(self):
+            points = self.data["point"]
+            return points.mean(axis=0) if len(points) else np.zeros(3)
+
+        def _set_point_free_anchor(self, center):
+            # The fixture's sole mobject is point-bearing by default. The
+            # point-free case retains an explicit anchor, like the real portal.
+            self.point_free_anchor = tuple(center)
+
         def lock_matching_data(self, start, target):
             self.lock_calls += 1
             self.locked_data_keys.update(
@@ -159,6 +168,10 @@ def fixture():
         AnimationGroup=AnimationGroup, _np=np, _copy=copy, _interpolate=straight,
         _smooth_rate=lambda alpha: alpha, _refuse_unrouted=refuse, _OUT=(0, 0, 1),
         straight_path=straight, _requires_python_animation=requires,
+        _point_free_family_ids=lambda root: {
+            id(member) for member in root.get_family()
+            if not len(member.data["point"])
+        },
     )
     # Only the transform protocol: the subsystem protocols `install` layers
     # on top need their own classes and are covered by
