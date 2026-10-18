@@ -247,10 +247,59 @@ fn run(options: Options, output: &mut dyn Write, shutdown: &AtomicBool) -> Resul
         frames.publish(&initial, limits)?;
         let mut secret = [0_u8; 32];
         StdHostEntropy.fill(&mut secret)?;
-        let host = StudioHost::bind(Arc::clone(&session), frames, CapabilityToken::new(secret)?, clock, host_config)?;
+        let host = StudioHost::bind(
+            Arc::clone(&session),
+            frames.clone(),
+            CapabilityToken::new(secret)?,
+            Arc::clone(&clock),
+            host_config,
+        )?;
         writeln!(output, "{}", host.launch_url()?)?;
         output.flush()?;
-        host.serve_until(shutdown)?;
+
+        let watcher = fmn_studio::project_watch::SourceWatch::new_filtered(
+            vec![project.join("Cargo.toml"), project.join("Cargo.lock"), project.join("src")],
+            vec![project.join("target")],
+            Duration::from_millis(300),
+            fmn_studio::project_watch::WatchLimits::default(),
+            fmn_studio::project_watch::WatchFilter {
+                extensions: vec!["rs".into(), "toml".into()],
+                ignored_directories: vec![".git".into()],
+            },
+        )?;
+        let address = host.local_addr()?;
+        let cap = host.launch_url()?;
+        let watcher_stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&watcher_stop);
+        let thread_clock = Arc::clone(&clock);
+        let watcher_thread = std::thread::Builder::new()
+            .name("fmn-project-source-watch".into())
+            .spawn(move || -> Result<()> {
+                let mut watcher = watcher;
+                while !thread_stop.load(Ordering::Acquire) {
+                    if watcher.poll(thread_clock.monotonic())? {
+                        let mut socket = std::net::TcpStream::connect_timeout(
+                            &address, Duration::from_secs(5),
+                        )?;
+                        socket.set_read_timeout(Some(Duration::from_secs(330)))?;
+                        socket.set_write_timeout(Some(Duration::from_secs(10)))?;
+                        let secret = cap.split("cap=").nth(1).ok_or("missing Studio capability")?;
+                        write!(socket, "POST /api/restart?cap={secret} HTTP/1.1\\r\\nHost: {address}\\r\\nOrigin: http://{address}\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n")?;
+                        let mut response = Vec::new();
+                        socket.take(128 * 1024 + 1).read_to_end(&mut response)?;
+                        if response.len() > 128 * 1024 || !response.starts_with(b"HTTP/1.1 200 ") {
+                            eprintln!("fmn studio-project: source rebuild failed; previous worker retained");
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Ok(())
+            })?;
+        let served = host.serve_until(shutdown);
+        watcher_stop.store(true, Ordering::Release);
+        frames.close();
+        watcher_thread.join().map_err(|_| "source watcher panicked")??;
+        served?;
         Ok(())
     })();
     session.shutdown_worker();
