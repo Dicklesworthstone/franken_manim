@@ -1,6 +1,8 @@
 //! Native Cargo-project front door. This host never executes scene callbacks.
 //! Manim's generated flag parser continues to own the ordinary `studio` route.
 
+mod reload;
+
 use std::error::Error;
 use std::ffi::OsString;
 use std::io::{Read, Write};
@@ -16,6 +18,7 @@ use fmn_platform::fs::{FileSystem, VirtualFs};
 use fmn_platform::process::StdProcessRunner;
 use fmn_scene::Journal;
 use fmn_studio::project::{CargoBuildConfig, CargoRebuildDriver, CargoTarget};
+use fmn_studio::project_watch::{SourceWatch, WatchFilter, WatchLimits};
 use fmn_studio::protocol::studio_seek_command;
 use fmn_studio::{
     CapabilityToken, FrameHub, ProtocolLimits, StdWorkerLauncher, StudioHost, StudioHostConfig,
@@ -37,9 +40,11 @@ Options:\n\
   --allow-network         Permit Cargo dependency downloads (offline by default)\n\
   --build-timeout SECONDS  Positive compiler deadline (default: 300)\n\
   --help, -h              Show this help without building or opening a listener\n\n\
-Builds are locked and bounded. Browser Restart recompiles and restores the\n\
-committed scene through the existing journal. Failed builds retain the last\n\
-healthy worker. The browser uses a loopback capability URL. Close stdin to stop.\n";
+Builds are locked and bounded. Source changes and Browser Restart recompile\n\
+and restore the committed scene through the existing journal. Failed builds\n\
+retain the last healthy worker. Temporary watch/connection failures recover\n\
+without restarting Studio. The browser uses a loopback capability URL.\n\
+Close stdin to stop; pending rebuild I/O is cancelled during shutdown.\n";
 
 #[derive(Debug)]
 struct Options {
@@ -201,6 +206,20 @@ impl Drop for PublishedImages {
     }
 }
 
+// Stop the scoped watcher before its implicit join even when host setup or
+// serving returns an error. Closing the hub also wakes idle preview readers.
+struct StopWatch<'a> {
+    stop: &'a AtomicBool,
+    frames: &'a FrameHub,
+}
+
+impl Drop for StopWatch<'_> {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        self.frames.close();
+    }
+}
+
 fn run(options: Options, output: &mut dyn Write, shutdown: &AtomicBool) -> Result<()> {
     let path = if options.manifest.is_dir() { options.manifest.join("Cargo.toml") } else { options.manifest };
     let manifest = path.canonicalize()?;
@@ -208,6 +227,18 @@ fn run(options: Options, output: &mut dyn Write, shutdown: &AtomicBool) -> Resul
         return Err("--manifest-path must select an existing Cargo.toml or project directory".into());
     }
     let project = manifest.parent().ok_or("manifest has no parent")?.to_path_buf();
+    // Take the baseline BEFORE compiling: edits during the first build must
+    // still be observed by the first live poll, not silently adopted as built.
+    let mut watcher = SourceWatch::new_filtered(
+        vec![project.join("Cargo.toml"), project.join("Cargo.lock"), project.join("src")],
+        vec![project.join("target")],
+        Duration::from_millis(300),
+        WatchLimits::default(),
+        WatchFilter {
+            extensions: vec!["rs".into(), "toml".into()],
+            ignored_directories: vec![".git".into()],
+        },
+    )?;
     let environment = compiler_environment(&options.cargo)?;
     let runner = Arc::new(StdProcessRunner);
     let triple = CargoRebuildDriver::host_triple(&*runner, &options.cargo, &environment)?;
@@ -247,60 +278,76 @@ fn run(options: Options, output: &mut dyn Write, shutdown: &AtomicBool) -> Resul
         frames.publish(&initial, limits)?;
         let mut secret = [0_u8; 32];
         StdHostEntropy.fill(&mut secret)?;
+        let token = CapabilityToken::new(secret)?;
+        let cap = token.try_expose_hex()?;
         let host = StudioHost::bind(
-            Arc::clone(&session),
-            frames.clone(),
-            CapabilityToken::new(secret)?,
-            Arc::clone(&clock),
-            host_config,
+            Arc::clone(&session), frames.clone(), token, Arc::clone(&clock), host_config,
         )?;
-        writeln!(output, "{}", host.launch_url()?)?;
-        output.flush()?;
-
-        let watcher = fmn_studio::project_watch::SourceWatch::new_filtered(
-            vec![project.join("Cargo.toml"), project.join("Cargo.lock"), project.join("src")],
-            vec![project.join("target")],
-            Duration::from_millis(300),
-            fmn_studio::project_watch::WatchLimits::default(),
-            fmn_studio::project_watch::WatchFilter {
-                extensions: vec!["rs".into(), "toml".into()],
-                ignored_directories: vec![".git".into()],
-            },
+        let client = reload::Client::new(
+            host.local_addr()?, cap, options.timeout.saturating_add(Duration::from_secs(30)),
         )?;
-        let address = host.local_addr()?;
-        let cap = host.launch_url()?;
-        let watcher_stop = Arc::new(AtomicBool::new(false));
-        let thread_stop = Arc::clone(&watcher_stop);
-        let thread_clock = Arc::clone(&clock);
-        let watcher_thread = std::thread::Builder::new()
-            .name("fmn-project-source-watch".into())
-            .spawn(move || -> Result<()> {
-                let mut watcher = watcher;
-                while !thread_stop.load(Ordering::Acquire) {
-                    if watcher.poll(thread_clock.monotonic())? {
-                        let mut socket = std::net::TcpStream::connect_timeout(
-                            &address, Duration::from_secs(5),
-                        )?;
-                        socket.set_read_timeout(Some(Duration::from_secs(330)))?;
-                        socket.set_write_timeout(Some(Duration::from_secs(10)))?;
-                        let secret = cap.split("cap=").nth(1).ok_or("missing Studio capability")?;
-                        write!(socket, "POST /api/restart?cap={secret} HTTP/1.1\\r\\nHost: {address}\\r\\nOrigin: http://{address}\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n")?;
-                        let mut response = Vec::new();
-                        socket.take(128 * 1024 + 1).read_to_end(&mut response)?;
-                        if response.len() > 128 * 1024 || !response.starts_with(b"HTTP/1.1 200 ") {
-                            eprintln!("fmn studio-project: source rebuild failed; previous worker retained");
+        let stop = AtomicBool::new(false);
+        std::thread::scope(|scope| -> Result<()> {
+            // Return (), not Box<dyn Error>: scoped thread results must be Send.
+            let watcher_thread = std::thread::Builder::new()
+                .name("fmn-project-source-watch".into())
+                .spawn_scoped(scope, || {
+                    let stopped = || stop.load(Ordering::Acquire) || shutdown.load(Ordering::Acquire);
+                    let mut pending = reload::PendingReload::default();
+                    let mut scan_error = String::new();
+                    let mut rebuild_error = String::new();
+                    while !stopped() {
+                        match watcher.poll(clock.monotonic()) {
+                            Ok(changed) => {
+                                pending.observe(changed);
+                                scan_error.clear();
+                            }
+                            Err(error) => {
+                                let message = error.to_string();
+                                if message != scan_error {
+                                    eprintln!("fmn studio-project: source watch: {message}");
+                                    scan_error = message;
+                                }
+                                std::thread::sleep(reload::POLL_INTERVAL);
+                                continue;
+                            }
                         }
+                        if pending.ready(clock.monotonic()) && !stopped() {
+                            let result = client.restart(&stopped);
+                            pending.complete(clock.monotonic(), &result);
+                            if stopped() { break; }
+                            match result {
+                                Ok(reload::Rebuild::Applied) => {
+                                    eprintln!("fmn studio-project: source rebuilt; committed frame restored");
+                                    rebuild_error.clear();
+                                }
+                                Ok(reload::Rebuild::Refused { status, detail }) => {
+                                    eprintln!("fmn studio-project: rebuild refused ({status}); last published frame retained: {detail}");
+                                    rebuild_error.clear();
+                                }
+                                Err(error) => {
+                                    let message = error.to_string();
+                                    if message != rebuild_error {
+                                        eprintln!("fmn studio-project: rebuild transport: {message}; retrying");
+                                        rebuild_error = message;
+                                    }
+                                }
+                            }
+                        }
+                        std::thread::sleep(reload::POLL_INTERVAL);
                     }
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-                Ok(())
-            })?;
-        let served = host.serve_until(shutdown);
-        watcher_stop.store(true, Ordering::Release);
-        frames.close();
-        watcher_thread.join().map_err(|_| "source watcher panicked")??;
-        served?;
-        Ok(())
+                    // Wake multipart readers before serve_until joins them.
+                    frames.close();
+                })?;
+            let guard = StopWatch { stop: &stop, frames: &frames };
+            writeln!(output, "{}", host.launch_url()?)?;
+            output.flush()?;
+            let served = host.serve_until(shutdown);
+            drop(guard);
+            watcher_thread.join().map_err(|_| "source watcher panicked")?;
+            served?;
+            Ok(())
+        })
     })();
     session.shutdown_worker();
     result
