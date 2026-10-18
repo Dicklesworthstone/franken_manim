@@ -259,6 +259,7 @@ class ParallelCheckpointTests(unittest.TestCase):
         self.render(fps=30)
         for overrides in ({"fps": 60}, {"threads": 2}, {"resolution": (80, 48)},
                           {"animation_range": (1, 3)}, {"_working_directory": self.root},
+                          {"_configuration": {"values": {"camera": {"background_color": "#112233"}}}},
                           {"_output_options": {"transparent": True}}, {"resume_key": "another-input-version"}):
             with self.subTest(overrides=overrides), self.assertRaises(ValueError):
                 self.render(resume=True, **{**{"fps": 30}, **overrides})

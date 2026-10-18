@@ -24,7 +24,7 @@ from .batch_rendering import (
 from .rendering import (
     RenderSession, _positive_integer, _apply_output_options, _runtime_identities,
 )
-from .scene_loading import SceneSource
+from .scene_loading import SceneSource, resolve_render_configuration
 from .typesetting import describe_receipt, typesetting_receipt
 from .render_selection import PLAYBACK_HELP, take_playback_options, select_still_format
 
@@ -66,9 +66,16 @@ _REFERENCE_HELP = """Reference render flags:
   -l, --low_quality        854x480; -m/--medium_quality: 1280x720.
   --hd / --uhd             1920x1080 / 3840x2160.
   -r, --resolution WxH     Explicit resolution overrides quality presets.
+  -c, --color COLOR        Camera background: CSS name or #RGB/#RRGGBB.
+  --config_file PATH      Overlay a UTF-8 YAML file on cwd custom_config.yml.
   -q, --quiet              Suppress progress and human success decoration.
 
 Quality presets preserve the configured frame rate (30 fps by default).
+Config files connect camera, resolution_options, directories, file_writer,
+scene and cache; unsupported portal-default sections name a capability refusal.
+File layers are scoped before source import and restored after rendering.
+-c and --config_file require standard mode while their certified provenance
+contract remains open. Class/constructor camera defaults override global -c.
 -s saves a final PNG. --format selects the output explicitly; -i conflicts
 with an explicit format other than GIF (or transparent MOV with -t).
 --video_dir is always a directory. For a previous command that used it as
@@ -91,7 +98,19 @@ def _output_paths(options, source, *, batch=False):
     if name is not None and (name in {".", ".."} or "/" in name or "\\" in name
                              or name.endswith((".", " ")) or any(ord(char) < 32 for char in name)):
         raise ValueError("--file_name must be an output stem without path separators or control characters")
-    root = (Path(directory) if directory is not None else Path("media") / "videos" / Path(source).stem).resolve()
+    configuration = options.get("_configuration")
+    configured = {} if configuration is None else configuration["values"].get("directories", {})
+    has_directory_layer = configuration is not None and "directories" in configuration["overrides"]
+    root = (Path(directory) if directory is not None else Path(configured["output"]) if has_directory_layer
+            else Path("media") / "videos" / Path(source).stem).resolve()
+    if configured.get("mirror_module_path"):
+        path = Path(source).resolve()
+        prefix = configured.get("removed_mirror_prefix")
+        try:
+            mirrored = path.relative_to(Path(prefix).resolve()) if prefix else Path(path.stem)
+        except ValueError:
+            mirrored = Path(path.stem)
+        root = (root / str(mirrored).lstrip("_")).with_suffix("")
     # Preserve the leaf spelling so no-clobber checks still see a symlink.
     path = None if exact is None else Path(exact).absolute()
     if path is not None:
@@ -271,6 +290,7 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
         positionals, options, width, height, fps, threads = native._portal_cli_render_arguments(parser_args)
         options = select_still_format(options, native_options, still)
         options.update(video_options)
+        configuration, width, height, fps = resolve_render_configuration(native, options, width, height, fps)
         output_options = _output_overrides(options)
         if parallel:
             if "--threads" not in native_options:
@@ -343,9 +363,10 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
         if parallel:
             from .parallel_discovery import discovery_source
             loading = discovery_source(source_path, working_directory=invocation_directory,
-                                       job_timeout=parallel.get("job_timeout"))
+                                       job_timeout=parallel.get("job_timeout"),
+                                       **({} if configuration is None else {"configuration": configuration}))
         else:
-            loading = SceneSource(source_path, native.Scene)
+            loading = SceneSource(source_path, native.Scene, configuration=configuration)
         with (redirect, recording_effects(bool(options.get("reproducible")) and not parallel), loading as loaded):
             scenes = loaded.scenes
             names = sorted(scenes)
@@ -382,6 +403,7 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                     **({"save_last_frame": True} if paired else {}),
                     **({} if selection is None else {"animation_range": selection}),
                     **({} if not output_options else {"_output_options": output_options}),
+                    **({} if configuration is None else {"_configuration": configuration}),
                     **certification_options,
                     **recovery,
                     on_result=None if options.get("quiet") else lambda outcome: print(

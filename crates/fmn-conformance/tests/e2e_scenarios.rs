@@ -3604,6 +3604,13 @@ fn python_scene_console_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErro
     Ok(RunOutcome::ok().with_counter("console_checks", checks))
 }
 
+fn python_reference_render_flags_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let checks = manimlib::run_portal_gauntlet_reference_flags()
+        .map_err(|error| fail(format!("Python Reference render flags: {error}")))?;
+    ctx.event(LogEvent::new("e2e.python.reference_flags").field("checks", checks));
+    Ok(RunOutcome::ok().with_counter("reference_flag_checks", checks))
+}
+
 /// Authored Surface hooks (fm-5wq.13): subclasses of the stock solids
 /// sample their authored `uv_func` and dispatch `init_points` once at
 /// construction, and render the same bytes as the equivalent
@@ -9253,6 +9260,20 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         vec![LogExpect::span_present(
             "e2e.python.scene_console",
             vec![FieldPred::u64_eq("checks", 7)],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.python_reference_render_flags.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_reference_render_flags_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("reference_flag_checks", 14),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.reference_flags",
+            vec![FieldPred::u64_eq("checks", 14)],
         )],
     ));
     specs.push(spec(

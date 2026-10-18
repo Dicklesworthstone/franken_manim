@@ -10,7 +10,7 @@
 use crate::svg_parser;
 pub use crate::svg_parser::{
     DEFAULT_SVG_TOLERANCE, LineCap, LineJoin, Paint, SvgError, SvgLimits, SvgShape, SvgStyle,
-    emit_path_data, emit_svg,
+    emit_path_data, emit_svg, named_color,
 };
 
 const UNSUPPORTED_DECLARATION: &str = concat!(

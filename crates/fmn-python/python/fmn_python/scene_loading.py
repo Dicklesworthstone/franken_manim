@@ -16,6 +16,7 @@ import importlib
 import importlib.abc
 import importlib.machinery
 import importlib.util
+import json
 import os
 import sys
 import threading
@@ -33,6 +34,89 @@ _MISSING = object()
 # Exceeding either budget disables provenance capture, not Python execution.
 _MAX_CAPTURED_SOURCES = 4096
 _MAX_CAPTURED_SOURCE_BYTES = 64 * 1024 * 1024
+_MAX_CONFIG_BYTES = 1024 * 1024
+_CONFIG_BOUND_AT_IMPORT = frozenset({
+    "vmobject", "mobject", "text", "tex", "sizes", "colors", "key_bindings",
+    "window", "embed", "determinism", "render", "log_level", "universal_import_line",
+    "ignore_manimlib_modules_on_reload",
+})
+
+
+def resolve_render_configuration(native, options, width, height, fps):
+    """Freeze file layers before source effects; workers receive values, not paths."""
+    explicit, color = options.get("config_file"), options.get("color")
+    if options.get("reproducible"):
+        if explicit is not None or color is not None:
+            raise RuntimeError(
+                "CAPABILITY: --config_file and --color require a standard render; "
+                "certified configuration-file/color provenance is not connected"
+            )
+        # Preserve the existing audited camera-file reads in certified scenes.
+        # C4 file-layer ownership is tracked separately from these CLI options.
+        return None, width, height, fps
+    if explicit is not None and (not isinstance(explicit, str) or not explicit or "\0" in explicit):
+        raise ValueError("--config_file requires a nonempty path without NUL")
+    custom = Path("custom_config.yml")
+    if explicit is None and color is None and not custom.is_file():
+        return None, width, height, fps
+    resolver = getattr(native, "_resolved_portal_config", None)
+    if not callable(resolver):
+        raise RuntimeError("CAPABILITY: native configuration-file resolution is unavailable")
+
+    def read(path):
+        from .batch_checkpoint import _open_regular
+        path = path.resolve()
+        with _open_regular(path) as stream:
+            if os.fstat(stream.fileno()).st_size > _MAX_CONFIG_BYTES:
+                raise ValueError(f"configuration {path} exceeds the 1 MiB budget")
+            data = stream.read(_MAX_CONFIG_BYTES + 1)
+        if len(data) > _MAX_CONFIG_BYTES:
+            raise ValueError(f"configuration {path} exceeds the 1 MiB budget")
+        return data.decode("utf-8")
+
+    custom_text = read(custom) if custom.is_file() else None
+    explicit_text = read(Path(explicit)) if explicit is not None else None
+    configuration = json.loads(json.dumps(resolver(custom_text, explicit_text), allow_nan=False))
+    values = configuration["values"]
+    unsupported = sorted(set(configuration["explicit_overrides"]).intersection(_CONFIG_BOUND_AT_IMPORT))
+    if unsupported:
+        raise RuntimeError("CAPABILITY: --config_file cannot rebind portal defaults for "
+                           + ", ".join(unsupported)
+                           + "; camera, resolution_options, directories, file_writer, scene and cache are supported")
+    camera = values["camera"]
+    if not options.get("_resolution_explicit"):
+        selected = options.get("_quality")
+        width, height = (values["resolution_options"][selected] if selected else camera["resolution"])
+    camera["resolution"] = [width, height]
+    if fps is not None:
+        camera["fps"] = fps
+    if color is not None:
+        camera["background_color"] = native._portal_cli_color(color)
+    if options.get("transparent"):
+        camera["background_opacity"] = 0.0
+    directories = values["directories"]
+    for key, subdir in directories.get("subdirs", {}).items():
+        directories[key] = str((Path(directories.get("base", "")) / subdir).resolve())
+    if directories.get("cache"):
+        # Keep links and parent components visible to the cache owner's path
+        # checks while anchoring the configured root before authored chdir.
+        directories["cache"] = str(Path.cwd() / os.path.expanduser(directories["cache"]))
+    writer = values.get("file_writer", {})
+    executable = writer.get("ffmpeg_bin")
+    if executable and Path(executable).name != executable:
+        writer["ffmpeg_bin"] = str(Path(executable).resolve())
+    options["_configuration"] = configuration
+    for warning in configuration.get("warnings", ()):
+        print("fmn-python: configuration warning: " + warning, file=sys.stderr)
+    return configuration, width, height, fps
+
+
+def _merge_configuration(target, source):
+    for key, value in source.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            _merge_configuration(target[key], value)
+        else:
+            target[key] = value
 
 
 def _origin(module: Any) -> Path | None:
@@ -155,6 +239,7 @@ class SceneSource:
         self, source: str | Path, scene_type: type, *,
         source_inputs: Mapping[str | Path, str] | None = None,
         entry_digest: str | None = None,
+        configuration: dict | None = None,
     ) -> None:
         self.path = Path(source).resolve()
         if self.path.suffix.lower() not in (".py", ".pyw"):
@@ -164,6 +249,10 @@ class SceneSource:
         if not isinstance(scene_type, type):
             raise TypeError("scene_type must be a Scene class")
         self.scene_type = scene_type
+        self._configuration = (None if configuration is None else
+                               json.loads(json.dumps(configuration, allow_nan=False)))
+        self._configuration_native = None
+        self._configuration_snapshots = []
         # Unlike source_inputs, this pins only the entry point: ordinary local
         # and lazy helper imports remain allowed. Check the exact compilation
         # bytes BEFORE authored module code executes, not a later disk read.
@@ -401,6 +490,7 @@ class SceneSource:
         self._entered = self._active = True
         self._owner_thread = threading.get_ident()
         try:
+            self._install_configuration()
             self._prepare()
             self.module = self._load()
             self.scenes = {
@@ -445,9 +535,65 @@ class SceneSource:
                         del sys.path[index]
                         break
         finally:
-            self._active = False
-            _SOURCE_OWNER.release()
+            try:
+                self._restore_configuration()
+            finally:
+                self._active = False
+                _SOURCE_OWNER.release()
         return False
+
+    def _install_configuration(self):
+        if self._configuration is None:
+            return
+        native = importlib.import_module("manimlib")
+        live = vars(native).get("manim_config")
+        if not isinstance(live, dict):
+            raise RuntimeError("CAPABILITY: scene-visible native configuration is unavailable")
+        self._configuration_native = native
+        self._configuration_live = live
+        self._configuration_module = sys.modules.get("manimlib.config")
+        self._configuration_module_value = (None if self._configuration_module is None else
+                                            vars(self._configuration_module).get("manim_config", _MISSING))
+        self._previous_configuration = vars(native).get("_portal_cli_configuration", _MISSING)
+        seen = set()
+
+        def remember(mapping):
+            if id(mapping) in seen:
+                return
+            seen.add(id(mapping))
+            self._configuration_snapshots.append((mapping, dict(mapping)))
+            for value in mapping.values():
+                if isinstance(value, dict):
+                    remember(value)
+
+        remember(live)
+        values = self._configuration["values"]
+        values["camera"]["resolution"] = tuple(values["camera"]["resolution"])
+        native._portal_cli_configuration = self._configuration
+        _merge_configuration(live, {key: value for key, value in self._configuration["overrides"].items()
+                                    if key not in _CONFIG_BOUND_AT_IMPORT})
+        _merge_configuration(live, {key: values[key] for key in (
+            "camera", "resolution_options", "directories", "file_writer", "scene", "cache", "log_level"
+        ) if key in values})
+
+    def _restore_configuration(self):
+        for mapping, original in reversed(self._configuration_snapshots):
+            mapping.clear()
+            mapping.update(original)
+        if self._configuration_native is not None:
+            native = self._configuration_native
+            native.manim_config = self._configuration_live
+            if self._configuration_module is not None:
+                if self._configuration_module_value is _MISSING:
+                    vars(self._configuration_module).pop("manim_config", None)
+                else:
+                    self._configuration_module.manim_config = self._configuration_module_value
+            if self._previous_configuration is _MISSING:
+                vars(native).pop("_portal_cli_configuration", None)
+            else:
+                native._portal_cli_configuration = self._previous_configuration
+        self._configuration_snapshots.clear()
+        self._configuration_native = None
 
     @property
     def sources(self) -> dict[str, bytes]:

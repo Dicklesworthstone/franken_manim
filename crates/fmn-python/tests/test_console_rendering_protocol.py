@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+from copy import deepcopy
 import hashlib
 import importlib
 import io
@@ -30,6 +31,29 @@ console = importlib.import_module(PACKAGE + ".console_rendering")
 def native_fixture():
     native = ModuleType("manimlib")
     native.instances, native.events = [], []
+    native.manim_config = {"camera": {"resolution": (1920, 1080), "fps": 30,
+                                    "background_color": "#333333", "background_opacity": 1.0}}
+    native.configuration = {"values": {
+        **deepcopy(native.manim_config),
+        "resolution_options": {"low": (854, 480), "med": (1280, 720), "high": (1920, 1080), "4k": (3840, 2160)},
+        "directories": {"base": "", "subdirs": {"output": "videos", "raster_images": "images"}},
+        "file_writer": {}, "scene": {},
+    }, "overrides": {}, "explicit_overrides": {}, "warnings": []}
+    native.config_documents = []
+
+    def resolve_config(custom, explicit):
+        # Protocol data returned by the typed native reader, not another YAML parser.
+        native.config_documents.append((custom, explicit))
+        return deepcopy(native.configuration)
+
+    def resolve_color(value):
+        colors = {"red": "#FF0000", "blue": "#0000FF", "#abc": "#AABBCC"}
+        if value not in colors:
+            raise ValueError("invalid color")
+        return colors[value]
+
+    native._resolved_portal_config = resolve_config
+    native._portal_cli_color = resolve_color
 
     class EndScene(Exception):
         pass
@@ -41,6 +65,7 @@ def native_fixture():
         random_seed = 0
         start_error = finish_error = abort_error = None
         writer_options = {}
+        default_camera_config = {}
         fail_provenance = False
 
         def __init__(self):
@@ -48,14 +73,20 @@ def native_fixture():
             native.instances.append(self)
             self.events = []
             self.frame = object()
-            self.dimensions = (12, 8)
+            configured = (dict(native.manim_config["camera"])
+                          if getattr(native, "_portal_cli_configuration", None) is not None else {})
+            configured.update(self.default_camera_config)
+            self.dimensions = tuple(configured.get("resolution", (12, 8)))
+            background = configured.get("background_color", "#333333")
             self.camera = SimpleNamespace(
-                frame=self.frame, fps=30,
-                background_rgba=[0.2, 0.2, 0.2, 1.0],
+                frame=self.frame, fps=configured.get("fps", 30),
+                background_rgba=[*[int(background[index:index + 2], 16) / 255 for index in (1, 3, 5)],
+                                 configured.get("background_opacity", 1.0)],
                 _core=SimpleNamespace(set_pixel_shape=self.set_pixel_shape),
                 get_pixel_shape=lambda: self.dimensions,
             )
-            self.file_writer = SimpleNamespace(**self.writer_options)
+            self.file_writer = SimpleNamespace(**{
+                **(native.manim_config.get("file_writer", {}) if configured else {}), **self.writer_options})
             self.active = self.published = False
             self._render_audio_inputs = []
 
@@ -156,6 +187,160 @@ class ConsoleRenderingProtocol(unittest.TestCase):
 
     def render(self, *extra):
         return self.invoke("--robot", str(self.source), "--resolution", "96x54", "--fps", "8", "--threads", "4", *extra)
+
+    def config_file(self, text="camera:\n  fps: 24\n", name="selected.yml"):
+        path = self.root / name
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_configuration_is_live_before_import_and_restores_nested_identity(self):
+        original = self.native.manim_config
+        camera = original["camera"]
+        saved = deepcopy(original)
+        self.native.configuration["values"]["camera"].update(fps=24, background_color="#112233")
+        self.native.configuration["overrides"] = {"authored": {"answer": 42}}
+        self.source.write_text(
+            "from manimlib import Scene, manim_config\n"
+            "assert manim_config['camera']['fps'] == 24\n"
+            "assert manim_config['authored']['answer'] == 42\n"
+            "manim_config['camera']['background_color'] = '#ABCDEF'\n"
+            "class Hello(Scene):\n"
+            "    def construct(self):\n"
+            "        assert self.camera.fps == 24\n"
+            "        assert manim_config['camera']['background_color'] == '#ABCDEF'\n"
+        )
+        code, report, _, _ = self.invoke("--robot", str(self.source), "--config_file", str(self.config_file()))
+        self.assertEqual(code, 0, report)
+        self.assertEqual(report["fps"], 24)
+        self.assertEqual(self.native.instances[0].camera.background_rgba[:3], [171 / 255, 205 / 255, 239 / 255])
+        self.assertIs(self.native.manim_config, original)
+        self.assertIs(original["camera"], camera)
+        self.assertEqual(original, saved)
+        self.assertNotIn("_portal_cli_configuration", vars(self.native))
+
+    def test_configured_quality_and_fps_reach_output_and_explicit_values_win(self):
+        self.native.configuration["values"]["camera"].update(resolution=(180, 100), fps=24)
+        self.native.configuration["values"]["resolution_options"]["low"] = (60, 40)
+        path = self.config_file()
+        code, report, _, _ = self.invoke("--robot", str(self.source), "--config_file", str(path), "-l")
+        self.assertEqual(code, 0, report)
+        self.assertEqual((report["resolution"], report["fps"]), ([60, 40], 24))
+        code, report, _, _ = self.render("--config_file", str(path), "-l", "--output", "explicit.y4m")
+        self.assertEqual(code, 0, report)
+        self.assertEqual((report["resolution"], report["fps"]), ([96, 54], 8))
+
+    def test_custom_and_explicit_documents_use_the_native_layer_owner(self):
+        custom = "camera:\n  background_color: '#112233'\n"
+        explicit = "camera:\n  fps: 24\n"
+        self.config_file(custom, "custom_config.yml")
+        path = self.config_file(explicit)
+        self.assertEqual(self.render("--config_file", str(path))[0], 0)
+        self.assertEqual(self.native.config_documents, [(custom, explicit)])
+
+    def test_css_color_is_applied_before_import_and_class_override_still_wins(self):
+        self.source.write_text(
+            "from manimlib import Scene, manim_config\n"
+            "assert manim_config['camera']['background_color'] == '#FF0000'\n"
+            "class Hello(Scene):\n"
+            "    default_camera_config = dict(background_color='#0000FF')\n"
+        )
+        code, report, _, _ = self.render("-c", "red")
+        self.assertEqual(code, 0, report)
+        self.assertEqual(self.native.instances[0].camera.background_rgba, [0.0, 0.0, 1.0, 1.0])
+        self.assertEqual(self.native.manim_config["camera"]["background_color"], "#333333")
+
+    def test_color_transparency_and_named_batch_share_the_configuration_scope(self):
+        self.source.write_text(
+            "from manimlib import Scene, manim_config\n"
+            "assert manim_config['camera']['background_color'] == '#AABBCC'\n"
+            "class First(Scene): pass\nclass Second(Scene): pass\n"
+        )
+        code, report, _, _ = self.render("Second", "First", "--color", "#abc", "-t", "--format", "png")
+        self.assertEqual(code, 0, report)
+        self.assertEqual(len(self.native.instances), 2)
+        for scene in self.native.instances:
+            self.assertEqual(scene.camera.background_rgba, [170 / 255, 187 / 255, 204 / 255, 0.0])
+        self.assertEqual(self.native.manim_config["camera"]["background_opacity"], 1.0)
+
+    def test_configured_output_and_asset_directories_are_frozen_before_source_chdir(self):
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        directories = {"base": "configured", "subdirs": {"output": "movies", "raster_images": "art"}}
+        self.native.configuration["values"]["directories"] = deepcopy(directories)
+        self.native.configuration["overrides"] = {"directories": directories}
+        self.source.write_text(
+            "from manimlib import Scene, manim_config\nimport os\n"
+            f"assert manim_config['directories']['raster_images'] == {str(self.root / 'configured/art')!r}\n"
+            f"os.chdir({str(elsewhere)!r})\nclass Hello(Scene): pass\n"
+        )
+        code, report, _, _ = self.render("--config_file", str(self.config_file()), "--format", "png")
+        self.assertEqual(code, 0, report)
+        self.assertEqual(Path(report["destination"]), self.root / "configured/movies/Hello.png")
+
+    def test_configured_writer_executable_freezes_before_source_chdir(self):
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+        self.native.configuration["values"]["file_writer"] = {"ffmpeg_bin": "tools/decoder"}
+        self.source.write_text(f"from manimlib import Scene\nimport os\nos.chdir({str(elsewhere)!r})\nclass Hello(Scene): pass\n")
+        code, report, _, _ = self.render("--config_file", str(self.config_file()), "--format", "wav")
+        self.assertEqual(code, 0, report)
+        self.assertEqual(self.native.instances[0].file_writer.ffmpeg_bin, str(self.root / "tools/decoder"))
+
+    def test_invalid_configuration_inputs_refuse_before_source_effects(self):
+        self.source.write_text("raise AssertionError('must not execute source')\n")
+        oversized = self.root / "oversized.yml"
+        oversized.write_bytes(b"x" * (1024 * 1024 + 1))
+        invalid_utf8 = self.root / "invalid.yml"
+        invalid_utf8.write_bytes(b"\xff")
+        paths = [self.root / "missing.yml", self.root, oversized, invalid_utf8]
+        if hasattr(os, "mkfifo"):
+            fifo = self.root / "pipe.yml"
+            os.mkfifo(fifo)
+            paths.append(fifo)
+        for path in paths:
+            with self.subTest(path=path):
+                code, report, _, _ = self.render("--config_file", str(path))
+                self.assertEqual(code, 2, report)
+        self.assertEqual(self.native.instances, [])
+        self.assertEqual(self.native.config_documents, [])
+
+    def test_invalid_color_and_unconnected_config_sections_refuse_before_source(self):
+        self.source.write_text("raise AssertionError('must not execute source')\n")
+        self.assertEqual(self.render("-c", "not-a-color")[0], 2)
+        self.native.configuration["explicit_overrides"] = {"text": {"font_size": 80}}
+        code, report, _, _ = self.render("--config_file", str(self.config_file("text:\n  font_size: 80\n")))
+        self.assertEqual(code, 4, report)
+        self.assertIn("text", report["message"])
+        self.assertEqual(self.native.instances, [])
+
+    def test_new_configuration_flags_refuse_unaudited_certification_before_source(self):
+        self.source.write_text("raise AssertionError('must not execute source')\n")
+        for options in (("-c", "red"), ("--config_file", "missing.yml")):
+            with self.subTest(options=options):
+                code, report, _, _ = self.render("--reproducible", *options)
+                self.assertEqual(code, 4, report)
+                self.assertIn("provenance", report["message"])
+        self.assertEqual(self.native.config_documents, [])
+
+    def test_option_looking_configuration_filename_remains_a_value(self):
+        path = self.config_file(name="-s")
+        code, report, _, _ = self.render("--config_file", path.name, "--format", "y4m")
+        self.assertEqual(code, 0, report)
+        self.assertEqual(report["format"], "y4m")
+
+    def test_configuration_restores_when_authored_constructor_raises(self):
+        original = deepcopy(self.native.manim_config)
+        self.source.write_text(
+            "from manimlib import Scene, manim_config\n"
+            "class Hello(Scene):\n"
+            "    def __init__(self):\n"
+            "        manim_config['camera']['fps'] = 99\n"
+            "        raise KeyboardInterrupt()\n"
+        )
+        code, _, _, _ = self.render("-c", "red")
+        self.assertEqual(code, 130)
+        self.assertEqual(self.native.manim_config, original)
+        self.assertNotIn("_portal_cli_configuration", vars(self.native))
 
     def test_audio_decoder_path_reaches_wav_writer(self):
         code, report, _, _ = self.render("--format", "wav", "--ffmpeg_bin", "tools/decoder with spaces")

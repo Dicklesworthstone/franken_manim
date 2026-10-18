@@ -15533,6 +15533,7 @@ class Scene(_SceneCore):
     def __init__(self, *args, **kwargs):
         self.args = args
         self.kwargs = kwargs
+        scene_defaults = _portal_configuration_section("scene")
         # Reference Scene.__init__: deterministic scenes are the default.
         # The compatibility portal seeds the two RNG modules source-unedited
         # scenes actually call; engine-owned randomness remains Marionette's
@@ -15584,7 +15585,7 @@ class Scene(_SceneCore):
         self.presenter_mode = bool(kwargs.get("presenter_mode", False))
         self.hold_on_wait = self.presenter_mode
         self.preview_while_skipping = bool(
-            kwargs.get("preview_while_skipping", True)
+            kwargs.get("preview_while_skipping", scene_defaults.get("preview_while_skipping", True))
         )
         self.quit_interaction = False
         self.skip_animations = bool(kwargs.get("skip_animations", False))
@@ -15597,15 +15598,16 @@ class Scene(_SceneCore):
         if self.start_at_animation_number is not None:
             self.skip_animations = True
         self.show_animation_progress = bool(
-            kwargs.get("show_animation_progress", False)
+            kwargs.get("show_animation_progress", scene_defaults.get("show_animation_progress", False))
         )
         self.always_update_mobjects = bool(
             kwargs.get("always_update_mobjects", False)
         )
         self.default_wait_time = float(
-            kwargs.get("default_wait_time", type(self).default_wait_time)
+            kwargs.get("default_wait_time", scene_defaults.get("default_wait_time", type(self).default_wait_time)
+                       if type(self).default_wait_time == Scene.default_wait_time else type(self).default_wait_time)
         )
-        self.leave_progress_bars = bool(kwargs.get("leave_progress_bars", False))
+        self.leave_progress_bars = bool(kwargs.get("leave_progress_bars", scene_defaults.get("leave_progress_bars", False)))
         # Reference Scene.__init__ merge: manim_config.camera (the pinned
         # defaults plus the cwd custom_config.yml, resolved natively), then
         # class default_camera_config, then the constructor camera_config.
@@ -15619,20 +15621,15 @@ class Scene(_SceneCore):
         merged.update(type(self).default_camera_config)
         merged.update(camera_config or {})
         self.camera_config = merged
-        # Reference Scene.__init__ merge: class default_file_writer_config,
-        # then constructor file_writer_config. SceneFileWriter records
-        # knobs without mkdir or ffmpeg.
+        # Reference order: configured writer defaults, class defaults, then
+        # constructor input. This records knobs without output I/O.
         file_writer_config = kwargs.get("file_writer_config", None)
-        if file_writer_config is None:
-            self.file_writer_config = dict(
-                type(self).default_file_writer_config
-            )
-        elif not isinstance(file_writer_config, dict):
+        if file_writer_config is not None and not isinstance(file_writer_config, dict):
             raise TypeError("Scene file_writer_config must be a dict")
-        else:
-            merged = dict(type(self).default_file_writer_config)
-            merged.update(file_writer_config)
-            self.file_writer_config = merged
+        merged = _portal_configuration_section("file_writer")
+        merged.update(type(self).default_file_writer_config)
+        merged.update(file_writer_config or {})
+        self.file_writer_config = merged
         self.file_writer = SceneFileWriter(self, **self.file_writer_config)
 
     @property
@@ -24179,11 +24176,18 @@ def _cwd_custom_config():
     return payload.decode("utf-8")
 
 
+def _portal_configuration_section(name):
+    if vars(_FMN_ROOT).get("_portal_cli_configuration") is None:
+        return {}
+    # The scoped live mapping also observes authored import-time edits.
+    return dict(_FMN_ROOT.manim_config.get(name, {}))
+
+
 def _reference_camera_layer():
     # The Reference's first Scene camera layer, manim_config.camera: resolution,
     # fps and background from default_config.yml plus the cwd custom_config.yml,
     # through the same typed native resolution standalone fmn uses.
-    camera = _FMN_ROOT._resolved_camera(_cwd_custom_config())
+    camera = _portal_configuration_section("camera") or _FMN_ROOT._resolved_camera(_cwd_custom_config())
     return {
         "resolution": tuple(camera["resolution"]),
         "fps": int(camera["fps"]),
@@ -24405,7 +24409,8 @@ def _install_config_module():
             ("uhd", "4k"),
         ):
             if getattr(args, flag):
-                return ast.literal_eval(resolution_options[key])
+                value = resolution_options[key]
+                return ast.literal_eval(value) if isinstance(value, str) else tuple(value)
         return None
 
     def load_yaml(file_path):
@@ -24477,6 +24482,7 @@ def _install_config_module():
         # the one native config reader (no PyYAML). The camera section is
         # the layer Scene's camera merges (fm-e661).
         pinned = _pinned_manim_config()
+        resolved = _FMN_ROOT._resolved_portal_config(_cwd_custom_config())["values"]
         sections = {
             name: dict(vars(getattr(pinned, name)))
             for name in ("sizes", "key_bindings", "vmobject", "mobject", "text", "tex")
@@ -24485,9 +24491,10 @@ def _install_config_module():
             {
                 **sections,
                 "colors": dict(pinned.colors),
-                "camera": _reference_camera_layer(),
-                "directories": _FMN_ROOT._resolved_directories(_cwd_custom_config()),
-                "log_level": "INFO",
+                "camera": resolved["camera"],
+                "directories": resolved["directories"],
+                "cache": resolved.get("cache", {}),
+                "log_level": resolved["log_level"],
             }
         )
         update_directory_config(config)
@@ -24593,6 +24600,7 @@ def _portal_cli_help():
                   [--resolution WIDTHxHEIGHT] [--fps FPS] [--threads N]
                   [--video_dir DIRECTORY | --output PATH] [--file_name NAME]
                   [-w | -i] [-l | -m | --hd | --uhd] [-q]
+                  [-c COLOR] [--config_file PATH]
        fmn-python studio SOURCE.py [SCENE]
 
 The wheel renders standard-mode final-state PNGs, PNG sequences, GIF and y4m through the
@@ -24600,9 +24608,10 @@ same retained Lumen CPU renderer and ordered Reel sink as the native front
 door. WAV output mixes Scene.add_sound cues with the native Reel mixer.
 MP4 and MOV use the optional governed ffmpeg encoder and mux that same native
 soundtrack after scene execution. Encoded video is always uncertified.
-Certified output, opener flags, write-all, and Studio
-remain precise capability refusals until their complete contracts are
-connected."""
+Named batches and partial playback use the same native render sessions.
+Configuration files and CSS background colors are supported in standard mode;
+unconnected configuration defaults and interactive file-render flags produce
+named capability refusals."""
 
 
 def _portal_cli_scene_types(source):
@@ -24646,6 +24655,8 @@ def _portal_cli_render_arguments(arguments):
         "video_dir": None,
         "output": None,
         "file_name": None,
+        "config_file": None,
+        "color": None,
         "quiet": False,
         "vcodec": None,
         "pix_fmt": None,
@@ -24657,8 +24668,10 @@ def _portal_cli_render_arguments(arguments):
     value_flags = {name: name[2:] for name in (
         "--format", "--resolution", "--fps", "--threads", "--video_dir",
         "--output", "--file_name", "--vcodec", "--pix_fmt", "--ffmpeg_bin",
+        "--config_file", "--color",
     )}
     value_flags["-r"] = "resolution"
+    value_flags["-c"] = "color"
     quality_flags = {
         "-l": "low", "--low_quality": "low", "-m": "med", "--medium_quality": "med",
         "--hd": "high", "--uhd": "4k",
@@ -24730,6 +24743,8 @@ def _portal_cli_render_arguments(arguments):
         )
     elif gif and values["format"] != ("mov" if values["transparent"] else "gif"):
         raise ValueError("--gif/-i conflicts with the explicit --format")
+    values["_resolution_explicit"] = values["resolution"] is not None
+    values["_quality"] = next((name for name in ("low", "med", "high", "4k") if name in qualities), None)
     if values["resolution"] is None:
         # config.py:get_resolution_from_args checks these booleans in this
         # order, independently of argv order. Quality changes resolution only.

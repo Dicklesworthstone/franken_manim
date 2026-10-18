@@ -7,6 +7,7 @@ substituted. Fixtures and output artifacts are retained for investigation.
 from __future__ import annotations
 
 import contextlib
+from copy import deepcopy
 import hashlib
 import io
 import json
@@ -443,6 +444,67 @@ def reference_flags_and_destinations():
         assert report['fps'] == 24 and report['resolution'] == list(dimensions)
 
 
+def reference_configuration_and_css_color():
+    configured = ROOT / "selected-configuration"
+    configured.mkdir()
+    (configured / "custom_config.yml").write_text("camera:\n  fps: 10\n")
+    config_file = configured / "selected.yml"
+    config_file.write_text(
+        'camera:\n  fps: 12\n  resolution: (120, 80)\n  background_color: "#112233"\n'
+        'resolution_options:\n  low: (60, 40)\n'
+        'directories:\n  base: authored\n  subdirs:\n    output: movies\n    raster_images: art\n'
+        'scene:\n  default_wait_time: 0.25\nauthored:\n  answer: 42\n'
+    )
+    path = source("configured_flags", f'''\
+        assert m.manim_config['camera']['fps'] == 12
+        assert m.manim_config['camera']['background_color'] == '#FF0000'
+        assert m.manim_config['authored']['answer'] == 42
+        assert m.manim_config['directories']['raster_images'] == {str(configured / 'authored/art')!r}
+        class Configured(m.Scene):
+            def construct(self):
+                assert self.default_wait_time == 0.25
+                self.wait()
+        class ClassCamera(m.Scene):
+            default_camera_config = dict(fps=18, background_color='#0000FF')
+            def construct(self):
+                self.wait(0.5)
+    ''')
+    original, camera = m.manim_config, m.manim_config['camera']
+    snapshot = deepcopy(original)
+    flags = ("--config_file", str(config_file), "-c", "red")
+    report = invoke_defaults(path, configured / "red.y4m", "Configured", configured, extra=flags)
+    rate, frames, y, _, v = y4m_rate_and_background(configured / "red.y4m")
+    assert report['fps'] == 12 and rate == '12:1' and frames == 3, (report, rate, frames)
+    assert abs(y - bt709_limited_luma('#FF0000')) <= 2 and v > 200, (y, v)
+    report = invoke_defaults(path, configured / "blue.y4m", "ClassCamera", configured, extra=flags)
+    rate, frames, y, u, _ = y4m_rate_and_background(configured / "blue.y4m")
+    assert report['fps'] == 18 and rate == '18:1' and frames == 9, (report, rate, frames)
+    assert abs(y - bt709_limited_luma('#0000FF')) <= 2 and u > 200, (y, u)
+
+    # The selected preset belongs to the same typed config layer, and the
+    # configured output directory is rooted before authored code is loaded.
+    before_argv, before_cwd, out = sys.argv, Path.cwd(), io.StringIO()
+    try:
+        os.chdir(configured)
+        sys.argv = ['fmn-python', '--robot', str(path), 'Configured', *flags,
+                    '-l', '-s', '-q', '--threads', '1']
+        with contextlib.redirect_stdout(out):
+            code = main()
+    finally:
+        sys.argv = before_argv
+        os.chdir(before_cwd)
+    report = json.loads(out.getvalue())
+    assert code == 0, report
+    output = configured / 'authored/movies/Configured.png'
+    data = output.read_bytes()
+    assert data.startswith(b'\x89PNG\r\n\x1a\n')
+    assert struct.unpack('>II', data[16:24]) == (60, 40)
+    assert report['resolution'] == [60, 40] and report['fps'] == 12
+    assert m.manim_config is original and m.manim_config['camera'] is camera
+    assert original == snapshot, 'configuration escaped its source lifetime'
+    assert '_portal_cli_configuration' not in vars(m)
+
+
 CASES = (
     ordinary_scene_capture, selected_order_and_output,
     write_all_alias_and_thread_repeatability, missing_selection_starts_no_scene,
@@ -450,8 +512,9 @@ CASES = (
     system_exit_zero_is_not_success, batch_fail_fast_and_keep_going,
     batch_interrupt_retains_completed_artifacts, later_destination_preflight_preserves_files,
     wav_output_keeps_native_sample_units, reference_camera_defaults, reference_flags_and_destinations,
+    reference_configuration_and_css_color,
 )
-assert len(CASES) == 13
+assert len(CASES) == 14
 for case in CASES:
     case()
     print("native console acceptance:", case.__name__)

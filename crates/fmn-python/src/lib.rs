@@ -28,7 +28,7 @@ mod portal_audio;
 mod portal_console;
 mod portal_network;
 #[cfg(feature = "gauntlet")]
-pub use portal_console::run_portal_gauntlet_console;
+pub use portal_console::{run_portal_gauntlet_console, run_portal_gauntlet_reference_flags};
 mod portal_playback;
 mod portal_readback;
 mod portal_recording;
@@ -11929,6 +11929,109 @@ fn _resolved_camera<'py>(
     Ok(out)
 }
 
+fn config_value_to_python(py: Python<'_>, value: &fmn_config::yaml::Value) -> PyResult<Py<PyAny>> {
+    use fmn_config::yaml::Value;
+    use pyo3::IntoPyObjectExt;
+    match value {
+        Value::Null => Ok(py.None()),
+        Value::Bool(value) => value.into_py_any(py),
+        Value::Int(value) => value.into_py_any(py),
+        Value::Float(value) => value.into_py_any(py),
+        Value::Str(value) => value.into_py_any(py),
+        Value::Map(entries) => {
+            let out = PyDict::new(py);
+            for (key, value) in entries {
+                out.set_item(key, config_value_to_python(py, value)?)?;
+            }
+            Ok(out.into_any().unbind())
+        }
+    }
+}
+
+/// Resolve frozen console documents with the one native YAML reader. Workers
+/// receive complete values and authored overrides as data before source import.
+#[pyfunction]
+#[pyo3(signature = (custom_config = None, explicit_config = None))]
+fn _resolved_portal_config<'py>(
+    py: Python<'py>,
+    custom_config: Option<&str>,
+    explicit_config: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let layers: Vec<_> = [
+        ("custom_config.yml", custom_config),
+        ("--config_file", explicit_config),
+    ]
+    .into_iter()
+    .filter_map(|(name, text)| text.map(|text| fmn_config::config::Layer { name, text }))
+    .collect();
+    let resolved = fmn_config::Config::resolve(&layers, None)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let values = config_value_to_python(py, &resolved.config.raw)?
+        .into_bound(py)
+        .cast_into::<PyDict>()?;
+    let camera = values
+        .get_item("camera")?
+        .ok_or_else(|| PyValueError::new_err("resolved camera configuration is absent"))?
+        .cast_into::<PyDict>()?;
+    camera.set_item("resolution", resolved.config.camera.resolution)?;
+    camera.set_item(
+        "background_color",
+        _portal_cli_color(&resolved.config.camera.background_color)
+            .map_err(|error| PyValueError::new_err(format!("camera.background_color: {error}")))?,
+    )?;
+    let resolutions = PyDict::new(py);
+    resolutions.set_item("low", resolved.config.resolution_options.low)?;
+    resolutions.set_item("med", resolved.config.resolution_options.med)?;
+    resolutions.set_item("high", resolved.config.resolution_options.high)?;
+    resolutions.set_item("4k", resolved.config.resolution_options.uhd)?;
+    values.set_item("resolution_options", resolutions)?;
+    let mut overrides = fmn_config::yaml::Value::Map(Vec::new());
+    let mut explicit_overrides = fmn_config::yaml::Value::Map(Vec::new());
+    for layer in &layers {
+        let (document, _) = fmn_config::yaml::parse(layer.text)
+            .map_err(|error| PyValueError::new_err(format!("{}: {error}", layer.name)))?;
+        if layer.name == "--config_file" {
+            explicit_overrides = document.clone();
+        }
+        overrides = fmn_config::yaml::merge(overrides, document);
+    }
+    let out = PyDict::new(py);
+    out.set_item("values", values)?;
+    out.set_item("overrides", config_value_to_python(py, &overrides)?)?;
+    out.set_item(
+        "explicit_overrides",
+        config_value_to_python(py, &explicit_overrides)?,
+    )?;
+    out.set_item(
+        "warnings",
+        resolved
+            .warnings
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+    )?;
+    Ok(out)
+}
+
+/// Reference CLI color spelling over SVG's keyword table and core hex parsing.
+#[pyfunction]
+fn _portal_cli_color(value: &str) -> PyResult<String> {
+    if value.len() > 128 {
+        return Err(PyValueError::new_err("--color exceeds 128 UTF-8 bytes"));
+    }
+    let value = value.trim();
+    let color = if value.starts_with('#') {
+        fmn_core::color::Srgb::from_hex(value).ok()
+    } else {
+        fmn_library::svg::named_color(value)
+    };
+    color.map(fmn_core::color::Srgb::to_hex).ok_or_else(|| {
+        PyValueError::new_err(format!(
+            "invalid --color {value:?}; use a CSS color name, #RGB, or #RRGGBB"
+        ))
+    })
+}
+
 // CPython's `subtype_traverse` skips visiting an instance's heap type when
 // the nearest non-Python base is itself a heap type with a traverse, trusting
 // that base to visit `Py_TYPE(self)`: since CPython 3.9, heap types visit
@@ -12052,6 +12155,8 @@ fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<(
     module.add_function(wrap_pyfunction!(_composition_intervals, module)?)?;
     module.add_function(wrap_pyfunction!(_resolved_directories, module)?)?;
     module.add_function(wrap_pyfunction!(_resolved_camera, module)?)?;
+    module.add_function(wrap_pyfunction!(_resolved_portal_config, module)?)?;
+    module.add_function(wrap_pyfunction!(_portal_cli_color, module)?)?;
     module.add_function(wrap_pyfunction!(
         portal_assignment::_linear_sum_assignment,
         module

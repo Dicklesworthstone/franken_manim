@@ -81,6 +81,7 @@ fmn-python [--robot] SOURCE.py [SCENE ...] [--format png_sequence|png|gif|y4m|wa
            [--resolution WIDTHxHEIGHT] [--fps FPS] [--threads N]
            [--video_dir DIRECTORY | --output PATH] [--file_name NAME] [--transparent]
            [-w | -i] [-l | -m | --hd | --uhd] [-q]
+           [-c COLOR] [--config_file PATH]
            [--vcodec ENCODER] [--pix_fmt FORMAT] [--ffmpeg_bin PATH]
 ```
 
@@ -113,6 +114,57 @@ rate (30 fps by default). `-r/--resolution WIDTHxHEIGHT` overrides them.
 output, failures and robot receipts remain visible. File renders refuse
 `-p/--presenter_mode`, `-f/--full_screen` and `-e/--embed` with exit 4 and name
 the Studio route.
+
+`-c/--color COLOR` selects the global camera background using CSS color names
+or `#RGB`/`#RRGGBB`. For example, `-c red` means CSS `#FF0000`; scene palette
+constants keep their existing values. The Reference camera precedence remains
+global configuration, then the class's `default_camera_config`, then the
+constructor's `camera_config`. Class and constructor backgrounds therefore
+override `-c`. `-t` supplies a transparent global background.
+
+`--config_file PATH` overlays the current directory's `custom_config.yml` on
+the built-in native defaults. Both files use the existing typed YAML reader;
+the selected file must exist, be a regular UTF-8 file and fit the 1 MiB budget.
+The connected sections are `camera`, `resolution_options`, `directories`,
+`file_writer`, `scene` and `cache`. Camera dimensions, FPS, quality presets,
+scene wait/progress defaults, writer options and asset/output directories
+reach their existing runtime owners. Explicit resolution/FPS flags override
+the file values. Author-defined sections are also visible in `manim_config`.
+Explicit overrides of defaults frozen when the portal is imported, such as
+`text`, `tex`, `vmobject`, `sizes`, colors or logger/window settings, produce
+a named capability refusal instead of silently ignoring the setting.
+
+The configuration is installed before the scene source and its helpers are
+imported and remains active through construction and rendering. The original
+configuration objects and nested mappings are restored after success, failure
+or cancellation. Asset, output, cache and path-like ffmpeg locations are
+anchored before authored code can change the working directory; cache path
+ownership checks still see symlinks and parent components. Named batches,
+parallel discovery/render workers, clip recovery and FMTL export receive the
+same frozen configuration. Checkpoint reuse binds these values, so a changed
+background or configuration cannot reuse completed outputs from the old plan.
+FMTL's existing camera-track capability requirements still apply.
+
+The certified configuration-file/color provenance contract is tracked
+separately; combining `--reproducible` with `--config_file` or `-c` returns a
+precise capability refusal before source execution. Standard rendering accepts
+both flags.
+
+```sh
+fmn-python lesson.py Example --config_file render.yml -c '#112233' -l -s --output example.png
+fmn-python lesson.py First Second --config_file render.yml --workers 2 --format png --video_dir stills
+```
+
+Python typesetting uses the configured `directories.cache` and `cache.max_bytes`
+through the existing native template engines. The default disk ceiling is
+1 GiB. Maintenance runs at the end of the scene lifecycle, respects active pins
+and a nonblocking maintenance lock, and reports storage errors without changing
+rendered ink. `configure_tex_cache(path, max_bytes=0)` selects zero retained
+unpinned disk entries; `enabled=False` detaches persistence without deleting
+stored data. Robot/human typesetting receipts expose the ceiling and maintenance
+attempts, eviction, retained bytes and nonfatal failures. See
+[cache configuration](cache_config_conventions.md) for the store's ownership and
+retention rules.
 
 **Destination migration:** older portal commands used `--video_dir` as an exact
 single-scene destination. Replace that spelling with `--output` to keep the

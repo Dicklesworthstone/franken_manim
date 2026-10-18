@@ -65,7 +65,8 @@ def _render_source_job(job):
         # Capture import-time effects too. The parent does NOT record its
         # orchestration subprocesses as though they were authored scene effects.
         with (recording(reproducible),
-              SceneSource(source, native.Scene, entry_digest=job["source_digest"]) as loaded):
+              SceneSource(source, native.Scene, entry_digest=job["source_digest"],
+                          configuration=options.get("_configuration")) as loaded):
             # SceneSource owns exact compilation bytes. Check those, not a
             # second disk read that could miss an edit during source loading.
             compiled = loaded._source_bytes.get(source)
@@ -145,7 +146,7 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
                          subdivide=False, max_segments=10_000, save_last_frame=False,
                          reproducible=False,
                          _output_options=None, _expected_source_digest=None,
-                         _working_directory=None):
+                         _working_directory=None, _configuration=None):
     """Render explicitly named local Scene classes in bounded fresh processes.
 
     Use this API under ``if __name__ == '__main__':`` in Python scripts. The
@@ -276,6 +277,8 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
         provenance = ParallelProvenance(native, format, destinations, digest)
     options = dict(format=format, resolution=resolution, fps=fps, threads=threads,
                    animation_range=selection, _output_options=_output_options)
+    if _configuration is not None:
+        options["_configuration"] = _configuration
     if reproducible:
         options["reproducible"] = True
     # Keep existing single-artifact checkpoint plans byte-compatible. Only an

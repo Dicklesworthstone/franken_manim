@@ -1106,9 +1106,14 @@ fn parse_rgb_function(inner: &str, line: usize) -> Result<(Srgb, f64), SvgError>
     Ok((Srgb { r, g, b }, a))
 }
 
-/// The CSS/SVG named colors (the full keyword table; sRGB hex values).
-fn named_color(name: &str) -> Option<Srgb> {
-    let hex: u32 = match name {
+/// Look up a CSS/SVG color keyword, independent of scene-library palettes.
+///
+/// Names are ASCII-case-insensitive. The full CSS table is shared by SVG
+/// imports and front-door color options. Unknown names, hex strings, functional
+/// colors, and paint keywords such as `none` and `currentColor` return `None`.
+#[must_use]
+pub fn named_color(name: &str) -> Option<Srgb> {
+    let hex: u32 = match name.to_ascii_lowercase().as_str() {
         "aliceblue" => 0xf0f8ff,
         "antiquewhite" => 0xfaebd7,
         "aqua" => 0x00ffff,
@@ -1283,7 +1288,7 @@ fn parse_color(text: &str, line: usize) -> Result<Option<(Srgb, f64)>, SvgError>
         let (color, alpha) = parse_rgb_function(body, line)?;
         return Ok(Some((color, alpha)));
     }
-    if let Some(color) = named_color(&lower) {
+    if let Some(color) = named_color(t) {
         return Ok(Some((color, 1.0)));
     }
     Err(malformed(line, format!("unknown color {t:?}")))
@@ -2957,6 +2962,29 @@ pub fn emit_svg(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn named_colors_use_css_values_independent_of_scene_palettes() {
+        assert_eq!(named_color("red").unwrap().to_hex(), "#FF0000");
+        assert_eq!(named_color("green").unwrap().to_hex(), "#008000");
+        assert_eq!(named_color("rebeccapurple").unwrap().to_hex(), "#663399");
+    }
+
+    #[test]
+    fn named_color_lookup_is_case_insensitive_and_rejects_non_names() {
+        assert_eq!(named_color("ReBeCcApUrPlE"), named_color("rebeccapurple"));
+        assert_eq!(named_color("DARKGREY"), named_color("darkgray"));
+        for name in [
+            "unknown-color",
+            "none",
+            "transparent",
+            "currentColor",
+            "#abc",
+            "rgb(1,2,3)",
+        ] {
+            assert_eq!(named_color(name), None, "{name}");
+        }
+    }
 
     fn parse(text: &str) -> Result<SvgDocument, SvgError> {
         SvgDocument::parse(text.as_bytes())

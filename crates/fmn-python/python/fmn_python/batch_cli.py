@@ -10,12 +10,12 @@ from .batch_provenance import validate_batch_mode
 from .effect_audit import recording as recording_effects
 from .batch_rendering import BatchRenderError, BatchRenderResult, _error_fields, render_scenes
 from .rendering import _positive_integer
-from .scene_loading import SceneSource
+from .scene_loading import SceneSource, resolve_render_configuration
 from .render_selection import PLAYBACK_HELP, take_playback_options, select_still_format
 
 _VALUE_FLAGS = frozenset({"--format", "--resolution", "--fps", "--threads", "--video_dir",
                           "-r", "--output", "--file_name", "--vcodec", "--pix_fmt", "--ffmpeg_bin",
-                          "-e", "--embed",
+                          "-e", "--embed", "-c", "--color", "--config_file",
                           "-n", "--start_at_animation_number"})
 _BATCH_HELP = """Multi-scene output:
   fmn-python [--robot] SOURCE.py --write_all [--keep-going]
@@ -108,6 +108,7 @@ def try_batch_cli(native: Any, arguments: list[str]) -> int | None:
         remaining, selection, still = take_playback_options(remaining)
         positionals, options, width, height, fps, threads = native._portal_cli_render_arguments(remaining)
         options = select_still_format(options, remaining, still)
+        configuration, width, height, fps = resolve_render_configuration(native, options, width, height, fps)
         if len(positionals) != 1:
             raise ValueError("--write_all accepts SOURCE.py without an individual scene name")
         for name, value in (("width", width), ("height", height), ("fps", fps), ("threads", threads)):
@@ -136,7 +137,7 @@ def try_batch_cli(native: Any, arguments: list[str]) -> int | None:
     phase = "load"
     try:
         with (redirect, recording_effects(bool(options.get("reproducible"))),
-              SceneSource(source_path, native.Scene) as loaded):
+              SceneSource(source_path, native.Scene, configuration=configuration) as loaded):
             discovered = loaded.scenes
             if not discovered:
                 raise ValueError(f"no locally declared Scene classes found in {source}")
@@ -146,6 +147,7 @@ def try_batch_cli(native: Any, arguments: list[str]) -> int | None:
                 format=options["format"], resolution=(width, height), fps=fps, threads=threads,
                 continue_on_error=bool(flags["--keep-going"]), on_result=None if options.get("quiet") else progress,
                 **({} if selection is None else {"animation_range": selection}),
+                **({} if configuration is None else {"_configuration": configuration}),
                 **({"reproducible": True, "sources": lambda: loaded.sources}
                    if options.get("reproducible") else {}),
             )

@@ -13,7 +13,7 @@ from .checkpoint_cli import take_checkpoint_options
 from .console_rendering import _VALUE_FLAGS, _output_overrides, _output_paths, _single_destination
 from .render_selection import take_playback_options
 from .rendering import _positive_integer
-from .scene_loading import SceneSource
+from .scene_loading import SceneSource, resolve_render_configuration
 from .subdivision import SubdividedRenderResult
 from .subdivision_rendering import (
     render_subdivided_scene, take_subdivision_option, validate_subdivided_mode,
@@ -118,6 +118,7 @@ def try_clip_recovery_cli(native, arguments):
         if not selected.isidentifier() or len(selected.encode("utf-8")) > 128:
             raise ValueError("clip recovery scene must be an identifier of at most 128 UTF-8 bytes")
         options.update(video)
+        configuration, width, height, fps = resolve_render_configuration(native, options, width, height, fps)
         output_options = _output_overrides(options)
         validate_subdivided_mode(native, options["format"], reproducible=bool(options.get("reproducible")))
         for name, value in (("width", width), ("height", height), ("fps", fps), ("threads", threads)):
@@ -142,6 +143,8 @@ def try_clip_recovery_cli(native, arguments):
         digest = _digest(source_path)
         source_identity = {"path": str(source_path), "sha256": digest,
                            "scene": selected, "cwd": str(invocation_directory)}
+        if configuration is not None:
+            source_identity["configuration"] = configuration
     except (OSError, TypeError, ValueError, RuntimeError) as error:
         message = _error_fields(error)[1]
         code = 4 if message.startswith("CAPABILITY: ") else 2
@@ -151,7 +154,7 @@ def try_clip_recovery_cli(native, arguments):
     phase = "load"
     try:
         with (redirect_stdout(sys.stderr) if robot else nullcontext(),
-              SceneSource(source_path, native.Scene, entry_digest=digest) as loaded):
+              SceneSource(source_path, native.Scene, entry_digest=digest, configuration=configuration) as loaded):
             if selected not in loaded.scenes:
                 raise ValueError(f"scene {selected!r} was not declared by {source}")
             phase = "render"

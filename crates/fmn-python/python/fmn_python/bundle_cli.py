@@ -16,7 +16,7 @@ from .console_rendering import _tokens, _VALUE_FLAGS, _message, _MAX_SELECTED_SC
 from .batch_cli import _emit_result
 from .checkpoint_cli import CHECKPOINT_HELP, take_checkpoint_options
 from .batch_rendering import BatchRenderError, BatchRenderResult, _error_notes, _name_key, render_scenes
-from .scene_loading import SceneSource
+from .scene_loading import SceneSource, resolve_render_configuration
 
 BUNDLE_HELP = """Portable scene bundles:
   fmn-python [--robot] SOURCE.py [SCENE] --format fmtl
@@ -44,7 +44,8 @@ Audio, partial playback and source certification remain explicit refusals.
 Use the same --resolution for exact replay; camera bundles also record aspect.
 """
 
-_ALLOWED = frozenset({"--format", "--resolution", "-r", "--fps", "--video_dir", "--output", "--file_name"})
+_ALLOWED = frozenset({"--format", "--resolution", "-r", "--fps", "--video_dir", "--output", "--file_name",
+                      "-c", "--color", "--config_file"})
 _ALLOWED_SWITCHES = frozenset({"-l", "--low_quality", "-m", "--medium_quality", "--hd", "--uhd", "-q", "--quiet"})
 
 
@@ -138,6 +139,7 @@ def try_bundle_cli(native, arguments):
         positionals, values, width, height, fps, _threads = native._portal_cli_render_arguments(
             (selectors[:1] if batch else selectors) + parser_options
         )
+        configuration, width, height, fps = resolve_render_configuration(native, values, width, height, fps)
         if width * height > 16_777_216 or (fps is not None and not 1 <= fps <= 240):
             raise ValueError("bundle export requires at most 16M pixels and 1..240 FPS")
         source = str(Path(positionals[0]).resolve())
@@ -155,7 +157,7 @@ def try_bundle_cli(native, arguments):
                 raise NotADirectoryError(str(destination))
         phase = "load"
         redirect = contextlib.redirect_stdout(sys.stderr) if robot else contextlib.nullcontext()
-        with redirect, SceneSource(source, native.Scene) as loaded:
+        with redirect, SceneSource(source, native.Scene, configuration=configuration) as loaded:
             names = sorted(loaded.scenes)
             phase = "select"
             if batch:
@@ -177,6 +179,7 @@ def try_bundle_cli(native, arguments):
                     format="fmtl", resolution=(width, height), fps=fps,
                     bundle_camera=camera, continue_on_error=bool(keep_going),
                     max_jobs=_MAX_SELECTED_SCENES, **recovery,
+                    **({} if configuration is None else {"_configuration": configuration}),
                     on_result=None if values.get("quiet") else lambda outcome: print(
                         f"fmn-python: {outcome.name}: {outcome.status}: {outcome.destination}",
                         file=sys.stderr,

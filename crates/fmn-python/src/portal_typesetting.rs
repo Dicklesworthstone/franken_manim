@@ -13,6 +13,10 @@ fn stats<'py>(py: Python<'py>, engine: &fmn_library::TexEngine) -> PyResult<Boun
     let memory = engine.memory_cache_stats();
     let row = PyDict::new(py);
     row.set_item("persistent", engine.persistent_cache_enabled())?;
+    row.set_item(
+        "persistent_ceiling_bytes",
+        engine.persistent_cache_ceiling(),
+    )?;
     row.set_item("memory_hits", memory.hits)?;
     row.set_item("memory_misses", memory.misses)?;
     row.set_item("memory_entries", memory.entries)?;
@@ -30,6 +34,17 @@ fn stats<'py>(py: Python<'py>, engine: &fmn_library::TexEngine) -> PyResult<Boun
     row.set_item("preflight_active_workers", preflight.active_workers)?;
     row.set_item("preflight_wall_ns", preflight.wall_ns)?;
     row.set_item("pack", engine.pack_content_id())?;
+    let maintenance = engine.cache_maintenance();
+    let retained = PyDict::new(py);
+    retained.set_item("runs", maintenance.runs)?;
+    retained.set_item("evicted_entries", maintenance.evicted_entries)?;
+    retained.set_item("evicted_bytes", maintenance.evicted_bytes)?;
+    retained.set_item("retained_bytes", maintenance.retained_bytes)?;
+    retained.set_item("skipped_lock_held", maintenance.skipped_lock_held)?;
+    retained.set_item("skipped_pinned", maintenance.skipped_pinned)?;
+    retained.set_item("errors", maintenance.errors)?;
+    retained.set_item("last_error", maintenance.last_error)?;
+    row.set_item("maintenance", retained)?;
     Ok(row)
 }
 
@@ -37,10 +52,11 @@ fn stats<'py>(py: Python<'py>, engine: &fmn_library::TexEngine) -> PyResult<Boun
 /// construction failures still surface normally rather than masquerading as
 /// a cache miss. `None` explicitly detaches all three persistent namespaces.
 #[pyfunction]
-#[pyo3(signature = (directory=None))]
+#[pyo3(signature = (directory=None, *, max_bytes=None))]
 fn _configure_tex_cache<'py>(
     py: Python<'py>,
     directory: Option<&str>,
+    max_bytes: Option<u64>,
 ) -> PyResult<Bound<'py, PyDict>> {
     if directory.is_some_and(|value| value.len() > 4096 || value.contains('\0')) {
         return Err(PyValueError::new_err(
@@ -52,11 +68,13 @@ fn _configure_tex_cache<'py>(
     result.set_item("version", 1)?;
     result.set_item("requested", directory.is_some())?;
     result.set_item("directory", directory)?;
+    let max_bytes = max_bytes.unwrap_or(fmn_config::config::DEFAULT_TYPESET_CACHE_MAX_BYTES);
+    result.set_item("max_bytes", max_bytes)?;
     let templates = PyDict::new(py);
     for name in TEMPLATES {
         let row = with_tex_template(name, |engine| {
             let error = engine
-                .configure_host_cache(directory)
+                .configure_host_cache_with_ceiling(directory, max_bytes)
                 .err()
                 .map(|error| error.to_string().chars().take(2048).collect::<String>());
             let row = stats(py, engine)?;
@@ -76,6 +94,19 @@ fn _tex_cache_info(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
         result.set_item(name, with_tex_template(name, |engine| stats(py, engine))?)?;
     }
     Ok(result)
+}
+
+/// The same thread-local template engines own retention. This is called at
+/// scene lifecycle boundaries, never in a per-formula constructor hot path.
+#[pyfunction]
+fn _maintain_tex_cache() -> PyResult<()> {
+    for name in TEMPLATES {
+        with_tex_template(name, |engine| {
+            engine.maintain_cache();
+            Ok(())
+        })?;
+    }
+    Ok(())
 }
 
 const MAX_PREFLIGHT_ITEMS: usize = 4096;
@@ -227,6 +258,7 @@ fn _preflight_tex<'py>(
 pub(super) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(_configure_tex_cache, module)?)?;
     module.add_function(wrap_pyfunction!(_tex_cache_info, module)?)?;
+    module.add_function(wrap_pyfunction!(_maintain_tex_cache, module)?)?;
     module.add_function(wrap_pyfunction!(_preflight_tex, module)?)?;
     Ok(())
 }
@@ -288,13 +320,15 @@ mod tests {
             py.run(source.as_c_str(), Some(globals), Some(globals))
                 .inspect_err(|error| error.print(py))
                 .unwrap();
-            globals
-                .get_item("run_typeset_cache")
-                .unwrap()
-                .unwrap()
-                .call1((module,))
-                .inspect_err(|error| error.print(py))
-                .unwrap();
+            for suite in ["run_typeset_cache", "run_cache_retention_boundaries"] {
+                globals
+                    .get_item(suite)
+                    .unwrap()
+                    .unwrap()
+                    .call1((module,))
+                    .inspect_err(|error| error.print(py))
+                    .unwrap();
+            }
         });
     }
 }

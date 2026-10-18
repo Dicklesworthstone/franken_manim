@@ -212,6 +212,7 @@ def render_scenes(
     checkpoint: os.PathLike[str] | str | None = None,
     resume: bool = False, resume_key: str | None = None,
     _output_options: dict[str, Any] | None = None,
+    _configuration: dict[str, Any] | None = None,
     reproducible: bool = False,
     sources: SourceInputs | None = None,
     runtime_identities: dict[str, str] | None = None,
@@ -362,6 +363,7 @@ def render_scenes(
                 "format": format, "resolution": resolution, "fps": fps,
                 "threads": threads, "animation_range": selection,
                 "output_options": _output_options,
+                **({"configuration": _configuration} if _configuration is not None else {}),
                 **({"save_last_frame": True} if save_last_frame else {}),
                 **({"bundle_camera": bundle_camera, "bundle_limits": limits}
                    if format == "fmtl" else {}),

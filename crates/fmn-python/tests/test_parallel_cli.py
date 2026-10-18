@@ -5,6 +5,7 @@ covered independently by test_process_batch.py with real spawned interpreters.
 """
 import ast
 import contextlib
+from copy import deepcopy
 from functools import partial
 import hashlib
 import os
@@ -24,6 +25,7 @@ from fmn_python.checkpoint_cli import CHECKPOINT_VALUES, take_checkpoint_options
 from fmn_python.parallel_cli_options import PARALLEL_VALUES, take_parallel_options
 from fmn_python.video_cli import VIDEO_VALUE_FLAGS, take_video_options
 from fmn_python.console_rendering import _output_overrides, _output_paths, _single_destination
+from fmn_python.scene_loading import resolve_render_configuration
 
 
 class ParallelOptionsTests(unittest.TestCase):
@@ -63,7 +65,7 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
         case = self
 
         class Source:
-            def __init__(self, path, scene_type):
+            def __init__(self, path, scene_type, *, configuration=None):
                 self._source_bytes = {path: path.read_bytes()}
                 self.sources = {path.name: path.read_bytes()}
                 self.scenes = {"Second": type("Second", (), {}), "First": type("First", (), {})}
@@ -91,7 +93,8 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
             options = {"format": "png", "video_dir": str(case.root / "out"),
                        "reproducible": "--reproducible" in args}
             for flag, name in (("--format", "format"), ("--vcodec", "vcodec"),
-                               ("--pix_fmt", "pix_fmt"), ("--ffmpeg_bin", "ffmpeg_bin")):
+                               ("--pix_fmt", "pix_fmt"), ("--ffmpeg_bin", "ffmpeg_bin"),
+                               ("--config_file", "config_file"), ("-c", "color")):
                 if flag in args:
                     options[name] = args[args.index(flag) + 1]
             threads = int(args[args.index("--threads") + 1]) if "--threads" in args else 8
@@ -109,7 +112,7 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
                                             _portal_prepare_recording_scene=lambda: None,
                                             _CameraCapture=types.SimpleNamespace(prepare_png=lambda: None))
         values = {"--threads", "--format", "--fps", "--resolution", "--video_dir", "--vcodec",
-                  "--pix_fmt", "--ffmpeg_bin", "-n"} | PARALLEL_VALUES | CHECKPOINT_VALUES | VIDEO_VALUE_FLAGS
+                  "--pix_fmt", "--ffmpeg_bin", "-n", "--config_file", "--color", "-c"} | PARALLEL_VALUES | CHECKPOINT_VALUES | VIDEO_VALUE_FLAGS
         self.g = {
             "__name__": "fmn_python._console_contract_test", "__package__": "fmn_python",
             "Any": object, "Path": Path, "os": os, "sys": sys, "contextlib": contextlib,
@@ -126,6 +129,7 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
             "select_still_format": lambda options, args, still: options,
             "_output_overrides": _output_overrides,
             "_output_paths": _output_paths, "_single_destination": _single_destination,
+            "resolve_render_configuration": resolve_render_configuration,
             "_positive_integer": lambda value, name: value,
             "_name_key": lambda name: name.casefold(),
             "validate_batch_mode": validate_batch_mode,
@@ -169,6 +173,33 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
 
     def run_cli(self, *args):
         return self.g["try_render_cli"](self.native, [str(self.source), *args])
+
+    def test_discovery_and_render_jobs_receive_the_same_frozen_configuration(self):
+        config = {"values": {"camera": {"resolution": [120, 80], "fps": 24,
+                                         "background_color": "#333333", "background_opacity": 1.0},
+                              "resolution_options": {},
+                              "directories": {"base": "", "subdirs": {"output": "videos"}},
+                              "file_writer": {}},
+                  "overrides": {}, "explicit_overrides": {}, "warnings": []}
+        path = self.root / "selected.yml"
+        path.write_text("camera:\n  fps: 24\n")
+        documents = []
+        def resolve(custom, explicit):
+            documents.append((custom, explicit))
+            return deepcopy(config)
+        self.native._resolved_portal_config = resolve
+        self.native._portal_cli_color = lambda color: "#FF0000"
+        code = self.run_cli("--write_all", "--workers", "2", "--config_file", str(path), "-c", "red")
+        self.assertEqual(code, 0, self.emitted)
+        self.assertEqual(documents, [(None, "camera:\n  fps: 24\n")])
+        discovery = self.discovery_calls[0][1]["configuration"]
+        rendered = self.calls[0][2]["_configuration"]
+        self.assertEqual(discovery, rendered)
+        self.assertEqual(rendered["values"]["camera"]["background_color"], "#FF0000")
+        self.assertEqual(self.calls[0][2]["resolution"], (120, 80))
+        config["values"]["camera"]["background_color"] = "#0000FF"
+        path.write_text("camera:\n  fps: 60\n")
+        self.assertEqual(rendered["values"]["camera"]["background_color"], "#FF0000")
 
     def test_write_all_selects_parallel_and_preserves_native_output_options(self):
         code = self.run_cli("--write_all", "--workers", "2", "--robot", "--keep-going",

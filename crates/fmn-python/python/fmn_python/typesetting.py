@@ -78,6 +78,24 @@ def _configured_cache_directory(native: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _configured_cache_ceiling(native: Any) -> int | None:
+    config = getattr(native, "manim_config", None)
+    try:
+        return config.get("cache", {}).get("max_bytes") if config is not None else None
+    except (TypeError, AttributeError):
+        return None
+
+
+def _ceiling(value):
+    if value is None:
+        return None  # The native config owns the platform-independent default.
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("typeset cache max_bytes must be an integer")
+    if not 0 <= value <= (1 << 64) - 1:
+        raise ValueError("typeset cache max_bytes must be in 0..=18446744073709551615")
+    return value
+
+
 def _literal(node: ast.AST) -> str | None:
     return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
 
@@ -173,34 +191,45 @@ def install_typesetting(native: Any) -> None:
     if _STATE in g:
         return
     backend, inspect_backend = g["_configure_tex_cache"], g["_tex_cache_info"]
+    maintain_backend = g["_maintain_tex_cache"]
     state = local()
 
-    def configure(directory=None, *, enabled=True):
+    def configuration_key():
+        directory, ceiling = _configured_cache_directory(native), _configured_cache_ceiling(native)
+        # Include types: changing integer 1 to invalid bool True must still
+        # trigger validation, even though Python considers the values equal.
+        return type(directory), directory, type(ceiling), deepcopy(ceiling)
+
+    def configure(directory=None, *, enabled=True, max_bytes=None):
         selected = _directory(directory, enabled)
+        ceiling = _ceiling(max_bytes)
         # Reconfiguration is explicit even when the path is unchanged: after
         # --clear-cache, reopen the new owned-root generation and cold-start
         # the memory front. Ordinary constructors use ensure() and do NOT
         # repeatedly reopen the store or discard its working set.
-        report = backend(selected)
+        report = backend(selected, max_bytes=ceiling)
         state.report = deepcopy(report)
+        state.configuration_key = configuration_key()
         _diagnose(report)
         return deepcopy(report)
 
     def ensure():
-        if hasattr(state, "report"):
+        key = configuration_key()
+        if hasattr(state, "report") and state.configuration_key == key:
             return
         configured = _configured_cache_directory(native)
         try:
-            configure(configured)
+            configure(configured, max_bytes=_configured_cache_ceiling(native))
         except (TypeError, ValueError) as error:
             # configure_tex_cache() refuses a bad explicit path loudly, but a
             # config value (`..`, NUL, over-long) must not fail every Scene and
             # Tex: like any refused root, typeset in memory and say why.
-            report = backend(None)
-            refusal = f"directories.cache {configured!r} refused: {error}"[:2048]
+            report = backend(None, max_bytes=None)
+            refusal = f"typeset cache configuration {configured!r} refused: {error}"[:2048]
             for row in report["templates"].values():
                 row["error"] = refusal
             state.report = deepcopy(report)
+            state.configuration_key = key
             _diagnose(report)
 
     def info():
@@ -274,11 +303,16 @@ def install_typesetting(native: Any) -> None:
         ensure()
         # The static strings are known before setup()/construct() build any
         # Tex, so their layouts run in parallel ahead of the first play().
-        before = inspect_backend()
-        report = static_preflight(self)
-        report["before"], report["after"] = before, inspect_backend()
-        self._fmn_static_tex_preflight = report
-        return previous_lifecycle(self)
+        try:
+            before = inspect_backend()
+            report = static_preflight(self)
+            report["before"], report["after"] = before, inspect_backend()
+            self._fmn_static_tex_preflight = report
+            return previous_lifecycle(self)
+        finally:
+            # Native maintenance records ordinary storage errors and respects
+            # active pins and the nonblocking lock. It never changes scene ink.
+            maintain_backend()
 
     def set_static_preflight(enabled=True):
         if not isinstance(enabled, bool):
@@ -297,6 +331,7 @@ def install_typesetting(native: Any) -> None:
 
 def configure_tex_cache(
     directory: os.PathLike[str] | str | None = None, *, enabled: bool = True,
+    max_bytes: int | None = None,
 ) -> dict[str, Any]:
     """Select the current thread's persistent typeset cache.
 
@@ -306,8 +341,10 @@ def configure_tex_cache(
     Storage failures return a diagnostic receipt with persistent=False; normal
     native typesetting remains available. Repeating this call reopens the root
     generation, useful after clearing the cache. No public class is replaced.
+    max_bytes is the namespace's retention ceiling, enforced after Scene.run;
+    zero evicts every unpinned disk entry, while None uses the native default.
     """
-    return import_module("manimlib")._fmn_configure_tex_cache(directory, enabled=enabled)
+    return import_module("manimlib")._fmn_configure_tex_cache(directory, enabled=enabled, max_bytes=max_bytes)
 
 
 def configure_static_tex_preflight(enabled: bool = True) -> None:
@@ -323,6 +360,8 @@ def configure_static_tex_preflight(enabled: bool = True) -> None:
 
 _RECEIPT_COUNTERS = ("memory_hits", "disk_hits", "layout_computations", "disk_bytes_read",
                      "disk_bytes_written", "disk_rejected", "disk_errors")
+_MAINTENANCE_COUNTERS = ("runs", "evicted_entries", "evicted_bytes", "skipped_lock_held",
+                         "skipped_pinned", "errors")
 
 
 def typesetting_receipt(scene: Any) -> dict[str, Any] | None:
@@ -336,14 +375,29 @@ def typesetting_receipt(scene: Any) -> dict[str, Any] | None:
         return None
     now = import_module("manimlib")._fmn_tex_cache_info()["templates"]
     totals = dict.fromkeys(_RECEIPT_COUNTERS, 0)
+    maintenance = dict.fromkeys(_MAINTENANCE_COUNTERS, 0)
+    retained, errors = [], []
     for name, row in now.items():
         start = report["before"].get(name, {})
         for key in _RECEIPT_COUNTERS:
             totals[key] += int(row.get(key, 0)) - int(start.get(key, 0))
+        current, previous = row.get("maintenance", {}), start.get("maintenance", {})
+        for key in _MAINTENANCE_COUNTERS:
+            maintenance[key] += int(current.get(key, 0)) - int(previous.get(key, 0))
+        if current.get("runs", 0) > previous.get("runs", 0) and current.get("retained_bytes") is not None:
+            retained.append(current["retained_bytes"])
+        if current.get("errors", 0) > previous.get("errors", 0) and current.get("last_error"):
+            errors.append(current["last_error"][:2048])
+    # All template packs share one typeset namespace. Report its largest
+    # observed retained size, not three copies of the same files' bytes.
+    maintenance.update(retained_bytes=max(retained, default=None),
+                       last_error="; ".join(sorted(set(errors)))[:2048] or None)
     after = report["after"].get("default", {})
     binding = now.get("default", {})
     return {
         "persistent": bool(binding.get("persistent")),
+        "persistent_ceiling_bytes": binding.get("persistent_ceiling_bytes"),
+        "maintenance": maintenance,
         # Why the store is not attached (a refused or unavailable root), as
         # the CLI's record names it; None while it is attached.
         "cache_error": binding.get("error") or None,
@@ -374,6 +428,22 @@ def describe_receipt(receipt: dict[str, Any]) -> str:
         text += f", {receipt['rejected']} corrupt entries recomputed"
     if receipt.get("store_errors"):
         text += f", {receipt['store_errors']} cache reads or writes failed (typeset in memory)"
+    if receipt.get("persistent_ceiling_bytes") is not None:
+        text += f", {receipt['persistent_ceiling_bytes']} byte disk ceiling"
+    maintenance = receipt.get("maintenance", {})
+    if maintenance.get("runs"):
+        text += (f"; cache maintenance: {maintenance['runs']} runs, "
+                 f"{maintenance['evicted_entries']} entries evicted ({maintenance['evicted_bytes']} bytes)")
+        if maintenance.get("retained_bytes") is not None:
+            text += f", {maintenance['retained_bytes']} bytes retained"
+        if maintenance.get("skipped_lock_held"):
+            text += f", {maintenance['skipped_lock_held']} maintenance attempts skipped while locked"
+        if maintenance.get("skipped_pinned"):
+            text += f", {maintenance['skipped_pinned']} pinned entries retained"
+    if maintenance.get("errors"):
+        text += f"; {maintenance['errors']} cache maintenance errors"
+        if maintenance.get("last_error"):
+            text += f" ({maintenance['last_error']})"
     preflight = receipt["preflight"]
     if preflight["requests"]:
         text += (f"; preflight {preflight['requests']} static strings on "

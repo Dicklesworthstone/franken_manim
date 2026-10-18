@@ -59,7 +59,8 @@ def _discover_source_job(job):
         from .scene_loading import SceneSource
 
         source = Path(job["source"])
-        with SceneSource(source, native.Scene, entry_digest=job["source_digest"]) as loaded:
+        with SceneSource(source, native.Scene, entry_digest=job["source_digest"],
+                         configuration=job.get("configuration")) as loaded:
             if len(loaded.scenes) > job["max_scenes"]:
                 raise ValueError("scene discovery exceeds its scene-count budget")
             names = tuple(loaded.scenes)
@@ -74,7 +75,7 @@ def _discover_source_job(job):
 
 
 def discover_source_scenes(source, *, working_directory=None, job_timeout=None,
-                           max_scenes=65536):
+                           max_scenes=65536, configuration=None):
     """Import in a fresh worker and return an immutable, data-only inventory.
 
     job_timeout includes interpreter/native startup and source import. A child
@@ -96,6 +97,9 @@ def discover_source_scenes(source, *, working_directory=None, job_timeout=None,
     digest = _entry_digest(path)
     job = {"source": str(path), "source_digest": digest,
            "working_directory": str(cwd), "max_scenes": limit}
+    if configuration is not None:
+        import json
+        job["configuration"] = json.loads(json.dumps(configuration, allow_nan=False))
     rows = run_process_jobs([job], _discover_source_job, workers=1, job_timeout=timeout)
     row = rows[0]
     if row["status"] == "cancelled":

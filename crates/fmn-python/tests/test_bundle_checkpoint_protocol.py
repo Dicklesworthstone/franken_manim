@@ -82,6 +82,7 @@ class BundleCheckpointProtocol(unittest.TestCase):
                         {"bundle_limits": {"max_frames": 10}},
                         {"bundle_limits": {"max_capture_bytes": 100_000}},
                         {"bundle_limits": {"max_output_bytes": 100_000}},
+                        {"_configuration": {"values": {"camera": {"background_color": "#112233"}}}},
                         {"resume_key": "changed-inputs"}):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 self.run_batch(resume=True, **changes)
