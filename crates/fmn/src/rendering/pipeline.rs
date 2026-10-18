@@ -420,7 +420,7 @@ pub struct NativeFramePipeline {
 }
 
 enum NativeCompiler {
-    Vector(VectorFrameCompiler),
+    Vector(Box<VectorFrameCompiler>),
     Camera(Box<RetainedFrameRenderer>),
 }
 
