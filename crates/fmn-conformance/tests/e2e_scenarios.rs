@@ -1361,7 +1361,7 @@ fn native_matching_workers_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioE
             )?;
             stage.play_prepared(vec![Box::new(matching)])?;
             if stage.roots() != [target] {
-                return Err(fmn::SceneError::InvalidLifecycle(
+                return Err(fmn::scene::SceneError::InvalidLifecycle(
                     "native equation matching did not publish its original target",
                 )
                 .into());
@@ -1392,7 +1392,7 @@ fn native_matching_workers_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioE
             )?;
             stage.play_prepared(vec![Box::new(matching)])?;
             if stage.roots() != [target, text_target] {
-                return Err(fmn::SceneError::InvalidLifecycle(
+                return Err(fmn::scene::SceneError::InvalidLifecycle(
                     "native string matching lost target identity or unrelated roots",
                 )
                 .into());
@@ -1695,7 +1695,9 @@ fn native_shape_matching_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
 
             let target = stage.arena_mut().add(fmn_mobject::Mobject::new());
             let circle = stage.arena_mut().add(Circle::new().radius(0.35));
-            let triangle = stage.arena_mut().add(fmn_library::triangle().radius(0.4));
+            let triangle = stage
+                .arena_mut()
+                .add(fmn_library::triangle().radius(0.4).build()?);
             stage.arena_mut().attach(target, circle)?;
             stage.arena_mut().attach(target, triangle)?;
             stage.shift(circle, [0.8, 0.55, 0.0]);
@@ -1725,14 +1727,14 @@ fn native_shape_matching_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
                 .map(|animation| animation.state().config.name.as_str())
                 .collect();
             if plan != ["Transform", "FadeOutToPoint", "FadeInFromPoint"] {
-                return Err(fmn::SceneError::InvalidLifecycle(
+                return Err(fmn::scene::SceneError::InvalidLifecycle(
                     "shape replacement lost matching or unmatched-piece fades",
                 )
                 .into());
             }
             stage.play_prepared(vec![Box::new(matching)])?;
             if stage.roots() != [target] {
-                return Err(fmn::SceneError::InvalidLifecycle(
+                return Err(fmn::scene::SceneError::InvalidLifecycle(
                     "shape replacement did not publish the original target exactly once",
                 )
                 .into());
@@ -4813,6 +4815,41 @@ fn cli_all_builtins() -> impl Iterator<Item = &'static str> {
     fmn::builtins::PRIMITIVE_SCENE_NAMES
         .into_iter()
         .chain(CLI_CAMERA_BUILTINS)
+}
+
+/// The production CLI, not an alternate renderer, consumes native programs.
+fn cli_pure_dispatch_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let mut baseline = None;
+    for threads in ["1", "4", "16"] {
+        let (output, frames) = cli_builtin_frames("circle_shift.v1", threads)?;
+        let dispatched = output.stdout.contains("\"pure_segments\":2")
+            && output.stdout.contains("\"serial_segments\":0")
+            && output.stdout.contains("\"pure_frames\":3")
+            && output.stdout.contains("\"compiled_frames\":0")
+            && output.stdout.contains("\"outstanding_slots\":0");
+        if output.code != 0 || !dispatched || frames.len() != 3 {
+            return Err(fail(format!(
+                "CLI pure dispatch {threads}: {:?} {:?}",
+                output.stdout, output.stderr
+            )));
+        }
+        if let Some(baseline) = &baseline {
+            if &frames != baseline {
+                return Err(fail("pure CLI artifacts changed with thread count"));
+            }
+        } else {
+            baseline = Some(frames);
+        }
+        ctx.event(
+            LogEvent::new("e2e.cli.pure_dispatch")
+                .field("threads", threads)
+                .field("pure_segments", 2_u64)
+                .field("pure_frames", 3_u64),
+        );
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("cli_pure_runs", 3)
+        .with_counter("cli_pure_frames", 9))
 }
 
 /// The CLI builtins' determinism drill (fm-cli-camera-route-i1zc,
@@ -8104,6 +8141,30 @@ fn spec(
 pub fn catalog() -> Vec<ScenarioSpec> {
     let mut specs = vec![
         spec(
+            "determinism.cli_pure_segments.v1",
+            ScenarioClass::DeterminismDrill,
+            Surface::CliInProcess,
+            Invocation::new(cli_pure_dispatch_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("cli_pure_runs", 3),
+                counter_eq("cli_pure_frames", 9),
+            ],
+            ["1", "4", "16"]
+                .into_iter()
+                .map(|threads| {
+                    LogExpect::span_present(
+                        "e2e.cli.pure_dispatch",
+                        vec![
+                            FieldPred::str_eq("threads", threads),
+                            FieldPred::u64_eq("pure_segments", 2),
+                            FieldPred::u64_eq("pure_frames", 3),
+                        ],
+                    )
+                })
+                .collect(),
+        ),
+        spec(
             "lifecycle.install_shared_family.v1",
             ScenarioClass::LifecycleDrill,
             Surface::RustApi,
@@ -10981,4 +11042,14 @@ fn rebless_e2e_cli_builtins_panel() {
     let out = manifest.join("../..").join(REBLESS_ARTEFACT_DIR);
     std::fs::create_dir_all(&out).expect("re-bless artefact directory");
     std::fs::write(out.join(rebless_artefact_name(lock, &digest)), panel).expect("panel written");
+}
+
+#[test]
+fn cli_pure_dispatch_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "determinism.cli_pure_segments.v1")
+        .expect("native CLI pure dispatch scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
 }

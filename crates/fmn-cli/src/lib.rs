@@ -2943,6 +2943,21 @@ impl<S> SceneSink for CancellableSceneSink<'_, S>
 where
     S: SceneSink + ?Sized,
 {
+    fn accepts_pure_segments(&self) -> bool {
+        !self.cancellation.is_cancelled() && self.inner.accepts_pure_segments()
+    }
+
+    fn capture_pure_segment(
+        &mut self,
+        segment: &fmn::animation::pure_frame::PureSegment,
+    ) -> Result<(), IntegrationError> {
+        self.cancellation.scene_checkpoint()?;
+        // The registered emitter interrupts admission within a long program.
+        // Never return a fallback after any of its samples were consumed.
+        self.inner.capture_pure_segment(segment)?;
+        self.cancellation.scene_checkpoint()
+    }
+
     fn event(&mut self, event: fmn_scene::LifecycleEvent) -> Result<(), IntegrationError> {
         self.cancellation.scene_checkpoint()?;
         self.inner.event(event)
@@ -3868,6 +3883,7 @@ struct BackendAccumulator {
     readback_bytes: Option<u64>,
     elapsed_ns: Option<u128>,
     pipeline: Option<fmn_runtime::PipelineStats>,
+    dispatch: offline_cpu::DispatchStats,
 }
 
 impl BackendAccumulator {
@@ -3881,6 +3897,7 @@ impl BackendAccumulator {
             readback_bytes: None,
             elapsed_ns: None,
             pipeline: None,
+            dispatch: offline_cpu::DispatchStats::default(),
         }
     }
 
@@ -3895,6 +3912,7 @@ impl BackendAccumulator {
             readback_bytes: Some(0),
             elapsed_ns: Some(0),
             pipeline: None,
+            dispatch: offline_cpu::DispatchStats::default(),
         }
     }
 
@@ -3983,6 +4001,7 @@ impl BackendAccumulator {
             readback_bytes: self.readback_bytes,
             elapsed_ns: self.elapsed_ns,
             pipeline: self.pipeline.clone(),
+            dispatch: self.dispatch,
         })
     }
 }
@@ -3997,6 +4016,7 @@ struct RenderBackendReport {
     readback_bytes: Option<u64>,
     elapsed_ns: Option<u128>,
     pipeline: Option<fmn_runtime::PipelineStats>,
+    dispatch: offline_cpu::DispatchStats,
 }
 
 struct FinishedRender {
@@ -4187,6 +4207,8 @@ struct RenderSink {
     soundtrack: Option<FfmpegSoundtrack>,
     soundtrack_timeline: SoundtrackTimeline,
     next_sequence: u64,
+    pure_enabled: bool,
+    failure: Option<IntegrationError>,
 }
 
 fn resolved_frame_config(config: &fmn_config::Config) -> Result<FrameConfig, CliError> {
@@ -4475,6 +4497,8 @@ impl RenderSink {
             soundtrack,
             soundtrack_timeline: SoundtrackTimeline::default(),
             next_sequence: 0,
+            pure_enabled: !matches!(target, RenderTarget::Native(NativeFrameFormat::Png)),
+            failure: None,
         })
     }
 
@@ -4575,6 +4599,10 @@ impl RenderSink {
     }
 
     fn finish(mut self, audio: Option<RenderSoundtrack<'_>>) -> Result<FinishedRender, CliError> {
+        if let Some(error) = &self.failure {
+            return Err(CliError::new("render", error.to_string()));
+        }
+        self.backend.dispatch.validate(self.backend.frames)?;
         match &mut self.renderer {
             OfflineFrameRenderer::Cpu(renderer) => {
                 let stats = renderer.finish()?;
@@ -4713,7 +4741,24 @@ impl Drop for RenderSink {
 }
 
 impl SceneSink for RenderSink {
+    fn accepts_pure_segments(&self) -> bool {
+        self.accepts_native_programs()
+    }
+
+    fn capture_pure_segment(
+        &mut self,
+        segment: &fmn::animation::pure_frame::PureSegment,
+    ) -> Result<(), IntegrationError> {
+        self.render_pure(segment)
+    }
+
     fn event(&mut self, event: LifecycleEvent) -> Result<(), IntegrationError> {
+        if let Some(error) = &self.failure {
+            return Err(error.clone());
+        }
+        if event.phase == LifecyclePhase::DriveSegment && !event.skipping {
+            self.backend.dispatch.begin_segment()?;
+        }
         if self.soundtrack.is_none() {
             return Ok(());
         }
@@ -4727,10 +4772,16 @@ impl SceneSink for RenderSink {
         _reason: CaptureReason,
         packet: fmn::animation::FramePacket,
     ) -> Result<(), IntegrationError> {
-        let stage = packet.materialize_stage();
-        let revision = u64::try_from(packet.frame_index())
-            .map_err(|_| IntegrationError::new("lumen", "negative frame index"))?;
-        self.render_stage(&stage, revision)
+        if let Some(error) = &self.failure {
+            return Err(error.clone());
+        }
+        let result = (|| {
+            let stage = packet.materialize_stage();
+            let revision = u64::try_from(packet.frame_index())
+                .map_err(|_| IntegrationError::new("lumen", "negative frame index"))?;
+            self.render_stage(&stage, revision)
+        })();
+        self.latch_capture(result)
     }
 }
 
@@ -5044,6 +5095,7 @@ fn composition_backend(config: &fmn_config::Config) -> RenderBackendReport {
         readback_bytes: None,
         elapsed_ns: None,
         pipeline: None,
+        dispatch: offline_cpu::DispatchStats::default(),
     }
 }
 
@@ -5690,7 +5742,10 @@ fn render_manifest(
     .map_err(|error| internal(error.to_string()))?;
     let c10 = ClosureItem::structural(
         10,
-        "determinism mode and declared execution configuration",
+        format!(
+            "determinism mode and declared execution configuration; execution_dispatch={}",
+            backend.dispatch.to_json(),
+        ),
         &[
             StructuralField::Text(mode.name()),
             StructuralField::Text(plan_determinism_name(plan.determinism)),
@@ -7116,6 +7171,10 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
                 .elapsed_ns
                 .map_or_else(|| "null".to_owned(), |value| value.to_string()),
         );
+        backend_json.push_str(&format!(
+            ",\"execution_dispatch\":{}",
+            backend.dispatch.to_json()
+        ));
         if let Some(stats) = &backend.pipeline {
             // Keep scheduler receipts out of the bit-affecting engine journal.
             // Only the user-facing report contains these actual joined counts.
