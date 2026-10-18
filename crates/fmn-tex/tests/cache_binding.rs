@@ -21,6 +21,132 @@ fn engine() -> TexEngine {
 }
 
 #[test]
+fn disk_retention_respects_pins_and_recomputed_layouts_keep_their_bytes() {
+    let store = store();
+    let cached = engine();
+    cached.set_cache_with_ceiling(Some(&store), 0).unwrap();
+    let namespace = store
+        .namespace(
+            "typeset",
+            TYPESET_FORMAT_VERSION,
+            NamespacePolicy::default(),
+        )
+        .unwrap();
+    let mode = Mode::Math(Style::Display);
+    let sources = [r"\frac{x^2+1}{2}", r"\sqrt{y}", "z+1"];
+    let expected: Vec<_> = sources
+        .iter()
+        .map(|source| cached.typeset(mode, source).unwrap().to_bytes().unwrap())
+        .collect();
+    let pinned_key = cached.cache_key(mode, sources[0]).unwrap();
+    let pin = namespace.pin(&pinned_key);
+    assert!(namespace.usage().unwrap() > 0);
+    cached.maintain_cache();
+    let first = cached.cache_maintenance();
+    assert_eq!(first.runs, 1);
+    assert_eq!(first.evicted_entries, 2);
+    assert_eq!(first.skipped_pinned, 1);
+    assert_eq!(first.errors, 0);
+    assert_eq!(first.retained_bytes, Some(namespace.usage().unwrap()));
+    assert!(namespace.get(&pinned_key).unwrap().is_some());
+    assert!(
+        namespace
+            .get(&cached.cache_key(mode, sources[1]).unwrap())
+            .unwrap()
+            .is_none()
+    );
+
+    let next = engine().with_cache(&store).unwrap();
+    for (source, expected) in sources.iter().zip(expected) {
+        assert_eq!(
+            next.typeset(mode, source).unwrap().to_bytes().unwrap(),
+            expected
+        );
+    }
+    assert_eq!(next.persistent_cache_hits(), 1);
+    assert_eq!(next.layout_computations(), 2);
+    drop(pin);
+    cached.maintain_cache();
+    assert_eq!(namespace.usage().unwrap(), 0);
+    assert_eq!(cached.cache_maintenance().retained_bytes, Some(0));
+    assert_eq!(cached.persistent_cache_ceiling(), Some(0));
+}
+
+#[test]
+fn maintenance_failure_is_diagnostic_and_does_not_replace_real_ink() {
+    let fs = Arc::new(VirtualFs::new());
+    let store = Store::open(
+        fs.clone(),
+        Arc::new(FakeClock::new()),
+        if cfg!(windows) { r"C:\cache" } else { "/cache" },
+        StoreConfig::default(),
+    )
+    .unwrap();
+    let cached = engine();
+    cached.set_cache_with_ceiling(Some(&store), 0).unwrap();
+    let mode = Mode::Math(Style::Display);
+    cached.typeset(mode, "x").unwrap();
+    // A host can replace the owned root after configuration. Maintenance must
+    // refuse that new node, and ordinary layout must still return actual ink.
+    fs.insert(store.root(), b"foreign replacement".to_vec());
+    cached.maintain_cache();
+    let report = cached.cache_maintenance();
+    assert_eq!(report.runs, 1);
+    assert_eq!(report.errors, 1);
+    assert!(report.last_error.is_some());
+    assert_eq!(report.retained_bytes, None);
+    assert_eq!(
+        cached.typeset(mode, "y+1").unwrap().to_bytes().unwrap(),
+        engine().typeset(mode, "y+1").unwrap().to_bytes().unwrap()
+    );
+    assert!(cached.persistent_store_errors() > 0);
+}
+
+#[test]
+fn concurrent_readers_keep_pinned_layouts_complete_during_retention() {
+    let store = store();
+    let cached = engine();
+    cached.set_cache_with_ceiling(Some(&store), 0).unwrap();
+    let mode = Mode::Math(Style::Display);
+    let source = r"\frac{x^2+1}{2}";
+    let expected = cached.typeset(mode, source).unwrap().to_bytes().unwrap();
+    let key = cached.cache_key(mode, source).unwrap();
+    let namespace = store
+        .namespace(
+            "typeset",
+            TYPESET_FORMAT_VERSION,
+            NamespacePolicy::default(),
+        )
+        .unwrap();
+    let pin = namespace.pin(&key);
+    let barrier = std::sync::Barrier::new(5);
+    let complete = std::sync::atomic::AtomicBool::new(true);
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            scope.spawn(|| {
+                for _ in 0..16 {
+                    barrier.wait();
+                    if namespace.get(&key).ok().flatten().as_deref() != Some(expected.as_slice()) {
+                        complete.store(false, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    barrier.wait();
+                }
+            });
+        }
+        for _ in 0..16 {
+            barrier.wait();
+            cached.maintain_cache();
+            barrier.wait();
+        }
+    });
+    assert!(complete.load(std::sync::atomic::Ordering::Relaxed));
+    assert_eq!(cached.cache_maintenance().errors, 0);
+    drop(pin);
+    cached.maintain_cache();
+    assert!(namespace.get(&key).unwrap().is_none());
+}
+
+#[test]
 fn attaching_after_a_layout_populates_disk_and_a_new_engine_reads_it() {
     let store = store();
     let first = engine();

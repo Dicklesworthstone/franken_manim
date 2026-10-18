@@ -5,7 +5,8 @@
 //! real `fmn` process checks. Fixtures are retained and never cleaned up here.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fmn_cli::{
@@ -336,9 +337,16 @@ fn doctor_schema(records: &[Record]) -> Check<()> {
                 ("root", Text),
                 ("exists", Bool),
                 ("direct_entries", NullableUint),
+                ("typeset_max_bytes", Uint),
+                ("typeset_bytes", NullableUint),
                 ("warning", NullableText),
             ],
-            "cache" => &[("resolved", Bool), ("reason", Text)],
+            "cache" => &[
+                ("resolved", Bool),
+                ("reason", Text),
+                ("typeset_max_bytes", Uint),
+                ("typeset_bytes", NullableUint),
+            ],
             "fonts" => &[
                 ("selected", Text),
                 ("bundled", Strings),
@@ -435,6 +443,8 @@ fn snapshot() -> DoctorSnapshot {
             root: PathBuf::from("/fixture/cache"),
             exists: true,
             direct_entries: Some(3),
+            typeset_max_bytes: 1_073_741_824,
+            typeset_bytes: Some(512),
             warning: None,
         },
         fonts: FontReport {
@@ -462,6 +472,8 @@ fn doctor_snapshot_robot_has_exact_typed_available_records() {
     assert_eq!(parsed[1]["estimated_in_flight_bytes"], Value::Uint(4096));
     assert_eq!(parsed[2]["sha256"], Value::Text("ab".repeat(32)));
     assert_eq!(parsed[3]["direct_entries"], Value::Uint(3));
+    assert_eq!(parsed[3]["typeset_max_bytes"], Value::Uint(1_073_741_824));
+    assert_eq!(parsed[3]["typeset_bytes"], Value::Uint(512));
     assert_eq!(parsed[4]["user"], Value::Strings(Vec::new()));
     assert_eq!(parsed[6]["supported"], Value::Bool(true));
 }
@@ -477,7 +489,7 @@ fn doctor_default_feature_run_collects_real_host_capabilities() {
     let config = root.join("doctor.yml");
     std::fs::write(
         &config,
-        b"render:\n  engine: cpu\nfile_writer:\n  pixel_format: rgba8\ntext:\n  font: IBM Plex Sans\n",
+        b"render:\n  engine: cpu\nfile_writer:\n  pixel_format: rgba8\ntext:\n  font: IBM Plex Sans\ncache:\n  max_bytes: 8192\n",
     )
     .expect("write owned doctor config");
     let output = fmn_cli::run([
@@ -506,8 +518,199 @@ fn doctor_default_feature_run_collects_real_host_capabilities() {
         cache.to_str().expect("UTF-8 path")
     );
     assert_eq!(parsed[4]["complete"], Value::Bool(true));
+    assert_eq!(parsed[3]["typeset_max_bytes"], Value::Uint(8192));
+    assert_eq!(parsed[3]["typeset_bytes"], Value::Uint(0));
     assert!(!cache.exists());
     assert!(!missing.exists());
+}
+
+fn doctor_cache_record(fixture: &Path, cache: &Path) -> Record {
+    let config = fixture.join("cache-doctor.yml");
+    std::fs::write(
+        &config,
+        b"render:\n  engine: cpu\nfile_writer:\n  pixel_format: rgba8\ncache:\n  max_bytes: 8192\n",
+    )
+    .expect("write doctor configuration");
+    let missing = fixture.join("no-ffmpeg");
+    let output = fmn_cli::run([
+        "doctor",
+        "--robot",
+        "--threads",
+        "1",
+        "--config_file",
+        config.to_str().expect("config path"),
+        "--ffmpeg",
+        missing.to_str().expect("missing ffmpeg path"),
+        "--cache-dir",
+        cache.to_str().expect("cache path"),
+    ]);
+    assert_eq!(output.code, 0, "{output:?}");
+    assert!(output.stderr.is_empty());
+    let mut parsed = records(&output.stdout).expect("doctor records");
+    doctor_schema(&parsed).expect("typed doctor schema");
+    parsed.remove(3)
+}
+
+#[test]
+fn doctor_reports_owned_envelope_bytes_without_opening_or_mutating_the_namespace() {
+    use fmn_cache::{
+        CacheError, KeyBuilder, NamespacePolicy, Store, StoreConfig, object_relative_path,
+    };
+    use fmn_platform::clock::StdClock;
+    use fmn_platform::fs::{FsError, StdFs};
+
+    let fixture = retained_root().expect("fresh retained fixture");
+    let cache = fixture.join("cache");
+    let version = fmn::tex::TYPESET_FORMAT_VERSION;
+    let store = Store::open(
+        Arc::new(StdFs),
+        Arc::new(StdClock::new()),
+        &cache,
+        StoreConfig::default(),
+    )
+    .expect("owned cache");
+    assert_eq!(
+        Store::inspect_namespace_bytes(&StdFs, &cache, "typeset", version, 0)
+            .expect("absent namespace"),
+        0
+    );
+    assert!(
+        !cache.join("ns").exists(),
+        "inspection creates no namespace"
+    );
+    let namespace = store
+        .namespace(
+            "typeset",
+            version,
+            NamespacePolicy {
+                ceiling_bytes: None,
+            },
+        )
+        .expect("typeset namespace");
+    let key = KeyBuilder::new("doctor-size").finish().expect("cache key");
+    let payload = b"one envelope";
+    namespace.put(&key, payload).expect("owned cache entry");
+    drop(namespace);
+    drop(store);
+    let namespace = cache.join("ns/typeset").join(format!("v{version}"));
+    let object = namespace
+        .join("objects")
+        .join(object_relative_path(key.digest()));
+    let bytes = std::fs::metadata(&object).expect("object metadata").len();
+    assert!(
+        bytes > payload.len() as u64,
+        "usage includes envelope overhead"
+    );
+    let paths = [
+        cache.join("STORE_OWNER"),
+        cache.join("STORE_FORMAT"),
+        namespace.join("index"),
+        object,
+    ];
+    let before: Vec<_> = paths
+        .iter()
+        .map(|path| std::fs::read(path).expect("existing cache file"))
+        .collect();
+    assert_eq!(
+        Store::inspect_namespace_bytes(&StdFs, &cache, "typeset", version, 2)
+            .expect("exact entry budget"),
+        bytes
+    );
+    assert!(matches!(
+        Store::inspect_namespace_bytes(&StdFs, &cache, "typeset", version, 1),
+        Err(CacheError::Storage(FsError::TooManyEntries {
+            limit: 1,
+            ..
+        }))
+    ));
+    let report = doctor_cache_record(&fixture, &cache);
+    assert_eq!(report["typeset_bytes"], Value::Uint(bytes));
+    assert_eq!(report["typeset_max_bytes"], Value::Uint(8192));
+    assert_eq!(report["warning"], Value::Null);
+    for (path, bytes) in paths.iter().zip(before) {
+        assert_eq!(
+            std::fs::read(path).expect("cache file after inspection"),
+            bytes
+        );
+    }
+    assert!(
+        !namespace.join("lock").exists(),
+        "inspection creates no maintenance lock"
+    );
+}
+
+#[test]
+fn doctor_reports_unknown_usage_for_foreign_cache_roots_without_claiming_them() {
+    let fixture = retained_root().expect("fresh retained fixture");
+    let cache = fixture.join("foreign-cache");
+    std::fs::create_dir(&cache).expect("foreign directory");
+    let sentinel = cache.join("foreign.txt");
+    std::fs::write(&sentinel, b"leave foreign data alone").expect("foreign sentinel");
+    let report = doctor_cache_record(&fixture, &cache);
+    assert_eq!(report["typeset_bytes"], Value::Null);
+    assert!(
+        text(&report, "warning")
+            .expect("ownership refusal")
+            .contains("ownership")
+    );
+    assert_eq!(
+        std::fs::read(sentinel).expect("foreign sentinel survives"),
+        b"leave foreign data alone"
+    );
+    assert!(!cache.join("STORE_OWNER").exists());
+    assert!(!cache.join("STORE_FORMAT").exists());
+    assert!(!cache.join("ns").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_refuses_linked_object_trees_and_entries_without_following_them() {
+    use fmn_cache::{Store, StoreConfig};
+    use fmn_platform::clock::StdClock;
+    use fmn_platform::fs::StdFs;
+
+    let fixture = retained_root().expect("fresh retained fixture");
+    let outside = fixture.join("outside");
+    std::fs::create_dir(&outside).expect("external directory");
+    let sentinel = outside.join("sentinel");
+    std::fs::write(&sentinel, b"external data").expect("external sentinel");
+    for leaf in [false, true] {
+        let cache = fixture.join(if leaf { "leaf-cache" } else { "tree-cache" });
+        let store = Store::open(
+            Arc::new(StdFs),
+            Arc::new(StdClock::new()),
+            &cache,
+            StoreConfig::default(),
+        )
+        .expect("owned cache");
+        drop(store);
+        let namespace = cache
+            .join("ns/typeset")
+            .join(format!("v{}", fmn::tex::TYPESET_FORMAT_VERSION));
+        if leaf {
+            let shard = namespace.join("objects/00");
+            std::fs::create_dir_all(&shard).expect("owned object shard");
+            std::os::unix::fs::symlink(&sentinel, shard.join("00".repeat(31)))
+                .expect("linked object");
+        } else {
+            std::fs::create_dir_all(&namespace).expect("owned namespace path");
+            std::os::unix::fs::symlink(&outside, namespace.join("objects"))
+                .expect("linked object tree");
+        }
+        let report = doctor_cache_record(&fixture, &cache);
+        assert_eq!(report["typeset_bytes"], Value::Null);
+        assert!(
+            text(&report, "warning")
+                .expect("link refusal")
+                .contains("Link")
+        );
+        assert!(!namespace.join("index").exists());
+        assert!(!namespace.join("lock").exists());
+    }
+    assert_eq!(
+        std::fs::read(sentinel).expect("external sentinel survives"),
+        b"external data"
+    );
 }
 
 #[test]
@@ -523,6 +726,8 @@ fn doctor_snapshot_robot_round_trips_escapes_and_optional_branches() {
         root: PathBuf::from(unusual),
         exists: false,
         direct_entries: None,
+        typeset_max_bytes: u64::MAX,
+        typeset_bytes: None,
         warning: Some(unusual.to_owned()),
     };
     input.fonts.selected = unusual.to_owned();
@@ -549,13 +754,18 @@ fn doctor_snapshot_robot_round_trips_escapes_and_optional_branches() {
     }
     assert_eq!(parsed[4]["user"], Value::Strings(vec![unusual.to_owned()]));
     assert_eq!(parsed[3]["direct_entries"], Value::Null);
+    assert_eq!(parsed[3]["typeset_max_bytes"], Value::Uint(u64::MAX));
+    assert_eq!(parsed[3]["typeset_bytes"], Value::Null);
     input.cache = CacheReport::Unresolved {
         reason: unusual.to_owned(),
+        typeset_max_bytes: 0,
     };
     let parsed = records(&input.to_ndjson().expect("unresolved snapshot"))
         .expect("unresolved record parses");
     doctor_schema(&parsed).expect("unresolved cache variant schema");
     assert_eq!(text(&parsed[3], "reason").expect("cache reason"), unusual);
+    assert_eq!(parsed[3]["typeset_max_bytes"], Value::Uint(0));
+    assert_eq!(parsed[3]["typeset_bytes"], Value::Null);
 }
 
 #[test]
@@ -571,6 +781,8 @@ fn doctor_snapshot_human_exposes_capabilities_and_degradation() {
         "hardware encoders: h264_nvenc",
         "hardware encoder probe warning: fixture inventory warning",
         "cache: /fixture/cache (exists true, direct entries 3)",
+        "typeset cache ceiling: 1073741824 bytes (cache.max_bytes)",
+        "typeset cache usage: 512 bytes",
         "fonts: selected Computer Modern; inventory complete",
         "math packs: default, minimal",
         "certification: supported target — fixture certified target",
@@ -588,6 +800,7 @@ fn doctor_snapshot_human_exposes_capabilities_and_degradation() {
     };
     input.cache = CacheReport::Unresolved {
         reason: "fixture cache unavailable".to_owned(),
+        typeset_max_bytes: 0,
     };
     input.fonts.complete = false;
     input.certification.supported = false;
@@ -597,6 +810,8 @@ fn doctor_snapshot_human_exposes_capabilities_and_degradation() {
     for expected in [
         "alternative: native PNG, GIF, y4m",
         "cache: unresolved (fixture cache unavailable)",
+        "typeset cache ceiling: 0 bytes (cache.max_bytes)",
+        "typeset cache usage: unknown",
         "fonts: selected Computer Modern; inventory partial",
         "certification: unsupported/pending target — fixture certified target",
     ] {

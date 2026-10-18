@@ -550,8 +550,7 @@ mod tests {
     #[test]
     fn real_overload_responses_do_not_drop_the_pending_source_change() {
         for status in [429, 503] {
-            let response =
-                format!("HTTP/1.1 {status} Busy\r\nContent-Length: 4\r\n\r\nbusy");
+            let response = format!("HTTP/1.1 {status} Busy\r\nContent-Length: 4\r\n\r\nbusy");
             let refused = exchange(response.into_bytes());
             assert_eq!(
                 refused.as_ref().unwrap(),

@@ -534,6 +534,10 @@ pub enum CacheReport {
         exists: bool,
         /// Number of direct entries, when readable.
         direct_entries: Option<usize>,
+        /// Resolved `cache.max_bytes` ceiling for the typesetting namespace.
+        typeset_max_bytes: u64,
+        /// Observed current-version object-file bytes, when safely inspectable.
+        typeset_bytes: Option<u64>,
         /// Read-only inspection failure, when any.
         warning: Option<String>,
     },
@@ -541,6 +545,8 @@ pub enum CacheReport {
     Unresolved {
         /// Why no path was available.
         reason: String,
+        /// Resolved retention policy, even when the root is unavailable.
+        typeset_max_bytes: u64,
     },
 }
 
@@ -2033,6 +2039,7 @@ pub fn collect_doctor_snapshot(
     let cache = cache_report_from_resolution(
         fs,
         fmn_cache::resolve_host_cache_root(&config.directories.cache),
+        config.cache.max_bytes,
     )?;
     let math_packs = fmn_config::PackRegistry::builtin()
         .names()
@@ -2115,14 +2122,21 @@ fn locate_and_probe_ffmpeg_in(
 fn cache_report_from_resolution(
     fs: &dyn FileSystem,
     resolution: Result<PathBuf, fmn_cache::CacheRootError>,
+    typeset_max_bytes: u64,
 ) -> Result<CacheReport, CliError> {
     match resolution {
-        Ok(root) => Ok(inspect_cache(fs, &root, MAX_DOCTOR_CACHE_DIRECT_ENTRIES)),
+        Ok(root) => Ok(inspect_cache(
+            fs,
+            &root,
+            MAX_DOCTOR_CACHE_DIRECT_ENTRIES,
+            typeset_max_bytes,
+        )),
         Err(error @ fmn_cache::CacheRootError::InvalidConfigured { .. }) => {
             Err(cache_root_cli_error(error))
         }
         Err(error) => Ok(CacheReport::Unresolved {
             reason: error.to_string(),
+            typeset_max_bytes,
         }),
     }
 }
@@ -2202,7 +2216,12 @@ fn cache_root_cli_error(error: fmn_cache::CacheRootError) -> CliError {
 
 const MAX_DOCTOR_CACHE_DIRECT_ENTRIES: usize = 4 * 1024;
 
-fn inspect_cache(fs: &dyn FileSystem, root: &Path, max_entries: usize) -> CacheReport {
+fn inspect_cache(
+    fs: &dyn FileSystem,
+    root: &Path,
+    max_entries: usize,
+    typeset_max_bytes: u64,
+) -> CacheReport {
     let mut components: Vec<&Path> = root
         .ancestors()
         .filter(|path| !path.as_os_str().is_empty())
@@ -2216,6 +2235,8 @@ fn inspect_cache(fs: &dyn FileSystem, root: &Path, max_entries: usize) -> CacheR
                     root: root.to_path_buf(),
                     exists: component == root, // ubs:ignore - Compares public filesystem paths, not authentication material.
                     direct_entries: None,
+                    typeset_max_bytes,
+                    typeset_bytes: None,
                     warning: Some(format!(
                         "cache traversal refused {kind:?} at {:?}",
                         component.as_os_str()
@@ -2227,6 +2248,8 @@ fn inspect_cache(fs: &dyn FileSystem, root: &Path, max_entries: usize) -> CacheR
                     root: root.to_path_buf(),
                     exists: false,
                     direct_entries: Some(0),
+                    typeset_max_bytes,
+                    typeset_bytes: Some(0),
                     warning: None,
                 };
             }
@@ -2235,22 +2258,40 @@ fn inspect_cache(fs: &dyn FileSystem, root: &Path, max_entries: usize) -> CacheR
                     root: root.to_path_buf(),
                     exists: false,
                     direct_entries: None,
+                    typeset_max_bytes,
+                    typeset_bytes: None,
                     warning: Some(error.to_string()),
                 };
             }
         }
     }
     match fs.count_dir_entries_bounded(root, max_entries) {
-        Ok(entry_count) => CacheReport::Configured {
-            root: root.to_path_buf(),
-            exists: true,
-            direct_entries: Some(entry_count),
-            warning: None,
-        },
+        Ok(entry_count) => {
+            let (typeset_bytes, warning) = match fmn_cache::Store::inspect_namespace_bytes(
+                fs,
+                root,
+                "typeset",
+                fmn::tex::TYPESET_FORMAT_VERSION,
+                max_entries,
+            ) {
+                Ok(bytes) => (Some(bytes), None),
+                Err(error) => (None, Some(error.to_string())),
+            };
+            CacheReport::Configured {
+                root: root.to_path_buf(),
+                exists: true,
+                direct_entries: Some(entry_count),
+                typeset_max_bytes,
+                typeset_bytes,
+                warning,
+            }
+        }
         Err(error) => CacheReport::Configured {
             root: root.to_path_buf(),
             exists: true,
             direct_entries: None,
+            typeset_max_bytes,
+            typeset_bytes: None,
             warning: Some(error.to_string()),
         },
     }
@@ -2451,6 +2492,8 @@ impl DoctorSnapshot {
                 root,
                 exists,
                 direct_entries,
+                typeset_max_bytes,
+                typeset_bytes,
                 warning,
             } => {
                 let root = strict_path_text(root, "doctor cache root")?;
@@ -2459,21 +2502,27 @@ impl DoctorSnapshot {
                     out,
                     "{{\"schema\":\"fmn.doctor\",\"version\":{},\"kind\":\"cache\",\
                      \"resolved\":true,\"root\":{},\"exists\":{},\
-                     \"direct_entries\":{},\"warning\":{}}}",
+                     \"direct_entries\":{},\"typeset_max_bytes\":{},\"typeset_bytes\":{},\"warning\":{}}}",
                     ROBOT_SCHEMA_VERSION,
                     json_string(root),
                     exists,
                     entries,
+                    typeset_max_bytes,
+                    typeset_bytes.map_or_else(|| "null".to_owned(), |bytes| bytes.to_string()),
                     json_option(warning.as_deref()),
                 );
             }
-            CacheReport::Unresolved { reason } => {
+            CacheReport::Unresolved {
+                reason,
+                typeset_max_bytes,
+            } => {
                 let _ = writeln!(
                     out,
                     "{{\"schema\":\"fmn.doctor\",\"version\":{},\"kind\":\"cache\",\
-                     \"resolved\":false,\"reason\":{}}}",
+                     \"resolved\":false,\"reason\":{},\"typeset_max_bytes\":{},\"typeset_bytes\":null}}",
                     ROBOT_SCHEMA_VERSION,
                     json_string(reason),
+                    typeset_max_bytes,
                 );
             }
         }
@@ -2580,6 +2629,8 @@ impl DoctorSnapshot {
                 root,
                 exists,
                 direct_entries,
+                typeset_max_bytes,
+                typeset_bytes,
                 warning,
             } => {
                 let _ = writeln!(
@@ -2588,12 +2639,30 @@ impl DoctorSnapshot {
                     root.display(),
                     direct_entries.map_or_else(|| "unknown".to_owned(), |n| n.to_string())
                 );
+                let _ = writeln!(
+                    out,
+                    "typeset cache ceiling: {typeset_max_bytes} bytes (cache.max_bytes)"
+                );
+                let _ = writeln!(
+                    out,
+                    "typeset cache usage: {}",
+                    typeset_bytes
+                        .map_or_else(|| "unknown".to_owned(), |bytes| format!("{bytes} bytes"))
+                );
                 if let Some(warning) = warning {
                     let _ = writeln!(out, "cache warning: {warning}");
                 }
             }
-            CacheReport::Unresolved { reason } => {
+            CacheReport::Unresolved {
+                reason,
+                typeset_max_bytes,
+            } => {
                 let _ = writeln!(out, "cache: unresolved ({reason})");
+                let _ = writeln!(out, "typeset cache usage: unknown");
+                let _ = writeln!(
+                    out,
+                    "typeset cache ceiling: {typeset_max_bytes} bytes (cache.max_bytes)"
+                );
             }
         }
         let _ = writeln!(
@@ -6996,10 +7065,15 @@ fn configured_output_directory(config: &fmn_config::Config) -> PathBuf {
 /// the store opened but is not caching.
 fn typesetting_robot_json(report: &fmn::tex::TypesetSessionReport) -> String {
     let preflight = &report.preflight;
+    let maintenance = &report.maintenance;
     format!(
         ",\"typesetting\":{{\"initialized\":{},\"persistent\":{},\"cache_error\":{},\
+         \"persistent_ceiling_bytes\":{},\
          \"hits\":{},\"memory_hits\":{},\"disk_hits\":{},\"misses\":{},\
          \"bytes_read\":{},\"bytes_written\":{},\"rejected\":{},\"store_errors\":{},\
+         \"maintenance\":{{\"runs\":{},\"evicted_entries\":{},\"evicted_bytes\":{},\
+         \"retained_bytes\":{},\"skipped_lock_held\":{},\"skipped_pinned\":{},\
+         \"errors\":{},\"last_error\":{}}},\
          \"layouts_before_construct\":{},\"layouts_before_first_frame\":{},\
          \"layouts_inside_play\":{},\
          \"preflight\":{{\"batches\":{},\"requests\":{},\"workers\":{},\
@@ -7007,6 +7081,9 @@ fn typesetting_robot_json(report: &fmn::tex::TypesetSessionReport) -> String {
         report.initialized,
         report.persistent,
         json_option(report.cache_error.as_deref()),
+        report
+            .persistent_ceiling_bytes
+            .map_or_else(|| "null".to_owned(), |value| value.to_string()),
         report.cache_hits(),
         report.memory.hits,
         report.persistent_hits,
@@ -7015,6 +7092,16 @@ fn typesetting_robot_json(report: &fmn::tex::TypesetSessionReport) -> String {
         report.persistent_bytes_written,
         report.persistent_rejected,
         report.persistent_store_errors,
+        maintenance.runs,
+        maintenance.evicted_entries,
+        maintenance.evicted_bytes,
+        maintenance
+            .retained_bytes
+            .map_or_else(|| "null".to_owned(), |value| value.to_string()),
+        maintenance.skipped_lock_held,
+        maintenance.skipped_pinned,
+        maintenance.errors,
+        json_option(maintenance.last_error.as_deref()),
         report
             .layouts_before_construct
             .map_or_else(|| "null".to_owned(), |value| value.to_string()),
@@ -7058,6 +7145,40 @@ fn typesetting_human_summary(report: &fmn::tex::TypesetSessionReport) -> String 
             ", {} cache reads or writes failed (typeset in memory)",
             report.persistent_store_errors
         );
+    }
+    if let Some(ceiling) = report.persistent_ceiling_bytes {
+        let _ = write!(summary, ", disk ceiling {ceiling} bytes");
+    }
+    let maintenance = &report.maintenance;
+    if maintenance.runs > 0 {
+        let _ = write!(
+            summary,
+            "; cache maintenance: {} runs, {} entries evicted ({} bytes)",
+            maintenance.runs, maintenance.evicted_entries, maintenance.evicted_bytes
+        );
+        if let Some(retained) = maintenance.retained_bytes {
+            let _ = write!(summary, ", {retained} bytes retained");
+        }
+        if maintenance.skipped_lock_held > 0 {
+            let _ = write!(
+                summary,
+                ", {} maintenance attempts skipped while locked",
+                maintenance.skipped_lock_held
+            );
+        }
+        if maintenance.skipped_pinned > 0 {
+            let _ = write!(
+                summary,
+                ", {} pinned entries skipped",
+                maintenance.skipped_pinned
+            );
+        }
+    }
+    if maintenance.errors > 0 {
+        let _ = write!(summary, "; {} cache maintenance errors", maintenance.errors);
+        if let Some(error) = &maintenance.last_error {
+            let _ = write!(summary, " ({error})");
+        }
     }
     let preflight = &report.preflight;
     if preflight.requests > 0 {
@@ -10651,6 +10772,62 @@ mod tests {
         assert_eq!(error.exit_name(), "config");
     }
 
+    #[test]
+    fn typesetting_diagnostics_report_retention_and_nonfatal_maintenance_failures() {
+        let report = fmn::tex::TypesetSessionReport {
+            initialized: true,
+            persistent: true,
+            persistent_ceiling_bytes: Some(0),
+            maintenance: fmn::tex::TypesetCacheMaintenance {
+                runs: 3,
+                evicted_entries: 5,
+                evicted_bytes: 8192,
+                retained_bytes: Some(96),
+                skipped_lock_held: 1,
+                skipped_pinned: 2,
+                errors: 1,
+                last_error: Some("read-only \"cache\"\nretry later".to_owned()),
+            },
+            ..Default::default()
+        };
+        let robot = typesetting_robot_json(&report);
+        assert!(robot.contains("\"persistent_ceiling_bytes\":0"));
+        assert!(robot.contains(concat!(
+            "\"maintenance\":{\"runs\":3,\"evicted_entries\":5,\"evicted_bytes\":8192,",
+            "\"retained_bytes\":96,\"skipped_lock_held\":1,\"skipped_pinned\":2,",
+            "\"errors\":1,\"last_error\":\"read-only \\\"cache\\\"\\nretry later\"}",
+        )));
+        assert!(!robot.contains('\n'), "robot diagnostics remain one record");
+        let human = typesetting_human_summary(&report);
+        for expected in [
+            "disk ceiling 0 bytes",
+            "cache maintenance: 3 runs, 5 entries evicted (8192 bytes)",
+            "96 bytes retained",
+            "1 maintenance attempts skipped while locked",
+            "2 pinned entries skipped",
+            "1 cache maintenance errors",
+            "read-only \"cache\"",
+        ] {
+            assert!(human.contains(expected), "missing diagnostic: {expected}");
+        }
+    }
+
+    #[test]
+    fn typesetting_diagnostics_distinguish_no_maintenance_from_zero_retention() {
+        let report = fmn::tex::TypesetSessionReport::default();
+        let robot = typesetting_robot_json(&report);
+        assert!(robot.contains("\"persistent_ceiling_bytes\":null"));
+        assert!(robot.contains(concat!(
+            "\"maintenance\":{\"runs\":0,\"evicted_entries\":0,\"evicted_bytes\":0,",
+            "\"retained_bytes\":null,\"skipped_lock_held\":0,\"skipped_pinned\":0,",
+            "\"errors\":0,\"last_error\":null}",
+        )));
+        let human = typesetting_human_summary(&report);
+        assert!(human.contains("typeset memory cache"));
+        assert!(!human.contains("disk ceiling"));
+        assert!(!human.contains("cache maintenance"));
+    }
+
     fn synthetic_doctor() -> DoctorSnapshot {
         DoctorSnapshot {
             topology_source: TopologySource::Fallback {
@@ -10685,6 +10862,8 @@ mod tests {
                 root: PathBuf::from("/cache"),
                 exists: true,
                 direct_entries: Some(3),
+                typeset_max_bytes: 1_073_741_824,
+                typeset_bytes: Some(512),
                 warning: None,
             },
             fonts: FontReport {
@@ -10709,7 +10888,7 @@ mod tests {
             "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"topology\",\"source\":\"fallback\",\"source_detail\":\"fixture fallback\",\"logical_cores\":8,\"physical_cores\":4,\"hardware_supported_tier\":\"x86-64-v4\",\"active_compiled_tier\":\"portable\"}\n",
             "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"execution_plan\",\"determinism\":\"certified\",\"engine\":\"certified-cpu\",\"frames_in_flight\":2,\"scene_threads\":1,\"render_teams\":2,\"render_threads\":4,\"output_threads\":1,\"fine_tile\":16,\"macro_tile\":128,\"estimated_in_flight_bytes\":4096,\"output_format\":\"rgba8\",\"tuning_source\":\"certified-profile\"}\n",
             "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"ffmpeg\",\"available\":true,\"path\":\"/opt/ffmpeg\",\"sha256\":\"abc123\",\"ffmpeg_version\":\"ffmpeg \\\"7\\\"\",\"hardware_encoders\":[\"h264_nvenc\"],\"hardware_encoder_probe_error\":\"encoder inventory timed out\"}\n",
-            "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"cache\",\"resolved\":true,\"root\":\"/cache\",\"exists\":true,\"direct_entries\":3,\"warning\":null}\n",
+            "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"cache\",\"resolved\":true,\"root\":\"/cache\",\"exists\":true,\"direct_entries\":3,\"typeset_max_bytes\":1073741824,\"typeset_bytes\":512,\"warning\":null}\n",
             "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"fonts\",\"selected\":\"Computer Modern\",\"bundled\":[\"Computer Modern\"],\"user\":[\"Fixture Sans\"],\"complete\":true,\"detail\":null}\n",
             "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"math_packs\",\"packs\":[\"default\",\"minimal\"]}\n",
             "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"certification\",\"platform\":\"linux-x86_64\",\"supported\":true,\"detail\":\"fixture certified\"}\n",
@@ -10917,9 +11096,10 @@ mod tests {
             reason: "no declared cache base",
         };
         assert_eq!(
-            cache_report_from_resolution(&fs, Err(unavailable)).unwrap(),
+            cache_report_from_resolution(&fs, Err(unavailable), 8192).unwrap(),
             CacheReport::Unresolved {
-                reason: "fixture cache default is unavailable: no declared cache base".to_owned()
+                reason: "fixture cache default is unavailable: no declared cache base".to_owned(),
+                typeset_max_bytes: 8192,
             }
         );
 
@@ -10927,8 +11107,8 @@ mod tests {
             path: PathBuf::from("../escape"),
             reason: "parent-directory components are not accepted",
         };
-        let error =
-            cache_report_from_resolution(&fs, Err(invalid)).expect_err("invalid config must abort");
+        let error = cache_report_from_resolution(&fs, Err(invalid), 8192)
+            .expect_err("invalid config must abort");
         assert_eq!(error.exit_name(), "config");
     }
 
@@ -10940,15 +11120,18 @@ mod tests {
             &fs,
             Path::new("/cache/blocker/owned"),
             MAX_DOCTOR_CACHE_DIRECT_ENTRIES,
+            0,
         ) {
             CacheReport::Configured {
                 exists,
                 direct_entries,
+                typeset_max_bytes,
                 warning: Some(warning),
                 ..
             } => {
                 assert!(!exists);
                 assert_eq!(direct_entries, None);
+                assert_eq!(typeset_max_bytes, 0);
                 assert!(warning.contains("RegularFile"));
                 assert!(warning.contains("/cache/blocker"));
             }
@@ -10961,15 +11144,17 @@ mod tests {
         let fs = VirtualFs::new();
         fs.insert("/cache/one", Vec::new());
         fs.insert("/cache/two", Vec::new());
-        match inspect_cache(&fs, Path::new("/cache"), 1) {
+        match inspect_cache(&fs, Path::new("/cache"), 1, 8192) {
             CacheReport::Configured {
                 exists,
                 direct_entries,
+                typeset_max_bytes,
                 warning: Some(warning),
                 ..
             } => {
                 assert!(exists);
                 assert_eq!(direct_entries, None);
+                assert_eq!(typeset_max_bytes, 8192);
                 assert!(warning.contains("1-entry limit"));
             }
             other => panic!("expected a bounded cache-count warning, got {other:?}"), // ubs:ignore - cfg(test) must reject missing entry-limit warnings.
@@ -11444,6 +11629,8 @@ mod tests {
             root: PathBuf::from(OsString::from_vec(b"/cache-\xff".to_vec())),
             exists: false,
             direct_entries: Some(0),
+            typeset_max_bytes: 1_073_741_824,
+            typeset_bytes: Some(0),
             warning: None,
         };
         let error = snapshot

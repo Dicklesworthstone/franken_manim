@@ -4532,6 +4532,105 @@ fn formula_sheet_render(
     Ok((record, frames))
 }
 
+/// fm-cache-eviction-wired-1w05: exercise the real render-completion hook
+/// with no disk retention, ordinary retention, and memory-only typesetting.
+/// All three render teams must publish exactly the same certified PNG.
+fn typeset_cache_retention_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    struct Formula;
+    impl fmn::SceneConstruct for Formula {
+        fn tex_preflight(&self) -> Vec<fmn::tex::TypesetRequest<'_>> {
+            vec![fmn::tex::TypesetRequest::math(r"\frac{x^2+1}{2}")]
+        }
+
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let formula = fmn::prelude::Tex::new(r"\frac{x^2+1}{2}").build(stage.tex_engine()?)?;
+            stage.add(formula)?;
+            Ok(())
+        }
+    }
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    let mut reference = None;
+    let mut evicted = 0;
+    for (index, threads) in [1, 4, 16].into_iter().enumerate() {
+        let destination = format!("/cache-retention-{threads}");
+        let mut options = fmn::RenderOptions::new(&destination)
+            .map_err(|error| fail(format!("retention render options: {error}")))?;
+        options.config.camera.resolution = (96, 54);
+        options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+        options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        options.config.directories.cache = if cfg!(windows) {
+            r"C:\typeset-retention".to_owned()
+        } else {
+            "/typeset-retention".to_owned()
+        };
+        if index == 0 {
+            options.config.cache.max_bytes = 0;
+        }
+        options.typeset_cache = index != 2;
+        let report = fmn::render_with_fs(&mut Formula, options, fs.clone())
+            .map_err(|error| fail(format!("retention render: {error}")))?;
+        let maintenance = &report.typesetting.maintenance;
+        if index == 0 {
+            if maintenance.runs != 1
+                || maintenance.errors != 0
+                || maintenance.evicted_entries == 0
+                || maintenance.retained_bytes != Some(0)
+            {
+                return Err(fail(format!(
+                    "retention did not run after rendering: {maintenance:?}"
+                )));
+            }
+            evicted = maintenance.evicted_entries;
+        }
+        if index == 1 {
+            if report.typesetting.persistent_hits != 0 {
+                return Err(fail(
+                    "the zero-ceiling render retained a reusable disk entry",
+                ));
+            }
+            let retained = maintenance.retained_bytes.unwrap_or(0);
+            if !report.typesetting.persistent
+                || maintenance.runs != 1
+                || maintenance.errors != 0
+                || retained == 0
+                || !report
+                    .typesetting
+                    .persistent_ceiling_bytes
+                    .is_some_and(|ceiling| retained <= ceiling)
+            {
+                return Err(fail(format!(
+                    "ordinary retention did not preserve its bounded disk cache: {maintenance:?}"
+                )));
+            }
+        }
+        if index == 2 && (report.typesetting.persistent || maintenance.runs != 0) {
+            return Err(fail("memory-only rendering performed disk maintenance"));
+        }
+        let frame = fs
+            .read(&PathBuf::from(destination).join("frame_000000.png"))
+            .map_err(|error| fail(format!("read retention PNG: {error}")))?;
+        if let Some(reference) = &reference {
+            if reference != &frame {
+                return Err(fail(
+                    "cache retention or thread count changed certified PNG bytes",
+                ));
+            }
+        } else {
+            reference = Some(frame);
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.typeset.retention")
+            .field("evicted", evicted)
+            .field("retained_bytes", 0_u64)
+            .field("identical_modes", 3_u64),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("cache_retention_modes", 3)
+        .with_counter("cache_retention_bytes", 0)
+        .with_counter("cache_retention_evicted", evicted))
+}
+
 /// One unsigned field of a render record's `typesetting` object.
 fn typesetting_field(record: &str, field: &str) -> Result<u64, ScenarioError> {
     let typesetting = record
@@ -5285,6 +5384,113 @@ fn render_certified_camera_doc(stage: &Stage) -> Vec<u8> {
         .render_with_camera(stage, &camera)
         .expect("the camera route renders the surface and vector frame");
     encode_frame(renderer.frame()).expect("the camera frame encodes into its canonical document")
+}
+
+/// Retained camera captures stay immutable while later poses and overlay
+/// edits reuse the same renderer. A fresh serial renderer supplies each
+/// expected frame; replay then reverses capture order on 1, 4, and 16 threads.
+fn retained_camera_frames_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::prelude::{Cube, RuntimeConfig, Scene};
+    use fmn_render::{Camera, CameraConfig, RetainedFrameRenderer, RetainedFrameRendererConfig};
+
+    let mut scene = Scene::new(RuntimeConfig::default(), 0)
+        .map_err(|error| fail(format!("retained camera scene: {error}")))?;
+    scene
+        .add_mobject(Cube::new(1.4))
+        .map_err(|error| fail(format!("retained camera cube: {error}")))?;
+    let overlay = scene
+        .add_mobject(Circle::new().radius(0.25))
+        .map_err(|error| fail(format!("retained camera overlay: {error}")))?;
+    scene.stage_mut().shift(overlay, [-1.2, 0.0, 0.0]);
+    let viewport = fmn_render::Viewport {
+        width: 64,
+        height: 36,
+    };
+    let frame_config = FrameConfig::new(
+        viewport,
+        fmn_render::ScreenMap {
+            scale: 9.0,
+            origin: [32.0, 18.0],
+            y_up: true,
+        },
+        fmn_core::color::LinearRgba {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        },
+    );
+    let config = RetainedFrameRendererConfig {
+        frame: frame_config,
+        tiling: TILING,
+        engine: EngineIdentity::certified(),
+        threads: 1,
+    };
+    let mut renderer = RetainedFrameRenderer::new(config)
+        .map_err(|error| fail(format!("retained camera renderer: {error}")))?;
+    let mut frames = Vec::new();
+    for index in 0..4 {
+        let mut camera = CameraConfig {
+            resolution: (viewport.width, viewport.height),
+            background: frame_config.background,
+            ..CameraConfig::default()
+        };
+        camera
+            .frame
+            .set_shape([64.0 / 9.0, 4.0])
+            .map_err(|error| fail(format!("retained camera shape: {error}")))?;
+        camera
+            .frame
+            .set_euler_angles(Some(f64::from(index.min(2)) * 0.3), Some(0.5), None)
+            .map_err(|error| fail(format!("retained camera orbit: {error}")))?;
+        if index == 3 {
+            scene.stage_mut().shift(overlay, [1.0, 0.5, 0.0]);
+        }
+        let camera =
+            Camera::new(camera).map_err(|error| fail(format!("retained camera pose: {error}")))?;
+        let captured = renderer
+            .prepare_with_camera(scene.stage(), &camera)
+            .map_err(|error| fail(format!("retained camera capture: {error}")))?;
+        let mut fresh = RetainedFrameRenderer::new(config)
+            .map_err(|error| fail(format!("serial camera renderer: {error}")))?;
+        fresh
+            .render_with_camera(scene.stage(), &camera)
+            .map_err(|error| fail(format!("serial camera frame: {error}")))?;
+        frames.push((captured, fresh.frame().as_bytes().to_vec()));
+    }
+    if frames[0].1 == frames[1].1 || frames[1].1 == frames[2].1 {
+        return Err(fail("camera orbit did not produce distinct visible frames"));
+    }
+    if frames[2].1 == frames[3].1 {
+        return Err(fail(
+            "overlay edit did not invalidate the retained camera frame",
+        ));
+    }
+    let layout = frames[0]
+        .0
+        .layout()
+        .map_err(|error| fail(error.to_string()))?;
+    let mut raster = FrameBuffer::new(layout);
+    let address = raster.as_bytes().as_ptr();
+    for threads in [1, 4, 16] {
+        for (frame, expected) in frames.iter().rev() {
+            frame
+                .render_into(threads, &mut raster)
+                .map_err(|error| fail(format!("retained camera replay: {error}")))?;
+            if raster.as_bytes() != expected || raster.as_bytes().as_ptr() != address {
+                return Err(fail(
+                    "frozen camera replay changed pixels or replaced the reusable raster",
+                ));
+            }
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.camera.retained")
+            .field("captures", 4_u64)
+            .field("replays", 12_u64)
+            .field("raster_reused", "true"),
+    );
+    Ok(RunOutcome::ok().with_counter("retained_camera_replays", 12))
 }
 
 /// A graph generated after native plane placement must occupy that plane's
@@ -8540,6 +8746,41 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.typeset_cache_retention.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(typeset_cache_retention_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("cache_retention_modes", 3),
+            counter_eq("cache_retention_bytes", 0),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.typeset.retention",
+            vec![
+                FieldPred::u64_eq("retained_bytes", 0),
+                FieldPred::u64_eq("identical_modes", 3),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.retained_camera_frames.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(retained_camera_frames_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("retained_camera_replays", 12),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.camera.retained",
+            vec![
+                FieldPred::u64_eq("captures", 4),
+                FieldPred::str_eq("raster_reused", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.cli_doctor_capabilities.v1",
         ScenarioClass::LifecycleDrill,
         Surface::CliInProcess,
@@ -10981,6 +11222,7 @@ fn typeset_cache_and_preflight_scenarios_pass() {
     for name in [
         "lifecycle.typeset_cache_warm_second_run.v1",
         "lifecycle.typeset_preflight_before_first_play.v1",
+        "lifecycle.typeset_cache_retention.v1",
     ] {
         let scenario = catalog()
             .into_iter()
@@ -10996,6 +11238,7 @@ fn typeset_cache_and_preflight_scenarios_pass() {
 #[test]
 fn cli_builtin_scenarios_pass() {
     for name in [
+        "render_matrix.retained_camera_frames.v1",
         "render_matrix.cli_camera_builtins.v1",
         "render_matrix.cli_primitive_builtins.v1",
         "determinism.cli_builtins_threads_1_4.v1",

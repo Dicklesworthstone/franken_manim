@@ -110,6 +110,36 @@ fn cold_warm_and_disabled_cache_render_identical_pngs_without_build_time_layouts
 
 struct ShapeOnly;
 
+#[test]
+fn render_completion_evicts_disk_layouts_without_changing_certified_pngs() {
+    let fs = Arc::new(VirtualFs::new());
+    let mut limited_options = options("/limited", 4);
+    limited_options.config.cache.max_bytes = 0;
+    let limited =
+        render_with_fs(&mut FormulaScene::default(), limited_options, fs.clone()).unwrap();
+    assert_eq!(limited.typesetting.persistent_ceiling_bytes, Some(0));
+    assert_eq!(limited.typesetting.maintenance.runs, 1);
+    assert_eq!(limited.typesetting.maintenance.errors, 0);
+    assert!(limited.typesetting.maintenance.evicted_entries >= 4);
+    assert!(limited.typesetting.maintenance.evicted_bytes > 0);
+    assert_eq!(limited.typesetting.maintenance.retained_bytes, Some(0));
+
+    let after = render_with_fs(
+        &mut FormulaScene::default(),
+        options("/after", 1),
+        fs.clone(),
+    )
+    .unwrap();
+    assert_eq!(after.typesetting.persistent_hits, 0);
+    assert!(after.typesetting.layout_computations >= 4);
+    let mut memory_options = options("/memory", 4);
+    memory_options.typeset_cache = false;
+    let memory = render_with_fs(&mut FormulaScene::default(), memory_options, fs.clone()).unwrap();
+    assert_eq!(memory.typesetting.maintenance.runs, 0);
+    assert_eq!(png(&fs, "/limited"), png(&fs, "/after"));
+    assert_eq!(png(&fs, "/limited"), png(&fs, "/memory"));
+}
+
 impl SceneConstruct for ShapeOnly {
     fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
         stage.add(Circle::new())?;

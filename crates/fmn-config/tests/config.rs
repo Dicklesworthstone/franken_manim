@@ -11,6 +11,36 @@ use fmn_config::{Config, ConfigError, PackError, PackRegistry, Value, yaml};
 const EVERY_SHAPE: &str = include_str!("fixtures/every_shape.yml");
 const CUSTOM_3B1B: &str = include_str!("fixtures/custom_config_3b1b.yml");
 
+#[test]
+fn cache_retention_uses_typed_precedence_without_changing_certified_identity() {
+    let defaults = Config::resolve(&[], None).unwrap().config;
+    assert_eq!(
+        defaults.cache.max_bytes,
+        fmn_config::config::DEFAULT_TYPESET_CACHE_MAX_BYTES
+    );
+    let limited = Config::resolve(
+        &[Layer {
+            name: "custom",
+            text: "cache:\n  max_bytes: 8192\n",
+        }],
+        Some(overlay([("cache.max_bytes", Value::Int(0))])),
+    )
+    .unwrap()
+    .config;
+    assert_eq!(limited.cache.max_bytes, 0);
+    assert_eq!(
+        defaults.canonical_bytes().unwrap(),
+        limited.canonical_bytes().unwrap()
+    );
+    for value in [Value::Int(-1), Value::Str("unlimited".to_owned())] {
+        let error = Config::resolve(&[], Some(overlay([("cache.max_bytes", value)])))
+            .unwrap_err()
+            .to_string();
+        assert!(error.starts_with("cache.max_bytes:"), "{error}");
+        assert!(error.contains("non-negative integer"), "{error}");
+    }
+}
+
 fn parse(src: &str) -> Value {
     let (value, warnings) = yaml::parse(src).expect("fixture parses");
     assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");

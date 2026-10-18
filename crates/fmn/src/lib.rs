@@ -1727,6 +1727,7 @@ where
         typesetting,
     };
     let run = scene.run(&mut adapter, &mut sink);
+    typesetting.maintain_cache();
     if let Some(error) = adapter.front_door_error {
         return Err(error);
     }
