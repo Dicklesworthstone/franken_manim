@@ -7,30 +7,48 @@ use std::path::{Component, Path, PathBuf};
 
 pub(super) const MAX_EXTRA_ROOTS: usize = 128;
 const DEFAULT_ROOTS: [&str; 8] = [
-    "Cargo.toml", "Cargo.lock", "src", "examples", "build.rs", ".cargo",
-    "rust-toolchain", "rust-toolchain.toml",
+    "Cargo.toml",
+    "Cargo.lock",
+    "src",
+    "examples",
+    "build.rs",
+    ".cargo",
+    "rust-toolchain",
+    "rust-toolchain.toml",
 ];
 
 pub(super) fn roots(project: &Path, extra: &[PathBuf]) -> io::Result<Vec<PathBuf>> {
     if !project.is_absolute() || extra.len() > MAX_EXTRA_ROOTS {
-        return Err(invalid("source watch needs an absolute project and at most 128 extra roots"));
+        return Err(invalid(
+            "source watch needs an absolute project and at most 128 extra roots",
+        ));
     }
     let mut roots = BTreeSet::new();
-    for path in DEFAULT_ROOTS.iter().map(PathBuf::from).chain(extra.iter().cloned()) {
+    for path in DEFAULT_ROOTS
+        .iter()
+        .map(PathBuf::from)
+        .chain(extra.iter().cloned())
+    {
         if path.as_os_str().is_empty() || path.as_os_str().as_encoded_bytes().contains(&0) {
-            return Err(invalid("source-watch paths must be nonempty and contain no NUL"));
+            return Err(invalid(
+                "source-watch paths must be nonempty and contain no NUL",
+            ));
         }
         let joined = project.join(path);
         if !joined.is_absolute() {
-            return Err(invalid("source-watch path did not resolve to an absolute path"));
+            return Err(invalid(
+                "source-watch path did not resolve to an absolute path",
+            ));
         }
         let mut normalized = PathBuf::new();
         for component in joined.components() {
             match component {
-                Component::CurDir => {},
+                Component::CurDir => {}
                 Component::ParentDir => {
                     if !normalized.pop() {
-                        return Err(invalid("source-watch path traverses above the filesystem root"));
+                        return Err(invalid(
+                            "source-watch path traverses above the filesystem root",
+                        ));
                     }
                 }
                 _ => normalized.push(component.as_os_str()),
@@ -50,7 +68,9 @@ mod tests {
     use super::*;
 
     fn project() -> PathBuf {
-        std::env::current_dir().unwrap().join("native-project-input-test")
+        std::env::current_dir()
+            .unwrap()
+            .join("native-project-input-test")
     }
 
     #[test]
@@ -68,7 +88,11 @@ mod tests {
     #[test]
     fn dependency_and_asset_paths_are_relative_to_the_manifest_not_cwd() {
         let project = project();
-        let roots = roots(&project, &["../shared/src".into(), "assets/voice.wav".into()]).unwrap();
+        let roots = roots(
+            &project,
+            &["../shared/src".into(), "assets/voice.wav".into()],
+        )
+        .unwrap();
         assert!(roots.contains(&project.parent().unwrap().join("shared/src")));
         assert!(roots.contains(&project.join("assets/voice.wav")));
     }
@@ -76,7 +100,11 @@ mod tests {
     #[test]
     fn explicitly_selected_directories_and_missing_paths_are_retained() {
         let project = project();
-        let roots = roots(&project, &["assets".into(), "not-created-yet/model.json".into()]).unwrap();
+        let roots = roots(
+            &project,
+            &["assets".into(), "not-created-yet/model.json".into()],
+        )
+        .unwrap();
         assert!(roots.contains(&project.join("assets")));
         assert!(roots.contains(&project.join("not-created-yet/model.json")));
     }
@@ -92,7 +120,11 @@ mod tests {
     #[test]
     fn lexical_aliases_are_deduplicated_before_scanning() {
         let project = project();
-        let roots = roots(&project, &["./src".into(), "target/../src".into(), project.join("src")]).unwrap();
+        let roots = roots(
+            &project,
+            &["./src".into(), "target/../src".into(), project.join("src")],
+        )
+        .unwrap();
         assert_eq!(roots.len(), DEFAULT_ROOTS.len());
         assert!(roots.windows(2).all(|pair| pair[0] < pair[1]));
     }

@@ -26,10 +26,13 @@ jobs:
           printf '#[path = "%s/crates/fmn-cli/src/studio_project/inputs.rs"] mod inputs;\n' "$PWD" >> "$RUNNER_TEMP/reload_tests.rs"
           rustc --edition=2024 --test "$RUNNER_TEMP/reload_tests.rs" -o "$RUNNER_TEMP/reload_tests"
           "$RUNNER_TEMP/reload_tests" --nocapture
-      - name: Prepare formatted source and normative context for inspection
+      - name: Check the tracked native-project sources without rewriting them
+        run: |
+          rustfmt --edition 2024 --check crates/fmn-cli/src/studio_project.rs
+          git diff --exit-code -- crates/fmn-cli/src/studio_project.rs crates/fmn-cli/src/studio_project
+      - name: Archive exact tested source and normative context
         if: always()
         run: |
-          rustfmt --edition 2024 crates/fmn-cli/src/studio_project.rs
           tar -czf "$RUNNER_TEMP/studio-source.tar.gz" crates/fmn-cli/src/studio_project.rs crates/fmn-cli/src/studio_project crates/fmn-studio/src/host.rs docs/planning/COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKEN_MANIM.md .beads/issues.jsonl
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()

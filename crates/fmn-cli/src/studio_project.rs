@@ -73,7 +73,9 @@ pub(super) fn selected(args: &[OsString]) -> bool {
 
 fn value<'a>(args: &'a [String], index: &mut usize, flag: &str) -> Result<&'a str> {
     *index += 1;
-    let value = args.get(*index).ok_or_else(|| format!("{flag} requires a value"))?;
+    let value = args
+        .get(*index)
+        .ok_or_else(|| format!("{flag} requires a value"))?;
     if value.is_empty() || value.contains('\0') || value.len() > 8192 {
         return Err(format!("{flag} has an empty, NUL-containing or oversized value").into());
     }
@@ -92,10 +94,16 @@ fn parse(args: &[OsString]) -> Result<Option<Options>> {
     if !selected(args) || args.len() > 512 {
         return Err("invalid native-project invocation or too many arguments".into());
     }
-    let args = args.iter().map(|arg| {
-        arg.to_str().map(str::to_owned).ok_or("native-project arguments must be UTF-8")
-    }).collect::<std::result::Result<Vec<_>, _>>()?;
-    let (mut manifest, mut cargo, mut package, mut target, mut scene) = (None, None, None, None, None);
+    let args = args
+        .iter()
+        .map(|arg| {
+            arg.to_str()
+                .map(str::to_owned)
+                .ok_or("native-project arguments must be UTF-8")
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let (mut manifest, mut cargo, mut package, mut target, mut scene) =
+        (None, None, None, None, None);
     let (mut worker_args, mut features, mut watch) = (Vec::new(), Vec::new(), Vec::new());
     let (mut release, mut allow_network, mut timeout) = (false, false, None);
     let mut index = 1;
@@ -103,13 +111,29 @@ fn parse(args: &[OsString]) -> Result<Option<Options>> {
         let flag = args[index].as_str();
         match flag {
             "--help" | "-h" => return Ok(None),
-            "--manifest-path" => once(&mut manifest, PathBuf::from(value(&args, &mut index, flag)?), flag)?,
-            "--cargo" => once(&mut cargo, PathBuf::from(value(&args, &mut index, flag)?), flag)?,
-            "--package" => once(&mut package, value(&args, &mut index, flag)?.to_owned(), flag)?,
+            "--manifest-path" => once(
+                &mut manifest,
+                PathBuf::from(value(&args, &mut index, flag)?),
+                flag,
+            )?,
+            "--cargo" => once(
+                &mut cargo,
+                PathBuf::from(value(&args, &mut index, flag)?),
+                flag,
+            )?,
+            "--package" => once(
+                &mut package,
+                value(&args, &mut index, flag)?.to_owned(),
+                flag,
+            )?,
             "--scene" => once(&mut scene, value(&args, &mut index, flag)?.to_owned(), flag)?,
             "--bin" | "--example" => {
                 let name = value(&args, &mut index, flag)?.to_owned();
-                let item = if flag == "--bin" { CargoTarget::Bin(name) } else { CargoTarget::Example(name) };
+                let item = if flag == "--bin" {
+                    CargoTarget::Bin(name)
+                } else {
+                    CargoTarget::Example(name)
+                };
                 once(&mut target, item, "--bin/--example")?;
             }
             "--worker-arg" => worker_args.push(value(&args, &mut index, flag)?.to_owned()),
@@ -129,7 +153,9 @@ fn parse(args: &[OsString]) -> Result<Option<Options>> {
         index += 1;
     }
     if worker_args.len() > 128 || features.len() > 128 || watch.len() > inputs::MAX_EXTRA_ROOTS {
-        return Err("native-project worker arguments, features or watch paths exceed 128 entries".into());
+        return Err(
+            "native-project worker arguments, features or watch paths exceed 128 entries".into(),
+        );
     }
     let cargo: PathBuf = cargo.ok_or("--cargo is required")?;
     if !cargo.is_absolute() {
@@ -156,39 +182,86 @@ fn parse(args: &[OsString]) -> Result<Option<Options>> {
 
 pub(super) fn run_os(args: &[OsString]) -> fmn_cli::RunOutput {
     let options = match parse(args) {
-        Ok(None) => return fmn_cli::RunOutput { code: 0, stdout: HELP.into(), stderr: String::new() },
+        Ok(None) => {
+            return fmn_cli::RunOutput {
+                code: 0,
+                stdout: HELP.into(),
+                stderr: String::new(),
+            };
+        }
         Ok(Some(options)) => options,
-        Err(error) => return fmn_cli::RunOutput { code: 2, stdout: String::new(), stderr: format!("fmn studio-project: {error}\n\n{HELP}") },
+        Err(error) => {
+            return fmn_cli::RunOutput {
+                code: 2,
+                stdout: String::new(),
+                stderr: format!("fmn studio-project: {error}\n\n{HELP}"),
+            };
+        }
     };
     let shutdown = Arc::new(AtomicBool::new(false));
     let input_shutdown = Arc::clone(&shutdown);
-    let result = std::thread::Builder::new().name("fmn-project-stdin".into()).spawn(move || {
-        let mut input = std::io::stdin().lock();
-        let mut discard = [0_u8; 1024];
-        while input.read(&mut discard).is_ok_and(|read| read != 0) {}
-        input_shutdown.store(true, Ordering::Release);
-    }).map_err(|error| Box::new(error) as Box<dyn Error>).and_then(|_| {
-        run(options, &mut std::io::stdout().lock(), &shutdown)
-    });
+    let result = std::thread::Builder::new()
+        .name("fmn-project-stdin".into())
+        .spawn(move || {
+            let mut input = std::io::stdin().lock();
+            let mut discard = [0_u8; 1024];
+            while input.read(&mut discard).is_ok_and(|read| read != 0) {}
+            input_shutdown.store(true, Ordering::Release);
+        })
+        .map_err(|error| Box::new(error) as Box<dyn Error>)
+        .and_then(|_| run(options, &mut std::io::stdout().lock(), &shutdown));
     shutdown.store(true, Ordering::Release);
     match result {
-        Ok(()) => fmn_cli::RunOutput { code: 0, stdout: String::new(), stderr: String::new() },
-        Err(error) => fmn_cli::RunOutput { code: 1, stdout: String::new(), stderr: format!("fmn studio-project: {error}\n") },
+        Ok(()) => fmn_cli::RunOutput {
+            code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        },
+        Err(error) => fmn_cli::RunOutput {
+            code: 1,
+            stdout: String::new(),
+            stderr: format!("fmn studio-project: {error}\n"),
+        },
     }
 }
 
 fn compiler_environment(cargo: &Path) -> Result<Vec<(String, String)>> {
     let mut env = Vec::new();
-    for key in ["PATH", "HOME", "CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN", "TMPDIR", "TMP", "TEMP", "SYSTEMROOT", "WINDIR", "USERPROFILE", "APPDATA", "LOCALAPPDATA"] {
+    for key in [
+        "PATH",
+        "HOME",
+        "CARGO_HOME",
+        "RUSTUP_HOME",
+        "RUSTUP_TOOLCHAIN",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "SYSTEMROOT",
+        "WINDIR",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+    ] {
         if let Some(value) = std::env::var_os(key) {
-            env.push((key.into(), value.into_string().map_err(|_| format!("{key} is not UTF-8"))?));
+            env.push((
+                key.into(),
+                value
+                    .into_string()
+                    .map_err(|_| format!("{key} is not UTF-8"))?,
+            ));
         }
     }
-    let rustc = cargo.parent().ok_or("Cargo has no directory")?.join(format!("rustc{}", std::env::consts::EXE_SUFFIX));
+    let rustc = cargo
+        .parent()
+        .ok_or("Cargo has no directory")?
+        .join(format!("rustc{}", std::env::consts::EXE_SUFFIX));
     if !rustc.is_file() {
         return Err("select Cargo beside its rustc (for example: rustup which cargo)".into());
     }
-    env.push(("RUSTC".into(), rustc.to_str().ok_or("rustc path is not UTF-8")?.into()));
+    env.push((
+        "RUSTC".into(),
+        rustc.to_str().ok_or("rustc path is not UTF-8")?.into(),
+    ));
     Ok(env)
 }
 
@@ -230,12 +303,21 @@ impl Drop for StopWatch<'_> {
 }
 
 fn run(options: Options, output: &mut dyn Write, shutdown: &AtomicBool) -> Result<()> {
-    let path = if options.manifest.is_dir() { options.manifest.join("Cargo.toml") } else { options.manifest };
+    let path = if options.manifest.is_dir() {
+        options.manifest.join("Cargo.toml")
+    } else {
+        options.manifest
+    };
     let manifest = path.canonicalize()?;
     if manifest.file_name().is_none_or(|name| name != "Cargo.toml") || !manifest.is_file() {
-        return Err("--manifest-path must select an existing Cargo.toml or project directory".into());
+        return Err(
+            "--manifest-path must select an existing Cargo.toml or project directory".into(),
+        );
     }
-    let project = manifest.parent().ok_or("manifest has no parent")?.to_path_buf();
+    let project = manifest
+        .parent()
+        .ok_or("manifest has no parent")?
+        .to_path_buf();
     // Take the baseline BEFORE compiling: edits during the first build must
     // still be observed by the first live poll, not silently adopted as built.
     let mut watcher = SourceWatch::new(
@@ -247,8 +329,15 @@ fn run(options: Options, output: &mut dyn Write, shutdown: &AtomicBool) -> Resul
     let environment = compiler_environment(&options.cargo)?;
     let runner = Arc::new(StdProcessRunner);
     let triple = CargoRebuildDriver::host_triple(&*runner, &options.cargo, &environment)?;
-    let mut config = CargoBuildConfig::new(options.cargo, manifest, options.package, options.target, triple,
-        project.join("target/fmn-studio-build"), project.join("target/fmn-studio-workers"));
+    let mut config = CargoBuildConfig::new(
+        options.cargo,
+        manifest,
+        options.package,
+        options.target,
+        triple,
+        project.join("target/fmn-studio-build"),
+        project.join("target/fmn-studio-workers"),
+    );
     config.build_env = environment;
     config.worker_argv = options.worker_args;
     config.worker_cwd = Some(project.clone());
@@ -259,12 +348,30 @@ fn run(options: Options, output: &mut dyn Write, shutdown: &AtomicBool) -> Resul
     let mut builder = CargoRebuildDriver::new(config, runner)?;
     let clock: Arc<dyn Clock> = Arc::new(StdClock::new());
     let fs: Arc<dyn FileSystem> = Arc::new(VirtualFs::new());
-    let cache = Store::open(fs, Arc::clone(&clock), project.join("target/fmn-project-cache"), StoreConfig::default())?
-        .namespace("studio-replay", 1, NamespacePolicy { ceiling_bytes: Some(64 * 1024 * 1024) })?;
+    let cache = Store::open(
+        fs,
+        Arc::clone(&clock),
+        project.join("target/fmn-project-cache"),
+        StoreConfig::default(),
+    )?
+    .namespace(
+        "studio-replay",
+        1,
+        NamespacePolicy {
+            ceiling_bytes: Some(64 * 1024 * 1024),
+        },
+    )?;
     let limits = ProtocolLimits::default();
     let mut images = PublishedImages::default();
-    let mut supervisor = Supervisor::new(Box::new(StdWorkerLauncher::default()), Arc::clone(&clock), cache,
-        SupervisorConfig { protocol_limits: limits, ..SupervisorConfig::default() });
+    let mut supervisor = Supervisor::new(
+        Box::new(StdWorkerLauncher::default()),
+        Arc::clone(&clock),
+        cache,
+        SupervisorConfig {
+            protocol_limits: limits,
+            ..SupervisorConfig::default()
+        },
+    );
     let scene = options.scene;
     supervisor.install_session(&scene, Journal::new())?;
     let started = supervisor.build_and_start(&mut builder);
@@ -272,11 +379,29 @@ fn run(options: Options, output: &mut dyn Write, shutdown: &AtomicBool) -> Resul
     started?;
     // Project and asset reads are not attested by this generic host. Rebuilds
     // conservatively replay the journal rather than reusing unknown checkpoints.
-    response(supervisor.request(SupervisorRequest::Play { scene: scene.clone(), command: studio_seek_command(&scene, 0)? }, &|_| false)?)?;
-    let WorkerResponse::Frame(initial) = response(supervisor.request(SupervisorRequest::Scrub { scene: scene.clone(), frame: 0 }, &|_| false)?)? else {
+    response(supervisor.request(
+        SupervisorRequest::Play {
+            scene: scene.clone(),
+            command: studio_seek_command(&scene, 0)?,
+        },
+        &|_| false,
+    )?)?;
+    let WorkerResponse::Frame(initial) = response(supervisor.request(
+        SupervisorRequest::Scrub {
+            scene: scene.clone(),
+            frame: 0,
+        },
+        &|_| false,
+    )?)?
+    else {
         return Err("selected worker did not return its native initial frame".into());
     };
-    let session = Arc::new(StudioWorkerSession::new(&scene, supervisor, Box::new(builder), Arc::new(|_| false))?);
+    let session = Arc::new(StudioWorkerSession::new(
+        &scene,
+        supervisor,
+        Box::new(builder),
+        Arc::new(|_| false),
+    )?);
     let result = (|| -> Result<()> {
         let host_config = StudioHostConfig::default();
         let frames = FrameHub::new(host_config.max_frame_history, host_config.max_png_bytes)?;
@@ -286,10 +411,16 @@ fn run(options: Options, output: &mut dyn Write, shutdown: &AtomicBool) -> Resul
         let token = CapabilityToken::new(secret)?;
         let cap = token.try_expose_hex()?;
         let host = StudioHost::bind(
-            Arc::clone(&session), frames.clone(), token, Arc::clone(&clock), host_config,
+            Arc::clone(&session),
+            frames.clone(),
+            token,
+            Arc::clone(&clock),
+            host_config,
         )?;
         let client = reload::Client::new(
-            host.local_addr()?, cap, options.timeout.saturating_add(Duration::from_secs(30)),
+            host.local_addr()?,
+            cap,
+            options.timeout.saturating_add(Duration::from_secs(30)),
         )?;
         let stop = AtomicBool::new(false);
         std::thread::scope(|scope| -> Result<()> {
@@ -344,12 +475,17 @@ fn run(options: Options, output: &mut dyn Write, shutdown: &AtomicBool) -> Resul
                     // Wake multipart readers before serve_until joins them.
                     frames.close();
                 })?;
-            let guard = StopWatch { stop: &stop, frames: &frames };
+            let guard = StopWatch {
+                stop: &stop,
+                frames: &frames,
+            };
             writeln!(output, "{}", host.launch_url()?)?;
             output.flush()?;
             let served = host.serve_until(shutdown);
             drop(guard);
-            watcher_thread.join().map_err(|_| "source watcher panicked")?;
+            watcher_thread
+                .join()
+                .map_err(|_| "source watcher panicked")?;
             served?;
             Ok(())
         })
@@ -364,22 +500,40 @@ mod tests {
 
     fn args() -> Vec<OsString> {
         let cargo = std::env::current_dir().unwrap().join("cargo");
-        vec!["studio-project".into(), "--cargo".into(), cargo.into_os_string(), "--manifest-path".into(),
-            "scene project/Cargo.toml".into(), "--package".into(), "demo".into(), "--bin".into(),
-            "worker".into(), "--scene".into(), "MyScene".into()]
+        vec![
+            "studio-project".into(),
+            "--cargo".into(),
+            cargo.into_os_string(),
+            "--manifest-path".into(),
+            "scene project/Cargo.toml".into(),
+            "--package".into(),
+            "demo".into(),
+            "--bin".into(),
+            "worker".into(),
+            "--scene".into(),
+            "MyScene".into(),
+        ]
     }
 
     #[test]
     fn only_the_explicit_native_project_command_is_selected() {
         assert!(selected(&args()));
-        for value in [vec![], vec!["studio".into()], vec!["render".into(), "studio-project".into()]] {
+        for value in [
+            vec![],
+            vec!["studio".into()],
+            vec!["render".into(), "studio-project".into()],
+        ] {
             assert!(!selected(&value));
         }
     }
 
     #[test]
     fn help_has_no_build_or_filesystem_precondition() {
-        assert!(parse(&["studio-project".into(), "--help".into()]).unwrap().is_none());
+        assert!(
+            parse(&["studio-project".into(), "--help".into()])
+                .unwrap()
+                .is_none()
+        );
         let output = run_os(&["studio-project".into(), "-h".into()]);
         assert_eq!(output.code, 0);
         assert!(output.stdout.contains("--manifest-path"));
@@ -399,7 +553,20 @@ mod tests {
     #[test]
     fn worker_arguments_are_not_interpreted_as_compiler_flags() {
         let mut args = args();
-        args.extend(["--worker-arg", "--worker", "--worker-arg", "--release", "--feature", "native", "--allow-network", "--build-timeout", "60"].map(OsString::from));
+        args.extend(
+            [
+                "--worker-arg",
+                "--worker",
+                "--worker-arg",
+                "--release",
+                "--feature",
+                "native",
+                "--allow-network",
+                "--build-timeout",
+                "60",
+            ]
+            .map(OsString::from),
+        );
         let options = parse(&args).unwrap().unwrap();
         assert_eq!(options.worker_args, ["--worker", "--release"]);
         assert_eq!(options.features, ["native"]);
@@ -420,9 +587,17 @@ mod tests {
 
     #[test]
     fn conflicting_missing_unknown_and_unbounded_requests_refuse() {
-        for suffix in [vec!["--example", "other"], vec!["--scene", "Other"], vec!["--feature"],
-            vec!["--build-timeout", "0"], vec!["--build-timeout", "86401"], vec!["--build-timeout", "NaN"],
-            vec!["--worker-arg", ""], vec!["--worker-arg", "bad\0arg"], vec!["--unknown"]] {
+        for suffix in [
+            vec!["--example", "other"],
+            vec!["--scene", "Other"],
+            vec!["--feature"],
+            vec!["--build-timeout", "0"],
+            vec!["--build-timeout", "86401"],
+            vec!["--build-timeout", "NaN"],
+            vec!["--worker-arg", ""],
+            vec!["--worker-arg", "bad\0arg"],
+            vec!["--unknown"],
+        ] {
             let mut args = args();
             args.extend(suffix.into_iter().map(OsString::from));
             assert!(parse(&args).is_err());
@@ -436,22 +611,36 @@ mod tests {
     #[test]
     fn repeated_values_have_a_count_budget() {
         let mut args = args();
-        for _ in 0..129 { args.extend(["--worker-arg".into(), "value".into()]); }
+        for _ in 0..129 {
+            args.extend(["--worker-arg".into(), "value".into()]);
+        }
         assert!(parse(&args).is_err());
     }
 
     #[test]
     fn explicit_dependency_and_asset_watches_preserve_separate_arguments() {
         let mut args = args();
-        args.extend(["--watch", "../shared/src", "--watch", "assets/my audio.wav"].map(OsString::from));
+        args.extend(
+            ["--watch", "../shared/src", "--watch", "assets/my audio.wav"].map(OsString::from),
+        );
         let options = parse(&args).unwrap().unwrap();
-        assert_eq!(options.watch, [PathBuf::from("../shared/src"), PathBuf::from("assets/my audio.wav")]);
+        assert_eq!(
+            options.watch,
+            [
+                PathBuf::from("../shared/src"),
+                PathBuf::from("assets/my audio.wav")
+            ]
+        );
         assert!(options.worker_args.is_empty());
     }
 
     #[test]
     fn watch_flags_obey_value_and_count_limits() {
-        for suffix in [vec!["--watch"], vec!["--watch", ""], vec!["--watch", "bad\0path"]] {
+        for suffix in [
+            vec!["--watch"],
+            vec!["--watch", ""],
+            vec!["--watch", "bad\0path"],
+        ] {
             let mut args = args();
             args.extend(suffix.into_iter().map(OsString::from));
             assert!(parse(&args).is_err());
@@ -469,18 +658,27 @@ mod tests {
         fn new() -> Self {
             static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             loop {
-                let path = std::env::temp_dir().join(format!("fmn-project-watch-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+                let path = std::env::temp_dir().join(format!(
+                    "fmn-project-watch-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, Ordering::Relaxed)
+                ));
                 match std::fs::create_dir(&path) {
                     Ok(()) => return Self(path),
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {},
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                     Err(error) => panic!("create source-watch fixture: {error}"),
                 }
             }
         }
 
         fn watch(&self, extra: &[PathBuf]) -> SourceWatch {
-            SourceWatch::new(inputs::roots(&self.0, extra).unwrap(), vec![self.0.join("target")],
-                Duration::from_millis(300), WatchLimits::default()).unwrap()
+            SourceWatch::new(
+                inputs::roots(&self.0, extra).unwrap(),
+                vec![self.0.join("target")],
+                Duration::from_millis(300),
+                WatchLimits::default(),
+            )
+            .unwrap()
         }
     }
 
