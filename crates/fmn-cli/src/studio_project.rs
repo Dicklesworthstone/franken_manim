@@ -1,6 +1,7 @@
 //! Native Cargo-project front door. This host never executes scene callbacks.
 //! Manim's generated flag parser continues to own the ordinary `studio` route.
 
+mod inputs;
 mod reload;
 
 use std::error::Error;
@@ -18,7 +19,7 @@ use fmn_platform::fs::{FileSystem, VirtualFs};
 use fmn_platform::process::StdProcessRunner;
 use fmn_scene::Journal;
 use fmn_studio::project::{CargoBuildConfig, CargoRebuildDriver, CargoTarget};
-use fmn_studio::project_watch::{SourceWatch, WatchFilter, WatchLimits};
+use fmn_studio::project_watch::{SourceWatch, WatchLimits};
 use fmn_studio::protocol::studio_seek_command;
 use fmn_studio::{
     CapabilityToken, FrameHub, ProtocolLimits, StdWorkerLauncher, StudioHost, StudioHostConfig,
@@ -36,6 +37,7 @@ serve the native Studio worker protocol; arbitrary render binaries are not worke
 Options:\n\
   --worker-arg VALUE       Repeat for each worker-mode argument (not Cargo flags)\n\
   --feature NAME          Repeat for each selected Cargo feature\n\
+  --watch PATH            Repeat for dependency/asset files or directories\n\
   --release               Build the worker with Cargo's release profile\n\
   --allow-network         Permit Cargo dependency downloads (offline by default)\n\
   --build-timeout SECONDS  Positive compiler deadline (default: 300)\n\
@@ -44,7 +46,11 @@ Builds are locked and bounded. Source changes and Browser Restart recompile\n\
 and restore the committed scene through the existing journal. Failed builds\n\
 retain the last healthy worker. Temporary watch/connection failures recover\n\
 without restarting Studio. The browser uses a loopback capability URL.\n\
-Close stdin to stop; pending rebuild I/O is cancelled during shutdown.\n";
+Close stdin to stop; pending rebuild I/O is cancelled during shutdown.\n\
+Watch paths are relative to the manifest directory; absolute paths are allowed.\n\
+Rust sources, examples, build.rs, Cargo files and toolchain configuration are\n\
+watched by default. Extra directories include assets of every file type.\n\
+Scans refuse symlinks and obey the existing 4096-entry / 64 MiB budget.\n";
 
 #[derive(Debug)]
 struct Options {
@@ -55,6 +61,7 @@ struct Options {
     scene: String,
     worker_args: Vec<String>,
     features: Vec<String>,
+    watch: Vec<PathBuf>,
     release: bool,
     offline: bool,
     timeout: Duration,
@@ -89,7 +96,7 @@ fn parse(args: &[OsString]) -> Result<Option<Options>> {
         arg.to_str().map(str::to_owned).ok_or("native-project arguments must be UTF-8")
     }).collect::<std::result::Result<Vec<_>, _>>()?;
     let (mut manifest, mut cargo, mut package, mut target, mut scene) = (None, None, None, None, None);
-    let (mut worker_args, mut features) = (Vec::new(), Vec::new());
+    let (mut worker_args, mut features, mut watch) = (Vec::new(), Vec::new(), Vec::new());
     let (mut release, mut allow_network, mut timeout) = (false, false, None);
     let mut index = 1;
     while index < args.len() {
@@ -107,6 +114,7 @@ fn parse(args: &[OsString]) -> Result<Option<Options>> {
             }
             "--worker-arg" => worker_args.push(value(&args, &mut index, flag)?.to_owned()),
             "--feature" => features.push(value(&args, &mut index, flag)?.to_owned()),
+            "--watch" => watch.push(PathBuf::from(value(&args, &mut index, flag)?)),
             "--release" if !release => release = true,
             "--allow-network" if !allow_network => allow_network = true,
             "--build-timeout" => {
@@ -120,8 +128,8 @@ fn parse(args: &[OsString]) -> Result<Option<Options>> {
         }
         index += 1;
     }
-    if worker_args.len() > 128 || features.len() > 128 {
-        return Err("native-project worker arguments or features exceed 128 entries".into());
+    if worker_args.len() > 128 || features.len() > 128 || watch.len() > inputs::MAX_EXTRA_ROOTS {
+        return Err("native-project worker arguments, features or watch paths exceed 128 entries".into());
     }
     let cargo: PathBuf = cargo.ok_or("--cargo is required")?;
     if !cargo.is_absolute() {
@@ -139,6 +147,7 @@ fn parse(args: &[OsString]) -> Result<Option<Options>> {
         scene,
         worker_args,
         features,
+        watch,
         release,
         offline: !allow_network,
         timeout: timeout.unwrap_or(Duration::from_secs(300)),
@@ -229,15 +238,11 @@ fn run(options: Options, output: &mut dyn Write, shutdown: &AtomicBool) -> Resul
     let project = manifest.parent().ok_or("manifest has no parent")?.to_path_buf();
     // Take the baseline BEFORE compiling: edits during the first build must
     // still be observed by the first live poll, not silently adopted as built.
-    let mut watcher = SourceWatch::new_filtered(
-        vec![project.join("Cargo.toml"), project.join("Cargo.lock"), project.join("src")],
+    let mut watcher = SourceWatch::new(
+        inputs::roots(&project, &options.watch)?,
         vec![project.join("target")],
         Duration::from_millis(300),
         WatchLimits::default(),
-        WatchFilter {
-            extensions: vec!["rs".into(), "toml".into()],
-            ignored_directories: vec![".git".into()],
-        },
     )?;
     let environment = compiler_environment(&options.cargo)?;
     let runner = Arc::new(StdProcessRunner);
@@ -433,5 +438,94 @@ mod tests {
         let mut args = args();
         for _ in 0..129 { args.extend(["--worker-arg".into(), "value".into()]); }
         assert!(parse(&args).is_err());
+    }
+
+    #[test]
+    fn explicit_dependency_and_asset_watches_preserve_separate_arguments() {
+        let mut args = args();
+        args.extend(["--watch", "../shared/src", "--watch", "assets/my audio.wav"].map(OsString::from));
+        let options = parse(&args).unwrap().unwrap();
+        assert_eq!(options.watch, [PathBuf::from("../shared/src"), PathBuf::from("assets/my audio.wav")]);
+        assert!(options.worker_args.is_empty());
+    }
+
+    #[test]
+    fn watch_flags_obey_value_and_count_limits() {
+        for suffix in [vec!["--watch"], vec!["--watch", ""], vec!["--watch", "bad\0path"]] {
+            let mut args = args();
+            args.extend(suffix.into_iter().map(OsString::from));
+            assert!(parse(&args).is_err());
+        }
+        let mut args = args();
+        for _ in 0..=inputs::MAX_EXTRA_ROOTS {
+            args.extend(["--watch".into(), "src".into()]);
+        }
+        assert!(parse(&args).is_err());
+    }
+
+    struct WatchProject(PathBuf);
+
+    impl WatchProject {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            loop {
+                let path = std::env::temp_dir().join(format!("fmn-project-watch-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+                match std::fs::create_dir(&path) {
+                    Ok(()) => return Self(path),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {},
+                    Err(error) => panic!("create source-watch fixture: {error}"),
+                }
+            }
+        }
+
+        fn watch(&self, extra: &[PathBuf]) -> SourceWatch {
+            SourceWatch::new(inputs::roots(&self.0, extra).unwrap(), vec![self.0.join("target")],
+                Duration::from_millis(300), WatchLimits::default()).unwrap()
+        }
+    }
+
+    impl Drop for WatchProject {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn explicit_asset_directories_trigger_reload_for_non_rust_files() {
+        let project = WatchProject::new();
+        std::fs::create_dir(project.0.join("assets")).unwrap();
+        let asset = project.0.join("assets/scene.json");
+        std::fs::write(&asset, b"first").unwrap();
+        let mut watcher = project.watch(&["assets".into()]);
+        std::fs::write(&asset, b"second").unwrap();
+        assert!(!watcher.poll(Duration::ZERO).unwrap());
+        assert!(watcher.poll(Duration::from_millis(300)).unwrap());
+        std::fs::write(&asset, b"second").unwrap();
+        assert!(!watcher.poll(Duration::from_millis(600)).unwrap());
+    }
+
+    #[test]
+    fn example_edits_during_initial_build_and_new_build_scripts_are_observed() {
+        let project = WatchProject::new();
+        std::fs::create_dir(project.0.join("examples")).unwrap();
+        let example = project.0.join("examples/worker.rs");
+        std::fs::write(&example, b"fn main() {} ").unwrap();
+        let mut watcher = project.watch(&[]);
+        std::fs::write(&example, b"fn main() { println!(\"changed\"); }").unwrap();
+        assert!(!watcher.poll(Duration::ZERO).unwrap());
+        assert!(watcher.poll(Duration::from_millis(300)).unwrap());
+        std::fs::write(project.0.join("build.rs"), b"fn main() {}").unwrap();
+        assert!(!watcher.poll(Duration::from_millis(400)).unwrap());
+        assert!(watcher.poll(Duration::from_millis(700)).unwrap());
+    }
+
+    #[test]
+    fn asset_directory_watches_do_not_rebuild_on_generated_target_outputs() {
+        let project = WatchProject::new();
+        std::fs::create_dir_all(project.0.join("assets/target")).unwrap();
+        let mut watcher = project.watch(&["assets".into()]);
+        std::fs::write(project.0.join("assets/target/generated.rs"), b"output").unwrap();
+        assert!(!watcher.poll(Duration::ZERO).unwrap());
+        assert!(!watcher.poll(Duration::from_secs(1)).unwrap());
     }
 }

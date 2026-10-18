@@ -23,6 +23,7 @@ jobs:
         run: |
           set -euo pipefail
           printf '#[path = "%s/crates/fmn-cli/src/studio_project/reload.rs"] mod reload;\n' "$PWD" > "$RUNNER_TEMP/reload_tests.rs"
+          printf '#[path = "%s/crates/fmn-cli/src/studio_project/inputs.rs"] mod inputs;\n' "$PWD" >> "$RUNNER_TEMP/reload_tests.rs"
           rustc --edition=2024 --test "$RUNNER_TEMP/reload_tests.rs" -o "$RUNNER_TEMP/reload_tests"
           "$RUNNER_TEMP/reload_tests" --nocapture
       - name: Prepare formatted source and normative context for inspection
@@ -53,6 +54,8 @@ jobs:
             target
           key: studio-project-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
       - name: Compile the shipping binary and exercise native-project tests
-        run: cargo test --locked -p fmn-cli --features cli,batch --bin fmn studio_project::
+        run: |
+          cargo test --locked -p fmn-cli --features cli,batch --bin fmn studio_project::
       - name: Exercise source-watch content and debounce regressions
-        run: cargo test --locked -p fmn-studio --lib project_watch::
+        run: |
+          cargo test --locked -p fmn-studio --lib project_watch::
