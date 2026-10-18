@@ -1814,7 +1814,6 @@ mod private_boundary {
         assert!(!destination.exists());
     }
 
-
     /// Measure cancellation after the native descendant starts growing a file.
     /// Executable copying/hashing is setup work and is not part of this bound.
     #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
@@ -1953,7 +1952,10 @@ mod private_boundary {
                 ),
                 "{route} did not preserve the output-size refusal: {result:?}"
             );
-            assert!(!destination.exists(), "{route} published an oversized artifact");
+            assert!(
+                !destination.exists(),
+                "{route} published an oversized artifact"
+            );
         }
     }
 

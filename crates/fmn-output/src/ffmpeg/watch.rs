@@ -43,7 +43,9 @@ fn workdir_bytes(workdir: &OwnedWorkdir, maximum: u64) -> Result<u64, BoundaryEr
                 Ok(_) => return Err(failure("ffmpeg scratch directory changed its file type")),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(error) => {
-                    return Err(failure(format!("inspect ffmpeg scratch directory: {error}")));
+                    return Err(failure(format!(
+                        "inspect ffmpeg scratch directory: {error}"
+                    )));
                 }
             }
         }

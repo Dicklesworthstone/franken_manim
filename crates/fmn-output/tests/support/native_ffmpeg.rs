@@ -83,8 +83,7 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
         }
         "runaway-output" | "runaway-scratch" | "runaway-mux" => {
             let artifact = artifact_path(&argv)?;
-            if mode == "runaway-mux"
-                && artifact.file_name().is_none_or(|name| name != "muxed.mp4")
+            if mode == "runaway-mux" && artifact.file_name().is_none_or(|name| name != "muxed.mp4")
             {
                 drain_stdin()?;
                 std::fs::write(&artifact, b"FAKEVIDEO")?;

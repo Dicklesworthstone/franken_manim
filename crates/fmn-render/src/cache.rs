@@ -242,8 +242,7 @@ impl TileKey {
         }
         let instances = plan.shapes().instances();
         draws.iter().enumerate().all(|(index, &draw)| {
-            let (Some(instance), Some(&flags)) =
-                (instances.get(draw as usize), flags.get(index))
+            let (Some(instance), Some(&flags)) = (instances.get(draw as usize), flags.get(index))
             else {
                 return false;
             };
@@ -417,9 +416,9 @@ impl<T> TileCache<T> {
             self.stats.empty += 1;
             return Ok(TileWork::Empty);
         }
-        let required = draws.len().checked_mul(
-            std::mem::size_of::<[u64; 15]>() + std::mem::size_of::<Revisions>(),
-        );
+        let required = draws
+            .len()
+            .checked_mul(std::mem::size_of::<[u64; 15]>() + std::mem::size_of::<Revisions>());
         if required.is_none_or(|bytes| bytes > max_key_bytes) {
             self.entries.remove(&tile);
             self.stats.poisoned += 1;
@@ -608,7 +607,9 @@ impl PixelTileCache {
             .entries
             .values()
             .filter_map(|(key, _)| key.as_ref())
-            .fold(0usize, |bytes, key| bytes.saturating_add(key.retained_bytes()));
+            .fold(0usize, |bytes, key| {
+                bytes.saturating_add(key.retained_bytes())
+            });
         self.work.iter().fold(retained, |bytes, work| match work {
             TileWork::Rasterize(key) => bytes.saturating_add(key.retained_bytes()),
             _ => bytes,
@@ -1512,17 +1513,28 @@ mod tests {
             }
             assert_eq!(
                 (stale.commands, stale.revisions, stale.camera, stale.output),
-                (actual.commands, actual.revisions, actual.camera, actual.output)
+                (
+                    actual.commands,
+                    actual.revisions,
+                    actual.camera,
+                    actual.output
+                )
             );
             assert_ne!(stale, actual);
             assert_eq!(stale.diff(&actual), vec![part]);
             let mut cache = TileCache::new();
             cache.store(tile, stale, 7u32);
             assert!(matches!(
-                cache.plan_tile(&binning, &plan, tile, 0, output()).expect("valid tile"),
+                cache
+                    .plan_tile(&binning, &plan, tile, 0, output())
+                    .expect("valid tile"),
                 TileWork::Rasterize(_)
             ));
-            assert_eq!(cache.stats().hits, 0, "equal fingerprints reused stale pixels");
+            assert_eq!(
+                cache.stats().hits,
+                0,
+                "equal fingerprints reused stale pixels"
+            );
         }
     }
 
@@ -1540,7 +1552,9 @@ mod tests {
         let mut cache = TileCache::new();
         cache.store(tile, key, 7u32);
         assert_eq!(
-            cache.plan_tile(&binning, &plan, tile, 0, output()).expect("valid tile"),
+            cache
+                .plan_tile(&binning, &plan, tile, 0, output())
+                .expect("valid tile"),
             TileWork::Reuse
         );
 
@@ -1548,27 +1562,38 @@ mod tests {
         plan.sync(&stage, 0).expect("valid moved fixture");
         let moved = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
             .expect("bounded moved binning");
-        let TileWork::Rasterize(key) =
-            cache.plan_tile(&moved, &plan, tile, 0, output()).expect("valid moved tile")
+        let TileWork::Rasterize(key) = cache
+            .plan_tile(&moved, &plan, tile, 0, output())
+            .expect("valid moved tile")
         else {
             panic!("the changed tile must rasterize");
         };
         assert_eq!(key.command_words.as_ptr(), command_storage);
         assert_eq!(key.revision_axes.as_ptr(), revision_storage);
-        assert!(cache.key(tile).is_none(), "pending work cannot validate the old payload");
-        assert_eq!(cache.get(tile), Some(&7), "dirty payload storage remains recyclable");
+        assert!(
+            cache.key(tile).is_none(),
+            "pending work cannot validate the old payload"
+        );
+        assert_eq!(
+            cache.get(tile),
+            Some(&7),
+            "dirty payload storage remains recyclable"
+        );
 
         // Abandon that render. Planning again must not treat the old payload
         // as complete merely because a replacement key was already built.
         drop(key);
-        let TileWork::Rasterize(key) =
-            cache.plan_tile(&moved, &plan, tile, 0, output()).expect("valid retry")
+        let TileWork::Rasterize(key) = cache
+            .plan_tile(&moved, &plan, tile, 0, output())
+            .expect("valid retry")
         else {
             panic!("abandoned work must rasterize again");
         };
         cache.store(tile, key, 9);
         assert_eq!(
-            cache.plan_tile(&moved, &plan, tile, 0, output()).expect("completed tile"),
+            cache
+                .plan_tile(&moved, &plan, tile, 0, output())
+                .expect("completed tile"),
             TileWork::Reuse
         );
         assert_eq!(cache.get(tile), Some(&9));
@@ -1589,7 +1614,9 @@ mod tests {
         let mut cache = TileCache::new();
         cache.store(tile, prior_epoch, 7u32);
         assert!(matches!(
-            cache.plan_tile(&binning, &plan, tile, 0, output()).expect("valid tile"),
+            cache
+                .plan_tile(&binning, &plan, tile, 0, output())
+                .expect("valid tile"),
             TileWork::Rasterize(_)
         ));
     }
@@ -1604,10 +1631,16 @@ mod tests {
         let budget = std::mem::size_of::<[u64; 15]>() + std::mem::size_of::<Revisions>();
         let mut cache = PixelTileCache::with_key_budget_bytes(budget);
         for _ in 0..2 {
-            cache.prepare_frame(&binning, &plan, 0, Digest::from_bytes([1; 32]))
+            cache
+                .prepare_frame(&binning, &plan, 0, Digest::from_bytes([1; 32]))
                 .expect("bounded cache planning");
             assert!(cache.retained_key_bytes() <= budget);
-            assert!(cache.work.iter().any(|work| matches!(work, TileWork::Rasterize(_))));
+            assert!(
+                cache
+                    .work
+                    .iter()
+                    .any(|work| matches!(work, TileWork::Rasterize(_)))
+            );
             assert!(cache.work.contains(&TileWork::RasterizeUncached));
         }
     }

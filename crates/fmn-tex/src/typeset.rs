@@ -317,10 +317,7 @@ pub struct Sub {
 /// Both the full typeset and compact span maps use UTF-8 byte intervals.
 /// A selection never takes partial ink from a macro, command or ligature.
 #[must_use]
-pub fn select_source_spans(
-    spans: impl IntoIterator<Item = Span>,
-    selection: Span,
-) -> Vec<usize> {
+pub fn select_source_spans(spans: impl IntoIterator<Item = Span>, selection: Span) -> Vec<usize> {
     spans
         .into_iter()
         .enumerate()
