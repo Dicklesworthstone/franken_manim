@@ -15117,7 +15117,7 @@ def verify_portal_console_scene():
         "30",
         "--threads",
         "1",
-        "--video_dir",
+        "--output",
         str(destination),
     )
     assert console_code == 0, console_err
@@ -15278,7 +15278,7 @@ def verify_portal_console_scene():
         "--resolution=96x54",
         "--fps=30",
         "--threads=1",
-        f"--video_dir={repeated_destination}",
+        f"--output={repeated_destination}",
     )
     assert console_code == 0, console_err
     repeated = json.loads(console_out)
@@ -15301,7 +15301,7 @@ def verify_portal_console_scene():
         "30",
         "--threads",
         "1",
-        "--video_dir",
+        "--output",
         str(still_destination),
     )
     assert console_code == 0, console_err
@@ -15328,7 +15328,7 @@ def verify_portal_console_scene():
         "--resolution=96x54",
         "--fps=30",
         "--threads=1",
-        f"--video_dir={repeated_still_destination}",
+        f"--output={repeated_still_destination}",
     )
     assert console_code == 0, console_err
     repeated_still = json.loads(console_out)
@@ -15611,7 +15611,7 @@ def verify_portal_console_scene():
         "30",
         "--threads",
         "1",
-        "--video_dir",
+        "--output",
         str(blocked_still_destination),
     )
     assert console_code == 6
@@ -15636,7 +15636,7 @@ def verify_portal_console_scene():
         "30",
         "--threads",
         "1",
-        "--video_dir",
+        "--output",
         str(destination),
     )
     assert console_code == 6

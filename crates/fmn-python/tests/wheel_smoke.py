@@ -294,7 +294,7 @@ def verify_installed_distribution(schema_path, scene_path):
         "30",
         "--threads",
         "1",
-        "--video_dir",
+        "--output",
         destination,
     )
     render_payload = json.loads(rendered.stdout)
@@ -324,7 +324,7 @@ def verify_installed_distribution(schema_path, scene_path):
         "30",
         "--threads",
         "1",
-        "--video_dir",
+        "--output",
         still_destination,
     )
     still_payload = json.loads(still.stdout)

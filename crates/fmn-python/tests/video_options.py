@@ -174,7 +174,7 @@ with tempfile.TemporaryDirectory(prefix="fmn-video-console-") as directory:
         return code, report
 
     target = root / "still.png"
-    code, report = console_output("First", "-s", "--transparent", "--video_dir", str(target))
+    code, report = console_output("First", "-s", "--transparent", "--output", str(target))
     assert code == 0 and report["frame_count"] == 1, report
     if ffmpeg:
         png = decode(target)
@@ -182,7 +182,7 @@ with tempfile.TemporaryDirectory(prefix="fmn-video-console-") as directory:
         target = root / "single.mov"
         code, report = console_output("First", "--format", "mov", "-t", "--pix_fmt", "bgra",
                                       "--vcodec", "qtrle", "--ffmpeg_bin", ffmpeg,
-                                      "--video_dir", str(target))
+                                      "--output", str(target))
         assert code == 0 and report["frame_count"] == 2, report
         assert report["ffmpeg_invocations"][0]["encoder"] == "qtrle"
         assert np.all(decode(target)[:, 0, 0, 3] == 0)

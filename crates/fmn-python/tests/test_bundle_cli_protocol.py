@@ -56,7 +56,7 @@ class BundleCliProtocol(unittest.TestCase):
 
     def export(self, *args):
         return self.invoke("--robot", str(self.source), "--format", "fmtl",
-                           "--video_dir", str(self.output), *args)
+                           "--output", str(self.output), *args)
 
     def test_selected_scene_and_common_options_reach_only_bundle_owner(self):
         code, receipt, _ = self.export("Example", "--resolution", "128x72", "--fps", "24")
@@ -228,7 +228,7 @@ class BundleCliProtocol(unittest.TestCase):
     def test_camera_switch_inside_option_value_is_not_interpreted(self):
         self.assertIsNone(self.invoke("--video_dir", "--bundle-camera")[0])
         code, receipt, _ = self.invoke("--robot", str(self.source), "--format=fmtl",
-                                        "--video_dir=--bundle-camera")
+                                        "--output=--bundle-camera")
         self.assertEqual(code, 0)
         self.assertNotIn("camera_track", receipt["bundle"])
         self.assertEqual(Path(receipt["destination"]).name, "--bundle-camera")

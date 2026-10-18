@@ -266,7 +266,7 @@ class NestedCamera(Scene):
     previous = sys.argv
     stdout, stderr = io.StringIO(), io.StringIO()
     sys.argv = ["fmn-python", "--robot", str(source), "NestedCamera", "--format", "y4m",
-                "--resolution", "96x54", "--fps", "8", "--threads", "1", "--video_dir", str(destination)]
+                "--resolution", "96x54", "--fps", "8", "--threads", "1", "--output", str(destination)]
     try:
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             code = manimlib._console_main()

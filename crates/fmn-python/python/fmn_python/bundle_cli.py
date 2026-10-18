@@ -12,7 +12,7 @@ from pathlib import Path
 import sys
 
 from .bundle_export import BundleExportSession, require_bundle_capability
-from .console_rendering import _tokens, _VALUE_FLAGS, _message, _MAX_SELECTED_SCENES
+from .console_rendering import _tokens, _VALUE_FLAGS, _message, _MAX_SELECTED_SCENES, _output_paths, _single_destination
 from .batch_cli import _emit_result
 from .checkpoint_cli import CHECKPOINT_HELP, take_checkpoint_options
 from .batch_rendering import BatchRenderError, BatchRenderResult, _error_notes, _name_key, render_scenes
@@ -21,7 +21,7 @@ from .scene_loading import SceneSource
 BUNDLE_HELP = """Portable scene bundles:
   fmn-python [--robot] SOURCE.py [SCENE] --format fmtl
              [--bundle-camera] [--resolution WIDTHxHEIGHT] [--fps FPS]
-             [--video_dir FILE.fmtl]
+             [--video_dir DIRECTORY | --output FILE.fmtl] [--file_name NAME]
   fmn-python [--robot] SOURCE.py SCENE1 SCENE2 --format fmtl
              [--bundle-camera] [--keep-going] [--video_dir DIRECTORY]
   fmn-python [--robot] SOURCE.py --write_all --format fmtl
@@ -29,9 +29,9 @@ BUNDLE_HELP = """Portable scene bundles:
 
 Runs setup/construct/tear_down once in the host interpreter. Actual captured
 frames become a bounded, code-free FMTL/1 artifact for standalone fmn/WASM.
---video_dir names the exact output file (default: media/videos/SOURCE/SCENE.fmtl).
-For multiple names or --write_all/-a, --video_dir names a directory containing
-SCENE.fmtl for each selected scene (default: media/videos/SOURCE). Names run in
+--video_dir names a directory containing SCENE.fmtl for each selected scene
+(default: media/videos/SOURCE). --output names an exact single-scene output;
+--file_name changes its stem. Names run in
 requested order; --write_all uses sorted locally declared names. All destinations
 are checked before any constructor runs. A failed scene stops the batch unless
 --keep-going is set; completed bundles remain valid. Interrupts always stop.
@@ -44,7 +44,8 @@ Audio, partial playback and source certification remain explicit refusals.
 Use the same --resolution for exact replay; camera bundles also record aspect.
 """
 
-_ALLOWED = frozenset({"--format", "--resolution", "--fps", "--video_dir"})
+_ALLOWED = frozenset({"--format", "--resolution", "-r", "--fps", "--video_dir", "--output", "--file_name"})
+_ALLOWED_SWITCHES = frozenset({"-l", "--low_quality", "-m", "--medium_quality", "--hd", "--uhd", "-q", "--quiet"})
 
 
 def _bundle_options(arguments):
@@ -124,6 +125,8 @@ def try_bundle_cli(native, arguments):
                 if token not in _ALLOWED:
                     raise native._CapabilityError(f"{token} does not apply to FMTL export")
                 index += 2
+            elif token in _ALLOWED_SWITCHES:
+                index += 1
             else:
                 raise native._CapabilityError(
                     f"{token} is not supported for full-scene FMTL export; use the PNG/video path"
@@ -139,12 +142,11 @@ def try_bundle_cli(native, arguments):
             raise ValueError("bundle export requires at most 16M pixels and 1..240 FPS")
         source = str(Path(positionals[0]).resolve())
         selected = requested[0] if len(requested) == 1 else None
-        supplied = values["video_dir"]
-        if supplied is not None:
-            if not str(supplied) or "\0" in str(supplied):
-                raise ValueError("bundle destination must be nonempty and contain no NUL")
-            destination = Path(os.path.abspath(supplied))
-        default_root = (Path("media") / "videos" / Path(source).stem).resolve()
+        values["format"] = "fmtl"
+        default_root, destination = _output_paths(values, source, batch=batch)
+        if batch and os.path.lexists(default_root) and not default_root.is_dir():
+            phase = "start"
+            raise NotADirectoryError(str(default_root))
         if destination is not None and os.path.lexists(destination):
             phase = "start"
             if not batch:
@@ -175,7 +177,7 @@ def try_bundle_cli(native, arguments):
                     format="fmtl", resolution=(width, height), fps=fps,
                     bundle_camera=camera, continue_on_error=bool(keep_going),
                     max_jobs=_MAX_SELECTED_SCENES, **recovery,
-                    on_result=lambda outcome: print(
+                    on_result=None if values.get("quiet") else lambda outcome: print(
                         f"fmn-python: {outcome.name}: {outcome.status}: {outcome.destination}",
                         file=sys.stderr,
                     ),
@@ -187,8 +189,7 @@ def try_bundle_cli(native, arguments):
                     selected = names[0]
                 if selected not in loaded.scenes:
                     raise ValueError(f"scene {selected!r} was not declared by {source}")
-                if destination is None:
-                    destination = default_root / (selected + ".fmtl")
+                destination = _single_destination(default_root, destination, selected, values)
                 phase = "start"
                 if os.path.lexists(destination):
                     raise FileExistsError(f"bundle destination already exists: {destination}")
@@ -240,7 +241,11 @@ def try_bundle_cli(native, arguments):
             notes=list(_error_notes(error)),
         )
     if report is not None:
+        if values.get("quiet") and not robot and report.ok:
+            return 0
         return _emit_result(native, report, robot, source, destination)
+    if values.get("quiet") and not robot:
+        return 0
     receipt = session.result
     return native._portal_cli_emit(
         0, "success", "bundle-export", f"exported {receipt.frame_count} frames to {destination}", robot,

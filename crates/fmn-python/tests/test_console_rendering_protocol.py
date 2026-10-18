@@ -51,6 +51,7 @@ def native_fixture():
             self.dimensions = (12, 8)
             self.camera = SimpleNamespace(
                 frame=self.frame, fps=30,
+                background_rgba=[0.2, 0.2, 0.2, 1.0],
                 _core=SimpleNamespace(set_pixel_shape=self.set_pixel_shape),
                 get_pixel_shape=lambda: self.dimensions,
             )
@@ -264,7 +265,7 @@ class ConsoleRenderingProtocol(unittest.TestCase):
         elsewhere = self.root / "elsewhere"
         elsewhere.mkdir()
         self.source.write_text(f"from manimlib import Scene\nimport os\nos.chdir({str(elsewhere)!r})\nclass Hello(Scene):\n    pass\n")
-        code, report, _, _ = self.render("--format", "png", "--video_dir", "chosen.png")
+        code, report, _, _ = self.render("--format", "png", "--output", "chosen.png")
         self.assertEqual(code, 0)
         self.assertEqual(Path(report["destination"]), self.root / "chosen.png")
 
@@ -309,7 +310,7 @@ class ConsoleRenderingProtocol(unittest.TestCase):
     def test_option_values_are_not_controls_or_robot_switches(self):
         code, report, _, _ = self.render("--video_dir", "--version", "--format", "png")
         self.assertEqual(code, 0)
-        self.assertEqual(Path(report["destination"]).name, "--version")
+        self.assertEqual(Path(report["destination"]), self.root / "--version/Hello.png")
         code, _, out, _ = self.invoke(str(self.source), "--video_dir", "--robot", "--format", "png")
         self.assertEqual(code, 0)
         self.assertFalse(out.startswith('{'))
@@ -348,7 +349,7 @@ class ConsoleRenderingProtocol(unittest.TestCase):
     def test_existing_output_is_not_clobbered(self):
         existing = self.root / "kept.png"
         existing.write_bytes(b"keep me")
-        self.assertEqual(self.render("--format", "png", "--video_dir", str(existing))[0], 6)
+        self.assertEqual(self.render("--format", "png", "--output", str(existing))[0], 6)
         self.assertEqual(existing.read_bytes(), b"keep me")
         self.assertNotIn("abort", self.native.instances[0].events)
 
@@ -371,6 +372,84 @@ class ConsoleRenderingProtocol(unittest.TestCase):
         argv = ["fmn-python", "--robot", str(self.source), "--video_dir", "--audit-parity", "--format", "png"]
         with patch.object(sys, "argv", argv), patch.object(main, "_emit_parity_audit", side_effect=AssertionError("audit was not requested")), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(main.main(), 0)
+
+    def test_reference_write_and_gif_flags_reach_the_selected_native_sink(self):
+        for index, (flags, format) in enumerate(((('-w',), 'mp4'), (('--write_file',), 'mp4'),
+                                                (('-i',), 'gif'), (('--gif',), 'gif'),
+                                                (('-w', '-t'), 'mov'), (('-i', '-t'), 'mov'))):
+            with self.subTest(flags=flags):
+                code, report, _, _ = self.render(*flags, '--video_dir', f'output{index}')
+                self.assertEqual(code, 0, report)
+                self.assertEqual(report['format'], format)
+                self.assertEqual(Path(report['destination']), self.root / f'output{index}/Hello.{format}')
+                self.assertEqual(self.native.instances[-1].arguments[1], format)
+
+    def test_quality_presets_change_resolution_without_changing_scene_fps(self):
+        for index, (flag, size) in enumerate((('-l', (854, 480)), ('--low_quality', (854, 480)),
+                                             ('-m', (1280, 720)), ('--medium_quality', (1280, 720)),
+                                             ('--hd', (1920, 1080)), ('--uhd', (3840, 2160)))):
+            with self.subTest(flag=flag):
+                code, report, _, _ = self.invoke('--robot', str(self.source), flag, '--format', 'png',
+                                                 '--video_dir', f'quality{index}')
+                self.assertEqual(code, 0, report)
+                self.assertEqual(report['resolution'], list(size))
+                self.assertEqual(report['fps'], 30)
+
+    def test_resolution_override_and_reference_quality_precedence(self):
+        parse = self.native._portal_cli_render_arguments
+        for flags in (['--uhd', '-l'], ['-l', '--uhd']):
+            self.assertEqual(parse(['scene.py', *flags])[2:5], (854, 480, None))
+            self.assertEqual(parse(['scene.py', '-r', '160x90', *flags, '--fps', '24'])[2:5], (160, 90, 24))
+        code, report, _, _ = self.invoke('--robot', str(self.source), '-r', '160x90', '--hd', '--fps', '24')
+        self.assertEqual(code, 0, report)
+        self.assertEqual((report['resolution'], report['fps']), ([160, 90], 24))
+
+    def test_video_directory_and_explicit_filename_share_the_same_root(self):
+        code, report, _, _ = self.render('--format', 'png', '--video_dir', 'out', '--file_name', 'Proof.png')
+        self.assertEqual(code, 0, report)
+        self.assertEqual(Path(report['destination']), self.root / 'out/Proof.png')
+        code, report, _, _ = self.render('--video_dir', 'out', '--file_name', 'Frames')
+        self.assertEqual(code, 0, report)
+        self.assertEqual(Path(report['destination']), self.root / 'out/Frames/frames')
+
+    def test_output_alias_keeps_option_looking_names_as_data(self):
+        code, report, _, _ = self.render('--format', 'png', '--output', '-s')
+        self.assertEqual(code, 0, report)
+        self.assertEqual(Path(report['destination']), self.root / '-s')
+        code, report, _, _ = self.render('--format', 'png', '--file_name', '--hd')
+        self.assertEqual(code, 0, report)
+        self.assertEqual(Path(report['destination']).name, '--hd.png')
+        self.assertEqual(report['resolution'], [96, 54])
+
+    def test_conflicting_destinations_and_unsafe_stems_refuse_before_source(self):
+        self.source.write_text("raise AssertionError('must not load')\n")
+        for flags in (('--output', 'a', '--video_dir', 'b'), ('--output', 'a', '--file_name', 'b'),
+                      ('--file_name', '../escape'), ('--file_name', ''), ('--file_name', 'x/y'),
+                      ('--file_name', 'x\\y'), ('--output', '\0bad'), ('--gif', '--format', 'wav')):
+            with self.subTest(flags=flags):
+                self.assertEqual(self.render(*flags)[0], 2)
+        self.assertEqual(self.native.instances, [])
+
+    def test_interactive_flags_have_named_capability_refusals(self):
+        self.source.write_text("raise AssertionError('must not load')\n")
+        for flags in (('-p',), ('--presenter_mode',), ('-f',), ('--full_screen',), ('-e', '12'), ('--embed=12',)):
+            with self.subTest(flags=flags):
+                code, report, _, _ = self.render(*flags)
+                self.assertEqual(code, 4)
+                self.assertIn('studio', report['message'])
+        self.assertEqual(self.native.instances, [])
+
+    def test_quiet_keeps_robot_receipts_and_authored_output(self):
+        self.source.write_text("from manimlib import Scene\nclass Hello(Scene):\n    def construct(self): print('authored')\n")
+        code, _, out, err = self.invoke(str(self.source), '-q', '--format', 'png', '--output', 'quiet.png')
+        self.assertEqual(code, 0)
+        self.assertEqual(out, 'authored\n')
+        self.assertNotIn('fmn-python:', err)
+        code, report, out, err = self.render('--quiet', '--format', 'png', '--output', 'robot.png')
+        self.assertEqual(code, 0)
+        self.assertTrue(report['rendered'])
+        self.assertEqual(len(out.splitlines()), 1)
+        self.assertIn('authored', err)
 
 
 if __name__ == "__main__":

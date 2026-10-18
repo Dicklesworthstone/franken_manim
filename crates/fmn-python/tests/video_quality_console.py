@@ -132,7 +132,7 @@ with tempfile.TemporaryDirectory(prefix="fmn-video-quality-console-") as directo
         ("--format", "png", "--ffmpeg-max-log-bytes=1048576"),
     ]
     for args in failures:
-        code, report = console("First", "--video_dir", str(target), *args)
+        code, report = console("First", "--output", str(target), *args)
         assert code == 2, (args, report)
         assert target.read_bytes() == b"existing output"
         assert not imported.exists() and not constructed.exists(), (args, report)
@@ -170,7 +170,7 @@ with tempfile.TemporaryDirectory(prefix="fmn-video-quality-console-") as directo
         for name, selectors, expected_constructors, encodes, muxes in cases:
             constructed.write_text("", encoding="utf-8")
             destination = root / name
-            code, report = console(*selectors, "--video_dir", str(destination),
+            code, report = console(*selectors, "--output" if len(expected_constructors) == 1 else "--video_dir", str(destination),
                                    "--ffmpeg_bin", ffmpeg,
                                    "--ffmpeg-timeout=37", "--ffmpeg-max-log-bytes", "131072",
                                    "--ffmpeg-max-artifact-bytes=1048576", "--ffmpeg-max-input-bytes=2097152",

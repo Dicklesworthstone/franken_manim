@@ -221,10 +221,10 @@ class Other(Clip):
         assert code == 0, (stdout.getvalue(), stderr.getvalue())
         assert len(stdout.getvalue().splitlines()) == 1
         return json.loads(stdout.getvalue())
-    clip = invoke("Clip", "-n", "1,2", "--format", "y4m", "--video_dir", str(ROOT / "cli.y4m"))
+    clip = invoke("Clip", "-n", "1,2", "--format", "y4m", "--output", str(ROOT / "cli.y4m"))
     assert clip["frame_count"] == 4 and clip["animation_range"] == [1, 2]
     assert frames(Path(clip["destination"])) == frames(ROOT / "full.y4m")[4:8]
-    still = invoke("Clip", "-n1,2", "-s", "--video_dir", str(ROOT / "cli.png"))
+    still = invoke("Clip", "-n1,2", "-s", "--output", str(ROOT / "cli.png"))
     assert still["frame_count"] == 1 and still["format"] == "png"
     assert Path(still["destination"]).read_bytes() == (ROOT / "still.png").read_bytes()
     result = invoke("Other", "Clip", "--start_at_animation_number=1,2", "--format=y4m",

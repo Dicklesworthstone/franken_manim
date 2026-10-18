@@ -57,6 +57,25 @@ while the file kept its configured rate, so `-f --fps 60` wrote 12 frames into a
 
 ## Migration guidance
 
+The Python portal accepts the Reference's everyday writing and quality flags:
+`-w/--write_file`, `-i/--gif`, `-l/--low_quality`, `-m/--medium_quality`, `--hd`,
+`--uhd`, `-r/--resolution`, and `-q/--quiet`. The pinned Reference's quality
+presets set resolution only; they preserve configured fps. Explicit resolution
+wins over presets, and multiple presets use the Reference's fixed low, medium,
+HD, UHD order. `-w` selects MP4, or MOV with `-t`, through optional ffmpeg;
+`-i` selects native GIF. `-s` saves a final PNG unless an explicit non-PNG
+`--format` conflicts. Interactive `-p`, `-f` and `-e` refuse with exit 4 on file
+renders. Quiet mode retains authored output, errors and robot receipts.
+
+`fmn-python --video_dir DIRECTORY` now has the Reference's directory meaning
+for both single scenes and batches. Single files use `DIRECTORY/SCENE.FORMAT`,
+PNG sequences use `DIRECTORY/SCENE/frames`, and clips use
+`DIRECTORY/SCENE/clips`. FMTL follows the same rule. To preserve an older
+portal command's exact output file or frames/clips directory, replace its
+`--video_dir PATH` with `--output PATH`. `--file_name NAME` changes one scene's
+stem. `--output` and `--file_name` reject batches so selected scenes cannot
+silently share a destination.
+
 - Treat a nonzero exit as a stable category, not as arbitrary argparse text;
   robot-mode errors carry the same identity in structured output.
 - Fix conflicting flags instead of relying on last-option-wins behavior. In

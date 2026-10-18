@@ -12,7 +12,9 @@ from typing import Any
 
 _RANGE_FLAGS = frozenset({"-n", "--start_at_animation_number"})
 _STILL_FLAGS = frozenset({"-s", "--skip_animations"})
-_NATIVE_VALUES = frozenset({"--format", "--resolution", "--fps", "--threads", "--video_dir"})
+_NATIVE_VALUES = frozenset({"--format", "--resolution", "-r", "--fps", "--threads", "--video_dir",
+                          "--output", "--file_name", "--vcodec", "--pix_fmt", "--ffmpeg_bin",
+                          "-e", "--embed"})
 _MAX_INDEX = (1 << 63) - 1
 
 

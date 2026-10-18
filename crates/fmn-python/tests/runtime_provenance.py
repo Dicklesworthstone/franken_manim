@@ -146,7 +146,7 @@ def _cli(folder, module):
     with redirect_stdout(stdout), redirect_stderr(stderr):
         code = try_render_cli(ml._native, ["--robot", str(folder / "scene.py"), "Shown", "--reproducible",
                                            "--format", "png", "--resolution", "96x54", "--fps", "4",
-                                           "--threads", "1", "--video_dir", str(folder / "out.png")])
+                                           "--threads", "1", "--output", str(folder / "out.png")])
     return code, stdout.getvalue(), stderr.getvalue()
 
 

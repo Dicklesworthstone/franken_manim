@@ -275,7 +275,7 @@ for format_name in ("gif", "y4m"):
     destination = output_root / ("motion." + format_name)
     arguments = (str(source), "MovingWhiteSquare", "--format", format_name,
                  "--resolution", "96x54", "--fps", "30", "--threads", "1")
-    code, report = console(*arguments, "--video_dir", str(destination))
+    code, report = console(*arguments, "--output", str(destination))
     assert code == 0, report
     # BN-02: binary f64 0.1 is above 1/10, so the fixed 30 fps clock emits
     # four samples to cover it. The fourth holds the clamped final state.
@@ -287,7 +287,7 @@ for format_name in ("gif", "y4m"):
     reports[format_name], artifacts[format_name] = report, destination
     # A second render at a different thread count must retain actual bytes.
     repeated = output_root / ("repeat." + format_name)
-    code, repeat = console(*arguments, "--threads", "4", "--video_dir", str(repeated))
+    code, repeat = console(*arguments, "--threads", "4", "--output", str(repeated))
     assert code == 0 and repeat["frame_count"] == 4, repeat
     assert repeated.read_bytes() == payload
     thread_replays += 1
@@ -296,7 +296,7 @@ for format_name in ("gif", "y4m"):
         failed = output_root / (f"failed-{exists}." + format_name)
         if exists:
             failed.write_bytes(b"preserve-existing-destination")
-        code, failure = console(str(source), "FailingScene", *arguments[2:], "--video_dir", str(failed))
+        code, failure = console(str(source), "FailingScene", *arguments[2:], "--output", str(failed))
         assert code == 5 and failure["kind"] == "scene-execution-failed", failure
         assert "native-output-after-capture" in failure["message"]
         if exists:
@@ -350,7 +350,7 @@ for format_name in ("gif", "y4m"):
     code, primary_report = console(
         str(source), "PrimarySwatches", "--format", format_name,
         "--resolution", "96x54", "--fps", "30",
-        "--video_dir", str(output_root / ("primaries." + format_name)),
+        "--output", str(output_root / ("primaries." + format_name)),
     )
     assert code == 0 and primary_report["frame_count"] == 1, primary_report
 primary_gif, _ = read_gif(output_root / "primaries.gif")
@@ -382,7 +382,7 @@ for color, codes, x_bounds in (
 # NV12's even geometry is enforced without silently changing the request.
 odd_destination = output_root / "odd.y4m"
 code, odd = console(str(source), "MovingWhiteSquare", "--format", "y4m",
-                    "--resolution", "95x54", "--video_dir", str(odd_destination))
+                    "--resolution", "95x54", "--output", str(odd_destination))
 assert code == 6 and odd["kind"] == "render-start-failed", odd
 assert not odd_destination.exists()
 code, unsupported = console("missing-source.py", "--format", "video")
@@ -399,7 +399,7 @@ for name, amplitude in (("cue.wav", 8192), ("quiet.wav", 4096)):
 
 wav_destination = output_root / "soundtrack.wav"
 wav_arguments = (str(source), "Soundtrack", "--format", "wav", "--fps", "32", "--threads", "1")
-code, wav_report = console(*wav_arguments, "--video_dir", str(wav_destination))
+code, wav_report = console(*wav_arguments, "--output", str(wav_destination))
 assert code == 0 and wav_report["engine"] == "native-sound-mixer", wav_report
 assert wav_report["sample_frames"] == wav_report["frame_count"] == 3000, wav_report
 assert wav_report["sample_rate"] == 48000 and wav_report["channels"] == 2
@@ -417,7 +417,7 @@ wav_bytes = wav_destination.read_bytes()
 assert wav_report["bytes"] == len(wav_bytes)
 assert wav_report["digest"] == hashlib.sha256(wav_bytes).hexdigest()  # ubs:ignore — public artifact checksum, not authentication or secret material.
 wav_replay = output_root / "soundtrack-repeat.wav"
-code, replay = console(*wav_arguments, "--threads", "4", "--video_dir", str(wav_replay))
+code, replay = console(*wav_arguments, "--threads", "4", "--output", str(wav_replay))
 assert code == 0 and replay["sample_frames"] == 3000, replay
 assert wav_replay.read_bytes() == wav_bytes
 reports["wav"] = wav_report
@@ -434,7 +434,7 @@ for scene_name, failure_code, message in (
         failed = output_root / f"{scene_name}-{exists}.wav"
         if exists:
             failed.write_bytes(b"preserve-existing-soundtrack")
-        code, failure = console(str(source), scene_name, *wav_arguments[2:], "--video_dir", str(failed))
+        code, failure = console(str(source), scene_name, *wav_arguments[2:], "--output", str(failed))
         assert code == failure_code and message in failure["message"], failure
         if exists:
             assert failed.read_bytes() == b"preserve-existing-soundtrack"
@@ -445,7 +445,7 @@ for scene_name, failure_code, message in (
 camera_destination = output_root / "camera-pan.gif"
 code, camera_report = console(str(source), "CameraPan", "--format", "gif",
                               "--resolution", "96x54", "--fps", "8", "--threads", "1",
-                              "--video_dir", str(camera_destination))
+                              "--output", str(camera_destination))
 assert code == 0 and camera_report["frame_count"] == 3, camera_report
 camera_frames, _ = read_gif(camera_destination)
 assert len(camera_frames) == 3
@@ -460,7 +460,7 @@ assert camera_centers[0] - camera_centers[-1] > 8, camera_centers
 updater_destination = output_root / "camera-updater.gif"
 code, updater_report = console(str(source), "CameraUpdater", "--format", "gif",
                                "--resolution", "96x54", "--fps", "8", "--threads", "1",
-                               "--video_dir", str(updater_destination))
+                               "--output", str(updater_destination))
 assert code == 0 and updater_report["frame_count"] == 3, updater_report
 updater_frames, _ = read_gif(updater_destination)
 assert len(updater_frames) == 3
@@ -475,14 +475,14 @@ invalid_camera_destination = output_root / "invalid-camera.gif"
 invalid_camera_destination.write_bytes(b"keep prior camera output")
 code, invalid_camera_report = console(str(source), "InvalidCameraAfterCapture", "--format", "gif",
                                       "--resolution", "96x54", "--fps", "8", "--threads", "1",
-                                      "--video_dir", str(invalid_camera_destination))
+                                      "--output", str(invalid_camera_destination))
 assert code == 6 and "background must be finite" in invalid_camera_report["message"], invalid_camera_report
 assert invalid_camera_destination.read_bytes() == b"keep prior camera output"
 
 background_destination = output_root / "background-changes.gif"
 code, background_report = console(str(source), "BackgroundChanges", "--format", "gif",
                                   "--resolution", "96x54", "--fps", "8", "--threads", "1",
-                                  "--video_dir", str(background_destination))
+                                  "--output", str(background_destination))
 assert code == 0 and background_report["frame_count"] == 3, background_report
 background_frames, _ = read_gif(background_destination)
 assert len(background_frames) == 3
@@ -495,7 +495,7 @@ for light_scene, light_name in (("LightChanges", "light-changes.gif"),
     light_destination = output_root / light_name
     code, light_report = console(str(source), light_scene, "--format", "gif",
                                  "--resolution", "96x54", "--fps", "8", "--threads", "1",
-                                 "--video_dir", str(light_destination))
+                                 "--output", str(light_destination))
     assert code == 0 and light_report["frame_count"] == 2, light_report
     light_frames, _ = read_gif(light_destination)
     assert len(light_frames) == 2
@@ -509,7 +509,7 @@ for markup_scene, markup_name in (("EscapedMarkup", "escaped-markup.png"),
     markup_destination = output_root / markup_name
     code, markup_report = console(str(source), markup_scene, "--format", "png",
                                    "--resolution", "192x108", "--threads", "1",
-                                   "--video_dir", str(markup_destination))
+                                   "--output", str(markup_destination))
     assert code == 0 and markup_report["frame_count"] == 1, markup_report
     markup_pngs.append(markup_destination.read_bytes())
     markup_image = manimlib.ImageMobject(str(markup_destination))
@@ -522,7 +522,7 @@ assert markup_pngs[0] == markup_pngs[1], "escaped markup changed literal text re
 centered_destination = output_root / "centered-typesetting.gif"
 code, centered_report = console(str(source), "CenteredTypesetting", "--format", "gif",
                                "--resolution", "480x270", "--fps", "30", "--threads", "1",
-                               "--video_dir", str(centered_destination))
+                               "--output", str(centered_destination))
 assert code == 0 and centered_report["frame_count"] == 2, centered_report
 centered_frames, _ = read_gif(centered_destination)
 assert len(centered_frames) == 2
@@ -535,7 +535,7 @@ for centered_frame in centered_frames:
 rectangle_destination = output_root / "rectangle-flash.gif"
 code, rectangle_report = console(str(source), "RectangleFlash", "--format", "gif",
                                  "--fps", "8", "--resolution", "192x108", "--threads", "1",
-                                 "--video_dir", str(rectangle_destination))
+                                 "--output", str(rectangle_destination))
 assert code == 0 and rectangle_report["frame_count"] == 5, rectangle_report
 rectangle_frames, rectangle_delays = read_gif(rectangle_destination)
 assert len(rectangle_frames) == 5 and all(delay > 0 for delay in rectangle_delays)
@@ -559,7 +559,7 @@ try:
     missing_destination.write_bytes(b"preserve missing-encoder destination")
     code, missing_encoder = console(str(source), "MovingWhiteSquare", "--format", "mp4",
                                     "--resolution", "96x54", "--threads", "1",
-                                    "--video_dir", str(missing_destination))
+                                    "--output", str(missing_destination))
     assert code == 4 and missing_encoder["exit"]["identity"] == "capability", missing_encoder
     assert "ffmpeg" in missing_encoder["message"] and "native" in missing_encoder["message"]
     assert missing_destination.read_bytes() == b"preserve missing-encoder destination"
@@ -583,7 +583,7 @@ if ffmpeg:
         destination = output_root / ("motion." + format_name)
         arguments = (str(source), "MovingWhiteSquare", "--format", format_name,
                      "--resolution", "96x54", "--fps", "30", "--threads", "1")
-        code, report = console(*arguments, "--video_dir", str(destination))
+        code, report = console(*arguments, "--output", str(destination))
         assert code == 0 and report["frame_count"] == 4, report
         assert report["certified"] is False
         invocations = report["ffmpeg_invocations"]
@@ -608,7 +608,7 @@ if ffmpeg:
         for scene_name, expected_code in (("FailingScene", 5), ("MissingSound", 6)):
             failed = output_root / f"{scene_name}.{format_name}"
             failed.write_bytes(b"preserve existing encoded video")
-            code, error = console(str(source), scene_name, *arguments[2:], "--video_dir", str(failed))
+            code, error = console(str(source), scene_name, *arguments[2:], "--output", str(failed))
             assert code == expected_code, error
             assert failed.read_bytes() == b"preserve existing encoded video"
         video_formats += 1
@@ -623,7 +623,7 @@ if ffmpeg:
     destination = output_root / "soundtrack.mp4"
     code, report = console(str(source), "VideoSoundtrack", "--format", "mp4",
                            "--resolution", "96x54", "--fps", "8", "--threads", "1",
-                           "--video_dir", str(destination))
+                           "--output", str(destination))
     assert code == 0 and report["frame_count"] == 4, report
     assert len(report["ffmpeg_invocations"]) == 2
     first, mux = report["ffmpeg_invocations"]
@@ -653,7 +653,7 @@ if ffmpeg:
             scene_name = "Soundtrack" if cert_format == "wav" else "MovingWhiteSquare"
             cert_args = (
                 str(source), scene_name, "--format", cert_format,
-                "--reproducible", "--video_dir", str(cert_dest),
+                "--reproducible", "--output", str(cert_dest),
             )
             code, cert_report = console(*cert_args)
             assert code == 0, cert_report
@@ -672,7 +672,7 @@ if ffmpeg:
             cert_dest2 = output_root / f"certified_scene_2.{cert_format}"
             code2, cert_report2 = console(
                 str(source), scene_name, "--format", cert_format,
-                "--reproducible", "--video_dir", str(cert_dest2),
+                "--reproducible", "--output", str(cert_dest2),
             )
             assert code2 == 0, cert_report2
             assert cert_dest.read_bytes() == cert_dest2.read_bytes(), f"certified {cert_format} output drifted across runs"
@@ -689,7 +689,7 @@ if ffmpeg:
             scene_name = "Soundtrack" if cert_format == "wav" else "MovingWhiteSquare"
             code, cert_report = console(
                 str(source), scene_name, "--format", cert_format,
-                "--reproducible", "--video_dir", str(cert_dest),
+                "--reproducible", "--output", str(cert_dest),
             )
             assert code == 4, cert_report
             assert cert_report["kind"] == "render-capability-unavailable", cert_report
@@ -699,7 +699,7 @@ if ffmpeg:
     bad_video_dest = output_root / "bad_cert.mp4"
     code_bad, bad_report = console(
         str(source), "MovingWhiteSquare", "--format", "mp4",
-        "--reproducible", "--video_dir", str(bad_video_dest),
+        "--reproducible", "--output", str(bad_video_dest),
     )
     assert code_bad == 4, bad_report
 

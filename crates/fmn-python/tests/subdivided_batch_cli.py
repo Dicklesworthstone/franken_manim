@@ -26,7 +26,8 @@ class BatchClipConsole(unittest.TestCase):
         argv = ['fmn-python', '--robot', str(self.source), *selectors, '--subdivide',
                 '--format', 'y4m', '--resolution', '96x54', '--fps', '8', '--threads', '1']
         if destination is not None:
-            argv.extend(['--video_dir', str(self.root / destination)])
+            output_flag = '--video_dir' if len(selectors) > 1 or any(value in {'-a', '--write_all'} for value in selectors) else '--output'
+            argv.extend([output_flag, str(self.root / destination)])
         argv.extend(extra)
         original = sys.argv
         original_path = list(sys.path)

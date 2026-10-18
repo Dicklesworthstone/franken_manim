@@ -251,7 +251,7 @@ class AudioClips(unittest.TestCase):
         output, errors = io.StringIO(), io.StringIO()
         try:
             sys.argv = ['fmn-python', '--robot', str(source), 'Motion', '--subdivide', '--format', 'wav',
-                        '--fps', '30', '--threads', '1', '--video_dir', str(self.root / 'cli')]
+                        '--fps', '30', '--threads', '1', '--output', str(self.root / 'cli')]
             with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
                 code = main()
         finally:

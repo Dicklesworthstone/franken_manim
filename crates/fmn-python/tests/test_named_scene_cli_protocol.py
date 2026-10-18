@@ -98,11 +98,32 @@ class NamedSceneCliProtocol(unittest.TestCase):
             self.assertEqual(scene.arguments[2:6], (96, 54, 8, 4))
             self.assertNotIn("_fmn_owned_render_session", vars(scene))
 
-    def test_single_scene_explicit_destination_is_not_reinterpreted_as_root(self):
-        code, report, _, _ = self.render("A", "--format", "png", "--video_dir", "single.png")
+    def test_single_scene_video_directory_contains_the_scene_filename(self):
+        code, report, _, _ = self.render("A", "--format", "png", "--video_dir", "single")
         self.assertEqual(code, 0)
         self.assertEqual(report["kind"], "render")
+        self.assertEqual(Path(report["destination"]), self.root / "single/A.png")
+
+    def test_single_scene_exact_destination_uses_output(self):
+        code, report, _, _ = self.render("A", "--format", "png", "--output", "single.png")
+        self.assertEqual(code, 0)
         self.assertEqual(Path(report["destination"]), self.root / "single.png")
+
+    def test_single_output_flags_refuse_batch_before_source_execution(self):
+        self.source.write_text("raise AssertionError('must not load')\n")
+        for selectors in (("A", "B"), ("--write_all",)):
+            for flag in ("--output", "--file_name"):
+                with self.subTest(selectors=selectors, flag=flag):
+                    code, report, _, _ = self.render(*selectors, flag, "shared.png")
+                    self.assertEqual(code, 2)
+                    self.assertIn("exactly one scene", report["message"])
+        self.assertEqual(self.names(), [])
+
+    def test_reference_write_flag_applies_to_each_named_scene(self):
+        code, report, _, _ = self.render("B", "A", "-w", "--video_dir", "video", "-q")
+        self.assertEqual(code, 0)
+        self.assertEqual([Path(row['destination']) for row in report['batch']['outcomes']],
+                         [self.root / 'video/B.mp4', self.root / 'video/A.mp4'])
 
     def test_write_all_and_named_selection_are_mutually_exclusive(self):
         self.source.write_text("raise AssertionError('must not load')\n")

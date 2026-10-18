@@ -213,9 +213,10 @@ class BundleBatchCliProtocol(unittest.TestCase):
         for row in report["batch"]["outcomes"]:
             self.assertTrue(Path(row["destination"]).is_relative_to(self.root / "media/videos/scenes"))
 
-    def test_single_scene_keeps_exact_file_and_receipt_contract(self):
-        path = self.root / "exact-output.fmtl"
-        code, report, _ = self.batch(names=("Zulu",), directory=path)
+    def test_single_scene_directory_uses_scene_name_and_bundle_receipt(self):
+        directory = self.root / "single-output"
+        path = directory / "Zulu.fmtl"
+        code, report, _ = self.batch(names=("Zulu",), directory=directory)
         self.assertEqual(code, 0)
         self.assertEqual(report["kind"], "bundle-export")
         self.assertEqual(report["destination"], str(path))
@@ -242,7 +243,7 @@ class BundleBatchCliProtocol(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(report["kind"], "bundle-export")
         self.assertFalse(self.calls[0][1])
-        self.assertEqual(Path(report["destination"]).name, "--bundle-camera")
+        self.assertEqual(Path(report["destination"]), self.root / "--bundle-camera/Alpha.fmtl")
         self.assertIsNone(try_bundle_cli(self.native, [str(self.source), "--format", "png", "--video_dir", "fmtl"]))
 
 

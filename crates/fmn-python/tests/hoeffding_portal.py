@@ -4,7 +4,7 @@ exercise franken_manim's *second* front door: the fmn-python portal
 (source-compatible `manimlib` on a host CPython).
 
     fmn-python hoeffding_portal.py RingHook ShuffleLiveD --format mp4 \
-        --resolution 1920x1080 --fps 60 --video_dir out.mp4
+        --resolution 1920x1080 --fps 60 --output out.mp4
 
 The Gauntlet (`run_portal_gauntlet_hoeffding`) executes this file unedited
 and renders both scenes through `fmn_python.render_scene`.

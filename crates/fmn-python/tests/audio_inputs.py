@@ -209,7 +209,7 @@ with tempfile.TemporaryDirectory(prefix="fmn sound inputs ") as directory:
             with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                 code = try_render_cli(m, ["--robot", str(source), *names, "--format", "wav",
                                          "--fps", "16", "--threads", "1", "--ffmpeg_bin", str(explicit),
-                                         "--video_dir", str(target)])
+                                         "--output", str(target)])
             assert code == 0, (stdout.getvalue(), stderr.getvalue())
             report = json.loads(stdout.getvalue())
             assert report["exit"]["code"] == 0

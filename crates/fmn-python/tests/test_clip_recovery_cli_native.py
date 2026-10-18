@@ -42,7 +42,7 @@ class Motion(Scene):
 ''')
         self.base = [str(self.source), "Motion", "--subdivide", "--format", "png_sequence",
                      "--resolution", "64x48", "--fps", "8", "--threads", "1",
-                     "--video_dir", str(self.output), "--clip-checkpoint", str(self.journal),
+                     "--output", str(self.output), "--clip-checkpoint", str(self.journal),
                      "--resume-key", "inputs-v1", "--robot"]
 
     def cli(self, *extra, args=None):
@@ -164,7 +164,7 @@ class Motion(Scene):
     def test_native_plain_render_and_global_help_still_work(self):
         self.marker.write_text("go")
         args = [str(self.source), "Motion", "--format", "png", "--resolution", "64x48", "--threads", "1",
-                "--video_dir", str(self.root / "plain.png"), "--robot"]
+                "--output", str(self.root / "plain.png"), "--robot"]
         code, report, _ = self.cli(args=args)
         self.assertEqual(code, 0, report)
         self.assertEqual((self.root / "plain.png").read_bytes()[:8], b"\x89PNG\r\n\x1a\n")

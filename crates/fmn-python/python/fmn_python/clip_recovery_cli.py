@@ -10,7 +10,7 @@ import sys
 from .batch_checkpoint import _open_regular
 from .batch_rendering import _error_fields, _error_notes
 from .checkpoint_cli import take_checkpoint_options
-from .console_rendering import _VALUE_FLAGS, _output_overrides
+from .console_rendering import _VALUE_FLAGS, _output_overrides, _output_paths, _single_destination
 from .render_selection import take_playback_options
 from .rendering import _positive_integer
 from .scene_loading import SceneSource
@@ -128,9 +128,8 @@ def try_clip_recovery_cli(native, arguments):
         source_path = Path(source).resolve()
         if source_path.suffix.lower() not in {".py", ".pyw"}:
             raise ValueError("clip recovery requires a .py or .pyw source")
-        supplied = options["video_dir"]
-        if supplied is None:
-            supplied = Path("media") / "videos" / source_path.stem / selected / "clips"
+        root, exact = _output_paths(options, source_path)
+        supplied = _single_destination(root, exact, selected, options, subdivide=True)
         text = os.fspath(supplied)
         if not isinstance(text, str) or not text or "\0" in text:
             raise ValueError("clip output must be a nonempty text path without NUL")
@@ -182,6 +181,8 @@ def try_clip_recovery_cli(native, arguments):
         return native._portal_cli_emit(code, identity, kind, _error_fields(error)[1], robot,
             source=source, scene=selected, destination=str(destination), checkpoint=str(journal.path),
             resume_requested=recovery["resume"], notes=list(_error_notes(error)), **detail)
+    if options.get("quiet") and not robot:
+        return 0
     return native._portal_cli_emit(0, "success", "render-subdivided",
         f"completed {len(result.segments)} checkpointed clips in {destination}", robot,
         source=source, scene=selected, destination=str(destination), rendered=True,

@@ -23,7 +23,7 @@ print(receipt.audio_inputs)
 For a soundtrack without video, select WAV:
 
 ```bash
-fmn-python lesson.py NarratedScene --format wav --video_dir narration.wav
+fmn-python lesson.py NarratedScene --format wav --output narration.wav
 fmn-python lesson.py First Second --format wav --ffmpeg_bin '/opt/media tools/ffmpeg' --video_dir soundtracks
 ```
 

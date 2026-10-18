@@ -23,7 +23,7 @@ from fmn_python.subdivision_rendering import validate_subdivided_mode
 from fmn_python.checkpoint_cli import CHECKPOINT_VALUES, take_checkpoint_options
 from fmn_python.parallel_cli_options import PARALLEL_VALUES, take_parallel_options
 from fmn_python.video_cli import VIDEO_VALUE_FLAGS, take_video_options
-from fmn_python.console_rendering import _output_overrides
+from fmn_python.console_rendering import _output_overrides, _output_paths, _single_destination
 
 
 class ParallelOptionsTests(unittest.TestCase):
@@ -125,6 +125,7 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
             "take_playback_options": lambda args: (args, None, False),
             "select_still_format": lambda options, args, still: options,
             "_output_overrides": _output_overrides,
+            "_output_paths": _output_paths, "_single_destination": _single_destination,
             "_positive_integer": lambda value, name: value,
             "_name_key": lambda name: name.casefold(),
             "validate_batch_mode": validate_batch_mode,

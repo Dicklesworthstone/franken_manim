@@ -75,7 +75,7 @@ def python_scene(destination, fps, format="fmtl", scene="Portable", expected=0):
     return run(PYTHON + [
         "--robot", str(SOURCE), scene, "--format", format,
         "--resolution", "96x54", "--fps", str(fps),
-        "--video_dir", str(destination),
+        "--output", str(destination),
     ], expected=expected)
 
 

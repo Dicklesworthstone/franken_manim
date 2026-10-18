@@ -54,9 +54,62 @@ _SELECTION_HELP = """Named scene selection:
 Named scenes render in command-line order; -a is an alias for --write_all.
 All selected names and destinations are checked before any scene is constructed.
 With multiple names, --video_dir is a batch root containing per-scene outputs.
-With one scene, --video_dir retains its existing single-output destination meaning.
+With one scene, --video_dir is also a directory containing SCENE.FORMAT
+(SCENE/frames for PNG sequences). --output PATH selects an exact single-scene
+destination; --file_name NAME changes the single-scene output stem.
 --keep-going requires multiple names or --write_all. It never ignores Ctrl-C.
 """
+
+_REFERENCE_HELP = """Reference render flags:
+  -w, --write_file         Write MP4 (MOV with -t), using optional ffmpeg.
+  -i, --gif                Write a native GIF.
+  -l, --low_quality        854x480; -m/--medium_quality: 1280x720.
+  --hd / --uhd             1920x1080 / 3840x2160.
+  -r, --resolution WxH     Explicit resolution overrides quality presets.
+  -q, --quiet              Suppress progress and human success decoration.
+
+Quality presets preserve the configured frame rate (30 fps by default).
+-s saves a final PNG. --format selects the output explicitly; -i conflicts
+with an explicit format other than GIF (or transparent MOV with -t).
+--video_dir is always a directory. For a previous command that used it as
+an exact output file or frames directory, replace that flag with --output.
+--output and --file_name require one scene. -p/-f/-e require the Studio;
+file renders refuse them with exit 4. Unknown options return exit 2.
+"""
+
+
+def _output_paths(options, source, *, batch=False):
+    """Freeze output paths before authored source can change the directory."""
+    exact, directory, name = (options.get(key) for key in ("output", "video_dir", "file_name"))
+    for value in (exact, directory, name):
+        if value is not None and (not str(value) or "\0" in str(value)):
+            raise ValueError("render destination must be nonempty and contain no NUL")
+    if exact is not None and (directory is not None or name is not None):
+        raise ValueError("--output cannot be combined with --video_dir or --file_name")
+    if batch and (exact is not None or name is not None):
+        raise ValueError("--output and --file_name require exactly one scene")
+    if name is not None and (name in {".", ".."} or "/" in name or "\\" in name
+                             or name.endswith((".", " ")) or any(ord(char) < 32 for char in name)):
+        raise ValueError("--file_name must be an output stem without path separators or control characters")
+    root = (Path(directory) if directory is not None else Path("media") / "videos" / Path(source).stem).resolve()
+    # Preserve the leaf spelling so no-clobber checks still see a symlink.
+    path = None if exact is None else Path(exact).absolute()
+    if path is not None:
+        path = path.parent.resolve() / path.name
+    return root, path
+
+
+def _single_destination(root, exact, selected, options, *, subdivide=False):
+    if exact is not None:
+        return exact
+    format = options["format"]
+    name = options.get("file_name") or selected
+    if name.endswith("." + format):
+        name = name[:-len(format) - 1]
+    if not name:
+        raise ValueError("--file_name requires a nonempty output stem")
+    return (root / name / "clips" if subdivide else root / name / "frames" if format == "png_sequence"
+            else root / (name + "." + format))
 
 _OUTPUT_HELP = """Native output profiles:
   --transparent, -t       Preserve alpha in PNG, SVG or qtrle MOV.
@@ -193,7 +246,7 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
         ).replace("Certified output, opener flags, and Studio", "Certified output and opener flags")
         from .studio import _HELP as _STUDIO_HELP
         text += "\n\n" + _BATCH_HELP + "\n" + _SELECTION_HELP + "\n" + PLAYBACK_HELP + "\n" + _OUTPUT_HELP + "\n" + SUBDIVISION_HELP + "\n" + PAIRED_HELP + "\n" + CHECKPOINT_HELP + "\n" + _STUDIO_HELP
-        text += "\n" + VIDEO_HELP + "\n" + PARALLEL_HELP
+        text += "\n" + VIDEO_HELP + "\n" + PARALLEL_HELP + "\n" + _REFERENCE_HELP
         if robot:
             return native._portal_cli_emit(0, "success", "help", "fmn-python usage", True, help=text)
         print(text)
@@ -251,12 +304,7 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                 raise ValueError("selected scene names collide; each output must be unique")
         selected = requested[0] if len(requested) == 1 else None
         source_path = Path(source).resolve()
-        supplied = options["video_dir"]
-        if supplied is not None and (not str(supplied) or "\0" in str(supplied)):
-            raise ValueError("render destination must be nonempty and contain no NUL")
-        # Freeze both paths before module code or a constructor changes cwd.
-        destination = None if supplied is None else Path(supplied).resolve()
-        default_root = (Path("media") / "videos" / source_path.stem).resolve()
+        default_root, destination = _output_paths(options, source_path, batch=batch)
         if subdivide and not batch and destination is not None and os.path.lexists(destination):
             raise FileExistsError(f"subdivision destination already exists: {destination}")
         if batch:
@@ -336,7 +384,7 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                     **({} if not output_options else {"_output_options": output_options}),
                     **certification_options,
                     **recovery,
-                    on_result=lambda outcome: print(
+                    on_result=None if options.get("quiet") else lambda outcome: print(
                         f"fmn-python: {outcome.name}: {outcome.status}: {outcome.destination}",
                         file=sys.stderr,
                     ),
@@ -349,10 +397,7 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                 if selected not in scenes:
                     raise ValueError(f"scene {selected!r} was not declared by {source}; discovered: "
                                      + (", ".join(names) or "none"))
-                if destination is None:
-                    destination = (default_root / selected / "clips" if subdivide else
-                                   default_root / selected / "frames" if options["format"] == "png_sequence"
-                                   else default_root / (selected + "." + options["format"]))
+                destination = _single_destination(default_root, destination, selected, options, subdivide=subdivide)
                 if options.get("reproducible"):
                     sidecar = destination.parent / (destination.name + ".manifest")
                     if os.path.lexists(sidecar):
@@ -438,7 +483,11 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                                        artifact_published=session is not None and session.artifact_published,
                                        **_partial_output(session, subdivide))
     if batch:
+        if options.get("quiet") and not robot and report.ok:
+            return 0
         return _emit_result(native, report, robot, source, destination)
+    if options.get("quiet") and not robot:
+        return 0
     try:
         typesetting = typesetting_receipt(scene)
     except Exception:

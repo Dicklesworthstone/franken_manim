@@ -24591,7 +24591,8 @@ def _portal_cli_help():
        fmn-python [--robot] --construct-only SOURCE.py [SCENE]
        fmn-python [--robot] SOURCE.py [SCENE] [--format png|png_sequence|gif|y4m|wav|svg|mp4|mov]
                   [--resolution WIDTHxHEIGHT] [--fps FPS] [--threads N]
-                  [--video_dir PATH]
+                  [--video_dir DIRECTORY | --output PATH] [--file_name NAME]
+                  [-w | -i] [-l | -m | --hd | --uhd] [-q]
        fmn-python studio SOURCE.py [SCENE]
 
 The wheel renders standard-mode final-state PNGs, PNG sequences, GIF and y4m through the
@@ -24630,19 +24631,22 @@ def _portal_cli_scene_types(source):
 
 
 def _portal_cli_render_arguments(arguments):
-    """Parse the deliberately narrow, actually shipped portal render surface."""
+    """Resolve the Reference's render flags and the portal's output options."""
 
     import os as _os
     import sys as _sys
 
     values = {
-        "format": "png_sequence",
-        "resolution": "1920x1080",
+        "format": None,
+        "resolution": None,
         # None: the scene camera's fps (manim_config.camera, then the class
         # default_camera_config), as the Reference resolves it without --fps.
         "fps": None,
         "threads": str(max(1, min(_os.cpu_count() or 1, 96))),
         "video_dir": None,
+        "output": None,
+        "file_name": None,
+        "quiet": False,
         "vcodec": None,
         "pix_fmt": None,
         "ffmpeg_bin": None,
@@ -24650,11 +24654,30 @@ def _portal_cli_render_arguments(arguments):
         "reproducible": False,
     }
     positionals = []
-    value_flags = ("--format", "--resolution", "--fps", "--threads", "--video_dir",
-                   "--vcodec", "--pix_fmt", "--ffmpeg_bin")
+    value_flags = {name: name[2:] for name in (
+        "--format", "--resolution", "--fps", "--threads", "--video_dir",
+        "--output", "--file_name", "--vcodec", "--pix_fmt", "--ffmpeg_bin",
+    )}
+    value_flags["-r"] = "resolution"
+    quality_flags = {
+        "-l": "low", "--low_quality": "low", "-m": "med", "--medium_quality": "med",
+        "--hd": "high", "--uhd": "4k",
+    }
+    qualities = set()
+    write_file = gif = False
     index = 0
     while index < len(arguments):
         argument = arguments[index]
+        if argument in quality_flags:
+            qualities.add(quality_flags[argument])
+            index += 1
+            continue
+        if argument in ("-w", "--write_file", "-i", "--gif", "-q", "--quiet"):
+            write_file |= argument in ("-w", "--write_file")
+            gif |= argument in ("-i", "--gif")
+            values["quiet"] |= argument in ("-q", "--quiet")
+            index += 1
+            continue
         if argument in ("--transparent", "-t"):
             if values["transparent"]:
                 raise ValueError("--transparent/-t must not be repeated")
@@ -24672,14 +24695,19 @@ def _portal_cli_render_arguments(arguments):
             values["reproducible"] = True
             index += 1
             continue
-        if argument in ("-o", "-so", "--write_all", "--autoreload"):
+        if argument in ("-p", "--presenter_mode", "-f", "--full_screen", "-e", "--embed") or argument.startswith("--embed="):
+            raise RuntimeError(
+                f"CAPABILITY: {argument.partition('=')[0]} requires an interactive window or "
+                "embedded console; use fmn-python studio SOURCE.py SCENE"
+            )
+        if argument in ("-o", "-so", "--open", "--finder", "--write_all", "--autoreload"):
             raise RuntimeError(
                 f"CAPABILITY: {argument} is not connected in the Python portal"
             )
         if argument in value_flags:
             if index + 1 >= len(arguments):
                 raise ValueError(f"{argument} requires a value")
-            values[argument[2:]] = arguments[index + 1]
+            values[value_flags[argument]] = arguments[index + 1]
             index += 2
             continue
         if argument.startswith("--") and "=" in argument:
@@ -24687,7 +24715,7 @@ def _portal_cli_render_arguments(arguments):
             if name in value_flags:
                 if not value:
                     raise ValueError(f"{name} requires a value")
-                values[name[2:]] = value
+                values[value_flags[name]] = value
                 index += 1
                 continue
         if argument.startswith("-"):
@@ -24695,6 +24723,18 @@ def _portal_cli_render_arguments(arguments):
         positionals.append(argument)
         index += 1
 
+    if values["format"] is None:
+        values["format"] = (
+            "mov" if values["transparent"] and (write_file or gif)
+            else "gif" if gif else "mp4" if write_file else "png_sequence"
+        )
+    elif gif and values["format"] != ("mov" if values["transparent"] else "gif"):
+        raise ValueError("--gif/-i conflicts with the explicit --format")
+    if values["resolution"] is None:
+        # config.py:get_resolution_from_args checks these booleans in this
+        # order, independently of argv order. Quality changes resolution only.
+        resolutions = {"low": "854x480", "med": "1280x720", "high": "1920x1080", "4k": "3840x2160"}
+        values["resolution"] = next((size for name, size in resolutions.items() if name in qualities), "1920x1080")
     if values["format"] not in ("png", "png_sequence", "gif", "y4m", "wav", "svg", "mp4", "mov"):
         raise RuntimeError(
             f"CAPABILITY: portal output format {values['format']!r} is not connected; "

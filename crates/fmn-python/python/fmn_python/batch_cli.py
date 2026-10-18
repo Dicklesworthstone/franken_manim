@@ -14,7 +14,8 @@ from .scene_loading import SceneSource
 from .render_selection import PLAYBACK_HELP, take_playback_options, select_still_format
 
 _VALUE_FLAGS = frozenset({"--format", "--resolution", "--fps", "--threads", "--video_dir",
-                          "--vcodec", "--pix_fmt", "--ffmpeg_bin",
+                          "-r", "--output", "--file_name", "--vcodec", "--pix_fmt", "--ffmpeg_bin",
+                          "-e", "--embed",
                           "-n", "--start_at_animation_number"})
 _BATCH_HELP = """Multi-scene output:
   fmn-python [--robot] SOURCE.py --write_all [--keep-going]
@@ -114,13 +115,8 @@ def try_batch_cli(native: Any, arguments: list[str]) -> int | None:
                 _positive_integer(value, name)
         source = positionals[0]
         source_path = Path(source).resolve()
-        directory = options["video_dir"]
-        if directory is None:
-            directory = Path("media") / "videos" / source_path.stem
-        if not str(directory) or "\0" in str(directory):
-            raise ValueError("batch output directory must be nonempty and contain no NUL")
-        # Source module code, not just constructors, may change cwd.
-        directory = Path(directory).resolve()
+        from .console_rendering import _output_paths
+        directory, _ = _output_paths(options, source_path, batch=True)
         validate_batch_mode(native, options["format"], bool(options.get("reproducible")))
     except RuntimeError as error:
         message = _error_fields(error)[1]
@@ -148,7 +144,7 @@ def try_batch_cli(native: Any, arguments: list[str]) -> int | None:
             report = render_scenes(
                 {name: discovered[name] for name in sorted(discovered)}, directory,
                 format=options["format"], resolution=(width, height), fps=fps, threads=threads,
-                continue_on_error=bool(flags["--keep-going"]), on_result=progress,
+                continue_on_error=bool(flags["--keep-going"]), on_result=None if options.get("quiet") else progress,
                 **({} if selection is None else {"animation_range": selection}),
                 **({"reproducible": True, "sources": lambda: loaded.sources}
                    if options.get("reproducible") else {}),
@@ -180,4 +176,6 @@ def try_batch_cli(native: Any, arguments: list[str]) -> int | None:
             code, identity, kind = 2, "usage", "usage-error"
         return native._portal_cli_emit(code, identity, kind, _error_fields(error)[1], robot,
                                        source=source, destination=str(directory))
+    if options.get("quiet") and not robot and report.ok:
+        return 0
     return _emit_result(native, report, robot, source, directory)

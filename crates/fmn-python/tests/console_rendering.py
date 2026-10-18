@@ -87,9 +87,10 @@ SCENES = source("motion", '''\
 
 
 def invoke(scene_source, destination, *selectors, format="y4m", threads=1, extra=()):
+    output_flag = "--video_dir" if len(selectors) > 1 or any(value in {"-a", "--write_all"} for value in selectors) else "--output"
     argv = ["fmn-python", "--robot", str(scene_source), *selectors,
             "--format", format, "--resolution", "96x54", "--fps", "8",
-            "--threads", str(threads), "--video_dir", str(destination), *extra]
+            "--threads", str(threads), output_flag, str(destination), *extra]
     out, err = io.StringIO(), io.StringIO()
     original_argv, original_path = sys.argv, list(sys.path)
     try:
@@ -340,7 +341,7 @@ def invoke_defaults(scene_source, destination, selector, cwd, extra=()):
     # No --fps and no --resolution override of the camera colour: the run must
     # inherit the Reference's manim_config.camera layer (fm-5wq.44).
     argv = ["fmn-python", "--robot", str(scene_source), selector, "--format", "y4m",
-            "--resolution", "96x54", "--threads", "1", "--video_dir", str(destination), *extra]
+            "--resolution", "96x54", "--threads", "1", "--output", str(destination), *extra]
     out, err = io.StringIO(), io.StringIO()
     original_argv, original_cwd = sys.argv, Path.cwd()
     try:
@@ -413,15 +414,44 @@ def reference_camera_defaults():
     assert abs(y - bt709_limited_luma("#440000")) <= 2 and v > 128, (y, u, v)
 
 
+def reference_flags_and_destinations():
+    path = source("reference_flags", '''\
+        class Preset(m.Scene):
+            default_camera_config = {"fps": 24}
+            def construct(self):
+                assert self.camera.fps == 24
+                self.add(m.Square(side_length=1, fill_opacity=1))
+    ''')
+    root = ROOT / "reference-flag-output"
+    for index, (flags, dimensions) in enumerate(((('-l',), (854, 480)), (('--hd', '-r', '160x90'), (160, 90)))):
+        argv = ['fmn-python', '--robot', str(path), 'Preset', '-s', *flags, '--threads', '1',
+                '--video_dir', str(root), '--file_name', f'proof{index}', '-q']
+        before, out = sys.argv, io.StringIO()
+        try:
+            sys.argv = argv
+            with contextlib.redirect_stdout(out):
+                code = main()
+        finally:
+            sys.argv = before
+        report = json.loads(out.getvalue())
+        assert code == 0, report
+        artifact = root / f'proof{index}.png'
+        data = artifact.read_bytes()
+        assert data.startswith(b'\x89PNG\r\n\x1a\n')
+        assert struct.unpack('>II', data[16:24]) == dimensions
+        assert report['destination'] == str(artifact)
+        assert report['fps'] == 24 and report['resolution'] == list(dimensions)
+
+
 CASES = (
     ordinary_scene_capture, selected_order_and_output,
     write_all_alias_and_thread_repeatability, missing_selection_starts_no_scene,
     early_scene_termination_publishes, interrupt_after_capture_does_not_publish,
     system_exit_zero_is_not_success, batch_fail_fast_and_keep_going,
     batch_interrupt_retains_completed_artifacts, later_destination_preflight_preserves_files,
-    wav_output_keeps_native_sample_units, reference_camera_defaults,
+    wav_output_keeps_native_sample_units, reference_camera_defaults, reference_flags_and_destinations,
 )
-assert len(CASES) == 12
+assert len(CASES) == 13
 for case in CASES:
     case()
     print("native console acceptance:", case.__name__)

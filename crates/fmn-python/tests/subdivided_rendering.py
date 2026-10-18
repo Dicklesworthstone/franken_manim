@@ -46,7 +46,7 @@ class FrontdoorTests(unittest.TestCase):
             destination = self.root / "cli-clips"
         arguments = ["fmn-python", "--robot", str(source), "Motion", "--subdivide",
                      "--format", "y4m", "--resolution", "96x54", "--fps", "8",
-                     "--threads", "1", "--video_dir", str(destination), *extra]
+                     "--threads", "1", "--output", str(destination), *extra]
         original, path = sys.argv, list(sys.path)
         stdout, stderr = io.StringIO(), io.StringIO()
         try:

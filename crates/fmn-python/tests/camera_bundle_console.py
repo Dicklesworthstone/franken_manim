@@ -75,7 +75,7 @@ class CameraBundleConsole(unittest.TestCase):
                resolution=(96, 54), extra=(), expected=0):
         path = self.root / (name + ".fmtl")
         argv = [sys.executable, "-m", "fmn_python", "--robot", str(self.source), scene,
-                "--format", "fmtl", "--video_dir", str(path), "--fps", str(fps),
+                "--format", "fmtl", "--output", str(path), "--fps", str(fps),
                 "--resolution", f"{resolution[0]}x{resolution[1]}"]
         if camera:
             argv.append("--bundle-camera")
