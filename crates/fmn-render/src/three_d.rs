@@ -15,7 +15,7 @@
 
 use std::collections::TryReserveError;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Condvar, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
 use fmn_core::color::{LinearRgba, PremulRgba};
 use fmn_core::types::Vec3;
@@ -343,6 +343,8 @@ pub enum ThreeDError {
     InvalidAntiAliasWidth,
     /// A retained-vector command named no instance in its plan.
     InvalidVectorInstance,
+    /// An immutable projection was rebound to a different camera or draw layout.
+    ProjectionMismatch,
     /// Camera clipping left a horizon crossing for the rational fill.
     UnclippedHorizon,
     /// Perspective subdivision hit its declared depth cap.
@@ -404,6 +406,9 @@ impl std::fmt::Display for ThreeDError {
             }
             Self::InvalidVectorInstance => {
                 f.write_str("retained vector draw names no render-plan instance")
+            }
+            Self::ProjectionMismatch => {
+                f.write_str("retained projection does not match its camera or draw bindings")
             }
             Self::UnclippedHorizon => {
                 f.write_str("camera clipping left a vector curve crossing the horizon")
@@ -1335,10 +1340,10 @@ fn build_curve_bins(
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum Shader<'a> {
+pub(crate) enum ProjectedShader<M> {
     Gouraud,
     Texture {
-        material: TextureMaterial<'a>,
+        material: M,
         shading: Vec3,
         light_position: Vec3,
         camera_position: Vec3,
@@ -1356,15 +1361,139 @@ pub(crate) enum Shader<'a> {
     },
 }
 
+pub(crate) type Shader<'a> = ProjectedShader<TextureMaterial<'a>>;
+
+impl<M> ProjectedShader<M> {
+    fn map_material<N>(self, map: impl FnOnce(M) -> N) -> ProjectedShader<N> {
+        match self {
+            Self::Gouraud => ProjectedShader::Gouraud,
+            Self::Texture {
+                material,
+                shading,
+                light_position,
+                camera_position,
+            } => ProjectedShader::Texture {
+                material: map(material),
+                shading,
+                light_position,
+                camera_position,
+            },
+            Self::Dot {
+                center,
+                radius,
+                color,
+                glow_factor,
+                shading,
+                to_camera,
+                scaled_aa_width,
+                light_position,
+                camera_position,
+            } => ProjectedShader::Dot {
+                center,
+                radius,
+                color,
+                glow_factor,
+                shading,
+                to_camera,
+                scaled_aa_width,
+                light_position,
+                camera_position,
+            },
+        }
+    }
+}
+
+/// Share the already-admitted vector allocation without copying its rows into
+/// another allocation when a projection becomes owned or is rebound for replay.
 #[derive(Debug, Clone)]
-pub(crate) struct CompiledDraw<'a> {
-    pub(crate) primitive: CompiledPrimitive<'a>,
+pub(crate) enum ProjectedRows<T> {
+    Owned(Vec<T>),
+    Shared(Arc<Vec<T>>),
+}
+
+impl<T> From<Vec<T>> for ProjectedRows<T> {
+    fn from(rows: Vec<T>) -> Self {
+        Self::Owned(rows)
+    }
+}
+
+impl<T> ProjectedRows<T> {
+    fn into_shared(self, budget: &mut PreparationBudget) -> Result<Self, ThreeDError> {
+        match self {
+            Self::Owned(rows) => {
+                // The row allocation is already admitted. Account for its
+                // shared owner and reference counts before adding ownership;
+                // ordinary borrowed jobs keep their original Vec allocation.
+                budget.charge_buffer::<(Vec<T>, [usize; 2])>("shared projection owners", 1)?;
+                Ok(Self::Shared(Arc::new(rows)))
+            }
+            shared @ Self::Shared(_) => Ok(shared),
+        }
+    }
+}
+
+impl<T> std::ops::Deref for ProjectedRows<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &[T] {
+        match self {
+            Self::Owned(rows) => rows,
+            Self::Shared(rows) => rows,
+        }
+    }
+}
+
+impl<'a, T> IntoIterator for &'a ProjectedRows<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ProjectedDraw<M> {
+    pub(crate) primitive: ProjectedPrimitive<M>,
     pub(crate) depth_test: bool,
     pub(crate) bounds: Option<[f64; 4]>,
 }
 
+pub(crate) type CompiledDraw<'a> = ProjectedDraw<TextureMaterial<'a>>;
+
+impl<M> ProjectedDraw<M> {
+    fn share_rows(mut self, budget: &mut PreparationBudget) -> Result<Self, ThreeDError> {
+        self.primitive = match self.primitive {
+            ProjectedPrimitive::Triangles { triangles, shader } => ProjectedPrimitive::Triangles {
+                triangles: triangles.into_shared(budget)?,
+                shader,
+            },
+            ProjectedPrimitive::Vector(vector) => {
+                ProjectedPrimitive::Vector(CompiledVectorSlot(vector.0.into_shared(budget)?))
+            }
+        };
+        Ok(self)
+    }
+
+    fn map_material<N>(self, map: impl FnOnce(M) -> N) -> ProjectedDraw<N> {
+        ProjectedDraw {
+            primitive: match self.primitive {
+                ProjectedPrimitive::Triangles { triangles, shader } => {
+                    ProjectedPrimitive::Triangles {
+                        triangles,
+                        shader: shader.map_material(map),
+                    }
+                }
+                ProjectedPrimitive::Vector(vector) => ProjectedPrimitive::Vector(vector),
+            },
+            depth_test: self.depth_test,
+            bounds: self.bounds,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
-pub(crate) struct CompiledVectorSlot(Vec<CompiledVector>);
+pub(crate) struct CompiledVectorSlot(ProjectedRows<CompiledVector>);
 
 impl CompiledVectorSlot {
     fn get(&self) -> &CompiledVector {
@@ -1375,12 +1504,126 @@ impl CompiledVectorSlot {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum CompiledPrimitive<'a> {
+pub(crate) enum ProjectedPrimitive<M> {
     Triangles {
-        triangles: Vec<RasterTriangle>,
-        shader: Shader<'a>,
+        triangles: ProjectedRows<RasterTriangle>,
+        shader: ProjectedShader<M>,
     },
     Vector(CompiledVectorSlot),
+}
+
+pub(crate) type CompiledPrimitive<'a> = ProjectedPrimitive<TextureMaterial<'a>>;
+
+/// Texture-independent, owned projection of one immutable scene capture.
+///
+/// Texture references are bound only for the duration of a raster call. The
+/// retained caller owns and validates the matching world resources and vector
+/// plan, so neither self-references nor copies of decoded texture pixels are
+/// needed. Only one such projection is cached by each retained renderer;
+/// frozen captures keep their own shared ownership until their permit expires.
+#[derive(Debug)]
+pub(crate) struct PreparedThreeDProjection {
+    camera: Camera,
+    draws: Vec<ProjectedDraw<()>>,
+    tiling: Tiling,
+    sample_grid: u32,
+    preparation_bytes: u64,
+    preparation_limits: ThreeDPreparationLimits,
+    scratch_pool: Arc<TileScratchPool>,
+}
+
+impl PreparedThreeDProjection {
+    /// Revisions alone cannot identify cameras created by separate callers.
+    /// Compare the complete value, then distinguish signed-zero inputs that
+    /// ordinary float equality treats as equal but raster arithmetic may read.
+    pub(crate) fn matches_camera(&self, camera: &Camera) -> bool {
+        same_projection_camera(&self.camera, camera)
+    }
+
+    /// Bind the exact immutable resources used to compile this projection.
+    /// The retained owner checks world/plan allocation identities before reuse;
+    /// this boundary additionally refuses a changed camera or material layout.
+    pub(crate) fn bind<'a>(
+        &self,
+        camera: &'a Camera,
+        draws: &[ThreeDDraw<'a>],
+    ) -> Result<ThreeDJob<'a>, ThreeDError> {
+        if !self.matches_camera(camera) || self.draws.len() != draws.len() {
+            return Err(ThreeDError::ProjectionMismatch);
+        }
+        // These binding rows replace the original compiled draw rows already
+        // included in preparation_bytes. Geometry remains shared, and the
+        // configured draw/byte ceilings were checked before publication.
+        let mut compiled = Vec::new();
+        compiled.try_reserve_exact(draws.len()).map_err(|_| {
+            ThreeDError::PreparationAllocationFailed {
+                resource: "projection binding rows",
+                requested: draws.len() as u64,
+            }
+        })?;
+        for (projected, draw) in self.draws.iter().zip(draws) {
+            let material = match (&projected.primitive, draw) {
+                (ProjectedPrimitive::Vector(_), ThreeDDraw::Vector(_))
+                | (
+                    ProjectedPrimitive::Triangles {
+                        shader: ProjectedShader::Dot { .. },
+                        ..
+                    },
+                    ThreeDDraw::TrueDot(_),
+                )
+                | (
+                    ProjectedPrimitive::Triangles {
+                        shader: ProjectedShader::Gouraud,
+                        ..
+                    },
+                    ThreeDDraw::Surface(SurfaceDraw {
+                        material: SurfaceMaterial::VertexColor,
+                        ..
+                    }),
+                ) => None,
+                (
+                    ProjectedPrimitive::Triangles {
+                        shader: ProjectedShader::Texture { .. },
+                        ..
+                    },
+                    ThreeDDraw::Surface(SurfaceDraw {
+                        material: SurfaceMaterial::Texture(material),
+                        ..
+                    }),
+                ) => Some(*material),
+                _ => return Err(ThreeDError::ProjectionMismatch),
+            };
+            compiled.push(
+                projected
+                    .clone()
+                    .map_material(|()| material.expect("validated texture projection binding")),
+            );
+        }
+        Ok(ThreeDJob {
+            camera,
+            draws: compiled,
+            tiling: self.tiling,
+            sample_grid: self.sample_grid,
+            camera_revision: camera.revision(),
+            preparation_bytes: self.preparation_bytes,
+            preparation_limits: self.preparation_limits,
+            scratch_pool: Arc::clone(&self.scratch_pool),
+        })
+    }
+}
+
+pub(crate) fn same_projection_camera(before: &Camera, after: &Camera) -> bool {
+    before == after
+        && before.frame().center().map(f64::to_bits) == after.frame().center().map(f64::to_bits)
+        && before.frame().shape().map(f64::to_bits) == after.frame().shape().map(f64::to_bits)
+        && before.frame().orientation().map(f64::to_bits)
+            == after.frame().orientation().map(f64::to_bits)
+        && before.frame().field_of_view().to_bits() == after.frame().field_of_view().to_bits()
+        && rgba_array(before.background()).map(f64::to_bits)
+            == rgba_array(after.background()).map(f64::to_bits)
+        && before.max_allowable_norm().to_bits() == after.max_allowable_norm().to_bits()
+        && before.light_source_position().map(f64::to_bits)
+            == after.light_source_position().map(f64::to_bits)
 }
 
 /// Camera-bound, clipped, tiled 3D frame.
@@ -1392,7 +1635,8 @@ pub struct ThreeDJob<'a> {
     sample_grid: u32,
     camera_revision: u64,
     preparation_bytes: u64,
-    scratch_pool: TileScratchPool,
+    preparation_limits: ThreeDPreparationLimits,
+    scratch_pool: Arc<TileScratchPool>,
 }
 
 impl<'a> ThreeDJob<'a> {
@@ -1439,7 +1683,28 @@ impl<'a> ThreeDJob<'a> {
             sample_grid,
             camera_revision: camera.revision(),
             preparation_bytes: budget.working_bytes,
-            scratch_pool: TileScratchPool::new(),
+            preparation_limits: limits,
+            scratch_pool: Arc::new(TileScratchPool::new()),
+        })
+    }
+
+    /// Freeze the projected rows without retaining any borrowed texture.
+    pub(crate) fn into_projection(self) -> Result<PreparedThreeDProjection, ThreeDError> {
+        let mut budget = PreparationBudget::new(self.preparation_limits);
+        budget.working_bytes = self.preparation_bytes;
+        let mut draws = Vec::new();
+        budget.reserve_retained(&mut draws, "retained projection rows", self.draws.len())?;
+        for draw in self.draws {
+            draws.push(draw.share_rows(&mut budget)?.map_material(|_| ()));
+        }
+        Ok(PreparedThreeDProjection {
+            camera: self.camera.clone(),
+            draws,
+            tiling: self.tiling,
+            sample_grid: self.sample_grid,
+            preparation_bytes: budget.working_bytes,
+            preparation_limits: self.preparation_limits,
+            scratch_pool: self.scratch_pool,
         })
     }
 
@@ -1998,7 +2263,7 @@ fn compile_vector<'a>(
     budget.reserve_retained(&mut vector_rows, "compiled vector rows", 1)?;
     vector_rows.push(vector);
     Ok(CompiledDraw {
-        primitive: CompiledPrimitive::Vector(CompiledVectorSlot(vector_rows)),
+        primitive: CompiledPrimitive::Vector(CompiledVectorSlot(vector_rows.into())),
         depth_test: style.depth_test,
         bounds,
     })
@@ -2564,7 +2829,10 @@ fn compile_surface<'a>(
     };
     Ok(CompiledDraw {
         bounds: union_bounds(&triangles),
-        primitive: CompiledPrimitive::Triangles { triangles, shader },
+        primitive: CompiledPrimitive::Triangles {
+            triangles: triangles.into(),
+            shader,
+        },
         depth_test: draw.depth_test,
     })
 }
@@ -2643,7 +2911,7 @@ fn compile_dot<'a>(
     Ok(CompiledDraw {
         bounds: union_bounds(&triangles),
         primitive: CompiledPrimitive::Triangles {
-            triangles,
+            triangles: triangles.into(),
             shader: Shader::Dot {
                 center: draw.center,
                 radius: draw.radius,
@@ -4648,6 +4916,99 @@ mod tests {
     }
 
     #[test]
+    fn owned_projection_rebinds_shared_rows_and_reuses_warm_scratch() {
+        fn send_sync_owned<T: Send + Sync + 'static>(_: &T) {}
+        fn assert_shared<T>(before: &ProjectedRows<T>, after: &ProjectedRows<T>) {
+            let (ProjectedRows::Shared(before), ProjectedRows::Shared(after)) = (before, after)
+            else {
+                panic!("published projection rows must have shared ownership");
+            };
+            assert!(Arc::ptr_eq(before, after));
+        }
+
+        let camera = camera();
+        let texture = Texture::from_rgba8(
+            1,
+            1,
+            &[50, 80, 120, 255],
+            crate::texture::TextureEncoding::Linear,
+        )
+        .unwrap();
+        let mesh = full_triangle(-1.0, color("#FFFFFF", 0.2));
+        let plan = vector_plan(
+            &path_points(
+                &[[-2.0, -1.0, 0.0], [0.0, 2.0, 0.0], [2.0, -1.0, 0.0]],
+                true,
+            ),
+            [0.8, 0.1, 0.2, 0.8],
+            [0.1, 0.8, 0.2, 1.0],
+            2.0,
+            camera.revision(),
+            |_| {},
+        );
+        let dot = TrueDotDraw::new([1.5, 0.5, 0.5], 0.5, color("#FFFFFF", 0.8));
+        let draws = [
+            ThreeDDraw::Surface(SurfaceDraw::image(&mesh, &texture)),
+            ThreeDDraw::Vector(VectorDraw::new(&plan, 0)),
+            ThreeDDraw::Surface(SurfaceDraw::new(&mesh)),
+            ThreeDDraw::TrueDot(dot),
+        ];
+        let job = ThreeDJob::new(&camera, &draws, Tiling::default()).unwrap();
+        let expected = job.render(4).unwrap().as_bytes().to_vec();
+        let projection = job.into_projection().unwrap();
+        send_sync_owned(&projection);
+
+        for threads in [4, 1, 16, 4] {
+            let bound = projection.bind(&camera, &draws).unwrap();
+            assert!(Arc::ptr_eq(&projection.scratch_pool, &bound.scratch_pool));
+            for (original, rebound) in projection.draws.iter().zip(&bound.draws) {
+                match (&original.primitive, &rebound.primitive) {
+                    (
+                        ProjectedPrimitive::Triangles {
+                            triangles: before, ..
+                        },
+                        ProjectedPrimitive::Triangles {
+                            triangles: after,
+                            shader,
+                        },
+                    ) => {
+                        assert_shared(before, after);
+                        if let Shader::Texture { material, .. } = shader {
+                            assert!(std::ptr::eq(material.light, &texture));
+                        }
+                    }
+                    (ProjectedPrimitive::Vector(before), ProjectedPrimitive::Vector(after)) => {
+                        assert_shared(&before.0, &after.0);
+                    }
+                    _ => panic!("binding preserves painter-ordered primitive kinds"),
+                }
+            }
+            assert_eq!(bound.render(threads).unwrap().as_bytes(), expected);
+            if threads != 16 {
+                assert_eq!(projection.scratch_pool.heap_allocs(), 0);
+            }
+        }
+        assert_eq!(projection.scratch_pool.slots(), 16);
+        assert!(matches!(
+            projection.bind(&camera, &draws[..3]),
+            Err(ThreeDError::ProjectionMismatch)
+        ));
+        assert!(matches!(
+            projection.bind(&camera, &[ThreeDDraw::TrueDot(dot); 4]),
+            Err(ThreeDError::ProjectionMismatch)
+        ));
+        let mut moved_camera = camera.clone();
+        moved_camera
+            .frame_mut()
+            .set_center([1.0, 0.0, 0.0])
+            .unwrap();
+        assert!(matches!(
+            projection.bind(&moved_camera, &draws),
+            Err(ThreeDError::ProjectionMismatch)
+        ));
+    }
+
+    #[test]
     fn three_d_scratch_pool_refuses_an_unrepresentable_team_atomically() {
         let pool = TileScratchPool::new();
         assert_eq!(pool.prepare(1, 1, usize::MAX), Err(FrameError::TooLarge));
@@ -4696,6 +5057,37 @@ mod tests {
             .expect("one clipped-empty draw fits its exact row bytes");
         assert_eq!(job.draw_count(), 1);
         assert_eq!(job.preparation_bytes(), draw_bytes);
+        assert!(matches!(
+            job.into_projection(),
+            Err(ThreeDError::PreparationLimitExceeded {
+                resource: "preparation working bytes",
+                ..
+            })
+        ));
+
+        let owned_bytes = draw_bytes
+            + std::mem::size_of::<ProjectedDraw<()>>() as u64
+            + std::mem::size_of::<(Vec<RasterTriangle>, [usize; 2])>() as u64;
+        let projection = ThreeDJob::new_with_limits(
+            &camera,
+            &draws,
+            Tiling::default(),
+            ThreeDPreparationLimits {
+                max_working_bytes: owned_bytes,
+                ..exact
+            },
+        )
+        .unwrap()
+        .into_projection()
+        .expect("owned draw rows and shared owner fit their exact admitted bytes");
+        assert_eq!(projection.preparation_bytes, owned_bytes);
+        assert_eq!(
+            projection
+                .bind(&camera, &draws)
+                .unwrap()
+                .preparation_bytes(),
+            owned_bytes
+        );
 
         assert!(matches!(
             ThreeDJob::new_with_limits(
