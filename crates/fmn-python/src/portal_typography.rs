@@ -26,10 +26,7 @@ const MAX_ITEMS: usize = 4096;
 ///
 /// Python's ordinary copy/become and numeric-part replacement already own
 /// these fields. Reading them at the boundary avoids a second cached index.
-fn string_span_map(
-    source: &str,
-    spans: Vec<(usize, usize)>,
-) -> PyResult<fmn_library::SpanMapData> {
+fn string_span_map(source: &str, spans: Vec<(usize, usize)>) -> PyResult<fmn_library::SpanMapData> {
     if spans
         .iter()
         .any(|&(start, end)| start > end || source.get(start..end).is_none())
@@ -485,17 +482,11 @@ mod tests {
         // Painter order is deliberately different from source order.
         let spans = vec![(5, 7), (3, 4), (0, 2)];
         assert_eq!(
-            _string_span_selections(
-                source,
-                spans.clone(),
-                vec![(0, 2), (5, 7), (0, 7)]
-            )
-            .unwrap(),
+            _string_span_selections(source, spans.clone(), vec![(0, 2), (5, 7), (0, 7)]).unwrap(),
             [vec![2], vec![0], vec![0, 1, 2]]
         );
         assert_eq!(
-            _string_matching_occurrences(source, spans, "é", vec![false, false, true])
-                .unwrap(),
+            _string_matching_occurrences(source, spans, "é", vec![false, false, true]).unwrap(),
             [vec![0]]
         );
     }
@@ -506,10 +497,7 @@ mod tests {
         Python::attach(|_| {
             assert!(_string_span_selections("é", vec![(0, 1)], vec![(0, 2)]).is_err());
             assert!(_string_span_selections("é", vec![(0, 2)], vec![(0, 1)]).is_err());
-            assert!(
-                _string_matching_occurrences("ab", vec![(0, 2)], "a", vec![false])
-                    .is_err()
-            );
+            assert!(_string_matching_occurrences("ab", vec![(0, 2)], "a", vec![false]).is_err());
             assert!(
                 _string_matching_occurrences("ab", vec![(0, 2)], "a", vec![true])
                     .unwrap()
@@ -523,13 +511,8 @@ mod tests {
         Python::initialize();
         Python::attach(|_| {
             let oversized = "x".repeat(MAX_BYTES + 1);
-            let error = _tex_substring_path_count(
-                &oversized,
-                false,
-                "unresolved-template",
-                "",
-            )
-            .expect_err("oversized source must be refused before typesetting");
+            let error = _tex_substring_path_count(&oversized, false, "unresolved-template", "")
+                .expect_err("oversized source must be refused before typesetting");
             assert!(error.to_string().contains("262144-byte source limit"));
         });
     }
