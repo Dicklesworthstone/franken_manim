@@ -8457,7 +8457,7 @@ class StringMobject(SVGMobject, _abc.ABC):
     def find_spans_by_selector(self, selector):
         def one(value):
             if isinstance(value, str):
-                return [match.span() for match in _re.finditer(_re.escape(value), self.string)]
+                return _string_find_spans(self.string, value)
             if isinstance(value, _re.Pattern):
                 return [match.span() for match in value.finditer(self.string)]
             if (
@@ -8564,7 +8564,19 @@ class StringMobject(SVGMobject, _abc.ABC):
         _refuse_render_twice("build_groups")
 
     def substr_to_path_count(self, substr):
-        return len(substr)
+        if not isinstance(substr, str):
+            raise TypeError("substring must be a string")
+        selections = self._selected_string_ordinals(substr)
+        for ordinals in selections:
+            if ordinals:
+                # Blank native glyphs retain an ordinal but have no SVG path.
+                return sum(
+                    bool(self._string_submobject(ordinal).family_members_with_points())
+                    for ordinal in ordinals
+                )
+        if selections:
+            return 0
+        return sum(not char.isspace() for char in substr)
 
     def _byte_span(self, span):
         start, end = span
@@ -8583,22 +8595,14 @@ class StringMobject(SVGMobject, _abc.ABC):
         return current
 
     def get_submob_indices_list_by_span(self, arbitrary_span):
-        start, end = self._byte_span(arbitrary_span)
-        return [
-            ordinal
-            for ordinal, (sub_start, sub_end) in enumerate(self._string_sub_spans)
-            if start <= sub_start and sub_end <= end
-        ]
+        return _string_span_selections(
+            self.string, self._string_sub_spans, [self._byte_span(arbitrary_span)]
+        )[0]
 
     def _selected_string_ordinals(self, selector):
-        return [
-            [
-                ordinal
-                for ordinal, (sub_start, sub_end) in enumerate(self._string_sub_spans)
-                if start <= sub_start and sub_end <= end
-            ]
-            for start, end in self._selector_byte_spans(selector)
-        ]
+        return _string_span_selections(
+            self.string, self._string_sub_spans, self._selector_byte_spans(selector)
+        )
 
     def get_submob_indices_lists_by_selector(self, selector):
         return [
@@ -19973,8 +19977,8 @@ class TransformMatchingStrings(_NativeAnimation):
     sequences (``difflib.SequenceMatcher``, ``autojunk=False`` — pure
     deterministic sequence data), the pinned Reference's matching-blocks
     discipline: a glyph pairs only inside a genuinely shared substring run.
-    ``TransformMatchingTex`` opts back into bare key equality, because Tex
-    span parts are semantic isolate units rather than glyphs."""
+    ``TransformMatchingTex`` shares the same block matching, including
+    additive pinned keys and explicit source-span renames."""
 
     _native_kind = "transform_matching_strings"
     _target_attr = "target_mobject"
@@ -20176,7 +20180,7 @@ class TransformMatchingStrings(_NativeAnimation):
 
 class TransformMatchingTex(TransformMatchingStrings):
     _native_kind = "transform_matching_tex"
-    _match_by_blocks = False
+    _match_by_blocks = True
 
 
 class FadeInFromPoint(FadeIn):

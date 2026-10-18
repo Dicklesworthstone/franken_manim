@@ -122,8 +122,7 @@ fn command_words(instance: &Instance, flags: u32) -> [u64; 15] {
     words[1] = u64::from(instance.style);
     words[2] = u64::from(flags);
     let coefficients: [f64; 12] = instance.placement.coefficients();
-    for (word, coefficient) in words[3..].iter_mut().zip(coefficients)
-    {
+    for (word, coefficient) in words[3..].iter_mut().zip(coefficients) {
         *word = coefficient.to_bits();
     }
     words

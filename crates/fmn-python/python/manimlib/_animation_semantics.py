@@ -1162,25 +1162,10 @@ def _install_matching_strings(g):
                         sequences[side][index] = masks[side]
 
         def occurrences(side, key):
-            if not key:
-                return []
             mobject = (source, target)[side]
-            encoded, needle = mobject.get_string().encode("utf-8"), key.encode("utf-8")
-            result, position = [], 0
-            while True:
-                start = encoded.find(needle, position)
-                if start < 0:
-                    return result
-                end = start + len(needle)
-                position = end
-                indices = [index for index, (a, b) in enumerate(mobject._string_sub_spans)
-                           if a < end and b > start]
-                if not indices or any(used[side][index] for index in indices):
-                    continue
-                if any(not start <= mobject._string_sub_spans[index][0]
-                           < mobject._string_sub_spans[index][1] <= end for index in indices):
-                    raise g["_TexError"]("Matching key " + repr(key) + " splits a native source-span part")
-                result.append(indices)
+            return g["_string_matching_occurrences"](
+                mobject.get_string(), mobject._string_sub_spans, key, used[side],
+            )
 
         # Explicit pairs were masked above. Authored renames claim next,
         # followed by pinned keys. Never close gaps by deleting claimed slots:
@@ -1194,19 +1179,6 @@ def _install_matching_strings(g):
                 continue
             for source_indices, target_indices in zip(occurrences(0, key), occurrences(1, key)):
                 claim(source_indices, target_indices)
-
-        if not self._match_by_blocks:
-            # D-09: Tex matches semantic native keys, never geometry. Retain
-            # the existing Tex matched_keys admission filter for leftovers.
-            admitted = set(matched_keys)
-            for source_index, (_, source_key) in enumerate(keys[0]):
-                if used[0][source_index] or (admitted and source_key not in admitted):
-                    continue
-                for target_index, (_, target_key) in enumerate(keys[1]):
-                    if not used[1][target_index] and source_key == target_key:
-                        claim([source_index], [target_index])
-                        break
-            return pairs
 
         # Repeated longest-block matching also handles reordered runs. The
         # two side-specific non-string sentinels cannot collide with authored

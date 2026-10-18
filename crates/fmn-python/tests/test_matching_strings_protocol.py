@@ -2,9 +2,33 @@
 import ast
 import difflib
 import itertools
+import re
 from pathlib import Path
 import unittest
 from test_matching_parts_protocol import environment, module, SOURCE
+
+
+def fixture_native_occurrences(source, spans, needle, unavailable):
+    """Explicit native-boundary double for source-level planner tests.
+
+    Actual Rust selection and installed extension behavior are exercised by
+    text_selection.py and the native Rust tests, not by this fixture.
+    """
+    if not needle:
+        return []
+    result = []
+    for match in re.finditer(re.escape(needle), source):
+        start = len(source[:match.start()].encode("utf-8"))
+        end = len(source[:match.end()].encode("utf-8"))
+        indices = [index for index, (low, high) in enumerate(spans)
+                   if low < end and high > start]
+        if not indices or any(unavailable[index] for index in indices):
+            continue
+        if any(not start <= spans[index][0] < spans[index][1] <= end
+               for index in indices):
+            raise ValueError("Matching key " + repr(needle) + " splits a native source-span part")
+        result.append(indices)
+    return result
 
 
 def strings_environment():
@@ -28,7 +52,7 @@ def strings_environment():
         _match_by_blocks = True
     class TransformMatchingTex(TransformMatchingStrings):
         _native_kind = "transform_matching_tex"
-        _match_by_blocks = False
+        _match_by_blocks = True
     # Execute the unchanged production UTF-8 span helper rather than copy its
     # algorithm into a test double. No geometry/storage is supplied by it.
     path = SOURCE.parent.parent / "manimlib_bootstrap.py"
@@ -39,7 +63,8 @@ def strings_environment():
     exec(compile(ast.Module(body=[helper], type_ignores=[]), str(path), "exec"), namespace)
     TransformMatchingStrings._native_span_keys = namespace["_native_span_keys"]
     g.update(StringMobject=StringMobject, TransformMatchingStrings=TransformMatchingStrings,
-             TransformMatchingTex=TransformMatchingTex, _TexError=ValueError, _difflib=difflib)
+             TransformMatchingTex=TransformMatchingTex, _TexError=ValueError, _difflib=difflib,
+             _string_matching_occurrences=fixture_native_occurrences)
     module._install_matching_parts(g)
     module._install_matching_strings(g)
     return g
@@ -134,17 +159,19 @@ class MatchingStringsProtocolTests(unittest.TestCase):
         self.assertEqual(self.transforms(animation), [])
         self.assertEqual(len(animation.animations), 2)
 
-    def test_tex_keys_and_whitelist(self):
+    def test_tex_matches_blocks_and_pinned_keys_are_additive(self):
         source, target = self.text("x+x"), self.text("x+x")
-        self.assertEqual(len(self.transforms(self.Tex(source, target))), 3)
+        transforms = self.transforms(self.Tex(source, target))
+        self.assertEqual(len(transforms), 1)
+        self.assertEqual(len(transforms[0].mobject.family_members_with_points()), 3)
         selected = self.Tex(source, target, matched_keys=("x",))
-        self.assertEqual(len(self.transforms(selected)), 2)
-        self.assertEqual(len(selected.animations), 4)
+        self.assertEqual(len(self.transforms(selected)), 3)
+        self.assertEqual(len(selected.animations), 3)
 
-    def test_tex_key_map_precedes_whitelist(self):
+    def test_tex_key_map_precedes_pinned_keys_and_retains_other_blocks(self):
         animation = self.Tex(self.text("x+x"), self.text("y+y"), matched_keys=("x",), key_map={"x": "y"})
-        self.assertEqual(len(self.transforms(animation)), 2)
-        self.assertEqual(len(animation.animations), 4)
+        self.assertEqual(len(self.transforms(animation)), 3)
+        self.assertEqual(len(animation.animations), 3)
 
     def test_explicit_duplicate_and_foreign_parts_refuse(self):
         source, target = self.text("ab"), self.text("xy")

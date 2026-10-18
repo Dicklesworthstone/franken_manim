@@ -85,3 +85,51 @@ ligature is one submobject), so scene code indexes identically.
   one-token box with no space (Appendix C-27): there `x\;y` sets as `xy`,
   `x\;=y` loses the relation spacing around `=`, and `a\!\!b` does not
   compile. A formula that asks for a space gets it.
+
+## Source selection and matching through the Python portal
+
+String selectors now use the native source spans throughout the portal.
+Literal lookup delegates to Scribe's literal occurrence finder; regular
+expressions and explicit ranges are converted to the same UTF-8 byte intervals.
+The Python-facing selector offsets remain character offsets. Native selection
+retains only whole primitives inside the requested range, in emission order.
+
+For example, selecting `"i"` in `Tex(r"e^{i\pi} + 1 = 0")` reaches the
+exponent's i and leaves the pi glyph untouched. An occurrence inside a command
+does not own that command's ink. Selection, color maps, direct source-range
+queries, and matching keys all consume this same boundary. Copies and live
+numeric replacements use their current native span/path metadata.
+
+`substr_to_path_count` now counts the primitives represented by a matching
+source occurrence. This fixes the former character-count behavior for commands
+such as `\sin`, `\frac` and `\sqrt`. A TeX snippet absent from the live formula
+is typeset through the existing native template and preamble engine. This
+deliberately differs from the pinned Reference's approximate command-count
+table when the native primitive decomposition differs. A live numeric group
+counts as one source-span part; plain-text whitespace slots have no paths and
+do not contribute.
+
+`TransformMatchingTex` uses the same repeated longest-block matching as
+`TransformMatchingStrings`, matching the pinned Reference's alias relationship.
+Explicit pairs and `key_map` renames claim their parts first; `matched_keys`
+adds priority matches while the remaining shared blocks still match. Reordered
+blocks are preserved, and already-claimed parts cannot be consumed again.
+Under D-09, unrelated source keys never match merely because their outlines
+look alike. Use explicit pairs or a key map for an authored rename.
+
+TeX color maps run once, after the constructor's public style hook, and once
+when `init_points()` directly regenerates the native glyphs. Literal, regex and
+range keys share this pass; no native-first duplicate color pass remains.
+
+The independent native selection regression is in
+`crates/fmn-tex/tests/scribe2.rs`; the compact text/TeX map checks are in
+`crates/fmn-library/src/spans.rs`. Installed-extension regressions in
+`crates/fmn-python/tests/text_selection.py` cover selection, coloring, counts,
+copying, numeric replacement and matching. The source-level matching protocol
+suites use explicit native-boundary doubles and are not rendering parity
+evidence. Broad Reference fixture coverage remains separate from these checks.
+
+Reference source at the pinned revision:
+[string selectors](https://github.com/3b1b/manim/blob/6199a00d4c1b1127ebe45cb629c3f22538b10e13/manimlib/mobject/svg/string_mobject.py),
+[TeX counting](https://github.com/3b1b/manim/blob/6199a00d4c1b1127ebe45cb629c3f22538b10e13/manimlib/mobject/svg/tex_mobject.py),
+[matching blocks and Tex alias](https://github.com/3b1b/manim/blob/6199a00d4c1b1127ebe45cb629c3f22538b10e13/manimlib/animation/transform_matching_parts.py).

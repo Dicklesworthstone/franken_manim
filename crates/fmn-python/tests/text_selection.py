@@ -70,5 +70,107 @@ class TextSelectionTests(unittest.TestCase):
         self.assertEqual(changed, camera.capture_snapshot(duplicate).pixels())
 
 
+class NativeTexSelectionTests(unittest.TestCase):
+    def test_literal_regex_and_ranges_use_the_native_selector(self):
+        formula = m.Tex(r'e^{i\pi} + 1 = 0')
+        calls = []
+        original = m._native._string_span_selections
+
+        def observe(source, spans, selections):
+            calls.append((source, tuple(spans), tuple(selections)))
+            return original(source, spans, selections)
+
+        m._native._string_span_selections = observe
+        try:
+            literal = formula.select_parts('i')
+            pattern = formula.select_parts(re.compile('i'))
+            indices = formula.get_submob_indices_list_by_span((3, 4))
+        finally:
+            m._native._string_span_selections = original
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(literal), 1)
+        self.assertEqual(len(literal[0]), 1)
+        self.assertEqual(tuple(map(id, literal[0])), tuple(map(id, pattern[0])))
+        self.assertIs(literal[0][0], formula._string_submobject(indices[0]))
+        self.assertEqual(formula.find_spans_by_selector('i'), [(3, 4), (6, 7)])
+
+    def test_coloring_literal_i_does_not_color_pi_or_other_glyphs(self):
+        formula = m.Tex(r'e^{i\pi} + 1 = 0')
+        selected = formula.select_part('i')[0]
+        before = [part.get_fill_color() for part in formula]
+        formula.set_color_by_tex('i', m.RED)
+        for part, color in zip(formula, before):
+            self.assertEqual(part.get_fill_color(), m.RED if part is selected else color)
+        self.assertNotEqual(formula.select_part(r'\pi')[0].get_fill_color(), m.RED)
+        self.assertNotEqual(formula.select_part('+')[0].get_fill_color(), m.RED)
+
+    def test_tex_color_map_runs_once_after_styles_and_once_on_regeneration(self):
+        events = []
+
+        class Observed(m.Tex):
+            def init_colors(self):
+                events.append(('before_styles', self.select_part('x')[0].get_fill_color()))
+                return super().init_colors()
+
+            def set_color_by_tex_to_color_map(self, colors):
+                events.append(('color_map', dict(colors)))
+                return super().set_color_by_tex_to_color_map(colors)
+
+        colors = {'x': m.RED, re.compile('y'): m.BLUE}
+        formula = Observed('x+y', t2c=colors, fill_color=m.GREEN)
+        self.assertEqual(events[0], ('before_styles', m.WHITE))
+        self.assertEqual(sum(event[0] == 'color_map' for event in events), 1)
+        self.assertEqual(formula.select_part('x')[0].get_fill_color(), m.RED)
+        self.assertEqual(formula.select_part('y')[0].get_fill_color(), m.BLUE)
+        self.assertEqual(formula.select_part('+')[0].get_fill_color(), m.GREEN)
+        formula.init_points()
+        self.assertEqual(sum(event[0] == 'color_map' for event in events), 2)
+        self.assertEqual(formula.select_part('x')[0].get_fill_color(), m.RED)
+        self.assertEqual(formula.select_part('y')[0].get_fill_color(), m.BLUE)
+
+    def test_substring_path_counts_follow_native_primitives(self):
+        formula = m.Tex(r'\sin x + \frac{1}{2} + \sqrt{y}')
+        for substring, count in [
+            (r'\sin', 3), (r'\frac', 1), (r'\sqrt', 2),
+            (r'\frac{1}{2}', 3), ('x', 1), (' ', 0), ('', 0),
+            (r'\alpha+\beta', 3),
+        ]:
+            with self.subTest(substring=substring):
+                self.assertEqual(formula.substr_to_path_count(substring), count)
+        for text in (m.Text('a b'), m.MarkupText('<b>a b</b>')):
+            self.assertEqual(text.substr_to_path_count('a b'), 2)
+            self.assertEqual(text.substr_to_path_count(' '), 0)
+            self.assertEqual(text.substr_to_path_count('c d'), 2)
+
+    def test_copy_and_live_numeric_replacement_keep_current_native_selection(self):
+        formula = m.Tex('x=12')
+        duplicate = copy.deepcopy(formula)
+        number = duplicate.make_number_changeable(12)
+        self.assertEqual(duplicate.substr_to_path_count(r'\decimalmob'), 1)
+        self.assertIs(duplicate.select_part(r'\decimalmob')[0], number)
+        self.assertEqual(formula.substr_to_path_count('12'), 2)
+        duplicate.set_color_by_tex('x', m.RED)
+        self.assertNotEqual(formula.select_part('x')[0].get_fill_color(), m.RED)
+
+    def test_tex_reordered_blocks_and_pinned_keys_keep_every_native_part(self):
+        source, target = m.Tex('ab+cd'), m.Tex('cd+ab')
+        animation = m.TransformMatchingTex(source, target)
+        blocks = [child for child in animation.animations if isinstance(child, m.Transform)]
+        self.assertEqual([len(child.mobject.family_members_with_points()) for child in blocks],
+                         [2, 2, 1])
+        pinned = m.TransformMatchingTex(source, target, matched_keys=['a'])
+        matched = [part for child in pinned.animations if isinstance(child, m.Transform)
+                   for part in child.mobject.family_members_with_points()]
+        expected = source.family_members_with_points()
+        self.assertEqual(set(map(id, matched)), set(map(id, expected)))
+        self.assertEqual(len(matched), len(expected))
+
+    def test_invalid_utf8_native_metadata_is_refused(self):
+        text = m.Text('é')
+        text._string_sub_spans = [(0, 1)]
+        with self.assertRaisesRegex(Exception, 'UTF-8'):
+            text.select_parts('é')
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

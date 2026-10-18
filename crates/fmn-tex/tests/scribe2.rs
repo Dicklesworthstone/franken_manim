@@ -97,6 +97,46 @@ fn spans_select_submobjects_by_source_identity() {
     assert_eq!(one.len(), 1);
 }
 
+#[test]
+fn compact_selection_matches_layout_selection_in_emission_order() {
+    let e = engine();
+    for source in [
+        r"e^{i\pi} + 1 = 0",
+        r"\frac{x}{y}+\sqrt{x}",
+        r"\overbrace{x+y}+\sin x",
+        r"\begin{pmatrix} a & b \\ c & d \end{pmatrix}",
+    ] {
+        let typeset = e.typeset(Mode::Math(Style::Display), source).unwrap();
+        let boundaries: Vec<_> = source
+            .char_indices()
+            .map(|(offset, _)| offset)
+            .chain(std::iter::once(source.len()))
+            .collect();
+        for (index, &start) in boundaries.iter().enumerate() {
+            for &end in &boundaries[index..] {
+                let span = fmn_tex::Span::new(start, end);
+                let selected = typeset.layout.select(span);
+                // Independent oracle: the original layout selector, translated
+                // through actual emitted primitive identities.
+                let expected: Vec<_> = typeset
+                    .subs
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(ordinal, sub)| {
+                        let hit = match sub.prim {
+                            fmn_tex::Prim::Glyph(i) => selected.glyphs.contains(&i),
+                            fmn_tex::Prim::Rule(i) => selected.rules.contains(&i),
+                            fmn_tex::Prim::Path(i) => selected.paths.contains(&i),
+                        };
+                        hit.then_some(ordinal)
+                    })
+                    .collect();
+                assert_eq!(typeset.select(span), expected, "{source:?}: {start}..{end}");
+            }
+        }
+    }
+}
+
 /// The primitive kinds a needle selects, flattened over its occurrences.
 fn kinds(t: &Typeset, needle: &str) -> Vec<&'static str> {
     t.occurrences(needle)
