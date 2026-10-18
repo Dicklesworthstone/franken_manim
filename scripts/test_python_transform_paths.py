@@ -195,6 +195,14 @@ class TransformPathProtocolTests(unittest.TestCase):
         self.assertIs(animation.path_func, excursion)
         self.assertTrue(self.n._requires_python_animation(animation))
 
+    def test_point_free_family_contract_in_fixture(self):
+        empty = self.n.Mobject()
+        empty.data = empty.data[:0].copy()
+        self.assertEqual(self.n._point_free_family_ids(empty), {id(empty)})
+        self.assertEqual(self.n._point_free_family_ids(self.source), set())
+        empty._set_point_free_anchor((1, 2, 3))
+        self.assertEqual(empty.point_free_anchor, (1, 2, 3))
+
     def test_analytic_midpoint_and_nonpoint_fields(self):
         self.target.data["rgba"] = 1
         self.target.uniforms["opacity"] = 0.25
