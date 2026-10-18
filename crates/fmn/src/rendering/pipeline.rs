@@ -496,9 +496,9 @@ impl NativeFramePipeline {
             Some(_) => NativeCompiler::Camera(Box::new(
                 RetainedFrameRenderer::new(config).map_err(RenderError::Renderer)?,
             )),
-            None => NativeCompiler::Vector(
+            None => NativeCompiler::Vector(Box::new(
                 VectorFrameCompiler::new(config).map_err(RenderError::Renderer)?,
-            ),
+            )),
         };
         let stages = NativeFrameStages::new(plan.render_teams.len(), compiler);
         let stream = FrameStream::new(plan, stages, |_, output| {
