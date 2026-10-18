@@ -85,6 +85,7 @@ where
             typesetting: &typesetting,
         },
     );
+    typesetting.maintain_cache();
     sink.inner.surface_failure()?;
     if let Some(error) = adapter.front_door_error.take() {
         return Err(RenderError::Scene(error));
