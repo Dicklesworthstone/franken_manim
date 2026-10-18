@@ -1,5 +1,6 @@
 """Native scene camera configuration, live frame identity and actual pixels."""
 from pathlib import Path
+from copy import deepcopy
 import subprocess
 import sys
 import tempfile
@@ -10,6 +11,45 @@ import manimlib as m
 
 
 class CameraConfigurationTests(unittest.TestCase):
+    def test_project_scene_and_writer_defaults_reach_the_installed_initializer(self):
+        from fmn_python.scene_loading import SceneSource
+        configuration = m._resolved_portal_config(None,
+            "scene:\n  default_wait_time: 0.25\n  show_animation_progress: true\n"
+            "  leave_progress_bars: true\n  preview_while_skipping: false\n"
+            "file_writer:\n  video_crf: 0\n  video_preset: slow\n"
+            "  video_tune: animation\n  audio_bitrate: 192000\n")
+        live, camera = m.manim_config, m.manim_config["camera"]
+        original = deepcopy(live)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "configured_scene.py")
+            path.write_text(
+                "import manimlib as m\n"
+                "class Configured(m.Scene): pass\n"
+                "class Authored(m.Scene):\n"
+                "    default_wait_time = 1.0\n"
+                "    default_file_writer_config = {'video_crf': 18}\n")
+            with SceneSource(path, m.Scene, configuration=configuration) as source:
+                scene = source.scenes["Configured"]()
+                self.assertEqual(scene.default_wait_time, .25)
+                self.assertEqual((scene.show_animation_progress, scene.leave_progress_bars,
+                                  scene.preview_while_skipping), (True, True, False))
+                self.assertEqual(scene.file_writer.video_crf, 0)
+                self.assertEqual(scene.file_writer.video_preset, "slow")
+                self.assertEqual(scene.file_writer.video_tune, "animation")
+                self.assertEqual(scene.file_writer.audio_bitrate, 192000)
+                self.assertIs(scene.camera.frame, scene.frame)
+                authored = source.scenes["Authored"]()
+                self.assertEqual(authored.default_wait_time, 1.)
+                self.assertEqual(authored.file_writer.video_crf, 18)
+                overridden = source.scenes["Authored"](
+                    default_wait_time=0., file_writer_config={"video_crf": None})
+                self.assertEqual(overridden.default_wait_time, 0.)
+                self.assertIsNone(overridden.file_writer.video_crf)
+                self.assertEqual(overridden.file_writer.video_tune, "animation")
+        self.assertIs(m.manim_config, live)
+        self.assertIs(m.manim_config["camera"], camera)
+        self.assertEqual(m.manim_config, original)
+
     def test_manim_config_carries_the_reference_sections(self):
         # fm-e661: manim_config is default_config.yml at the pin, with the
         # camera layer under the cwd custom_config.yml, read once at import

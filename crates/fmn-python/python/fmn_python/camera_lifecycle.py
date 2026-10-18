@@ -22,6 +22,11 @@ def install_scene_camera_configuration(native):
     def __init__(self, *args, **kwargs):
         self.args = args
         self.kwargs = kwargs
+        # SceneSource installs the resolved project configuration before it
+        # imports authored scenes. This is the production initializer (the
+        # bootstrap initializer has already been superseded), so consume the
+        # live scene and writer layers here, including edits made at import.
+        scene_defaults = g["_portal_configuration_section"]("scene")
         # Reference Scene.__init__: deterministic scenes are the default.
         # The compatibility portal seeds the two RNG modules source-unedited
         # scenes actually call; engine-owned randomness remains Marionette's
@@ -96,7 +101,7 @@ def install_scene_camera_configuration(native):
         self.presenter_mode = bool(kwargs.get("presenter_mode", False))
         self.hold_on_wait = self.presenter_mode
         self.preview_while_skipping = bool(
-            kwargs.get("preview_while_skipping", True)
+            kwargs.get("preview_while_skipping", scene_defaults.get("preview_while_skipping", True))
         )
         self.quit_interaction = False
         self.skip_animations = bool(kwargs.get("skip_animations", False))
@@ -109,29 +114,36 @@ def install_scene_camera_configuration(native):
         if self.start_at_animation_number is not None:
             self.skip_animations = True
         self.show_animation_progress = bool(
-            kwargs.get("show_animation_progress", False)
+            kwargs.get("show_animation_progress", scene_defaults.get("show_animation_progress", False))
         )
         self.always_update_mobjects = bool(
             kwargs.get("always_update_mobjects", False)
         )
-        self.default_wait_time = float(
-            kwargs.get("default_wait_time", type(self).default_wait_time)
+        default_wait_time = type(self).default_wait_time
+        # Preserve an authored class default even when its numeric value
+        # happens to equal Scene's built-in default. Do not compare values or
+        # ask a descriptor to run twice merely to identify the owner.
+        for cls in type(self).__mro__:
+            if "default_wait_time" in vars(cls):
+                if cls is Scene:
+                    default_wait_time = scene_defaults.get("default_wait_time", default_wait_time)
+                break
+        self.default_wait_time = float(kwargs.get("default_wait_time", default_wait_time))
+        self.leave_progress_bars = bool(
+            kwargs.get("leave_progress_bars", scene_defaults.get("leave_progress_bars", False))
         )
-        self.leave_progress_bars = bool(kwargs.get("leave_progress_bars", False))
-        # Reference Scene.__init__ merge: class default_file_writer_config,
-        # then constructor file_writer_config. SceneFileWriter records
-        # knobs without mkdir or ffmpeg.
+        # Reference Scene.__init__: project writer defaults, then class
+        # defaults, then constructor input; nested mappings merge recursively.
+        # SceneFileWriter only records these knobs. Native negotiation remains
+        # responsible for validating codec/quality combinations before I/O.
         file_writer_config = kwargs.get("file_writer_config", None)
-        if file_writer_config is None:
-            self.file_writer_config = dict(
-                type(self).default_file_writer_config
-            )
-        elif not isinstance(file_writer_config, dict):
+        if file_writer_config is not None and not isinstance(file_writer_config, dict):
             raise TypeError("Scene file_writer_config must be a dict")
-        else:
-            merged = dict(type(self).default_file_writer_config)
-            merged.update(file_writer_config)
-            self.file_writer_config = merged
+        self.file_writer_config = g["_FMN_ROOT"].merge_dicts_recursively(
+            g["_portal_configuration_section"]("file_writer"),
+            type(self).default_file_writer_config,
+            {} if file_writer_config is None else file_writer_config,
+        )
         self.file_writer = g["SceneFileWriter"](self, **self.file_writer_config)
 
     def camera(self):

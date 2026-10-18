@@ -21119,6 +21119,15 @@ class SceneFileWriter:
         gamma=1.0,
         **kwargs,
     ):
+        # The typed file_writer layer carries the same explicit native encode
+        # controls as the console. Retain their original values: native video
+        # negotiation owns type/range/codec validation, including CRF zero,
+        # optional None, and the refusal of lossy numeric conversions.
+        encode_options = {
+            name: kwargs.pop(name)
+            for name in ("video_crf", "video_preset", "video_tune", "video_bitrate", "audio_bitrate")
+            if name in kwargs
+        }
         if kwargs:
             raise TypeError(
                 "unexpected keyword arguments: " + ", ".join(sorted(kwargs))
@@ -21145,6 +21154,8 @@ class SceneFileWriter:
         self.pixel_format = str(pixel_format)
         self.saturation = float(saturation)
         self.gamma = float(gamma)
+        for name, value in encode_options.items():
+            setattr(self, name, value)
         self.image_file_path = self.get_image_file_path()
         self.movie_file_path = self.get_movie_file_path()
 
