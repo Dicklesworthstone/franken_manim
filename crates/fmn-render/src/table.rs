@@ -42,6 +42,7 @@ use shared::SharedIndex;
 pub(crate) use shared::SharedRows;
 
 use crate::hint::Hint;
+use crate::revision::Revisions;
 use crate::texture::{SamplerPolicy, Texture, TextureEncoding, TextureWrap};
 use fmn_cache::CacheKey;
 use fmn_core::types::{Vec3, canonicalize_f64};
@@ -766,13 +767,11 @@ pub struct Instance {
     pub placement: Placement,
     /// Painter order: position in the draw sequence.
     pub order: u32,
-    /// A fold of this occurrence's seven revision axes at sync time.
+    /// This occurrence's seven revision axes at sync time.
     ///
-    /// Carried on the instance rather than looked up because the tile cache's
-    /// key (§10.8) is per *tile*, and a tile knows its commands rather than
-    /// their mobjects. One `u64` per occurrence is the cheapest thing that makes
-    /// the key complete.
-    pub revisions: u64,
+    /// The tile cache compares each axis. Folding them into one short hash
+    /// would discard the evidence needed to distinguish colliding keys.
+    pub revisions: Revisions,
     /// Whether a **writable live view** exists on this occurrence's buffer.
     ///
     /// §8.2: "while a *writable* live view exists, the affected object … is
@@ -1558,7 +1557,7 @@ mod tests {
                     mob,
                     placement: Placement::from_translation([pts[0][0], pts[0][1], pts[0][2]]),
                     order: u32::try_from(i).expect("small fixture"),
-                    revisions: 0,
+                    revisions: Revisions::default(),
                     volatile: false,
                     hint_unsafe: false,
                 })

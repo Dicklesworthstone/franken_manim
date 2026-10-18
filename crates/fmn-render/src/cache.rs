@@ -48,7 +48,8 @@
 
 use crate::bin::{Binning, ScreenMap, Viewport};
 use crate::plan::RenderPlan;
-use crate::revision::{Mixer, mix};
+use crate::revision::{Mixer, Revisions, mix};
+use crate::table::Instance;
 use fmn_frame::{FrameBuffer, PixelFormat};
 use fmn_hash::Digest;
 use std::collections::HashMap;
@@ -75,9 +76,9 @@ pub struct OutputTransform {
 }
 
 impl OutputTransform {
-    /// Fold into the key.
-    fn fold(&self) -> u64 {
-        mix(&[
+    /// The exact output-transform inputs, preserving every floating-point bit.
+    fn words(&self) -> [u64; 7] {
+        [
             u64::from(self.viewport.width),
             u64::from(self.viewport.height),
             self.map.scale.to_bits(),
@@ -85,37 +86,79 @@ impl OutputTransform {
             self.map.origin[1].to_bits(),
             u64::from(self.map.y_up),
             u64::from(self.pixel_format),
-        ])
+        ]
+    }
+
+    /// A diagnostic fingerprint, never sufficient to authorize pixel reuse.
+    fn fold(&self) -> u64 {
+        mix(&self.words())
     }
 }
 
-/// §10.8's tile-cache key, in its four declared parts.
+/// §10.8's tile-cache key, including the inputs behind its four fingerprints.
 ///
-/// Kept as four fields rather than one hash so a cache miss can say *which* part
-/// moved — the difference between a diagnosable reuse regression and a mystery.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// The public fingerprints diagnose misses. Reuse compares the ordered command
+/// words, all seven revision axes, the retained-table epoch and the exact output
+/// transform; equal short hashes alone never authorize cached pixels.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TileKey {
-    /// The tile's command run and its class words.
+    /// A fingerprint of the tile's command run and its class words.
     pub commands: u64,
-    /// A fold of every listed instance's seven revision axes.
+    /// A fingerprint of every listed instance's seven revision axes.
     pub revisions: u64,
     /// The camera revision.
     pub camera: u64,
-    /// The output transform.
+    /// A fingerprint of the output transform.
     pub output: u64,
+    command_words: Vec<[u64; 15]>,
+    revision_axes: Vec<Revisions>,
+    output_words: [u64; 7],
+    epoch: u64,
+}
+
+fn command_words(instance: &Instance, flags: u32) -> [u64; 15] {
+    let mut words = [0; 15];
+    words[0] = u64::from(instance.shape);
+    words[1] = u64::from(instance.style);
+    words[2] = u64::from(flags);
+    let coefficients: [f64; 12] = instance.placement.coefficients();
+    for (word, coefficient) in words[3..].iter_mut().zip(coefficients)
+    {
+        *word = coefficient.to_bits();
+    }
+    words
 }
 
 impl TileKey {
     /// Build the key for one fine tile, or `None` if the tile is uncacheable.
     ///
-    /// `None` means poisoned. A §8.2 writable live view is the ordinary source;
-    /// stale binning or an output transform different from the one that produced
-    /// it is also refused, because caching a wrong command list would make the
-    /// wrong pixels persist. It is deliberately not a key that happens never to
-    /// match: a caller that sees `None` knows not to *store* the result either,
-    /// which a never-matching key would not tell it.
+    /// Writable live views, stale binning, a mismatched output transform and
+    /// insufficient key storage all refuse caching. The caller must rasterize
+    /// without storing a result under an incomplete key.
     #[must_use]
     pub fn build(
+        binning: &Binning,
+        plan: &RenderPlan,
+        tile: usize,
+        camera: u64,
+        output: OutputTransform,
+    ) -> Option<TileKey> {
+        Self::build_reusing(None, binning, plan, tile, camera, output)
+    }
+
+    fn retained_bytes(&self) -> usize {
+        self.command_words
+            .capacity()
+            .saturating_mul(std::mem::size_of::<[u64; 15]>())
+            .saturating_add(
+                self.revision_axes
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<Revisions>()),
+            )
+    }
+
+    fn build_reusing(
+        previous: Option<TileKey>,
         binning: &Binning,
         plan: &RenderPlan,
         tile: usize,
@@ -132,49 +175,99 @@ impl TileKey {
         let draws = binning.tile(tile)?;
         let flags = binning.tile_flags(tile)?;
         let instances = plan.shapes().instances();
+        let mut key = previous.unwrap_or_else(|| TileKey {
+            commands: 0,
+            revisions: 0,
+            camera,
+            output: 0,
+            command_words: Vec::new(),
+            revision_axes: Vec::new(),
+            output_words: output.words(),
+            epoch: plan.epoch().get(),
+        });
+        key.command_words.clear();
+        key.revision_axes.clear();
+        key.command_words.try_reserve_exact(draws.len()).ok()?;
+        key.revision_axes.try_reserve_exact(draws.len()).ok()?;
 
         let mut commands = Mixer::new();
         let mut revisions = Mixer::new();
-        for (k, &d) in draws.iter().enumerate() {
-            let inst = instances.get(d as usize)?;
-            if inst.volatile {
+        for (index, &draw) in draws.iter().enumerate() {
+            let instance = instances.get(draw as usize)?;
+            if instance.volatile {
                 return None;
             }
-            // The command's *identity within the frame*, not the instance index:
-            // an object inserted earlier in the scene shifts every later index
-            // without changing what this tile draws, and a key that moved for
-            // that would defeat reuse on every insertion.
-            commands.write_u64(u64::from(inst.shape));
-            commands.write_u64(u64::from(inst.style));
-            commands.write_u64(u64::from(*flags.get(k)?));
-            for coefficient in inst.placement.coefficients() {
-                commands.write_u64(coefficient.to_bits());
+            // Instance indices may shift when an unrelated object is inserted.
+            // Shape/style rows remain stable within the retained-table epoch.
+            let words = command_words(instance, *flags.get(index)?);
+            for word in words {
+                commands.write_u64(word);
             }
-            revisions.write_u64(inst.revisions);
+            revisions.write_u64(instance.revisions.fold());
+            key.command_words.push(words);
+            key.revision_axes.push(instance.revisions);
         }
+        key.commands = commands.finish();
+        key.revisions = revisions.finish();
+        key.camera = camera;
+        key.output = output.fold();
+        key.output_words = output.words();
+        key.epoch = plan.epoch().get();
+        Some(key)
+    }
 
-        Some(TileKey {
-            commands: commands.finish(),
-            revisions: revisions.finish(),
-            camera,
-            output: output.fold(),
+    /// Compare borrowed inputs directly: a warm hit allocates and hashes nothing.
+    fn matches_inputs(
+        &self,
+        binning: &Binning,
+        plan: &RenderPlan,
+        tile: usize,
+        camera: u64,
+        output: OutputTransform,
+    ) -> bool {
+        if tile >= binning.tile_count()
+            || !binning.matches_plan(plan)
+            || binning.viewport() != output.viewport
+            || binning.map() != output.map
+            || self.camera != camera
+            || self.output_words != output.words()
+            || self.epoch != plan.epoch().get()
+        {
+            return false;
+        }
+        let (Some(draws), Some(flags)) = (binning.tile(tile), binning.tile_flags(tile)) else {
+            return false;
+        };
+        if draws.len() != self.command_words.len() || draws.len() != self.revision_axes.len() {
+            return false;
+        }
+        let instances = plan.shapes().instances();
+        draws.iter().enumerate().all(|(index, &draw)| {
+            let (Some(instance), Some(&flags)) =
+                (instances.get(draw as usize), flags.get(index))
+            else {
+                return false;
+            };
+            !instance.volatile
+                && self.command_words[index] == command_words(instance, flags)
+                && self.revision_axes[index] == instance.revisions
         })
     }
 
-    /// Which part of the key differs from `other`, for diagnosing a miss.
+    /// Which input part differs from `other`, even when its fingerprints collide.
     #[must_use]
     pub fn diff(&self, other: &TileKey) -> Vec<&'static str> {
         let mut out = Vec::new();
-        if self.commands != other.commands {
+        if self.command_words != other.command_words || self.epoch != other.epoch {
             out.push("commands");
         }
-        if self.revisions != other.revisions {
+        if self.revision_axes != other.revision_axes {
             out.push("revisions");
         }
         if self.camera != other.camera {
             out.push("camera");
         }
-        if self.output != other.output {
+        if self.output_words != other.output_words {
             out.push("output");
         }
         out
@@ -193,7 +286,7 @@ pub struct CacheStats {
     pub hits: usize,
     /// Tiles that had to be rasterized.
     pub misses: usize,
-    /// Tiles that could not be cached at all (§8.2's live views).
+    /// Tiles that could not be cached: live views, invalid inputs or insufficient key storage.
     pub poisoned: usize,
     /// Tiles with no commands — nothing to rasterize and nothing to cache.
     pub empty: usize,
@@ -224,12 +317,14 @@ impl CacheStats {
 /// A retained tile cache over an engine-supplied payload.
 #[derive(Debug, Clone, Default)]
 pub struct TileCache<T> {
-    entries: HashMap<usize, (TileKey, T)>,
+    // A dirty tile lends its key buffers to pending work. Its old payload may
+    // be recycled, but cannot hit again until a completed raster is stored.
+    entries: HashMap<usize, (Option<TileKey>, T)>,
     stats: CacheStats,
 }
 
 /// What compositing one tile needs to do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TileWork {
     /// Nothing is drawn here; the tile is background.
     Empty,
@@ -299,6 +394,18 @@ impl<T> TileCache<T> {
         camera: u64,
         output: OutputTransform,
     ) -> Result<TileWork, TilePlanError> {
+        self.plan_tile_with_key_budget(binning, plan, tile, camera, output, usize::MAX)
+    }
+
+    fn plan_tile_with_key_budget(
+        &mut self,
+        binning: &Binning,
+        plan: &RenderPlan,
+        tile: usize,
+        camera: u64,
+        output: OutputTransform,
+        max_key_bytes: usize,
+    ) -> Result<TileWork, TilePlanError> {
         let tile_count = binning.tile_count();
         if tile >= tile_count {
             return Err(TilePlanError { tile, tile_count });
@@ -307,28 +414,42 @@ impl<T> TileCache<T> {
             return Err(TilePlanError { tile, tile_count });
         };
         if draws.is_empty() {
-            // An empty tile is not a cache entry: it has no contents to reuse,
-            // and keeping one would let a stale payload outlive the commands
-            // that produced it.
             self.entries.remove(&tile);
             self.stats.empty += 1;
             return Ok(TileWork::Empty);
         }
-        let Some(key) = TileKey::build(binning, plan, tile, camera, output) else {
+        let required = draws.len().checked_mul(
+            std::mem::size_of::<[u64; 15]>() + std::mem::size_of::<Revisions>(),
+        );
+        if required.is_none_or(|bytes| bytes > max_key_bytes) {
+            self.entries.remove(&tile);
+            self.stats.poisoned += 1;
+            return Ok(TileWork::RasterizeUncached);
+        }
+        if self.entries.get(&tile).is_some_and(|(cached, _)| {
+            cached.as_ref().is_some_and(|key| {
+                key.retained_bytes() <= max_key_bytes
+                    && key.matches_inputs(binning, plan, tile, camera, output)
+            })
+        }) {
+            self.stats.hits += 1;
+            return Ok(TileWork::Reuse);
+        }
+
+        let previous = self
+            .entries
+            .get_mut(&tile)
+            .and_then(|(key, _)| key.take())
+            .filter(|key| key.retained_bytes() <= max_key_bytes);
+        let Some(key) = TileKey::build_reusing(previous, binning, plan, tile, camera, output)
+            .filter(|key| key.retained_bytes() <= max_key_bytes)
+        else {
             self.entries.remove(&tile);
             self.stats.poisoned += 1;
             return Ok(TileWork::RasterizeUncached);
         };
-        match self.entries.get(&tile) {
-            Some((cached, _)) if *cached == key => {
-                self.stats.hits += 1;
-                Ok(TileWork::Reuse)
-            }
-            _ => {
-                self.stats.misses += 1;
-                Ok(TileWork::Rasterize(key))
-            }
-        }
+        self.stats.misses += 1;
+        Ok(TileWork::Rasterize(key))
     }
 
     /// Store a freshly rasterized tile under the key [`plan_tile`] returned.
@@ -339,7 +460,7 @@ impl<T> TileCache<T> {
     ///
     /// [`plan_tile`]: TileCache::plan_tile
     pub fn store(&mut self, tile: usize, key: TileKey, payload: T) {
-        self.entries.insert(tile, (key, payload));
+        self.entries.insert(tile, (Some(key), payload));
     }
 
     /// The cached payload for a tile, if any.
@@ -351,7 +472,7 @@ impl<T> TileCache<T> {
     /// The key a tile is currently cached under.
     #[must_use]
     pub fn key(&self, tile: usize) -> Option<TileKey> {
-        self.entries.get(&tile).map(|(k, _)| *k)
+        self.entries.get(&tile).and_then(|(key, _)| key.clone())
     }
 
     /// This frame's counters.
@@ -442,17 +563,59 @@ impl From<TilePlanError> for PixelTileCacheError {
 /// missing pixel half: a retained work table and tightly packed tile payloads.
 /// Payload allocations are recycled when a dirty tile is replaced, so after a
 /// stable geometry warm-up the cache itself performs no per-frame allocation.
-#[derive(Debug, Default)]
+///
+/// Exact command/revision storage retained after planning is bounded to 64 MiB
+/// by default, independently of pixel payloads and cache metadata. Dense tiles
+/// exceeding the remaining budget are rasterized uncached. Replacing keys can
+/// temporarily hold old and new storage during planning.
+#[derive(Debug)]
 pub struct PixelTileCache {
     tiles: TileCache<Vec<u8>>,
     work: Vec<TileWork>,
     render_state: Option<Digest>,
+    max_key_bytes: usize,
     // Bumped when a render starts and again when it succeeds, so only the
     // surface of the last *completed* render can present the current value.
     serial: u64,
 }
 
+impl Default for PixelTileCache {
+    fn default() -> Self {
+        Self::with_key_budget_bytes(64 * 1024 * 1024)
+    }
+}
+
 impl PixelTileCache {
+    /// An empty cache with a bound on retained exact command/revision storage.
+    ///
+    /// This does not bound pixel payloads or instantaneous allocation peaks
+    /// while replacing old keys. A zero budget disables non-empty tile reuse.
+    #[must_use]
+    pub fn with_key_budget_bytes(max_key_bytes: usize) -> Self {
+        Self {
+            tiles: TileCache::new(),
+            work: Vec::new(),
+            render_state: None,
+            max_key_bytes,
+            serial: 0,
+        }
+    }
+
+    /// Bytes of exact command/revision storage, including pending raster work.
+    #[must_use]
+    pub fn retained_key_bytes(&self) -> usize {
+        let retained = self
+            .tiles
+            .entries
+            .values()
+            .filter_map(|(key, _)| key.as_ref())
+            .fold(0usize, |bytes, key| bytes.saturating_add(key.retained_bytes()));
+        self.work.iter().fold(retained, |bytes, work| match work {
+            TileWork::Rasterize(key) => bytes.saturating_add(key.retained_bytes()),
+            _ => bytes,
+        })
+    }
+
     /// An empty real-pixel cache.
     #[must_use]
     pub fn new() -> Self {
@@ -534,15 +697,34 @@ impl PixelTileCache {
             // therefore the intended representation (see OutputTransform).
             pixel_format: transient_format_id(PixelFormat::Rgba16F),
         };
+        let mut remaining_key_bytes = self.max_key_bytes;
         for tile in 0..binning.tile_count() {
-            self.work
-                .push(self.tiles.plan_tile(binning, plan, tile, camera, output)?);
+            let work = self.tiles.plan_tile_with_key_budget(
+                binning,
+                plan,
+                tile,
+                camera,
+                output,
+                remaining_key_bytes,
+            )?;
+            let key_bytes = match &work {
+                TileWork::Rasterize(key) => key.retained_bytes(),
+                TileWork::Reuse => self
+                    .tiles
+                    .entries
+                    .get(&tile)
+                    .and_then(|(key, _)| key.as_ref())
+                    .map_or(0, TileKey::retained_bytes),
+                TileWork::Empty | TileWork::RasterizeUncached => 0,
+            };
+            remaining_key_bytes = remaining_key_bytes.saturating_sub(key_bytes);
+            self.work.push(work);
         }
         Ok(())
     }
 
-    pub(crate) fn work(&self, tile: usize) -> Option<TileWork> {
-        self.work.get(tile).copied()
+    pub(crate) fn work(&self, tile: usize) -> Option<&TileWork> {
+        self.work.get(tile)
     }
 
     pub(crate) fn restore_reused_tiles(
@@ -629,9 +811,9 @@ impl PixelTileCache {
         let plane = frame.plane(0);
 
         for tile in 0..self.work.len() {
-            let Some(TileWork::Rasterize(key)) = self.work.get(tile).copied() else {
+            if !matches!(self.work.get(tile), Some(TileWork::Rasterize(_))) {
                 continue;
-            };
+            }
             let (x0, y0, tile_width, tile_height) =
                 tile_rect(tile, cols, tile_edge, width, height)?;
             let row_bytes = rgba16f_row_bytes(tile_width)?;
@@ -673,6 +855,11 @@ impl PixelTileCache {
                 )?;
                 destination.copy_from_slice(source);
             }
+            let TileWork::Rasterize(key) =
+                std::mem::replace(&mut self.work[tile], TileWork::RasterizeUncached)
+            else {
+                continue;
+            };
             self.tiles.store(tile, key, payload);
         }
         Ok(())
@@ -820,13 +1007,13 @@ mod tests {
         (stage, mobs)
     }
 
-    fn legacy_tile_key(
+    fn legacy_tile_fingerprints(
         binning: &Binning,
         plan: &RenderPlan,
         tile: usize,
         camera: u64,
         output: OutputTransform,
-    ) -> Option<TileKey> {
+    ) -> Option<(u64, u64, u64, u64)> {
         if tile >= binning.tile_count()
             || !binning.matches_plan(plan)
             || binning.viewport() != output.viewport
@@ -859,15 +1046,10 @@ mod tests {
                     .into_iter()
                     .map(f64::to_bits),
             );
-            revisions.push(instance.revisions);
+            revisions.push(instance.revisions.fold());
         }
 
-        Some(TileKey {
-            commands: mix(&commands),
-            revisions: mix(&revisions),
-            camera,
-            output: output.fold(),
-        })
+        Some((mix(&commands), mix(&revisions), camera, output.fold()))
     }
 
     /// The frame loop, retained: one plan and one cache across frames.
@@ -907,9 +1089,9 @@ mod tests {
                 .expect("binning supplies its own valid tile range");
             // Rasterize the misses, exactly as an engine would, and store what
             // it would have produced.
-            for (t, w) in work.iter().enumerate() {
+            for (t, w) in work.into_iter().enumerate() {
                 if let TileWork::Rasterize(key) = w {
-                    self.cache.store(t, *key, t as u32);
+                    self.cache.store(t, key, t as u32);
                 }
             }
             (self.cache.stats(), binning)
@@ -1209,9 +1391,9 @@ mod tests {
         let work = plan_frame(&mut cache, &binning, &plan, 0, output())
             .expect("binning supplies its own valid tile range");
         let mut painted = Vec::new();
-        for (t, w) in work.iter().enumerate() {
+        for (t, w) in work.into_iter().enumerate() {
             if let TileWork::Rasterize(key) = w {
-                cache.store(t, *key, vec![t as u8; 16]);
+                cache.store(t, key, vec![t as u8; 16]);
                 painted.push(t);
             }
         }
@@ -1302,10 +1484,133 @@ mod tests {
         );
         assert_ne!(first.revisions, second.revisions);
 
+        let key = TileKey::build(&binning, &plan, tile, 17, output()).expect("cacheable");
         assert_eq!(
-            TileKey::build(&binning, &plan, tile, 17, output()),
-            legacy_tile_key(&binning, &plan, tile, 17, output()),
+            Some((key.commands, key.revisions, key.camera, key.output)),
+            legacy_tile_fingerprints(&binning, &plan, tile, 17, output()),
         );
+    }
+
+    #[test]
+    fn equal_fingerprints_never_authorize_a_different_tile() {
+        let (stage, _) = scene();
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, 0).expect("valid cache fixture");
+        let binning = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
+            .expect("bounded test binning");
+        let tile = tile_at(&binning, 40, 40);
+        let actual = TileKey::build(&binning, &plan, tile, 0, output()).expect("cacheable");
+
+        // Model the outcome of a short-hash collision directly. The retained
+        // inputs differ, while every diagnostic fingerprint remains identical.
+        for part in ["commands", "revisions", "output"] {
+            let mut stale = actual.clone();
+            match part {
+                "commands" => stale.command_words[0][0] ^= 1,
+                "revisions" => stale.revision_axes[0].geometry ^= 1,
+                "output" => stale.output_words[2] ^= 1,
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                (stale.commands, stale.revisions, stale.camera, stale.output),
+                (actual.commands, actual.revisions, actual.camera, actual.output)
+            );
+            assert_ne!(stale, actual);
+            assert_eq!(stale.diff(&actual), vec![part]);
+            let mut cache = TileCache::new();
+            cache.store(tile, stale, 7u32);
+            assert!(matches!(
+                cache.plan_tile(&binning, &plan, tile, 0, output()).expect("valid tile"),
+                TileWork::Rasterize(_)
+            ));
+            assert_eq!(cache.stats().hits, 0, "equal fingerprints reused stale pixels");
+        }
+    }
+
+    #[test]
+    fn dirty_tiles_recycle_exact_key_storage_and_require_a_completed_store() {
+        let (mut stage, mobs) = scene();
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, 0).expect("valid cache fixture");
+        let binning = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
+            .expect("bounded test binning");
+        let tile = tile_at(&binning, 40, 40);
+        let key = TileKey::build(&binning, &plan, tile, 0, output()).expect("cacheable");
+        let command_storage = key.command_words.as_ptr();
+        let revision_storage = key.revision_axes.as_ptr();
+        let mut cache = TileCache::new();
+        cache.store(tile, key, 7u32);
+        assert_eq!(
+            cache.plan_tile(&binning, &plan, tile, 0, output()).expect("valid tile"),
+            TileWork::Reuse
+        );
+
+        stage.shift(mobs[0], [1.0, 0.0, 0.0]);
+        plan.sync(&stage, 0).expect("valid moved fixture");
+        let moved = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
+            .expect("bounded moved binning");
+        let TileWork::Rasterize(key) =
+            cache.plan_tile(&moved, &plan, tile, 0, output()).expect("valid moved tile")
+        else {
+            panic!("the changed tile must rasterize");
+        };
+        assert_eq!(key.command_words.as_ptr(), command_storage);
+        assert_eq!(key.revision_axes.as_ptr(), revision_storage);
+        assert!(cache.key(tile).is_none(), "pending work cannot validate the old payload");
+        assert_eq!(cache.get(tile), Some(&7), "dirty payload storage remains recyclable");
+
+        // Abandon that render. Planning again must not treat the old payload
+        // as complete merely because a replacement key was already built.
+        drop(key);
+        let TileWork::Rasterize(key) =
+            cache.plan_tile(&moved, &plan, tile, 0, output()).expect("valid retry")
+        else {
+            panic!("abandoned work must rasterize again");
+        };
+        cache.store(tile, key, 9);
+        assert_eq!(
+            cache.plan_tile(&moved, &plan, tile, 0, output()).expect("completed tile"),
+            TileWork::Reuse
+        );
+        assert_eq!(cache.get(tile), Some(&9));
+    }
+
+    #[test]
+    fn a_retained_table_epoch_change_invalidates_local_row_indices() {
+        let (stage, _) = scene();
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, 0).expect("valid cache fixture");
+        let binning = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
+            .expect("bounded test binning");
+        let tile = tile_at(&binning, 40, 40);
+        let actual = TileKey::build(&binning, &plan, tile, 0, output()).expect("cacheable");
+        let mut prior_epoch = actual.clone();
+        prior_epoch.epoch = prior_epoch.epoch.wrapping_add(1);
+        assert_eq!(prior_epoch.diff(&actual), vec!["commands"]);
+        let mut cache = TileCache::new();
+        cache.store(tile, prior_epoch, 7u32);
+        assert!(matches!(
+            cache.plan_tile(&binning, &plan, tile, 0, output()).expect("valid tile"),
+            TileWork::Rasterize(_)
+        ));
+    }
+
+    #[test]
+    fn exact_key_budget_counts_pending_raster_work() {
+        let (stage, _) = scene();
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, 0).expect("valid cache fixture");
+        let binning = Binning::build(&plan, viewport(), Tiling::default(), ScreenMap::default())
+            .expect("bounded test binning");
+        let budget = std::mem::size_of::<[u64; 15]>() + std::mem::size_of::<Revisions>();
+        let mut cache = PixelTileCache::with_key_budget_bytes(budget);
+        for _ in 0..2 {
+            cache.prepare_frame(&binning, &plan, 0, Digest::from_bytes([1; 32]))
+                .expect("bounded cache planning");
+            assert!(cache.retained_key_bytes() <= budget);
+            assert!(cache.work.iter().any(|work| matches!(work, TileWork::Rasterize(_))));
+            assert!(cache.work.contains(&TileWork::RasterizeUncached));
+        }
     }
 
     #[test]

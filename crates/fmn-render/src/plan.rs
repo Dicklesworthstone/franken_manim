@@ -1078,7 +1078,7 @@ impl RenderPlan {
                 mob,
                 placement,
                 order,
-                revisions: now.fold(),
+                revisions: now,
                 volatile,
                 hint_unsafe,
             });
