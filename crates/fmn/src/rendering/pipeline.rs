@@ -71,11 +71,6 @@ impl std::error::Error for NativeFrameError {
     }
 }
 
-#[expect(
-    clippy::large_enum_variant,
-    reason = "each frame moves once through a bounded queue holding about one job per worker; \
-              boxing the camera frame would add a heap allocation per frame (PG-6)"
-)]
 pub(super) enum NativeFrame {
     Camera(PreparedCameraFrame),
     Vector(OwnedVectorFrame),
@@ -116,18 +111,18 @@ pub(super) struct PreparedFrameJob {
 }
 
 #[derive(Default)]
-struct VectorWorker {
+struct RenderWorker {
     arena: FrameArena,
     cache: PixelTileCache,
     compiled_vector: Option<VectorFrameCompiler>,
     compiled_camera: Option<RetainedFrameRenderer>,
-    // The last vector raster, kept with the cache token proving it still
-    // holds that frame: no 66 MB zeroed allocation per 4K frame (its page
-    // faults were ~12% of a 4K render), and reused tiles stay in place.
-    spare: Option<(FrameBuffer, u64)>,
+    // One raw surface shared by camera and vector frames. Only a vector
+    // raster carries the cache token proving its cached pixels remain intact.
+    // Switching routes must clear that token, without retaining a second frame.
+    spare: Option<(FrameBuffer, Option<u64>)>,
 }
 
-impl VectorWorker {
+impl RenderWorker {
     // Render into the recycled raster, convert into the output slot on the
     // same team, then keep the raster for the next frame. A raster from a
     // failed render is dropped, so a stale surface can never be resumed.
@@ -139,7 +134,7 @@ impl VectorWorker {
     ) -> Result<(), NativeFrameError> {
         let layout = frame.raster_layout().map_err(NativeFrameError::Frame)?;
         let (mut raster, resume) = match self.spare.take() {
-            Some((raster, serial)) if *raster.layout() == layout => (raster, Some(serial)),
+            Some((raster, serial)) if *raster.layout() == layout => (raster, serial),
             _ => (FrameBuffer::new(layout), None),
         };
         frame
@@ -152,7 +147,26 @@ impl VectorWorker {
             )
             .map_err(NativeFrameError::Renderer)?;
         convert_into(&raster, output, threads)?;
-        self.spare = Some((raster, self.cache.serial()));
+        self.spare = Some((raster, Some(self.cache.serial())));
+        Ok(())
+    }
+
+    fn render_camera(
+        &mut self,
+        frame: &PreparedCameraFrame,
+        threads: usize,
+        output: &mut FrameBuffer,
+    ) -> Result<(), NativeFrameError> {
+        let layout = frame.layout().map_err(NativeFrameError::Frame)?;
+        let mut raster = match self.spare.take() {
+            Some((raster, _)) if *raster.layout() == layout => raster,
+            _ => FrameBuffer::new(layout),
+        };
+        frame
+            .render_into(threads, &mut raster)
+            .map_err(NativeFrameError::Renderer)?;
+        convert_into(&raster, output, threads)?;
+        self.spare = Some((raster, None));
         Ok(())
     }
 }
@@ -164,7 +178,7 @@ pub(super) struct NativeFrameStages {
     compiler: Mutex<NativeCompiler>,
     // One independent arena/cache per real render team. No global raster lock:
     // nonconsecutive frame contents and cache identities decide reuse.
-    workers: Vec<Mutex<VectorWorker>>,
+    workers: Vec<Mutex<RenderWorker>>,
 }
 
 impl NativeFrameStages {
@@ -172,7 +186,7 @@ impl NativeFrameStages {
         Self {
             compiler: Mutex::new(compiler),
             workers: (0..render_teams)
-                .map(|_| Mutex::new(VectorWorker::default()))
+                .map(|_| Mutex::new(RenderWorker::default()))
                 .collect(),
         }
     }
@@ -205,17 +219,15 @@ impl NativeFrameStages {
                 worker.compiled_camera =
                     Some(RetainedFrameRenderer::new(config).map_err(NativeFrameError::Renderer)?);
             }
-            let raster = worker
+            let frame = worker
                 .compiled_camera
                 .as_mut()
                 .ok_or(NativeFrameError::WorkerState(
                     "missing compiled camera renderer",
                 ))?
                 .prepare_with_camera(stage, &camera)
-                .map_err(NativeFrameError::Renderer)?
-                .render(team.threads())
                 .map_err(NativeFrameError::Renderer)?;
-            convert_into(&raster, output.frame_mut(), team.threads())?;
+            worker.render_camera(&frame, team.threads(), output.frame_mut())?;
         } else {
             if worker.compiled_vector.is_none() {
                 worker.compiled_vector =
@@ -284,10 +296,23 @@ impl PipelineStages for NativeFrameStages {
         let PreparedFrameJob { frame, mut output } = job;
         match frame {
             NativeFrame::Camera(frame) => {
-                let raster = frame
-                    .render(team.threads())
-                    .map_err(NativeFrameError::Renderer)?;
-                convert_into(&raster, output.frame_mut(), team.threads())?;
+                let TeamRole::Render(index) = team.role else {
+                    return Err(NativeFrameError::WorkerState(
+                        "rasterization requires a render team",
+                    ));
+                };
+                let worker = self
+                    .workers
+                    .get(index)
+                    .ok_or(NativeFrameError::WorkerState(
+                        "render team has no retained worker state",
+                    ))?;
+                let mut worker = worker.lock().map_err(|_| {
+                    NativeFrameError::WorkerState(
+                        "render worker scratch was poisoned by an earlier panic",
+                    )
+                })?;
+                worker.render_camera(&frame, team.threads(), output.frame_mut())?;
             }
             NativeFrame::Compiled {
                 job,
@@ -772,7 +797,158 @@ impl Drop for NativeFramePipeline {
 
 #[cfg(test)]
 mod handoff_tests {
+    #![allow(clippy::expect_used)]
+
     use super::*;
+
+    fn camera_fixture() -> (fmn_mobject::Stage, RetainedFrameRendererConfig, Camera) {
+        let background = fmn_core::color::LinearRgba {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        };
+        let config = RetainedFrameRendererConfig {
+            frame: fmn_render::FrameConfig::new(
+                Viewport {
+                    width: 16,
+                    height: 16,
+                },
+                fmn_render::ScreenMap {
+                    scale: 2.0,
+                    origin: [8.0, 8.0],
+                    y_up: true,
+                },
+                background,
+            ),
+            tiling: fmn_render::Tiling {
+                macro_tile: 16,
+                fine_tile: 8,
+            },
+            engine: EngineIdentity::certified(),
+            threads: 1,
+        };
+        let camera = Camera::new(CameraConfig {
+            resolution: (16, 16),
+            background,
+            ..CameraConfig::default()
+        })
+        .expect("valid camera");
+        let mut buffer = fmn_mobject::RecordBuffer::new(fmn_mobject::RecordSchema::vmobject(), 3)
+            .expect("small triangle");
+        buffer.write_range(
+            "point",
+            0,
+            &[-2.0, -1.5, 0.0, 0.0, 1.5, 0.0, 2.0, -1.5, 0.0],
+        );
+        buffer.write_range("fill_rgba", 0, &[0.2, 0.6, 1.0, 1.0].repeat(3));
+        let mut stage = fmn_mobject::Stage::new();
+        let mob = stage.add(fmn_mobject::Mobject::from_buffer(buffer));
+        stage.add_to_scene(mob).expect("live triangle root");
+        (stage, config, camera)
+    }
+
+    #[test]
+    fn camera_team_recycles_raw_pixels_and_clears_vector_resume_state() {
+        let (stage, config, mut camera) = camera_fixture();
+        let mut renderer = RetainedFrameRenderer::new(config).expect("retained renderer");
+        let mut worker = RenderWorker::default();
+        let layout =
+            fmn_frame::FrameLayout::tight(PixelFormat::Rgba8, 16, 16).expect("output layout");
+        let mut output = FrameBuffer::new(layout);
+        let initial = renderer
+            .prepare_with_camera(&stage, &camera)
+            .expect("first camera job");
+        worker
+            .render_camera(&initial, 1, &mut output)
+            .expect("first camera raster");
+        let first_bits = output.as_bytes().to_vec();
+        let allocation = worker
+            .spare
+            .as_ref()
+            .expect("retained raster")
+            .0
+            .as_bytes()
+            .as_ptr();
+        for (center, threads) in [0.5, 1.5, 2.5].into_iter().zip([1, 4, 16]) {
+            camera
+                .frame_mut()
+                .set_center([center, 0.0, 0.0])
+                .expect("camera motion");
+            let frame = renderer
+                .prepare_with_camera(&stage, &camera)
+                .expect("camera capture");
+            let fresh = frame.render(1).expect("fresh reference raster");
+            let mut expected = FrameBuffer::new(layout);
+            convert_into(&fresh, &mut expected, 1).expect("reference conversion");
+            worker
+                .render_camera(&frame, threads, &mut output)
+                .expect("recycled raster");
+            let (raster, token) = worker.spare.as_ref().expect("retained raster");
+            assert_eq!(raster.as_bytes().as_ptr(), allocation);
+            assert_eq!(*token, None);
+            assert_eq!(output.as_bytes(), expected.as_bytes());
+        }
+        assert_ne!(output.as_bytes(), first_bits);
+        let mut compiler = VectorFrameCompiler::new(config).expect("vector compiler");
+        let vector = compiler.capture(&stage, 0).expect("vector frame");
+        worker
+            .render_vector(&vector, 1, &mut output)
+            .expect("vector raster");
+        let vector_bits = output.as_bytes().to_vec();
+        let (raster, token) = worker.spare.as_ref().expect("retained vector raster");
+        assert_eq!(raster.as_bytes().as_ptr(), allocation);
+        assert!(token.is_some());
+        worker
+            .render_camera(&initial, 4, &mut output)
+            .expect("camera after vector");
+        assert_eq!(output.as_bytes(), first_bits);
+        assert_eq!(worker.spare.as_ref().expect("camera raster").1, None);
+        worker
+            .render_vector(&vector, 4, &mut output)
+            .expect("vector after camera");
+        assert_eq!(output.as_bytes(), vector_bits);
+        assert_eq!(
+            worker
+                .spare
+                .as_ref()
+                .expect("reused vector raster")
+                .0
+                .as_bytes()
+                .as_ptr(),
+            allocation
+        );
+    }
+
+    #[test]
+    fn failed_camera_conversion_discards_the_recycled_surface() {
+        let (stage, config, camera) = camera_fixture();
+        let mut renderer = RetainedFrameRenderer::new(config).expect("retained renderer");
+        let frame = renderer
+            .prepare_with_camera(&stage, &camera)
+            .expect("camera job");
+        let mut worker = RenderWorker::default();
+        let mut output = FrameBuffer::new(
+            fmn_frame::FrameLayout::tight(PixelFormat::Rgba8, 16, 16).expect("valid output"),
+        );
+        worker
+            .render_camera(&frame, 1, &mut output)
+            .expect("initial render");
+        let expected = output.as_bytes().to_vec();
+        let mut wrong_size = FrameBuffer::new(
+            fmn_frame::FrameLayout::tight(PixelFormat::Rgba8, 8, 8).expect("small output"),
+        );
+        assert!(matches!(
+            worker.render_camera(&frame, 1, &mut wrong_size),
+            Err(NativeFrameError::Frame(FrameError::DimensionMismatch))
+        ));
+        assert!(worker.spare.is_none());
+        worker
+            .render_camera(&frame, 4, &mut output)
+            .expect("fresh raster after failure");
+        assert_eq!(output.as_bytes(), expected);
+        assert!(worker.spare.is_some());
+    }
 
     #[test]
     fn preparation_inputs_never_carry_owner_thread_callbacks() {

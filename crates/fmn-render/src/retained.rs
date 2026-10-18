@@ -6,11 +6,16 @@
 //! semantic renderer.
 
 use std::fmt;
+use std::sync::Arc;
 
 use fmn_core::color::LinearRgba;
 use fmn_core::types::Vec3;
 use fmn_frame::{FrameBuffer, FrameError};
-use fmn_mobject::{Mob, Placement, ProgramKind, RenderPrimitive, Stage};
+use fmn_mobject::record::StorageIdentity;
+use fmn_mobject::{
+    DrawItem, DrawPlan, Entry, ImageResource, Mob, Placement, ProgramKind, RenderPrimitive, Stage,
+    Uniforms,
+};
 
 use crate::{
     Binning, BinningError, CachedRenderError, CachedRenderStats, Camera, EngineIdentity,
@@ -174,6 +179,8 @@ pub struct RetainedFrameRenderer {
     arena: FrameArena,
     cache: PixelTileCache,
     frame: FrameBuffer,
+    camera_scene: Option<CachedCameraScene>,
+    camera_plan: Option<Arc<RenderPlan>>,
 }
 
 impl RetainedFrameRenderer {
@@ -194,6 +201,8 @@ impl RetainedFrameRenderer {
             arena: FrameArena::new(),
             cache: PixelTileCache::new(),
             frame,
+            camera_scene: None,
+            camera_plan: None,
         })
     }
 
@@ -226,6 +235,8 @@ impl RetainedFrameRenderer {
                 program: item.key.program,
             });
         }
+        self.camera_scene = None;
+        self.camera_plan = None;
         self.plan.sync(stage, camera_revision)?;
         let mono = MonoTable::build(&self.plan, self.config.frame.map)?;
         let mut binning = Binning::build(
@@ -251,7 +262,7 @@ impl RetainedFrameRenderer {
         )?)
     }
 
-    /// Synchronize vector records, rebuild camera-bound surface/dot commands,
+    /// Synchronize vector records, retain camera-bound surface/dot commands,
     /// and rasterize their one shared painter sequence through [`ThreeDJob`].
     ///
     /// Surface topology comes only from [`RenderPrimitive`]; record counts are
@@ -262,7 +273,7 @@ impl RetainedFrameRenderer {
         stage: &Stage,
         camera: &Camera,
     ) -> Result<(), RetainedFrameRendererError> {
-        let scene = prepare_camera_scene(&mut self.plan, stage, camera)?;
+        let scene = self.prepare_camera_scene(stage, camera)?;
         render_camera_scene(
             &self.plan,
             &scene,
@@ -271,7 +282,6 @@ impl RetainedFrameRenderer {
             self.config.threads,
             &mut self.frame,
         )?;
-        self.plan.commit_image_frame(scene.images);
         Ok(())
     }
 
@@ -293,14 +303,44 @@ impl RetainedFrameRenderer {
         stage: &Stage,
         camera: &Camera,
     ) -> Result<PreparedCameraFrame, RetainedFrameRendererError> {
-        let scene = prepare_camera_scene(&mut self.plan, stage, camera)?;
-        self.plan.commit_image_frame(scene.images.clone());
+        let scene = self.prepare_camera_scene(stage, camera)?;
+        if !self
+            .camera_plan
+            .as_ref()
+            .is_some_and(|plan| same_camera_plan(plan, &self.plan))
+        {
+            self.camera_plan = Some(Arc::new(self.plan.clone()));
+        }
         Ok(PreparedCameraFrame {
-            plan: self.plan.clone(),
+            plan: Arc::clone(self.camera_plan.as_ref().expect("published camera plan")),
             scene,
             camera: camera.clone(),
             tiling: self.config.tiling,
         })
+    }
+
+    fn prepare_camera_scene(
+        &mut self,
+        stage: &Stage,
+        camera: &Camera,
+    ) -> Result<Arc<PreparedCameraScene>, RetainedFrameRendererError> {
+        // Always synchronize the authoritative plan, including its latest
+        // revision diagnostics. Camera motion does not change world geometry.
+        self.plan.sync(stage, camera.revision())?;
+        let draw_plan = stage.draw_plan();
+        if let Some(cached) = &self.camera_scene
+            && cached.matches(stage, &draw_plan)
+        {
+            return Ok(Arc::clone(&cached.scene));
+        }
+        let scene = Arc::new(prepare_camera_scene(&mut self.plan, stage, &draw_plan)?);
+        let entries = camera_scene_entries(stage, &draw_plan)?;
+        self.plan.commit_image_frame(scene.images.clone());
+        self.camera_scene = Some(CachedCameraScene {
+            entries,
+            scene: Arc::clone(&scene),
+        });
+        Ok(scene)
     }
 
     /// Current raw linear-light RGBA16F frame.
@@ -332,8 +372,8 @@ impl RetainedFrameRenderer {
 /// camera projection, texture sampling, lighting, and painter order.
 #[derive(Debug)]
 pub struct PreparedCameraFrame {
-    plan: RenderPlan,
-    scene: PreparedCameraScene,
+    plan: Arc<RenderPlan>,
+    scene: Arc<PreparedCameraScene>,
     camera: Camera,
     tiling: Tiling,
 }
@@ -392,13 +432,127 @@ struct PreparedCameraScene {
     commands: Vec<PreparedCommand>,
 }
 
+// The camera rasterizer reads geometry, styles and instance metadata, but not
+// the tile-cache revision fold. Each packet owns its complete camera state.
+// Ignore only that fold so camera motion can share immutable vector resources
+// without copying the retained map and instance array for every in-flight frame.
+fn same_camera_plan(previous: &RenderPlan, current: &RenderPlan) -> bool {
+    previous.identity() == current.identity()
+        && previous.epoch() == current.epoch()
+        && previous.shapes().instances().len() == current.shapes().instances().len()
+        && previous
+            .shapes()
+            .instances()
+            .iter()
+            .zip(current.shapes().instances())
+            .all(|(before, after)| {
+                let mut before = *before;
+                before.revisions = after.revisions;
+                before == *after
+            })
+        && previous.images().len() == current.images().len()
+        && previous
+            .images()
+            .rows()
+            .iter()
+            .zip(current.images().rows())
+            .all(|(before, after)| before.descriptor() == after.descriptor())
+}
+
+#[derive(Debug)]
+struct CachedCameraScene {
+    entries: Vec<CameraSceneEntry>,
+    scene: Arc<PreparedCameraScene>,
+}
+
+impl CachedCameraScene {
+    fn matches(&self, stage: &Stage, draw_plan: &DrawPlan) -> bool {
+        self.entries.len() == draw_plan.items().len()
+            && self
+                .entries
+                .iter()
+                .zip(draw_plan.items())
+                .all(|(cached, item)| {
+                    cached.item == *item
+                        && stage
+                            .get(item.mob)
+                            .is_some_and(|entry| cached.matches(entry))
+                })
+    }
+}
+
+#[derive(Debug)]
+struct CameraSceneEntry {
+    item: DrawItem,
+    storage: StorageIdentity,
+    record_revision: u64,
+    records: usize,
+    primitive: RenderPrimitive,
+    placement_revision: u64,
+    placement: Placement,
+    uniforms: Uniforms,
+    image: Option<ImageResource>,
+}
+
+impl CameraSceneEntry {
+    fn matches(&self, entry: &Entry) -> bool {
+        self.storage.matches(&entry.buffer)
+            && self.record_revision == entry.buffer.revision()
+            && self.records == entry.buffer.len()
+            && self.primitive == entry.render_primitive()
+            && self.placement_revision == entry.placement_revision()
+            && self.placement == entry.placement()
+            && self.uniforms == *entry.uniforms()
+            && self.image.as_ref() == entry.image_resource()
+            // Foreign writes can bypass revision increments. Snapshot buffers
+            // preserve these flags too; all camera record fields participate.
+            && !entry
+                .buffer
+                .schema()
+                .fields()
+                .iter()
+                .any(|field| entry.buffer.writable_view_affects(&field.name))
+    }
+}
+
+fn camera_scene_entries(
+    stage: &Stage,
+    draw_plan: &DrawPlan,
+) -> Result<Vec<CameraSceneEntry>, RetainedFrameRendererError> {
+    let mut entries = Vec::new();
+    entries
+        .try_reserve_exact(draw_plan.items().len())
+        .map_err(|_| RetainedFrameRendererError::AllocationFailed {
+            resource: "camera-scene-entry",
+            requested: draw_plan.items().len(),
+        })?;
+    for item in draw_plan.items() {
+        let entry = stage
+            .get(item.mob)
+            .ok_or(RetainedFrameRendererError::InvalidPrimitive {
+                mob: item.mob,
+                reason: "draw-plan handle is stale",
+            })?;
+        entries.push(CameraSceneEntry {
+            item: *item,
+            storage: entry.buffer.storage_identity(),
+            record_revision: entry.buffer.revision(),
+            records: entry.buffer.len(),
+            primitive: entry.render_primitive(),
+            placement_revision: entry.placement_revision(),
+            placement: entry.placement(),
+            uniforms: *entry.uniforms(),
+            image: entry.image_resource().cloned(),
+        });
+    }
+    Ok(entries)
+}
+
 fn prepare_camera_scene(
     plan: &mut RenderPlan,
     stage: &Stage,
-    camera: &Camera,
+    draw_plan: &DrawPlan,
 ) -> Result<PreparedCameraScene, RetainedFrameRendererError> {
-    plan.sync(stage, camera.revision())?;
-    let draw_plan = stage.draw_plan();
     let mut image_frame = plan.prepare_image_frame()?;
     let mut meshes = Vec::new();
     let mut commands = Vec::new();
@@ -1098,6 +1252,188 @@ mod tests {
             let at = component * 2;
             fmn_frame::half::f16_to_f64(u16::from_le_bytes([bytes[at], bytes[at + 1]]))
         })
+    }
+
+    fn fresh_camera_bits(stage: &Stage, camera: &Camera) -> Vec<u8> {
+        let mut fresh = RetainedFrameRenderer::new(config(1)).unwrap();
+        fresh.render_with_camera(stage, camera).unwrap();
+        fresh.frame().as_bytes().to_vec()
+    }
+
+    #[test]
+    fn camera_motion_reuses_world_resources_and_frozen_vector_plan() {
+        let mut camera = camera();
+        let mut stage = Stage::new();
+        for object in [vector(), surface((2, 2)), dot_cloud(), triangle_mesh()] {
+            let mob = stage.add(object);
+            stage.add_to_scene(mob).unwrap();
+        }
+        let mut renderer = RetainedFrameRenderer::new(config(1)).unwrap();
+        let first = renderer.prepare_with_camera(&stage, &camera).unwrap();
+        let mut frames = vec![(first, fresh_camera_bits(&stage, &camera))];
+        for step in 1..=3 {
+            camera
+                .frame_mut()
+                .set_center([f64::from(step) * 0.4, 0.0, 0.0])
+                .unwrap();
+            camera
+                .set_light_source_position([f64::from(step), -3.0, 5.0])
+                .unwrap();
+            let frame = renderer.prepare_with_camera(&stage, &camera).unwrap();
+            assert!(Arc::ptr_eq(&frames[0].0.scene, &frame.scene));
+            assert!(Arc::ptr_eq(&frames[0].0.plan, &frame.plan));
+            frames.push((frame, fresh_camera_bits(&stage, &camera)));
+        }
+        assert_ne!(frames[0].1, frames[3].1);
+        drop(renderer);
+        drop(stage);
+        for (frame, expected) in frames.into_iter().rev() {
+            for threads in [1, 4, 16] {
+                assert_eq!(frame.render(threads).unwrap().as_bytes(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn camera_resource_cache_observes_records_uniforms_placement_and_order() {
+        let camera = camera();
+        let mut stage = Stage::new();
+        let vector = stage.add(vector());
+        let surface = stage.add(surface((2, 2)));
+        stage.add_to_scene(vector).unwrap();
+        stage.add_to_scene(surface).unwrap();
+        let mut renderer = RetainedFrameRenderer::new(config(1)).unwrap();
+        let first = renderer.prepare_with_camera(&stage, &camera).unwrap();
+        let mut frames = vec![(first, fresh_camera_bits(&stage, &camera))];
+        for step in 0..6 {
+            match step {
+                0 => {
+                    stage
+                        .set_placement(surface, Placement::from_translation([1.0, 0.0, 0.0]))
+                        .unwrap();
+                }
+                1 => {
+                    stage.get_mut(surface).unwrap().buffer.write_range(
+                        "rgba",
+                        0,
+                        &[0.1, 0.8, 0.3, 0.8].repeat(4),
+                    );
+                }
+                2 => {
+                    stage.set_shading(surface, [0.2, 0.4, 0.1], false);
+                }
+                3 => {
+                    stage.get_mut(vector).unwrap().buffer.write_range(
+                        "fill_rgba",
+                        0,
+                        &[0.9, 0.1, 0.4, 0.8].repeat(3),
+                    );
+                }
+                4 => {
+                    stage
+                        .get_mut(vector)
+                        .unwrap()
+                        .buffer
+                        .write(1, "point", &[0.5, 1.75, 0.0]);
+                }
+                _ => stage.bring_to_front(vector).unwrap(),
+            }
+            let frame = renderer.prepare_with_camera(&stage, &camera).unwrap();
+            let previous = &frames.last().unwrap().0;
+            assert!(!Arc::ptr_eq(&previous.scene, &frame.scene));
+            if matches!(step, 3 | 4) {
+                assert!(!Arc::ptr_eq(&previous.plan, &frame.plan));
+            }
+            frames.push((frame, fresh_camera_bits(&stage, &camera)));
+        }
+        for (frame, expected) in frames.into_iter().rev() {
+            for threads in [1, 4] {
+                assert_eq!(frame.render(threads).unwrap().as_bytes(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn camera_resources_never_reuse_writable_view_observations() {
+        let camera = camera();
+        let mut stage = Stage::new();
+        let mob = stage.add(surface((2, 2)));
+        stage.add_to_scene(mob).unwrap();
+        let mut renderer = RetainedFrameRenderer::new(config(1)).unwrap();
+        let first = renderer.prepare_with_camera(&stage, &camera).unwrap();
+        let first_bits = first.render(1).unwrap().as_bytes().to_vec();
+        let view = stage
+            .get_mut(mob)
+            .unwrap()
+            .buffer
+            .export_field_view("rgba", true)
+            .unwrap();
+        let viewed = renderer.prepare_with_camera(&stage, &camera).unwrap();
+        let repeated = renderer.prepare_with_camera(&stage, &camera).unwrap();
+        assert!(!Arc::ptr_eq(&viewed.scene, &repeated.scene));
+        let revision = stage.get(mob).unwrap().buffer.revision();
+        for record in 0..4 {
+            assert!(view.write_foreign(record, "rgba", &[0.0, 1.0, 0.0, 1.0]));
+        }
+        assert_eq!(revision, stage.get(mob).unwrap().buffer.revision());
+        let changed = renderer.prepare_with_camera(&stage, &camera).unwrap();
+        let expected = fresh_camera_bits(&stage, &camera);
+        assert_ne!(expected, first_bits);
+        assert!(!Arc::ptr_eq(&repeated.scene, &changed.scene));
+        let frozen_stage = stage.freeze_render_state().materialize();
+        let snapshot = renderer
+            .prepare_with_camera(&frozen_stage, &camera)
+            .unwrap();
+        let snapshot_repeat = renderer
+            .prepare_with_camera(&frozen_stage, &camera)
+            .unwrap();
+        assert!(!Arc::ptr_eq(&snapshot.scene, &snapshot_repeat.scene));
+        drop(view);
+        let clean = renderer.prepare_with_camera(&stage, &camera).unwrap();
+        let clean_repeat = renderer.prepare_with_camera(&stage, &camera).unwrap();
+        assert!(Arc::ptr_eq(&clean.scene, &clean_repeat.scene));
+        for threads in [1, 4] {
+            assert_eq!(first.render(threads).unwrap().as_bytes(), first_bits);
+            assert_eq!(changed.render(threads).unwrap().as_bytes(), expected);
+            assert_eq!(snapshot.render(threads).unwrap().as_bytes(), expected);
+            assert_eq!(clean_repeat.render(threads).unwrap().as_bytes(), expected);
+        }
+    }
+
+    #[test]
+    fn camera_resource_cache_distinguishes_replacement_storage_with_equal_revisions() {
+        let camera = camera();
+        let mut stage = Stage::new();
+        let mob = stage.add(surface((2, 2)));
+        stage.add_to_scene(mob).unwrap();
+        let mut replacement = stage.get(mob).unwrap().buffer.deep_clone();
+        let view = replacement.export_field_view("rgba", true).unwrap();
+        for record in 0..4 {
+            assert!(view.write_foreign(record, "rgba", &[0.0, 0.1, 1.0, 1.0]));
+        }
+        drop(view);
+        // Match the view-detach bump without changing the original pixels.
+        stage
+            .get_mut(mob)
+            .unwrap()
+            .buffer
+            .write(0, "rgba", &[1.0, 0.2, 0.1, 0.9]);
+        assert_eq!(
+            replacement.revision(),
+            stage.get(mob).unwrap().buffer.revision()
+        );
+        let mut renderer = RetainedFrameRenderer::new(config(1)).unwrap();
+        let first = renderer.prepare_with_camera(&stage, &camera).unwrap();
+        let first_bits = first.render(1).unwrap().as_bytes().to_vec();
+        stage.get_mut(mob).unwrap().buffer = replacement;
+        let second = renderer.prepare_with_camera(&stage, &camera).unwrap();
+        assert!(!Arc::ptr_eq(&first.scene, &second.scene));
+        let second_bits = fresh_camera_bits(&stage, &camera);
+        assert_ne!(first_bits, second_bits);
+        for threads in [1, 4] {
+            assert_eq!(first.render(threads).unwrap().as_bytes(), first_bits);
+            assert_eq!(second.render(threads).unwrap().as_bytes(), second_bits);
+        }
     }
 
     #[test]
