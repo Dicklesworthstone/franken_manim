@@ -104,12 +104,12 @@ impl Boundary {
             let argv = decode_argv(format, &input, &artifact, cap);
             workdir.verify_current("start audio decode")?;
             bound_tool.verify_current(&self.tool)?;
+            let spec = self.spec(bound_tool.path(), argv.clone(), &workdir, None);
             let outcome =
-                self.runner
-                    .run(&self.spec(bound_tool.path(), argv.clone(), &workdir, None));
+                self.run_artifact_process(&mut bound_tool, &spec, &workdir, &artifact, cap);
             workdir.verify_current("finish audio decode")?;
             bound_tool.verify_current(&self.tool)?;
-            let outcome = outcome.map_err(BoundaryError::from)?;
+            let outcome = outcome?;
             self.check_outcome(&outcome)?;
             // Hash the staged source too: a child cannot silently change the
             // input whose digest is being attached to the decoded PCM.

@@ -16,6 +16,7 @@ use std::time::Duration;
 const VERSION: &str = "ffmpeg version 7.1-fake";
 const MODE_LEAF: &str = ".fmn-native-ffmpeg-mode";
 const TIMEOUT_READY_LEAF: &str = ".fmn-native-ffmpeg-timeout-ready";
+const OUTPUT_READY_LEAF: &str = ".fmn-native-ffmpeg-output-ready";
 
 fn main() -> ExitCode {
     match run() {
@@ -29,6 +30,10 @@ fn main() -> ExitCode {
 
 fn run() -> Result<u8, Box<dyn std::error::Error>> {
     let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
+    if argv.len() == 3 && argv[0] == "--fmn-grow-file" {
+        grow_file(Path::new(&argv[1]), Path::new(&argv[2]))?;
+        return Ok(0);
+    }
     if argv == [OsString::from("--fmn-sleep-child")] {
         std::thread::sleep(Duration::from_secs(5));
         return Ok(0);
@@ -70,10 +75,38 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
             let _status = child.wait()?;
             Ok(0)
         }
-        "oversize" => {
+        "oversize" | "bounded-output" => {
             drain_stdin()?;
             let artifact = artifact_path(&argv)?;
             std::fs::write(&artifact, vec![0_u8; 4_096])?;
+            Ok(0)
+        }
+        "runaway-output" | "runaway-scratch" | "runaway-mux" => {
+            let artifact = artifact_path(&argv)?;
+            if mode == "runaway-mux"
+                && artifact.file_name().is_none_or(|name| name != "muxed.mp4")
+            {
+                drain_stdin()?;
+                std::fs::write(&artifact, b"FAKEVIDEO")?;
+                return Ok(0);
+            }
+            let growing = if mode == "runaway-scratch" {
+                std::fs::write(&artifact, b"FAKEVIDEO")?;
+                let scratch = private_dir.join("scratch");
+                std::fs::create_dir(&scratch)?;
+                scratch.join("growing.tmp")
+            } else {
+                artifact
+            };
+            // This parent deliberately keeps stdin unread. The descendant
+            // inherits its process group and pipes, exercising cancellation
+            // of both a blocked writer and the complete external process tree.
+            let mut child = Command::new(std::env::current_exe()?)
+                .arg("--fmn-grow-file")
+                .arg(&growing)
+                .arg(fixture_root.join(OUTPUT_READY_LEAF))
+                .spawn()?;
+            let _status = child.wait()?;
             Ok(0)
         }
         "fail7" => {
@@ -82,6 +115,22 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
             Ok(7)
         }
         mode => Err(format!("unknown fixture mode {mode:?}").into()),
+    }
+}
+
+fn grow_file(path: &Path, ready: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
+    // Signal before crossing the limit, so an immediate watcher cancellation
+    // cannot race away the test's post-spawn timing marker.
+    std::fs::write(ready, format!("{}\n{}", std::process::id(), path.display()))?;
+    loop {
+        output.write_all(&[0_u8; 4_096])?;
+        output.flush()?;
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 

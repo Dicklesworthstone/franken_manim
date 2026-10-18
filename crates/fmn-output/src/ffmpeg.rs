@@ -27,6 +27,12 @@
 //!   reaches the destination only through atomic rename after verification.
 //! - **Environment allowlist + locale pinning.** The child sees
 //!   exactly `LANG=C`, `LC_ALL=C`, and `TMPDIR=<job dir>`.
+//! - **Live disk budgets.** A bounded directory scan checks output and newly
+//!   created scratch bytes throughout stdin streaming and process completion,
+//!   with at most 25 ms idle between scans. An overrun cancels the supervised
+//!   process tree and returns a typed refusal before publication. Polling is
+//!   not an exact filesystem quota; scheduling and writes between inspections
+//!   can temporarily overshoot the declared byte budget.
 //! - **Hardware encoders enter here and only here.** They are named,
 //!   validated against the probed encoder list, and recorded in
 //!   provenance; ffmpeg products are excluded from certification by
@@ -46,6 +52,9 @@
 //! a future host capability rather than an unsafe platform carve-out.
 
 mod audio;
+mod watch;
+
+use watch::ArtifactWatch;
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, Write};
@@ -168,6 +177,14 @@ pub enum BoundaryError {
         /// The configured budget.
         max: u64,
     },
+    /// Files created inside the private directory exceed the invocation's
+    /// output/scratch allowance; the process is cancelled.
+    WorkdirOversized {
+        /// Observed regular-file bytes, including the verified input baseline.
+        bytes: u64,
+        /// Baseline plus the configured output/scratch allowance.
+        max: u64,
+    },
     /// Private-directory or publication filesystem failure.
     Workdir {
         /// What broke.
@@ -235,6 +252,11 @@ impl std::fmt::Display for BoundaryError {
             Self::ArtifactOversized { bytes, max } => write!(
                 f,
                 "artifact of {bytes} bytes exceeds the {max}-byte budget; not published"
+            ),
+            Self::WorkdirOversized { bytes, max } => write!(
+                f,
+                "private ffmpeg workdir of {bytes} bytes exceeds its {max}-byte disk budget; \
+                 job cancelled and artifact not published"
             ),
             Self::Workdir { detail } => write!(f, "boundary workdir: {detail}"),
         }
@@ -800,8 +822,10 @@ pub struct JobLimits {
     pub timeout: Duration,
     /// Cap on captured stdout/stderr per stream.
     pub max_log_bytes: u64,
-    /// Cap on the produced artifact's size; larger is refused, not
-    /// published.
+    /// Cap on each produced artifact and on output plus newly created scratch
+    /// bytes per invocation. Existing verified inputs and earlier mux stages
+    /// form a separate baseline. Live polling cancels overruns; final
+    /// verification also refuses publication. This is not an OS disk quota.
     pub max_artifact_bytes: u64,
     /// Keep the job-scoped working directory after the job (the repro-
     /// bundle hook; default false).
@@ -1435,9 +1459,22 @@ impl Boundary {
             return Err(error);
         }
         let spec = self.spec(bound_tool.path(), argv.clone(), &workdir, None);
+        let watch = match ArtifactWatch::start(
+            &workdir,
+            &video_artifact,
+            self.limits.max_artifact_bytes,
+            cancellation.clone(),
+        ) {
+            Ok(watch) => watch,
+            Err(error) => {
+                self.cleanup(&workdir);
+                return Err(error);
+            }
+        };
         let process = match self.runner.start(&spec, cancellation.clone(), stdin_limits) {
             Ok(process) => process,
             Err(error) => {
+                drop(watch);
                 self.cleanup(&workdir);
                 return Err(error.into());
             }
@@ -1447,6 +1484,7 @@ impl Boundary {
             .and_then(|()| bound_tool.verify_current(&self.tool));
         if let Err(error) = post_start {
             let _ = process.cancel();
+            drop(watch);
             self.cleanup(&workdir);
             return Err(error);
         }
@@ -1463,6 +1501,7 @@ impl Boundary {
             encoder,
             video_argv: argv,
             process: Some(process),
+            watch: Some(watch),
             cancellation,
             cleanup: true,
         })
@@ -1550,6 +1589,36 @@ impl Boundary {
         }
     }
 
+    /// Supervise an invocation with no streamed stdin under the same live
+    /// output/scratch budget as video encoding. The watcher is joined before
+    /// the caller can validate, publish, or clean up the private directory.
+    fn run_artifact_process(
+        &self,
+        bound_tool: &mut BoundFfmpeg,
+        spec: &ProcessSpec,
+        workdir: &OwnedWorkdir,
+        artifact: &Path,
+        max_bytes: u64,
+    ) -> Result<ProcessOutcome, BoundaryError> {
+        let cancellation = ProcessCancellation::new();
+        let watch = ArtifactWatch::start(workdir, artifact, max_bytes, cancellation.clone())?;
+        let process = self
+            .runner
+            .start(spec, cancellation, ProcessStdinLimits::new(1, 0))?;
+        let post_start = workdir
+            .verify_current("finish artifact-process spawn")
+            .and_then(|()| bound_tool.verify_current(&self.tool));
+        if let Err(error) = post_start {
+            let _ = process.cancel();
+            return Err(error);
+        }
+        let outcome = process.finish();
+        // A size-triggered cancellation must retain its precise refusal,
+        // rather than becoming an incidental pipe or Cancelled error.
+        watch.finish()?;
+        outcome.map_err(BoundaryError::from)
+    }
+
     /// Run one invocation inside a job-scoped dir, then verify + publish
     /// the artifact it should have produced.
     fn run_publishing(
@@ -1564,7 +1633,13 @@ impl Boundary {
         workdir.verify_current("start ffmpeg invocation")?;
         bound_tool.verify_current(&self.tool)?;
         let spec = self.spec(bound_tool.path(), argv.clone(), workdir, None);
-        let outcome = self.runner.run(&spec);
+        let outcome = self.run_artifact_process(
+            bound_tool,
+            &spec,
+            workdir,
+            artifact,
+            self.limits.max_artifact_bytes,
+        );
         workdir.verify_current("finish ffmpeg invocation")?;
         bound_tool.verify_current(&self.tool)?;
         let outcome = outcome?;
@@ -1698,6 +1773,41 @@ impl Boundary {
         result
     }
 
+    /// Decode an ffmpeg-readable image to PNG through the same private,
+    /// supervised, atomically published boundary as other media transcodes.
+    ///
+    /// # Errors
+    /// Every refusal in [`BoundaryError`].
+    pub fn transcode_image(
+        &self,
+        input: &Path,
+        destination: &Path,
+    ) -> Result<BoundaryReport, BoundaryError> {
+        let input = std::fs::canonicalize(input).map_err(|error| BoundaryError::Workdir {
+            detail: format!("resolve image input {}: {error}", input.display()),
+        })?;
+        let workdir = self.make_workdir()?;
+        let mut bound_tool = match self.tool.bind_into(&workdir) {
+            Ok(bound_tool) => bound_tool,
+            Err(error) => {
+                self.cleanup(&workdir);
+                return Err(error);
+            }
+        };
+        let artifact = workdir.join("decoded.png");
+        let argv = crate::negotiate::transcode_image_argv(&input, &artifact);
+        let result = self.run_publishing(
+            &mut bound_tool,
+            argv,
+            &workdir,
+            &artifact,
+            destination,
+            None,
+        );
+        self.cleanup(&workdir);
+        result
+    }
+
     /// Concatenate already-encoded partial files with stream copy (the
     /// insert-file mechanism).
     ///
@@ -1772,6 +1882,7 @@ pub struct StreamingEncode {
     encoder: Option<String>,
     video_argv: Vec<String>,
     process: Option<Box<dyn RunningProcess>>,
+    watch: Option<ArtifactWatch>,
     cancellation: ProcessCancellation,
     cleanup: bool,
 }
@@ -1797,6 +1908,9 @@ impl StreamingEncode {
             });
         }
         self.workdir.verify_current("stage finalized native WAV")?;
+        if let Some(watch) = &self.watch {
+            watch.allow_staged_input(wav.len() as u64)?;
+        }
         let audio = self.workdir.join("soundtrack.wav");
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
@@ -1826,6 +1940,9 @@ impl StreamingEncode {
     /// # Errors
     /// [`BoundaryError`] when process stdin refuses the chunk.
     pub fn write_stdin(&mut self, bytes: &[u8]) -> Result<(), BoundaryError> {
+        if self.watch.as_ref().is_some_and(ArtifactWatch::is_finished) {
+            self.finish_watch()?;
+        }
         let write = self
             .process
             .as_mut()
@@ -1834,6 +1951,9 @@ impl StreamingEncode {
             })?
             .write_stdin(bytes);
         let Err(write_error) = write else {
+            if self.watch.as_ref().is_some_and(ArtifactWatch::is_finished) {
+                self.finish_watch()?;
+            }
             return Ok(());
         };
 
@@ -1850,9 +1970,12 @@ impl StreamingEncode {
             ProcessError::StdinChunkLimit { .. } | ProcessError::StdinTotalLimit { .. }
         ) {
             let _ = process.cancel();
+            self.finish_watch()?;
             return Err(BoundaryError::Mechanism(write_error));
         }
-        match process.finish() {
+        let outcome = process.finish();
+        self.finish_watch()?;
+        match outcome {
             Ok(outcome) => match check_process_outcome(&self.limits, &outcome) {
                 Ok(()) => Err(BoundaryError::Mechanism(write_error)),
                 Err(terminal) => Err(terminal),
@@ -1871,6 +1994,7 @@ impl StreamingEncode {
             detail: "streaming ffmpeg process was already finalized".to_string(),
         })?;
         let outcome = process.finish();
+        self.finish_watch()?;
         self.workdir.verify_current("finalize video encode")?;
         self.bound_tool.verify_current(&self.tool)?;
         let outcome = outcome?;
@@ -1905,6 +2029,12 @@ impl StreamingEncode {
                 timeout: self.limits.timeout,
                 max_output_bytes: self.limits.max_log_bytes,
             };
+            let watch = ArtifactWatch::start(
+                &self.workdir,
+                &muxed,
+                self.limits.max_artifact_bytes,
+                self.cancellation.clone(),
+            )?;
             let process = self.runner.start(
                 &spec,
                 self.cancellation.clone(),
@@ -1919,6 +2049,7 @@ impl StreamingEncode {
                 return Err(error);
             }
             let outcome = process.finish();
+            watch.finish()?;
             self.workdir.verify_current("finalize audio mux")?;
             self.bound_tool.verify_current(&self.tool)?;
             let outcome = outcome?;
@@ -1957,10 +2088,20 @@ impl StreamingEncode {
     /// [`BoundaryError`] when supervision fails while reaping.
     pub fn cancel(mut self) -> Result<(), BoundaryError> {
         self.cancellation.cancel();
-        if let Some(process) = self.process.take() {
-            process.cancel()?;
+        let result = self
+            .process
+            .take()
+            .map_or(Ok(()), |process| process.cancel());
+        self.finish_watch()?;
+        result.map_err(BoundaryError::from)
+    }
+
+    fn finish_watch(&mut self) -> Result<(), BoundaryError> {
+        let result = self.watch.take().map_or(Ok(()), ArtifactWatch::finish);
+        if result.is_err() {
+            self.cancellation.cancel();
         }
-        Ok(())
+        result
     }
 }
 
@@ -1971,6 +2112,7 @@ impl Drop for StreamingEncode {
             if let Some(process) = self.process.take() {
                 let _ = process.cancel();
             }
+            let _ = self.finish_watch();
             cleanup_workdir(&self.limits, &self.workdir);
         }
     }

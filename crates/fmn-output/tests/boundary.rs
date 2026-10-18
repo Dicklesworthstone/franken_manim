@@ -1814,6 +1814,242 @@ mod private_boundary {
         assert!(!destination.exists());
     }
 
+
+    /// Measure cancellation after the native descendant starts growing a file.
+    /// Executable copying/hashing is setup work and is not part of this bound.
+    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    fn finish_live_disk_job<T: Send + 'static>(
+        dir: &Path,
+        worker: std::thread::JoinHandle<T>,
+    ) -> T {
+        let ready = dir.join(".fmn-native-ffmpeg-output-ready");
+        let setup_started = std::time::Instant::now();
+        while !ready.exists() {
+            assert!(
+                !worker.is_finished(),
+                "disk-budget job ended before the descendant readiness marker"
+            );
+            assert!(
+                setup_started.elapsed() < Duration::from_secs(30),
+                "native disk-budget fixture did not become ready"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let supervision_started = std::time::Instant::now();
+        let result = worker.join().expect("native disk-budget worker");
+        let supervision_elapsed = supervision_started.elapsed();
+        assert!(
+            supervision_elapsed < Duration::from_secs(3),
+            "disk-budget cancellation/tree-kill/reap waited too long: {supervision_elapsed:?}"
+        );
+        let marker = std::fs::read_to_string(ready).unwrap();
+        let grown_path = PathBuf::from(
+            marker
+                .lines()
+                .nth(1)
+                .expect("native descendant recorded its growing file"),
+        );
+        assert!(
+            !grown_path.exists(),
+            "an oversized private output or scratch file survived cleanup"
+        );
+        result
+    }
+
+    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[test]
+    fn live_output_limit_cancels_a_descendant_while_stdin_is_backpressured() {
+        let (dir, _gate) = scratch("live-output-backpressure");
+        set_native_fixture_mode(&dir, "runaway-output");
+        let (tool, runner) = real_tool(&dir);
+        let limits = JobLimits {
+            timeout: Duration::from_secs(8),
+            max_artifact_bytes: 1024,
+            ..JobLimits::default()
+        };
+        let boundary = Boundary::new(tool, Arc::new(runner), limits, dir.clone()).unwrap();
+        let destination = dir.join("movie.mp4");
+        std::fs::write(&destination, b"previous completed movie").unwrap();
+        let output = destination.clone();
+        let worker = std::thread::spawn(move || {
+            let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
+            let mut video = job(WireFormat::Nv12, Container::Mp4, EncoderChoice::Auto);
+            video.width = 3840;
+            video.height = 2160;
+            // Far larger than the stdin pipe; the fixture never consumes it.
+            let frames = vec![0_u8; video.wire.frame_bytes(video.width, video.height)];
+            boundary.encode(&video, frames, &caps, &output)
+        });
+        let result = finish_live_disk_job(&dir, worker);
+        assert!(
+            matches!(
+                result,
+                Err(BoundaryError::ArtifactOversized { bytes, max: 1024 }) if bytes >= 4096
+            ),
+            "expected live output-size refusal, got {result:?}"
+        );
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            b"previous completed movie"
+        );
+    }
+
+    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[test]
+    fn live_disk_limit_covers_mux_decode_image_and_concat_processes() {
+        use fmn_output::audio::{AudioDecodeError, AudioDecodeLimits, AudioInputFormat};
+
+        let (suite, _gate) = scratch("live-output-routes");
+        for route in ["mux", "audio", "image", "concat", "audio-bytes"] {
+            let dir = suite.join(route);
+            create_private_test_directory(&dir);
+            set_native_fixture_mode(
+                &dir,
+                if route == "mux" {
+                    "runaway-mux"
+                } else {
+                    "runaway-output"
+                },
+            );
+            let (tool, runner) = real_tool(&dir);
+            let limits = JobLimits {
+                timeout: Duration::from_secs(8),
+                max_artifact_bytes: 1024,
+                ..JobLimits::default()
+            };
+            let boundary = Boundary::new(tool, Arc::new(runner), limits, dir.clone()).unwrap();
+            let input = dir.join("source.media");
+            std::fs::write(&input, b"immutable native fixture input").unwrap();
+            let destination = dir.join("published.media");
+            let output = destination.clone();
+            let worker = std::thread::spawn(move || match route {
+                "mux" => {
+                    let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
+                    let video = job(WireFormat::Nv12, Container::Mp4, EncoderChoice::Auto);
+                    let frames = vec![0_u8; video.wire.frame_bytes(video.width, video.height)];
+                    boundary
+                        .encode_with_audio(&video, frames, &input, &caps, &output)
+                        .map(|_| ())
+                }
+                "audio" => boundary.transcode_audio(&input, &output).map(|_| ()),
+                "image" => boundary.transcode_image(&input, &output).map(|_| ()),
+                "concat" => boundary.concat(&[input], &output).map(|_| ()),
+                "audio-bytes" => match boundary.decode_audio_bytes(
+                    b"immutable compressed fixture",
+                    AudioInputFormat::Flac,
+                    &AudioDecodeLimits::default(),
+                ) {
+                    Err(AudioDecodeError::Boundary(error)) => Err(error),
+                    Err(error) => panic!("unexpected audio-decode refusal: {error}"),
+                    Ok(_) => panic!("runaway audio decode unexpectedly succeeded"),
+                },
+                _ => unreachable!(),
+            });
+            let result = finish_live_disk_job(&dir, worker);
+            assert!(
+                matches!(
+                    result,
+                    Err(BoundaryError::ArtifactOversized { bytes, max: 1024 }) if bytes >= 4096
+                ),
+                "{route} did not preserve the output-size refusal: {result:?}"
+            );
+            assert!(!destination.exists(), "{route} published an oversized artifact");
+        }
+    }
+
+    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[test]
+    fn live_directory_budget_cancels_unbounded_scratch_with_a_small_output() {
+        let (dir, _gate) = scratch("live-scratch-budget");
+        set_native_fixture_mode(&dir, "runaway-scratch");
+        let (tool, runner) = real_tool(&dir);
+        let limits = JobLimits {
+            timeout: Duration::from_secs(8),
+            max_artifact_bytes: 1024,
+            ..JobLimits::default()
+        };
+        let boundary = Boundary::new(tool, Arc::new(runner), limits, dir.clone()).unwrap();
+        let input = dir.join("image.webp");
+        std::fs::write(&input, b"immutable image fixture").unwrap();
+        let destination = dir.join("image.png");
+        let output = destination.clone();
+        let worker = std::thread::spawn(move || boundary.transcode_image(&input, &output));
+        let result = finish_live_disk_job(&dir, worker);
+        assert!(
+            matches!(
+                result,
+                Err(BoundaryError::WorkdirOversized { bytes, max }) if bytes > max
+            ),
+            "expected a private-directory disk refusal, got {result:?}"
+        );
+        assert!(!destination.exists());
+    }
+
+    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[test]
+    fn staged_wav_and_completed_video_keep_their_own_disk_allowances() {
+        let (dir, _gate) = scratch("staged-input-allowances");
+        set_native_fixture_mode(&dir, "bounded-output");
+        let (tool, runner) = real_tool(&dir);
+        let limits = JobLimits {
+            max_artifact_bytes: 4096,
+            ..JobLimits::default()
+        };
+        let boundary = Boundary::new(tool, Arc::new(runner), limits, dir.clone()).unwrap();
+        let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
+        let video = job(WireFormat::Nv12, Container::Mp4, EncoderChoice::Auto);
+        let frames = vec![0_u8; video.wire.frame_bytes(video.width, video.height)];
+        let bytes = frames.len() as u64;
+        let destination = dir.join("soundtrack.mp4");
+        let mut encode = boundary
+            .start_encode(
+                &video,
+                &caps,
+                &destination,
+                None,
+                ProcessCancellation::new(),
+                ProcessStdinLimits::new(bytes, bytes),
+            )
+            .unwrap();
+        encode.write_stdin(&frames).unwrap();
+        let report = encode
+            .prepare_with_wav(&[0_u8; 4096])
+            .unwrap()
+            .commit()
+            .unwrap();
+        assert_eq!(report.invocations.len(), 2);
+        assert_eq!(report.artifact_bytes, 4096);
+        assert_eq!(std::fs::metadata(destination).unwrap().len(), 4096);
+    }
+
+    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[test]
+    fn image_transcode_executes_the_png_codec_through_the_same_boundary() {
+        let (dir, _gate) = scratch("image-transcode");
+        let (tool, runner) = real_tool(&dir);
+        let boundary =
+            Boundary::new(tool, Arc::new(runner), JobLimits::default(), dir.clone()).unwrap();
+        let input = dir.join("source.webp");
+        let destination = dir.join("decoded/image.png");
+        std::fs::write(&input, b"immutable image fixture").unwrap();
+        let report = boundary.transcode_image(&input, &destination).unwrap();
+        assert_eq!(std::fs::read(destination).unwrap(), b"FAKEVIDEO");
+        assert_eq!(report.invocations.len(), 1);
+        let invocation = &report.invocations[0];
+        assert!(invocation.provenance.encoder.is_none());
+        assert!(
+            invocation
+                .provenance
+                .argv
+                .windows(2)
+                .any(|args| args == ["-c:v", "png"])
+        );
+        assert_eq!(
+            invocation.artifact.file_name().unwrap(),
+            std::ffi::OsStr::new("decoded.png")
+        );
+    }
+
     #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
     #[test]
     fn sandbox_refuses_oversized_artifacts() {
