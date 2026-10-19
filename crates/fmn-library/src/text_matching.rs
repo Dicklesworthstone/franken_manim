@@ -17,6 +17,8 @@
 //! fades, followed by removal of the source and publication of the real target.
 //! Their prepared interpolation can run on native frame workers; source/target
 //! validation, begin, finish and replacement cleanup stay on the scene owner.
+//! A failed callback prevents replacement publication. Its first diagnostic
+//! remains attached to the failed run until a validated new begin.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
@@ -382,11 +384,11 @@ fn available_occurrences(
         let occurrence = ranges
             .partition_point(|&(start, _)| start <= span.start)
             .checked_sub(1);
-        if let Some(occurrence) = occurrence {
-            if span.end <= ranges[occurrence].1 {
-                groups[occurrence].push(index);
-                blocked[occurrence] |= used[index];
-            }
+        if let Some(occurrence) = occurrence
+            && span.end <= ranges[occurrence].1
+        {
+            groups[occurrence].push(index);
+            blocked[occurrence] |= used[index];
         }
     }
     Ok(groups
@@ -450,9 +452,7 @@ fn matching_pairs(
         }
     }
     let remaining = match kind {
-        MatchingKind::Tex => {
-            tex_pairs_remaining(source_keys, target_keys, &used_source, &used_target)
-        }
+        MatchingKind::Tex => tex_pairs_remaining(source_keys, target_keys, &used_source, &used_target),
         MatchingKind::Strings => {
             string_pairs_remaining(source_keys, target_keys, &used_source, &used_target)?
         }
@@ -577,6 +577,18 @@ impl MatchingAnimation {
             }
         }
         members
+    }
+
+    /// A void callback's first failure belongs to this run even after the
+    /// host acknowledges the Stage fault. Cleanup is publication, not recovery.
+    fn retain_error(&mut self, stage: &Stage) -> bool {
+        if self.error.is_none() {
+            self.error = self
+                .group
+                .deferred_error()
+                .or_else(|| stage.updater_error().cloned().map(AnimError::from));
+        }
+        self.error.is_some()
     }
 }
 
@@ -711,30 +723,51 @@ macro_rules! matching_animation {
                 self.inner.finished = false;
                 self.inner.cleaned = false;
                 self.inner.error = None;
-                self.inner.group.begin(stage)?;
+                if let Err(error) = self.inner.group.begin(stage) {
+                    self.inner.error = Some(error.clone());
+                    self.inner.group.abort(stage);
+                    return Err(error);
+                }
                 self.inner.begun = true;
+                if self.inner.retain_error(stage) {
+                    self.inner.group.abort(stage);
+                    self.inner.begun = false;
+                    return Err(self.inner.error.clone().expect("retained matching failure"));
+                }
                 Ok(())
             }
             fn interpolate_submobject(&mut self, _stage: &mut Stage, _mobs: &[Mob], _alpha: f64) {}
             fn interpolate(&mut self, stage: &mut Stage, alpha: f64) {
-                self.inner.group.interpolate(stage, alpha);
+                if !self.inner.retain_error(stage) {
+                    self.inner.group.interpolate(stage, alpha);
+                    self.inner.retain_error(stage);
+                }
             }
             fn update_mobjects(&mut self, stage: &mut Stage, dt: f64) {
-                self.inner.group.update_mobjects(stage, dt);
+                if !self.inner.retain_error(stage) {
+                    self.inner.group.update_mobjects(stage, dt);
+                    self.inner.retain_error(stage);
+                }
             }
             fn finish(&mut self, stage: &mut Stage) {
                 if self.inner.begun && !self.inner.finished {
+                    if self.inner.retain_error(stage) {
+                        self.inner.group.abort(stage);
+                        return;
+                    }
                     self.inner.group.finish(stage);
-                    self.inner.finished = true;
+                    self.inner.finished = !self.inner.retain_error(stage);
                 }
             }
             fn abort(&mut self, stage: &mut Stage) {
+                self.inner.retain_error(stage);
                 self.inner.group.abort(stage);
+                self.inner.retain_error(stage);
                 self.inner.begun = false;
                 self.inner.finished = false;
             }
             fn clean_up_from_scene(&mut self, stage: &mut Stage) {
-                if self.inner.cleaned {
+                if self.inner.cleaned || self.inner.retain_error(stage) {
                     return;
                 }
                 if !self.inner.finished {
@@ -748,6 +781,9 @@ macro_rules! matching_animation {
                     return;
                 }
                 self.inner.group.clean_up_from_scene(stage);
+                if self.inner.retain_error(stage) {
+                    return;
+                }
                 stage.remove_many_from_scene(&[self.state().mobject(), self.inner.source.root]);
                 if let Err(error) = stage.add_to_scene(self.inner.target.root) {
                     self.inner.error = Some(AnimError::Stage(error));
@@ -883,11 +919,7 @@ mod tests {
         for kind in [MatchingKind::Tex, MatchingKind::Strings] {
             assert_eq!(
                 plan(&spans("x+x"), &spans("y+y+x"), kind, &[("x", "y")]).unwrap(),
-                [
-                    (vec![0], vec![0]),
-                    (vec![2], vec![2]),
-                    (vec![1], vec![1]),
-                ]
+                [(vec![0], vec![0]), (vec![2], vec![2]), (vec![1], vec![1])]
             );
         }
     }
@@ -919,8 +951,7 @@ mod tests {
             [(vec![0, 1], vec![0]), (vec![2], vec![1])]
         );
         assert_eq!(
-            plan(&spans("z"), &spans("uvw"), MatchingKind::Tex, &[("z", "uvw")])
-                .unwrap(),
+            plan(&spans("z"), &spans("uvw"), MatchingKind::Tex, &[("z", "uvw")]).unwrap(),
             [(vec![0], vec![0, 1, 2])]
         );
     }
@@ -935,11 +966,7 @@ mod tests {
                 &[("x", "z")],
             )
             .unwrap(),
-            [
-                (vec![1], vec![2]),
-                (vec![0], vec![0]),
-                (vec![2], vec![1]),
-            ]
+            [(vec![1], vec![2]), (vec![0], vec![0]), (vec![2], vec![1])]
         );
     }
 
@@ -1005,8 +1032,7 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(
-            plan(&source, &spans("x"), MatchingKind::Tex, &[("\\alpha", "x")])
-                .unwrap(),
+            plan(&source, &spans("x"), MatchingKind::Tex, &[("\\alpha", "x")]).unwrap(),
             [(vec![0], vec![0])]
         );
     }
@@ -1016,9 +1042,21 @@ mod tests {
         let source = SpanMapData {
             source: "ab".into(),
             entries: vec![
-                SpanMapEntry { start: 1, end: 2, kind: SpanKindU8::MathGlyph },
-                SpanMapEntry { start: 0, end: 1, kind: SpanKindU8::MathGlyph },
-                SpanMapEntry { start: 0, end: 2, kind: SpanKindU8::MathRule },
+                SpanMapEntry {
+                    start: 1,
+                    end: 2,
+                    kind: SpanKindU8::MathGlyph,
+                },
+                SpanMapEntry {
+                    start: 0,
+                    end: 1,
+                    kind: SpanKindU8::MathGlyph,
+                },
+                SpanMapEntry {
+                    start: 0,
+                    end: 2,
+                    kind: SpanKindU8::MathRule,
+                },
             ],
         };
         assert_eq!(
@@ -1041,7 +1079,11 @@ mod tests {
 
     #[test]
     fn invalid_maps_refuse_before_planning() {
-        for mappings in [vec![("", "x")], vec![("x", "")], vec![("x", "y"), ("x", "z")]] {
+        for mappings in [
+            vec![("", "x")],
+            vec![("x", "")],
+            vec![("x", "y"), ("x", "z")],
+        ] {
             assert!(matches!(
                 plan(&spans("x"), &spans("y"), MatchingKind::Tex, &mappings),
                 Err(TextMatchingError::InvalidKeyMap { .. })
@@ -1054,12 +1096,122 @@ mod tests {
         let mappings = vec![("x", "y"); MAX_MATCHING_KEY_MAP_ENTRIES + 1];
         assert!(matches!(
             plan(&spans("x"), &spans("y"), MatchingKind::Tex, &mappings),
-            Err(TextMatchingError::BudgetExceeded { resource: "key-map entries", .. })
+            Err(TextMatchingError::BudgetExceeded {
+                resource: "key-map entries",
+                ..
+            })
         ));
         let mut work = MAX_MATCHING_MAPPING_WORK;
         assert!(matches!(
             charge_mapping_work(&mut work, usize::MAX),
-            Err(TextMatchingError::BudgetExceeded { resource: "key-map search work", .. })
+            Err(TextMatchingError::BudgetExceeded {
+                resource: "key-map search work",
+                ..
+            })
         ));
+    }
+
+    fn native_fixture(stage: &mut Stage, key: &str, x: f64) -> (Mob, Mob, SpanMapData) {
+        let root = stage.add(Mobject::new());
+        let child = stage.add(Mobject::from_points(&[
+            [x, 0.0, 0.0],
+            [x + 0.5, 1.0, 0.0],
+            [x + 1.0, 0.0, 0.0],
+        ]));
+        stage.attach(root, child).unwrap();
+        (root, child, spans(key))
+    }
+
+    #[test]
+    fn callback_failures_block_replacement_until_an_explicit_new_run() {
+        for strings in [false, true] {
+            for phase in 0..3 {
+                let mut stage = Stage::new();
+                let (source, source_part, sm) = native_fixture(&mut stage, "x", 0.0);
+                let (target, target_part, tm) = native_fixture(&mut stage, "y", 10.0);
+                stage.add_to_scene(source).unwrap();
+                let target_ink = stage.get_points(target_part);
+                let trigger = stage.add(Mobject::new());
+                stage
+                    .add_try_updater(
+                        trigger,
+                        |_, _| {
+                            Err(fmn_mobject::UpdaterError::callback(
+                                "matching callback",
+                                "preserve this first diagnostic",
+                            ))
+                        },
+                        false,
+                    )
+                    .unwrap();
+                let mut animation: Box<dyn Animation> = if strings {
+                    Box::new(
+                        TransformMatchingStrings::with_key_map(
+                            &mut stage,
+                            source,
+                            target,
+                            &sm,
+                            &tm,
+                            &[("x", "y")],
+                            TextMatchingConfig::default(),
+                        )
+                        .unwrap(),
+                    )
+                } else {
+                    Box::new(
+                        TransformMatchingTex::with_key_map(
+                            &mut stage,
+                            source,
+                            target,
+                            &sm,
+                            &tm,
+                            &[("x", "y")],
+                            TextMatchingConfig::default(),
+                        )
+                        .unwrap(),
+                    )
+                };
+                animation.begin(&mut stage).unwrap();
+                if phase == 1 {
+                    animation.finish(&mut stage);
+                }
+                stage.update_mobject(trigger, 0.1);
+                let expected = AnimError::from(stage.updater_error().unwrap().clone());
+                match phase {
+                    0 => animation.finish(&mut stage),
+                    1 => animation.clean_up_from_scene(&mut stage),
+                    _ => animation.update_mobjects(&mut stage, 0.1),
+                }
+                assert_eq!(animation.deferred_error(), Some(expected.clone()));
+                assert_eq!(stage.roots(), &[source]);
+                assert_eq!(stage.get_points(target_part), target_ink);
+                assert!(animation.freeze_interpolation().is_none());
+
+                // Acknowledging the Stage fault is not permission to publish
+                // the target of this failed animation or replay its endpoint.
+                stage.take_updater_error().unwrap().unwrap();
+                let points_before_retry = stage.get_points(source_part);
+                animation.interpolate(&mut stage, 0.75);
+                animation.update_mobjects(&mut stage, 0.1);
+                animation.finish(&mut stage);
+                animation.clean_up_from_scene(&mut stage);
+                animation.abort(&mut stage);
+                animation.clean_up_from_scene(&mut stage);
+                assert_eq!(animation.deferred_error(), Some(expected));
+                assert_eq!(stage.roots(), &[source]);
+                assert_eq!(stage.get_points(source_part), points_before_retry);
+                assert!(!stage.is_animating(source_part));
+                assert!(!stage.is_updating_suspended(source_part));
+
+                stage.clear_updaters(trigger, false);
+                animation.begin(&mut stage).unwrap();
+                assert!(animation.deferred_error().is_none());
+                animation.finish(&mut stage);
+                animation.clean_up_from_scene(&mut stage);
+                assert_eq!(stage.roots(), &[target]);
+                assert_eq!(stage.get_points(target_part), target_ink);
+                assert!(animation.deferred_error().is_none());
+            }
+        }
     }
 }
