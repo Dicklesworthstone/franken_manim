@@ -48,6 +48,19 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
         );
         return Ok(0);
     }
+    if argv.len() == 3 && argv[0] == "-hide_banner" && argv[1] == "-h" {
+        let encoder = argv[2]
+            .to_str()
+            .and_then(|help| help.strip_prefix("encoder="))
+            .ok_or("expected a named encoder help query")?;
+        let formats = match encoder {
+            "libx264" => "yuv420p nv12 yuv420p10le",
+            "h264_nvenc" => "yuv420p nv12 p010le",
+            _ => return Err("fixture help queried an unlisted encoder".into()),
+        };
+        println!("Encoder {encoder} [Fixture encoder]:\n    Supported pixel formats: {formats}");
+        return Ok(0);
+    }
 
     let private_dir = std::env::var_os("TMPDIR")
         .map(PathBuf::from)

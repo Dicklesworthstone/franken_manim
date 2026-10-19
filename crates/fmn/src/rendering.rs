@@ -570,7 +570,31 @@ impl fmt::Display for RenderError {
                  with fmn::render_camera"
             ),
             Self::Renderer(error) => error.fmt(f),
-            Self::Pipeline(error) => error.fmt(f),
+            Self::Pipeline(error) => {
+                error.fmt(f)?;
+                // Keep the worker's frame/stage context and structured
+                // counters, while giving the same public remedy as a direct
+                // renderer refusal. Preparation can discover 3D content on
+                // an asynchronous worker after scene construction returns.
+                if let FrameStreamError::Pipeline(failure) = error
+                    && matches!(
+                        &failure.error,
+                        fmn_runtime::PipelineError::Stage {
+                            source: NativeFrameError::Renderer(
+                                RetainedFrameRendererError::CameraRequired { .. }
+                            ),
+                            ..
+                        }
+                    )
+                {
+                    f.write_str(
+                        "; use the camera route: set RenderOptions::camera \
+                         (for example `options.camera = Some(options.camera_config()?)`) \
+                         or render with fmn::render_camera",
+                    )?;
+                }
+                Ok(())
+            }
             Self::Sink(error) => error.fmt(f),
             Self::Emitter(error) => error.fmt(f),
             Self::Drain(error) => error.fmt(f),
@@ -1041,6 +1065,12 @@ impl RenderSink {
                 if !capabilities.offers(&encoder) {
                     return Err(RenderError::EncoderUnavailable(encoder));
                 }
+                // The streaming sink starts its process on the first frame.
+                // Admit the selected hardware and bit depth now, before the
+                // scene executes or spends time generating any frames.
+                capabilities
+                    .require_video_job(&tool, capability.runner.as_ref(), &job)
+                    .map_err(RenderError::Ffmpeg)?;
                 let (sink, soundtrack) = FfmpegSink::new(
                     Arc::clone(&capability.runner),
                     FfmpegSinkConfig {

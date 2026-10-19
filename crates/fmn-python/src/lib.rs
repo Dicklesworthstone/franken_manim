@@ -699,6 +699,9 @@ impl PortalFrameSession {
                         fmn_output::NATIVE_ALTERNATIVE,
                     )));
                 }
+                capabilities
+                    .require_video_job(&tool, runner.as_ref(), &video.job)
+                    .map_err(|error| CapabilityError::new_err(error.to_string()))?;
                 let sink = fmn_output::FfmpegSink::new(
                     runner,
                     fmn_output::FfmpegSinkConfig {

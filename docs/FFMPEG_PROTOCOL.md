@@ -42,6 +42,25 @@ opaque wire, CRF on a non-CRF encoder, an encoder the installed
 ffmpeg does not offer, a payload that is not a whole number of
 frames, zero dimensions or frame rate.
 
+Opaque NV12/P010 video jobs discover the selected encoder's input formats
+with `ffmpeg -hide_banner -h encoder=<name>` before scene execution. The
+same admission runs again at the low-level streaming boundary, reusing the
+resolved tool's cached observation. The help query is bound to that exact
+encoder and executable, with a two-second deadline, 64 KiB of captured
+output per stream, and a live 1 MiB scratch allowance. Malformed, mismatched,
+or failed queries are refused and are not cached as capabilities.
+
+When advertised, `nv12` stays NV12 for software and hardware encoders alike;
+otherwise the encoder receives the existing planar `yuv420p` request. P010
+prefers `p010le`, then advertised planar 10-bit 4:2:0, 4:2:2, or 4:4:4.
+An encoder without a verified compatible 10-bit input receives a named
+`UnsupportedEncoderPixelFormat` refusal before frames are rendered. An absent
+format list does not establish 10-bit support. Alpha/GIF profiles, color
+metadata, frame rate, and quality controls retain their own existing policy.
+The selected encoder input format is recorded in the invocation argv in
+provenance. This removes an unnecessary format conversion when the encoder
+accepts the native planes; no hardware-independent throughput gain is promised.
+
 ## 2. The D2 invocation protocol
 
 Offline native video requests use the finite render policy described in

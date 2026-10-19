@@ -55,7 +55,7 @@ mod audio;
 mod encoders;
 mod watch;
 
-pub use encoders::EncoderProbe;
+pub use encoders::{EncoderPixelFormats, EncoderProbe};
 use watch::ArtifactWatch;
 
 use std::fs::{File, OpenOptions};
@@ -73,8 +73,8 @@ use fmn_platform::process::{
 };
 
 use crate::negotiate::{
-    AudioQuality, Container, NegotiationError, VideoJob, encode_argv, mux_argv_with_quality,
-    transcode_audio_argv,
+    AudioQuality, Container, NegotiationError, VideoJob, WireFormat, encode_argv,
+    encode_argv_with_formats, encoder_pixel_format, mux_argv_with_quality, transcode_audio_argv,
 };
 
 /// The message every "ffmpeg is missing" error carries: the named
@@ -133,7 +133,7 @@ pub enum BoundaryError {
     },
     /// The process mechanism itself failed.
     Mechanism(ProcessError),
-    /// A probe (`-version`, `-encoders`) ran but its output was not
+    /// A probe (`-version`, `-encoders`, encoder help) ran but its output was not
     /// usable.
     ProbeFailed(&'static str),
     /// A named encoder the installed ffmpeg does not offer.
@@ -149,6 +149,15 @@ pub enum BoundaryError {
         requested: String,
         /// The probe's bounded diagnostic.
         detail: String,
+    },
+    /// An encoder cannot establish the requested wire precision.
+    UnsupportedEncoderPixelFormat {
+        /// The selected encoder.
+        requested: String,
+        /// The native wire format that needs a compatible encoder input.
+        wire: WireFormat,
+        /// The advertised formats; empty means no list was reported.
+        advertised: Vec<String>,
     },
     /// The job negotiation was refused.
     Negotiation(NegotiationError),
@@ -249,6 +258,16 @@ impl std::fmt::Display for BoundaryError {
                 "encoder {requested:?} is compiled in but unusable: {detail}; \
                  select a usable encoder or the software default"
             ),
+            Self::UnsupportedEncoderPixelFormat {
+                requested,
+                wire,
+                advertised,
+            } => write!(
+                f,
+                "encoder {requested:?} does not advertise a compatible 10-bit input for {} \
+                 (advertised formats: {advertised:?}); choose a 10-bit encoder or request NV12",
+                wire.ffmpeg_pix_fmt()
+            ),
             Self::Negotiation(e) => write!(f, "{e}"),
             Self::PayloadGeometry { frame_bytes, got } => write!(
                 f,
@@ -303,6 +322,7 @@ pub struct FfmpegTool {
     // A tool and its clones share only results from this immutable fingerprint.
     // Fresh resolution starts a new hardware observation (drivers may change).
     encoder_probes: Arc<std::sync::Mutex<std::collections::BTreeMap<String, EncoderProbe>>>,
+    encoder_formats: Arc<std::sync::Mutex<std::collections::BTreeMap<String, EncoderPixelFormats>>>,
 }
 
 /// Probe timeouts are short: a probe is milliseconds of work.
@@ -488,6 +508,7 @@ impl FfmpegTool {
             version: String::new(),
             session,
             encoder_probes: Arc::default(),
+            encoder_formats: Arc::default(),
         };
         let outcome = match tool.run_bound_probe(runner, &["-version"]) {
             Ok(outcome) => outcome,
@@ -1450,9 +1471,7 @@ impl Boundary {
             return Err(NegotiationError("AAC quality requires MP4 or MOV output").into());
         }
         let encoder = job.resolved_encoder()?;
-        if let Some(name) = &encoder {
-            caps.require_encoder(&self.tool, self.runner.as_ref(), name)?;
-        }
+        let formats = caps.require_video_job(&self.tool, self.runner.as_ref(), job)?;
         let audio = audio
             .map(|input| {
                 std::fs::canonicalize(input).map_err(|error| BoundaryError::Workdir {
@@ -1473,7 +1492,11 @@ impl Boundary {
         } else {
             workdir.join(format!("out.{}", job.container.extension()))
         };
-        let argv = match encode_argv(job, &video_artifact) {
+        let planned_argv = match &formats {
+            Some(formats) => encode_argv_with_formats(job, &video_artifact, &formats.formats),
+            None => encode_argv(job, &video_artifact),
+        };
+        let argv = match planned_argv {
             Ok(argv) => argv,
             Err(error) => {
                 self.cleanup(&workdir);
@@ -2480,6 +2503,7 @@ mod tests {
             version: String::new(),
             session,
             encoder_probes: Arc::default(),
+            encoder_formats: Arc::default(),
         };
         let runner = ScriptedRunner::new();
 

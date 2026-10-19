@@ -6079,14 +6079,9 @@ fn prepare_ffmpeg_context(
             format!("ffmpeg encoder discovery failed: {error}"),
         )
     })?;
-    if let Some(encoder) = job
-        .resolved_encoder()
-        .map_err(|error| CliError::new("config", error.to_string()))?
-    {
-        capabilities
-            .require_encoder(&tool, runner.as_ref(), &encoder)
-            .map_err(|error| CliError::new("capability", error.to_string()))?;
-    }
+    capabilities
+        .require_video_job(&tool, runner.as_ref(), &job)
+        .map_err(|error| CliError::new("capability", error.to_string()))?;
     Ok(FfmpegRenderContext {
         runner,
         tool,
@@ -9187,20 +9182,22 @@ mod tests {
             Box<dyn fmn_platform::process::RunningProcess>,
             fmn_platform::process::ProcessError,
         > {
-            if !spec.argv.windows(2).any(|args| args == ["-f", "null"]) {
-                return Err(fmn_platform::process::ProcessError::NotScripted {
-                    program: spec.program.clone(),
-                });
-            }
-            let mut runner = fmn_platform::process::ScriptedRunner::new();
-            runner.script(
-                &spec.program,
+            let outcome = if spec.argv.windows(2).any(|args| args == ["-f", "null"]) {
                 fmn_platform::process::ProcessOutcome {
                     termination: fmn_platform::process::ProcessTermination::Exited(Some(0)),
                     stdout: Vec::new(),
                     stderr: Vec::new(),
-                },
-            );
+                }
+            } else if spec.argv == ["-hide_banner", "-h", "encoder=h264_nvenc"] {
+                assert_eq!(stdin_limits.max_total_bytes, 0);
+                self.run(spec)?
+            } else {
+                return Err(fmn_platform::process::ProcessError::NotScripted {
+                    program: spec.program.clone(),
+                });
+            };
+            let mut runner = fmn_platform::process::ScriptedRunner::new();
+            runner.script(&spec.program, outcome);
             fmn_platform::process::ProcessRunner::start(&runner, spec, cancellation, stdin_limits)
         }
 
@@ -9213,6 +9210,9 @@ mod tests {
                 b"ffmpeg version cli-locator-fixture\n".to_vec()
             } else if spec.argv == ["-hide_banner", "-encoders"] {
                 b"Encoders:\n ------\n V....D h264_nvenc fixture\n".to_vec()
+            } else if spec.argv == ["-hide_banner", "-h", "encoder=h264_nvenc"] {
+                b"Encoder h264_nvenc [fixture]:\n    Supported pixel formats: yuv420p nv12 p010le\n"
+                    .to_vec()
             } else {
                 return Err(fmn_platform::process::ProcessError::NotScripted {
                     program: spec.program.clone(),
@@ -9787,6 +9787,119 @@ mod tests {
         );
     }
 
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    #[test]
+    fn video_preflight_admits_pixel_formats_before_starting_a_stream() {
+        use fmn_platform::process::{
+            ProcessCancellation, ProcessError, ProcessMechanism, ProcessOutcome, ProcessRunner,
+            ProcessSpec, ProcessStdinLimits, ProcessTermination, RunningProcess,
+        };
+        use std::sync::atomic::AtomicUsize;
+
+        struct PixelFormats {
+            formats: Option<&'static str>,
+            help_calls: AtomicUsize,
+        }
+
+        impl ProcessRunner for PixelFormats {
+            fn mechanism(&self) -> ProcessMechanism {
+                ProcessMechanism::Scripted
+            }
+
+            fn run(&self, spec: &ProcessSpec) -> Result<ProcessOutcome, ProcessError> {
+                let stdout = if spec.argv == ["-version"] {
+                    "ffmpeg version cli-pixel-formats\n".to_owned()
+                } else if spec.argv == ["-hide_banner", "-encoders"] {
+                    "Encoders:\n ------\n V....D libx264 fixture\n".to_owned()
+                } else if spec.argv == ["-hide_banner", "-h", "encoder=libx264"] {
+                    self.help_calls.fetch_add(1, Ordering::SeqCst);
+                    let mut help = "Encoder libx264 [fixture]:\n".to_owned();
+                    if let Some(formats) = self.formats {
+                        help.push_str(&format!("    Supported pixel formats: {formats}\n"));
+                    }
+                    help
+                } else {
+                    return Err(ProcessError::NotScripted {
+                        program: spec.program.clone(),
+                    });
+                };
+                Ok(ProcessOutcome {
+                    termination: ProcessTermination::Exited(Some(0)),
+                    stdout: stdout.into_bytes(),
+                    stderr: Vec::new(),
+                })
+            }
+
+            fn start(
+                &self,
+                spec: &ProcessSpec,
+                cancellation: ProcessCancellation,
+                limits: ProcessStdinLimits,
+            ) -> Result<Box<dyn RunningProcess>, ProcessError> {
+                assert_eq!(
+                    spec.argv,
+                    ["-hide_banner", "-h", "encoder=libx264"],
+                    "video preflight must not start the frame stream"
+                );
+                assert_eq!(limits.max_total_bytes, 0, "format probe receives no frames");
+                let mut runner = fmn_platform::process::ScriptedRunner::new();
+                runner.script(&spec.program, self.run(spec)?);
+                runner.start(spec, cancellation, limits)
+            }
+        }
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "fmn-cli-pixel-formats-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let executable = root.join("ffmpeg");
+        write_native_ffmpeg_fixture(&executable);
+        for (wire, formats, admitted) in [
+            ("p010le", None, false),
+            ("p010le", Some("yuv420p nv12"), false),
+            ("p010le", Some("nv12 yuv420p10le"), true),
+            ("nv12", None, true),
+            ("nv12", Some("yuv420p"), true),
+        ] {
+            let command = render(parse_args(["--format", "video", "--pix_fmt", wire]).unwrap());
+            let config = resolve_render_config(&VirtualFs::new(), &command).unwrap();
+            let job = ffmpeg_video_job(&command, &config).unwrap();
+            let expected_wire = job.wire;
+            let runner = Arc::new(PixelFormats {
+                formats,
+                help_calls: AtomicUsize::new(0),
+            });
+            let context = prepare_ffmpeg_context(
+                runner.clone(),
+                &no_ffmpeg_locator(),
+                &executable,
+                job,
+                fmn_output::AudioQuality::default(),
+                &FfmpegLimitOptions::default(),
+            );
+            assert_eq!(runner.help_calls.load(Ordering::SeqCst), 1);
+            match context {
+                Ok(context) => {
+                    assert!(admitted, "{wire}: {formats:?}");
+                    assert_eq!(
+                        context.job.wire, expected_wire,
+                        "wire precision is retained"
+                    );
+                }
+                Err(error) => {
+                    assert!(!admitted, "{wire}: {formats:?}: {error}");
+                    assert_eq!(error.exit_name(), "capability");
+                    assert!(error.message().contains("10-bit"), "{error}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn video_quality_cli_overrides_config_and_switches_rate_control_modes() {
         let fs = VirtualFs::new();
@@ -10038,7 +10151,9 @@ mod tests {
                 cancellation: ProcessCancellation,
                 stdin: ProcessStdinLimits,
             ) -> Result<Box<dyn RunningProcess>, ProcessError> {
-                if spec.argv.windows(2).any(|args| args == ["-f", "null"]) {
+                if spec.argv.windows(2).any(|args| args == ["-f", "null"])
+                    || spec.argv == ["-hide_banner", "-h", "encoder=h264_nvenc"]
+                {
                     return SuccessfulFfmpegProbeRunner.start(spec, cancellation, stdin);
                 }
                 self.0.lock().unwrap().push((
@@ -10153,16 +10268,6 @@ mod tests {
             }
 
             fn run(&self, spec: &ProcessSpec) -> Result<ProcessOutcome, ProcessError> {
-                if spec
-                    .argv
-                    .last()
-                    .is_some_and(|path| path.ends_with("decoded.wav"))
-                {
-                    let bytes = self.decoded_wav.as_ref().expect("scripted audio decode");
-                    std::fs::write(spec.argv.last().unwrap(), bytes).unwrap();
-                    self.decodes.lock().unwrap().push(spec.clone());
-                    return Ok(success());
-                }
                 SuccessfulFfmpegProbeRunner.run(spec)
             }
 
@@ -10172,15 +10277,37 @@ mod tests {
                 cancellation: ProcessCancellation,
                 limits: ProcessStdinLimits,
             ) -> Result<Box<dyn RunningProcess>, ProcessError> {
-                if spec.argv.windows(2).any(|args| args == ["-f", "null"]) {
+                if spec.argv.windows(2).any(|args| args == ["-f", "null"])
+                    || spec.argv == ["-hide_banner", "-h", "encoder=h264_nvenc"]
+                {
                     return SuccessfulFfmpegProbeRunner.start(spec, cancellation, limits);
                 }
+                let decoded_wav = if spec
+                    .argv
+                    .last()
+                    .is_some_and(|path| path.ends_with("decoded.wav"))
+                {
+                    assert!(
+                        spec.argv
+                            .windows(2)
+                            .any(|pair| pair == ["-acodec", "pcm_s16le"])
+                    );
+                    assert_eq!(
+                        limits.max_total_bytes, 0,
+                        "audio decode reads its staged file"
+                    );
+                    self.decodes.lock().unwrap().push(spec.clone());
+                    Some(self.decoded_wav.clone().expect("scripted audio decode"))
+                } else {
+                    None
+                };
                 Ok(Box::new(AudioProcess {
                     spec: spec.clone(),
                     cancellation,
                     limits,
                     bytes: 0,
                     mux_inputs: Arc::clone(&self.mux_inputs),
+                    decoded_wav,
                     fail_mux: self.fail_mux,
                 }))
             }
@@ -10192,6 +10319,7 @@ mod tests {
             limits: ProcessStdinLimits,
             bytes: u64,
             mux_inputs: Arc<Mutex<Vec<Vec<u8>>>>,
+            decoded_wav: Option<Vec<u8>>,
             fail_mux: bool,
         }
 
@@ -10218,6 +10346,11 @@ mod tests {
                         termination: ProcessTermination::Cancelled,
                         ..success()
                     });
+                }
+                if let Some(wav) = &self.decoded_wav {
+                    assert_eq!(self.bytes, 0, "audio decode receives no video frames");
+                    std::fs::write(self.spec.argv.last().unwrap(), wav).unwrap();
+                    return Ok(success());
                 }
                 let mux = self
                     .spec

@@ -620,6 +620,10 @@ mod private_boundary {
                 stderr: Vec::new(),
             },
         );
+        runner.script(
+            probe_bound_tool(dir, 1),
+            pixel_format_outcome("libx264", "yuv420p nv12 yuv420p10le"),
+        );
         (tool_path, runner)
     }
 
@@ -658,6 +662,17 @@ mod private_boundary {
         ProcessOutcome {
             termination: ProcessTermination::Exited(Some(0)),
             stdout: Vec::new(),
+            stderr: Vec::new(),
+        }
+    }
+
+    fn pixel_format_outcome(encoder: &str, formats: &str) -> ProcessOutcome {
+        ProcessOutcome {
+            termination: ProcessTermination::Exited(Some(0)),
+            stdout: format!(
+                "Encoder {encoder} [Fixture encoder]:\n    Supported pixel formats: {formats}\n"
+            )
+            .into_bytes(),
             stderr: Vec::new(),
         }
     }
@@ -985,16 +1000,16 @@ mod private_boundary {
         assert_eq!(std::fs::read(&sentinel).unwrap(), b"not ours");
 
         let runs = runner.runs();
-        assert_eq!(runs.len(), 2);
-        let workdir = runs[1].program.parent().expect("job workdir");
-        assert!(runs[1].cwd.is_none());
+        assert_eq!(runs.len(), 3, "version, format discovery, then encode");
+        let workdir = runs[2].program.parent().expect("job workdir");
+        assert!(runs[2].cwd.is_none());
         assert_eq!(
             workdir,
             session_root(&dir, 0)
                 .join(format!("fmn-job-{}-1", std::process::id()))
                 .as_path()
         );
-        assert_eq!(runs[1].program, workdir.join(bound_tool_leaf()));
+        assert_eq!(runs[2].program, workdir.join(bound_tool_leaf()));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1004,7 +1019,7 @@ mod private_boundary {
                 0o700
             );
             assert_eq!(
-                std::fs::metadata(&runs[1].program)
+                std::fs::metadata(&runs[2].program)
                     .unwrap()
                     .permissions()
                     .mode()
@@ -1098,6 +1113,133 @@ mod private_boundary {
         assert!(caps.offers("h264_nvenc"));
         assert!(!caps.offers("hevc_videotoolbox"));
         assert_eq!(caps.hardware(), vec!["h264_nvenc".to_string()]);
+    }
+
+    #[test]
+    fn pixel_format_discovery_is_bounded_cached_and_rechecks_executable_identity() {
+        let (dir, _gate) = scratch("pixel-format-cache");
+        let (tool_path, runner) = scripted_tool(&dir);
+        let tool = resolve_tool(&tool_path, &runner, &dir).unwrap();
+        let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
+        let first = caps.probe_pixel_formats(&tool, &runner, "libx264").unwrap();
+        assert_eq!(first.encoder, "libx264");
+        assert_eq!(first.formats, ["nv12", "yuv420p", "yuv420p10le"]);
+        assert_eq!(
+            caps.probe_pixel_formats(&tool.clone(), &runner, "libx264")
+                .unwrap(),
+            first,
+        );
+        assert_eq!(
+            caps.require_video_job(
+                &tool,
+                &runner,
+                &job(WireFormat::P010, Container::Mp4, EncoderChoice::Auto),
+            )
+            .unwrap(),
+            Some(first),
+        );
+        let runs = runner.runs();
+        assert_eq!(runs.len(), 2, "version plus one cached format query");
+        let probe = &runs[1];
+        assert_eq!(probe.argv, ["-hide_banner", "-h", "encoder=libx264"]);
+        assert_eq!(probe.timeout, std::time::Duration::from_secs(2));
+        assert_eq!(probe.max_output_bytes, 64 * 1024);
+        assert!(probe.stdin.is_none());
+        assert_eq!(probe.env[0], ("LANG".into(), "C".into()));
+        assert_eq!(probe.env[1], ("LC_ALL".into(), "C".into()));
+        assert_eq!(probe.program, probe_bound_tool(&dir, 1));
+        assert_ne!(probe.program, tool.path());
+
+        std::fs::write(&tool_path, b"changed executable").unwrap();
+        let error = caps
+            .probe_pixel_formats(&tool, &runner, "libx264")
+            .expect_err("a cached format list cannot conceal executable replacement");
+        assert!(matches!(
+            error,
+            BoundaryError::ExecutableImageRejected { .. }
+        ));
+        assert_eq!(runner.runs().len(), 2);
+    }
+
+    #[test]
+    fn p010_refusal_preserves_destination_and_never_starts_an_eight_bit_encode() {
+        let (dir, _gate) = scratch("pixel-format-precision");
+        let (tool_path, mut runner) = scripted_tool(&dir);
+        runner.script(
+            probe_bound_tool(&dir, 1),
+            pixel_format_outcome("libx264", "nv12 yuv420p"),
+        );
+        let tool = resolve_tool(&tool_path, &runner, &dir).unwrap();
+        let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
+        let runner = Arc::new(runner);
+        let boundary =
+            Boundary::new(tool, runner.clone(), JobLimits::default(), dir.clone()).unwrap();
+        let destination = dir.join("existing.mp4");
+        std::fs::write(&destination, b"existing movie").unwrap();
+        let error = boundary
+            .encode(
+                &job(WireFormat::P010, Container::Mp4, EncoderChoice::Auto),
+                vec![0; WireFormat::P010.frame_bytes(64, 36)],
+                &caps,
+                &destination,
+            )
+            .expect_err("P010 cannot silently become eight-bit video");
+        assert!(matches!(
+            &error,
+            BoundaryError::UnsupportedEncoderPixelFormat {
+                requested,
+                wire: WireFormat::P010,
+                advertised,
+            } if requested == "libx264" && advertised == &["nv12", "yuv420p"]
+        ));
+        assert!(error.to_string().contains("10-bit"));
+        assert_eq!(std::fs::read(&destination).unwrap(), b"existing movie");
+        assert_eq!(runner.runs().len(), 2, "only version and format discovery");
+        assert!(
+            caps.require_video_job(
+                boundary.tool(),
+                runner.as_ref(),
+                &job(WireFormat::Nv12, Container::Mp4, EncoderChoice::Auto),
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            runner.runs().len(),
+            2,
+            "NV12 reuses the same valid inventory"
+        );
+    }
+
+    #[test]
+    fn failed_or_malformed_format_queries_do_not_poison_the_tool_cache() {
+        for (label, outcome) in [
+            ("wrong-encoder", pixel_format_outcome("libx265", "p010le")),
+            (
+                "timeout",
+                ProcessOutcome {
+                    termination: ProcessTermination::TimedOut,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                },
+            ),
+        ] {
+            let (dir, _gate) = scratch(label);
+            let (tool_path, mut runner) = scripted_tool(&dir);
+            runner.script(probe_bound_tool(&dir, 1), outcome);
+            runner.script(
+                probe_bound_tool(&dir, 2),
+                pixel_format_outcome("libx264", "nv12 yuv420p10le"),
+            );
+            let tool = resolve_tool(&tool_path, &runner, &dir).unwrap();
+            let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
+            assert!(matches!(
+                caps.probe_pixel_formats(&tool, &runner, "libx264"),
+                Err(BoundaryError::ProbeFailed(_))
+            ));
+            let accepted = caps.probe_pixel_formats(&tool, &runner, "libx264").unwrap();
+            assert_eq!(accepted.formats, ["nv12", "yuv420p10le"]);
+            assert_eq!(runner.runs().len(), 3, "failed discovery was retried");
+        }
     }
 
     #[test]
@@ -1277,7 +1419,13 @@ mod private_boundary {
         let (tool_path, mut runner) = scripted_tool(&dir);
         let tool = resolve_tool(&tool_path, &runner, &dir).unwrap();
         runner.script(first_bound_tool(&dir), successful_scripted_outcome());
-        runner.script(probe_bound_tool(&dir, 1), successful_scripted_outcome());
+        if let EncoderChoice::Named(name) = &encoder {
+            runner.script(probe_bound_tool(&dir, 1), successful_scripted_outcome());
+            runner.script(
+                probe_bound_tool(&dir, 2),
+                pixel_format_outcome(name, "nv12 yuv420p p010le"),
+            );
+        }
         let runner = Arc::new(runner);
         let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
         let boundary =
@@ -1303,9 +1451,10 @@ mod private_boundary {
         assert!(matches!(result, Err(BoundaryError::ArtifactMissing)));
         assert!(!dir.join("final/out.mp4").exists());
 
-        // One probe (-version) + one encode.
-        assert_eq!(runs.len(), 2);
-        let spec = &runs[1];
+        // Version and input-format discovery precede the actual encode.
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[1].argv, ["-hide_banner", "-h", "encoder=libx264"]);
+        let spec = &runs[2];
         assert!(spec.program.is_absolute());
         // Env allowlist, exactly, in order: LANG, LC_ALL, TMPDIR.
         assert_eq!(spec.env.len(), 3);
@@ -1361,8 +1510,12 @@ mod private_boundary {
         assert!(matches!(result, Err(BoundaryError::ArtifactMissing)));
 
         let runs = runner.runs();
-        assert_eq!(runs.len(), 3, "probe, video encode, then audio mux");
-        let mux = &runs[2];
+        assert_eq!(
+            runs.len(),
+            4,
+            "version, formats, video encode, then audio mux"
+        );
+        let mux = &runs[3];
         assert!(mux.cwd.is_none());
         let canonical_audio = canonical_audio.to_str().expect("UTF-8 test path");
         assert!(
@@ -1444,9 +1597,10 @@ mod private_boundary {
         let (result, runs, _) =
             scripted_encode(EncoderChoice::Named("h264_nvenc".into()), frame.clone());
         assert!(matches!(result, Err(BoundaryError::ArtifactMissing)));
-        assert_eq!(runs.len(), 3);
+        assert_eq!(runs.len(), 4);
         assert!(runs[1].argv.windows(2).any(|w| w == ["-f", "null"]));
-        assert!(runs[2].argv.windows(2).any(|w| w == ["-c:v", "h264_nvenc"]));
+        assert_eq!(runs[2].argv, ["-hide_banner", "-h", "encoder=h264_nvenc"]);
+        assert!(runs[3].argv.windows(2).any(|w| w == ["-c:v", "h264_nvenc"]));
 
         // Absent from caps: refused before any spawn.
         let (result, runs, _) =
@@ -1961,6 +2115,12 @@ mod private_boundary {
         let tool = resolve_tool(&source, runner.as_ref(), &dir).unwrap();
         let source_identity = tool.path().to_path_buf();
         let source_sha256 = tool.sha256_hex().to_owned();
+        let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
+        // Discover formats before arming the production-spawn substitution.
+        // The cached query still verifies identity at admission; this test
+        // specifically replaces the source during the actual encode spawn.
+        caps.probe_pixel_formats(&tool, &StdProcessRunner, "libx264")
+            .unwrap();
         let boundary = Boundary::new(
             tool,
             runner,
@@ -1971,7 +2131,6 @@ mod private_boundary {
             dir.clone(),
         )
         .unwrap();
-        let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
         let destination = dir.join("bound.mp4");
         let frames = vec![3_u8; WireFormat::Nv12.frame_bytes(64, 36)];
         let report = boundary

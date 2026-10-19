@@ -1,4 +1,4 @@
-//! Functional observations of the installed hardware encoders.
+//! Functional observations and input formats of the installed encoders.
 //!
 //! An encoder listed by FFmpeg may still lack its driver or a usable device.
 //! Trials use the same bound executable and containment as production jobs.
@@ -9,6 +9,8 @@ use super::*;
 const ENCODER_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const ENCODER_PROBE_LOG_CAP: u64 = 16 * 1024;
 const ENCODER_PROBE_DISK_CAP: u64 = 1024 * 1024;
+const ENCODER_FORMAT_LOG_CAP: u64 = 64 * 1024;
+const MAX_ENCODER_PIXEL_FORMATS: usize = 256;
 const PROBE_SIDE: usize = 256;
 const PROBE_LUMA_BYTES: usize = PROBE_SIDE * PROBE_SIDE;
 const PROBE_FRAME_BYTES: usize = PROBE_LUMA_BYTES * 3 / 2;
@@ -30,7 +32,79 @@ pub struct EncoderProbe {
     pub detail: Option<String>,
 }
 
+/// Input pixel formats advertised by one encoder in this FFmpeg executable.
+///
+/// This is a capability observation, not a hardware initialization trial.
+/// The boundary checks both when a hardware encoder is explicitly selected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncoderPixelFormats {
+    /// The exact encoder whose help was queried.
+    pub encoder: String,
+    /// Sorted, unique FFmpeg format names. Empty means the matching encoder
+    /// help did not advertise a list; it never establishes 10-bit support.
+    pub formats: Vec<String>,
+}
+
 impl EncoderCapabilities {
+    /// Discover the selected encoder's supported input formats once per tool.
+    ///
+    /// The bounded help query uses the same verified private executable and
+    /// process containment as an encode. Clones share the result, but every
+    /// cache hit still checks the tool's executable and private-session identity.
+    ///
+    /// # Errors
+    /// Unknown encoders, failed/malformed help, and boundary integrity failures.
+    pub fn probe_pixel_formats(
+        &self,
+        tool: &FfmpegTool,
+        runner: &dyn ProcessRunner,
+        encoder: &str,
+    ) -> Result<EncoderPixelFormats, BoundaryError> {
+        if !self.offers(encoder) {
+            return Err(BoundaryError::UnknownEncoder {
+                requested: encoder.to_owned(),
+                hardware_available: self.hardware(),
+            });
+        }
+        tool.probe_encoder_pixel_formats(runner, encoder)
+    }
+
+    /// Admit an entire video job before scene execution or encoder startup.
+    ///
+    /// Hardware must pass its functional trial. Opaque NV12/P010 jobs also
+    /// discover encoder input formats so their native planes can pass through.
+    /// P010 refuses an unverified 10-bit path instead of letting FFmpeg choose
+    /// an 8-bit substitute. Alpha and GIF jobs retain their existing profiles.
+    ///
+    /// # Errors
+    /// Invalid jobs, unknown/unusable encoders, incompatible input precision,
+    /// malformed capability output, and boundary integrity failures.
+    pub fn require_video_job(
+        &self,
+        tool: &FfmpegTool,
+        runner: &dyn ProcessRunner,
+        job: &VideoJob,
+    ) -> Result<Option<EncoderPixelFormats>, BoundaryError> {
+        let Some(encoder) = job.resolved_encoder()? else {
+            return Ok(None);
+        };
+        self.require_encoder(tool, runner, &encoder)?;
+        if !matches!(job.container, Container::Mp4 | Container::Mov)
+            || !matches!(job.wire, WireFormat::Nv12 | WireFormat::P010)
+        {
+            return Ok(None);
+        }
+        let formats = self.probe_pixel_formats(tool, runner, &encoder)?;
+        encoder_pixel_format(job, Some(&formats.formats)).map_err(|_| {
+            BoundaryError::UnsupportedEncoderPixelFormat {
+                requested: encoder,
+                wire: job.wire,
+                advertised: formats.formats.clone(),
+            }
+        })?;
+        Ok(Some(formats))
+    }
+
     /// Functionally probe each compiled-in recognized hardware encoder.
     ///
     /// Stable inventory order is preserved. Existing observations from this
@@ -88,6 +162,61 @@ impl EncoderCapabilities {
 }
 
 impl FfmpegTool {
+    fn probe_encoder_pixel_formats(
+        &self,
+        runner: &dyn ProcessRunner,
+        encoder: &str,
+    ) -> Result<EncoderPixelFormats, BoundaryError> {
+        self.session.verify_root()?;
+        self.verify_source_identity()?;
+        if let Some(formats) = self
+            .encoder_formats
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(encoder)
+            .cloned()
+        {
+            return Ok(formats);
+        }
+        // No cache lock is held while invoking the host-supplied process runner.
+        let outcome = self.with_bound_probe(
+            |_, _| Ok(()),
+            |path, workdir| {
+                let help = format!("encoder={encoder}");
+                let mut spec = probe_spec(path, &["-hide_banner", "-h", &help], workdir.path());
+                spec.timeout = ENCODER_PROBE_TIMEOUT;
+                spec.max_output_bytes = ENCODER_FORMAT_LOG_CAP;
+                let cancellation = ProcessCancellation::new();
+                let watch = ArtifactWatch::start(
+                    workdir,
+                    &workdir.join("probe-output"),
+                    ENCODER_PROBE_DISK_CAP,
+                    cancellation.clone(),
+                )?;
+                let result = runner
+                    .start(&spec, cancellation, ProcessStdinLimits::new(1, 0))
+                    .and_then(|process| process.finish())
+                    .map_err(BoundaryError::from);
+                watch.finish()?;
+                result
+            },
+        )?;
+        if !outcome.success() {
+            return Err(BoundaryError::ProbeFailed(
+                "encoder pixel-format help failed or exceeded its time/output limits",
+            ));
+        }
+        let listing = std::str::from_utf8(&outcome.stdout).map_err(|_| {
+            BoundaryError::ProbeFailed("encoder pixel-format help is not valid UTF-8")
+        })?;
+        let formats = parse_pixel_formats(encoder, listing)?;
+        let mut cache = self
+            .encoder_formats
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(cache.entry(encoder.to_owned()).or_insert(formats).clone())
+    }
+
     pub(super) fn cached_hardware_probe(&self, encoder: &str) -> Option<EncoderProbe> {
         self.encoder_probes
             .lock()
@@ -122,6 +251,46 @@ impl FfmpegTool {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         Ok(probes.entry(encoder.to_owned()).or_insert(probe).clone())
     }
+}
+
+fn parse_pixel_formats(encoder: &str, listing: &str) -> Result<EncoderPixelFormats, BoundaryError> {
+    let expected_banner = format!("Encoder {encoder} [");
+    let first_line = listing.lines().next().unwrap_or_default().trim();
+    if !first_line.starts_with(&expected_banner) || !first_line.ends_with("]:") {
+        return Err(BoundaryError::ProbeFailed(
+            "encoder help did not describe the requested encoder",
+        ));
+    }
+    let mut formats = None;
+    for line in listing.lines().skip(1) {
+        let Some(values) = line.trim().strip_prefix("Supported pixel formats:") else {
+            continue;
+        };
+        if formats.is_some() {
+            return Err(BoundaryError::ProbeFailed(
+                "encoder help repeats the supported pixel-format list",
+            ));
+        }
+        let mut parsed = std::collections::BTreeSet::new();
+        for (index, value) in values.split_whitespace().enumerate() {
+            if index >= MAX_ENCODER_PIXEL_FORMATS
+                || value.len() > 64
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            {
+                return Err(BoundaryError::ProbeFailed(
+                    "encoder help contains an invalid or oversized pixel-format list",
+                ));
+            }
+            parsed.insert(value.to_owned());
+        }
+        formats = Some(parsed.into_iter().collect());
+    }
+    Ok(EncoderPixelFormats {
+        encoder: encoder.to_owned(),
+        formats: formats.unwrap_or_default(),
+    })
 }
 
 fn run_encoder_probe(
@@ -242,6 +411,129 @@ fn classify_probe(encoder: &str, outcome: &ProcessOutcome) -> EncoderProbe {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::negotiate::{ColorDescription, EncoderChoice};
+
+    fn format_job(wire: WireFormat) -> VideoJob {
+        VideoJob {
+            width: 64,
+            height: 36,
+            fps: (30000, 1001),
+            wire,
+            color: ColorDescription::for_native_wire(wire),
+            container: Container::Mp4,
+            encoder: EncoderChoice::Auto,
+            crf: Some(18),
+        }
+    }
+
+    fn advertised(formats: &str) -> Vec<String> {
+        formats.split_whitespace().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn encoder_help_is_bound_to_the_selected_encoder_and_keeps_exact_format_names() {
+        let help = "Encoder libx264 [libx264 H.264 / AVC]:\r\n    General capabilities: dr1 delay\r\n    Supported pixel formats: yuv420p nv12 yuv420p10le nv12\r\nlibx264 AVOptions:\r\n";
+        let formats = parse_pixel_formats("libx264", help).unwrap();
+        assert_eq!(formats.encoder, "libx264");
+        assert_eq!(formats.formats, advertised("nv12 yuv420p yuv420p10le"));
+        assert!(parse_pixel_formats("h264_nvenc", help).is_err());
+        assert!(parse_pixel_formats("libx264", "Codec libx264 is not recognized.\n").is_err());
+        let unknown = parse_pixel_formats(
+            "dynamic_encoder",
+            "Encoder dynamic_encoder [Dynamic formats]:\n    General capabilities: none\n",
+        )
+        .unwrap();
+        assert!(unknown.formats.is_empty());
+    }
+
+    #[test]
+    fn malformed_and_unbounded_encoder_format_lists_are_refused() {
+        for values in ["nv12 -pix_fmt", "nv12 yuv420p;", "nv12 \u{1b}[31m"] {
+            let help =
+                format!("Encoder example [Example]:\n    Supported pixel formats: {values}\n");
+            assert!(parse_pixel_formats("example", &help).is_err());
+        }
+        let duplicated = "Encoder example [Example]:\n    Supported pixel formats: nv12\n    Supported pixel formats: yuv420p\n";
+        assert!(parse_pixel_formats("example", duplicated).is_err());
+        let repeated = "nv12 ".repeat(MAX_ENCODER_PIXEL_FORMATS + 1);
+        let help = format!("Encoder example [Example]:\n    Supported pixel formats: {repeated}\n");
+        assert!(parse_pixel_formats("example", &help).is_err());
+        let long_name = "x".repeat(65);
+        let help =
+            format!("Encoder example [Example]:\n    Supported pixel formats: {long_name}\n");
+        assert!(parse_pixel_formats("example", &help).is_err());
+    }
+
+    #[test]
+    fn nv12_negotiation_uses_the_advertised_format_without_changing_quality_or_color() {
+        let job = format_job(WireFormat::Nv12);
+        let out = Path::new("/out.mp4");
+        let original = encode_argv(&job, out).unwrap();
+        let direct = encode_argv_with_formats(&job, out, &advertised("yuv420p nv12")).unwrap();
+        let fallback = encode_argv_with_formats(&job, out, &advertised("yuv420p")).unwrap();
+        let unknown = encode_argv_with_formats(&job, out, &[]).unwrap();
+        assert_eq!(fallback, original);
+        assert_eq!(unknown, original);
+        let differences: Vec<_> = original
+            .iter()
+            .zip(&direct)
+            .enumerate()
+            .filter(|(_, (before, after))| before != after)
+            .collect();
+        assert_eq!(original.len(), direct.len());
+        assert_eq!(differences.len(), 1);
+        let (position, (before, after)) = differences[0];
+        assert_eq!(original[position - 1], "-pix_fmt");
+        assert_eq!(before, "yuv420p");
+        assert_eq!(after, "nv12");
+        assert!(direct.windows(2).any(|pair| pair == ["-crf", "18"]));
+        assert_eq!(
+            direct.iter().filter(|argument| *argument == "nv12").count(),
+            2
+        );
+    }
+
+    #[test]
+    fn p010_negotiation_preserves_ten_bits_or_refuses_before_encoding() {
+        let job = format_job(WireFormat::P010);
+        let out = Path::new("/out.mp4");
+        for (formats, expected) in [
+            ("yuv420p p010le yuv420p10le", "p010le"),
+            ("yuv420p yuv420p10le", "yuv420p10le"),
+            ("yuv422p10le yuv444p10le", "yuv422p10le"),
+            ("yuv444p10le", "yuv444p10le"),
+        ] {
+            let argv = encode_argv_with_formats(&job, out, &advertised(formats)).unwrap();
+            let pixel_formats: Vec<_> = argv
+                .windows(2)
+                .filter(|pair| pair[0] == "-pix_fmt")
+                .map(|pair| pair[1].as_str())
+                .collect();
+            assert_eq!(pixel_formats, ["p010le", expected]);
+        }
+        for formats in ["", "nv12 yuv420p", "yuv420p10be"] {
+            let error = encode_argv_with_formats(&job, out, &advertised(formats)).unwrap_err();
+            assert!(error.to_string().contains("10-bit"));
+        }
+    }
+
+    #[test]
+    fn format_discovery_does_not_change_alpha_rgb_or_gif_profiles() {
+        for (wire, container) in [
+            (WireFormat::Rgba8, Container::Mp4),
+            (WireFormat::Bgra8, Container::Mov),
+            (WireFormat::Rgba8, Container::MovTransparent),
+            (WireFormat::Rgba8, Container::Gif),
+        ] {
+            let mut job = format_job(wire);
+            job.container = container;
+            job.crf = None;
+            assert_eq!(
+                encode_argv_with_formats(&job, Path::new("/out"), &[]).unwrap(),
+                encode_argv(&job, Path::new("/out")).unwrap(),
+            );
+        }
+    }
 
     fn failed(termination: ProcessTermination, stderr: Vec<u8>) -> EncoderProbe {
         classify_probe(
