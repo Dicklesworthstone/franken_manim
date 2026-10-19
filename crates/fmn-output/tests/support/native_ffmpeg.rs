@@ -215,7 +215,7 @@ fn validate_hardware_probe(argv: &[OsString]) -> Result<(), Box<dyn std::error::
         )
         .into());
     }
-    for frame in payload.chunks_exact(FRAME_BYTES) {
+    for frame in payload.as_chunks::<FRAME_BYTES>().0 {
         if !frame[..LUMA_BYTES].iter().all(|byte| *byte == 16)
             || !frame[LUMA_BYTES..].iter().all(|byte| *byte == 128)
         {
