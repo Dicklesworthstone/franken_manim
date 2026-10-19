@@ -612,7 +612,7 @@ fn invalid_layout_recordings_refuse_before_any_target_allocation_or_source_chang
             .space_out_submobjects(f64::from_bits(1))
             .unwrap(),
     ];
-    let count = stage.len();
+    let before = stage.snapshot_bytes().unwrap();
     let topology = stage.topology_epoch();
     let points = stage.get_points(mob);
     for recording in recordings {
@@ -620,7 +620,7 @@ fn invalid_layout_recordings_refuse_before_any_target_allocation_or_source_chang
             recording.build(&mut stage),
             Err(AnimateError::InvalidLayoutArgument(_))
         ));
-        assert_eq!(stage.len(), count);
+        assert_eq!(stage.snapshot_bytes().unwrap(), before);
         assert_eq!(stage.topology_epoch(), topology);
         assert_eq!(stage.get_points(mob), points);
     }
@@ -634,14 +634,14 @@ fn invalid_layout_recordings_refuse_before_any_target_allocation_or_source_chang
         .unwrap();
     let surround = mob.animate().surround(stale, 0, true, 0.25).unwrap();
     stage.delete(stale).unwrap();
-    let count = stage.len();
+    let before = stage.snapshot_bytes().unwrap();
     let topology = stage.topology_epoch();
     for recording in [replace, surround] {
         assert_eq!(
             recording.build(&mut stage),
             Err(AnimateError::StaleHandle(stale))
         );
-        assert_eq!(stage.len(), count);
+        assert_eq!(stage.snapshot_bytes().unwrap(), before);
         assert_eq!(stage.topology_epoch(), topology);
         assert_eq!(stage.get_points(mob), points);
     }
@@ -652,7 +652,7 @@ fn invalid_layout_recordings_refuse_before_any_target_allocation_or_source_chang
         recording.build(&mut stage),
         Err(AnimateError::StaleHandle(foreign))
     );
-    assert_eq!(stage.len(), count);
+    assert_eq!(stage.snapshot_bytes().unwrap(), before);
 }
 
 #[test]

@@ -442,7 +442,7 @@ impl AnimBuilder {
         self.push(AnimateCommand::SetDepth(depth, stretch))
     }
 
-    /// Record independent fits of the specified axes.
+    /// Record independent fits of the specified axes via [`Stage::set_dimensions`].
     ///
     /// # Errors
     /// [`AnimateError::OverrideNotChainable`] after an override.
@@ -977,7 +977,7 @@ fn apply(stage: &mut Stage, target: Mob, command: AnimateCommand) -> Result<(), 
             stage.set_depth(target, d, s);
         }
         AnimateCommand::SetShape(width, height, depth) => {
-            stage.set_shape(target, width, height, depth);
+            stage.set_dimensions(target, width, height, depth);
         }
         AnimateCommand::SetMaxDimSize(length, dim, stretch) => {
             stage.set_max_dim_size(target, length, dim, stretch);

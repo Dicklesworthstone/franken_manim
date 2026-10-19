@@ -1259,8 +1259,9 @@ impl Stage {
         self.rescale_to_fit(mob, depth, 2, stretch)
     }
     /// Independently fit the specified extents; omitted axes are unchanged.
+    /// Implements the Reference's dimensional `set_shape` operation.
     /// Zero current extents retain [`Stage::rescale_to_fit`]'s no-op rule.
-    pub fn set_shape(
+    pub fn set_dimensions(
         &mut self,
         mob: Mob,
         width: Option<f64>,

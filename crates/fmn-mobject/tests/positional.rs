@@ -561,7 +561,7 @@ fn conditional_size_constraints_preserve_noops_and_choose_stretch_or_uniform_sca
     near(stage.get_width(mob), 4.0);
     near(stage.get_height(mob), 3.0);
     near(stage.get_depth(mob), 5.0);
-    stage.set_shape(mob, Some(2.0), None, Some(3.0));
+    stage.set_dimensions(mob, Some(2.0), None, Some(3.0));
     near(stage.get_width(mob), 2.0);
     near(stage.get_height(mob), 3.0);
     near(stage.get_depth(mob), 3.0);
@@ -569,7 +569,7 @@ fn conditional_size_constraints_preserve_noops_and_choose_stretch_or_uniform_sca
 
     let empty = stage.add(Mobject::new());
     stage.set_min_width(empty, 2.0, false);
-    stage.set_shape(empty, Some(1.0), Some(1.0), Some(1.0));
+    stage.set_dimensions(empty, Some(1.0), Some(1.0), Some(1.0));
     assert_eq!(stage.get_center(empty), ORIGIN);
     near(stage.get_width(empty), 0.0);
 }
@@ -581,7 +581,8 @@ fn replace_and_surround_keep_identity_geometry_and_reference_buffer_semantics() 
     let target = stage.add(layout_box([1.0, -3.0, 0.0], [7.0, -1.0, 1.0]));
     let points = stage.get_object_points(source);
     let target_points = stage.get_points(target);
-    let count = stage.len();
+    let families = [stage.family(source), stage.family(target)];
+    let snapshot_size = stage.snapshot_bytes().unwrap().len();
     stage.replace(source, target, 0, false);
     near(stage.get_width(source), 6.0);
     near(stage.get_height(source), 6.0);
@@ -597,9 +598,10 @@ fn replace_and_surround_keep_identity_geometry_and_reference_buffer_semantics() 
     near(stage.get_depth(source), 1.1);
     assert_eq!(stage.get_object_points(source), points);
     assert_eq!(stage.get_points(target), target_points);
+    assert_eq!([stage.family(source), stage.family(target)], families);
     assert_eq!(
-        stage.len(),
-        count,
+        stage.snapshot_bytes().unwrap().len(),
+        snapshot_size,
         "replace is a fit, not scene or family replacement"
     );
 
@@ -608,11 +610,10 @@ fn replace_and_surround_keep_identity_geometry_and_reference_buffer_semantics() 
     let center = stage.get_center(source);
     let width = stage.get_width(source);
     stage.replace(source, empty, 0, false);
-    assert_eq!(
-        stage.get_center(source),
-        center,
-        "an empty leaf target shrinks in place"
-    );
+    // The in-place shrink uses affine arithmetic, which can round the bounds.
+    for (actual, expected) in stage.get_center(source).into_iter().zip(center) {
+        near(actual, expected);
+    }
     assert!(stage.get_width(source) > 0.0);
     assert!((stage.get_width(source) / width - 1e-8).abs() < 1e-15);
 }
