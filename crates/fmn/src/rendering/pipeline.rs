@@ -2,7 +2,7 @@
 
 use std::cell::RefCell;
 use std::fmt;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, Weak};
 
 use fmn_anim::pure_frame::PureFrameJob;
 use fmn_frame::convert::{
@@ -72,7 +72,7 @@ impl std::error::Error for NativeFrameError {
 }
 
 pub(super) enum NativeFrame {
-    Camera(PreparedCameraFrame),
+    Camera(Arc<PreparedCameraFrame>),
     Vector(OwnedVectorFrame),
     Compiled {
         job: TimelineFrameJob,
@@ -110,16 +110,58 @@ pub(super) struct PreparedFrameJob {
     output: FrameReservation,
 }
 
+// Lumen already retains the latest complete immutable capture. Share one
+// handle to that same capture so workers can hold weak pixel identities
+// without extending a previous scene's lifetime beyond its in-flight permits.
+struct CameraCompiler {
+    renderer: RetainedFrameRenderer,
+    latest: Option<Arc<PreparedCameraFrame>>,
+}
+
+impl CameraCompiler {
+    fn new(config: RetainedFrameRendererConfig) -> Result<Self, RetainedFrameRendererError> {
+        Ok(Self {
+            renderer: RetainedFrameRenderer::new(config)?,
+            latest: None,
+        })
+    }
+
+    fn prepare_with_camera(
+        &mut self,
+        stage: &fmn_mobject::Stage,
+        camera: &Camera,
+    ) -> Result<Arc<PreparedCameraFrame>, RetainedFrameRendererError> {
+        let prepared = match self.renderer.prepare_with_camera(stage, camera) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.latest = None;
+                return Err(error);
+            }
+        };
+        if let Some(latest) = &self.latest
+            && latest.same_capture(&prepared)
+        {
+            return Ok(Arc::clone(latest));
+        }
+        let prepared = Arc::new(prepared);
+        self.latest = Some(Arc::clone(&prepared));
+        Ok(prepared)
+    }
+}
+
 #[derive(Default)]
 struct RenderWorker {
     arena: FrameArena,
     cache: PixelTileCache,
     compiled_vector: Option<VectorFrameCompiler>,
-    compiled_camera: Option<RetainedFrameRenderer>,
+    compiled_camera: Option<CameraCompiler>,
     // One raw surface shared by camera and vector frames. Only a vector
     // raster carries the cache token proving its cached pixels remain intact.
     // Switching routes must clear that token, without retaining a second frame.
     spare: Option<(FrameBuffer, Option<u64>)>,
+    // Identifies only the successful camera raster in `spare`. Weak ownership
+    // keeps neither geometry nor expired frame permits alive between jobs.
+    camera_pixels: Weak<PreparedCameraFrame>,
 }
 
 impl RenderWorker {
@@ -132,6 +174,7 @@ impl RenderWorker {
         threads: usize,
         output: &mut FrameBuffer,
     ) -> Result<(), NativeFrameError> {
+        self.camera_pixels = Weak::new();
         let layout = frame.raster_layout().map_err(NativeFrameError::Frame)?;
         let (mut raster, resume) = match self.spare.take() {
             Some((raster, serial)) if *raster.layout() == layout => (raster, serial),
@@ -151,23 +194,42 @@ impl RenderWorker {
         Ok(())
     }
 
+    // Return whether an intact raster was reused. Conversion and publication
+    // still run for every frame; only the redundant Lumen raster is omitted.
     fn render_camera(
         &mut self,
-        frame: &PreparedCameraFrame,
+        frame: &Arc<PreparedCameraFrame>,
         threads: usize,
         output: &mut FrameBuffer,
-    ) -> Result<(), NativeFrameError> {
+    ) -> Result<bool, NativeFrameError> {
+        if threads == 0 {
+            return Err(NativeFrameError::Renderer(
+                RetainedFrameRendererError::InvalidThreads,
+            ));
+        }
         let layout = frame.layout().map_err(NativeFrameError::Frame)?;
-        let mut raster = match self.spare.take() {
-            Some((raster, _)) if *raster.layout() == layout => raster,
-            _ => FrameBuffer::new(layout),
+        let same_capture = self
+            .camera_pixels
+            .upgrade()
+            .is_some_and(|previous| Arc::ptr_eq(&previous, frame));
+        // Clear before any fallible write, including output conversion on a
+        // cache hit. Success alone publishes the new raster and its identity.
+        self.camera_pixels = Weak::new();
+        let (mut raster, reused) = match self.spare.take() {
+            Some((raster, serial)) if *raster.layout() == layout => {
+                (raster, same_capture && serial.is_none())
+            }
+            _ => (FrameBuffer::new(layout), false),
         };
-        frame
-            .render_into(threads, &mut raster)
-            .map_err(NativeFrameError::Renderer)?;
+        if !reused {
+            frame
+                .render_into(threads, &mut raster)
+                .map_err(NativeFrameError::Renderer)?;
+        }
         convert_into(&raster, output, threads)?;
         self.spare = Some((raster, None));
-        Ok(())
+        self.camera_pixels = Arc::downgrade(frame);
+        Ok(reused)
     }
 }
 
@@ -217,7 +279,7 @@ impl NativeFrameStages {
         if let Some(camera) = camera {
             if worker.compiled_camera.is_none() {
                 worker.compiled_camera =
-                    Some(RetainedFrameRenderer::new(config).map_err(NativeFrameError::Renderer)?);
+                    Some(CameraCompiler::new(config).map_err(NativeFrameError::Renderer)?);
             }
             let frame = worker
                 .compiled_camera
@@ -423,7 +485,9 @@ fn convert_into(
 /// The scene owner freezes callback-free data after admission. The existing
 /// in-order preparation worker materializes and compiles it while the owner
 /// advances the next frame. Raster/conversion work uses every planned render
-/// team and their worker-local retained tile caches.
+/// team and their worker-local retained tile caches. Unchanged camera captures
+/// also reuse the team's complete raw raster; conversion and output sequence
+/// publication still occur for every admitted frame.
 /// The output ring capacity must equal `plan.frames_in_flight`.
 /// Call `finish` successfully BEFORE finishing the emitter. Dropping an
 /// unfinished adapter cancels the emitter before joining all pipeline workers.
@@ -434,7 +498,8 @@ fn convert_into(
 /// Output conversion runs directly from the RGBA16F raster into the reserved output
 /// slot; no per-frame intermediate surface is allocated. Frozen graph/record
 /// storage is additional to that pixel budget, with at most one input per
-/// admitted pipeline slot. Caller-retained replay packets have their own lifetime.
+/// admitted pipeline slot. Worker camera-pixel identities are weak and retain
+/// no additional scene resources. Caller-retained replay packets have their own lifetime.
 pub struct NativeFramePipeline {
     camera: Option<Camera>,
     stream: Option<FrameStream<NativeFrameJob, NativeFrameError>>,
@@ -446,7 +511,7 @@ pub struct NativeFramePipeline {
 
 enum NativeCompiler {
     Vector(Box<VectorFrameCompiler>),
-    Camera(Box<RetainedFrameRenderer>),
+    Camera(Box<CameraCompiler>),
 }
 
 impl NativeFramePipeline {
@@ -519,7 +584,7 @@ impl NativeFramePipeline {
         }
         let compiler = match &camera {
             Some(_) => NativeCompiler::Camera(Box::new(
-                RetainedFrameRenderer::new(config).map_err(RenderError::Renderer)?,
+                CameraCompiler::new(config).map_err(RenderError::Renderer)?,
             )),
             None => NativeCompiler::Vector(Box::new(
                 VectorFrameCompiler::new(config).map_err(RenderError::Renderer)?,
@@ -851,7 +916,7 @@ mod handoff_tests {
     #[test]
     fn camera_team_recycles_raw_pixels_and_clears_vector_resume_state() {
         let (stage, config, mut camera) = camera_fixture();
-        let mut renderer = RetainedFrameRenderer::new(config).expect("retained renderer");
+        let mut renderer = CameraCompiler::new(config).expect("retained renderer");
         let mut worker = RenderWorker::default();
         let layout =
             fmn_frame::FrameLayout::tight(PixelFormat::Rgba8, 16, 16).expect("output layout");
@@ -881,9 +946,11 @@ mod handoff_tests {
             let fresh = frame.render(1).expect("fresh reference raster");
             let mut expected = FrameBuffer::new(layout);
             convert_into(&fresh, &mut expected, 1).expect("reference conversion");
-            worker
-                .render_camera(&frame, threads, &mut output)
-                .expect("recycled raster");
+            assert!(
+                !worker
+                    .render_camera(&frame, threads, &mut output)
+                    .expect("recycled raster")
+            );
             let (raster, token) = worker.spare.as_ref().expect("retained raster");
             assert_eq!(raster.as_bytes().as_ptr(), allocation);
             assert_eq!(*token, None);
@@ -899,9 +966,12 @@ mod handoff_tests {
         let (raster, token) = worker.spare.as_ref().expect("retained vector raster");
         assert_eq!(raster.as_bytes().as_ptr(), allocation);
         assert!(token.is_some());
-        worker
-            .render_camera(&initial, 4, &mut output)
-            .expect("camera after vector");
+        assert!(worker.camera_pixels.upgrade().is_none());
+        assert!(
+            !worker
+                .render_camera(&initial, 4, &mut output)
+                .expect("camera after vector")
+        );
         assert_eq!(output.as_bytes(), first_bits);
         assert_eq!(worker.spare.as_ref().expect("camera raster").1, None);
         worker
@@ -923,7 +993,7 @@ mod handoff_tests {
     #[test]
     fn failed_camera_conversion_discards_the_recycled_surface() {
         let (stage, config, camera) = camera_fixture();
-        let mut renderer = RetainedFrameRenderer::new(config).expect("retained renderer");
+        let mut renderer = CameraCompiler::new(config).expect("retained renderer");
         let frame = renderer
             .prepare_with_camera(&stage, &camera)
             .expect("camera job");
@@ -943,11 +1013,105 @@ mod handoff_tests {
             Err(NativeFrameError::Frame(FrameError::DimensionMismatch))
         ));
         assert!(worker.spare.is_none());
-        worker
-            .render_camera(&frame, 4, &mut output)
-            .expect("fresh raster after failure");
+        assert!(worker.camera_pixels.upgrade().is_none());
+        assert!(
+            !worker
+                .render_camera(&frame, 4, &mut output)
+                .expect("fresh raster after failure")
+        );
         assert_eq!(output.as_bytes(), expected);
         assert!(worker.spare.is_some());
+    }
+
+    #[test]
+    fn repeated_camera_jobs_reuse_pixels_but_convert_each_output_slot() {
+        let (stage, config, camera) = camera_fixture();
+        let mut compiler = CameraCompiler::new(config).expect("camera compiler");
+        let initial = compiler
+            .prepare_with_camera(&stage, &camera)
+            .expect("initial capture");
+        let fresh = initial.render(1).expect("independent serial raster");
+        let mut worker = RenderWorker::default();
+        let mut calls = 0;
+        for format in [
+            PixelFormat::Rgba8,
+            PixelFormat::Bgra8,
+            PixelFormat::Nv12,
+            PixelFormat::P010,
+        ] {
+            let layout = fmn_frame::FrameLayout::tight(format, 16, 16).expect("output layout");
+            let mut expected = FrameBuffer::new(layout);
+            convert_into(&fresh, &mut expected, 1).expect("fresh output conversion");
+            for threads in [1, 4, 16] {
+                let repeated = compiler
+                    .prepare_with_camera(&stage, &camera)
+                    .expect("unchanged capture");
+                assert!(Arc::ptr_eq(&initial, &repeated));
+                let mut output = FrameBuffer::new(layout);
+                output.plane_mut(0).fill(0xA5);
+                let reused = worker
+                    .render_camera(&repeated, threads, &mut output)
+                    .expect("worker capture");
+                assert_eq!(reused, calls != 0);
+                assert_eq!(output.as_bytes(), expected.as_bytes());
+                calls += 1;
+            }
+        }
+        let layout = fmn_frame::FrameLayout::tight(PixelFormat::Rgba8, 16, 16).unwrap();
+        let mut output = FrameBuffer::new(layout);
+        output.plane_mut(0).fill(0x3C);
+        let before = output.as_bytes().to_vec();
+        assert!(matches!(
+            worker.render_camera(&initial, 0, &mut output),
+            Err(NativeFrameError::Renderer(
+                RetainedFrameRendererError::InvalidThreads
+            ))
+        ));
+        assert_eq!(output.as_bytes(), before);
+        assert!(worker.render_camera(&initial, 1, &mut output).unwrap());
+    }
+
+    #[test]
+    fn worker_pixel_keys_do_not_keep_expired_captures_alive() {
+        let (stage, config, camera) = camera_fixture();
+        let mut compiler = CameraCompiler::new(config).expect("camera compiler");
+        let first = compiler.prepare_with_camera(&stage, &camera).unwrap();
+        let weak = Arc::downgrade(&first);
+        let mut worker = RenderWorker::default();
+        let layout = fmn_frame::FrameLayout::tight(PixelFormat::Rgba8, 16, 16).unwrap();
+        let mut output = FrameBuffer::new(layout);
+        assert!(!worker.render_camera(&first, 1, &mut output).unwrap());
+        let original = output.as_bytes().to_vec();
+        let changed = Camera::new(CameraConfig {
+            resolution: (16, 16),
+            background: fmn_core::color::LinearRgba {
+                r: 0.3,
+                g: 0.1,
+                b: 0.2,
+                a: 1.0,
+            },
+            ..CameraConfig::default()
+        })
+        .unwrap();
+        assert_eq!(camera.revision(), changed.revision());
+        let next = compiler.prepare_with_camera(&stage, &changed).unwrap();
+        assert!(!first.same_capture(&next));
+        drop(first);
+        assert!(weak.upgrade().is_none());
+        assert!(worker.camera_pixels.upgrade().is_none());
+        assert!(!worker.render_camera(&next, 4, &mut output).unwrap());
+        assert_ne!(original, output.as_bytes());
+        let raw = next.render(1).unwrap();
+        let mut expected = FrameBuffer::new(layout);
+        convert_into(&raw, &mut expected, 1).unwrap();
+        assert_eq!(output.as_bytes(), expected.as_bytes());
+        let repeated = compiler.prepare_with_camera(&stage, &changed).unwrap();
+        assert!(worker.render_camera(&repeated, 16, &mut output).unwrap());
+        drop(repeated);
+        drop(next);
+        drop(compiler);
+        assert!(worker.camera_pixels.upgrade().is_none());
+        assert!(worker.spare.is_some(), "only reusable pixel storage remains");
     }
 
     #[test]
