@@ -96,6 +96,15 @@ jobs:
           set -euo pipefail
           cargo test --locked -p fmn-cli --features cli,batch --bin fmn bundle_audio::tests \
             2>&1 | tee /tmp/camera-acceptance/cli-bundle-audio.log
+      - name: Install optional video tool for required media acceptance
+        if: ${{ !cancelled() && matrix.suite == 'native' }}
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install --yes --no-install-recommends ffmpeg
+          ffmpeg -version 2>&1 | tee /tmp/camera-acceptance/ffmpeg-version.log
       - name: Execute shipping binary and real narrated video round trips
         if: ${{ !cancelled() && matrix.suite == 'native' }}
         shell: bash
