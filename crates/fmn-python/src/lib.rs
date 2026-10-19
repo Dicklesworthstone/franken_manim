@@ -13577,6 +13577,13 @@ mod tests {
                 .inspect_err(|error| error.print(py))
                 .expect("dispatch table generates");
             let committed = include_str!("../../../docs/api/portal_dispatch.tsv");
+            if generated != committed {
+                // The whole table the embedded portal builds, so a red run's
+                // log is the regenerated file (between the markers).
+                eprintln!(
+                    "--- BEGIN generated docs/api/portal_dispatch.tsv ---\n{generated}--- END generated docs/api/portal_dispatch.tsv ---"
+                );
+            }
             if let Some((line, (built, recorded))) = generated
                 .lines()
                 .zip(committed.lines())

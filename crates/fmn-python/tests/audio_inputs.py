@@ -205,11 +205,14 @@ with tempfile.TemporaryDirectory(prefix="fmn sound inputs ") as directory:
                           "        self.wait(0.25)\nclass Second(First):\n    pass\n")
         for names, target in [(["First"], root / "console.wav"),
                               (["First", "Second"], root / "batch")]:
+            # --output is one scene's exact destination; a batch's root is
+            # --video_dir (BN-15, the console's destination contract).
+            destination = ["--output" if len(names) == 1 else "--video_dir", str(target)]
             stdout, stderr = io.StringIO(), io.StringIO()
             with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                 code = try_render_cli(m, ["--robot", str(source), *names, "--format", "wav",
                                          "--fps", "16", "--threads", "1", "--ffmpeg_bin", str(explicit),
-                                         "--output", str(target)])
+                                         *destination])
             assert code == 0, (stdout.getvalue(), stderr.getvalue())
             report = json.loads(stdout.getvalue())
             assert report["exit"]["code"] == 0
