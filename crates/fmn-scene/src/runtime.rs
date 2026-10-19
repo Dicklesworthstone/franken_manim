@@ -292,6 +292,21 @@ impl From<AnimError> for SceneError {
     }
 }
 
+impl From<fmn_mobject::UpdaterError> for SceneError {
+    fn from(error: fmn_mobject::UpdaterError) -> Self {
+        match error {
+            fmn_mobject::UpdaterError::Stage(error) => Self::Stage(error),
+            error => Self::Animation(error.into()),
+        }
+    }
+}
+
+impl From<fmn_mobject::UpdaterFailure> for SceneError {
+    fn from(error: fmn_mobject::UpdaterFailure) -> Self {
+        Self::Animation(error.into())
+    }
+}
+
 impl From<CameraError> for SceneError {
     fn from(error: CameraError) -> Self {
         Self::Camera(error)
@@ -1481,6 +1496,7 @@ impl Scene {
         wait: SteppedWait,
         sink: &mut dyn SceneSink,
     ) -> Result<SegmentReport, SceneError> {
+        self.ensure_updaters_ready()?;
         let report = finish_open_wait(wait.open)?;
         self.sync_stage_time();
         let event_error = self.event_error.take();
@@ -1645,8 +1661,10 @@ impl Scene {
         for root in self.stage.roots().to_vec() {
             self.stage.update_mobject(root, 0.0);
         }
+        self.ensure_updaters_ready()?;
         self.sync_stage_time();
         self.dispatch_pending_events()?;
+        self.ensure_updaters_ready()?;
         sink.capture(
             CaptureReason::Show,
             FramePacket::freeze_barrier(&self.stage, &self.clock, &self.rng_root),
@@ -1832,6 +1850,16 @@ impl Scene {
         }
     }
 
+    // Callback failures remain inspectable while playback is stopped. State
+    // capture/restore keep their existing contract; only another frame or
+    // authored callback requires explicit acknowledgment of the first failure.
+    fn ensure_updaters_ready(&self) -> Result<(), SceneError> {
+        match self.stage.updater_error() {
+            Some(error) => Err(AnimError::Updater(error.clone()).into()),
+            None => Ok(()),
+        }
+    }
+
     fn allocate_event_sequence(&mut self) -> Result<u64, EventError> {
         let sequence = self
             .next_event_sequence
@@ -1846,6 +1874,7 @@ impl Scene {
         sink: &mut dyn SceneSink,
     ) -> Result<(), SceneError> {
         self.ensure_ready()?;
+        self.ensure_updaters_ready()?;
         if self.preflight_done {
             return Ok(());
         }
@@ -1895,9 +1924,11 @@ impl Scene {
     ) -> Result<(), SceneError> {
         let result = if notify_sink {
             (|| {
+                self.ensure_updaters_ready()?;
                 if self.config.preview_while_skipping && self.skipping && self.config.windowed {
                     self.sync_stage_time();
                     self.dispatch_pending_events()?;
+                    self.ensure_updaters_ready()?;
                     sink.capture(
                         CaptureReason::SkippedPreview,
                         FramePacket::freeze_barrier(&self.stage, &self.clock, &self.rng_root),
@@ -1931,6 +1962,7 @@ impl Scene {
         for root in self.stage.roots().to_vec() {
             self.stage.update_mobject(root, 0.0);
         }
+        self.ensure_updaters_ready()?;
         self.hold_loop(HoldKind::Wait, SegmentKind::Wait, sink)?;
         let n_frames = self.clock.now().frames() - base_frame;
         Ok(SegmentReport {
@@ -1949,9 +1981,11 @@ impl Scene {
         segment: SegmentKind,
         sink: &mut dyn SceneSink,
     ) -> Result<(), SceneError> {
+        self.ensure_updaters_ready()?;
         self.emit_event(sink, LifecyclePhase::HoldBegin, Some(segment))?;
         loop {
             self.dispatch_pending_events()?;
+            self.ensure_updaters_ready()?;
             match self
                 .hold_controller
                 .poll(kind, &self.stage, self.clock.now())?
@@ -1962,7 +1996,9 @@ impl Scene {
                     self.clock.advance_frames(1).map_err(AnimError::Clock)?;
                     self.stage
                         .update_at_time(self.clock.dt().to_f64(), self.clock.now().to_f64());
+                    self.ensure_updaters_ready()?;
                     self.dispatch_pending_events()?;
+                    self.ensure_updaters_ready()?;
                     if !self.skipping {
                         sink.capture(
                             CaptureReason::PresenterHold,
@@ -2057,7 +2093,7 @@ fn drain_event_queue(
     stage: &mut Stage,
     time: RationalTime,
 ) -> usize {
-    if event_error.is_some() {
+    if event_error.is_some() || stage.updater_error().is_some() {
         return 0;
     }
 
@@ -2109,6 +2145,11 @@ fn drain_event_queue(
         dispatcher.dispatch(&event, stage);
         recorded.push(event);
         dispatched += 1;
+        if stage.updater_error().is_some() {
+            // Retain later events for explicit recovery; the event whose
+            // listener failed was observed and remains in the journal.
+            break;
+        }
     }
     dispatched
 }

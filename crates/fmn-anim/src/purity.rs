@@ -31,7 +31,7 @@ use std::rc::Rc;
 use fmn_core::rng::RngRoot;
 use fmn_mobject::{Mob, Snapshot, Stage};
 
-use crate::animation::{AnimError, Animation, AnimationSignature};
+use crate::animation::{AnimError, Animation, AnimationSignature, check_updater_error};
 use crate::clock::{FrameSample, RationalFrameClock};
 use crate::frame::FramePacket;
 
@@ -199,6 +199,7 @@ pub fn reconstruct_pure_frame(
     rng: &RngRoot,
     sample: &FrameSample,
 ) -> Result<FramePacket, AnimError> {
+    check_updater_error(stage)?;
     let Some(begin_state) = report
         .begin_state
         .as_ref()
@@ -213,6 +214,7 @@ pub fn reconstruct_pure_frame(
     for animation in animations.iter_mut() {
         let alpha = sample.time.to_f64() / animation.state().config.run_time;
         animation.interpolate(stage, alpha);
+        check_updater_error(stage)?;
     }
     let mut clock =
         RationalFrameClock::new(sample.time.fps()).expect("sample fps is a live clock's");

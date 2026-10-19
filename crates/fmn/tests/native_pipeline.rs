@@ -481,3 +481,69 @@ fn failed_native_numeric_callback_aborts_the_artifact_and_allows_immediate_retry
     assert_eq!(retry.artifact.frame_count, 1);
     assert_eq!(retry.frame_pipeline.unwrap().outstanding_slots, 0);
 }
+
+#[test]
+fn fallible_native_redraw_aborts_staged_output_and_allows_a_fresh_render() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    struct RefusedRedraw {
+        calls: Rc<Cell<usize>>,
+    }
+
+    impl SceneConstruct for RefusedRedraw {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            stage.add(Circle::new().radius(0.5).color(WHITE))?;
+            // Start real output work before a later regeneration fails.
+            stage.wait(0.125)?;
+            let calls = Rc::clone(&self.calls);
+            let redraw = stage.arena_mut().try_always_redraw(move |arena| {
+                calls.set(calls.get() + 1);
+                if calls.get() == 3 {
+                    return Err(UpdaterError::callback(
+                        "native redraw",
+                        "the next geometry sample was refused",
+                    ));
+                }
+                Ok(arena.add(Circle::new().radius(0.3).color(BLUE)))
+            })?;
+            stage.add_to_scene(redraw)?;
+            stage.wait(0.5)?;
+            panic!("a failed native redraw cannot report successful playback")
+        }
+    }
+
+    let calls = Rc::new(Cell::new(0));
+    let fs = Arc::new(VirtualFs::new());
+    let error = render_with_fs(
+        &mut RefusedRedraw {
+            calls: Rc::clone(&calls),
+        },
+        options("/refused-redraw", RenderFormat::PngSequence, 2, 2),
+        fs.clone(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        RenderError::Scene(Error::Animation(AnimError::Updater(UpdaterFailure {
+            error: UpdaterError::Callback {
+                operation: "native redraw",
+                ..
+            },
+            ..
+        })))
+    ));
+    assert_eq!(calls.get(), 3, "abort must not retry the failed factory");
+    assert!(!fs.exists(Path::new("/refused-redraw")));
+
+    let retry = render_with_fs(
+        &mut Static,
+        options("/refused-redraw", RenderFormat::PngSequence, 2, 2),
+        fs.clone(),
+    )
+    .unwrap();
+    assert_eq!(retry.artifact.frame_count, 1);
+    assert_eq!(retry.frame_pipeline.unwrap().outstanding_slots, 0);
+    assert!(fs.exists(Path::new("/refused-redraw")));
+    assert_eq!(calls.get(), 3);
+}

@@ -24,6 +24,15 @@ ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = "_fmn_console_protocol"
 package = ModuleType(PACKAGE)
 package.__path__ = [str(ROOT / "python/fmn_python")]
+
+
+def _unexpected_native_namespace_initialization():
+    raise AssertionError("console help must not initialize the native Studio runtime")
+
+
+# Studio contributes help through a real module import. Its package helper is
+# available, but using it would turn a parser protocol into native execution.
+package._ensure_exclusive_manimlib_namespace = _unexpected_native_namespace_initialization
 sys.modules[PACKAGE] = package
 console = importlib.import_module(PACKAGE + ".console_rendering")
 

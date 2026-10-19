@@ -1389,6 +1389,21 @@ error_from!(FfmpegLocatorError, FfmpegLocator);
 error_from!(ProcessError, Process);
 error_from!(TopologyError, Topology);
 
+impl From<fmn_mobject::UpdaterError> for Error {
+    fn from(error: fmn_mobject::UpdaterError) -> Self {
+        match error {
+            fmn_mobject::UpdaterError::Stage(error) => Self::Stage(error),
+            error => Self::Animation(error.into()),
+        }
+    }
+}
+
+impl From<fmn_mobject::UpdaterFailure> for Error {
+    fn from(error: fmn_mobject::UpdaterFailure) -> Self {
+        Self::Animation(error.into())
+    }
+}
+
 impl From<AnimateError> for Error {
     fn from(error: AnimateError) -> Self {
         Self::Animation(error.into())

@@ -1558,3 +1558,444 @@ fn the_container_is_a_vgroup_over_vmobjects_and_a_group_otherwise() {
     let mixed = AnimationGroup::with_lag_ratio(&mut stage, mixed, 0.0).expect("mixed group");
     assert!(!is_vector(&stage, mixed.state().mobject()));
 }
+
+// ------------------------------------------------ native updater failures
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FailurePhase {
+    Begin,
+    Interpolate,
+    Update,
+    Finish,
+}
+
+type CallbackLog = Rc<RefCell<Vec<(&'static str, FailurePhase)>>>;
+
+/// An extension animation may call native updaters from any lifecycle slot.
+/// Deliberately leave error propagation to the surrounding composition, even
+/// after a custom begin returns Ok, as the trait permits.
+struct NativeFailureProbe {
+    probe: Probe,
+    failure: Option<(Mob, FailurePhase)>,
+    secondary_begin_error: bool,
+    callbacks: CallbackLog,
+    aborts: Rc<RefCell<Vec<&'static str>>>,
+}
+
+impl NativeFailureProbe {
+    fn callback(&self, stage: &mut Stage, phase: FailurePhase) {
+        self.callbacks.borrow_mut().push((self.probe.id, phase));
+        if let Some((mob, expected)) = self.failure
+            && phase == expected
+        {
+            stage.update_mobject(mob, 0.0);
+        }
+    }
+}
+
+impl Animation for NativeFailureProbe {
+    fn state(&self) -> &AnimState {
+        self.probe.state()
+    }
+
+    fn state_mut(&mut self) -> &mut AnimState {
+        self.probe.state_mut()
+    }
+
+    fn begin(&mut self, stage: &mut Stage) -> Result<(), AnimError> {
+        self.probe.begin(stage)?;
+        self.callback(stage, FailurePhase::Begin);
+        if self.secondary_begin_error {
+            return Err(AnimError::EmptyMobject);
+        }
+        Ok(())
+    }
+
+    fn interpolate(&mut self, stage: &mut Stage, alpha: f64) {
+        let mob = self.state().mobject();
+        stage.shift(mob, [alpha - stage.get_center(mob)[0], 0.0, 0.0]);
+        self.probe.interpolate(stage, alpha);
+        self.callback(stage, FailurePhase::Interpolate);
+    }
+
+    fn update_mobjects(&mut self, stage: &mut Stage, _dt: f64) {
+        self.callback(stage, FailurePhase::Update);
+    }
+
+    fn finish(&mut self, stage: &mut Stage) {
+        self.probe.finish(stage);
+        self.callback(stage, FailurePhase::Finish);
+    }
+
+    fn abort(&mut self, stage: &mut Stage) {
+        self.aborts.borrow_mut().push(self.probe.id);
+        self.probe.abort(stage);
+    }
+
+    fn interpolate_submobject(&mut self, _stage: &mut Stage, _mobs: &[Mob], _alpha: f64) {}
+}
+
+#[test]
+fn nested_groups_stop_at_each_fallible_child_callback() {
+    use fmn_mobject::{UpdaterError, UpdaterFailure};
+
+    for phase in [
+        FailurePhase::Begin,
+        FailurePhase::Interpolate,
+        FailurePhase::Update,
+        FailurePhase::Finish,
+    ] {
+        let mut stage = Stage::new();
+        let failing = stage.add_value_tracker(0.0);
+        let error = UpdaterError::callback("composition probe", "rebuild refused");
+        let callback_error = error.clone();
+        let updater = stage
+            .add_try_updater(
+                failing,
+                move |stage, me| {
+                    stage.increment_tracker_value(me, 1.0)?;
+                    Err(callback_error.clone())
+                },
+                false,
+            )
+            .expect("fallible updater");
+        let expected = AnimError::Updater(UpdaterFailure {
+            mobject: failing,
+            updater,
+            error,
+        });
+        let log: Log = Rc::new(RefCell::new(Vec::new()));
+        let callbacks: CallbackLog = Rc::new(RefCell::new(Vec::new()));
+        let aborts = Rc::new(RefCell::new(Vec::new()));
+        let a = square(&mut stage);
+        let b = square(&mut stage);
+        let c = square(&mut stage);
+        let member = |mob, id, failure| -> Box<dyn Animation> {
+            Box::new(NativeFailureProbe {
+                probe: Probe::new(mob, id, 1.0, &log),
+                failure,
+                secondary_begin_error: false,
+                callbacks: Rc::clone(&callbacks),
+                aborts: Rc::clone(&aborts),
+            })
+        };
+        let inner = AnimationGroup::new(
+            &mut stage,
+            vec![member(a, "a", Some((failing, phase))), member(b, "b", None)],
+        )
+        .expect("inner group");
+        let mut outer =
+            AnimationGroup::new(&mut stage, vec![Box::new(inner), member(c, "c", None)])
+                .expect("outer group");
+        let root = outer.group();
+
+        if phase == FailurePhase::Begin {
+            assert_eq!(outer.begin(&mut stage), Err(expected.clone()));
+        } else {
+            outer.begin(&mut stage).expect("begin");
+            callbacks.borrow_mut().clear();
+            match phase {
+                FailurePhase::Interpolate => outer.interpolate(&mut stage, 0.25),
+                FailurePhase::Update => outer.update_mobjects(&mut stage, 0.25),
+                FailurePhase::Finish => outer.finish(&mut stage),
+                FailurePhase::Begin => unreachable!(),
+            }
+        }
+        assert_eq!(*callbacks.borrow(), vec![("a", phase)]);
+        assert_eq!(outer.deferred_error(), Some(expected.clone()));
+        assert_eq!(stage.tracker_value(failing), Some(1.0));
+
+        // A rejected retry must leave ownership of the failed attempt intact.
+        assert_eq!(outer.begin(&mut stage), Err(expected.clone()));
+        let partial = stage.get_center(a);
+        outer.interpolate(&mut stage, 1.0);
+        outer.update_mobjects(&mut stage, 1.0);
+        outer.finish(&mut stage);
+        outer.abort(&mut stage);
+        assert_eq!(*callbacks.borrow(), vec![("a", phase)]);
+        assert_eq!(
+            stage.get_center(a),
+            partial,
+            "abort preserves partial content"
+        );
+        let expected_aborts = match phase {
+            FailurePhase::Begin => vec!["a"],
+            FailurePhase::Finish => vec!["b", "c"],
+            FailurePhase::Interpolate | FailurePhase::Update => vec!["a", "b", "c"],
+        };
+        assert_eq!(
+            *aborts.borrow(),
+            expected_aborts,
+            "each owned lifetime aborts once"
+        );
+        for mob in stage.family(root) {
+            assert!(!stage.is_animating(mob));
+            assert!(!stage.is_updating_suspended(mob));
+        }
+
+        // Acknowledging the Stage fault cannot resume an already-failed group.
+        stage.remove_updater(failing, updater);
+        stage.take_updater_error().expect("acknowledge");
+        outer.interpolate(&mut stage, 1.0);
+        outer.finish(&mut stage);
+        assert_eq!(*callbacks.borrow(), vec![("a", phase)]);
+        assert_eq!(outer.deferred_error(), Some(expected));
+        outer.begin(&mut stage).expect("a new lifetime may begin");
+        assert!(outer.deferred_error().is_none());
+        outer.finish(&mut stage);
+    }
+}
+
+#[test]
+fn succession_stops_advancing_and_replaying_after_a_native_updater_failure() {
+    use fmn_mobject::UpdaterError;
+
+    for phase in [
+        FailurePhase::Begin,
+        FailurePhase::Interpolate,
+        FailurePhase::Update,
+        FailurePhase::Finish,
+    ] {
+        let mut stage = Stage::new();
+        let failing = stage.add_value_tracker(0.0);
+        stage
+            .add_try_updater(
+                failing,
+                |stage, me| {
+                    stage.increment_tracker_value(me, 1.0)?;
+                    Err(UpdaterError::callback(
+                        "succession probe",
+                        "rebuild refused",
+                    ))
+                },
+                false,
+            )
+            .expect("fallible updater");
+        let log: Log = Rc::new(RefCell::new(Vec::new()));
+        let callbacks: CallbackLog = Rc::new(RefCell::new(Vec::new()));
+        let aborts = Rc::new(RefCell::new(Vec::new()));
+        let a = square(&mut stage);
+        let b = square(&mut stage);
+        let c = square(&mut stage);
+        let member = |mob, id, failure| -> Box<dyn Animation> {
+            Box::new(NativeFailureProbe {
+                probe: Probe::new(mob, id, 1.0, &log),
+                failure,
+                secondary_begin_error: failure
+                    .is_some_and(|(_, phase)| phase == FailurePhase::Begin),
+                callbacks: Rc::clone(&callbacks),
+                aborts: Rc::clone(&aborts),
+            })
+        };
+        let failing_member = usize::from(phase == FailurePhase::Begin);
+        let mut succession = Succession::new(
+            &mut stage,
+            [("a", a), ("b", b), ("c", c)]
+                .into_iter()
+                .enumerate()
+                .map(|(index, (id, mob))| {
+                    member(
+                        mob,
+                        id,
+                        (index == failing_member).then_some((failing, phase)),
+                    )
+                })
+                .collect(),
+        )
+        .expect("succession");
+        let root = succession.group();
+        succession.begin(&mut stage).expect("first member begins");
+        callbacks.borrow_mut().clear();
+        match phase {
+            FailurePhase::Begin | FailurePhase::Finish => succession.interpolate(&mut stage, 1.0),
+            FailurePhase::Interpolate => succession.interpolate(&mut stage, 0.1),
+            FailurePhase::Update => succession.update_mobjects(&mut stage, 0.25),
+        }
+        let expected_callbacks = if phase == FailurePhase::Begin {
+            vec![("a", FailurePhase::Finish), ("b", FailurePhase::Begin)]
+        } else {
+            vec![("a", phase)]
+        };
+        assert_eq!(*callbacks.borrow(), expected_callbacks);
+        let failure = stage
+            .updater_error()
+            .expect("retained native failure")
+            .clone();
+        assert_eq!(
+            succession.deferred_error(),
+            Some(AnimError::Updater(failure))
+        );
+        assert_eq!(stage.tracker_value(failing), Some(1.0));
+
+        let partial = stage.get_center(a);
+        succession.interpolate(&mut stage, 0.0);
+        succession.interpolate(&mut stage, 1.0);
+        succession.update_mobjects(&mut stage, 1.0);
+        succession.finish(&mut stage);
+        succession.abort(&mut stage);
+        assert_eq!(*callbacks.borrow(), expected_callbacks);
+        assert_eq!(
+            stage.get_center(a),
+            partial,
+            "no failed endpoint checkpoint replays"
+        );
+        assert_eq!(
+            *aborts.borrow(),
+            match phase {
+                FailurePhase::Begin => vec!["b"],
+                FailurePhase::Finish => vec![],
+                FailurePhase::Interpolate | FailurePhase::Update => vec!["a"],
+            },
+            "the unfinished attempted member aborts, and unbegun members stay untouched"
+        );
+        for mob in stage.family(root) {
+            assert!(!stage.is_animating(mob));
+            assert!(!stage.is_updating_suspended(mob));
+        }
+    }
+}
+
+#[test]
+fn composed_default_finish_releases_a_failing_resumed_updater_once() {
+    use fmn_mobject::UpdaterError;
+
+    for successive in [false, true] {
+        let mut stage = Stage::new();
+        let a = square(&mut stage);
+        let b = square(&mut stage);
+        stage
+            .add_try_updater(
+                a,
+                |_, _| Err(UpdaterError::callback("finish probe", "resume refused")),
+                false,
+            )
+            .expect("fallible updater");
+        let log: Log = Rc::new(RefCell::new(Vec::new()));
+        let mut first = Probe::new(a, "a", 1.0, &log);
+        first.state.config.suspend_mobject_updating = true;
+        let members: Vec<Box<dyn Animation>> =
+            vec![Box::new(first), Probe::boxed(b, "b", 1.0, &log)];
+        let mut composition: Box<dyn Animation> = if successive {
+            Box::new(Succession::new(&mut stage, members).expect("succession"))
+        } else {
+            Box::new(AnimationGroup::new(&mut stage, members).expect("group"))
+        };
+        let root = composition.state().mobject();
+        composition.begin(&mut stage).expect("begin");
+        log.borrow_mut().clear();
+
+        // Probe uses the real default finish: endpoint, resume-updater pass,
+        // and teardown. The parent must not abort that same lifetime again.
+        composition.finish(&mut stage);
+        assert_eq!(stage.updater_error().expect("resume failed").mobject, a);
+        composition.abort(&mut stage);
+        assert_eq!(
+            log.borrow()
+                .iter()
+                .filter(|event| **event == Event::Finish("a"))
+                .count(),
+            1,
+            "the default finish already owns the failing member's teardown"
+        );
+        assert!(
+            alphas_of(&log, "b").is_empty(),
+            "later members never land on an endpoint"
+        );
+        assert!(
+            !log.borrow().contains(&Event::Begin("b")),
+            "succession never advances"
+        );
+        for mob in stage.family(root) {
+            assert!(!stage.is_animating(mob));
+            assert!(!stage.is_updating_suspended(mob));
+        }
+    }
+}
+
+struct CleanupFailureProbe {
+    probe: Probe,
+    trigger: Mob,
+    calls: Rc<RefCell<usize>>,
+}
+
+impl Animation for CleanupFailureProbe {
+    fn state(&self) -> &AnimState {
+        self.probe.state()
+    }
+
+    fn state_mut(&mut self) -> &mut AnimState {
+        self.probe.state_mut()
+    }
+
+    fn interpolate_submobject(&mut self, _stage: &mut Stage, _mobs: &[Mob], _alpha: f64) {}
+
+    fn clean_up_from_scene(&mut self, stage: &mut Stage) {
+        *self.calls.borrow_mut() += 1;
+        stage.update_mobject(self.trigger, 0.0);
+    }
+}
+
+#[test]
+fn nested_cleanup_stops_before_later_removers_after_an_updater_failure() {
+    use fmn_mobject::UpdaterError;
+
+    let mut stage = Stage::new();
+    let trigger = stage.add_value_tracker(0.0);
+    stage
+        .add_try_updater(
+            trigger,
+            |_, _| Err(UpdaterError::callback("cleanup probe", "updater refused")),
+            false,
+        )
+        .expect("fallible updater");
+    let log: Log = Rc::new(RefCell::new(Vec::new()));
+    let calls = Rc::new(RefCell::new(0));
+    let a = square(&mut stage);
+    let b = square(&mut stage);
+    let c = square(&mut stage);
+    let inner = AnimationGroup::new(
+        &mut stage,
+        vec![
+            Box::new(CleanupFailureProbe {
+                probe: Probe::new(a, "a", 1.0, &log),
+                trigger,
+                calls: Rc::clone(&calls),
+            }),
+            Box::new(Probe::new(b, "b", 1.0, &log).remover()),
+        ],
+    )
+    .expect("inner");
+    let mut outer = AnimationGroup::new(
+        &mut stage,
+        vec![
+            Box::new(inner),
+            Box::new(Probe::new(c, "c", 1.0, &log).remover()),
+        ],
+    )
+    .expect("outer");
+    stage.add_to_scene(outer.group()).expect("scene");
+    let roots = stage.roots().to_vec();
+
+    outer.clean_up_from_scene(&mut stage);
+    let failure = stage.updater_error().expect("cleanup failed").clone();
+    assert_eq!(failure.mobject, trigger);
+    assert_eq!(
+        outer.deferred_error(),
+        Some(AnimError::Updater(failure.clone()))
+    );
+    outer.clean_up_from_scene(&mut stage);
+    stage.take_updater_error().expect("acknowledge");
+    outer.clean_up_from_scene(&mut stage);
+    assert_eq!(
+        *calls.borrow(),
+        1,
+        "pending or retained failures block cleanup entry"
+    );
+    assert_eq!(stage.roots(), roots.as_slice());
+    assert!(
+        !log.borrow()
+            .iter()
+            .any(|event| matches!(event, Event::Removed(_)))
+    );
+    assert_eq!(outer.deferred_error(), Some(AnimError::Updater(failure)));
+}

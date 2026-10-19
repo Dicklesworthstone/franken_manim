@@ -38,7 +38,8 @@ pub use fmn_library::{
     v_highlight, vector, vectorized_point,
 };
 pub use fmn_mobject::{
-    AnimBuilder, AnimateArgs, AnimateError, Mob, Mobject, PosTarget, StageError,
+    AnimBuilder, AnimateArgs, AnimateError, Mob, Mobject, PosTarget, StageError, UpdaterError,
+    UpdaterFailure, UpdaterId,
 };
 pub use fmn_scene::{
     CaptureReason, IntegrationError, NullSceneSink, PlayOverrides, RuntimeConfig, Scene,

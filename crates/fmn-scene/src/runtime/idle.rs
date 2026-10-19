@@ -61,6 +61,7 @@ impl Scene {
         sink: &mut dyn SceneSink,
     ) -> Result<(), SceneError> {
         self.ensure_ready()?;
+        self.ensure_updaters_ready()?;
         if !Rc::ptr_eq(&frame.owner, &self.idle_owner)
             || frame.sequence != self.idle_sequence
             || frame.time != self.clock.now()
@@ -71,7 +72,9 @@ impl Scene {
             ));
         }
         self.stage.update_at_time(frame.dt(), frame.time.to_f64());
+        self.ensure_updaters_ready()?;
         self.dispatch_pending_events()?;
+        self.ensure_updaters_ready()?;
         sink.capture(
             CaptureReason::PresenterHold,
             FramePacket::freeze_barrier(&self.stage, &self.clock, &self.rng_root),
@@ -220,5 +223,150 @@ mod tests {
         assert!(scene.restore_state_bytes(b"not a scene state").is_err());
         scene.complete_idle_frame(frame, &mut sink).unwrap();
         assert_eq!(sink.frames.len(), 1);
+    }
+
+    fn updater_refusal() -> fmn_mobject::UpdaterError {
+        fmn_mobject::UpdaterError::Callback {
+            operation: "live geometry",
+            detail: "regeneration failed".to_owned(),
+        }
+    }
+
+    #[test]
+    fn idle_failure_survives_restore_and_requires_explicit_acknowledgment() {
+        let mut scene = Scene::default();
+        let failing = scene.add_mobject(Mobject::new()).unwrap();
+        let later = scene.add_mobject(Mobject::new()).unwrap();
+        let later_calls = Rc::new(RefCell::new(0));
+        let observed = Rc::clone(&later_calls);
+        let updater = scene
+            .stage_mut()
+            .add_try_dt_updater(failing, |_, _, _| Err(updater_refusal()), false)
+            .unwrap();
+        scene
+            .stage_mut()
+            .add_updater(later, move |_, _| *observed.borrow_mut() += 1, false)
+            .unwrap();
+        let before = scene.state().unwrap();
+        let mut sink = Sink::default();
+        let frame = scene.prepare_idle_frame(&mut sink).unwrap();
+        let error = scene.complete_idle_frame(frame, &mut sink).unwrap_err();
+        assert!(matches!(
+            error,
+            SceneError::Animation(AnimError::Updater(_))
+        ));
+        let failure = scene.stage().updater_error().unwrap().clone();
+        assert_eq!(failure.mobject, failing);
+        assert_eq!(failure.updater, updater);
+        assert_eq!(*later_calls.borrow(), 0);
+        assert!(sink.frames.is_empty());
+        assert_eq!(scene.time().frames(), 1);
+        assert_eq!(scene.play_count(), 0);
+
+        scene.restore_state(&before).unwrap();
+        assert_eq!(scene.stage().updater_error(), Some(&failure));
+        scene.stage_mut().remove_updater(failing, updater);
+        assert!(scene.prepare_idle_frame(&mut sink).is_err());
+        assert_eq!(
+            scene.time().frames(),
+            0,
+            "refusal does not advance the restored clock"
+        );
+        assert_eq!(
+            scene.stage_mut().take_updater_error().unwrap(),
+            Some(failure)
+        );
+        let frame = scene.prepare_idle_frame(&mut sink).unwrap();
+        scene.complete_idle_frame(frame, &mut sink).unwrap();
+        assert_eq!(*later_calls.borrow(), 1);
+        assert_eq!(sink.frames.len(), 1);
+        assert_eq!(scene.play_count(), 0);
+    }
+
+    #[test]
+    fn idle_completion_refuses_a_native_failure_in_the_released_host_window() {
+        let mut scene = Scene::default();
+        let mob = scene.add_mobject(Mobject::new()).unwrap();
+        let mut sink = Sink::default();
+        let frame = scene.prepare_idle_frame(&mut sink).unwrap();
+        assert!(
+            scene
+                .stage_mut()
+                .add_try_updater(mob, |_, _| Err(updater_refusal()), true)
+                .is_err()
+        );
+        assert!(matches!(
+            scene.complete_idle_frame(frame, &mut sink),
+            Err(SceneError::Animation(AnimError::Updater(_)))
+        ));
+        assert!(sink.frames.is_empty());
+        assert_eq!(scene.time().frames(), 1);
+    }
+
+    #[test]
+    fn show_reports_updater_failure_without_capturing_or_advancing_time() {
+        let mut scene = Scene::default();
+        let mob = scene.add_mobject(Mobject::new()).unwrap();
+        scene
+            .stage_mut()
+            .add_try_updater(mob, |_, _| Err(updater_refusal()), false)
+            .unwrap();
+        let mut sink = Sink::default();
+        assert!(matches!(
+            scene.show(&mut sink),
+            Err(SceneError::Animation(AnimError::Updater(_)))
+        ));
+        assert!(sink.frames.is_empty());
+        assert_eq!(scene.time().frames(), 0);
+        assert!(scene.stage().updater_error().is_some());
+    }
+
+    #[test]
+    fn presenter_hold_reports_native_failure_before_capture_or_another_poll() {
+        let mut scene = Scene::new(
+            RuntimeConfig {
+                fps: 7,
+                presenter_mode: true,
+                ..RuntimeConfig::default()
+            },
+            0,
+        )
+        .unwrap();
+        let mob = scene.add_mobject(Mobject::new()).unwrap();
+        scene
+            .stage_mut()
+            .add_try_dt_updater(
+                mob,
+                |_, _, dt| {
+                    if dt > 0.0 {
+                        Err(updater_refusal())
+                    } else {
+                        Ok(())
+                    }
+                },
+                false,
+            )
+            .unwrap();
+        let polls = Rc::new(RefCell::new(0));
+        let observed = Rc::clone(&polls);
+        scene.set_hold_controller(move |kind, _: &Stage, _| {
+            if kind == HoldKind::Initial {
+                return Ok(HoldDecision::Release);
+            }
+            *observed.borrow_mut() += 1;
+            Ok(if *observed.borrow() == 1 {
+                HoldDecision::Continue
+            } else {
+                HoldDecision::Release
+            })
+        });
+        let mut sink = Sink::default();
+        assert!(matches!(
+            scene.wait(None, &mut sink),
+            Err(SceneError::Animation(AnimError::Updater(_)))
+        ));
+        assert_eq!(*polls.borrow(), 1);
+        assert_eq!(scene.time().frames(), 1);
+        assert!(sink.frames.is_empty());
     }
 }

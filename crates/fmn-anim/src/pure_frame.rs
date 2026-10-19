@@ -13,6 +13,7 @@ use fmn_core::rate::CatalogRate;
 use fmn_core::rng::{Pcg64Dxsm, RngRoot};
 use fmn_mobject::{FrozenRenderState, Mob, Stage};
 
+use crate::animation::check_updater_error;
 use crate::{
     AnimError, AnimState, Animation, FrameSample, FrameSegment, OpenSegment, OpenWait, RateFunc,
     RationalFrameClock, RationalTime, Rotating, SegmentKind, SegmentReport, ShowPartial, Transform,
@@ -314,6 +315,7 @@ impl PureSegment {
             .as_ref()
             .filter(|_| {
                 report.purity.is_pure()
+                    && stage.updater_error().is_none()
                     && open.is_at_begin()
                     && report.n_frames > 0
                     && crate::classify_play(stage, animations).is_pure()
@@ -393,6 +395,7 @@ impl PureSegment {
             .as_ref()
             .filter(|_| {
                 open.is_at_begin()
+                    && stage.updater_error().is_none()
                     && report.purity.is_pure()
                     && report.n_frames > 0
                     && crate::classify_wait(stage, false).is_pure()
@@ -436,6 +439,7 @@ impl PureSegment {
         clock: &mut RationalFrameClock,
         open: OpenWait,
     ) -> Result<SegmentReport, AnimError> {
+        check_updater_error(stage)?;
         if self.data.kind != SegmentKind::Wait
             || !open.is_at_begin()
             || !open.report().purity.is_pure()
@@ -502,6 +506,10 @@ impl PureSegment {
         animations: &mut [Box<dyn Animation>],
         open: OpenSegment,
     ) -> Result<SegmentReport, AnimError> {
+        if let Err(error) = check_updater_error(stage) {
+            let _report = crate::frame::abort_open_play(stage, animations, open);
+            return Err(error);
+        }
         if self.data.kind != SegmentKind::Play
             || !open.is_at_begin()
             || animations.len() != self.data.animations.len()
@@ -515,9 +523,14 @@ impl PureSegment {
             ));
         }
         let last = self.data.grid.end_time().to_f64();
-        for animation in animations.iter_mut() {
+        for index in 0..animations.len() {
+            let animation = &mut animations[index];
             let alpha = last / animation.state().config.run_time;
             animation.interpolate(stage, alpha);
+            if let Err(error) = check_updater_error(stage) {
+                let _report = crate::frame::abort_open_play(stage, animations, open);
+                return Err(error);
+            }
         }
         clock
             .advance_frames(self.frame_count())

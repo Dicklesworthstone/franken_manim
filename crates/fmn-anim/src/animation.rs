@@ -50,7 +50,9 @@
 
 use fmn_core::rate;
 use fmn_mobject::animate::{AnimateArgs, AnimateError, IntoAnimate};
-use fmn_mobject::{AnimBuilder, BuiltAnimate, Mob, Stage, StageError};
+use fmn_mobject::{
+    AnimBuilder, BuiltAnimate, Mob, Stage, StageError, UpdaterError, UpdaterFailure,
+};
 
 /// The Reference's `DEFAULT_ANIMATION_RUN_TIME`.
 pub const DEFAULT_ANIMATION_RUN_TIME: f64 = 1.0;
@@ -368,6 +370,9 @@ pub enum AnimError {
     /// The Stage refused an alignment or copy operation (malformed point
     /// run, mixed schemas).
     Stage(StageError),
+    /// A native scene updater refused its sample. The Stage retains the
+    /// first failure until the caller explicitly acknowledges it.
+    Updater(UpdaterFailure),
     /// A composition operator (§9.4) was handed no members. The Reference
     /// indexes `args[0]` and raises `IndexError`; `Succession.begin`
     /// asserts. An empty composition has no timeline to derive, so it is
@@ -448,6 +453,7 @@ impl std::fmt::Display for AnimError {
                 write!(f, "animation requires a mobject with points")
             }
             Self::Stage(e) => write!(f, "stage refused the operation: {e}"),
+            Self::Updater(e) => write!(f, "scene updater failed: {e}"),
             Self::EmptyComposition => {
                 write!(f, "a composition needs at least one animation")
             }
@@ -491,6 +497,7 @@ impl std::error::Error for AnimError {
         match self {
             Self::Builder(e) => Some(e),
             Self::Clock(e) => Some(e),
+            Self::Updater(e) => Some(e),
             _ => None,
         }
     }
@@ -499,6 +506,32 @@ impl std::error::Error for AnimError {
 impl From<StageError> for AnimError {
     fn from(e: StageError) -> Self {
         Self::Stage(e)
+    }
+}
+
+impl From<UpdaterError> for AnimError {
+    fn from(error: UpdaterError) -> Self {
+        match error {
+            UpdaterError::Stage(error) => Self::Stage(error),
+            UpdaterError::Callback { operation, detail } => {
+                Self::UpdateFailed { operation, detail }
+            }
+        }
+    }
+}
+
+impl From<UpdaterFailure> for AnimError {
+    fn from(error: UpdaterFailure) -> Self {
+        Self::Updater(error)
+    }
+}
+
+/// Observe the Stage's first callback failure without acknowledging it.
+/// Every serial callback boundary must pass this check before further work.
+pub(crate) fn check_updater_error(stage: &Stage) -> Result<(), AnimError> {
+    match stage.updater_error() {
+        Some(error) => Err(error.clone().into()),
+        None => Ok(()),
     }
 }
 
@@ -736,6 +769,7 @@ pub trait Animation {
     /// [`AnimError::StaleHandle`] for a dead preflight handle, or
     /// [`AnimError::InvalidTimeSpan`] for `end <= start`.
     fn validate_begin(&self, stage: &Stage) -> Result<(), AnimError> {
+        check_updater_error(stage)?;
         validate_begin_state(self.state(), stage, self.preflight_mobjects())
     }
 
@@ -750,7 +784,10 @@ pub trait Animation {
     /// [`AnimError::InvalidTimeSpan`], [`AnimError::StaleHandle`], and
     /// whatever [`Animation::setup`] reports.
     fn begin(&mut self, stage: &mut Stage) -> Result<(), AnimError> {
-        self.setup(stage)?;
+        check_updater_error(stage)?;
+        let setup = self.setup(stage);
+        check_updater_error(stage)?;
+        setup?;
         // 1. time_span widens run_time to cover its end (the Reference
         //    mutates run_time here, and get_run_time repeats the max).
         if let Some((start, end)) = self.state().config.time_span {
@@ -767,8 +804,9 @@ pub trait Animation {
         }
         stage.set_animating_status(mobject, true, true);
         // 3. The starting copy.
-        let starting = self.create_starting_mobject(stage)?;
-        self.state_mut().starting_mobject = Some(starting);
+        let starting = self.create_starting_mobject(stage);
+        check_updater_error(stage)?;
+        self.state_mut().starting_mobject = Some(starting?);
         // 4. Optional updater suspension (remembering whether the mobject
         //    was updating, so finish only resumes what begin paused).
         if self.state().config.suspend_mobject_updating {
@@ -787,12 +825,13 @@ pub trait Animation {
         //    alpha-zero frame is ever emitted; this is where alpha zero
         //    happens instead).
         self.interpolate(stage, 0.0);
+        check_updater_error(stage)?;
         // 7. Post-begin subclass hook — the Reference's Transform locks
         //    matching data *after* `super().begin()` (transform.py:54);
         //    this slot keeps that order with the canonical sequence
         //    written once.
         self.after_begin(stage);
-        Ok(())
+        check_updater_error(stage)
     }
 
     /// Subclass slot run at the end of [`Animation::begin`], after the
@@ -807,8 +846,16 @@ pub trait Animation {
     /// removal for removers is the runtime's (`clean_up_from_scene`,
     /// fm-5xm) via [`Animation::is_remover`].
     fn finish(&mut self, stage: &mut Stage) {
+        if stage.updater_error().is_some() {
+            self.abort(stage);
+            return;
+        }
         let final_alpha = self.state().config.final_alpha_value;
         self.interpolate(stage, final_alpha);
+        if stage.updater_error().is_some() {
+            self.abort(stage);
+            return;
+        }
         let mobject = self.state().mobject();
         stage.set_animating_status(mobject, false, true);
         if self.state().config.suspend_mobject_updating && self.state().mobject_was_updating {
@@ -852,6 +899,9 @@ pub trait Animation {
     /// `interpolate_mobject`). `alpha` is the raw segment alpha — the
     /// pipeline (`time_span` → lag → rate) applies inside, once.
     fn interpolate(&mut self, stage: &mut Stage, alpha: f64) {
+        if stage.updater_error().is_some() {
+            return;
+        }
         let state = self.state();
         let families = state.families.clone();
         let run_time = state.config.run_time;
@@ -863,6 +913,9 @@ pub trait Animation {
         for (index, mobs) in families.iter().enumerate() {
             let sa = sub_alpha(spanned, index, num, lag_ratio, &rate_func);
             self.interpolate_submobject(stage, mobs, sa);
+            if stage.updater_error().is_some() {
+                break;
+            }
         }
     }
 
@@ -872,6 +925,9 @@ pub trait Animation {
     /// (fm-x79).
     fn update_mobjects(&mut self, stage: &mut Stage, dt: f64) {
         for mob in self.mobjects_to_update() {
+            if stage.updater_error().is_some() {
+                break;
+            }
             stage.update_mobject(mob, dt);
         }
     }
