@@ -5,9 +5,7 @@
 //! and the R20 demotion — their segments never frame-parallelize.
 //!
 //! `numbers.py`'s `ChangingDecimal`/`ChangeDecimalToValue`/`CountInFrom`
-//! are this mechanism pointed at `DecimalNumber.set_value` — they land
-//! with the de-TeX'd `DecimalNumber` (fmn-library, §12.4); the seam is
-//! recorded on the fm-cye bead.
+//! use this same mechanism, including its fallible callback boundary.
 
 use fmn_core::types::Vec3;
 use fmn_mobject::{Mob, Stage};
@@ -15,7 +13,7 @@ use fmn_mobject::{Mob, Stage};
 use crate::animation::{AnimConfig, AnimError, AnimState, Animation, time_spanned_alpha};
 
 /// The boxed update closure: `(stage, mobject, true_alpha)`.
-type UpdateClosure = Box<dyn FnMut(&mut Stage, Mob, f64)>;
+type UpdateClosure = Box<dyn FnMut(&mut Stage, Mob, f64) -> Result<(), AnimError>>;
 
 /// `UpdateFromFunc` (update.py:13) and, alpha-aware,
 /// `UpdateFromAlphaFunc` (update.py:37): run a stage closure against the
@@ -24,6 +22,7 @@ pub struct UpdateFromFunc {
     state: AnimState,
     update: UpdateClosure,
     alpha_aware: bool,
+    error: Option<AnimError>,
 }
 
 impl std::fmt::Debug for UpdateFromFunc {
@@ -31,6 +30,7 @@ impl std::fmt::Debug for UpdateFromFunc {
         f.debug_struct("UpdateFromFunc")
             .field("state", &self.state)
             .field("alpha_aware", &self.alpha_aware)
+            .field("error", &self.error)
             .finish_non_exhaustive()
     }
 }
@@ -39,6 +39,35 @@ impl UpdateFromFunc {
     /// `UpdateFromFunc(mobject, update_function)`.
     #[must_use]
     pub fn new(mobject: Mob, update: impl FnMut(&mut Stage, Mob) + 'static) -> Self {
+        let mut update = update;
+        Self::try_new(mobject, move |stage, mob| {
+            update(stage, mob);
+            Ok(())
+        })
+    }
+
+    /// `UpdateFromAlphaFunc(mobject, update_function)`: the closure also
+    /// receives `rate(time_spanned(α))` (update.py:50's `true_alpha`).
+    #[must_use]
+    pub fn new_alpha(mobject: Mob, update: impl FnMut(&mut Stage, Mob, f64) + 'static) -> Self {
+        let mut update = update;
+        Self::try_new_alpha(mobject, move |stage, mob, alpha| {
+            update(stage, mob, alpha);
+            Ok(())
+        })
+    }
+
+    /// An update callback that can refuse its sample without panicking.
+    ///
+    /// The first error is retained by [`Animation::deferred_error`]. No
+    /// further samples call the callback until a new `begin`. This does not
+    /// roll back arbitrary callback side effects; prepare fallible work before
+    /// installing it into the stage. The callback stays on the scene owner.
+    #[must_use]
+    pub fn try_new(
+        mobject: Mob,
+        update: impl FnMut(&mut Stage, Mob) -> Result<(), AnimError> + 'static,
+    ) -> Self {
         let mut update = update;
         Self {
             state: AnimState::new(
@@ -50,13 +79,18 @@ impl UpdateFromFunc {
             ),
             update: Box::new(move |stage, mob, _| update(stage, mob)),
             alpha_aware: false,
+            error: None,
         }
     }
 
-    /// `UpdateFromAlphaFunc(mobject, update_function)`: the closure also
-    /// receives `rate(time_spanned(α))` (update.py:50's `true_alpha`).
+    /// Alpha-aware fallible update, using the same time-span and rate pipeline
+    /// as [`Self::new_alpha`]. Errors follow [`Self::try_new`]'s first-failure
+    /// rule; this remains effectful and is never submitted to pure workers.
     #[must_use]
-    pub fn new_alpha(mobject: Mob, update: impl FnMut(&mut Stage, Mob, f64) + 'static) -> Self {
+    pub fn try_new_alpha(
+        mobject: Mob,
+        update: impl FnMut(&mut Stage, Mob, f64) -> Result<(), AnimError> + 'static,
+    ) -> Self {
         Self {
             state: AnimState::new(
                 mobject,
@@ -67,6 +101,7 @@ impl UpdateFromFunc {
             ),
             update: Box::new(update),
             alpha_aware: true,
+            error: None,
         }
     }
 
@@ -92,12 +127,16 @@ impl Animation for UpdateFromFunc {
         if !stage.contains(mobject) {
             return Err(AnimError::StaleHandle(mobject));
         }
+        self.error = None;
         Ok(())
     }
 
     /// update.py:33/49: the plain variant ignores alpha entirely; the
     /// alpha variant passes `rate(time_spanned(α))`. Lag never applies.
     fn interpolate(&mut self, stage: &mut Stage, alpha: f64) {
+        if self.error.is_some() {
+            return;
+        }
         let true_alpha = if self.alpha_aware {
             let config = &self.state.config;
             config
@@ -106,7 +145,11 @@ impl Animation for UpdateFromFunc {
         } else {
             alpha
         };
-        (self.update)(stage, self.state.mobject(), true_alpha);
+        self.error = (self.update)(stage, self.state.mobject(), true_alpha).err();
+    }
+
+    fn deferred_error(&self) -> Option<AnimError> {
+        self.error.clone()
     }
 
     fn interpolate_submobject(&mut self, _stage: &mut Stage, _mobs: &[Mob], _sub_alpha: f64) {
@@ -190,5 +233,99 @@ impl Animation for MaintainPositionRelativeTo {
 
     fn interpolate_submobject(&mut self, _stage: &mut Stage, _mobs: &[Mob], _sub_alpha: f64) {
         // Unreachable: interpolate is overridden and never zips families.
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::animation::{AnimationSignature, RateFunc};
+    use fmn_mobject::Mobject;
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+
+    #[test]
+    fn fallible_update_retains_first_failure_and_stops_callback_side_effects() {
+        let mut stage = Stage::new();
+        let mob = stage.add(Mobject::new());
+        let calls = Rc::new(Cell::new(0));
+        let observed = Rc::clone(&calls);
+        let expected = AnimError::UpdateFailed {
+            operation: "fixture",
+            detail: "layout refused".to_owned(),
+        };
+        let failure = expected.clone();
+        let mut animation = UpdateFromFunc::try_new_alpha(mob, move |_, _, alpha| {
+            observed.set(observed.get() + 1);
+            if alpha >= 0.5 {
+                Err(failure.clone())
+            } else {
+                Ok(())
+            }
+        })
+        .with_config(AnimConfig {
+            rate_func: RateFunc::linear(),
+            ..AnimConfig::default()
+        });
+        animation.begin(&mut stage).unwrap();
+        animation.interpolate(&mut stage, 0.25);
+        assert!(animation.deferred_error().is_none());
+        animation.interpolate(&mut stage, 0.5);
+        assert_eq!(animation.deferred_error(), Some(expected.clone()));
+        let at_failure = calls.get();
+        animation.interpolate(&mut stage, 0.75);
+        animation.finish(&mut stage);
+        assert_eq!(calls.get(), at_failure);
+        assert_eq!(animation.deferred_error(), Some(expected));
+        assert_eq!(animation.effect_signature(), AnimationSignature::Unclassified);
+        assert!(animation.freeze_interpolation().is_none());
+        animation.begin(&mut stage).unwrap();
+        assert!(animation.deferred_error().is_none());
+        assert_eq!(calls.get(), at_failure + 1);
+        animation.abort(&mut stage);
+    }
+
+    #[test]
+    fn fallible_alpha_applies_time_span_and_rate_exactly_once() {
+        let mut stage = Stage::new();
+        let mob = stage.add(Mobject::new());
+        let samples = Rc::new(RefCell::new(Vec::new()));
+        let observed = Rc::clone(&samples);
+        let mut animation = UpdateFromFunc::try_new_alpha(mob, move |_, _, alpha| {
+            observed.borrow_mut().push(alpha);
+            Ok(())
+        })
+        .with_config(AnimConfig {
+            run_time: 4.0,
+            time_span: Some((1.0, 3.0)),
+            rate_func: RateFunc::linear().scaled(0.5),
+            lag_ratio: 1.0,
+            ..AnimConfig::default()
+        });
+        animation.begin(&mut stage).unwrap();
+        for alpha in [0.25, 0.5, 0.75, 1.0] {
+            animation.interpolate(&mut stage, alpha);
+        }
+        assert_eq!(*samples.borrow(), [0.0, 0.0, 0.25, 0.5, 0.5]);
+        assert!(animation.deferred_error().is_none());
+    }
+
+    #[test]
+    fn fallible_plain_update_has_the_existing_begin_callback_count() {
+        let mut stage = Stage::new();
+        let mob = stage.add(Mobject::new());
+        let calls = Rc::new(Cell::new(0));
+        let observed = Rc::clone(&calls);
+        let mut animation = UpdateFromFunc::try_new(mob, move |_, target| {
+            assert_eq!(target, mob);
+            observed.set(observed.get() + 1);
+            Err(AnimError::EmptyMobject)
+        });
+        animation.begin(&mut stage).unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(animation.deferred_error(), Some(AnimError::EmptyMobject));
+        animation.interpolate(&mut stage, 1.0);
+        assert_eq!(calls.get(), 1);
+        animation.abort(&mut stage);
     }
 }

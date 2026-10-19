@@ -403,6 +403,15 @@ pub enum AnimError {
     /// updater-owned history. Those effects cannot be undone by restoring
     /// mobject content; use Timeline seek's checkpoint-and-replay route.
     StatefulSuccessionRewind,
+    /// An effectful animation callback refused a sample. The first failure
+    /// is retained through the existing deferred-error boundary; later
+    /// interpolation must not call the failed callback again.
+    UpdateFailed {
+        /// The native operation that refused the sample.
+        operation: &'static str,
+        /// The original operation's diagnostic, without a panic or fallback.
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for AnimError {
@@ -469,6 +478,9 @@ impl std::fmt::Display for AnimError {
             ),
             Self::InvalidFramePhase(message) => {
                 write!(f, "invalid resumable frame phase: {message}")
+            }
+            Self::UpdateFailed { operation, detail } => {
+                write!(f, "animation update {operation} failed: {detail}")
             }
         }
     }
@@ -927,10 +939,9 @@ pub trait Animation {
     }
 
     /// A failure recorded during `interpolate`, which has no error channel.
-    /// Only the composition operators that begin members just in time
-    /// (§9.4's `Succession`) can produce one; the drivers surface it at the
-    /// end of the segment so a mid-play failure is named rather than
-    /// silently frozen. `None` for every leaf animation.
+    /// Composition operators and fallible update callbacks retain their first
+    /// error here so drivers can refuse the failed segment instead of treating
+    /// a frozen display as successful playback. The default is infallible.
     fn deferred_error(&self) -> Option<AnimError> {
         None
     }
