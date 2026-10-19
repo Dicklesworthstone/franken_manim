@@ -361,7 +361,9 @@ where
         let selector = TextSelector::from_py(&pair.get_item(0)?, source, budget)?;
         result.push((
             selector,
-            pair.get_item(1)?.extract::<T>().map_err(Into::into)?,
+            pair.get_item(1)?
+                .extract::<T>()
+                .map_err(|error| -> PyErr { error.into() })?,
         ));
     }
     Ok(result)

@@ -1690,6 +1690,100 @@ mod private_boundary {
 
     #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
     #[test]
+    fn real_hardware_probe_succeeds_and_is_recorded_in_encode_provenance() {
+        let (dir, _gate) = scratch("real-hardware-probe");
+        let (tool, runner) = real_tool(&dir);
+        let caps = EncoderCapabilities::probe(&tool, &runner).unwrap();
+        assert!(caps.offers("h264_nvenc"));
+        let destination = dir.join("hardware.mp4");
+        let worker_destination = destination.clone();
+        let (completed, result) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let probes = caps.probe_hardware(&tool, &runner).unwrap();
+            let limits = JobLimits {
+                timeout: Duration::from_secs(2),
+                ..JobLimits::default()
+            };
+            let boundary = Boundary::new(tool, Arc::new(runner), limits, dir).unwrap();
+            let report = boundary
+                .encode(
+                    &job(
+                        WireFormat::Nv12,
+                        Container::Mp4,
+                        EncoderChoice::Named("h264_nvenc".to_owned()),
+                    ),
+                    vec![7_u8; WireFormat::Nv12.frame_bytes(64, 36)],
+                    &caps,
+                    &worker_destination,
+                )
+                .unwrap();
+            completed.send((probes, report)).unwrap();
+        });
+        let (probes, report) = result
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the real hardware trial and encode must complete within their budgets");
+        worker.join().unwrap();
+
+        assert_eq!(probes.len(), 1);
+        assert_eq!(probes[0].encoder, "h264_nvenc");
+        assert!(probes[0].available);
+        assert!(probes[0].detail.is_none());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"FAKEVIDEO");
+        assert_eq!(report.artifact_bytes, 9);
+        assert_eq!(report.artifact_digest, sha256(b"FAKEVIDEO"));
+        assert_eq!(report.destination, destination);
+        assert_eq!(report.invocations.len(), 1);
+        let provenance = &report.invocations[0].provenance;
+        assert_eq!(provenance.encoder.as_deref(), Some("h264_nvenc"));
+        assert_eq!(provenance.hardware_encoder_probe.as_ref(), probes.first());
+    }
+
+    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[test]
+    fn real_hardware_probe_preserves_missing_driver_refusal_before_stdin_drain() {
+        let (dir, _gate) = scratch("real-hardware-probe-missing-driver");
+        set_native_fixture_mode(&dir, "hardware-unavailable");
+        let (tool, runner) = real_tool(&dir);
+        let caps = EncoderCapabilities::probe(&tool, &runner).unwrap();
+        assert!(caps.offers("h264_nvenc"), "the compiled encoder is listed");
+        let destination = dir.join("existing.mp4");
+        std::fs::write(&destination, b"existing artifact").unwrap();
+        let worker_destination = destination.clone();
+        let limits = JobLimits {
+            timeout: Duration::from_secs(2),
+            ..JobLimits::default()
+        };
+        let boundary = Boundary::new(tool, Arc::new(runner), limits, dir).unwrap();
+        let (completed, result) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let outcome = boundary.encode(
+                &job(
+                    WireFormat::Nv12,
+                    Container::Mp4,
+                    EncoderChoice::Named("h264_nvenc".to_owned()),
+                ),
+                vec![7_u8; WireFormat::Nv12.frame_bytes(64, 36)],
+                &caps,
+                &worker_destination,
+            );
+            completed.send(outcome).unwrap();
+        });
+        let outcome = result
+            .recv_timeout(Duration::from_secs(10))
+            .expect("an early hardware exit must not block while streaming probe stdin");
+        worker.join().unwrap();
+
+        let error = outcome.expect_err("a missing driver refuses the production encode");
+        assert!(matches!(
+            error,
+            BoundaryError::UnusableEncoder { requested, detail }
+                if requested == "h264_nvenc" && detail == "Cannot load libcuda.so.1"
+        ));
+        assert_eq!(std::fs::read(&destination).unwrap(), b"existing artifact");
+    }
+
+    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[test]
     fn transient_source_swap_cannot_select_the_version_probe_executable() {
         let (dir, _gate) = scratch("transient-version-substitution");
         let source = copy_native_ffmpeg(&dir, "fake-ffmpeg");

@@ -5,6 +5,7 @@
 
 use fmn_core::color::Srgb;
 use fmn_text::layout::BASELINE_SKIP;
+use fmn_text::maps::{SourceSelector, SourceStyle};
 use fmn_text::{
     Align, FontBook, LineBreaker, StyleMaps, TextError, TextLayout, TextRequest, glyph_quadpath,
     layout_text,
@@ -522,6 +523,115 @@ fn t2g_sweeps_a_gradient_across_the_occurrence() {
     assert!(last.r > 0.99, "last stop white");
     let mid = l.glyphs[1].fill.expect("gradient fill");
     assert!(mid.r > 0.05 && mid.r < 0.95, "interior interpolates");
+}
+
+#[test]
+fn source_ranges_compose_with_literal_styles_without_losing_markup_or_unicode() {
+    let book = book();
+    let source = "é<b>ABA</b>é";
+    let last_a = source.rfind('A').unwrap();
+    let last_range = [(last_a, last_a + 1)];
+    let styles = [
+        SourceStyle {
+            bold: Some(false),
+            ..SourceStyle::new(SourceSelector::Literal("A"))
+        },
+        SourceStyle {
+            family: Some("IBM Plex Sans"),
+            bold: Some(true),
+            italic: Some(true),
+            ..SourceStyle::new(SourceSelector::Ranges(&last_range))
+        },
+    ];
+    let mut request = TextRequest::markup(source);
+    request.maps.source_styles = &styles;
+    let layout = lay(&book, &request);
+    let glyphs = &layout.glyphs;
+    assert_eq!(glyphs.len(), 5);
+    assert_eq!(glyphs[0].span, (0, 2));
+    assert!(!glyphs[1].face.key.bold);
+    assert!(glyphs[2].face.key.bold);
+    assert_eq!(glyphs[3].span, last_range[0]);
+    assert_eq!(glyphs[3].face.family, "IBM Plex Sans");
+    assert!(glyphs[3].face.key.bold && glyphs[3].face.key.italic);
+    assert!(!glyphs[4].face.key.bold);
+    assert_eq!(layout.select(last_range[0]), [3]);
+}
+
+#[test]
+fn resolved_styles_preserve_the_existing_native_map_layout_and_paint() {
+    let book = book();
+    let stops = [Srgb::from_rgb8(255, 0, 0), Srgb::from_rgb8(0, 0, 255)];
+    let families = [("B", "IBM Plex Sans")];
+    let slants = [("B", true)];
+    let weights = [("A", true)];
+    let gradients: [(&str, &[Srgb]); 1] = [("AB", &stops)];
+    let mut old_request = TextRequest::plain("éABA");
+    old_request.maps = StyleMaps {
+        t2f: &families,
+        t2s: &slants,
+        t2w: &weights,
+        t2g: &gradients,
+        ..StyleMaps::default()
+    };
+    let old = lay(&book, &old_request);
+
+    let b = [(3, 4)];
+    let a = [(2, 3), (4, 5)];
+    let ab = [(2, 4)];
+    let styles = [
+        SourceStyle {
+            family: Some("IBM Plex Sans"),
+            italic: Some(true),
+            ..SourceStyle::new(SourceSelector::Ranges(&b))
+        },
+        SourceStyle {
+            bold: Some(true),
+            ..SourceStyle::new(SourceSelector::Ranges(&a))
+        },
+        SourceStyle {
+            gradient: &stops,
+            ..SourceStyle::new(SourceSelector::Ranges(&ab))
+        },
+    ];
+    let mut new_request = TextRequest::plain("éABA");
+    new_request.maps.source_styles = &styles;
+    let new = lay(&book, &new_request);
+    assert_eq!(old, new);
+}
+
+#[test]
+fn range_gradients_restart_per_occurrence_and_respect_whole_entities() {
+    let book = book();
+    let source = "<b>AB</b>&amp;<b>AB</b>";
+    let first = source.find("AB").unwrap();
+    let second = source.rfind("AB").unwrap();
+    let entity = source.find("&amp;").unwrap();
+    let ranges = [(first, first + 2), (second, second + 2)];
+    let partial_entity = [(entity + 1, entity + 4)];
+    let stops = [Srgb::from_rgb8(255, 0, 0), Srgb::from_rgb8(0, 0, 255)];
+    let styles = [
+        SourceStyle {
+            gradient: &stops,
+            ..SourceStyle::new(SourceSelector::Ranges(&ranges))
+        },
+        SourceStyle {
+            color: Some(Srgb::from_rgb8(0, 255, 0)),
+            family: Some("IBM Plex Sans"),
+            ..SourceStyle::new(SourceSelector::Ranges(&partial_entity))
+        },
+    ];
+    let mut request = TextRequest::markup(source);
+    request.maps.source_styles = &styles;
+    let layout = lay(&book, &request);
+    let glyphs = &layout.glyphs;
+    assert_eq!(glyphs.len(), 5);
+    for (index, color) in [(0, stops[0]), (1, stops[1]), (3, stops[0]), (4, stops[1])] {
+        assert_eq!(glyphs[index].fill, Some(color));
+    }
+    assert_eq!(glyphs[2].span, (entity, entity + 5));
+    assert_eq!(glyphs[2].face.family, "Computer Modern");
+    assert_eq!(glyphs[2].fill, None);
 }
 
 // ── Submobject indexing (the Reference's conventions) ───────────────────

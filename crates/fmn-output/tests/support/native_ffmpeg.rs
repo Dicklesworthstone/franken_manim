@@ -55,7 +55,25 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
     if !private_dir.is_absolute() {
         return Err("ffmpeg fixture TMPDIR is not absolute".into());
     }
-    let Some((mode, fixture_root)) = fixture_mode(&private_dir)? else {
+    let mode = fixture_mode(&private_dir)?;
+    if argv
+        .windows(2)
+        .any(|pair| pair[0] == "-f" && pair[1] == "null")
+    {
+        if mode
+            .as_ref()
+            .is_some_and(|(mode, _)| mode == "hardware-unavailable")
+        {
+            // Fail before reading stdin, as FFmpeg does when driver loading
+            // fails. The real runner must retain this diagnostic even when
+            // its larger-than-pipe-capacity input encounters a broken pipe.
+            eprintln!("Cannot load libcuda.so.1");
+            return Ok(1);
+        }
+        validate_hardware_probe(&argv)?;
+        return Ok(0);
+    }
+    let Some((mode, fixture_root)) = mode else {
         drain_stdin()?;
         let artifact = artifact_path(&argv)?;
         append_argv(&private_dir, &argv)?;
@@ -145,6 +163,54 @@ fn fixture_mode(
         }
     }
     Ok(None)
+}
+
+fn validate_hardware_probe(argv: &[OsString]) -> Result<(), Box<dyn std::error::Error>> {
+    for (flag, value) in [
+        ("-f", "rawvideo"),
+        ("-pix_fmt", "yuv420p"),
+        ("-video_size", "256x256"),
+        ("-framerate", "1"),
+        ("-i", "-"),
+        ("-frames:v", "2"),
+        ("-c:v", "h264_nvenc"),
+    ] {
+        if !argv
+            .windows(2)
+            .any(|pair| pair[0] == flag && pair[1] == value)
+        {
+            return Err(format!("hardware probe is missing {flag} {value}").into());
+        }
+    }
+    if argv.last().is_none_or(|value| value != "-") {
+        return Err("hardware probe must use stdout as its null output".into());
+    }
+
+    const LUMA_BYTES: usize = 256 * 256;
+    const FRAME_BYTES: usize = LUMA_BYTES * 3 / 2;
+    const INPUT_BYTES: usize = 2 * FRAME_BYTES;
+    // One extra byte detects excess input while keeping the fixture's own
+    // allocation and read bounded, including if the trial contract regresses.
+    let mut payload = Vec::new();
+    std::io::stdin()
+        .take((INPUT_BYTES + 1) as u64)
+        .read_to_end(&mut payload)?;
+    if payload.len() != INPUT_BYTES {
+        return Err(format!(
+            "hardware probe expected {INPUT_BYTES} bytes, received {}",
+            payload.len()
+        )
+        .into());
+    }
+    for frame in payload.chunks_exact(FRAME_BYTES) {
+        if !frame[..LUMA_BYTES].iter().all(|byte| *byte == 16)
+            || !frame[LUMA_BYTES..].iter().all(|byte| *byte == 128)
+        {
+            return Err("hardware probe input is not limited-range black YUV420P".into());
+        }
+    }
+    // A null-muxer trial never creates an artifact or an environment dump.
+    Ok(())
 }
 
 fn drain_stdin() -> Result<(), std::io::Error> {
