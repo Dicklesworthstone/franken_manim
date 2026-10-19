@@ -6,7 +6,7 @@
 //! semantic renderer.
 
 use std::fmt;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use fmn_core::color::LinearRgba;
 use fmn_core::types::Vec3;
@@ -183,6 +183,11 @@ pub struct RetainedFrameRenderer {
     camera_scene: Option<CachedCameraScene>,
     camera_plan: Option<Arc<RenderPlan>>,
     camera_projection: Option<PreparedCameraFrame>,
+    // Identity of the successful camera raster currently in `frame`, not the
+    // last prepared job. A weak key adds no framebuffer or geometry ownership
+    // and cannot alias a subsequently recycled projection allocation.
+    camera_pixels: Weak<CameraProjection>,
+    last_camera_frame_reused: bool,
 }
 
 impl RetainedFrameRenderer {
@@ -206,6 +211,8 @@ impl RetainedFrameRenderer {
             camera_scene: None,
             camera_plan: None,
             camera_projection: None,
+            camera_pixels: Weak::new(),
+            last_camera_frame_reused: false,
         })
     }
 
@@ -228,6 +235,7 @@ impl RetainedFrameRenderer {
         stage: &Stage,
         camera_revision: u64,
     ) -> Result<CachedRenderStats, RetainedFrameRendererError> {
+        self.last_camera_frame_reused = false;
         if let Some(item) = stage
             .draw_plan()
             .items()
@@ -238,6 +246,7 @@ impl RetainedFrameRenderer {
                 program: item.key.program,
             });
         }
+        self.camera_pixels = Weak::new();
         self.camera_scene = None;
         self.camera_plan = None;
         self.camera_projection = None;
@@ -272,13 +281,36 @@ impl RetainedFrameRenderer {
     /// Surface topology comes only from [`RenderPrimitive`]; record counts are
     /// never factorized or guessed. The 2D retained plan remains the sole owner
     /// of vector geometry, so this route does not create a second path compiler.
+    /// Identical consecutive captures reuse the completed pixels in place.
+    /// Synchronization still runs, including conservative writable-view checks.
     pub fn render_with_camera(
         &mut self,
         stage: &Stage,
         camera: &Camera,
     ) -> Result<(), RetainedFrameRendererError> {
+        self.last_camera_frame_reused = false;
         let prepared = self.prepare_with_camera(stage, camera)?;
-        prepared.render_into(self.config.threads, &mut self.frame)
+        if self
+            .camera_pixels
+            .upgrade()
+            .is_some_and(|previous| Arc::ptr_eq(&previous, &prepared.projection))
+        {
+            self.last_camera_frame_reused = true;
+            return Ok(());
+        }
+        // A failed raster may have partially written the destination. Never
+        // leave a success key installed across a fallible write.
+        self.camera_pixels = Weak::new();
+        prepared.render_into(self.config.threads, &mut self.frame)?;
+        self.camera_pixels = Arc::downgrade(&prepared.projection);
+        Ok(())
+    }
+
+    /// Whether the most recent render call reused a complete camera frame
+    /// without rasterization. Preparation alone does not change this flag.
+    #[must_use]
+    pub const fn last_camera_frame_reused(&self) -> bool {
+        self.last_camera_frame_reused
     }
 
     /// Freeze a camera-bound frame for worker-owned rasterization.
@@ -392,6 +424,18 @@ pub struct PreparedCameraFrame {
 }
 
 impl PreparedCameraFrame {
+    /// Whether two captures share the complete immutable raster input.
+    ///
+    /// A true result permits reusing a successful raw frame, regardless of
+    /// worker count. A false result is conservative, not proof of different
+    /// pixels. The identity is process-local and must not be serialized or
+    /// substituted for a provenance hash. It includes scene resources and
+    /// every camera value checked by the ordinary preparation cache.
+    #[must_use]
+    pub fn same_capture(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.projection, &other.projection)
+    }
+
     /// Frozen raw linear-light RGBA16F layout.
     ///
     /// # Errors
@@ -1940,6 +1984,135 @@ mod tests {
             })
         ));
         assert_eq!(renderer.frame().as_bytes(), before);
+    }
+
+    #[test]
+    fn static_camera_pixels_are_reused_without_an_extra_frame_owner() {
+        let camera = camera();
+        let mut stage = Stage::new();
+        for object in [vector(), surface((2, 2)), dot_cloud(), triangle_mesh()] {
+            let mob = stage.add(object);
+            stage.add_to_scene(mob).unwrap();
+        }
+        let expected = fresh_camera_bits(&stage, &camera);
+        for threads in [1, 4, 16] {
+            let mut renderer = RetainedFrameRenderer::new(config(threads)).unwrap();
+            let prepared = renderer.prepare_with_camera(&stage, &camera).unwrap();
+            assert!(prepared.same_capture(&prepared.clone()));
+            renderer.render_with_camera(&stage, &camera).unwrap();
+            assert!(!renderer.last_camera_frame_reused());
+            let storage = renderer.frame().as_bytes().as_ptr();
+            let owners = Arc::strong_count(&prepared.projection);
+            for _ in 0..4 {
+                renderer.render_with_camera(&stage, &camera).unwrap();
+                assert!(renderer.last_camera_frame_reused());
+                assert_eq!(renderer.frame().as_bytes(), expected);
+                assert_eq!(renderer.frame().as_bytes().as_ptr(), storage);
+                assert_eq!(Arc::strong_count(&prepared.projection), owners);
+            }
+        }
+    }
+
+    #[test]
+    fn camera_pixel_reuse_observes_live_scene_and_foreign_view_changes() {
+        let camera = camera();
+        let mut stage = Stage::new();
+        let vector = stage.add(vector());
+        let surface = stage.add(surface((2, 2)));
+        let image = stage.add(image_quad(&camera, [80, 20, 10, 255].repeat(4)));
+        for mob in [image, vector, surface] {
+            stage.add_to_scene(mob).unwrap();
+        }
+        let mut renderer = RetainedFrameRenderer::new(config(4)).unwrap();
+        renderer.render_with_camera(&stage, &camera).unwrap();
+        for step in 0..6 {
+            renderer.render_with_camera(&stage, &camera).unwrap();
+            assert!(renderer.last_camera_frame_reused());
+            match step {
+                0 => stage.shift(vector, [0.5, 0.0, 0.0]),
+                1 => {
+                    stage.set_shading(surface, [0.2, 0.4, 0.1], false);
+                }
+                2 => {
+                    stage.get_mut(vector).unwrap().buffer.write_range(
+                        "fill_rgba", 0, &[0.8, 0.1, 0.4, 0.7].repeat(3),
+                    );
+                }
+                3 => {
+                    stage.bring_to_front(vector).unwrap();
+                }
+                4 => {
+                    stage.set_image_resource(image, Some(ImageResource::rgba8(
+                        2, 2, [10, 90, 20, 255].repeat(4),
+                        ImageColorSpace::Linear, ImageSampler::default(),
+                    ).unwrap())).unwrap();
+                }
+                _ => {
+                    stage.set_placement(surface, Placement::from_translation([1.0, 0.0, 0.0])).unwrap();
+                }
+            }
+            renderer.render_with_camera(&stage, &camera).unwrap();
+            assert!(!renderer.last_camera_frame_reused());
+            assert_eq!(renderer.frame().as_bytes(), fresh_camera_bits(&stage, &camera));
+        }
+        let view = stage.get_mut(surface).unwrap().buffer.export_field_view("rgba", true).unwrap();
+        for _ in 0..2 {
+            renderer.render_with_camera(&stage, &camera).unwrap();
+            assert!(!renderer.last_camera_frame_reused());
+        }
+        for record in 0..4 {
+            assert!(view.write_foreign(record, "rgba", &[0.0, 1.0, 0.0, 1.0]));
+        }
+        renderer.render_with_camera(&stage, &camera).unwrap();
+        assert!(!renderer.last_camera_frame_reused());
+        assert_eq!(renderer.frame().as_bytes(), fresh_camera_bits(&stage, &camera));
+        drop(view);
+        renderer.render_with_camera(&stage, &camera).unwrap();
+        renderer.render_with_camera(&stage, &camera).unwrap();
+        assert!(renderer.last_camera_frame_reused());
+    }
+
+    #[test]
+    fn camera_pixels_key_the_rendered_capture_not_the_last_prepared_capture() {
+        let base = camera();
+        let mut stage = Stage::new();
+        let mob = stage.add(vector());
+        stage.add_to_scene(mob).unwrap();
+        let mut renderer = RetainedFrameRenderer::new(config(1)).unwrap();
+        renderer.render_with_camera(&stage, &base).unwrap();
+        let original = renderer.frame().as_bytes().to_vec();
+        let changed = Camera::new(CameraConfig {
+            resolution: (32, 18),
+            background: LinearRgba { r: 0.3, g: 0.1, b: 0.2, a: 1.0 },
+            ..CameraConfig::default()
+        }).unwrap();
+        assert_eq!(base.revision(), changed.revision());
+        let a = renderer.prepare_with_camera(&stage, &base).unwrap();
+        let b = renderer.prepare_with_camera(&stage, &changed).unwrap();
+        assert!(!a.same_capture(&b));
+        assert_eq!(renderer.frame().as_bytes(), original);
+        renderer.render_with_camera(&stage, &changed).unwrap();
+        assert!(!renderer.last_camera_frame_reused());
+        assert_eq!(renderer.frame().as_bytes(), fresh_camera_bits(&stage, &changed));
+        assert_ne!(renderer.frame().as_bytes(), original);
+        renderer.render_with_camera(&stage, &changed).unwrap();
+        assert!(renderer.last_camera_frame_reused());
+
+        renderer.render(&stage, changed.revision()).unwrap();
+        assert!(!renderer.last_camera_frame_reused());
+        renderer.render_with_camera(&stage, &changed).unwrap();
+        assert!(!renderer.last_camera_frame_reused());
+        assert_eq!(renderer.frame().as_bytes(), fresh_camera_bits(&stage, &changed));
+
+        let invalid_layout = Camera::new(CameraConfig {
+            resolution: (24, 24),
+            ..CameraConfig::default()
+        }).unwrap();
+        assert!(renderer.render_with_camera(&stage, &invalid_layout).is_err());
+        assert!(!renderer.last_camera_frame_reused());
+        renderer.render_with_camera(&stage, &changed).unwrap();
+        assert!(!renderer.last_camera_frame_reused());
+        assert_eq!(renderer.frame().as_bytes(), fresh_camera_bits(&stage, &changed));
     }
 }
 
