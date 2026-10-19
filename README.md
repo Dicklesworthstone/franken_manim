@@ -129,7 +129,7 @@ For MP4/MOV, enable the facade's `ffmpeg` feature (`fmn = { …, features = ["ff
 
 For a standalone WAV soundtrack, call `render_soundtrack(&mut scene, SoundtrackRenderOptions::new("media/soundtrack.wav")?)`. The ordinary scene and its updaters execute once; `scene_mut().add_sound(…)` cues retain their offsets, gains, background ducking, and tails, with skipped time removed from the output clock. A cue-free scene produces silence of the correct duration. This route uses native PCM source decoding and canonical signed 16-bit WAV publication without a pixel renderer or ffmpeg. `SoundtrackRenderOptions` exposes the sample rate/channel matrix, mixer worker ceiling, scene duration, source/decoded/prepared audio budgets, and a 64 MiB default artifact ceiling. Existing destinations are preserved, and the report includes actual sample frames, clipping counts, and the exact inputs decoded. Compressed source files return a named decoder-capability error.
 
-```rust
+```rust,no_run
 use fmn::prelude::*;
 
 struct Narration;

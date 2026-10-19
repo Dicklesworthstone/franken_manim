@@ -378,3 +378,47 @@ fn authored_failure_precedes_a_later_cleanup_budget_refusal() {
     ));
     assert!(!fs.exists(Path::new("/cleanup.wav")));
 }
+
+/// The README's soundtrack example, executed against the real filesystem:
+/// the same scene and options, with its `assets/voice.wav` written first
+/// and both paths rooted in a private directory (the README block itself is
+/// compile-only, since a doctest cannot own a real asset or a fresh
+/// destination).
+#[test]
+fn readme_soundtrack_example_renders_three_seconds_of_stereo_at_48_khz() {
+    struct Narration(std::path::PathBuf);
+    impl SceneConstruct for Narration {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            stage
+                .scene_mut()
+                .add_sound(self.0.clone(), 0.0, None, None)?;
+            stage.wait(3.0)?;
+            Ok(())
+        }
+    }
+    let root = std::env::temp_dir().join(format!(
+        "fmn-readme-soundtrack-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(root.join("assets")).unwrap();
+    let voice = root.join("assets/voice.wav");
+    let tone: Vec<f32> = (0..24_000)
+        .map(|i| 0.25 * (f64::from(i) * 440.0 * std::f64::consts::TAU / 48_000.0).sin() as f32)
+        .collect();
+    std::fs::write(&voice, encode_wav(1, 48_000, SampleFormat::F32, &tone)).unwrap();
+    let output = root.join("media/soundtrack.wav");
+    let mut audio = SoundtrackRenderOptions::new(&output).unwrap();
+    audio.mixer.sample_rate = 48_000;
+    audio.mixer.channels = 2;
+    let report = fmn::render_soundtrack(&mut Narration(voice), audio).unwrap();
+    assert_eq!(report.artifact.sample_frames, 3 * 48_000);
+    assert_eq!((report.sample_rate, report.channels), (48_000, 2));
+    assert_eq!(report.artifact.cues_mixed, 1);
+    assert_eq!(report.artifact.path, output);
+    let decoded = decode_wav(&std::fs::read(&output).unwrap(), &WavLimits::default()).unwrap();
+    assert_eq!((decoded.sample_rate, decoded.channels), (48_000, 2));
+}
