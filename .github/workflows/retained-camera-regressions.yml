@@ -8,6 +8,9 @@ on:
       - "crates/fmn/src/rendering/**"
       - "crates/fmn/tests/native_camera_pipeline.rs"
       - "crates/fmn/tests/native_cpu_pipeline.rs"
+      - "crates/fmn/tests/compiled_ranges.rs"
+      - "crates/fmn-cli/src/bundle_audio.rs"
+      - "crates/fmn-cli/src/main.rs"
       - "rust-toolchain.toml"
       - "Cargo.lock"
       - ".github/workflows/retained-camera-regressions.yml"
@@ -76,6 +79,22 @@ jobs:
           grep -E 'test result: ok\. [1-9][0-9]* passed' /tmp/camera-acceptance/workers.log
           cargo test --locked -p fmn --test native_camera_pipeline --test native_cpu_pipeline \
             2>&1 | tee /tmp/camera-acceptance/pipelines.log
+      - name: Execute exact compiled excerpt and PCM boundary tests
+        if: ${{ !cancelled() && matrix.suite == 'native' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p fmn --lib rendering::compiled::tests \
+            2>&1 | tee /tmp/camera-acceptance/compiled-pcm.log
+          cargo test --locked -p fmn --test compiled_ranges \
+            2>&1 | tee /tmp/camera-acceptance/compiled-ranges.log
+      - name: Execute standalone narrated WAV and subdivision tests
+        if: ${{ !cancelled() && matrix.suite == 'native' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p fmn-cli --features cli,batch --bin fmn bundle_audio::tests \
+            2>&1 | tee /tmp/camera-acceptance/cli-bundle-audio.log
       - name: Check affected targets with warnings denied
         if: ${{ !cancelled() }}
         shell: bash
@@ -87,8 +106,10 @@ jobs:
             cargo clippy --locked -p fmn-render --lib --tests -- -D warnings \
               2>&1 | tee /tmp/camera-acceptance/clippy.log
           else
-            cargo clippy --locked -p fmn --lib --test native_camera_pipeline --test native_cpu_pipeline -- -D warnings \
+            cargo clippy --locked -p fmn --lib --test native_camera_pipeline --test native_cpu_pipeline --test compiled_ranges -- -D warnings \
               2>&1 | tee /tmp/camera-acceptance/clippy.log
+            cargo clippy --locked -p fmn-cli --features cli,batch --bin fmn -- -D warnings \
+              2>&1 | tee /tmp/camera-acceptance/cli-clippy.log
           fi
       - name: Preserve test evidence
         if: ${{ !cancelled() }}
