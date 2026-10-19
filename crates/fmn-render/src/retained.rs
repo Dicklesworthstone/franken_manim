@@ -1936,7 +1936,7 @@ mod tests {
         let blue = pixel(renderer.frame(), 8, 13);
         let white = pixel(renderer.frame(), 24, 13);
         assert!(red[0] > 0.8 && red[1] < 0.1 && red[2] < 0.1);
-        assert!(green[0] > 0.8 && green[1] < 0.1 && green[2] < 0.1);
+        assert!(green[0] < 0.1 && green[1] > 0.8 && green[2] < 0.1);
         assert!(blue[0] < 0.1 && blue[1] < 0.1 && blue[2] > 0.8);
         assert!(white[0] > 0.8 && white[1] > 0.8 && white[2] > 0.8);
         let changed = ImageResource::rgba8(
