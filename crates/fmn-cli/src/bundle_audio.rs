@@ -775,7 +775,6 @@ mod tests {
             vec!["--fps", "4"],
             vec!["--write_all"],
             vec!["-n", "1,2"],
-            vec!["--vcodec", "libx264"],
         ] {
             let fs = Arc::new(VirtualFs::new());
             let bytes = recording();
@@ -789,6 +788,30 @@ mod tests {
             assert_ne!(output.code, 0, "{extra:?}");
             assert!(!fs.exists(Path::new("/out/scene.wav")));
         }
+        // The generated parser owns this CLI refusal. It must not be passed
+        // through the helper that deliberately requires a valid invocation.
+        let error = fmn_cli::parse_args([
+            "/scene.fmtl", "--format", "wav", "--vcodec", "libx264",
+        ])
+        .unwrap_err();
+        assert_eq!(error.exit_name(), "usage");
+        assert_eq!(error.rule(), Some("native-format-vs-codec"));
+
+        // Hosts can construct a RenderCommand directly, so the adapter must
+        // independently reject the same incompatible request before output.
+        let mut incompatible = command(&[]);
+        incompatible.vcodec = Some("libx264".to_owned());
+        let fs = Arc::new(VirtualFs::new());
+        let bytes = recording();
+        let output = run(
+            incompatible,
+            &bytes,
+            TimelineBundle::from_bytes(&bytes).unwrap(),
+            fs.clone(),
+            &|| panic!("codec refusal acquired ffmpeg"),
+        );
+        assert_eq!(output.code, code("usage"));
+        assert!(!fs.exists(Path::new("/out/scene.wav")));
     }
 
     #[test]
