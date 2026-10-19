@@ -11,6 +11,7 @@ on:
       - "crates/fmn/tests/compiled_ranges.rs"
       - "crates/fmn-cli/src/bundle_audio.rs"
       - "crates/fmn-cli/src/main.rs"
+      - "crates/fmn-cli/tests/narrated_bundle_cli.rs"
       - "rust-toolchain.toml"
       - "Cargo.lock"
       - ".github/workflows/retained-camera-regressions.yml"
@@ -95,6 +96,15 @@ jobs:
           set -euo pipefail
           cargo test --locked -p fmn-cli --features cli,batch --bin fmn bundle_audio::tests \
             2>&1 | tee /tmp/camera-acceptance/cli-bundle-audio.log
+      - name: Execute shipping binary and real narrated video round trips
+        if: ${{ !cancelled() && matrix.suite == 'native' }}
+        shell: bash
+        env:
+          FMN_REQUIRE_FULL_INPUTS: "1"
+        run: |
+          set -euo pipefail
+          cargo test --locked -p fmn-cli --features cli,batch --test narrated_bundle_cli \
+            2>&1 | tee /tmp/camera-acceptance/cli-narrated-media.log
       - name: Check affected targets with warnings denied
         if: ${{ !cancelled() }}
         shell: bash
