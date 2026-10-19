@@ -559,8 +559,41 @@ pub enum RenderError {
     Sound(SoundError),
 }
 
+impl RenderError {
+    /// The renderer program that needs the camera route, whether the planar
+    /// renderer refused it directly or a native frame worker did (the
+    /// refusal then arrives inside the pipeline's stage failure).
+    fn camera_required(&self) -> Option<fmn_mobject::ProgramKind> {
+        let renderer = match self {
+            Self::Renderer(error) => error,
+            Self::Pipeline(FrameStreamError::Pipeline(failure)) => match &failure.error {
+                fmn_runtime::PipelineError::Stage {
+                    source: NativeFrameError::Renderer(error),
+                    ..
+                } => error,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        match renderer {
+            RetainedFrameRendererError::CameraRequired { program } => Some(*program),
+            _ => None,
+        }
+    }
+}
+
 impl fmt::Display for RenderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The remedy, wherever the camera refusal surfaced; the pipeline's
+        // stage detail stays in the source chain.
+        if let Some(program) = self.camera_required() {
+            return write!(
+                f,
+                "{program:?} content needs the camera route: set RenderOptions::camera \
+                 (for example `options.camera = Some(options.camera_config()?)`) or render \
+                 with fmn::render_camera"
+            );
+        }
         match self {
             Self::InvalidOptions(message) | Self::Capability(message) => f.write_str(message),
             Self::Bundle(error) => error.fmt(f),
@@ -569,12 +602,6 @@ impl fmt::Display for RenderError {
             Self::Scene(error) => error.fmt(f),
             Self::Plan(error) => error.fmt(f),
             Self::Frame(error) => error.fmt(f),
-            Self::Renderer(RetainedFrameRendererError::CameraRequired { program }) => write!(
-                f,
-                "{program:?} content needs the camera route: set RenderOptions::camera \
-                 (for example `options.camera = Some(options.camera_config()?)`) or render \
-                 with fmn::render_camera"
-            ),
             Self::Renderer(error) => error.fmt(f),
             Self::Pipeline(error) => {
                 error.fmt(f)?;
