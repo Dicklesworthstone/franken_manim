@@ -387,7 +387,7 @@ fn math_tables_honor_column_alignment_and_make_room_for_tall_formulas() {
                 < 1e-10
         );
     }
-    for rows in cells.chunks_exact(3).collect::<Vec<_>>().windows(2) {
+    for rows in cells.as_chunks::<3>().0.windows(2) {
         let bottom = rows[0]
             .iter()
             .map(|cell| cell.extent().unwrap().0[1])
@@ -398,7 +398,7 @@ fn math_tables_honor_column_alignment_and_make_room_for_tall_formulas() {
             .fold(f64::NEG_INFINITY, f64::max);
         assert!(bottom > top, "adjacent table rows overlap");
     }
-    for row in cells.chunks_exact(3) {
+    for row in cells.as_chunks::<3>().0 {
         for pair in row.windows(2) {
             assert!(pair[0].extent().unwrap().1[0] < pair[1].extent().unwrap().0[0]);
         }
