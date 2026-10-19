@@ -115,16 +115,38 @@ with tempfile.TemporaryDirectory(prefix="fmn-video-options-") as directory:
             else:
                 os.environ["PATH"] = prior_path
 
+        encoder_help = subprocess.run(
+            [ffmpeg, "-hide_banner", "-h", "encoder=libx264"],
+            capture_output=True, text=True, timeout=30, check=True,
+            env={**os.environ, "LANG": "C", "LC_ALL": "C"},
+        ).stdout
+        assert encoder_help.startswith("Encoder libx264 ["), encoder_help
+        format_rows = [line.strip().partition(":")[2].split()
+                       for line in encoder_help.splitlines()
+                       if line.strip().startswith("Supported pixel formats:")]
+        assert len(format_rows) <= 1, encoder_help
+        encoder_formats = set(format_rows[0]) if format_rows else set()
+
         for wire, codec in (("nv12", "auto"), ("rgba", "libx264"),
                             ("bgra", "libx264"), ("p010le", "libx264")):
             target = root / ("opaque-" + wire + ".mp4")
+            if wire == "p010le":
+                output_format = next((name for name in
+                                      ("p010le", "yuv420p10le", "yuv422p10le", "yuv444p10le")
+                                      if name in encoder_formats), None)
+                if output_format is None:
+                    assert "10-bit" in rejected(root, target.name, format="mp4",
+                                                pixel_format=wire, video_codec=codec)
+                    continue
+            else:
+                output_format = "nv12" if wire == "nv12" and "nv12" in encoder_formats else "yuv420p"
             report = render_scene(Swatch, target, resolution=(96, 54), fps=8, threads=1,
                                   scene_kwargs=options(pixel_format=wire, video_codec=codec))
             invocation, = report.ffmpeg_invocations
             assert invocation["encoder"] == "libx264"
             argv = invocation["argv"]
             formats = [argv[i + 1] for i, word in enumerate(argv[:-1]) if word == "-pix_fmt"]
-            assert formats == [wire, "yuv420p10le" if wire == "p010le" else "yuv420p"], formats
+            assert formats == [wire, output_format], formats
             transfer_tags = [argv[i + 1] for i, word in enumerate(argv[:-1]) if word == "-color_trc"]
             assert transfer_tags == ["iec61966-2-1", "iec61966-2-1"], (wire, transfer_tags)
             # Actual MP4 colr/nclx payload: BT.709 primaries, sRGB transfer,

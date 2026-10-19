@@ -1575,6 +1575,16 @@ mod ffmpeg_boundary {
                     stderr: Vec::new(),
                 });
             }
+            if self.spec.argv == ["-hide_banner", "-h", "encoder=libx264"] {
+                assert!(self.input.is_empty(), "encoder help receives no frames");
+                assert_eq!(self.stdin_limits.max_total_bytes, 0);
+                self.record();
+                return Ok(ProcessOutcome {
+                    termination: ProcessTermination::Exited(Some(0)),
+                    stdout: b"Encoder libx264 [Fixture encoder]:\n    Supported pixel formats: nv12 yuv420p yuv420p10le\n".to_vec(),
+                    stderr: Vec::new(),
+                });
+            }
             if self.fail_encode && is_encode {
                 self.record();
                 return Ok(ProcessOutcome {
@@ -1999,8 +2009,16 @@ mod ffmpeg_boundary {
             emitter.finish().expect("ffmpeg finish");
 
             let runs = runner.runs();
-            assert_eq!(runs.len(), 2);
-            assert_eq!(runs[1].stdin.as_deref(), Some(tight.as_slice()));
+            let encode_index = if matches!(wire, WireFormat::Nv12 | WireFormat::P010) {
+                assert_eq!(runs[1].argv, ["-hide_banner", "-h", "encoder=libx264"]);
+                assert!(runs[1].stdin.is_none());
+                2
+            } else {
+                1
+            };
+            assert_eq!(runs.len(), encode_index + 1);
+            let encode = &runs[encode_index];
+            assert_eq!(encode.stdin.as_deref(), Some(tight.as_slice()));
             let chunks = runner.stdin_chunks();
             assert_eq!(chunks.iter().sum::<usize>(), tight.len());
             assert!(chunks.len() > 1, "frame feed must be row/plane chunked");
@@ -2024,7 +2042,7 @@ mod ffmpeg_boundary {
             assert_eq!(invocation.provenance.tool_sha256_hex, tool.sha256_hex());
             assert_eq!(invocation.provenance.native_image, tool.native_image());
             assert_eq!(invocation.provenance.tool_version, tool.version());
-            assert_eq!(invocation.provenance.bound_tool_path, runs[1].program);
+            assert_eq!(invocation.provenance.bound_tool_path, encode.program);
             assert_eq!(
                 invocation.provenance.process_mechanism,
                 "scripted.process_runner"
@@ -2276,8 +2294,10 @@ mod ffmpeg_boundary {
         write_direct(&mut sink, 7, &frame);
         sink.abort();
         let runs = runner.runs();
-        assert_eq!(runs.len(), 2, "version probe and cancelled encode");
-        assert_eq!(runs[1].stdin.as_deref(), Some(tight.as_slice()));
+        assert_eq!(runs.len(), 3, "version, format probe and cancelled encode");
+        assert_eq!(runs[1].argv, ["-hide_banner", "-h", "encoder=libx264"]);
+        assert!(runs[1].stdin.is_none());
+        assert_eq!(runs[2].stdin.as_deref(), Some(tight.as_slice()));
         assert_eq!(
             std::fs::read(&destination).expect("existing destination"),
             b"old-video"
@@ -2407,16 +2427,20 @@ mod ffmpeg_boundary {
         write_direct(&mut sink, 7, &frame);
         sink.finish().expect("finish");
         let runs = runner.runs();
-        assert_eq!(runs[1].timeout, Duration::from_secs(17));
-        assert_eq!(runs[1].max_output_bytes, 4_096);
+        assert_eq!(runs.len(), 3, "version, format probe and encode");
+        assert_eq!(runs[1].argv, ["-hide_banner", "-h", "encoder=libx264"]);
+        assert_eq!(runs[1].timeout, Duration::from_secs(2));
+        assert_eq!(runs[1].max_output_bytes, 64 * 1024);
+        assert_eq!(runs[2].timeout, Duration::from_secs(17));
+        assert_eq!(runs[2].max_output_bytes, 4_096);
         assert_eq!(
-            runs[1].env,
+            runs[2].env,
             vec![
                 ("LANG".to_string(), "C".to_string()),
                 ("LC_ALL".to_string(), "C".to_string()),
                 (
                     "TMPDIR".to_string(),
-                    runs[1]
+                    runs[2]
                         .program
                         .parent()
                         .expect("private tool parent")
@@ -2425,7 +2449,7 @@ mod ffmpeg_boundary {
                 ),
             ]
         );
-        assert!(runs[1].cwd.is_none());
+        assert!(runs[2].cwd.is_none());
     }
 }
 
