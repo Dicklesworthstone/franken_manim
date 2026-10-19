@@ -21,6 +21,7 @@ use fmn_core::color::Srgb;
 
 const MAX_BYTES: usize = 262_144;
 const MAX_ITEMS: usize = 4096;
+const MAX_STYLE_WORK: usize = 16_777_216;
 
 /// Reuse the library's compact span map over the current live metadata.
 ///
@@ -252,7 +253,91 @@ fn flag(options: &Bound<'_, PyDict>, name: &str, default: bool) -> PyResult<bool
     }
 }
 
-fn pairs<T>(options: &Bound<'_, PyDict>, name: &str) -> PyResult<Vec<(String, T)>>
+#[derive(Default)]
+struct TextStyleBudget {
+    ranges: usize,
+    work: usize,
+}
+
+impl TextStyleBudget {
+    fn charge(&mut self, work: usize) -> PyResult<()> {
+        self.work = self.work.saturating_add(work);
+        if self.work > MAX_STYLE_WORK {
+            return Err(PyValueError::new_err(
+                "Text style matching exceeds the 16777216-byte-work budget",
+            ));
+        }
+        Ok(())
+    }
+}
+
+enum TextSelector {
+    Literal(String),
+    Ranges(Vec<(usize, usize)>),
+}
+
+impl TextSelector {
+    fn from_py(
+        value: &Bound<'_, PyAny>,
+        source: &str,
+        budget: &mut TextStyleBudget,
+    ) -> PyResult<Self> {
+        if let Ok(literal) = value.extract::<String>() {
+            budget.charge(source.len().max(1))?;
+            return Ok(Self::Literal(literal));
+        }
+        if value.len()? > (MAX_BYTES + 1).saturating_sub(budget.ranges) {
+            return Err(PyValueError::new_err(
+                "Text selectors exceed the 262145-range budget",
+            ));
+        }
+        let mut ranges = Vec::new();
+        for range in value.try_iter()? {
+            if budget.ranges == MAX_BYTES + 1 {
+                return Err(PyValueError::new_err(
+                    "Text selectors exceed the 262145-range budget",
+                ));
+            }
+            let (start, end): (usize, usize) = range?.extract().map_err(|_| {
+                PyTypeError::new_err(
+                    "Text selectors must be literal strings or resolved UTF-8 byte ranges",
+                )
+            })?;
+            if start > end || source.get(start..end).is_none() {
+                return Err(PyValueError::new_err(
+                    "Text style selectors must be valid UTF-8 source byte ranges",
+                ));
+            }
+            budget.ranges += 1;
+            budget.charge((end - start).max(1))?;
+            ranges.push((start, end));
+        }
+        Ok(Self::Ranges(ranges))
+    }
+
+    fn work(&self, source: &str) -> usize {
+        match self {
+            Self::Literal(_) => source.len().max(1),
+            Self::Ranges(ranges) => ranges.iter().fold(0usize, |total, &(start, end)| {
+                total.saturating_add((end - start).max(1))
+            }),
+        }
+    }
+
+    fn native(&self) -> fmn_library::text::SourceSelector<'_> {
+        match self {
+            Self::Literal(key) => fmn_library::text::SourceSelector::Literal(key),
+            Self::Ranges(ranges) => fmn_library::text::SourceSelector::Ranges(ranges),
+        }
+    }
+}
+
+fn pairs<T>(
+    options: &Bound<'_, PyDict>,
+    name: &str,
+    source: &str,
+    budget: &mut TextStyleBudget,
+) -> PyResult<Vec<(TextSelector, T)>>
 where
     for<'a, 'py> T: FromPyObject<'a, 'py>,
 {
@@ -262,12 +347,31 @@ where
     if value.len()? > MAX_ITEMS {
         return Err(PyValueError::new_err("Text style map exceeds 4096 entries"));
     }
-    value.extract().map_err(|_| {
-        PyTypeError::new_err(format!("Text {name} must be ordered string/value pairs"))
-    })
+    let mut result = Vec::new();
+    for pair in value.try_iter()? {
+        if result.len() == MAX_ITEMS {
+            return Err(PyValueError::new_err("Text style map exceeds 4096 entries"));
+        }
+        let pair = pair?;
+        if pair.len()? != 2 {
+            return Err(PyTypeError::new_err(format!(
+                "Text {name} must be ordered selector/value pairs"
+            )));
+        }
+        let selector = TextSelector::from_py(&pair.get_item(0)?, source, budget)?;
+        result.push((
+            selector,
+            pair.get_item(1)?.extract::<T>().map_err(Into::into)?,
+        ));
+    }
+    Ok(result)
 }
 
-fn colors(options: &Bound<'_, PyDict>) -> PyResult<Vec<(String, Vec<Srgb>)>> {
+fn colors(
+    options: &Bound<'_, PyDict>,
+    source: &str,
+    budget: &mut TextStyleBudget,
+) -> PyResult<Vec<(TextSelector, Vec<Srgb>)>> {
     let Some(value) = options.get_item("t2g")? else {
         return Ok(Vec::new());
     };
@@ -279,20 +383,30 @@ fn colors(options: &Bound<'_, PyDict>) -> PyResult<Vec<(String, Vec<Srgb>)>> {
     let mut result = Vec::new();
     let mut total = 0usize;
     for pair in value.try_iter()? {
+        if result.len() == MAX_ITEMS {
+            return Err(PyValueError::new_err(
+                "Text gradient map exceeds 4096 entries",
+            ));
+        }
         let pair = pair?;
         if pair.len()? != 2 {
             return Err(PyTypeError::new_err("Text gradient entries must be pairs"));
         }
-        let key = pair.get_item(0)?.extract::<String>()?;
+        let key = TextSelector::from_py(&pair.get_item(0)?, source, budget)?;
         let stops = pair.get_item(1)?;
-        total = total.saturating_add(stops.len()?);
-        if total > MAX_ITEMS {
+        if stops.len()? > MAX_ITEMS - total {
             return Err(PyValueError::new_err(
                 "Text gradients exceed 4096 total stops",
             ));
         }
         let mut converted = Vec::new();
         for stop in stops.try_iter()? {
+            if total == MAX_ITEMS {
+                return Err(PyValueError::new_err(
+                    "Text gradients exceed 4096 total stops",
+                ));
+            }
+            total += 1;
             let color = srgb_from_py(&stop?)?;
             if [color.r, color.g, color.b]
                 .iter()
@@ -304,6 +418,7 @@ fn colors(options: &Bound<'_, PyDict>) -> PyResult<Vec<(String, Vec<Srgb>)>> {
             }
             converted.push(color);
         }
+        budget.charge(key.work(source).saturating_mul(converted.len()))?;
         result.push((key, converted));
     }
     Ok(result)
@@ -359,26 +474,30 @@ fn _build_styled_text<'py>(
             ));
         }
     };
-    let families = pairs::<String>(options, "t2f")?;
-    let slants = pairs::<bool>(options, "t2s")?;
-    let weights = pairs::<bool>(options, "t2w")?;
-    let gradients = colors(options)?;
+    let mut budget = TextStyleBudget::default();
+    let families = pairs::<String>(options, "t2f", text, &mut budget)?;
+    let slants = pairs::<bool>(options, "t2s", text, &mut budget)?;
+    let weights = pairs::<bool>(options, "t2w", text, &mut budget)?;
+    let gradients = colors(options, text, &mut budget)?;
     let count = families.len() + slants.len() + weights.len() + gradients.len();
-    if text.len().saturating_mul(count.max(1)) > 16_777_216 {
-        return Err(PyValueError::new_err(
-            "Text style matching exceeds the 16777216-byte-work budget",
-        ));
-    }
-    let family_refs: Vec<(&str, &str)> = families
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
-    let slant_refs: Vec<(&str, bool)> = slants.iter().map(|(k, v)| (k.as_str(), *v)).collect();
-    let weight_refs: Vec<(&str, bool)> = weights.iter().map(|(k, v)| (k.as_str(), *v)).collect();
-    let gradient_refs: Vec<(&str, &[Srgb])> = gradients
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_slice()))
-        .collect();
+    use fmn_library::text::SourceStyle;
+    let mut source_styles = Vec::with_capacity(count);
+    source_styles.extend(families.iter().map(|(selector, family)| SourceStyle {
+        family: Some(family.as_str()),
+        ..SourceStyle::new(selector.native())
+    }));
+    source_styles.extend(slants.iter().map(|(selector, italic)| SourceStyle {
+        italic: Some(*italic),
+        ..SourceStyle::new(selector.native())
+    }));
+    source_styles.extend(weights.iter().map(|(selector, bold)| SourceStyle {
+        bold: Some(*bold),
+        ..SourceStyle::new(selector.native())
+    }));
+    source_styles.extend(gradients.iter().map(|(selector, stops)| SourceStyle {
+        gradient: stops,
+        ..SourceStyle::new(selector.native())
+    }));
     // Highlight by original byte position, never substring/color replacement.
     // The public Code class selects its default bundled family separately so
     // explicit fonts and local face maps retain the ordinary text semantics.
@@ -428,10 +547,7 @@ fn _build_styled_text<'py>(
     .justify(flag(options, "justify", false)?)
     .indent(number(options, "indent", 0., false)?)
     .ligatures(!flag(options, "disable_ligatures", true)?)
-    .t2f(&family_refs)
-    .t2s(&slant_refs)
-    .t2w(&weight_refs)
-    .t2g(&gradient_refs)
+    .source_styles(&source_styles)
     .char_overrides(&code_styles);
     if options.contains("line_width")? {
         builder = builder.width(number(options, "line_width", 1., true)?);
@@ -514,6 +630,56 @@ mod tests {
             let error = _tex_substring_path_count(&oversized, false, "unresolved-template", "")
                 .expect_err("oversized source must be refused before typesetting");
             assert!(error.to_string().contains("262144-byte source limit"));
+        });
+    }
+
+    #[test]
+    fn text_style_selectors_validate_native_utf8_ranges_before_layout() {
+        Python::initialize();
+        Python::attach(|py| {
+            let source = "éA";
+            let valid = PyList::new(py, [(0usize, 2usize), (2, 3)]).unwrap();
+            let mut budget = TextStyleBudget::default();
+            let selector = TextSelector::from_py(valid.as_any(), source, &mut budget).unwrap();
+            assert!(matches!(selector, TextSelector::Ranges(ref ranges)
+                if ranges == &[(0, 2), (2, 3)]));
+            assert_eq!((budget.ranges, budget.work), (2, 3));
+            for range in [(1usize, 2usize), (0, 1), (3, 2), (0, 4)] {
+                let value = PyList::new(py, [range]).unwrap();
+                let error =
+                    TextSelector::from_py(value.as_any(), source, &mut TextStyleBudget::default())
+                        .err()
+                        .expect("invalid source bytes must be refused");
+                assert!(error.to_string().contains("valid UTF-8 source byte ranges"));
+            }
+        });
+    }
+
+    #[test]
+    fn repeated_text_style_ranges_share_the_total_work_budget() {
+        Python::initialize();
+        Python::attach(|py| {
+            let value = PyList::new(py, [(0usize, 3usize)]).unwrap();
+            let mut budget = TextStyleBudget {
+                ranges: 0,
+                work: MAX_STYLE_WORK - 3,
+            };
+            assert!(TextSelector::from_py(value.as_any(), "éA", &mut budget).is_ok());
+            let error = TextSelector::from_py(value.as_any(), "éA", &mut budget)
+                .err()
+                .expect("a later selector cannot restart admission");
+            assert!(error.to_string().contains("byte-work budget"));
+            let mut ranges = TextStyleBudget {
+                ranges: MAX_BYTES + 1,
+                work: 0,
+            };
+            assert!(
+                TextSelector::from_py(value.as_any(), "éA", &mut ranges)
+                    .err()
+                    .unwrap()
+                    .to_string()
+                    .contains("range budget")
+            );
         });
     }
 

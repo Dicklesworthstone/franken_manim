@@ -324,7 +324,7 @@ def _typed_textbox_constructor(g):
             "text", "string", "font", "font_size", "weight", "slant", "alignment",
             "line_width", "justify", "indent", "lsh", "global_config", "local_configs",
             "disable_ligatures", "isolate", "use_labelled_svg", "base_color", "protect",
-            "t2c", "t2f", "t2s", "t2w", "t2g", "_fmn_text_options", "_fmn_string_style",
+            "t2c", "t2f", "t2s", "t2w", "t2g", "gradient", "_fmn_text_options", "_fmn_string_style",
         ):
             setattr(text, name, getattr(candidate, name))
         if self.box.is_fixed_in_frame():

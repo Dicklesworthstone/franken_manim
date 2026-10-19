@@ -13,6 +13,7 @@ from .invocation import InvocationGuard
 
 
 _initializing = InvocationGuard()
+_text_regenerating = InvocationGuard()
 
 
 # The Reference's StringMobject (an ABC) declares these render-twice steps
@@ -128,15 +129,36 @@ def install_string_lifecycle(native):
         return self
 
     def text_points(self):
-        candidate = g["_native_shell_factory"]()
-        options = dict(self._fmn_text_options, font_size=float(self.font_size), font=getattr(self, "native_font", self.font))
-        specs = g["_build_styled_text"](
-            candidate, g["_native_shell_factory"], self.text,
-            type(self)._native_markup, type(self)._hoist_descendant_records, options,
-        )
-        _publish(g, self, candidate, specs)
-        self.string = self.text
-        return self
+        from .text_authoring import text_recipe, apply_text_colors
+        with _text_regenerating.hold(self, message="Text regeneration is already active"):
+            source = str(self.text)
+            is_code = isinstance(self, g["Code"])
+            if is_code and source == self.string and not _initializing.busy(self):
+                # Code and text are public source aliases. An edited code
+                # field is authoritative while text still names the last build.
+                source = str(getattr(self, "code", source))
+            options, maps, gradient = text_recipe(g, self, source)
+            candidate = g["_native_shell_factory"]()
+            specs = g["_build_styled_text"](
+                candidate, g["_native_shell_factory"], source,
+                type(self)._native_markup, type(self)._hoist_descendant_records, options,
+            )
+            _publish(g, self, candidate, specs)
+            self.text = self.string = source
+            self.font_size = options["font_size"]
+            self.lsh = options["line_spacing"]
+            self.gradient = gradient
+            for name, value in maps.items():
+                setattr(self, name, value)
+            # The last built recipe is diagnostic/checkpoint data, never the
+            # authority for a subsequent rebuild of writable public fields.
+            self._fmn_text_options = options
+            if is_code:
+                self.code, self.native_font = source, options["font"]
+            if not _initializing.busy(self):
+                self.init_colors()
+                apply_text_colors(self)
+            return self
 
     def tex_points(self):
         separator = getattr(self, "_tex_arg_separator", " ")

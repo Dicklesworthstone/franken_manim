@@ -33,6 +33,7 @@ use fmn_text::{
 };
 
 pub use fmn_text::Align;
+pub use fmn_text::maps::{SourceSelector, SourceStyle};
 use fmn_text::markup::CharStyle;
 
 use crate::spans::{SpanKindU8, SpanMapData, SpanMapEntry};
@@ -383,6 +384,14 @@ impl<'a> Text<'a> {
         self
     }
 
+    /// Ordered source-selector styles, including regex/range selections
+    /// resolved by a front door. Applied before shaping, after literal maps.
+    #[must_use]
+    pub fn source_styles(mut self, styles: &'a [SourceStyle<'a>]) -> Self {
+        self.maps.source_styles = styles;
+        self
+    }
+
     /// text→color (`t2c`).
     #[must_use]
     pub fn t2c(mut self, t2c: &'a [(&'a str, Srgb)]) -> Self {
@@ -590,6 +599,13 @@ impl<'a> MarkupText<'a> {
     #[must_use]
     pub fn maps(mut self, maps: StyleMaps<'a>) -> Self {
         self.inner = self.inner.maps(maps);
+        self
+    }
+
+    /// Ordered source-selector styles over the original markup bytes.
+    #[must_use]
+    pub fn source_styles(mut self, styles: &'a [SourceStyle<'a>]) -> Self {
+        self.inner = self.inner.source_styles(styles);
         self
     }
 
