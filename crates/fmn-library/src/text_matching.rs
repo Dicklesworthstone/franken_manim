@@ -11,12 +11,14 @@
 //! order. [`TransformMatchingStrings`] repeatedly claims the longest common
 //! contiguous run, so reordered words can move together. Claimed slots remain
 //! barriers: removing them would invent substrings that never existed.
+//! Explicit `with_key_map` mappings claim complete source-span occurrences
+//! first, including expressions containing different numbers of primitives.
 //! Both are ordinary Choreo animations: groups of Transform and directional
 //! fades, followed by removal of the source and publication of the real target.
 //! Their prepared interpolation can run on native frame workers; source/target
 //! validation, begin, finish and replacement cleanup stay on the scene owner.
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
 use fmn_anim::{
     AnimError, AnimState, Animation, AnimationGroup, AnimationSignature, RateFunc, Transform,
@@ -30,6 +32,10 @@ use crate::spans::SpanMapData;
 pub const MAX_MATCHING_PARTS: usize = 65_536;
 /// Maximum equal-key comparisons in a longest-block search, across all rounds.
 pub const MAX_MATCHING_COMPARISONS: usize = 1_048_576;
+/// Maximum authored expression mappings in one animation.
+pub const MAX_MATCHING_KEY_MAP_ENTRIES: usize = 4096;
+/// Maximum source/pattern bytes and native-part probes in a mapping search.
+pub const MAX_MATCHING_MAPPING_WORK: usize = 16_777_216;
 
 /// Timing of a native text-matching composition. Child transforms retain their
 /// normal smooth rate curve; `rate_func` shapes the composition's timeline.
@@ -72,6 +78,13 @@ pub enum TextMatchingError {
         /// The violated binding contract.
         reason: &'static str,
     },
+    /// An explicit mapping has an empty key or repeats a source key.
+    InvalidKeyMap {
+        /// Mapping ordinal, in caller order.
+        index: usize,
+        /// The violated mapping contract.
+        reason: &'static str,
+    },
     /// Both operands contain the same live member. Copy the target first.
     AliasedFamilies,
     /// Matching exceeded a fixed resource ceiling.
@@ -95,6 +108,9 @@ impl std::fmt::Display for TextMatchingError {
             }
             Self::InvalidLayout { side, reason } => {
                 write!(f, "{side} native span layout is invalid: {reason}")
+            }
+            Self::InvalidKeyMap { index, reason } => {
+                write!(f, "native text key mapping {index} is invalid: {reason}")
             }
             Self::AliasedFamilies => {
                 write!(
@@ -211,14 +227,33 @@ enum MatchingKind {
 type PartPair = (Vec<usize>, Vec<usize>);
 
 fn tex_pairs(source: &[&str], target: &[&str]) -> Vec<PartPair> {
+    tex_pairs_remaining(
+        source,
+        target,
+        &vec![false; source.len()],
+        &vec![false; target.len()],
+    )
+}
+
+fn tex_pairs_remaining(
+    source: &[&str],
+    target: &[&str],
+    used_source: &[bool],
+    used_target: &[bool],
+) -> Vec<PartPair> {
     let mut available: BTreeMap<&str, VecDeque<usize>> = BTreeMap::new();
     for (index, key) in target.iter().enumerate() {
-        available.entry(*key).or_default().push_back(index);
+        if !used_target[index] {
+            available.entry(*key).or_default().push_back(index);
+        }
     }
     source
         .iter()
         .enumerate()
         .filter_map(|(index, key)| {
+            if used_source[index] {
+                return None;
+            }
             let other = available.get_mut(*key)?.pop_front()?;
             Some((vec![index], vec![other]))
         })
@@ -229,10 +264,27 @@ fn tex_pairs(source: &[&str], target: &[&str]) -> Vec<PartPair> {
 /// source/target tie breaking. Index equal keys rather than scanning the full
 /// Cartesian product; used slots are barriers, not deleted sequence entries.
 fn string_pairs(source: &[&str], target: &[&str]) -> Result<Vec<PartPair>, TextMatchingError> {
+    string_pairs_remaining(
+        source,
+        target,
+        &vec![false; source.len()],
+        &vec![false; target.len()],
+    )
+}
+
+fn string_pairs_remaining(
+    source: &[&str],
+    target: &[&str],
+    source_claims: &[bool],
+    target_claims: &[bool],
+) -> Result<Vec<PartPair>, TextMatchingError> {
     if source.is_empty() || target.is_empty() {
         return Ok(Vec::new());
     }
-    if source == target {
+    if source == target
+        && !source_claims.iter().any(|used| *used)
+        && !target_claims.iter().any(|used| *used)
+    {
         return Ok(vec![(
             (0..source.len()).collect(),
             (0..target.len()).collect(),
@@ -240,10 +292,12 @@ fn string_pairs(source: &[&str], target: &[&str]) -> Result<Vec<PartPair>, TextM
     }
     let mut positions: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (index, key) in target.iter().enumerate() {
-        positions.entry(*key).or_default().push(index);
+        if !target_claims[index] {
+            positions.entry(*key).or_default().push(index);
+        }
     }
-    let mut used_source = vec![false; source.len()];
-    let mut used_target = vec![false; target.len()];
+    let mut used_source = source_claims.to_vec();
+    let mut used_target = target_claims.to_vec();
     let mut pairs = Vec::new();
     let mut comparisons = 0;
     loop {
@@ -287,8 +341,133 @@ fn string_pairs(source: &[&str], target: &[&str]) -> Result<Vec<PartPair>, TextM
     }
 }
 
-fn part_group(stage: &mut Stage, children: &[Mob], indices: &[usize]) -> Result<Mob, AnimError> {
-    if indices.len() == 1 {
+fn charge_mapping_work(work: &mut usize, amount: usize) -> Result<(), TextMatchingError> {
+    *work = work.saturating_add(amount);
+    if *work > MAX_MATCHING_MAPPING_WORK {
+        return Err(TextMatchingError::BudgetExceeded {
+            resource: "key-map search work",
+            limit: MAX_MATCHING_MAPPING_WORK,
+        });
+    }
+    Ok(())
+}
+
+/// Locate literal occurrences once, then assign each native part to the
+/// containing occurrence by binary search. This avoids rescanning every part
+/// for every repeated symbol and retains painter order within each group.
+fn available_occurrences(
+    spans: &SpanMapData,
+    needle: &str,
+    used: &[bool],
+    work: &mut usize,
+) -> Result<Vec<Vec<usize>>, TextMatchingError> {
+    charge_mapping_work(work, spans.source.len().saturating_add(needle.len()))?;
+    let mut ranges = Vec::new();
+    for (start, text) in spans.source.match_indices(needle) {
+        if ranges.len() == MAX_MATCHING_PARTS {
+            return Err(TextMatchingError::BudgetExceeded {
+                resource: "literal occurrences per mapping operand",
+                limit: MAX_MATCHING_PARTS,
+            });
+        }
+        ranges.push((start, start + text.len()));
+    }
+    if ranges.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut groups = vec![Vec::new(); ranges.len()];
+    let mut blocked = vec![false; ranges.len()];
+    for (index, span) in spans.entries.iter().enumerate() {
+        charge_mapping_work(work, 1)?;
+        let occurrence = ranges
+            .partition_point(|&(start, _)| start <= span.start)
+            .checked_sub(1);
+        if let Some(occurrence) = occurrence {
+            if span.end <= ranges[occurrence].1 {
+                groups[occurrence].push(index);
+                blocked[occurrence] |= used[index];
+            }
+        }
+    }
+    Ok(groups
+        .into_iter()
+        .zip(blocked)
+        .filter_map(|(group, blocked)| (!blocked && !group.is_empty()).then_some(group))
+        .collect())
+}
+
+fn matching_pairs(
+    source: &SpanMapData,
+    target: &SpanMapData,
+    source_keys: &[&str],
+    target_keys: &[&str],
+    kind: MatchingKind,
+    key_map: &[(&str, &str)],
+) -> Result<Vec<PartPair>, TextMatchingError> {
+    if key_map.is_empty() {
+        return match kind {
+            MatchingKind::Tex => Ok(tex_pairs(source_keys, target_keys)),
+            MatchingKind::Strings => string_pairs(source_keys, target_keys),
+        };
+    }
+    if key_map.len() > MAX_MATCHING_KEY_MAP_ENTRIES {
+        return Err(TextMatchingError::BudgetExceeded {
+            resource: "key-map entries",
+            limit: MAX_MATCHING_KEY_MAP_ENTRIES,
+        });
+    }
+    let mut seen = BTreeSet::new();
+    let mut work = 0;
+    for (index, &(from, to)) in key_map.iter().enumerate() {
+        charge_mapping_work(&mut work, from.len().saturating_add(to.len()))?;
+        if from.is_empty() || to.is_empty() {
+            return Err(TextMatchingError::InvalidKeyMap {
+                index,
+                reason: "both source and target keys must be nonempty",
+            });
+        }
+        if !seen.insert(from) {
+            return Err(TextMatchingError::InvalidKeyMap {
+                index,
+                reason: "a source key may appear only once",
+            });
+        }
+    }
+    let mut used_source = vec![false; source_keys.len()];
+    let mut used_target = vec![false; target_keys.len()];
+    let mut pairs = Vec::new();
+    for &(from, to) in key_map {
+        let sources = available_occurrences(source, from, &used_source, &mut work)?;
+        let targets = available_occurrences(target, to, &used_target, &mut work)?;
+        for (a, b) in sources.into_iter().zip(targets) {
+            for &index in &a {
+                used_source[index] = true;
+            }
+            for &index in &b {
+                used_target[index] = true;
+            }
+            pairs.push((a, b));
+        }
+    }
+    let remaining = match kind {
+        MatchingKind::Tex => {
+            tex_pairs_remaining(source_keys, target_keys, &used_source, &used_target)
+        }
+        MatchingKind::Strings => {
+            string_pairs_remaining(source_keys, target_keys, &used_source, &used_target)?
+        }
+    };
+    pairs.extend(remaining);
+    Ok(pairs)
+}
+
+fn part_group(
+    stage: &mut Stage,
+    children: &[Mob],
+    indices: &[usize],
+    wrap_singleton: bool,
+) -> Result<Mob, AnimError> {
+    if indices.len() == 1 && !wrap_singleton {
         return Ok(children[indices[0]]);
     }
     let group = stage.add(Mobject::new());
@@ -315,8 +494,9 @@ impl MatchingAnimation {
         source_spans: &SpanMapData,
         target_spans: &SpanMapData,
         config: TextMatchingConfig,
-        kind: MatchingKind,
+        plan: (MatchingKind, &[(&str, &str)]),
     ) -> Result<Self, TextMatchingError> {
+        let (kind, key_map) = plan;
         let (source, source_keys) = Binding::read(stage, source, source_spans, "source")?;
         let (target, target_keys) = Binding::read(stage, target, target_spans, "target")?;
         let source_family: HashSet<Mob, IdBuildHasher> = std::iter::once(source.root)
@@ -329,18 +509,25 @@ impl MatchingAnimation {
             return Err(TextMatchingError::AliasedFamilies);
         }
         // Finish every fallible provenance/search check before editing the arena.
-        let pairs = match kind {
-            MatchingKind::Tex => tex_pairs(&source_keys, &target_keys),
-            MatchingKind::Strings => string_pairs(&source_keys, &target_keys)?,
-        };
+        let pairs = matching_pairs(
+            source_spans,
+            target_spans,
+            &source_keys,
+            &target_keys,
+            kind,
+            key_map,
+        )?;
         let source_center = stage.get_center(source.root);
         let target_center = stage.get_center(target.root);
         let mut used_source = vec![false; source.children.len()];
         let mut used_target = vec![false; target.children.len()];
         let mut animations: Vec<Box<dyn Animation>> = Vec::new();
         for (a, b) in pairs {
-            let from = part_group(stage, &source.children, &a)?;
-            let to = part_group(stage, &target.children, &b)?;
+            // Family alignment for a one-to-many substitution belongs to the
+            // temporary groups, not to an original leaf bound by a native map.
+            let wrap_singleton = a.len() != b.len();
+            let from = part_group(stage, &source.children, &a, wrap_singleton)?;
+            let to = part_group(stage, &target.children, &b, wrap_singleton)?;
             animations.push(Box::new(Transform::new(from, to)));
             for index in a {
                 used_source[index] = true;
@@ -435,6 +622,45 @@ macro_rules! matching_animation {
                 target_spans: &SpanMapData,
                 config: TextMatchingConfig,
             ) -> Result<Self, TextMatchingError> {
+                Self::with_key_map(
+                    stage,
+                    source,
+                    target,
+                    source_spans,
+                    target_spans,
+                    &[],
+                    config,
+                )
+            }
+
+            /// Map literal expressions before automatically matching leftovers.
+            ///
+            /// For example, `&[("x", "y"), ("ab", "z")]` renames every available
+            /// `x` occurrence and transforms each available `ab` run as one unit.
+            /// Keys refer to the verbatim UTF-8 source, including TeX commands.
+            /// Only whole native spans participate: a substring of a command or
+            /// ligature cannot take partial ink. Repeated occurrences pair in
+            /// source order; primitive order inside each occurrence is retained.
+            ///
+            /// Caller order resolves overlapping mappings. Once any primitive
+            /// of an occurrence is claimed, that entire occurrence is unavailable
+            /// to later mappings. Missing or ink-free occurrences are skipped.
+            /// Unpaired occurrences remain available to automatic matching/fades.
+            /// An empty map has exactly [`Self::with_config`]'s behavior.
+            ///
+            /// # Errors
+            /// As [`Self::new`], plus empty keys, duplicate source keys, or a
+            /// mapping search exceeding its fixed work/storage ceilings. These
+            /// refusals happen before any arena mutation.
+            pub fn with_key_map(
+                stage: &mut Stage,
+                source: Mob,
+                target: Mob,
+                source_spans: &SpanMapData,
+                target_spans: &SpanMapData,
+                key_map: &[(&str, &str)],
+                config: TextMatchingConfig,
+            ) -> Result<Self, TextMatchingError> {
                 Ok(Self {
                     inner: MatchingAnimation::new(
                         stage,
@@ -443,7 +669,7 @@ macro_rules! matching_animation {
                         source_spans,
                         target_spans,
                         config,
-                        MatchingKind::$kind,
+                        (MatchingKind::$kind, key_map),
                     )?,
                 })
             }
@@ -574,7 +800,46 @@ matching_animation!(
 
 #[cfg(test)]
 mod tests {
-    use super::{TextMatchingError, string_pairs, tex_pairs};
+    use super::*;
+    use crate::spans::{SpanKindU8, SpanMapEntry};
+
+    fn spans(source: &str) -> SpanMapData {
+        SpanMapData {
+            source: source.into(),
+            entries: source
+                .char_indices()
+                .map(|(start, ch)| SpanMapEntry {
+                    start,
+                    end: start + ch.len_utf8(),
+                    kind: SpanKindU8::TextGlyph,
+                })
+                .collect(),
+        }
+    }
+
+    fn plan(
+        source: &SpanMapData,
+        target: &SpanMapData,
+        kind: MatchingKind,
+        mappings: &[(&str, &str)],
+    ) -> Result<Vec<PartPair>, TextMatchingError> {
+        let keys = |map: &SpanMapData| {
+            map.entries
+                .iter()
+                .map(|entry| map.source[entry.start..entry.end].to_owned())
+                .collect::<Vec<_>>()
+        };
+        let a = keys(source);
+        let b = keys(target);
+        matching_pairs(
+            source,
+            target,
+            &a.iter().map(String::as_str).collect::<Vec<_>>(),
+            &b.iter().map(String::as_str).collect::<Vec<_>>(),
+            kind,
+            mappings,
+        )
+    }
 
     #[test]
     fn tex_repeated_keys_claim_in_occurrence_order() {
@@ -610,6 +875,191 @@ mod tests {
         assert!(matches!(
             string_pairs(&vec!["A"; 1025], &vec!["A"; 1026]),
             Err(TextMatchingError::BudgetExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn explicit_renames_precede_identity_and_claim_repeated_occurrences() {
+        for kind in [MatchingKind::Tex, MatchingKind::Strings] {
+            assert_eq!(
+                plan(&spans("x+x"), &spans("y+y+x"), kind, &[("x", "y")]).unwrap(),
+                [
+                    (vec![0], vec![0]),
+                    (vec![2], vec![2]),
+                    (vec![1], vec![1]),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_swaps_do_not_lose_targets_to_automatic_matching() {
+        assert_eq!(
+            plan(
+                &spans("xy"),
+                &spans("xy"),
+                MatchingKind::Tex,
+                &[("x", "y"), ("y", "x")],
+            )
+            .unwrap(),
+            [(vec![0], vec![1]), (vec![1], vec![0])]
+        );
+    }
+
+    #[test]
+    fn unequal_expression_lengths_match_as_whole_occurrences() {
+        assert_eq!(
+            plan(
+                &spans("ab+ab"),
+                &spans("z+uvw"),
+                MatchingKind::Strings,
+                &[("ab", "z")],
+            )
+            .unwrap(),
+            [(vec![0, 1], vec![0]), (vec![2], vec![1])]
+        );
+        assert_eq!(
+            plan(&spans("z"), &spans("uvw"), MatchingKind::Tex, &[("z", "uvw")])
+                .unwrap(),
+            [(vec![0], vec![0, 1, 2])]
+        );
+    }
+
+    #[test]
+    fn claims_are_barriers_not_deleted_characters() {
+        assert_eq!(
+            plan(
+                &spans("axb"),
+                &spans("abz"),
+                MatchingKind::Strings,
+                &[("x", "z")],
+            )
+            .unwrap(),
+            [
+                (vec![1], vec![2]),
+                (vec![0], vec![0]),
+                (vec![2], vec![1]),
+            ]
+        );
+    }
+
+    #[test]
+    fn caller_order_resolves_overlaps_without_partial_expressions() {
+        assert_eq!(
+            plan(
+                &spans("abc"),
+                &spans("xy"),
+                MatchingKind::Tex,
+                &[("ab", "x"), ("bc", "y")],
+            )
+            .unwrap(),
+            [(vec![0, 1], vec![0])]
+        );
+    }
+
+    #[test]
+    fn shared_target_keys_consume_distinct_available_occurrences() {
+        assert_eq!(
+            plan(
+                &spans("ab"),
+                &spans("xx"),
+                MatchingKind::Tex,
+                &[("a", "x"), ("b", "x")],
+            )
+            .unwrap(),
+            [(vec![0], vec![0]), (vec![1], vec![1])]
+        );
+    }
+
+    #[test]
+    fn unicode_mapping_uses_byte_spans_not_character_offsets() {
+        assert_eq!(
+            plan(
+                &spans("αβ+αβ"),
+                &spans("界+界"),
+                MatchingKind::Strings,
+                &[("αβ", "界")],
+            )
+            .unwrap(),
+            [
+                (vec![0, 1], vec![0]),
+                (vec![3, 4], vec![2]),
+                (vec![2], vec![1]),
+            ]
+        );
+    }
+
+    #[test]
+    fn native_commands_are_indivisible_but_full_commands_can_be_mapped() {
+        let source = SpanMapData {
+            source: "\\alpha".into(),
+            entries: vec![SpanMapEntry {
+                start: 0,
+                end: 6,
+                kind: SpanKindU8::MathGlyph,
+            }],
+        };
+        assert!(
+            plan(&source, &spans("x"), MatchingKind::Tex, &[("alpha", "x")])
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            plan(&source, &spans("x"), MatchingKind::Tex, &[("\\alpha", "x")])
+                .unwrap(),
+            [(vec![0], vec![0])]
+        );
+    }
+
+    #[test]
+    fn native_macro_ink_and_painter_order_stay_together() {
+        let source = SpanMapData {
+            source: "ab".into(),
+            entries: vec![
+                SpanMapEntry { start: 1, end: 2, kind: SpanKindU8::MathGlyph },
+                SpanMapEntry { start: 0, end: 1, kind: SpanKindU8::MathGlyph },
+                SpanMapEntry { start: 0, end: 2, kind: SpanKindU8::MathRule },
+            ],
+        };
+        assert_eq!(
+            plan(&source, &spans("z"), MatchingKind::Tex, &[("ab", "z")]).unwrap(),
+            [(vec![0, 1, 2], vec![0])]
+        );
+    }
+
+    #[test]
+    fn nonexistent_mapping_leaves_automatic_matching_unchanged() {
+        let source = spans("aba");
+        let target = spans("bab");
+        for kind in [MatchingKind::Tex, MatchingKind::Strings] {
+            assert_eq!(
+                plan(&source, &target, kind, &[("missing", "absent")]).unwrap(),
+                plan(&source, &target, kind, &[]).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_maps_refuse_before_planning() {
+        for mappings in [vec![("", "x")], vec![("x", "")], vec![("x", "y"), ("x", "z")]] {
+            assert!(matches!(
+                plan(&spans("x"), &spans("y"), MatchingKind::Tex, &mappings),
+                Err(TextMatchingError::InvalidKeyMap { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn mapping_count_and_work_have_named_ceilings() {
+        let mappings = vec![("x", "y"); MAX_MATCHING_KEY_MAP_ENTRIES + 1];
+        assert!(matches!(
+            plan(&spans("x"), &spans("y"), MatchingKind::Tex, &mappings),
+            Err(TextMatchingError::BudgetExceeded { resource: "key-map entries", .. })
+        ));
+        let mut work = MAX_MATCHING_MAPPING_WORK;
+        assert!(matches!(
+            charge_mapping_work(&mut work, usize::MAX),
+            Err(TextMatchingError::BudgetExceeded { resource: "key-map search work", .. })
         ));
     }
 }
