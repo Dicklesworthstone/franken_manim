@@ -1,0 +1,100 @@
+name: Retained camera and native pipeline regressions
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/fmn-render/**"
+      - "crates/fmn/src/rendering/**"
+      - "crates/fmn/tests/native_camera_pipeline.rs"
+      - "crates/fmn/tests/native_cpu_pipeline.rs"
+      - "rust-toolchain.toml"
+      - "Cargo.lock"
+      - ".github/workflows/retained-camera-regressions.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: retained-camera-regressions-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  CARGO_TERM_COLOR: never
+  CARGO_BUILD_JOBS: "2"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  acceptance:
+    name: ${{ matrix.suite }} camera acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [lumen, native]
+    env:
+      CARGO_TARGET_DIR: target/camera-acceptance-${{ matrix.suite }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install repository-pinned toolchain
+        run: rustup show active-toolchain
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/camera-acceptance-${{ matrix.suite }}
+          key: camera-acceptance-${{ matrix.suite }}-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Record exact tested source
+        run: |
+          mkdir -p /tmp/camera-acceptance
+          git rev-parse HEAD | tee /tmp/camera-acceptance/source-sha.txt
+          git diff --check
+      - name: Execute retained camera cache, invalidation, and lifetime tests
+        if: matrix.suite == 'lumen'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p fmn-render --lib retained:: -- --nocapture \
+            2>&1 | tee /tmp/camera-acceptance/retained.log
+          grep -E 'test result: ok\. [1-9][0-9]* passed' /tmp/camera-acceptance/retained.log
+      - name: Execute native worker and real pipeline tests
+        if: matrix.suite == 'native'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p fmn --lib rendering::pipeline::handoff_tests -- --nocapture \
+            2>&1 | tee /tmp/camera-acceptance/workers.log
+          grep -E 'test result: ok\. [1-9][0-9]* passed' /tmp/camera-acceptance/workers.log
+          cargo test --locked -p fmn --test native_camera_pipeline --test native_cpu_pipeline \
+            2>&1 | tee /tmp/camera-acceptance/pipelines.log
+      - name: Check affected targets with warnings denied
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          SUITE: ${{ matrix.suite }}
+        run: |
+          set -euo pipefail
+          if [ "$SUITE" = lumen ]; then
+            cargo clippy --locked -p fmn-render --lib --tests -- -D warnings \
+              2>&1 | tee /tmp/camera-acceptance/clippy.log
+          else
+            cargo clippy --locked -p fmn --lib --test native_camera_pipeline --test native_cpu_pipeline -- -D warnings \
+              2>&1 | tee /tmp/camera-acceptance/clippy.log
+          fi
+      - name: Preserve test evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: camera-acceptance-${{ matrix.suite }}-${{ github.sha }}
+          path: /tmp/camera-acceptance/
+          if-no-files-found: error
+          retention-days: 7
