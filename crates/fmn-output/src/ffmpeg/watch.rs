@@ -215,7 +215,7 @@ impl ArtifactWatch {
     /// joins the baseline before the host writes it, never the output budget.
     pub(super) fn allow_staged_input(&self, bytes: u64) -> Result<(), BoundaryError> {
         self.workdir_limit
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |limit| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |limit| {
                 limit.checked_add(bytes)
             })
             .map(|_| ())

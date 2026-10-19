@@ -34,8 +34,8 @@
 //!   not an exact filesystem quota; scheduling and writes between inspections
 //!   can temporarily overshoot the declared byte budget.
 //! - **Hardware encoders enter here and only here.** They are named,
-//!   validated against the probed encoder list, and recorded in
-//!   provenance; ffmpeg products are excluded from certification by
+//!   validated against the probed encoder list and a bounded functional
+//!   encode trial, and recorded in provenance; ffmpeg products are excluded from certification by
 //!   construction, so none of this touches the determinism story.
 //!
 //! The filesystem side (job dirs, rename publication) uses
@@ -52,8 +52,10 @@
 //! a future host capability rather than an unsafe platform carve-out.
 
 mod audio;
+mod encoders;
 mod watch;
 
+pub use encoders::EncoderProbe;
 use watch::ArtifactWatch;
 
 use std::fs::{File, OpenOptions};
@@ -140,6 +142,13 @@ pub enum BoundaryError {
         requested: String,
         /// The recognized hardware encoders this ffmpeg does offer.
         hardware_available: Vec<String>,
+    },
+    /// A compiled-in hardware encoder failed its bounded functional trial.
+    UnusableEncoder {
+        /// The explicitly requested encoder.
+        requested: String,
+        /// The probe's bounded diagnostic.
+        detail: String,
     },
     /// The job negotiation was refused.
     Negotiation(NegotiationError),
@@ -235,6 +244,11 @@ impl std::fmt::Display for BoundaryError {
                 "encoder {requested:?} is not offered by the installed ffmpeg \
                  (recognized hardware encoders present: {hardware_available:?})"
             ),
+            Self::UnusableEncoder { requested, detail } => write!(
+                f,
+                "encoder {requested:?} is compiled in but unusable: {detail}; \
+                 select a usable encoder or the software default"
+            ),
             Self::Negotiation(e) => write!(f, "{e}"),
             Self::PayloadGeometry { frame_bytes, got } => write!(
                 f,
@@ -286,6 +300,9 @@ pub struct FfmpegTool {
     native_image: NativeImageAttestation,
     version: String,
     session: Arc<ToolSession>,
+    // A tool and its clones share only results from this immutable fingerprint.
+    // Fresh resolution starts a new hardware observation (drivers may change).
+    encoder_probes: Arc<std::sync::Mutex<std::collections::BTreeMap<String, EncoderProbe>>>,
 }
 
 /// Probe timeouts are short: a probe is milliseconds of work.
@@ -470,6 +487,7 @@ impl FfmpegTool {
             native_image,
             version: String::new(),
             session,
+            encoder_probes: Arc::default(),
         };
         let outcome = match tool.run_bound_probe(runner, &["-version"]) {
             Ok(outcome) => outcome,
@@ -688,15 +706,27 @@ impl FfmpegTool {
     where
         F: FnOnce(&mut File, &Path) -> Result<(), BoundaryError>,
     {
+        self.with_bound_probe(after_copy, |path, workdir| {
+            runner
+                .run(&probe_spec(path, argv, workdir.path()))
+                .map_err(BoundaryError::from)
+        })
+    }
+
+    fn with_bound_probe<F, R>(&self, after_copy: F, run: R) -> Result<ProcessOutcome, BoundaryError>
+    where
+        F: FnOnce(&mut File, &Path) -> Result<(), BoundaryError>,
+        R: FnOnce(&Path, &OwnedWorkdir) -> Result<ProcessOutcome, BoundaryError>,
+    {
         let workdir = self.session.make_probe_workdir()?;
         let result = (|| {
             let mut bound = self.bind_into_after_copy(&workdir, after_copy)?;
             bound.verify_current(self)?;
-            let outcome = runner.run(&probe_spec(bound.path(), argv, workdir.path()));
+            let outcome = run(bound.path(), &workdir);
             workdir.verify_current("finish executable probe")?;
             bound.verify_current(self)?;
             self.verify_source_identity()?;
-            outcome.map_err(BoundaryError::from)
+            outcome
         })();
         workdir.cleanup_recursive();
         result
@@ -803,8 +833,10 @@ impl EncoderCapabilities {
         self.names.contains(encoder)
     }
 
-    /// The recognized hardware encoders present in this inventory
-    /// (`fmn doctor`'s report).
+    /// The recognized hardware encoders compiled into this ffmpeg.
+    ///
+    /// This inventory alone does not prove that their drivers or devices work;
+    /// use [`Self::probe_hardware`] for functional observations.
     #[must_use]
     pub fn hardware(&self) -> Vec<String> {
         HARDWARE_ENCODERS
@@ -952,6 +984,9 @@ pub struct Provenance {
     /// The resolved encoder (`None` for muxer-level modes like GIF and
     /// stream-copy jobs).
     pub encoder: Option<String>,
+    /// The successful bounded trial used to admit a hardware encoder.
+    /// Software encoders and stream-copy invocations have no hardware probe.
+    pub hardware_encoder_probe: Option<EncoderProbe>,
     /// The complete argv, verbatim.
     pub argv: Vec<String>,
 }
@@ -1415,13 +1450,8 @@ impl Boundary {
             return Err(NegotiationError("AAC quality requires MP4 or MOV output").into());
         }
         let encoder = job.resolved_encoder()?;
-        if let Some(name) = &encoder
-            && !caps.offers(name)
-        {
-            return Err(BoundaryError::UnknownEncoder {
-                requested: name.clone(),
-                hardware_available: caps.hardware(),
-            });
+        if let Some(name) = &encoder {
+            caps.require_encoder(&self.tool, self.runner.as_ref(), name)?;
         }
         let audio = audio
             .map(|input| {
@@ -2323,6 +2353,9 @@ fn invocation_report(
             bound_tool_path: bound_tool.to_path_buf(),
             process_mechanism: mechanism.identity().to_string(),
             process_policy_version: mechanism.policy_version(),
+            hardware_encoder_probe: encoder
+                .as_deref()
+                .and_then(|name| tool.cached_hardware_probe(name)),
             encoder,
             argv,
         },
@@ -2446,6 +2479,7 @@ mod tests {
             native_image,
             version: String::new(),
             session,
+            encoder_probes: Arc::default(),
         };
         let runner = ScriptedRunner::new();
 

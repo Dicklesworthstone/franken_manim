@@ -64,7 +64,7 @@ pub use emitter::{
 };
 pub use ffmpeg::{
     Boundary, BoundaryError, BoundaryReport, DEFAULT_RENDER_FFMPEG_TIMEOUT, EncoderCapabilities,
-    FfmpegLimitsReport, FfmpegTool, HARDWARE_ENCODERS, InvocationReport, JobLimits,
+    EncoderProbe, FfmpegLimitsReport, FfmpegTool, HARDWARE_ENCODERS, InvocationReport, JobLimits,
     NATIVE_ALTERNATIVE, PreparedFfmpegArtifact, Provenance, StreamingEncode,
     admit_render_ffmpeg_limits, default_render_ffmpeg_limits,
 };

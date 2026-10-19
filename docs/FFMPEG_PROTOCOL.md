@@ -244,9 +244,39 @@ changes nothing about the determinism story. Recognized names:
 `h264_videotoolbox`, `hevc_videotoolbox`, `prores_videotoolbox`,
 `h264_nvenc`, `hevc_nvenc`, `av1_nvenc`. Policy: `Auto` always
 resolves to the software default; hardware is selected only by
-explicit name, validated against the probed `-encoders` inventory,
-and recorded in provenance. `fmn doctor` reports the installed
-ffmpeg's fingerprint and its recognized hardware encoders.
+explicit name. Every encoder must appear in the probed `-encoders`
+inventory, and a recognized hardware encoder must also pass a bounded
+functional trial before rendering or starting its production encode.
+
+The trial streams two native 256×256 YUV420P frames into the selected
+encoder with the null muxer; it needs no source file, filter graph, shell,
+or additional tool. The dimensions avoid the minimum-size rejection that
+some NVENC devices impose on 64×64 inputs. It uses the same verified private
+executable-copy protocol and cleared environment as an export, a two-second
+process timeout, 16 KiB captured logs per stream, and a live 1 MiB scratch
+allowance. A driver failure that closes stdin early retains the process's
+useful stderr diagnostic. Timeouts and log overruns remain named failures;
+executable, directory, and mechanism failures are propagated separately.
+
+A resolved tool and its clones cache these observations under that immutable
+tool fingerprint. Cache hits still verify the source and session identities;
+a replaced executable cannot inherit a previous success. Fresh resolution
+refreshes observations, including after driver/device changes. Concurrent
+first requests may repeat a trial without holding a cache lock across process
+callbacks; the first completed observation becomes the shared result.
+
+`fmn doctor` distinguishes `available` from
+`compiled-in (unusable: <reason>)`. Robot output preserves the existing
+`hardware_encoders` compiled inventory and adds `usable_hardware_encoders`
+and per-encoder `hardware_encoder_probes` records with `encoder`,
+`available`, and `detail` fields. A successful selected hardware trial
+enters invocation provenance as `hardware_encoder_probe`; software and
+stream-copy invocations record no hardware trial. `Auto` retains its
+software policy. A small successful trial does not guarantee every later
+resolution, pixel format, quality setting, or GPU session will work; production
+jobs retain their own timeout, cancellation, artifact checks, and refusals.
+The short trial limits are not a claim that the complete Doctor command,
+including executable copying and hashing, finishes within one second.
 
 ## 6. CI: the fake ffmpeg
 

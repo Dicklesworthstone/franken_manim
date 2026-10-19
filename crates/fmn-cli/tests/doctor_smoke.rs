@@ -52,12 +52,13 @@ enum Value {
     Bool(bool),
     Null,
     Strings(Vec<String>),
+    Records(Vec<Record>),
 }
 
 type Record = BTreeMap<String, Value>;
 type Check<T> = Result<T, &'static str>;
 
-/// Intentionally limited to flat doctor v1 records, not arbitrary JSON.
+/// Limited to doctor v1 records and one level of hardware-probe objects.
 /// Independent decoding catches escaping bugs in the production formatter.
 struct FlatJson<'a> {
     chars: std::iter::Peekable<std::str::Chars<'a>>,
@@ -144,7 +145,7 @@ impl<'a> FlatJson<'a> {
         Ok(value)
     }
 
-    fn value(&mut self) -> Check<Value> {
+    fn value(&mut self, records_allowed: bool) -> Check<Value> {
         match self.chars.peek().copied().ok_or("missing value")? {
             '"' => self.string().map(Value::Text),
             't' => self.literal("true", Value::Bool(true)),
@@ -153,6 +154,23 @@ impl<'a> FlatJson<'a> {
             '[' => {
                 self.take('[')?;
                 self.space();
+                if records_allowed && self.chars.peek() == Some(&'{') {
+                    let mut records = Vec::new();
+                    loop {
+                        if records.len() == 256 {
+                            return Err("array limit exceeded");
+                        }
+                        records.push(self.object(false)?);
+                        self.space();
+                        if self.chars.peek() != Some(&',') {
+                            break;
+                        }
+                        self.take(',')?;
+                        self.space();
+                    }
+                    self.take(']')?;
+                    return Ok(Value::Records(records));
+                }
                 let mut strings = Vec::new();
                 if self.chars.peek() != Some(&']') {
                     loop {
@@ -194,6 +212,36 @@ impl<'a> FlatJson<'a> {
         }
     }
 
+    fn object(&mut self, records_allowed: bool) -> Check<Record> {
+        let mut record = Record::new();
+        self.space();
+        self.take('{')?;
+        self.space();
+        if self.chars.peek() != Some(&'}') {
+            loop {
+                if record.len() == 32 {
+                    return Err("field limit exceeded");
+                }
+                let key = self.string()?;
+                self.space();
+                self.take(':')?;
+                self.space();
+                let value = self.value(records_allowed)?;
+                if record.insert(key, value).is_some() {
+                    return Err("duplicate field");
+                }
+                self.space();
+                if self.chars.peek() != Some(&',') {
+                    break;
+                }
+                self.take(',')?;
+                self.space();
+            }
+        }
+        self.take('}')?;
+        Ok(record)
+    }
+
     fn record(line: &'a str) -> Check<Record> {
         if line.len() > 128 * 1024 {
             return Err("record limit exceeded");
@@ -201,32 +249,7 @@ impl<'a> FlatJson<'a> {
         let mut parser = Self {
             chars: line.chars().peekable(),
         };
-        let mut record = Record::new();
-        parser.space();
-        parser.take('{')?;
-        parser.space();
-        if parser.chars.peek() != Some(&'}') {
-            loop {
-                if record.len() == 32 {
-                    return Err("field limit exceeded");
-                }
-                let key = parser.string()?;
-                parser.space();
-                parser.take(':')?;
-                parser.space();
-                let value = parser.value()?;
-                if record.insert(key, value).is_some() {
-                    return Err("duplicate field");
-                }
-                parser.space();
-                if parser.chars.peek() != Some(&',') {
-                    break;
-                }
-                parser.take(',')?;
-                parser.space();
-            }
-        }
-        parser.take('}')?;
+        let record = parser.object(true)?;
         parser.space();
         if parser.chars.next().is_some() {
             return Err("trailing JSON data");
@@ -259,6 +282,7 @@ enum Field {
     Uint,
     Bool,
     Strings,
+    Records,
     NullableText,
     NullableUint,
 }
@@ -274,7 +298,11 @@ fn fields(record: &Record, expected: &[(&str, Field)]) -> Check<()> {
                 | (Field::Uint | Field::NullableUint, Some(Value::Uint(_)))
                 | (Field::Bool, Some(Value::Bool(_)))
                 | (Field::Strings, Some(Value::Strings(_)))
+                | (Field::Records, Some(Value::Records(_)))
                 | (Field::NullableText | Field::NullableUint, Some(Value::Null))
+        ) || matches!(
+            (kind, record.get(*name)),
+            (Field::Records, Some(Value::Strings(values))) if values.is_empty()
         );
         if !valid {
             return Err("missing or mistyped field");
@@ -284,7 +312,7 @@ fn fields(record: &Record, expected: &[(&str, Field)]) -> Check<()> {
 }
 
 fn doctor_schema(records: &[Record]) -> Check<()> {
-    use Field::{Bool, NullableText, NullableUint, Strings, Text, Uint};
+    use Field::{Bool, NullableText, NullableUint, Records, Strings, Text, Uint};
     if records.len() != KINDS.len() {
         return Err("doctor must emit seven records");
     }
@@ -325,6 +353,8 @@ fn doctor_schema(records: &[Record]) -> Check<()> {
                 ("ffmpeg_version", Text),
                 ("hardware_encoders", Strings),
                 ("hardware_encoder_probe_error", NullableText),
+                ("usable_hardware_encoders", Strings),
+                ("hardware_encoder_probes", Records),
             ],
             "ffmpeg" => &[
                 ("available", Bool),
@@ -395,9 +425,53 @@ fn doctor_schema(records: &[Record]) -> Check<()> {
         return Err("unknown execution mode");
     }
     if records[2].get("available") == Some(&Value::Bool(true)) {
-        let digest = text(&records[2], "sha256")?;
+        let ffmpeg = &records[2];
+        let digest = text(ffmpeg, "sha256")?;
         if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err("invalid ffmpeg fingerprint");
+        }
+        let Some(Value::Strings(compiled)) = ffmpeg.get("hardware_encoders") else {
+            return Err("expected compiled encoder inventory");
+        };
+        let probes = match ffmpeg.get("hardware_encoder_probes") {
+            Some(Value::Records(probes)) => probes.as_slice(),
+            // Empty JSON arrays have no element type to infer while parsing.
+            Some(Value::Strings(values)) if values.is_empty() => &[],
+            _ => return Err("expected hardware probe records"),
+        };
+        let mut observed = Vec::new();
+        let mut usable = Vec::new();
+        for probe in probes {
+            fields(
+                probe,
+                &[
+                    ("encoder", Text),
+                    ("available", Bool),
+                    ("detail", NullableText),
+                ],
+            )?;
+            let encoder = text(probe, "encoder")?;
+            if !compiled.iter().any(|name| name == encoder) || observed.contains(&encoder) {
+                return Err("probe does not name a unique compiled encoder");
+            }
+            observed.push(encoder);
+            if probe.get("available") == Some(&Value::Bool(true)) {
+                if probe.get("detail") != Some(&Value::Null) {
+                    return Err("successful probe carries a failure diagnostic");
+                }
+                usable.push(encoder.to_owned());
+            } else if !matches!(probe.get("detail"), Some(Value::Text(reason)) if !reason.is_empty())
+            {
+                return Err("unusable encoder lacks a reason");
+            }
+        }
+        if ffmpeg.get("usable_hardware_encoders") != Some(&Value::Strings(usable)) {
+            return Err("usable inventory disagrees with functional probes");
+        }
+        if ffmpeg.get("hardware_encoder_probe_error") == Some(&Value::Null)
+            && probes.len() != compiled.len()
+        {
+            return Err("compiled encoder omitted without a probe warning");
         }
     }
     for (record, name) in [(&records[4], "bundled"), (&records[5], "packs")] {
@@ -437,6 +511,7 @@ fn snapshot() -> DoctorSnapshot {
             sha256: "ab".repeat(32),
             version: "ffmpeg fixture".to_owned(),
             hardware_encoders: vec!["h264_nvenc".to_owned()],
+            hardware_encoder_probes: Vec::new(),
             hardware_encoder_probe_error: Some("fixture inventory warning".to_owned()),
         },
         cache: CacheReport::Configured {
@@ -476,6 +551,80 @@ fn doctor_snapshot_robot_has_exact_typed_available_records() {
     assert_eq!(parsed[3]["typeset_bytes"], Value::Uint(512));
     assert_eq!(parsed[4]["user"], Value::Strings(Vec::new()));
     assert_eq!(parsed[6]["supported"], Value::Bool(true));
+}
+
+#[test]
+fn doctor_probe_records_preserve_usable_and_compiled_only_outcomes() {
+    let diagnostic = r#"Cannot load "libcuda.so.1" from C:\GPU\é雪"#;
+    for available in [true, false] {
+        let mut input = snapshot();
+        let FfmpegReport::Available {
+            hardware_encoder_probes,
+            hardware_encoder_probe_error,
+            ..
+        } = &mut input.ffmpeg
+        else {
+            panic!("the fixture contains an available executable");
+        };
+        *hardware_encoder_probes = vec![fmn_output::EncoderProbe {
+            encoder: "h264_nvenc".to_owned(),
+            available,
+            detail: (!available).then(|| diagnostic.to_owned()),
+        }];
+        *hardware_encoder_probe_error = None;
+
+        let parsed = records(&input.to_ndjson().expect("format probe snapshot"))
+            .expect("independently decode nested probe records");
+        doctor_schema(&parsed).expect("compiled and usable inventories agree with probes");
+        assert_eq!(
+            parsed[2]["hardware_encoders"],
+            Value::Strings(vec!["h264_nvenc".to_owned()])
+        );
+        assert_eq!(
+            parsed[2]["usable_hardware_encoders"],
+            Value::Strings(if available {
+                vec!["h264_nvenc".to_owned()]
+            } else {
+                Vec::new()
+            })
+        );
+        let Value::Records(probes) = &parsed[2]["hardware_encoder_probes"] else {
+            panic!("one compiled encoder yields one typed probe record");
+        };
+        assert_eq!(probes.len(), 1);
+        assert_eq!(probes[0]["available"], Value::Bool(available));
+        assert_eq!(
+            probes[0]["detail"],
+            if available {
+                Value::Null
+            } else {
+                Value::Text(diagnostic.to_owned())
+            }
+        );
+        let status = if available {
+            "h264_nvenc: available".to_owned()
+        } else {
+            format!("h264_nvenc: compiled-in (unusable: {diagnostic})")
+        };
+        assert!(input.to_human().contains(&status));
+
+        let mut inconsistent = parsed.clone();
+        inconsistent[2].insert(
+            "usable_hardware_encoders".to_owned(),
+            Value::Strings(if available {
+                Vec::new()
+            } else {
+                vec!["h264_nvenc".to_owned()]
+            }),
+        );
+        assert!(doctor_schema(&inconsistent).is_err());
+        let mut mistyped = parsed;
+        let Some(Value::Records(probes)) = mistyped[2].get_mut("hardware_encoder_probes") else {
+            panic!("nested probe records survive cloning");
+        };
+        probes[0].insert("available".to_owned(), Value::Text("true".to_owned()));
+        assert!(doctor_schema(&mistyped).is_err());
+    }
 }
 
 #[test]
@@ -778,7 +927,8 @@ fn doctor_snapshot_human_exposes_capabilities_and_degradation() {
         "cores: 8 logical / 4 physical",
         "SIMD: hardware x86-64-v4 / active build portable",
         "plan: certified certified-cpu, 2 frame slots, 2 render teams / 4 render threads",
-        "hardware encoders: h264_nvenc",
+        "hardware encoders:",
+        "  h264_nvenc: compiled-in (not probed)",
         "hardware encoder probe warning: fixture inventory warning",
         "cache: /fixture/cache (exists true, direct entries 3)",
         "typeset cache ceiling: 1073741824 bytes (cache.max_bytes)",
@@ -858,6 +1008,12 @@ fn flat_json_oracle_refuses_malformed_duplicate_and_trailing_values() {
         r#"{"x":{}}"#,
         r#"{"x":[1]}"#,
         r#"{"x":["a",]}"#,
+        r#"{"x":[{"encoder":"n","encoder":"m"}]}"#,
+        r#"{"x":[{"nested":[{}]}]}"#,
+        r#"{"x":[{},"mixed"]}"#,
+        r#"{"x":["mixed",{}]}"#,
+        r#"{"x":[{},]}"#,
+        r#"{"x":[{}]false}"#,
         r#"{"x":"\q"}"#,
         r#"{"x":"\u12xz"}"#,
         r#"{"x":"\ud800"}"#,
@@ -886,6 +1042,16 @@ fn doctor_schema_oracle_refuses_structural_and_value_drift() {
         (1, "frames_in_flight", Value::Uint(0)),
         (2, "available", Value::Text("true".to_owned())),
         (2, "sha256", Value::Text("short".to_owned())),
+        (
+            2,
+            "usable_hardware_encoders",
+            Value::Strings(vec!["h264_nvenc".to_owned()]),
+        ),
+        (
+            2,
+            "hardware_encoder_probes",
+            Value::Strings(vec!["untyped probe".to_owned()]),
+        ),
         (3, "direct_entries", Value::Bool(false)),
         (4, "bundled", Value::Strings(Vec::new())),
         (6, "supported", Value::Text("true".to_owned())),

@@ -1100,6 +1100,167 @@ mod private_boundary {
         assert_eq!(caps.hardware(), vec!["h264_nvenc".to_string()]);
     }
 
+    #[test]
+    fn hardware_probe_classifies_missing_driver_and_caches_the_fingerprint() {
+        let (dir, _gate) = scratch("hardware-probe-cache");
+        let (tool_path, mut runner) = scripted_tool(&dir);
+        let tool = resolve_tool(&tool_path, &runner, &dir).unwrap();
+        runner.script(
+            probe_bound_tool(&dir, 1),
+            ProcessOutcome {
+                termination: ProcessTermination::Exited(Some(1)),
+                stdout: Vec::new(),
+                stderr: b"Cannot load libcuda.so.1\ninitialization failed\n".to_vec(),
+            },
+        );
+        let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
+        let probes = caps.probe_hardware(&tool, &runner).unwrap();
+        assert_eq!(probes.len(), 1);
+        assert_eq!(probes[0].encoder, "h264_nvenc");
+        assert!(!probes[0].available);
+        assert_eq!(
+            probes[0].detail.as_deref(),
+            Some("Cannot load libcuda.so.1")
+        );
+        assert!(
+            caps.offers("h264_nvenc"),
+            "compiled inventory remains distinct"
+        );
+        assert_eq!(caps.probe_hardware(&tool.clone(), &runner).unwrap(), probes);
+        let error = caps
+            .require_encoder(&tool, &runner, "h264_nvenc")
+            .expect_err("a compiled encoder without its driver is refused");
+        assert!(matches!(error, BoundaryError::UnusableEncoder { .. }));
+        assert_eq!(runner.runs().len(), 2, "tool clones reuse the observation");
+
+        let runs = runner.runs();
+        let probe = &runs[1];
+        assert_eq!(probe.timeout, std::time::Duration::from_secs(2));
+        assert_eq!(probe.max_output_bytes, 16 * 1024);
+        assert!(probe.argv.windows(2).any(|args| args == ["-f", "null"]));
+        assert!(probe.argv.windows(2).any(|args| args == ["-frames:v", "2"]));
+        assert!(
+            probe
+                .argv
+                .windows(2)
+                .any(|args| args == ["-c:v", "h264_nvenc"])
+        );
+        assert!(
+            probe
+                .argv
+                .windows(2)
+                .any(|args| args == ["-video_size", "256x256"])
+        );
+        assert!(probe.cwd.is_none());
+        assert_eq!(
+            probe.env,
+            [
+                ("LANG".to_owned(), "C".to_owned()),
+                ("LC_ALL".to_owned(), "C".to_owned()),
+                (
+                    "TMPDIR".to_owned(),
+                    probe.program.parent().unwrap().display().to_string(),
+                ),
+            ]
+        );
+        let frames = probe.stdin.as_ref().expect("two raw frames streamed");
+        let luma_bytes = 256 * 256;
+        let frame_bytes = luma_bytes * 3 / 2;
+        assert_eq!(frames.len(), 2 * frame_bytes);
+        for frame in frames.chunks_exact(frame_bytes) {
+            assert!(frame[..luma_bytes].iter().all(|byte| *byte == 16));
+            assert!(frame[luma_bytes..].iter().all(|byte| *byte == 128));
+        }
+
+        assert!(
+            caps.require_encoder(&tool, &runner, "libx264")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(runner.runs().len(), 2, "software needs no hardware trial");
+
+        let mut changed = std::fs::read(&tool_path).unwrap();
+        changed.push(0);
+        std::fs::write(&tool_path, changed).unwrap();
+        assert!(matches!(
+            caps.probe_hardware(&tool, &runner),
+            Err(BoundaryError::ExecutableIdentityChanged { .. }
+                | BoundaryError::ExecutableImageRejected { .. })
+        ));
+        assert_eq!(
+            runner.runs().len(),
+            2,
+            "cache cannot mask source replacement"
+        );
+
+        // A new fingerprint gets a fresh observation, even at the same path.
+        runner.script(
+            probe_bound_tool_in_session(&dir, 1, 0),
+            ProcessOutcome {
+                termination: ProcessTermination::Exited(Some(0)),
+                stdout: format!("{FAKE_VERSION}\n").into_bytes(),
+                stderr: Vec::new(),
+            },
+        );
+        runner.script(
+            probe_bound_tool_in_session(&dir, 1, 1),
+            successful_scripted_outcome(),
+        );
+        let refreshed = resolve_tool(&tool_path, &runner, &dir).unwrap();
+        assert_ne!(tool.sha256_hex(), refreshed.sha256_hex());
+        assert!(
+            caps.require_encoder(&refreshed, &runner, "h264_nvenc")
+                .unwrap()
+                .expect("hardware admission retains its probe")
+                .available
+        );
+        assert_eq!(runner.runs().len(), 4);
+    }
+
+    #[test]
+    fn an_unusable_hardware_encoder_is_refused_before_production_starts() {
+        let (dir, _gate) = scratch("hardware-probe-timeout");
+        let (tool_path, mut runner) = scripted_tool(&dir);
+        let tool = resolve_tool(&tool_path, &runner, &dir).unwrap();
+        runner.script(
+            probe_bound_tool(&dir, 1),
+            ProcessOutcome {
+                termination: ProcessTermination::TimedOut,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            },
+        );
+        let runner = Arc::new(runner);
+        let boundary =
+            Boundary::new(tool, runner.clone(), JobLimits::default(), dir.clone()).unwrap();
+        let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
+        let destination = dir.join("existing.mp4");
+        std::fs::write(&destination, b"existing artifact").unwrap();
+        let error = boundary
+            .encode(
+                &job(
+                    WireFormat::Nv12,
+                    Container::Mp4,
+                    EncoderChoice::Named("h264_nvenc".to_owned()),
+                ),
+                vec![0; WireFormat::Nv12.frame_bytes(64, 36)],
+                &caps,
+                &destination,
+            )
+            .expect_err("a timed-out trial cannot admit a production encode");
+        assert!(matches!(
+            error,
+            BoundaryError::UnusableEncoder { requested, detail }
+                if requested == "h264_nvenc" && detail.contains("2000 ms timeout")
+        ));
+        assert_eq!(std::fs::read(&destination).unwrap(), b"existing artifact");
+        assert_eq!(
+            runner.runs().len(),
+            2,
+            "only version and the functional trial"
+        );
+    }
+
     /// Run one scripted encode and hand back the recorded spec (the run
     /// necessarily ends in `ArtifactMissing` — the scripted runner writes
     /// nothing — which itself proves artifact verification gates
@@ -1116,6 +1277,7 @@ mod private_boundary {
         let (tool_path, mut runner) = scripted_tool(&dir);
         let tool = resolve_tool(&tool_path, &runner, &dir).unwrap();
         runner.script(first_bound_tool(&dir), successful_scripted_outcome());
+        runner.script(probe_bound_tool(&dir, 1), successful_scripted_outcome());
         let runner = Arc::new(runner);
         let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
         let boundary =
@@ -1278,11 +1440,13 @@ mod private_boundary {
     #[test]
     fn hardware_encoder_explicit_and_unknown() {
         let frame = vec![0u8; WireFormat::Nv12.frame_bytes(64, 36)];
-        // Present in caps: the argv names it.
+        // Present in caps and functionally usable: both trial and encode name it.
         let (result, runs, _) =
             scripted_encode(EncoderChoice::Named("h264_nvenc".into()), frame.clone());
         assert!(matches!(result, Err(BoundaryError::ArtifactMissing)));
-        assert!(runs[1].argv.windows(2).any(|w| w == ["-c:v", "h264_nvenc"]));
+        assert_eq!(runs.len(), 3);
+        assert!(runs[1].argv.windows(2).any(|w| w == ["-f", "null"]));
+        assert!(runs[2].argv.windows(2).any(|w| w == ["-c:v", "h264_nvenc"]));
 
         // Absent from caps: refused before any spawn.
         let (result, runs, _) =

@@ -8655,6 +8655,15 @@ impl PyScene {
             image.set_item("policy_version", provenance.native_image.policy_version)?;
             fact.set_item("native_image", image)?;
             fact.set_item("encoder", &provenance.encoder)?;
+            if let Some(probe) = &provenance.hardware_encoder_probe {
+                let observation = PyDict::new(slf.py());
+                observation.set_item("encoder", &probe.encoder)?;
+                observation.set_item("available", probe.available)?;
+                observation.set_item("detail", &probe.detail)?;
+                fact.set_item("hardware_encoder_probe", observation)?;
+            } else {
+                fact.set_item("hardware_encoder_probe", slf.py().None())?;
+            }
             fact.set_item("argv", &provenance.argv)?;
             invocations.append(fact)?;
         }

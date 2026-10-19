@@ -498,8 +498,10 @@ pub enum FfmpegReport {
         sha256: String,
         /// First `ffmpeg -version` line.
         version: String,
-        /// Recognized hardware encoders, in stable order.
+        /// Recognized compiled-in hardware encoders, in stable order.
         hardware_encoders: Vec<String>,
+        /// Bounded functional observations, distinct from the compiled inventory.
+        hardware_encoder_probes: Vec<fmn_output::EncoderProbe>,
         /// Encoder-inventory probe failure, without discarding the valid
         /// executable identity and version probe.
         hardware_encoder_probe_error: Option<String>,
@@ -2180,27 +2182,32 @@ fn probe_ffmpeg_in(
             };
         }
     };
-    let (hardware_encoders, hardware_encoder_probe_error) =
-        match fmn_output::EncoderCapabilities::probe(&tool, runner) {
-            Ok(encoders) => (encoders.hardware(), None),
-            Err(
-                error @ (fmn_output::BoundaryError::ExecutableIdentityChanged { .. }
-                | fmn_output::BoundaryError::ExecutableImageRejected { .. }
-                | fmn_output::BoundaryError::Workdir { .. }),
-            ) => {
-                return FfmpegReport::Unavailable {
-                    attempted: path,
-                    reason: error.to_string(),
-                    alternative: fmn_output::NATIVE_ALTERNATIVE.to_owned(),
-                };
-            }
-            Err(error) => (Vec::new(), Some(error.to_string())),
-        };
+    let mut hardware_encoders = Vec::new();
+    let probes = fmn_output::EncoderCapabilities::probe(&tool, runner).and_then(|encoders| {
+        hardware_encoders = encoders.hardware();
+        encoders.probe_hardware(&tool, runner)
+    });
+    let (hardware_encoder_probes, hardware_encoder_probe_error) = match probes {
+        Ok(probes) => (probes, None),
+        Err(
+            error @ (fmn_output::BoundaryError::ExecutableIdentityChanged { .. }
+            | fmn_output::BoundaryError::ExecutableImageRejected { .. }
+            | fmn_output::BoundaryError::Workdir { .. }),
+        ) => {
+            return FfmpegReport::Unavailable {
+                attempted: path,
+                reason: error.to_string(),
+                alternative: fmn_output::NATIVE_ALTERNATIVE.to_owned(),
+            };
+        }
+        Err(error) => (Vec::new(), Some(error.to_string())),
+    };
     FfmpegReport::Available {
         path: tool.path().to_path_buf(),
         sha256: tool.sha256_hex().to_owned(),
         version: tool.version().to_owned(),
         hardware_encoders,
+        hardware_encoder_probes,
         hardware_encoder_probe_error,
     }
 }
@@ -2453,20 +2460,34 @@ impl DoctorSnapshot {
                 sha256,
                 version,
                 hardware_encoders,
+                hardware_encoder_probes,
                 hardware_encoder_probe_error,
             } => {
                 let path = strict_path_text(path, "doctor ffmpeg path")?;
+                let usable = hardware_encoder_probes
+                    .iter()
+                    .filter(|probe| probe.available)
+                    .map(|probe| probe.encoder.clone())
+                    .collect::<Vec<_>>();
+                let probes = hardware_encoder_probes
+                    .iter()
+                    .map(encoder_probe_json)
+                    .collect::<Vec<_>>()
+                    .join(",");
                 let _ = writeln!(
                     out,
                     "{{\"schema\":\"fmn.doctor\",\"version\":{},\"kind\":\"ffmpeg\",\
                      \"available\":true,\"path\":{},\"sha256\":{},\"ffmpeg_version\":{},\
-                     \"hardware_encoders\":{},\"hardware_encoder_probe_error\":{}}}",
+                     \"hardware_encoders\":{},\"hardware_encoder_probe_error\":{},\
+                     \"usable_hardware_encoders\":{},\"hardware_encoder_probes\":[{}]}}",
                     ROBOT_SCHEMA_VERSION,
                     json_string(path),
                     json_string(sha256),
                     json_string(version),
                     json_array(hardware_encoders),
                     json_option(hardware_encoder_probe_error.as_deref()),
+                    json_array(&usable),
+                    probes,
                 );
             }
             FfmpegReport::Unavailable {
@@ -2591,6 +2612,7 @@ impl DoctorSnapshot {
                 sha256,
                 version,
                 hardware_encoders,
+                hardware_encoder_probes,
                 hardware_encoder_probe_error,
             } => {
                 let _ = writeln!(
@@ -2598,15 +2620,25 @@ impl DoctorSnapshot {
                     "ffmpeg: {} ({version}, sha256 {sha256})",
                     path.display()
                 );
-                let _ = writeln!(
-                    out,
-                    "hardware encoders: {}",
-                    if hardware_encoders.is_empty() {
-                        "none".to_owned()
-                    } else {
-                        hardware_encoders.join(", ")
+                if hardware_encoders.is_empty() {
+                    let _ = writeln!(out, "hardware encoders: none compiled in");
+                } else {
+                    let _ = writeln!(out, "hardware encoders:");
+                    for encoder in hardware_encoders {
+                        let probe = hardware_encoder_probes
+                            .iter()
+                            .find(|probe| &probe.encoder == encoder);
+                        let status = match probe {
+                            Some(probe) if probe.available => "available".to_owned(),
+                            Some(probe) => format!(
+                                "compiled-in (unusable: {})",
+                                probe.detail.as_deref().unwrap_or("functional probe failed")
+                            ),
+                            None => "compiled-in (not probed)".to_owned(),
+                        };
+                        let _ = writeln!(out, "  {encoder}: {status}");
                     }
-                );
+                }
                 if let Some(error) = hardware_encoder_probe_error {
                     let _ = writeln!(out, "hardware encoder probe warning: {error}");
                 }
@@ -2832,11 +2864,20 @@ impl VideoArtifactReport {
     }
 }
 
+fn encoder_probe_json(probe: &fmn_output::EncoderProbe) -> String {
+    format!(
+        "{{\"encoder\":{},\"available\":{},\"detail\":{}}}",
+        json_string(&probe.encoder),
+        probe.available,
+        json_option(probe.detail.as_deref()),
+    )
+}
+
 fn ffmpeg_invocations_json(invocations: &[InvocationReport]) -> String {
     let entries = invocations.iter().map(|invocation| {
         let provenance = &invocation.provenance;
         format!(
-            "{{\"path\":{},\"sha256\":{},\"version\":{},\"bound_path\":{},\"native_image_format\":{},\"native_image_architecture\":{},\"native_image_bytes\":{},\"native_image_policy_version\":{},\"encoder\":{},\"process_mechanism\":{},\"process_policy_version\":{},\"argv\":{},\"artifact\":{}}}",
+            "{{\"path\":{},\"sha256\":{},\"version\":{},\"bound_path\":{},\"native_image_format\":{},\"native_image_architecture\":{},\"native_image_bytes\":{},\"native_image_policy_version\":{},\"encoder\":{},\"process_mechanism\":{},\"process_policy_version\":{},\"argv\":{},\"hardware_encoder_probe\":{},\"artifact\":{}}}",
             json_string(&provenance.tool_path.to_string_lossy()),
             json_string(&provenance.tool_sha256_hex),
             json_string(&provenance.tool_version),
@@ -2849,6 +2890,10 @@ fn ffmpeg_invocations_json(invocations: &[InvocationReport]) -> String {
             json_string(&provenance.process_mechanism),
             provenance.process_policy_version,
             json_array(&provenance.argv),
+            provenance
+                .hardware_encoder_probe
+                .as_ref()
+                .map_or_else(|| "null".to_owned(), encoder_probe_json),
             json_string(&invocation.artifact.to_string_lossy()),
         )
     }).collect::<Vec<_>>();
@@ -6037,12 +6082,10 @@ fn prepare_ffmpeg_context(
     if let Some(encoder) = job
         .resolved_encoder()
         .map_err(|error| CliError::new("config", error.to_string()))?
-        && !capabilities.offers(&encoder)
     {
-        return Err(CliError::new(
-            "capability",
-            format!("installed ffmpeg does not offer encoder {encoder:?}"),
-        ));
+        capabilities
+            .require_encoder(&tool, runner.as_ref(), &encoder)
+            .map_err(|error| CliError::new("capability", error.to_string()))?;
     }
     Ok(FfmpegRenderContext {
         runner,
@@ -9138,15 +9181,27 @@ mod tests {
         fn start(
             &self,
             spec: &fmn_platform::process::ProcessSpec,
-            _cancellation: fmn_platform::process::ProcessCancellation,
-            _stdin_limits: fmn_platform::process::ProcessStdinLimits,
+            cancellation: fmn_platform::process::ProcessCancellation,
+            stdin_limits: fmn_platform::process::ProcessStdinLimits,
         ) -> Result<
             Box<dyn fmn_platform::process::RunningProcess>,
             fmn_platform::process::ProcessError,
         > {
-            Err(fmn_platform::process::ProcessError::NotScripted {
-                program: spec.program.clone(),
-            })
+            if !spec.argv.windows(2).any(|args| args == ["-f", "null"]) {
+                return Err(fmn_platform::process::ProcessError::NotScripted {
+                    program: spec.program.clone(),
+                });
+            }
+            let mut runner = fmn_platform::process::ScriptedRunner::new();
+            runner.script(
+                &spec.program,
+                fmn_platform::process::ProcessOutcome {
+                    termination: fmn_platform::process::ProcessTermination::Exited(Some(0)),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                },
+            );
+            fmn_platform::process::ProcessRunner::start(&runner, spec, cancellation, stdin_limits)
         }
 
         fn run(
@@ -9980,9 +10035,12 @@ mod tests {
             fn start(
                 &self,
                 spec: &ProcessSpec,
-                _: ProcessCancellation,
+                cancellation: ProcessCancellation,
                 stdin: ProcessStdinLimits,
             ) -> Result<Box<dyn RunningProcess>, ProcessError> {
+                if spec.argv.windows(2).any(|args| args == ["-f", "null"]) {
+                    return SuccessfulFfmpegProbeRunner.start(spec, cancellation, stdin);
+                }
                 self.0.lock().unwrap().push((
                     spec.timeout,
                     spec.max_output_bytes,
@@ -10114,6 +10172,9 @@ mod tests {
                 cancellation: ProcessCancellation,
                 limits: ProcessStdinLimits,
             ) -> Result<Box<dyn RunningProcess>, ProcessError> {
+                if spec.argv.windows(2).any(|args| args == ["-f", "null"]) {
+                    return SuccessfulFfmpegProbeRunner.start(spec, cancellation, limits);
+                }
                 Ok(Box::new(AudioProcess {
                     spec: spec.clone(),
                     cancellation,
@@ -10288,6 +10349,10 @@ mod tests {
                     .contains("\"cues_mixed\":1,\"sample_frames\":60000")
             );
             assert!(result.stdout.contains("\"audio_decodes\":[]"));
+            assert!(result.stdout.contains(
+                "\"hardware_encoder_probe\":{\"encoder\":\"h264_nvenc\",\"available\":true,\"detail\":null}"
+            ));
+            assert!(result.stdout.contains("\"hardware_encoder_probe\":null"));
             assert!(result.stdout.contains("\"decoder\":\"native-wav\""));
             assert!(result.stdout.contains("\"-c:v\",\"copy\",\"-c:a\",\"aac\""));
             let manifest = ProvenanceManifest::from_bytes(
@@ -10856,7 +10921,12 @@ mod tests {
                 sha256: "abc123".to_owned(),
                 version: "ffmpeg \"7\"".to_owned(),
                 hardware_encoders: vec!["h264_nvenc".to_owned()],
-                hardware_encoder_probe_error: Some("encoder inventory timed out".to_owned()),
+                hardware_encoder_probes: vec![fmn_output::EncoderProbe {
+                    encoder: "h264_nvenc".to_owned(),
+                    available: false,
+                    detail: Some("Cannot load libcuda.so.1".to_owned()),
+                }],
+                hardware_encoder_probe_error: None,
             },
             cache: CacheReport::Configured {
                 root: PathBuf::from("/cache"),
@@ -10887,7 +10957,7 @@ mod tests {
         let expected = concat!(
             "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"topology\",\"source\":\"fallback\",\"source_detail\":\"fixture fallback\",\"logical_cores\":8,\"physical_cores\":4,\"hardware_supported_tier\":\"x86-64-v4\",\"active_compiled_tier\":\"portable\"}\n",
             "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"execution_plan\",\"determinism\":\"certified\",\"engine\":\"certified-cpu\",\"frames_in_flight\":2,\"scene_threads\":1,\"render_teams\":2,\"render_threads\":4,\"output_threads\":1,\"fine_tile\":16,\"macro_tile\":128,\"estimated_in_flight_bytes\":4096,\"output_format\":\"rgba8\",\"tuning_source\":\"certified-profile\"}\n",
-            "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"ffmpeg\",\"available\":true,\"path\":\"/opt/ffmpeg\",\"sha256\":\"abc123\",\"ffmpeg_version\":\"ffmpeg \\\"7\\\"\",\"hardware_encoders\":[\"h264_nvenc\"],\"hardware_encoder_probe_error\":\"encoder inventory timed out\"}\n",
+            "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"ffmpeg\",\"available\":true,\"path\":\"/opt/ffmpeg\",\"sha256\":\"abc123\",\"ffmpeg_version\":\"ffmpeg \\\"7\\\"\",\"hardware_encoders\":[\"h264_nvenc\"],\"hardware_encoder_probe_error\":null,\"usable_hardware_encoders\":[],\"hardware_encoder_probes\":[{\"encoder\":\"h264_nvenc\",\"available\":false,\"detail\":\"Cannot load libcuda.so.1\"}]}\n",
             "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"cache\",\"resolved\":true,\"root\":\"/cache\",\"exists\":true,\"direct_entries\":3,\"typeset_max_bytes\":1073741824,\"typeset_bytes\":512,\"warning\":null}\n",
             "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"fonts\",\"selected\":\"Computer Modern\",\"bundled\":[\"Computer Modern\"],\"user\":[\"Fixture Sans\"],\"complete\":true,\"detail\":null}\n",
             "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"math_packs\",\"packs\":[\"default\",\"minimal\"]}\n",
@@ -10903,6 +10973,100 @@ mod tests {
             assert!(line.starts_with("{\"schema\":\"fmn.doctor\",\"version\":1,"));
             assert!(line.ends_with('}'));
         }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    #[test]
+    fn doctor_distinguishes_compiled_hardware_from_a_working_encoder() {
+        use fmn_platform::process::{
+            ProcessCancellation, ProcessError, ProcessMechanism, ProcessOutcome, ProcessRunner,
+            ProcessSpec, ProcessStdinLimits, ProcessTermination, RunningProcess,
+        };
+
+        struct MissingDriver;
+        impl ProcessRunner for MissingDriver {
+            fn mechanism(&self) -> ProcessMechanism {
+                ProcessMechanism::Scripted
+            }
+
+            fn start(
+                &self,
+                spec: &ProcessSpec,
+                cancellation: ProcessCancellation,
+                stdin_limits: ProcessStdinLimits,
+            ) -> Result<Box<dyn RunningProcess>, ProcessError> {
+                assert!(spec.argv.windows(2).any(|args| args == ["-f", "null"]));
+                let mut runner = fmn_platform::process::ScriptedRunner::new();
+                runner.script(
+                    &spec.program,
+                    ProcessOutcome {
+                        termination: ProcessTermination::Exited(Some(1)),
+                        stdout: Vec::new(),
+                        stderr: b"Cannot load libcuda.so.1\n".to_vec(),
+                    },
+                );
+                runner.start(spec, cancellation, stdin_limits)
+            }
+
+            fn run(&self, spec: &ProcessSpec) -> Result<ProcessOutcome, ProcessError> {
+                SuccessfulFfmpegProbeRunner.run(spec)
+            }
+        }
+
+        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "fmn-cli-doctor-hardware-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed),
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let source = root.join("ffmpeg");
+        write_native_ffmpeg_fixture(&source);
+        let locator = fmn_platform::process::StdFfmpegLocator::from_search_path(None);
+        for (runner, available) in [
+            (&SuccessfulFfmpegProbeRunner as &dyn ProcessRunner, true),
+            (&MissingDriver as &dyn ProcessRunner, false),
+        ] {
+            let ffmpeg = locate_and_probe_ffmpeg_in(&locator, runner, &source, &root);
+            let FfmpegReport::Available {
+                hardware_encoders,
+                hardware_encoder_probes,
+                hardware_encoder_probe_error,
+                ..
+            } = &ffmpeg
+            else {
+                panic!("the executable remains available: {ffmpeg:?}");
+            };
+            assert_eq!(hardware_encoders, &["h264_nvenc".to_owned()]);
+            assert!(hardware_encoder_probe_error.is_none());
+            assert_eq!(hardware_encoder_probes.len(), 1);
+            assert_eq!(hardware_encoder_probes[0].available, available);
+            let mut snapshot = synthetic_doctor();
+            snapshot.ffmpeg = ffmpeg;
+            let robot = snapshot.to_ndjson().unwrap();
+            let human = snapshot.to_human();
+            if available {
+                assert!(robot.contains("\"usable_hardware_encoders\":[\"h264_nvenc\"]"));
+                assert!(human.contains("h264_nvenc: available"));
+            } else {
+                assert!(robot.contains("\"usable_hardware_encoders\":[]"));
+                assert!(robot.contains(
+                    "\"encoder\":\"h264_nvenc\",\"available\":false,\"detail\":\"Cannot load libcuda.so.1\""
+                ));
+                assert!(human.contains("compiled-in (unusable: Cannot load libcuda.so.1)"));
+            }
+        }
+        let auto = VideoJob {
+            width: 256,
+            height: 256,
+            fps: (1, 1),
+            wire: WireFormat::Nv12,
+            color: ColorDescription::video_bt709(),
+            container: Container::Mp4,
+            encoder: EncoderChoice::Auto,
+            crf: None,
+        };
+        assert_eq!(auto.resolved_encoder().unwrap().as_deref(), Some("libx264"));
     }
 
     #[cfg(unix)]
@@ -11051,6 +11215,7 @@ mod tests {
             path,
             version,
             hardware_encoders,
+            hardware_encoder_probes,
             ..
         } = ffmpeg
         else {
@@ -11059,6 +11224,8 @@ mod tests {
         assert_eq!(path.to_str(), Some(canonical));
         assert_eq!(version, "ffmpeg version cli-locator-fixture");
         assert_eq!(hardware_encoders, ["h264_nvenc"]);
+        assert_eq!(hardware_encoder_probes.len(), 1);
+        assert!(hardware_encoder_probes[0].available);
     }
 
     #[test]
