@@ -1111,7 +1111,10 @@ mod handoff_tests {
         drop(next);
         drop(compiler);
         assert!(worker.camera_pixels.upgrade().is_none());
-        assert!(worker.spare.is_some(), "only reusable pixel storage remains");
+        assert!(
+            worker.spare.is_some(),
+            "only reusable pixel storage remains"
+        );
     }
 
     #[test]
