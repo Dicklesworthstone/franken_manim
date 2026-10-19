@@ -1,6 +1,7 @@
 # ADR-0028 — Bundle Computer Modern's math faces from the OFL AMS release
 
-**Status:** Proposed
+**Status:** Accepted (owner ruling 2026-10-19, owner decision session item D2,
+fm-adr0028-cm-math-faces-decision-2xyy: "Accept")
 **Date:** 2026-10-05
 **Bead:** fm-tex-metrics-glyphs-ru72
 **Amends:** §11.1's bundled face list (D-08's "bundled Computer Modern" is
