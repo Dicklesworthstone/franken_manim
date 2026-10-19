@@ -1,6 +1,7 @@
 //! The `fmn` binary entry point.
 #![forbid(unsafe_code)]
 
+mod bundle_audio;
 mod process_output;
 mod studio_project;
 
@@ -58,6 +59,8 @@ fn main() -> ExitCode {
             let stdout = std::io::stdout();
             fmn_cli::run_studio_os(&args, &mut stdout.lock(), &shutdown)
         }
+    } else if let Some(output) = bundle_audio::try_run_os(&args) {
+        output
     } else {
         fmn_cli::run_os(args)
     };
