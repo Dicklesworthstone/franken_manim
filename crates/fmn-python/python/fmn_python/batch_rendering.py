@@ -17,7 +17,10 @@ from typing import Any
 
 from .batch_checkpoint import BatchCheckpoint
 from .batch_provenance import BatchProvenance, has_provenance, validate_batch_mode
-from .bundle_export import BundleExportResult, _validated_limits, export_bundle, require_bundle_capability
+from .bundle_export import (
+    BundleExportResult, _validated_audio_options, _validated_limits, export_bundle,
+    require_bundle_capability,
+)
 from .render_selection import animation_range as _animation_range
 from .rendering import RenderResult, SourceInputs, _FORMATS, _positive_integer, render_scene
 from .paired_output import (
@@ -218,6 +221,8 @@ def render_scenes(
     runtime_identities: dict[str, str] | None = None,
     bundle_camera: bool = False,
     bundle_limits: Mapping[str, int] | None = None,
+    bundle_audio: bool = False,
+    bundle_audio_options: Mapping[str, int] | None = None,
 ) -> BatchRenderResult:
     """Render named scenes in input order using independent native sessions.
 
@@ -282,13 +287,34 @@ def render_scenes(
     caller-owned resume_key contract: completed bundles are hash-verified and
     skipped, never reconstructed as live Scenes. Camera mode, capture limits,
     explicit resolution/FPS and constructor inputs must match the saved plan.
+
+    bundle_audio=True includes native WAV cues through the existing bounded
+    soundtrack exporter. bundle_audio_options may set audio_sample_rate,
+    audio_channels, audio_threads and max_audio_bytes per scene. Those settings
+    are validated and copied before planning any jobs and bound into checkpoint
+    identity. A no-cue scene retains its ordinary picture-only receipt; an
+    attached soundtrack retains rate/channel/frame metadata through recovery.
+    Audio workers belong to the native mixer, never to Python scene execution.
     """
     if not isinstance(format, str) or format not in _FORMATS | {"fmtl"}:
         raise ValueError("render format must be png, png_sequence, gif, y4m, wav, svg, mp4, mov, or fmtl")
     if not isinstance(bundle_camera, bool):
         raise TypeError("bundle_camera must be bool")
-    if format != "fmtl" and (bundle_camera or bundle_limits is not None):
-        raise ValueError("bundle_camera and bundle_limits require format='fmtl'")
+    if type(bundle_audio) is not bool:
+        raise TypeError("bundle_audio must be bool")
+    if format != "fmtl" and (bundle_camera or bundle_limits is not None
+                             or bundle_audio or bundle_audio_options is not None):
+        raise ValueError("bundle camera, audio and limits require format='fmtl'")
+    if bundle_audio_options is not None and not isinstance(bundle_audio_options, Mapping):
+        raise TypeError("bundle_audio_options must be a mapping or None")
+    if bundle_audio_options is not None and not bundle_audio:
+        raise ValueError("bundle_audio_options require bundle_audio=True")
+    audio_options = {}
+    if bundle_audio:
+        rate, channels, audio_threads, budget = _validated_audio_options(
+            audio=True, **({} if bundle_audio_options is None else dict(bundle_audio_options)))
+        audio_options = {"audio_sample_rate": rate, "audio_channels": channels,
+                         "audio_threads": audio_threads, "max_audio_bytes": budget}
     if not isinstance(save_last_frame, bool):
         raise TypeError("save_last_frame must be bool")
     if not isinstance(subdivide, bool):
@@ -318,7 +344,7 @@ def render_scenes(
     native = importlib.import_module("manimlib")
     limits = None
     if format == "fmtl":
-        require_bundle_capability(native, camera=bundle_camera)
+        require_bundle_capability(native, camera=bundle_camera, audio=bundle_audio)
         if (threads is not None or selection is not None or subdivide or save_last_frame
                 or reproducible or sources is not None
                 or runtime_identities is not None or _output_options):
@@ -367,6 +393,8 @@ def render_scenes(
                 **({"save_last_frame": True} if save_last_frame else {}),
                 **({"bundle_camera": bundle_camera, "bundle_limits": limits}
                    if format == "fmtl" else {}),
+                **({"bundle_audio": True, "bundle_audio_options": audio_options}
+                   if bundle_audio else {}),
             })
             completed = journal.completed
             for index, job in enumerate(jobs):
@@ -385,7 +413,8 @@ def render_scenes(
                         kwargs = journal.constructor_kwargs(index)
                     if format == "fmtl":
                         receipt = export_bundle(job.scene, path, resolution=resolution, fps=fps,
-                                                camera=bundle_camera, scene_kwargs=kwargs, **limits)
+                                                camera=bundle_camera, scene_kwargs=kwargs, **limits,
+                                                **({"audio": True, **audio_options} if bundle_audio else {}))
                     else:
                         receipt = render(job.scene, path, format=format, resolution=resolution,
                                            fps=fps, threads=threads, scene_kwargs=kwargs,
