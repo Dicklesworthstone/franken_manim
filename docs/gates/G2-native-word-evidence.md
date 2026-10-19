@@ -37,7 +37,7 @@ The eight criteria are quoted from `fm-i1q` (plan §20.3).
 | (4) SVGMobject works for user files (W2SVG) | `fm-6nm` and `fm-5wq.4.50` closed: portal `SVGMobject` builds a VMobject family through Chisel's hardened processor (`crates/fmn-geom/src/svg.rs`), covered by `crates/fmn-python/tests/bridge.py` | **Green** |
 | (5) Typeset caching live (W6TEX + W8CACHE) | All three front doors attach the persistent typeset store at the one resolved root (`fm-typeset-cache-preflight-wiring-1sn0`, closed): standalone `fmn` (`0126fd51`), `fmn::render` (`a89eaee9`) and `fmn-python` (`59807496`, plus `directories.cache` from the config, with store read/write error counting `c21d049e`). Cache keys name the bundled faces' SHA-256s, the `fmn-tex` version and the pinned `franken_markdown` rev. Fresh-process acceptance passes on Linux and macOS arm64 (`crates/fmn-cli/tests/typeset_cache.rs`, 8/8; `crates/fmn-tex/tests/memory_cache.rs`, 9/9; `crates/fmn-python` `typesetting::tests`, 3/3; e2e `lifecycle.typeset_cache_warm_second_run.v1` and `lifecycle.typeset_preflight_before_first_play.v1`): a warm second run serves 21/21 layouts from disk with byte-identical `--reproducible` frames; a corrupt entry is detected and recomputed; `--clear-cache` empties the store. Static strings are preflighted on the worker pool before `construct` (the formula sheet: 21 layouts before construct, 0 in construct, 0 in play): native scenes from `SceneConstruct::tex_preflight`, portal scenes from literal `Tex`/`TexText` calls found across the MRO. PG-7's formula workloads time real layouts and verified store hits since `a362dcec` (`fm-a87y`, closed); open: a qualified PG-7 observation (`fm-inr.1`) | **Partial (pending PG-7 observation `fm-inr.1`)** |
 | (6) Coverage-ratchet dashboard public and live (W6RATCHET) | `docs/ratchet/dashboard.md`, regenerated at the `68fe29b8` pin (`8e6d7372`): frozen G0-4 denominator, CI-enforced pin/ratchet lockstep, and honest columns ("typeset returned Ok" apart from "checked by an oracle"). Recomputing it needs the private corpus, which exists only on the project host | **Green** |
-| (7) fmd renders `$…$` in HTML/PDF via the same crates | Re-measured at the `f059cac6` pin (see "Cross-repo payoff"): PDF inline and display math both go through fmd-math `Layout` (`fm-djcw`, UPSTREAM_LEDGER row 21). HTML emits MathML from the fmd-math parse tree and the browser lays it out; this packet records that as **not** using the shared layout | **PDF GREEN; HTML NOT GREEN (MathML; owner decision on whether it satisfies "via the same crates")** |
+| (7) fmd renders `$…$` in HTML/PDF via the same crates | Re-measured at the `f059cac6` pin (see "Cross-repo payoff"): PDF inline and display math both go through fmd-math `Layout` (`fm-djcw`, UPSTREAM_LEDGER row 21). HTML emits MathML from the fmd-math parse tree and the browser lays it out; it shares the parser, not the layout. Owner ruling 2026-10-19 (`fm-mmzl`, decision session D6): parser-only MathML satisfies criterion 7 for HTML, together with a box-check test that the MathML carries the same atoms and refusals as `Layout` (`fm-jc0d`) | **PDF GREEN; HTML ruled acceptable, pending the box-check test (`fm-jc0d`)** |
 | (8) PG-1(G2) and PG-7 enforced and blocking | Policy rows are `blocking` in `docs/performance/PERF_GATES.tsv` and the rig is in-tree (`crates/fmn-conformance/src/perf_pg7.rs`, `perf_frontdoor.rs`, `bin/fmn-perf.rs`). ADR-0024 makes host qualification satisfiable (`fm-5wq.8` closed), but no pinned-host observation is committed (`fm-inr.1`), and the Reference side of PG-1 is still a calibration capture (`fm-5wq.17`) | **NOT GREEN** |
 
 ## Dependency closure
@@ -52,7 +52,7 @@ Of `fm-i1q`'s 25 blockers, 20 are closed and 5 are open.
   passed 2026-08-20, `f1248b6`).
 - **Open, by criterion:**
   - (1) `fm-tex-metrics-glyphs-ru72`, `fm-5wq.50`;
-  - (7) `fm-mmzl` (the HTML ruling, `agent:claim:manual`);
+  - (7) `fm-jc0d` (the HTML box-check test the 2026-10-19 `fm-mmzl` ruling requires);
   - (8) `fm-inr` (in progress), `fm-5wq.17`.
 
 ## The coverage ratchet (criterion 1 numerator, criterion 6)
@@ -331,9 +331,10 @@ measurement) and `probe.pdf` (17,594 bytes, SHA-256 `530154af…bd48400`):
 
 So criterion 7 now holds for PDF: inline and display math both go through
 the shared layout. HTML uses the shared parser but not the shared layout.
-This packet does not reinterpret the criterion. Whether parser-only MathML
-satisfies "via the same crates" for HTML is recorded here as an open owner
-decision (`fm-mmzl`), not as green.
+On 2026-10-19 the owner ruled (`fm-mmzl`) that parser-only MathML satisfies
+"via the same crates" for HTML, provided a box-check test proves the MathML
+carries the same atoms and refusals as `Layout` (`fm-jc0d`). Until that test
+lands, HTML is ruled acceptable but not green.
 
 ## Performance gates (criterion 8) — PG-1 is NOT green
 
@@ -375,8 +376,8 @@ HOLD, but it is also not a pass, and G2 makes these gates blocking.
    typeset caching + preflight are wired across `fmn`, `fmn::render`, and
    `fmn-python` (`fm-typeset-cache-preflight-wiring-1sn0`).
 3. **Criterion 7:** PDF is done (`fm-djcw`). HTML math is browser-laid-out
-   MathML from the fmd-math parser; whether criterion 7 requires fmd-math
-   `Layout` for HTML too is an owner ruling (`fm-mmzl`).
+   MathML from the fmd-math parser, ruled acceptable by the owner on 2026-10-19
+   (`fm-mmzl`) subject to the box-check test (`fm-jc0d`).
 4. **Criterion 8:** a qualified Linux observation for PG-1(G2) and PG-7
    (`fm-inr.1`), and an honest PG-1 Reference side (`fm-5wq.17`).
 
