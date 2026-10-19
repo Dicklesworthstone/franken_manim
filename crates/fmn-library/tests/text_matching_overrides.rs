@@ -5,8 +5,8 @@ use fmn_anim::pure_frame::PureSegment;
 use fmn_anim::{Animation, RateFunc, RationalFrameClock, open_play, play_segment};
 use fmn_core::rng::RngRoot;
 use fmn_library::{
-    SpanKindU8, SpanMapData, SpanMapEntry, Tex, TexEngine, TextMatchingConfig,
-    TextMatchingError, TransformMatchingStrings, TransformMatchingTex,
+    SpanKindU8, SpanMapData, SpanMapEntry, Tex, TexEngine, TextMatchingConfig, TextMatchingError,
+    TransformMatchingStrings, TransformMatchingTex,
 };
 use fmn_mobject::{Mob, Mobject, Stage};
 
@@ -93,7 +93,10 @@ fn renames_claim_real_target_handles_before_equal_keys() {
             animation.animations()[index].preflight_mobjects(),
             [source_parts[a], target_parts[b]]
         );
-        assert_eq!(animation.animations()[index].state().config.name, "Transform");
+        assert_eq!(
+            animation.animations()[index].state().config.name,
+            "Transform"
+        );
     }
     assert_eq!(stage.roots(), &[source]);
 }
@@ -139,9 +142,8 @@ fn mapped_play_and_skip_publish_original_target_once_and_preserve_its_ink() {
                     .iter()
                     .map(|&mob| stage.get_points(mob))
                     .collect();
-                let animation = mapped(
-                    &mut stage, source, target, &sm, &tm, &[(from, to)], strings,
-                );
+                let animation =
+                    mapped(&mut stage, source, target, &sm, &tm, &[(from, to)], strings);
                 let mut animations = vec![animation];
                 let mut clock = RationalFrameClock::new(24).unwrap();
                 let mut emitted = 0;
@@ -327,7 +329,10 @@ fn mapped_worker_frames_match_serial_under_reordered_evaluation() {
                                     .rev()
                                     .map(|index| {
                                         let frame = i64::try_from(index + 1).unwrap();
-                                        (frame, frame_facts(&program.job(frame).unwrap().materialize()))
+                                        (
+                                            frame,
+                                            frame_facts(&program.job(frame).unwrap().materialize()),
+                                        )
                                     })
                                     .collect::<Vec<_>>()
                             })

@@ -534,7 +534,9 @@ fn matching_pairs(
         }
     }
     let remaining = match kind {
-        MatchingKind::Tex => tex_pairs_remaining(source_keys, target_keys, &used_source, &used_target),
+        MatchingKind::Tex => {
+            tex_pairs_remaining(source_keys, target_keys, &used_source, &used_target)
+        }
         MatchingKind::Strings => {
             string_pairs_remaining(source_keys, target_keys, &used_source, &used_target)?
         }
@@ -1106,7 +1108,13 @@ mod tests {
             [(vec![0, 1], vec![0]), (vec![2], vec![1])]
         );
         assert_eq!(
-            plan(&spans("z"), &spans("uvw"), MatchingKind::Tex, &[("z", "uvw")]).unwrap(),
+            plan(
+                &spans("z"),
+                &spans("uvw"),
+                MatchingKind::Tex,
+                &[("z", "uvw")]
+            )
+            .unwrap(),
             [(vec![0], vec![0, 1, 2])]
         );
     }
