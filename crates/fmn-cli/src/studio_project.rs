@@ -280,10 +280,10 @@ struct PublishedImages(Option<PathBuf>);
 
 impl Drop for PublishedImages {
     fn drop(&mut self) {
-        if let Some(directory) = self.0.take() {
-            if let Err(error) = std::fs::remove_dir_all(&directory) {
-                eprintln!("fmn studio-project: cannot remove retired worker images: {error}");
-            }
+        if let Some(directory) = self.0.take()
+            && let Err(error) = std::fs::remove_dir_all(&directory)
+        {
+            eprintln!("fmn studio-project: cannot remove retired worker images: {error}");
         }
     }
 }
