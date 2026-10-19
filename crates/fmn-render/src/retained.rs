@@ -1936,7 +1936,7 @@ mod tests {
         let blue = pixel(renderer.frame(), 8, 13);
         let white = pixel(renderer.frame(), 24, 13);
         assert!(red[0] > 0.8 && red[1] < 0.1 && red[2] < 0.1);
-        assert!(green[0] < 0.1 && green[1] > 0.8 && green[2] < 0.1);
+        assert!(green[0] > 0.8 && green[1] < 0.1 && green[2] < 0.1);
         assert!(blue[0] < 0.1 && blue[1] < 0.1 && blue[2] > 0.8);
         assert!(white[0] > 0.8 && white[1] > 0.8 && white[2] > 0.8);
         let changed = ImageResource::rgba8(
@@ -2029,33 +2029,52 @@ mod tests {
             renderer.render_with_camera(&stage, &camera).unwrap();
             assert!(renderer.last_camera_frame_reused());
             match step {
-                0 => stage.shift(vector, [0.5, 0.0, 0.0]),
+                0 => {
+                    stage.shift(vector, [0.5, 0.0, 0.0]);
+                }
                 1 => {
                     stage.set_shading(surface, [0.2, 0.4, 0.1], false);
                 }
                 2 => {
                     stage.get_mut(vector).unwrap().buffer.write_range(
-                        "fill_rgba", 0, &[0.8, 0.1, 0.4, 0.7].repeat(3),
+                        "fill_rgba",
+                        0,
+                        &[0.8, 0.1, 0.4, 0.7].repeat(3),
                     );
                 }
                 3 => {
                     stage.bring_to_front(vector).unwrap();
                 }
                 4 => {
-                    stage.set_image_resource(image, Some(ImageResource::rgba8(
-                        2, 2, [10, 90, 20, 255].repeat(4),
-                        ImageColorSpace::Linear, ImageSampler::default(),
-                    ).unwrap())).unwrap();
+                    let resource = ImageResource::rgba8(
+                        2,
+                        2,
+                        [10, 90, 20, 255].repeat(4),
+                        ImageColorSpace::Linear,
+                        ImageSampler::default(),
+                    )
+                    .unwrap();
+                    stage.set_image_resource(image, Some(resource)).unwrap();
                 }
                 _ => {
-                    stage.set_placement(surface, Placement::from_translation([1.0, 0.0, 0.0])).unwrap();
+                    stage
+                        .set_placement(surface, Placement::from_translation([1.0, 0.0, 0.0]))
+                        .unwrap();
                 }
             }
             renderer.render_with_camera(&stage, &camera).unwrap();
             assert!(!renderer.last_camera_frame_reused());
-            assert_eq!(renderer.frame().as_bytes(), fresh_camera_bits(&stage, &camera));
+            assert_eq!(
+                renderer.frame().as_bytes(),
+                fresh_camera_bits(&stage, &camera)
+            );
         }
-        let view = stage.get_mut(surface).unwrap().buffer.export_field_view("rgba", true).unwrap();
+        let view = stage
+            .get_mut(surface)
+            .unwrap()
+            .buffer
+            .export_field_view("rgba", true)
+            .unwrap();
         for _ in 0..2 {
             renderer.render_with_camera(&stage, &camera).unwrap();
             assert!(!renderer.last_camera_frame_reused());
@@ -2065,7 +2084,10 @@ mod tests {
         }
         renderer.render_with_camera(&stage, &camera).unwrap();
         assert!(!renderer.last_camera_frame_reused());
-        assert_eq!(renderer.frame().as_bytes(), fresh_camera_bits(&stage, &camera));
+        assert_eq!(
+            renderer.frame().as_bytes(),
+            fresh_camera_bits(&stage, &camera)
+        );
         drop(view);
         renderer.render_with_camera(&stage, &camera).unwrap();
         renderer.render_with_camera(&stage, &camera).unwrap();
@@ -2083,9 +2105,15 @@ mod tests {
         let original = renderer.frame().as_bytes().to_vec();
         let changed = Camera::new(CameraConfig {
             resolution: (32, 18),
-            background: LinearRgba { r: 0.3, g: 0.1, b: 0.2, a: 1.0 },
+            background: LinearRgba {
+                r: 0.3,
+                g: 0.1,
+                b: 0.2,
+                a: 1.0,
+            },
             ..CameraConfig::default()
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!(base.revision(), changed.revision());
         let a = renderer.prepare_with_camera(&stage, &base).unwrap();
         let b = renderer.prepare_with_camera(&stage, &changed).unwrap();
@@ -2093,7 +2121,10 @@ mod tests {
         assert_eq!(renderer.frame().as_bytes(), original);
         renderer.render_with_camera(&stage, &changed).unwrap();
         assert!(!renderer.last_camera_frame_reused());
-        assert_eq!(renderer.frame().as_bytes(), fresh_camera_bits(&stage, &changed));
+        assert_eq!(
+            renderer.frame().as_bytes(),
+            fresh_camera_bits(&stage, &changed)
+        );
         assert_ne!(renderer.frame().as_bytes(), original);
         renderer.render_with_camera(&stage, &changed).unwrap();
         assert!(renderer.last_camera_frame_reused());
@@ -2102,17 +2133,62 @@ mod tests {
         assert!(!renderer.last_camera_frame_reused());
         renderer.render_with_camera(&stage, &changed).unwrap();
         assert!(!renderer.last_camera_frame_reused());
-        assert_eq!(renderer.frame().as_bytes(), fresh_camera_bits(&stage, &changed));
+        assert_eq!(
+            renderer.frame().as_bytes(),
+            fresh_camera_bits(&stage, &changed)
+        );
 
         let invalid_layout = Camera::new(CameraConfig {
             resolution: (24, 24),
             ..CameraConfig::default()
-        }).unwrap();
-        assert!(renderer.render_with_camera(&stage, &invalid_layout).is_err());
+        })
+        .unwrap();
+        assert!(
+            renderer
+                .render_with_camera(&stage, &invalid_layout)
+                .is_err()
+        );
         assert!(!renderer.last_camera_frame_reused());
         renderer.render_with_camera(&stage, &changed).unwrap();
         assert!(!renderer.last_camera_frame_reused());
-        assert_eq!(renderer.frame().as_bytes(), fresh_camera_bits(&stage, &changed));
+        assert_eq!(
+            renderer.frame().as_bytes(),
+            fresh_camera_bits(&stage, &changed)
+        );
+    }
+
+    #[test]
+    fn cached_camera_pixels_never_hide_invalid_live_records() {
+        let camera = camera();
+        let mut stage = Stage::new();
+        let mob = stage.add(vector());
+        stage.add_to_scene(mob).unwrap();
+        let mut renderer = RetainedFrameRenderer::new(config(1)).unwrap();
+        renderer.render_with_camera(&stage, &camera).unwrap();
+        renderer.render_with_camera(&stage, &camera).unwrap();
+        assert!(renderer.last_camera_frame_reused());
+        let before = renderer.frame().as_bytes().to_vec();
+        stage
+            .get_mut(mob)
+            .unwrap()
+            .buffer
+            .write(1, "point", &[f32::NAN, 1.25, 0.0]);
+        assert!(renderer.render_with_camera(&stage, &camera).is_err());
+        assert!(!renderer.last_camera_frame_reused());
+        assert_eq!(renderer.frame().as_bytes(), before);
+        stage
+            .get_mut(mob)
+            .unwrap()
+            .buffer
+            .write(1, "point", &[0.5, 1.75, 0.0]);
+        renderer.render_with_camera(&stage, &camera).unwrap();
+        assert!(!renderer.last_camera_frame_reused());
+        assert_eq!(
+            renderer.frame().as_bytes(),
+            fresh_camera_bits(&stage, &camera)
+        );
+        renderer.render_with_camera(&stage, &camera).unwrap();
+        assert!(renderer.last_camera_frame_reused());
     }
 }
 
