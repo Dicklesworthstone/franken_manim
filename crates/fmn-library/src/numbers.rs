@@ -1913,6 +1913,8 @@ mod tests {
         use fmn_core::constants::BLUE;
         use fmn_mobject::Placement;
 
+        use crate::style::VStyle;
+
         let expected_book = book();
         let book = book();
         let mut stage = Stage::new();
@@ -1988,7 +1990,7 @@ mod tests {
             count_in_from(mob, decimal, book, 1.0)
                 .unwrap()
                 .with_config(AnimConfig {
-                    rate_func: RateFunc::linear().scaled(2.0),
+                    rate_func: RateFunc::linear().not_quite_there(2.0),
                     ..AnimConfig::default()
                 });
         animation.begin(&mut stage).unwrap();

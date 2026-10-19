@@ -380,10 +380,10 @@ impl SceneConstruct for NumericReadout {
 
 fn numeric_options(path: &str, format: RenderFormat) -> RenderOptions {
     let mut options = options(path, format, 2, 2);
-    options.camera = None;
     options.config.camera.resolution = (160, 96);
     options.config.camera.fps = 8;
     options.config.camera.background_color = "#808080".to_owned();
+    options.camera = Some(options.camera_config().unwrap());
     options
 }
 

@@ -301,7 +301,7 @@ mod tests {
         .with_config(AnimConfig {
             run_time: 4.0,
             time_span: Some((1.0, 3.0)),
-            rate_func: RateFunc::linear().scaled(0.5),
+            rate_func: RateFunc::linear().not_quite_there(0.5),
             lag_ratio: 1.0,
             ..AnimConfig::default()
         });

@@ -10290,7 +10290,7 @@ mod tests {
                     assert!(
                         spec.argv
                             .windows(2)
-                            .any(|pair| pair == ["-acodec", "pcm_s16le"])
+                            .any(|pair| pair == ["-c:a", "pcm_f32le"])
                     );
                     assert_eq!(
                         limits.max_total_bytes, 0,
@@ -10566,7 +10566,12 @@ mod tests {
             let source = b"fLaCscripted compressed audio input".to_vec();
             fs.insert(fmn::builtins::SOUND_CUE_ASSET_NAME, source.clone());
             let runner = Arc::new(AudioRunner {
-                decoded_wav: Some(source_wav()),
+                decoded_wav: Some(fmn_codec::encode_wav(
+                    1,
+                    48_000,
+                    SampleFormat::F32,
+                    &vec![0.25; 36_000],
+                )),
                 ..AudioRunner::default()
             });
             let (result, artifact) = render(&fs, &runner, &[]);
