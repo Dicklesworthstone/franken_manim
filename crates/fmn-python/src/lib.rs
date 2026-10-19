@@ -12312,6 +12312,17 @@ _fmn_sys.unraisablehook = _fmn_capture_unraisable
         modules
             .set_item("manimlib", &module)
             .expect("install manimlib");
+        // The installed wheel ships this extension as `manimlib._native`
+        // under its Python package, and the console entry point imports it
+        // by that name. Here the extension *is* `manimlib`, so alias it; the
+        // manimlib* teardown below removes the alias, and clearing the
+        // module's dict breaks the self-reference.
+        module
+            .add("_native", &module)
+            .expect("alias the extension as manimlib._native");
+        modules
+            .set_item("manimlib._native", &module)
+            .expect("install manimlib._native");
         let module_weakref = weakref
             .getattr("ref")
             .and_then(|constructor| constructor.call1((&module,)))
