@@ -328,3 +328,156 @@ fn native_layout_animations_render_the_same_final_scene_as_explicit_placement() 
         "the laid-out blue bars must actually be visible"
     );
 }
+
+struct NumericReadout {
+    animated: bool,
+}
+
+impl SceneConstruct for NumericReadout {
+    fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+        use fmn::library::numbers::{add_decimal_for_value_animation, change_decimal_to_value};
+
+        let book = FontBook::bundled().expect("bundled fonts parse");
+        let decimal = DecimalNumber::new(if self.animated { 1.0 } else { 1234.0 })
+            .num_decimal_places(0)
+            .font_size(56.0)
+            .include_background_rectangle(true)
+            .unit("m")
+            .build(&book)?;
+        let mob = if self.animated {
+            let mob = add_decimal_for_value_animation(stage.arena_mut(), &decimal, &book)?;
+            stage.add_to_scene(mob)?;
+            mob
+        } else {
+            // The expected image constructs the final value directly and
+            // uses the ordinary public Stage::add path.
+            stage.add(decimal.clone())?
+        };
+        stage.scale(mob, 1.8);
+        stage.move_to(mob, [-2.2, 0.6, 0.0], LEFT);
+        stage.set_fill(mob, Some(BLUE), Some(1.0), None, true);
+        let background = stage.get(mob).unwrap().submobjects()[0];
+        stage.set_fill(background, Some(BLACK), Some(1.0), None, true);
+        stage.set_z_index(mob, 3, true);
+        stage.set_fixed_in_frame(mob, 1.0, true);
+        if self.animated {
+            stage.play(
+                change_decimal_to_value(mob, decimal, book, 1234.0)?.with_config(AnimConfig {
+                    run_time: 0.5,
+                    rate_func: RateFunc::linear(),
+                    ..AnimConfig::default()
+                }),
+            )?;
+        }
+        let anchor = stage.get_bounding_box_point(mob, LEFT);
+        for (actual, expected) in anchor.into_iter().zip([-2.2, 0.6, 0.0]) {
+            assert!((actual - expected).abs() < 1e-6);
+        }
+        assert_eq!(stage.z_index(mob), 3);
+        Ok(())
+    }
+}
+
+fn numeric_options(path: &str, format: RenderFormat) -> RenderOptions {
+    let mut options = options(path, format, 2, 2);
+    options.camera = None;
+    options.config.camera.resolution = (160, 96);
+    options.config.camera.fps = 8;
+    options.config.camera.background_color = "#808080".to_owned();
+    options
+}
+
+#[test]
+fn native_numeric_animation_matches_independently_placed_final_glyph_pixels() {
+    let fs = Arc::new(VirtualFs::new());
+    for (path, animated) in [("/number.png", true), ("/expected-number.png", false)] {
+        let report = render_with_fs(
+            &mut NumericReadout { animated },
+            numeric_options(path, RenderFormat::Png),
+            fs.clone(),
+        )
+        .unwrap();
+        assert_eq!(report.scene.play_count, u64::from(animated));
+        assert_eq!(report.artifact.frame_count, 1);
+        assert_eq!(report.frame_pipeline.unwrap().outstanding_slots, 0);
+    }
+    let actual = decode_png(
+        &fs.read(Path::new("/number.png")).unwrap(),
+        &PngLimits::default(),
+    )
+    .unwrap();
+    let expected = decode_png(
+        &fs.read(Path::new("/expected-number.png")).unwrap(),
+        &PngLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(actual.rgba, expected.rgba);
+    let pixels = actual.rgba.as_chunks::<4>().0;
+    assert!(
+        pixels
+            .iter()
+            .any(|pixel| pixel[2] > pixel[0] && pixel[2] > 64)
+    );
+    assert!(pixels.iter().any(|pixel| pixel[..3] == [0, 0, 0]));
+    assert!(pixels.iter().any(|pixel| pixel[..3] == [128, 128, 128]));
+}
+
+#[test]
+fn failed_native_numeric_callback_aborts_the_artifact_and_allows_immediate_retry() {
+    struct RefusedNumber;
+    impl SceneConstruct for RefusedNumber {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            use fmn::library::numbers::{add_decimal_for_value_animation, changing_decimal};
+
+            let book = FontBook::bundled().expect("bundled fonts parse");
+            let decimal = DecimalNumber::new(1.0)
+                .num_decimal_places(0)
+                .character_limit(1)
+                .build(&book)?;
+            let mob = add_decimal_for_value_animation(stage.arena_mut(), &decimal, &book)?;
+            stage.add_to_scene(mob)?;
+            stage.wait(0.125)?;
+            stage.play(
+                changing_decimal(
+                    mob,
+                    decimal,
+                    book,
+                    |alpha| {
+                        if alpha < 0.5 { 2.0 } else { 1234.0 }
+                    },
+                )?
+                .with_config(AnimConfig {
+                    run_time: 0.5,
+                    rate_func: RateFunc::linear(),
+                    ..AnimConfig::default()
+                }),
+            )?;
+            panic!("a refused numeric frame cannot report successful playback")
+        }
+    }
+
+    let fs = Arc::new(VirtualFs::new());
+    let result = render_with_fs(
+        &mut RefusedNumber,
+        numeric_options("/refused-number", RenderFormat::PngSequence),
+        fs.clone(),
+    );
+    assert!(matches!(
+        result,
+        Err(RenderError::Scene(Error::Animation(
+            AnimError::UpdateFailed {
+                operation: "DecimalNumber::set_value",
+                ..
+            }
+        )))
+    ));
+    assert!(!fs.exists(Path::new("/refused-number")));
+    let retry = render_with_fs(
+        &mut NumericReadout { animated: false },
+        numeric_options("/refused-number", RenderFormat::PngSequence),
+        fs,
+    )
+    .unwrap();
+    assert_eq!(retry.artifact.frame_count, 1);
+    assert_eq!(retry.frame_pipeline.unwrap().outstanding_slots, 0);
+}

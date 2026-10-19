@@ -277,7 +277,10 @@ mod tests {
         animation.finish(&mut stage);
         assert_eq!(calls.get(), at_failure);
         assert_eq!(animation.deferred_error(), Some(expected));
-        assert_eq!(animation.effect_signature(), AnimationSignature::Unclassified);
+        assert_eq!(
+            animation.effect_signature(),
+            AnimationSignature::Unclassified
+        );
         assert!(animation.freeze_interpolation().is_none());
         animation.begin(&mut stage).unwrap();
         assert!(animation.deferred_error().is_none());

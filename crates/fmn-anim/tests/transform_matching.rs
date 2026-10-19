@@ -25,6 +25,7 @@ fn vmob(stage: &mut Stage, points: &[[f64; 3]]) -> Mob {
         .flat_map(|p| p.iter().map(|v| *v as f32))
         .collect();
     entry.buffer.write_range("point", 0, &flat);
+    stage.refresh_family_joint_angles(mob).unwrap();
     mob
 }
 
@@ -186,13 +187,13 @@ fn replacement_fixture(stage: &mut Stage, empty_source: bool, empty_target: bool
     if !empty_target {
         let nested = stage.add(Mobject::new());
         let matched = vee(stage, 10.0);
-        // The extra curve cannot match either source piece.
+        // The extra curve cannot match either source piece. Two connected
+        // quadratic curves share their middle anchor, giving five points.
         let unmatched = vmob(
             stage,
             &[
                 [13.0, 0.0, 0.0],
                 [14.0, 1.0, 0.0],
-                [15.0, 0.0, 0.0],
                 [15.0, 0.0, 0.0],
                 [16.0, -1.0, 0.0],
                 [17.0, 0.0, 0.0],
@@ -308,7 +309,7 @@ fn native_matching_refuses_shared_families_before_mutating_the_stage() {
         }
         stage.add_to_scene(source).unwrap();
         let before = (
-            stage.len(),
+            stage.snapshot_bytes().unwrap(),
             frame_facts(&stage),
             family_facts(&stage, target),
         );
@@ -318,7 +319,7 @@ fn native_matching_refuses_shared_families_before_mutating_the_stage() {
         ));
         assert_eq!(
             (
-                stage.len(),
+                stage.snapshot_bytes().unwrap(),
                 frame_facts(&stage),
                 family_facts(&stage, target)
             ),
@@ -348,7 +349,7 @@ fn native_matching_rechecks_nested_topology_before_any_begin_side_effect() {
             stage.replace_children(nested, &children).unwrap();
         }
         let before = (
-            stage.len(),
+            stage.snapshot_bytes().unwrap(),
             frame_facts(&stage),
             family_facts(&stage, target),
         );
@@ -358,7 +359,7 @@ fn native_matching_rechecks_nested_topology_before_any_begin_side_effect() {
         );
         assert_eq!(
             (
-                stage.len(),
+                stage.snapshot_bytes().unwrap(),
                 frame_facts(&stage),
                 family_facts(&stage, target)
             ),

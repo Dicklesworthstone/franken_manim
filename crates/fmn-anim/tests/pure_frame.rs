@@ -76,7 +76,9 @@ fn square(stage: &mut Stage, x: f64) -> Mob {
     mob
 }
 
-fn facts(stage: &Stage) -> (Vec<Vec<Mob>>, Vec<u64>, Vec<String>) {
+type StageFacts = (Vec<Vec<Mob>>, Vec<u64>, Vec<String>);
+
+fn facts(stage: &Stage) -> StageFacts {
     let mut topology = Vec::new();
     let mut bits = vec![stage.time().to_bits()];
     let mut metadata = Vec::new();
@@ -449,7 +451,8 @@ fn partly_prepared_or_finished_segments_cannot_be_frozen() {
         PureSegment::freeze(&stage, &clock, &rng, &animations, &open).unwrap_err(),
         PureFrameRefusal::NotAtPureBegin
     );
-    fmn_anim::abort_open_play(&mut stage, &mut animations, open);
+    let aborted = fmn_anim::abort_open_play(&mut stage, &mut animations, open);
+    assert_eq!(aborted.kind, fmn_anim::SegmentKind::Play);
     let mut open = open_play(&mut stage, &clock, &mut animations).unwrap();
     fmn_anim::finish_open_play_animations(&mut stage, &mut animations, &mut open).unwrap();
     assert_eq!(
@@ -466,7 +469,7 @@ fn dispatch_and_sink_refusal_keep_one_begin_and_the_same_serial_epilogue() {
         accept: bool,
         offered: usize,
         packets: usize,
-        frames: Vec<(Vec<Vec<Mob>>, Vec<u64>, Vec<String>)>,
+        frames: Vec<StageFacts>,
     }
     impl PlayCapture for Consumer {
         fn accepts_pure_segments(&self) -> bool {
@@ -681,7 +684,7 @@ fn static_wait_jobs_keep_exact_clocks_rng_and_storage_after_owner_mutation() {
     struct Sink {
         accept: bool,
         offered: usize,
-        packets: Vec<(i64, (Vec<Vec<Mob>>, Vec<u64>, Vec<String>), u64)>,
+        packets: Vec<(i64, StageFacts, u64)>,
         jobs: Vec<PureFrameJob>,
     }
     impl PlayCapture for Sink {
