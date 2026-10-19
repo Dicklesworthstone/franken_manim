@@ -218,6 +218,8 @@ impl FrozenRenderState {
             time: self.time,
             next_updater_id: self.next_updater_id,
             topology_epoch: fresh_epoch(),
+            updater_failure: None,
+            updater_callbacks: std::rc::Rc::new(()),
         }
     }
 }

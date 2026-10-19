@@ -167,6 +167,92 @@ impl UpdaterId {
     }
 }
 
+/// A returned failure from a native updater or redraw factory.
+///
+/// Ownership failures retain their typed cause. Other builders can attach
+/// their own operation and diagnostic with [`Self::callback`], without
+/// introducing dependencies from the arena to the mobject library.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdaterError {
+    /// The arena refused an ownership or family operation.
+    Stage(StageError),
+    /// A user-supplied operation refused the current update.
+    Callback {
+        /// The operation that failed, such as a graph or text rebuild.
+        operation: &'static str,
+        /// The original operation's diagnostic.
+        detail: String,
+    },
+}
+
+impl UpdaterError {
+    /// Attach a named operation to a builder's error.
+    #[must_use]
+    pub fn callback(operation: &'static str, error: impl std::fmt::Display) -> Self {
+        Self::Callback {
+            operation,
+            detail: error.to_string(),
+        }
+    }
+}
+
+impl From<StageError> for UpdaterError {
+    fn from(error: StageError) -> Self {
+        Self::Stage(error)
+    }
+}
+
+impl std::fmt::Display for UpdaterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stage(error) => error.fmt(f),
+            Self::Callback { operation, detail } => write!(f, "{operation}: {detail}"),
+        }
+    }
+}
+
+impl std::error::Error for UpdaterError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Stage(error) => Some(error),
+            Self::Callback { .. } => None,
+        }
+    }
+}
+
+/// The first updater failure retained by one physical [`Stage`].
+///
+/// A copied mobject shares its callable and updater identity, but failures
+/// name the actual receiving handle. This diagnostic is execution state;
+/// snapshots and durable updater manifests do not carry it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdaterFailure {
+    /// The receiving mobject, which may have been deleted by its callback.
+    pub mobject: Mob,
+    /// The failing callback's registration identity.
+    pub updater: UpdaterId,
+    /// The first returned error. Later errors never replace it.
+    pub error: UpdaterError,
+}
+
+impl std::fmt::Display for UpdaterFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "updater {} on {:?} failed: {}",
+            self.updater.raw(),
+            self.mobject,
+            self.error
+        )
+    }
+}
+
+impl std::error::Error for UpdaterFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
 /// One registered updater: identity plus callable.
 #[derive(Clone)]
 pub struct UpdaterSlot {
@@ -537,6 +623,8 @@ impl Snapshot {
             time: 0.0,
             next_updater_id: self.next_updater_id,
             topology_epoch: fresh_epoch(),
+            updater_failure: None,
+            updater_callbacks: Rc::new(()),
         };
         stage.restore(self);
         stage
@@ -621,6 +709,11 @@ pub struct Stage {
     time: f64,
     next_updater_id: u64,
     topology_epoch: u64,
+    // Physical execution state, deliberately outside Snapshot/SnapshotEntry.
+    // A stack clone of this token prevents acknowledgment during callbacks;
+    // automatic Rc destruction also restores the guard when a callback panics.
+    updater_failure: Option<UpdaterFailure>,
+    updater_callbacks: Rc<()>,
 }
 
 impl Default for Stage {
@@ -640,6 +733,8 @@ impl Stage {
             time: 0.0,
             next_updater_id: 1,
             topology_epoch: fresh_epoch(),
+            updater_failure: None,
+            updater_callbacks: Rc::new(()),
         }
     }
 
@@ -1745,6 +1840,94 @@ impl Stage {
     //   Reference calls it twice (C-5), a fixed bug (Behavior Note
     //   BN-07-updater-and-group-fixes).
 
+    /// The first returned updater failure, retained until explicitly taken.
+    ///
+    /// While a failure is pending, no native updater callbacks run. Restoring
+    /// a snapshot or aborting an animation leaves the diagnostic intact so
+    /// cleanup cannot retry a failed callback. The failure belongs to this
+    /// physical Stage; [`Snapshot::materialize`] starts with no failure.
+    #[must_use]
+    pub fn updater_error(&self) -> Option<&UpdaterFailure> {
+        self.updater_failure.as_ref()
+    }
+
+    /// Acknowledge a failure after repairing or removing the offending updater.
+    ///
+    /// This is the only operation that clears the retained diagnostic and
+    /// allows callbacks to run again. It never rolls back callback mutations.
+    ///
+    /// # Errors
+    /// A callback or initial redraw factory cannot acknowledge an error while
+    /// it is running: nested updates must not resume the rest of a failed pass.
+    pub fn take_updater_error(&mut self) -> Result<Option<UpdaterFailure>, UpdaterError> {
+        if Rc::strong_count(&self.updater_callbacks) > 1 {
+            return Err(UpdaterError::callback(
+                "Stage::take_updater_error",
+                "cannot acknowledge an updater failure while a callback is running",
+            ));
+        }
+        Ok(self.updater_failure.take())
+    }
+
+    /// Preflight fallible registration without invoking a factory or minting
+    /// an identity. Redraw factories must repeat this after running user code.
+    pub(crate) fn check_updater_registration(&self) -> Result<(), UpdaterError> {
+        if let Some(failure) = &self.updater_failure {
+            return Err(failure.error.clone());
+        }
+        self.next_updater_id
+            .checked_add(1)
+            .ok_or(StageError::UpdaterIdExhausted)?;
+        Ok(())
+    }
+
+    /// Guard a redraw's initial factory, before it has a registered identity.
+    /// An ignored failure from a nested updater still prevents publication.
+    pub(crate) fn invoke_updater_factory<T>(
+        &mut self,
+        factory: impl FnOnce(&mut Stage) -> Result<T, UpdaterError>,
+    ) -> Result<T, UpdaterError> {
+        if let Some(failure) = &self.updater_failure {
+            return Err(failure.error.clone());
+        }
+        let _callback = Rc::clone(&self.updater_callbacks);
+        let result = factory(self);
+        match &self.updater_failure {
+            Some(failure) => Err(failure.error.clone()),
+            None => result,
+        }
+    }
+
+    fn record_updater_error(&mut self, mobject: Mob, updater: UpdaterId, error: UpdaterError) {
+        if self.updater_failure.is_none() {
+            self.updater_failure = Some(UpdaterFailure {
+                mobject,
+                updater,
+                error,
+            });
+        }
+    }
+
+    fn register_try_updater(
+        &mut self,
+        mob: Mob,
+        func: UpdaterFn,
+        call: bool,
+    ) -> Result<UpdaterId, UpdaterError> {
+        let id = self.register_updater(mob, func, None, false)?;
+        if call {
+            self.update_mob(mob, 0.0);
+            if let Some(error) = self.updater_error().map(|failure| failure.error.clone()) {
+                // Return no undisclosed registration after an immediate error.
+                // User mutations and any other registrations remain intact;
+                // issued identities are never rewound or reused.
+                self.remove_updater(mob, id);
+                return Err(error);
+            }
+        }
+        Ok(id)
+    }
+
     fn register_updater(
         &mut self,
         mob: Mob,
@@ -1812,6 +1995,83 @@ impl Stage {
             mob,
             UpdaterFn::Dt(Rc::new(RefCell::new(updater))),
             None,
+            call,
+        )
+    }
+
+    /// Register a non-dt updater that can refuse a graph, text, or other rebuild.
+    ///
+    /// The first returned error is retained by [`Self::updater_error`] and
+    /// stops all remaining callbacks until [`Self::take_updater_error`].
+    /// Copies share the callable and its identity, but failures name the
+    /// receiving mobject and stay on the physical Stage that ran the callback.
+    /// Insertion order, suspension, and per-tick list snapshots are unchanged.
+    ///
+    /// With `call`, run exactly one zero-dt family pass. An immediate failure
+    /// removes only this new registration; callback mutations are not undone.
+    ///
+    /// # Errors
+    /// A stale target, exhausted identity space, an already-pending failure,
+    /// or a callback failure during the immediate pass.
+    pub fn add_try_updater(
+        &mut self,
+        mob: Mob,
+        mut updater: impl FnMut(&mut Stage, Mob) -> Result<(), UpdaterError> + 'static,
+        call: bool,
+    ) -> Result<UpdaterId, UpdaterError> {
+        self.check_updater_registration()?;
+        self.try_get(mob)?;
+        let id = UpdaterId(self.next_updater_id);
+        self.register_try_updater(
+            mob,
+            UpdaterFn::NonDt(Rc::new(RefCell::new(move |stage: &mut Stage, me| {
+                if stage.updater_error().is_some() {
+                    return;
+                }
+                let result = if stage.contains(me) {
+                    updater(stage, me)
+                } else {
+                    Err(StageError::StaleHandle.into())
+                };
+                if let Err(error) = result {
+                    stage.record_updater_error(me, id, error);
+                }
+            }))),
+            call,
+        )
+    }
+
+    /// Register a fallible dt updater, with [`Self::add_try_updater`]'s error
+    /// retention and immediate-call rules. The callback receives the same
+    /// frame delta as an ordinary [`Self::add_dt_updater`] callback.
+    ///
+    /// # Errors
+    /// A stale target, exhausted identity space, an already-pending failure,
+    /// or a callback failure during the immediate pass.
+    pub fn add_try_dt_updater(
+        &mut self,
+        mob: Mob,
+        mut updater: impl FnMut(&mut Stage, Mob, f64) -> Result<(), UpdaterError> + 'static,
+        call: bool,
+    ) -> Result<UpdaterId, UpdaterError> {
+        self.check_updater_registration()?;
+        self.try_get(mob)?;
+        let id = UpdaterId(self.next_updater_id);
+        self.register_try_updater(
+            mob,
+            UpdaterFn::Dt(Rc::new(RefCell::new(move |stage: &mut Stage, me, dt| {
+                if stage.updater_error().is_some() {
+                    return;
+                }
+                let result = if stage.contains(me) {
+                    updater(stage, me, dt)
+                } else {
+                    Err(StageError::StaleHandle.into())
+                };
+                if let Err(error) = result {
+                    stage.record_updater_error(me, id, error);
+                }
+            }))),
             call,
         )
     }
@@ -2245,6 +2505,9 @@ impl Stage {
     /// first; then run this node's own updaters in insertion order over a
     /// per-tick snapshot of the list.
     fn update_mob(&mut self, mob: Mob, dt: f64) {
+        if self.updater_failure.is_some() {
+            return;
+        }
         let Some(entry) = self.get(mob) else {
             return;
         };
@@ -2257,6 +2520,9 @@ impl Stage {
             .unwrap_or_default();
         for child in children {
             self.update_mob(child, dt);
+            if self.updater_failure.is_some() {
+                return;
+            }
         }
         self.update_mob_self(mob, dt);
     }
@@ -2264,7 +2530,9 @@ impl Stage {
     /// Run only one node's updater snapshot. The caller owns family order;
     /// this helper is also the exact `recurse = false` path.
     fn update_mob_self(&mut self, mob: Mob, dt: f64) {
-        if self.get(mob).is_none_or(|entry| entry.updating_suspended) {
+        if self.updater_failure.is_some()
+            || self.get(mob).is_none_or(|entry| entry.updating_suspended)
+        {
             return;
         }
         let updaters = self
@@ -2272,9 +2540,25 @@ impl Stage {
             .map(|e| e.updaters.clone())
             .unwrap_or_default();
         for slot in updaters {
-            match slot.func {
-                UpdaterFn::NonDt(f) => f.borrow_mut()(self, mob),
-                UpdaterFn::Dt(f) => f.borrow_mut()(self, mob, dt),
+            if self.updater_failure.is_some() {
+                break;
+            }
+            let _callback = Rc::clone(&self.updater_callbacks);
+            let result = match slot.func {
+                UpdaterFn::NonDt(f) => f.try_borrow_mut().map(|mut callback| callback(self, mob)),
+                UpdaterFn::Dt(f) => f
+                    .try_borrow_mut()
+                    .map(|mut callback| callback(self, mob, dt)),
+            };
+            if result.is_err() {
+                self.record_updater_error(
+                    mob,
+                    slot.id,
+                    UpdaterError::callback(
+                        "Stage::update_mobject",
+                        "updater callback is already running",
+                    ),
+                );
             }
         }
     }
@@ -2286,9 +2570,15 @@ impl Stage {
     /// (child-first, insertion order, suspension-pruned). The full
     /// six-step order is Choreo's; the arena provides the execution slot.
     pub fn update(&mut self, dt: f64) {
+        if self.updater_failure.is_some() {
+            return;
+        }
         self.time += dt;
         for root in self.roots.clone() {
             self.update_mob(root, dt);
+            if self.updater_failure.is_some() {
+                break;
+            }
         }
     }
 
@@ -2300,9 +2590,15 @@ impl Stage {
     /// per-frame delta. Lower-level callers without a rational clock continue
     /// to use [`Stage::update`].
     pub fn update_at_time(&mut self, dt: f64, time: f64) {
+        if self.updater_failure.is_some() {
+            return;
+        }
         self.set_time_from_clock(time);
         for root in self.roots.clone() {
             self.update_mob(root, dt);
+            if self.updater_failure.is_some() {
+                break;
+            }
         }
     }
 
@@ -2544,3 +2840,428 @@ mod surface_grid;
 pub use surface_grid::{
     MAX_SURFACE_GRID_POINTS, SurfaceGridUpdate, prepare_surface_grid_alignment,
 };
+
+#[cfg(test)]
+mod updater_tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    #[test]
+    fn fallible_updaters_stop_the_whole_ordered_pass_until_acknowledged() {
+        let mut stage = Stage::new();
+        let parent = stage.add(Mobject::new());
+        let first = stage.add(Mobject::new());
+        let second = stage.add(Mobject::new());
+        let later_root = stage.add(Mobject::new());
+        stage.attach(parent, first).unwrap();
+        stage.attach(parent, second).unwrap();
+        stage.add_many_to_scene(&[parent, later_root]).unwrap();
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let times = Rc::new(RefCell::new(Vec::new()));
+        let callback_log = Rc::clone(&log);
+        let callback_times = Rc::clone(&times);
+        stage
+            .add_dt_updater(
+                first,
+                move |stage, _, dt| {
+                    callback_log.borrow_mut().push("first dt");
+                    callback_times.borrow_mut().push((stage.time(), dt));
+                },
+                false,
+            )
+            .unwrap();
+        let callback_log = Rc::clone(&log);
+        let expected = UpdaterError::callback("geometry", "sample refused");
+        let callback_error = expected.clone();
+        let failing = stage
+            .add_try_updater(
+                first,
+                move |_, _| {
+                    callback_log.borrow_mut().push("first failure");
+                    Err(callback_error.clone())
+                },
+                false,
+            )
+            .unwrap();
+        for (mob, label) in [
+            (first, "first tail"),
+            (second, "second"),
+            (parent, "parent"),
+            (later_root, "later root"),
+        ] {
+            let callback_log = Rc::clone(&log);
+            stage
+                .add_updater(
+                    mob,
+                    move |_, _| callback_log.borrow_mut().push(label),
+                    false,
+                )
+                .unwrap();
+        }
+
+        stage.update(0.25);
+
+        assert_eq!(*log.borrow(), vec!["first dt", "first failure"]);
+        assert_eq!(*times.borrow(), vec![(0.25, 0.25)]);
+        assert_eq!(
+            stage.updater_error(),
+            Some(&UpdaterFailure {
+                mobject: first,
+                updater: failing,
+                error: expected,
+            })
+        );
+        stage.suspend_updating(first, false);
+        stage.resume_updating(first, false, true);
+        assert!(!stage.get(first).unwrap().updating_suspended);
+        stage.update(1.0);
+        stage.update_at_time(1.0, 9.0);
+        stage.update_mobject_with_recurse(later_root, 1.0, false);
+        assert_eq!(stage.time(), 0.25);
+        assert_eq!(*log.borrow(), vec!["first dt", "first failure"]);
+
+        stage.remove_updater(first, failing);
+        assert!(stage.take_updater_error().unwrap().is_some());
+        log.borrow_mut().clear();
+        stage.update(0.5);
+
+        assert!(stage.updater_error().is_none());
+        assert_eq!(
+            *log.borrow(),
+            vec!["first dt", "first tail", "second", "parent", "later root"]
+        );
+        assert_eq!(*times.borrow(), vec![(0.25, 0.25), (0.75, 0.5)]);
+    }
+
+    #[test]
+    fn immediate_failure_removes_only_the_new_slot_and_preserves_user_mutations() {
+        let mut stage = Stage::new();
+        let mob = stage.add_value_tracker(0.0);
+        let older = stage
+            .add_updater(
+                mob,
+                |stage, me| stage.increment_tracker_value(me, 1.0).unwrap(),
+                false,
+            )
+            .unwrap();
+        let next = stage.next_updater_id;
+        let expected = UpdaterError::callback("number rebuild", "invalid text");
+        let callback_error = expected.clone();
+
+        let result = stage.add_try_dt_updater(
+            mob,
+            move |stage, me, dt| {
+                assert_eq!(dt, 0.0);
+                stage.set_tracker_value(me, 42.0)?;
+                Err(callback_error.clone())
+            },
+            true,
+        );
+
+        assert_eq!(result, Err(expected.clone()));
+        assert_eq!(stage.tracker_value(mob), Some(42.0));
+        assert_eq!(stage.time(), 0.0);
+        assert_eq!(stage.updater_ids(mob), vec![older]);
+        assert_eq!(stage.next_updater_id, next + 1);
+        assert_eq!(
+            stage.updater_error(),
+            Some(&UpdaterFailure {
+                mobject: mob,
+                updater: UpdaterId(next),
+                error: expected,
+            })
+        );
+        stage.take_updater_error().unwrap().unwrap();
+        let replacement = stage.add_try_updater(mob, |_, _| Ok(()), false).unwrap();
+        assert_eq!(replacement.raw(), next + 1);
+    }
+
+    #[test]
+    fn immediate_pass_retains_an_older_failure_and_never_invokes_the_new_callback() {
+        let mut stage = Stage::new();
+        let mob = stage.add(Mobject::new());
+        let expected = UpdaterError::callback("older updater", "first failure");
+        let callback_error = expected.clone();
+        let older = stage
+            .add_try_updater(mob, move |_, _| Err(callback_error.clone()), false)
+            .unwrap();
+        let calls = Rc::new(Cell::new(0));
+        let callback_calls = Rc::clone(&calls);
+
+        let result = stage.add_try_updater(
+            mob,
+            move |_, _| {
+                callback_calls.set(callback_calls.get() + 1);
+                Ok(())
+            },
+            true,
+        );
+
+        assert_eq!(result, Err(expected));
+        assert_eq!(calls.get(), 0);
+        assert_eq!(stage.updater_ids(mob), vec![older]);
+        assert_eq!(stage.updater_error().unwrap().updater, older);
+    }
+
+    #[test]
+    fn updater_failure_is_physical_execution_state_outside_snapshots() {
+        let mut stage = Stage::new();
+        let mob = stage.add(Mobject::new());
+        let fail = Rc::new(Cell::new(true));
+        let calls = Rc::new(Cell::new(0));
+        let callback_fail = Rc::clone(&fail);
+        let callback_calls = Rc::clone(&calls);
+        let updater = stage
+            .add_try_updater(
+                mob,
+                move |_, _| {
+                    callback_calls.set(callback_calls.get() + 1);
+                    if callback_fail.get() {
+                        Err(UpdaterError::callback("snapshot callback", "retry later"))
+                    } else {
+                        Ok(())
+                    }
+                },
+                false,
+            )
+            .unwrap();
+        let original = stage.snapshot();
+        let bytes = stage.snapshot_bytes().unwrap();
+
+        stage.update_mobject(mob, 0.1);
+
+        let failure = stage.updater_error().unwrap().clone();
+        let failed_snapshot = stage.snapshot();
+        let render_copy = stage.freeze_render_state().materialize();
+        assert!(render_copy.updater_error().is_none());
+        assert!(render_copy.updater_ids(mob).is_empty());
+        assert_eq!(stage.snapshot_bytes().unwrap(), bytes);
+        stage.remove_updater(mob, updater);
+        stage.restore(&original);
+        assert_eq!(stage.updater_error(), Some(&failure));
+        assert_eq!(stage.updater_ids(mob), vec![updater]);
+
+        let mut independent = failed_snapshot.materialize();
+        assert!(independent.updater_error().is_none());
+        fail.set(false);
+        independent.update_mobject(mob, 0.1);
+        assert_eq!(calls.get(), 2);
+        assert!(independent.updater_error().is_none());
+        stage.update_mobject(mob, 0.1);
+        assert_eq!(calls.get(), 2);
+        assert_eq!(stage.take_updater_error().unwrap(), Some(failure));
+        stage.update_mobject(mob, 0.1);
+        assert_eq!(calls.get(), 3);
+    }
+
+    #[test]
+    fn copied_fallible_callbacks_retain_identity_and_report_the_actual_receiver() {
+        let mut stage = Stage::new();
+        let original = stage.add_value_tracker(1.0);
+        let updater = stage
+            .add_try_dt_updater(
+                original,
+                |stage, me, dt| {
+                    stage.increment_tracker_value(me, dt)?;
+                    Err(UpdaterError::callback("copied updater", "sample refused"))
+                },
+                false,
+            )
+            .unwrap();
+        let copy = stage.copy_family(original).unwrap();
+
+        stage.update_mobject(copy, 0.5);
+
+        let failure = stage.updater_error().unwrap();
+        assert_eq!(failure.mobject, copy);
+        assert_eq!(failure.updater, updater);
+        assert_eq!(stage.updater_ids(copy), vec![updater]);
+        assert_eq!(stage.tracker_value(copy), Some(1.5));
+        assert_eq!(stage.tracker_value(original), Some(1.0));
+    }
+
+    #[test]
+    fn nested_failures_cannot_be_acknowledged_or_replaced_inside_callbacks() {
+        let mut stage = Stage::new();
+        let inner = stage.add(Mobject::new());
+        let outer = stage.add(Mobject::new());
+        let expected = UpdaterError::callback("inner updater", "first error");
+        let callback_error = expected.clone();
+        let inner_updater = stage
+            .add_try_updater(inner, move |_, _| Err(callback_error.clone()), false)
+            .unwrap();
+        let tail_calls = Rc::new(Cell::new(0));
+        stage
+            .add_try_updater(
+                outer,
+                move |stage, _| {
+                    stage.update_mobject(inner, 0.0);
+                    assert!(stage.take_updater_error().is_err());
+                    Err(UpdaterError::callback("outer updater", "later error"))
+                },
+                false,
+            )
+            .unwrap();
+        let callback_calls = Rc::clone(&tail_calls);
+        stage
+            .add_updater(
+                outer,
+                move |_, _| callback_calls.set(callback_calls.get() + 1),
+                false,
+            )
+            .unwrap();
+
+        stage.update_mobject(outer, 0.0);
+
+        assert_eq!(tail_calls.get(), 0);
+        assert_eq!(
+            stage.take_updater_error().unwrap(),
+            Some(UpdaterFailure {
+                mobject: inner,
+                updater: inner_updater,
+                error: expected.clone(),
+            })
+        );
+        let result = stage.invoke_updater_factory(|stage| {
+            stage.update_mobject(inner, 0.0);
+            assert!(stage.take_updater_error().is_err());
+            Ok(42)
+        });
+        assert_eq!(result, Err(expected));
+        assert_eq!(stage.updater_error().unwrap().updater, inner_updater);
+        assert!(stage.take_updater_error().unwrap().is_some());
+    }
+
+    #[test]
+    fn recursive_callback_borrow_is_a_retained_error_instead_of_a_refcell_panic() {
+        let mut stage = Stage::new();
+        let mob = stage.add(Mobject::new());
+        let calls = Rc::new(Cell::new(0));
+        let callback_calls = Rc::clone(&calls);
+        let updater = stage
+            .add_try_updater(
+                mob,
+                move |stage, me| {
+                    callback_calls.set(callback_calls.get() + 1);
+                    stage.update_mobject(me, 0.0);
+                    Ok(())
+                },
+                false,
+            )
+            .unwrap();
+
+        stage.update_mobject(mob, 0.1);
+
+        assert_eq!(calls.get(), 1);
+        assert_eq!(
+            stage.updater_error(),
+            Some(&UpdaterFailure {
+                mobject: mob,
+                updater,
+                error: UpdaterError::callback(
+                    "Stage::update_mobject",
+                    "updater callback is already running",
+                ),
+            })
+        );
+    }
+
+    #[test]
+    fn callback_guard_unwinds_after_a_user_panic() {
+        let mut stage = Stage::new();
+        let mob = stage.add(Mobject::new());
+        let panicking = stage
+            .add_updater(mob, |_, _| panic!("user callback panic"), false)
+            .unwrap();
+
+        let caught = catch_unwind(AssertUnwindSafe(|| stage.update_mobject(mob, 0.0)));
+
+        assert!(caught.is_err());
+        stage.remove_updater(mob, panicking);
+        assert!(stage.take_updater_error().unwrap().is_none());
+        stage
+            .add_try_updater(
+                mob,
+                |stage, _| {
+                    assert!(stage.take_updater_error().is_err());
+                    Ok(())
+                },
+                true,
+            )
+            .unwrap();
+        assert!(stage.take_updater_error().unwrap().is_none());
+    }
+
+    #[test]
+    fn fallible_registration_preflights_target_capacity_and_pending_failure() {
+        let mut stage = Stage::new();
+        let stale = stage.add(Mobject::new());
+        stage.delete(stale).unwrap();
+        let mob = stage.add(Mobject::new());
+        let before = stage.snapshot_bytes().unwrap();
+        assert_eq!(
+            stage.add_try_updater(stale, |_, _| panic!("stale callback must not run"), true),
+            Err(UpdaterError::Stage(StageError::StaleHandle))
+        );
+        assert_eq!(stage.snapshot_bytes().unwrap(), before);
+
+        let next = stage.next_updater_id;
+        stage.next_updater_id = u64::MAX;
+        let before = stage.snapshot_bytes().unwrap();
+        assert_eq!(
+            stage.add_try_dt_updater(
+                mob,
+                |_, _, _| panic!("exhausted callback must not run"),
+                true
+            ),
+            Err(UpdaterError::Stage(StageError::UpdaterIdExhausted))
+        );
+        assert_eq!(stage.snapshot_bytes().unwrap(), before);
+        assert!(stage.updater_error().is_none());
+
+        stage.next_updater_id = next;
+        let expected = UpdaterError::callback("existing updater", "repair first");
+        let callback_error = expected.clone();
+        stage
+            .add_try_updater(mob, move |_, _| Err(callback_error.clone()), false)
+            .unwrap();
+        stage.update_mobject(mob, 0.0);
+        let failure = stage.updater_error().unwrap().clone();
+        let before = stage.snapshot_bytes().unwrap();
+        assert_eq!(
+            stage.add_try_updater(mob, |_, _| panic!("pending callback must not run"), true),
+            Err(expected)
+        );
+        assert_eq!(stage.snapshot_bytes().unwrap(), before);
+        assert_eq!(stage.updater_error(), Some(&failure));
+    }
+
+    #[test]
+    fn a_deleted_receiver_is_refused_before_the_fallible_callback_runs() {
+        let mut stage = Stage::new();
+        let mob = stage.add(Mobject::new());
+        stage
+            .add_updater(mob, |stage, me| stage.delete(me).unwrap(), false)
+            .unwrap();
+        let updater = stage
+            .add_try_updater(
+                mob,
+                |_, _| panic!("deleted receiver must not reach user code"),
+                false,
+            )
+            .unwrap();
+
+        stage.update_mobject(mob, 0.1);
+
+        assert!(!stage.contains(mob));
+        assert_eq!(
+            stage.updater_error(),
+            Some(&UpdaterFailure {
+                mobject: mob,
+                updater,
+                error: UpdaterError::Stage(StageError::StaleHandle),
+            })
+        );
+    }
+}
