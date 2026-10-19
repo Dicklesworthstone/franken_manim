@@ -963,7 +963,7 @@ Tex.replace_for_content	StringMobject	bootstrap	1	bootstrap
 Tex.replace_for_matching	StringMobject	bootstrap	1	bootstrap
 Tex.set_color_by_tex	Tex	bootstrap	1	bootstrap
 Tex.set_color_by_tex_to_color_map	Tex	bootstrap	1	bootstrap
-Tex.substr_to_path_count	StringMobject	bootstrap	1	bootstrap
+Tex.substr_to_path_count	Tex	fmn_python.string_lifecycle	1	fmn_python.string_lifecycle
 Code.__init__	Code	fmn_python.text_authoring	2	fmn_python.text_authoring > bootstrap
 MarkupText.__init__	MarkupText	fmn_python.text_authoring	2	fmn_python.text_authoring > bootstrap
 MarkupText.escape_markup_char	MarkupText	bootstrap	1	bootstrap
