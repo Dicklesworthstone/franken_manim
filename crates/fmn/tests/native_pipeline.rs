@@ -235,3 +235,96 @@ fn cached_affine_exports_use_the_shared_frame_pipeline() {
     assert_eq!(stats.outstanding_slots, 0);
     assert_eq!(report.artifact.frame_count, 1);
 }
+
+#[test]
+fn native_layout_animations_render_the_same_final_scene_as_explicit_placement() {
+    struct LayoutScene {
+        animated: bool,
+    }
+    impl SceneConstruct for LayoutScene {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            let row = stage.add(Mobject::group(vec![
+                Rectangle::new()
+                    .width(0.5)
+                    .height(0.75)
+                    .build()?
+                    .shifted([-0.75, 0.0, 0.0])
+                    .into(),
+                Rectangle::new().width(0.5).height(0.75).build()?.into(),
+                Rectangle::new()
+                    .width(0.5)
+                    .height(0.75)
+                    .build()?
+                    .shifted([0.75, 0.0, 0.0])
+                    .into(),
+            ]))?;
+            stage.set_fill(row, Some(BLUE), Some(1.0), None, true);
+            stage.set_stroke(row, None, Some(0.0), None, None, true);
+            let children = stage.get(row).unwrap().submobjects().to_vec();
+            let highlight = stage.add(Rectangle::new().width(1.0).height(1.0).build()?)?;
+            stage.set_fill(highlight, None, Some(0.0), None, true);
+            stage.set_stroke(highlight, Some(WHITE), Some(2.0), Some(1.0), None, true);
+            let args = AnimateArgs {
+                run_time: Some(0.25),
+                rate_func: Some(fmn::core::rate::linear),
+                ..AnimateArgs::default()
+            };
+            if self.animated {
+                stage.play(
+                    row.animate()
+                        .set_anim_args(args)?
+                        .arrange_to_fit_width(4.5, ORIGIN)?
+                        .space_out_submobjects(0.75)?
+                        .set_max_height(1.0, false)?,
+                )?;
+                stage.play(
+                    highlight
+                        .animate()
+                        .set_anim_args(args)?
+                        .surround(row, 0, true, 0.5)?,
+                )?;
+            } else {
+                // Independent endpoint: centers at -1.5, 0, 1.5; each bar
+                // remains 0.5 by 0.75. The row is 3.5 wide; the highlight's
+                // total-width buffer is 0.5, so its height is 0.75 * 4/3.5.
+                for (&child, x) in children.iter().zip([-1.5, 0.0, 1.5]) {
+                    stage.move_to(child, [x, 0.0, 0.0], ORIGIN);
+                }
+                stage.set_width(highlight, 4.0, true);
+                stage.set_height(highlight, 6.0 / 7.0, true);
+            }
+            for &child in &children {
+                assert!((stage.get_width(child) - 0.5).abs() < 1e-6);
+                assert!((stage.get_height(child) - 0.75).abs() < 1e-6);
+            }
+            assert!((stage.get_width(row) - 3.5).abs() < 1e-6);
+            Ok(())
+        }
+    }
+
+    let fs = Arc::new(VirtualFs::new());
+    for (path, animated) in [("/layout.png", true), ("/expected-layout.png", false)] {
+        let mut render_options = options(path, RenderFormat::Png, 2, 2);
+        render_options.camera = None;
+        render_options.config.camera.fps = 8;
+        let report =
+            render_with_fs(&mut LayoutScene { animated }, render_options, fs.clone()).unwrap();
+        assert_eq!(report.artifact.frame_count, 1);
+        assert_eq!(report.scene.play_count, if animated { 2 } else { 0 });
+        assert_eq!(report.frame_pipeline.unwrap().outstanding_slots, 0);
+    }
+    let actual = fs.read(Path::new("/layout.png")).unwrap();
+    let expected = fs.read(Path::new("/expected-layout.png")).unwrap();
+    let actual = decode_png(&actual, &PngLimits::default()).unwrap();
+    let expected = decode_png(&expected, &PngLimits::default()).unwrap();
+    assert_eq!(actual.rgba, expected.rgba);
+    assert!(
+        actual
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|pixel| { pixel[2] > pixel[0] && pixel[2] > 64 }),
+        "the laid-out blue bars must actually be visible"
+    );
+}

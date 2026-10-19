@@ -417,3 +417,263 @@ fn arrange_records_over_the_target_children_and_stale_match_targets_refuse() {
         Err(AnimateError::StaleHandle(m)) if m == other
     ));
 }
+
+fn layout_near(actual: f64, expected: f64) {
+    assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
+}
+
+#[test]
+fn layout_recording_uses_current_children_and_preserves_the_source_family() {
+    use fmn_core::constants::LEFT;
+    let mut stage = Stage::new();
+    let group = stage.add(Mobject::group(vec![
+        Mobject::from_points(&[[-0.5, -0.5, 0.0], [0.5, 0.5, 0.0]]),
+        Mobject::group(vec![Mobject::from_points(&[
+            [-1.0, -0.5, 0.0],
+            [1.0, 0.5, 0.0],
+        ])]),
+    ]));
+    let recording = group.animate().arrange_to_fit_width(8.0, LEFT).unwrap();
+
+    // A child added and a parent moved after recording both belong to build.
+    let late_child = square(&mut stage);
+    stage.attach(group, late_child).unwrap();
+    stage.shift(group, [5.0, 2.0, 0.0]);
+    let before: Vec<_> = stage
+        .family(group)
+        .into_iter()
+        .map(|m| (m, stage.get_points(m), stage.placement(m)))
+        .collect();
+    let edge = stage.get_left(group);
+    let built = recording.build(&mut stage).unwrap();
+    let children = stage.get(built.target).unwrap().submobjects();
+    assert_eq!(children.len(), 3);
+    layout_near(stage.get_width(built.target), 8.0);
+    assert_eq!(stage.get_left(built.target), edge);
+    for (&child, width) in children.iter().zip([1.0, 2.0, 1.0]) {
+        layout_near(stage.get_width(child), width);
+    }
+    for pair in children.windows(2) {
+        layout_near(
+            stage.get_left(pair[1])[0] - stage.get_right(pair[0])[0],
+            2.0,
+        );
+    }
+    for (member, points, placement) in before {
+        assert_eq!(stage.get_points(member), points);
+        assert_eq!(stage.placement(member), placement);
+    }
+    assert_eq!(stage.get(group).unwrap().submobjects().len(), 3);
+}
+
+#[test]
+fn spacing_and_depth_layout_recording_keep_individual_child_extents() {
+    let mut stage = Stage::new();
+    let group = stage.add(Mobject::group(vec![
+        Mobject::from_points(&[[-2.5, -0.5, -0.5], [-1.5, 0.5, 0.5]]),
+        Mobject::from_points(&[[1.5, -0.5, -0.5], [2.5, 0.5, 0.5]]),
+    ]));
+    let built = group
+        .animate()
+        .space_out_submobjects(2.0)
+        .unwrap()
+        .arrange_to_fit_height(4.0, ORIGIN)
+        .unwrap()
+        .arrange_to_fit_depth(6.0, ORIGIN)
+        .unwrap()
+        .build(&mut stage)
+        .unwrap();
+    layout_near(stage.get_width(group), 5.0);
+    layout_near(stage.get_width(built.target), 9.0);
+    layout_near(stage.get_height(built.target), 4.0);
+    layout_near(stage.get_depth(built.target), 6.0);
+    for &child in stage.get(built.target).unwrap().submobjects() {
+        layout_near(stage.get_width(child), 1.0);
+        layout_near(stage.get_height(child), 1.0);
+        layout_near(stage.get_depth(child), 1.0);
+    }
+
+    let empty = stage.add(Mobject::new());
+    stage.shift(empty, [3.0, 2.0, 1.0]);
+    let built = empty
+        .animate()
+        .arrange_to_fit_width(8.0, ORIGIN)
+        .unwrap()
+        .space_out_submobjects(2.0)
+        .unwrap()
+        .build(&mut stage)
+        .unwrap();
+    assert_eq!(stage.get_center(built.target), [3.0, 2.0, 1.0]);
+    assert!(stage.get(built.target).unwrap().buffer.is_empty());
+}
+
+#[test]
+fn constraint_recording_evaluates_current_size_and_prior_commands_in_order() {
+    let mut stage = Stage::new();
+    let mob = stage.add(Mobject::from_points(&[[-0.5; 3], [0.5; 3]]));
+    let recording = mob
+        .animate()
+        .set_max_width(3.0, false)
+        .unwrap()
+        .set_min_height(2.0, true)
+        .unwrap()
+        .set_depth(4.0, true)
+        .unwrap()
+        .set_shape(None, None, Some(1.0))
+        .unwrap()
+        .stretch_to_fit_width(4.0)
+        .unwrap()
+        .set_min_width(2.0, false)
+        .unwrap()
+        .set_max_height(3.0, false)
+        .unwrap()
+        .set_max_depth(2.0, true)
+        .unwrap()
+        .set_min_depth(0.5, false)
+        .unwrap();
+    // The recorded maximum must see 6, not the original width of 1.
+    stage.set_width(mob, 6.0, true);
+    let built = recording.build(&mut stage).unwrap();
+    layout_near(stage.get_width(built.target), 4.0);
+    layout_near(stage.get_height(built.target), 2.0);
+    layout_near(stage.get_depth(built.target), 1.0);
+    layout_near(stage.get_width(mob), 6.0);
+    layout_near(stage.get_height(mob), 1.0);
+    layout_near(stage.get_depth(mob), 1.0);
+
+    let built = mob
+        .animate()
+        .stretch_to_fit_height(3.0)
+        .unwrap()
+        .stretch_to_fit_depth(2.0)
+        .unwrap()
+        .build(&mut stage)
+        .unwrap();
+    layout_near(stage.get_width(built.target), 6.0);
+    layout_near(stage.get_height(built.target), 3.0);
+    layout_near(stage.get_depth(built.target), 2.0);
+}
+
+#[test]
+fn replace_and_surround_resolve_the_other_mobjects_current_geometry() {
+    let mut stage = Stage::new();
+    let mob = square(&mut stage);
+    let anchor = square(&mut stage);
+    let replace = mob.animate().replace(anchor, 0, false).unwrap();
+    let surround = mob.animate().surround(anchor, 0, true, 1.0).unwrap();
+    stage.shift(anchor, [4.0, -1.0, 0.0]);
+    stage.set_width(anchor, 4.0, true);
+    stage.set_height(anchor, 2.0, true);
+
+    let replaced = replace.build(&mut stage).unwrap();
+    layout_near(stage.get_width(replaced.target), 4.0);
+    layout_near(stage.get_height(replaced.target), 4.0);
+    assert_eq!(stage.get_center(replaced.target), [4.0, -1.0, 0.0]);
+    let surrounded = surround.build(&mut stage).unwrap();
+    layout_near(stage.get_width(surrounded.target), 5.0);
+    layout_near(stage.get_height(surrounded.target), 2.5);
+    assert_eq!(stage.get_center(surrounded.target), [4.0, -1.0, 0.0]);
+    assert_eq!(stage.get_center(mob), ORIGIN);
+    layout_near(stage.get_width(mob), 1.0);
+    layout_near(stage.get_width(anchor), 4.0);
+    assert_eq!(stage.get_center(anchor), [4.0, -1.0, 0.0]);
+}
+
+#[test]
+fn invalid_layout_recordings_refuse_before_any_target_allocation_or_source_change() {
+    let mut stage = Stage::new();
+    let mob = square(&mut stage);
+    let other = square(&mut stage);
+    let empty = stage.add(Mobject::new());
+    let narrow = stage.add(Mobject::from_points(&[[0.0; 3], [0.25, 1.0, 0.0]]));
+    let recordings = [
+        mob.animate()
+            .shift(RIGHT)
+            .unwrap()
+            .arrange_to_fit_dim(4.0, 3, ORIGIN)
+            .unwrap(),
+        mob.animate()
+            .shift(RIGHT)
+            .unwrap()
+            .replace(other, 3, false)
+            .unwrap(),
+        mob.animate().surround(other, 3, false, 0.25).unwrap(),
+        mob.animate().surround(empty, 0, false, 0.25).unwrap(),
+        mob.animate().surround(other, 0, false, f64::NAN).unwrap(),
+        mob.animate()
+            .surround(other, 0, false, f64::INFINITY)
+            .unwrap(),
+        mob.animate().surround(narrow, 0, false, f64::MAX).unwrap(),
+        mob.animate().space_out_submobjects(0.0).unwrap(),
+        mob.animate().space_out_submobjects(-1.0).unwrap(),
+        mob.animate().space_out_submobjects(f64::INFINITY).unwrap(),
+        mob.animate().space_out_submobjects(f64::NAN).unwrap(),
+        mob.animate()
+            .space_out_submobjects(f64::from_bits(1))
+            .unwrap(),
+    ];
+    let count = stage.len();
+    let topology = stage.topology_epoch();
+    let points = stage.get_points(mob);
+    for recording in recordings {
+        assert!(matches!(
+            recording.build(&mut stage),
+            Err(AnimateError::InvalidLayoutArgument(_))
+        ));
+        assert_eq!(stage.len(), count);
+        assert_eq!(stage.topology_epoch(), topology);
+        assert_eq!(stage.get_points(mob), points);
+    }
+
+    let stale = square(&mut stage);
+    let replace = mob
+        .animate()
+        .shift(RIGHT)
+        .unwrap()
+        .replace(stale, 0, true)
+        .unwrap();
+    let surround = mob.animate().surround(stale, 0, true, 0.25).unwrap();
+    stage.delete(stale).unwrap();
+    let count = stage.len();
+    let topology = stage.topology_epoch();
+    for recording in [replace, surround] {
+        assert_eq!(
+            recording.build(&mut stage),
+            Err(AnimateError::StaleHandle(stale))
+        );
+        assert_eq!(stage.len(), count);
+        assert_eq!(stage.topology_epoch(), topology);
+        assert_eq!(stage.get_points(mob), points);
+    }
+
+    let foreign = square(&mut Stage::new());
+    let recording = mob.animate().replace(foreign, 0, false).unwrap();
+    assert_eq!(
+        recording.build(&mut stage),
+        Err(AnimateError::StaleHandle(foreign))
+    );
+    assert_eq!(stage.len(), count);
+}
+
+#[test]
+fn layout_commands_keep_the_override_no_chaining_rule() {
+    let mut stage = Stage::new();
+    let mob = square(&mut stage);
+    let override_animation = OverrideAnimation {
+        name: "layout_override",
+    };
+    assert_eq!(
+        mob.animate()
+            .with_override(override_animation)
+            .unwrap()
+            .arrange_to_fit_width(4.0, ORIGIN),
+        Err(AnimateError::OverrideNotChainable)
+    );
+    assert_eq!(
+        mob.animate()
+            .space_out_submobjects(2.0)
+            .unwrap()
+            .with_override(override_animation),
+        Err(AnimateError::OverrideNotChainable)
+    );
+}

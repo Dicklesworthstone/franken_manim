@@ -6,8 +6,10 @@
 //! The recordable surface is the Reference's chainable mutation vocabulary
 //! that a target copy can realize: placement (`shift`, `move_to`, `next_to`,
 //! `align_to`, `to_edge`, `to_corner`, `center`, `set_x/y/z`, `match_*`,
-//! `arrange`), transforms (`scale`, `stretch`, `rotate` about a point or axis,
-//! `flip`, `apply_matrix`), size (`set_width`, `set_height`), style
+//! `arrange`, `arrange_to_fit_*`, `space_out_submobjects`, `replace`,
+//! `surround`), transforms (`scale`, `stretch`, `rotate` about a point or axis,
+//! `flip`, `apply_matrix`), size (`set_width/height/depth`, `set_shape`,
+//! `set_min/max_*`), style
 //! (`set_color`, `set_fill`, `set_stroke`, `set_opacity`, `fade`), and value
 //! trackers. Arbitrary callables (`apply_function`, `become`) are not
 //! recordable as `Copy` commands; they are ordinary animations instead.
@@ -116,6 +118,18 @@ pub enum AnimateCommand {
     SetWidth(f64, bool),
     /// `set_height(height, stretch)`.
     SetHeight(f64, bool),
+    /// `set_depth(depth, stretch)`.
+    SetDepth(f64, bool),
+    /// `set_shape(width, height, depth)`; omitted axes are unchanged.
+    SetShape(Option<f64>, Option<f64>, Option<f64>),
+    /// Upper extent constraint: `(length, dim, stretch)`.
+    SetMaxDimSize(f64, usize, bool),
+    /// Lower extent constraint: `(length, dim, stretch)`.
+    SetMinDimSize(f64, usize, bool),
+    /// Fit to another mobject's size and center, read at build time.
+    Replace(Mob, usize, bool),
+    /// Fit around another mobject: `(other, dim_to_match, stretch, buff)`.
+    Surround(Mob, usize, bool, f64),
     /// Set a scalar tracker (plain or exponential) through its encoding.
     SetValue(f64),
     /// Increment a scalar tracker's decoded value at build time.
@@ -140,6 +154,10 @@ pub enum AnimateCommand {
     MatchDimSize(Mob, usize),
     /// `arrange(direction, buff, center)` over the target's submobjects.
     Arrange(Vec3, f64, bool),
+    /// Arrange without resizing children: `(length, dim, about_edge)`.
+    ArrangeToFit(f64, usize, Vec3),
+    /// Scale the family, then inverse-scale each direct child about its center.
+    SpaceOutSubmobjects(f64, Option<Vec3>, Option<Vec3>),
     /// `set_color(color, opacity)` across the family: fill and stroke (and
     /// a base mobject's `rgba`) take the colour; opacity only when given.
     SetColor(Srgb, Option<f64>),
@@ -170,6 +188,9 @@ pub enum AnimateError {
     OverrideNotChainable,
     /// A handle (the source, or a command's Mob target) is dead at build.
     StaleHandle(Mob),
+    /// A new layout command has an invalid dimension or undefined divisor.
+    /// Rejected before allocating or changing a target copy.
+    InvalidLayoutArgument(&'static str),
     /// A live source lacks the tracker encoding required by a command.
     TrackerKindMismatch {
         /// The live, but incompatible, source.
@@ -192,6 +213,9 @@ impl std::fmt::Display for AnimateError {
                 "method chaining is not supported for overridden animations"
             ),
             Self::StaleHandle(_) => write!(f, "animate target handle is stale"),
+            Self::InvalidLayoutArgument(message) => {
+                write!(f, "invalid animation layout: {message}")
+            }
             Self::TrackerKindMismatch { expected, .. } => {
                 write!(f, "animate command requires a {expected} value tracker")
             }
@@ -410,6 +434,131 @@ impl AnimBuilder {
         self.push(AnimateCommand::SetHeight(height, stretch))
     }
 
+    /// Record `set_depth`.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn set_depth(self, depth: f64, stretch: bool) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::SetDepth(depth, stretch))
+    }
+
+    /// Record independent fits of the specified axes.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn set_shape(
+        self,
+        width: Option<f64>,
+        height: Option<f64>,
+        depth: Option<f64>,
+    ) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::SetShape(width, height, depth))
+    }
+
+    /// Record a width fit that leaves height and depth unchanged.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn stretch_to_fit_width(self, width: f64) -> Result<Self, AnimateError> {
+        self.set_width(width, true)
+    }
+
+    /// Record a height fit that leaves width and depth unchanged.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn stretch_to_fit_height(self, height: f64) -> Result<Self, AnimateError> {
+        self.set_height(height, true)
+    }
+
+    /// Record a depth fit that leaves width and height unchanged.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn stretch_to_fit_depth(self, depth: f64) -> Result<Self, AnimateError> {
+        self.set_depth(depth, true)
+    }
+
+    /// Record a maximum width, evaluated against the target at build time.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn set_max_width(self, width: f64, stretch: bool) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::SetMaxDimSize(width, 0, stretch))
+    }
+
+    /// Record a maximum height, evaluated against the target at build time.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn set_max_height(self, height: f64, stretch: bool) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::SetMaxDimSize(height, 1, stretch))
+    }
+
+    /// Record a maximum depth, evaluated against the target at build time.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn set_max_depth(self, depth: f64, stretch: bool) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::SetMaxDimSize(depth, 2, stretch))
+    }
+
+    /// Record a minimum width, evaluated against the target at build time.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn set_min_width(self, width: f64, stretch: bool) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::SetMinDimSize(width, 0, stretch))
+    }
+
+    /// Record a minimum height, evaluated against the target at build time.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn set_min_height(self, height: f64, stretch: bool) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::SetMinDimSize(height, 1, stretch))
+    }
+
+    /// Record a minimum depth, evaluated against the target at build time.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn set_min_depth(self, depth: f64, stretch: bool) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::SetMinDimSize(depth, 2, stretch))
+    }
+
+    /// Fit to `other`'s size and center at build time, keeping this object's
+    /// geometry and style. This records `Mobject.replace`, not scene removal.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override. The other
+    /// handle and matching dimension are validated before copying at build.
+    pub fn replace(
+        self,
+        other: Mob,
+        dim_to_match: usize,
+        stretch: bool,
+    ) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::Replace(other, dim_to_match, stretch))
+    }
+
+    /// Fit around `other` at build time with `buff` added to its full
+    /// matching extent; the other axes scale proportionally.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override. The other
+    /// handle, dimension, target extent, and finite buffer scale are validated
+    /// at build before any target allocation.
+    pub fn surround(
+        self,
+        other: Mob,
+        dim_to_match: usize,
+        stretch: bool,
+        buff: f64,
+    ) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::Surround(other, dim_to_match, stretch, buff))
+    }
+
     /// Record `set_value` for a plain or exponential ValueTracker.
     /// The source is untouched; the target receives the decoded value at build.
     ///
@@ -569,6 +718,77 @@ impl AnimBuilder {
         self.push(AnimateCommand::Arrange(direction, buff, true))
     }
 
+    /// Arrange children over `length` along `dim` without resizing them,
+    /// retaining the target's `about_edge` critical point at build time.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override. An invalid
+    /// dimension is rejected at build before allocating the target copy.
+    pub fn arrange_to_fit_dim(
+        self,
+        length: f64,
+        dim: usize,
+        about_edge: Vec3,
+    ) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::ArrangeToFit(length, dim, about_edge))
+    }
+
+    /// Arrange children into a width without resizing them.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn arrange_to_fit_width(self, width: f64, about_edge: Vec3) -> Result<Self, AnimateError> {
+        self.arrange_to_fit_dim(width, 0, about_edge)
+    }
+
+    /// Arrange children into a height without resizing them.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn arrange_to_fit_height(
+        self,
+        height: f64,
+        about_edge: Vec3,
+    ) -> Result<Self, AnimateError> {
+        self.arrange_to_fit_dim(height, 1, about_edge)
+    }
+
+    /// Arrange children into a depth without resizing them.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn arrange_to_fit_depth(self, depth: f64, about_edge: Vec3) -> Result<Self, AnimateError> {
+        self.arrange_to_fit_dim(depth, 2, about_edge)
+    }
+
+    /// Spread child centers about the family center, preserving child sizes
+    /// subject to [`Stage::scale`]'s minimum factor.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override. The factor
+    /// and its reciprocal must be finite and positive, checked before copying.
+    pub fn space_out_submobjects(self, factor: f64) -> Result<Self, AnimateError> {
+        self.space_out_submobjects_about(factor, None, Some(fmn_core::constants::ORIGIN))
+    }
+
+    /// Spread children with an explicit initial scaling pivot; each child
+    /// still scales back about its own center.
+    ///
+    /// # Errors
+    /// As [`Self::space_out_submobjects`].
+    pub fn space_out_submobjects_about(
+        self,
+        factor: f64,
+        about_point: Option<Vec3>,
+        about_edge: Option<Vec3>,
+    ) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::SpaceOutSubmobjects(
+            factor,
+            about_point,
+            about_edge,
+        ))
+    }
+
     /// Record `set_color(color)` across the family; opacity is unchanged.
     ///
     /// # Errors
@@ -624,6 +844,7 @@ impl AnimBuilder {
     /// [`AnimateError::StaleHandle`] for a dead source or a dead Mob target
     /// inside a command; [`AnimateError::TrackerKindMismatch`] for a scalar
     /// command on a non-scalar source or a complex command on a non-complex one.
+    /// [`AnimateError::InvalidLayoutArgument`] for an undefined layout.
     pub fn build(self, stage: &mut Stage) -> Result<BuiltAnimate, AnimateError> {
         // Validate every Mob reference before mutating anything.
         if !stage.contains(self.source) {
@@ -654,10 +875,46 @@ impl AnimBuilder {
             | AnimateCommand::NextTo(PosTarget::Mob(m), _, _, _)
             | AnimateCommand::AlignTo(PosTarget::Mob(m), _)
             | AnimateCommand::MatchCoord(m, _)
-            | AnimateCommand::MatchDimSize(m, _) = command
+            | AnimateCommand::MatchDimSize(m, _)
+            | AnimateCommand::Replace(m, _, _)
+            | AnimateCommand::Surround(m, _, _, _) = command
                 && !stage.contains(*m)
             {
                 return Err(AnimateError::StaleHandle(*m));
+            }
+            match *command {
+                AnimateCommand::ArrangeToFit(_, dim, _)
+                | AnimateCommand::SetMaxDimSize(_, dim, _)
+                | AnimateCommand::SetMinDimSize(_, dim, _)
+                | AnimateCommand::Surround(_, dim, _, _)
+                | AnimateCommand::Replace(_, dim, false)
+                    if dim >= 3 =>
+                {
+                    return Err(AnimateError::InvalidLayoutArgument(
+                        "dimension must be 0, 1, or 2",
+                    ));
+                }
+                AnimateCommand::SpaceOutSubmobjects(factor, _, _)
+                    if !factor.is_finite() || factor <= 0.0 || !factor.recip().is_finite() =>
+                {
+                    return Err(AnimateError::InvalidLayoutArgument(
+                        "spacing factor and its reciprocal must be finite and positive",
+                    ));
+                }
+                AnimateCommand::Surround(other, dim, _, buff) => {
+                    let length = stage.length_over_dim(other, dim);
+                    if !length.is_finite() || length == 0.0 {
+                        return Err(AnimateError::InvalidLayoutArgument(
+                            "surround target must have a finite nonzero matching extent",
+                        ));
+                    }
+                    if !buff.is_finite() || !((length + buff) / length).is_finite() {
+                        return Err(AnimateError::InvalidLayoutArgument(
+                            "surround buffer must yield a finite scale",
+                        ));
+                    }
+                }
+                _ => {}
             }
         }
         let target = stage
@@ -716,6 +973,24 @@ fn apply(stage: &mut Stage, target: Mob, command: AnimateCommand) -> Result<(), 
         AnimateCommand::SetHeight(h, s) => {
             stage.set_height(target, h, s);
         }
+        AnimateCommand::SetDepth(d, s) => {
+            stage.set_depth(target, d, s);
+        }
+        AnimateCommand::SetShape(width, height, depth) => {
+            stage.set_shape(target, width, height, depth);
+        }
+        AnimateCommand::SetMaxDimSize(length, dim, stretch) => {
+            stage.set_max_dim_size(target, length, dim, stretch);
+        }
+        AnimateCommand::SetMinDimSize(length, dim, stretch) => {
+            stage.set_min_dim_size(target, length, dim, stretch);
+        }
+        AnimateCommand::Replace(other, dim, stretch) => {
+            stage.replace(target, other, dim, stretch);
+        }
+        AnimateCommand::Surround(other, dim, stretch, buff) => {
+            stage.surround(target, other, dim, stretch, buff);
+        }
         AnimateCommand::SetValue(value) => {
             stage
                 .set_tracker_value(target, value)
@@ -759,6 +1034,12 @@ fn apply(stage: &mut Stage, target: Mob, command: AnimateCommand) -> Result<(), 
         }
         AnimateCommand::Arrange(direction, buff, center) => {
             stage.arrange(target, direction, buff, center);
+        }
+        AnimateCommand::ArrangeToFit(length, dim, about_edge) => {
+            stage.arrange_to_fit_dim(target, length, dim, about_edge);
+        }
+        AnimateCommand::SpaceOutSubmobjects(factor, about_point, about_edge) => {
+            stage.space_out_submobjects_about(target, factor, about_point, about_edge);
         }
         AnimateCommand::SetColor(color, opacity) => {
             let rgb = Some([color.r, color.g, color.b]);

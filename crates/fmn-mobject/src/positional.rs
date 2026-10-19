@@ -1104,6 +1104,86 @@ impl Stage {
         self.shift(mob, sub(target_point, point_to_align))
     }
 
+    /// Match another mobject's size and center without replacing this
+    /// mobject's geometry, style, identity, or children (`Mobject.replace`).
+    /// With `stretch`, fit each axis independently; otherwise match only
+    /// `dim_to_match` by uniform scaling. A point-free target with no children
+    /// shrinks the source in place, using [`Stage::scale`]'s minimum factor.
+    /// A stale handle is a no-op, as in the other positional methods.
+    ///
+    /// # Panics
+    /// If `dim_to_match >= 3` and `stretch` is false.
+    pub fn replace(
+        &mut self,
+        mob: Mob,
+        other: Mob,
+        dim_to_match: usize,
+        stretch: bool,
+    ) -> &mut Self {
+        assert!(
+            stretch || dim_to_match < 3,
+            "layout dimension must be 0, 1, or 2"
+        );
+        let Some(other_entry) = self.get(other) else {
+            return self;
+        };
+        if other_entry.buffer.is_empty() && other_entry.submobjects().is_empty() {
+            return self.scale(mob, 0.0);
+        }
+        if stretch {
+            for dim in 0..3 {
+                let length = self.length_over_dim(other, dim);
+                self.rescale_to_fit(mob, length, dim, true);
+            }
+        } else {
+            let length = self.length_over_dim(other, dim_to_match);
+            self.rescale_to_fit(mob, length, dim_to_match, false);
+        }
+        self.move_to(mob, other, ORIGIN)
+    }
+
+    /// Fit around another mobject, adding `buff` to its full extent along
+    /// `dim_to_match`, then scaling the other axes proportionally. This is
+    /// the Reference's `Mobject.surround`, whose buffer is a total increment,
+    /// rather than a separate increment on each side.
+    ///
+    /// # Panics
+    /// Before fitting if `dim_to_match >= 3`, the target's matching extent
+    /// is zero or non-finite, or `buff` does not yield a finite scale.
+    /// If the two families share geometry, their post-fit extent is checked
+    /// again before the final scaling.
+    pub fn surround(
+        &mut self,
+        mob: Mob,
+        other: Mob,
+        dim_to_match: usize,
+        stretch: bool,
+        buff: f64,
+    ) -> &mut Self {
+        assert!(dim_to_match < 3, "layout dimension must be 0, 1, or 2");
+        if !self.contains(other) {
+            return self;
+        }
+        let length = self.length_over_dim(other, dim_to_match);
+        assert!(
+            length.is_finite() && length != 0.0,
+            "surround target must have a finite nonzero matching extent"
+        );
+        assert!(
+            buff.is_finite() && ((length + buff) / length).is_finite(),
+            "surround buffer must yield a finite scale"
+        );
+        self.replace(mob, other, dim_to_match, stretch);
+        // Read after replace: `other` may be the source or share descendants.
+        let length = self.length_over_dim(other, dim_to_match);
+        let factor = (length + buff) / length;
+        assert!(
+            factor.is_finite(),
+            "surround post-fit extent must yield a finite scale"
+        );
+        self.scale(mob, factor)
+    }
+
     /// Align `mob` to a target along the nonzero components of `direction`
     /// (Reference `align_to`).
     pub fn align_to(
@@ -1178,6 +1258,82 @@ impl Stage {
     pub fn set_depth(&mut self, mob: Mob, depth: f64, stretch: bool) -> &mut Self {
         self.rescale_to_fit(mob, depth, 2, stretch)
     }
+    /// Independently fit the specified extents; omitted axes are unchanged.
+    /// Zero current extents retain [`Stage::rescale_to_fit`]'s no-op rule.
+    pub fn set_shape(
+        &mut self,
+        mob: Mob,
+        width: Option<f64>,
+        height: Option<f64>,
+        depth: Option<f64>,
+    ) -> &mut Self {
+        for (dim, length) in [width, height, depth].into_iter().enumerate() {
+            if let Some(length) = length {
+                self.rescale_to_fit(mob, length, dim, true);
+            }
+        }
+        self
+    }
+
+    /// Shrink only when the current extent exceeds `max_length`.
+    ///
+    /// # Panics
+    /// If `dim >= 3`.
+    pub fn set_max_dim_size(
+        &mut self,
+        mob: Mob,
+        max_length: f64,
+        dim: usize,
+        stretch: bool,
+    ) -> &mut Self {
+        if self.length_over_dim(mob, dim) > max_length {
+            self.rescale_to_fit(mob, max_length, dim, stretch);
+        }
+        self
+    }
+
+    /// Grow only when the current extent is below `min_length`.
+    ///
+    /// # Panics
+    /// If `dim >= 3`.
+    pub fn set_min_dim_size(
+        &mut self,
+        mob: Mob,
+        min_length: f64,
+        dim: usize,
+        stretch: bool,
+    ) -> &mut Self {
+        if self.length_over_dim(mob, dim) < min_length {
+            self.rescale_to_fit(mob, min_length, dim, stretch);
+        }
+        self
+    }
+
+    /// Constrain the width without enlarging an already smaller mobject.
+    pub fn set_max_width(&mut self, mob: Mob, width: f64, stretch: bool) -> &mut Self {
+        self.set_max_dim_size(mob, width, 0, stretch)
+    }
+    /// Constrain the height without enlarging an already smaller mobject.
+    pub fn set_max_height(&mut self, mob: Mob, height: f64, stretch: bool) -> &mut Self {
+        self.set_max_dim_size(mob, height, 1, stretch)
+    }
+    /// Constrain the depth without enlarging an already smaller mobject.
+    pub fn set_max_depth(&mut self, mob: Mob, depth: f64, stretch: bool) -> &mut Self {
+        self.set_max_dim_size(mob, depth, 2, stretch)
+    }
+    /// Constrain the width without shrinking an already larger mobject.
+    pub fn set_min_width(&mut self, mob: Mob, width: f64, stretch: bool) -> &mut Self {
+        self.set_min_dim_size(mob, width, 0, stretch)
+    }
+    /// Constrain the height without shrinking an already larger mobject.
+    pub fn set_min_height(&mut self, mob: Mob, height: f64, stretch: bool) -> &mut Self {
+        self.set_min_dim_size(mob, height, 1, stretch)
+    }
+    /// Constrain the depth without shrinking an already larger mobject.
+    pub fn set_min_depth(&mut self, mob: Mob, depth: f64, stretch: bool) -> &mut Self {
+        self.set_min_dim_size(mob, depth, 2, stretch)
+    }
+
     /// Stretch (single-axis) to fit a width.
     pub fn stretch_to_fit_width(&mut self, mob: Mob, width: f64) -> &mut Self {
         self.rescale_to_fit(mob, width, 0, true)
@@ -1224,6 +1380,97 @@ impl Stage {
     /// Match another mobject's z.
     pub fn match_z(&mut self, mob: Mob, other: Mob) -> &mut Self {
         self.match_coord(mob, other, 2, ORIGIN)
+    }
+
+    /// Spread direct submobjects about the family's center while preserving
+    /// each child's size, subject to [`Stage::scale`]'s minimum factor.
+    /// The parent first scales, then each direct child's family scales back
+    /// about its own center, in insertion order. A parent with its own points
+    /// keeps their scaled geometry, as in the Reference.
+    ///
+    /// # Panics
+    /// Before mutation if `factor` or its reciprocal is not finite and
+    /// strictly positive.
+    pub fn space_out_submobjects(&mut self, mob: Mob, factor: f64) -> &mut Self {
+        self.space_out_submobjects_about(mob, factor, None, Some(ORIGIN))
+    }
+
+    /// [`Stage::space_out_submobjects`] with an explicit initial scaling
+    /// pivot. Children always scale back about their individual centers.
+    ///
+    /// # Panics
+    /// Before mutation if `factor` or its reciprocal is not finite and
+    /// strictly positive.
+    pub fn space_out_submobjects_about(
+        &mut self,
+        mob: Mob,
+        factor: f64,
+        about_point: Option<Vec3>,
+        about_edge: Option<Vec3>,
+    ) -> &mut Self {
+        assert!(
+            factor.is_finite() && factor > 0.0 && factor.recip().is_finite(),
+            "submobject spacing factor and its reciprocal must be finite and positive"
+        );
+        let children = self
+            .get(mob)
+            .map(|entry| entry.submobjects().to_vec())
+            .unwrap_or_default();
+        self.scale_about(mob, factor, about_point, about_edge);
+        for child in children {
+            self.scale(child, 1.0 / factor);
+        }
+        self
+    }
+
+    /// Arrange direct children along an axis by changing the gaps, retaining
+    /// each child's size and the family's previous `about_edge` critical
+    /// point. Children keep their order and their other coordinates. Negative
+    /// gaps intentionally overlap children when `length` is smaller than
+    /// their combined extents. The actual bounds can exceed `length` when
+    /// a child is wider than the requested span. Zero or one child is unchanged.
+    ///
+    /// # Panics
+    /// Before mutation if `dim >= 3`.
+    pub fn arrange_to_fit_dim(
+        &mut self,
+        mob: Mob,
+        length: f64,
+        dim: usize,
+        about_edge: Vec3,
+    ) -> &mut Self {
+        assert!(dim < 3, "layout dimension must be 0, 1, or 2");
+        let children = self
+            .get(mob)
+            .map(|entry| entry.submobjects().to_vec())
+            .unwrap_or_default();
+        if children.len() <= 1 {
+            return self;
+        }
+        let reference = self.get_bounding_box_point(mob, about_edge);
+        let total: f64 = children.iter().map(|&m| self.length_over_dim(m, dim)).sum();
+        let buff = (length - total) / (children.len() - 1) as f64;
+        let mut edge = ORIGIN;
+        edge[dim] = -1.0;
+        let mut coordinate = 0.0;
+        for child in children {
+            self.set_coord(child, coordinate, dim, edge);
+            coordinate += self.length_over_dim(child, dim) + buff;
+        }
+        self.move_to(mob, reference, about_edge)
+    }
+
+    /// Arrange children into the requested width without resizing them.
+    pub fn arrange_to_fit_width(&mut self, mob: Mob, width: f64, about_edge: Vec3) -> &mut Self {
+        self.arrange_to_fit_dim(mob, width, 0, about_edge)
+    }
+    /// Arrange children into the requested height without resizing them.
+    pub fn arrange_to_fit_height(&mut self, mob: Mob, height: f64, about_edge: Vec3) -> &mut Self {
+        self.arrange_to_fit_dim(mob, height, 1, about_edge)
+    }
+    /// Arrange children into the requested depth without resizing them.
+    pub fn arrange_to_fit_depth(&mut self, mob: Mob, depth: f64, about_edge: Vec3) -> &mut Self {
+        self.arrange_to_fit_dim(mob, depth, 2, about_edge)
     }
 
     /// Lay out `mob`'s direct submobjects in a line, each `next_to` the last
