@@ -236,7 +236,13 @@ mod tests {
             let pixels = player.core.render_index(0).unwrap();
             assert_eq!(pixels, expected.render_index(0).unwrap());
             if camera {
-                assert!(pixels.chunks_exact(4).all(|p| p == [255, 0, 0, 255]));
+                assert!(
+                    pixels
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .all(|p| *p == [255, 0, 0, 255])
+                );
             }
             assert!(
                 !FmnPlayer::from_bundle_with_audio(&pictures)
