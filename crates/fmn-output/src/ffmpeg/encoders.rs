@@ -199,7 +199,7 @@ fn finish_probe_input(
 
 fn probe_frames() -> Vec<u8> {
     let mut frames = vec![128_u8; 2 * PROBE_FRAME_BYTES];
-    for frame in frames.chunks_exact_mut(PROBE_FRAME_BYTES) {
+    for frame in frames.as_chunks_mut::<PROBE_FRAME_BYTES>().0 {
         frame[..PROBE_LUMA_BYTES].fill(16);
     }
     frames

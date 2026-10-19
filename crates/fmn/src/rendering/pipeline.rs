@@ -920,7 +920,7 @@ mod handoff_tests {
         let mut worker = RenderWorker::default();
         let layout =
             fmn_frame::FrameLayout::tight(PixelFormat::Rgba8, 16, 16).expect("output layout");
-        let mut output = FrameBuffer::new(layout);
+        let mut output = FrameBuffer::new(layout.clone());
         let initial = renderer
             .prepare_with_camera(&stage, &camera)
             .expect("first camera job");
@@ -944,7 +944,7 @@ mod handoff_tests {
                 .prepare_with_camera(&stage, &camera)
                 .expect("camera capture");
             let fresh = frame.render(1).expect("fresh reference raster");
-            let mut expected = FrameBuffer::new(layout);
+            let mut expected = FrameBuffer::new(layout.clone());
             convert_into(&fresh, &mut expected, 1).expect("reference conversion");
             assert!(
                 !worker
@@ -1040,14 +1040,14 @@ mod handoff_tests {
             PixelFormat::P010,
         ] {
             let layout = fmn_frame::FrameLayout::tight(format, 16, 16).expect("output layout");
-            let mut expected = FrameBuffer::new(layout);
+            let mut expected = FrameBuffer::new(layout.clone());
             convert_into(&fresh, &mut expected, 1).expect("fresh output conversion");
             for threads in [1, 4, 16] {
                 let repeated = compiler
                     .prepare_with_camera(&stage, &camera)
                     .expect("unchanged capture");
                 assert!(Arc::ptr_eq(&initial, &repeated));
-                let mut output = FrameBuffer::new(layout);
+                let mut output = FrameBuffer::new(layout.clone());
                 output.plane_mut(0).fill(0xA5);
                 let reused = worker
                     .render_camera(&repeated, threads, &mut output)
@@ -1079,7 +1079,7 @@ mod handoff_tests {
         let weak = Arc::downgrade(&first);
         let mut worker = RenderWorker::default();
         let layout = fmn_frame::FrameLayout::tight(PixelFormat::Rgba8, 16, 16).unwrap();
-        let mut output = FrameBuffer::new(layout);
+        let mut output = FrameBuffer::new(layout.clone());
         assert!(!worker.render_camera(&first, 1, &mut output).unwrap());
         let original = output.as_bytes().to_vec();
         let changed = Camera::new(CameraConfig {
