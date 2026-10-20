@@ -114,7 +114,11 @@
     emit(message = "") { this.onState({status: this.status, message, sample: this.current(), info: this.info}); }
     current() {
       if (this.status !== "playing") return this.position;
-      return Math.min(this.end, this.anchorSample + Math.max(0,
+      // The device clock keeps running when the UI or a fetch stalls. It is
+      // not evidence that unscheduled PCM was played. Only a fully queued
+      // soundtrack (or an explicit seek past it) admits a silent picture suffix.
+      const available = this.queuedEnd < this.info.sample_frames ? this.queuedEnd : this.end;
+      return Math.min(this.end, available, this.anchorSample + Math.max(0,
         Math.floor((this.context.currentTime - this.anchorTime) * this.info.sample_rate)));
     }
     clear() {
@@ -163,6 +167,7 @@
           throw new Error("The recording or worker changed. Select a frame and start narration again.");
         }
         this.onReady(info);
+        if (epoch !== this.epoch) return false;
         this.info = info;
         if (frame !== null) {
           if (!uint(frame) || frame >= info.picture_frames) throw new Error("Invalid selected narration frame.");

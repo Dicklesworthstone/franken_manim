@@ -210,3 +210,65 @@ test("picture ownership is validated before fetching or scheduling the first aud
   assert.equal(await f.player.play(),false);assert.equal(f.calls.length,0);assert.equal(f.context.nodes.length,0);
   assert.match(f.states.at(-1).message,/generation/);
 });
+
+test("pause after a stalled tick resumes at the first unqueued sample",async()=>{
+  const f=fixture();assert(await f.player.play(3));
+  f.context.currentTime=10;
+  assert.equal(f.player.current(),28800);
+  f.player.pause("Tab lost focus");
+  assert.equal(f.player.position,28800);assert.equal(f.states.at(-1).sample,28800);
+  assert(await f.player.play());assert.equal(f.calls.at(-1).start,28800);
+});
+test("a tick delayed beyond both track ends reports underrun, never false completion",async()=>{
+  const f=fixture();assert(await f.player.play());f.context.currentTime=10;f.player.pump();
+  assert.equal(f.player.status,"paused");assert.equal(f.player.position,24000);
+  assert.match(f.states.at(-1).message,/without skipping/);assert.deepEqual(f.frames,[]);
+  assert.equal(f.player.slots.size,0);assert.equal(f.calls.length,1);
+});
+test("device suspension cannot advance past narration that was never queued",async()=>{
+  const f=fixture();assert(await f.player.play());
+  f.context.currentTime=10;f.context.state="suspended";f.player.pump();
+  assert.equal(f.player.position,24000);assert.match(f.states.at(-1).message,/suspended/);
+  assert(await f.player.play());assert.equal(f.calls.at(-1).start,24000);
+});
+test("late generation-check failures preserve the audible cursor without a timely pump",async()=>{
+  const f=fixture();assert(await f.player.play());
+  for(let n=0;n<2;n++){f.player.pump();await flush();}
+  const pending=deferred(), chunk=deferred();
+  f.transport.info=()=>pending.promise;f.transport.chunk=()=>chunk.promise;
+  f.context.currentTime=1.1;f.player.pump();
+  f.context.currentTime=10;pending.reject(new Error("connection unavailable"));await flush();
+  assert.equal(f.player.position,72000);assert.equal(f.player.status,"paused");
+  assert.match(f.states.at(-1).message,/connection/);assert.equal(f.player.slots.size,0);
+});
+test("repeated stalls neither skip nor duplicate narration across resume cycles",async()=>{
+  const f=fixture();const heard=[];
+  for(let n=0;n<5;n++){
+    assert(await f.player.play());
+    heard.push(...f.context.buffers.at(-1).values[0]);
+    f.context.currentTime+=10;f.player.pump();
+    assert.equal(f.player.position,(n+1)*24000);
+    assert.equal(f.player.status,"paused");
+  }
+  assert.deepEqual(f.calls.map(c=>c.start),[0,24000,48000,72000,96000]);
+  assert.deepEqual(heard,Array.from({length:120000},(_,i)=>(i%127)/128));
+  assert.match(f.states.at(-1).message,/finished/);assert.deepEqual(f.frames,[59]);
+});
+test("a fully queued short track may advance through its intentional silent suffix",async()=>{
+  const f=fixture(info({sample_frames:100,picture_frames:90}));assert(await f.player.play());
+  f.context.currentTime=10;f.player.pump();
+  assert.equal(f.player.position,144000);assert.match(f.states.at(-1).message,/finished/);
+  assert.equal(f.calls.length,1);assert.deepEqual(f.frames,[89]);
+});
+test("an empty soundtrack still runs the picture clock without requesting PCM",async()=>{
+  const f=fixture(info({sample_frames:0,picture_frames:60}));assert(await f.player.play());
+  f.context.currentTime=10;f.player.pump();
+  assert.equal(f.player.position,96000);assert.deepEqual(f.frames,[59]);assert.equal(f.calls.length,0);
+});
+test("readiness callbacks can cancel loading before any audio fetch",async()=>{
+  const f=fixture();f.player.onReady=()=>f.player.pause("picture ownership changed");
+  assert.equal(await f.player.play(12),false);
+  assert.equal(f.player.status,"paused");assert.equal(f.player.position,0);
+  assert.equal(f.calls.length,0);assert.equal(f.context.nodes.length,0);
+  assert.match(f.states.at(-1).message,/ownership/);
+});
