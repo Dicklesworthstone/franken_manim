@@ -417,9 +417,19 @@ impl Session {
         )?)
     }
 
+    #[cfg(test)]
     pub fn publish(
         &self,
         fs: Arc<dyn FileSystem>,
+        output: Artifact<'_>,
+    ) -> Result<Publication, Failure> {
+        self.publish_with_destination(fs, None, output)
+    }
+
+    pub fn publish_with_destination(
+        &self,
+        fs: Arc<dyn FileSystem>,
+        sidecar: Option<&Path>,
         output: Artifact<'_>,
     ) -> Result<Publication, Failure> {
         if fs.identity() != self.filesystem {
@@ -432,7 +442,7 @@ impl Session {
         let binary = manifest.to_bytes()?;
         let text = manifest.to_text();
         let semantic = manifest.semantic_digest()?;
-        let sidecar = destination(output.destination)?;
+        let sidecar = sidecar.map_or_else(|| destination(output.destination), |path| Ok(path.to_owned()))?;
         let publication_error = |error| {
             Failure::new(
                 "render",
