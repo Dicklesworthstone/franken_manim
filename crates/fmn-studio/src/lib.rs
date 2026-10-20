@@ -24,6 +24,7 @@ pub mod project;
 pub mod project_watch;
 pub mod protocol;
 pub mod recorded;
+pub mod recorded_audio;
 pub mod scrub;
 pub mod supervisor;
 pub mod tui;
@@ -51,12 +52,13 @@ pub use protocol::{
     ResponseEnvelope, StudioDataKind, SupervisorRequest, TransportCapabilities, WorkerErrorCode,
     WorkerResponse, read_request, read_response, write_request, write_response,
 };
+pub use recorded_audio::StudioRecordedAudio;
 pub use scrub::{
     ScrubMode, ScrubResult, commit_timeline_frame, preview_timeline_frame, scrub_timeline,
 };
 pub use supervisor::{
     BuildError, ChannelError, ChannelFailureKind, CheckpointSource, LaunchError, RebuildDriver,
-    RecoveryReport, StdWorkerLauncher, Supervisor,SupervisorConfig, SupervisorError,
+    RecoveryReport, StdWorkerLauncher, Supervisor, SupervisorConfig, SupervisorError,
     SupervisorReply, WorkerArtifact, WorkerChannel, WorkerLauncher,
 };
 pub use tui::{TerminalPreview, TerminalProtocol, TuiError, TuiLimits};
