@@ -510,3 +510,57 @@ fn failed_resizes_are_atomic_and_keep_live_views() {
         assert_eq!(buffer.read(0, "point").unwrap(), vec![9.0, 9.0, 9.0]);
     }
 }
+
+#[test]
+fn point_free_colour_writes_create_the_phantom_record_and_growth_adopts_it() {
+    // A fresh point-free buffer has no phantom row yet. The colour write must
+    // create it, as the scalar write does, whichever comes first; it used to be
+    // dropped, so `set_stroke(color, width)` kept the width and lost the colour.
+    for colour_first in [true, false] {
+        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), 0).unwrap();
+        assert!(!buffer.has_defaults());
+        if colour_first {
+            buffer.write_color_lanes("stroke_rgba", Some([1.0, 0.5, 0.25]), Some(0.75));
+            buffer.write_scalar_lanes("stroke_width", 3.0);
+        } else {
+            buffer.write_scalar_lanes("stroke_width", 3.0);
+            buffer.write_color_lanes("stroke_rgba", Some([1.0, 0.5, 0.25]), Some(0.75));
+        }
+        assert!(buffer.has_defaults());
+        assert_eq!(
+            buffer.default_record("stroke_rgba").unwrap(),
+            vec![1.0, 0.5, 0.25, 0.75]
+        );
+        assert_eq!(buffer.default_record("stroke_width").unwrap(), vec![3.0]);
+
+        // Colour and opacity stay independent writes on the phantom row.
+        buffer.write_color_lanes("stroke_rgba", None, Some(0.5));
+        buffer.write_color_lanes("fill_rgba", Some([0.0, 1.0, 0.0]), None);
+        assert_eq!(
+            buffer.default_record("stroke_rgba").unwrap(),
+            vec![1.0, 0.5, 0.25, 0.5]
+        );
+        assert_eq!(
+            buffer.default_record("fill_rgba").unwrap(),
+            vec![0.0, 1.0, 0.0, 0.0]
+        );
+
+        // Growth from zero adopts the style (`_data_defaults`).
+        buffer.resize(2).unwrap();
+        for index in 0..2 {
+            assert_eq!(
+                buffer.read(index, "stroke_rgba").unwrap(),
+                vec![1.0, 0.5, 0.25, 0.5]
+            );
+            assert_eq!(buffer.read(index, "stroke_width").unwrap(), vec![3.0]);
+            assert_eq!(
+                buffer.read(index, "fill_rgba").unwrap(),
+                vec![0.0, 1.0, 0.0, 0.0]
+            );
+        }
+    }
+    // A schema without a 4-lane field stays a no-op and creates nothing.
+    let mut plain = RecordBuffer::new(RecordSchema::mobject(), 0).unwrap();
+    plain.write_color_lanes("stroke_rgba", Some([1.0, 0.0, 0.0]), Some(1.0));
+    assert!(!plain.has_defaults());
+}
