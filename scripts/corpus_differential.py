@@ -46,6 +46,7 @@ import structural_facts as sf  # noqa: E402
 
 FACTS_TOOL = ROOT / "crates" / "fmn-conformance" / "python" / "structural_facts.py"
 EXCLUSIONS = ROOT / "crates" / "fmn-conformance" / "fixtures" / "structural_facts" / "exclusions.json"
+SCENE_TRIAGE = ROOT / "docs" / "ratchet" / "differential_triage.tsv"
 SCHEMA = "fmn.corpus-differential"
 VERSION = 1
 # Concurrent invocations (parallel --minimize runs) each count from their own base, so their
@@ -63,12 +64,19 @@ def _slug(module: str, scene: str) -> str:
     return f"{module.replace('/', '__')}__{scene}"
 
 
+# --jobs runs that many scenes at once, so each engine gets one core: the portal's render team
+# and both engines' BLAS otherwise size themselves to the whole machine, and 16 jobs at 64
+# threads each turned the per-scene timeout into a measure of host load. Thread count
+# changes speed, never meaning (D18).
+ONE_THREAD = {"OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}
+
+
 def run_portal(args, module, scene, work):
     png = work / "portal.png"
     argv = [args.portal_python, str(FACTS_TOOL), "run-scene", "--facts", str(work / "portal.ndjson"),
             "--engine", "portal", "--", str(args.videos / module), scene, "-s",
-            "--format", "png", "--resolution", "320x180", "--output", str(png)]
-    env = dict(os.environ, PYTHONPATH=str(args.videos))
+            "--format", "png", "--resolution", "320x180", "--threads", "1", "--output", str(png)]
+    env = dict(os.environ, PYTHONPATH=str(args.videos), **ONE_THREAD)
     return run_child(argv, args.workdir, env, args.timeout), png
 
 
@@ -109,7 +117,7 @@ def tex_toolchain() -> str:
 def run_reference(args, module, scene, work):
     media = work / "reference_media"
     env = {"PATH": "/usr/bin:/bin", "HOME": os.environ.get("HOME", "/tmp"),
-           "PYTHONPATH": f"{args.reference_root}{os.pathsep}{args.videos}"}
+           "PYTHONPATH": f"{args.reference_root}{os.pathsep}{args.videos}", **ONE_THREAD}
     config = args.tex_slots.get()
     try:
         for attempt in range(3):
@@ -217,13 +225,19 @@ def run_one(args, module, scene):
 
 
 # Rule-based triage for scenes that ran in one engine only. First match wins; `side` is the
-# engine whose error is matched. A scene no rule covers stays "untriaged".
+# engine whose error is matched ("portal-alone": the portal's, and only when the Reference
+# ran, so a portal policy never labels a scene the Reference cannot run either). After the
+# rules, a scene both engines fail with the same error is "agree-error"; one no rule covers
+# stays "untriaged".
 TRIAGE = (
     ("reference", "Must specify either a file_name or svg_string SVGMobject", "reference-defect",
      "the pinned Reference cannot construct OldTex/OldTexText (Appendix C-18, BN-07)"),
     ("any", "ModuleNotFoundError", "environment", "a scene-side package is not installed"),
     ("any", r"not Found|No such file or directory|cannot read", "environment",
      "a private asset (image, SVG, sound, data) is absent"),
+    ("portal-alone", r"font family '[^']+' is not available; bundled families:", "owner-ruling",
+     "the scene names a face that is not bundled: the portal refuses it by name (BN-05) where the "
+     "Reference's Pango substitutes a host face; the policy awaits the owner's ADR (fm-mywm)"),
     ("reference", "unexpected keyword argument", "portal-leniency",
      "the Reference rejects a keyword the portal accepts"),
     ("reference", r"^KeyError: 'stroke_color'$", "reference-defect",
@@ -241,17 +255,35 @@ TRIAGE = (
 def triage(record):
     import re
 
+    reference_ran = record["reference"].get("exit") == 0 and not record["reference"].get("error")
     for side, pattern, label, reason in TRIAGE:
-        sides = ("portal", "reference") if side == "any" else (side,)
+        if side == "portal-alone" and not reference_ran:
+            continue
+        sides = {"any": ("portal", "reference"), "portal-alone": ("portal",)}.get(side, (side,))
         for name in sides:
             error = record[name].get("error") or ""
             if re.search(pattern, error):
                 return {"label": label, "side": name, "rule": pattern, "reason": reason}
+    portal, reference = (_comparable_error(record[name].get("error")) for name in ("portal", "reference"))
+    if portal and reference and portal[:len(reference)] == reference[:len(portal)]:
+        return {"label": "agree-error", "side": "both", "rule": "same exception and message",
+                "reason": "both engines raise the same error: the scene's own failure, not an engine difference"}
     for name in ("reference", "portal"):
         if record[name].get("exit") is None:
             return {"label": "timeout", "side": name, "rule": "exit is None",
                     "reason": "the run exceeded the differential's --timeout"}
     return {"label": "untriaged"}
+
+
+def _comparable_error(error):
+    """An error line without the portal CLI's `fmn-python: <code>:` prefix or object addresses.
+    Both sides are cut at 240 characters, so the shorter must be a prefix of the longer."""
+    import re
+
+    if not error:
+        return ""
+    error = re.sub(r"^fmn-python: [\w/-]+: ", "", error)
+    return re.sub(r"0x[0-9a-f]+", "0x", error)
 
 
 def _last_error(stderr):
@@ -277,7 +309,60 @@ def candidates(args):
     return scenes[: args.limit] if args.limit else scenes
 
 
-def write_dashboard(records, path, title):
+def difference_key(first):
+    """A first difference as the triage registry spells it: `path class.fact`."""
+    return f"{first['path'] or '(scene)'} {first['class'] or '(scene)'}.{first['fact']}"
+
+
+def load_scene_triage(path):
+    """The per-scene triage of two-engine structure differences (fm-5wq.33): `module:scene`,
+    its first difference, a label (bug, behavior-note, reference-defect, environment,
+    owner-ruling), the bead or BN, and a note. Scene ids only: the corpus is CC BY-NC-SA."""
+    rows = {}
+    if not path.exists():
+        return rows
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip() or line.startswith("#"):
+            continue
+        fields = line.split("\t")
+        if len(fields) != 5 or fields[0] in rows:
+            raise ValueError(f"{path}:{number}: want 5 tab-separated fields and one row per scene")
+        scene, first, label, ref, note = fields
+        rows[scene] = {"first": first, "label": label, "ref": ref, "note": note}
+    return rows
+
+
+def triage_lines(both, triage):
+    """Every structure-differing scene with its triage. A row whose recorded first difference
+    is no longer the scene's is stale, and so is one whose scene no longer differs: either
+    way it must be re-triaged, never silently kept."""
+    differing = {f"{r['module']}:{r['scene']}": difference_key(r["structure"]["first_difference"])
+                 for r in both if r["structure"]["verdict"] == "differs" and r["structure"]["first_difference"]}
+    rows, labels = [], {}
+    for scene, first in sorted(differing.items()):
+        entry = triage.get(scene)
+        if entry is None:
+            label, ref = "untriaged", ""
+        elif entry["first"] != first:
+            label, ref = f"stale (was `{entry['first']}`)", entry["ref"]
+        else:
+            label, ref = entry["label"], entry["ref"]
+        labels[label.split(" ")[0]] = labels.get(label.split(" ")[0], 0) + 1
+        rows.append(f"| `{scene}` | `{first}` | {label} | {ref} |")
+    gone = sorted(scene for scene in triage if scene not in differing
+                  and any(f"{r['module']}:{r['scene']}" == scene for r in both))
+    lines = ["", "## Structure differences, triaged per scene", "",
+             "Labels come from `docs/ratchet/differential_triage.tsv`. A stale label must be re-triaged.", "",
+             "| label | scenes |", "|---|---|"]
+    lines += [f"| {label} | {n} |" for label, n in sorted(labels.items(), key=lambda kv: (-kv[1], kv[0]))]
+    lines += ["", "| scene | first difference | label | bead / BN |", "|---|---|---|---|", *rows]
+    if gone:
+        lines += ["", "Triage rows whose scene ran in both engines and no longer differs (remove them): "
+                  + ", ".join(f"`{scene}`" for scene in gone) + "."]
+    return lines
+
+
+def write_dashboard(records, path, title, triage=None):
     """Outcome codes and counts only (the corpus is CC BY-NC-SA). The page depends only on
     the set of records, not their order: every table breaks ties by its key."""
     records = sorted(records, key=lambda r: (r["module"], r["scene"]))
@@ -314,6 +399,7 @@ def write_dashboard(records, path, title):
               "| class | fact | scenes | example |", "|---|---|---|---|"]
     for (cls, fact), scenes in sorted(clusters.items(), key=lambda kv: (-len(kv[1]), kv[0])):
         lines.append(f"| {cls} | {fact} | {len(scenes)} | `{scenes[0]}` |")
+    lines += triage_lines(both, triage or {})
     # A bbox outside every admitting row's envelope (fm-5wq.45): size or position, not outline.
     envelopes = {}
     for r in violating:
@@ -516,6 +602,8 @@ def main():
                         help="recompute DIR's verdicts from its saved facts under the current exclusions")
     parser.add_argument("--dashboard", type=pathlib.Path)
     parser.add_argument("--title", default="Corpus differential")
+    parser.add_argument("--triage-file", type=pathlib.Path, default=SCENE_TRIAGE,
+                        help="per-scene triage of two-engine structure differences")
     args = parser.parse_args()
     if args.rediff:
         # Recompute both tiers from the saved facts under the current exclusion table.
@@ -545,7 +633,7 @@ def main():
     if args.report:
         records = sf.read_ndjson(args.report / "records.ndjson")
         if args.dashboard:
-            write_dashboard(records, args.dashboard, args.title)
+            write_dashboard(records, args.dashboard, args.title, load_scene_triage(args.triage_file))
         write_gallery(records, args.report / "gallery.html")
         return 0
     if not (args.portal_python and args.reference_python and args.out):

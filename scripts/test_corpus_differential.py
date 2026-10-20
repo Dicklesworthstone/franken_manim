@@ -144,6 +144,31 @@ class TriageTests(unittest.TestCase):
         error = "ModuleNotFoundError: unexpected keyword argument"
         self.assertEqual(cd.triage(self.record(reference_error=error))["label"], "environment")
 
+    def test_the_same_error_in_both_engines_is_agreement(self):
+        portal = ("fmn-python: scene/scene-execution-failed: TypeError: Object <bound method "
+                  "Mobject.move_to of <Point object at 0x78d7d6b9c370>> cannot be converted to an animation")
+        reference = ("TypeError: Object <bound method Mobject.move_to of <Point object at 0x7f2a3f19eba0>> "
+                     "cannot be converted to an animation")
+        result = cd.triage(self.record(portal_error=portal, reference_error=reference))
+        self.assertEqual((result["label"], result["side"]), ("agree-error", "both"))
+        # A cut-off line still agrees with its full counterpart.
+        self.assertEqual(cd.triage(self.record(portal_error=portal[:120], reference_error=reference))["label"],
+                         "agree-error")
+
+    def test_the_same_exception_class_with_another_message_is_not_agreement(self):
+        result = cd.triage(self.record(portal_error="TypeError: missing a required argument: 'values'",
+                                       reference_error="TypeError: BarChart.__init__() missing 1 required "
+                                                       "positional argument: 'values'"))
+        self.assertEqual(result, {"label": "untriaged"})
+
+    def test_a_portal_policy_never_labels_a_scene_the_reference_cannot_run(self):
+        refusal = ("fmn-python: scene/scene-execution-failed: ValueError: font family 'Consolas' is not "
+                   "available; bundled families: Computer Modern, CM Typewriter, IBM Plex Sans")
+        ran = cd.triage(self.record(portal_error=refusal, reference_exit=0))
+        self.assertEqual((ran["label"], ran["side"]), ("owner-ruling", "portal"))
+        failed = cd.triage(self.record(portal_error=refusal, reference_error="IndexError: index 5 is out of bounds"))
+        self.assertEqual(failed, {"label": "untriaged"})
+
     def test_timeout_is_the_fallback_and_untriaged_is_explicit(self):
         result = cd.triage(self.record(portal_exit=None))
         self.assertEqual((result["label"], result["side"]), ("timeout", "portal"))
@@ -332,6 +357,36 @@ class DashboardTests(unittest.TestCase):
                         text.index("| Circle | class | 1 |"))
         self.assertLess(text.index("| neither | environment |"), text.index("| portal-only | portal-leniency |"))
         self.assertIn("| Tex | bn05-text-geometry | 1 | 2 | 1 | 1 | 0 | 2 | 0.500 | 0.250 |", text)
+
+    def test_every_differing_scene_carries_its_triage_or_says_it_has_none(self):
+        triage = {
+            "_2021/demo.py:Circled": {"first": "0 Circle.class", "label": "bug", "ref": "fm-x1", "note": ""},
+            "_2021/demo.py:Arrowed": {"first": "9 Arrow.class", "label": "bug", "ref": "fm-x2", "note": ""},
+            "_2021/demo.py:Equal": {"first": "0 Square.class", "label": "bug", "ref": "fm-x3", "note": ""},
+        }
+        path = pathlib.Path(tempfile.mkdtemp(prefix="fmn-cd-tri-")) / "dashboard.md"
+        self.addCleanup(shutil.rmtree, path.parent, True)
+        cd.write_dashboard(self.RECORDS, path, "Test dashboard", triage)
+        text = path.read_text()
+        self.assertIn("| `_2021/demo.py:Circled` | `0 Circle.class` | bug | fm-x1 |", text)
+        # Its recorded first difference is no longer the scene's: stale, never kept.
+        self.assertIn("| `_2021/demo.py:Arrowed` | `1 Arrow.n_points` | stale (was `9 Arrow.class`) | fm-x2 |", text)
+        self.assertIn("| `_2021/demo.py:Arrowed2` | `0 Arrow.n_points` | untriaged |  |", text)
+        self.assertIn("| bug | 1 |", text)
+        self.assertIn("| stale | 1 |", text)
+        self.assertIn("| untriaged | 1 |", text)
+        self.assertIn("no longer differs (remove them): `_2021/demo.py:Equal`.", text)
+
+    def test_the_registry_refuses_malformed_or_duplicate_rows(self):
+        path = pathlib.Path(tempfile.mkdtemp(prefix="fmn-cd-reg-")) / "triage.tsv"
+        self.addCleanup(shutil.rmtree, path.parent, True)
+        row = "_2021/demo.py:Circled\t0 Circle.class\tbug\tfm-x1\tnote"
+        path.write_text(f"# header\n{row}\n")
+        self.assertEqual(cd.load_scene_triage(path)["_2021/demo.py:Circled"]["ref"], "fm-x1")
+        for bad in (f"{row}\n{row}\n", "_2021/demo.py:Circled\tbug\n"):
+            path.write_text(bad)
+            with self.assertRaises(ValueError):
+                cd.load_scene_triage(path)
 
     def test_no_frame_path_or_error_text_reaches_the_page(self):
         text = self.render(self.RECORDS).decode()
