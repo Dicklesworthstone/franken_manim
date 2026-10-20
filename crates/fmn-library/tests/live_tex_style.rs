@@ -49,15 +49,29 @@ fn assert_paint(stage: &Stage, slot: Mob, separate_root: bool) {
     assert_eq!(stage.get_color(slot), stage.get_fill_color(slot));
     let children = stage.get(slot).unwrap().submobjects();
     assert!(children.len() > 1);
-    assert_eq!(stage.get_fill_color(children[0]).unwrap().to_rgb8(), BLACK.to_rgb8());
+    assert_eq!(
+        stage.get_fill_color(children[0]).unwrap().to_rgb8(),
+        BLACK.to_rgb8()
+    );
     assert_eq!(stage.get_fill_opacity(children[0]), Some(1.0));
     for &digit in &children[1..] {
-        assert_eq!(stage.get_fill_color(digit).unwrap().to_rgb8(), BLUE.to_rgb8());
+        assert_eq!(
+            stage.get_fill_color(digit).unwrap().to_rgb8(),
+            BLUE.to_rgb8()
+        );
         assert_eq!(stage.get_fill_opacity(digit), Some(0.625));
-        assert_eq!(stage.get_stroke_color(digit).unwrap().to_rgb8(), RED.to_rgb8());
+        assert_eq!(
+            stage.get_stroke_color(digit).unwrap().to_rgb8(),
+            RED.to_rgb8()
+        );
         assert_eq!(stage.get_stroke_width(digit), Some(2.5));
         assert_eq!(stage.get_stroke_opacity(digit), Some(0.375));
-        let borders = stage.get(digit).unwrap().buffer.read_column("fill_border_width").unwrap();
+        let borders = stage
+            .get(digit)
+            .unwrap()
+            .buffer
+            .read_column("fill_border_width")
+            .unwrap();
         assert!(borders.iter().all(|&width| width == 0.75));
     }
 }
@@ -78,7 +92,10 @@ fn numeric_root_and_digit_paint_survive_normal_and_skipped_regeneration() {
             let anchor = stage.get_bounding_box_point(slot, LEFT);
             for target in [1234.5, -7.0, 0.0] {
                 let mut animation = change_decimal_to_value(
-                    slot, model.clone(), FontBook::bundled().unwrap(), target,
+                    slot,
+                    model.clone(),
+                    FontBook::bundled().unwrap(),
+                    target,
                 )
                 .unwrap();
                 animation.state_mut().config.run_time = 0.5;
@@ -100,11 +117,20 @@ fn numeric_root_and_digit_paint_survive_normal_and_skipped_regeneration() {
                 assert!(animations[0].deferred_error().is_none());
                 assert_paint(&stage, slot, separate_root);
                 assert_eq!(stage.roots(), &[binding.mobject()]);
-                assert_eq!(binding.occurrences(&stage, r"\decimalmob").unwrap(), [vec![slot]]);
-                for (actual, expected) in stage.get_bounding_box_point(slot, LEFT).into_iter().zip(anchor) {
+                assert_eq!(
+                    binding.occurrences(&stage, r"\decimalmob").unwrap(),
+                    [vec![slot]]
+                );
+                for (actual, expected) in stage
+                    .get_bounding_box_point(slot, LEFT)
+                    .into_iter()
+                    .zip(anchor)
+                {
                     assert!((actual - expected).abs() < 2e-6);
                 }
-                model.set_value(target, &FontBook::bundled().unwrap()).unwrap();
+                model
+                    .set_value(target, &FontBook::bundled().unwrap())
+                    .unwrap();
             }
             assert_eq!(clock.now().frames(), 12);
         }
@@ -120,16 +146,17 @@ fn copied_and_restored_numeric_roots_keep_their_own_style_records() {
     let copied_slot = copied.get(slot).unwrap();
     let original = stage.snapshot();
     stage.set_fill(copied_slot, Some(RED), Some(0.25), None, false);
-    let mut animation = change_decimal_to_value(
-        copied_slot, model, FontBook::bundled().unwrap(), 987.6,
-    )
-    .unwrap();
+    let mut animation =
+        change_decimal_to_value(copied_slot, model, FontBook::bundled().unwrap(), 987.6).unwrap();
     animation.begin(&mut stage).unwrap();
     animation.finish(&mut stage);
     assert!(animation.deferred_error().is_none());
     assert_paint(&stage, copied_slot, true);
     assert_paint(&stage, slot, false);
-    assert_eq!(copied_binding.occurrences(&stage, r"\decimalmob").unwrap(), [vec![copied_slot]]);
+    assert_eq!(
+        copied_binding.occurrences(&stage, r"\decimalmob").unwrap(),
+        [vec![copied_slot]]
+    );
     stage.restore(&original);
     assert_paint(&stage, copied_slot, false);
     assert_paint(&stage, slot, false);

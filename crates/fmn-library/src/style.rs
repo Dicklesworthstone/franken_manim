@@ -326,7 +326,9 @@ impl VStyle for Stage {
     }
 
     fn get_stroke_width(&self, mob: Mob) -> Option<f64> {
-        Some(f64::from(first_style_record::<1>(self, mob, "stroke_width")?[0]))
+        Some(f64::from(
+            first_style_record::<1>(self, mob, "stroke_width")?[0],
+        ))
     }
 
     fn get_color(&self, mob: Mob) -> Option<Srgb> {
@@ -730,7 +732,8 @@ mod tests {
                 )
                 .unwrap();
                 let mut buffer = RecordBuffer::new(schema, records).unwrap();
-                buffer.write_color_lanes("stroke_rgba", Some([1.0, 0.0, 0.0]), Some(1.0));
+                let rgb = [RED.r, RED.g, RED.b];
+                buffer.write_color_lanes("stroke_rgba", Some(rgb), Some(1.0));
                 let mut stage = Stage::new();
                 let mob = stage.add(fmn_mobject::Mobject::from_buffer(buffer));
                 assert_eq!(stage.get_stroke_width(mob), None);
