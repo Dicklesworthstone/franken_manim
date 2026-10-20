@@ -241,6 +241,13 @@ TRIAGE = (
     ("portal-alone", r"AttributeError: 'VMobject' object has no attribute 'submobjects'", "bug",
      "fm-yynk: padding a family whose members carry native children (NumberLine numbers) crashes "
      "_adopt_padding_ghosts"),
+    ("portal-alone", r"is excluded \(OOT-MODERNGL-SHADER-SURFACE\)", "excluded",
+     "the scene drives moderngl shaders directly; the portal excludes that surface by name"),
+    ("portal-alone", r"has no glyph in the selected faces", "owner-ruling",
+     "a character no bundled face covers: a glyph-coverage miss, refused by name; the policy awaits "
+     "the owner's ADR (fm-mywm)"),
+    ("portal-alone", r"surface uv_func must return finite f32-representable coordinates", "behavior-note",
+     "a surface whose uv_func returns non-finite coordinates is refused at construction (BN-22)"),
     ("portal-alone", r"TexError: .+ is not supported", "tex-coverage",
      "fmd-math refuses, by name, a TeX construct it does not support yet (§11.5); the coverage "
      "ratchet counts it"),
