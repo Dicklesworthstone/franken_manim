@@ -737,6 +737,7 @@ fn portal_cli_flags_are_governed_by_schema_or_bn15_portal_contract() {
         "--job-timeout",
         "--keep-going",
         "--list-scenes",
+        "--output",
         "--resume",
         "--resume-key",
         "--save-last-frame",
@@ -774,9 +775,9 @@ fn portal_cli_flags_are_governed_by_schema_or_bn15_portal_contract() {
                 if let Some(end) = after_quote.find(quote) {
                     let candidate = &after_quote[..end];
                     if candidate.len() > 2
-                        && candidate[2..]
-                            .bytes()
-                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+                        && candidate[2..].bytes().all(|b| {
+                            b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_'
+                        })
                         && !schema_flags.contains(candidate)
                         && !governed_extensions.contains(candidate)
                     {
@@ -794,4 +795,3 @@ fn portal_cli_flags_are_governed_by_schema_or_bn15_portal_contract() {
         "undeclared portal CLI flags found outside API_OVERLAY.tsv and BN-15: {undeclared:?}"
     );
 }
-

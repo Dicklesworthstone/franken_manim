@@ -207,6 +207,11 @@ this Behavior Note and enforced by `crates/fmn-conformance/tests/api_schema.rs`:
 - **Ordered batch continuation (`--keep-going`).** Continues a multi-scene
   portal batch after ordinary scene failures (the inverse of standalone
   `fmn batch --fail-fast`).
+- **Exact single-scene destination (`--output PATH`).** Names the exact output
+  file (or the PNG-sequence frames directory) of a one-scene render. It replaces
+  the earlier use of `--video_dir` as an exact path; `--video_dir` is always a
+  directory. `--output` refuses to combine with `--video_dir` or `--file_name`
+  and refuses multi-scene batches, before any scene is constructed.
 - **Companion final-frame PNG (`--save-last-frame`, `--save_last_frame`).**
   Emits a companion final-state PNG alongside the primary render output without
   re-running `construct()`.
