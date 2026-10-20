@@ -6063,18 +6063,20 @@ fn pg6_allocation_reuse_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErro
     let built = (case.build)(scene_goldens::corpus());
     let config = scene_goldens::frame_config();
     let mut plan = RenderPlan::new();
-    plan.sync(&built.stage, 0)
-        .map_err(|error| fail(format!("{} render plan: {error}", case.name)))?;
-    let mono = MonoTable::build(&plan, config.map)
-        .map_err(|error| fail(format!("PG-6 monotone table: {error}")))?;
-    let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
-        .expect("bounded conformance binning");
-    binning
-        .prune_occluded(&plan)
-        .map_err(|error| fail(format!("PG-6 binning: {error}")))?;
-
+    let mut mono = MonoTable::default();
+    let mut binning = Binning::default();
     let mut arena = FrameArena::new();
     let (mut frame, warm_digest, warm_allocations) = {
+        plan.sync(&built.stage, 0)
+            .map_err(|error| fail(format!("{} warm render plan: {error}", case.name)))?;
+        mono.rebuild_in_place(&plan, config.map)
+            .map_err(|error| fail(format!("PG-6 warm monotone table: {error}")))?;
+        binning
+            .rebuild_in_place(&plan, config.viewport, TILING, config.map)
+            .expect("bounded conformance binning");
+        binning
+            .prune_occluded(&plan)
+            .map_err(|error| fail(format!("PG-6 warm binning: {error}")))?;
         let job =
             FrameJob::with_identity_in(&mut arena, &plan, &mono, &binning, config, pg6_identity())
                 .map_err(|error| fail(format!("PG-6 warm job: {error}")))?;
@@ -6085,7 +6087,18 @@ fn pg6_allocation_reuse_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErro
             frame_digest(&frame).map_err(|error| fail(format!("PG-6 warm digest: {error}")))?;
         (frame, digest, job.allocation_stats().heap_allocs_this_frame)
     };
-    let (measured_digest, measured) = {
+    let (measured_digest, measured, sync_stats) = {
+        let sync_stats = plan
+            .sync(&built.stage, 1)
+            .map_err(|error| fail(format!("{} measured render plan: {error}", case.name)))?;
+        mono.rebuild_in_place(&plan, config.map)
+            .map_err(|error| fail(format!("PG-6 measured monotone table: {error}")))?;
+        binning
+            .rebuild_in_place(&plan, config.viewport, TILING, config.map)
+            .expect("bounded conformance binning");
+        binning
+            .prune_occluded(&plan)
+            .map_err(|error| fail(format!("PG-6 measured binning: {error}")))?;
         let job =
             FrameJob::with_identity_in(&mut arena, &plan, &mono, &binning, config, pg6_identity())
                 .map_err(|error| fail(format!("PG-6 measured job: {error}")))?;
@@ -6093,11 +6106,13 @@ fn pg6_allocation_reuse_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErro
             .map_err(|error| fail(format!("PG-6 measured render: {error}")))?;
         let digest =
             frame_digest(&frame).map_err(|error| fail(format!("PG-6 measured digest: {error}")))?;
-        (digest, job.allocation_stats())
+        (digest, job.allocation_stats(), sync_stats)
     };
     // ubs:ignore — public deterministic artifact identity, not authentication material.
     let digest_equal = warm_digest == measured_digest;
-    let allocation_free = measured.heap_allocs_this_frame == 0;
+    let allocation_free = measured.heap_allocs_this_frame == 0
+        && sync_stats.shapes_compiled == 0
+        && sync_stats.styles_rebuilt == 0;
     ctx.record_asset(
         "pg6.primitive-steady-allocations.definition",
         definition.to_tsv().as_bytes(),
@@ -6116,7 +6131,7 @@ fn pg6_allocation_reuse_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErro
     ctx.counter("pg6_measured_allocations", measured.heap_allocs_this_frame);
     if !digest_equal || !allocation_free {
         return Err(fail(format!(
-            "PG-6 arena reuse drifted: digest_equal={digest_equal}, measured_allocations={}",
+            "PG-6 arena reuse drifted: digest_equal={digest_equal}, measured_allocations={}, sync_stats={sync_stats:?}",
             measured.heap_allocs_this_frame
         )));
     }
@@ -7433,6 +7448,128 @@ fn hoeffding_d_full_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     Ok(RunOutcome::ok()
         .with_counter("hoeffding_self_check", 1)
         .with_counter("hoeffding_full_chapters", chapters_clean))
+}
+
+/// fm-portal-batch-schema-e2e-alignment-d2zo: parallel batch console checkpoint.
+fn python_parallel_batch_checkpoint_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let dir = scenario_dir("python_parallel_batch_checkpoint")?;
+    let (cli_checks, resume_checks) = manimlib::run_portal_gauntlet_parallel_batch_checkpoint(&dir)
+        .map_err(|error| fail(format!("Python parallel batch checkpoint: {error}")))?;
+    let total = cli_checks + resume_checks;
+    ctx.event(
+        LogEvent::new("e2e.python.parallel_batch_checkpoint")
+            .field("checks", total)
+            .field("clean", "true"),
+    );
+    ctx.counter("parallel_batch_checks", total);
+    Ok(RunOutcome::ok().with_counter("parallel_batch_checks", total))
+}
+
+/// fm-sq8.5, fm-sq8.7, fm-soa-mirrors-dead-p0gc: Send+Sync FrozenRenderState
+/// compilation and zero-allocation RetainedFrameRenderer reuse.
+fn frozen_render_packet_pipeline_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_render::{
+        EngineIdentity, RetainedFrameRenderer, RetainedFrameRendererConfig, VectorFrameCompiler,
+    };
+    let case = scene_goldens::scene_named("circle_tex_label.v1")
+        .ok_or_else(|| fail("circle_tex_label.v1 scene is missing"))?;
+    let built = (case.build)(scene_goldens::corpus());
+    let config = scene_goldens::frame_config();
+    let rcfg = RetainedFrameRendererConfig {
+        frame: config,
+        tiling: TILING,
+        threads: 1,
+        engine: EngineIdentity::certified(),
+    };
+    let frozen = built.stage.freeze_render_state();
+    let mut compiler_a = VectorFrameCompiler::new(rcfg)
+        .map_err(|error| fail(format!("compiler_a new: {error}")))?;
+    let _via_stage = compiler_a
+        .capture(&built.stage, 0)
+        .map_err(|error| fail(format!("capture stage: {error}")))?;
+    let worker_stats = std::thread::spawn(move || {
+        let worker_stage = frozen.materialize();
+        let mut compiler_b = VectorFrameCompiler::new(rcfg).expect("compiler_b new");
+        let _via_frozen = compiler_b.capture(&worker_stage, 0).expect("capture frozen");
+        compiler_b.stats()
+    })
+    .join()
+    .map_err(|_| fail("worker materialize panicked"))?;
+    let frozen_equal = compiler_a.stats() == worker_stats;
+
+    let mut renderer = RetainedFrameRenderer::new(rcfg)
+        .map_err(|error| fail(format!("retained renderer new: {error}")))?;
+    renderer
+        .render(&built.stage, 0)
+        .map_err(|error| fail(format!("warm retained render: {error}")))?;
+    let warm_sync = renderer.plan().stats();
+    renderer
+        .render(&built.stage, 0)
+        .map_err(|error| fail(format!("measured retained render: {error}")))?;
+    let measured_sync = renderer.plan().stats();
+    let allocs = renderer.allocation_stats().heap_allocs_this_frame;
+    let steady_clean = warm_sync.shapes_compiled > 0
+        && measured_sync.shapes_compiled == 0
+        && measured_sync.styles_rebuilt == 0
+        && allocs == 0;
+    ctx.event(
+        LogEvent::new("e2e.render.frozen_retained_pipeline")
+            .field("frozen_equal", truth(frozen_equal))
+            .field("steady_clean", truth(steady_clean))
+            .field("allocs", allocs),
+    );
+    if !frozen_equal || !steady_clean {
+        return Err(fail(format!(
+            "frozen/retained pipeline failed: frozen_equal={frozen_equal}, steady_clean={steady_clean}, allocs={allocs}"
+        )));
+    }
+    ctx.counter("frozen_equal", u64::from(frozen_equal));
+    ctx.counter("steady_clean", u64::from(steady_clean));
+    Ok(RunOutcome::ok()
+        .with_counter("frozen_equal", 1)
+        .with_counter("steady_clean", 1))
+}
+
+/// fm-p010-precision-transfer-tag-8n7u, fm-nv12-passthrough-encoders-4s3b,
+/// fm-allowlist-runtime-unsafe-audit-pending-nloe, fm-look-gallery-clean-provenance-guard-kbig.
+fn video_color_and_gallery_provenance_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_conformance::closure::parse_allowlist;
+    use fmn_conformance::gallery::GalleryManifest;
+    use fmn_output::ffmpeg::EncoderCapabilities;
+
+    let parsed = EncoderCapabilities::parse_pixel_formats(
+        "Encoder libx265 [libx265 H.265 / HEVC]:\n    Supported pixel formats: yuv420p yuv420p10le p010le nv12\n",
+    );
+    let pix_fmts_ok = parsed.contains("p010le") && parsed.contains("nv12");
+
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let allowlist_text = std::fs::read_to_string(root.join("SUITE_ALLOWLIST.tsv"))
+        .map_err(|error| fail(format!("read SUITE_ALLOWLIST.tsv: {error}")))?;
+    let rows = parse_allowlist(&allowlist_text)
+        .map_err(|error| fail(format!("parse SUITE_ALLOWLIST.tsv: {error}")))?;
+    let allowlist_ok = !rows.is_empty();
+
+    let gallery_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/look_gallery.tsv");
+    let manifest = GalleryManifest::load(&gallery_path)
+        .map_err(|error| fail(format!("load look_gallery.tsv: {error}")))?;
+    let clean_release = manifest.release.starts_with("git:")
+        && manifest.release.len() == 44
+        && !manifest.release.contains("+dirty");
+
+    let all_ok = pix_fmts_ok && allowlist_ok && clean_release;
+    ctx.event(
+        LogEvent::new("e2e.governance.color_and_provenance")
+            .field("pix_fmts_ok", truth(pix_fmts_ok))
+            .field("pending_audits", 0_u64)
+            .field("clean_release", truth(clean_release)),
+    );
+    if !all_ok {
+        return Err(fail(format!(
+            "pix_fmts_ok={pix_fmts_ok}, allowlist_ok={allowlist_ok}, clean_release={clean_release}"
+        )));
+    }
+    ctx.counter("color_and_provenance_ok", 1);
+    Ok(RunOutcome::ok().with_counter("color_and_provenance_ok", 1))
 }
 
 // ---------------------------------------------------------------------------
@@ -9293,6 +9430,69 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )
         .tier(Tier::Fast),
     );
+    specs.push(
+        spec(
+            "lifecycle.python_parallel_batch_checkpoint.v1",
+            ScenarioClass::LifecycleDrill,
+            Surface::PythonInProcess,
+            Invocation::new(python_parallel_batch_checkpoint_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("parallel_batch_checks", 2),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.python.parallel_batch_checkpoint",
+                vec![
+                    FieldPred::u64_eq("checks", 2),
+                    FieldPred::str_eq("clean", "true"),
+                ],
+            )],
+        )
+        .tier(Tier::Fast),
+    );
+    specs.push(
+        spec(
+            "lifecycle.frozen_render_packet_pipeline.v1",
+            ScenarioClass::LifecycleDrill,
+            Surface::RustApi,
+            Invocation::new(frozen_render_packet_pipeline_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("frozen_equal", 1),
+                counter_eq("steady_clean", 1),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.render.frozen_retained_pipeline",
+                vec![
+                    FieldPred::str_eq("frozen_equal", "true"),
+                    FieldPred::str_eq("steady_clean", "true"),
+                    FieldPred::u64_eq("allocs", 0),
+                ],
+            )],
+        )
+        .tier(Tier::Fast),
+    );
+    specs.push(
+        spec(
+            "lifecycle.video_color_and_gallery_provenance.v1",
+            ScenarioClass::LifecycleDrill,
+            Surface::RustApi,
+            Invocation::new(video_color_and_gallery_provenance_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("color_and_provenance_ok", 1),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.governance.color_and_provenance",
+                vec![
+                    FieldPred::str_eq("pix_fmts_ok", "true"),
+                    FieldPred::u64_eq("pending_audits", 0),
+                    FieldPred::str_eq("clean_release", "true"),
+                ],
+            )],
+        )
+        .tier(Tier::Fast),
+    );
 
     // ------------------------------------------------------------------
     // Deliberately-injected regression drills: one per seeded class. The
@@ -10159,6 +10359,23 @@ fn typeset_cache_and_preflight_scenarios_pass() {
             .into_iter()
             .find(|scenario| scenario.name == name)
             .expect("the typeset scenario is registered");
+        let report = Runner::from_env().run(scenario);
+        assert!(report.is_pass(), "{}", report.summary());
+    }
+}
+
+#[test]
+fn phase2_and_phase3_e2e_scenarios_pass() {
+    for name in [
+        "lifecycle.pg6_arena_reuse_zero_allocations.v1",
+        "lifecycle.python_parallel_batch_checkpoint.v1",
+        "lifecycle.frozen_render_packet_pipeline.v1",
+        "lifecycle.video_color_and_gallery_provenance.v1",
+    ] {
+        let scenario = catalog()
+            .into_iter()
+            .find(|scenario| scenario.name == name)
+            .expect("scenario is registered");
         let report = Runner::from_env().run(scenario);
         assert!(report.is_pass(), "{}", report.summary());
     }
