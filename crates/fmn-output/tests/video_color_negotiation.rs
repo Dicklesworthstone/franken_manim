@@ -362,8 +362,10 @@ fn real_ffmpeg_p010_hevc_retains_more_than_256_luma_levels_and_color_tags() {
     );
     let first_row = &decoded.stdout[..width as usize * 2];
     let levels: BTreeSet<u16> = first_row
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
         .collect();
     assert!(
         levels.len() > 256,

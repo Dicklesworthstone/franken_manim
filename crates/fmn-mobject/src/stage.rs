@@ -100,6 +100,13 @@ impl<T: Clone> ArcVec<T> {
         }
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "fm-q2l6: only tests call it since the f6b54659 merge"
+        )
+    )]
     pub(crate) fn extend<I>(&mut self, iter: I)
     where
         I: IntoIterator<Item = T>,
@@ -111,6 +118,13 @@ impl<T: Clone> ArcVec<T> {
         self.vec_mut().extend(iter);
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "fm-q2l6: only tests call it since the f6b54659 merge"
+        )
+    )]
     pub(crate) fn clear(&mut self) {
         if let Some(arc) = self.0.as_mut() {
             Arc::make_mut(arc).clear();

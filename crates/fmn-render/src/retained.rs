@@ -19,10 +19,10 @@ use fmn_mobject::{
 
 use crate::three_d::{PreparedThreeDProjection, same_projection_camera};
 use crate::{
-    Binning, BinningError, CachedRenderError, CachedRenderStats, Camera, EngineIdentity,
-    FrameArena, FrameConfig, FrameJob, FrameJobError, MonoTable, MonoTableError, PixelTileCache,
-    RenderPlan, SurfaceDraw, SurfaceMaterial, SurfaceMesh, SurfaceVertex, SyncError, ThreeDDraw,
-    ThreeDError, ThreeDJob, Tiling, TrueDotDraw, VectorDraw,
+    AllocStats, Binning, BinningError, CachedRenderError, CachedRenderStats, Camera,
+    EngineIdentity, FrameArena, FrameConfig, FrameJob, FrameJobError, MonoTable, MonoTableError,
+    PixelTileCache, RenderPlan, SurfaceDraw, SurfaceMaterial, SurfaceMesh, SurfaceVertex,
+    SyncError, ThreeDDraw, ThreeDError, ThreeDJob, Tiling, TrueDotDraw, VectorDraw,
 };
 
 /// Immutable policy for one retained CPU renderer.
@@ -432,6 +432,12 @@ impl RetainedFrameRenderer {
     #[must_use]
     pub const fn cache(&self) -> &PixelTileCache {
         &self.cache
+    }
+
+    /// The PG-6 per-frame allocation ledger for the most recent 2D frame.
+    #[must_use]
+    pub fn allocation_stats(&self) -> AllocStats {
+        self.arena.stats()
     }
 }
 

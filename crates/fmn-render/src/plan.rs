@@ -33,7 +33,7 @@ use crate::hint::Hint;
 use crate::revision::{Axis, Dependency, Revisions};
 use crate::table::{
     ImageTable, Instance, Segment, Shape, ShapeTable, SharedRows, Style, StyleTable, TableError,
-    check_row_count, compile_shape, shape_digest, shape_digest_soa_points,
+    check_row_count, compile_shape, shape_digest_soa_points,
 };
 use fmn_core::types::Vec3;
 use fmn_geom::{GeomError, quadpath::QuadPath};

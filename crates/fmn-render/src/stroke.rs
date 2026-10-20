@@ -281,22 +281,13 @@ impl ChordStrip {
     }
 }
 
-/// Per-draw stroke data whose inputs are fixed before a tile is touched.
-///
-/// The retained [`Segment`] remains geometry-only. These values additionally
-/// depend on style, placement, and camera scale, so they belong to the
-/// per-frame draw derivation: one conservative slab and one total arc length
-/// per segment. A pixel outside a segment slab cannot receive coverage from
-/// that segment, which lets the engine avoid its cubic solve without changing a
-/// visible bit.
-///
-/// The struct is a *view*: the segment storage lives in the caller's buffer —
-/// the frame arena's typed pool in the engine, a plain `Vec` in tests — so the
 /// Minimum segment count before a planar stroke builds a fine-tile CSR index.
+#[expect(dead_code, reason = "fm-q2l6: tile-binned strokes have no caller yet")]
 pub(crate) const STROKE_BIN_MIN_SEGMENTS: usize = 64;
 
 /// Hard cap on CSR entry count for a single stroke draw so pathological full-frame
 /// slabs fall back to linear scan rather than blowing up the arena.
+#[expect(dead_code, reason = "fm-q2l6: tile-binned strokes have no caller yet")]
 const MAX_STROKE_BIN_ENTRIES: usize = 1 << 24;
 
 /// Borrowed fine-tile CSR index over a draw's [`PreparedSegment`] slice.
@@ -306,11 +297,13 @@ const MAX_STROKE_BIN_ENTRIES: usize = 1 << 24;
 /// [`PreparedStroke::shade_in_tile`] visit candidate segments in the exact
 /// same order as the unbinned scan.
 #[derive(Debug, Clone, Copy)]
+#[expect(dead_code, reason = "fm-q2l6: tile-binned strokes have no caller yet")]
 pub(crate) struct StrokeBins<'a> {
     starts: &'a [u32],
     entries: &'a [u32],
 }
 
+#[expect(dead_code, reason = "fm-q2l6: tile-binned strokes have no caller yet")]
 impl<'a> StrokeBins<'a> {
     #[must_use]
     pub(crate) fn new(starts: &'a [u32], entries: &'a [u32]) -> Self {
@@ -336,6 +329,7 @@ impl<'a> StrokeBins<'a> {
 
 /// Build a fine-tile CSR index for `prepared_segments` into `starts_pool` and
 /// `entries_pool`, using `ranges_scratch` as construction-only temporary storage.
+#[expect(dead_code, reason = "fm-q2l6: tile-binned strokes have no caller yet")]
 pub(crate) fn build_stroke_bins_into(
     starts_pool: &mut crate::arena::Pool<u32>,
     entries_pool: &mut crate::arena::Pool<u32>,
@@ -454,11 +448,23 @@ pub(crate) fn build_stroke_bins_into(
     Ok(Some((starts_range, entries_range)))
 }
 
+/// Per-draw stroke data whose inputs are fixed before a tile is touched.
+///
+/// The retained [`Segment`] remains geometry-only. These values additionally
+/// depend on style, placement, and camera scale, so they belong to the
+/// per-frame draw derivation: one conservative slab and one total arc length
+/// per segment. A pixel outside a segment slab cannot receive coverage from
+/// that segment, which lets the engine avoid its cubic solve without changing a
+/// visible bit.
+///
+/// The struct is a *view*: the segment storage lives in the caller's buffer —
+/// the frame arena's typed pool in the engine, a plain `Vec` in tests — so the
 /// per-frame path allocates nothing once the arena is warm.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PreparedStroke<'a> {
     segments: &'a [PreparedSegment],
     slab: [f64; 4],
+    #[expect(dead_code, reason = "fm-q2l6: tile-binned strokes have no caller yet")]
     bins: Option<StrokeBins<'a>>,
 }
 
@@ -477,6 +483,7 @@ impl<'a> PreparedStroke<'a> {
 
     /// The view over caller-owned prepared segments, their aggregate slab, and
     /// an optional fine-tile CSR index.
+    #[expect(dead_code, reason = "fm-q2l6: tile-binned strokes have no caller yet")]
     pub(crate) fn from_parts_binned(
         segments: &'a [PreparedSegment],
         slab: [f64; 4],
@@ -576,6 +583,7 @@ impl<'a> PreparedStroke<'a> {
     /// Tile-scoped counterpart to [`Self::row_span`]: when a fine-tile CSR
     /// index is present, only segments overlapping `tile` are inspected.
     #[must_use]
+    #[expect(dead_code, reason = "fm-q2l6: tile-binned strokes have no caller yet")]
     pub(crate) fn row_span_in_tile(&self, tile: usize, y0: f64) -> Option<(f64, f64)> {
         let Some(bins) = self.bins else {
             return self.row_span(y0);
@@ -651,6 +659,7 @@ impl<'a> PreparedStroke<'a> {
         admitted.then_some((best, best_s))
     }
 
+    #[expect(dead_code, reason = "fm-q2l6: tile-binned strokes have no caller yet")]
     fn nearest_in_tile(
         &self,
         tile: usize,
@@ -736,6 +745,8 @@ impl<'a> PreparedStroke<'a> {
     }
 
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    #[expect(dead_code, reason = "fm-q2l6: tile-binned strokes have no caller yet")]
     pub(crate) fn shade_in_tile(
         &self,
         tile: usize,

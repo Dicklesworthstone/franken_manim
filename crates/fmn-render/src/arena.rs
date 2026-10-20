@@ -235,6 +235,10 @@ impl<T> Pool<T> {
 
     /// Append `len` copies of `value` in one reserve+resize pass, returning
     /// the range they landed in.
+    #[expect(
+        dead_code,
+        reason = "fm-q2l6: only the unwired stroke binning calls it"
+    )]
     pub(crate) fn fill_range(
         &mut self,
         resource: &'static str,
