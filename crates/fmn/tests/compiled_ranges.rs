@@ -82,7 +82,6 @@ fn selected_frames_equal_the_full_recording_without_replaying_callbacks_or_prefi
     for (workers, window, preloaded) in [(1, 1, false), (4, 4, false), (4, 2, true)] {
         let path = format!("/clip-{workers}-{window}");
         let mut options = options(&path, RenderFormat::PngSequence, workers, window);
-        // The unrendered 16-frame recording exceeds this selected-work bound.
         options.max_frames = 4;
         let report = if preloaded {
             options.render_loaded_bundle_with_fs(
@@ -107,11 +106,7 @@ fn selected_frames_equal_the_full_recording_without_replaying_callbacks_or_prefi
             assert_eq!(frame(&fs, &path, local), frame(&fs, "/full", local + 5));
         }
         assert!(!fs.exists(Path::new(&format!("{path}/frame_000004.png"))));
-        assert_eq!(
-            calls.get(),
-            callbacks_after_export,
-            "compiled replay invoked scene code"
-        );
+        assert_eq!(calls.get(), callbacks_after_export, "compiled replay invoked scene code");
     }
 }
 
@@ -184,4 +179,83 @@ fn a_range_never_authorizes_silent_picture_only_replay_of_attached_audio() {
         .render_bundle_range_with_fs(&bytes, 5..9, fs.clone());
     assert!(matches!(result, Err(RenderError::InvalidOptions(_))));
     assert!(!fs.exists(Path::new("/refused")));
+}
+
+#[test]
+fn one_shared_recording_serves_concurrent_reordered_outputs_after_source_release() {
+    let (bytes, calls) = recording();
+    let callbacks_after_export = calls.get();
+    let fs = Arc::new(VirtualFs::new());
+    render_bundle_with_fs(
+        &bytes,
+        options("/reference", RenderFormat::PngSequence, 1, 1),
+        fs.clone(),
+    )
+    .unwrap();
+    let loaded = TimelineBundle::from_bytes(&bytes).unwrap();
+    let ranges: Vec<_> = (0..loaded.segment_count())
+        .map(|index| loaded.segment_frame_range(index).unwrap())
+        .collect();
+    let shared = loaded.into_shared().unwrap();
+    drop(bytes);
+    let storage = shared.snapshot_bytes();
+    assert!(!shared.has_camera_track());
+    for (index, range) in ranges.into_iter().enumerate() {
+        assert_eq!(shared.segment_frame_range(index), Some(range));
+    }
+    assert_eq!(shared.segment_frame_range(shared.segment_count()), None);
+    std::thread::scope(|scope| {
+        let mut tasks = Vec::new();
+        for (ordinal, range) in [12..16, 5..9, 0..4].into_iter().enumerate() {
+            let shared = &shared;
+            let fs = fs.clone();
+            tasks.push(scope.spawn(move || {
+                let root = format!("/shared-{ordinal}");
+                let mut selected = options(&root, RenderFormat::PngSequence, 2, 2);
+                selected.max_frames = 4;
+                let report = selected
+                    .render_shared_bundle_with_fs(shared, None, Some(range.clone()), fs.clone())
+                    .unwrap();
+                assert_eq!(report.scene.time.frames(), i64::from(range.end));
+                assert_eq!(report.artifact.frame_count, 4);
+                assert_eq!(report.frame_pipeline.unwrap().outstanding_slots, 0);
+                for index in 0..4 {
+                    assert_eq!(frame(&fs, &root, index), frame(&fs, "/reference", range.start + index));
+                }
+            }));
+        }
+        for task in tasks {
+            task.join().unwrap();
+        }
+    });
+    assert_eq!(shared.snapshot_bytes(), storage);
+    assert_eq!(calls.get(), callbacks_after_export);
+}
+
+#[test]
+fn failed_shared_output_does_not_consume_pictures_or_soundtrack() {
+    let (bytes, _) = recording();
+    let shared = TimelineBundle::from_bytes(&bytes).unwrap().into_shared().unwrap();
+    let pcm = BundleSoundtrack::new(48_000, 1, vec![0.25; 8]).unwrap();
+    let fs = Arc::new(VirtualFs::new());
+    assert!(matches!(
+        options("/refused", RenderFormat::PngSequence, 1, 1)
+            .render_shared_bundle_with_fs(&shared, Some(&pcm), Some(5..9), fs.clone()),
+        Err(RenderError::InvalidOptions(_))
+    ));
+    assert!(!fs.exists(Path::new("/refused")));
+    assert_eq!(pcm.samples(), &[0.25; 8]);
+    let first = options("/kept", RenderFormat::PngSequence, 1, 1)
+        .render_shared_bundle_with_fs(&shared, None, Some(5..9), fs.clone())
+        .unwrap();
+    let kept = frame(&fs, "/kept", 0);
+    assert!(options("/kept", RenderFormat::PngSequence, 1, 1)
+        .render_shared_bundle_with_fs(&shared, None, Some(9..13), fs.clone())
+        .is_err());
+    assert_eq!(frame(&fs, "/kept", 0), kept);
+    let next = options("/next", RenderFormat::PngSequence, 4, 2)
+        .render_shared_bundle_with_fs(&shared, None, Some(5..9), fs.clone())
+        .unwrap();
+    assert_eq!(first.artifact.digest, next.artifact.digest);
+    assert_eq!(frame(&fs, "/next", 0), kept);
 }

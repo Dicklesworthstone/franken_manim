@@ -4,7 +4,7 @@ use fmn_anim::RationalFrameClock;
 use fmn_platform::fs::{FileSystem, StdFs};
 use fmn_runtime::{FrameStreamError, PipelineError, PipelineStats};
 use fmn_scene::SceneRunReport;
-use fmn_scene::timeline_bundle::{BundleSoundtrack, TimelineBundle};
+use fmn_scene::timeline_bundle::{BundleSoundtrack, SharedTimelineBundle, TimelineBundle};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -118,89 +118,165 @@ impl RenderOptions {
         selection: Option<Range<u32>>,
         fs: Arc<dyn FileSystem>,
     ) -> Result<RenderReport, RenderError> {
-        if bundle.fps() != self.config.camera.fps {
-            return Err(RenderError::InvalidOptions(
-                "compiled frame rate must match export configuration",
-            ));
-        }
         let full_replay = selection.is_none();
-        let frames = admitted_frames(bundle.frame_count(), selection, self.max_frames)?;
-        if bundle.has_camera_track() {
-            if self.camera.is_some() {
-                return Err(RenderError::InvalidOptions(
-                    "an explicit camera cannot override a recorded FMTL camera track",
-                ));
-            }
-            self.camera = Some(self.camera_config()?);
-        }
-        if bundle.has_soundtrack() && !self.format.is_video() {
-            return Err(RenderError::InvalidOptions(
-                "sound-bearing FMTL requires MP4/MOV output; picture-only export must explicitly extract its soundtrack",
-            ));
-        }
-        let play_count = if full_replay {
-            bundle.segment_count()
-        } else {
-            (0..bundle.segment_count())
-                .filter(|&index| {
-                    bundle.segment_frame_range(index).is_some_and(|segment| {
-                        segment.start < segment.end
-                            && segment.start < frames.end
-                            && frames.start < segment.end
-                    })
-                })
-                .count()
-        };
+        let frames = admit_playback(
+            &mut self,
+            bundle.fps(),
+            bundle.frame_count(),
+            bundle.has_camera_track(),
+            bundle.has_soundtrack(),
+            selection,
+        )?;
         let mix = bundle
             .take_soundtrack()
             .map(|pcm| compiled_soundtrack(pcm, bundle.fps(), &frames, full_replay))
             .transpose()?;
-        let mut clock = RationalFrameClock::new(bundle.fps())
-            .map_err(|error| RenderError::Scene(fmn_anim::AnimError::Clock(error).into()))?;
-        clock
-            .advance_frames(i64::from(frames.end))
-            .map_err(|error| RenderError::Scene(fmn_anim::AnimError::Clock(error).into()))?;
-        let scene = SceneRunReport {
-            ended_early: frames.end < bundle.frame_count(),
-            play_count: u64::try_from(play_count)
-                .map_err(|_| RenderError::InvalidOptions("compiled segment count exceeds u64"))?,
-            time: clock.now(),
-        };
         let shared = bundle.into_shared().map_err(RenderError::Bundle)?;
-        let first = if self.format == RenderFormat::Png {
-            frames.end - 1
-        } else {
-            frames.start
-        };
-        let mut sink = RenderSink::new(self, fs)?;
-        for (sequence, index) in (first..frames.end).enumerate() {
-            let job = shared.frame_job(index).map_err(RenderError::Bundle)?;
-            let pipeline = sink.pipeline.as_mut().ok_or(RenderError::InvalidOptions(
-                "compiled pipeline was already finalized",
-            ))?;
-            if let Err(error) = pipeline.capture_compiled(job, sequence as u64) {
-                // A source reservation can observe cancellation before the
-                // coordinator sees its failing worker. Join before choosing
-                // the diagnostic, without publishing private output frames.
-                if let Some(emitter) = &sink.emitter {
-                    emitter.cancel();
-                }
-                return Err(match sink.pipeline.take() {
-                    Some(pipeline) => admission_failure(error, pipeline.finish()),
-                    None => error,
-                });
-            }
-        }
-        let finished = sink.finish_with_soundtrack(None, mix)?;
-        Ok(RenderReport {
-            scene,
-            artifact: finished.artifact,
-            emission: finished.emission,
-            execution_plan: sink.plan.clone(),
-            frame_pipeline: finished.frame_pipeline,
-            typesetting: fmn_tex::TypesetSessionReport::default(),
-        })
+        render_prepared(self, &shared, frames, full_replay, mix, fs)
     }
+
+    /// Render another output from reusable, immutable compiled inputs.
+    ///
+    /// Take a recording's soundtrack with [`TimelineBundle::take_soundtrack`],
+    /// then consume its pictures with [`TimelineBundle::into_shared`] once.
+    /// Pass that same soundtrack here for every narrated output. Both inputs
+    /// are borrowed and remain usable after success, admission refusal or a
+    /// failed output. Separate outputs may also use them concurrently; each
+    /// render owns its bounded pipeline, frame caches and publication lifetime.
+    ///
+    /// No whole-recording decode or snapshot freeze is repeated per output.
+    /// Workers still reconstruct selected frames with the original replay law.
+    /// Audio copies only the requested sample window (the full soundtrack for
+    /// full replay), without remixing, resampling or decoding source media.
+    /// `None` selection preserves audio tails; `Some` is an exact cut, as in
+    /// [`Self::render_bundle_range`]. Supplying sound to picture-only output
+    /// refuses. Explicitly supplying no sound is the caller's extraction choice,
+    /// not a certification of how these separately supplied inputs were paired.
+    ///
+    /// A recorded camera cannot be overridden. No ambient filesystem or process
+    /// capabilities are obtained, and no destination is overwritten. Input
+    /// snapshot/PCM storage is additional to the planned pixel/sink budget.
+    ///
+    /// # Errors
+    /// The same range, clock, camera, sound and output errors as loaded replay.
+    pub fn render_shared_bundle_with_fs(
+        mut self,
+        bundle: &SharedTimelineBundle,
+        soundtrack: Option<&BundleSoundtrack>,
+        selection: Option<Range<u32>>,
+        fs: Arc<dyn FileSystem>,
+    ) -> Result<RenderReport, RenderError> {
+        let full_replay = selection.is_none();
+        let frames = admit_playback(
+            &mut self,
+            bundle.fps(),
+            bundle.frame_count(),
+            bundle.has_camera_track(),
+            soundtrack.is_some(),
+            selection,
+        )?;
+        let mix = soundtrack
+            .map(|pcm| borrowed_soundtrack(pcm, bundle.fps(), &frames, full_replay))
+            .transpose()?;
+        render_prepared(self, bundle, frames, full_replay, mix, fs)
+    }
+}
+
+fn admit_playback(
+    options: &mut RenderOptions,
+    fps: u32,
+    total: u32,
+    camera: bool,
+    soundtrack: bool,
+    selection: Option<Range<u32>>,
+) -> Result<Range<u32>, RenderError> {
+    if fps != options.config.camera.fps {
+        return Err(RenderError::InvalidOptions(
+            "compiled frame rate must match export configuration",
+        ));
+    }
+    let frames = admitted_frames(total, selection, options.max_frames)?;
+    if camera {
+        if options.camera.is_some() {
+            return Err(RenderError::InvalidOptions(
+                "an explicit camera cannot override a recorded FMTL camera track",
+            ));
+        }
+        options.camera = Some(options.camera_config()?);
+    }
+    if soundtrack && !options.format.is_video() {
+        return Err(RenderError::InvalidOptions(
+            "sound-bearing FMTL requires MP4/MOV output; picture-only export must explicitly extract its soundtrack",
+        ));
+    }
+    Ok(frames)
+}
+
+fn render_prepared(
+    options: RenderOptions,
+    shared: &SharedTimelineBundle,
+    frames: Range<u32>,
+    full_replay: bool,
+    mix: Option<fmn_output::MixReport>,
+    fs: Arc<dyn FileSystem>,
+) -> Result<RenderReport, RenderError> {
+    let play_count = if full_replay {
+        shared.segment_count()
+    } else {
+        (0..shared.segment_count())
+            .filter(|&index| {
+                shared.segment_frame_range(index).is_some_and(|segment| {
+                    segment.start < segment.end
+                        && segment.start < frames.end
+                        && frames.start < segment.end
+                })
+            })
+            .count()
+    };
+    let mut clock = RationalFrameClock::new(shared.fps())
+        .map_err(|error| RenderError::Scene(fmn_anim::AnimError::Clock(error).into()))?;
+    clock
+        .advance_frames(i64::from(frames.end))
+        .map_err(|error| RenderError::Scene(fmn_anim::AnimError::Clock(error).into()))?;
+    let scene = SceneRunReport {
+        ended_early: frames.end < shared.frame_count(),
+        play_count: u64::try_from(play_count)
+            .map_err(|_| RenderError::InvalidOptions("compiled segment count exceeds u64"))?,
+        time: clock.now(),
+    };
+    let first = if options.format == RenderFormat::Png {
+        frames.end - 1
+    } else {
+        frames.start
+    };
+    let mut sink = RenderSink::new(options, fs)?;
+    for (sequence, index) in (first..frames.end).enumerate() {
+        let job = shared.frame_job(index).map_err(RenderError::Bundle)?;
+        let pipeline = sink.pipeline.as_mut().ok_or(RenderError::InvalidOptions(
+            "compiled pipeline was already finalized",
+        ))?;
+        if let Err(error) = pipeline.capture_compiled(job, sequence as u64) {
+            // A source reservation can observe cancellation before the
+            // coordinator sees its failing worker. Join before choosing
+            // the diagnostic, without publishing private output frames.
+            if let Some(emitter) = &sink.emitter {
+                emitter.cancel();
+            }
+            return Err(match sink.pipeline.take() {
+                Some(pipeline) => admission_failure(error, pipeline.finish()),
+                None => error,
+            });
+        }
+    }
+    let finished = sink.finish_with_soundtrack(None, mix)?;
+    Ok(RenderReport {
+        scene,
+        artifact: finished.artifact,
+        emission: finished.emission,
+        execution_plan: sink.plan.clone(),
+        frame_pipeline: finished.frame_pipeline,
+        typesetting: fmn_tex::TypesetSessionReport::default(),
+    })
 }
 
 fn admitted_frames(
@@ -227,35 +303,75 @@ fn admitted_frames(
     Ok(frames)
 }
 
+fn sample_interval(
+    pcm: &BundleSoundtrack,
+    fps: u32,
+    frames: &Range<u32>,
+    full_replay: bool,
+) -> Result<Range<u64>, RenderError> {
+    let boundary = |frame| {
+        let samples = fmn_output::frames_to_samples(i64::from(frame), fps, pcm.sample_rate())
+            .map_err(RenderError::Sound)?;
+        u64::try_from(samples)
+            .map_err(|_| RenderError::InvalidOptions("negative compiled soundtrack boundary"))
+    };
+    let end = boundary(frames.end)?;
+    if full_replay {
+        return Ok(0..end.max(pcm.sample_frames()));
+    }
+    let start = boundary(frames.start)?;
+    if end < start {
+        return Err(RenderError::InvalidOptions(
+            "compiled soundtrack interval is reversed",
+        ));
+    }
+    Ok(start..end)
+}
+
 fn compiled_soundtrack(
     pcm: BundleSoundtrack,
     fps: u32,
     frames: &Range<u32>,
     full_replay: bool,
 ) -> Result<fmn_output::MixReport, RenderError> {
-    let sample_rate = pcm.sample_rate();
-    let channels = pcm.channels();
-    let boundary = |frame| {
-        let samples = fmn_output::frames_to_samples(i64::from(frame), fps, sample_rate)
-            .map_err(RenderError::Sound)?;
-        u64::try_from(samples)
-            .map_err(|_| RenderError::InvalidOptions("negative compiled soundtrack boundary"))
-    };
-    let end = boundary(frames.end)?;
+    let interval = sample_interval(&pcm, fps, frames, full_replay)?;
     let pcm = if full_replay {
-        pcm.pad_to(end, fmn_scene::DEFAULT_MAX_BUNDLE_BYTES)
+        // An owned full replay transfers the existing allocation, rather than
+        // copying it just to share the borrowed-output path.
+        pcm.pad_to(interval.end, fmn_scene::DEFAULT_MAX_BUNDLE_BYTES)
     } else {
-        let start = boundary(frames.start)?;
-        let count = end.checked_sub(start).ok_or(RenderError::InvalidOptions(
-            "compiled soundtrack interval is reversed",
-        ))?;
-        pcm.sample_window(start, count, fmn_scene::DEFAULT_MAX_BUNDLE_BYTES)
+        pcm.sample_window(
+            interval.start,
+            interval.end - interval.start,
+            fmn_scene::DEFAULT_MAX_BUNDLE_BYTES,
+        )
     }
     .map_err(RenderError::Bundle)?;
-    Ok(fmn_output::MixReport {
+    Ok(pcm_report(pcm))
+}
+
+fn borrowed_soundtrack(
+    pcm: &BundleSoundtrack,
+    fps: u32,
+    frames: &Range<u32>,
+    full_replay: bool,
+) -> Result<fmn_output::MixReport, RenderError> {
+    let interval = sample_interval(pcm, fps, frames, full_replay)?;
+    let window = pcm
+        .sample_window(
+            interval.start,
+            interval.end - interval.start,
+            fmn_scene::DEFAULT_MAX_BUNDLE_BYTES,
+        )
+        .map_err(RenderError::Bundle)?;
+    Ok(pcm_report(window))
+}
+
+fn pcm_report(pcm: BundleSoundtrack) -> fmn_output::MixReport {
+    fmn_output::MixReport {
         audio: fmn_codec::WavAudio {
-            channels,
-            sample_rate,
+            channels: pcm.channels(),
+            sample_rate: pcm.sample_rate(),
             format: fmn_codec::SampleFormat::F32,
             samples: pcm.into_samples(),
         },
@@ -263,7 +379,7 @@ fn compiled_soundtrack(
         cues_mixed: 1,
         workers_used: 0,
         kernel: fmn_output::MixKernel::Scalar,
-    })
+    }
 }
 
 // A real worker failure discovered while joining carries the root cause.
@@ -345,6 +461,24 @@ mod tests {
         assert!(admitted_frames(0, None, 1).is_err());
         for (start, end) in [(0, 0), (2, 1), (1, 1001), (1000, 1001)] {
             assert!(admitted_frames(1000, Some(start..end), 1001).is_err());
+        }
+    }
+
+    #[test]
+    fn borrowed_audio_is_reusable_and_matches_owned_replay_bit_for_bit() {
+        let source = pcm();
+        let original: Vec<_> = source.samples().iter().map(|v| v.to_bits()).collect();
+        for (range, full) in [(1..2, false), (0..3, true), (0..3, false), (1000..1001, false)] {
+            let borrowed = borrowed_soundtrack(&source, 3, &range, full).unwrap();
+            let owned = compiled_soundtrack(pcm(), 3, &range, full).unwrap();
+            assert_eq!(
+                borrowed.audio.samples.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                owned.audio.samples.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+            );
+            assert_eq!(borrowed.workers_used, 0);
+            assert_eq!(borrowed.audio.sample_rate, source.sample_rate());
+            assert_eq!(borrowed.audio.channels, source.channels());
+            assert_eq!(source.samples().iter().map(|v| v.to_bits()).collect::<Vec<_>>(), original);
         }
     }
 }

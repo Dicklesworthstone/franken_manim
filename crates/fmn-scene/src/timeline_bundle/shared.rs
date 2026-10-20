@@ -161,6 +161,20 @@ impl SharedTimelineBundle {
     pub fn segment_count(&self) -> usize {
         self.segments.len()
     }
+    /// Original zero-based, half-open frame interval of an authored segment.
+    /// Empty segments retain their ordinal; no duration is rounded again.
+    #[must_use]
+    pub fn segment_frame_range(&self, index: usize) -> Option<std::ops::Range<u32>> {
+        let segment = self.plan.segments().get(index)?;
+        let start = segment.base_frame;
+        let end = start.checked_add(segment.n_frames)?;
+        Some(u32::try_from(start).ok()?..u32::try_from(end).ok()?)
+    }
+    /// Whether frame jobs carry a recorded camera/light/background track.
+    #[must_use]
+    pub const fn has_camera_track(&self) -> bool {
+        self.cameras.is_some()
+    }
     /// The certified renderer and reconstruction-law identity of this input.
     #[must_use]
     pub fn engine_version(&self) -> &str {
