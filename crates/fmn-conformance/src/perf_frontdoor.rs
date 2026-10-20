@@ -1740,8 +1740,12 @@ mod tests {
             // NumberPlane axes' fill, which since 7825f9b7 (fm-78b6) keeps
             // NumberLine's DEFAULT_LIGHT_COLOR at opacity 0 instead of white:
             // two members' fill_rgba change, and all 30 certified frames
-            // are byte-identical (fm-bbpz).
-            "d00df553c4edbcdce1270254bdcc0dfef71730b5bc2f7626266641dc504cc8bd"
+            // are byte-identical (fm-bbpz). Then for point-free colour writes,
+            // which since 3ead52c1 create the phantom record instead of
+            // vanishing: four of 163 members, each with no records, change
+            // only phantom stroke/fill colour or opacity. Same size and
+            // engine, and all 30 certified frames byte-identical (fm-f4x6).
+            "0088fcb07c68b8330ece9f527fa3d549b9668713aa45acda1da76f6cb04f18b5"
         );
         let opening = TimelineBundle::from_bytes(&opening_a).expect("decode opening fixture");
         assert_eq!(opening.fps(), 30);
