@@ -55,7 +55,6 @@ fn recording(root: &Path) -> (PathBuf, Vec<f32>) {
     let bytes = attach_bundle_soundtrack(&pictures, &soundtrack, DEFAULT_MAX_BUNDLE_BYTES).unwrap();
     let source = root.join("self-contained.fmtl");
     std::fs::write(&source, bytes).unwrap();
-    // There is deliberately no source WAV, Python program, or imported scene.
     (source, pcm)
 }
 
@@ -132,8 +131,6 @@ fn decoded(ffmpeg: &Path, artifact: &Path, audio: bool) -> Vec<u8> {
     let mut command = Command::new(ffmpeg);
     command.args(["-v", "error", "-nostdin", "-i"]).arg(artifact);
     if audio {
-        // No -ar or -ac: a wrong rate or channel layout must not be repaired
-        // by the acceptance decoder before the waveform is inspected.
         command.args(["-map", "0:a:0", "-c:a", "pcm_f32le", "-f", "f32le", "pipe:1"]);
     } else {
         command.args(["-map", "0:v:0", "-fps_mode", "passthrough", "-pix_fmt", "rgba", "-f", "rawvideo", "pipe:1"]);
@@ -148,7 +145,6 @@ fn assert_encoded_audio(ffmpeg: &Path, artifact: &Path, expected: &[f32]) {
     assert_eq!(bytes.len() % 4, 0);
     let samples: Vec<_> = bytes.chunks_exact(4)
         .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap())).collect();
-    // AAC may retain a terminal packet's padding, but cannot drop the tail.
     assert!(samples.len() >= expected.len(), "encoded soundtrack was truncated");
     assert!(samples.len() <= expected.len() + 4096, "unexpected encoded duration");
     let start = 2048;
@@ -196,5 +192,55 @@ fn shipping_video_subdivision_preserves_original_audio_offsets() {
         let artifact = clips.join(format!("Narrated/{index:05}.mp4"));
         assert_eq!(decoded(&ffmpeg, &artifact, false).len(), frame_count * 32 * 24 * 4);
         assert_encoded_audio(&ffmpeg, &artifact, &pcm[start..end]);
+    }
+}
+
+#[test]
+fn shipping_range_selection_extracts_exact_wav_without_a_source_runtime() {
+    let root = root();
+    let (source, pcm) = recording(&root);
+    for (range, name) in [("1,2", "Narrated_1_2"), ("1", "Narrated_1")] {
+        let directory = root.join(format!("range-{name}"));
+        let stdout = success(invoke(&source, &directory, "wav", &["-n", range], true));
+        assert!(stdout.contains("\"source_frames\":[3,8]"), "{stdout}");
+        assert!(stdout.contains("\"source_segments\":[1,2]"), "{stdout}");
+        assert!(stdout.contains("\"sample_frames\":30000"), "{stdout}");
+        assert_wav(&directory.join(format!("{name}.wav")), &pcm[36_000..96_000]);
+    }
+    let clips = root.join("selected-clips");
+    let stdout = success(invoke(&source, &clips, "wav", &["-n", "1,2", "--subdivide"], true));
+    assert_eq!(stdout.lines().count(), 1);
+    assert!(stdout.contains("\"subdivision\":1"), "{stdout}");
+    assert!(!clips.join("Narrated_1_2/00000.wav").exists());
+    assert_wav(&clips.join("Narrated_1_2/00001.wav"), &pcm[36_000..96_000]);
+    let invalid = root.join("outside");
+    assert!(!invoke(&source, &invalid, "wav", &["-n", "1,3"], true).status.success());
+    assert!(!invalid.exists());
+}
+
+#[test]
+fn shipping_selected_alpha_video_matches_full_frame_slice_and_original_sound() {
+    let Some(ffmpeg) = ffmpeg() else { return; };
+    let root = root();
+    let (source, pcm) = recording(&root);
+    let full = root.join("full");
+    success(invoke(&source, &full, "video", &["--transparent", "--threads", "1"], false));
+    let reference = decoded(&ffmpeg, &full.join("Narrated.mov"), false);
+    assert_eq!(reference.len(), 8 * 32 * 24 * 4);
+    for subdivide in [false, true] {
+        let directory = root.join(if subdivide { "selected-clips" } else { "selected" });
+        let mut arguments = vec!["--transparent", "--threads", "4", "-n", "1,2"];
+        if subdivide {
+            arguments.push("--subdivide");
+        }
+        let stdout = success(invoke(&source, &directory, "video", &arguments, false));
+        assert!(stdout.contains("\"frames\":5"), "{stdout}");
+        assert!(stdout.contains("\"source_frames\":[3,8]"), "{stdout}");
+        assert!(stdout.contains("\"sample_frames\":30000"), "{stdout}");
+        assert!(stdout.contains("\"outstanding_slots\":0"), "{stdout}");
+        let path = directory.join(if subdivide { "Narrated_1_2/00001.mov" } else { "Narrated_1_2.mov" });
+        // qtrle's lossless alpha path permits an exact decoded-pixel comparison.
+        assert_eq!(decoded(&ffmpeg, &path, false), reference[3 * 32 * 24 * 4..]);
+        assert_encoded_audio(&ffmpeg, &path, &pcm[36_000..96_000]);
     }
 }

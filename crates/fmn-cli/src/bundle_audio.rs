@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use fmn::rendering::{FfmpegCapability, RenderError, RenderFormat, RenderOptions, RenderReport};
-use fmn_cli::{Invocation, OutputFormat, RenderCommand, RunOutput};
+use fmn_cli::{AnimationRange, Invocation, OutputFormat, RenderCommand, RunOutput};
 use fmn_codec::{SampleFormat, WavAudio};
 use fmn_config::config::{DeterminismMode, Engine};
 use fmn_output::{
@@ -122,6 +122,46 @@ struct Request {
     target: Target,
     scene: String,
     outputs: Vec<(PathBuf, Option<Range<u32>>)>,
+    segments: Range<usize>,
+    frames: Range<u32>,
+}
+
+/// Resolve the schema's exclusive play range against stored segment ordinals.
+/// Duration arithmetic never participates: the recording owns every boundary.
+fn selected_ranges(
+    bundle: &TimelineBundle,
+    selection: Option<AnimationRange>,
+    max_frames: u64,
+) -> Result<(Range<usize>, Range<u32>), Failure> {
+    let total = bundle.segment_count();
+    let (start, end) = match selection {
+        Some(range) => {
+            let start = usize::try_from(range.start)
+                .map_err(|_| Failure::new("usage", "play-range start exceeds this recording"))?;
+            let end = range.end.map_or(Ok(total), usize::try_from)
+                .map_err(|_| Failure::new("usage", "play-range end exceeds this recording"))?;
+            (start, end)
+        }
+        None => (0, total),
+    };
+    if start >= end || end > total {
+        return Err(Failure::new(
+            "usage",
+            format!("compiled play range must be nonempty and lie inside 0..{total}; END is exclusive"),
+        ));
+    }
+    let first = bundle.segment_frame_range(start)
+        .ok_or_else(|| Failure::new("scene", "missing compiled start segment"))?;
+    let last = bundle.segment_frame_range(end - 1)
+        .ok_or_else(|| Failure::new("scene", "missing compiled end segment"))?;
+    let frames = first.start..last.end;
+    if frames.is_empty() {
+        return Err(Failure::new("scene", "selected compiled segments contain no captured frames"));
+    }
+    if u64::from(frames.end - frames.start) > max_frames {
+        return Err(Failure::new("budget", "selected compiled schedule exceeds the output frame budget"));
+    }
+    Ok((start..end, frames))
 }
 
 fn prepare(
@@ -136,7 +176,6 @@ fn prepare(
         ));
     }
     if command.skip_animations
-        || command.animation_range.is_some()
         || command.presenter_mode
         || command.full_screen
         || command.autoreload
@@ -148,7 +187,7 @@ fn prepare(
     {
         return Err(Failure::new(
             "capability",
-            "narrated FMTL file replay does not support skip/range, live-window, opener or progress-bar controls; --subdivide cuts its recorded segments",
+            "narrated FMTL file replay does not support skip, live-window, opener or progress-bar controls; -n selects recorded segments and --subdivide emits them separately",
         ));
     }
     let video_format = if command.transparent {
@@ -242,14 +281,14 @@ fn prepare(
             "non-default file_writer gamma/saturation have no native color-transform adapter",
         ));
     }
-    if bundle.frame_count() == 0
-        || u64::from(bundle.frame_count()) > fmn_scene::DEFAULT_MAX_BUNDLE_EXPORT_FRAMES
-    {
-        return Err(Failure::new(
-            "budget",
-            "compiled schedule must contain 1..1000000 frames",
-        ));
+    if !bundle.has_soundtrack() {
+        return Err(Failure::new("scene", "recording has no embedded soundtrack"));
     }
+    let (segments, frames) = selected_ranges(
+        bundle,
+        command.animation_range,
+        fmn_scene::DEFAULT_MAX_BUNDLE_EXPORT_FRAMES,
+    )?;
     let source = command
         .file
         .as_deref()
@@ -288,26 +327,26 @@ fn prepare(
     let naming = OutputNaming {
         output_directory: command.video_dir.clone().unwrap_or(directory),
         file_name: command.file_name.as_deref().map(PathBuf::from),
-        start_at_play: None,
-        end_at_play: None,
+        start_at_play: command.animation_range.map(|range| range.start),
+        end_at_play: command.animation_range.and_then(|range| range.end),
         open_on_completion: false,
     };
     let mut outputs = Vec::new();
     if command.subdivide {
-        if bundle.segment_count() > MAX_OUTPUTS {
+        if segments.len() > MAX_OUTPUTS {
             return Err(Failure::new(
                 "budget",
-                "compiled audio subdivision exceeds 4096 output generations",
+                "selected compiled audio subdivision exceeds 4096 output generations",
             ));
         }
-        for index in 0..bundle.segment_count() {
+        for index in segments.clone() {
             let range = bundle
                 .segment_frame_range(index)
                 .ok_or_else(|| Failure::new("scene", "missing compiled segment range"))?;
             if range.is_empty() {
                 return Err(Failure::new(
                     "scene",
-                    "a zero-frame segment cannot produce an output generation",
+                    "a selected zero-frame segment cannot produce an output generation",
                 ));
             }
             outputs.push((
@@ -315,11 +354,11 @@ fn prepare(
                 Some(range),
             ));
         }
-        if outputs.is_empty() {
-            return Err(Failure::new("scene", "compiled recording has no output segments"));
-        }
     } else {
-        outputs.push((naming.artifact(&scene, target.extension()), None));
+        outputs.push((
+            naming.artifact(&scene, target.extension()),
+            command.animation_range.map(|_| frames.clone()),
+        ));
     }
     for (path, _) in &outputs {
         preflight_destination(fs, path)?;
@@ -329,6 +368,8 @@ fn prepare(
         target,
         scene,
         outputs,
+        segments,
+        frames,
     })
 }
 
@@ -408,7 +449,7 @@ fn run(
 fn execute(
     command: &RenderCommand,
     bytes: &[u8],
-    bundle: TimelineBundle,
+    mut bundle: TimelineBundle,
     fs: Arc<dyn FileSystem>,
     capability: &dyn Fn() -> Option<FfmpegCapability>,
     stdout: &mut String,
@@ -422,32 +463,38 @@ fn execute(
         .as_deref()
         .ok_or_else(|| Failure::new("usage", "missing FMTL source"))?;
     if command.prerun {
+        let selected_frames = request.frames.end - request.frames.start;
         if command.common.robot {
             let _ = writeln!(
                 stdout,
-                "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"prerun\",\"source\":\"compiled\",\"frames\":{total_frames},\"segments\":{}}}",
+                "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"prerun\",\"source\":\"compiled\",\"frames\":{selected_frames},\"segments\":{},\"source_frames\":[{},{}],\"source_segments\":[{},{}]}}",
                 fmn_cli::ROBOT_SCHEMA_VERSION,
-                bundle.segment_count(),
+                request.segments.len(),
+                request.frames.start,
+                request.frames.end,
+                request.segments.start,
+                request.segments.end,
             );
         } else if !command.common.quiet {
             let _ = writeln!(
                 stdout,
-                "compiled schedule: {total_frames} frames, {} segments; no scene executed",
-                bundle.segment_count(),
+                "compiled selection: {selected_frames} frames, {} segments; no scene executed",
+                request.segments.len(),
             );
         }
     }
-    let mut loaded = Some(bundle);
-    let mut soundtrack = if matches!(request.target, Target::Wav) {
-        loaded.as_mut().and_then(TimelineBundle::take_soundtrack)
+    let video = matches!(request.target, Target::Video(_));
+    let needs_camera = video && !bundle.has_camera_track() && bundle.requires_camera();
+    let mut soundtrack = bundle.take_soundtrack();
+    // Convert the complete validated recording once, not once per output.
+    // WAV releases pictures without freezing them or obtaining process access.
+    let shared = if video {
+        Some(bundle.into_shared().map_err(|error| Failure::new("scene", error.to_string()))?)
     } else {
+        drop(bundle);
         None
     };
-    // WAV needs no geometry after schedule admission and never acquires a
-    // renderer, ffmpeg locator, source decoder or native mixer.
-    if matches!(request.target, Target::Wav) {
-        drop(loaded.take());
-    }
+    let ffmpeg = if video { capability() } else { None };
     for (index, (destination, selection)) in request.outputs.iter().enumerate() {
         let range = selection.clone().unwrap_or(0..total_frames);
         let (artifact_bytes, digest, frames, rate, channels, samples, video) = match request.target {
@@ -491,11 +538,8 @@ fn execute(
                 )
             }
             Target::Video(format) => {
-                let current = match loaded.take() {
-                    Some(bundle) => bundle,
-                    None => TimelineBundle::from_bytes(bytes)
-                        .map_err(|error| Failure::new("scene", error.to_string()))?,
-                };
+                let pictures = shared.as_ref()
+                    .ok_or_else(|| Failure::new("internal", "missing prepared compiled pictures"))?;
                 let mut options = RenderOptions::with_format(destination.clone(), format)
                     .map_err(|error| Failure::new("config", error.to_string()))?;
                 options.config = request.config.clone();
@@ -504,12 +548,13 @@ fn execute(
                 let (limits, input_bytes) = command.ffmpeg_limits.effective_limits()?;
                 options.ffmpeg_limits = limits;
                 options.max_output_bytes = input_bytes;
-                options.ffmpeg = capability();
-                if !current.has_camera_track() && current.requires_camera() {
+                options.ffmpeg = ffmpeg.clone();
+                if needs_camera {
                     options.camera = Some(options.camera_config()?);
                 }
-                let report = options.render_loaded_bundle_with_fs(
-                    current,
+                let report = options.render_shared_bundle_with_fs(
+                    pictures,
+                    soundtrack.as_ref(),
                     selection.clone(),
                     Arc::clone(&fs),
                 )?;
@@ -536,14 +581,20 @@ fn execute(
         // Emit only after native publication. Earlier clip receipts survive a
         // later failure; no successful output is rolled back or overwritten.
         if command.common.robot {
+            let segments = if command.subdivide {
+                let ordinal = request.segments.start + index;
+                ordinal..ordinal + 1
+            } else {
+                request.segments.clone()
+            };
             let subdivision = if command.subdivide {
-                format!(",\"subdivision\":{index}")
+                format!(",\"subdivision\":{}", segments.start)
             } else {
                 String::new()
             };
             let _ = writeln!(
                 stdout,
-                "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"bundle-audio-render\",\"source\":\"compiled\",\"source_artifact\":{},\"source_sha256\":{},\"scene\":{},\"artifact\":{},\"format\":{},\"bytes\":{artifact_bytes},\"sha256\":{},\"frames\":{frames},\"fps\":{fps},\"source_frames\":[{},{}],\"certified\":false,\"manifest\":null,\"soundtrack\":{{\"sample_rate\":{rate},\"channels\":{channels},\"sample_frames\":{samples}}}{subdivision}{video}}}",
+                "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"bundle-audio-render\",\"source\":\"compiled\",\"source_artifact\":{},\"source_sha256\":{},\"scene\":{},\"artifact\":{},\"format\":{},\"bytes\":{artifact_bytes},\"sha256\":{},\"frames\":{frames},\"fps\":{fps},\"source_frames\":[{},{}],\"source_segments\":[{},{}],\"certified\":false,\"manifest\":null,\"soundtrack\":{{\"sample_rate\":{rate},\"channels\":{channels},\"sample_frames\":{samples}}}{subdivision}{video}}}",
                 fmn_cli::ROBOT_SCHEMA_VERSION,
                 quote(&source.to_string_lossy()),
                 quote(&source_digest),
@@ -553,6 +604,8 @@ fn execute(
                 quote(&digest),
                 range.start,
                 range.end,
+                segments.start,
+                segments.end,
             );
         } else if !command.common.quiet {
             let _ = writeln!(
@@ -774,7 +827,6 @@ mod tests {
             vec!["--reproducible"],
             vec!["--fps", "4"],
             vec!["--write_all"],
-            vec!["-n", "1,2"],
         ] {
             let fs = Arc::new(VirtualFs::new());
             let bytes = recording();
@@ -796,9 +848,6 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.exit_name(), "usage");
         assert_eq!(error.rule(), Some("native-format-vs-codec"));
-
-        // Hosts can construct a RenderCommand directly, so the adapter must
-        // independently reject the same incompatible request before output.
         let mut incompatible = command(&[]);
         incompatible.vcodec = Some("libx264".to_owned());
         let fs = Arc::new(VirtualFs::new());
@@ -851,5 +900,159 @@ mod tests {
     #[test]
     fn json_strings_escape_controls_quotes_and_backslashes() {
         assert_eq!(quote("a\"\\\n\u{0000}\t界"), "\"a\\\"\\\\\\n\\u0000\\t界\"");
+    }
+
+    fn varying_recording(empty_segments: bool) -> (Vec<u8>, Vec<f32>) {
+        let mut stage = fmn::mobject::Stage::new();
+        let mut timeline = fmn::animation::Timeline::new(3).unwrap();
+        let durations = if empty_segments {
+            vec![0.0, 1.0 / 3.0, 0.0, 1.0 / 3.0, 1.0 / 3.0, 0.0]
+        } else {
+            vec![1.0 / 3.0; 3]
+        };
+        for duration in durations {
+            timeline.wait(duration).unwrap();
+        }
+        let pictures = fmn_scene::export_timeline_bundle(
+            timeline, &mut stage, &fmn_core::rng::RngRoot::from_seed(0),
+        ).unwrap();
+        let samples: Vec<_> = (0_u8..14)
+            .flat_map(|index| [f32::from(index) / 32.0, -f32::from(index) / 32.0])
+            .collect();
+        let pcm = BundleSoundtrack::new(10, 2, samples.clone()).unwrap();
+        let bytes = fmn_scene::timeline_bundle::attach_bundle_soundtrack(
+            &pictures, &pcm, DEFAULT_MAX_BUNDLE_BYTES,
+        ).unwrap();
+        (bytes, samples)
+    }
+
+    fn wav_samples(fs: &VirtualFs, path: &str) -> Vec<f32> {
+        let wav = fs.read(Path::new(path)).unwrap();
+        fmn_codec::decode_wav(&wav, &fmn_codec::WavLimits::default()).unwrap().samples
+    }
+
+    #[test]
+    fn ranged_wav_honors_exclusive_segments_absolute_offsets_and_tail_trimming() {
+        let (bytes, samples) = varying_recording(false);
+        for (selection, path, expected, frames) in [
+            ("1,2", "/out/scene_1_2.wav", 6..14, "[1,2]"),
+            ("1", "/out/scene_1.wav", 6..20, "[1,3]"),
+            ("0", "/out/scene_0.wav", 0..20, "[0,3]"),
+            ("0,3", "/out/scene_0_3.wav", 0..20, "[0,3]"),
+            ("2,3", "/out/scene_2_3.wav", 14..20, "[2,3]"),
+        ] {
+            let fs = Arc::new(VirtualFs::new());
+            let output = run(
+                command(&["-n", selection]), &bytes,
+                TimelineBundle::from_bytes(&bytes).unwrap(), fs.clone(),
+                &|| panic!("range WAV acquired ffmpeg"),
+            );
+            assert_eq!(output.code, 0, "{}", output.stdout);
+            assert_eq!(wav_samples(&fs, path), samples[expected]);
+            assert!(output.stdout.contains(&format!("\"source_frames\":{frames}")));
+            assert!(!fs.exists(Path::new("/out/scene.wav")));
+        }
+    }
+
+    #[test]
+    fn ranged_subdivision_keeps_original_ordinals_and_exact_sample_partition() {
+        let (bytes, samples) = varying_recording(false);
+        let fs = Arc::new(VirtualFs::new());
+        let output = run(
+            command(&["-n", "1,3", "--subdivide", "--prerun"]), &bytes,
+            TimelineBundle::from_bytes(&bytes).unwrap(), fs.clone(),
+            &|| panic!("range WAV acquired ffmpeg"),
+        );
+        assert_eq!(output.code, 0, "{}", output.stdout);
+        let mut joined = wav_samples(&fs, "/out/scene_1_3/00001.wav");
+        joined.extend(wav_samples(&fs, "/out/scene_1_3/00002.wav"));
+        assert_eq!(joined, samples[6..20]);
+        assert!(!fs.exists(Path::new("/out/scene_1_3/00000.wav")));
+        assert!(output.stdout.contains("\"subdivision\":1"));
+        assert!(output.stdout.contains("\"subdivision\":2"));
+        assert!(!output.stdout.contains("\"subdivision\":0"));
+        assert!(output.stdout.contains("\"frames\":2,\"segments\":2"));
+        assert!(output.stdout.contains("\"source_segments\":[1,3]"));
+    }
+
+    #[test]
+    fn unselected_empty_segments_do_not_block_a_valid_excerpt() {
+        let (bytes, samples) = varying_recording(true);
+        let fs = Arc::new(VirtualFs::new());
+        let output = run(
+            command(&["-n", "3,5", "--subdivide"]), &bytes,
+            TimelineBundle::from_bytes(&bytes).unwrap(), fs.clone(),
+            &|| panic!("range WAV acquired ffmpeg"),
+        );
+        assert_eq!(output.code, 0, "{}", output.stdout);
+        assert_eq!(wav_samples(&fs, "/out/scene_3_5/00003.wav"), samples[6..14]);
+        assert_eq!(wav_samples(&fs, "/out/scene_3_5/00004.wav"), samples[14..20]);
+        for extra in [vec!["-n", "0,1"], vec!["-n", "1,4", "--subdivide"]] {
+            let fs = Arc::new(VirtualFs::new());
+            let output = run(
+                command(&extra), &bytes, TimelineBundle::from_bytes(&bytes).unwrap(),
+                fs.clone(), &|| panic!("empty refusal acquired ffmpeg"),
+            );
+            assert_ne!(output.code, 0);
+            assert!(!fs.exists(Path::new("/out")));
+        }
+        let fs = Arc::new(VirtualFs::new());
+        let output = run(
+            command(&["-n", "1,4"]), &bytes,
+            TimelineBundle::from_bytes(&bytes).unwrap(), fs.clone(), &|| None,
+        );
+        assert_eq!(output.code, 0, "{}", output.stdout);
+        assert_eq!(wav_samples(&fs, "/out/scene_1_4.wav"), samples[..14]);
+    }
+
+    #[test]
+    fn invalid_compiled_ranges_refuse_without_output_or_process_access() {
+        let bytes = recording();
+        for (start, end) in [(3, None), (1, Some(4)), (2, Some(1)), (0, Some(0)), (u64::MAX, None)] {
+            let fs = Arc::new(VirtualFs::new());
+            let mut command = command(&[]);
+            // A host may construct requests without going through parse_args.
+            command.animation_range = Some(AnimationRange { start, end });
+            let output = run(command, &bytes, TimelineBundle::from_bytes(&bytes).unwrap(),
+                fs.clone(), &|| panic!("invalid range acquired ffmpeg"));
+            assert_eq!(output.code, code("usage"));
+            assert!(!fs.exists(Path::new("/out")));
+        }
+    }
+
+    #[test]
+    fn selected_preflight_preserves_unselected_outputs_and_refuses_late_collisions() {
+        let bytes = recording();
+        for collide in [false, true] {
+            let fs = Arc::new(VirtualFs::new());
+            fs.insert("/out/scene_1_3/00000.wav", b"unselected".to_vec());
+            if collide {
+                fs.insert("/out/scene_1_3/00002.wav", b"existing winner".to_vec());
+            }
+            let output = run(command(&["-n", "1,3", "--subdivide"]), &bytes,
+                TimelineBundle::from_bytes(&bytes).unwrap(), fs.clone(), &|| None);
+            assert_eq!(output.code == 0, !collide, "{}", output.stdout);
+            assert_eq!(fs.read(Path::new("/out/scene_1_3/00000.wav")).unwrap(), b"unselected");
+            if collide {
+                assert!(!fs.exists(Path::new("/out/scene_1_3/00001.wav")));
+                assert_eq!(fs.read(Path::new("/out/scene_1_3/00002.wav")).unwrap(), b"existing winner");
+            }
+        }
+    }
+
+    #[test]
+    fn selected_work_budget_and_explicit_names_do_not_charge_the_prefix() {
+        let bytes = recording();
+        let bundle = TimelineBundle::from_bytes(&bytes).unwrap();
+        assert!(selected_ranges(&bundle, None, 1).is_err());
+        let selection = Some(AnimationRange { start: 1, end: Some(2) });
+        assert_eq!(selected_ranges(&bundle, selection, 1).unwrap(), (1..2, 1..2));
+        let fs = Arc::new(VirtualFs::new());
+        let output = run(command(&["-n", "1,2", "--file_name", "excerpt", "--prerun"]),
+            &bytes, bundle, fs.clone(), &|| None);
+        assert_eq!(output.code, 0, "{}", output.stdout);
+        assert!(fs.exists(Path::new("/out/excerpt.wav")));
+        assert!(output.stdout.contains("\"source_segments\":[1,2]"));
+        assert!(output.stdout.contains("\"frames\":1,\"segments\":1"));
     }
 }
