@@ -40,7 +40,7 @@ pub struct UiAsset {
 }
 
 /// The Studio browser script, embedded verbatim.
-const STUDIO_JS: &str = include_str!("studio.js");
+const STUDIO_JS: &str = concat!(include_str!("studio.js"), "\n", include_str!("studio_audio.js"));
 const STUDIO_CSS: &str = include_str!("studio.css");
 
 /// The static prefix of the index shell. The capability token and suffix are
@@ -74,6 +74,11 @@ const STUDIO_INDEX_HTML_PREFIX: &str = concat!(
 <label for="frame">Frame</label><input id="frame" type="number" min="0" max="0" value="0" required>
 <button id="seek" type="submit">Go</button></div></form>
 <p id="replay">Release the timeline to commit a replay position.</p>
+<fieldset id="narration"><legend>Recorded narration</legend>
+<button id="audio-play" type="button" disabled aria-pressed="false">Play narration</button>
+<label for="audio-volume">Volume</label>
+<input id="audio-volume" type="range" min="0" max="1" step="0.05" value="1">
+<p id="audio-status" role="status">Checking recorded narration…</p></fieldset>
 <div class="transport" aria-label="Live scene clock">
 <button type="button" id="live-step" disabled>Step live frame</button>
 <button type="button" id="live-run" disabled>Run live</button>
@@ -177,6 +182,19 @@ mod tests {
         assert!(rendered.contains("/studio.js?cap=abc123"));
         assert!(rendered.contains("id=\"restart\""));
         assert!(STUDIO_JS.contains("api(\"/api/restart\""));
+    }
+
+    #[test]
+    fn narration_controls_and_player_share_the_authenticated_embedded_asset() {
+        let rendered = studio_index_html("abc123").unwrap();
+        for id in ["audio-play", "audio-volume", "audio-status"] {
+            assert!(rendered.contains(&format!("id=\"{id}\"")));
+        }
+        assert!(STUDIO_JS.contains("/api/audio/chunk?"));
+        assert!(STUDIO_JS.contains("X-FMN-Audio-Source"));
+        assert!(STUDIO_JS.contains("AudioContext"));
+        assert!(STUDIO_JS.contains("dataset.workerGeneration"));
+        assert_eq!(rendered.matches("/studio.js?cap=").count(), 1);
     }
 
     #[test]

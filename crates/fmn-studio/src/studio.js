@@ -103,6 +103,9 @@
     const matched = matchesFrame(), shown = state.shown;
     $("display").textContent = shown ? `Displayed frame ${shown.index}${matched ? " · inspector synchronized" : " · waiting for synchronized inspector / stream"}` : "Waiting for the first frame…";
     $("display").dataset.frame = shown ? String(shown.index) : "";
+    $("display").dataset.connected = String(state.connected);
+    $("display").dataset.workerGeneration = state.generation === null ? "" : String(state.generation);
+    $("display").dataset.fps = state.snapshot ? String(state.snapshot.view.fps) : "";
     $("display").dataset.synchronized = String(Boolean(matched));
     $("display").dataset.sha256 = shown?.hash || "";
     $("display").dataset.publication = shown ? String(shown.publication) : "";

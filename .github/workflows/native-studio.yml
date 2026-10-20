@@ -7,6 +7,7 @@ on:
       - 'crates/fmn-studio/**'
       - 'crates/fmn-scene/**'
       - 'scripts/check_native_project_host.py'
+      - 'scripts/test_studio_audio.cjs'
       - '.github/workflows/native-studio.yml'
   workflow_dispatch:
 
@@ -25,6 +26,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+      - name: Exercise bounded narration transport and device-clock scheduling
+        run: node --test scripts/test_studio_audio.cjs
       - name: Archive exact tracked integration sources
         run: git archive --format=tar.gz --output=native-studio-source.tar.gz HEAD crates/fmn-studio
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
