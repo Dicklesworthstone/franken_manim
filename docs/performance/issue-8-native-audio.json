@@ -1,0 +1,804 @@
+{
+  "schema_version": 1,
+  "scope": "Actual native no-default fmn-output mixer using the original issue-8 WAV. Not a Python-portal end-to-end comparison.",
+  "input_sha256": "29fa7b0b4eb00fcf7899f60c07e3d397d27200522f44d3cccedf67259ac8ad4b",
+  "oracle_wav_sha256": "e0adff5a80fa8e757d3d3b63b737a065d84464ad06d2e38e1fd3307163e80bfb",
+  "driver_sha256": "d8b2d3242616c760fb672937b962a30e2a32a71161437ddb39b475d32076fdf9",
+  "build_commands": {
+    "baseline": [
+      "rustc",
+      "--edition=2024",
+      "-O",
+      "-C",
+      "lto=thin",
+      "-Z",
+      "threads=1",
+      "benchmark_original_audio.rs",
+      "--extern",
+      "fmn_codec=artifacts/baseline/libfmn_codec-b7ed39aea7bed814.rmeta",
+      "--extern",
+      "fmn_codec=artifacts/baseline/libfmn_codec-b7ed39aea7bed814.rlib",
+      "--extern",
+      "fmn_output=artifacts/baseline/libfmn_output-70d74356a3f0da0e.rmeta",
+      "--extern",
+      "fmn_output=artifacts/baseline/libfmn_output-70d74356a3f0da0e.rlib",
+      "-L",
+      "dependency=artifacts/baseline",
+      "-o",
+      "bin/audio-baseline"
+    ],
+    "optimized": [
+      "rustc",
+      "--edition=2024",
+      "-O",
+      "-C",
+      "lto=thin",
+      "-Z",
+      "threads=1",
+      "benchmark_original_audio.rs",
+      "--extern",
+      "fmn_codec=artifacts/optimized/libfmn_codec-b7ed39aea7bed814.rmeta",
+      "--extern",
+      "fmn_codec=artifacts/optimized/libfmn_codec-b7ed39aea7bed814.rlib",
+      "--extern",
+      "fmn_output=artifacts/optimized/libfmn_output-70d74356a3f0da0e.rmeta",
+      "--extern",
+      "fmn_output=artifacts/optimized/libfmn_output-70d74356a3f0da0e.rlib",
+      "-L",
+      "dependency=artifacts/optimized",
+      "-o",
+      "bin/audio-optimized"
+    ]
+  },
+  "artifact_identities": {
+    "baseline": {
+      "source_commit": "fb151d131d988e626bae390e083413910423ca5f",
+      "libraries": {
+        "fmn_codec": "artifacts/baseline/libfmn_codec-b7ed39aea7bed814.rlib",
+        "fmn_output": "artifacts/baseline/libfmn_output.rlib"
+      },
+      "dependency_dirs": [
+        "artifacts/baseline"
+      ],
+      "artifacts": [
+        {
+          "crate": "fnp_random_core",
+          "path": "artifacts/baseline/libfnp_random_core-8e91333a41246c8a.rlib",
+          "sha256": "80d10c8835d733f4a296748cb01115d0f9071056940711d9f038bb1f74b3cf8d",
+          "bytes": 25694
+        },
+        {
+          "crate": "fmn_dmath",
+          "path": "artifacts/baseline/libfmn_dmath-b5197600c9b0ba45.rlib",
+          "sha256": "bfceb83d2179b202649ba968fd6b138fc7bd13bacb8783444b1454aa9eb59adc",
+          "bytes": 76088
+        },
+        {
+          "crate": "fmn_core",
+          "path": "artifacts/baseline/libfmn_core-d4acd2356ae494aa.rlib",
+          "sha256": "bec92160007f3ddd227408155bec7b60994237b78a88eb07530a0db3722d7fbc",
+          "bytes": 58238
+        },
+        {
+          "crate": "fmn_hash",
+          "path": "artifacts/baseline/libfmn_hash-4815e23f3a7499d6.rlib",
+          "sha256": "c798aced7441f3b27725330f2c33dcdea8b32c5b9706ac69ab4bfba197e0f0ea",
+          "bytes": 63606
+        },
+        {
+          "crate": "fmn_platform",
+          "path": "artifacts/baseline/libfmn_platform-97463ded81ac3136.rlib",
+          "sha256": "61d5066b1bdac95579cfbe51d5ccbcb12db2056333fe6561f5ffe7da796b930a",
+          "bytes": 1370250
+        },
+        {
+          "crate": "fmn_frame",
+          "path": "artifacts/baseline/libfmn_frame-f625b0ef2bded788.rlib",
+          "sha256": "be57553a5ca8a69e8d219c5bb2f622e4b32240ea575d75dc74d05e89732ef586",
+          "bytes": 236072
+        },
+        {
+          "crate": "fmn_codec",
+          "path": "artifacts/baseline/libfmn_codec-b7ed39aea7bed814.rlib",
+          "sha256": "4a02baaab4bb325790203d11f437011cc997f71856b0519c3185a0d2bcd3a498",
+          "bytes": 855478
+        },
+        {
+          "crate": "fmn_cache",
+          "path": "artifacts/baseline/libfmn_cache-f874f59aaf9c548c.rlib",
+          "sha256": "4370db07e046f468d1460f5543cf898525949ba8932a220879deebfd76696568",
+          "bytes": 945708
+        },
+        {
+          "crate": "fmn_output",
+          "path": "artifacts/baseline/libfmn_output.rlib",
+          "sha256": "64ee91ada177f5a76b01369b19b8bc25852b929e8be49aed9e307ba888af905f",
+          "bytes": 2597108
+        }
+      ],
+      "externs": {
+        "fmn_codec": "artifacts/baseline/libfmn_codec-b7ed39aea7bed814.rmeta",
+        "fmn_output": "artifacts/baseline/libfmn_output-70d74356a3f0da0e.rmeta"
+      },
+      "metadata_pairs": [
+        {
+          "crate": "fnp_random_core",
+          "rmeta": "artifacts/baseline/libfnp_random_core-8e91333a41246c8a.rmeta",
+          "rlib": "artifacts/baseline/libfnp_random_core-8e91333a41246c8a.rlib",
+          "rmeta_sha256": "547240fe4b6a81c8e0f4f837d5262dd52588b62fc8bcc90a3f86bb367a255c85",
+          "rlib_sha256": "80d10c8835d733f4a296748cb01115d0f9071056940711d9f038bb1f74b3cf8d"
+        },
+        {
+          "crate": "fmn_dmath",
+          "rmeta": "artifacts/baseline/libfmn_dmath-b5197600c9b0ba45.rmeta",
+          "rlib": "artifacts/baseline/libfmn_dmath-b5197600c9b0ba45.rlib",
+          "rmeta_sha256": "40faa85b7dac43f800efe62971d13aa1a61822c90ec3f79f77e61d6e58eb8d29",
+          "rlib_sha256": "bfceb83d2179b202649ba968fd6b138fc7bd13bacb8783444b1454aa9eb59adc"
+        },
+        {
+          "crate": "fmn_core",
+          "rmeta": "artifacts/baseline/libfmn_core-d4acd2356ae494aa.rmeta",
+          "rlib": "artifacts/baseline/libfmn_core-d4acd2356ae494aa.rlib",
+          "rmeta_sha256": "fda3664cbaaa7ee742801401c6221cc4fde2515b86eacfdb541375c3bca38ff9",
+          "rlib_sha256": "bec92160007f3ddd227408155bec7b60994237b78a88eb07530a0db3722d7fbc"
+        },
+        {
+          "crate": "fmn_hash",
+          "rmeta": "artifacts/baseline/libfmn_hash-4815e23f3a7499d6.rmeta",
+          "rlib": "artifacts/baseline/libfmn_hash-4815e23f3a7499d6.rlib",
+          "rmeta_sha256": "2a662cd6c7972c864534f3e91aaee3d05f8b71b8d6d7d99ac259241969a94227",
+          "rlib_sha256": "c798aced7441f3b27725330f2c33dcdea8b32c5b9706ac69ab4bfba197e0f0ea"
+        },
+        {
+          "crate": "fmn_platform",
+          "rmeta": "artifacts/baseline/libfmn_platform-97463ded81ac3136.rmeta",
+          "rlib": "artifacts/baseline/libfmn_platform-97463ded81ac3136.rlib",
+          "rmeta_sha256": "5489970834471b1a9f65414ea768299056162d83f175deccb4beaa4deb332899",
+          "rlib_sha256": "61d5066b1bdac95579cfbe51d5ccbcb12db2056333fe6561f5ffe7da796b930a"
+        },
+        {
+          "crate": "fmn_frame",
+          "rmeta": "artifacts/baseline/libfmn_frame-f625b0ef2bded788.rmeta",
+          "rlib": "artifacts/baseline/libfmn_frame-f625b0ef2bded788.rlib",
+          "rmeta_sha256": "d6b7f8937e2bae54dd24451cfcff83c68ff97c15d887931476da5148cc22223f",
+          "rlib_sha256": "be57553a5ca8a69e8d219c5bb2f622e4b32240ea575d75dc74d05e89732ef586"
+        },
+        {
+          "crate": "fmn_codec",
+          "rmeta": "artifacts/baseline/libfmn_codec-b7ed39aea7bed814.rmeta",
+          "rlib": "artifacts/baseline/libfmn_codec-b7ed39aea7bed814.rlib",
+          "rmeta_sha256": "2ac9030e5d61677cd473e4269329e181fe54951ebd6108c6dd6c6616e1e01c06",
+          "rlib_sha256": "4a02baaab4bb325790203d11f437011cc997f71856b0519c3185a0d2bcd3a498"
+        },
+        {
+          "crate": "fmn_cache",
+          "rmeta": "artifacts/baseline/libfmn_cache-f874f59aaf9c548c.rmeta",
+          "rlib": "artifacts/baseline/libfmn_cache-f874f59aaf9c548c.rlib",
+          "rmeta_sha256": "bc4b4f4fb08639dc18ddca3669beecc4318936b38f573e489f93b9c6c2f67419",
+          "rlib_sha256": "4370db07e046f468d1460f5543cf898525949ba8932a220879deebfd76696568"
+        },
+        {
+          "crate": "fmn_output",
+          "rmeta": "artifacts/baseline/libfmn_output-70d74356a3f0da0e.rmeta",
+          "rlib": "artifacts/baseline/libfmn_output-70d74356a3f0da0e.rlib",
+          "rmeta_sha256": "923d3586a2bfa125619748c50081b4efd51adcd0eb163b2f2caa7e6a8ec7e201",
+          "rlib_sha256": "64ee91ada177f5a76b01369b19b8bc25852b929e8be49aed9e307ba888af905f"
+        }
+      ],
+      "sound_rs": {
+        "repository_path": "crates/fmn-output/src/sound.rs",
+        "sha256": "7bb983c03c3759b73c5963cb539dfcc78e5ba059eb2ecc90e22c6d9dbccd608c",
+        "bytes": 62121
+      }
+    },
+    "optimized": {
+      "source_base_commit": "fb151d131d988e626bae390e083413910423ca5f",
+      "dirty_tree": true,
+      "libraries": {
+        "fmn_codec": "artifacts/optimized/libfmn_codec-b7ed39aea7bed814.rlib",
+        "fmn_output": "artifacts/optimized/libfmn_output.rlib"
+      },
+      "dependency_dirs": [
+        "artifacts/optimized"
+      ],
+      "artifacts": [
+        {
+          "crate": "fmn_dmath",
+          "path": "artifacts/optimized/libfmn_dmath-b5197600c9b0ba45.rlib",
+          "sha256": "bfceb83d2179b202649ba968fd6b138fc7bd13bacb8783444b1454aa9eb59adc",
+          "bytes": 76088
+        },
+        {
+          "crate": "fnp_random_core",
+          "path": "artifacts/optimized/libfnp_random_core-8e91333a41246c8a.rlib",
+          "sha256": "80d10c8835d733f4a296748cb01115d0f9071056940711d9f038bb1f74b3cf8d",
+          "bytes": 25694
+        },
+        {
+          "crate": "fmn_core",
+          "path": "artifacts/optimized/libfmn_core-d4acd2356ae494aa.rlib",
+          "sha256": "bec92160007f3ddd227408155bec7b60994237b78a88eb07530a0db3722d7fbc",
+          "bytes": 58238
+        },
+        {
+          "crate": "fmn_hash",
+          "path": "artifacts/optimized/libfmn_hash-4815e23f3a7499d6.rlib",
+          "sha256": "c798aced7441f3b27725330f2c33dcdea8b32c5b9706ac69ab4bfba197e0f0ea",
+          "bytes": 63606
+        },
+        {
+          "crate": "fmn_frame",
+          "path": "artifacts/optimized/libfmn_frame-f625b0ef2bded788.rlib",
+          "sha256": "be57553a5ca8a69e8d219c5bb2f622e4b32240ea575d75dc74d05e89732ef586",
+          "bytes": 236072
+        },
+        {
+          "crate": "fmn_platform",
+          "path": "artifacts/optimized/libfmn_platform-97463ded81ac3136.rlib",
+          "sha256": "61d5066b1bdac95579cfbe51d5ccbcb12db2056333fe6561f5ffe7da796b930a",
+          "bytes": 1370250
+        },
+        {
+          "crate": "fmn_cache",
+          "path": "artifacts/optimized/libfmn_cache-f874f59aaf9c548c.rlib",
+          "sha256": "4370db07e046f468d1460f5543cf898525949ba8932a220879deebfd76696568",
+          "bytes": 945708
+        },
+        {
+          "crate": "fmn_codec",
+          "path": "artifacts/optimized/libfmn_codec-b7ed39aea7bed814.rlib",
+          "sha256": "4a02baaab4bb325790203d11f437011cc997f71856b0519c3185a0d2bcd3a498",
+          "bytes": 855478
+        },
+        {
+          "crate": "fmn_output",
+          "path": "artifacts/optimized/libfmn_output.rlib",
+          "sha256": "fa75504c6ad23f69730628a38d957fc151be176f3b54cab14d21da94a841ed67",
+          "bytes": 2610222
+        }
+      ],
+      "externs": {
+        "fmn_codec": "artifacts/optimized/libfmn_codec-b7ed39aea7bed814.rmeta",
+        "fmn_output": "artifacts/optimized/libfmn_output-70d74356a3f0da0e.rmeta"
+      },
+      "metadata_pairs": [
+        {
+          "crate": "fmn_dmath",
+          "rmeta": "artifacts/optimized/libfmn_dmath-b5197600c9b0ba45.rmeta",
+          "rlib": "artifacts/optimized/libfmn_dmath-b5197600c9b0ba45.rlib",
+          "rmeta_sha256": "40faa85b7dac43f800efe62971d13aa1a61822c90ec3f79f77e61d6e58eb8d29",
+          "rlib_sha256": "bfceb83d2179b202649ba968fd6b138fc7bd13bacb8783444b1454aa9eb59adc"
+        },
+        {
+          "crate": "fnp_random_core",
+          "rmeta": "artifacts/optimized/libfnp_random_core-8e91333a41246c8a.rmeta",
+          "rlib": "artifacts/optimized/libfnp_random_core-8e91333a41246c8a.rlib",
+          "rmeta_sha256": "547240fe4b6a81c8e0f4f837d5262dd52588b62fc8bcc90a3f86bb367a255c85",
+          "rlib_sha256": "80d10c8835d733f4a296748cb01115d0f9071056940711d9f038bb1f74b3cf8d"
+        },
+        {
+          "crate": "fmn_core",
+          "rmeta": "artifacts/optimized/libfmn_core-d4acd2356ae494aa.rmeta",
+          "rlib": "artifacts/optimized/libfmn_core-d4acd2356ae494aa.rlib",
+          "rmeta_sha256": "fda3664cbaaa7ee742801401c6221cc4fde2515b86eacfdb541375c3bca38ff9",
+          "rlib_sha256": "bec92160007f3ddd227408155bec7b60994237b78a88eb07530a0db3722d7fbc"
+        },
+        {
+          "crate": "fmn_hash",
+          "rmeta": "artifacts/optimized/libfmn_hash-4815e23f3a7499d6.rmeta",
+          "rlib": "artifacts/optimized/libfmn_hash-4815e23f3a7499d6.rlib",
+          "rmeta_sha256": "2a662cd6c7972c864534f3e91aaee3d05f8b71b8d6d7d99ac259241969a94227",
+          "rlib_sha256": "c798aced7441f3b27725330f2c33dcdea8b32c5b9706ac69ab4bfba197e0f0ea"
+        },
+        {
+          "crate": "fmn_frame",
+          "rmeta": "artifacts/optimized/libfmn_frame-f625b0ef2bded788.rmeta",
+          "rlib": "artifacts/optimized/libfmn_frame-f625b0ef2bded788.rlib",
+          "rmeta_sha256": "d6b7f8937e2bae54dd24451cfcff83c68ff97c15d887931476da5148cc22223f",
+          "rlib_sha256": "be57553a5ca8a69e8d219c5bb2f622e4b32240ea575d75dc74d05e89732ef586"
+        },
+        {
+          "crate": "fmn_platform",
+          "rmeta": "artifacts/optimized/libfmn_platform-97463ded81ac3136.rmeta",
+          "rlib": "artifacts/optimized/libfmn_platform-97463ded81ac3136.rlib",
+          "rmeta_sha256": "5489970834471b1a9f65414ea768299056162d83f175deccb4beaa4deb332899",
+          "rlib_sha256": "61d5066b1bdac95579cfbe51d5ccbcb12db2056333fe6561f5ffe7da796b930a"
+        },
+        {
+          "crate": "fmn_cache",
+          "rmeta": "artifacts/optimized/libfmn_cache-f874f59aaf9c548c.rmeta",
+          "rlib": "artifacts/optimized/libfmn_cache-f874f59aaf9c548c.rlib",
+          "rmeta_sha256": "bc4b4f4fb08639dc18ddca3669beecc4318936b38f573e489f93b9c6c2f67419",
+          "rlib_sha256": "4370db07e046f468d1460f5543cf898525949ba8932a220879deebfd76696568"
+        },
+        {
+          "crate": "fmn_codec",
+          "rmeta": "artifacts/optimized/libfmn_codec-b7ed39aea7bed814.rmeta",
+          "rlib": "artifacts/optimized/libfmn_codec-b7ed39aea7bed814.rlib",
+          "rmeta_sha256": "2ac9030e5d61677cd473e4269329e181fe54951ebd6108c6dd6c6616e1e01c06",
+          "rlib_sha256": "4a02baaab4bb325790203d11f437011cc997f71856b0519c3185a0d2bcd3a498"
+        },
+        {
+          "crate": "fmn_output",
+          "rmeta": "artifacts/optimized/libfmn_output-70d74356a3f0da0e.rmeta",
+          "rlib": "artifacts/optimized/libfmn_output-70d74356a3f0da0e.rlib",
+          "rmeta_sha256": "13904cb29225b0d94c41d8a5696dc54fde89ae94edbc103e772f67f0f1e64168",
+          "rlib_sha256": "fa75504c6ad23f69730628a38d957fc151be176f3b54cab14d21da94a841ed67"
+        }
+      ],
+      "sound_rs": {
+        "repository_path": "crates/fmn-output/src/sound.rs",
+        "sha256": "a4a4bbaf36dbddeb286d0b4207e3e17a93f79849a421aa491f89dd6215d4efaf",
+        "bytes": 72682
+      }
+    }
+  },
+  "runs": [
+    {
+      "engine": "baseline",
+      "kind": "warmup",
+      "iteration": 0,
+      "argv": [
+        "bin/audio-baseline",
+        "input/frankenmanim-640x360-20261020/audio_beginner/normalized/02_part2_where_value_comes_from.wav",
+        "results/baseline.wav",
+        "4",
+        "2291200",
+        "15"
+      ],
+      "wall_seconds": 4.888931467000475,
+      "user_seconds": 4.805199,
+      "system_seconds": 0.20098,
+      "native_stages": {
+        "schema_version": 1,
+        "input_sample_rate": 24000,
+        "input_channels": 1,
+        "input_frames": 1128000,
+        "output_sample_rate": 48000,
+        "output_channels": 2,
+        "output_frames": 2291200,
+        "threads": 4,
+        "workers_used": 4,
+        "decode_ns": 4543743,
+        "prepare_ns": 4801985589,
+        "mix_ns": 57620095,
+        "encode_ns": 18928285,
+        "total_ns": 4883078152,
+        "wav_bytes": 9164844
+      },
+      "wav_sha256": "e0adff5a80fa8e757d3d3b63b737a065d84464ad06d2e38e1fd3307163e80bfb"
+    },
+    {
+      "engine": "optimized",
+      "kind": "warmup",
+      "iteration": 0,
+      "argv": [
+        "bin/audio-optimized",
+        "input/frankenmanim-640x360-20261020/audio_beginner/normalized/02_part2_where_value_comes_from.wav",
+        "results/optimized.wav",
+        "4",
+        "2291200",
+        "15"
+      ],
+      "wall_seconds": 0.3896384970003055,
+      "user_seconds": 0.304932,
+      "system_seconds": 0.196264,
+      "native_stages": {
+        "schema_version": 1,
+        "input_sample_rate": 24000,
+        "input_channels": 1,
+        "input_frames": 1128000,
+        "output_sample_rate": 48000,
+        "output_channels": 2,
+        "output_frames": 2291200,
+        "threads": 4,
+        "workers_used": 4,
+        "decode_ns": 3971098,
+        "prepare_ns": 302560102,
+        "mix_ns": 55544790,
+        "encode_ns": 21340483,
+        "total_ns": 383416984,
+        "wav_bytes": 9164844
+      },
+      "wav_sha256": "e0adff5a80fa8e757d3d3b63b737a065d84464ad06d2e38e1fd3307163e80bfb"
+    },
+    {
+      "engine": "baseline",
+      "kind": "measured",
+      "iteration": 0,
+      "argv": [
+        "bin/audio-baseline",
+        "input/frankenmanim-640x360-20261020/audio_beginner/normalized/02_part2_where_value_comes_from.wav",
+        "results/baseline.wav",
+        "4",
+        "2291200",
+        "15"
+      ],
+      "wall_seconds": 5.142378894999638,
+      "user_seconds": 5.016006,
+      "system_seconds": 0.24007700000000004,
+      "native_stages": {
+        "schema_version": 1,
+        "input_sample_rate": 24000,
+        "input_channels": 1,
+        "input_frames": 1128000,
+        "output_sample_rate": 48000,
+        "output_channels": 2,
+        "output_frames": 2291200,
+        "threads": 4,
+        "workers_used": 4,
+        "decode_ns": 3700289,
+        "prepare_ns": 5040834959,
+        "mix_ns": 71331670,
+        "encode_ns": 20130378,
+        "total_ns": 5135997856,
+        "wav_bytes": 9164844
+      },
+      "wav_sha256": "e0adff5a80fa8e757d3d3b63b737a065d84464ad06d2e38e1fd3307163e80bfb"
+    },
+    {
+      "engine": "optimized",
+      "kind": "measured",
+      "iteration": 0,
+      "argv": [
+        "bin/audio-optimized",
+        "input/frankenmanim-640x360-20261020/audio_beginner/normalized/02_part2_where_value_comes_from.wav",
+        "results/optimized.wav",
+        "4",
+        "2291200",
+        "15"
+      ],
+      "wall_seconds": 0.3682852450001519,
+      "user_seconds": 0.2742299999999993,
+      "system_seconds": 0.20889999999999997,
+      "native_stages": {
+        "schema_version": 1,
+        "input_sample_rate": 24000,
+        "input_channels": 1,
+        "input_frames": 1128000,
+        "output_sample_rate": 48000,
+        "output_channels": 2,
+        "output_frames": 2291200,
+        "threads": 4,
+        "workers_used": 4,
+        "decode_ns": 3967788,
+        "prepare_ns": 285486811,
+        "mix_ns": 52753652,
+        "encode_ns": 19494215,
+        "total_ns": 361703247,
+        "wav_bytes": 9164844
+      },
+      "wav_sha256": "e0adff5a80fa8e757d3d3b63b737a065d84464ad06d2e38e1fd3307163e80bfb"
+    },
+    {
+      "engine": "optimized",
+      "kind": "measured",
+      "iteration": 1,
+      "argv": [
+        "bin/audio-optimized",
+        "input/frankenmanim-640x360-20261020/audio_beginner/normalized/02_part2_where_value_comes_from.wav",
+        "results/optimized.wav",
+        "4",
+        "2291200",
+        "15"
+      ],
+      "wall_seconds": 0.41116754399990896,
+      "user_seconds": 0.3285210000000003,
+      "system_seconds": 0.19549099999999997,
+      "native_stages": {
+        "schema_version": 1,
+        "input_sample_rate": 24000,
+        "input_channels": 1,
+        "input_frames": 1128000,
+        "output_sample_rate": 48000,
+        "output_channels": 2,
+        "output_frames": 2291200,
+        "threads": 4,
+        "workers_used": 4,
+        "decode_ns": 3122557,
+        "prepare_ns": 317596482,
+        "mix_ns": 58838291,
+        "encode_ns": 23744346,
+        "total_ns": 403302418,
+        "wav_bytes": 9164844
+      },
+      "wav_sha256": "e0adff5a80fa8e757d3d3b63b737a065d84464ad06d2e38e1fd3307163e80bfb"
+    },
+    {
+      "engine": "baseline",
+      "kind": "measured",
+      "iteration": 1,
+      "argv": [
+        "bin/audio-baseline",
+        "input/frankenmanim-640x360-20261020/audio_beginner/normalized/02_part2_where_value_comes_from.wav",
+        "results/baseline.wav",
+        "4",
+        "2291200",
+        "15"
+      ],
+      "wall_seconds": 4.750837046000015,
+      "user_seconds": 4.5893180000000005,
+      "system_seconds": 0.28976,
+      "native_stages": {
+        "schema_version": 1,
+        "input_sample_rate": 24000,
+        "input_channels": 1,
+        "input_frames": 1128000,
+        "output_sample_rate": 48000,
+        "output_channels": 2,
+        "output_frames": 2291200,
+        "threads": 4,
+        "workers_used": 4,
+        "decode_ns": 3210257,
+        "prepare_ns": 4660602227,
+        "mix_ns": 60441486,
+        "encode_ns": 19535597,
+        "total_ns": 4743790027,
+        "wav_bytes": 9164844
+      },
+      "wav_sha256": "e0adff5a80fa8e757d3d3b63b737a065d84464ad06d2e38e1fd3307163e80bfb"
+    },
+    {
+      "engine": "baseline",
+      "kind": "measured",
+      "iteration": 2,
+      "argv": [
+        "bin/audio-baseline",
+        "input/frankenmanim-640x360-20261020/audio_beginner/normalized/02_part2_where_value_comes_from.wav",
+        "results/baseline.wav",
+        "4",
+        "2291200",
+        "15"
+      ],
+      "wall_seconds": 4.936874177000391,
+      "user_seconds": 4.846014,
+      "system_seconds": 0.22674099999999986,
+      "native_stages": {
+        "schema_version": 1,
+        "input_sample_rate": 24000,
+        "input_channels": 1,
+        "input_frames": 1128000,
+        "output_sample_rate": 48000,
+        "output_channels": 2,
+        "output_frames": 2291200,
+        "threads": 4,
+        "workers_used": 4,
+        "decode_ns": 3112693,
+        "prepare_ns": 4843501718,
+        "mix_ns": 62825518,
+        "encode_ns": 19735649,
+        "total_ns": 4929175929,
+        "wav_bytes": 9164844
+      },
+      "wav_sha256": "e0adff5a80fa8e757d3d3b63b737a065d84464ad06d2e38e1fd3307163e80bfb"
+    },
+    {
+      "engine": "optimized",
+      "kind": "measured",
+      "iteration": 2,
+      "argv": [
+        "bin/audio-optimized",
+        "input/frankenmanim-640x360-20261020/audio_beginner/normalized/02_part2_where_value_comes_from.wav",
+        "results/optimized.wav",
+        "4",
+        "2291200",
+        "15"
+      ],
+      "wall_seconds": 0.37144950499987317,
+      "user_seconds": 0.30730099999999894,
+      "system_seconds": 0.18425700000000012,
+      "native_stages": {
+        "schema_version": 1,
+        "input_sample_rate": 24000,
+        "input_channels": 1,
+        "input_frames": 1128000,
+        "output_sample_rate": 48000,
+        "output_channels": 2,
+        "output_frames": 2291200,
+        "threads": 4,
+        "workers_used": 4,
+        "decode_ns": 3099804,
+        "prepare_ns": 276696179,
+        "mix_ns": 59694573,
+        "encode_ns": 24682298,
+        "total_ns": 364173675,
+        "wav_bytes": 9164844
+      },
+      "wav_sha256": "e0adff5a80fa8e757d3d3b63b737a065d84464ad06d2e38e1fd3307163e80bfb"
+    },
+    {
+      "engine": "optimized",
+      "kind": "thread_identity",
+      "iteration": 1,
+      "argv": [
+        "bin/audio-optimized",
+        "input/frankenmanim-640x360-20261020/audio_beginner/normalized/02_part2_where_value_comes_from.wav",
+        "results/optimized.wav",
+        "1",
+        "2291200",
+        "15"
+      ],
+      "wall_seconds": 0.34349431800001184,
+      "user_seconds": 0.30702400000000196,
+      "system_seconds": 0.035997999999999974,
+      "native_stages": {
+        "schema_version": 1,
+        "input_sample_rate": 24000,
+        "input_channels": 1,
+        "input_frames": 1128000,
+        "output_sample_rate": 48000,
+        "output_channels": 2,
+        "output_frames": 2291200,
+        "threads": 1,
+        "workers_used": 1,
+        "decode_ns": 3157799,
+        "prepare_ns": 286379656,
+        "mix_ns": 28870768,
+        "encode_ns": 19477989,
+        "total_ns": 337886703,
+        "wav_bytes": 9164844
+      },
+      "wav_sha256": "e0adff5a80fa8e757d3d3b63b737a065d84464ad06d2e38e1fd3307163e80bfb"
+    },
+    {
+      "engine": "optimized",
+      "kind": "thread_identity",
+      "iteration": 16,
+      "argv": [
+        "bin/audio-optimized",
+        "input/frankenmanim-640x360-20261020/audio_beginner/normalized/02_part2_where_value_comes_from.wav",
+        "results/optimized.wav",
+        "16",
+        "2291200",
+        "15"
+      ],
+      "wall_seconds": 0.3691886490005345,
+      "user_seconds": 0.3139019999999988,
+      "system_seconds": 0.2601579999999999,
+      "native_stages": {
+        "schema_version": 1,
+        "input_sample_rate": 24000,
+        "input_channels": 1,
+        "input_frames": 1128000,
+        "output_sample_rate": 48000,
+        "output_channels": 2,
+        "output_frames": 2291200,
+        "threads": 16,
+        "workers_used": 16,
+        "decode_ns": 3285327,
+        "prepare_ns": 288740145,
+        "mix_ns": 46025615,
+        "encode_ns": 23165020,
+        "total_ns": 361216977,
+        "wav_bytes": 9164844
+      },
+      "wav_sha256": "e0adff5a80fa8e757d3d3b63b737a065d84464ad06d2e38e1fd3307163e80bfb"
+    }
+  ],
+  "summary": {
+    "baseline": {
+      "wall_seconds": 4.943363372666681,
+      "total_seconds": 4.936321270666667,
+      "decode_seconds": 0.0033410796666666666,
+      "prepare_seconds": 4.848312968,
+      "mix_seconds": 0.06486622466666667,
+      "encode_seconds": 0.019800541333333335
+    },
+    "optimized": {
+      "wall_seconds": 0.383634097999978,
+      "total_seconds": 0.3763931133333333,
+      "decode_seconds": 0.0033967163333333333,
+      "prepare_seconds": 0.293259824,
+      "mix_seconds": 0.05709550533333333,
+      "encode_seconds": 0.022640286333333332
+    }
+  },
+  "driver_source": "//! Diagnostic driver linked against the actual fmn-output and fmn-codec rlibs.\n//! The caller supplies the original WAV and exact portal timeline parameters.\n//! This isolates native audio work; it is not an end-to-end portal benchmark.\nuse std::{env, error::Error, fs, time::Instant};\n\nuse fmn_codec::{SampleFormat, WavLimits, decode_wav};\nuse fmn_output::{DitherPolicy, MixerConfig, SoundCue, SoundMixer};\n\nfn main() -> Result<(), Box<dyn Error>> {\n    let args: Vec<String> = env::args().collect();\n    if args.len() != 6 {\n        return Err(\"usage: benchmark_original_audio INPUT.wav OUTPUT.wav THREADS TIMELINE_SAMPLES FPS\".into());\n    }\n    let threads: usize = args[3].parse()?;\n    let timeline: u64 = args[4].parse()?;\n    let fps: u32 = args[5].parse()?;\n    let total = Instant::now();\n    let input = fs::read(&args[1])?;\n    let audio = decode_wav(&input, &WavLimits::default())?;\n    let decode_ns = total.elapsed().as_nanos();\n    let input_rate = audio.sample_rate;\n    let input_channels = audio.channels;\n    let input_frames = audio.samples.len() / usize::from(input_channels);\n    let mut mixer = SoundMixer::new(MixerConfig::default())?.with_timeline_frames(timeline);\n    let start = Instant::now();\n    mixer.add(SoundCue::new(audio, 0, fps))?;\n    let prepare_ns = start.elapsed().as_nanos();\n    let start = Instant::now();\n    let report = mixer.mix(threads)?;\n    let mix_ns = start.elapsed().as_nanos();\n    let start = Instant::now();\n    let wav = report.wav_bytes(SampleFormat::S16, DitherPolicy::None)?;\n    let encode_ns = start.elapsed().as_nanos();\n    let total_ns = total.elapsed().as_nanos();\n    fs::write(&args[2], &wav)?;\n    println!(\n        \"{{\\\"schema_version\\\":1,\\\"input_sample_rate\\\":{input_rate},\\\"input_channels\\\":{input_channels},\\\"input_frames\\\":{input_frames},\\\"output_sample_rate\\\":{},\\\"output_channels\\\":{},\\\"output_frames\\\":{},\\\"threads\\\":{threads},\\\"workers_used\\\":{},\\\"decode_ns\\\":{decode_ns},\\\"prepare_ns\\\":{prepare_ns},\\\"mix_ns\\\":{mix_ns},\\\"encode_ns\\\":{encode_ns},\\\"total_ns\\\":{total_ns},\\\"wav_bytes\\\":{}}}\",\n        report.audio.sample_rate,\n        report.audio.channels,\n        report.audio.samples.len() / usize::from(report.audio.channels),\n        report.workers_used,\n        wav.len(),\n    );\n    Ok(())\n}\n",
+  "provenance": {
+    "issue_url": "https://github.com/Dicklesworthstone/franken_manim/issues/8",
+    "evidence_comment_url": "https://github.com/Dicklesworthstone/franken_manim/issues/8#issuecomment-6295566933",
+    "archive_url": "https://github.com/user-attachments/files/33727698/frankenmanim-640x360-evidence.tar.gz",
+    "archive_sha256": "78e62e32f9e1d3a274c1c599e09aa06b1b682823c658d36c228476f0dd0ce16e",
+    "report_url": "https://github.com/user-attachments/files/33727705/report.txt",
+    "archive_input_path": "frankenmanim-640x360-20261020/audio_beginner/normalized/02_part2_where_value_comes_from.wav",
+    "input_description": "Original supplied replacement 47-second 220-Hz tone, mono 24000-Hz PCM16; original speech unavailable.",
+    "oracle_description": "Complete S16 WAV produced by the published FrankenManim 0.5.0 Python portal from the supplied original scene; SHA independently rechecked when archiving this evidence."
+  },
+  "measurement_definition": {
+    "producer": "Diagnostic Rust driver using actual production fmn-output and fmn-codec release rlibs; exact source embedded in driver_source.",
+    "features": {
+      "fmn_output": [],
+      "cargo_configuration": "--release --no-default-features --lib",
+      "build_profile": "opt-level=3; thin LTO; no debug assertions or overflow checks; both comparators use the same configuration"
+    },
+    "toolchain": {
+      "channel": "nightly-2026-08-31",
+      "rustc_release": "1.100.0-nightly",
+      "rustc_commit": "90850177249efe0321573c569aec5d12b257f8d6",
+      "rustc_commit_date": "2026-08-30",
+      "llvm_version": "23.1.0",
+      "target": "x86_64-unknown-linux-gnu"
+    },
+    "sample_plan": {
+      "warmups_per_engine": 1,
+      "measured_repetitions_per_engine": 3,
+      "measurement_threads": 4,
+      "sequential_engine_round_order": [
+        [
+          "baseline",
+          "optimized"
+        ],
+        [
+          "optimized",
+          "baseline"
+        ],
+        [
+          "baseline",
+          "optimized"
+        ]
+      ],
+      "additional_optimized_identity_threads": [
+        1,
+        16
+      ]
+    },
+    "output": {
+      "sample_rate": 48000,
+      "channels": 2,
+      "sample_format": "S16",
+      "dither": "None",
+      "sample_frames": 2291200,
+      "duration_seconds": 47.733333333333334,
+      "wav_bytes": 9164844
+    },
+    "timing_scope": {
+      "wall_seconds": "Process launch through native audio driver exit, including WAV file write.",
+      "total_ns": "Driver region from input file read through native WAV serialization; excludes final WAV file write and process exit.",
+      "decode_ns": "Input WAV file read and native decode.",
+      "prepare_ns": "SoundMixer::add: cue validation, mono/stereo mapping and resampling.",
+      "mix_ns": "SoundMixer::mix: four-thread production mix including timeline padding.",
+      "encode_ns": "Native S16 WAV serialization, not FFmpeg or AAC encoding."
+    },
+    "summary": "Arithmetic means of the three measured four-thread runs only; warmups and thread-identity observations excluded.",
+    "limitations": [
+      "Shared, unisolated host; descriptive local native audio measurements, not a pinned-host performance-gate verdict.",
+      "No Python startup, scene construction, callbacks, visual rendering, frame conversion, FFmpeg video encoding or audio muxing is timed.",
+      "No-default-features libraries isolate production audio behavior and do not verify the full default-feature Python portal build.",
+      "This evidence does not replace existing PG-1/PG-8 baselines or imply full Python-portal speedup."
+    ]
+  },
+  "verification": {
+    "sound_module_tests": {
+      "passed": 31,
+      "failed": 0,
+      "scope": "Actual compiled native release fmn-output sound::tests, including frozen independent scalar oracle, bounded short/extreme resampling, channel mapping/placement and WAV identity; not a complete workspace test gate."
+    },
+    "scoped_clippy": {
+      "exit_code": 0,
+      "scope": "fmn-output release --no-default-features --lib with -D warnings"
+    },
+    "complete_wav_identity": {
+      "observations": 10,
+      "all_equal_to_published_wheel_oracle": true,
+      "counts": {
+        "warmup": 2,
+        "measured": 6,
+        "optimized_thread_identity": 2
+      }
+    }
+  },
+  "publication_note": {
+    "path_redaction": "This portable evidence copy replaces machine-specific absolute paths with relative placeholders and omits host-specific environment metadata. The original measurement records remain unchanged in the private working evidence.",
+    "path_conventions": {
+      "rustc": "Use the compiler identified in measurement_definition.toolchain.",
+      "benchmark_original_audio.rs": "Materialize the exact embedded driver_source; verify driver_sha256.",
+      "artifacts/baseline": "Actual baseline release library/metadata files, identified by the retained SHA-256 hashes.",
+      "artifacts/optimized": "Actual optimized release library/metadata files, identified by the retained SHA-256 hashes.",
+      "bin/audio-baseline": "Baseline diagnostic executable.",
+      "bin/audio-optimized": "Optimized diagnostic executable.",
+      "input/frankenmanim-640x360-20261020": "Extracted public benchmark archive root.",
+      "results": "Output directory for complete WAV files."
+    },
+    "preserved": "All run observations, sample plans, public input/source/artifact identities, compiler flags, diagnostic driver source and result hashes are preserved. Commands retain their arguments with path substitutions; the listed paths are not a verbatim transcript of private machine locations."
+  }
+}

@@ -221,9 +221,14 @@ fn portal_planar_content_stays_inside_the_versioned_v1_budget() {
         .expect("the portal's FMTL/1 export decodes");
     assert!(!bundle.requires_camera(), "a planar scene needs no camera");
     let frames = u32::try_from(report.frame_count).expect("a small frame count");
-    assert!(frames >= 3, "the scene animates over {frames} frames");
+    assert_eq!(
+        frames, 6,
+        "four animation samples followed by two wait frames"
+    );
     let mut failures = Vec::new();
-    for index in [0, frames / 2, frames - 1] {
+    // Preserve the original four-frame scene's [0, 2, 3] oracle coverage.
+    // Appending waits must not move its midpoint onto the finished animation.
+    for index in [0, 2, 3, frames - 1] {
         let stage = bundle
             .stage_at(index)
             .expect("every exported frame reconstructs");

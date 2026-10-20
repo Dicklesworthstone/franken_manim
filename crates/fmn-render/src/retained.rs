@@ -17,6 +17,7 @@ use fmn_mobject::{
     Uniforms,
 };
 
+use crate::plan::PlanIdentity;
 use crate::three_d::{PreparedThreeDProjection, same_projection_camera};
 use crate::{
     AllocStats, Binning, BinningError, CachedRenderError, CachedRenderStats, Camera,
@@ -194,6 +195,12 @@ pub struct RetainedFrameRenderer {
     // and cannot alias a subsequently recycled projection allocation.
     camera_pixels: Weak<CameraProjection>,
     last_camera_frame_reused: bool,
+    /// Identity of the successful planar pixels currently in `frame`.
+    /// A tile-hit count cannot supply this proof: removing a draw can empty
+    /// a tile without producing a cache miss, and a camera render overwrites
+    /// the same surface while retaining the older planar tile cache.
+    planar_pixels: Option<(PlanIdentity, u64, FrameConfig)>,
+    last_frame_reused: bool,
 }
 
 impl RetainedFrameRenderer {
@@ -223,6 +230,8 @@ impl RetainedFrameRenderer {
             camera_projection: None,
             camera_pixels: Weak::new(),
             last_camera_frame_reused: false,
+            planar_pixels: None,
+            last_frame_reused: false,
         })
     }
 
@@ -234,6 +243,8 @@ impl RetainedFrameRenderer {
             self.config.frame.background = background;
             self.cache.clear();
             self.last_cache_serial = None;
+            self.planar_pixels = None;
+            self.last_frame_reused = false;
         }
     }
 
@@ -247,6 +258,10 @@ impl RetainedFrameRenderer {
         camera_revision: u64,
     ) -> Result<CachedRenderStats, RetainedFrameRendererError> {
         self.last_camera_frame_reused = false;
+        self.last_frame_reused = false;
+        // Retire the successful surface before any fallible preparation or
+        // write. An error must not leave a reuse assertion for partial pixels.
+        let previous_pixels = self.planar_pixels.take();
         stage.draw_plan_into(&mut self.scratch_draw_items);
         if let Some(item) = self
             .scratch_draw_items
@@ -262,6 +277,7 @@ impl RetainedFrameRenderer {
         self.camera_plan = None;
         self.camera_projection = None;
         self.plan.sync(stage, camera_revision)?;
+        let pixels = (self.plan.identity(), camera_revision, self.config.frame);
         self.mono
             .rebuild_in_place(&self.plan, self.config.frame.map)?;
         if !self.binning.matches_plan(&self.plan)
@@ -293,6 +309,8 @@ impl RetainedFrameRenderer {
             self.last_cache_serial,
         )?;
         self.last_cache_serial = Some(self.cache.serial());
+        self.last_frame_reused = previous_pixels == Some(pixels);
+        self.planar_pixels = Some(pixels);
         Ok(stats)
     }
 
@@ -310,6 +328,8 @@ impl RetainedFrameRenderer {
         camera: &Camera,
     ) -> Result<(), RetainedFrameRendererError> {
         self.last_camera_frame_reused = false;
+        self.last_frame_reused = false;
+        self.planar_pixels = None;
         // The camera raster replaces the planar surface. A later planar frame
         // must restore retained tiles instead of trusting this serial.
         self.last_cache_serial = None;
@@ -320,6 +340,7 @@ impl RetainedFrameRenderer {
             .is_some_and(|previous| Arc::ptr_eq(&previous, &prepared.projection))
         {
             self.last_camera_frame_reused = true;
+            self.last_frame_reused = true;
             return Ok(());
         }
         // A failed raster may have partially written the destination. Never
@@ -335,6 +356,16 @@ impl RetainedFrameRenderer {
     #[must_use]
     pub const fn last_camera_frame_reused(&self) -> bool {
         self.last_camera_frame_reused
+    }
+
+    /// Whether the last successful render has exactly the preceding render's
+    /// raw pixels. Both routes synchronize authoritative records first,
+    /// including live writable views. Route changes, failures and background
+    /// changes retire the proof. Consumers may reuse deterministic conversions
+    /// of these pixels, but must still publish each frame and its timestamp.
+    #[must_use]
+    pub const fn last_frame_reused(&self) -> bool {
+        self.last_frame_reused
     }
 
     /// Freeze a camera-bound frame for worker-owned rasterization.
@@ -2017,6 +2048,107 @@ mod tests {
     }
 
     #[test]
+    fn planar_pixel_identity_tracks_changes_not_just_tile_hits() {
+        for threads in [1, 4, 16] {
+            let mut stage = Stage::new();
+            let mob = stage.add(vector());
+            stage.add_to_scene(mob).unwrap();
+            let mut renderer = RetainedFrameRenderer::new(config(threads)).unwrap();
+            let check = |renderer: &mut RetainedFrameRenderer,
+                         stage: &Stage,
+                         revision: u64,
+                         reused: bool| {
+                let stats = renderer.render(stage, revision).unwrap();
+                assert_eq!(renderer.last_frame_reused(), reused);
+                let mut cold = RetainedFrameRenderer::new(renderer.config()).unwrap();
+                cold.render(stage, revision).unwrap();
+                assert_eq!(renderer.frame().as_bytes(), cold.frame().as_bytes());
+                stats
+            };
+            check(&mut renderer, &stage, 0, false);
+            check(&mut renderer, &stage, 0, true);
+            stage.shift(mob, [0.75, 0.0, 0.0]);
+            check(&mut renderer, &stage, 0, false);
+            check(&mut renderer, &stage, 0, true);
+
+            // Removal empties the last occupied tiles. There can be zero
+            // misses although the entire visible object just disappeared.
+            stage.remove_from_scene(mob);
+            let cleared = check(&mut renderer, &stage, 0, false);
+            assert_eq!(cleared.cache.misses, 0);
+            assert!(cleared.cache.empty > 0);
+            check(&mut renderer, &stage, 0, true);
+            renderer.set_background(LinearRgba {
+                r: 0.2,
+                g: 0.1,
+                b: 0.0,
+                a: 1.0,
+            });
+            check(&mut renderer, &stage, 0, false);
+            check(&mut renderer, &stage, 0, true);
+            check(&mut renderer, &stage, 1, false);
+            check(&mut renderer, &stage, 1, true);
+
+            stage.add_to_scene(mob).unwrap();
+            check(&mut renderer, &stage, 1, false);
+            let camera = camera();
+            renderer.render_with_camera(&stage, &camera).unwrap();
+            assert!(!renderer.last_frame_reused());
+            renderer.render_with_camera(&stage, &camera).unwrap();
+            assert!(renderer.last_frame_reused());
+            check(&mut renderer, &stage, 1, false);
+            check(&mut renderer, &stage, 1, true);
+        }
+    }
+
+    #[test]
+    fn planar_pixel_identity_checks_live_views_and_retires_failed_renders() {
+        let mut stage = Stage::new();
+        let mob = stage.add(vector());
+        stage.add_to_scene(mob).unwrap();
+        let mut renderer = RetainedFrameRenderer::new(config(4)).unwrap();
+        renderer.render(&stage, 0).unwrap();
+        renderer.render(&stage, 0).unwrap();
+        assert!(renderer.last_frame_reused());
+        let before = renderer.frame().as_bytes().to_vec();
+        let view = stage
+            .get_mut(mob)
+            .unwrap()
+            .buffer
+            .export_field_view("fill_rgba", true)
+            .unwrap();
+        for index in 0..3 {
+            assert!(view.write_foreign(index, "fill_rgba", &[1.0, 0.0, 0.0, 0.8]));
+        }
+        renderer.render(&stage, 0).unwrap();
+        assert!(!renderer.last_frame_reused());
+        assert_ne!(renderer.frame().as_bytes(), before);
+        let mut cold = RetainedFrameRenderer::new(config(1)).unwrap();
+        cold.render(&stage, 0).unwrap();
+        assert_eq!(renderer.frame().as_bytes(), cold.frame().as_bytes());
+        drop(view);
+        renderer.render(&stage, 0).unwrap();
+        renderer.render(&stage, 0).unwrap();
+        assert!(renderer.last_frame_reused());
+        // The planar route explicitly refuses surface primitives. Retire the
+        // proof even when admission fails before overwriting any raw pixels.
+        let surface = stage.add(surface((2, 2)));
+        stage.add_to_scene(surface).unwrap();
+        assert!(matches!(
+            renderer.render(&stage, 0),
+            Err(RetainedFrameRendererError::CameraRequired {
+                program: ProgramKind::Surface,
+            })
+        ));
+        assert!(!renderer.last_frame_reused());
+        stage.remove_from_scene(surface);
+        renderer.render(&stage, 0).unwrap();
+        assert!(!renderer.last_frame_reused());
+        renderer.render(&stage, 0).unwrap();
+        assert!(renderer.last_frame_reused());
+    }
+
+    #[test]
     fn static_camera_pixels_are_reused_without_an_extra_frame_owner() {
         let camera = camera();
         let mut stage = Stage::new();
@@ -2031,11 +2163,13 @@ mod tests {
             assert!(prepared.same_capture(&prepared.clone()));
             renderer.render_with_camera(&stage, &camera).unwrap();
             assert!(!renderer.last_camera_frame_reused());
+            assert!(!renderer.last_frame_reused());
             let storage = renderer.frame().as_bytes().as_ptr();
             let owners = Arc::strong_count(&prepared.projection);
             for _ in 0..4 {
                 renderer.render_with_camera(&stage, &camera).unwrap();
                 assert!(renderer.last_camera_frame_reused());
+                assert!(renderer.last_frame_reused());
                 assert_eq!(renderer.frame().as_bytes(), expected);
                 assert_eq!(renderer.frame().as_bytes().as_ptr(), storage);
                 assert_eq!(Arc::strong_count(&prepared.projection), owners);

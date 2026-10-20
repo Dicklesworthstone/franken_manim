@@ -86,6 +86,12 @@ python3 -m py_compile \
     scripts/test_corpus_speed_ratio.py
 python3 scripts/test_corpus_speed_ratio.py
 
+echo "==> Python portal benchmark evidence contract"
+python3 -m py_compile \
+    scripts/benchmark_python_portal.py \
+    scripts/test_benchmark_python_portal.py
+python3 scripts/test_benchmark_python_portal.py
+
 echo "==> Python portal runtime-parity audit contract"
 python3 -m py_compile \
     crates/fmn-python/python/fmn_python/schema_provenance.py \

@@ -7,7 +7,7 @@ use fmn_frame::half::f16_from_f32;
 use fmn_frame::transfer::srgb_decode;
 use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameLayout, PixelFormat};
 
-use super::convert_frame;
+use super::{RetainedConversion, convert_frame};
 
 fn frame(format: PixelFormat, width: u32, height: u32) -> FrameBuffer {
     let mut frame =
@@ -39,6 +39,92 @@ fn codes(frame: &FrameBuffer, plane: usize) -> Vec<u16> {
             word >> 6
         })
         .collect()
+}
+
+#[test]
+fn retained_portal_conversion_reuses_exact_bytes_for_every_wire() {
+    let mut source = frame(PixelFormat::Rgba16F, 6, 4);
+    for y in 0..4 {
+        for x in 0..6 {
+            set_pixel(
+                &mut source,
+                x,
+                y,
+                [
+                    f16_from_f32(x as f32 / 6.0),
+                    f16_from_f32(y as f32 / 4.0),
+                    f16_from_f32(0.18),
+                    f16_from_f32((x + y) as f32 / 10.0),
+                ],
+            );
+        }
+    }
+    for wire in [
+        PixelFormat::Rgba8,
+        PixelFormat::Bgra8,
+        PixelFormat::Nv12,
+        PixelFormat::P010,
+    ] {
+        let mut output = frame(wire, 6, 4);
+        let mut expected = frame(wire, 6, 4);
+        convert_frame(&source, &mut expected, None).unwrap();
+        let mut cache = RetainedConversion::new(output.layout().clone());
+        let storage = cache.frame.as_bytes().as_ptr();
+        assert_eq!(cache.bytes(), output.layout().total_bytes());
+        // A reuse request before the first success must still convert.
+        assert!(!cache.write_frame(&source, &mut output, true).unwrap());
+        assert_eq!(output.as_bytes(), expected.as_bytes(), "initial {wire:?}");
+        for _ in 0..8 {
+            output.as_bytes_mut().fill(0xBD);
+            assert!(cache.write_frame(&source, &mut output, true).unwrap());
+            assert_eq!(output.as_bytes(), expected.as_bytes(), "reused {wire:?}");
+        }
+        let mut changed = source.clone();
+        for y in 0..4 {
+            for x in 0..6 {
+                set_pixel(&mut changed, x, y, [0, 0x3c00, 0, 0x3c00]);
+            }
+        }
+        convert_frame(&changed, &mut expected, None).unwrap();
+        assert!(!cache.write_frame(&changed, &mut output, false).unwrap());
+        assert_eq!(output.as_bytes(), expected.as_bytes(), "changed {wire:?}");
+        assert!(cache.write_frame(&changed, &mut output, true).unwrap());
+        assert_eq!(output.as_bytes(), expected.as_bytes());
+        assert_eq!(
+            cache.frame.as_bytes().as_ptr(),
+            storage,
+            "cache grew for {wire:?}"
+        );
+    }
+}
+
+#[test]
+fn retained_conversion_refusal_invalidates_success_without_touching_output() {
+    for wire in [
+        PixelFormat::Rgba8,
+        PixelFormat::Bgra8,
+        PixelFormat::Nv12,
+        PixelFormat::P010,
+    ] {
+        let source = frame(PixelFormat::Rgba16F, 4, 4);
+        let mut output = frame(wire, 4, 4);
+        let mut cache = RetainedConversion::new(output.layout().clone());
+        cache.write_frame(&source, &mut output, false).unwrap();
+        for invalid in [
+            frame(PixelFormat::Rgba8, 4, 4),
+            frame(PixelFormat::Rgba16F, 2, 2),
+        ] {
+            let before = output.as_bytes().to_vec();
+            assert!(cache.write_frame(&invalid, &mut output, true).is_err());
+            assert_eq!(output.as_bytes(), before);
+            assert!(!cache.write_frame(&source, &mut output, true).unwrap());
+        }
+        let mut wrong_layout = frame(wire, 2, 2);
+        let before = wrong_layout.as_bytes().to_vec();
+        assert!(cache.write_frame(&source, &mut wrong_layout, true).is_err());
+        assert_eq!(wrong_layout.as_bytes(), before);
+        assert!(!cache.write_frame(&source, &mut output, true).unwrap());
+    }
 }
 
 #[test]

@@ -98,6 +98,26 @@ class RenderSessionTests(unittest.TestCase):
         report["audio_inputs"][0]["source_sha256"] = "changed again"
         self.assertEqual(result.audio_inputs[0]["source_sha256"], "a" * 64)
 
+    def test_performance_receipt_is_detached_and_does_not_change_artifact_identity(self):
+        self.scene._render_performance = {
+            "schema_version": 1, "frames": 4, "converted_frames": 1,
+            "conversion_reuses": 3, "native_render_ns": 100,
+        }
+        result = render_scene(self.scene, "movie.y4m", threads=1)
+        self.scene._render_performance["conversion_reuses"] = 99
+        self.assertEqual(result.performance["conversion_reuses"], 3)
+        report = result.as_dict()
+        report["performance"]["native_render_ns"] = 0
+        self.assertEqual(result.performance["native_render_ns"], 100)
+        self.assertEqual(result.digest, "a" * 64)
+        self.assertEqual(result.frame_count, 4)
+
+    def test_nonframe_output_does_not_claim_unmeasured_phase_times(self):
+        self.scene._render_performance = {"schema_version": 1, "audio_mix_ns": 0}
+        result = render_scene(self.scene, "soundtrack.wav", threads=1)
+        self.assertIsNone(result.performance)
+        self.assertNotIn("performance", result.as_dict())
+
     def test_imperative_context_publishes_one_native_receipt(self):
         session = self.session()
         self.assertEqual(self.scene.events, [])

@@ -3957,8 +3957,9 @@ fn python_portal_sequence_run(
 
 /// fm-sq8.11: a pure-2D Python scene renders on Lumen's retained planar
 /// route, and its frames are byte-identical to native `fmn` replaying the
-/// same scene's FMTL/1 export (same engine, one thread); a surface scene keeps
-/// the camera route and says why. The installed-wheel suite
+/// same scene's FMTL/1 export (same engine, one thread), including two static
+/// frames whose output conversion is reused. A surface scene keeps the camera
+/// route and says why. The installed-wheel suite
 /// (scene_execution.py) checks that certified provenance names the route.
 fn python_portal_planar_route_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let root = scenario_dir("python_portal_planar_route")?;
@@ -4012,6 +4013,13 @@ fn python_portal_planar_route_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenar
     let planar_route = *planar == report.frame_count && *camera == 0 && reason.is_none();
     let (surface_planar, surface_camera, surface_reason) = &report.surface_routes;
     let surface_route = *surface_planar == 0 && *surface_camera > 0 && surface_reason.is_some();
+    let conversion_accounted = report.frame_count == 6
+        && report.converted_frames > 0
+        && report.conversion_reuses >= 2
+        && report
+            .converted_frames
+            .checked_add(report.conversion_reuses)
+            == Some(report.frame_count);
     ctx.event(
         LogEvent::new("e2e.python.planar_route")
             .field("frames", report.frame_count)
@@ -4019,6 +4027,9 @@ fn python_portal_planar_route_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenar
             .field("camera_frames", *camera)
             .field("identical_frames", identical_frames)
             .field("native_identical", truth(native_identical))
+            .field("converted_frames", report.converted_frames)
+            .field("conversion_reuses", report.conversion_reuses)
+            .field("conversion_accounted", truth(conversion_accounted))
             .field("surface_camera_frames", *surface_camera)
             .field(
                 "surface_reason",
@@ -4034,16 +4045,19 @@ fn python_portal_planar_route_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenar
         && teams_used <= teams_planned
         && team_threads >= 1
         && frames_in_flight >= 1;
-    if !(native_identical && planar_route && surface_route && plan_reported) {
+    if !(native_identical && planar_route && surface_route && plan_reported && conversion_accounted)
+    {
         return Err(fail(format!(
             "portal planar route: routes={:?} surface={:?} plan={:?} frames={} portal={} \
-             native={} identical={identical_frames} cli_code={} stderr={:?}",
+             native={} identical={identical_frames} converted={} reused={} cli_code={} stderr={:?}",
             report.planar_routes,
             report.surface_routes,
             report.planar_plan,
             report.frame_count,
             portal.len(),
             native.len(),
+            report.converted_frames,
+            report.conversion_reuses,
             output.code,
             output.stderr
         )));
@@ -4051,6 +4065,8 @@ fn python_portal_planar_route_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenar
     Ok(RunOutcome::ok()
         .with_counter("python_planar_route_frames", *planar)
         .with_counter("python_planar_native_identical", 1)
+        .with_counter("python_planar_converted_frames", report.converted_frames)
+        .with_counter("python_planar_conversion_reuses", report.conversion_reuses)
         .with_counter("python_planar_surface_camera", 1))
 }
 
@@ -9794,11 +9810,15 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             Assertion::ExitCode(0),
             counter_eq("python_planar_native_identical", 1),
             counter_eq("python_planar_surface_camera", 1),
+            counter_eq("python_planar_route_frames", 6),
+            counter_ge("python_planar_converted_frames", 1),
+            counter_ge("python_planar_conversion_reuses", 2),
         ],
         vec![LogExpect::span_present(
             "e2e.python.planar_route",
             vec![
                 FieldPred::str_eq("native_identical", "true"),
+                FieldPred::str_eq("conversion_accounted", "true"),
                 FieldPred::u64_eq("camera_frames", 0),
             ],
         )],

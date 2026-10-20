@@ -189,6 +189,32 @@ struct PortalRoutes {
     teams_planned: u64,
     team_threads: u64,
     frames_in_flight: u64,
+    performance: PortalPerformance,
+}
+
+/// Owner-thread wall times are disjoint: preparation, rendering, conversion,
+/// emitter submission, audio mixing and final output drain. The encoder runs
+/// concurrently; its CPU time is not inferred by adding these wall times.
+#[derive(Clone, Copy, Default, Debug)]
+struct PortalPerformance {
+    raw_frame_reuses: u64,
+    converted_frames: u64,
+    conversion_reuses: u64,
+    conversion_cache_bytes: u64,
+    tile_cache_hits: u64,
+    tile_cache_misses: u64,
+    tile_cache_poisoned: u64,
+    empty_tiles: u64,
+    capture_prepare_ns: u64,
+    native_render_ns: u64,
+    conversion_ns: u64,
+    output_submit_ns: u64,
+    audio_mix_ns: u64,
+    output_finish_ns: u64,
+}
+
+fn portal_elapsed_ns(start: Instant) -> u64 {
+    u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
 impl From<NativeArtifactReport> for PortalArtifactReport {
@@ -403,7 +429,7 @@ struct PortalFrameSession {
     soundtrack: Option<fmn_output::FfmpegSoundtrack>,
     audio: Box<portal_audio::PortalAudio>,
     light_mob: Option<Mob>,
-    rgba8_scratch: Option<FrameBuffer>,
+    conversion: portal_video::RetainedConversion,
     opaque_video: bool,
     next_sequence: u64,
     timeline: OutputTimeline,
@@ -469,17 +495,26 @@ impl PortalFrameSession {
             fmn_output::WireFormat::Nv12 => fmn_runtime::OutputPixelFormat::Nv12,
             fmn_output::WireFormat::P010 => fmn_runtime::OutputPixelFormat::P010,
         };
+        // Reserve one converted-frame cache in the RAM-derived plan. The
+        // planner budgets per in-flight slot, so charging its rounded-up cost
+        // to each working surface is conservative (we allocate exactly one).
+        let mut surface = fmn_runtime::SurfaceSpec::lumen(width, height);
+        surface.working_bytes_per_pixel += match wire {
+            fmn_output::WireFormat::Rgba8 | fmn_output::WireFormat::Bgra8 => 4,
+            fmn_output::WireFormat::Nv12 => 2,
+            fmn_output::WireFormat::P010 => 3,
+        };
         let request = if reproducible {
             fmn_runtime::PlanRequest::certified(
                 fmn_runtime::RenderIntent::Offline,
-                fmn_runtime::SurfaceSpec::lumen(width, height),
+                surface,
                 output_format,
             )
             .with_max_cpu_threads(max_threads)
         } else {
             fmn_runtime::PlanRequest::standard(
                 fmn_runtime::RenderIntent::Offline,
-                fmn_runtime::SurfaceSpec::lumen(width, height),
+                surface,
                 output_format,
             )
             .with_max_cpu_threads(max_threads)
@@ -544,15 +579,11 @@ impl PortalFrameSession {
         let pixel_format = wire.frame_format();
         let output_layout = FrameLayout::tight(pixel_format, width, height)
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
-        // ubs:ignore — compares a public output-format enum, not a secret.
-        let rgba8_scratch = if pixel_format != PixelFormat::Rgba8 {
-            Some(FrameBuffer::new(
-                FrameLayout::tight(PixelFormat::Rgba8, width, height)
-                    .map_err(|error| PyValueError::new_err(error.to_string()))?,
-            ))
-        } else {
-            None
-        };
+        // Replaces the obsolete RGBA8 conversion scratch: the direct native
+        // converters need no scratch, and the retained output uses only its
+        // negotiated wire size, including the smaller NV12 representation.
+        let conversion = portal_video::RetainedConversion::new(output_layout.clone());
+        let conversion_cache_bytes = conversion.bytes() as u64;
         let frame_bytes = u64::try_from(output_layout.total_bytes())
             .map_err(|_| PyOverflowError::new_err("render frame size exceeds u64"))?;
         // ubs:ignore — compares a public output-format enum, not a secret.
@@ -754,7 +785,7 @@ impl PortalFrameSession {
                 soundtrack,
                 audio,
                 light_mob: None,
-                rgba8_scratch,
+                conversion,
                 opaque_video,
                 next_sequence: 0,
                 timeline: OutputTimeline::new(single_frame),
@@ -771,6 +802,10 @@ impl PortalFrameSession {
                         .map_or(1, fmn_runtime::TeamPlan::threads)
                         as u64,
                     frames_in_flight: plan.frames_in_flight as u64,
+                    performance: PortalPerformance {
+                        conversion_cache_bytes,
+                        ..PortalPerformance::default()
+                    },
                     ..PortalRoutes::default()
                 },
             },
@@ -782,6 +817,7 @@ impl PortalFrameSession {
         &mut self,
         packet: fmn_scene::studio_bridge::FramePacket,
     ) -> Result<(), fmn_scene::IntegrationError> {
+        let preparation_start = Instant::now();
         let stage = packet.materialize_stage();
         if let Some(light) = self.light_mob {
             if stage.get(light).is_none() {
@@ -815,6 +851,8 @@ impl PortalFrameSession {
         } else {
             planar_stage_refusal(&stage)
         };
+        self.routes.performance.capture_prepare_ns += portal_elapsed_ns(preparation_start);
+        let render_start = Instant::now();
         if let Some(reason) = refusal {
             self.renderer
                 .render_with_camera(&stage, &self.camera)
@@ -823,11 +861,20 @@ impl PortalFrameSession {
             self.routes.first_camera_reason.get_or_insert(reason);
         } else {
             self.renderer.set_background(self.camera.background());
-            self.renderer
+            let stats = self
+                .renderer
                 .render(&stage, 0)
                 .map_err(|error| fmn_scene::IntegrationError::new("lumen", error.to_string()))?;
+            self.routes.performance.tile_cache_hits += stats.cache.hits as u64;
+            self.routes.performance.tile_cache_misses += stats.cache.misses as u64;
+            self.routes.performance.tile_cache_poisoned += stats.cache.poisoned as u64;
+            self.routes.performance.empty_tiles += stats.cache.empty as u64;
             self.routes.planar += 1;
         }
+        self.routes.performance.native_render_ns += portal_elapsed_ns(render_start);
+        let unchanged = self.renderer.last_frame_reused();
+        self.routes.performance.raw_frame_reuses += u64::from(unchanged);
+        let reserve_start = Instant::now();
         let mut reservation = self
             .emitter
             .as_ref()
@@ -836,15 +883,20 @@ impl PortalFrameSession {
             })?
             .reserve(self.next_sequence)
             .map_err(|error| fmn_scene::IntegrationError::new("reel", error.to_string()))?;
-        portal_video::convert_frame(
-            self.renderer.frame(),
-            reservation.frame_mut(),
-            self.rgba8_scratch.as_mut(),
-        )
-        .map_err(|error| fmn_scene::IntegrationError::new("reel", error.to_string()))?;
+        self.routes.performance.output_submit_ns += portal_elapsed_ns(reserve_start);
+        let conversion_start = Instant::now();
+        let reused = self
+            .conversion
+            .write_frame(self.renderer.frame(), reservation.frame_mut(), unchanged)
+            .map_err(|error| fmn_scene::IntegrationError::new("reel", error.to_string()))?;
+        self.routes.performance.conversion_ns += portal_elapsed_ns(conversion_start);
+        self.routes.performance.conversion_reuses += u64::from(reused);
+        self.routes.performance.converted_frames += u64::from(!reused);
+        let publish_start = Instant::now();
         reservation
             .publish()
             .map_err(|error| fmn_scene::IntegrationError::new("reel", error.to_string()))?;
+        self.routes.performance.output_submit_ns += portal_elapsed_ns(publish_start);
         self.next_sequence = self
             .next_sequence
             .checked_add(1)
@@ -887,16 +939,25 @@ impl PortalFrameSession {
 
     fn finish(mut self, scene: &Scene) -> PyResult<(PortalArtifactReport, String, usize)> {
         let renderer = self.renderer.config();
-        if let Some(soundtrack) = self.soundtrack.take() {
-            soundtrack
-                .finish(self.audio.mix(scene, renderer.threads, &self.timeline)?)
-                .map_err(native_error)?;
+        let soundtrack = self.soundtrack.take();
+        let mix = if soundtrack.is_some() {
+            let mix_start = Instant::now();
+            let mix = self.audio.mix(scene, renderer.threads, &self.timeline)?;
+            self.routes.performance.audio_mix_ns += portal_elapsed_ns(mix_start);
+            mix
+        } else {
+            None
+        };
+        let finish_start = Instant::now();
+        if let Some(soundtrack) = soundtrack {
+            soundtrack.finish(mix).map_err(native_error)?;
         }
         self.emitter
             .take()
             .ok_or_else(|| PyRuntimeError::new_err("portal render generation is already closed"))?
             .finish()
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        self.routes.performance.output_finish_ns += portal_elapsed_ns(finish_start);
         let mut report: PortalArtifactReport = match &self.receipt {
             PortalReceipt::Native(receipt) => receipt.take().map_err(native_error)?.into(),
             PortalReceipt::Video(receipt) => {
@@ -8601,6 +8662,42 @@ impl PyScene {
         )
     }
 
+    /// Performance evidence published when a frame generation finishes successfully.
+    /// Starting a new generation resets these counters; failed/aborted generations
+    /// publish no evidence. WAV/SVG generations leave their zero defaults.
+    /// Durations are non-overlapping owner-thread wall-time nanoseconds, not CPU times
+    /// and not deterministic provenance. Encoder work overlaps capture;
+    /// output_finish_ns measures only the remaining drain/mux wait.
+    #[getter]
+    fn _render_performance(slf: &Bound<'_, Self>) -> PyResult<Py<PyDict>> {
+        let routes = slf.borrow().render_routes;
+        let stats = routes.performance;
+        let out = PyDict::new(slf.py());
+        for (name, value) in [
+            ("schema_version", 1),
+            ("frames", routes.planar + routes.camera),
+            ("planar_frames", routes.planar),
+            ("camera_frames", routes.camera),
+            ("raw_frame_reuses", stats.raw_frame_reuses),
+            ("converted_frames", stats.converted_frames),
+            ("conversion_reuses", stats.conversion_reuses),
+            ("conversion_cache_bytes", stats.conversion_cache_bytes),
+            ("tile_cache_hits", stats.tile_cache_hits),
+            ("tile_cache_misses", stats.tile_cache_misses),
+            ("tile_cache_poisoned", stats.tile_cache_poisoned),
+            ("empty_tiles", stats.empty_tiles),
+            ("capture_prepare_ns", stats.capture_prepare_ns),
+            ("native_render_ns", stats.native_render_ns),
+            ("conversion_ns", stats.conversion_ns),
+            ("output_submit_ns", stats.output_submit_ns),
+            ("audio_mix_ns", stats.audio_mix_ns),
+            ("output_finish_ns", stats.output_finish_ns),
+        ] {
+            out.set_item(name, value)?;
+        }
+        Ok(out.unbind())
+    }
+
     #[getter]
     fn _render_audio_inputs(slf: &Bound<'_, Self>) -> PyResult<Py<PyList>> {
         portal_audio::input_facts(slf)
@@ -12595,6 +12692,10 @@ pub struct PortalPlanarRouteGauntletReport {
     /// The planar render's `(teams used, teams planned, threads per team,
     /// frames in flight)`.
     pub planar_plan: (u64, u64, u64, u64),
+    /// Planar frames that ran the negotiated wire conversion.
+    pub converted_frames: u64,
+    /// Planar frames copied from an identical preceding conversion.
+    pub conversion_reuses: u64,
 }
 
 /// One semantic-oracle reading from the portal suite (fm-5wq.46).
@@ -12736,6 +12837,9 @@ class _Flat(Scene):
         self.add(square)
         self.play(Transform(square, Circle(radius=1).set_stroke(YELLOW, 4)),
                   run_time=0.5, rate_func=linear)
+        # Preserve all four animated samples, then exercise two static output
+        # slots through the same portal/native-export scene and pixel oracle.
+        self.wait(0.25)
 
 
 class _Curved(Scene):
@@ -12750,6 +12854,9 @@ flat_result = flat.render(os.path.join(_fmn_dir, "portal"), format="png_sequence
                           resolution=(64, 36), fps=8, threads=1)
 _fmn_flat_routes = tuple(flat._render_routes)
 _fmn_flat_plan = tuple(flat._render_plan)
+_fmn_performance = flat._render_performance
+_fmn_flat_conversion = (int(_fmn_performance["converted_frames"]),
+                        int(_fmn_performance["conversion_reuses"]))
 export_bundle(_Flat, os.path.join(_fmn_dir, "flat.fmtl"), resolution=(64, 36), fps=8)
 curved = _Curved()
 curved.render(os.path.join(_fmn_dir, "curved.y4m"), format="y4m",
@@ -12780,6 +12887,9 @@ _fmn_flat_frames = int(flat_result.frame_count)
         let planar_plan = get("_fmn_flat_plan")?
             .extract()
             .map_err(|error: PyErr| error.to_string())?;
+        let (converted_frames, conversion_reuses) = get("_fmn_flat_conversion")?
+            .extract()
+            .map_err(|error: PyErr| error.to_string())?;
         Ok(PortalPlanarRouteGauntletReport {
             portal_sequence: directory.join("portal"),
             bundle: directory.join("flat.fmtl"),
@@ -12787,6 +12897,8 @@ _fmn_flat_frames = int(flat_result.frame_count)
             planar_routes,
             surface_routes,
             planar_plan,
+            converted_frames,
+            conversion_reuses,
         })
     })
 }

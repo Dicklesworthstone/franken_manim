@@ -405,8 +405,10 @@ class ConsoleProvenanceTests(unittest.TestCase):
             self.emitted.append((code, identity, kind, details))
             return code
         self.native._portal_cli_emit = emit
+        # An exact single-scene destination is --output; --video_dir is a
+        # directory containing Demo.png, including in production CLI dispatch.
         self.native._portal_cli_render_arguments = lambda args: (
-            [args[0]], {"format": "png", "video_dir": str(self.root / "out.png"),
+            [args[0]], {"format": "png", "output": str(self.root / "out.png"),
                         "reproducible": "--reproducible" in args}, 8, 8, 30, 1,
         )
 

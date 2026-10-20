@@ -1737,8 +1737,15 @@ mod tests {
         assert_eq!(fill(&m, "+"), [fmn_core::constants::WHITE]);
         assert_eq!(fill(&m, "z"), [fmn_core::constants::WHITE]);
         // A declaration runs to the end of its group: x, + and y alike.
-        let m = Tex::new(r"\color{red} x + y").build(&engine).expect("builds");
-        assert!(m.vmob.children().iter().all(|c| c.style().fill_color == red));
+        let m = Tex::new(r"\color{red} x + y")
+            .build(&engine)
+            .expect("builds");
+        assert!(
+            m.vmob
+                .children()
+                .iter()
+                .all(|c| c.style().fill_color == red)
+        );
         // tex_to_color_map over \color.
         let t2c = [("y", BLUE)];
         let m = Tex::new(r"\color{red} x + y")

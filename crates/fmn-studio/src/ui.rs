@@ -40,7 +40,11 @@ pub struct UiAsset {
 }
 
 /// The Studio browser script, embedded verbatim.
-const STUDIO_JS: &str = concat!(include_str!("studio.js"), "\n", include_str!("studio_audio.js"));
+const STUDIO_JS: &str = concat!(
+    include_str!("studio.js"),
+    "\n",
+    include_str!("studio_audio.js")
+);
 const STUDIO_CSS: &str = include_str!("studio.css");
 
 /// The static prefix of the index shell. The capability token and suffix are

@@ -268,6 +268,67 @@ fn video_job(
     Ok(job)
 }
 
+/// One bounded wire-format frame retained by an output generation.
+///
+/// `unchanged` is supplied only by Lumen's successful raw-pixel identity
+/// proof, never inferred from the clock, a wait(), or tile-hit counts. Every
+/// call still fills a distinct ordered-emitter reservation. No output slot or
+/// mutable renderer buffer is retained across publication.
+pub(crate) struct RetainedConversion {
+    frame: FrameBuffer,
+    valid: bool,
+}
+
+impl RetainedConversion {
+    pub(crate) fn new(layout: FrameLayout) -> Self {
+        Self {
+            frame: FrameBuffer::new(layout),
+            valid: false,
+        }
+    }
+
+    pub(crate) fn bytes(&self) -> usize {
+        self.frame.layout().total_bytes()
+    }
+
+    /// Return true only when a previous conversion supplied this frame.
+    pub(crate) fn write_frame(
+        &mut self,
+        source: &FrameBuffer,
+        destination: &mut FrameBuffer,
+        unchanged: bool,
+    ) -> Result<bool, FrameError> {
+        let reuse = unchanged && self.valid;
+        // Retire the cached result across every fallible operation. In
+        // particular an invalid source cannot leave a reusable success flag.
+        self.valid = false;
+        if destination.layout() != self.frame.layout()
+            || source.layout().width() != destination.layout().width()
+            || source.layout().height() != destination.layout().height()
+        {
+            return Err(FrameError::DimensionMismatch);
+        }
+        if source.layout().format() != PixelFormat::Rgba16F {
+            return Err(FrameError::FormatMismatch {
+                expected: "Rgba16F raw frame",
+                got: source.layout().format(),
+            });
+        }
+        if reuse {
+            destination
+                .as_bytes_mut()
+                .copy_from_slice(self.frame.as_bytes());
+        } else {
+            convert_frame(source, destination, None)?;
+            self.frame
+                .as_bytes_mut()
+                .copy_from_slice(destination.as_bytes());
+        }
+        self.valid = true;
+        Ok(reuse)
+    }
+}
+
 /// Convert from Lumen's linear-light frame directly to the negotiated wire.
 /// P010 must not pass through RGBA8: doing so irreversibly discards the extra
 /// precision before the 10-bit encoder ever sees it. The fused 8-bit kernels
@@ -365,6 +426,17 @@ mod tests {
             py.run(source.as_c_str(), Some(globals), Some(globals))
                 .inspect_err(|error| error.print(py))
                 .expect("writer callbacks cannot invalidate generation ownership");
+        });
+    }
+
+    #[test]
+    fn portal_retained_conversion_production_acceptance() {
+        crate::with_python_test_module("retained portal conversion", |py, _module, globals| {
+            let source = std::ffi::CString::new(include_str!("../tests/retained_conversion.py"))
+                .expect("retained conversion suite contains no NUL");
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .expect("real portal pixels, callbacks, timing, routes and conversion reuse");
         });
     }
 
