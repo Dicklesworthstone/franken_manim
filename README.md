@@ -123,7 +123,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 The `Tex` mobject above is laid out by fmd-math from bundled Computer Modern (same paths, every platform, every time), and `MoveAlongPath`, dashes, tips, and tracers all place by *true* arc length.
 
-`RenderOptions::with_format(path, RenderFormat::Gif | RenderFormat::Y4m)` selects the other native codecs. For MP4/MOV, enable the facade's `ffmpeg` feature (`fmn = { …, features = ["ffmpeg"] }`) and pass `RenderFormat::Mp4` or `RenderFormat::Mov`: frames go through the one sandboxed ffmpeg boundary, and any `scene_mut().add_sound(…)` cues are mixed natively and muxed. Hosts that govern processes themselves inject an `FfmpegCapability` instead. Without one, video is a named capability error, never a silent substitute.
+`RenderOptions::with_format("still.png", RenderFormat::Png)` renders one final-state PNG after the scene completes. Animations and updaters keep their normal timing, and post-play edits appear in the still; intermediate captures count against the frame budget without being rasterized. The camera render route samples the final camera rig, and bundle rendering selects the last recorded sample. PNG publication preserves existing destinations and uses canonical bytes under certified determinism. `RenderFormat::Gif` and `RenderFormat::Y4m` select the other native codecs.
+
+For MP4/MOV, enable the facade's `ffmpeg` feature (`fmn = { …, features = ["ffmpeg"] }`) and pass `RenderFormat::Mp4` or `RenderFormat::Mov`: frames go through the one sandboxed ffmpeg boundary, and any `scene_mut().add_sound(…)` cues are mixed natively and muxed. Hosts that govern processes themselves inject an `FfmpegCapability` instead. Without one, video is a named capability error, never a silent substitute.
+
+For a standalone WAV soundtrack, call `render_soundtrack(&mut scene, SoundtrackRenderOptions::new("media/soundtrack.wav")?)`. The ordinary scene and its updaters execute once; `scene_mut().add_sound(…)` cues retain their offsets, gains, background ducking, and tails, with skipped time removed from the output clock. A cue-free scene produces silence of the correct duration. This route uses native PCM source decoding and canonical signed 16-bit WAV publication without a pixel renderer or ffmpeg. `SoundtrackRenderOptions` exposes the sample rate/channel matrix, mixer worker ceiling, scene duration, source/decoded/prepared audio budgets, and a 64 MiB default artifact ceiling. Existing destinations are preserved, and the report includes actual sample frames, clipping counts, and the exact inputs decoded. Compressed source files return a named decoder-capability error.
+
+```rust
+use fmn::prelude::*;
+
+struct Narration;
+
+impl SceneConstruct for Narration {
+    fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+        stage.scene_mut().add_sound("assets/voice.wav", 0.0, None, None)?;
+        stage.wait(3.0)?;
+        Ok(())
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut audio = SoundtrackRenderOptions::new("media/soundtrack.wav")?;
+    audio.mixer.sample_rate = 48_000;
+    audio.mixer.channels = 2;
+    let report = render_soundtrack(&mut Narration, audio)?;
+    println!("{} sample frames in {}", report.artifact.sample_frames, report.artifact.path.display());
+    Ok(())
+}
+```
 
 For a long-form example ("Made with FrankenManim"), [`crates/fmn/examples/hoeffding_d`](crates/fmn/examples/hoeffding_d/main.rs) is an eight-chapter explainer of Hoeffding's D, about 4,000 lines of Rust, paired with a source-unedited Python portal counterpart in [`crates/fmn-python/tests/hoeffding_portal.py`](crates/fmn-python/tests/hoeffding_portal.py). It runs over four minutes at 1080p60 (`15,144` frames) with a procedurally synthesized score mixed natively and muxed through the governed `ffmpeg` boundary (`render_matrix.hoeffding_d_full_mp4.v1`). Its readouts recompute the statistic from live dot positions every frame. Run `cargo run --release -p fmn --example hoeffding_d -- render all` for MP4 (ffmpeg on `PATH`), or add `--format png --res 480x270 --fps 15` for a fully native draft. The e2e suite renders all eight native chapters (`render_matrix.hoeffding_d_chapters.v1`) and the portal segments (`render_matrix.hoeffding_d_portal.v1`) on every commit.
 

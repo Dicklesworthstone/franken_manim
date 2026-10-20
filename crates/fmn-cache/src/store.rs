@@ -1836,6 +1836,90 @@ impl fmt::Debug for Store {
 }
 
 impl Store {
+    /// Inspect an existing owned host namespace without opening or changing it.
+    ///
+    /// Sums the byte lengths of regular files in its two-level object tree,
+    /// including envelope overhead, without reading payloads or touching the
+    /// advisory index or locks. A missing namespace is zero.
+    /// The shared work budget counts both shard directories and object entries;
+    /// at most one additional entry is inspected to detect overflow. This is
+    /// a diagnostic observation, not an atomic snapshot or envelope validation.
+    ///
+    /// # Errors
+    /// Refuses non-host capabilities, unowned roots, link-like or wrong-kind
+    /// nodes, and scans exceeding `max_entries`. Creates no missing paths.
+    pub fn inspect_namespace_bytes(
+        fs: &dyn FileSystem,
+        root: &Path,
+        name: &str,
+        version: u32,
+        max_entries: usize,
+    ) -> Result<u64, CacheError> {
+        validate_namespace_name(name)?;
+        if !fs.grants_host_destructive_lifecycle() {
+            return Err(root_refused(
+                root,
+                RootRefusalCode::CapabilityRequired,
+                "cache size inspection requires the ambient host filesystem capability",
+            ));
+        }
+        let cwd = env::current_dir().map_err(|err| host_io(Path::new("."), err))?;
+        let configured = absolute_without_parent_components(root, &cwd)?;
+        let (path, owner) = validate_host_owned_root(&configured, &cwd)?;
+        let root = RootContext { path, owner };
+        let objects = root
+            .path
+            .join("ns")
+            .join(name)
+            .join(format!("v{version}"))
+            .join("objects");
+        ensure_managed_directory(fs, &root.path, &objects, DirectoryMode::ExistingPrefix)?;
+        if fs.node_kind_no_follow(&objects)?.is_none() {
+            root.validate_generation(fs)?;
+            return Ok(0);
+        }
+        let mut remaining = max_entries;
+        let mut visit = || -> Result<(), CacheError> {
+            if remaining == 0 {
+                return Err(CacheError::Storage(FsError::TooManyEntries {
+                    path: objects.clone(),
+                    limit: max_entries,
+                }));
+            }
+            remaining -= 1;
+            Ok(())
+        };
+        let mut bytes = 0u64;
+        for shard in fs::read_dir(&objects).map_err(|err| host_io(&objects, err))? {
+            visit()?;
+            let shard = shard.map_err(|err| host_io(&objects, err))?.path();
+            ensure_managed_directory(fs, &root.path, &shard, DirectoryMode::Existing)?;
+            for entry in fs::read_dir(&shard).map_err(|err| host_io(&shard, err))? {
+                visit()?;
+                let entry = entry.map_err(|err| host_io(&shard, err))?.path();
+                match managed_leaf_kind(fs, &root.path, &entry, DirectoryMode::Existing)? {
+                    Some(FsNodeKind::RegularFile) => {}
+                    Some(kind) => {
+                        return Err(managed_node_refused(&entry, "regular object file", kind));
+                    }
+                    None => return Err(managed_not_found(&entry)),
+                }
+                let metadata = fs::symlink_metadata(&entry).map_err(|err| host_io(&entry, err))?;
+                if !metadata.is_file() {
+                    return Err(managed_path_refused(
+                        &entry,
+                        "cache object changed kind during inspection",
+                    ));
+                }
+                bytes = bytes.checked_add(metadata.len()).ok_or_else(|| {
+                    managed_path_refused(&objects, "cache object byte total exceeds u64")
+                })?;
+            }
+        }
+        root.validate_generation(fs)?;
+        Ok(bytes)
+    }
+
     /// Resolve the effective host cache setting and open its owned store.
     ///
     /// This is the construction entry point for a user-facing cache setting:
@@ -2031,6 +2115,12 @@ impl fmt::Debug for Namespace {
 }
 
 impl Namespace {
+    /// Retention policy attached to this namespace handle.
+    #[must_use]
+    pub const fn policy(&self) -> NamespacePolicy {
+        self.policy
+    }
+
     /// The namespace name.
     #[must_use]
     pub fn name(&self) -> &str {

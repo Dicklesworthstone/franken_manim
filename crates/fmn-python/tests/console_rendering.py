@@ -7,6 +7,7 @@ substituted. Fixtures and output artifacts are retained for investigation.
 from __future__ import annotations
 
 import contextlib
+from copy import deepcopy
 import hashlib
 import io
 import json
@@ -87,9 +88,10 @@ SCENES = source("motion", '''\
 
 
 def invoke(scene_source, destination, *selectors, format="y4m", threads=1, extra=()):
+    output_flag = "--video_dir" if len(selectors) > 1 or any(value in {"-a", "--write_all"} for value in selectors) else "--output"
     argv = ["fmn-python", "--robot", str(scene_source), *selectors,
             "--format", format, "--resolution", "96x54", "--fps", "8",
-            "--threads", str(threads), "--video_dir", str(destination), *extra]
+            "--threads", str(threads), output_flag, str(destination), *extra]
     out, err = io.StringIO(), io.StringIO()
     original_argv, original_path = sys.argv, list(sys.path)
     try:
@@ -340,7 +342,7 @@ def invoke_defaults(scene_source, destination, selector, cwd, extra=()):
     # No --fps and no --resolution override of the camera colour: the run must
     # inherit the Reference's manim_config.camera layer (fm-5wq.44).
     argv = ["fmn-python", "--robot", str(scene_source), selector, "--format", "y4m",
-            "--resolution", "96x54", "--threads", "1", "--video_dir", str(destination), *extra]
+            "--resolution", "96x54", "--threads", "1", "--output", str(destination), *extra]
     out, err = io.StringIO(), io.StringIO()
     original_argv, original_cwd = sys.argv, Path.cwd()
     try:
@@ -413,15 +415,106 @@ def reference_camera_defaults():
     assert abs(y - bt709_limited_luma("#440000")) <= 2 and v > 128, (y, u, v)
 
 
+def reference_flags_and_destinations():
+    path = source("reference_flags", '''\
+        class Preset(m.Scene):
+            default_camera_config = {"fps": 24}
+            def construct(self):
+                assert self.camera.fps == 24
+                self.add(m.Square(side_length=1, fill_opacity=1))
+    ''')
+    root = ROOT / "reference-flag-output"
+    for index, (flags, dimensions) in enumerate(((('-l',), (854, 480)), (('--hd', '-r', '160x90'), (160, 90)))):
+        argv = ['fmn-python', '--robot', str(path), 'Preset', '-s', *flags, '--threads', '1',
+                '--video_dir', str(root), '--file_name', f'proof{index}', '-q']
+        before, out = sys.argv, io.StringIO()
+        try:
+            sys.argv = argv
+            with contextlib.redirect_stdout(out):
+                code = main()
+        finally:
+            sys.argv = before
+        report = json.loads(out.getvalue())
+        assert code == 0, report
+        artifact = root / f'proof{index}.png'
+        data = artifact.read_bytes()
+        assert data.startswith(b'\x89PNG\r\n\x1a\n')
+        assert struct.unpack('>II', data[16:24]) == dimensions
+        assert report['destination'] == str(artifact)
+        assert report['fps'] == 24 and report['resolution'] == list(dimensions)
+
+
+def reference_configuration_and_css_color():
+    configured = ROOT / "selected-configuration"
+    configured.mkdir()
+    (configured / "custom_config.yml").write_text("camera:\n  fps: 10\n")
+    config_file = configured / "selected.yml"
+    config_file.write_text(
+        'camera:\n  fps: 12\n  resolution: (120, 80)\n  background_color: "#112233"\n'
+        'resolution_options:\n  low: (60, 40)\n'
+        'directories:\n  base: authored\n  subdirs:\n    output: movies\n    raster_images: art\n'
+        'scene:\n  default_wait_time: 0.25\nauthored:\n  answer: 42\n'
+    )
+    path = source("configured_flags", f'''\
+        assert m.manim_config['camera']['fps'] == 12
+        assert m.manim_config['camera']['background_color'] == '#FF0000'
+        assert m.manim_config['authored']['answer'] == 42
+        assert m.manim_config['directories']['raster_images'] == {str(configured / 'authored/art')!r}
+        class Configured(m.Scene):
+            def construct(self):
+                assert self.default_wait_time == 0.25
+                self.wait()
+        class ClassCamera(m.Scene):
+            default_camera_config = dict(fps=18, background_color='#0000FF')
+            def construct(self):
+                self.wait(0.5)
+    ''')
+    original, camera = m.manim_config, m.manim_config['camera']
+    snapshot = deepcopy(original)
+    flags = ("--config_file", str(config_file), "-c", "red")
+    report = invoke_defaults(path, configured / "red.y4m", "Configured", configured, extra=flags)
+    rate, frames, y, _, v = y4m_rate_and_background(configured / "red.y4m")
+    assert report['fps'] == 12 and rate == '12:1' and frames == 3, (report, rate, frames)
+    assert abs(y - bt709_limited_luma('#FF0000')) <= 2 and v > 200, (y, v)
+    report = invoke_defaults(path, configured / "blue.y4m", "ClassCamera", configured, extra=flags)
+    rate, frames, y, u, _ = y4m_rate_and_background(configured / "blue.y4m")
+    assert report['fps'] == 18 and rate == '18:1' and frames == 9, (report, rate, frames)
+    assert abs(y - bt709_limited_luma('#0000FF')) <= 2 and u > 200, (y, u)
+
+    # The selected preset belongs to the same typed config layer, and the
+    # configured output directory is rooted before authored code is loaded.
+    before_argv, before_cwd, out = sys.argv, Path.cwd(), io.StringIO()
+    try:
+        os.chdir(configured)
+        sys.argv = ['fmn-python', '--robot', str(path), 'Configured', *flags,
+                    '-l', '-s', '-q', '--threads', '1']
+        with contextlib.redirect_stdout(out):
+            code = main()
+    finally:
+        sys.argv = before_argv
+        os.chdir(before_cwd)
+    report = json.loads(out.getvalue())
+    assert code == 0, report
+    output = configured / 'authored/movies/Configured.png'
+    data = output.read_bytes()
+    assert data.startswith(b'\x89PNG\r\n\x1a\n')
+    assert struct.unpack('>II', data[16:24]) == (60, 40)
+    assert report['resolution'] == [60, 40] and report['fps'] == 12
+    assert m.manim_config is original and m.manim_config['camera'] is camera
+    assert original == snapshot, 'configuration escaped its source lifetime'
+    assert '_portal_cli_configuration' not in vars(m)
+
+
 CASES = (
     ordinary_scene_capture, selected_order_and_output,
     write_all_alias_and_thread_repeatability, missing_selection_starts_no_scene,
     early_scene_termination_publishes, interrupt_after_capture_does_not_publish,
     system_exit_zero_is_not_success, batch_fail_fast_and_keep_going,
     batch_interrupt_retains_completed_artifacts, later_destination_preflight_preserves_files,
-    wav_output_keeps_native_sample_units, reference_camera_defaults,
+    wav_output_keeps_native_sample_units, reference_camera_defaults, reference_flags_and_destinations,
+    reference_configuration_and_css_color,
 )
-assert len(CASES) == 12
+assert len(CASES) == 14
 for case in CASES:
     case()
     print("native console acceptance:", case.__name__)

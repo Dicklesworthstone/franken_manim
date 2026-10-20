@@ -110,6 +110,36 @@ fn cold_warm_and_disabled_cache_render_identical_pngs_without_build_time_layouts
 
 struct ShapeOnly;
 
+#[test]
+fn render_completion_evicts_disk_layouts_without_changing_certified_pngs() {
+    let fs = Arc::new(VirtualFs::new());
+    let mut limited_options = options("/limited", 4);
+    limited_options.config.cache.max_bytes = 0;
+    let limited =
+        render_with_fs(&mut FormulaScene::default(), limited_options, fs.clone()).unwrap();
+    assert_eq!(limited.typesetting.persistent_ceiling_bytes, Some(0));
+    assert_eq!(limited.typesetting.maintenance.runs, 1);
+    assert_eq!(limited.typesetting.maintenance.errors, 0);
+    assert!(limited.typesetting.maintenance.evicted_entries >= 4);
+    assert!(limited.typesetting.maintenance.evicted_bytes > 0);
+    assert_eq!(limited.typesetting.maintenance.retained_bytes, Some(0));
+
+    let after = render_with_fs(
+        &mut FormulaScene::default(),
+        options("/after", 1),
+        fs.clone(),
+    )
+    .unwrap();
+    assert_eq!(after.typesetting.persistent_hits, 0);
+    assert!(after.typesetting.layout_computations >= 4);
+    let mut memory_options = options("/memory", 4);
+    memory_options.typeset_cache = false;
+    let memory = render_with_fs(&mut FormulaScene::default(), memory_options, fs.clone()).unwrap();
+    assert_eq!(memory.typesetting.maintenance.runs, 0);
+    assert_eq!(png(&fs, "/limited"), png(&fs, "/after"));
+    assert_eq!(png(&fs, "/limited"), png(&fs, "/memory"));
+}
+
 impl SceneConstruct for ShapeOnly {
     fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
         stage.add(Circle::new())?;
@@ -263,6 +293,54 @@ fn camera_rendering_uses_the_same_persistent_session_as_affine_rendering() {
     assert!(report.typesetting.persistent);
     assert_eq!(report.typesetting.layout_computations, 0);
     assert!(report.typesetting.persistent_hits >= 4);
+}
+
+#[test]
+fn camera_render_completion_obeys_retention_without_changing_pngs() {
+    let fs = Arc::new(VirtualFs::new());
+    let mut reference = None;
+    for (index, threads) in [1, 4, 16].into_iter().enumerate() {
+        let destination = format!("/camera-retention-{threads}");
+        let mut settings = options(&destination, 4);
+        settings.config.render.threads = ThreadPolicy::Fixed(threads);
+        settings.typeset_cache = index != 2;
+        if index == 0 {
+            settings.config.cache.max_bytes = 0;
+        }
+        let report = render_camera_with_fs(
+            |scene, camera| {
+                let rig = CameraRig::new(scene, camera)?;
+                Ok((FormulaScene::default(), rig))
+            },
+            settings,
+            fs.clone(),
+        )
+        .unwrap();
+        let maintenance = &report.typesetting.maintenance;
+        assert_eq!(maintenance.errors, 0);
+        if index == 0 {
+            assert_eq!(report.typesetting.persistent_ceiling_bytes, Some(0));
+            assert_eq!(maintenance.runs, 1);
+            assert!(maintenance.evicted_entries >= 4);
+            assert_eq!(maintenance.retained_bytes, Some(0));
+        } else if index == 1 {
+            assert!(report.typesetting.persistent);
+            assert_eq!(report.typesetting.persistent_hits, 0);
+            assert_eq!(maintenance.runs, 1);
+            let retained = maintenance.retained_bytes.unwrap();
+            assert!(retained > 0);
+            assert!(retained <= report.typesetting.persistent_ceiling_bytes.unwrap());
+        } else {
+            assert!(!report.typesetting.persistent);
+            assert_eq!(maintenance.runs, 0);
+        }
+        let frame = png(&fs, &destination);
+        if let Some(reference) = &reference {
+            assert_eq!(reference, &frame);
+        } else {
+            reference = Some(frame);
+        }
+    }
 }
 
 #[test]

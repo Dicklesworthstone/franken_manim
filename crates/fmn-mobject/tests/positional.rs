@@ -375,3 +375,245 @@ fn shift_onto_screen_pulls_back_only_the_edges_beyond_the_inset_frame() {
     assert!((stage.get_left(low)[0] + (FRAME_X_RADIUS - 0.25)).abs() < TOL);
     assert!((stage.get_bottom(low)[1] + (FRAME_Y_RADIUS - 0.25)).abs() < TOL);
 }
+
+fn layout_box(min: Vec3, max: Vec3) -> Mobject {
+    Mobject::from_points(&[min, max])
+}
+
+fn near(actual: f64, expected: f64) {
+    assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
+}
+
+#[test]
+fn fit_layout_preserves_nested_child_sizes_order_and_the_selected_edge() {
+    let mut stage = Stage::new();
+    let group = stage.add(Mobject::group(vec![
+        layout_box([0.0, -1.0, 0.0], [1.0, 1.0, 1.0]),
+        Mobject::group(vec![layout_box([2.0, -2.0, 0.0], [4.0, 2.0, 1.0])]),
+        layout_box([5.0, 0.0, 0.0], [6.0, 1.0, 1.0]),
+    ]));
+    stage.shift(group, [4.0, 3.0, 2.0]);
+    let children = stage.get(group).unwrap().submobjects().to_vec();
+    let edge_before = stage.get_bounding_box_point(group, LEFT);
+    let centers_before: Vec<Vec3> = children.iter().map(|&m| stage.get_center(m)).collect();
+    let point_columns: Vec<_> = stage
+        .family(group)
+        .into_iter()
+        .map(|m| {
+            (
+                m,
+                stage.get_object_points(m),
+                stage.get(m).unwrap().buffer.field_revision("point"),
+            )
+        })
+        .collect();
+
+    stage.arrange_to_fit_width(group, 8.0, LEFT);
+
+    near(stage.get_width(group), 8.0);
+    assert_eq!(stage.get_bounding_box_point(group, LEFT), edge_before);
+    assert_eq!(stage.get(group).unwrap().submobjects(), children);
+    for ((&child, width), before) in children.iter().zip([1.0, 2.0, 1.0]).zip(centers_before) {
+        near(stage.get_width(child), width);
+        near(stage.get_y(child), before[1]);
+        near(stage.get_z(child), before[2]);
+    }
+    for pair in children.windows(2) {
+        near(
+            stage.get_left(pair[1])[0] - stage.get_right(pair[0])[0],
+            2.0,
+        );
+    }
+    for (member, points, revision) in point_columns {
+        assert_eq!(
+            stage.get_object_points(member),
+            points,
+            "layout keeps retained geometry"
+        );
+        assert_eq!(
+            stage.get(member).unwrap().buffer.field_revision("point"),
+            revision
+        );
+    }
+
+    // The Reference permits overlap: there is no hidden clamp to zero gap.
+    stage.arrange_to_fit_width(group, 2.0, LEFT);
+    near(stage.get_width(group), 2.0);
+    for pair in children.windows(2) {
+        near(
+            stage.get_left(pair[1])[0] - stage.get_right(pair[0])[0],
+            -1.0,
+        );
+    }
+    assert_eq!(stage.get_bounding_box_point(group, LEFT), edge_before);
+}
+
+#[test]
+fn fit_layout_supports_height_depth_and_point_free_or_single_child_groups() {
+    let mut stage = Stage::new();
+    let group = stage.add(Mobject::group(vec![
+        layout_box([-2.0, -0.5, -0.5], [0.0, 0.5, 0.5]),
+        layout_box([1.0, 1.5, 1.5], [3.0, 2.5, 2.5]),
+    ]));
+    let center = stage.get_center(group);
+    stage.arrange_to_fit_height(group, 6.0, ORIGIN);
+    near(stage.get_height(group), 6.0);
+    stage.arrange_to_fit_depth(group, 7.0, ORIGIN);
+    near(stage.get_depth(group), 7.0);
+    assert_eq!(stage.get_center(group), center);
+    for &child in stage.get(group).unwrap().submobjects() {
+        near(stage.get_width(child), 2.0);
+        near(stage.get_height(child), 1.0);
+        near(stage.get_depth(child), 1.0);
+    }
+
+    for detached in [Mobject::new(), Mobject::group(vec![Mobject::new()])] {
+        let empty = stage.add(detached);
+        stage.shift(empty, [3.0, -2.0, 1.0]);
+        let before: Vec<_> = stage
+            .family(empty)
+            .into_iter()
+            .map(|m| (m, stage.placement(m)))
+            .collect();
+        stage.arrange_to_fit_width(empty, 10.0, RIGHT);
+        for (member, placement) in before {
+            assert_eq!(
+                stage.placement(member),
+                placement,
+                "trivial child counts are unchanged"
+            );
+        }
+    }
+
+    let empty_children = stage.add(Mobject::group(vec![Mobject::new(), Mobject::new()]));
+    stage.arrange_to_fit_width(empty_children, 4.0, ORIGIN);
+    for member in stage.family(empty_children) {
+        assert!(stage.get_center(member).into_iter().all(f64::is_finite));
+        assert!(stage.get(member).unwrap().buffer.is_empty());
+    }
+}
+
+#[test]
+fn spacing_preserves_nested_child_sizes_with_an_explicit_parent_pivot() {
+    let mut stage = Stage::new();
+    let group = stage.add(Mobject::group(vec![
+        layout_box([-2.5, -0.5, 0.0], [-1.5, 0.5, 0.0]),
+        Mobject::group(vec![
+            layout_box([2.0, -1.0, 0.0], [2.5, 1.0, 0.0]),
+            layout_box([3.5, -1.0, 0.0], [4.0, 1.0, 0.0]),
+        ]),
+    ]));
+    let children = stage.get(group).unwrap().submobjects().to_vec();
+    let before: Vec<_> = children
+        .iter()
+        .map(|&m| (stage.get_center(m), stage.get_width(m), stage.get_height(m)))
+        .collect();
+    let pivot = [1.0, 2.0, 0.0];
+    stage.space_out_submobjects_about(group, 2.0, Some(pivot), None);
+    for (&child, (center, width, height)) in children.iter().zip(before) {
+        let actual = stage.get_center(child);
+        for dim in 0..3 {
+            near(actual[dim], pivot[dim] + 2.0 * (center[dim] - pivot[dim]));
+        }
+        near(stage.get_width(child), width);
+        near(stage.get_height(child), height);
+    }
+    let nested = stage.get(children[1]).unwrap().submobjects();
+    near(
+        stage.get_left(nested[1])[0] - stage.get_right(nested[0])[0],
+        1.0,
+    );
+
+    // Only direct children scale back. A parent's own point run stays scaled.
+    let parent = stage.add(layout_box([-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]));
+    let child = stage.add(layout_box([-0.5, -0.5, 0.0], [0.5, 0.5, 0.0]));
+    stage.attach(parent, child).unwrap();
+    stage.space_out_submobjects(parent, 2.0);
+    assert_eq!(
+        stage.get_points(parent).unwrap(),
+        vec![[-2.0, 0.0, 0.0], [2.0, 0.0, 0.0]]
+    );
+    near(stage.get_width(child), 1.0);
+}
+
+#[test]
+fn conditional_size_constraints_preserve_noops_and_choose_stretch_or_uniform_scale() {
+    let mut stage = Stage::new();
+    let mob = stage.add(layout_box([-2.0, -1.0, -3.0], [2.0, 1.0, 3.0]));
+    stage.shift(mob, [1.0, 2.0, 3.0]);
+    let before = stage.placement_revision(mob);
+    stage.set_max_width(mob, 8.0, false);
+    stage.set_min_height(mob, 1.0, false);
+    assert_eq!(
+        stage.placement_revision(mob),
+        before,
+        "satisfied constraints do not invalidate caches"
+    );
+
+    stage.set_max_width(mob, 2.0, false);
+    near(stage.get_height(mob), 1.0);
+    near(stage.get_depth(mob), 3.0);
+    stage.set_min_height(mob, 4.0, true);
+    stage.set_max_depth(mob, 2.0, true);
+    stage.set_min_width(mob, 4.0, true);
+    stage.set_max_height(mob, 3.0, true);
+    stage.set_min_depth(mob, 5.0, true);
+    near(stage.get_width(mob), 4.0);
+    near(stage.get_height(mob), 3.0);
+    near(stage.get_depth(mob), 5.0);
+    stage.set_dimensions(mob, Some(2.0), None, Some(3.0));
+    near(stage.get_width(mob), 2.0);
+    near(stage.get_height(mob), 3.0);
+    near(stage.get_depth(mob), 3.0);
+    assert_eq!(stage.get_center(mob), [1.0, 2.0, 3.0]);
+
+    let empty = stage.add(Mobject::new());
+    stage.set_min_width(empty, 2.0, false);
+    stage.set_dimensions(empty, Some(1.0), Some(1.0), Some(1.0));
+    assert_eq!(stage.get_center(empty), ORIGIN);
+    near(stage.get_width(empty), 0.0);
+}
+
+#[test]
+fn replace_and_surround_keep_identity_geometry_and_reference_buffer_semantics() {
+    let mut stage = Stage::new();
+    let source = stage.add(layout_box([-1.0, -1.0, -1.0], [1.0, 1.0, 1.0]));
+    let target = stage.add(layout_box([1.0, -3.0, 0.0], [7.0, -1.0, 1.0]));
+    let points = stage.get_object_points(source);
+    let target_points = stage.get_points(target);
+    let families = [stage.family(source), stage.family(target)];
+    let snapshot_size = stage.snapshot_bytes().unwrap().len();
+    stage.replace(source, target, 0, false);
+    near(stage.get_width(source), 6.0);
+    near(stage.get_height(source), 6.0);
+    assert_eq!(stage.get_center(source), stage.get_center(target));
+    stage.replace(source, target, 0, true);
+    assert_eq!(
+        stage.get_bounding_box(source),
+        stage.get_bounding_box(target)
+    );
+    stage.surround(source, target, 0, true, 0.6);
+    near(stage.get_width(source), 6.6);
+    near(stage.get_height(source), 2.2);
+    near(stage.get_depth(source), 1.1);
+    assert_eq!(stage.get_object_points(source), points);
+    assert_eq!(stage.get_points(target), target_points);
+    assert_eq!([stage.family(source), stage.family(target)], families);
+    assert_eq!(
+        stage.snapshot_bytes().unwrap().len(),
+        snapshot_size,
+        "replace is a fit, not scene or family replacement"
+    );
+
+    let empty = stage.add(Mobject::new());
+    stage.shift(empty, [-10.0, 0.0, 0.0]);
+    let center = stage.get_center(source);
+    let width = stage.get_width(source);
+    stage.replace(source, empty, 0, false);
+    // The in-place shrink uses affine arithmetic, which can round the bounds.
+    for (actual, expected) in stage.get_center(source).into_iter().zip(center) {
+        near(actual, expected);
+    }
+    assert!(stage.get_width(source) > 0.0);
+    assert!((stage.get_width(source) / width - 1e-8).abs() < 1e-15);
+}

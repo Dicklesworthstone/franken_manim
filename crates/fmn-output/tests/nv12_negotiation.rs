@@ -167,20 +167,20 @@ Encoder h264_nvenc [NVIDIA NVENC H.264 encoder]:
             StdProcessRunner,
         };
 
-        let executable =
-            match StdFfmpegLocator::from_host_path().locate_ffmpeg(Path::new("ffmpeg")) {
-                Ok(executable) => executable,
-                Err(FfmpegLocatorError::NotFound) => return,
-                Err(error) => panic!("ffmpeg locator refused: {error}"),
-            };
+        let executable = match StdFfmpegLocator::from_host_path().locate_ffmpeg(Path::new("ffmpeg"))
+        {
+            Ok(executable) => executable,
+            Err(FfmpegLocatorError::NotFound) => return,
+            Err(error) => panic!("ffmpeg locator refused: {error}"),
+        };
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = Path::new("/tmp").canonicalize().unwrap().join(format!(
-            "fmn-nv12-probe-{}-{unique}",
-            std::process::id()
-        ));
+        let root = Path::new("/tmp")
+            .canonicalize()
+            .unwrap()
+            .join(format!("fmn-nv12-probe-{}-{unique}", std::process::id()));
         std::fs::create_dir(&root).unwrap();
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
         let runner = Arc::new(StdProcessRunner);
@@ -191,13 +191,19 @@ Encoder h264_nvenc [NVIDIA NVENC H.264 encoder]:
             let fmts = caps
                 .probe_pixel_formats(&tool, runner.as_ref(), "libx264")
                 .unwrap();
-            assert!(fmts.contains("nv12") && fmts.contains("yuv420p"));
+            assert!(
+                fmts.formats.iter().any(|fmt| fmt == "nv12")
+                    && fmts.formats.iter().any(|fmt| fmt == "yuv420p")
+            );
         }
         if caps.offers("h264_nvenc") {
             let fmts = caps
                 .probe_pixel_formats(&tool, runner.as_ref(), "h264_nvenc")
                 .unwrap();
-            assert!(fmts.contains("nv12") && fmts.contains("p010le"));
+            assert!(
+                fmts.formats.iter().any(|fmt| fmt == "nv12")
+                    && fmts.formats.iter().any(|fmt| fmt == "p010le")
+            );
         }
         // Verify decoded framemd5 identity when feeding rawvideo nv12 with vs without
         // a redundant output -pix_fmt yuv420p conversion.
@@ -246,4 +252,3 @@ Encoder h264_nvenc [NVIDIA NVENC H.264 encoder]:
         assert!(passthrough.contains("0,          0,          0,        1"));
     }
 }
-

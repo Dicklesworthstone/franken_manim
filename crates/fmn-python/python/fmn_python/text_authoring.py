@@ -6,9 +6,11 @@ from functools import wraps
 import inspect
 import itertools
 import math
+import operator
 
 _MAX_BYTES = 262_144
 _MAX_ITEMS = 4096
+_MAX_STYLE_WORK = 16_777_216
 
 
 def _number(value, name, *, positive=False):
@@ -52,6 +54,103 @@ def _stops(g, values, name):
     return result
 
 
+def _resolved_selector(obj, selector, offsets, budget, multiplier):
+    """Use the public selector protocol, then retain exact original bytes."""
+    result = []
+    for span in itertools.islice(iter(obj.find_spans_by_selector(selector)), budget[0] + 1):
+        if budget[0] == 0:
+            raise ValueError("Text selectors exceed the 262145-range budget")
+        start, end = (operator.index(index) for index in span)
+        if not 0 <= start <= end < len(offsets):
+            raise ValueError("Text style selectors must identify valid source character ranges")
+        start, end = offsets[start], offsets[end]
+        budget[0] -= 1
+        budget[1] -= max(end - start, 1) * multiplier
+        if budget[1] < 0:
+            raise ValueError("Text style matching exceeds the 16777216-byte-work budget")
+        result.append((start, end))
+    return result
+
+
+def text_recipe(g, obj, source):
+    """Compile the current public fields before publishing a new glyph family."""
+    size = len(source.encode("utf-8"))
+    if size > _MAX_BYTES:
+        raise ValueError("Text source exceeds 262144 bytes")
+    if obj.global_config or obj.local_configs:
+        raise NotImplementedError("Text global_config/local_configs require unsupported Pango attributes; use native font/style maps")
+    font = obj.font
+    if not isinstance(font, str):
+        raise TypeError("Text font must be a family name")
+    alignment = obj.alignment.upper() if isinstance(obj.alignment, str) else None
+    if alignment not in ("", "LEFT", "CENTER", "RIGHT"):
+        raise ValueError("Text alignment must be LEFT, CENTER or RIGHT")
+    maps = {name: _map({}, getattr(obj, name), name)
+            for name in ("t2c", "t2f", "t2s", "t2w", "t2g")}
+    if any(not isinstance(value, str) for value in maps["t2f"].values()):
+        raise TypeError("t2f values must be font family names")
+    maps["t2g"] = {key: _stops(g, value, "t2g") for key, value in maps["t2g"].items()}
+    stop_count = sum(len(stops) for stops in maps["t2g"].values())
+    if stop_count > _MAX_ITEMS:
+        raise ValueError("Text gradients exceed 4096 total stops")
+    gradient = None if obj.gradient is None else _stops(g, obj.gradient, "gradient")
+    count = sum(len(maps[name]) for name in ("t2f", "t2s", "t2w", "t2g"))
+    if size * max(count + stop_count, 1) > _MAX_STYLE_WORK:
+        raise ValueError("Text style matching exceeds the 16777216-byte-work budget")
+    options = dict(font=font,
+                   font_size=_number(obj.font_size, "Text font_size", positive=True),
+                   bold=_style_flag(obj.weight, "Text weight", "BOLD"),
+                   italic=_style_flag(obj.slant, "Text slant", "ITALIC"),
+                   alignment=alignment or "LEFT",
+                   line_spacing=1. if obj.lsh is None else _number(obj.lsh, "Text line spacing", positive=True),
+                   justify=bool(obj.justify), indent=_number(obj.indent, "Text indent"),
+                   disable_ligatures=bool(obj.disable_ligatures))
+    if obj.line_width is not None:
+        options["line_width"] = _number(obj.line_width, "Text line_width", positive=True)
+    if isinstance(obj, g["Code"]):
+        code_options = vars(obj).get("_fmn_code_layout")
+        language, theme = code_options if code_options is not None else (obj.language, obj.code_style)
+        _validate_code_names(language, theme)
+        options["code_language"], options["code_style"] = language, theme
+        options["font"] = "CM Typewriter" if font in ("", "Consolas") else font
+    offsets = [0]
+    for character in source:
+        offsets.append(offsets[-1] + len(character.encode("utf-8")))
+    budget = [_MAX_BYTES + 1, _MAX_STYLE_WORK]
+    previous_source = obj.string
+    # Authored selector overrides must see the new source even during a live
+    # rebuild. Restore the old published source if validation/layout fails.
+    obj.string = source
+    try:
+        for name in ("t2f", "t2s", "t2w", "t2g"):
+            entries = []
+            for selector, value in maps[name].items():
+                if name == "t2s":
+                    value = _style_flag(value, name, "ITALIC")
+                elif name == "t2w":
+                    value = _style_flag(value, name, "BOLD")
+                multiplier = 1 + len(value) if name == "t2g" else 1
+                entries.append((_resolved_selector(obj, selector, offsets, budget, multiplier), value))
+            options[name] = entries
+    finally:
+        obj.string = previous_source
+    return options, maps, gradient
+
+
+def apply_text_colors(obj):
+    """Run paint hooks after constructor or regeneration style initialization."""
+    if obj.gradient:
+        obj.set_color_by_gradient(*obj.gradient)
+    obj.set_color_by_text_to_color_map(obj.t2c)
+
+
+def _validate_code_names(language, theme):
+    if not isinstance(language, str) or not isinstance(theme, str):
+        raise TypeError("Code language and code_style must be strings")
+    if len(language.encode("utf-8")) > 1024 or len(theme.encode("utf-8")) > 1024:
+        raise ValueError("Code language/style names exceed 1024 bytes")
+
+
 def install_text_authoring(native):
     g = vars(native)
     if g.get("_FMN_TEXT_AUTHORING_INSTALLED", False):
@@ -73,42 +172,11 @@ def install_text_authoring(native):
             raise ValueError("Text source exceeds 262144 bytes")
         if p["global_config"] or p["local_configs"]:
             raise NotImplementedError("Text global_config/local_configs require unsupported Pango attributes; use native font/style maps")
-        font = p["font"]
-        if not isinstance(font, str):
-            raise TypeError("Text font must be a family name")
-        alignment = p["alignment"].upper() if isinstance(p["alignment"], str) else None
-        if alignment not in ("", "LEFT", "CENTER", "RIGHT"):
-            raise ValueError("Text alignment must be LEFT, CENTER or RIGHT")
-        spacing = p["line_spacing_height"] if p["line_spacing_height"] is not None else p["lsh"]
-        spacing = 1. if spacing is None else _number(spacing, "Text line spacing", positive=True)
         maps = {name: _map(p[long], p[name], name) for name, long in (
             ("t2c", "text2color"), ("t2f", "text2font"), ("t2s", "text2slant"),
             ("t2w", "text2weight"), ("t2g", "text2gradient"),
         )}
-        for name in ("t2f", "t2s", "t2w", "t2g"):
-            if any(not isinstance(key, str) for key in maps[name]):
-                raise TypeError(name + " currently requires literal source-string keys")
-        if any(not isinstance(value, str) for value in maps["t2f"].values()):
-            raise TypeError("t2f values must be font family names")
-        gradients = [(key, _stops(g, value, "t2g")) for key, value in maps["t2g"].items()]
-        if sum(len(stops) for _, stops in gradients) > _MAX_ITEMS:
-            raise ValueError("Text gradients exceed 4096 total stops")
-        gradient = None if p["gradient"] is None else _stops(g, p["gradient"], "gradient")
-        options = dict(font=font, font_size=_number(p["font_size"], "Text font_size", positive=True),
-                       bold=_style_flag(p["weight"], "Text weight", "BOLD"),
-                       italic=_style_flag(p["slant"], "Text slant", "ITALIC"),
-                       alignment=alignment or "LEFT", line_spacing=spacing,
-                       justify=bool(p["justify"]), indent=_number(p["indent"], "Text indent"),
-                       disable_ligatures=bool(p["disable_ligatures"]),
-                       t2f=list(maps["t2f"].items()),
-                       t2s=[(key, _style_flag(value, "t2s", "ITALIC")) for key, value in maps["t2s"].items()],
-                       t2w=[(key, _style_flag(value, "t2w", "BOLD")) for key, value in maps["t2w"].items()],
-                       t2g=gradients)
-        code_options = vars(self).get("_fmn_code_layout")
-        if isinstance(self, g["Code"]) and code_options is not None:
-            options["code_language"], options["code_style"] = code_options
-        if p["line_width"] is not None:
-            options["line_width"] = _number(p["line_width"], "Text line_width", positive=True)
+        spacing = p["line_spacing_height"] if p["line_spacing_height"] is not None else p["lsh"]
         height = None if p["height"] is None else _number(p["height"], "Text height", positive=True)
         labelled = bool(style.pop("use_labelled_svg", False))
         centered = style.pop("should_center", True)
@@ -117,22 +185,19 @@ def install_text_authoring(native):
         protect = style.pop("protect", ())
         g["_preflight_vmobject_style_kwargs"](style)
         self.text = self.string = source
-        self.font_size, self.font = options["font_size"], font
+        self.font_size, self.font = p["font_size"], p["font"]
         self.weight, self.slant = p["weight"], p["slant"]
         self.alignment, self.line_width = p["alignment"], p["line_width"]
-        self.justify, self.indent, self.lsh = options["justify"], options["indent"], spacing
+        self.justify, self.indent, self.lsh = p["justify"], p["indent"], spacing
         self.global_config, self.local_configs = {}, {}
-        self.disable_ligatures, self.isolate = options["disable_ligatures"], p["isolate"]
+        self.disable_ligatures, self.isolate = p["disable_ligatures"], p["isolate"]
+        self.gradient = None if p["gradient"] is None else _stops(g, p["gradient"], "gradient")
         self.use_labelled_svg, self.base_color, self.protect = labelled, base_color, protect
         for name, value in maps.items():
             setattr(self, name, value)
-        self._fmn_text_options = options
+        self._fmn_text_options = {}
         initialize_string(g, self, style)
-        if gradient:
-            self.set_color_by_gradient(*gradient)
-        # Existing selectors retain regex/Unicode/byte-span behavior and win
-        # over a whole-object gradient, as on the public authoring surface.
-        self.set_color_by_text_to_color_map(self.t2c)
+        apply_text_colors(self)
         if centered:
             self.center()
         if height is not None:
@@ -164,10 +229,7 @@ def _install_code(g):
                    code_style="monokai", **kwargs):
         if not isinstance(font, str):
             raise TypeError("Code font must be a family name")
-        if not isinstance(language, str) or not isinstance(code_style, str):
-            raise TypeError("Code language and code_style must be strings")
-        if len(language.encode("utf-8")) > 1024 or len(code_style.encode("utf-8")) > 1024:
-            raise ValueError("Code language/style names exceed 1024 bytes")
+        _validate_code_names(language, code_style)
         # The legacy default name is an explicit Code-only compatibility
         # policy, not OS font discovery. Record the real bundled family.
         native_font = "CM Typewriter" if font in ("", "Consolas") else font

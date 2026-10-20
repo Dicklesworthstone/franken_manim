@@ -620,6 +620,10 @@ mod private_boundary {
                 stderr: Vec::new(),
             },
         );
+        runner.script(
+            probe_bound_tool(dir, 1),
+            pixel_format_outcome("libx264", "yuv420p nv12 yuv420p10le"),
+        );
         (tool_path, runner)
     }
 
@@ -658,6 +662,17 @@ mod private_boundary {
         ProcessOutcome {
             termination: ProcessTermination::Exited(Some(0)),
             stdout: Vec::new(),
+            stderr: Vec::new(),
+        }
+    }
+
+    fn pixel_format_outcome(encoder: &str, formats: &str) -> ProcessOutcome {
+        ProcessOutcome {
+            termination: ProcessTermination::Exited(Some(0)),
+            stdout: format!(
+                "Encoder {encoder} [Fixture encoder]:\n    Supported pixel formats: {formats}\n"
+            )
+            .into_bytes(),
             stderr: Vec::new(),
         }
     }
@@ -985,16 +1000,16 @@ mod private_boundary {
         assert_eq!(std::fs::read(&sentinel).unwrap(), b"not ours");
 
         let runs = runner.runs();
-        assert_eq!(runs.len(), 2);
-        let workdir = runs[1].program.parent().expect("job workdir");
-        assert!(runs[1].cwd.is_none());
+        assert_eq!(runs.len(), 3, "version, format discovery, then encode");
+        let workdir = runs[2].program.parent().expect("job workdir");
+        assert!(runs[2].cwd.is_none());
         assert_eq!(
             workdir,
             session_root(&dir, 0)
                 .join(format!("fmn-job-{}-1", std::process::id()))
                 .as_path()
         );
-        assert_eq!(runs[1].program, workdir.join(bound_tool_leaf()));
+        assert_eq!(runs[2].program, workdir.join(bound_tool_leaf()));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1004,7 +1019,7 @@ mod private_boundary {
                 0o700
             );
             assert_eq!(
-                std::fs::metadata(&runs[1].program)
+                std::fs::metadata(&runs[2].program)
                     .unwrap()
                     .permissions()
                     .mode()
@@ -1100,6 +1115,294 @@ mod private_boundary {
         assert_eq!(caps.hardware(), vec!["h264_nvenc".to_string()]);
     }
 
+    #[test]
+    fn pixel_format_discovery_is_bounded_cached_and_rechecks_executable_identity() {
+        let (dir, _gate) = scratch("pixel-format-cache");
+        let (tool_path, runner) = scripted_tool(&dir);
+        let tool = resolve_tool(&tool_path, &runner, &dir).unwrap();
+        let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
+        let first = caps.probe_pixel_formats(&tool, &runner, "libx264").unwrap();
+        assert_eq!(first.encoder, "libx264");
+        assert_eq!(first.formats, ["nv12", "yuv420p", "yuv420p10le"]);
+        assert_eq!(
+            caps.probe_pixel_formats(&tool.clone(), &runner, "libx264")
+                .unwrap(),
+            first,
+        );
+        assert_eq!(
+            caps.require_video_job(
+                &tool,
+                &runner,
+                &job(WireFormat::P010, Container::Mp4, EncoderChoice::Auto),
+            )
+            .unwrap(),
+            Some(first),
+        );
+        let runs = runner.runs();
+        assert_eq!(runs.len(), 2, "version plus one cached format query");
+        let probe = &runs[1];
+        assert_eq!(probe.argv, ["-hide_banner", "-h", "encoder=libx264"]);
+        assert_eq!(probe.timeout, std::time::Duration::from_secs(2));
+        assert_eq!(probe.max_output_bytes, 64 * 1024);
+        assert!(probe.stdin.is_none());
+        assert_eq!(probe.env[0], ("LANG".into(), "C".into()));
+        assert_eq!(probe.env[1], ("LC_ALL".into(), "C".into()));
+        assert_eq!(probe.program, probe_bound_tool(&dir, 1));
+        assert_ne!(probe.program, tool.path());
+
+        std::fs::write(&tool_path, b"changed executable").unwrap();
+        let error = caps
+            .probe_pixel_formats(&tool, &runner, "libx264")
+            .expect_err("a cached format list cannot conceal executable replacement");
+        assert!(matches!(
+            error,
+            BoundaryError::ExecutableImageRejected { .. }
+        ));
+        assert_eq!(runner.runs().len(), 2);
+    }
+
+    #[test]
+    fn p010_refusal_preserves_destination_and_never_starts_an_eight_bit_encode() {
+        let (dir, _gate) = scratch("pixel-format-precision");
+        let (tool_path, mut runner) = scripted_tool(&dir);
+        runner.script(
+            probe_bound_tool(&dir, 1),
+            pixel_format_outcome("libx264", "nv12 yuv420p"),
+        );
+        let tool = resolve_tool(&tool_path, &runner, &dir).unwrap();
+        let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
+        let runner = Arc::new(runner);
+        let boundary =
+            Boundary::new(tool, runner.clone(), JobLimits::default(), dir.clone()).unwrap();
+        let destination = dir.join("existing.mp4");
+        std::fs::write(&destination, b"existing movie").unwrap();
+        let error = boundary
+            .encode(
+                &job(WireFormat::P010, Container::Mp4, EncoderChoice::Auto),
+                vec![0; WireFormat::P010.frame_bytes(64, 36)],
+                &caps,
+                &destination,
+            )
+            .expect_err("P010 cannot silently become eight-bit video");
+        assert!(matches!(
+            &error,
+            BoundaryError::UnsupportedEncoderPixelFormat {
+                requested,
+                wire: WireFormat::P010,
+                advertised,
+            } if requested == "libx264" && advertised == &["nv12", "yuv420p"]
+        ));
+        assert!(error.to_string().contains("10-bit"));
+        assert_eq!(std::fs::read(&destination).unwrap(), b"existing movie");
+        assert_eq!(runner.runs().len(), 2, "only version and format discovery");
+        assert!(
+            caps.require_video_job(
+                boundary.tool(),
+                runner.as_ref(),
+                &job(WireFormat::Nv12, Container::Mp4, EncoderChoice::Auto),
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            runner.runs().len(),
+            2,
+            "NV12 reuses the same valid inventory"
+        );
+    }
+
+    #[test]
+    fn failed_or_malformed_format_queries_do_not_poison_the_tool_cache() {
+        for (label, outcome) in [
+            ("wrong-encoder", pixel_format_outcome("libx265", "p010le")),
+            (
+                "timeout",
+                ProcessOutcome {
+                    termination: ProcessTermination::TimedOut,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                },
+            ),
+        ] {
+            let (dir, _gate) = scratch(label);
+            let (tool_path, mut runner) = scripted_tool(&dir);
+            runner.script(probe_bound_tool(&dir, 1), outcome);
+            runner.script(
+                probe_bound_tool(&dir, 2),
+                pixel_format_outcome("libx264", "nv12 yuv420p10le"),
+            );
+            let tool = resolve_tool(&tool_path, &runner, &dir).unwrap();
+            let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
+            assert!(matches!(
+                caps.probe_pixel_formats(&tool, &runner, "libx264"),
+                Err(BoundaryError::ProbeFailed(_))
+            ));
+            let accepted = caps.probe_pixel_formats(&tool, &runner, "libx264").unwrap();
+            assert_eq!(accepted.formats, ["nv12", "yuv420p10le"]);
+            assert_eq!(runner.runs().len(), 3, "failed discovery was retried");
+        }
+    }
+
+    #[test]
+    fn hardware_probe_classifies_missing_driver_and_caches_the_fingerprint() {
+        let (dir, _gate) = scratch("hardware-probe-cache");
+        let (tool_path, mut runner) = scripted_tool(&dir);
+        let tool = resolve_tool(&tool_path, &runner, &dir).unwrap();
+        runner.script(
+            probe_bound_tool(&dir, 1),
+            ProcessOutcome {
+                termination: ProcessTermination::Exited(Some(1)),
+                stdout: Vec::new(),
+                stderr: b"Cannot load libcuda.so.1\ninitialization failed\n".to_vec(),
+            },
+        );
+        let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
+        let probes = caps.probe_hardware(&tool, &runner).unwrap();
+        assert_eq!(probes.len(), 1);
+        assert_eq!(probes[0].encoder, "h264_nvenc");
+        assert!(!probes[0].available);
+        assert_eq!(
+            probes[0].detail.as_deref(),
+            Some("Cannot load libcuda.so.1")
+        );
+        assert!(
+            caps.offers("h264_nvenc"),
+            "compiled inventory remains distinct"
+        );
+        assert_eq!(caps.probe_hardware(&tool.clone(), &runner).unwrap(), probes);
+        let error = caps
+            .require_encoder(&tool, &runner, "h264_nvenc")
+            .expect_err("a compiled encoder without its driver is refused");
+        assert!(matches!(error, BoundaryError::UnusableEncoder { .. }));
+        assert_eq!(runner.runs().len(), 2, "tool clones reuse the observation");
+
+        let runs = runner.runs();
+        let probe = &runs[1];
+        assert_eq!(probe.timeout, std::time::Duration::from_secs(2));
+        assert_eq!(probe.max_output_bytes, 16 * 1024);
+        assert!(probe.argv.windows(2).any(|args| args == ["-f", "null"]));
+        assert!(probe.argv.windows(2).any(|args| args == ["-frames:v", "2"]));
+        assert!(
+            probe
+                .argv
+                .windows(2)
+                .any(|args| args == ["-c:v", "h264_nvenc"])
+        );
+        assert!(
+            probe
+                .argv
+                .windows(2)
+                .any(|args| args == ["-video_size", "256x256"])
+        );
+        assert!(probe.cwd.is_none());
+        assert_eq!(
+            probe.env,
+            [
+                ("LANG".to_owned(), "C".to_owned()),
+                ("LC_ALL".to_owned(), "C".to_owned()),
+                (
+                    "TMPDIR".to_owned(),
+                    probe.program.parent().unwrap().display().to_string(),
+                ),
+            ]
+        );
+        let frames = probe.stdin.as_ref().expect("two raw frames streamed");
+        let luma_bytes = 256 * 256;
+        let frame_bytes = luma_bytes * 3 / 2;
+        assert_eq!(frames.len(), 2 * frame_bytes);
+        for frame in frames.chunks_exact(frame_bytes) {
+            assert!(frame[..luma_bytes].iter().all(|byte| *byte == 16));
+            assert!(frame[luma_bytes..].iter().all(|byte| *byte == 128));
+        }
+
+        assert!(
+            caps.require_encoder(&tool, &runner, "libx264")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(runner.runs().len(), 2, "software needs no hardware trial");
+
+        let mut changed = std::fs::read(&tool_path).unwrap();
+        changed.push(0);
+        std::fs::write(&tool_path, changed).unwrap();
+        assert!(matches!(
+            caps.probe_hardware(&tool, &runner),
+            Err(BoundaryError::ExecutableIdentityChanged { .. }
+                | BoundaryError::ExecutableImageRejected { .. })
+        ));
+        assert_eq!(
+            runner.runs().len(),
+            2,
+            "cache cannot mask source replacement"
+        );
+
+        // A new fingerprint gets a fresh observation, even at the same path.
+        runner.script(
+            probe_bound_tool_in_session(&dir, 1, 0),
+            ProcessOutcome {
+                termination: ProcessTermination::Exited(Some(0)),
+                stdout: format!("{FAKE_VERSION}\n").into_bytes(),
+                stderr: Vec::new(),
+            },
+        );
+        runner.script(
+            probe_bound_tool_in_session(&dir, 1, 1),
+            successful_scripted_outcome(),
+        );
+        let refreshed = resolve_tool(&tool_path, &runner, &dir).unwrap();
+        assert_ne!(tool.sha256_hex(), refreshed.sha256_hex());
+        assert!(
+            caps.require_encoder(&refreshed, &runner, "h264_nvenc")
+                .unwrap()
+                .expect("hardware admission retains its probe")
+                .available
+        );
+        assert_eq!(runner.runs().len(), 4);
+    }
+
+    #[test]
+    fn an_unusable_hardware_encoder_is_refused_before_production_starts() {
+        let (dir, _gate) = scratch("hardware-probe-timeout");
+        let (tool_path, mut runner) = scripted_tool(&dir);
+        let tool = resolve_tool(&tool_path, &runner, &dir).unwrap();
+        runner.script(
+            probe_bound_tool(&dir, 1),
+            ProcessOutcome {
+                termination: ProcessTermination::TimedOut,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            },
+        );
+        let runner = Arc::new(runner);
+        let boundary =
+            Boundary::new(tool, runner.clone(), JobLimits::default(), dir.clone()).unwrap();
+        let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
+        let destination = dir.join("existing.mp4");
+        std::fs::write(&destination, b"existing artifact").unwrap();
+        let error = boundary
+            .encode(
+                &job(
+                    WireFormat::Nv12,
+                    Container::Mp4,
+                    EncoderChoice::Named("h264_nvenc".to_owned()),
+                ),
+                vec![0; WireFormat::Nv12.frame_bytes(64, 36)],
+                &caps,
+                &destination,
+            )
+            .expect_err("a timed-out trial cannot admit a production encode");
+        assert!(matches!(
+            error,
+            BoundaryError::UnusableEncoder { requested, detail }
+                if requested == "h264_nvenc" && detail.contains("2000 ms timeout")
+        ));
+        assert_eq!(std::fs::read(&destination).unwrap(), b"existing artifact");
+        assert_eq!(
+            runner.runs().len(),
+            2,
+            "only version and the functional trial"
+        );
+    }
+
     /// Run one scripted encode and hand back the recorded spec (the run
     /// necessarily ends in `ArtifactMissing` — the scripted runner writes
     /// nothing — which itself proves artifact verification gates
@@ -1116,6 +1419,13 @@ mod private_boundary {
         let (tool_path, mut runner) = scripted_tool(&dir);
         let tool = resolve_tool(&tool_path, &runner, &dir).unwrap();
         runner.script(first_bound_tool(&dir), successful_scripted_outcome());
+        if let EncoderChoice::Named(name) = &encoder {
+            runner.script(probe_bound_tool(&dir, 1), successful_scripted_outcome());
+            runner.script(
+                probe_bound_tool(&dir, 2),
+                pixel_format_outcome(name, "nv12 yuv420p p010le"),
+            );
+        }
         let runner = Arc::new(runner);
         let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
         let boundary =
@@ -1141,9 +1451,10 @@ mod private_boundary {
         assert!(matches!(result, Err(BoundaryError::ArtifactMissing)));
         assert!(!dir.join("final/out.mp4").exists());
 
-        // One probe (-version) + one encode.
-        assert_eq!(runs.len(), 2);
-        let spec = &runs[1];
+        // Version and input-format discovery precede the actual encode.
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[1].argv, ["-hide_banner", "-h", "encoder=libx264"]);
+        let spec = &runs[2];
         assert!(spec.program.is_absolute());
         // Env allowlist, exactly, in order: LANG, LC_ALL, TMPDIR.
         assert_eq!(spec.env.len(), 3);
@@ -1199,8 +1510,12 @@ mod private_boundary {
         assert!(matches!(result, Err(BoundaryError::ArtifactMissing)));
 
         let runs = runner.runs();
-        assert_eq!(runs.len(), 3, "probe, video encode, then audio mux");
-        let mux = &runs[2];
+        assert_eq!(
+            runs.len(),
+            4,
+            "version, formats, video encode, then audio mux"
+        );
+        let mux = &runs[3];
         assert!(mux.cwd.is_none());
         let canonical_audio = canonical_audio.to_str().expect("UTF-8 test path");
         assert!(
@@ -1278,11 +1593,14 @@ mod private_boundary {
     #[test]
     fn hardware_encoder_explicit_and_unknown() {
         let frame = vec![0u8; WireFormat::Nv12.frame_bytes(64, 36)];
-        // Present in caps: the argv names it.
+        // Present in caps and functionally usable: both trial and encode name it.
         let (result, runs, _) =
             scripted_encode(EncoderChoice::Named("h264_nvenc".into()), frame.clone());
         assert!(matches!(result, Err(BoundaryError::ArtifactMissing)));
-        assert!(runs[1].argv.windows(2).any(|w| w == ["-c:v", "h264_nvenc"]));
+        assert_eq!(runs.len(), 4);
+        assert!(runs[1].argv.windows(2).any(|w| w == ["-f", "null"]));
+        assert_eq!(runs[2].argv, ["-hide_banner", "-h", "encoder=h264_nvenc"]);
+        assert!(runs[3].argv.windows(2).any(|w| w == ["-c:v", "h264_nvenc"]));
 
         // Absent from caps: refused before any spawn.
         let (result, runs, _) =
@@ -1526,6 +1844,100 @@ mod private_boundary {
 
     #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
     #[test]
+    fn real_hardware_probe_succeeds_and_is_recorded_in_encode_provenance() {
+        let (dir, _gate) = scratch("real-hardware-probe");
+        let (tool, runner) = real_tool(&dir);
+        let caps = EncoderCapabilities::probe(&tool, &runner).unwrap();
+        assert!(caps.offers("h264_nvenc"));
+        let destination = dir.join("hardware.mp4");
+        let worker_destination = destination.clone();
+        let (completed, result) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let probes = caps.probe_hardware(&tool, &runner).unwrap();
+            let limits = JobLimits {
+                timeout: Duration::from_secs(2),
+                ..JobLimits::default()
+            };
+            let boundary = Boundary::new(tool, Arc::new(runner), limits, dir).unwrap();
+            let report = boundary
+                .encode(
+                    &job(
+                        WireFormat::Nv12,
+                        Container::Mp4,
+                        EncoderChoice::Named("h264_nvenc".to_owned()),
+                    ),
+                    vec![7_u8; WireFormat::Nv12.frame_bytes(64, 36)],
+                    &caps,
+                    &worker_destination,
+                )
+                .unwrap();
+            completed.send((probes, report)).unwrap();
+        });
+        let (probes, report) = result
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the real hardware trial and encode must complete within their budgets");
+        worker.join().unwrap();
+
+        assert_eq!(probes.len(), 1);
+        assert_eq!(probes[0].encoder, "h264_nvenc");
+        assert!(probes[0].available);
+        assert!(probes[0].detail.is_none());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"FAKEVIDEO");
+        assert_eq!(report.artifact_bytes, 9);
+        assert_eq!(report.artifact_digest, sha256(b"FAKEVIDEO"));
+        assert_eq!(report.destination, destination);
+        assert_eq!(report.invocations.len(), 1);
+        let provenance = &report.invocations[0].provenance;
+        assert_eq!(provenance.encoder.as_deref(), Some("h264_nvenc"));
+        assert_eq!(provenance.hardware_encoder_probe.as_ref(), probes.first());
+    }
+
+    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[test]
+    fn real_hardware_probe_preserves_missing_driver_refusal_before_stdin_drain() {
+        let (dir, _gate) = scratch("real-hardware-probe-missing-driver");
+        set_native_fixture_mode(&dir, "hardware-unavailable");
+        let (tool, runner) = real_tool(&dir);
+        let caps = EncoderCapabilities::probe(&tool, &runner).unwrap();
+        assert!(caps.offers("h264_nvenc"), "the compiled encoder is listed");
+        let destination = dir.join("existing.mp4");
+        std::fs::write(&destination, b"existing artifact").unwrap();
+        let worker_destination = destination.clone();
+        let limits = JobLimits {
+            timeout: Duration::from_secs(2),
+            ..JobLimits::default()
+        };
+        let boundary = Boundary::new(tool, Arc::new(runner), limits, dir).unwrap();
+        let (completed, result) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let outcome = boundary.encode(
+                &job(
+                    WireFormat::Nv12,
+                    Container::Mp4,
+                    EncoderChoice::Named("h264_nvenc".to_owned()),
+                ),
+                vec![7_u8; WireFormat::Nv12.frame_bytes(64, 36)],
+                &caps,
+                &worker_destination,
+            );
+            completed.send(outcome).unwrap();
+        });
+        let outcome = result
+            .recv_timeout(Duration::from_secs(10))
+            .expect("an early hardware exit must not block while streaming probe stdin");
+        worker.join().unwrap();
+
+        let error = outcome.expect_err("a missing driver refuses the production encode");
+        assert!(matches!(
+            error,
+            BoundaryError::UnusableEncoder { requested, detail }
+                if requested == "h264_nvenc" && detail == "Cannot load libcuda.so.1"
+        ));
+        assert_eq!(std::fs::read(&destination).unwrap(), b"existing artifact");
+    }
+
+    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[test]
     fn transient_source_swap_cannot_select_the_version_probe_executable() {
         let (dir, _gate) = scratch("transient-version-substitution");
         let source = copy_native_ffmpeg(&dir, "fake-ffmpeg");
@@ -1703,6 +2115,12 @@ mod private_boundary {
         let tool = resolve_tool(&source, runner.as_ref(), &dir).unwrap();
         let source_identity = tool.path().to_path_buf();
         let source_sha256 = tool.sha256_hex().to_owned();
+        let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
+        // Discover formats before arming the production-spawn substitution.
+        // The cached query still verifies identity at admission; this test
+        // specifically replaces the source during the actual encode spawn.
+        caps.probe_pixel_formats(&tool, &StdProcessRunner, "libx264")
+            .unwrap();
         let boundary = Boundary::new(
             tool,
             runner,
@@ -1713,7 +2131,6 @@ mod private_boundary {
             dir.clone(),
         )
         .unwrap();
-        let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
         let destination = dir.join("bound.mp4");
         let frames = vec![3_u8; WireFormat::Nv12.frame_bytes(64, 36)];
         let report = boundary
@@ -1812,6 +2229,244 @@ mod private_boundary {
              setup was independently classified as {setup_elapsed:?}"
         );
         assert!(!destination.exists());
+    }
+
+    /// Measure cancellation after the native descendant starts growing a file.
+    /// Executable copying/hashing is setup work and is not part of this bound.
+    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    fn finish_live_disk_job<T: Send + 'static>(
+        dir: &Path,
+        worker: std::thread::JoinHandle<T>,
+    ) -> T {
+        let ready = dir.join(".fmn-native-ffmpeg-output-ready");
+        let setup_started = std::time::Instant::now();
+        while !ready.exists() {
+            assert!(
+                !worker.is_finished(),
+                "disk-budget job ended before the descendant readiness marker"
+            );
+            assert!(
+                setup_started.elapsed() < Duration::from_secs(30),
+                "native disk-budget fixture did not become ready"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let supervision_started = std::time::Instant::now();
+        let result = worker.join().expect("native disk-budget worker");
+        let supervision_elapsed = supervision_started.elapsed();
+        assert!(
+            supervision_elapsed < Duration::from_secs(3),
+            "disk-budget cancellation/tree-kill/reap waited too long: {supervision_elapsed:?}"
+        );
+        let marker = std::fs::read_to_string(ready).unwrap();
+        let grown_path = PathBuf::from(
+            marker
+                .lines()
+                .nth(1)
+                .expect("native descendant recorded its growing file"),
+        );
+        assert!(
+            !grown_path.exists(),
+            "an oversized private output or scratch file survived cleanup"
+        );
+        result
+    }
+
+    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[test]
+    fn live_output_limit_cancels_a_descendant_while_stdin_is_backpressured() {
+        let (dir, _gate) = scratch("live-output-backpressure");
+        set_native_fixture_mode(&dir, "runaway-output");
+        let (tool, runner) = real_tool(&dir);
+        let limits = JobLimits {
+            timeout: Duration::from_secs(8),
+            max_artifact_bytes: 1024,
+            ..JobLimits::default()
+        };
+        let boundary = Boundary::new(tool, Arc::new(runner), limits, dir.clone()).unwrap();
+        let destination = dir.join("movie.mp4");
+        std::fs::write(&destination, b"previous completed movie").unwrap();
+        let output = destination.clone();
+        let worker = std::thread::spawn(move || {
+            let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
+            let mut video = job(WireFormat::Nv12, Container::Mp4, EncoderChoice::Auto);
+            video.width = 3840;
+            video.height = 2160;
+            // Far larger than the stdin pipe; the fixture never consumes it.
+            let frames = vec![0_u8; video.wire.frame_bytes(video.width, video.height)];
+            boundary.encode(&video, frames, &caps, &output)
+        });
+        let result = finish_live_disk_job(&dir, worker);
+        assert!(
+            matches!(
+                result,
+                Err(BoundaryError::ArtifactOversized { bytes, max: 1024 }) if bytes >= 4096
+            ),
+            "expected live output-size refusal, got {result:?}"
+        );
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            b"previous completed movie"
+        );
+    }
+
+    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[test]
+    fn live_disk_limit_covers_mux_decode_image_and_concat_processes() {
+        use fmn_output::audio::{AudioDecodeError, AudioDecodeLimits, AudioInputFormat};
+
+        let (suite, _gate) = scratch("live-output-routes");
+        for route in ["mux", "audio", "image", "concat", "audio-bytes"] {
+            let dir = suite.join(route);
+            create_private_test_directory(&dir);
+            set_native_fixture_mode(
+                &dir,
+                if route == "mux" {
+                    "runaway-mux"
+                } else {
+                    "runaway-output"
+                },
+            );
+            let (tool, runner) = real_tool(&dir);
+            let limits = JobLimits {
+                timeout: Duration::from_secs(8),
+                max_artifact_bytes: 1024,
+                ..JobLimits::default()
+            };
+            let boundary = Boundary::new(tool, Arc::new(runner), limits, dir.clone()).unwrap();
+            let input = dir.join("source.media");
+            std::fs::write(&input, b"immutable native fixture input").unwrap();
+            let destination = dir.join("published.media");
+            let output = destination.clone();
+            let worker = std::thread::spawn(move || match route {
+                "mux" => {
+                    let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
+                    let video = job(WireFormat::Nv12, Container::Mp4, EncoderChoice::Auto);
+                    let frames = vec![0_u8; video.wire.frame_bytes(video.width, video.height)];
+                    boundary
+                        .encode_with_audio(&video, frames, &input, &caps, &output)
+                        .map(|_| ())
+                }
+                "audio" => boundary.transcode_audio(&input, &output).map(|_| ()),
+                "image" => boundary.transcode_image(&input, &output).map(|_| ()),
+                "concat" => boundary.concat(&[input], &output).map(|_| ()),
+                "audio-bytes" => match boundary.decode_audio_bytes(
+                    b"immutable compressed fixture",
+                    AudioInputFormat::Flac,
+                    &AudioDecodeLimits::default(),
+                ) {
+                    Err(AudioDecodeError::Boundary(error)) => Err(error),
+                    Err(error) => panic!("unexpected audio-decode refusal: {error}"),
+                    Ok(_) => panic!("runaway audio decode unexpectedly succeeded"),
+                },
+                _ => unreachable!(),
+            });
+            let result = finish_live_disk_job(&dir, worker);
+            assert!(
+                matches!(
+                    result,
+                    Err(BoundaryError::ArtifactOversized { bytes, max: 1024 }) if bytes >= 4096
+                ),
+                "{route} did not preserve the output-size refusal: {result:?}"
+            );
+            assert!(
+                !destination.exists(),
+                "{route} published an oversized artifact"
+            );
+        }
+    }
+
+    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[test]
+    fn live_directory_budget_cancels_unbounded_scratch_with_a_small_output() {
+        let (dir, _gate) = scratch("live-scratch-budget");
+        set_native_fixture_mode(&dir, "runaway-scratch");
+        let (tool, runner) = real_tool(&dir);
+        let limits = JobLimits {
+            timeout: Duration::from_secs(8),
+            max_artifact_bytes: 1024,
+            ..JobLimits::default()
+        };
+        let boundary = Boundary::new(tool, Arc::new(runner), limits, dir.clone()).unwrap();
+        let input = dir.join("image.webp");
+        std::fs::write(&input, b"immutable image fixture").unwrap();
+        let destination = dir.join("image.png");
+        let output = destination.clone();
+        let worker = std::thread::spawn(move || boundary.transcode_image(&input, &output));
+        let result = finish_live_disk_job(&dir, worker);
+        assert!(
+            matches!(
+                result,
+                Err(BoundaryError::WorkdirOversized { bytes, max }) if bytes > max
+            ),
+            "expected a private-directory disk refusal, got {result:?}"
+        );
+        assert!(!destination.exists());
+    }
+
+    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[test]
+    fn staged_wav_and_completed_video_keep_their_own_disk_allowances() {
+        let (dir, _gate) = scratch("staged-input-allowances");
+        set_native_fixture_mode(&dir, "bounded-output");
+        let (tool, runner) = real_tool(&dir);
+        let limits = JobLimits {
+            max_artifact_bytes: 4096,
+            ..JobLimits::default()
+        };
+        let boundary = Boundary::new(tool, Arc::new(runner), limits, dir.clone()).unwrap();
+        let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
+        let video = job(WireFormat::Nv12, Container::Mp4, EncoderChoice::Auto);
+        let frames = vec![0_u8; video.wire.frame_bytes(video.width, video.height)];
+        let bytes = frames.len() as u64;
+        let destination = dir.join("soundtrack.mp4");
+        let mut encode = boundary
+            .start_encode(
+                &video,
+                &caps,
+                &destination,
+                None,
+                ProcessCancellation::new(),
+                ProcessStdinLimits::new(bytes, bytes),
+            )
+            .unwrap();
+        encode.write_stdin(&frames).unwrap();
+        let report = encode
+            .prepare_with_wav(&[0_u8; 4096])
+            .unwrap()
+            .commit()
+            .unwrap();
+        assert_eq!(report.invocations.len(), 2);
+        assert_eq!(report.artifact_bytes, 4096);
+        assert_eq!(std::fs::metadata(destination).unwrap().len(), 4096);
+    }
+
+    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[test]
+    fn image_transcode_executes_the_png_codec_through_the_same_boundary() {
+        let (dir, _gate) = scratch("image-transcode");
+        let (tool, runner) = real_tool(&dir);
+        let boundary =
+            Boundary::new(tool, Arc::new(runner), JobLimits::default(), dir.clone()).unwrap();
+        let input = dir.join("source.webp");
+        let destination = dir.join("decoded/image.png");
+        std::fs::write(&input, b"immutable image fixture").unwrap();
+        let report = boundary.transcode_image(&input, &destination).unwrap();
+        assert_eq!(std::fs::read(destination).unwrap(), b"FAKEVIDEO");
+        assert_eq!(report.invocations.len(), 1);
+        let invocation = &report.invocations[0];
+        assert!(invocation.provenance.encoder.is_none());
+        assert!(
+            invocation
+                .provenance
+                .argv
+                .windows(2)
+                .any(|args| args == ["-c:v", "png"])
+        );
+        assert_eq!(
+            invocation.artifact.file_name().unwrap(),
+            std::ffi::OsStr::new("decoded.png")
+        );
     }
 
     #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]

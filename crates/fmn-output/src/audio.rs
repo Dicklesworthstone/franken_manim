@@ -128,6 +128,7 @@ impl AudioDecodeLimits {
 #[derive(Debug)]
 pub enum AudioDecodeError {
     InvalidLimits,
+    InvalidJobLimits(&'static str),
     InputOversized { bytes: u64, max: u64 },
     UnsupportedInput,
     TranscoderRequired { format: AudioInputFormat },
@@ -141,6 +142,7 @@ impl std::fmt::Display for AudioDecodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidLimits => f.write_str("audio decode limits must be nonzero and fit native RIFF/address-space bounds"),
+            Self::InvalidJobLimits(detail) => write!(f, "audio ffmpeg policy: {detail}"),
             Self::InputOversized { bytes, max } => write!(f, "audio input of {bytes} bytes exceeds the {max}-byte budget"),
             Self::UnsupportedInput => f.write_str("unrecognized audio container; use PCM WAV, FLAC, MP3, ADTS AAC, Ogg, M4A/MP4, or AIFF; playlists and remote references are not audio assets"),
             Self::TranscoderRequired { format } => write!(f, "{} audio requires the optional governed ffmpeg decoder; supply PCM WAV for native-only or certified rendering", format.demuxer()),
@@ -225,6 +227,7 @@ pub(crate) fn decoded_audio(
 /// silently select a different executable after a PATH or source change.
 pub struct AudioDecoder {
     limits: AudioDecodeLimits,
+    job_limits: JobLimits,
     ffmpeg_bin: Option<PathBuf>,
     boundary: Option<Boundary>,
     locator: StdFfmpegLocator,
@@ -268,12 +271,37 @@ impl AudioDecoder {
             (StdFfmpegLocator::default(), None)
         };
         Ok(Self {
+            job_limits: JobLimits {
+                max_artifact_bytes: limits.decoded_byte_limit()?,
+                ..JobLimits::default()
+            },
             limits,
             ffmpeg_bin,
             boundary: None,
             locator,
             workdir_root,
         })
+    }
+
+    /// Set a lazy decoder's ffmpeg policy without discovering or launching it.
+    /// Native PCM stays independent of ffmpeg; compressed expansion retains
+    /// the tighter of this artifact ceiling and the native sample budget.
+    ///
+    /// # Errors
+    /// Refuses invalid bounds or replacing an already-resolved boundary's policy.
+    pub fn with_job_limits(mut self, limits: JobLimits) -> Result<Self, AudioDecodeError> {
+        if self.boundary.is_some() {
+            return Err(AudioDecodeError::InvalidJobLimits(
+                "cannot replace limits after the decoder boundary is resolved",
+            ));
+        }
+        self.job_limits = crate::admit_render_ffmpeg_limits(&limits, limits.max_artifact_bytes)
+            .map_err(AudioDecodeError::InvalidJobLimits)?;
+        self.job_limits.max_artifact_bytes = self
+            .job_limits
+            .max_artifact_bytes
+            .min(self.limits.decoded_byte_limit()?);
+        Ok(self)
     }
 
     /// Inject an already-governed boundary (e.g. a host's capability runner).
@@ -283,6 +311,7 @@ impl AudioDecoder {
     ) -> Result<Self, AudioDecodeError> {
         limits.decoded_byte_limit()?;
         Ok(Self {
+            job_limits: JobLimits::default(),
             limits,
             ffmpeg_bin: None,
             boundary: Some(boundary),
@@ -342,11 +371,7 @@ impl AudioDecoder {
                 .clone()
                 .ok_or(AudioDecodeError::TranscoderRequired { format })?;
             let tool = FfmpegTool::resolve(executable, runner.as_ref(), &root)?;
-            let limits = JobLimits {
-                max_artifact_bytes: self.limits.decoded_byte_limit()?,
-                ..JobLimits::default()
-            };
-            self.boundary = Some(Boundary::new(tool, runner, limits, root)?);
+            self.boundary = Some(Boundary::new(tool, runner, self.job_limits.clone(), root)?);
         }
         self.boundary
             .as_ref()

@@ -1,7 +1,7 @@
 //! Native scene-to-artifact composition over Proscenium, Lumen, and Reel.
 //!
 //! [`render`] runs an ordinary [`SceneConstruct`] and publishes PNG frames, a
-//! GIF, or a Y4M stream without CPython or ffmpeg, or an MP4/MOV video through
+//! final PNG, GIF, or a Y4M stream without CPython or ffmpeg, or an MP4/MOV video through
 //! the one governed ffmpeg boundary (D2) with the scene's sound cues mixed
 //! natively and muxed. The existing scene clock, retained renderer, bounded
 //! frame pipeline, and ordered emitter remain authoritative; this module does
@@ -59,6 +59,7 @@ mod compiled;
 mod ffmpeg_limits;
 mod pipeline;
 mod soundtrack;
+mod svg;
 pub use camera_animation::{render_camera, render_camera_with_fs};
 pub use compiled::{render_bundle, render_bundle_with_fs};
 pub use ffmpeg_limits::{
@@ -66,7 +67,15 @@ pub use ffmpeg_limits::{
     default_render_ffmpeg_limits,
 };
 pub use pipeline::{NativeFrameError, NativeFramePipeline};
-pub use soundtrack::{PreparedSceneSoundtrack, SoundtrackInput, SoundtrackTimeline};
+pub use soundtrack::{
+    PreparedSceneSoundtrack, SoundtrackInput, SoundtrackPreparationLimits, SoundtrackRenderOptions,
+    SoundtrackRenderReport, SoundtrackTimeline, render_soundtrack, render_soundtrack_with_fs,
+};
+
+pub use svg::{
+    SvgRenderError, SvgRenderOptions, SvgRenderReport, render_svg, render_svg_camera,
+    render_svg_camera_with_fs, render_svg_with_fs,
+};
 
 pub use fmn_output::negotiate::{AudioQuality, EncoderPreset, EncoderTune, VideoQuality};
 pub use fmn_output::{EmitterReport, JobLimits, NativeArtifactReport};
@@ -111,6 +120,10 @@ pub fn configured_video_quality(
 /// file otherwise. No format silently substitutes for another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RenderFormat {
+    /// One PNG of the completed scene, including final animation cleanup and
+    /// teardown edits. The normal scene clock and updaters still execute;
+    /// intermediate frames are counted against `max_frames` but not rasterized.
+    Png,
     /// `frame_000000.png`, ... and a completion manifest, atomically published
     /// as one new directory generation.
     PngSequence,
@@ -233,6 +246,7 @@ pub struct RenderArtifact {
 impl RenderArtifact {
     fn native(format: RenderFormat, report: NativeArtifactReport) -> Result<Self, RenderError> {
         let expected = match format {
+            RenderFormat::Png => NativeArtifactKind::Png,
             RenderFormat::PngSequence => NativeArtifactKind::PngSequence,
             RenderFormat::Gif => NativeArtifactKind::Gif,
             RenderFormat::Y4m => NativeArtifactKind::Y4m,
@@ -306,6 +320,8 @@ pub struct RenderOptions {
     /// mode; `CameraConfig::samples` controls their adaptive edge ceiling.
     pub camera: Option<CameraConfig>,
     /// Maximum number of captured frames (checked before rasterization).
+    /// Final PNG output also checks intermediate scene captures against this
+    /// bound, even though it publishes and rasterizes only one final frame.
     pub max_frames: u64,
     /// Maximum input stream and encoded artifact size, independently enforced.
     pub max_output_bytes: u64,
@@ -560,7 +576,31 @@ impl fmt::Display for RenderError {
                  with fmn::render_camera"
             ),
             Self::Renderer(error) => error.fmt(f),
-            Self::Pipeline(error) => error.fmt(f),
+            Self::Pipeline(error) => {
+                error.fmt(f)?;
+                // Keep the worker's frame/stage context and structured
+                // counters, while giving the same public remedy as a direct
+                // renderer refusal. Preparation can discover 3D content on
+                // an asynchronous worker after scene construction returns.
+                if let FrameStreamError::Pipeline(failure) = error
+                    && matches!(
+                        &failure.error,
+                        fmn_runtime::PipelineError::Stage {
+                            source: NativeFrameError::Renderer(
+                                RetainedFrameRendererError::CameraRequired { .. }
+                            ),
+                            ..
+                        }
+                    )
+                {
+                    f.write_str(
+                        "; use the camera route: set RenderOptions::camera \
+                         (for example `options.camera = Some(options.camera_config()?)`) \
+                         or render with fmn::render_camera",
+                    )?;
+                }
+                Ok(())
+            }
             Self::Sink(error) => error.fmt(f),
             Self::Emitter(error) => error.fmt(f),
             Self::Drain(error) => error.fmt(f),
@@ -618,8 +658,10 @@ impl std::error::Error for RenderError {
 /// Render one native scene and atomically publish the requested artifact.
 ///
 /// Static scenes with no explicit capture receive one final-state frame.
-/// Animated scenes retain exactly the runtime's capture samples; no alpha-zero
-/// or extra terminal frame is inserted. Sound cues (`Scene::add_sound`) are
+/// Animated sequences retain exactly the runtime's capture samples; no alpha-zero
+/// or extra terminal frame is inserted. [`RenderFormat::Png`] instead renders
+/// the completed scene once, after animation cleanup and scene teardown, while
+/// preserving normal playback and updater execution. Sound cues (`Scene::add_sound`) are
 /// mixed natively and muxed into MP4/MOV video; image and Y4M outputs carry no
 /// audio.
 ///
@@ -725,6 +767,7 @@ struct RenderSink {
     video: Option<VideoSession>,
     plan: ExecutionPlan,
     next_sequence: u64,
+    deferred_captures: u64,
     max_frames: u64,
     failure: Option<RenderError>,
 }
@@ -924,15 +967,20 @@ impl RenderSink {
         };
         let mut video = None;
         let (binding, receipt) = match options.format {
-            RenderFormat::PngSequence => {
+            RenderFormat::Png | RenderFormat::PngSequence => {
+                let target = if options.format == RenderFormat::Png {
+                    PngTarget::Single(options.output)
+                } else {
+                    PngTarget::Sequence {
+                        directory: options.output,
+                        stem: "frame".to_owned(),
+                        digits: 6,
+                    }
+                };
                 let (binding, receipt) = PngSink::new(
                     fs,
                     PngSinkConfig {
-                        target: PngTarget::Sequence {
-                            directory: options.output,
-                            stem: "frame".to_owned(),
-                            digits: 6,
-                        },
+                        target,
                         width,
                         height,
                         first_sequence: 0,
@@ -948,7 +996,11 @@ impl RenderSink {
                 )
                 .map_err(RenderError::Sink)?
                 .with_no_clobber()
-                .into_binding("png-sequence");
+                .into_binding(if options.format == RenderFormat::Png {
+                    "png"
+                } else {
+                    "png-sequence"
+                });
                 (binding, RenderReceipt::Native(receipt))
             }
             RenderFormat::Gif => {
@@ -1019,6 +1071,12 @@ impl RenderSink {
                 if !capabilities.offers(&encoder) {
                     return Err(RenderError::EncoderUnavailable(encoder));
                 }
+                // The streaming sink starts its process on the first frame.
+                // Admit the selected hardware and bit depth now, before the
+                // scene executes or spends time generating any frames.
+                capabilities
+                    .require_video_job(&tool, capability.runner.as_ref(), &job)
+                    .map_err(RenderError::Ffmpeg)?;
                 let (sink, soundtrack) = FfmpegSink::new(
                     Arc::clone(&capability.runner),
                     FfmpegSinkConfig {
@@ -1080,9 +1138,23 @@ impl RenderSink {
             video,
             plan,
             next_sequence: 0,
+            deferred_captures: 0,
             max_frames: options.max_frames,
             failure: None,
         })
+    }
+
+    /// Keep the authored capture budget while final PNG output defers all
+    /// raster work. This does not switch the runtime into skipped playback:
+    /// dt-updaters, stop conditions and cleanup retain their normal semantics.
+    fn defer_captures(&mut self, count: u64) -> Result<(), RenderError> {
+        let total = self
+            .deferred_captures
+            .checked_add(count)
+            .filter(|total| *total <= self.max_frames)
+            .ok_or(RenderError::InvalidOptions("scene exceeded max_frames"))?;
+        self.deferred_captures = total;
+        Ok(())
     }
 
     fn render_stage(&mut self, stage: &fmn_mobject::Stage) -> Result<(), RenderError> {
@@ -1105,12 +1177,12 @@ impl RenderSink {
         };
         // A closed admission stream can hide the original worker failure.
         // Wake output waiters before joining raster/conversion workers.
-        if matches!(&error, RenderError::Pipeline(_)) {
+        if matches!(&error, RenderError::Pipeline(_) | RenderError::Emitter(_)) {
             if let Some(emitter) = &self.emitter {
                 emitter.cancel();
             }
             if let Some(pipeline) = self.pipeline.take() {
-                pipeline.finish()?;
+                return Err(compiled::admission_failure(error, pipeline.finish()));
             }
         }
         Err(error)
@@ -1118,8 +1190,21 @@ impl RenderSink {
 
     /// Join every frame stage, supply a video's soundtrack, drain the output
     /// and take the publication receipt — in that order. `scene` provides the
-    /// sound cues; compiled replay has none.
+    /// sound cues; compiled replay supplies its final PCM separately.
     fn finish(&mut self, scene: Option<&fmn_scene::Scene>) -> Result<FinishedRender, RenderError> {
+        self.finish_with_soundtrack(scene, None)
+    }
+
+    fn finish_with_soundtrack(
+        &mut self,
+        scene: Option<&fmn_scene::Scene>,
+        recorded_mix: Option<MixReport>,
+    ) -> Result<FinishedRender, RenderError> {
+        if recorded_mix.is_some() && (scene.is_some() || self.video.is_none()) {
+            return Err(RenderError::InvalidOptions(
+                "recorded audio needs exclusive audio-capable video output",
+            ));
+        }
         // Joining all raster/conversion work is a prerequisite to publication.
         let frame_pipeline = self
             .pipeline
@@ -1134,7 +1219,7 @@ impl RenderSink {
                         self.next_sequence,
                         self.plan.output_team.threads().max(1),
                     )?,
-                    None => None,
+                    None => recorded_mix,
                 };
                 let report = mix.as_ref().map(|mix| SoundtrackReport {
                     cues_mixed: mix.cues_mixed,
@@ -1353,6 +1438,46 @@ impl SceneSink for RenderSink {
         Ok(())
     }
 
+    fn accepts_pure_segments(&self) -> bool {
+        self.failure.is_none() && self.pipeline.is_some()
+    }
+
+    fn capture_pure_segment(
+        &mut self,
+        segment: &fmn_anim::pure_frame::PureSegment,
+    ) -> Result<(), IntegrationError> {
+        if let Some(error) = &self.failure {
+            return Err(IntegrationError::new("native-render", error.to_string()));
+        }
+        let result = (|| {
+            if self.format == RenderFormat::Png {
+                let count = u64::try_from(segment.frame_count()).map_err(|_| {
+                    RenderError::InvalidOptions("pure segment has a negative frame count")
+                })?;
+                return self.defer_captures(count);
+            }
+            for frame in 1..=segment.frame_count() {
+                if self.next_sequence >= self.max_frames {
+                    return Err(RenderError::InvalidOptions("scene exceeded max_frames"));
+                }
+                let job = segment.job(frame).map_err(|_| {
+                    RenderError::InvalidOptions("pure segment lost its nominal sample")
+                })?;
+                self.pipeline
+                    .as_mut()
+                    .ok_or(RenderError::Pipeline(FrameStreamError::Closed))?
+                    .capture_pure(job, self.next_sequence)?;
+                self.next_sequence += 1;
+            }
+            Ok(())
+        })();
+        result.map_err(|error: RenderError| {
+            let message = error.to_string();
+            self.failure = Some(error);
+            IntegrationError::new("native-render", message)
+        })
+    }
+
     fn capture(
         &mut self,
         _reason: CaptureReason,
@@ -1361,8 +1486,21 @@ impl SceneSink for RenderSink {
         if let Some(error) = &self.failure {
             return Err(IntegrationError::new("native-render", error.to_string()));
         }
-        let stage = packet.materialize_stage();
-        self.render_stage(&stage).map_err(|error| {
+        let deferred = self.format == RenderFormat::Png;
+        let result = if deferred {
+            self.defer_captures(1)
+        } else if self.next_sequence >= self.max_frames {
+            Err(RenderError::InvalidOptions("scene exceeded max_frames"))
+        } else {
+            self.pipeline
+                .as_mut()
+                .ok_or(RenderError::Pipeline(FrameStreamError::Closed))
+                .and_then(|pipeline| pipeline.capture_packet(packet, self.next_sequence))
+        };
+        if result.is_ok() && !deferred {
+            self.next_sequence += 1;
+        }
+        result.map_err(|error| {
             let message = error.to_string();
             self.failure = Some(error);
             IntegrationError::new("native-render", message)

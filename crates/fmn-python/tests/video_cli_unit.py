@@ -14,6 +14,30 @@ _spec.loader.exec_module(v)
 
 
 class VideoCliTests(unittest.TestCase):
+    def test_ffmpeg_limits_preserve_64_bit_units_and_all_dispatch_forms(self):
+        for flag, name in v._LIMIT_FLAGS.items():
+            for value in (1, 86400, 1 << 40, (1 << 64) - 1):
+                for tokens in ([flag, str(value)], [f"{flag}={value}"]):
+                    self.assertEqual(v.take_video_options(tokens), ([], {name: value}))
+            for value in ("0", "-1", "+1", "1.5", "nan", "1e6", "", "١٦",
+                          str(1 << 64), "1" * 1000):
+                with self.assertRaises(ValueError):
+                    v.take_video_options([flag, value])
+            with self.assertRaises(ValueError):
+                v.take_video_options([flag, "1", f"{flag}=2"])
+            self.assertEqual(v.take_video_options(["--file_name", flag, f"{flag}=5"], {"--file_name"}),
+                             (["--file_name", flag], {name: 5}))
+            for format in ("mp4", "mov", "wav"):
+                v.validate_video_format(format, {name: 17})
+            v.validate_video_format("mov", {name: 17}, transparent=True)
+            for format in ("png", "png_sequence", "gif", "y4m", "svg", "fmtl"):
+                with self.assertRaisesRegex(ValueError, "ffmpeg resource"):
+                    v.validate_video_format(format, {name: 17})
+            writer = SimpleNamespace(video_crf=16)
+            v.apply_video_options(SimpleNamespace(file_writer=writer), {name: 17})
+            self.assertEqual(getattr(writer, name), 17)
+            self.assertEqual(writer.video_crf, 16)
+
     def test_every_crf_in_both_spellings(self):
         for crf in range(52):
             for tokens in (["--crf", str(crf)], [f"--crf={crf}"]):

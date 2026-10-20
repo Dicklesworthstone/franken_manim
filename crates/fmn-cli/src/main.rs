@@ -1,7 +1,9 @@
 //! The `fmn` binary entry point.
 #![forbid(unsafe_code)]
 
+mod bundle_audio;
 mod process_output;
+mod studio_project;
 
 use std::io::Read as _;
 use std::process::ExitCode;
@@ -32,7 +34,9 @@ fn quiet_human_doctor(args: &[std::ffi::OsString]) -> bool {
 fn main() -> ExitCode {
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let suppress_doctor_report = quiet_human_doctor(&args);
-    let mut run_output = if fmn_cli::is_internal_studio_worker_os(&args) {
+    let mut run_output = if studio_project::selected(&args) {
+        studio_project::run_os(&args)
+    } else if fmn_cli::is_internal_studio_worker_os(&args) {
         fmn_cli::run_internal_studio_worker_os(&args)
     } else if fmn_cli::is_studio_invocation_os(&args) {
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -55,6 +59,8 @@ fn main() -> ExitCode {
             let stdout = std::io::stdout();
             fmn_cli::run_studio_os(&args, &mut stdout.lock(), &shutdown)
         }
+    } else if let Some(output) = bundle_audio::try_run_os(&args) {
+        output
     } else {
         fmn_cli::run_os(args)
     };

@@ -325,7 +325,7 @@ fn increasing_subsets_round_ties_even() {
 }
 
 #[test]
-fn one_by_one_uses_ceiling_and_reference_indexing() {
+fn one_by_one_uses_ceiling_and_reaches_the_last_child() {
     let mut stage = Stage::new();
     let root = stage.add(Mobject::new());
     let children: Vec<Mob> = (0..3).map(|_| line5(&mut stage)).collect();
@@ -347,10 +347,9 @@ fn one_by_one_uses_ceiling_and_reference_indexing() {
     // ceil(0.5·3) = 2 → the second child alone.
     anim.interpolate(&mut stage, 0.5);
     assert_eq!(stage.get(root).unwrap().submobjects(), &children[1..2]);
-    // The Reference clips to n−1 before its index−1 lookup, so the final
-    // frame shows the second-to-last child — ported verbatim.
+    // BN-12 fixes the Reference's off-by-one: the final child is reachable.
     anim.interpolate(&mut stage, 1.0);
-    assert_eq!(stage.get(root).unwrap().submobjects(), &children[1..2]);
+    assert_eq!(stage.get(root).unwrap().submobjects(), &children[2..3]);
 }
 
 // ---------------------------------------------------- AddTextWordByWord

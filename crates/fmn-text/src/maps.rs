@@ -10,8 +10,66 @@
 
 use crate::markup::StyledChar;
 use fmn_core::color::Srgb;
+use std::borrow::Cow;
 
-/// The five maps, all keyed by source substring.
+/// A literal source key or already-resolved UTF-8 source ranges.
+///
+/// Regex and character-index selectors are resolved by the authoring front
+/// door. The layouter receives exact source bytes, never rewritten markup.
+#[derive(Clone, Copy, Debug)]
+pub enum SourceSelector<'a> {
+    /// Every non-overlapping occurrence of this source string.
+    Literal(&'a str),
+    /// Selected source occurrences, in authored order.
+    Ranges(&'a [(usize, usize)]),
+}
+
+impl SourceSelector<'_> {
+    fn ranges(&self, source: &str) -> Cow<'_, [(usize, usize)]> {
+        match self {
+            Self::Literal(key) => Cow::Owned(find_occurrences(source, key)),
+            Self::Ranges(ranges) => Cow::Borrowed(*ranges),
+        }
+    }
+}
+
+/// An ordered style update over a source selector, before shaping.
+///
+/// Only supplied fields change. Later entries win on their own fields, so
+/// overlapping font, weight, slant and gradient maps compose. Each occurrence
+/// receives its own gradient sweep.
+#[derive(Clone, Debug)]
+pub struct SourceStyle<'a> {
+    /// Which source characters receive the style.
+    pub selector: SourceSelector<'a>,
+    /// Fill color, if supplied.
+    pub color: Option<Srgb>,
+    /// Font family, if supplied.
+    pub family: Option<&'a str>,
+    /// Italic face override, including an explicit normal face.
+    pub italic: Option<bool>,
+    /// Bold face override, including an explicit normal face.
+    pub bold: Option<bool>,
+    /// Gradient stops; empty preserves the existing paint.
+    pub gradient: &'a [Srgb],
+}
+
+impl<'a> SourceStyle<'a> {
+    /// A selector with no style fields overridden yet.
+    #[must_use]
+    pub fn new(selector: SourceSelector<'a>) -> Self {
+        Self {
+            selector,
+            color: None,
+            family: None,
+            italic: None,
+            bold: None,
+            gradient: &[],
+        }
+    }
+}
+
+/// The five literal maps and ordered source-selector styles.
 #[derive(Clone, Debug, Default)]
 pub struct StyleMaps<'a> {
     /// text→color.
@@ -25,6 +83,9 @@ pub struct StyleMaps<'a> {
     pub t2s: &'a [(&'a str, bool)],
     /// text→weight (true = bold).
     pub t2w: &'a [(&'a str, bool)],
+    /// Ordered source-selector styles, after literal maps and before Code's
+    /// positional highlighter channel.
+    pub source_styles: &'a [SourceStyle<'a>],
 }
 
 impl StyleMaps<'_> {
@@ -36,6 +97,7 @@ impl StyleMaps<'_> {
             && self.t2g.is_empty()
             && self.t2s.is_empty()
             && self.t2w.is_empty()
+            && self.source_styles.is_empty()
     }
 }
 
@@ -52,7 +114,8 @@ pub fn find_occurrences(source: &str, needle: &str) -> Vec<(usize, usize)> {
         .collect()
 }
 
-/// Apply the maps to styled characters in place.
+/// Apply the maps to styled characters in place, in the increasing source-span
+/// order emitted by the plain-text and markup parsers before shaping.
 pub fn apply_maps(chars: &mut [StyledChar], source: &str, maps: &StyleMaps<'_>) {
     for (key, color) in maps.t2c {
         for occ in find_occurrences(source, key) {
@@ -90,26 +153,51 @@ pub fn apply_maps(chars: &mut [StyledChar], source: &str, maps: &StyleMaps<'_>) 
         for occ in find_occurrences(source, key) {
             // Position each covered character across the occurrence so the
             // gradient sweeps it left to right.
-            let covered_ix: Vec<usize> = chars
-                .iter()
-                .enumerate()
-                .filter(|(_, c)| c.span.0 >= occ.0 && c.span.1 <= occ.1)
-                .map(|(i, _)| i)
-                .collect();
-            let denom = covered_ix.len().saturating_sub(1).max(1) as f64;
-            for (pos, ix) in covered_ix.into_iter().enumerate() {
+            let selected = covered(chars, occ);
+            let denom = selected.len().saturating_sub(1).max(1) as f64;
+            for (pos, character) in selected.iter_mut().enumerate() {
                 let t = pos as f64 / denom;
-                chars[ix].style.color = None;
-                chars[ix].style.gradient = Some((stops.to_vec(), t));
+                character.style.color = None;
+                character.style.gradient = Some((stops.to_vec(), t));
+            }
+        }
+    }
+    for update in maps.source_styles {
+        for &range in update.selector.ranges(source).iter() {
+            let selected = covered(chars, range);
+            let denominator = selected.len().saturating_sub(1).max(1) as f64;
+            for (position, character) in selected.iter_mut().enumerate() {
+                let style = &mut character.style;
+                if let Some(color) = update.color {
+                    style.color = Some(color);
+                    style.gradient = None;
+                }
+                if let Some(family) = update.family {
+                    style.family = Some(family.to_owned());
+                }
+                if let Some(italic) = update.italic {
+                    style.italic = italic;
+                }
+                if let Some(bold) = update.bold {
+                    style.bold = bold;
+                }
+                if !update.gradient.is_empty() {
+                    style.color = None;
+                    style.gradient =
+                        Some((update.gradient.to_vec(), position as f64 / denominator));
+                }
             }
         }
     }
 }
 
-fn covered(chars: &mut [StyledChar], occ: (usize, usize)) -> impl Iterator<Item = &mut StyledChar> {
-    chars
-        .iter_mut()
-        .filter(move |c| c.span.0 >= occ.0 && c.span.1 <= occ.1)
+fn covered(chars: &mut [StyledChar], occ: (usize, usize)) -> &mut [StyledChar] {
+    // Styled characters remain in source order until shaping. Select the
+    // contained run without scanning the full text for every occurrence.
+    // A markup entity is selected only when its whole source span fits.
+    let start = chars.partition_point(|character| character.span.0 < occ.0);
+    let end = chars.partition_point(|character| character.span.1 <= occ.1);
+    &mut chars[start..end.max(start)]
 }
 
 /// Sample a gradient's stops at `t ∈ [0, 1]` (piecewise-linear in sRGB

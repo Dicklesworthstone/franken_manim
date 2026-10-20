@@ -178,8 +178,7 @@ class SubdividedRecordingSession:
         if namespace.get("_fmn_scene_execution") is not None:
             raise RuntimeError("subdivision must start between play/wait calls")
         if self._prepare:
-            if os.path.lexists(self.destination):
-                raise FileExistsError(f"subdivision destination already exists: {self.destination}")
+            self._preflight_directory()
             config = self._configuration
             self._native._portal_prepare_recording_scene(
                 self.scene, *config.resolution, config.fps, config.seed,
@@ -191,10 +190,17 @@ class SubdividedRecordingSession:
         _, self._last_frame = self._native._portal_scene_clock(self.scene)
         # Claim a fresh namespace before any authored scene execution. Each
         # child is still published atomically/no-clobber by its native sink.
-        self.destination.mkdir(parents=True, exist_ok=False)
+        self._claim_directory()
         namespace[_OWNER] = self
         self._state = "active"
         return self
+
+    def _preflight_directory(self) -> None:
+        if os.path.lexists(self.destination):
+            raise FileExistsError(f"subdivision destination already exists: {self.destination}")
+
+    def _claim_directory(self) -> None:
+        self.destination.mkdir(parents=True, exist_ok=False)
 
     def _release(self) -> None:
         if vars(self.scene).get(_OWNER) is self:

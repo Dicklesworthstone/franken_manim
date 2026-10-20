@@ -7,7 +7,7 @@ mod flow;
 mod math;
 
 use crate::code::{Code, CodeTheme};
-use crate::data_mobjects::TableMobject;
+use crate::data_mobjects::layout_table_cells;
 use crate::line::Line;
 use crate::tex::{Tex, TexMobjectError, TexText};
 use crate::text::{DEFAULT_FONT_SIZE_FOR_UNIT_HEIGHT, Text, TextMobjectError};
@@ -453,28 +453,43 @@ impl<'a> Composer<'a> {
                         "Markdown table exceeds 64 columns or 4096 cells",
                     ));
                 }
-                let plain = |inlines: &[Inline]| -> Result<String, MathDocumentError> {
-                    plain_inlines(inlines, protected, 0)
-                };
-                let headers = table
-                    .head
-                    .iter()
-                    .map(|c| plain(c))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let rows = table
-                    .rows
-                    .iter()
-                    .map(|r| r.iter().map(|c| plain(c)).collect::<Result<Vec<_>, _>>())
-                    .collect::<Result<Vec<_>, _>>()?;
-                for cell in headers.iter().chain(rows.iter().flatten()) {
-                    budget.input(cell)?;
+                if table.align.len() != table.head.len()
+                    || table.rows.iter().any(|row| row.len() != table.head.len())
+                {
+                    return Err(MathDocumentError::Invalid(
+                        "Markdown table rows must match their declared columns",
+                    ));
                 }
-                let geometry = TableMobject::from_grid(headers, rows)
-                    .build(book)
+                let mut rows = Vec::with_capacity(table.rows.len() + 1);
+                for row in std::iter::once(&table.head).chain(&table.rows) {
+                    let mut cells = Vec::with_capacity(row.len());
+                    for inlines in row {
+                        cells.push(self.table_cell(book, engine, inlines, protected, budget)?);
+                    }
+                    rows.push(cells);
+                }
+                let alignments = table
+                    .align
+                    .iter()
+                    .map(|alignment| match alignment {
+                        franken_markdown::ast::Align::Left => fmn_text::layout::Align::Left,
+                        franken_markdown::ast::Align::Right => fmn_text::layout::Align::Right,
+                        // Unspecified alignment keeps the existing native
+                        // table's centered cells; explicit GFM choices win.
+                        franken_markdown::ast::Align::None
+                        | franken_markdown::ast::Align::Center => fmn_text::layout::Align::Center,
+                    })
+                    .collect::<Vec<_>>();
+                let cells = rows.len() * table.head.len();
+                let geometry = layout_table_cells(rows, &alignments)
                     .map_err(|e| MathDocumentError::Geometry(e.to_string()))?
                     .scaled_about(self.font_size / 48.0, ORIGIN)
                     .map_style_deep(|s| s.color(self.color));
-                budget.output(&geometry)?;
+                // Each native cell was counted at construction; only the
+                // shared layout's leading rule children add new geometry.
+                for rule in &geometry.children()[..geometry.children().len() - cells] {
+                    budget.output(rule)?;
+                }
                 Ok(geometry)
             }
             Block::ThematicBreak => {
@@ -558,6 +573,35 @@ impl<'a> Composer<'a> {
                 .text_box(book, source, Face::default(), self.font_size, budget)?
                 .geometry),
         }
+    }
+
+    fn table_cell(
+        &self,
+        book: &FontBook,
+        engine: Option<&TexEngine>,
+        inlines: &[Inline],
+        protected: &math::Protected,
+        budget: &mut Budget,
+    ) -> Result<VMobject, MathDocumentError> {
+        // Preserve the single Scribe run (including inter-word metrics) of
+        // an ordinary string table. Rich cells use the same measured inline
+        // boxes as paragraphs, so formulas, styles and code retain identity.
+        if let Some(source) = literal_table_cell(inlines, protected) {
+            budget.input(&source)?;
+            let geometry = Text::new(&source).build(book)?.vmob;
+            budget.output(&geometry)?;
+            return Ok(geometry);
+        }
+        self.prose(
+            book,
+            engine,
+            inlines,
+            protected,
+            budget,
+            Face::default(),
+            crate::text::DEFAULT_FONT_SIZE,
+            None,
+        )
     }
 
     fn text_box(
@@ -831,49 +875,18 @@ impl<'a> Composer<'a> {
     }
 }
 
-fn plain_inlines(
-    inlines: &[Inline],
-    protected: &math::Protected,
-    depth: usize,
-) -> Result<String, MathDocumentError> {
-    if depth > 24 {
-        return Err(MathDocumentError::Limit(
-            "Markdown table inline nesting exceeds 24 levels",
-        ));
-    }
+fn literal_table_cell(inlines: &[Inline], protected: &math::Protected) -> Option<String> {
     let mut out = String::new();
     for inline in inlines {
-        match inline {
-            Inline::Text(s) | Inline::Code(s) | Inline::Html(s) => {
-                if !protected.islands.is_empty() && s.contains(&protected.prefix) {
-                    return Err(MathDocumentError::Unsupported(
-                        "Markdown math in table cells is not yet supported; use a native TexMatrix",
-                    ));
-                }
-                out.push_str(s);
-            }
-            Inline::Emphasis(inner)
-            | Inline::Strong(inner)
-            | Inline::Strikethrough(inner)
-            | Inline::Link { content: inner, .. } => {
-                out.push_str(&plain_inlines(inner, protected, depth + 1)?)
-            }
-            Inline::SoftBreak => out.push(' '),
-            Inline::HardBreak => out.push('\n'),
-            Inline::Image { .. } => {
-                return Err(MathDocumentError::Unsupported(
-                    "Markdown table images require explicit scene assets",
-                ));
-            }
-            Inline::Math(_) | Inline::DisplayMath(_) => {
-                return Err(MathDocumentError::Unsupported(
-                    "Markdown math in table cells is not yet supported; use a native TexMatrix",
-                ));
-            }
-            Inline::FootnoteRef { id } => out.push_str(&format!("[^{id}]")),
+        let Inline::Text(text) = inline else {
+            return None;
+        };
+        if !protected.islands.is_empty() && text.contains(&protected.prefix) {
+            return None;
         }
+        out.push_str(text);
     }
-    Ok(out)
+    Some(out)
 }
 
 /// Extra layout controls for math-enabled Markdown; dimensions are scene units.

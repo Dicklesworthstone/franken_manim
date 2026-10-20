@@ -40,6 +40,7 @@ fn bytes(session: &TexSession, source: &str) -> Vec<u8> {
 fn construction_and_reports_are_lazy_and_the_engine_is_reused() {
     let fs = Arc::new(VirtualFs::new());
     let session = session(&config(), &fs);
+    session.maintain_cache();
     assert_eq!(session.report(), TypesetSessionReport::default());
     assert!(!fs.exists(Path::new(root())));
     let first = session.engine().unwrap();

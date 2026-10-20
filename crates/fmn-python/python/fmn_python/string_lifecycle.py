@@ -9,6 +9,11 @@ from __future__ import annotations
 import abc
 from .coordinate_lifecycle import _bind
 from .copying import FamilyRefs
+from .invocation import InvocationGuard
+
+
+_initializing = InvocationGuard()
+_text_regenerating = InvocationGuard()
 
 
 # The Reference's StringMobject (an ABC) declares these render-twice steps
@@ -40,18 +45,18 @@ def explicit_channel_colors(style):
 
 def initialize_string(g, obj, style):
     """Recipe fields must already exist before init_data/init_points execute."""
-    g["_preflight_vmobject_style_kwargs"](style)
-    obj._fmn_string_style = dict(style)
-    obj._string_sub_spans, obj._string_sub_paths = [], []
-    obj._fmn_string_children = FamilyRefs()
-    options = dict(style)
-    options.setdefault("fill_opacity", 1.0)
-    options.setdefault("stroke_width", 0.0)
-    options.setdefault("fill_color", obj.base_color)
-    # VMobject dispatches init_colors after native data/points/uniforms. The
-    # string-specific default below preserves native markup/highlight paints;
-    # authored overrides can call it and then change real glyph colors.
-    g["_init_native_vmobject"](obj, options)
+    with _initializing.hold(obj, message="StringMobject initialization is already active"):
+        g["_preflight_vmobject_style_kwargs"](style)
+        obj._fmn_string_style = dict(style)
+        obj._string_sub_spans, obj._string_sub_paths = [], []
+        obj._fmn_string_children = FamilyRefs()
+        options = dict(style)
+        options.setdefault("fill_opacity", 1.0)
+        options.setdefault("stroke_width", 0.0)
+        options.setdefault("fill_color", obj.base_color)
+        # VMobject dispatches init_colors after native data/points/uniforms.
+        # Apply the TeX color map only after that public hook has completed.
+        g["_init_native_vmobject"](obj, options)
 
 
 def _reclass_leaves(g, candidate, paths):
@@ -124,15 +129,36 @@ def install_string_lifecycle(native):
         return self
 
     def text_points(self):
-        candidate = g["_native_shell_factory"]()
-        options = dict(self._fmn_text_options, font_size=float(self.font_size), font=getattr(self, "native_font", self.font))
-        specs = g["_build_styled_text"](
-            candidate, g["_native_shell_factory"], self.text,
-            type(self)._native_markup, type(self)._hoist_descendant_records, options,
-        )
-        _publish(g, self, candidate, specs)
-        self.string = self.text
-        return self
+        from .text_authoring import text_recipe, apply_text_colors
+        with _text_regenerating.hold(self, message="Text regeneration is already active"):
+            source = str(self.text)
+            is_code = isinstance(self, g["Code"])
+            if is_code and source == self.string and not _initializing.busy(self):
+                # Code and text are public source aliases. An edited code
+                # field is authoritative while text still names the last build.
+                source = str(getattr(self, "code", source))
+            options, maps, gradient = text_recipe(g, self, source)
+            candidate = g["_native_shell_factory"]()
+            specs = g["_build_styled_text"](
+                candidate, g["_native_shell_factory"], source,
+                type(self)._native_markup, type(self)._hoist_descendant_records, options,
+            )
+            _publish(g, self, candidate, specs)
+            self.text = self.string = source
+            self.font_size = options["font_size"]
+            self.lsh = options["line_spacing"]
+            self.gradient = gradient
+            for name, value in maps.items():
+                setattr(self, name, value)
+            # The last built recipe is diagnostic/checkpoint data, never the
+            # authority for a subsequent rebuild of writable public fields.
+            self._fmn_text_options = options
+            if is_code:
+                self.code, self.native_font = source, options["font"]
+            if not _initializing.busy(self):
+                self.init_colors()
+                apply_text_colors(self)
+            return self
 
     def tex_points(self):
         separator = getattr(self, "_tex_arg_separator", " ")
@@ -144,15 +170,33 @@ def install_string_lifecycle(native):
             parts, separator = self._isolate_segments(separator)
         else:
             parts, separator = [separator.join(self.tex_strings).strip()], ""
-        native_colors = {key: value for key, value in self.tex_to_color_map.items() if isinstance(key, str)}
         candidate = g["_native_shell_factory"]()
         specs = candidate._build_tex(
             g["_native_shell_factory"], parts, separator,
-            bool(self._native_text_mode), self.font_size, native_colors or None,
+            bool(self._native_text_mode), self.font_size, None,
             bool(self._native_group_single_part), self.template, self.additional_preamble,
             g["_tex_line_align"](self.alignment, bool(self._native_text_mode)),
         )
-        return _publish(g, self, candidate, specs)
+        _publish(g, self, candidate, specs)
+        self.string = self.tex_string = separator.join(parts)
+        if not _initializing.busy(self):
+            # A direct regeneration has no following constructor color pass.
+            self.set_color_by_tex_to_color_map(self.tex_to_color_map)
+        return self
+
+    def tex_path_count(self, substr):
+        if not isinstance(substr, str):
+            raise TypeError("substring must be a string")
+        selections = self._selected_string_ordinals(substr)
+        for ordinals in selections:
+            if ordinals:
+                return len(ordinals)
+        if selections:
+            return 0
+        return g["_tex_substring_path_count"](
+            substr, bool(self._native_text_mode), self.template,
+            self.additional_preamble,
+        )
 
     def tex_init(self, *tex_strings, font_size=48, alignment="\\centering", template="",
                  additional_preamble="", tex_to_color_map={}, t2c={}, isolate=[],
@@ -189,6 +233,8 @@ def install_string_lifecycle(native):
 
     _bind(Markup, "init_points", text_points)
     _bind(Tex, "init_points", tex_points)
+    tex_path_count.__annotations__ = dict(Tex.substr_to_path_count.__annotations__)
+    _bind(Tex, "substr_to_path_count", tex_path_count)
     tex_init.__annotations__ = dict(Tex.__init__.__annotations__)
     _bind(Tex, "__init__", tex_init)
     # Distinct functions keep correct defining-class introspection on aliases.

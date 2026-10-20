@@ -8,7 +8,7 @@ use fmn_codec::{PngLimits, decode_png};
 use fmn_config::config::{DeterminismMode, ThreadPolicy};
 use fmn_platform::fs::{FileSystem, VirtualFs};
 use fmn_render::RetainedFrameRendererError;
-use fmn_runtime::ExecutionEngine;
+use fmn_runtime::{ExecutionEngine, FrameStreamError};
 
 fn options(path: &str) -> RenderOptions {
     let mut options = RenderOptions::new(path).unwrap();
@@ -85,10 +85,26 @@ fn mixed_surface_and_vector_scene_uses_the_real_camera_pose() {
 fn non_vector_content_without_a_camera_is_not_silently_dropped() {
     let fs = Arc::new(VirtualFs::new());
     let error = render_with_fs(&mut MixedScene, options("/refused"), fs.clone()).unwrap_err();
-    assert!(matches!(
-        error,
-        RenderError::Renderer(RetainedFrameRendererError::CameraRequired { .. })
-    ));
+    let RenderError::Pipeline(FrameStreamError::Pipeline(failure)) = &error else {
+        panic!("expected the drained pipeline failure, got {error:?}"); // ubs:ignore - cfg(test) assertion verifies the public error retains pipeline diagnostics.
+    };
+    assert_eq!(failure.stats.outstanding_slots, 0);
+    let mut source: &(dyn std::error::Error + 'static) = &error;
+    let mut camera_required = false;
+    loop {
+        if matches!(
+            source.downcast_ref::<RetainedFrameRendererError>(),
+            Some(RetainedFrameRendererError::CameraRequired { .. })
+        ) {
+            camera_required = true;
+            break;
+        }
+        match source.source() {
+            Some(next) => source = next,
+            None => break,
+        }
+    }
+    assert!(camera_required, "typed CameraRequired source was preserved");
     assert!(!fs.exists(Path::new("/refused")));
 }
 

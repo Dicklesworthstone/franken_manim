@@ -49,7 +49,6 @@ use std::fmt::Write as _;
 use fmn_core::color::Srgb;
 use fmn_core::constants::{BLACK, DOWN, LEFT, RIGHT, UP};
 use fmn_core::types::Vec3;
-use fmn_geom::QuadPath;
 use fmn_text::FontBook;
 
 use crate::matchers;
@@ -305,11 +304,12 @@ impl DecimalNumber {
     /// # Errors
     ///
     /// [`TextMobjectError`]: a newly displayed character the book cannot
-    /// typeset.
+    /// typeset, or formatting/layout exceeds the declared resource limits.
+    /// A refusal keeps the previous value, displayed string, and geometry.
+    /// Glyphs successfully cached before a later refusal remain reusable.
     pub fn set_value(&mut self, number: f64, book: &FontBook) -> Result<(), TextMobjectError> {
         let move_to = self.vmob.bbox_point(self.edge_to_fix);
-        self.number = number;
-        self.refresh(book)?;
+        self.refresh_value(number, book)?;
         if let Some(point) = move_to {
             self.vmob = core::mem::take(&mut self.vmob).moved_to_aligned(point, self.edge_to_fix);
         }
@@ -368,6 +368,19 @@ impl DecimalNumber {
     /// configuration. The counter is cumulative work and is not rewound.
     fn invalidate_cache(&mut self) {
         self.cache.clear();
+    }
+
+    /// Regenerate at the canonical layout origin, committing the logical
+    /// value only with its displayed string and geometry. Staged animations
+    /// anchor after record conversion in world space, avoiding a cumulative
+    /// f64-to-f32 translation roundtrip in the cached glyph layout.
+    fn refresh_value(&mut self, number: f64, book: &FontBook) -> Result<(), TextMobjectError> {
+        let previous = core::mem::replace(&mut self.number, number);
+        if let Err(error) = self.refresh(book) {
+            self.number = previous;
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// The cached child for `c`, typesetting it (and counting the
@@ -437,11 +450,10 @@ impl DecimalNumber {
             None => None,
         };
 
-        self.num_string = num_string;
         let digit_buff = self.digit_buff_per_font_unit * self.font_size;
         let mut chars =
             try_vec_with_capacity("decimal-number numeric characters", numeric_characters)?;
-        chars.extend(self.num_string.chars());
+        chars.extend(num_string.chars());
         let child_capacity = checked_add(
             "decimal-number child count",
             checked_add(
@@ -531,6 +543,7 @@ impl DecimalNumber {
         }
         family.extend(placed);
         self.vmob = VMobject::new().with_style(self.style).with_children(family);
+        self.num_string = num_string;
         Ok(())
     }
 
@@ -1093,49 +1106,139 @@ fn group_digits(digits: &str) -> Result<String, TextMobjectError> {
 // typed wrappers live here, beside DecimalNumber, because Choreo cannot
 // depend upward on this crate)
 
-use fmn_anim::UpdateFromFunc;
-use fmn_mobject::{Mob, Stage};
+use fmn_anim::{AnimError, UpdateFromFunc};
+use fmn_mobject::uniforms::Uniforms;
+use fmn_mobject::{Mob, Mobject, RecordBuffer, RecordSchema, Stage};
 
-/// One entity carrying the number's whole family geometry under the root
-/// style: the shape a value animation installs per frame. Digit-count
-/// changes alter the family shape, so the animation needs a single stable
-/// handle over a merged path (per-glyph styling is the portal's typed
-/// path, not this one).
-fn flattened_number_vmob(decimal: &DecimalNumber) -> VMobject {
-    let root = decimal.vmob();
-    let mut merged = QuadPath::new();
-    let mut stack = vec![root];
-    while let Some(current) = stack.pop() {
-        for child in current.children().iter().rev() {
-            stack.push(child);
-        }
-        if current.points().is_empty() {
-            continue;
-        }
-        if let Ok(path) = current.path() {
-            for subpath in path.subpaths() {
-                let _ = merged.add_subpath(subpath);
-            }
-        }
-    }
-    VMobject::from_path(&merged).with_style(root.style())
+const NUMBER_STYLE_FIELDS: [&str; 4] = [
+    "fill_rgba",
+    "fill_border_width",
+    "stroke_rgba",
+    "stroke_width",
+];
+
+/// Capture paint before retiring a rebuilt family. Keeping the record
+/// columns, rather than only their first row, preserves gradient colors and
+/// stroke profiles when the new glyph has a different point count.
+struct NumberPaint {
+    buffer: RecordBuffer,
+    z_index: i32,
 }
 
-/// Add `decimal`'s flattened render to the stage as a single entity and
-/// return the handle a value animation drives. The typed `DecimalNumber`
-/// the caller holds stays the value authority.
+impl NumberPaint {
+    fn capture(stage: &Stage, mob: Mob) -> Result<Self, AnimError> {
+        let entry = stage.get(mob).ok_or(AnimError::StaleHandle(mob))?;
+        // Do not carry geometry into the paint sampler. Constant style
+        // records can then take RecordBuffer's exact repeat path instead of
+        // accumulating interpolation roundoff as glyph shapes change.
+        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), entry.buffer.len())
+            .map_err(number_update_error)?;
+        for field in NUMBER_STYLE_FIELDS {
+            if buffer.is_empty() {
+                if let Some(value) = entry.buffer.default_record(field) {
+                    buffer.write_default_record(field, &value);
+                }
+            } else if let Some(values) = entry.buffer.read_column(field) {
+                buffer.write_range(field, 0, &values);
+            }
+        }
+        Ok(Self {
+            buffer,
+            z_index: stage.z_index(mob),
+        })
+    }
+
+    fn apply(&self, target: &mut Mobject, uniforms: Uniforms) -> Result<(), AnimError> {
+        if target.buffer.is_empty() {
+            for field in NUMBER_STYLE_FIELDS {
+                if let Some(value) = self
+                    .buffer
+                    .read(0, field)
+                    .or_else(|| self.buffer.default_record(field))
+                {
+                    target.buffer.write_default_record(field, &value);
+                }
+            }
+        } else {
+            let mut source = self.buffer.snapshot_clone();
+            source
+                .resize_with_interpolation(target.buffer.len())
+                .map_err(number_update_error)?;
+            for field in NUMBER_STYLE_FIELDS {
+                if let Some(values) = source.read_column(field) {
+                    target.buffer.write_range(field, 0, &values);
+                }
+            }
+        }
+        // The buffer's defaults above now carry the live style; an older
+        // detached constructor row must not overwrite them during Stage::add.
+        target.defaults_row = None;
+        target.uniforms = uniforms;
+        target.z_index = self.z_index;
+        Ok(())
+    }
+
+    fn apply_family(&self, target: &mut Mobject, uniforms: Uniforms) -> Result<(), AnimError> {
+        self.apply(target, uniforms)?;
+        for child in &mut target.submobjects {
+            self.apply_family(child, uniforms)?;
+        }
+        Ok(())
+    }
+}
+
+fn number_update_error(error: impl core::fmt::Display) -> AnimError {
+    AnimError::UpdateFailed {
+        operation: "DecimalNumber::set_value",
+        detail: error.to_string(),
+    }
+}
+
+impl DecimalNumber {
+    /// Prepare a native numeric slot using an existing glyph as its paint
+    /// donor. Keep the background's own paint while propagating placement-
+    /// independent render settings to every member. The caller can validate
+    /// the complete detached result before editing an adopted formula.
+    pub(crate) fn with_live_paint(
+        &self,
+        stage: &Stage,
+        donor: Mob,
+    ) -> Result<Mobject, AnimError> {
+        let entry = stage.get(donor).ok_or(AnimError::StaleHandle(donor))?;
+        let uniforms = *entry.uniforms();
+        let paint = NumberPaint::capture(stage, donor)?;
+        let mut prepared: Mobject = self.vmob.clone().into();
+        paint.apply(&mut prepared, uniforms)?;
+        for (index, child) in prepared.submobjects.iter_mut().enumerate() {
+            if self.include_background_rectangle && index == 0 {
+                // The background is independent of the digits' live color.
+                child.uniforms = uniforms;
+                child.z_index = prepared.z_index;
+            } else {
+                paint.apply_family(child, uniforms)?;
+            }
+        }
+        Ok(prepared)
+    }
+}
+
+/// Add the current number's glyph family and return the stable root handle
+/// a value animation drives. Background, digit, ellipsis, and unit geometry
+/// retain their separate styles. The initial displayed value is validated
+/// against `book`; no speculative value is formatted or typeset.
 ///
 /// # Errors
-/// [`TextMobjectError`] if the number was never built against `book`.
+/// [`TextMobjectError`] if the current number cannot be built against `book`
+/// within its declared formatting/layout limits. No stage entry is added on
+/// failure.
 pub fn add_decimal_for_value_animation(
     stage: &mut Stage,
     decimal: &DecimalNumber,
     book: &FontBook,
 ) -> Result<Mob, TextMobjectError> {
-    let mut probe = decimal.clone();
-    probe.set_value(-1234567890.123_456, book)?;
-    let mob = stage.add(flattened_number_vmob(decimal));
-    Ok(mob)
+    let mut prepared = decimal.clone();
+    prepared.set_value(prepared.value(), book)?;
+    Ok(stage.add(prepared.into_vmob()))
 }
 
 /// `ChangingDecimal` (numbers.py:14): drive the displayed value from a
@@ -1145,35 +1248,82 @@ pub fn add_decimal_for_value_animation(
 /// Reference passes). `mob` is the handle [`add_decimal_for_value_animation`]
 /// returned; `decimal` is the same typed value it was built from.
 ///
-/// The constructor preflights the reachable character space (every digit,
-/// sign, grouping comma, decimal point at full magnitude) so the per-frame
-/// rebuild — whose trait slot is infallible — cannot meet an unmapped
-/// glyph mid-play. Unit and ellipsis glyphs were validated by the initial
-/// build.
+/// Each sample retains the current whole-family affine placement and holds
+/// the staged `edge_to_fix` bounding-box point in world space. The first
+/// numeric glyph supplies the new glyphs' live paint columns (as in the
+/// Reference); the background keeps its own paint. The root's uniforms,
+/// including fixed-in-frame/depth settings, propagate to the rebuilt family,
+/// and the root's draw order survives. Individual glyph geometry edits are
+/// replaced by the numeric layout rather than carried to unrelated digits.
+///
+/// Only the current value is validated at construction. Per-sample formatting
+/// and typesetting are fallible: the first refusal is retained through
+/// [`fmn_anim::Animation::deferred_error`], with the previous visible family
+/// intact. Later samples do not call `number_update_func` until a new begin.
 ///
 /// # Errors
-/// [`TextMobjectError`] when the preflight probe finds a glyph the book
-/// cannot typeset. A stale `mob` surfaces as [`fmn_mobject::StageError`] at
-/// the first frame boundary.
+/// [`TextMobjectError`] if the current value cannot be built. A later layout
+/// refusal surfaces as [`AnimError::UpdateFailed`]; a stale `mob` as
+/// [`AnimError::StaleHandle`], through the animation's frame boundary.
 pub fn changing_decimal(
     mob: Mob,
     mut decimal: DecimalNumber,
     book: FontBook,
     number_update_func: impl FnMut(f64) -> f64 + 'static,
 ) -> Result<UpdateFromFunc, TextMobjectError> {
-    // The reachable-format probe: full magnitude exercises every digit,
-    // the sign, the grouping comma, and the decimal point.
-    let mut probe = decimal.clone();
-    probe.set_value(-1234567890.123_456, &book)?;
+    decimal.set_value(decimal.value(), &book)?;
     let mut update = number_update_func;
-    Ok(UpdateFromFunc::new_alpha(mob, move |stage, mob, alpha| {
-        let value = update(alpha);
-        // Infallible by the constructor's preflight: every character the
-        // formatter can emit is already book-approved.
-        if decimal.set_value(value, &book).is_ok() {
-            let _ = stage.install(mob, flattened_number_vmob(&decimal));
-        }
-    }))
+    Ok(UpdateFromFunc::try_new_alpha(
+        mob,
+        move |stage, mob, alpha| {
+            let entry = stage.get(mob).ok_or(AnimError::StaleHandle(mob))?;
+            let placement = entry.placement();
+            let uniforms = *entry.uniforms();
+            let anchor = stage.get_bounding_box_point(mob, decimal.edge_to_fix);
+            let root_paint = NumberPaint::capture(stage, mob)?;
+            let background = decimal
+                .include_background_rectangle
+                .then(|| entry.submobjects().first().copied())
+                .flatten();
+            let background_paint = background
+                .map(|background| NumberPaint::capture(stage, background))
+                .transpose()?;
+            let digit = entry
+                .submobjects()
+                .iter()
+                .copied()
+                .find(|child| Some(*child) != background)
+                .unwrap_or(mob);
+            let digit_paint = NumberPaint::capture(stage, digit)?;
+
+            // All fallible layout and paint preparation precedes publication.
+            // Stage::install accepts an owned, acyclic family over this already
+            // checked handle; every placement target below is then newly live.
+            decimal
+                .refresh_value(update(alpha), &book)
+                .map_err(number_update_error)?;
+            let mut prepared: Mobject = decimal.vmob().clone().into();
+            root_paint.apply(&mut prepared, uniforms)?;
+            for (index, child) in prepared.submobjects.iter_mut().enumerate() {
+                let paint = if decimal.include_background_rectangle && index == 0 {
+                    background_paint.as_ref()
+                } else {
+                    Some(&digit_paint)
+                };
+                if let Some(paint) = paint {
+                    paint.apply_family(child, uniforms)?;
+                }
+            }
+            stage.install(mob, prepared).map_err(AnimError::Stage)?;
+            for member in stage.family(mob) {
+                stage
+                    .set_placement(member, placement)
+                    .map_err(AnimError::Stage)?;
+            }
+            stage.move_to(mob, anchor, decimal.edge_to_fix);
+            Ok(())
+        },
+    ))
 }
 
 /// `ChangeDecimalToValue` (numbers.py:38): interpolate from the decimal's
@@ -1189,7 +1339,7 @@ pub fn change_decimal_to_value(
 ) -> Result<UpdateFromFunc, TextMobjectError> {
     let start_number = decimal.value();
     changing_decimal(mob, decimal, book, move |alpha| {
-        start_number + (target_number - start_number) * alpha
+        (1.0 - alpha) * start_number + alpha * target_number
     })
 }
 
@@ -1206,7 +1356,8 @@ pub fn count_in_from(
 ) -> Result<UpdateFromFunc, TextMobjectError> {
     let target_number = decimal.value();
     changing_decimal(mob, decimal, book, move |alpha| {
-        source_number + (target_number - source_number) * alpha
+        let alpha = alpha.clamp(0.0, 1.0);
+        (1.0 - alpha) * source_number + alpha * target_number
     })
 }
 
@@ -1225,6 +1376,38 @@ mod tests {
 
     fn extent(v: &VMobject) -> (Vec3, Vec3) {
         v.extent().expect("has extent")
+    }
+
+    fn point_count(stage: &Stage, mob: Mob) -> usize {
+        stage
+            .family(mob)
+            .into_iter()
+            .map(|member| stage.get(member).unwrap().buffer.len())
+            .sum()
+    }
+
+    fn first_digit(stage: &Stage, mob: Mob, background: bool) -> Mob {
+        stage.get(mob).unwrap().submobjects()[usize::from(background)]
+    }
+
+    fn assert_point_close(actual: Vec3, expected: Vec3) {
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
+        }
+    }
+
+    fn assert_number_geometry(stage: &Stage, actual: Mob, expected: Mob) {
+        let actual_family = stage.family(actual);
+        let expected_family = stage.family(expected);
+        assert_eq!(actual_family.len(), expected_family.len());
+        for (actual, expected) in actual_family.into_iter().zip(expected_family) {
+            let actual = stage.get_points(actual).unwrap();
+            let expected = stage.get_points(expected).unwrap();
+            assert_eq!(actual.len(), expected.len());
+            for (actual, expected) in actual.into_iter().zip(expected) {
+                assert_point_close(actual, expected);
+            }
+        }
     }
 
     #[test]
@@ -1592,6 +1775,303 @@ mod tests {
     }
 
     #[test]
+    fn refused_value_rebuild_preserves_value_string_and_visible_geometry() {
+        let book = book();
+        let mut decimal = DecimalNumber::new(1.0)
+            .num_decimal_places(0)
+            .character_limit(2)
+            .build(&book)
+            .unwrap();
+        let before = decimal.vmob().clone();
+        assert!(matches!(
+            decimal.set_value(1234.0, &book),
+            Err(TextMobjectError::ResourceLimit { .. })
+        ));
+        assert_eq!(decimal.value(), 1.0);
+        assert_eq!(decimal.num_string(), "1");
+        assert_eq!(decimal.vmob(), &before);
+
+        // The numeric glyphs may be cached successfully before a later
+        // unit glyph refuses. The public value/string/geometry still agree.
+        decimal = decimal.character_limit(16).unit("\u{10ffff}");
+        let before_typesets = decimal.typesets();
+        assert!(decimal.set_value(23.0, &book).is_err());
+        assert_eq!(decimal.value(), 1.0);
+        assert_eq!(decimal.num_string(), "1");
+        assert_eq!(decimal.vmob(), &before);
+        assert_eq!(decimal.typesets(), before_typesets + 2);
+        decimal = decimal.unit("m");
+        decimal.set_value(23.0, &book).unwrap();
+        assert_eq!(decimal.value(), 23.0);
+        assert_eq!(decimal.num_string(), "23");
+        assert_eq!(decimal.typesets(), before_typesets + 3);
+    }
+
+    #[test]
+    fn value_animation_accepts_a_single_digit_character_budget() {
+        use fmn_anim::{AnimConfig, RateFunc};
+
+        let expected_book = book();
+        let book = book();
+        let mut stage = Stage::new();
+        let decimal = DecimalNumber::new(0.0)
+            .num_decimal_places(0)
+            .group_with_commas(false)
+            .character_limit(1)
+            .build(&book)
+            .unwrap();
+        let mob = add_decimal_for_value_animation(&mut stage, &decimal, &book).unwrap();
+        stage.shift(mob, [2.0, 1.0, 0.0]);
+        let anchor = stage.get_bounding_box_point(mob, LEFT);
+        let mut animation = change_decimal_to_value(mob, decimal, book, 9.0)
+            .unwrap()
+            .with_config(AnimConfig {
+                rate_func: RateFunc::linear(),
+                ..AnimConfig::default()
+            });
+        animation.begin(&mut stage).unwrap();
+        animation.interpolate(&mut stage, 0.5);
+        animation.finish(&mut stage);
+        assert!(animation.deferred_error().is_none());
+        assert_eq!(stage.family(mob).len(), 2);
+        assert_point_close(stage.get_bounding_box_point(mob, LEFT), anchor);
+        let expected = stage.add(
+            DecimalNumber::new(9.0)
+                .num_decimal_places(0)
+                .build(&expected_book)
+                .unwrap(),
+        );
+        stage.move_to(expected, anchor, LEFT);
+        assert_number_geometry(&stage, mob, expected);
+    }
+
+    #[test]
+    fn refused_initial_number_does_not_allocate_an_arena_family() {
+        let book = book();
+        let mut stage = Stage::new();
+        let before = stage.snapshot_bytes().unwrap();
+        let decimal = DecimalNumber::new(1000.0)
+            .num_decimal_places(0)
+            .character_limit(2);
+        assert!(add_decimal_for_value_animation(&mut stage, &decimal, &book).is_err());
+        assert_eq!(stage.snapshot_bytes().unwrap(), before);
+    }
+
+    #[test]
+    fn failed_number_sample_is_reported_once_without_publishing_a_partial_family() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        use fmn_anim::{AnimConfig, RateFunc};
+
+        let book = book();
+        let mut stage = Stage::new();
+        let decimal = DecimalNumber::new(1.0)
+            .num_decimal_places(0)
+            .character_limit(2)
+            .build(&book)
+            .unwrap();
+        let mob = add_decimal_for_value_animation(&mut stage, &decimal, &book).unwrap();
+        let calls = Rc::new(Cell::new(0));
+        let observed = Rc::clone(&calls);
+        let mut animation = changing_decimal(mob, decimal, book, move |alpha| {
+            observed.set(observed.get() + 1);
+            if alpha < 0.5 { 22.0 } else { 1234.0 }
+        })
+        .unwrap()
+        .with_config(AnimConfig {
+            rate_func: RateFunc::linear(),
+            ..AnimConfig::default()
+        });
+        animation.begin(&mut stage).unwrap();
+        assert_eq!(calls.get(), 1);
+        let good_frame = stage.snapshot_bytes().unwrap();
+        animation.interpolate(&mut stage, 0.5);
+        let failure = animation.deferred_error().unwrap();
+        assert!(matches!(
+            &failure,
+            AnimError::UpdateFailed {
+                operation: "DecimalNumber::set_value",
+                detail,
+            } if detail.contains("decimal-number")
+        ));
+        assert_eq!(stage.snapshot_bytes().unwrap(), good_frame);
+        animation.interpolate(&mut stage, 0.9);
+        assert_eq!(calls.get(), 2);
+        assert_eq!(animation.deferred_error(), Some(failure));
+        assert_eq!(stage.snapshot_bytes().unwrap(), good_frame);
+        animation.finish(&mut stage);
+        assert_eq!(calls.get(), 2);
+
+        animation.begin(&mut stage).unwrap();
+        assert_eq!(calls.get(), 3);
+        assert!(animation.deferred_error().is_none());
+        animation.abort(&mut stage);
+    }
+
+    #[test]
+    fn a_stale_number_handle_refuses_before_calling_the_value_function() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let book = book();
+        let mut stage = Stage::new();
+        let decimal = DecimalNumber::new(1.0).build(&book).unwrap();
+        let mob = add_decimal_for_value_animation(&mut stage, &decimal, &book).unwrap();
+        let calls = Rc::new(Cell::new(0));
+        let observed = Rc::clone(&calls);
+        let mut animation = changing_decimal(mob, decimal, book, move |_| {
+            observed.set(observed.get() + 1);
+            2.0
+        })
+        .unwrap();
+        stage.delete(mob).unwrap();
+        let before = stage.snapshot_bytes().unwrap();
+        animation.interpolate(&mut stage, 0.5);
+        assert_eq!(
+            animation.deferred_error(),
+            Some(AnimError::StaleHandle(mob))
+        );
+        assert_eq!(stage.snapshot_bytes().unwrap(), before);
+        assert_eq!(calls.get(), 0);
+    }
+
+    #[test]
+    fn value_animation_preserves_affine_placement_live_style_background_and_uniforms() {
+        use fmn_core::constants::BLUE;
+        use fmn_mobject::Placement;
+
+        use crate::style::VStyle;
+
+        let expected_book = book();
+        let book = book();
+        let mut stage = Stage::new();
+        let decimal = DecimalNumber::new(9.0)
+            .num_decimal_places(0)
+            .include_background_rectangle(true)
+            .show_ellipsis(true)
+            .unit("m")
+            .edge_to_fix(RIGHT)
+            .build(&book)
+            .unwrap();
+        let mob = add_decimal_for_value_animation(&mut stage, &decimal, &book).unwrap();
+        let affine = Placement::new(
+            [[0.0, -1.5, 0.0], [2.0, 0.25, 0.0], [0.0, 0.0, 1.0]],
+            [3.0, -2.0, 0.5],
+        );
+        stage.apply_affine(mob, affine);
+        stage.set_fill(mob, Some(BLUE), Some(0.4), Some(1.25), true);
+        stage.set_stroke(mob, Some(BLUE), Some(2.0), Some(0.3), Some(true), true);
+        let background = stage.get(mob).unwrap().submobjects()[0];
+        stage.set_fill(background, Some(BLACK), Some(1.0), Some(0.0), true);
+        stage.set_stroke(background, None, Some(0.0), Some(0.0), None, true);
+        stage.set_fixed_in_frame(mob, 1.0, true);
+        stage.set_z_index(mob, 7, true);
+        let uniforms = *stage.uniforms(mob).unwrap();
+        let anchor = stage.get_bounding_box_point(mob, RIGHT);
+        let mut animation = changing_decimal(mob, decimal.clone(), book, |_| 1234.0).unwrap();
+        animation.begin(&mut stage).unwrap();
+        animation.finish(&mut stage);
+        assert!(animation.deferred_error().is_none());
+        assert_point_close(stage.get_bounding_box_point(mob, RIGHT), anchor);
+        assert_eq!(stage.z_index(mob), 7);
+        assert_eq!(stage.placement(mob).unwrap().linear(), affine.linear());
+        assert_eq!(
+            stage.get(mob).unwrap().buffer.default_record("fill_rgba"),
+            Some(vec![BLUE.r as f32, BLUE.g as f32, BLUE.b as f32, 0.4])
+        );
+        let children = stage.get(mob).unwrap().submobjects();
+        assert_eq!(children.len(), 8, "background, 1,comma,2,3,4,ellipsis,unit");
+        let background = children[0];
+        assert_eq!(stage.get_fill_color(background), Some(BLACK));
+        assert_eq!(stage.get_fill_opacity(background), Some(1.0));
+        for member in stage.family(mob).into_iter().skip(1) {
+            assert_eq!(stage.uniforms(member), Some(&uniforms));
+            assert_eq!(stage.z_index(member), 7);
+            if member != background && !stage.get(member).unwrap().buffer.is_empty() {
+                let color = stage.get_fill_color(member).unwrap();
+                assert_point_close([color.r, color.g, color.b], [BLUE.r, BLUE.g, BLUE.b]);
+                assert!((stage.get_fill_opacity(member).unwrap() - 0.4).abs() < 1e-6);
+                assert_eq!(stage.get_stroke_width(member), Some(2.0));
+            }
+        }
+
+        let mut expected = decimal;
+        expected.set_value(1234.0, &expected_book).unwrap();
+        let expected = stage.add(expected);
+        stage.apply_affine(expected, affine);
+        stage.move_to(expected, anchor, RIGHT);
+        assert_number_geometry(&stage, mob, expected);
+    }
+
+    #[test]
+    fn count_in_from_clips_an_overshooting_rate_at_the_target() {
+        use fmn_anim::{AnimConfig, RateFunc};
+
+        let expected_book = book();
+        let book = book();
+        let mut stage = Stage::new();
+        let decimal = DecimalNumber::new(5.0).build(&book).unwrap();
+        let mob = add_decimal_for_value_animation(&mut stage, &decimal, &book).unwrap();
+        let anchor = stage.get_bounding_box_point(mob, LEFT);
+        let mut animation =
+            count_in_from(mob, decimal, book, 1.0)
+                .unwrap()
+                .with_config(AnimConfig {
+                    rate_func: RateFunc::linear().not_quite_there(2.0),
+                    ..AnimConfig::default()
+                });
+        animation.begin(&mut stage).unwrap();
+        animation.interpolate(&mut stage, 0.75);
+        let expected = stage.add(DecimalNumber::new(5.0).build(&expected_book).unwrap());
+        stage.move_to(expected, anchor, LEFT);
+        assert_number_geometry(&stage, mob, expected);
+        assert!(animation.deferred_error().is_none());
+        animation.finish(&mut stage);
+    }
+
+    #[test]
+    fn regenerated_digits_keep_live_gradient_paint_and_stroke_profiles() {
+        let book = book();
+        let mut stage = Stage::new();
+        let decimal = DecimalNumber::new(8.0)
+            .num_decimal_places(0)
+            .build(&book)
+            .unwrap();
+        let mob = add_decimal_for_value_animation(&mut stage, &decimal, &book).unwrap();
+        let digit = first_digit(&stage, mob, false);
+        let entry = stage.get_mut(digit).unwrap();
+        let count = entry.buffer.len();
+        assert!(count > 1);
+        let mut colors = Vec::with_capacity(count * 4);
+        let mut widths = Vec::with_capacity(count);
+        for index in 0..count {
+            let alpha = index as f32 / (count - 1) as f32;
+            colors.extend_from_slice(&[alpha, 0.25, 1.0 - alpha, 1.0]);
+            widths.push(1.0 + 4.0 * alpha);
+        }
+        entry.buffer.write_range("fill_rgba", 0, &colors);
+        entry.buffer.write_range("stroke_width", 0, &widths);
+        let mut animation = changing_decimal(mob, decimal, book, |_| 2.0).unwrap();
+        animation.begin(&mut stage).unwrap();
+        let entry = stage.get(first_digit(&stage, mob, false)).unwrap();
+        let new_count = entry.buffer.len();
+        assert_ne!(new_count, count, "the glyph change must resample its style");
+        for index in 0..new_count {
+            let alpha = index as f32 / (new_count - 1) as f32;
+            let color = entry.buffer.read(index, "fill_rgba").unwrap();
+            assert!((color[0] - alpha).abs() < 1e-6);
+            assert!((color[1] - 0.25).abs() < 1e-6);
+            assert!((color[2] - (1.0 - alpha)).abs() < 1e-6);
+            assert_eq!(color[3], 1.0);
+            let width = entry.buffer.read(index, "stroke_width").unwrap()[0];
+            assert!((width - (1.0 + 4.0 * alpha)).abs() < 1e-6);
+        }
+        assert!(animation.deferred_error().is_none());
+        animation.finish(&mut stage);
+    }
+
+    #[test]
     fn the_family_enters_the_arena_as_a_family() {
         let mut stage = Stage::new();
         let d = DecimalNumber::new(12.0).build(&book()).expect("builds");
@@ -1613,36 +2093,37 @@ mod tests {
         let mut stage = Stage::new();
         let decimal = DecimalNumber::new(0.0).build(&book).expect("builds");
         let mob = add_decimal_for_value_animation(&mut stage, &decimal, &book)
-            .expect("flattened entity added");
+            .expect("number family added");
         let mut anim = changing_decimal(mob, decimal, book, |alpha| 2.0 * alpha)
-            .expect("preflight passes on the bundled book");
+            .expect("current value builds on the bundled book");
         anim.interpolate(&mut stage, 1.0);
 
-        let expected = flattened_number_vmob(
-            &DecimalNumber::new(2.0)
+        let expected = stage.add(
+            DecimalNumber::new(2.0)
                 .build(&expected_book)
                 .expect("builds"),
         );
-        let entry = stage.get(mob).expect("the handle survived the install");
         assert_eq!(
-            entry.buffer.len(),
-            expected.points().len(),
+            point_count(&stage, mob),
+            point_count(&stage, expected),
             "the 2.0 render's structure is installed"
         );
         // Placement: set_value re-anchors through edge_to_fix with recycled
         // glyphs, so absolute coordinates may drift from a fresh build when
         // digit widths differ — the display must simply BE the new value's
         // ink, not the old one's.
-        let stale = flattened_number_vmob(
-            &DecimalNumber::new(0.0)
+        let stale = stage.add(
+            DecimalNumber::new(0.0)
                 .build(&expected_book)
                 .expect("builds"),
         );
-        let p0 = entry.buffer.read(0, "point").expect("point column");
-        let drifted = (f64::from(p0[0]) - stale.points()[0][0]).abs() > 1e-6
-            || (f64::from(p0[1]) - stale.points()[0][1]).abs() > 1e-6;
+        let p0 = stage.get_points(first_digit(&stage, mob, false)).unwrap()[0];
+        let old = stage.get_points(first_digit(&stage, stale, false)).unwrap()[0];
+        let drifted = (p0[0] - old[0]).abs() > 1e-6 || (p0[1] - old[1]).abs() > 1e-6;
         assert!(drifted, "the installed ink is the new value's, not 0.00's");
-        let _ = expected;
+        stage.move_to(expected, stage.get_bounding_box_point(mob, LEFT), LEFT);
+        assert_number_geometry(&stage, mob, expected);
+        assert!(anim.deferred_error().is_none());
     }
 
     #[test]
@@ -1652,20 +2133,19 @@ mod tests {
         let mut stage = Stage::new();
         let decimal = DecimalNumber::new(1.0).build(&book).expect("builds");
         let mob = add_decimal_for_value_animation(&mut stage, &decimal, &book)
-            .expect("flattened entity added");
+            .expect("number family added");
         let mut anim = change_decimal_to_value(mob, decimal, book, 5.0).expect("wired");
         anim.interpolate(&mut stage, 0.5);
 
         // value 3.0 renders as "3.00" — same glyph count as "1.00".
-        let expected = flattened_number_vmob(
-            &DecimalNumber::new(3.0)
+        let expected = stage.add(
+            DecimalNumber::new(3.0)
                 .build(&expected_book)
                 .expect("builds"),
         );
-        assert_eq!(
-            stage.get(mob).expect("live").buffer.len(),
-            expected.points().len()
-        );
+        stage.move_to(expected, stage.get_bounding_box_point(mob, LEFT), LEFT);
+        assert_number_geometry(&stage, mob, expected);
+        assert!(anim.deferred_error().is_none());
     }
 
     #[test]
@@ -1675,29 +2155,34 @@ mod tests {
         let mut stage = Stage::new();
         let decimal = DecimalNumber::new(5.0).build(&book).expect("builds");
         let mob = add_decimal_for_value_animation(&mut stage, &decimal, &book)
-            .expect("flattened entity added");
+            .expect("number family added");
         let mut anim = count_in_from(mob, decimal, book, 0.0).expect("wired");
         anim.interpolate(&mut stage, 0.0);
-        let at_source = flattened_number_vmob(
-            &DecimalNumber::new(0.0)
+        let at_source = stage.add(
+            DecimalNumber::new(0.0)
                 .build(&expected_book)
                 .expect("builds"),
         );
         assert_eq!(
-            stage.get(mob).expect("live").buffer.len(),
-            at_source.points().len(),
+            point_count(&stage, mob),
+            point_count(&stage, at_source),
             "alpha zero shows the source value"
         );
+        stage.move_to(at_source, stage.get_bounding_box_point(mob, LEFT), LEFT);
+        assert_number_geometry(&stage, mob, at_source);
         anim.interpolate(&mut stage, 1.0);
-        let at_target = flattened_number_vmob(
-            &DecimalNumber::new(5.0)
+        let at_target = stage.add(
+            DecimalNumber::new(5.0)
                 .build(&expected_book)
                 .expect("builds"),
         );
         assert_eq!(
-            stage.get(mob).expect("live").buffer.len(),
-            at_target.points().len(),
+            point_count(&stage, mob),
+            point_count(&stage, at_target),
             "alpha one shows the target value"
         );
+        stage.move_to(at_target, stage.get_bounding_box_point(mob, LEFT), LEFT);
+        assert_number_geometry(&stage, mob, at_target);
+        assert!(anim.deferred_error().is_none());
     }
 }

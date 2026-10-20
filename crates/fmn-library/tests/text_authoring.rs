@@ -1,3 +1,5 @@
+use fmn_core::color::Srgb;
+use fmn_library::text::{MarkupText, SourceSelector, SourceStyle};
 use fmn_library::{FontBook, Text};
 
 #[test]
@@ -116,4 +118,45 @@ fn native_highlighter_exposes_positional_styles_without_source_rewriting() {
             .iter()
             .all(|style| style.family == Some("CM Typewriter"))
     );
+}
+
+#[test]
+fn source_styles_builders_retain_resolved_styles_and_owned_source() {
+    let book = FontBook::bundled().unwrap();
+    let color = Srgb::from_rgb8(40, 120, 220);
+    let (text, markup, selected) = {
+        let source = String::from("é<b>A</b>B");
+        let start = source.find('A').unwrap();
+        let ranges = [(start, start + 1)];
+        let styles = [SourceStyle {
+            color: Some(color),
+            family: Some("IBM Plex Sans"),
+            bold: Some(false),
+            ..SourceStyle::new(SourceSelector::Ranges(&ranges))
+        }];
+        let text = Text::markup(&source)
+            .source_styles(&styles)
+            .build(&book)
+            .unwrap();
+        let markup = MarkupText::new(&source)
+            .source_styles(&styles)
+            .build(&book)
+            .unwrap();
+        (text, markup, ranges[0])
+    };
+
+    // Both builders must forward the borrowed styles and retain the source
+    // and resolved native glyph data after all authoring inputs are dropped.
+    assert_eq!(text.layout, markup.layout);
+    assert_eq!(text.span_map().entries, markup.span_map().entries);
+    for built in [&text, &markup] {
+        assert_eq!(&*built.source, "é<b>A</b>B");
+        assert_eq!(built.select(selected), [1]);
+        let glyph = &built.layout.glyphs[1];
+        assert_eq!(glyph.face.family, "IBM Plex Sans");
+        assert!(!glyph.face.key.bold);
+        assert_eq!(glyph.fill, Some(color));
+        assert!(built.layout.glyphs[0].fill.is_none());
+        assert!(built.layout.glyphs[2].fill.is_none());
+    }
 }

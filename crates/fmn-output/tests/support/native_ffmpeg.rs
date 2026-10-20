@@ -16,6 +16,7 @@ use std::time::Duration;
 const VERSION: &str = "ffmpeg version 7.1-fake";
 const MODE_LEAF: &str = ".fmn-native-ffmpeg-mode";
 const TIMEOUT_READY_LEAF: &str = ".fmn-native-ffmpeg-timeout-ready";
+const OUTPUT_READY_LEAF: &str = ".fmn-native-ffmpeg-output-ready";
 
 fn main() -> ExitCode {
     match run() {
@@ -29,6 +30,10 @@ fn main() -> ExitCode {
 
 fn run() -> Result<u8, Box<dyn std::error::Error>> {
     let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
+    if argv.len() == 3 && argv[0] == "--fmn-grow-file" {
+        grow_file(Path::new(&argv[1]), Path::new(&argv[2]))?;
+        return Ok(0);
+    }
     if argv == [OsString::from("--fmn-sleep-child")] {
         std::thread::sleep(Duration::from_secs(5));
         return Ok(0);
@@ -43,6 +48,19 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
         );
         return Ok(0);
     }
+    if argv.len() == 3 && argv[0] == "-hide_banner" && argv[1] == "-h" {
+        let encoder = argv[2]
+            .to_str()
+            .and_then(|help| help.strip_prefix("encoder="))
+            .ok_or("expected a named encoder help query")?;
+        let formats = match encoder {
+            "libx264" => "yuv420p nv12 yuv420p10le",
+            "h264_nvenc" => "yuv420p nv12 p010le",
+            _ => return Err("fixture help queried an unlisted encoder".into()),
+        };
+        println!("Encoder {encoder} [Fixture encoder]:\n    Supported pixel formats: {formats}");
+        return Ok(0);
+    }
 
     let private_dir = std::env::var_os("TMPDIR")
         .map(PathBuf::from)
@@ -50,7 +68,25 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
     if !private_dir.is_absolute() {
         return Err("ffmpeg fixture TMPDIR is not absolute".into());
     }
-    let Some((mode, fixture_root)) = fixture_mode(&private_dir)? else {
+    let mode = fixture_mode(&private_dir)?;
+    if argv
+        .windows(2)
+        .any(|pair| pair[0] == "-f" && pair[1] == "null")
+    {
+        if mode
+            .as_ref()
+            .is_some_and(|(mode, _)| mode == "hardware-unavailable")
+        {
+            // Fail before reading stdin, as FFmpeg does when driver loading
+            // fails. The real runner must retain this diagnostic even when
+            // its larger-than-pipe-capacity input encounters a broken pipe.
+            eprintln!("Cannot load libcuda.so.1");
+            return Ok(1);
+        }
+        validate_hardware_probe(&argv)?;
+        return Ok(0);
+    }
+    let Some((mode, fixture_root)) = mode else {
         drain_stdin()?;
         let artifact = artifact_path(&argv)?;
         append_argv(&private_dir, &argv)?;
@@ -70,10 +106,37 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
             let _status = child.wait()?;
             Ok(0)
         }
-        "oversize" => {
+        "oversize" | "bounded-output" => {
             drain_stdin()?;
             let artifact = artifact_path(&argv)?;
             std::fs::write(&artifact, vec![0_u8; 4_096])?;
+            Ok(0)
+        }
+        "runaway-output" | "runaway-scratch" | "runaway-mux" => {
+            let artifact = artifact_path(&argv)?;
+            if mode == "runaway-mux" && artifact.file_name().is_none_or(|name| name != "muxed.mp4")
+            {
+                drain_stdin()?;
+                std::fs::write(&artifact, b"FAKEVIDEO")?;
+                return Ok(0);
+            }
+            let growing = if mode == "runaway-scratch" {
+                std::fs::write(&artifact, b"FAKEVIDEO")?;
+                let scratch = private_dir.join("scratch");
+                std::fs::create_dir(&scratch)?;
+                scratch.join("growing.tmp")
+            } else {
+                artifact
+            };
+            // This parent deliberately keeps stdin unread. The descendant
+            // inherits its process group and pipes, exercising cancellation
+            // of both a blocked writer and the complete external process tree.
+            let mut child = Command::new(std::env::current_exe()?)
+                .arg("--fmn-grow-file")
+                .arg(&growing)
+                .arg(fixture_root.join(OUTPUT_READY_LEAF))
+                .spawn()?;
+            let _status = child.wait()?;
             Ok(0)
         }
         "fail7" => {
@@ -82,6 +145,22 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
             Ok(7)
         }
         mode => Err(format!("unknown fixture mode {mode:?}").into()),
+    }
+}
+
+fn grow_file(path: &Path, ready: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let mut output = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
+    // Signal before crossing the limit, so an immediate watcher cancellation
+    // cannot race away the test's post-spawn timing marker.
+    std::fs::write(ready, format!("{}\n{}", std::process::id(), path.display()))?;
+    loop {
+        output.write_all(&[0_u8; 4_096])?;
+        output.flush()?;
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -97,6 +176,54 @@ fn fixture_mode(
         }
     }
     Ok(None)
+}
+
+fn validate_hardware_probe(argv: &[OsString]) -> Result<(), Box<dyn std::error::Error>> {
+    for (flag, value) in [
+        ("-f", "rawvideo"),
+        ("-pix_fmt", "yuv420p"),
+        ("-video_size", "256x256"),
+        ("-framerate", "1"),
+        ("-i", "-"),
+        ("-frames:v", "2"),
+        ("-c:v", "h264_nvenc"),
+    ] {
+        if !argv
+            .windows(2)
+            .any(|pair| pair[0] == flag && pair[1] == value)
+        {
+            return Err(format!("hardware probe is missing {flag} {value}").into());
+        }
+    }
+    if argv.last().is_none_or(|value| value != "-") {
+        return Err("hardware probe must use stdout as its null output".into());
+    }
+
+    const LUMA_BYTES: usize = 256 * 256;
+    const FRAME_BYTES: usize = LUMA_BYTES * 3 / 2;
+    const INPUT_BYTES: usize = 2 * FRAME_BYTES;
+    // One extra byte detects excess input while keeping the fixture's own
+    // allocation and read bounded, including if the trial contract regresses.
+    let mut payload = Vec::new();
+    std::io::stdin()
+        .take((INPUT_BYTES + 1) as u64)
+        .read_to_end(&mut payload)?;
+    if payload.len() != INPUT_BYTES {
+        return Err(format!(
+            "hardware probe expected {INPUT_BYTES} bytes, received {}",
+            payload.len()
+        )
+        .into());
+    }
+    for frame in payload.chunks_exact(FRAME_BYTES) {
+        if !frame[..LUMA_BYTES].iter().all(|byte| *byte == 16)
+            || !frame[LUMA_BYTES..].iter().all(|byte| *byte == 128)
+        {
+            return Err("hardware probe input is not limited-range black YUV420P".into());
+        }
+    }
+    // A null-muxer trial never creates an artifact or an environment dump.
+    Ok(())
 }
 
 fn drain_stdin() -> Result<(), std::io::Error> {

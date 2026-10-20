@@ -50,7 +50,7 @@ use std::rc::Rc;
 use fmn_core::rng::{Pcg64Dxsm, RngRoot};
 use fmn_mobject::{Mob, Snapshot, Stage};
 
-use crate::animation::{AnimError, Animation};
+use crate::animation::{AnimError, Animation, check_updater_error};
 use crate::clock::{FrameSample, FrameSegment, RationalFrameClock, RationalTime};
 use crate::purity::{
     ImpureEffect, Purity, SegmentKind, SegmentReport, classify_play, classify_wait,
@@ -188,10 +188,13 @@ impl FramePacket {
 /// Scene-updater pass without a time advance (the Reference's bare
 /// `Scene.update_mobjects(dt)` — used by `finish_animations` and the top
 /// of `wait`; `Stage::update` is steps 3–4 fused).
-fn update_scene_mobjects(stage: &mut Stage, dt: f64) {
+fn update_scene_mobjects(stage: &mut Stage, dt: f64) -> Result<(), AnimError> {
+    check_updater_error(stage)?;
     for root in stage.roots().to_vec() {
         stage.update_mobject(root, dt);
+        check_updater_error(stage)?;
     }
+    Ok(())
 }
 
 /// Whether `mob` is already in some rooted family (the Reference's
@@ -211,10 +214,15 @@ fn begin_animations(
     stage: &mut Stage,
     animations: &mut [Box<dyn Animation>],
 ) -> Result<(), AnimError> {
+    check_updater_error(stage)?;
     let before_begin = stage.snapshot();
+    let mut begun = 0;
     let result = (|| {
         for animation in animations.iter_mut() {
-            animation.begin(stage)?;
+            begun += 1;
+            let begin = animation.begin(stage);
+            check_updater_error(stage)?;
+            begin?;
             let mobject = animation.state().mobject();
             if !in_scene_family(stage, mobject) {
                 stage
@@ -227,6 +235,11 @@ fn begin_animations(
     match result {
         Ok(()) => Ok(()),
         Err(error) => {
+            if matches!(error, AnimError::Updater(_)) {
+                for animation in animations.iter_mut().take(begun) {
+                    animation.abort(stage);
+                }
+            }
             stage.restore(&before_begin);
             Err(error)
         }
@@ -310,16 +323,45 @@ pub struct AnimationBoundary {
 /// remover cleanup, then one scene-updater pass at `dt = 0` — in both
 /// modes (the skip-mode `dt = run_time` double-application is the BN-10
 /// correction).
-fn finish_animations(stage: &mut Stage, animations: &mut [Box<dyn Animation>]) {
-    for animation in animations.iter_mut() {
-        animation.finish(stage);
+fn finish_animations(
+    stage: &mut Stage,
+    animations: &mut [Box<dyn Animation>],
+) -> Result<(), AnimError> {
+    finish_animation_lifecycles(stage, animations)?;
+    update_scene_mobjects(stage, 0.0)
+}
+
+fn finish_animation_lifecycles(
+    stage: &mut Stage,
+    animations: &mut [Box<dyn Animation>],
+) -> Result<(), AnimError> {
+    if let Err(error) = check_updater_error(stage) {
+        for animation in animations {
+            animation.abort(stage);
+        }
+        return Err(error);
+    }
+    for index in 0..animations.len() {
+        animations[index].finish(stage);
+        if let Err(error) = check_updater_error(stage) {
+            for animation in &mut animations[index + 1..] {
+                animation.abort(stage);
+            }
+            return Err(error);
+        }
         // `clean_up_from_scene` is the removal decision: leaves consult
         // their own `remover` flag, composition operators (§9.4) delegate to
         // their members — a remover composed into a group is still a
         // remover, and the container never is.
-        animation.clean_up_from_scene(stage);
+        animations[index].clean_up_from_scene(stage);
+        if let Err(error) = check_updater_error(stage) {
+            for animation in &mut animations[index + 1..] {
+                animation.abort(stage);
+            }
+            return Err(error);
+        }
     }
-    update_scene_mobjects(stage, 0.0);
+    Ok(())
 }
 
 /// What `begin_animations` + classification establish, before any sample
@@ -360,6 +402,7 @@ fn plan_play(
     clock: &RationalFrameClock,
     animations: &[Box<dyn Animation>],
 ) -> Result<(FrameSegment, f64), AnimError> {
+    check_updater_error(stage)?;
     for animation in animations {
         animation.validate_begin(stage)?;
     }
@@ -445,6 +488,15 @@ impl OpenSegment {
     #[must_use]
     pub fn stepped(&self) -> i64 {
         self.stepped
+    }
+
+    pub(crate) fn is_at_begin(&self) -> bool {
+        self.stepped == 0
+            && self.current_sample.is_none()
+            && self.prepared.is_none()
+            && self.next_animation == 0
+            && !self.animations_finished
+            && !self.final_updaters_completed
     }
 
     /// Mark the prepared frame's whole scene-updater phase as completed by
@@ -538,6 +590,7 @@ pub fn prepare_play_animation(
     animations: &mut [Box<dyn Animation>],
     open: &mut OpenSegment,
 ) -> Result<Option<AnimationBoundary>, AnimError> {
+    check_updater_error(stage)?;
     if open.animations_finished {
         return Err(AnimError::InvalidFramePhase(
             "cannot advance a play after animation cleanup",
@@ -571,8 +624,10 @@ pub fn prepare_play_animation(
     let dt = clock.dt().to_f64();
     let animation = &mut animations[index];
     animation.update_mobjects(stage, dt);
+    check_updater_error(stage)?;
     let alpha = sample.time.to_f64() / animation.state().config.run_time;
     animation.interpolate(stage, alpha);
+    check_updater_error(stage)?;
     open.next_animation += 1;
     Ok(Some(AnimationBoundary {
         animation_index: index,
@@ -639,13 +694,16 @@ pub fn complete_play_frame(
     boundary: &mut dyn FnMut(&mut Stage, RationalTime),
     emit: &mut dyn FnMut(FramePacket),
 ) -> Result<(), AnimError> {
+    check_updater_error(stage)?;
     let plan = open.prepared.take().ok_or(AnimError::InvalidFramePhase(
         "prepare a frame before completing it",
     ))?;
     if !plan.updaters_completed {
         stage.update_at_time(plan.dt, clock.now().to_f64());
     }
+    check_updater_error(stage)?;
     boundary(stage, clock.now());
+    check_updater_error(stage)?;
     if capture {
         emit(FramePacket::freeze(stage, clock, rng, &plan.sample));
     }
@@ -670,8 +728,9 @@ pub fn finish_open_play(
 ) -> Result<SegmentReport, AnimError> {
     finish_open_play_animations(stage, animations, &mut open)?;
     if !open.final_updaters_completed {
-        update_scene_mobjects(stage, 0.0);
+        update_scene_mobjects(stage, 0.0)?;
     }
+    check_updater_error(stage)?;
     if let Some(error) = animations
         .iter()
         .find_map(|animation| animation.deferred_error())
@@ -696,17 +755,24 @@ pub fn finish_open_play_animations(
     animations: &mut [Box<dyn Animation>],
     open: &mut OpenSegment,
 ) -> Result<(), AnimError> {
+    if let Err(error) = check_updater_error(stage) {
+        if !open.animations_finished {
+            for animation in animations {
+                animation.abort(stage);
+            }
+            open.animations_finished = true;
+        }
+        return Err(error);
+    }
     if open.prepared.is_some() || open.current_sample.is_some() {
         return Err(AnimError::InvalidFramePhase(
             "complete the prepared frame before finishing the segment",
         ));
     }
     if !open.animations_finished {
-        for animation in animations.iter_mut() {
-            animation.finish(stage);
-            animation.clean_up_from_scene(stage);
-        }
+        let result = finish_animation_lifecycles(stage, animations);
         open.animations_finished = true;
+        result?;
     }
     Ok(())
 }
@@ -723,8 +789,10 @@ pub fn abort_open_play(
     animations: &mut [Box<dyn Animation>],
     open: OpenSegment,
 ) -> SegmentReport {
-    for animation in animations {
-        animation.abort(stage);
+    if !open.animations_finished {
+        for animation in animations {
+            animation.abort(stage);
+        }
     }
     open.report
 }
@@ -738,6 +806,26 @@ pub struct OpenWait {
 }
 
 impl OpenWait {
+    pub(crate) fn report(&self) -> &SegmentReport {
+        &self.report
+    }
+
+    pub(crate) fn segment(&self) -> FrameSegment {
+        self.segment
+    }
+
+    pub(crate) fn is_at_begin(&self) -> bool {
+        self.stepped == 0 && self.prepared.is_none()
+    }
+
+    pub(crate) fn finish_pure(mut self) -> Result<SegmentReport, AnimError> {
+        if !self.is_at_begin() || !self.report.purity.is_pure() {
+            return Err(AnimError::InvalidFramePhase("pure wait no longer at begin"));
+        }
+        self.stepped = self.segment.n_frames();
+        finish_open_wait(self)
+    }
+
     /// Mark the prepared wait frame's whole scene-updater phase complete.
     ///
     /// # Errors
@@ -778,7 +866,7 @@ pub fn open_wait(
     duration: f64,
     skip: bool,
 ) -> Result<OpenWait, AnimError> {
-    update_scene_mobjects(stage, 0.0);
+    update_scene_mobjects(stage, 0.0)?;
     plan_open_wait(stage, clock, duration, skip, false)
 }
 
@@ -803,6 +891,7 @@ fn plan_open_wait(
     skip: bool,
     external_updaters: bool,
 ) -> Result<OpenWait, AnimError> {
+    check_updater_error(stage)?;
     let segment = clock.segment(duration).map_err(AnimError::Clock)?;
     let purity = classify_wait(stage, false);
     let mut report = SegmentReport {
@@ -833,6 +922,7 @@ pub fn prepare_wait_frame(
     clock: &mut RationalFrameClock,
     open: &mut OpenWait,
 ) -> Result<Option<SceneUpdaterBoundary>, AnimError> {
+    check_updater_error(stage)?;
     if open.prepared.is_some() {
         return Err(AnimError::InvalidFramePhase(
             "complete the prepared wait frame before preparing another",
@@ -876,13 +966,16 @@ pub fn complete_wait_frame(
     boundary: &mut dyn FnMut(&mut Stage, RationalTime),
     emit: &mut dyn FnMut(FramePacket),
 ) -> Result<(), AnimError> {
+    check_updater_error(stage)?;
     let plan = open.prepared.take().ok_or(AnimError::InvalidFramePhase(
         "prepare a wait frame before completing it",
     ))?;
     if !plan.updaters_completed {
         stage.update_at_time(plan.dt, clock.now().to_f64());
     }
+    check_updater_error(stage)?;
     boundary(stage, clock.now());
+    check_updater_error(stage)?;
     if capture {
         emit(FramePacket::freeze(stage, clock, rng, &plan.sample));
     }
@@ -967,6 +1060,7 @@ fn advance_play_with_boundary_mode(
     boundary: &mut dyn FnMut(&mut Stage, RationalTime),
     emit: &mut dyn FnMut(FramePacket),
 ) -> Result<(), AnimError> {
+    check_updater_error(stage)?;
     let target = upto.clamp(open.stepped, open.segment.n_frames());
     while open.stepped < target {
         prepare_play_frame(stage, clock, animations, open)?.ok_or(AnimError::InvalidFramePhase(
@@ -994,7 +1088,7 @@ pub fn wait_segment_upto(
     upto: i64,
     emit: &mut dyn FnMut(FramePacket),
 ) -> Result<SegmentReport, AnimError> {
-    update_scene_mobjects(stage, 0.0);
+    update_scene_mobjects(stage, 0.0)?;
     let segment = clock.segment(duration).map_err(AnimError::Clock)?;
     let purity = classify_wait(stage, false);
     let base_frame = clock.now().frames();
@@ -1006,6 +1100,7 @@ pub fn wait_segment_upto(
     {
         clock.advance_frames(1).map_err(AnimError::Clock)?;
         stage.update_at_time(dt, clock.now().to_f64());
+        check_updater_error(stage)?;
         emit(FramePacket::freeze(stage, clock, rng, &sample));
     }
     Ok(SegmentReport {
@@ -1064,25 +1159,29 @@ pub fn play_segment_with_boundary(
     boundary: &mut dyn FnMut(&mut Stage, RationalTime),
     emit: &mut dyn FnMut(FramePacket),
 ) -> Result<SegmentReport, AnimError> {
-    let prologue = play_prologue(stage, clock, animations, skip)?;
-    let segment = prologue.segment;
-    let report = prologue.report(SegmentKind::Play);
-    // Once the prologue succeeds, the finish/cleanup phase runs EXACTLY once
-    // in both modes, error or not (fm-tqy4): the segment body's earliest
-    // driver/deferred error is captured — never `?`-propagated past
-    // `finish_animations` — so a failing composition is still unmarked from
-    // animating, removers apply, and the final zero-dt updater pass runs
-    // before the same error surfaces that skip mode reports.
-    let mut open = OpenSegment {
-        report: report.clone(),
-        segment,
-        stepped: 0,
-        current_sample: None,
-        next_animation: 0,
-        prepared: None,
-        animations_finished: false,
-        final_updaters_completed: false,
-    };
+    let open = open_play_with_mode(stage, clock, animations, skip)?;
+    drive_open_play(stage, clock, rng, animations, skip, boundary, emit, open)
+}
+
+// Shared serial continuation, including failure cleanup, for ordinary play and
+// a pure-dispatch refusal AFTER begin. Never repeat begin or lose a deferred
+// composition error merely because a sink declined compact frame jobs.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn drive_open_play(
+    stage: &mut Stage,
+    clock: &mut RationalFrameClock,
+    rng: &RngRoot,
+    animations: &mut [Box<dyn Animation>],
+    skip: bool,
+    boundary: &mut dyn FnMut(&mut Stage, RationalTime),
+    emit: &mut dyn FnMut(FramePacket),
+    mut open: OpenSegment,
+) -> Result<SegmentReport, AnimError> {
+    let report = open.report.clone();
+    let segment = open.segment;
+    // Once begin succeeds, lifecycle cleanup runs exactly once. A native
+    // updater failure aborts without invoking another endpoint callback;
+    // other deferred failures retain the established finish epilogue.
     // Both modes use the exact same stepped driver. Skip changes one thing:
     // `complete_play_frame` suppresses capture/emission. In particular, a
     // composition's deferred error is observed before the same clock advance
@@ -1098,8 +1197,13 @@ pub fn play_segment_with_boundary(
         boundary,
         emit,
     );
-    finish_animations(stage, animations);
+    if matches!(&body, Err(AnimError::Updater(_))) {
+        let _report = abort_open_play(stage, animations, open);
+        return body.map(|()| report);
+    }
+    let finish = finish_animations(stage, animations);
     body?;
+    finish?;
     // A composition operator that begins members just in time has no error
     // channel inside `interpolate` (§9.4); the segment surfaces what it
     // recorded, by name, rather than leaving a frozen composition unexplained.
@@ -1116,7 +1220,7 @@ pub fn play_segment_with_boundary(
 /// under skip (the Reference's `override_skip_animations`) — capture stays
 /// off while skipping. Returns the segment's [`SegmentReport`]; a stop
 /// condition demotes to stateful by vocabulary (its callback reads
-/// per-frame state and decides the segment's length).
+/// per-frame state and decides the segment's length dynamically).
 ///
 /// # Errors
 /// [`AnimError::Clock`] for a non-finite or oversized duration.
@@ -1158,7 +1262,7 @@ pub fn wait_segment_with_boundary(
     boundary: &mut dyn FnMut(&mut Stage, RationalTime),
     emit: &mut dyn FnMut(FramePacket),
 ) -> Result<SegmentReport, AnimError> {
-    update_scene_mobjects(stage, 0.0);
+    update_scene_mobjects(stage, 0.0)?;
     let segment = clock.segment(duration).map_err(AnimError::Clock)?;
     let purity = classify_wait(stage, stop_condition.is_some());
     let base_frame = clock.now().frames();
@@ -1176,8 +1280,10 @@ pub fn wait_segment_with_boundary(
     for sample in segment.samples() {
         clock.advance_frames(1).map_err(AnimError::Clock)?;
         stage.update_at_time(dt, clock.now().to_f64());
+        check_updater_error(stage)?;
         stepped += 1;
         boundary(stage, clock.now());
+        check_updater_error(stage)?;
         if !skip {
             emit(FramePacket::freeze(stage, clock, rng, &sample));
         }

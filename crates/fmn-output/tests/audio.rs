@@ -24,6 +24,52 @@ fn audio_native_pcm_never_needs_the_configured_executable() {
 }
 
 #[test]
+fn audio_job_policy_is_admitted_before_lazy_tool_discovery() {
+    use fmn_output::JobLimits;
+    use std::time::Duration;
+    for limits in [
+        JobLimits {
+            timeout: Duration::ZERO,
+            ..JobLimits::default()
+        },
+        JobLimits {
+            timeout: Duration::MAX,
+            ..JobLimits::default()
+        },
+        JobLimits {
+            max_log_bytes: 0,
+            ..JobLimits::default()
+        },
+        JobLimits {
+            max_artifact_bytes: 0,
+            ..JobLimits::default()
+        },
+    ] {
+        let decoder =
+            AudioDecoder::new(AudioDecodeLimits::default(), Some("/missing/ffmpeg".into()))
+                .unwrap();
+        assert!(matches!(
+            decoder.with_job_limits(limits),
+            Err(AudioDecodeError::InvalidJobLimits(_))
+        ));
+    }
+    let mut decoder =
+        AudioDecoder::new(AudioDecodeLimits::default(), Some("/missing/ffmpeg".into()))
+            .unwrap()
+            .with_job_limits(JobLimits {
+                timeout: Duration::from_secs(37),
+                max_artifact_bytes: 1,
+                ..JobLimits::default()
+            })
+            .unwrap();
+    let decoded = decoder
+        .decode(&encode_wav(1, 48000, SampleFormat::F32, &[0.25]))
+        .unwrap();
+    assert_eq!(decoded.audio.samples, [0.25]);
+    assert!(decoded.report.invocation.is_none());
+}
+
+#[test]
 fn audio_native_only_refuses_transcode_without_substitution() {
     let mut decoder = AudioDecoder::new(AudioDecodeLimits::default(), None).unwrap();
     assert!(matches!(

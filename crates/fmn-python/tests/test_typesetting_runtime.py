@@ -26,6 +26,8 @@ spec.loader.exec_module(runtime)
 
 def protocol(error=None):
     calls = []
+    ceilings, maintenance = [], [0]
+    policy = {"max_bytes": None, "persistent": False}
     class Scene:
         def __init__(self, *args, **kwargs):
             calls.append(("scene", args, kwargs))
@@ -33,11 +35,14 @@ def protocol(error=None):
                 raise ValueError("scene constructor refused")
             self.received = (args, kwargs)
         def _run_lifecycle(self):
-            # install_typesetting wraps the run for the static Tex preflight
-            # (fm-typeset-cache-preflight-wiring-1sn0); these cases never run it.
-            return None
-    def backend(directory):
+            calls.append(("lifecycle",))
+            if hasattr(self, "lifecycle_error"):
+                raise self.lifecycle_error
+            return "rendered"
+    def backend(directory, *, max_bytes=None):
         calls.append(("cache", directory))
+        ceilings.append(max_bytes)
+        policy.update(max_bytes=max_bytes, persistent=directory is not None and error is None)
         return {"schema": "fmn-python.typeset-cache", "version": 1,
                 "requested": directory is not None, "directory": directory,
                 "templates": {name: {
@@ -45,6 +50,7 @@ def protocol(error=None):
                     "memory_hits": 0, "memory_misses": 0,
                     "memory_entries": 0, "memory_bytes": 0,
                     "disk_hits": 0, "layout_computations": 0,
+                    "persistent_ceiling_bytes": max_bytes if policy["persistent"] else None,
                     "error": error,
                 } for name in ("default", "basic", "empty")}}
     def validate(template, preamble, text_mode):
@@ -53,9 +59,18 @@ def protocol(error=None):
             raise ValueError("unknown template")
         return "validated"
     def info():
-        return {name: {"memory_hits": 7} for name in ("default", "basic", "empty")}
+        return {name: {"memory_hits": 7,
+                       "persistent_ceiling_bytes": policy["max_bytes"] if policy["persistent"] else None,
+                       "maintenance": {"runs": maintenance[0], "evicted_entries": maintenance[0],
+                                       "evicted_bytes": maintenance[0] * 100,
+                                       "retained_bytes": 250 if maintenance[0] else None}}
+                for name in ("default", "basic", "empty")}
+    def maintain():
+        calls.append(("maintenance",))
+        maintenance[0] += 1
     native = SimpleNamespace(Scene=Scene, _configure_tex_cache=backend,
-                             _tex_cache_info=info, _validate_tex_options=validate)
+                             _tex_cache_info=info, _validate_tex_options=validate,
+                             _maintain_tex_cache=maintain, ceiling_calls=ceilings)
     return native, calls
 
 
@@ -196,7 +211,7 @@ class TypesettingRuntime(unittest.TestCase):
     def test_engine_failures_are_not_mislabeled_as_optional_storage_failures(self):
         failure = RuntimeError("bundled math faces are corrupt")
         native, _ = protocol()
-        def broken_backend(directory):
+        def broken_backend(directory, *, max_bytes=None):
             raise failure
         native._configure_tex_cache = broken_backend
         runtime.install_typesetting(native)
@@ -209,6 +224,80 @@ class TypesettingRuntime(unittest.TestCase):
             result = runtime.configure_tex_cache(enabled=False)
             self.assertFalse(result["requested"])
             self.assertEqual(runtime.tex_cache_info()["templates"]["basic"]["memory_hits"], 7)
+
+    def test_configured_and_explicit_byte_ceilings_reach_the_native_owner(self):
+        self.native.manim_config = {"directories": {"cache": "configured-cache"}, "cache": {"max_bytes": 4096}}
+        self.native.Scene()
+        self.assertEqual(self.cache_calls(), [("cache", os.path.abspath("configured-cache"))])
+        self.assertEqual(self.native.ceiling_calls, [4096])
+        with patch.dict(sys.modules, {"manimlib": self.native}):
+            runtime.configure_tex_cache("manual-cache", max_bytes=0)
+        self.native.Scene()
+        self.assertEqual(self.native.ceiling_calls, [4096, 0])
+        self.assertEqual(self.native._fmn_tex_cache_info()["templates"]["default"]["persistent_ceiling_bytes"], 0)
+
+    def test_scoped_configuration_change_rebinds_once_and_restoring_it_rebinds_again(self):
+        self.native.manim_config = {"directories": {"cache": "first"}, "cache": {"max_bytes": 4000}}
+        self.native.Scene()
+        self.native.manim_config["directories"]["cache"] = "second"
+        self.native.manim_config["cache"]["max_bytes"] = 2000
+        self.native.Scene()
+        self.native.Scene()
+        self.native.manim_config["directories"]["cache"] = "first"
+        self.native.manim_config["cache"]["max_bytes"] = 4000
+        self.native._validate_tex_options("default", "", False)
+        self.assertEqual(self.native.ceiling_calls, [4000, 2000, 4000])
+        self.assertEqual(self.cache_calls(), [("cache", os.path.abspath(path)) for path in ("first", "second", "first")])
+
+    def test_invalid_explicit_ceilings_refuse_before_native_work(self):
+        for value in (True, False, -1, 1 << 64, 1.5, "10", {}):
+            with self.subTest(value=value), self.assertRaises((TypeError, ValueError)):
+                self.native._fmn_configure_tex_cache("leaf", max_bytes=value)
+        self.assertEqual(self.cache_calls(), [])
+
+    def test_invalid_configured_ceiling_falls_back_once_without_failing_the_scene(self):
+        self.native.manim_config = {"cache": {"max_bytes": 1}}
+        self.native.Scene()
+        self.native.manim_config["cache"]["max_bytes"] = True
+        output = io.StringIO()
+        with redirect_stderr(output):
+            self.native.Scene()
+            self.native.Scene()
+        self.assertEqual(self.cache_calls(), [("cache", ""), ("cache", None)])
+        self.assertEqual(len(output.getvalue().splitlines()), 1)
+        self.assertIn("max_bytes", output.getvalue())
+
+    def test_maintenance_runs_after_success_failure_and_cancellation(self):
+        self.native._fmn_set_static_tex_preflight(False)
+        for error in (None, ValueError("authored error"), KeyboardInterrupt(), SystemExit(0)):
+            with self.subTest(error=error):
+                scene = self.native.Scene()
+                if error is None:
+                    self.assertEqual(scene._run_lifecycle(), "rendered")
+                else:
+                    scene.lifecycle_error = error
+                    with self.assertRaises(type(error)) as caught:
+                        scene._run_lifecycle()
+                    self.assertIs(caught.exception, error)
+                self.assertEqual(self.calls[-2:], [("lifecycle",), ("maintenance",)])
+
+    def test_render_receipt_reports_per_run_maintenance_without_tripling_retained_bytes(self):
+        self.native._fmn_set_static_tex_preflight(False)
+        self.native._fmn_configure_tex_cache("cache", max_bytes=1000)
+        with patch.dict(sys.modules, {"manimlib": self.native}):
+            for _ in range(2):
+                scene = self.native.Scene()
+                scene._run_lifecycle()
+                receipt = runtime.typesetting_receipt(scene)
+                self.assertEqual(receipt["persistent_ceiling_bytes"], 1000)
+                self.assertEqual(receipt["maintenance"], {
+                    "runs": 3, "evicted_entries": 3, "evicted_bytes": 300,
+                    "retained_bytes": 250, "skipped_lock_held": 0,
+                    "skipped_pinned": 0, "errors": 0, "last_error": None})
+                human = runtime.describe_receipt(receipt)
+                self.assertIn("1000 byte disk ceiling", human)
+                self.assertIn("3 entries evicted (300 bytes)", human)
+                self.assertIn("250 bytes retained", human)
 
 
 if __name__ == "__main__":

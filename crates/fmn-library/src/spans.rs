@@ -66,6 +66,45 @@ pub struct SpanMapData {
     pub entries: Vec<SpanMapEntry>,
 }
 
+impl SpanMapData {
+    /// Select complete native parts contained in a UTF-8 source byte range.
+    ///
+    /// Entry order is retained, even when painter order differs from source
+    /// order. The full typeset and this compact map share one selector.
+    #[must_use]
+    pub fn select(&self, range: (usize, usize)) -> Vec<usize> {
+        fmn_tex::select_source_spans(
+            self.entries
+                .iter()
+                .map(|entry| fmn_tex::Span::new(entry.start, entry.end)),
+            fmn_tex::Span::new(range.0, range.1),
+        )
+    }
+
+    /// Non-overlapping literal occurrences as UTF-8 source byte ranges.
+    ///
+    /// Empty needles have no native occurrence.
+    #[must_use]
+    pub fn find_occurrences(source: &str, needle: &str) -> Vec<(usize, usize)> {
+        fmn_tex::find_occurrences(source, needle)
+            .into_iter()
+            .map(|span| (span.start, span.end))
+            .collect()
+    }
+
+    /// Whole native parts selected by each literal source occurrence.
+    ///
+    /// Empty selections are retained: a literal can occur inside a command
+    /// without owning that command's ink.
+    #[must_use]
+    pub fn occurrences(&self, needle: &str) -> Vec<Vec<usize>> {
+        Self::find_occurrences(&self.source, needle)
+            .into_iter()
+            .map(|range| self.select(range))
+            .collect()
+    }
+}
+
 /// One collected span map, keyed by stable identity: the root's ordinal
 /// in the stage's top-level draw list at record time.
 ///
@@ -255,6 +294,30 @@ mod tests {
 
     fn book() -> FontBook {
         FontBook::bundled().expect("bundled faces parse")
+    }
+
+    #[test]
+    fn compact_span_selection_is_the_native_tex_and_text_selection() {
+        let tex = Tex::new(r"\frac{x}{y}+\sqrt{x}")
+            .build(&engine())
+            .expect("builds");
+        let data = tex.span_map();
+        for needle in ["x", "y", r"\frac", r"\sqrt", "q", "", "frac"] {
+            assert_eq!(data.occurrences(needle), tex.occurrences(needle));
+        }
+        assert_eq!(data.occurrences(r"\frac")[0].len(), 1);
+        assert!(data.occurrences("frac")[0].is_empty());
+
+        let text = Text::markup("<b>café</b> + café")
+            .build(&book())
+            .expect("builds");
+        let data = text.span_map();
+        let ranges = SpanMapData::find_occurrences(&data.source, "café");
+        assert_eq!(ranges, [(3, 8), (15, 20)]);
+        for range in ranges {
+            assert_eq!(data.select(range), text.select(range));
+            assert_eq!(data.select(range).len(), 4);
+        }
     }
 
     #[test]

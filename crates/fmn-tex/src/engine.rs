@@ -98,6 +98,28 @@ pub struct TypesetPreflightStats {
     pub wall_ns: u64,
 }
 
+/// Best-effort disk retention performed at render boundaries. These counters
+/// describe storage work only and never participate in certified identity.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TypesetCacheMaintenance {
+    /// Maintenance attempts on an attached namespace.
+    pub runs: u64,
+    /// Complete cache entries evicted across successful attempts.
+    pub evicted_entries: u64,
+    /// Envelope bytes released across successful attempts.
+    pub evicted_bytes: u64,
+    /// Bytes retained after the most recent successful attempt.
+    pub retained_bytes: Option<u64>,
+    /// Attempts skipped because another maintainer held the nonblocking lock.
+    pub skipped_lock_held: u64,
+    /// Pinned entries skipped across successful attempts.
+    pub skipped_pinned: u64,
+    /// Storage failures, all nonfatal to layout and rendering.
+    pub errors: u64,
+    /// The most recent maintenance failure, when one occurred.
+    pub last_error: Option<String>,
+}
+
 /// What one batch's scheduler actually did.
 #[derive(Clone, Copy, Debug, Default)]
 struct PreflightRun {
@@ -162,6 +184,7 @@ pub struct TexEngine {
     persistent_store_errors: AtomicU64,
     layout_computations: AtomicU64,
     preflight: Mutex<TypesetPreflightStats>,
+    maintenance: Mutex<TypesetCacheMaintenance>,
 }
 
 impl core::fmt::Debug for TexEngine {
@@ -211,6 +234,7 @@ impl TexEngine {
             persistent_store_errors: AtomicU64::new(0),
             layout_computations: AtomicU64::new(0),
             preflight: Mutex::new(TypesetPreflightStats::default()),
+            maintenance: Mutex::new(TypesetCacheMaintenance::default()),
         })
     }
 
@@ -256,12 +280,28 @@ impl TexEngine {
     /// [`TexError::Cache`] if the new namespace cannot be opened. On that
     /// failure the prior binding is unchanged.
     pub fn set_cache(&self, store: Option<&fmn_cache::Store>) -> Result<(), TexError> {
+        self.set_cache_with_ceiling(store, fmn_config::config::DEFAULT_TYPESET_CACHE_MAX_BYTES)
+    }
+
+    /// Attach a store with an explicit typesetting retention ceiling. The
+    /// ceiling is enforced by [`Self::maintain_cache`] at render boundaries,
+    /// outside the per-formula hot path. Zero retains no unpinned disk entries.
+    ///
+    /// # Errors
+    /// As [`Self::set_cache`]; a refused namespace leaves the binding unchanged.
+    pub fn set_cache_with_ceiling(
+        &self,
+        store: Option<&fmn_cache::Store>,
+        max_bytes: u64,
+    ) -> Result<(), TexError> {
         let next = store
             .map(|store| {
                 store.namespace(
                     "typeset",
                     TYPESET_FORMAT_VERSION,
-                    fmn_cache::NamespacePolicy::default(),
+                    fmn_cache::NamespacePolicy {
+                        ceiling_bytes: Some(max_bytes),
+                    },
                 )
             })
             .transpose()
@@ -297,6 +337,22 @@ impl TexEngine {
     /// failure, so it cannot keep writing to a previously selected directory.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn configure_host_cache(&self, configured: Option<&str>) -> Result<(), TexError> {
+        self.configure_host_cache_with_ceiling(
+            configured,
+            fmn_config::config::DEFAULT_TYPESET_CACHE_MAX_BYTES,
+        )
+    }
+
+    /// Host-cache configuration with an explicit disk retention ceiling.
+    ///
+    /// # Errors
+    /// As [`Self::configure_host_cache`], including detachment on refusal.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn configure_host_cache_with_ceiling(
+        &self,
+        configured: Option<&str>,
+        max_bytes: u64,
+    ) -> Result<(), TexError> {
         let Some(configured) = configured else {
             return self.set_cache(None);
         };
@@ -304,11 +360,71 @@ impl TexEngine {
             .map_err(|error| TexError::Cache {
                 what: error.to_string(),
             })
-            .and_then(|store| self.set_cache(Some(&store)));
+            .and_then(|store| self.set_cache_with_ceiling(Some(&store), max_bytes));
         if attached.is_err() {
             self.set_cache(None)?;
         }
         attached
+    }
+
+    /// Enforce the current namespace's disk ceiling without failing a render.
+    /// A concurrent maintainer is skipped, active pins are respected, and
+    /// storage errors are available through [`Self::cache_maintenance`]. No
+    /// configuration or statistics mutex is held across filesystem work.
+    pub fn maintain_cache(&self) {
+        let namespace = self
+            .cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let Some(namespace) = namespace else {
+            return;
+        };
+        let outcome = namespace.evict_to_ceiling();
+        let mut stats = self
+            .maintenance
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        stats.runs = stats.runs.saturating_add(1);
+        match outcome {
+            Ok(fmn_cache::EvictOutcome::Done(report)) => {
+                stats.evicted_entries = stats
+                    .evicted_entries
+                    .saturating_add(u64::try_from(report.evicted).unwrap_or(u64::MAX));
+                stats.evicted_bytes = stats.evicted_bytes.saturating_add(report.evicted_bytes);
+                stats.retained_bytes = Some(report.retained_bytes);
+                stats.skipped_pinned = stats
+                    .skipped_pinned
+                    .saturating_add(u64::try_from(report.skipped_pinned).unwrap_or(u64::MAX));
+            }
+            Ok(fmn_cache::EvictOutcome::SkippedLockHeld) => {
+                stats.skipped_lock_held = stats.skipped_lock_held.saturating_add(1);
+            }
+            Ok(fmn_cache::EvictOutcome::Unlimited) => {}
+            Err(error) => {
+                stats.errors = stats.errors.saturating_add(1);
+                stats.last_error = Some(error.to_string());
+            }
+        }
+    }
+
+    /// Inspect disk maintenance counters without touching the filesystem.
+    #[must_use]
+    pub fn cache_maintenance(&self) -> TypesetCacheMaintenance {
+        self.maintenance
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Configured disk ceiling, absent when persistence is disabled.
+    #[must_use]
+    pub fn persistent_cache_ceiling(&self) -> Option<u64> {
+        self.cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .and_then(|namespace| namespace.policy().ceiling_bytes)
     }
 
     /// Whether a persistent namespace is attached. Storage may still become

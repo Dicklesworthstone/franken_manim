@@ -1,18 +1,29 @@
-//! Native sound-cue composition and retained input receipts for video front doors.
+//! Native sound-cue composition, standalone WAV export, and input receipts.
 
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use fmn_anim::FramePacket;
+use fmn_codec::SampleFormat;
+use fmn_config::Config;
 use fmn_output::{
-    AudioDecodeReport, AudioDecoder, DecodedAudio, InvocationReport, MixReport, MixerConfig,
-    SoundCue, SoundMixer,
+    AudioDecodeLimits, AudioDecodeReport, AudioDecoder, DecodedAudio, DitherPolicy,
+    InvocationReport, MixReport, MixerConfig, SoundCue, SoundMixer, WavPublicationConfig,
+    WavPublicationReport, frames_to_samples, publish_wav_new,
 };
-use fmn_platform::fs::FileSystem;
-use fmn_scene::SoundRequest;
+use fmn_platform::clock::StdClock;
+use fmn_platform::fs::{FileSystem, StdFs};
+use fmn_scene::{
+    CaptureReason, IntegrationError, LifecycleEvent, RuntimeConfig, SceneRunReport, SceneSink,
+    SoundRequest,
+};
+use fmn_tex::{TexSession, TypesetSessionReport};
 
 use super::RenderError;
+use crate::SceneConstruct;
 
 const MAX_SOUND_ASSET_BYTES: usize = 64 * 1024 * 1024;
 const MAX_OMITTED_INTERVALS: usize = 1_000_000;
@@ -97,6 +108,56 @@ pub struct SoundtrackInput {
     pub report: AudioDecodeReport,
 }
 
+/// Cumulative admission limits for retained audio preparation, independent of
+/// the final mixed duration. Repeated cues share source reads/decodes but each
+/// retains its own mapped/resampled f64 samples.
+#[derive(Clone, Copy, Debug)]
+pub struct SoundtrackPreparationLimits {
+    /// Insertion-ordered requests, checked before reading any source.
+    pub max_cues: usize,
+    /// Total bytes retained for distinct source paths, not repeated cues.
+    pub max_source_bytes: usize,
+    /// Total cached interleaved f32 samples; each decoder has its own limit too.
+    pub max_decoded_samples: usize,
+    /// Total mapped/resampled interleaved f64 samples, charged for every cue.
+    pub max_prepared_samples: usize,
+}
+
+impl SoundtrackPreparationLimits {
+    /// Preserve the original preparation API's per-source and mixer limits.
+    pub const UNBOUNDED: Self = Self {
+        max_cues: usize::MAX,
+        max_source_bytes: usize::MAX,
+        max_decoded_samples: usize::MAX,
+        max_prepared_samples: usize::MAX,
+    };
+}
+
+impl Default for SoundtrackPreparationLimits {
+    fn default() -> Self {
+        Self {
+            max_cues: 4096,
+            max_source_bytes: 256 * 1024 * 1024,
+            max_decoded_samples: 16 * 1024 * 1024,
+            max_prepared_samples: 32 * 1024 * 1024,
+        }
+    }
+}
+
+fn charge(
+    current: &mut usize,
+    additional: usize,
+    limit: usize,
+    message: &'static str,
+) -> Result<(), RenderError> {
+    let next = current
+        .checked_add(additional)
+        .filter(|&n| n <= limit)
+        .ok_or(RenderError::InvalidOptions(message))?;
+    *current = next;
+    Ok(())
+}
+
 /// One prepared, insertion-ordered native mix shared by complete renders and
 /// absolute sample windows. Decoding, channel mapping and resampling happen
 /// once; each window preserves source phase and background ducking.
@@ -128,6 +189,39 @@ impl PreparedSceneSoundtrack {
         config: MixerConfig,
         timeline: Option<&SoundtrackTimeline>,
     ) -> Result<Self, RenderError> {
+        Self::new_with_limits(
+            fs,
+            requests,
+            decoder,
+            config,
+            timeline,
+            SoundtrackPreparationLimits::UNBOUNDED,
+        )
+    }
+
+    /// Prepare through the same native mixer with cumulative source, decoded
+    /// and resampled storage bounds. Cue-count refusal precedes filesystem work;
+    /// raw reads use the remaining budget, and mapped storage is charged before
+    /// each cue is cloned/resampled. The decoder separately caps each decode.
+    ///
+    /// # Errors
+    /// The original typed asset/decode/mix failures or a named cumulative limit.
+    pub fn new_with_limits(
+        fs: &dyn FileSystem,
+        requests: &[SoundRequest],
+        decoder: &mut AudioDecoder,
+        config: MixerConfig,
+        timeline: Option<&SoundtrackTimeline>,
+        limits: SoundtrackPreparationLimits,
+    ) -> Result<Self, RenderError> {
+        if requests.len() > limits.max_cues {
+            return Err(RenderError::InvalidOptions(
+                "soundtrack cue-count budget exceeded",
+            ));
+        }
+        let mut source_bytes = 0;
+        let mut decoded_samples = 0;
+        let mut prepared_samples = 0;
         let mut mixer = SoundMixer::new(config).map_err(RenderError::Sound)?;
         let mut inputs = Vec::new();
         inputs
@@ -144,11 +238,20 @@ impl PreparedSceneSoundtrack {
                 Entry::Occupied(entry) => entry.into_mut(),
                 Entry::Vacant(entry) => {
                     let bytes = fs
-                        .read_bounded(&request.sound_file, MAX_SOUND_ASSET_BYTES)
+                        .read_bounded(
+                            &request.sound_file,
+                            MAX_SOUND_ASSET_BYTES.min(limits.max_source_bytes - source_bytes),
+                        )
                         .map_err(|error| RenderError::SoundAsset {
                             path: request.sound_file.clone(),
                             error,
                         })?;
+                    charge(
+                        &mut source_bytes,
+                        bytes.len(),
+                        limits.max_source_bytes,
+                        "soundtrack source-byte budget exceeded",
+                    )?;
                     let decoded =
                         decoder
                             .decode(&bytes)
@@ -156,6 +259,12 @@ impl PreparedSceneSoundtrack {
                                 path: request.sound_file.clone(),
                                 error,
                             })?;
+                    charge(
+                        &mut decoded_samples,
+                        decoded.audio.samples.len(),
+                        limits.max_decoded_samples,
+                        "soundtrack decoded-sample budget exceeded",
+                    )?;
                     if let Some(invocation) = decoded.report.invocation.clone() {
                         invocations.try_reserve(1).map_err(|_| {
                             RenderError::InvalidOptions("soundtrack invocation allocation failed")
@@ -165,6 +274,23 @@ impl PreparedSceneSoundtrack {
                     entry.insert((Arc::from(bytes), decoded))
                 }
             };
+            // Budget sizing only: the native mixer's resampler owns the actual
+            // channel mapping and samples. Its output uses ceil(n * out / in).
+            let input_frames = decoded.audio.samples.len() / usize::from(decoded.audio.channels);
+            let output_frames = ((input_frames as u128) * u128::from(config.sample_rate))
+                .div_ceil(u128::from(decoded.audio.sample_rate));
+            let count = output_frames
+                .checked_mul(u128::from(config.channels))
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or(RenderError::InvalidOptions(
+                    "soundtrack prepared-sample count overflow",
+                ))?;
+            charge(
+                &mut prepared_samples,
+                count,
+                limits.max_prepared_samples,
+                "soundtrack prepared-sample budget exceeded",
+            )?;
             mixer
                 .add(SoundCue {
                     audio: decoded.audio.clone(),
@@ -235,6 +361,344 @@ impl PreparedSceneSoundtrack {
     #[must_use]
     pub fn invocations(&self) -> Vec<InvocationReport> {
         self.invocations.clone()
+    }
+}
+
+/// Native WAV export of an ordinary scene's sound requests.
+///
+/// The scene still executes its normal animations and updaters. No pixel
+/// buffers, render teams, or video encoder are created. Input is native PCM
+/// WAV; compressed media returns the decoder's named capability refusal.
+/// Output is canonical signed 16-bit PCM without dither, at the explicit
+/// mixer's sample rate and mono/stereo layout. AAC/video quality settings
+/// are irrelevant to this native artifact and are not consulted.
+#[derive(Debug, Clone)]
+pub struct SoundtrackRenderOptions {
+    /// New file destination. An existing file is never replaced.
+    pub output: PathBuf,
+    /// Existing scene clock, seed and native typesetting configuration.
+    /// Camera resolution, raster quality and render engine are not used.
+    pub config: Config,
+    /// Output sample rate, mono/stereo layout and per-cue/timeline frame bound.
+    /// The output-byte ceiling below can impose a smaller sample-frame bound.
+    pub mixer: MixerConfig,
+    /// Per-source native WAV decoding bounds. No transcoder is admitted.
+    pub decode: AudioDecodeLimits,
+    /// Cumulative source, decoded and per-cue prepared-storage admission.
+    pub preparation: SoundtrackPreparationLimits,
+    /// Nonzero ceiling for mixer workers. Reported workers are those used.
+    pub threads: NonZeroUsize,
+    /// Maximum absolute scene time in frame-clock ticks, and maximum number
+    /// of capture requests. Skipped time also counts against the clock limit.
+    pub max_scene_frames: u64,
+    /// Complete WAV artifact ceiling, including its 44-byte RIFF header.
+    /// Mixer allocation is bounded to the representable S16 payload first.
+    /// Source decoding retains its existing 64 MiB per-file input bound.
+    pub max_output_bytes: u64,
+    /// Attach the configured persistent typeset cache if construction uses it.
+    pub typeset_cache: bool,
+    /// Ceiling for the scene's declared native typesetting preflight.
+    pub typeset_preflight_workers: NonZeroUsize,
+}
+
+impl SoundtrackRenderOptions {
+    /// Bundled scene defaults, 48 kHz stereo, and one native mixer worker.
+    ///
+    /// # Errors
+    /// Returns the existing configuration error if bundled defaults fail.
+    pub fn new(output: impl Into<PathBuf>) -> Result<Self, fmn_config::ConfigError> {
+        Ok(Self {
+            output: output.into(),
+            config: Config::resolve(&[], None)?.config,
+            mixer: MixerConfig::default(),
+            decode: AudioDecodeLimits::default(),
+            preparation: SoundtrackPreparationLimits::default(),
+            threads: NonZeroUsize::MIN,
+            max_scene_frames: 1_000_000,
+            max_output_bytes: 64 * 1024 * 1024,
+            typeset_cache: true,
+            typeset_preflight_workers: crate::typesetting::DEFAULT_PREFLIGHT_WORKERS,
+        })
+    }
+
+    fn admitted_mixer(&self) -> Result<MixerConfig, RenderError> {
+        if self.output.as_os_str().is_empty() || self.output.file_name().is_none() {
+            return Err(RenderError::InvalidOptions(
+                "soundtrack output must name a file",
+            ));
+        }
+        if self.max_scene_frames == 0 {
+            return Err(RenderError::InvalidOptions(
+                "soundtrack scene-frame limit must be nonzero",
+            ));
+        }
+        if self.preparation.max_cues == 0
+            || self.preparation.max_source_bytes == 0
+            || self.preparation.max_decoded_samples == 0
+            || self.preparation.max_prepared_samples == 0
+        {
+            return Err(RenderError::InvalidOptions(
+                "soundtrack preparation budgets must be nonzero",
+            ));
+        }
+        // Validate the authored channel/rate/timeline policy before using any
+        // fields in byte-budget arithmetic, and before executing scene code.
+        SoundMixer::new(self.mixer)
+            .and_then(|mixer| mixer.mix(self.threads.get()))
+            .map_err(RenderError::Sound)?;
+        if self
+            .mixer
+            .sample_rate
+            .checked_mul(u32::from(self.mixer.channels) * 2)
+            .is_none()
+        {
+            return Err(RenderError::InvalidOptions(
+                "soundtrack sample rate exceeds WAV byte-rate representation",
+            ));
+        }
+        let payload = self
+            .max_output_bytes
+            .checked_sub(44)
+            .ok_or(RenderError::InvalidOptions(
+                "soundtrack byte budget is smaller than a WAV header",
+            ))?;
+        // Native WAV uses RIFF's 32-bit size. Its data length plus the other
+        // 36 bytes must fit that representation even on a 64-bit host.
+        let payload = payload.min(u64::from(u32::MAX) - 36);
+        let frames = payload / (u64::from(self.mixer.channels) * 2);
+        if frames == 0 {
+            return Err(RenderError::InvalidOptions(
+                "soundtrack byte budget must hold at least one PCM sample frame",
+            ));
+        }
+        Ok(MixerConfig {
+            max_output_frames: self.mixer.max_output_frames.min(frames),
+            ..self.mixer
+        })
+    }
+
+    fn decoder(&self) -> Result<AudioDecoder, RenderError> {
+        let mut limits = self.decode.clone();
+        limits.max_input_bytes = limits
+            .max_input_bytes
+            .min(self.preparation.max_source_bytes as u64);
+        limits.max_samples = limits
+            .max_samples
+            .min(self.preparation.max_decoded_samples as u64);
+        AudioDecoder::new(limits, None).map_err(|error| RenderError::SoundDecode {
+            path: PathBuf::new(),
+            error,
+        })
+    }
+}
+
+/// Completed native WAV and the scene that authored it.
+///
+/// Audio reports sample frames and actual mixer workers; it has no fictitious
+/// pixel pipeline or video-frame count. This is an artifact receipt, not a
+/// complete certified input-closure manifest for caller-authored scene code.
+#[derive(Debug, Clone)]
+pub struct SoundtrackRenderReport {
+    /// Exact rational scene time and play count.
+    pub scene: SceneRunReport,
+    /// Published WAV path, digest, sample frames, cue count and clipping count.
+    pub artifact: WavPublicationReport,
+    /// Native output sample rate.
+    pub sample_rate: u32,
+    /// Native output channels (one or two).
+    pub channels: u16,
+    /// Actual native mixer workers, zero for an empty mix.
+    pub workers_used: usize,
+    /// Insertion-ordered exact source bytes and decoder identities. Repeated
+    /// cues share the retained source bytes; no input is reopened for receipts.
+    pub inputs: Vec<SoundtrackInput>,
+    /// Actual native typesetting/cache work during scene construction.
+    pub typesetting: TypesetSessionReport,
+}
+
+/// Execute a native scene and publish its complete soundtrack as PCM WAV.
+///
+/// The normal scene clock, updater ordering, early completion, cue offsets,
+/// gains and background ducking remain authoritative. Skipped intervals are
+/// removed using the same timeline mapping as native video; cue tails extend
+/// the output past the scene when necessary. A scene with no cues emits
+/// digital silence spanning its non-skipped duration.
+///
+/// No renderer or external process is used. PCM source files are decoded by
+/// the native codec, then the native mixer and create-only WAV publication
+/// complete before the receipt is returned. Scene, source and budget failures
+/// leave the destination unpublished; existing files survive all failures.
+///
+/// # Errors
+/// Invalid configuration, scene execution, native source decode/mix, budget,
+/// or create-only publication errors, preserving their existing typed source.
+pub fn render_soundtrack<P: SceneConstruct + ?Sized>(
+    program: &mut P,
+    options: SoundtrackRenderOptions,
+) -> Result<SoundtrackRenderReport, RenderError> {
+    render_soundtrack_with_fs(program, options, Arc::new(StdFs))
+}
+
+/// [`render_soundtrack`] with an explicit filesystem capability.
+///
+/// # Errors
+/// Returns the same typed errors as [`render_soundtrack`].
+pub fn render_soundtrack_with_fs<P: SceneConstruct + ?Sized>(
+    program: &mut P,
+    options: SoundtrackRenderOptions,
+    fs: Arc<dyn FileSystem>,
+) -> Result<SoundtrackRenderReport, RenderError> {
+    let mixer = options.admitted_mixer()?;
+    let mut decoder = options.decoder()?;
+    let runtime = RuntimeConfig::from_config(&options.config);
+    let typesetting = if options.typeset_cache {
+        TexSession::with_cache(&options.config, Arc::clone(&fs), Arc::new(StdClock::new()))
+    } else {
+        TexSession::memory(options.config.tex.template.clone())
+    };
+    let mut sink = SoundtrackCapture {
+        timeline: SoundtrackTimeline::default(),
+        max_frames: options.max_scene_frames,
+        captures: 0,
+        failure: None,
+    };
+    let completed = crate::run_scene_with_typesetting(
+        program,
+        runtime,
+        options.config.determinism.seed,
+        &mut sink,
+        &typesetting,
+        options.typeset_preflight_workers,
+    );
+    let completed = completed.map_err(|error| {
+        // Scene::run preserves authored failures over later cleanup failures.
+        // Recover our typed cause only for the integration error we emitted.
+        if matches!(&error, crate::Error::Scene(fmn_scene::SceneError::Integration(integration))
+            if integration.point() == "native-soundtrack")
+            && let Some(failure) = sink.failure.take()
+        {
+            return failure;
+        }
+        RenderError::Scene(error)
+    })?;
+    // Catching a capture error in authored code cannot publish a partial mix.
+    if let Some(error) = sink.failure.take() {
+        return Err(error);
+    }
+    let scene = completed.scene();
+    sink.observe_time(scene.time().frames(), scene.is_skipping())?;
+    let requests = scene.sound_requests();
+    let frames = sink.timeline.output_frame(scene.time().frames())?;
+    let samples = frames_to_samples(frames, scene.time().fps(), mixer.sample_rate)
+        .map_err(RenderError::Sound)?;
+    let samples = u64::try_from(samples)
+        .map_err(|_| RenderError::InvalidOptions("soundtrack timeline is negative"))?;
+    if samples > mixer.max_output_frames {
+        return Err(RenderError::Sound(fmn_output::SoundError::OutputTooLong {
+            frames: samples,
+            max_frames: mixer.max_output_frames,
+        }));
+    }
+    let prepared = PreparedSceneSoundtrack::new_with_limits(
+        fs.as_ref(),
+        requests,
+        &mut decoder,
+        mixer,
+        Some(&sink.timeline),
+        options.preparation,
+    )?
+    .with_timeline_frames(samples);
+    let mix = prepared.mix(options.threads.get())?;
+    let artifact = publish_wav_new(
+        fs.as_ref(),
+        &WavPublicationConfig {
+            destination: options.output,
+            format: SampleFormat::S16,
+            dither: DitherPolicy::None,
+            max_artifact_bytes: options.max_output_bytes,
+            profile: None,
+        },
+        &mix,
+    )
+    .map_err(RenderError::Sink)?;
+    Ok(SoundtrackRenderReport {
+        scene: *completed.report(),
+        artifact,
+        sample_rate: mix.audio.sample_rate,
+        channels: mix.audio.channels,
+        workers_used: mix.workers_used,
+        inputs: prepared.inputs().to_vec(),
+        typesetting: completed.typesetting_report().clone(),
+    })
+}
+
+/// Observe the actual runtime with no alternate animation or audio clock.
+struct SoundtrackCapture {
+    timeline: SoundtrackTimeline,
+    max_frames: u64,
+    captures: u64,
+    failure: Option<RenderError>,
+}
+
+impl SoundtrackCapture {
+    fn observe_time(&mut self, frames: i64, skipping: bool) -> Result<(), RenderError> {
+        if u64::try_from(frames)
+            .ok()
+            .is_none_or(|frames| frames > self.max_frames)
+        {
+            return Err(RenderError::InvalidOptions(
+                "scene exceeded max_scene_frames",
+            ));
+        }
+        self.timeline.observe(frames, skipping)
+    }
+
+    fn observe_captures(&mut self, count: u64) -> Result<(), RenderError> {
+        let frames = self
+            .captures
+            .checked_add(count)
+            .filter(|frames| *frames <= self.max_frames)
+            .ok_or(RenderError::InvalidOptions(
+                "scene exceeded max_scene_frames",
+            ))?;
+        self.captures = frames;
+        Ok(())
+    }
+
+    fn retain_error(&mut self, result: Result<(), RenderError>) -> Result<(), IntegrationError> {
+        result.map_err(|error| {
+            let message = error.to_string();
+            if self.failure.is_none() {
+                self.failure = Some(error);
+            }
+            IntegrationError::new("native-soundtrack", message)
+        })
+    }
+}
+
+impl SceneSink for SoundtrackCapture {
+    fn event(&mut self, event: LifecycleEvent) -> Result<(), IntegrationError> {
+        let result = self.observe_time(event.time.frames(), event.skipping);
+        self.retain_error(result)
+    }
+
+    fn capture(&mut self, _: CaptureReason, _: FramePacket) -> Result<(), IntegrationError> {
+        let result = self.observe_captures(1);
+        self.retain_error(result)
+    }
+
+    fn accepts_pure_segments(&self) -> bool {
+        self.failure.is_none()
+    }
+
+    fn capture_pure_segment(
+        &mut self,
+        segment: &fmn_anim::pure_frame::PureSegment,
+    ) -> Result<(), IntegrationError> {
+        let result = u64::try_from(segment.frame_count())
+            .map_err(|_| RenderError::InvalidOptions("pure segment has a negative frame count"))
+            .and_then(|count| self.observe_captures(count));
+        self.retain_error(result)
     }
 }
 

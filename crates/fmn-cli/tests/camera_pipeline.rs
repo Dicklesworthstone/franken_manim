@@ -400,3 +400,170 @@ fn camera_native_streams_subdivisions_and_no_clobber_share_the_output_contract()
     );
     assert_eq!(std::fs::read_dir(output).unwrap().count(), 0);
 }
+
+#[test]
+fn svg_bundle_uses_recorded_final_camera_background_and_fixed_overlay() {
+    struct CameraVectors {
+        rig: fmn_scene::CameraRig,
+        base: CameraConfig,
+    }
+    impl fmn::SceneConstruct for CameraVectors {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let world = stage.add(fmn_library::Square::new())?;
+            stage.shift(world, [2.0, 0.0, 0.0]);
+            let fixed = stage.add(fmn_library::Square::new().side_length(0.5))?;
+            stage.shift(fixed, [-1.0, 1.0, 0.0]);
+            stage
+                .arena_mut()
+                .uniforms_mut(fixed)
+                .unwrap()
+                .is_fixed_in_frame = 1.0;
+            let mut target = self.base.clone();
+            target.frame.set_center([2.0, 0.0, 0.0])?;
+            target.frame.set_width(4.0)?;
+            let animation = self.rig.animate_to(stage.scene_mut(), &target)?;
+            stage.play_prepared_with(
+                vec![Box::new(animation)],
+                fmn_scene::PlayOverrides {
+                    run_time: Some(0.25),
+                    rate_func: Some(fmn::animation::RateFunc::linear()),
+                    ..Default::default()
+                },
+            )?;
+            stage.wait(0.125)?;
+            Ok(())
+        }
+    }
+    let mut options = fmn::BundleExportOptions::new().unwrap();
+    options.config.camera.fps = 8;
+    options.config.camera.resolution = (64, 48);
+    let mut base = CameraConfig {
+        resolution: (64, 48),
+        fps: 8,
+        background: RED.to_linear(0.25),
+        ..CameraConfig::default()
+    };
+    base.frame.set_width(8.0).unwrap();
+    let bytes = fmn::export_camera_bundle_bytes(
+        |scene, base| {
+            let rig = fmn_scene::CameraRig::new(scene, base)?;
+            Ok((
+                CameraVectors {
+                    rig,
+                    base: base.clone(),
+                },
+                rig,
+            ))
+        },
+        base,
+        options,
+    )
+    .unwrap()
+    .bundle
+    .bytes;
+    let bundle = TimelineBundle::from_bytes(&bytes).unwrap();
+    assert!(bundle.has_camera_track());
+    let (stage, camera) = bundle
+        .stage_at_with_camera(bundle.frame_count() - 1, (64, 48))
+        .unwrap();
+    let camera = camera.unwrap();
+    assert!((camera.frame().center()[0] - 2.0).abs() < 1e-6);
+    let expected: Vec<Vec<[f64; 3]>> = stage
+        .draw_plan()
+        .items()
+        .iter()
+        .map(|item| {
+            stage
+                .get_points(item.mob)
+                .unwrap()
+                .into_iter()
+                .map(|point| {
+                    camera
+                        .project(point, item.key.uniforms.is_fixed_in_frame)
+                        .pixel((64, 48))
+                        .unwrap()
+                })
+                .collect()
+        })
+        .collect();
+    let root = root();
+    let source = root.join("camera.fmtl");
+    std::fs::write(&source, bytes).unwrap();
+    let mut baseline = None;
+    for threads in ["1", "4"] {
+        let output = root.join(threads);
+        let result = run(&source, &output, "CameraSvg", threads, "svg", &[]);
+        assert!(
+            result.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let bytes = std::fs::read(output.join("CameraSvg.svg")).unwrap();
+        let svg = fmn::geometry::SvgDocument::parse(&bytes).unwrap();
+        assert_eq!(svg.shapes.len(), expected.len() + 1);
+        assert_eq!(
+            svg.shapes[0].style.fill,
+            Some(fmn::geometry::Paint::Color(RED))
+        );
+        assert_eq!(svg.shapes[0].style.fill_opacity, 0.25);
+        for (shape, expected) in svg.shapes[1..].iter().zip(&expected) {
+            assert_eq!(shape.path.points().len(), expected.len());
+            for (actual, expected) in shape.path.points().iter().zip(expected) {
+                assert!((actual[0] - expected[0]).abs() < 1e-4);
+                assert!((actual[1] - expected[1]).abs() < 1e-4);
+            }
+        }
+        if let Some(baseline) = &baseline {
+            assert_eq!(&bytes, baseline);
+        } else {
+            baseline = Some(bytes);
+        }
+    }
+}
+
+#[test]
+fn svg_camera_primitives_and_gradients_refuse_before_artifact_publication() {
+    let root = root();
+    for name in ["surface_cube.v1", "dot_cloud_depth.v1", "image_quad.v1"] {
+        let output = root.join(name);
+        let result = run(Path::new("@builtin"), &output, name, "1", "svg", &[]);
+        assert!(!result.status.success());
+        let diagnostic = format!(
+            "{}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            diagnostic.contains("only quadratic vector families are supported"),
+            "{diagnostic}"
+        );
+        assert!(
+            !output
+                .join(format!("{}.svg", name.trim_end_matches(".v1")))
+                .exists()
+        );
+    }
+    let mut stage = Stage::new();
+    let shape = add(&mut stage, fmn_library::Square::new());
+    stage
+        .get_mut(shape)
+        .unwrap()
+        .buffer
+        .write(0, "fill_rgba", &[1.0; 4]);
+    let mut timeline = Timeline::new(8).unwrap();
+    timeline.wait(0.125).unwrap();
+    let bytes = export_timeline_bundle(timeline, &mut stage, &RngRoot::from_seed(0)).unwrap();
+    let source = root.join("gradient.fmtl");
+    std::fs::write(&source, bytes).unwrap();
+    let output = root.join("gradient");
+    let result = run(&source, &output, "Gradient", "1", "svg", &[]);
+    assert!(!result.status.success());
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(diagnostic.contains("per-vertex paint"), "{diagnostic}");
+    assert!(!output.join("Gradient.svg").exists());
+}

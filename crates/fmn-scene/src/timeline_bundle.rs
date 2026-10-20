@@ -56,6 +56,9 @@ use fmn_mobject::persist::PersistError;
 use fmn_mobject::{Snapshot, Stage};
 use fmn_render::engine::EngineIdentity;
 
+mod audio;
+pub use audio::{BundleSoundtrack, SOUNDTRACK_TIMELINE_BUNDLE_SCHEMA, attach_bundle_soundtrack};
+
 mod camera;
 pub use camera::CAMERA_TIMELINE_BUNDLE_SCHEMA;
 
@@ -140,6 +143,10 @@ impl BundleSegmentKind {
 /// Every refusal the FMTL/1 reader can produce.
 #[derive(Debug)]
 pub enum BundleReadError {
+    /// Invalid normalized PCM or soundtrack framing.
+    Soundtrack(&'static str),
+    /// The caller has not explicitly taken responsibility for the soundtrack.
+    SoundtrackRequired,
     /// Container framing, schema, version, checksum, or limit failure.
     Malformed(SerialError),
     /// A camera capture was invalid or malformed.
@@ -181,6 +188,8 @@ pub enum BundleReadError {
 impl std::fmt::Display for BundleReadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Soundtrack(reason) => write!(f, "invalid FMTL soundtrack: {reason}"),
+            Self::SoundtrackRequired => f.write_str("sound-bearing FMTL requires audio-aware playback; take the soundtrack explicitly before picture-only replay"),
             Self::Malformed(error) => write!(f, "malformed FMTL/1 container: {error}"),
             Self::Camera(error) => write!(f, "invalid FMTL camera capture: {error}"),
             Self::CameraTrackRequired => f.write_str(
@@ -246,6 +255,7 @@ pub struct TimelineBundle {
     frame_count: u32,
     engine_version: String,
     cameras: Option<Vec<fmn_render::camera::CameraSample>>,
+    soundtrack: Option<BundleSoundtrack>,
 }
 
 impl TimelineBundle {
@@ -260,11 +270,14 @@ impl TimelineBundle {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, BundleReadError> {
         let mut reader = Reader::open(
             bytes,
-            CAMERA_TIMELINE_BUNDLE_SCHEMA,
+            SOUNDTRACK_TIMELINE_BUNDLE_SCHEMA,
             Limits::DEFAULT,
             UnknownPolicy::Strict,
         )
         .map_err(BundleReadError::Malformed)?;
+        if reader.version().1 == 2 {
+            return audio::read_envelope(bytes);
+        }
         let wanted = reader
             .get_str()
             .map_err(BundleReadError::Malformed)?
@@ -386,6 +399,7 @@ impl TimelineBundle {
             frame_count,
             engine_version: found,
             cameras,
+            soundtrack: None,
         })
     }
 
@@ -509,6 +523,7 @@ impl TimelineBundle {
     }
 
     fn stage_at_inner(&self, index: u32) -> Result<Stage, BundleReadError> {
+        self.require_picture_only()?;
         let total = self.frame_count();
         let global = i64::from(index) + 1;
         let (segment_index, offset) = self

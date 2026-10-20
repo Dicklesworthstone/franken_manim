@@ -323,8 +323,75 @@ fn base_argv() -> Vec<String> {
 /// # Errors
 /// [`NegotiationError`] per [`VideoJob::resolved_encoder`].
 pub fn encode_argv(job: &VideoJob, out: &Path) -> Result<Vec<String>, NegotiationError> {
+    build_encode_argv(job, out, None)
+}
+
+/// Build encode arguments using the selected encoder's advertised input formats.
+///
+/// The process boundary supplies the formats from its bounded, fingerprinted
+/// `-h encoder=...` probe. Native NV12 and P010 pass through when accepted;
+/// otherwise a compatible planar input is selected. P010 requires an
+/// advertised 10-bit format, so an 8-bit encoder cannot silently reduce it.
+/// `formats` must describe the encoder returned by [`VideoJob::resolved_encoder`].
+///
+/// # Errors
+/// The normal job refusals, or no supported 10-bit input for a P010 job.
+pub fn encode_argv_with_formats(
+    job: &VideoJob,
+    out: &Path,
+    formats: &[String],
+) -> Result<Vec<String>, NegotiationError> {
+    build_encode_argv(job, out, Some(formats))
+}
+
+pub(crate) fn encoder_pixel_format(
+    job: &VideoJob,
+    formats: Option<&[String]>,
+) -> Result<Option<&'static str>, NegotiationError> {
+    match job.container {
+        Container::MovTransparent => Ok(Some("argb")),
+        Container::Gif => Ok(None),
+        Container::Mp4 | Container::Mov => match (job.wire, formats) {
+            (WireFormat::Nv12, Some(formats)) => Ok(Some(
+                if formats.iter().any(|format| format == "nv12") {
+                    "nv12"
+                } else {
+                    "yuv420p"
+                },
+            )),
+            (WireFormat::P010, Some(formats)) => [
+                "p010le",
+                "yuv420p10le",
+                "yuv422p10le",
+                "yuv444p10le",
+            ]
+            .into_iter()
+            .find(|candidate| formats.iter().any(|format| format.as_str() == *candidate))
+            .map(Some)
+            .ok_or(NegotiationError(
+                "P010 requires an encoder advertising a compatible 10-bit input; choose a 10-bit encoder or NV12",
+            )),
+            // Pure callers without a capability observation keep the existing
+            // conservative argv. Production boundaries always probe YUV jobs.
+            (WireFormat::P010, None) => Ok(Some("yuv420p10le")),
+            (WireFormat::Nv12, None)
+                if job.resolved_encoder()?.as_deref() != Some("libx264") =>
+            {
+                Ok(None)
+            }
+            _ => Ok(Some("yuv420p")),
+        },
+    }
+}
+
+fn build_encode_argv(
+    job: &VideoJob,
+    out: &Path,
+    formats: Option<&[String]>,
+) -> Result<Vec<String>, NegotiationError> {
     let encoder = job.resolved_encoder()?;
     let quality = job.merged_quality()?;
+    let output_pixel_format = encoder_pixel_format(job, formats)?;
     let mut argv = base_argv();
     // Input: tightly-packed frames, output orientation, on stdin.
     push(&mut argv, &["-f", "rawvideo"]);
@@ -358,24 +425,11 @@ pub fn encode_argv(job: &VideoJob, out: &Path) -> Result<Vec<String>, Negotiatio
         argv.push("-b:v".into());
         argv.push(bitrate.to_string());
     }
-    match job.container {
-        Container::Mp4 | Container::Mov => {
-            // Keep the documented libx264 software profile byte-for-byte,
-            // but do not force a native NV12 encoder through planar 4:2:0.
-            // With no output -pix_fmt, ffmpeg negotiates against the selected
-            // encoder's actual supported formats: NV12 stays NV12 when it is
-            // accepted, otherwise ffmpeg chooses a compatible encoder input.
-            // This is capability-driven, not a list of hardware brand names.
-            // P010 remains explicit: an unconstrained choice could silently
-            // reduce its bit depth on an 8-bit-only encoder.
-            if job.wire == WireFormat::P010 {
-                push(&mut argv, &["-pix_fmt", "yuv420p10le"]);
-            } else if job.wire != WireFormat::Nv12 || encoder.as_deref() == Some("libx264") {
-                push(&mut argv, &["-pix_fmt", "yuv420p"]);
-            }
-        }
-        Container::MovTransparent => push(&mut argv, &["-pix_fmt", "argb"]),
-        Container::Gif => push(&mut argv, &["-f", "gif"]),
+    if let Some(format) = output_pixel_format {
+        push(&mut argv, &["-pix_fmt", format]);
+    }
+    if job.container == Container::Gif {
+        push(&mut argv, &["-f", "gif"]);
     }
     if job.container == Container::Mp4 {
         push(&mut argv, &["-movflags", "+faststart"]);

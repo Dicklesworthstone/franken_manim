@@ -198,3 +198,6 @@ render:
   aa: "adaptive"
   # auto, or a fixed thread count
   threads: "auto"
+cache:
+  # Typesetting envelope bytes retained after a render; zero keeps none on disk.
+  max_bytes: 1073741824

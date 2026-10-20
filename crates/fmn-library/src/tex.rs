@@ -20,18 +20,25 @@
 //! typeset a reference "0" and scale so its height is
 //! `font_size / font_size_for_unit_height` manim units.
 
+use std::collections::HashSet;
 use std::sync::Arc;
+
+use fmn_anim::AnimError;
 
 use fmn_core::color::Srgb;
 use fmn_core::types::Vec3;
 use fmn_geom::QuadPath;
-use fmn_mobject::Mobject;
+use fmn_mobject::{CopyMap, IdBuildHasher, Mob, Mobject, Placement, Stage, StageError};
 pub use fmn_tex::LineAlign;
 use fmn_tex::{Mode, PathContour, PathSeg, Prim, Style as MathStyle, TexEngine, TexError, Typeset};
+use fmn_text::FontBook;
 
+use crate::numbers::DecimalNumber;
 use crate::spans::{SpanKindU8, SpanMapData, SpanMapEntry};
 use crate::style::Style;
-use crate::text::{DEFAULT_FONT_SIZE, DEFAULT_FONT_SIZE_FOR_UNIT_HEIGHT, text_style};
+use crate::text::{
+    DEFAULT_FONT_SIZE, DEFAULT_FONT_SIZE_FOR_UNIT_HEIGHT, TextMobjectError, text_style,
+};
 use crate::vmobject::VMobject;
 
 /// A tex-bridge failure: fmd-math's precise, tier-tagged construct
@@ -150,6 +157,784 @@ impl From<TexMobject> for Mobject {
     fn from(t: TexMobject) -> Self {
         t.vmob.moved_to([0.0; 3]).into()
     }
+}
+
+/// Maximum native parts retained by one adopted TeX binding.
+pub const MAX_TEX_BINDING_PARTS: usize = 65_536;
+/// Maximum source bytes inspected or retained by one live TeX binding.
+pub const MAX_TEX_BINDING_SOURCE_BYTES: usize = 1_048_576;
+/// Maximum numeric occurrences replaced in one atomic formula edit.
+pub const MAX_TEX_NUMBER_REPLACEMENTS: usize = 4096;
+/// Maximum source and replacement point records examined in one formula edit.
+pub const MAX_TEX_BINDING_POINTS: usize = 1_048_576;
+
+const DECIMAL_SOURCE_SLOT: &str = r"\decimalmob";
+
+/// A native formula could not be bound or edited. Layout, source ownership,
+/// numeric formatting, and placement are checked before publishing children.
+#[derive(Debug)]
+pub enum TexBindingError {
+    /// An arena or paint-record operation failed.
+    Animation(AnimError),
+    /// The requested decimal formatting or glyph layout failed.
+    Number(TextMobjectError),
+    /// An entry is not a nonempty UTF-8 range in the current source.
+    InvalidSpan {
+        /// The native primitive's span ordinal.
+        index: usize,
+    },
+    /// The adopted formula no longer has the bound direct-child layout.
+    InvalidLayout {
+        /// The violated provenance contract.
+        reason: &'static str,
+    },
+    /// A selected literal does not parse as a finite real number.
+    InvalidNumber {
+        /// The requested source literal.
+        literal: String,
+    },
+    /// A particular zero-based occurrence does not exist.
+    MissingOccurrence {
+        /// The requested occurrence.
+        index: usize,
+        /// Number of literal occurrences in the current source.
+        count: usize,
+    },
+    /// Replacing the requested source would divide or duplicate native ink.
+    AmbiguousSelection {
+        /// Why this occurrence cannot own an independent numeric slot.
+        reason: &'static str,
+    },
+    /// A fit is empty, degenerate, or cannot retain finite native coordinates.
+    InvalidGeometry {
+        /// The invalid coordinate or fit.
+        reason: &'static str,
+    },
+    /// A formula edit exceeded a fixed work or storage ceiling.
+    BudgetExceeded {
+        /// The bounded resource.
+        resource: &'static str,
+        /// Its ceiling.
+        limit: usize,
+    },
+}
+
+impl TexBindingError {
+    /// Whether this refusal represents a native work, storage, or allocation
+    /// limit, including the decimal model's own formatting limits.
+    #[must_use]
+    pub const fn is_budget_exceeded(&self) -> bool {
+        matches!(
+            self,
+            Self::BudgetExceeded { .. }
+                | Self::Number(
+                    TextMobjectError::ResourceLimit { .. }
+                        | TextMobjectError::CapacityOverflow { .. }
+                        | TextMobjectError::AllocationFailed { .. }
+                )
+        )
+    }
+}
+
+impl core::fmt::Display for TexBindingError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Animation(error) => error.fmt(f),
+            Self::Number(error) => error.fmt(f),
+            Self::InvalidSpan { index } => {
+                write!(f, "TeX span {index} is not a nonempty UTF-8 range")
+            }
+            Self::InvalidLayout { reason } => write!(f, "adopted TeX layout is invalid: {reason}"),
+            Self::InvalidNumber { literal } => {
+                write!(f, "TeX literal {literal:?} is not a finite number")
+            }
+            Self::MissingOccurrence { index, count } => {
+                write!(f, "TeX occurrence {index} does not exist ({count} available)")
+            }
+            Self::AmbiguousSelection { reason } => {
+                write!(f, "TeX number selection is ambiguous: {reason}")
+            }
+            Self::InvalidGeometry { reason } => {
+                write!(f, "TeX number placement is invalid: {reason}")
+            }
+            Self::BudgetExceeded { resource, limit } => {
+                write!(f, "live TeX exceeds the {limit} {resource} budget")
+            }
+        }
+    }
+}
+
+impl std::error::Error for TexBindingError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Animation(error) => Some(error),
+            Self::Number(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<AnimError> for TexBindingError {
+    fn from(error: AnimError) -> Self {
+        Self::Animation(error)
+    }
+}
+
+impl From<StageError> for TexBindingError {
+    fn from(error: StageError) -> Self {
+        Self::Animation(AnimError::Stage(error))
+    }
+}
+
+impl From<TextMobjectError> for TexBindingError {
+    fn from(error: TextMobjectError) -> Self {
+        Self::Number(error)
+    }
+}
+
+/// The installed numeric root and its initial formatting model. Move these
+/// into the ordinary native numeric animations, such as
+/// [change_decimal_to_value](crate::numbers::change_decimal_to_value).
+/// The handle remains stable as its numeric glyph children regenerate.
+#[derive(Debug, Clone)]
+pub struct TexNumberBinding {
+    mob: Mob,
+    decimal: DecimalNumber,
+}
+
+impl TexNumberBinding {
+    /// The numeric root actually installed in the formula.
+    #[must_use]
+    pub fn mobject(&self) -> Mob {
+        self.mob
+    }
+
+    /// The initial value and formatting configuration of the installed number.
+    /// Subsequent animations own their own model; this is not a live readback.
+    #[must_use]
+    pub fn decimal(&self) -> &DecimalNumber {
+        &self.decimal
+    }
+
+    /// Consume the binding into the handle and model accepted by native
+    /// ChangingDecimal, ChangeDecimalToValue, and CountInFrom helpers.
+    #[must_use]
+    pub fn into_parts(self) -> (Mob, DecimalNumber) {
+        (self.mob, self.decimal)
+    }
+}
+
+/// Source provenance for an adopted flat TeX formula, with explicit live
+/// numeric slots. Unselected primitive handles and painter order survive
+/// replacement; selected source is rewritten to an opaque decimal slot.
+///
+/// This binding retains the formula's direct-child identities, not the
+/// replaceable descendants inside a number. Thus numeric animations can
+/// regenerate glyphs while later selections and newly planned
+/// [matching animations](crate::text_matching::TransformMatchingTex::from_bindings)
+/// remain valid. A matching plan separately freezes the current descendant
+/// topology and refuses a regeneration between planning and begin.
+///
+/// Cloning this value refers to the same formula. Use [Self::for_copy] with
+/// the arena's explicit copy map to bind a copied family. Restoring an older
+/// arena snapshot also requires the corresponding older binding.
+#[derive(Debug, Clone)]
+pub struct TexSpanBinding {
+    root: Mob,
+    spans: SpanMapData,
+    children: Vec<Mob>,
+    numeric_slots: Vec<Mob>,
+}
+
+impl TexSpanBinding {
+    /// Bind a native map saved before adopting a Tex or TexText value. Entry
+    /// i must still describe direct child i; mapped primitives must be leaves.
+    ///
+    /// # Errors
+    /// Stale handles, invalid UTF-8 spans, regrouped primitives, or budgets.
+    pub fn new(stage: &Stage, root: Mob, spans: SpanMapData) -> Result<Self, TexBindingError> {
+        let entry = stage.get(root).ok_or(AnimError::StaleHandle(root))?;
+        tex_budget(
+            entry.submobjects().len(),
+            MAX_TEX_BINDING_PARTS,
+            "parts per formula",
+        )?;
+        let binding = Self {
+            root,
+            spans,
+            children: entry.submobjects().to_vec(),
+            numeric_slots: Vec::new(),
+        };
+        binding.validate(stage)?;
+        Ok(binding)
+    }
+
+    /// The bound formula root.
+    #[must_use]
+    pub fn mobject(&self) -> Mob {
+        self.root
+    }
+
+    /// Current source and native direct-child spans. Numeric entries identify
+    /// whole live slots, not their transient digit descendants. Pass this
+    /// binding itself to the explicit grouped matching constructor.
+    #[must_use]
+    pub fn span_map(&self) -> &SpanMapData {
+        &self.spans
+    }
+
+    /// Complete native primitives in each literal occurrence, in source
+    /// occurrence order and original emission order within each occurrence.
+    ///
+    /// # Errors
+    /// The bound direct-child layout is stale or the query exceeds its budget.
+    pub fn occurrences(
+        &self,
+        stage: &Stage,
+        literal: &str,
+    ) -> Result<Vec<Vec<Mob>>, TexBindingError> {
+        self.validate(stage)?;
+        let ranges = self.literal_ranges(literal)?;
+        let mut groups = vec![Vec::new(); ranges.len()];
+        for (index, span) in self.spans.entries.iter().enumerate() {
+            if let Some(occurrence) = ranges
+                .partition_point(|&(start, _)| start <= span.start)
+                .checked_sub(1)
+                && span.end <= ranges[occurrence].1
+            {
+                groups[occurrence].push(self.children[index]);
+            }
+        }
+        Ok(groups)
+    }
+
+    /// Bind a copied formula using every retained handle's explicit remapping.
+    /// Missing mappings are refused, including a map for a different family.
+    ///
+    /// # Errors
+    /// Incomplete copy map, stale destination, or changed copied topology.
+    pub fn for_copy(&self, stage: &Stage, copied: &CopyMap) -> Result<Self, TexBindingError> {
+        let remap = |mob| {
+            copied.get(mob).ok_or(TexBindingError::InvalidLayout {
+                reason: "the copy map does not cover every bound formula handle",
+            })
+        };
+        let binding = Self {
+            root: remap(self.root)?,
+            spans: self.spans.clone(),
+            children: self
+                .children
+                .iter()
+                .map(|&mob| remap(mob))
+                .collect::<Result<_, _>>()?,
+            numeric_slots: self
+                .numeric_slots
+                .iter()
+                .map(|&mob| remap(mob))
+                .collect::<Result<_, _>>()?,
+        };
+        binding.validate(stage)?;
+        Ok(binding)
+    }
+
+    /// Replace one zero-based source occurrence with an independently animated
+    /// decimal and return that actual installed root (C-20). The supplied
+    /// decimal is a formatting template; its initial value comes from literal.
+    /// The first selected glyph supplies root and digit paint (C-21).
+    ///
+    /// The number fits the selected run's width and center. A common staged
+    /// affine placement is retained, including rotation and nonuniform scale;
+    /// individually transformed primitives instead use their world bounds.
+    /// The fit lives on the numeric root and every current descendant, so the
+    /// first numeric animation sample retains that placement.
+    ///
+    /// # Errors
+    /// All source, formatting, ownership and finite-coordinate checks happen
+    /// before any adopted graph changes.
+    pub fn make_number_changeable(
+        &mut self,
+        stage: &mut Stage,
+        literal: &str,
+        index: usize,
+        format: DecimalNumber,
+        book: &FontBook,
+    ) -> Result<TexNumberBinding, TexBindingError> {
+        let mut numbers = self.replace_numbers(stage, literal, Some(index), format, book)?;
+        Ok(numbers.remove(0))
+    }
+
+    /// Replace every occurrence atomically, returning independent installed
+    /// numbers in source order. A missing valid literal returns an empty list.
+    ///
+    /// # Errors
+    /// As [Self::make_number_changeable]. Every replacement is prepared before
+    /// the first arena allocation; a rejected occurrence leaves all unchanged.
+    pub fn make_numbers_changeable(
+        &mut self,
+        stage: &mut Stage,
+        literal: &str,
+        format: DecimalNumber,
+        book: &FontBook,
+    ) -> Result<Vec<TexNumberBinding>, TexBindingError> {
+        self.replace_numbers(stage, literal, None, format, book)
+    }
+
+    pub(crate) fn numeric_slots(&self) -> &[Mob] {
+        &self.numeric_slots
+    }
+
+    pub(crate) fn validate(&self, stage: &Stage) -> Result<(), TexBindingError> {
+        tex_budget(
+            self.spans.source.len(),
+            MAX_TEX_BINDING_SOURCE_BYTES,
+            "source bytes",
+        )?;
+        tex_budget(
+            self.children.len(),
+            MAX_TEX_BINDING_PARTS,
+            "parts per formula",
+        )?;
+        let entry = stage
+            .get(self.root)
+            .ok_or(AnimError::StaleHandle(self.root))?;
+        let invalid = |reason| TexBindingError::InvalidLayout { reason };
+        if !entry.buffer.is_empty() || entry.submobjects() != self.children.as_slice() {
+            return Err(invalid(
+                "the formula must retain its point-free root and direct-child order",
+            ));
+        }
+        if self.spans.entries.len() > self.children.len() {
+            return Err(invalid("there are more source spans than direct children"));
+        }
+        let slots: HashSet<Mob, IdBuildHasher> = self.numeric_slots.iter().copied().collect();
+        let unique: HashSet<Mob, IdBuildHasher> = self.children.iter().copied().collect();
+        if unique.len() != self.children.len() {
+            return Err(invalid("a native child appears more than once"));
+        }
+        if slots.len() != self.numeric_slots.len()
+            || slots.iter().any(|mob| !unique.contains(mob))
+        {
+            return Err(invalid("a numeric slot no longer belongs to the formula"));
+        }
+        for (index, &child) in self.children.iter().enumerate() {
+            let part = stage.get(child).ok_or(AnimError::StaleHandle(child))?;
+            if self.spans.entries.is_empty() && !part.buffer.is_empty() {
+                return Err(invalid(
+                    "point-bearing formula primitives require a native source map",
+                ));
+            }
+            if slots.contains(&child) {
+                if !part.buffer.is_empty()
+                    || self
+                        .spans
+                        .entries
+                        .get(index)
+                        .and_then(|span| self.spans.source.get(span.start..span.end))
+                        != Some(DECIMAL_SOURCE_SLOT)
+                {
+                    return Err(invalid(
+                        "a live number must retain its point-free source slot",
+                    ));
+                }
+            } else if !part.submobjects().is_empty() {
+                return Err(invalid(
+                    "a native primitive was regrouped outside a live number slot",
+                ));
+            }
+        }
+        for (index, span) in self.spans.entries.iter().enumerate() {
+            if self
+                .spans
+                .source
+                .get(span.start..span.end)
+                .is_none_or(str::is_empty)
+            {
+                return Err(TexBindingError::InvalidSpan { index });
+            }
+        }
+        Ok(())
+    }
+
+    fn literal_ranges(&self, literal: &str) -> Result<Vec<(usize, usize)>, TexBindingError> {
+        tex_budget(
+            literal.len(),
+            MAX_TEX_BINDING_SOURCE_BYTES,
+            "query bytes",
+        )?;
+        let mut ranges = Vec::new();
+        if !literal.is_empty() {
+            for (start, matched) in self.spans.source.match_indices(literal) {
+                tex_budget(
+                    ranges.len() + 1,
+                    MAX_TEX_NUMBER_REPLACEMENTS,
+                    "literal occurrences",
+                )?;
+                ranges.push((start, start + matched.len()));
+            }
+        }
+        Ok(ranges)
+    }
+
+    fn selected_parts(
+        &self,
+        ranges: &[(usize, usize)],
+    ) -> Result<(Vec<Vec<usize>>, Vec<Option<usize>>), TexBindingError> {
+        let mut groups = vec![Vec::new(); ranges.len()];
+        let mut owners = vec![None; self.children.len()];
+        let mut seen_spans = vec![std::collections::BTreeSet::new(); ranges.len()];
+        for (index, span) in self.spans.entries.iter().enumerate() {
+            let first = ranges.partition_point(|&(_, end)| end <= span.start);
+            let after = ranges.partition_point(|&(start, _)| start < span.end);
+            if first == after {
+                continue;
+            }
+            let (start, end) = ranges[first];
+            if first + 1 == after && start <= span.start && span.end <= end {
+                if !seen_spans[first].insert((span.start, span.end)) {
+                    return Err(TexBindingError::AmbiguousSelection {
+                        reason: "multiple primitives own the same selected source bytes",
+                    });
+                }
+                groups[first].push(index);
+                owners[index] = Some(first);
+            } else if span.start <= start && ranges[after - 1].1 <= span.end {
+                // Macro-generated enclosing ink can legitimately own the
+                // whole call site. Keep its native handle and rewrite both
+                // source boundaries, without claiming it as a numeric digit.
+            } else {
+                return Err(TexBindingError::AmbiguousSelection {
+                    reason: "the selected run crosses an indivisible primitive's source span",
+                });
+            }
+        }
+        if groups.iter().any(Vec::is_empty) {
+            return Err(TexBindingError::AmbiguousSelection {
+                reason: "a selected occurrence contains no complete native ink",
+            });
+        }
+        Ok((groups, owners))
+    }
+
+    fn replace_numbers(
+        &mut self,
+        stage: &mut Stage,
+        literal: &str,
+        selected: Option<usize>,
+        mut format: DecimalNumber,
+        book: &FontBook,
+    ) -> Result<Vec<TexNumberBinding>, TexBindingError> {
+        self.validate(stage)?;
+        let ranges = self.literal_ranges(literal)?;
+        let value = literal
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| TexBindingError::InvalidNumber {
+                literal: literal.to_owned(),
+            })?;
+        let ranges = if let Some(index) = selected {
+            vec![*ranges
+                .get(index)
+                .ok_or(TexBindingError::MissingOccurrence {
+                    index,
+                    count: ranges.len(),
+                })?]
+        } else {
+            ranges
+        };
+        if ranges.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (groups, owners) = self.selected_parts(&ranges)?;
+        let retired = groups
+            .iter()
+            .flatten()
+            .map(|&index| self.children[index])
+            .collect::<Vec<_>>();
+        let (source, replacement_spans) = rewrite_decimal_source(&self.spans.source, &ranges)?;
+        let mut child_plan = Vec::with_capacity(self.children.len());
+        let mut entries = Vec::with_capacity(self.spans.entries.len());
+        for (index, &child) in self.children.iter().enumerate() {
+            if let Some(occurrence) = owners[index] {
+                if groups[occurrence][0] == index {
+                    child_plan.push(FormulaPart::Number(occurrence));
+                    entries.push(replacement_spans[occurrence]);
+                }
+            } else {
+                child_plan.push(FormulaPart::Existing(child));
+                if let Some(span) = self.spans.entries.get(index) {
+                    entries.push(SpanMapEntry {
+                        start: remap_source_boundary(span.start, &ranges, &replacement_spans),
+                        end: remap_source_boundary(span.end, &ranges, &replacement_spans),
+                        kind: span.kind,
+                    });
+                }
+            }
+        }
+        // Canonical local coordinates make the first numeric update use the
+        // exact same f32 conversion as the installed glyphs.
+        format.set_value(value, book)?;
+        let format = format.build(book)?;
+        let mut prepared = Vec::with_capacity(groups.len());
+        let mut point_count = 0;
+        let mut member_count = 0;
+        for group in &groups {
+            let selected = group
+                .iter()
+                .map(|&index| self.children[index])
+                .collect::<Vec<_>>();
+            let mobject = format.with_live_paint(stage, selected[0])?;
+            let points = detached_number_points(&mobject, &mut point_count, &mut member_count)?;
+            let placement = fit_number_to_parts(stage, &selected, &points, &mut point_count)?;
+            prepared.push((mobject, placement));
+        }
+
+        // No authored callback runs between the checks above and publication.
+        // Fresh owned numeric trees cannot introduce a cycle; reused children
+        // already belong to this root. Only one parent-list edit is published.
+        let mut numbers = Vec::with_capacity(prepared.len());
+        for (mobject, placement) in prepared {
+            let mob = stage.add(mobject);
+            for member in stage.family(mob) {
+                stage.set_placement(member, placement)?;
+            }
+            numbers.push(TexNumberBinding {
+                mob,
+                decimal: format.clone(),
+            });
+        }
+        let children = child_plan
+            .into_iter()
+            .map(|part| match part {
+                FormulaPart::Existing(mob) => mob,
+                FormulaPart::Number(index) => numbers[index].mob,
+            })
+            .collect::<Vec<_>>();
+        stage.replace_children(self.root, &children)?;
+        self.children = children;
+        self.spans = SpanMapData {
+            source: source.into(),
+            entries,
+        };
+        self.numeric_slots
+            .extend(numbers.iter().map(|number| number.mob));
+        // Retire only the removed primitive leaves that nobody else owns.
+        // Shared, separately rooted, and pinned handles keep Stage's normal
+        // ownership and deferred-deletion semantics.
+        for mob in retired {
+            if stage.get(mob).is_some_and(|entry| entry.parents().is_empty())
+                && !stage.roots().contains(&mob)
+            {
+                // The just-checked live leaf cannot become stale here:
+                // neither deletion nor publication invokes user callbacks.
+                let _ = stage.delete(mob);
+            }
+        }
+        Ok(numbers)
+    }
+}
+
+enum FormulaPart {
+    Existing(Mob),
+    Number(usize),
+}
+
+fn tex_budget(count: usize, limit: usize, resource: &'static str) -> Result<(), TexBindingError> {
+    if count > limit {
+        Err(TexBindingError::BudgetExceeded { resource, limit })
+    } else {
+        Ok(())
+    }
+}
+
+
+fn rewrite_decimal_source(
+    source: &str,
+    ranges: &[(usize, usize)],
+) -> Result<(String, Vec<SpanMapEntry>), TexBindingError> {
+    let removed: usize = ranges.iter().map(|&(start, end)| end - start).sum();
+    let size = source.len() - removed + ranges.len() * DECIMAL_SOURCE_SLOT.len();
+    tex_budget(
+        size,
+        MAX_TEX_BINDING_SOURCE_BYTES,
+        "replacement source bytes",
+    )?;
+    let mut rewritten = String::with_capacity(size);
+    let mut spans = Vec::with_capacity(ranges.len());
+    let mut previous = 0;
+    for &(start, end) in ranges {
+        rewritten.push_str(&source[previous..start]);
+        let start = rewritten.len();
+        rewritten.push_str(DECIMAL_SOURCE_SLOT);
+        spans.push(SpanMapEntry {
+            start,
+            end: rewritten.len(),
+            kind: SpanKindU8::MathGlyph,
+        });
+        previous = end;
+    }
+    rewritten.push_str(&source[previous..]);
+    Ok((rewritten, spans))
+}
+
+fn remap_source_boundary(
+    position: usize,
+    ranges: &[(usize, usize)],
+    replacements: &[SpanMapEntry],
+) -> usize {
+    ranges
+        .partition_point(|&(_, end)| end <= position)
+        .checked_sub(1)
+        .map_or(position, |index| {
+            replacements[index].end + position - ranges[index].1
+        })
+}
+
+fn detached_number_points(
+    mobject: &Mobject,
+    point_count: &mut usize,
+    member_count: &mut usize,
+) -> Result<Vec<Vec3>, TexBindingError> {
+    let mut pending = vec![mobject];
+    let mut points = Vec::new();
+    while let Some(member) = pending.pop() {
+        *member_count = member_count.saturating_add(1);
+        tex_budget(
+            *member_count,
+            MAX_TEX_BINDING_PARTS,
+            "replacement family members",
+        )?;
+        *point_count = point_count.saturating_add(member.buffer.len());
+        tex_budget(*point_count, MAX_TEX_BINDING_POINTS, "point records examined")?;
+        if let Some(column) = member.buffer.read_column("point") {
+            for xyz in column.as_chunks::<3>().0 {
+                let point = [f64::from(xyz[0]), f64::from(xyz[1]), f64::from(xyz[2])];
+                if !point.iter().all(|value| value.is_finite()) {
+                    return Err(TexBindingError::InvalidGeometry {
+                        reason: "a decimal glyph cannot be represented by finite f32 records",
+                    });
+                }
+                points.push(point);
+            }
+        }
+        // Admission precedes extending the traversal stack.
+        tex_budget(
+            member_count
+                .saturating_add(pending.len())
+                .saturating_add(member.submobjects.len()),
+            MAX_TEX_BINDING_PARTS,
+            "replacement family members",
+        )?;
+        pending.extend(member.submobjects.iter());
+    }
+    Ok(points)
+}
+
+#[derive(Clone, Copy)]
+struct NumberBounds {
+    min: Vec3,
+    max: Vec3,
+}
+
+impl NumberBounds {
+    fn from_points(points: impl IntoIterator<Item = Vec3>) -> Option<Self> {
+        let mut points = points.into_iter();
+        let first = points.next()?;
+        let mut bounds = Self {
+            min: first,
+            max: first,
+        };
+        for point in points {
+            for (axis, value) in point.into_iter().enumerate() {
+                bounds.min[axis] = bounds.min[axis].min(value);
+                bounds.max[axis] = bounds.max[axis].max(value);
+            }
+        }
+        Some(bounds)
+    }
+
+    fn center(self) -> Vec3 {
+        std::array::from_fn(|axis| 0.5 * self.min[axis] + 0.5 * self.max[axis])
+    }
+}
+
+fn fit_number_to_parts(
+    stage: &Stage,
+    selected: &[Mob],
+    number_points: &[Vec3],
+    point_count: &mut usize,
+) -> Result<Placement, TexBindingError> {
+    let invalid = |reason| TexBindingError::InvalidGeometry { reason };
+    let common = stage
+        .get(selected[0])
+        .ok_or(AnimError::StaleHandle(selected[0]))?
+        .placement();
+    let same_placement = selected.iter().all(|&mob| {
+        stage
+            .get(mob)
+            .is_some_and(|entry| entry.placement().same_bits(common))
+    });
+    let outer = if same_placement {
+        common
+    } else {
+        Placement::IDENTITY
+    };
+    let mut selected_points = Vec::new();
+    for &mob in selected {
+        let entry = stage.get(mob).ok_or(AnimError::StaleHandle(mob))?;
+        *point_count = point_count.saturating_add(entry.buffer.len());
+        tex_budget(*point_count, MAX_TEX_BINDING_POINTS, "point records examined")?;
+        if !entry
+            .placement()
+            .coefficients()
+            .iter()
+            .all(|value| value.is_finite())
+        {
+            return Err(invalid("a selected glyph has nonfinite affine coefficients"));
+        }
+        for point in stage.get_object_points(mob).unwrap_or_default() {
+            let world = entry.placement().apply_point(point);
+            if !point.iter().chain(world.iter()).all(|value| value.is_finite()) {
+                return Err(invalid("a selected glyph has nonfinite points"));
+            }
+            selected_points.push(if same_placement { point } else { world });
+        }
+    }
+    let target = NumberBounds::from_points(selected_points)
+        .ok_or_else(|| invalid("the selected native primitives have no points"))?;
+    let number = NumberBounds::from_points(number_points.iter().copied())
+        .ok_or_else(|| invalid("the decimal has no measurable glyphs"))?;
+    let width = number.max[0] - number.min[0];
+    let target_width = target.max[0] - target.min[0];
+    let scale = target_width / width;
+    if !width.is_finite() || width <= 0.0 || !scale.is_finite() || scale <= 0.0 {
+        return Err(invalid(
+            "the selected run and decimal must have finite positive widths",
+        ));
+    }
+    let number_center = number.center();
+    let target_center = target.center();
+    let translation =
+        std::array::from_fn(|axis| target_center[axis] - scale * number_center[axis]);
+    let placement = outer.compose(Placement::new(
+        [[scale, 0.0, 0.0], [0.0, scale, 0.0], [0.0, 0.0, scale]],
+        translation,
+    ));
+    if !placement
+        .coefficients()
+        .iter()
+        .all(|value| value.is_finite())
+        || number_points.iter().any(|&point| {
+            !placement
+                .apply_point(point)
+                .iter()
+                .all(|value| value.is_finite())
+        })
+    {
+        return Err(invalid("the fitted numeric placement is not finite"));
+    }
+    Ok(placement)
 }
 
 /// `Tex` (Appendix A `mobject/svg/tex_mobject`): the math builder over

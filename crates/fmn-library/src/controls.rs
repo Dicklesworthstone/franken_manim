@@ -6,31 +6,24 @@
 //! Every class here is a **composition with state**: the mobjects the
 //! Reference's constructor assembles, plus the state mutators
 //! (`set_value` / `toggle_value` / `set_active` / `open_panel` …) that
-//! rewrite the right records when the value changes. What is deliberately
-//! NOT here is the event plumbing. The Reference reaches interactivity by
-//! registering listeners on the window (`add_mouse_drag_listner`,
-//! `add_mouse_press_listner`, `add_mouse_scroll_listner`,
-//! `add_key_press_listner`) and by two bookkeeping devices — the no-op
-//! `add_updater(lambda mob: None)` that keeps a control out of
-//! `lock_static_mobject_data`, and `fix_in_frame`, which pins the control
-//! to the camera frame. All of that lands with **W9EVENTS** in Proscenium.
-//! Concretely, the omitted hooks are:
+//! rewrite the right records when the value changes. Native scene bindings
+//! live in the facade's `fmn::controls` module: checkboxes, enable/disable
+//! toggles, buttons, and number sliders support pointer input, tracker
+//! animation, stable transformed geometry, and recorded Scene event replay.
+//! This library stays independent of the scene dispatcher. The remaining
+//! controls without native event bindings are:
 //!
 //! * `MotionMobject.mob_on_mouse_drag` (drag-to-move),
-//! * `Button`'s `on_click` dispatch on mouse press,
-//! * `EnableDisableButton.on_mouse_press` / `Checkbox.on_mouse_press`
-//!   (click-to-toggle),
-//! * `LinearNumberSlider.slider_on_mouse_drag` (its pure half,
-//!   [`LinearNumberSlider::value_from_point`], IS here and is tested),
 //! * `Textbox.box_on_mouse_press` and `Textbox.on_key_press` (keyboard
 //!   editing),
 //! * `ControlPanel.panel_opener_on_mouse_drag` /
-//!   `ControlPanel.panel_on_mouse_scroll`,
-//! * every `fix_in_frame` pin and every keep-alive no-op updater.
+//!   `ControlPanel.panel_on_mouse_scroll`.
+//!
+//! Camera-fixed placement remains an explicit native scene choice.
 //!
 //! None of these are replaced by stubs: the compositions stand on their
 //! own, the mutators the handlers would have called are public, and the
-//! event layer will call exactly them.
+//! bindings use the same state mutators and fallible value surfaces.
 //!
 //! # `ControlMobject` IS a `ValueTracker` — the tracker design
 //!
@@ -290,8 +283,8 @@ impl From<MotionMobject> for Mobject {
 /// `Button` — a clickable: a background rect behind a label (or behind any
 /// mobject, the Reference's `Button(mobject, on_click)` form).
 ///
-/// The click dispatch is the omitted `on_click` hook (W9EVENTS); the
-/// composition — rect plus content — is the deliverable.
+/// Add it with `fmn::controls::add_button` or `add_try_button` to register
+/// native Scene click callbacks. This builder owns the detached composition.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Button {
     content: ButtonContent,
@@ -1069,8 +1062,8 @@ impl LinearNumberSlider {
 
     /// `get_value_from_point`: project onto the axis, turn the fraction
     /// into a value, and snap DOWN to the nearest step (the Reference's
-    /// `int()` truncation). This is the pure half of the omitted drag
-    /// handler; the drag itself is W9EVENTS.
+    /// `int()` truncation). The native `fmn::controls::add_slider` binding
+    /// maps its live staged axis into this detached projection.
     ///
     /// # Errors
     ///

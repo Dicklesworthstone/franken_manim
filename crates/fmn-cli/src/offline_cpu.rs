@@ -3,6 +3,9 @@
 //! The CLI retains ownership of sink finalization and artifact publication.
 //! No scene callback is moved to a worker and no sampling loop is replaced.
 
+mod pure;
+pub(super) use pure::DispatchStats;
+
 use fmn::rendering::{NativeFramePipeline, RenderError};
 use fmn_output::EmitterHandle;
 use fmn_render::RetainedFrameRendererConfig;
@@ -94,6 +97,7 @@ impl super::RenderSink {
             super::OfflineFrameRenderer::Cpu(renderer) => {
                 renderer.capture_compiled(job, self.next_sequence)?;
                 self.backend.record_cpu_frame()?;
+                self.backend.dispatch.compiled_frame()?;
                 self.backend.route =
                     if matches!(self.backend.route, "camera-cpu" | "compiled-camera-cpu") {
                         "compiled-camera-cpu"

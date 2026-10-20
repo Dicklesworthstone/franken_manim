@@ -18,9 +18,10 @@ from fmn_python.__main__ import main
 
 
 def invoke(source, destination, *names, extra=()):
+    output_flag = '--video_dir' if len(names) > 1 or any(value in {'-a', '--write_all'} for value in (*names, *extra)) else '--output'
     arguments = ['fmn-python', '--robot', str(source), *names, '--format', 'svg',
                  '--resolution', '160x90', '--fps', '8', '--threads', '1',
-                 '--video_dir', str(destination), *extra]
+                 output_flag, str(destination), *extra]
     stdout, stderr = io.StringIO(), io.StringIO()
     old_arguments, old_path = sys.argv, list(sys.path)
     try:

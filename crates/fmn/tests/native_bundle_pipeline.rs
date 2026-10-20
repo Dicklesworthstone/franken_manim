@@ -244,6 +244,29 @@ fn native_bundle_export_preserves_clock_and_format_bytes_across_windows() {
 }
 
 #[test]
+fn final_png_replays_the_last_bundle_sample_for_pure_stateful_and_camera_content() {
+    for camera in [false, true] {
+        for stateful in [false, true] {
+            let fs = Arc::new(VirtualFs::new());
+            let bytes = bundle(camera, stateful);
+            let sequence =
+                render_bundle_with_fs(&bytes, options("/sequence", 2, camera), fs.clone()).unwrap();
+            let mut still = options("/final.png", 4, camera);
+            still.format = RenderFormat::Png;
+            let report = render_bundle_with_fs(&bytes, still, fs.clone()).unwrap();
+            assert_eq!(report.scene, sequence.scene);
+            assert_eq!(report.artifact.frame_count, 1);
+            let stats = report.frame_pipeline.unwrap();
+            assert_eq!((stats.submitted, stats.emitted), (1, 1));
+            assert_eq!(
+                fs.read(Path::new("/final.png")).unwrap(),
+                fs.read(Path::new("/sequence/frame_000003.png")).unwrap(),
+            );
+        }
+    }
+}
+
+#[test]
 fn compiled_refusals_do_not_publish_and_worker_failure_allows_retry() {
     let fs = Arc::new(VirtualFs::new());
     let bytes = bundle(false, false);
@@ -261,16 +284,40 @@ fn compiled_refusals_do_not_publish_and_worker_failure_allows_retry() {
     ));
     assert!(!fs.exists(Path::new("/retry")));
     // A 3D bundle on the affine route fails inside a real render worker.
-    assert!(matches!(
-        render_bundle_with_fs(
-            &bundle(true, false),
-            options("/retry", 4, false),
-            fs.clone()
-        ),
-        Err(RenderError::Pipeline(_))
-    ));
-    assert!(!fs.exists(Path::new("/retry")));
-    render_bundle_with_fs(&bytes, options("/retry", 4, false), fs).unwrap();
+    // With a tight window its dropped output reservation can wake admission
+    // before the coordinator closes the source. Both schedules must preserve
+    // CameraRequired rather than returning a secondary output-ring failure.
+    let unsupported = bundle(true, false);
+    for window in [1, 2, 4, 8] {
+        for attempt in 0..4 {
+            let path = format!("/worker-retry-{window}-{attempt}");
+            let result =
+                render_bundle_with_fs(&unsupported, options(&path, window, false), fs.clone());
+            match result {
+                Err(RenderError::Pipeline(fmn_runtime::FrameStreamError::Pipeline(failure))) => {
+                    assert_eq!(failure.stats.outstanding_slots, 0);
+                    assert!(
+                        matches!(
+                            &failure.error,
+                            fmn_runtime::PipelineError::Stage {
+                                source: fmn::rendering::NativeFrameError::Renderer(
+                                    fmn_render::RetainedFrameRendererError::CameraRequired { .. }
+                                ),
+                                ..
+                            }
+                        ),
+                        "wrong root failure: {failure:?}"
+                    );
+                }
+                other => panic!("window {window} lost the worker failure: {other:?}"),
+            }
+            assert!(!fs.exists(Path::new(&path)));
+            let report =
+                render_bundle_with_fs(&bytes, options(&path, window, false), fs.clone()).unwrap();
+            assert_eq!(report.artifact.frame_count, 4);
+            assert_eq!(report.frame_pipeline.unwrap().outstanding_slots, 0);
+        }
+    }
 }
 
 #[test]

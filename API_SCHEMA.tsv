@@ -6918,3 +6918,5 @@ render	map	-	0
 render.engine	string	"cpu"	0
 render.aa	string	"adaptive"	0
 render.threads	string	"auto"	0
+cache	map	-	0
+cache.max_bytes	int	1073741824	0

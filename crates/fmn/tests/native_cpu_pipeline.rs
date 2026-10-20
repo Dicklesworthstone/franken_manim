@@ -267,3 +267,168 @@ fn drain_barriers_never_grant_artifact_publication() {
     emitter.finish().unwrap();
     assert!(committed.load(Ordering::SeqCst));
 }
+
+// The same real Lumen/output fixture for the callback-free packet handoff.
+type CapturedFrames = Arc<Mutex<Vec<(u64, Vec<u8>)>>>;
+
+fn packet_pipeline() -> (NativeFramePipeline, OrderedEmitter, CapturedFrames) {
+    let plan = plan(OutputPixelFormat::Rgba8);
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let output = received.clone();
+    let emitter = OrderedEmitter::new(
+        EmitterConfig::new(
+            FrameLayout::tight(PixelFormat::Rgba8, 32, 24).unwrap(),
+            plan.frames_in_flight,
+            0,
+        )
+        .unwrap(),
+        vec![SinkBinding::reliable(
+            "packet-record",
+            move |sequence, frame: &FrameBuffer| {
+                output
+                    .lock()
+                    .unwrap()
+                    .push((sequence, frame.as_bytes().to_vec()));
+                Ok(SinkWrite::Consumed)
+            },
+        )],
+    )
+    .unwrap();
+    let pipeline =
+        NativeFramePipeline::new(plan.clone(), config(&plan), None, emitter.handle()).unwrap();
+    (pipeline, emitter, received)
+}
+
+#[test]
+fn owned_and_journal_shared_packets_match_the_serial_renderer_after_later_edits() {
+    use fmn_anim::{FramePacket, RationalFrameClock};
+    use fmn_core::rng::RngRoot;
+
+    for shared in [false, true] {
+        let (mut pipeline, emitter, received) = packet_pipeline();
+        let mut serial =
+            RetainedFrameRenderer::new(config(&plan(OutputPixelFormat::Rgba8))).unwrap();
+        let mut stage = Stage::new();
+        let mob = stage.add(shape());
+        stage.add_to_scene(mob).unwrap();
+        let mut clock = RationalFrameClock::new(10).unwrap();
+        let rng = RngRoot::from_seed(7);
+        let mut journal = Vec::new();
+        let mut expected = Vec::new();
+        for sequence in 0..12 {
+            clock.advance_frames(1).unwrap();
+            let packet = FramePacket::freeze_barrier(&stage, &clock, &rng);
+            serial.render(&packet.materialize_stage(), 0).unwrap();
+            expected.push((
+                sequence,
+                convert_reference(serial.frame(), PixelFormat::Rgba8),
+            ));
+            if shared {
+                journal.push(packet.clone());
+            }
+            pipeline.capture_packet(packet, sequence).unwrap();
+            stage.shift(mob, [0.15, 0.0, 0.0]);
+        }
+        drop(stage);
+        let stats = pipeline.finish().unwrap();
+        emitter.finish().unwrap();
+        assert_eq!(*received.lock().unwrap(), expected);
+        assert_ne!(expected[0].1, expected[11].1);
+        assert_eq!(stats.outstanding_slots, 0);
+        assert!(stats.render_team_frames.iter().all(|count| *count > 0));
+        // The handoff must not consume or mutate the journal's replay states.
+        for (index, packet) in journal.iter().enumerate() {
+            assert_eq!(packet.frame_index(), index as i64 + 1);
+            serial.render(&packet.materialize_stage(), 0).unwrap();
+            assert_eq!(
+                convert_reference(serial.frame(), PixelFormat::Rgba8),
+                expected[index].1
+            );
+        }
+    }
+}
+
+#[test]
+fn packet_handoff_releases_non_send_updater_captures_only_on_the_scene_owner() {
+    use fmn_anim::{FramePacket, RationalFrameClock};
+    use fmn_core::rng::RngRoot;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    struct OwnerDrop {
+        thread: std::thread::ThreadId,
+        dropped: Rc<Cell<usize>>,
+    }
+    impl Drop for OwnerDrop {
+        fn drop(&mut self) {
+            assert_eq!(std::thread::current().id(), self.thread);
+            self.dropped.set(self.dropped.get() + 1);
+        }
+    }
+    for shared in [false, true] {
+        let (mut pipeline, emitter, received) = packet_pipeline();
+        let dropped = Rc::new(Cell::new(0));
+        let probe = OwnerDrop {
+            thread: std::thread::current().id(),
+            dropped: dropped.clone(),
+        };
+        let mut stage = Stage::new();
+        let mob = stage.add(shape());
+        stage.add_to_scene(mob).unwrap();
+        stage
+            .add_updater(
+                mob,
+                move |_, _| {
+                    let _keep_capture = &probe;
+                    panic!("render preparation must not execute scene updaters");
+                },
+                false,
+            )
+            .unwrap();
+        let clock = RationalFrameClock::new(30).unwrap();
+        let packet = FramePacket::freeze_barrier(&stage, &clock, &RngRoot::from_seed(7));
+        let saved = shared.then(|| packet.clone());
+        drop(stage);
+        assert_eq!(dropped.get(), 0);
+        pipeline.capture_packet(packet, 0).unwrap();
+        assert_eq!(dropped.get(), usize::from(!shared));
+        drop(saved);
+        assert_eq!(dropped.get(), 1);
+        pipeline.finish().unwrap();
+        emitter.finish().unwrap();
+        assert_eq!(received.lock().unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn frozen_scene_compilation_errors_belong_to_prepare_and_release_every_slot() {
+    use fmn::rendering::NativeFrameError;
+    use fmn_mobject::RenderPrimitive;
+    use fmn_render::RetainedFrameRendererError;
+    use fmn_runtime::{FrameStreamError, PipelineError, PipelineStage};
+
+    let (mut pipeline, emitter, received) = packet_pipeline();
+    let mut stage = Stage::new();
+    let mob = stage.add(shape().with_render_primitive(RenderPrimitive::DotCloud));
+    stage.add_to_scene(mob).unwrap();
+    // Old capture compiled on this thread and returned CameraRequired here.
+    // The new path only admits the immutable state; the retained compiler's
+    // original typed refusal is returned by the preparation worker at finish.
+    pipeline.capture(&stage, 0).unwrap();
+    let error = pipeline.finish().unwrap_err();
+    let RenderError::Pipeline(FrameStreamError::Pipeline(failure)) = error else {
+        panic!("lost original preparation failure: {error}");
+    };
+    assert!(matches!(
+        failure.error,
+        PipelineError::Stage {
+            stage: PipelineStage::Prepare,
+            source: NativeFrameError::Renderer(RetainedFrameRendererError::CameraRequired { .. }),
+            ..
+        }
+    ));
+    assert_eq!(failure.stats.outstanding_slots, 0);
+    let output = emitter.finish().unwrap_err();
+    assert_eq!(output.report.stats.outstanding, 0);
+    assert!(received.lock().unwrap().is_empty());
+}

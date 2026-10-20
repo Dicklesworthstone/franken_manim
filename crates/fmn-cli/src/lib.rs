@@ -498,8 +498,10 @@ pub enum FfmpegReport {
         sha256: String,
         /// First `ffmpeg -version` line.
         version: String,
-        /// Recognized hardware encoders, in stable order.
+        /// Recognized compiled-in hardware encoders, in stable order.
         hardware_encoders: Vec<String>,
+        /// Bounded functional observations, distinct from the compiled inventory.
+        hardware_encoder_probes: Vec<fmn_output::EncoderProbe>,
         /// Encoder-inventory probe failure, without discarding the valid
         /// executable identity and version probe.
         hardware_encoder_probe_error: Option<String>,
@@ -534,6 +536,10 @@ pub enum CacheReport {
         exists: bool,
         /// Number of direct entries, when readable.
         direct_entries: Option<usize>,
+        /// Resolved `cache.max_bytes` ceiling for the typesetting namespace.
+        typeset_max_bytes: u64,
+        /// Observed current-version object-file bytes, when safely inspectable.
+        typeset_bytes: Option<u64>,
         /// Read-only inspection failure, when any.
         warning: Option<String>,
     },
@@ -541,6 +547,8 @@ pub enum CacheReport {
     Unresolved {
         /// Why no path was available.
         reason: String,
+        /// Resolved retention policy, even when the root is unavailable.
+        typeset_max_bytes: u64,
     },
 }
 
@@ -2033,6 +2041,7 @@ pub fn collect_doctor_snapshot(
     let cache = cache_report_from_resolution(
         fs,
         fmn_cache::resolve_host_cache_root(&config.directories.cache),
+        config.cache.max_bytes,
     )?;
     let math_packs = fmn_config::PackRegistry::builtin()
         .names()
@@ -2115,14 +2124,21 @@ fn locate_and_probe_ffmpeg_in(
 fn cache_report_from_resolution(
     fs: &dyn FileSystem,
     resolution: Result<PathBuf, fmn_cache::CacheRootError>,
+    typeset_max_bytes: u64,
 ) -> Result<CacheReport, CliError> {
     match resolution {
-        Ok(root) => Ok(inspect_cache(fs, &root, MAX_DOCTOR_CACHE_DIRECT_ENTRIES)),
+        Ok(root) => Ok(inspect_cache(
+            fs,
+            &root,
+            MAX_DOCTOR_CACHE_DIRECT_ENTRIES,
+            typeset_max_bytes,
+        )),
         Err(error @ fmn_cache::CacheRootError::InvalidConfigured { .. }) => {
             Err(cache_root_cli_error(error))
         }
         Err(error) => Ok(CacheReport::Unresolved {
             reason: error.to_string(),
+            typeset_max_bytes,
         }),
     }
 }
@@ -2166,27 +2182,32 @@ fn probe_ffmpeg_in(
             };
         }
     };
-    let (hardware_encoders, hardware_encoder_probe_error) =
-        match fmn_output::EncoderCapabilities::probe(&tool, runner) {
-            Ok(encoders) => (encoders.hardware(), None),
-            Err(
-                error @ (fmn_output::BoundaryError::ExecutableIdentityChanged { .. }
-                | fmn_output::BoundaryError::ExecutableImageRejected { .. }
-                | fmn_output::BoundaryError::Workdir { .. }),
-            ) => {
-                return FfmpegReport::Unavailable {
-                    attempted: path,
-                    reason: error.to_string(),
-                    alternative: fmn_output::NATIVE_ALTERNATIVE.to_owned(),
-                };
-            }
-            Err(error) => (Vec::new(), Some(error.to_string())),
-        };
+    let mut hardware_encoders = Vec::new();
+    let probes = fmn_output::EncoderCapabilities::probe(&tool, runner).and_then(|encoders| {
+        hardware_encoders = encoders.hardware();
+        encoders.probe_hardware(&tool, runner)
+    });
+    let (hardware_encoder_probes, hardware_encoder_probe_error) = match probes {
+        Ok(probes) => (probes, None),
+        Err(
+            error @ (fmn_output::BoundaryError::ExecutableIdentityChanged { .. }
+            | fmn_output::BoundaryError::ExecutableImageRejected { .. }
+            | fmn_output::BoundaryError::Workdir { .. }),
+        ) => {
+            return FfmpegReport::Unavailable {
+                attempted: path,
+                reason: error.to_string(),
+                alternative: fmn_output::NATIVE_ALTERNATIVE.to_owned(),
+            };
+        }
+        Err(error) => (Vec::new(), Some(error.to_string())),
+    };
     FfmpegReport::Available {
         path: tool.path().to_path_buf(),
         sha256: tool.sha256_hex().to_owned(),
         version: tool.version().to_owned(),
         hardware_encoders,
+        hardware_encoder_probes,
         hardware_encoder_probe_error,
     }
 }
@@ -2202,7 +2223,12 @@ fn cache_root_cli_error(error: fmn_cache::CacheRootError) -> CliError {
 
 const MAX_DOCTOR_CACHE_DIRECT_ENTRIES: usize = 4 * 1024;
 
-fn inspect_cache(fs: &dyn FileSystem, root: &Path, max_entries: usize) -> CacheReport {
+fn inspect_cache(
+    fs: &dyn FileSystem,
+    root: &Path,
+    max_entries: usize,
+    typeset_max_bytes: u64,
+) -> CacheReport {
     let mut components: Vec<&Path> = root
         .ancestors()
         .filter(|path| !path.as_os_str().is_empty())
@@ -2216,6 +2242,8 @@ fn inspect_cache(fs: &dyn FileSystem, root: &Path, max_entries: usize) -> CacheR
                     root: root.to_path_buf(),
                     exists: component == root, // ubs:ignore - Compares public filesystem paths, not authentication material.
                     direct_entries: None,
+                    typeset_max_bytes,
+                    typeset_bytes: None,
                     warning: Some(format!(
                         "cache traversal refused {kind:?} at {:?}",
                         component.as_os_str()
@@ -2227,6 +2255,8 @@ fn inspect_cache(fs: &dyn FileSystem, root: &Path, max_entries: usize) -> CacheR
                     root: root.to_path_buf(),
                     exists: false,
                     direct_entries: Some(0),
+                    typeset_max_bytes,
+                    typeset_bytes: Some(0),
                     warning: None,
                 };
             }
@@ -2235,22 +2265,40 @@ fn inspect_cache(fs: &dyn FileSystem, root: &Path, max_entries: usize) -> CacheR
                     root: root.to_path_buf(),
                     exists: false,
                     direct_entries: None,
+                    typeset_max_bytes,
+                    typeset_bytes: None,
                     warning: Some(error.to_string()),
                 };
             }
         }
     }
     match fs.count_dir_entries_bounded(root, max_entries) {
-        Ok(entry_count) => CacheReport::Configured {
-            root: root.to_path_buf(),
-            exists: true,
-            direct_entries: Some(entry_count),
-            warning: None,
-        },
+        Ok(entry_count) => {
+            let (typeset_bytes, warning) = match fmn_cache::Store::inspect_namespace_bytes(
+                fs,
+                root,
+                "typeset",
+                fmn::tex::TYPESET_FORMAT_VERSION,
+                max_entries,
+            ) {
+                Ok(bytes) => (Some(bytes), None),
+                Err(error) => (None, Some(error.to_string())),
+            };
+            CacheReport::Configured {
+                root: root.to_path_buf(),
+                exists: true,
+                direct_entries: Some(entry_count),
+                typeset_max_bytes,
+                typeset_bytes,
+                warning,
+            }
+        }
         Err(error) => CacheReport::Configured {
             root: root.to_path_buf(),
             exists: true,
             direct_entries: None,
+            typeset_max_bytes,
+            typeset_bytes: None,
             warning: Some(error.to_string()),
         },
     }
@@ -2412,20 +2460,34 @@ impl DoctorSnapshot {
                 sha256,
                 version,
                 hardware_encoders,
+                hardware_encoder_probes,
                 hardware_encoder_probe_error,
             } => {
                 let path = strict_path_text(path, "doctor ffmpeg path")?;
+                let usable = hardware_encoder_probes
+                    .iter()
+                    .filter(|probe| probe.available)
+                    .map(|probe| probe.encoder.clone())
+                    .collect::<Vec<_>>();
+                let probes = hardware_encoder_probes
+                    .iter()
+                    .map(encoder_probe_json)
+                    .collect::<Vec<_>>()
+                    .join(",");
                 let _ = writeln!(
                     out,
                     "{{\"schema\":\"fmn.doctor\",\"version\":{},\"kind\":\"ffmpeg\",\
                      \"available\":true,\"path\":{},\"sha256\":{},\"ffmpeg_version\":{},\
-                     \"hardware_encoders\":{},\"hardware_encoder_probe_error\":{}}}",
+                     \"hardware_encoders\":{},\"hardware_encoder_probe_error\":{},\
+                     \"usable_hardware_encoders\":{},\"hardware_encoder_probes\":[{}]}}",
                     ROBOT_SCHEMA_VERSION,
                     json_string(path),
                     json_string(sha256),
                     json_string(version),
                     json_array(hardware_encoders),
                     json_option(hardware_encoder_probe_error.as_deref()),
+                    json_array(&usable),
+                    probes,
                 );
             }
             FfmpegReport::Unavailable {
@@ -2451,6 +2513,8 @@ impl DoctorSnapshot {
                 root,
                 exists,
                 direct_entries,
+                typeset_max_bytes,
+                typeset_bytes,
                 warning,
             } => {
                 let root = strict_path_text(root, "doctor cache root")?;
@@ -2459,21 +2523,27 @@ impl DoctorSnapshot {
                     out,
                     "{{\"schema\":\"fmn.doctor\",\"version\":{},\"kind\":\"cache\",\
                      \"resolved\":true,\"root\":{},\"exists\":{},\
-                     \"direct_entries\":{},\"warning\":{}}}",
+                     \"direct_entries\":{},\"typeset_max_bytes\":{},\"typeset_bytes\":{},\"warning\":{}}}",
                     ROBOT_SCHEMA_VERSION,
                     json_string(root),
                     exists,
                     entries,
+                    typeset_max_bytes,
+                    typeset_bytes.map_or_else(|| "null".to_owned(), |bytes| bytes.to_string()),
                     json_option(warning.as_deref()),
                 );
             }
-            CacheReport::Unresolved { reason } => {
+            CacheReport::Unresolved {
+                reason,
+                typeset_max_bytes,
+            } => {
                 let _ = writeln!(
                     out,
                     "{{\"schema\":\"fmn.doctor\",\"version\":{},\"kind\":\"cache\",\
-                     \"resolved\":false,\"reason\":{}}}",
+                     \"resolved\":false,\"reason\":{},\"typeset_max_bytes\":{},\"typeset_bytes\":null}}",
                     ROBOT_SCHEMA_VERSION,
                     json_string(reason),
+                    typeset_max_bytes,
                 );
             }
         }
@@ -2542,6 +2612,7 @@ impl DoctorSnapshot {
                 sha256,
                 version,
                 hardware_encoders,
+                hardware_encoder_probes,
                 hardware_encoder_probe_error,
             } => {
                 let _ = writeln!(
@@ -2549,15 +2620,25 @@ impl DoctorSnapshot {
                     "ffmpeg: {} ({version}, sha256 {sha256})",
                     path.display()
                 );
-                let _ = writeln!(
-                    out,
-                    "hardware encoders: {}",
-                    if hardware_encoders.is_empty() {
-                        "none".to_owned()
-                    } else {
-                        hardware_encoders.join(", ")
+                if hardware_encoders.is_empty() {
+                    let _ = writeln!(out, "hardware encoders: none compiled in");
+                } else {
+                    let _ = writeln!(out, "hardware encoders:");
+                    for encoder in hardware_encoders {
+                        let probe = hardware_encoder_probes
+                            .iter()
+                            .find(|probe| &probe.encoder == encoder);
+                        let status = match probe {
+                            Some(probe) if probe.available => "available".to_owned(),
+                            Some(probe) => format!(
+                                "compiled-in (unusable: {})",
+                                probe.detail.as_deref().unwrap_or("functional probe failed")
+                            ),
+                            None => "compiled-in (not probed)".to_owned(),
+                        };
+                        let _ = writeln!(out, "  {encoder}: {status}");
                     }
-                );
+                }
                 if let Some(error) = hardware_encoder_probe_error {
                     let _ = writeln!(out, "hardware encoder probe warning: {error}");
                 }
@@ -2580,6 +2661,8 @@ impl DoctorSnapshot {
                 root,
                 exists,
                 direct_entries,
+                typeset_max_bytes,
+                typeset_bytes,
                 warning,
             } => {
                 let _ = writeln!(
@@ -2588,12 +2671,30 @@ impl DoctorSnapshot {
                     root.display(),
                     direct_entries.map_or_else(|| "unknown".to_owned(), |n| n.to_string())
                 );
+                let _ = writeln!(
+                    out,
+                    "typeset cache ceiling: {typeset_max_bytes} bytes (cache.max_bytes)"
+                );
+                let _ = writeln!(
+                    out,
+                    "typeset cache usage: {}",
+                    typeset_bytes
+                        .map_or_else(|| "unknown".to_owned(), |bytes| format!("{bytes} bytes"))
+                );
                 if let Some(warning) = warning {
                     let _ = writeln!(out, "cache warning: {warning}");
                 }
             }
-            CacheReport::Unresolved { reason } => {
+            CacheReport::Unresolved {
+                reason,
+                typeset_max_bytes,
+            } => {
                 let _ = writeln!(out, "cache: unresolved ({reason})");
+                let _ = writeln!(out, "typeset cache usage: unknown");
+                let _ = writeln!(
+                    out,
+                    "typeset cache ceiling: {typeset_max_bytes} bytes (cache.max_bytes)"
+                );
             }
         }
         let _ = writeln!(
@@ -2763,11 +2864,20 @@ impl VideoArtifactReport {
     }
 }
 
+fn encoder_probe_json(probe: &fmn_output::EncoderProbe) -> String {
+    format!(
+        "{{\"encoder\":{},\"available\":{},\"detail\":{}}}",
+        json_string(&probe.encoder),
+        probe.available,
+        json_option(probe.detail.as_deref()),
+    )
+}
+
 fn ffmpeg_invocations_json(invocations: &[InvocationReport]) -> String {
     let entries = invocations.iter().map(|invocation| {
         let provenance = &invocation.provenance;
         format!(
-            "{{\"path\":{},\"sha256\":{},\"version\":{},\"bound_path\":{},\"native_image_format\":{},\"native_image_architecture\":{},\"native_image_bytes\":{},\"native_image_policy_version\":{},\"encoder\":{},\"process_mechanism\":{},\"process_policy_version\":{},\"argv\":{},\"artifact\":{}}}",
+            "{{\"path\":{},\"sha256\":{},\"version\":{},\"bound_path\":{},\"native_image_format\":{},\"native_image_architecture\":{},\"native_image_bytes\":{},\"native_image_policy_version\":{},\"encoder\":{},\"process_mechanism\":{},\"process_policy_version\":{},\"argv\":{},\"hardware_encoder_probe\":{},\"artifact\":{}}}",
             json_string(&provenance.tool_path.to_string_lossy()),
             json_string(&provenance.tool_sha256_hex),
             json_string(&provenance.tool_version),
@@ -2780,6 +2890,10 @@ fn ffmpeg_invocations_json(invocations: &[InvocationReport]) -> String {
             json_string(&provenance.process_mechanism),
             provenance.process_policy_version,
             json_array(&provenance.argv),
+            provenance
+                .hardware_encoder_probe
+                .as_ref()
+                .map_or_else(|| "null".to_owned(), encoder_probe_json),
             json_string(&invocation.artifact.to_string_lossy()),
         )
     }).collect::<Vec<_>>();
@@ -2943,6 +3057,21 @@ impl<S> SceneSink for CancellableSceneSink<'_, S>
 where
     S: SceneSink + ?Sized,
 {
+    fn accepts_pure_segments(&self) -> bool {
+        !self.cancellation.is_cancelled() && self.inner.accepts_pure_segments()
+    }
+
+    fn capture_pure_segment(
+        &mut self,
+        segment: &fmn::animation::pure_frame::PureSegment,
+    ) -> Result<(), IntegrationError> {
+        self.cancellation.scene_checkpoint()?;
+        // The registered emitter interrupts admission within a long program.
+        // Never return a fallback after any of its samples were consumed.
+        self.inner.capture_pure_segment(segment)?;
+        self.cancellation.scene_checkpoint()
+    }
+
     fn event(&mut self, event: fmn_scene::LifecycleEvent) -> Result<(), IntegrationError> {
         self.cancellation.scene_checkpoint()?;
         self.inner.event(event)
@@ -3868,6 +3997,7 @@ struct BackendAccumulator {
     readback_bytes: Option<u64>,
     elapsed_ns: Option<u128>,
     pipeline: Option<fmn_runtime::PipelineStats>,
+    dispatch: offline_cpu::DispatchStats,
 }
 
 impl BackendAccumulator {
@@ -3881,6 +4011,7 @@ impl BackendAccumulator {
             readback_bytes: None,
             elapsed_ns: None,
             pipeline: None,
+            dispatch: offline_cpu::DispatchStats::default(),
         }
     }
 
@@ -3895,6 +4026,7 @@ impl BackendAccumulator {
             readback_bytes: Some(0),
             elapsed_ns: Some(0),
             pipeline: None,
+            dispatch: offline_cpu::DispatchStats::default(),
         }
     }
 
@@ -3983,6 +4115,7 @@ impl BackendAccumulator {
             readback_bytes: self.readback_bytes,
             elapsed_ns: self.elapsed_ns,
             pipeline: self.pipeline.clone(),
+            dispatch: self.dispatch,
         })
     }
 }
@@ -3997,6 +4130,7 @@ struct RenderBackendReport {
     readback_bytes: Option<u64>,
     elapsed_ns: Option<u128>,
     pipeline: Option<fmn_runtime::PipelineStats>,
+    dispatch: offline_cpu::DispatchStats,
 }
 
 struct FinishedRender {
@@ -4187,6 +4321,8 @@ struct RenderSink {
     soundtrack: Option<FfmpegSoundtrack>,
     soundtrack_timeline: SoundtrackTimeline,
     next_sequence: u64,
+    pure_enabled: bool,
+    failure: Option<IntegrationError>,
 }
 
 fn resolved_frame_config(config: &fmn_config::Config) -> Result<FrameConfig, CliError> {
@@ -4475,6 +4611,8 @@ impl RenderSink {
             soundtrack,
             soundtrack_timeline: SoundtrackTimeline::default(),
             next_sequence: 0,
+            pure_enabled: !matches!(target, RenderTarget::Native(NativeFrameFormat::Png)),
+            failure: None,
         })
     }
 
@@ -4575,6 +4713,10 @@ impl RenderSink {
     }
 
     fn finish(mut self, audio: Option<RenderSoundtrack<'_>>) -> Result<FinishedRender, CliError> {
+        if let Some(error) = &self.failure {
+            return Err(CliError::new("render", error.to_string()));
+        }
+        self.backend.dispatch.validate(self.backend.frames)?;
         match &mut self.renderer {
             OfflineFrameRenderer::Cpu(renderer) => {
                 let stats = renderer.finish()?;
@@ -4713,7 +4855,24 @@ impl Drop for RenderSink {
 }
 
 impl SceneSink for RenderSink {
+    fn accepts_pure_segments(&self) -> bool {
+        self.accepts_native_programs()
+    }
+
+    fn capture_pure_segment(
+        &mut self,
+        segment: &fmn::animation::pure_frame::PureSegment,
+    ) -> Result<(), IntegrationError> {
+        self.render_pure(segment)
+    }
+
     fn event(&mut self, event: LifecycleEvent) -> Result<(), IntegrationError> {
+        if let Some(error) = &self.failure {
+            return Err(error.clone());
+        }
+        if event.phase == LifecyclePhase::DriveSegment && !event.skipping {
+            self.backend.dispatch.begin_segment()?;
+        }
         if self.soundtrack.is_none() {
             return Ok(());
         }
@@ -4727,10 +4886,16 @@ impl SceneSink for RenderSink {
         _reason: CaptureReason,
         packet: fmn::animation::FramePacket,
     ) -> Result<(), IntegrationError> {
-        let stage = packet.materialize_stage();
-        let revision = u64::try_from(packet.frame_index())
-            .map_err(|_| IntegrationError::new("lumen", "negative frame index"))?;
-        self.render_stage(&stage, revision)
+        if let Some(error) = &self.failure {
+            return Err(error.clone());
+        }
+        let result = (|| {
+            let stage = packet.materialize_stage();
+            let revision = u64::try_from(packet.frame_index())
+                .map_err(|_| IntegrationError::new("lumen", "negative frame index"))?;
+            self.render_stage(&stage, revision)
+        })();
+        self.latch_capture(result)
     }
 }
 
@@ -5044,6 +5209,7 @@ fn composition_backend(config: &fmn_config::Config) -> RenderBackendReport {
         readback_bytes: None,
         elapsed_ns: None,
         pipeline: None,
+        dispatch: offline_cpu::DispatchStats::default(),
     }
 }
 
@@ -5160,31 +5326,10 @@ fn publish_scene_soundtrack(
     Ok((artifact, cue_assets))
 }
 
-/// The pixel viewport and world-frame extent one SVG still is sized by.
-#[derive(Clone, Copy, Debug)]
-struct StillViewport {
-    pixel_width: u32,
-    pixel_height: u32,
-    frame_width: f64,
-    frame_height: f64,
-}
-
-impl StillViewport {
-    fn new(pixel_width: u32, pixel_height: u32, frame_width: f64, frame_height: f64) -> Self {
-        Self {
-            pixel_width,
-            pixel_height,
-            frame_width,
-            frame_height,
-        }
-    }
-}
-
 /// Export the final scene state as one deterministic SVG still.
 ///
-/// Geometry stays in the geometry crates: the CLI hands the live stage to
-/// `fmn::library::svg_export` and publishes the emitted bytes through the
-/// Reel `SvgPublication` boundary.
+/// Lumen projects and admits the actual camera/records; Chisel emits the
+/// detached painter sequence, and Reel publishes the document create-only.
 ///
 /// # Errors
 /// Geometry or publication refusals, both typed.
@@ -5193,14 +5338,19 @@ fn publish_scene_still_svg(
     destination: &Path,
     max_artifact_bytes: u64,
     stage: &fmn_scene::studio_bridge::Stage,
-    viewport: StillViewport,
+    camera: &fmn_render::Camera,
 ) -> Result<RenderArtifactReport, CliError> {
-    let document = fmn::library::svg_export::stage_svg_document(
-        stage,
-        f64::from(viewport.pixel_width),
-        f64::from(viewport.pixel_height),
-        viewport.frame_width,
-        viewport.frame_height,
+    let projected =
+        fmn_render::svg::project_svg_stage(stage, camera, fmn_render::svg::SvgLimits::default())
+            .map_err(|error| CliError::new("capability", error.to_string()))?;
+    let (width, height) = camera.pixel_shape();
+    let document = fmn::library::svg_export::stage_svg_document_with_background(
+        &projected,
+        f64::from(width),
+        f64::from(height),
+        f64::from(width),
+        f64::from(height),
+        Some(camera.background()),
     )
     .map_err(|error| CliError::new("scene", error.to_string()))?;
     // Create-only for the same reason as the WAV soundtrack (issue #4).
@@ -5233,16 +5383,6 @@ fn composition_budget(config: &fmn_config::Config) -> Result<(u64, u32, u32), Cl
         width,
         height,
     ))
-}
-/// The scene frame extent (width, height) in user units: the configured
-/// frame height scaled to the output aspect ratio.
-fn scene_frame_extent(config: &fmn_config::Config) -> (f64, f64) {
-    let (width, height) = config.camera.resolution;
-    let frame_height = config.sizes.frame_height;
-    (
-        frame_height * f64::from(width) / f64::from(height),
-        frame_height,
-    )
 }
 
 fn output_adapter_error(error: fmn_output::SinkAdapterError) -> CliError {
@@ -5690,7 +5830,10 @@ fn render_manifest(
     .map_err(|error| internal(error.to_string()))?;
     let c10 = ClosureItem::structural(
         10,
-        "determinism mode and declared execution configuration",
+        format!(
+            "determinism mode and declared execution configuration; execution_dispatch={}",
+            backend.dispatch.to_json(),
+        ),
         &[
             StructuralField::Text(mode.name()),
             StructuralField::Text(plan_determinism_name(plan.determinism)),
@@ -5910,16 +6053,9 @@ fn prepare_ffmpeg_context(
             format!("ffmpeg encoder discovery failed: {error}"),
         )
     })?;
-    if let Some(encoder) = job
-        .resolved_encoder()
-        .map_err(|error| CliError::new("config", error.to_string()))?
-        && !capabilities.offers(&encoder)
-    {
-        return Err(CliError::new(
-            "capability",
-            format!("installed ffmpeg does not offer encoder {encoder:?}"),
-        ));
-    }
+    capabilities
+        .require_video_job(&tool, runner.as_ref(), &job)
+        .map_err(|error| CliError::new("capability", error.to_string()))?;
     Ok(FfmpegRenderContext {
         runner,
         tool,
@@ -6549,8 +6685,7 @@ fn execute_native_render_with_cancellation(
                         cancellation.cli_checkpoint()?;
                     }
                     let scene = completed.into_scene();
-                    let (max_artifact_bytes, pixel_width, pixel_height) =
-                        composition_budget(&config)?;
+                    let (max_artifact_bytes, _, _) = composition_budget(&config)?;
                     let (artifact, cue_assets) = match target {
                         RenderTarget::Wav => publish_scene_soundtrack(
                             fs.as_ref(),
@@ -6560,20 +6695,14 @@ fn execute_native_render_with_cancellation(
                             render_threads,
                         )?,
                         _ => {
-                            let (frame_width, frame_height) = scene_frame_extent(&config);
-                            let viewport = StillViewport::new(
-                                pixel_width,
-                                pixel_height,
-                                frame_width,
-                                frame_height,
-                            );
+                            let svg_camera = camera_route::camera(&config)?;
                             (
                                 publish_scene_still_svg(
                                     fs.as_ref(),
                                     &artifact_destination,
                                     max_artifact_bytes,
                                     scene.stage(),
-                                    viewport,
+                                    &svg_camera,
                                 )?,
                                 Vec::new(),
                             )
@@ -6711,17 +6840,20 @@ fn execute_native_render_with_cancellation(
                         "the compiled timeline has no frame to publish as a final-state SVG",
                     )
                 })?;
-                let stage = bundle.stage_at(final_frame).map_err(bundle_read_error)?;
                 let (max_artifact_bytes, pixel_width, pixel_height) = composition_budget(&config)?;
-                let (frame_width, frame_height) = scene_frame_extent(&config);
-                let viewport =
-                    StillViewport::new(pixel_width, pixel_height, frame_width, frame_height);
+                let (stage, captured_camera) = bundle
+                    .stage_at_with_camera(final_frame, (pixel_width, pixel_height))
+                    .map_err(bundle_read_error)?;
+                let svg_camera = match captured_camera {
+                    Some(camera) => camera,
+                    None => camera_route::camera(&config)?,
+                };
                 let artifact = publish_scene_still_svg(
                     fs.as_ref(),
                     &artifact_destination,
                     max_artifact_bytes,
                     &stage,
-                    viewport,
+                    &svg_camera,
                 )?;
                 let summary = PreRunSummary {
                     frames: u64::from(bundle.frame_count()),
@@ -6941,10 +7073,15 @@ fn configured_output_directory(config: &fmn_config::Config) -> PathBuf {
 /// the store opened but is not caching.
 fn typesetting_robot_json(report: &fmn::tex::TypesetSessionReport) -> String {
     let preflight = &report.preflight;
+    let maintenance = &report.maintenance;
     format!(
         ",\"typesetting\":{{\"initialized\":{},\"persistent\":{},\"cache_error\":{},\
+         \"persistent_ceiling_bytes\":{},\
          \"hits\":{},\"memory_hits\":{},\"disk_hits\":{},\"misses\":{},\
          \"bytes_read\":{},\"bytes_written\":{},\"rejected\":{},\"store_errors\":{},\
+         \"maintenance\":{{\"runs\":{},\"evicted_entries\":{},\"evicted_bytes\":{},\
+         \"retained_bytes\":{},\"skipped_lock_held\":{},\"skipped_pinned\":{},\
+         \"errors\":{},\"last_error\":{}}},\
          \"layouts_before_construct\":{},\"layouts_before_first_frame\":{},\
          \"layouts_inside_play\":{},\
          \"preflight\":{{\"batches\":{},\"requests\":{},\"workers\":{},\
@@ -6952,6 +7089,9 @@ fn typesetting_robot_json(report: &fmn::tex::TypesetSessionReport) -> String {
         report.initialized,
         report.persistent,
         json_option(report.cache_error.as_deref()),
+        report
+            .persistent_ceiling_bytes
+            .map_or_else(|| "null".to_owned(), |value| value.to_string()),
         report.cache_hits(),
         report.memory.hits,
         report.persistent_hits,
@@ -6960,6 +7100,16 @@ fn typesetting_robot_json(report: &fmn::tex::TypesetSessionReport) -> String {
         report.persistent_bytes_written,
         report.persistent_rejected,
         report.persistent_store_errors,
+        maintenance.runs,
+        maintenance.evicted_entries,
+        maintenance.evicted_bytes,
+        maintenance
+            .retained_bytes
+            .map_or_else(|| "null".to_owned(), |value| value.to_string()),
+        maintenance.skipped_lock_held,
+        maintenance.skipped_pinned,
+        maintenance.errors,
+        json_option(maintenance.last_error.as_deref()),
         report
             .layouts_before_construct
             .map_or_else(|| "null".to_owned(), |value| value.to_string()),
@@ -7003,6 +7153,40 @@ fn typesetting_human_summary(report: &fmn::tex::TypesetSessionReport) -> String 
             ", {} cache reads or writes failed (typeset in memory)",
             report.persistent_store_errors
         );
+    }
+    if let Some(ceiling) = report.persistent_ceiling_bytes {
+        let _ = write!(summary, ", disk ceiling {ceiling} bytes");
+    }
+    let maintenance = &report.maintenance;
+    if maintenance.runs > 0 {
+        let _ = write!(
+            summary,
+            "; cache maintenance: {} runs, {} entries evicted ({} bytes)",
+            maintenance.runs, maintenance.evicted_entries, maintenance.evicted_bytes
+        );
+        if let Some(retained) = maintenance.retained_bytes {
+            let _ = write!(summary, ", {retained} bytes retained");
+        }
+        if maintenance.skipped_lock_held > 0 {
+            let _ = write!(
+                summary,
+                ", {} maintenance attempts skipped while locked",
+                maintenance.skipped_lock_held
+            );
+        }
+        if maintenance.skipped_pinned > 0 {
+            let _ = write!(
+                summary,
+                ", {} pinned entries skipped",
+                maintenance.skipped_pinned
+            );
+        }
+    }
+    if maintenance.errors > 0 {
+        let _ = write!(summary, "; {} cache maintenance errors", maintenance.errors);
+        if let Some(error) = &maintenance.last_error {
+            let _ = write!(summary, " ({error})");
+        }
     }
     let preflight = &report.preflight;
     if preflight.requests > 0 {
@@ -7116,6 +7300,10 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
                 .elapsed_ns
                 .map_or_else(|| "null".to_owned(), |value| value.to_string()),
         );
+        backend_json.push_str(&format!(
+            ",\"execution_dispatch\":{}",
+            backend.dispatch.to_json()
+        ));
         if let Some(stats) = &backend.pipeline {
             // Keep scheduler receipts out of the bit-affecting engine journal.
             // Only the user-facing report contains these actual joined counts.
@@ -8958,15 +9146,29 @@ mod tests {
         fn start(
             &self,
             spec: &fmn_platform::process::ProcessSpec,
-            _cancellation: fmn_platform::process::ProcessCancellation,
-            _stdin_limits: fmn_platform::process::ProcessStdinLimits,
+            cancellation: fmn_platform::process::ProcessCancellation,
+            stdin_limits: fmn_platform::process::ProcessStdinLimits,
         ) -> Result<
             Box<dyn fmn_platform::process::RunningProcess>,
             fmn_platform::process::ProcessError,
         > {
-            Err(fmn_platform::process::ProcessError::NotScripted {
-                program: spec.program.clone(),
-            })
+            let outcome = if spec.argv.windows(2).any(|args| args == ["-f", "null"]) {
+                fmn_platform::process::ProcessOutcome {
+                    termination: fmn_platform::process::ProcessTermination::Exited(Some(0)),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                }
+            } else if spec.argv == ["-hide_banner", "-h", "encoder=h264_nvenc"] {
+                assert_eq!(stdin_limits.max_total_bytes, 0);
+                self.run(spec)?
+            } else {
+                return Err(fmn_platform::process::ProcessError::NotScripted {
+                    program: spec.program.clone(),
+                });
+            };
+            let mut runner = fmn_platform::process::ScriptedRunner::new();
+            runner.script(&spec.program, outcome);
+            fmn_platform::process::ProcessRunner::start(&runner, spec, cancellation, stdin_limits)
         }
 
         fn run(
@@ -8978,6 +9180,9 @@ mod tests {
                 b"ffmpeg version cli-locator-fixture\n".to_vec()
             } else if spec.argv == ["-hide_banner", "-encoders"] {
                 b"Encoders:\n ------\n V....D h264_nvenc fixture\n".to_vec()
+            } else if spec.argv == ["-hide_banner", "-h", "encoder=h264_nvenc"] {
+                b"Encoder h264_nvenc [fixture]:\n    Supported pixel formats: yuv420p nv12 p010le\n"
+                    .to_vec()
             } else {
                 return Err(fmn_platform::process::ProcessError::NotScripted {
                     program: spec.program.clone(),
@@ -9552,6 +9757,119 @@ mod tests {
         );
     }
 
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    #[test]
+    fn video_preflight_admits_pixel_formats_before_starting_a_stream() {
+        use fmn_platform::process::{
+            ProcessCancellation, ProcessError, ProcessMechanism, ProcessOutcome, ProcessRunner,
+            ProcessSpec, ProcessStdinLimits, ProcessTermination, RunningProcess,
+        };
+        use std::sync::atomic::AtomicUsize;
+
+        struct PixelFormats {
+            formats: Option<&'static str>,
+            help_calls: AtomicUsize,
+        }
+
+        impl ProcessRunner for PixelFormats {
+            fn mechanism(&self) -> ProcessMechanism {
+                ProcessMechanism::Scripted
+            }
+
+            fn run(&self, spec: &ProcessSpec) -> Result<ProcessOutcome, ProcessError> {
+                let stdout = if spec.argv == ["-version"] {
+                    "ffmpeg version cli-pixel-formats\n".to_owned()
+                } else if spec.argv == ["-hide_banner", "-encoders"] {
+                    "Encoders:\n ------\n V....D libx264 fixture\n".to_owned()
+                } else if spec.argv == ["-hide_banner", "-h", "encoder=libx264"] {
+                    self.help_calls.fetch_add(1, Ordering::SeqCst);
+                    let mut help = "Encoder libx264 [fixture]:\n".to_owned();
+                    if let Some(formats) = self.formats {
+                        help.push_str(&format!("    Supported pixel formats: {formats}\n"));
+                    }
+                    help
+                } else {
+                    return Err(ProcessError::NotScripted {
+                        program: spec.program.clone(),
+                    });
+                };
+                Ok(ProcessOutcome {
+                    termination: ProcessTermination::Exited(Some(0)),
+                    stdout: stdout.into_bytes(),
+                    stderr: Vec::new(),
+                })
+            }
+
+            fn start(
+                &self,
+                spec: &ProcessSpec,
+                cancellation: ProcessCancellation,
+                limits: ProcessStdinLimits,
+            ) -> Result<Box<dyn RunningProcess>, ProcessError> {
+                assert_eq!(
+                    spec.argv,
+                    ["-hide_banner", "-h", "encoder=libx264"],
+                    "video preflight must not start the frame stream"
+                );
+                assert_eq!(limits.max_total_bytes, 0, "format probe receives no frames");
+                let mut runner = fmn_platform::process::ScriptedRunner::new();
+                runner.script(&spec.program, self.run(spec)?);
+                runner.start(spec, cancellation, limits)
+            }
+        }
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "fmn-cli-pixel-formats-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let executable = root.join("ffmpeg");
+        write_native_ffmpeg_fixture(&executable);
+        for (wire, formats, admitted) in [
+            ("p010le", None, false),
+            ("p010le", Some("yuv420p nv12"), false),
+            ("p010le", Some("nv12 yuv420p10le"), true),
+            ("nv12", None, true),
+            ("nv12", Some("yuv420p"), true),
+        ] {
+            let command = render(parse_args(["--format", "video", "--pix_fmt", wire]).unwrap());
+            let config = resolve_render_config(&VirtualFs::new(), &command).unwrap();
+            let job = ffmpeg_video_job(&command, &config).unwrap();
+            let expected_wire = job.wire;
+            let runner = Arc::new(PixelFormats {
+                formats,
+                help_calls: AtomicUsize::new(0),
+            });
+            let context = prepare_ffmpeg_context(
+                runner.clone(),
+                &no_ffmpeg_locator(),
+                &executable,
+                job,
+                fmn_output::AudioQuality::default(),
+                &FfmpegLimitOptions::default(),
+            );
+            assert_eq!(runner.help_calls.load(Ordering::SeqCst), 1);
+            match context {
+                Ok(context) => {
+                    assert!(admitted, "{wire}: {formats:?}");
+                    assert_eq!(
+                        context.job.wire, expected_wire,
+                        "wire precision is retained"
+                    );
+                }
+                Err(error) => {
+                    assert!(!admitted, "{wire}: {formats:?}: {error}");
+                    assert_eq!(error.exit_name(), "capability");
+                    assert!(error.message().contains("10-bit"), "{error}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn video_quality_cli_overrides_config_and_switches_rate_control_modes() {
         let fs = VirtualFs::new();
@@ -9800,9 +10118,14 @@ mod tests {
             fn start(
                 &self,
                 spec: &ProcessSpec,
-                _: ProcessCancellation,
+                cancellation: ProcessCancellation,
                 stdin: ProcessStdinLimits,
             ) -> Result<Box<dyn RunningProcess>, ProcessError> {
+                if spec.argv.windows(2).any(|args| args == ["-f", "null"])
+                    || spec.argv == ["-hide_banner", "-h", "encoder=h264_nvenc"]
+                {
+                    return SuccessfulFfmpegProbeRunner.start(spec, cancellation, stdin);
+                }
                 self.0.lock().unwrap().push((
                     spec.timeout,
                     spec.max_output_bytes,
@@ -9915,16 +10238,6 @@ mod tests {
             }
 
             fn run(&self, spec: &ProcessSpec) -> Result<ProcessOutcome, ProcessError> {
-                if spec
-                    .argv
-                    .last()
-                    .is_some_and(|path| path.ends_with("decoded.wav"))
-                {
-                    let bytes = self.decoded_wav.as_ref().expect("scripted audio decode");
-                    std::fs::write(spec.argv.last().unwrap(), bytes).unwrap();
-                    self.decodes.lock().unwrap().push(spec.clone());
-                    return Ok(success());
-                }
                 SuccessfulFfmpegProbeRunner.run(spec)
             }
 
@@ -9934,12 +10247,37 @@ mod tests {
                 cancellation: ProcessCancellation,
                 limits: ProcessStdinLimits,
             ) -> Result<Box<dyn RunningProcess>, ProcessError> {
+                if spec.argv.windows(2).any(|args| args == ["-f", "null"])
+                    || spec.argv == ["-hide_banner", "-h", "encoder=h264_nvenc"]
+                {
+                    return SuccessfulFfmpegProbeRunner.start(spec, cancellation, limits);
+                }
+                let decoded_wav = if spec
+                    .argv
+                    .last()
+                    .is_some_and(|path| path.ends_with("decoded.wav"))
+                {
+                    assert!(
+                        spec.argv
+                            .windows(2)
+                            .any(|pair| pair == ["-c:a", "pcm_f32le"])
+                    );
+                    assert_eq!(
+                        limits.max_total_bytes, 0,
+                        "audio decode reads its staged file"
+                    );
+                    self.decodes.lock().unwrap().push(spec.clone());
+                    Some(self.decoded_wav.clone().expect("scripted audio decode"))
+                } else {
+                    None
+                };
                 Ok(Box::new(AudioProcess {
                     spec: spec.clone(),
                     cancellation,
                     limits,
                     bytes: 0,
                     mux_inputs: Arc::clone(&self.mux_inputs),
+                    decoded_wav,
                     fail_mux: self.fail_mux,
                 }))
             }
@@ -9951,6 +10289,7 @@ mod tests {
             limits: ProcessStdinLimits,
             bytes: u64,
             mux_inputs: Arc<Mutex<Vec<Vec<u8>>>>,
+            decoded_wav: Option<Vec<u8>>,
             fail_mux: bool,
         }
 
@@ -9977,6 +10316,11 @@ mod tests {
                         termination: ProcessTermination::Cancelled,
                         ..success()
                     });
+                }
+                if let Some(wav) = &self.decoded_wav {
+                    assert_eq!(self.bytes, 0, "audio decode receives no video frames");
+                    std::fs::write(self.spec.argv.last().unwrap(), wav).unwrap();
+                    return Ok(success());
                 }
                 let mux = self
                     .spec
@@ -10108,6 +10452,10 @@ mod tests {
                     .contains("\"cues_mixed\":1,\"sample_frames\":60000")
             );
             assert!(result.stdout.contains("\"audio_decodes\":[]"));
+            assert!(result.stdout.contains(
+                "\"hardware_encoder_probe\":{\"encoder\":\"h264_nvenc\",\"available\":true,\"detail\":null}"
+            ));
+            assert!(result.stdout.contains("\"hardware_encoder_probe\":null"));
             assert!(result.stdout.contains("\"decoder\":\"native-wav\""));
             assert!(result.stdout.contains("\"-c:v\",\"copy\",\"-c:a\",\"aac\""));
             let manifest = ProvenanceManifest::from_bytes(
@@ -10188,7 +10536,12 @@ mod tests {
             let source = b"fLaCscripted compressed audio input".to_vec();
             fs.insert(fmn::builtins::SOUND_CUE_ASSET_NAME, source.clone());
             let runner = Arc::new(AudioRunner {
-                decoded_wav: Some(source_wav()),
+                decoded_wav: Some(fmn_codec::encode_wav(
+                    1,
+                    48_000,
+                    SampleFormat::F32,
+                    &vec![0.25; 36_000],
+                )),
                 ..AudioRunner::default()
             });
             let (result, artifact) = render(&fs, &runner, &[]);
@@ -10592,6 +10945,62 @@ mod tests {
         assert_eq!(error.exit_name(), "config");
     }
 
+    #[test]
+    fn typesetting_diagnostics_report_retention_and_nonfatal_maintenance_failures() {
+        let report = fmn::tex::TypesetSessionReport {
+            initialized: true,
+            persistent: true,
+            persistent_ceiling_bytes: Some(0),
+            maintenance: fmn::tex::TypesetCacheMaintenance {
+                runs: 3,
+                evicted_entries: 5,
+                evicted_bytes: 8192,
+                retained_bytes: Some(96),
+                skipped_lock_held: 1,
+                skipped_pinned: 2,
+                errors: 1,
+                last_error: Some("read-only \"cache\"\nretry later".to_owned()),
+            },
+            ..Default::default()
+        };
+        let robot = typesetting_robot_json(&report);
+        assert!(robot.contains("\"persistent_ceiling_bytes\":0"));
+        assert!(robot.contains(concat!(
+            "\"maintenance\":{\"runs\":3,\"evicted_entries\":5,\"evicted_bytes\":8192,",
+            "\"retained_bytes\":96,\"skipped_lock_held\":1,\"skipped_pinned\":2,",
+            "\"errors\":1,\"last_error\":\"read-only \\\"cache\\\"\\nretry later\"}",
+        )));
+        assert!(!robot.contains('\n'), "robot diagnostics remain one record");
+        let human = typesetting_human_summary(&report);
+        for expected in [
+            "disk ceiling 0 bytes",
+            "cache maintenance: 3 runs, 5 entries evicted (8192 bytes)",
+            "96 bytes retained",
+            "1 maintenance attempts skipped while locked",
+            "2 pinned entries skipped",
+            "1 cache maintenance errors",
+            "read-only \"cache\"",
+        ] {
+            assert!(human.contains(expected), "missing diagnostic: {expected}");
+        }
+    }
+
+    #[test]
+    fn typesetting_diagnostics_distinguish_no_maintenance_from_zero_retention() {
+        let report = fmn::tex::TypesetSessionReport::default();
+        let robot = typesetting_robot_json(&report);
+        assert!(robot.contains("\"persistent_ceiling_bytes\":null"));
+        assert!(robot.contains(concat!(
+            "\"maintenance\":{\"runs\":0,\"evicted_entries\":0,\"evicted_bytes\":0,",
+            "\"retained_bytes\":null,\"skipped_lock_held\":0,\"skipped_pinned\":0,",
+            "\"errors\":0,\"last_error\":null}",
+        )));
+        let human = typesetting_human_summary(&report);
+        assert!(human.contains("typeset memory cache"));
+        assert!(!human.contains("disk ceiling"));
+        assert!(!human.contains("cache maintenance"));
+    }
+
     fn synthetic_doctor() -> DoctorSnapshot {
         DoctorSnapshot {
             topology_source: TopologySource::Fallback {
@@ -10620,12 +11029,19 @@ mod tests {
                 sha256: "abc123".to_owned(),
                 version: "ffmpeg \"7\"".to_owned(),
                 hardware_encoders: vec!["h264_nvenc".to_owned()],
-                hardware_encoder_probe_error: Some("encoder inventory timed out".to_owned()),
+                hardware_encoder_probes: vec![fmn_output::EncoderProbe {
+                    encoder: "h264_nvenc".to_owned(),
+                    available: false,
+                    detail: Some("Cannot load libcuda.so.1".to_owned()),
+                }],
+                hardware_encoder_probe_error: None,
             },
             cache: CacheReport::Configured {
                 root: PathBuf::from("/cache"),
                 exists: true,
                 direct_entries: Some(3),
+                typeset_max_bytes: 1_073_741_824,
+                typeset_bytes: Some(512),
                 warning: None,
             },
             fonts: FontReport {
@@ -10649,8 +11065,8 @@ mod tests {
         let expected = concat!(
             "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"topology\",\"source\":\"fallback\",\"source_detail\":\"fixture fallback\",\"logical_cores\":8,\"physical_cores\":4,\"hardware_supported_tier\":\"x86-64-v4\",\"active_compiled_tier\":\"portable\"}\n",
             "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"execution_plan\",\"determinism\":\"certified\",\"engine\":\"certified-cpu\",\"frames_in_flight\":2,\"scene_threads\":1,\"render_teams\":2,\"render_threads\":4,\"output_threads\":1,\"fine_tile\":16,\"macro_tile\":128,\"estimated_in_flight_bytes\":4096,\"output_format\":\"rgba8\",\"tuning_source\":\"certified-profile\"}\n",
-            "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"ffmpeg\",\"available\":true,\"path\":\"/opt/ffmpeg\",\"sha256\":\"abc123\",\"ffmpeg_version\":\"ffmpeg \\\"7\\\"\",\"hardware_encoders\":[\"h264_nvenc\"],\"hardware_encoder_probe_error\":\"encoder inventory timed out\"}\n",
-            "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"cache\",\"resolved\":true,\"root\":\"/cache\",\"exists\":true,\"direct_entries\":3,\"warning\":null}\n",
+            "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"ffmpeg\",\"available\":true,\"path\":\"/opt/ffmpeg\",\"sha256\":\"abc123\",\"ffmpeg_version\":\"ffmpeg \\\"7\\\"\",\"hardware_encoders\":[\"h264_nvenc\"],\"hardware_encoder_probe_error\":null,\"usable_hardware_encoders\":[],\"hardware_encoder_probes\":[{\"encoder\":\"h264_nvenc\",\"available\":false,\"detail\":\"Cannot load libcuda.so.1\"}]}\n",
+            "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"cache\",\"resolved\":true,\"root\":\"/cache\",\"exists\":true,\"direct_entries\":3,\"typeset_max_bytes\":1073741824,\"typeset_bytes\":512,\"warning\":null}\n",
             "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"fonts\",\"selected\":\"Computer Modern\",\"bundled\":[\"Computer Modern\"],\"user\":[\"Fixture Sans\"],\"complete\":true,\"detail\":null}\n",
             "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"math_packs\",\"packs\":[\"default\",\"minimal\"]}\n",
             "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"certification\",\"platform\":\"linux-x86_64\",\"supported\":true,\"detail\":\"fixture certified\"}\n",
@@ -10665,6 +11081,100 @@ mod tests {
             assert!(line.starts_with("{\"schema\":\"fmn.doctor\",\"version\":1,"));
             assert!(line.ends_with('}'));
         }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    #[test]
+    fn doctor_distinguishes_compiled_hardware_from_a_working_encoder() {
+        use fmn_platform::process::{
+            ProcessCancellation, ProcessError, ProcessMechanism, ProcessOutcome, ProcessRunner,
+            ProcessSpec, ProcessStdinLimits, ProcessTermination, RunningProcess,
+        };
+
+        struct MissingDriver;
+        impl ProcessRunner for MissingDriver {
+            fn mechanism(&self) -> ProcessMechanism {
+                ProcessMechanism::Scripted
+            }
+
+            fn start(
+                &self,
+                spec: &ProcessSpec,
+                cancellation: ProcessCancellation,
+                stdin_limits: ProcessStdinLimits,
+            ) -> Result<Box<dyn RunningProcess>, ProcessError> {
+                assert!(spec.argv.windows(2).any(|args| args == ["-f", "null"]));
+                let mut runner = fmn_platform::process::ScriptedRunner::new();
+                runner.script(
+                    &spec.program,
+                    ProcessOutcome {
+                        termination: ProcessTermination::Exited(Some(1)),
+                        stdout: Vec::new(),
+                        stderr: b"Cannot load libcuda.so.1\n".to_vec(),
+                    },
+                );
+                runner.start(spec, cancellation, stdin_limits)
+            }
+
+            fn run(&self, spec: &ProcessSpec) -> Result<ProcessOutcome, ProcessError> {
+                SuccessfulFfmpegProbeRunner.run(spec)
+            }
+        }
+
+        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "fmn-cli-doctor-hardware-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed),
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let source = root.join("ffmpeg");
+        write_native_ffmpeg_fixture(&source);
+        let locator = fmn_platform::process::StdFfmpegLocator::from_search_path(None);
+        for (runner, available) in [
+            (&SuccessfulFfmpegProbeRunner as &dyn ProcessRunner, true),
+            (&MissingDriver as &dyn ProcessRunner, false),
+        ] {
+            let ffmpeg = locate_and_probe_ffmpeg_in(&locator, runner, &source, &root);
+            let FfmpegReport::Available {
+                hardware_encoders,
+                hardware_encoder_probes,
+                hardware_encoder_probe_error,
+                ..
+            } = &ffmpeg
+            else {
+                panic!("the executable remains available: {ffmpeg:?}");
+            };
+            assert_eq!(hardware_encoders, &["h264_nvenc".to_owned()]);
+            assert!(hardware_encoder_probe_error.is_none());
+            assert_eq!(hardware_encoder_probes.len(), 1);
+            assert_eq!(hardware_encoder_probes[0].available, available);
+            let mut snapshot = synthetic_doctor();
+            snapshot.ffmpeg = ffmpeg;
+            let robot = snapshot.to_ndjson().unwrap();
+            let human = snapshot.to_human();
+            if available {
+                assert!(robot.contains("\"usable_hardware_encoders\":[\"h264_nvenc\"]"));
+                assert!(human.contains("h264_nvenc: available"));
+            } else {
+                assert!(robot.contains("\"usable_hardware_encoders\":[]"));
+                assert!(robot.contains(
+                    "\"encoder\":\"h264_nvenc\",\"available\":false,\"detail\":\"Cannot load libcuda.so.1\""
+                ));
+                assert!(human.contains("compiled-in (unusable: Cannot load libcuda.so.1)"));
+            }
+        }
+        let auto = VideoJob {
+            width: 256,
+            height: 256,
+            fps: (1, 1),
+            wire: WireFormat::Nv12,
+            color: ColorDescription::video_bt709(),
+            container: Container::Mp4,
+            encoder: EncoderChoice::Auto,
+            crf: None,
+        };
+        assert_eq!(auto.resolved_encoder().unwrap().as_deref(), Some("libx264"));
     }
 
     #[cfg(unix)]
@@ -10813,6 +11323,7 @@ mod tests {
             path,
             version,
             hardware_encoders,
+            hardware_encoder_probes,
             ..
         } = ffmpeg
         else {
@@ -10821,6 +11332,8 @@ mod tests {
         assert_eq!(path.to_str(), Some(canonical));
         assert_eq!(version, "ffmpeg version cli-locator-fixture");
         assert_eq!(hardware_encoders, ["h264_nvenc"]);
+        assert_eq!(hardware_encoder_probes.len(), 1);
+        assert!(hardware_encoder_probes[0].available);
     }
 
     #[test]
@@ -10858,9 +11371,10 @@ mod tests {
             reason: "no declared cache base",
         };
         assert_eq!(
-            cache_report_from_resolution(&fs, Err(unavailable)).unwrap(),
+            cache_report_from_resolution(&fs, Err(unavailable), 8192).unwrap(),
             CacheReport::Unresolved {
-                reason: "fixture cache default is unavailable: no declared cache base".to_owned()
+                reason: "fixture cache default is unavailable: no declared cache base".to_owned(),
+                typeset_max_bytes: 8192,
             }
         );
 
@@ -10868,8 +11382,8 @@ mod tests {
             path: PathBuf::from("../escape"),
             reason: "parent-directory components are not accepted",
         };
-        let error =
-            cache_report_from_resolution(&fs, Err(invalid)).expect_err("invalid config must abort");
+        let error = cache_report_from_resolution(&fs, Err(invalid), 8192)
+            .expect_err("invalid config must abort");
         assert_eq!(error.exit_name(), "config");
     }
 
@@ -10881,15 +11395,18 @@ mod tests {
             &fs,
             Path::new("/cache/blocker/owned"),
             MAX_DOCTOR_CACHE_DIRECT_ENTRIES,
+            0,
         ) {
             CacheReport::Configured {
                 exists,
                 direct_entries,
+                typeset_max_bytes,
                 warning: Some(warning),
                 ..
             } => {
                 assert!(!exists);
                 assert_eq!(direct_entries, None);
+                assert_eq!(typeset_max_bytes, 0);
                 assert!(warning.contains("RegularFile"));
                 assert!(warning.contains("/cache/blocker"));
             }
@@ -10902,15 +11419,17 @@ mod tests {
         let fs = VirtualFs::new();
         fs.insert("/cache/one", Vec::new());
         fs.insert("/cache/two", Vec::new());
-        match inspect_cache(&fs, Path::new("/cache"), 1) {
+        match inspect_cache(&fs, Path::new("/cache"), 1, 8192) {
             CacheReport::Configured {
                 exists,
                 direct_entries,
+                typeset_max_bytes,
                 warning: Some(warning),
                 ..
             } => {
                 assert!(exists);
                 assert_eq!(direct_entries, None);
+                assert_eq!(typeset_max_bytes, 8192);
                 assert!(warning.contains("1-entry limit"));
             }
             other => panic!("expected a bounded cache-count warning, got {other:?}"), // ubs:ignore - cfg(test) must reject missing entry-limit warnings.
@@ -11385,6 +11904,8 @@ mod tests {
             root: PathBuf::from(OsString::from_vec(b"/cache-\xff".to_vec())),
             exists: false,
             direct_entries: Some(0),
+            typeset_max_bytes: 1_073_741_824,
+            typeset_bytes: Some(0),
             warning: None,
         };
         let error = snapshot

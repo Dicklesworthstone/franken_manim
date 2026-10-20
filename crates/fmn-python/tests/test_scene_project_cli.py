@@ -47,7 +47,7 @@ class SceneProjectCli(unittest.TestCase):
             handler = importlib.import_module(fixtures.PACKAGE + ".batch_cli").try_batch_cli
         out, err = io.StringIO(), io.StringIO()
         arguments = ["--robot", str(self.source), "--format", "png",
-                     "--video_dir", str(self.root / destination), *extra]
+                     "--output", str(self.root / destination), *extra]
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = handler(self.native, arguments)
         self.assertEqual(len(out.getvalue().splitlines()), 1, out.getvalue())

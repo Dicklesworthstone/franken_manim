@@ -52,8 +52,8 @@
 use fmn_mobject::{FamilyCheckpoint, Mob, Mobject, Stage};
 
 use crate::animation::{
-    AnimConfig, AnimError, AnimState, Animation, AnimationSignature, RateFunc, clip,
-    time_spanned_alpha, validate_begin_state,
+    AnimConfig, AnimError, AnimState, Animation, AnimationSignature, RateFunc, check_updater_error,
+    clip, time_spanned_alpha, validate_begin_state,
 };
 
 /// The Reference's `DEFAULT_LAGGED_START_LAG_RATIO`.
@@ -168,7 +168,7 @@ fn assemble(
 /// The composition's own alpha → a position on its internal timeline: the
 /// one normalized-alpha pipeline (`time_span` re-window, then the rate
 /// curve), scaled by `max_end_time`.
-fn timeline_position(config: &AnimConfig, alpha: f64, max_end_time: f64) -> f64 {
+pub(crate) fn timeline_position(config: &AnimConfig, alpha: f64, max_end_time: f64) -> f64 {
     let spanned = time_spanned_alpha(alpha, config.run_time, config.time_span);
     config.rate_func.eval(spanned) * max_end_time
 }
@@ -200,6 +200,9 @@ pub struct AnimationGroup {
     animations: Vec<Box<dyn Animation>>,
     timings: Vec<Interval>,
     max_end_time: f64,
+    updater_error: Option<AnimError>,
+    begun: usize,
+    finished: usize,
 }
 
 impl AnimationGroup {
@@ -249,6 +252,9 @@ impl AnimationGroup {
             animations,
             timings,
             max_end_time,
+            updater_error: None,
+            begun: 0,
+            finished: 0,
         })
     }
 
@@ -304,7 +310,7 @@ impl AnimationGroup {
 /// The composition-wide lifecycle pieces `AnimationGroup` and `Succession`
 /// share verbatim.
 macro_rules! composite_common {
-    () => {
+    ($deferred:ident) => {
         fn state(&self) -> &AnimState {
             &self.state
         }
@@ -379,15 +385,25 @@ macro_rules! composite_common {
         /// The Reference's `AnimationGroup.clean_up_from_scene`: removal is
         /// each member's own decision, never the container's.
         fn clean_up_from_scene(&mut self, stage: &mut Stage) {
+            if retain_updater_error(stage, &mut self.$deferred) {
+                return;
+            }
             for animation in &mut self.animations {
                 animation.clean_up_from_scene(stage);
+                if retain_updater_error(stage, &mut self.$deferred) {
+                    return;
+                }
             }
         }
     };
 }
 
 impl Animation for AnimationGroup {
-    composite_common!();
+    composite_common!(updater_error);
+
+    fn freeze_interpolation(&self) -> Option<crate::pure_frame::FrozenAnimation> {
+        crate::pure_frame::FrozenAnimation::group(self)
+    }
 
     fn prepare_interpolation_replay(&mut self) {
         for animation in &mut self.animations {
@@ -414,9 +430,21 @@ impl Animation for AnimationGroup {
     /// this level — each member's own `begin` already lands it at its zero,
     /// which is where the composition's timeline starts it too.
     fn begin(&mut self, stage: &mut Stage) -> Result<(), AnimError> {
+        // A refused retry must not erase the previous attempted lifetimes.
+        check_updater_error(stage)?;
+        self.updater_error = None;
+        self.begun = 0;
+        self.finished = 0;
         begin_composite(&mut self.state, stage)?;
         for animation in &mut self.animations {
-            animation.begin(stage)?;
+            // A failing zero sample may already have suspended its family.
+            // Abort owns that attempted lifetime, but never an unbegun sibling.
+            self.begun += 1;
+            let result = animation.begin(stage);
+            if retain_updater_error(stage, &mut self.updater_error) {
+                return Err(self.updater_error.clone().expect("retained updater error"));
+            }
+            result?;
         }
         Ok(())
     }
@@ -424,17 +452,29 @@ impl Animation for AnimationGroup {
     /// The Reference's `AnimationGroup.interpolate`, with the group's own
     /// normalized-alpha pipeline in front of it (BN-11).
     fn interpolate(&mut self, stage: &mut Stage, alpha: f64) {
+        if retain_updater_error(stage, &mut self.updater_error) {
+            return;
+        }
         let time = timeline_position(&self.state.config, alpha, self.max_end_time);
         for (animation, interval) in self.animations.iter_mut().zip(&self.timings) {
             animation.interpolate(stage, interval.sub_alpha(time));
+            if retain_updater_error(stage, &mut self.updater_error) {
+                return;
+            }
         }
     }
 
     /// The Reference's `AnimationGroup.update_mobjects`: every member ticks
     /// its own animation-owned mobjects.
     fn update_mobjects(&mut self, stage: &mut Stage, dt: f64) {
+        if retain_updater_error(stage, &mut self.updater_error) {
+            return;
+        }
         for animation in &mut self.animations {
             animation.update_mobjects(stage, dt);
+            if retain_updater_error(stage, &mut self.updater_error) {
+                return;
+            }
         }
     }
 
@@ -442,23 +482,44 @@ impl Animation for AnimationGroup {
     /// own `final_alpha_value` (see the module note), then the container
     /// stops animating.
     fn finish(&mut self, stage: &mut Stage) {
-        for animation in &mut self.animations {
-            animation.finish(stage);
+        if !retain_updater_error(stage, &mut self.updater_error) {
+            for (index, animation) in self.animations.iter_mut().enumerate() {
+                animation.finish(stage);
+                // Finish owns its cleanup even when an endpoint or resumed
+                // updater fails. Abort must visit only later begun siblings.
+                self.finished = index + 1;
+                if retain_updater_error(stage, &mut self.updater_error) {
+                    break;
+                }
+            }
         }
-        stage.set_animating_status(self.state.mobject(), false, true);
+        if self.updater_error.is_some() {
+            self.abort(stage);
+        } else {
+            stage.set_animating_status(self.state.mobject(), false, true);
+        }
     }
 
     fn abort(&mut self, stage: &mut Stage) {
-        for animation in &mut self.animations {
+        retain_updater_error(stage, &mut self.updater_error);
+        for animation in self
+            .animations
+            .iter_mut()
+            .take(self.begun)
+            .skip(self.finished)
+        {
             animation.abort(stage);
         }
+        self.finished = self.begun;
         stage.set_animating_status(self.state.mobject(), false, true);
     }
 
     /// A member's deferred failure (a nested [`Succession`], say) surfaces
     /// through the composition that contains it.
     fn deferred_error(&self) -> Option<AnimError> {
-        self.animations.iter().find_map(|a| a.deferred_error())
+        self.updater_error
+            .clone()
+            .or_else(|| self.animations.iter().find_map(|a| a.deferred_error()))
     }
 }
 
@@ -467,6 +528,7 @@ impl Animation for AnimationGroup {
 /// leaf steps (starting copy, zipped families, zero-interpolate) have no
 /// meaning for a container that owns no records.
 fn begin_composite(state: &mut AnimState, stage: &mut Stage) -> Result<(), AnimError> {
+    check_updater_error(stage)?;
     if let Some((start, end)) = state.config.time_span {
         if end <= start {
             return Err(AnimError::InvalidTimeSpan { start, end });
@@ -479,6 +541,22 @@ fn begin_composite(state: &mut AnimState, stage: &mut Stage) -> Result<(), AnimE
     }
     stage.set_animating_status(group, true, true);
     Ok(())
+}
+
+/// A void child callback can fail through Stage's retained updater channel.
+/// Keep that fault sticky in its composition too, without changing the legacy
+/// endpoint handling for unrelated deferred animation errors.
+fn retain_updater_error(stage: &Stage, deferred: &mut Option<AnimError>) -> bool {
+    if matches!(deferred, Some(AnimError::Updater(_))) {
+        return true;
+    }
+    if let Err(error) = check_updater_error(stage) {
+        if deferred.is_none() {
+            *deferred = Some(error);
+        }
+        return true;
+    }
+    false
 }
 
 // --------------------------------------------------------------- Succession
@@ -627,6 +705,7 @@ impl Succession {
     }
 
     fn begin_member(&mut self, stage: &mut Stage, index: usize) -> Result<(), AnimError> {
+        check_updater_error(stage)?;
         let mob = self.animations[index].state().mobject();
         let before = self
             .replayable
@@ -641,7 +720,9 @@ impl Succession {
             completed: None,
             finished: false,
         });
-        self.animations[index].begin(stage)?;
+        let begin = self.animations[index].begin(stage);
+        check_updater_error(stage)?;
+        begin?;
         if let Some(error) = self.animations[index].deferred_error() {
             return Err(error);
         }
@@ -660,6 +741,7 @@ impl Succession {
     /// both disjoint mobjects and chains that mutate the same family, including
     /// alignments that changed its child topology or record schema.
     fn restore_member(&self, stage: &mut Stage, target: usize) -> Result<(), AnimError> {
+        check_updater_error(stage)?;
         for member in self.playback.iter().rev() {
             if let Some(before) = &member.before {
                 stage.restore_family_checkpoint(before)?;
@@ -677,6 +759,7 @@ impl Succession {
     }
 
     fn finish_member(&mut self, stage: &mut Stage, index: usize) -> Result<(), AnimError> {
+        check_updater_error(stage)?;
         if self.playback[index].finished {
             if let Some(completed) = &self.playback[index].completed {
                 stage.restore_family_checkpoint(completed)?;
@@ -684,7 +767,10 @@ impl Succession {
             return Ok(());
         }
         self.animations[index].finish(stage);
+        // Finish has released this lifetime even if an updater failed. Keep
+        // its partial content, but never cache that fault as a completed frame.
         self.playback[index].finished = true;
+        check_updater_error(stage)?;
         if let Some(error) = self.animations[index].deferred_error() {
             return Err(error);
         }
@@ -718,7 +804,7 @@ impl Succession {
 }
 
 impl Animation for Succession {
-    composite_common!();
+    composite_common!(deferred);
 
     fn prepare_interpolation_replay(&mut self) {
         self.replaying = true;
@@ -749,7 +835,10 @@ impl Animation for Succession {
     /// members passed on the way, then interpolate it at its window
     /// position.
     fn interpolate(&mut self, stage: &mut Stage, alpha: f64) {
-        if self.deferred.is_some() || self.playback.is_empty() {
+        if retain_updater_error(stage, &mut self.deferred)
+            || self.deferred.is_some()
+            || self.playback.is_empty()
+        {
             return;
         }
         // The rational clock may round the final raw alpha above one. Its
@@ -783,14 +872,18 @@ impl Animation for Succession {
         self.active = target;
         let sub_alpha = self.timings[self.active].sub_alpha(time);
         self.animations[self.active].interpolate(stage, sub_alpha);
+        if retain_updater_error(stage, &mut self.deferred) {
+            return;
+        }
         self.last_time = Some(time);
     }
 
     /// The Reference's `Succession.update_mobjects`: only the active member
     /// ticks — the others own no live state yet, or no longer do.
     fn update_mobjects(&mut self, stage: &mut Stage, dt: f64) {
-        if self.deferred.is_none() {
+        if !retain_updater_error(stage, &mut self.deferred) && self.deferred.is_none() {
             self.animations[self.active].update_mobjects(stage, dt);
+            retain_updater_error(stage, &mut self.deferred);
         }
     }
 
@@ -798,6 +891,10 @@ impl Animation for Succession {
     /// members through `interpolate`), finish the member left active, and
     /// stop the container animating.
     fn finish(&mut self, stage: &mut Stage) {
+        if retain_updater_error(stage, &mut self.deferred) {
+            self.abort(stage);
+            return;
+        }
         // A reverse curve may leave the most recently begun member paused
         // behind the current view. Balance that lifetime once before landing
         // on the composition's final member; restoring checkpoints then puts
@@ -827,10 +924,14 @@ impl Animation for Succession {
             // updaters suspended after the segment driver reports the error.
             self.abort(stage);
         }
+        if retain_updater_error(stage, &mut self.deferred) {
+            self.abort(stage);
+        }
         stage.set_animating_status(self.state.mobject(), false, true);
     }
 
     fn abort(&mut self, stage: &mut Stage) {
+        retain_updater_error(stage, &mut self.deferred);
         for (animation, playback) in self.animations.iter_mut().zip(&mut self.playback) {
             if !playback.finished {
                 animation.abort(stage);

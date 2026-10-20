@@ -227,9 +227,9 @@ impl Revisions {
 
     /// Fold all seven axes into one value.
     ///
-    /// For consumers that key on *any* change rather than on a declared subset —
-    /// the tile cache, whose §10.8 key is "resource revisions" without
-    /// qualification, because a tile's bytes can depend on any axis.
+    /// A diagnostic fingerprint for consumers interested in any revision axis.
+    /// Pixel reuse must compare the original revision vector: equal short
+    /// fingerprints alone do not prove that the inputs are equal.
     #[must_use]
     pub fn fold(&self) -> u64 {
         mix(&[
@@ -315,8 +315,9 @@ const MIX_PRIME: u64 = 0x0000_0100_0000_01b3;
 /// Incremental form of [`mix`].
 ///
 /// Tile command runs can contain millions of entries. Feeding their words as
-/// they are visited keeps the key's working storage constant without changing
-/// the byte stream, and therefore without changing a single key bit.
+/// they are visited keeps fingerprint construction's working storage constant
+/// without changing the byte stream. Consumers authorizing pixel reuse must
+/// also retain and compare the original inputs.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Mixer {
     state: u64,

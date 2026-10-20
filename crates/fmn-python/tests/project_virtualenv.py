@@ -61,7 +61,7 @@ class VenvScene(Scene):
         try:
             sys.argv = ['fmn-python', '--robot', str(source_path), 'VenvScene',
                         '--format', 'png_sequence', '--resolution', '96x54',
-                        '--fps', '8', '--threads', str(threads), '--video_dir', str(output)]
+                        '--fps', '8', '--threads', str(threads), '--output', str(output)]
             with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                 code = main()
         finally:

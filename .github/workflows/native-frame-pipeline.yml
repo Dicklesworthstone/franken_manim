@@ -6,9 +6,16 @@ on:
       - '.github/workflows/native-frame-pipeline.yml'
       - 'crates/fmn-cli/**'
       - 'crates/fmn-runtime/**'
+      - 'crates/fmn-anim/**'
       - 'crates/fmn-render/**'
       - 'crates/fmn-scene/**'
       - 'crates/fmn-mobject/**'
+      - 'crates/fmn-library/src/fields.rs'
+      - 'crates/fmn-library/src/lib.rs'
+      - 'crates/fmn-library/src/tex.rs'
+      - 'crates/fmn-library/src/numbers.rs'
+      - 'crates/fmn-library/src/text_matching.rs'
+      - 'crates/fmn-library/tests/live_tex.rs'
       - 'crates/fmn/**'
   workflow_dispatch:
 permissions:
@@ -49,7 +56,20 @@ jobs:
           key: cargo-${{ runner.os }}-${{ runner.arch }}-portable-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'SUITE.lock') }}
           restore-keys: |
             cargo-${{ runner.os }}-${{ runner.arch }}-portable-
+      - name: Native pure interpolation worker ownership
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p fmn-anim --test pure_frame
+      - name: Native scene pure dispatch and serial observer fallbacks
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p fmn-scene --test pure_dispatch
+      - name: Live pure program pipeline and publication
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test --locked -p fmn --test native_pure_pipeline
+          cargo test --locked -p fmn --test native_pure_render
+          cargo test --locked -p fmn --test native_vector_pipeline
       - name: CLI unit and shipping binary camera and compiled-playback regressions
+        if: ${{ !cancelled() }}
         run: cargo test --locked -p fmn-cli --features cli,batch --tests
       - name: Native camera motion, compiled replay and atomic publication
         if: ${{ !cancelled() }}
@@ -57,6 +77,15 @@ jobs:
       - name: Snapshot draw metadata and painter order
         if: ${{ !cancelled() }}
         run: cargo test --locked -p fmn-mobject --test render_order
+      - name: Fallible stateful updater lifecycle
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p fmn-mobject --lib fallible_stateful
+      - name: Native trace and time-field updater failures
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p fmn-library --lib fields::tests
+      - name: Native live numeric TeX ownership and matching
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p fmn-library --test live_tex --test text_matching
       - name: Compiled ownership and reconstruction
         if: ${{ !cancelled() }}
         run: |
@@ -70,7 +99,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           cargo test --locked -p fmn-render --lib vector_frame
+          cargo test --locked -p fmn-render --lib table::shared
+          cargo test --locked -p fmn-render --lib plan::generation
           cargo test --locked -p fmn-render --lib retained
+      - name: SVG export through the scene camera
+        if: ${{ !cancelled() }}
+        run: 'cargo test --locked -p fmn-render --lib svg::'
       - name: Native executable examples
         if: ${{ !cancelled() }}
         run: cargo check --locked -p fmn --examples

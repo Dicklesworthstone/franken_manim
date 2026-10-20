@@ -442,3 +442,356 @@ fn native_mp4_mov_quality_survives_into_provenance_and_x264_sei() {
     }
     // Retain movies and logged SEI evidence. No new encoder default is inferred.
 }
+
+#[cfg(unix)]
+mod wire_precision {
+    use super::*;
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    use fmn_output::{
+        Boundary, ColorDescription, Container, EncoderCapabilities, EncoderChoice, FfmpegTool,
+        JobLimits, VideoJob, WireFormat,
+    };
+    use fmn_platform::fs::StdFs;
+    use fmn_platform::process::{ProcessOutcome, ProcessRunner, ProcessSpec, StdFfmpegLocator};
+
+    struct Host {
+        root: PathBuf,
+        tool: FfmpegTool,
+        caps: EncoderCapabilities,
+        runner: Arc<StdProcessRunner>,
+        locator: Arc<StdFfmpegLocator>,
+    }
+
+    fn host(test: &str, encoder: &str) -> Option<Host> {
+        let locator = Arc::new(StdFfmpegLocator::from_host_path());
+        let executable = match locator.locate_ffmpeg(Path::new("ffmpeg")) {
+            Ok(executable) => executable,
+            Err(FfmpegLocatorError::NotFound) => {
+                fmn_core::test_inputs::skip_or_fail(test, "an ffmpeg executable on PATH");
+                assert_ne!(std::env::var("FMN_REQUIRE_FFMPEG").as_deref(), Ok("1"));
+                return None;
+            }
+            Err(error) => panic!("ffmpeg locator refused: {error}"),
+        };
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("fmn-wire-{test}-{}-{unique}", std::process::id()));
+        let mut private = std::fs::DirBuilder::new();
+        std::os::unix::fs::DirBuilderExt::mode(&mut private, 0o700);
+        private.create(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let runner = Arc::new(StdProcessRunner);
+        let tool = FfmpegTool::resolve(executable, runner.as_ref(), &root).unwrap();
+        let caps = EncoderCapabilities::probe(&tool, runner.as_ref()).unwrap();
+        if !caps.offers(encoder) {
+            fmn_core::test_inputs::skip_or_fail(test, "the selected ffmpeg software encoder");
+            assert_ne!(std::env::var("FMN_REQUIRE_FFMPEG").as_deref(), Ok("1"));
+            return None;
+        }
+        Some(Host {
+            root,
+            tool,
+            caps,
+            runner,
+            locator,
+        })
+    }
+
+    fn job(wire: WireFormat) -> VideoJob {
+        VideoJob {
+            width: 64,
+            height: 36,
+            fps: (10, 1),
+            wire,
+            color: ColorDescription::for_native_wire(wire),
+            container: Container::Mp4,
+            encoder: EncoderChoice::Named("libx264".to_owned()),
+            crf: Some(0),
+        }
+    }
+
+    fn invoke(host: &Host, argv: Vec<String>, stdin: Option<Vec<u8>>) -> ProcessOutcome {
+        let outcome = host
+            .runner
+            .run(&ProcessSpec {
+                program: host.tool.path().to_path_buf(),
+                argv,
+                env: vec![
+                    ("LANG".into(), "C".into()),
+                    ("LC_ALL".into(), "C".into()),
+                    ("TMPDIR".into(), host.root.display().to_string()),
+                ],
+                cwd: None,
+                stdin,
+                timeout: Duration::from_secs(15),
+                max_output_bytes: 1 << 20,
+            })
+            .unwrap();
+        assert!(
+            outcome.success(),
+            "{}",
+            String::from_utf8_lossy(&outcome.stderr)
+        );
+        outcome
+    }
+
+    fn decode(host: &Host, path: &Path, pixel_format: Option<&str>) -> Vec<u8> {
+        let mut argv = vec![
+            "-v".into(),
+            "error".into(),
+            "-i".into(),
+            path.display().to_string(),
+            "-map".into(),
+            "0:v:0".into(),
+            "-an".into(),
+        ];
+        if let Some(format) = pixel_format {
+            argv.extend(["-pix_fmt".into(), format.into()]);
+        }
+        argv.extend(["-f".into(), "rawvideo".into(), "-".into()]);
+        invoke(host, argv, None).stdout
+    }
+
+    fn boundary(host: &Host) -> Boundary {
+        Boundary::new(
+            host.tool.clone(),
+            host.runner.clone(),
+            JobLimits {
+                timeout: Duration::from_secs(15),
+                max_log_bytes: 1 << 20,
+                max_artifact_bytes: 1 << 20,
+                ..JobLimits::default()
+            },
+            host.root.clone(),
+        )
+        .unwrap()
+    }
+
+    fn output_pixel_format(argv: &[String]) -> &str {
+        let at = argv.iter().rposition(|arg| arg == "-pix_fmt").unwrap();
+        &argv[at + 1]
+    }
+
+    // Each frame has distinct luma and two distinct chroma planes. P010
+    // contains all four low-bit residues, so an 8-bit roundtrip is observable.
+    fn samples(wire: WireFormat) -> (Vec<u8>, Vec<u8>) {
+        let mut interleaved = Vec::new();
+        let mut planar = Vec::new();
+        for frame in 0..3 {
+            let ten_bit = wire == WireFormat::P010;
+            let luma: Vec<u16> = (0..36)
+                .flat_map(|y| {
+                    (0..64).map(move |x| {
+                        if ten_bit {
+                            64 + (19 * x + 37 * y + 53 * frame) % 877
+                        } else {
+                            16 + (3 * x + 5 * y + 19 * frame) % 220
+                        }
+                    })
+                })
+                .collect();
+            let cb: Vec<u16> = (0..18)
+                .flat_map(|y| {
+                    (0..32).map(move |x| {
+                        if ten_bit {
+                            64 + (29 * x + 41 * y + 71 * frame) % 897
+                        } else {
+                            16 + (5 * x + 3 * y + 13 * frame) % 225
+                        }
+                    })
+                })
+                .collect();
+            let cr: Vec<u16> = (0..18)
+                .flat_map(|y| {
+                    (0..32).map(move |x| {
+                        if ten_bit {
+                            64 + (31 * x + 43 * y + 73 * frame) % 897
+                        } else {
+                            16 + (7 * x + 2 * y + 17 * frame) % 225
+                        }
+                    })
+                })
+                .collect();
+            for value in luma.iter().chain(&cb).chain(&cr) {
+                if ten_bit {
+                    planar.extend_from_slice(&value.to_le_bytes());
+                } else {
+                    planar.push(u8::try_from(*value).unwrap());
+                }
+            }
+            for value in &luma {
+                if ten_bit {
+                    interleaved.extend_from_slice(&(value << 6).to_le_bytes());
+                } else {
+                    interleaved.push(u8::try_from(*value).unwrap());
+                }
+            }
+            for (u, v) in cb.iter().zip(&cr) {
+                if ten_bit {
+                    interleaved.extend_from_slice(&(u << 6).to_le_bytes());
+                    interleaved.extend_from_slice(&(v << 6).to_le_bytes());
+                } else {
+                    interleaved
+                        .extend_from_slice(&[u8::try_from(*u).unwrap(), u8::try_from(*v).unwrap()]);
+                }
+            }
+        }
+        (interleaved, planar)
+    }
+
+    #[test]
+    fn native_nv12_passthrough_matches_planar_reconstruction_at_lossless_and_lossy_quality() {
+        let test = "native_nv12_passthrough";
+        let Some(host) = host(test, "libx264") else {
+            return;
+        };
+        let mut job = job(WireFormat::Nv12);
+        let formats = host
+            .caps
+            .require_video_job(&host.tool, host.runner.as_ref(), &job)
+            .unwrap()
+            .unwrap();
+        if !formats.formats.iter().any(|format| format == "nv12") {
+            fmn_core::test_inputs::skip_or_fail(test, "libx264 with advertised NV12 input");
+            assert_ne!(std::env::var("FMN_REQUIRE_FFMPEG").as_deref(), Ok("1"));
+            return;
+        }
+        let (wire, expected) = samples(WireFormat::Nv12);
+        for crf in [0, 23] {
+            job.crf = Some(crf);
+            let output = host.root.join(format!("nv12-{crf}.mp4"));
+            let report = boundary(&host)
+                .encode(&job, wire.clone(), &host.caps, &output)
+                .unwrap();
+            assert_eq!(report.invocations.len(), 1);
+            assert_eq!(
+                output_pixel_format(&report.invocations[0].provenance.argv),
+                "nv12"
+            );
+
+            // Force the prior planar path for an independent real encode of
+            // the very same wire bytes, codec, color tags and quality.
+            let planar = host.root.join(format!("planar-{crf}.mp4"));
+            let argv = fmn_output::negotiate::encode_argv_with_formats(
+                &job,
+                &planar,
+                &["yuv420p".to_owned()],
+            )
+            .unwrap();
+            assert_eq!(output_pixel_format(&argv), "yuv420p");
+            invoke(&host, argv, Some(wire.clone()));
+            let actual = decode(&host, &output, Some("yuv420p"));
+            let reference = decode(&host, &planar, Some("yuv420p"));
+            assert_eq!(actual.len(), expected.len());
+            assert_eq!(
+                actual, reference,
+                "NV12 changed decoded samples at CRF {crf}"
+            );
+            if crf == 0 {
+                assert_eq!(actual, expected, "lossless NV12 altered native YUV codes");
+            }
+        }
+        eprintln!("NV12 decoder witnesses retained in {}", host.root.display());
+    }
+
+    #[test]
+    fn native_p010_preserves_ten_bit_stream_and_matches_planar_input() {
+        let test = "native_p010_precision";
+        let Some(host) = host(test, "libx264") else {
+            return;
+        };
+        let job = job(WireFormat::P010);
+        let formats = match host
+            .caps
+            .require_video_job(&host.tool, host.runner.as_ref(), &job)
+        {
+            Ok(Some(formats)) => formats,
+            Ok(None) => panic!("P010 admission must discover encoder formats"),
+            Err(fmn_output::BoundaryError::UnsupportedEncoderPixelFormat {
+                requested,
+                wire,
+                ..
+            }) => {
+                assert_eq!(requested, "libx264");
+                assert_eq!(wire, WireFormat::P010);
+                fmn_core::test_inputs::skip_or_fail(test, "libx264 with a 10-bit input format");
+                assert_ne!(std::env::var("FMN_REQUIRE_FFMPEG").as_deref(), Ok("1"));
+                return;
+            }
+            Err(error) => panic!("P010 capability probe failed: {error}"),
+        };
+        assert!(formats.formats.iter().any(|format| format == "yuv420p10le"));
+        let (wire, planar) = samples(WireFormat::P010);
+        let output = host.root.join("p010.mp4");
+        let report = boundary(&host)
+            .encode(&job, wire, &host.caps, &output)
+            .unwrap();
+        assert_eq!(
+            output_pixel_format(&report.invocations[0].provenance.argv),
+            "yuv420p10le"
+        );
+
+        let reference = host.root.join("planar10.mp4");
+        let mut argv = fmn_output::negotiate::encode_argv_with_formats(
+            &job,
+            &reference,
+            &["yuv420p10le".to_owned()],
+        )
+        .unwrap();
+        let input_format = argv.iter().position(|arg| arg == "-pix_fmt").unwrap();
+        assert!(input_format < argv.iter().position(|arg| arg == "-i").unwrap());
+        argv[input_format + 1] = "yuv420p10le".into();
+        invoke(&host, argv, Some(planar.clone()));
+
+        // Do not force a decoder pixel format: an accidentally 8-bit stream
+        // must emit half as many bytes and fail, even if upconversion could
+        // manufacture a superficially 10-bit rawvideo output.
+        let actual = decode(&host, &output, None);
+        assert_eq!(
+            actual.len(),
+            planar.len(),
+            "encoded stream lost its 10-bit depth"
+        );
+        assert!(
+            actual
+                .chunks_exact(2)
+                .any(|bytes| { u16::from_le_bytes(bytes.try_into().unwrap()) & 3 != 0 }),
+            "decoded samples retain precision beyond an 8-bit grid"
+        );
+        assert_eq!(
+            actual,
+            decode(&host, &reference, None),
+            "P010 packing changed the planar 10-bit encoder input"
+        );
+        // CRF 0 is not universally lossless in a 10-bit x264 build. Compare
+        // identical decoded reconstructions, without promising source equality.
+        eprintln!("P010 decoder witnesses retained in {}", host.root.display());
+    }
+
+    #[test]
+    fn native_p010_refuses_eight_bit_encoder_before_scene_construction() {
+        let Some(host) = host("native_p010_refusal", "mpeg4") else {
+            return;
+        };
+        let (mut options, _) = options(RenderFormat::Mp4);
+        options.output = host.root.join("must-not-exist.mp4");
+        let output = options.output.clone();
+        options.config.file_writer.video_codec = "mpeg4".to_owned();
+        options.config.file_writer.pixel_format = "p010le".to_owned();
+        options.ffmpeg = Some(FfmpegCapability {
+            runner: host.runner,
+            locator: host.locator,
+            workdir_root: host.root,
+        });
+        options.ffmpeg_limits.timeout = Duration::from_secs(15);
+        let error = render_with_fs(&mut MustNotRun, options, Arc::new(StdFs)).unwrap_err();
+        assert!(matches!(error, RenderError::Ffmpeg(_)), "{error}");
+        assert!(error.to_string().contains("10-bit"), "{error}");
+        assert!(!output.exists(), "refused scene published a video");
+    }
+}

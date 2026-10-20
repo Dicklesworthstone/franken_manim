@@ -6,7 +6,7 @@ use fmn_anim::FramePacket;
 use fmn_platform::fs::{FileSystem, StdFs};
 use fmn_scene::{CameraRig, CaptureReason, IntegrationError, RuntimeConfig, Scene};
 
-use super::{CameraConfig, RenderError, RenderOptions, RenderReport, RenderSink};
+use super::{CameraConfig, RenderError, RenderFormat, RenderOptions, RenderReport, RenderSink};
 use crate::{ProgramAdapter, SceneConstruct};
 
 /// Render ordinary native animation with a snapshot-native camera rig.
@@ -85,6 +85,7 @@ where
             typesetting: &typesetting,
         },
     );
+    typesetting.maintain_cache();
     sink.inner.surface_failure()?;
     if let Some(error) = adapter.front_door_error.take() {
         return Err(RenderError::Scene(error));
@@ -140,11 +141,17 @@ impl fmn_scene::SceneSink for RigSink {
         if let Some(error) = &self.inner.failure {
             return Err(IntegrationError::new("native-camera", error.to_string()));
         }
-        self.render_stage(&packet.materialize_stage())
-            .map_err(|error| {
-                let message = error.to_string();
-                self.inner.failure = Some(error);
-                IntegrationError::new("native-camera", message)
-            })
+        let result = if self.inner.format == RenderFormat::Png {
+            // The final rig is sampled after the completed scene, including
+            // teardown. Do not rasterize or materialize intermediate captures.
+            self.inner.defer_captures(1)
+        } else {
+            self.render_stage(&packet.materialize_stage())
+        };
+        result.map_err(|error| {
+            let message = error.to_string();
+            self.inner.failure = Some(error);
+            IntegrationError::new("native-camera", message)
+        })
     }
 }

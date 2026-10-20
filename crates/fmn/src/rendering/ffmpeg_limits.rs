@@ -5,29 +5,11 @@
 //! the render request. The low-level boundary's short-job defaults and probe
 //! bounds are deliberately unchanged.
 
-use std::time::{Duration, Instant};
-
 use super::{JobLimits, RenderError, RenderOptions};
 
-/// Default allowance for each offline render-time ffmpeg invocation.
-///
-/// Twenty-four hours accommodates long-form/overnight rendering without
-/// disabling the watchdog. Services should choose a smaller tenant-specific
-/// allowance explicitly. This is wall time, not movie duration or idle time.
-pub const DEFAULT_RENDER_FFMPEG_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
-
-/// Default resource bounds shared by native render entry points.
-///
-/// Encoding remains open while the scene produces frames, so its watchdog
-/// allows 24 hours. The low-level boundary's log/artifact bounds and workdir
-/// retention policy are preserved. Tool probes keep their separate deadlines.
-#[must_use]
-pub fn default_render_ffmpeg_limits() -> JobLimits {
-    JobLimits {
-        timeout: DEFAULT_RENDER_FFMPEG_TIMEOUT,
-        ..JobLimits::default()
-    }
-}
+pub use fmn_output::{
+    DEFAULT_RENDER_FFMPEG_TIMEOUT, FfmpegLimitsReport, default_render_ffmpeg_limits,
+};
 
 pub(super) fn default_job_limits() -> JobLimits {
     default_render_ffmpeg_limits()
@@ -48,29 +30,8 @@ pub fn admit_render_ffmpeg_limits(
     limits: &JobLimits,
     max_input_bytes: u64,
 ) -> Result<JobLimits, RenderError> {
-    if limits.timeout.is_zero() {
-        return Err(RenderError::InvalidOptions(
-            "ffmpeg timeout must be nonzero",
-        ));
-    }
-    if Instant::now().checked_add(limits.timeout).is_none() {
-        return Err(RenderError::InvalidOptions(
-            "ffmpeg timeout exceeds the monotonic clock range",
-        ));
-    }
-    if limits.max_log_bytes == 0 {
-        return Err(RenderError::InvalidOptions(
-            "ffmpeg max_log_bytes must be nonzero",
-        ));
-    }
-    if limits.max_artifact_bytes == 0 || max_input_bytes == 0 {
-        return Err(RenderError::InvalidOptions(
-            "ffmpeg artifact and input byte limits must be nonzero",
-        ));
-    }
-    let mut admitted = limits.clone();
-    admitted.max_artifact_bytes = admitted.max_artifact_bytes.min(max_input_bytes);
-    Ok(admitted)
+    fmn_output::admit_render_ffmpeg_limits(limits, max_input_bytes)
+        .map_err(RenderError::InvalidOptions)
 }
 
 impl RenderOptions {
@@ -91,58 +52,10 @@ impl RenderOptions {
     }
 }
 
-/// Effective resource policy attached to a successfully published video receipt.
-///
-/// This records the admitted upper bounds, not elapsed time or bytes consumed.
-/// Tool probes retain their separate short deadlines. Audio decoding may apply
-/// tighter format-specific limits. This is not an input-closure certificate.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FfmpegLimitsReport {
-    /// Wall-clock allowance for each encode, mux, or media-decode invocation.
-    pub timeout: Duration,
-    /// Captured stdout/stderr ceiling, independently for each stream.
-    pub max_log_bytes: u64,
-    /// Encoded/intermediate artifact ceiling after intersecting both budgets.
-    pub max_artifact_bytes: u64,
-    /// Independent ceiling on cumulative raw-frame bytes sent to the encoder.
-    pub max_input_bytes: u64,
-    /// Whether job work directories are retained for diagnosis.
-    pub keep_workdir: bool,
-}
-
-impl FfmpegLimitsReport {
-    pub(super) fn new(limits: &JobLimits, max_input_bytes: u64) -> Self {
-        Self {
-            timeout: limits.timeout,
-            max_log_bytes: limits.max_log_bytes,
-            max_artifact_bytes: limits.max_artifact_bytes,
-            max_input_bytes,
-            keep_workdir: limits.keep_workdir,
-        }
-    }
-
-    /// Stable JSON object for embedding in an artifact/provenance manifest.
-    ///
-    /// Duration is represented as whole seconds plus subsecond nanoseconds,
-    /// preserving the exact configured allowance without floating-point loss.
-    /// No timestamps, paths, or ambient configuration enter this object.
-    #[must_use]
-    pub fn to_json(&self) -> String {
-        format!(
-            "{{\"timeout_seconds\":{},\"timeout_nanoseconds\":{},\"max_log_bytes\":{},\"max_artifact_bytes\":{},\"max_input_bytes\":{},\"keep_workdir\":{}}}",
-            self.timeout.as_secs(),
-            self.timeout.subsec_nanos(),
-            self.max_log_bytes,
-            self.max_artifact_bytes,
-            self.max_input_bytes,
-            self.keep_workdir,
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn offline_default_keeps_a_watchdog_without_the_ten_minute_ceiling() {

@@ -70,16 +70,39 @@ frames, zero dimensions or frame rate.
   keeping native `nv12` without an extra per-frame `swscale` chroma de-interleave
   pass whenever the encoder accepts `nv12`.
 
+Opaque NV12/P010 video jobs discover the selected encoder's input formats
+with `ffmpeg -hide_banner -h encoder=<name>` before scene execution. The
+same admission runs again at the low-level streaming boundary, reusing the
+resolved tool's cached observation. The help query is bound to that exact
+encoder and executable, with a two-second deadline, 64 KiB of captured
+output per stream, and a live 1 MiB scratch allowance. Malformed, mismatched,
+or failed queries are refused and are not cached as capabilities.
+
+When advertised, `nv12` stays NV12 for software and hardware encoders alike;
+otherwise the encoder receives the existing planar `yuv420p` request. P010
+prefers `p010le`, then advertised planar 10-bit 4:2:0, 4:2:2, or 4:4:4.
+An encoder without a verified compatible 10-bit input receives a named
+`UnsupportedEncoderPixelFormat` refusal before frames are rendered. An absent
+format list does not establish 10-bit support. Alpha/GIF profiles, color
+metadata, frame rate, and quality controls retain their own existing policy.
+The selected encoder input format is recorded in the invocation argv in
+provenance. This removes an unnecessary format conversion when the encoder
+accepts the native planes; no hardware-independent throughput gain is promised.
+
 ## 2. The D2 invocation protocol
 
 Offline native video requests use the finite render policy described in
 [native video limits](NATIVE_VIDEO_LIMITS.md): a 24-hour default watchdog,
 explicit timeout/log/artifact/input budgets, and the same admission function
-for the Rust API and standalone CLI. The streaming encoder's wall clock
+for the Rust API, standalone CLI, and Python portal. The streaming encoder's wall clock
 includes scene construction and frame rendering. CLI overrides are
 `--ffmpeg-timeout`, `--ffmpeg-max-log-bytes`, `--ffmpeg-max-artifact-bytes`, and
 `--ffmpeg-max-input-bytes`. The resolved limits enter the video receipt and CLI
-provenance; they do not alter tool-probe deadlines or the low-level boundary's
+provenance. The Python console accepts the same flags, forwards one policy to
+encode, mux, and compressed-audio decode, and records it as `ffmpeg_limits` in
+render receipts. Python writers expose the matching `ffmpeg_timeout`,
+`ffmpeg_max_log_bytes`, `ffmpeg_max_artifact_bytes`, and `ffmpeg_max_input_bytes`
+attributes. These controls do not alter tool-probe deadlines or the low-level boundary's
 short-job defaults. [Video quality](VIDEO_ENCODING_QUALITY.md) documents the
 separate negotiated CRF/preset/tune/bitrate controls.
 
@@ -268,9 +291,39 @@ changes nothing about the determinism story. Recognized names:
 `h264_videotoolbox`, `hevc_videotoolbox`, `prores_videotoolbox`,
 `h264_nvenc`, `hevc_nvenc`, `av1_nvenc`. Policy: `Auto` always
 resolves to the software default; hardware is selected only by
-explicit name, validated against the probed `-encoders` inventory,
-and recorded in provenance. `fmn doctor` reports the installed
-ffmpeg's fingerprint and its recognized hardware encoders.
+explicit name. Every encoder must appear in the probed `-encoders`
+inventory, and a recognized hardware encoder must also pass a bounded
+functional trial before rendering or starting its production encode.
+
+The trial streams two native 256×256 YUV420P frames into the selected
+encoder with the null muxer; it needs no source file, filter graph, shell,
+or additional tool. The dimensions avoid the minimum-size rejection that
+some NVENC devices impose on 64×64 inputs. It uses the same verified private
+executable-copy protocol and cleared environment as an export, a two-second
+process timeout, 16 KiB captured logs per stream, and a live 1 MiB scratch
+allowance. A driver failure that closes stdin early retains the process's
+useful stderr diagnostic. Timeouts and log overruns remain named failures;
+executable, directory, and mechanism failures are propagated separately.
+
+A resolved tool and its clones cache these observations under that immutable
+tool fingerprint. Cache hits still verify the source and session identities;
+a replaced executable cannot inherit a previous success. Fresh resolution
+refreshes observations, including after driver/device changes. Concurrent
+first requests may repeat a trial without holding a cache lock across process
+callbacks; the first completed observation becomes the shared result.
+
+`fmn doctor` distinguishes `available` from
+`compiled-in (unusable: <reason>)`. Robot output preserves the existing
+`hardware_encoders` compiled inventory and adds `usable_hardware_encoders`
+and per-encoder `hardware_encoder_probes` records with `encoder`,
+`available`, and `detail` fields. A successful selected hardware trial
+enters invocation provenance as `hardware_encoder_probe`; software and
+stream-copy invocations record no hardware trial. `Auto` retains its
+software policy. A small successful trial does not guarantee every later
+resolution, pixel format, quality setting, or GPU session will work; production
+jobs retain their own timeout, cancellation, artifact checks, and refusals.
+The short trial limits are not a claim that the complete Doctor command,
+including executable copying and hashing, finishes within one second.
 
 ## 6. CI: the fake ffmpeg
 

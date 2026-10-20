@@ -24,6 +24,7 @@ use std::sync::Arc;
 /// It is NOT a rollback checkpoint or permission to evaluate animations on a
 /// worker: materialization intentionally installs no updater registrations.
 /// Use [`Snapshot`] for undo/replay, where retaining those callbacks matters.
+#[derive(Clone)]
 pub struct FrozenRenderState {
     stage_id: u64,
     next_updater_id: u64,
@@ -54,6 +55,33 @@ struct FrozenRenderEntry {
     image: Option<ImageResource>,
     image_revision: u64,
     family_cache: Option<Arc<Vec<Mob>>>,
+}
+
+impl Clone for FrozenRenderEntry {
+    fn clone(&self) -> Self {
+        Self {
+            buffer: self.buffer.snapshot_clone(),
+            placement: self.placement,
+            placement_revision: self.placement_revision,
+            submobjects: self.submobjects.clone(),
+            parents: self.parents.clone(),
+            updating_suspended: self.updating_suspended,
+            is_animating: self.is_animating,
+            tracker: self.tracker,
+            target: self.target,
+            saved_state: self.saved_state,
+            padding_source: self.padding_source,
+            pins: self.pins,
+            pending_delete: self.pending_delete,
+            uniforms: self.uniforms,
+            z_index: self.z_index,
+            shape: self.shape,
+            render_primitive: self.render_primitive,
+            image: self.image.clone(),
+            image_revision: self.image_revision,
+            family_cache: self.family_cache.clone(),
+        }
+    }
 }
 
 impl FrozenRenderEntry {
@@ -196,6 +224,8 @@ impl FrozenRenderState {
             time: self.time,
             next_updater_id: self.next_updater_id,
             topology_epoch: fresh_epoch(),
+            updater_failure: None,
+            updater_callbacks: std::rc::Rc::new(()),
         }
     }
 }

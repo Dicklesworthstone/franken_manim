@@ -181,6 +181,11 @@ impl Animation for ShowPartial {
         AnimationSignature::Pure
     }
 
+    /// Freeze the prepared reveal rule; schema validation remains in begin.
+    fn freeze_interpolation(&self) -> Option<crate::pure_frame::FrozenAnimation> {
+        crate::pure_frame::FrozenAnimation::partial(self.clone())
+    }
+
     /// Validate the selected typed geometry up front, so interpolation can
     /// never silently skip a schema or grid mismatch.
     fn setup(&mut self, stage: &mut Stage) -> Result<(), AnimError> {
@@ -484,6 +489,10 @@ pub(crate) fn match_style_from(stage: &mut Stage, mobject: Mob, source: Mob) {
 }
 
 impl Animation for DrawBorderThenFill {
+    fn freeze_interpolation(&self) -> Option<crate::pure_frame::FrozenAnimation> {
+        crate::pure_frame::FrozenAnimation::border_fill(self.clone())
+    }
+
     fn state(&self) -> &AnimState {
         &self.state
     }
@@ -547,16 +556,34 @@ impl Animation for DrawBorderThenFill {
             return; // rows are triples once begin has run
         };
         let (index, subalpha) = integer_interpolate(2, sub_alpha);
-        if index == 1 && !self.crossed.contains(&submob) {
-            // First crossing: submob.set_data(outline.data).
-            let source = match stage.get(outline) {
-                Some(entry) => entry.buffer.snapshot_clone(),
+        // Partial reveal only replaces points and joint angles. On a reverse
+        // crossing it must also restore outline style, otherwise the previous
+        // fill sample leaks into the drawing half and interpolation is history
+        // dependent. Forward-only playback retains its original first-crossing
+        // copy; revisiting either half resets exactly once at that boundary.
+        let was_filling = self.crossed.contains(&submob);
+        if (index == 1) != was_filling {
+            let (source, uniforms) = match stage.get(outline) {
+                Some(entry) => (entry.buffer.snapshot_clone(), *entry.uniforms()),
                 None => return,
             };
+            let tracker = stage.tracker(outline);
             if let Some(entry) = stage.get_mut(submob) {
                 entry.buffer.assign_from(&source);
+                if index == 0 {
+                    // Even lerping identical numeric uniforms can round by one
+                    // bit. Do not retain that fill-phase rounding in a reveal.
+                    *entry.uniforms_mut() = uniforms;
+                }
             }
-            self.crossed.push(submob);
+            if index == 0 {
+                let _ = stage.set_tracker_state(submob, tracker);
+            }
+            if index == 1 {
+                self.crossed.push(submob);
+            } else {
+                self.crossed.retain(|mob| *mob != submob);
+            }
         }
         if index == 0 {
             let _ = stage.pointwise_become_partial(submob, outline, 0.0, subalpha);
@@ -646,6 +673,28 @@ impl ShowIncreasingSubsets {
         self
     }
 
+    /// Release the family captured at begin, not only the children still
+    /// visible after a reveal. Hidden descendants must be reusable afterward.
+    /// Only the final visible family receives the ordinary resume callback;
+    /// abort never executes an updater or changes the revealed membership.
+    fn release_lifetime(&self, stage: &mut Stage, call_updater: bool) {
+        let root = self.state.mobject();
+        let resume =
+            self.state.config.suspend_mobject_updating && self.state.mobject_was_updating();
+        for row in self.state.families() {
+            if let Some(&member) = row.first() {
+                stage.set_animating_status(member, false, false);
+                if resume {
+                    stage.resume_updating(member, false, false);
+                }
+            }
+        }
+        stage.set_animating_status(root, false, true);
+        if resume {
+            stage.resume_updating(root, true, call_updater);
+        }
+    }
+
     /// creation.py:196 / creation.py:207 `update_submobject_list`.
     fn update_submobject_list(&self, stage: &mut Stage, index: i64) {
         let n = self.all_submobs.len();
@@ -653,10 +702,10 @@ impl ShowIncreasingSubsets {
             return;
         }
         let desired: Vec<Mob> = if self.one_by_one {
-            // index = int(clip(index, 0, n - 1)); 0 → empty, else the
-            // single (index-1)-th child.
+            // Index zero is the empty start; 1..=n selects child index-1.
+            // Clipping to n-1 made the last child unreachable (BN-12).
             #[allow(clippy::cast_sign_loss)]
-            let idx = index.clamp(0, n as i64 - 1) as usize;
+            let idx = index.clamp(0, n as i64) as usize;
             if idx == 0 {
                 Vec::new()
             } else {
@@ -692,6 +741,15 @@ impl ShowIncreasingSubsets {
 }
 
 impl Animation for ShowIncreasingSubsets {
+    fn finish(&mut self, stage: &mut Stage) {
+        self.interpolate(stage, self.state.config.final_alpha_value);
+        self.release_lifetime(stage, true);
+    }
+
+    fn abort(&mut self, stage: &mut Stage) {
+        self.release_lifetime(stage, false);
+    }
+
     fn state(&self) -> &AnimState {
         &self.state
     }
@@ -700,10 +758,21 @@ impl Animation for ShowIncreasingSubsets {
         &mut self.state
     }
 
-    // Deliberately Unclassified (the default made explicit): the frame
-    // writes are structural (arena child-list rewiring), and until the
-    // scene runtime's membership rules land (fm-5xm) the conservative
-    // R20 demotion is the correct classification.
+    // The captured child inventory and rated alpha determine membership.
+    // Hidden children are still animation-owned inputs, not absent effects.
+    fn effect_signature(&self) -> AnimationSignature {
+        AnimationSignature::Pure
+    }
+
+    fn freeze_interpolation(&self) -> Option<crate::pure_frame::FrozenAnimation> {
+        crate::pure_frame::FrozenAnimation::subsets(self.clone())
+    }
+
+    fn preflight_mobjects(&self) -> Vec<Mob> {
+        let mut out = vec![self.state.mobject()];
+        out.extend(self.all_submobs.iter().copied());
+        out
+    }
 
     /// The Reference overrides `interpolate_mobject` (creation.py:190):
     /// the rate function applies to the raw alpha, and the lag/time-span

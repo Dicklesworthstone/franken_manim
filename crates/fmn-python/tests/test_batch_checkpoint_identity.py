@@ -69,6 +69,20 @@ class CheckpointIdentityTests(unittest.TestCase):
         self.assertEqual(self.fixture.run_batch(resume=True).as_dict(), result.as_dict())
         self.assertEqual(self.fixture.calls, [])
 
+    def test_frozen_configuration_changes_invalidate_completed_scene_receipts(self):
+        fixture = self.fixture
+        first = {"values": {"camera": {"background_color": "#FF0000", "fps": 30}}}
+        result = fixture.run_batch(_configuration=first)
+        fixture.calls.clear()
+        self.assertEqual(fixture.run_batch(resume=True, _configuration=first).as_dict(), result.as_dict())
+        self.assertEqual(fixture.calls, [])
+        before = fixture.journal.read_bytes()
+        second = {"values": {"camera": {"background_color": "#0000FF", "fps": 30}}}
+        with self.assertRaisesRegex(ValueError, "plan"):
+            fixture.run_batch(resume=True, _configuration=second)
+        self.assertEqual(fixture.calls, [])
+        self.assertEqual(fixture.journal.read_bytes(), before)
+
     def test_moduleless_class_is_rejected_before_execution(self):
         self.fixture.jobs = {"first": type("Demo", (fixtures.Scene,), {"__module__": None})}
         with self.assertRaisesRegex(ValueError, "scene identity"):

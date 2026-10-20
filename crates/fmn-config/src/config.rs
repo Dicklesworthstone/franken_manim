@@ -23,6 +23,9 @@ use fmn_hash::{Schema, SerialError, Writer};
 /// Canonical fully-resolved configuration document used by C4 provenance.
 pub const RESOLVED_CONFIG_SCHEMA: Schema = Schema::new(*b"FMNF", 1, 1, 0);
 
+/// Default disk retention ceiling for the persistent typesetting namespace.
+pub const DEFAULT_TYPESET_CACHE_MAX_BYTES: u64 = 1024 * 1024 * 1024;
+
 /// A configuration failure: parse trouble in one source, or a precise
 /// typed-extraction error naming the key path.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -332,6 +335,14 @@ pub struct RenderConfig {
     pub threads: ThreadPolicy,
 }
 
+/// `cache:` — disk retention policy, independent of rendered scene identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CacheConfig {
+    /// Maximum envelope bytes retained by the typesetting namespace after a
+    /// render. Zero retains no unpinned entries; memory caching stays available.
+    pub max_bytes: u64,
+}
+
 /// The fully resolved, typed configuration.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
@@ -373,6 +384,8 @@ pub struct Config {
     pub determinism: DeterminismConfig,
     /// `render:` (native).
     pub render: RenderConfig,
+    /// `cache:` (native).
+    pub cache: CacheConfig,
     /// The complete merged document, for dynamic consumers reading keys the
     /// typed family does not name (Reference-tolerant behavior).
     pub raw: Value,
@@ -450,7 +463,7 @@ impl Config {
     /// Serialize the fully merged, closure-relevant document after all
     /// precedence and CLI overlays. Map order is retained because open maps
     /// such as directory aliases are observably ordered; scalar spellings
-    /// have already been resolved to their typed meaning. Two operational
+    /// have already been resolved to their typed meaning. Operational
     /// settings are normalized, each to its own structural marker, because
     /// neither can change a certified byte:
     /// - `render.threads`: §16.7 proves scheduler width inert and explicitly
@@ -459,6 +472,8 @@ impl Config {
     ///   content-addressed store lives, and a verified cache hit is
     ///   bit-identical to a fresh computation, so two cache roots render the
     ///   same frames and must name the same closure.
+    /// - `cache.max_bytes`: retention changes whether a verified layout is
+    ///   reused or recomputed, never its canonical geometry.
     ///
     /// Everything else, the typesetting inputs included (`tex.template`,
     /// `text.font`), is serialized as resolved.
@@ -477,6 +492,7 @@ enum ConfigLocation {
     Root,
     Render,
     Directories,
+    Cache,
     Other,
 }
 
@@ -486,6 +502,7 @@ fn inert_marker(location: ConfigLocation, key: &str) -> Option<&'static str> {
     match (location, key) {
         (ConfigLocation::Render, "threads") => Some("scheduler-width-proven-inert/v1"),
         (ConfigLocation::Directories, "cache") => Some("cache-location-proven-inert/v1"),
+        (ConfigLocation::Cache, "max_bytes") => Some("cache-retention-proven-inert/v1"),
         _ => None,
     }
 }
@@ -519,6 +536,7 @@ fn put_config_value(writer: &mut Writer, value: &Value, location: ConfigLocation
                     let child_location = match (location, key.as_str()) {
                         (ConfigLocation::Root, "render") => ConfigLocation::Render,
                         (ConfigLocation::Root, "directories") => ConfigLocation::Directories,
+                        (ConfigLocation::Root, "cache") => ConfigLocation::Cache,
                         _ => ConfigLocation::Other,
                     };
                     put_config_value(writer, value, child_location);
@@ -652,7 +670,11 @@ impl Cx<'_> {
         match self.lookup(path)? {
             Value::Int(v) => u64::try_from(*v).map_err(|_| ConfigError::Value {
                 path: path.to_owned(),
-                message: format!("{v} is negative; a seed is a non-negative integer"),
+                message: if path == "determinism.seed" {
+                    format!("{v} is negative; a seed is a non-negative integer")
+                } else {
+                    format!("{v} is negative; expected a non-negative integer")
+                },
             }),
             other => Err(Self::type_err(path, "a non-negative integer", other)),
         }

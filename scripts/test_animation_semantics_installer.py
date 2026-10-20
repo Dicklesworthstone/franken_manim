@@ -52,6 +52,7 @@ def make_native():
             self.submobjects = list(children)
             self.data = np.zeros(len(points), dtype=[("point", "f8", 3), ("rgba", "f8", 4)])
             self.data["point"] = np.asarray(points).reshape((-1, 3))
+            self._point_free_anchor = np.zeros(3)
             self.uniforms = {"shading": (0.0, 0.0, 0.0)}
             self.locked_data_keys = set()
             self.locked_uniform_keys = set()
@@ -68,7 +69,26 @@ def make_native():
             return copy.deepcopy(self)
 
         def get_family(self):
-            return [self, *(descendant for child in self for descendant in child.get_family())]
+            return native._family_preorder(self)
+
+        def has_points(self):
+            return len(self.data) > 0
+
+        def get_bounding_box(self):
+            # The fixture stores world-space points directly. A family with
+            # no points keeps its own anchor, not its empty children's boxes.
+            arrays = [member.data["point"] for member in self.get_family() if member.has_points()]
+            if not arrays:
+                return np.repeat(self._point_free_anchor[None, :], 3, axis=0)
+            points = np.concatenate(arrays, axis=0)
+            lower, upper = points.min(axis=0), points.max(axis=0)
+            return np.array([lower, (lower + upper) / 2, upper])
+
+        def get_center(self):
+            return self.get_bounding_box()[1]
+
+        def _set_point_free_anchor(self, center):
+            self._point_free_anchor = np.asarray(center, dtype=float).copy()
 
         def family_members_with_points(self):
             return [member for member in self.get_family() if len(member.data)]
@@ -194,6 +214,8 @@ def make_native():
         "Mobject": Mobject, "_BridgeMobject": Mobject, "VMobject": VMobject, "Surface": Surface,
         "StringMobject": StringMobject, "CameraFrame": CameraFrame,
         "Scene": Scene, "_FMN_ROOT": native, "_FMN_MODULE": native,
+        # Engine-seam types used by the unchanged bootstrap family walk.
+        "_BridgeMobject": Mobject, "_FamilyCycleError": ValueError,
         "_ensure_module": ensure_module,
     })
     source = ast.parse(BOOTSTRAP.read_text(encoding="utf-8"), filename=str(BOOTSTRAP))
@@ -367,6 +389,58 @@ class TransformDispatchTests(unittest.TestCase):
         self.assertIs(source.interpolate(source.copy(), target, 0.5), source)
         self.assertEqual(source.changes, 0)
         np.testing.assert_allclose(source.uniforms["shading"], [0.5, 0.25, 0.125])
+
+    def test_point_free_classification_uses_the_real_bootstrap_family_walk(self):
+        n = self.native
+        empty_leaf = n.Mobject(points=())
+        empty_branch = n.Mobject(empty_leaf, points=())
+        points = n.Mobject(points=((1.0, 2.0, 3.0), (5.0, 8.0, 9.0)))
+        root = n.Mobject(empty_branch, points, empty_leaf, points=())
+        empty_leaf._set_point_free_anchor((100.0, 200.0, 300.0))
+        empty_branch._set_point_free_anchor((-100.0, -200.0, -300.0))
+        self.assertEqual(root.get_family(), [root, empty_branch, empty_leaf, points])
+        self.assertEqual(
+            n._point_free_family_ids(root),
+            {id(empty_branch), id(empty_leaf)},
+        )
+        np.testing.assert_array_equal(
+            root.get_bounding_box(),
+            [[1.0, 2.0, 3.0], [3.0, 5.0, 6.0], [5.0, 8.0, 9.0]],
+        )
+        empty_leaf.submobjects.append(root)
+        with self.assertRaisesRegex(ValueError, "family cycle"):
+            n._point_free_family_ids(root)
+
+    def test_point_free_transform_preserves_anchors_and_runs_the_authored_path(self):
+        n = self.native
+        source = n.Mobject(n.Mobject(points=()), points=())
+        source._set_point_free_anchor((-2.0, 0.0, 1.0))
+        source.submobjects[0]._set_point_free_anchor((2.0, -1.0, 0.0))
+        target = source.copy()
+        target._set_point_free_anchor((2.0, 4.0, 3.0))
+        target.submobjects[0]._set_point_free_anchor((6.0, 3.0, 2.0))
+
+        def curve(start, end, alpha):
+            value = n.straight_path(start, end, alpha)
+            value[..., 1] += 4.0 * alpha * (1.0 - alpha)
+            return value
+
+        transform = n.Transform(
+            source, target, path_func=curve, rate_func=lambda alpha: alpha,
+        )
+        transform.begin()
+        np.testing.assert_array_equal(source.get_center(), [-2.0, 0.0, 1.0])
+        np.testing.assert_array_equal(source.submobjects[0].get_center(), [2.0, -1.0, 0.0])
+        transform.interpolate(0.5)
+        np.testing.assert_array_equal(source.get_center(), [0.0, 3.0, 2.0])
+        np.testing.assert_array_equal(source.submobjects[0].get_center(), [4.0, 2.0, 1.0])
+        np.testing.assert_array_equal(target.get_center(), [2.0, 4.0, 3.0])
+        np.testing.assert_array_equal(target.submobjects[0].get_center(), [6.0, 3.0, 2.0])
+        self.assertTrue(all(not member.has_points() for member in source.get_family()))
+        self.assertTrue(all(member.changes == 0 for member in source.get_family()))
+        transform.finish()
+        np.testing.assert_array_equal(source.get_center(), [2.0, 4.0, 3.0])
+        np.testing.assert_array_equal(source.submobjects[0].get_center(), [6.0, 3.0, 2.0])
 
     def test_locked_fields_and_uniforms_are_preserved(self):
         n = self.native

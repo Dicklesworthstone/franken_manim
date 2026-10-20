@@ -13,6 +13,14 @@ _VIDEO_FLAGS = {
     "--video-bitrate": "video_bitrate",
     "--audio-bitrate": "audio_bitrate",
 }
+_QUALITY_WRITER_OPTIONS = tuple(_VIDEO_FLAGS.values())
+_LIMIT_FLAGS = {
+    "--ffmpeg-timeout": "ffmpeg_timeout",
+    "--ffmpeg-max-log-bytes": "ffmpeg_max_log_bytes",
+    "--ffmpeg-max-artifact-bytes": "ffmpeg_max_artifact_bytes",
+    "--ffmpeg-max-input-bytes": "ffmpeg_max_input_bytes",
+}
+_VIDEO_FLAGS.update(_LIMIT_FLAGS)
 VIDEO_VALUE_FLAGS = frozenset(_VIDEO_FLAGS)
 VIDEO_WRITER_OPTIONS = tuple(_VIDEO_FLAGS.values())
 VIDEO_HELP = """Compressed video quality (fmn-python):
@@ -21,18 +29,33 @@ VIDEO_HELP = """Compressed video quality (fmn-python):
   --tune NAME             One native-validated encoder tune, e.g. animation.
   --video-bitrate BPS     Positive integer bits/second, instead of CRF.
   --audio-bitrate BPS     AAC soundtrack bits/second; video is stream-copied.
+  --ffmpeg-timeout SECONDS       Positive wall-clock allowance per invocation.
+  --ffmpeg-max-log-bytes BYTES    Captured stdout/stderr ceiling per stream.
+  --ffmpeg-max-artifact-bytes N   Encoded/intermediate artifact ceiling.
+  --ffmpeg-max-input-bytes N     Raw-video input ceiling; audio keeps its own cap.
 
 Both --flag value and --flag=value are accepted; each setting is specified once.
-Applies to MP4/MOV, including named batches, --write_all and --subdivide.
-Native outputs refuse these controls; transparent MOV accepts only audio bitrate.
+Video quality applies to MP4/MOV, including named batches, --write_all and --subdivide.
+Native outputs refuse quality controls; transparent MOV accepts audio bitrate and resource limits.
 The shared native
 negotiator rejects software-only controls on hardware encoders and unsupported
 tunes. Omitting these options preserves encoder defaults; no quality or speed
 improvement is inferred from a setting. Actual arguments appear in receipts.
+The ffmpeg watchdog defaults to 24 hours, including scene construction and
+frame rendering. Limits also apply to compressed sound decoding for WAV output.
+Every bound is a positive integer; there is no unlimited sentinel. Video encode,
+audio decode and final mux share the admitted policy, recorded in receipts.
 """
 
 
 def _value(flag: str, text: str):
+    if flag in _LIMIT_FLAGS:
+        if not text or len(text) > 20 or any(char not in "0123456789" for char in text):
+            raise ValueError(f"{flag} requires a positive unsigned decimal integer")
+        value = int(text)
+        if not 0 < value <= (1 << 64) - 1:
+            raise ValueError(f"{flag} must lie between 1 and {(1 << 64) - 1}")
+        return value
     if flag in {"--crf", "--video-bitrate", "--audio-bitrate"}:
         # Bound before int(): huge decimal strings are not a parser workload.
         if not text or len(text) > 10 or any(char not in "0123456789" for char in text):
@@ -80,11 +103,14 @@ def take_video_options(arguments: list[str], value_flags=frozenset()):
 
 def validate_video_format(format: str, options, *, transparent: bool = False) -> None:
     """Reject explicitly ignored controls before console source execution."""
-    if not any(options.get(name) is not None for name in VIDEO_WRITER_OPTIONS):
+    if any(options.get(name) is not None for name in _LIMIT_FLAGS.values()):
+        if format not in {"mp4", "mov", "wav"}:
+            raise ValueError("ffmpeg resource controls require mp4, mov, or wav output")
+    if not any(options.get(name) is not None for name in _QUALITY_WRITER_OPTIONS):
         return
     if format not in {"mp4", "mov"}:
         raise ValueError("video quality controls require mp4 or mov output")
-    if transparent and any(options.get(name) is not None for name in VIDEO_WRITER_OPTIONS
+    if transparent and any(options.get(name) is not None for name in _QUALITY_WRITER_OPTIONS
                            if name != "audio_bitrate"):
         raise ValueError("video quality controls require opaque MP4/MOV, not transparent MOV")
 
@@ -101,5 +127,6 @@ def validate_writer_video_format(writer, format: str) -> None:
     # Video parsing happens ONCE in native code, with ownership checks around
     # authored getters. Do not invoke those getters a second time here.
     if format not in {"mp4", "mov"}:
+        names = _QUALITY_WRITER_OPTIONS if format == "wav" else VIDEO_WRITER_OPTIONS
         validate_video_format(format, {name: getattr(writer, name, None)
-                                       for name in VIDEO_WRITER_OPTIONS})
+                                       for name in names})

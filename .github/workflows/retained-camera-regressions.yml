@@ -1,0 +1,140 @@
+name: Retained camera and native pipeline regressions
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/fmn-render/**"
+      - "crates/fmn/src/rendering/**"
+      - "crates/fmn/tests/native_camera_pipeline.rs"
+      - "crates/fmn/tests/native_cpu_pipeline.rs"
+      - "crates/fmn/tests/compiled_ranges.rs"
+      - "crates/fmn-cli/src/bundle_audio.rs"
+      - "crates/fmn-cli/src/main.rs"
+      - "crates/fmn-cli/tests/narrated_bundle_cli.rs"
+      - "rust-toolchain.toml"
+      - "Cargo.lock"
+      - ".github/workflows/retained-camera-regressions.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: retained-camera-regressions-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  CARGO_TERM_COLOR: never
+  CARGO_BUILD_JOBS: "2"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  acceptance:
+    name: ${{ matrix.suite }} camera acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [lumen, native]
+    env:
+      CARGO_TARGET_DIR: target/camera-acceptance-${{ matrix.suite }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install repository-pinned toolchain
+        run: rustup show active-toolchain
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/camera-acceptance-${{ matrix.suite }}
+          key: camera-acceptance-${{ matrix.suite }}-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Record exact tested source
+        run: |
+          mkdir -p /tmp/camera-acceptance
+          git rev-parse HEAD | tee /tmp/camera-acceptance/source-sha.txt
+          git diff --check
+      - name: Execute retained camera cache, invalidation, and lifetime tests
+        if: matrix.suite == 'lumen'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p fmn-render --lib retained:: -- --nocapture \
+            2>&1 | tee /tmp/camera-acceptance/retained.log
+          grep -E 'test result: ok\. [1-9][0-9]* passed' /tmp/camera-acceptance/retained.log
+      - name: Execute native worker and real pipeline tests
+        if: matrix.suite == 'native'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p fmn --lib rendering::pipeline::handoff_tests -- --nocapture \
+            2>&1 | tee /tmp/camera-acceptance/workers.log
+          grep -E 'test result: ok\. [1-9][0-9]* passed' /tmp/camera-acceptance/workers.log
+          cargo test --locked -p fmn --test native_camera_pipeline --test native_cpu_pipeline \
+            2>&1 | tee /tmp/camera-acceptance/pipelines.log
+      - name: Execute exact compiled excerpt and PCM boundary tests
+        if: ${{ !cancelled() && matrix.suite == 'native' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p fmn --lib rendering::compiled::tests \
+            2>&1 | tee /tmp/camera-acceptance/compiled-pcm.log
+          cargo test --locked -p fmn --test compiled_ranges \
+            2>&1 | tee /tmp/camera-acceptance/compiled-ranges.log
+      - name: Execute standalone narrated WAV and subdivision tests
+        if: ${{ !cancelled() && matrix.suite == 'native' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p fmn-cli --features cli,batch --bin fmn bundle_audio::tests \
+            2>&1 | tee /tmp/camera-acceptance/cli-bundle-audio.log
+      - name: Install optional video tool for required media acceptance
+        if: ${{ !cancelled() && matrix.suite == 'native' }}
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install --yes --no-install-recommends ffmpeg
+          ffmpeg -version 2>&1 | tee /tmp/camera-acceptance/ffmpeg-version.log
+      - name: Execute shipping binary and real narrated video round trips
+        if: ${{ !cancelled() && matrix.suite == 'native' }}
+        shell: bash
+        env:
+          FMN_REQUIRE_FULL_INPUTS: "1"
+        run: |
+          set -euo pipefail
+          cargo test --locked -p fmn-cli --features cli,batch --test narrated_bundle_cli \
+            2>&1 | tee /tmp/camera-acceptance/cli-narrated-media.log
+      - name: Check affected targets with warnings denied
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          SUITE: ${{ matrix.suite }}
+        run: |
+          set -euo pipefail
+          if [ "$SUITE" = lumen ]; then
+            cargo clippy --locked -p fmn-render --lib --tests -- -D warnings \
+              2>&1 | tee /tmp/camera-acceptance/clippy.log
+          else
+            cargo clippy --locked -p fmn --lib --test native_camera_pipeline --test native_cpu_pipeline --test compiled_ranges -- -D warnings \
+              2>&1 | tee /tmp/camera-acceptance/clippy.log
+            cargo clippy --locked -p fmn-cli --features cli,batch --bin fmn -- -D warnings \
+              2>&1 | tee /tmp/camera-acceptance/cli-clippy.log
+          fi
+      - name: Preserve test evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: camera-acceptance-${{ matrix.suite }}-${{ github.sha }}
+          path: /tmp/camera-acceptance/
+          if-no-files-found: error
+          retention-days: 7

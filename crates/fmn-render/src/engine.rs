@@ -2154,7 +2154,7 @@ impl<'a> FrameJob<'a> {
         for tx in 0..self.cols {
             let t = band * self.cols as usize + tx as usize;
             worker.tile_classes[tx as usize] =
-                if CACHED && cache.is_some_and(|cache| cache.work(t) == Some(TileWork::Reuse)) {
+                if CACHED && cache.is_some_and(|cache| cache.work(t) == Some(&TileWork::Reuse)) {
                     CoverageClass::Empty
                 } else if t < self.binning.tile_count() {
                     self.initial_tile_class(t)
@@ -2177,7 +2177,7 @@ impl<'a> FrameJob<'a> {
                 }
                 let w = (x_hi - x_lo) as usize;
                 let t = band * self.cols as usize + tx as usize;
-                if CACHED && cache.is_some_and(|cache| cache.work(t) == Some(TileWork::Reuse)) {
+                if CACHED && cache.is_some_and(|cache| cache.work(t) == Some(&TileWork::Reuse)) {
                     // The typed, bounds-checked serial restore ran before
                     // worker fan-out. A hit's only worker action is to skip.
                     continue;
@@ -2252,7 +2252,7 @@ impl<'a> FrameJob<'a> {
             .enumerate()
         {
             let tile = band * self.cols as usize + tx;
-            if !CACHED || cache.is_none_or(|cache| cache.work(tile) != Some(TileWork::Reuse)) {
+            if !CACHED || cache.is_none_or(|cache| cache.work(tile) != Some(&TileWork::Reuse)) {
                 worker.stats.count_tile(*class);
             }
         }
@@ -3766,6 +3766,51 @@ mod tests {
             moved.cache.misses > 0,
             "movement reused stale affected tiles"
         );
+    }
+
+    #[test]
+    fn bounded_exact_keys_fall_back_to_identical_pixels_at_every_schedule() {
+        let cfg = FrameConfig {
+            viewport: Viewport {
+                width: 109,
+                height: 107,
+            },
+            ..config()
+        };
+        let tiling = default_tiling();
+        for budget in [0, 176, 64 * 1024] {
+            let (mut stage, mobs) = corpus();
+            let mut plan = RenderPlan::new();
+            let mut arena = FrameArena::new();
+            let mut cache = PixelTileCache::with_key_budget_bytes(budget);
+            let layout = cfg.layout().expect("layout");
+            let mut frame = FrameBuffer::new(layout.clone());
+            for (index, threads) in [1, 4, 16].into_iter().enumerate() {
+                if index == 2 {
+                    stage.shift(mobs[0], [24.0, 0.0, 0.0]);
+                }
+                plan.sync(&stage, 0).expect("valid frame");
+                let mono = MonoTable::build(&plan, cfg.map).expect("bounded monotone table");
+                let binning =
+                    Binning::build(&plan, cfg.viewport, tiling, cfg.map).expect("bounded binning");
+                let stats = FrameJob::new_in(&mut arena, &plan, &mono, &binning, cfg)
+                    .expect("matching cached artifacts")
+                    .render_into_cached(threads, &mut frame, 0, &mut cache)
+                    .expect("bounded cached render");
+                let mut cold = FrameBuffer::new(layout.clone());
+                FrameJob::new(&plan, &mono, &binning, cfg)
+                    .expect("matching cold artifacts")
+                    .render_into(1, &mut cold)
+                    .expect("cold render");
+                assert_frames_equal(&frame, &cold, "key-budget fallback changed raw pixels");
+                assert!(cache.retained_key_bytes() <= budget);
+                if budget == 0 {
+                    assert_eq!(stats.cache.hits, 0);
+                    assert!(stats.cache.poisoned > 0);
+                    assert!(cache.is_empty());
+                }
+            }
+        }
     }
 
     #[test]

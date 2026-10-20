@@ -13,7 +13,9 @@ use fmn_config::{Config, PackRegistry};
 use fmn_platform::clock::Clock;
 use fmn_platform::fs::FileSystem;
 
-use crate::{TexEngine, TexError, TypesetCacheStats, TypesetPreflightStats};
+use crate::{
+    TexEngine, TexError, TypesetCacheMaintenance, TypesetCacheStats, TypesetPreflightStats,
+};
 
 /// Actual work performed by a session, not part of certified scene identity.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -38,6 +40,10 @@ pub struct TypesetSessionReport {
     /// entries). Nonzero means the store opened but is not caching: each
     /// failure degraded to the memory front and a fresh layout.
     pub persistent_store_errors: u64,
+    /// Configured disk ceiling, absent when persistence is disabled.
+    pub persistent_ceiling_bytes: Option<u64>,
+    /// Best-effort disk retention performed after scene execution.
+    pub maintenance: TypesetCacheMaintenance,
     /// Actual layouts, excluding engine-fingerprint probes. Every request
     /// that neither cache layer served is one layout: the run's misses.
     pub layout_computations: u64,
@@ -81,6 +87,7 @@ struct SegmentAccounting {
 
 struct CacheBinding {
     root: Result<Option<PathBuf>, String>,
+    max_bytes: u64,
     fs: Arc<dyn FileSystem>,
     clock: Arc<dyn Clock>,
 }
@@ -125,6 +132,7 @@ impl TexSession {
         Self {
             cache: Some(CacheBinding {
                 root: cache_root(&config.directories.cache, fs.as_ref()),
+                max_bytes: config.cache.max_bytes,
                 fs,
                 clock,
             }),
@@ -155,7 +163,7 @@ impl TexSession {
         if let Some(binding) = &self.cache {
             let result = open_store(binding).and_then(|store| {
                 engine
-                    .set_cache(Some(&store))
+                    .set_cache_with_ceiling(Some(&store), binding.max_bytes)
                     .map_err(|error| error.to_string())
             });
             if let Err(error) = result {
@@ -163,6 +171,14 @@ impl TexSession {
             }
         }
         Ok(self.engine.get_or_init(|| engine))
+    }
+
+    /// Perform bounded disk retention after scene execution. A shape-only
+    /// scene remains lazy, and storage failures never replace render errors.
+    pub fn maintain_cache(&self) {
+        if let Some(engine) = self.engine.get() {
+            engine.maintain_cache();
+        }
     }
 
     /// Inspect counters without initializing the engine or touching the cache.
@@ -189,6 +205,8 @@ impl TexSession {
             persistent_bytes_written: engine.persistent_bytes_written(),
             persistent_rejected: engine.persistent_rejected_entries(),
             persistent_store_errors: engine.persistent_store_errors(),
+            persistent_ceiling_bytes: engine.persistent_cache_ceiling(),
+            maintenance: engine.cache_maintenance(),
             layout_computations: engine.layout_computations(),
             preflight: engine.preflight_stats(),
             layouts_before_construct: self.segments.before_construct.get(),

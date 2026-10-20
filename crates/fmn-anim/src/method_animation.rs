@@ -56,6 +56,10 @@ impl Animation for MethodAnimation {
         self.transform.effect_signature()
     }
 
+    fn freeze_interpolation(&self) -> Option<crate::pure_frame::FrozenAnimation> {
+        self.transform.freeze_interpolation()
+    }
+
     fn setup(&mut self, stage: &mut Stage) -> Result<(), AnimError> {
         self.transform.setup(stage)
     }

@@ -30,6 +30,7 @@ mod portal_network;
 #[cfg(feature = "gauntlet")]
 pub use portal_console::{
     run_portal_gauntlet_console, run_portal_gauntlet_parallel_batch_checkpoint,
+    run_portal_gauntlet_reference_flags,
 };
 mod portal_playback;
 mod portal_readback;
@@ -561,16 +562,22 @@ impl PortalFrameSession {
         } else {
             PORTAL_MAX_RENDER_FRAMES
         };
-        let max_stream_bytes = frame_bytes
+        let mut max_stream_bytes = frame_bytes
             .checked_mul(max_frames)
             .ok_or_else(|| PyOverflowError::new_err("render stream budget exceeds u64"))?;
+        if let Some(video) = &video {
+            max_stream_bytes = max_stream_bytes.min(video.max_input_bytes);
+        }
         let max_resident_bytes = frame_bytes
             .checked_mul(3)
             .and_then(|bytes| bytes.checked_add(4 * 1024 * 1024))
             .ok_or_else(|| PyOverflowError::new_err("render resident budget exceeds u64"))?;
-        let max_artifact_bytes = max_stream_bytes
+        let mut max_artifact_bytes = max_stream_bytes
             .checked_mul(2)
             .ok_or_else(|| PyOverflowError::new_err("render artifact budget exceeds u64"))?;
+        if let Some(video) = &video {
+            max_artifact_bytes = max_artifact_bytes.min(video.job_limits.max_artifact_bytes);
+        }
         let limits = SinkLimits::new(
             max_frames,
             max_resident_bytes,
@@ -695,6 +702,9 @@ impl PortalFrameSession {
                         fmn_output::NATIVE_ALTERNATIVE,
                     )));
                 }
+                capabilities
+                    .require_video_job(&tool, runner.as_ref(), &video.job)
+                    .map_err(|error| CapabilityError::new_err(error.to_string()))?;
                 let sink = fmn_output::FfmpegSink::new(
                     runner,
                     fmn_output::FfmpegSinkConfig {
@@ -704,7 +714,7 @@ impl PortalFrameSession {
                         audio: None,
                         destination,
                         workdir_root,
-                        job_limits: fmn_output::JobLimits::default(),
+                        job_limits: video.job_limits,
                         first_sequence: 0,
                         limits,
                         profile: None,
@@ -1041,6 +1051,7 @@ struct PyScene {
     render: Arc<Mutex<Option<PortalRenderSession>>>,
     render_invocations: Vec<fmn_output::InvocationReport>,
     render_audio_inputs: Vec<portal_audio::PortalAudioInput>,
+    render_ffmpeg_limits: Option<fmn_output::FfmpegLimitsReport>,
     /// The last render's frame routes (fm-sq8.11).
     render_routes: PortalRoutes,
 }
@@ -1706,6 +1717,7 @@ pub(crate) fn install_pristine_arena(
         owner.engine = Rc::clone(&replacement);
         owner.render_invocations.clear();
         owner.render_audio_inputs.clear();
+        owner.render_ffmpeg_limits = None;
     }
     if let (Some((proxy, _)), Some((old_mob, new_mob))) = (frame, carried) {
         {
@@ -8278,6 +8290,7 @@ fn begin_portal_render(slf: &Bound<'_, PyScene>, request: PortalRenderRequest) -
         _ => None,
     };
     let audio = portal_audio::PortalAudio::from_scene(slf, &format, video.as_ref())?;
+    let ffmpeg_limits = audio.ffmpeg_limits.clone();
     portal_video::check_scene_ownership(slf)?;
     let (session, runtime_config) = PortalRenderSession::new(
         PathBuf::from(destination),
@@ -8316,7 +8329,11 @@ fn begin_portal_render(slf: &Bound<'_, PyScene>, request: PortalRenderRequest) -
         session.abort();
         return Err(error);
     }
-    slf.borrow_mut().render_routes = PortalRoutes::default();
+    {
+        let mut owner = slf.borrow_mut();
+        owner.render_routes = PortalRoutes::default();
+        owner.render_ffmpeg_limits = ffmpeg_limits;
+    }
     *render = Some(session);
     Ok(())
 }
@@ -8336,6 +8353,7 @@ impl PyScene {
             render: Arc::new(Mutex::new(None)),
             render_invocations: Vec::new(),
             render_audio_inputs: Vec::new(),
+            render_ffmpeg_limits: None,
             render_routes: PortalRoutes::default(),
         })
     }
@@ -8588,6 +8606,23 @@ impl PyScene {
         portal_audio::input_facts(slf)
     }
 
+    /// Admitted resource policy for the current or most recent output generation.
+    #[getter]
+    fn _render_ffmpeg_limits(slf: &Bound<'_, Self>) -> PyResult<Option<Py<PyDict>>> {
+        let owner = slf.borrow();
+        let Some(limits) = &owner.render_ffmpeg_limits else {
+            return Ok(None);
+        };
+        let fact = PyDict::new(slf.py());
+        fact.set_item("timeout_seconds", limits.timeout.as_secs())?;
+        fact.set_item("timeout_nanoseconds", limits.timeout.subsec_nanos())?;
+        fact.set_item("max_log_bytes", limits.max_log_bytes)?;
+        fact.set_item("max_artifact_bytes", limits.max_artifact_bytes)?;
+        fact.set_item("max_input_bytes", limits.max_input_bytes)?;
+        fact.set_item("keep_workdir", limits.keep_workdir)?;
+        Ok(Some(fact.unbind()))
+    }
+
     #[getter]
     fn _render_invocations(slf: &Bound<'_, Self>) -> PyResult<Py<PyList>> {
         let invocations = PyList::empty(slf.py());
@@ -8626,6 +8661,15 @@ impl PyScene {
             image.set_item("policy_version", provenance.native_image.policy_version)?;
             fact.set_item("native_image", image)?;
             fact.set_item("encoder", &provenance.encoder)?;
+            if let Some(probe) = &provenance.hardware_encoder_probe {
+                let observation = PyDict::new(slf.py());
+                observation.set_item("encoder", &probe.encoder)?;
+                observation.set_item("available", probe.available)?;
+                observation.set_item("detail", &probe.detail)?;
+                fact.set_item("hardware_encoder_probe", observation)?;
+            } else {
+                fact.set_item("hardware_encoder_probe", slf.py().None())?;
+            }
             fact.set_item("argv", &provenance.argv)?;
             invocations.append(fact)?;
         }
@@ -11900,6 +11944,109 @@ fn _resolved_camera<'py>(
     Ok(out)
 }
 
+fn config_value_to_python(py: Python<'_>, value: &fmn_config::yaml::Value) -> PyResult<Py<PyAny>> {
+    use fmn_config::yaml::Value;
+    use pyo3::IntoPyObjectExt;
+    match value {
+        Value::Null => Ok(py.None()),
+        Value::Bool(value) => value.into_py_any(py),
+        Value::Int(value) => value.into_py_any(py),
+        Value::Float(value) => value.into_py_any(py),
+        Value::Str(value) => value.into_py_any(py),
+        Value::Map(entries) => {
+            let out = PyDict::new(py);
+            for (key, value) in entries {
+                out.set_item(key, config_value_to_python(py, value)?)?;
+            }
+            Ok(out.into_any().unbind())
+        }
+    }
+}
+
+/// Resolve frozen console documents with the one native YAML reader. Workers
+/// receive complete values and authored overrides as data before source import.
+#[pyfunction]
+#[pyo3(signature = (custom_config = None, explicit_config = None))]
+fn _resolved_portal_config<'py>(
+    py: Python<'py>,
+    custom_config: Option<&str>,
+    explicit_config: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let layers: Vec<_> = [
+        ("custom_config.yml", custom_config),
+        ("--config_file", explicit_config),
+    ]
+    .into_iter()
+    .filter_map(|(name, text)| text.map(|text| fmn_config::config::Layer { name, text }))
+    .collect();
+    let resolved = fmn_config::Config::resolve(&layers, None)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    let values = config_value_to_python(py, &resolved.config.raw)?
+        .into_bound(py)
+        .cast_into::<PyDict>()?;
+    let camera = values
+        .get_item("camera")?
+        .ok_or_else(|| PyValueError::new_err("resolved camera configuration is absent"))?
+        .cast_into::<PyDict>()?;
+    camera.set_item("resolution", resolved.config.camera.resolution)?;
+    camera.set_item(
+        "background_color",
+        _portal_cli_color(&resolved.config.camera.background_color)
+            .map_err(|error| PyValueError::new_err(format!("camera.background_color: {error}")))?,
+    )?;
+    let resolutions = PyDict::new(py);
+    resolutions.set_item("low", resolved.config.resolution_options.low)?;
+    resolutions.set_item("med", resolved.config.resolution_options.med)?;
+    resolutions.set_item("high", resolved.config.resolution_options.high)?;
+    resolutions.set_item("4k", resolved.config.resolution_options.uhd)?;
+    values.set_item("resolution_options", resolutions)?;
+    let mut overrides = fmn_config::yaml::Value::Map(Vec::new());
+    let mut explicit_overrides = fmn_config::yaml::Value::Map(Vec::new());
+    for layer in &layers {
+        let (document, _) = fmn_config::yaml::parse(layer.text)
+            .map_err(|error| PyValueError::new_err(format!("{}: {error}", layer.name)))?;
+        if layer.name == "--config_file" {
+            explicit_overrides = document.clone();
+        }
+        overrides = fmn_config::yaml::merge(overrides, document);
+    }
+    let out = PyDict::new(py);
+    out.set_item("values", values)?;
+    out.set_item("overrides", config_value_to_python(py, &overrides)?)?;
+    out.set_item(
+        "explicit_overrides",
+        config_value_to_python(py, &explicit_overrides)?,
+    )?;
+    out.set_item(
+        "warnings",
+        resolved
+            .warnings
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+    )?;
+    Ok(out)
+}
+
+/// Reference CLI color spelling over SVG's keyword table and core hex parsing.
+#[pyfunction]
+fn _portal_cli_color(value: &str) -> PyResult<String> {
+    if value.len() > 128 {
+        return Err(PyValueError::new_err("--color exceeds 128 UTF-8 bytes"));
+    }
+    let value = value.trim();
+    let color = if value.starts_with('#') {
+        fmn_core::color::Srgb::from_hex(value).ok()
+    } else {
+        fmn_library::svg::named_color(value)
+    };
+    color.map(fmn_core::color::Srgb::to_hex).ok_or_else(|| {
+        PyValueError::new_err(format!(
+            "invalid --color {value:?}; use a CSS color name, #RGB, or #RRGGBB"
+        ))
+    })
+}
+
 // CPython's `subtype_traverse` skips visiting an instance's heap type when
 // the nearest non-Python base is itself a heap type with a traverse, trusting
 // that base to visit `Py_TYPE(self)`: since CPython 3.9, heap types visit
@@ -12023,6 +12170,8 @@ fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<(
     module.add_function(wrap_pyfunction!(_composition_intervals, module)?)?;
     module.add_function(wrap_pyfunction!(_resolved_directories, module)?)?;
     module.add_function(wrap_pyfunction!(_resolved_camera, module)?)?;
+    module.add_function(wrap_pyfunction!(_resolved_portal_config, module)?)?;
+    module.add_function(wrap_pyfunction!(_portal_cli_color, module)?)?;
     module.add_function(wrap_pyfunction!(
         portal_assignment::_linear_sum_assignment,
         module

@@ -110,6 +110,41 @@ the preflight's request count, workers and wall time. These are diagnostics,
 never manifest inputs: a warm cache renders the same certified bits as a cold
 one.
 
+### Bounded typesetting retention
+
+The typesetting namespace retains at most 1 GiB by default after a scene run.
+Change the ceiling in the ordinary typed configuration layers:
+
+```yaml
+cache:
+  max_bytes: 268435456
+```
+
+This example retains 256 MiB of entry envelopes. `max_bytes: 0` evicts all
+unpinned disk entries while keeping the engine's bounded memory cache available.
+The policy applies only to the typesetting namespace, not replay journals or
+other cache namespaces. `fmn doctor` reports the resolved ceiling and the
+current namespace's stored envelope bytes. Its inspection reads no payloads
+and creates no directories, stamps, indexes, or locks. The scan is bounded
+to 4096 shard/object entries; unsafe paths or a larger inventory report an
+unknown byte count with a warning instead of an unbounded scan.
+
+Maintenance runs after native scene execution and at the Python scene lifecycle
+boundary, outside individual formula lookups. It uses the store's nonblocking
+maintenance lock and least-recently-used eviction. A busy maintenance lock is
+skipped, pinned entries stay available, and a concurrent writer may temporarily
+take usage above the ceiling until the next pass. Storage refusals are reported
+without replacing a successful render or its original error.
+
+Render diagnostics include the configured ceiling and a `maintenance` record
+with attempts, evicted entries and bytes, the last observed retained byte count,
+lock and pin skips, and nonfatal errors. `retained_bytes: null` means no successful
+pass has measured usage; zero means a pass observed no retained entry bytes.
+Changing the ceiling, like changing the cache directory, does not change
+certified scene identity or canonical layout/frame bytes. Capability-injected
+Rust hosts can use `TexEngine::set_cache_with_ceiling` and call
+`TexEngine::maintain_cache` at their own render boundary.
+
 ## Config file locations
 
 The CLI first looks for one optional per-user config, using the native platform

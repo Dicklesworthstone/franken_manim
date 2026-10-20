@@ -8457,7 +8457,7 @@ class StringMobject(SVGMobject, _abc.ABC):
     def find_spans_by_selector(self, selector):
         def one(value):
             if isinstance(value, str):
-                return [match.span() for match in _re.finditer(_re.escape(value), self.string)]
+                return _string_find_spans(self.string, value)
             if isinstance(value, _re.Pattern):
                 return [match.span() for match in value.finditer(self.string)]
             if (
@@ -8564,7 +8564,19 @@ class StringMobject(SVGMobject, _abc.ABC):
         _refuse_render_twice("build_groups")
 
     def substr_to_path_count(self, substr):
-        return len(substr)
+        if not isinstance(substr, str):
+            raise TypeError("substring must be a string")
+        selections = self._selected_string_ordinals(substr)
+        for ordinals in selections:
+            if ordinals:
+                # Blank native glyphs retain an ordinal but have no SVG path.
+                return sum(
+                    bool(self._string_submobject(ordinal).family_members_with_points())
+                    for ordinal in ordinals
+                )
+        if selections:
+            return 0
+        return sum(not char.isspace() for char in substr)
 
     def _byte_span(self, span):
         start, end = span
@@ -8583,22 +8595,14 @@ class StringMobject(SVGMobject, _abc.ABC):
         return current
 
     def get_submob_indices_list_by_span(self, arbitrary_span):
-        start, end = self._byte_span(arbitrary_span)
-        return [
-            ordinal
-            for ordinal, (sub_start, sub_end) in enumerate(self._string_sub_spans)
-            if start <= sub_start and sub_end <= end
-        ]
+        return _string_span_selections(
+            self.string, self._string_sub_spans, [self._byte_span(arbitrary_span)]
+        )[0]
 
     def _selected_string_ordinals(self, selector):
-        return [
-            [
-                ordinal
-                for ordinal, (sub_start, sub_end) in enumerate(self._string_sub_spans)
-                if start <= sub_start and sub_end <= end
-            ]
-            for start, end in self._selector_byte_spans(selector)
-        ]
+        return _string_span_selections(
+            self.string, self._string_sub_spans, self._selector_byte_spans(selector)
+        )
 
     def get_submob_indices_lists_by_selector(self, selector):
         return [
@@ -15533,6 +15537,7 @@ class Scene(_SceneCore):
     def __init__(self, *args, **kwargs):
         self.args = args
         self.kwargs = kwargs
+        scene_defaults = _portal_configuration_section("scene")
         # Reference Scene.__init__: deterministic scenes are the default.
         # The compatibility portal seeds the two RNG modules source-unedited
         # scenes actually call; engine-owned randomness remains Marionette's
@@ -15584,7 +15589,7 @@ class Scene(_SceneCore):
         self.presenter_mode = bool(kwargs.get("presenter_mode", False))
         self.hold_on_wait = self.presenter_mode
         self.preview_while_skipping = bool(
-            kwargs.get("preview_while_skipping", True)
+            kwargs.get("preview_while_skipping", scene_defaults.get("preview_while_skipping", True))
         )
         self.quit_interaction = False
         self.skip_animations = bool(kwargs.get("skip_animations", False))
@@ -15597,15 +15602,16 @@ class Scene(_SceneCore):
         if self.start_at_animation_number is not None:
             self.skip_animations = True
         self.show_animation_progress = bool(
-            kwargs.get("show_animation_progress", False)
+            kwargs.get("show_animation_progress", scene_defaults.get("show_animation_progress", False))
         )
         self.always_update_mobjects = bool(
             kwargs.get("always_update_mobjects", False)
         )
         self.default_wait_time = float(
-            kwargs.get("default_wait_time", type(self).default_wait_time)
+            kwargs.get("default_wait_time", scene_defaults.get("default_wait_time", type(self).default_wait_time)
+                       if type(self).default_wait_time == Scene.default_wait_time else type(self).default_wait_time)
         )
-        self.leave_progress_bars = bool(kwargs.get("leave_progress_bars", False))
+        self.leave_progress_bars = bool(kwargs.get("leave_progress_bars", scene_defaults.get("leave_progress_bars", False)))
         # Reference Scene.__init__ merge: manim_config.camera (the pinned
         # defaults plus the cwd custom_config.yml, resolved natively), then
         # class default_camera_config, then the constructor camera_config.
@@ -15619,20 +15625,15 @@ class Scene(_SceneCore):
         merged.update(type(self).default_camera_config)
         merged.update(camera_config or {})
         self.camera_config = merged
-        # Reference Scene.__init__ merge: class default_file_writer_config,
-        # then constructor file_writer_config. SceneFileWriter records
-        # knobs without mkdir or ffmpeg.
+        # Reference order: configured writer defaults, class defaults, then
+        # constructor input. This records knobs without output I/O.
         file_writer_config = kwargs.get("file_writer_config", None)
-        if file_writer_config is None:
-            self.file_writer_config = dict(
-                type(self).default_file_writer_config
-            )
-        elif not isinstance(file_writer_config, dict):
+        if file_writer_config is not None and not isinstance(file_writer_config, dict):
             raise TypeError("Scene file_writer_config must be a dict")
-        else:
-            merged = dict(type(self).default_file_writer_config)
-            merged.update(file_writer_config)
-            self.file_writer_config = merged
+        merged = _portal_configuration_section("file_writer")
+        merged.update(type(self).default_file_writer_config)
+        merged.update(file_writer_config or {})
+        self.file_writer_config = merged
         self.file_writer = SceneFileWriter(self, **self.file_writer_config)
 
     @property
@@ -19976,8 +19977,8 @@ class TransformMatchingStrings(_NativeAnimation):
     sequences (``difflib.SequenceMatcher``, ``autojunk=False`` — pure
     deterministic sequence data), the pinned Reference's matching-blocks
     discipline: a glyph pairs only inside a genuinely shared substring run.
-    ``TransformMatchingTex`` opts back into bare key equality, because Tex
-    span parts are semantic isolate units rather than glyphs."""
+    ``TransformMatchingTex`` shares the same block matching, including
+    additive pinned keys and explicit source-span renames."""
 
     _native_kind = "transform_matching_strings"
     _target_attr = "target_mobject"
@@ -20179,7 +20180,7 @@ class TransformMatchingStrings(_NativeAnimation):
 
 class TransformMatchingTex(TransformMatchingStrings):
     _native_kind = "transform_matching_tex"
-    _match_by_blocks = False
+    _match_by_blocks = True
 
 
 class FadeInFromPoint(FadeIn):
@@ -21118,6 +21119,15 @@ class SceneFileWriter:
         gamma=1.0,
         **kwargs,
     ):
+        # The typed file_writer layer carries the same explicit native encode
+        # controls as the console. Retain their original values: native video
+        # negotiation owns type/range/codec validation, including CRF zero,
+        # optional None, and the refusal of lossy numeric conversions.
+        encode_options = {
+            name: kwargs.pop(name)
+            for name in ("video_crf", "video_preset", "video_tune", "video_bitrate", "audio_bitrate")
+            if name in kwargs
+        }
         if kwargs:
             raise TypeError(
                 "unexpected keyword arguments: " + ", ".join(sorted(kwargs))
@@ -21144,6 +21154,8 @@ class SceneFileWriter:
         self.pixel_format = str(pixel_format)
         self.saturation = float(saturation)
         self.gamma = float(gamma)
+        for name, value in encode_options.items():
+            setattr(self, name, value)
         self.image_file_path = self.get_image_file_path()
         self.movie_file_path = self.get_movie_file_path()
 
@@ -24179,11 +24191,18 @@ def _cwd_custom_config():
     return payload.decode("utf-8")
 
 
+def _portal_configuration_section(name):
+    if vars(_FMN_ROOT).get("_portal_cli_configuration") is None:
+        return {}
+    # The scoped live mapping also observes authored import-time edits.
+    return dict(_FMN_ROOT.manim_config.get(name, {}))
+
+
 def _reference_camera_layer():
     # The Reference's first Scene camera layer, manim_config.camera: resolution,
     # fps and background from default_config.yml plus the cwd custom_config.yml,
     # through the same typed native resolution standalone fmn uses.
-    camera = _FMN_ROOT._resolved_camera(_cwd_custom_config())
+    camera = _portal_configuration_section("camera") or _FMN_ROOT._resolved_camera(_cwd_custom_config())
     return {
         "resolution": tuple(camera["resolution"]),
         "fps": int(camera["fps"]),
@@ -24405,7 +24424,8 @@ def _install_config_module():
             ("uhd", "4k"),
         ):
             if getattr(args, flag):
-                return ast.literal_eval(resolution_options[key])
+                value = resolution_options[key]
+                return ast.literal_eval(value) if isinstance(value, str) else tuple(value)
         return None
 
     def load_yaml(file_path):
@@ -24477,6 +24497,7 @@ def _install_config_module():
         # the one native config reader (no PyYAML). The camera section is
         # the layer Scene's camera merges (fm-e661).
         pinned = _pinned_manim_config()
+        resolved = _FMN_ROOT._resolved_portal_config(_cwd_custom_config())["values"]
         sections = {
             name: dict(vars(getattr(pinned, name)))
             for name in ("sizes", "key_bindings", "vmobject", "mobject", "text", "tex")
@@ -24485,9 +24506,10 @@ def _install_config_module():
             {
                 **sections,
                 "colors": dict(pinned.colors),
-                "camera": _reference_camera_layer(),
-                "directories": _FMN_ROOT._resolved_directories(_cwd_custom_config()),
-                "log_level": "INFO",
+                "camera": resolved["camera"],
+                "directories": resolved["directories"],
+                "cache": resolved.get("cache", {}),
+                "log_level": resolved["log_level"],
             }
         )
         update_directory_config(config)
@@ -24591,7 +24613,9 @@ def _portal_cli_help():
        fmn-python [--robot] --construct-only SOURCE.py [SCENE]
        fmn-python [--robot] SOURCE.py [SCENE] [--format png|png_sequence|gif|y4m|wav|svg|mp4|mov]
                   [--resolution WIDTHxHEIGHT] [--fps FPS] [--threads N]
-                  [--video_dir PATH]
+                  [--video_dir DIRECTORY | --output PATH] [--file_name NAME]
+                  [-w | -i] [-l | -m | --hd | --uhd] [-q]
+                  [-c COLOR] [--config_file PATH]
        fmn-python studio SOURCE.py [SCENE]
 
 The wheel renders standard-mode final-state PNGs, PNG sequences, GIF and y4m through the
@@ -24599,9 +24623,10 @@ same retained Lumen CPU renderer and ordered Reel sink as the native front
 door. WAV output mixes Scene.add_sound cues with the native Reel mixer.
 MP4 and MOV use the optional governed ffmpeg encoder and mux that same native
 soundtrack after scene execution. Encoded video is always uncertified.
-Certified output, opener flags, write-all, and Studio
-remain precise capability refusals until their complete contracts are
-connected."""
+Named batches and partial playback use the same native render sessions.
+Configuration files and CSS background colors are supported in standard mode;
+unconnected configuration defaults and interactive file-render flags produce
+named capability refusals."""
 
 
 def _portal_cli_scene_types(source):
@@ -24630,19 +24655,24 @@ def _portal_cli_scene_types(source):
 
 
 def _portal_cli_render_arguments(arguments):
-    """Parse the deliberately narrow, actually shipped portal render surface."""
+    """Resolve the Reference's render flags and the portal's output options."""
 
     import os as _os
     import sys as _sys
 
     values = {
-        "format": "png_sequence",
-        "resolution": "1920x1080",
+        "format": None,
+        "resolution": None,
         # None: the scene camera's fps (manim_config.camera, then the class
         # default_camera_config), as the Reference resolves it without --fps.
         "fps": None,
         "threads": str(max(1, min(_os.cpu_count() or 1, 96))),
         "video_dir": None,
+        "output": None,
+        "file_name": None,
+        "config_file": None,
+        "color": None,
+        "quiet": False,
         "vcodec": None,
         "pix_fmt": None,
         "ffmpeg_bin": None,
@@ -24650,11 +24680,32 @@ def _portal_cli_render_arguments(arguments):
         "reproducible": False,
     }
     positionals = []
-    value_flags = ("--format", "--resolution", "--fps", "--threads", "--video_dir",
-                   "--vcodec", "--pix_fmt", "--ffmpeg_bin")
+    value_flags = {name: name[2:] for name in (
+        "--format", "--resolution", "--fps", "--threads", "--video_dir",
+        "--output", "--file_name", "--vcodec", "--pix_fmt", "--ffmpeg_bin",
+        "--config_file", "--color",
+    )}
+    value_flags["-r"] = "resolution"
+    value_flags["-c"] = "color"
+    quality_flags = {
+        "-l": "low", "--low_quality": "low", "-m": "med", "--medium_quality": "med",
+        "--hd": "high", "--uhd": "4k",
+    }
+    qualities = set()
+    write_file = gif = False
     index = 0
     while index < len(arguments):
         argument = arguments[index]
+        if argument in quality_flags:
+            qualities.add(quality_flags[argument])
+            index += 1
+            continue
+        if argument in ("-w", "--write_file", "-i", "--gif", "-q", "--quiet"):
+            write_file |= argument in ("-w", "--write_file")
+            gif |= argument in ("-i", "--gif")
+            values["quiet"] |= argument in ("-q", "--quiet")
+            index += 1
+            continue
         if argument in ("--transparent", "-t"):
             if values["transparent"]:
                 raise ValueError("--transparent/-t must not be repeated")
@@ -24672,14 +24723,19 @@ def _portal_cli_render_arguments(arguments):
             values["reproducible"] = True
             index += 1
             continue
-        if argument in ("-o", "-so", "--write_all", "--autoreload"):
+        if argument in ("-p", "--presenter_mode", "-f", "--full_screen", "-e", "--embed") or argument.startswith("--embed="):
+            raise RuntimeError(
+                f"CAPABILITY: {argument.partition('=')[0]} requires an interactive window or "
+                "embedded console; use fmn-python studio SOURCE.py SCENE"
+            )
+        if argument in ("-o", "-so", "--open", "--finder", "--write_all", "--autoreload"):
             raise RuntimeError(
                 f"CAPABILITY: {argument} is not connected in the Python portal"
             )
         if argument in value_flags:
             if index + 1 >= len(arguments):
                 raise ValueError(f"{argument} requires a value")
-            values[argument[2:]] = arguments[index + 1]
+            values[value_flags[argument]] = arguments[index + 1]
             index += 2
             continue
         if argument.startswith("--") and "=" in argument:
@@ -24687,7 +24743,7 @@ def _portal_cli_render_arguments(arguments):
             if name in value_flags:
                 if not value:
                     raise ValueError(f"{name} requires a value")
-                values[name[2:]] = value
+                values[value_flags[name]] = value
                 index += 1
                 continue
         if argument.startswith("-"):
@@ -24695,6 +24751,20 @@ def _portal_cli_render_arguments(arguments):
         positionals.append(argument)
         index += 1
 
+    if values["format"] is None:
+        values["format"] = (
+            "mov" if values["transparent"] and (write_file or gif)
+            else "gif" if gif else "mp4" if write_file else "png_sequence"
+        )
+    elif gif and values["format"] != ("mov" if values["transparent"] else "gif"):
+        raise ValueError("--gif/-i conflicts with the explicit --format")
+    values["_resolution_explicit"] = values["resolution"] is not None
+    values["_quality"] = next((name for name in ("low", "med", "high", "4k") if name in qualities), None)
+    if values["resolution"] is None:
+        # config.py:get_resolution_from_args checks these booleans in this
+        # order, independently of argv order. Quality changes resolution only.
+        resolutions = {"low": "854x480", "med": "1280x720", "high": "1920x1080", "4k": "3840x2160"}
+        values["resolution"] = next((size for name, size in resolutions.items() if name in qualities), "1920x1080")
     if values["format"] not in ("png", "png_sequence", "gif", "y4m", "wav", "svg", "mp4", "mov"):
         raise RuntimeError(
             f"CAPABILITY: portal output format {values['format']!r} is not connected; "

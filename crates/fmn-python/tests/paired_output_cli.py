@@ -54,7 +54,8 @@ class B(A):
         argv = ["fmn-python", "--robot", str(self.source), *selectors,
                 "--format", format, "--resolution", "96x54", "--fps", "8", "--threads", "1"]
         if destination is not None:
-            argv += ["--video_dir", str(destination)]
+            output_flag = "--video_dir" if len(selectors) > 1 or any(value in {"-a", "--write_all"} for value in selectors) else "--output"
+            argv += [output_flag, str(destination)]
         if paired:
             argv.append("--save-last-frame")
         argv += list(extra)

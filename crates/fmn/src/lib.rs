@@ -55,7 +55,8 @@ use fmn_geom::{GeomError, SpaceOpsError};
 use fmn_library::{
     CoordsError, DashError, DataMobjectError, FieldError, GraphError, ImageError, MatrixError,
     MeshError, NetworkGraphError, NeuralNetworkError, ObjError, ProbabilityError, SamplingError,
-    SliderError, SpanCollectorError, TexMobjectError, TextMatchingError, TextMobjectError,
+    SliderError, SpanCollectorError, TexBindingError, TexMobjectError, TextMatchingError,
+    TextMobjectError,
 };
 use fmn_mobject::{AnimateError, Mob, Mobject, Stage as MobjectStage, StageError};
 use fmn_platform::fetch::FetchError;
@@ -68,6 +69,7 @@ use fmn_scene::{
 };
 use fmn_tex::{TexEngine, TexError, TexSession, TypesetRequest, TypesetSessionReport};
 
+pub mod controls;
 pub mod exporting;
 pub mod prelude;
 pub mod rendering;
@@ -76,12 +78,15 @@ pub use typesetting::TexPreflightError;
 
 pub use exporting::{
     BundleExportError, BundleExportOptions, BundleExportReport, SceneBundleExport, export_bundle,
-    export_bundle_bytes, export_bundle_with_fs,
+    export_bundle_bytes, export_bundle_with_fs, export_camera_bundle, export_camera_bundle_bytes,
+    export_camera_bundle_with_fs,
 };
 
 pub use rendering::{
     FfmpegCapability, RenderArtifact, RenderError, RenderFormat, RenderOptions, RenderReport,
-    SoundtrackReport, render, render_with_fs,
+    SoundtrackRenderOptions, SoundtrackRenderReport, SoundtrackReport, SvgRenderError,
+    SvgRenderOptions, SvgRenderReport, render, render_soundtrack, render_soundtrack_with_fs,
+    render_svg, render_svg_camera, render_svg_camera_with_fs, render_svg_with_fs, render_with_fs,
 };
 
 /// Built-in native scenes shipped with the standalone binary.
@@ -1131,6 +1136,8 @@ pub enum LibraryError {
     Boolean(fmn_library::boolean_ops::BooleanMobjectError),
     /// `TransformMatchingTex`/`TransformMatchingStrings` planning.
     TextMatching(TextMatchingError),
+    /// Source-bound live numeric replacements inside native TeX families.
+    TexBinding(TexBindingError),
     /// `NetworkGraph`.
     NetworkGraph(NetworkGraphError),
     /// `NeuralNetworkMobject`.
@@ -1165,6 +1172,7 @@ impl LibraryError {
             | Self::Coordinates(CoordsError::Sampling(error))
             | Self::Graph(GraphError::Sampling(error)) => sampling(error),
             Self::TextMatching(TextMatchingError::BudgetExceeded { .. }) => true,
+            Self::TexBinding(error) => error.is_budget_exceeded(),
             _ => false,
         }
     }
@@ -1182,6 +1190,7 @@ impl LibraryError {
             Self::Markdown(error) => error,
             Self::Boolean(error) => error,
             Self::TextMatching(error) => error,
+            Self::TexBinding(error) => error,
             Self::NetworkGraph(error) => error,
             Self::NeuralNetwork(error) => error,
             Self::Slider(error) => error,
@@ -1232,6 +1241,7 @@ library_error_from!(ImageError, Image);
 library_error_from!(fmn_library::markdown::MarkdownError, Markdown);
 library_error_from!(fmn_library::boolean_ops::BooleanMobjectError, Boolean);
 library_error_from!(TextMatchingError, TextMatching);
+library_error_from!(TexBindingError, TexBinding);
 library_error_from!(NetworkGraphError, NetworkGraph);
 library_error_from!(NeuralNetworkError, NeuralNetwork);
 library_error_from!(SliderError, Slider);
@@ -1388,9 +1398,30 @@ error_from!(FfmpegLocatorError, FfmpegLocator);
 error_from!(ProcessError, Process);
 error_from!(TopologyError, Topology);
 
+impl From<fmn_mobject::UpdaterError> for Error {
+    fn from(error: fmn_mobject::UpdaterError) -> Self {
+        match error {
+            fmn_mobject::UpdaterError::Stage(error) => Self::Stage(error),
+            error => Self::Animation(error.into()),
+        }
+    }
+}
+
+impl From<fmn_mobject::UpdaterFailure> for Error {
+    fn from(error: fmn_mobject::UpdaterFailure) -> Self {
+        Self::Animation(error.into())
+    }
+}
+
 impl From<AnimateError> for Error {
     fn from(error: AnimateError) -> Self {
         Self::Animation(error.into())
+    }
+}
+
+impl From<fmn_render::CameraError> for Error {
+    fn from(error: fmn_render::CameraError) -> Self {
+        Self::Scene(SceneError::Camera(error))
     }
 }
 
@@ -1604,6 +1635,19 @@ pub(crate) struct SegmentAccountingSink<'a> {
 }
 
 impl SceneSink for SegmentAccountingSink<'_> {
+    fn accepts_pure_segments(&self) -> bool {
+        self.inner.accepts_pure_segments()
+    }
+
+    fn capture_pure_segment(
+        &mut self,
+        segment: &fmn_anim::pure_frame::PureSegment,
+    ) -> std::result::Result<(), IntegrationError> {
+        // Accounting observes lifecycle boundaries, not individual pixels.
+        // Preserve the inner sink's explicit worker-program capability.
+        self.inner.capture_pure_segment(segment)
+    }
+
     fn event(&mut self, event: LifecycleEvent) -> std::result::Result<(), IntegrationError> {
         match event.phase {
             // The one-shot preflight point precedes the first capture.
@@ -1713,6 +1757,7 @@ where
         typesetting,
     };
     let run = scene.run(&mut adapter, &mut sink);
+    typesetting.maintain_cache();
     if let Some(error) = adapter.front_door_error {
         return Err(error);
     }

@@ -9,6 +9,7 @@ from pathlib import Path
 import unittest
 
 from test_matching_authoring_protocol import matching, namespace
+from test_matching_strings_protocol import fixture_native_occurrences
 
 
 def string_namespace():
@@ -49,10 +50,11 @@ def string_namespace():
                 result.append((mobject._string_submobject(ordinal), key))
             return result
     class Tex(Strings):
-        _match_by_blocks = False
+        _match_by_blocks = True
     g.StringMobject, g.Group, g.VGroup, g.VMobject = StringMobject, Group, Group, g.Mobject
     g.TransformMatchingStrings, g.TransformMatchingTex = Strings, Tex
     g._difflib, g._TexError = difflib, ValueError
+    g._string_matching_occurrences = fixture_native_occurrences
     path = Path(__file__).resolve().parents[1] / "python/manimlib/_animation_semantics.py"
     nodes = [node for node in ast.parse(path.read_text()).body
              if isinstance(node, ast.FunctionDef) and node.name == "_install_matching_strings"]
@@ -152,9 +154,9 @@ class StringPlanningTests(unittest.TestCase):
         animation = self.g.TransformMatchingTex(source, target)
         self.assertEqual([a._native_kind for a in animation.animations], ["fade_out_to_point", "fade_in_from_point"])
 
-    def test_tex_pinned_keys_filter_leftovers(self):
+    def test_tex_pinned_keys_are_additive(self):
         animation = self.g.TransformMatchingTex(self.g.StringMobject("x+y"), self.g.StringMobject("y+x"), matched_keys=["x"])
-        self.assertEqual(self.pairs(animation), [("x", "x")])
+        self.assertEqual(self.pairs(animation), [("x", "x"), ("+", "+"), ("y", "y")])
 
     def test_custom_factory_reaches_string_children(self):
         calls = []

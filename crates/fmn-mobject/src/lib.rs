@@ -64,7 +64,7 @@ pub use render_snapshot::{RenderSnapshotError, RenderSnapshotLimits};
 pub use shape::ShapeTag;
 pub use stage::{
     CopyMap, Entry, FamilyCheckpoint, FrozenRenderState, IdBuildHasher, IdHasher, Mob, Snapshot,
-    Stage, UpdaterFn, UpdaterId, UpdaterSlot,
+    Stage, UpdaterError, UpdaterFailure, UpdaterFn, UpdaterId, UpdaterSlot,
 };
 pub use uniforms::{JointType, Uniforms};
 

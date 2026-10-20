@@ -1,6 +1,6 @@
 # FrankenManim implementation status
 
-**Status date:** 2026-10-13. The October 13 assessment below supersedes earlier current-state statements; the October 4, September 27, September 23, September 9 and September 7 assessments and earlier execution records remain historical evidence.
+**Status date:** 2026-10-17. The October 17 assessment below supersedes earlier current-state statements. The October 13 assessment from the previously unpushed shared-checkout commit `fd3d6dd1` is included after it; the October 4, September 27, September 23, September 9 and September 7 assessments and earlier execution records remain historical evidence.
 
 **September 7 reality-check source:** `d784048148002acdb7d3a914a8e764afcfad3b1d` on `main`; initially clean. That audit changed this report and Beads only.
 
@@ -8,6 +8,174 @@
 **Historical runtime-audit checkpoint:** `7aeb3f40a763998d07b43b74613f3c6becc49207`.  
 **Agent-governance checkpoint:** ADR-0023 and `docs/GOVERNANCE.md` through `19e1e8b0014f5e4dd68aebc0520cd7ba9fb98283`.  
 **Authority rule:** this document summarizes evidence. `.beads/issues.jsonl` remains the task, status, and dependency authority; the Revision-4 comprehensive plan remains the design authority.
+
+## 2026-10-17 reality check
+
+**Verdict.** The engine is real, and in places excellent:
+- 80/80 animation classes and 160/161 mobject classes exist natively in Rust, with no `todo!`/`unimplemented!`;
+- certified output is byte-identical across thread counts on the shipped artifacts;
+- the codecs and the ffmpeg sandbox are solid;
+- the native span map colors exactly the TeX substring asked for, where the Reference's render-twice hack also colors a neighbour.
+
+The program is still not converging, and the cause is now mechanical, not technical:
+- **The verification loop is open-circuit.** origin HEAD fails `cargo fmt` and cannot compile two test targets, the e2e harness among them. Linux CI compiled nothing, because a merge-corrupted bead title tripped the activation-cap check that `scripts/check.sh` runs before any cargo step. Agents commit code that, by their own messages, nobody compiled, and they name CI as the authority.
+- **The previous steering never landed.** The 10-13 reality check, its fixes and its tracker repairs sit in 8 unpushed commits and a dirty tracker in the shared checkout.
+- **Users run v0.5.0**, 530 commits stale and visibly wrong on the README's own scenes. A HEAD wheel fixes all four of those bugs and renders the README scenes 2.8–5.6× faster, at 0.16–0.47× a software-GL Reference. The improvement is real but has not been released.
+- **No gate has closed since G1 (2026-08-20)**, and G1's evidence never saw the production camera route.
+
+**Assessment source.**
+- `origin/main` at `c3218755` (2026-10-17 20:29), in a detached worktree.
+- The shipped product: release `v0.5.0` (`8b6fdbf0`), downloaded and SHA-256 verified, run in a clean CPython 3.13.1 venv.
+- Host: Linux x86-64, 64 logical cores. Load average 30–105 from other sessions, so wall-clock numbers are indicative only.
+- Six read-only subsystem audits ran against `c3218755`. Their load-bearing citations were re-verified by hand over nine refinement rounds.
+
+### Executed evidence
+
+| Observation | Result |
+|---|---|
+| `cargo fmt --check` @ `c3218755` | **FAIL**: 19 hunks in `crates/fmn-cli/src/studio_project.rs`, from `c3218755` itself. That commit's workflow formats a temp copy of the file. |
+| `cargo test --workspace` @ `c3218755` (rch) | **Does not compile.** `fmn-anim/tests/transform_matching.rs:311-361` calls a nonexistent `Stage::len` (`509be083`). The e2e harness `fmn-conformance/tests/e2e_scenarios.rs` has 5 errors: private `fmn::SceneError` at 1364/1395 (`834ab5d2`) and 1728/1735 (`509be083`), and `Mobject: From<RegularPolygon>` at 1698 (`509be083`). `509be083`'s message: "Local Rust compilation stopped … Existing main-push workflows will run the exact source". Everything in fmn-anim that does compile passes: **36 binaries, 345 passed, 0 failed.** |
+| Hosted CI | No green `ci.yml` since 2026-08-10. Linux legs stopped at `error: active workstream cap breached (5/4)`. Root cause: merge `bb233045` concatenated fm-3jw2's two titles (`"W4/W10: …\n\nW10/W4: …"`), so the classifier counted a phantom W4. **Repaired in this commit** (title only, via `br`); `agent_brief --check` exits 0 on origin's tracker again. The exact-image native legs (macos-aarch64, linux-aarch64-musl, windows) passed. |
+| Shipped `fmn` v0.5.0, README CLI block | 13 of 14 commands behave as documented. The sound-cue command `cd`s into `crates/fmn/assets`, which never existed. `doctor` lists `h264_nvenc/hevc_nvenc/av1_nvenc` on a host with no NVIDIA GPU; they fail with "Cannot load libcuda.so.1". |
+| Shipped `fmn-python` v0.5.0 | 663 public names, import 0.60 s. Every README portal command behaves as documented. The Reference's everyday `-w`, `-l` and `--hd` exit 2 (unrecognized). |
+| **README scenes, shipped portal vs pinned Reference** | **Visible bugs:**<br>• `SquareToCircle`'s `Tex` is set in text style;<br>• `Brace(Matrix, LEFT)` draws no brace and its label lands at the origin;<br>• the `cases` brace spans one row;<br>• the background is black, not `#333333`.<br>HEAD claims fixes for the first, second and fourth. None is released.<br>A visible win: `set_color_by_tex("i", YELLOW)` colors only `i`; the Reference also colors `+`. |
+| Certified determinism, shipped artifacts | **PASS**: portal (75 frames, TeX included) and native `layered_polygon.v1` are byte-identical at `--threads` 1/3/8/16, under load average 70–100. |
+| Speed, shipped v0.5.0 portal vs Reference (1080p30 MP4, interleaved; loaded host) | Portal/Reference median ≈ 0.7–1.3×; the Reference ran on llvmpipe software GL. PG-1 requires ≤ 0.50×. A static 1 s `wait()` costs about 9–12 s at 1080p. **This describes only the shipped release; see the HEAD rows below.** |
+| Workspace tests @ `c3218755`, every target that compiles (rch) | Everything except fmn-anim and fmn-conformance: **232 binaries, 3,427 passed, 2 failed, 2 ignored.**<br>(1) `fmn/tests/native_render.rs:568`: a Surface render without a camera now fails with an internal "prepare stage failed … RetainedFrameRenderer::render_with_camera" instead of the actionable `RenderOptions::camera` refusal (new bead `fm-surface-camera-refusal-i17m`).<br>(2) The README soundtrack doctest fails: `SoundAsset { path: "assets/voice.wav", NotFound }`.<br>fmn-conformance (35 compiling targets + lib): 432 passed, 9 ignored. 4 failures are environmental: `git ls-files` exit 128 and "built without git metadata", because a worktree's `.git` is absent on the rch worker. Unverified, not counted.<br>`clippy -p fmn-anim --lib -D warnings` is clean. **Workspace `clippy --lib --bins -D warnings` FAILS**: `clippy::large_enum_variant` at `crates/fmn/src/rendering/pipeline.rs:422`, where `NativeCompiler::Vector` holds an unboxed 728-byte `VectorFrameCompiler`; the file was last changed by `79a8cf0c` on 10-17. Workspace `clippy --all-targets` hit rch's 1 h job limit, so it has no result. |
+| Hosted CI after this audit's tracker repair (run 39089230584, `4ce0076a`) | The Linux legs now pass the agent control-plane step and fail at the next real defect: `scripts/test_python_transform_paths.py`, 9× `KeyError: '_point_free_family_ids'`. That is the 10-13 P0 regression whose fix is stranded in `052eb79c`. |
+| **HEAD wheel** (built from `c3218755` via rch; freshness markers verified) vs Reference, README scenes | **All four shipped bugs are fixed at HEAD:** display-style Tex, `Brace(Matrix)`, the `cases` brace, `#333333`. A visible G2 defect remains on the README's own formula: the ∞ upper limit **collides with a heavy substitute ∫**, and the minus in `e^{-x^2}` renders as a hyphen. That is the CM-math-faces gap, with box metrics around substitute ink. |
+| **HEAD portal speed** (1080p30 MP4, interleaved, quiet host) | SquareToCircle: Reference 8.26 s / v0.5.0 11.10 s / **HEAD 3.92 s (0.47×)**.<br>TypicalStill: 10.16 s / 9.39 s / **1.67 s (0.16×)**.<br>So HEAD meets PG-1's G2 bar on README-class scenes against a software-GL Reference. Unqualified: one host, no GPU Reference. |
+| Native vs portal, identical scene (640×360@30) | Native `fmn::render` 1.32 s wall / 2.8 s CPU. HEAD portal 2.42 s / 9.9 s. v0.5.0 portal 4.9 s / 22.4 s. The remaining native-offload headroom at HEAD is about 1.8× wall, 3.5× CPU. |
+| Native flagship `hoeffding_d`, all 8 chapters (480×270@15 PNG) | **3,833 frames in 66.7 s**, 448 MB peak. A polished, 3b1b-grade explainer with no LaTeX. Only 227% CPU on an idle 64-core host: its live-readout segments are stateful, so frame parallelism has little to act on. |
+
+### Vision checklist (`c3218755`)
+
+| # | Goal | Status | Key evidence |
+|---|---|---|---|
+| 1 | One CPython-free binary | WORKING, as a player | `@builtin` scenes and `.fmtl` bundles only. A user's scene must be compiled Rust first. |
+| 2 | Rust API (`fmn::render`) | WORKING | `hoeffding_d`. README example is `no_run`. Prelude reaches 13/80 animations. |
+| 3 | `fmn-python` portal | Surface WORKING; architecture WRONG_APPROACH | 59,935 runtime Python lines in 137 files (+1,465 since 10-13). 1,383/1,454 Reference methods resolve in Python. ADR-0026 Proposed 18 days. |
+| 4 | TeX "indistinguishable from LaTeX" | PARTIAL; unmeasured | No CM math faces (θ→ϑ, α reads as Latin a, relations from Noto Sans). 26% of corpus occurrences within 5% of TeX's box. `\color` silently dropped. |
+| 5 | Native text | WORKING mechanics | Text breaks its structural envelope in 65 corpus scenes. |
+| 6 | Correct math under manim names | WORKING | Closed-form arc length + LUT; rational clock; fsci RK45. |
+| 7 | Analytic renderer + kept look | Renderer WORKING; look UNJUDGED | 29 gallery panels, **0 owner verdicts**. G1's harness (`spikes/g0-8-accelerator/src/bin/g0_2_look.rs:189-201`) baked its own y-flipped camera. |
+| 8 | Certified determinism | WORKING on one host | Real-ARM re-verification last on 09-24. |
+| 9 | PG-1..PG-8 | NOT MEASURED (qualified); PG-1 promising at HEAD | 0 qualified observations. HEAD portal 0.16–0.47× and native ≈0.30× a software-GL Reference on README scenes, against shipped v0.5.0 at 0.9–1.3×. The corpus 1.40× (09-29) is stale. PG-7's test is `#[ignore]`. PG-8 native-builtins 3.55× vs 1.10×. |
+| 10 | Rev-4 scaling in the product | PARTIAL; on the least-used door | Pure segments only via `fmn::render`; CLI/portal sinks keep `false` (`fmn-scene/src/runtime.rs:431`). Threads spawned per frame. Mirrors dead at origin. No global allocation counter. The "fast" engine is an f32 colour accumulator. |
+| 11 | Accelerator Annex | STUB in the product | Not in the shipped binary, no Mac CI; CUDA feature empty. |
+| 12 | Studio | PARTIAL | Isolation and security real. Restore deliberately re-executes from t = 0. `fmn studio-project` spawns cargo, **contradicting D2/ADR-0017**. |
+| 13 | Reference CLI flag surface | PARTIAL | See the evidence rows. |
+| 14 | Reel | WORKING; some claims unwired | No cache-eviction caller. The 8 GiB artifact budget is checked post-exit. |
+| 15 | WASM + npm | PARTIAL | 3 scenes, no text, over budget. README says npm "shipped"; it has not. |
+| 16 | Distribution | PARTIAL | Portable tier only; unsigned; no linux-aarch64 (certified platform, green in CI). |
+| 17 | Gauntlet | PARTIAL; measures "unchanged", not "correct" | Ledger "100% reviewed", but 1,317 rows cite `bridge.py`. No generated Rust builders or Python signatures. Laptop golden silently unchecked. |
+| 18 | Governed closure / one tool | PARTIAL | 11 runtime crates with pending unsafe audits accepted at origin; `studio-project`. |
+| 19 | G4a corpus | NOT MET | 37.4% measured 768 commits ago and means "didn't crash". 1 of 825 scenes strictly structurally equal. |
+| 20 | Enhanced mobjects | PARTIAL | NeuralNetworkMobject claims ft backing it lacks. |
+| 21 | Hygiene | REGRESSED | Red HEAD, blind CI, false README claims, no release in 13 days. |
+
+### Stranded work
+- 8 commits in the shared checkout (stamped 2026-10-16) were never pushed: `052eb79c`, `46d22343`, `15ef13ae`, `856f3ff9`, `53c03fd4`, `d845a7da`, `b2e6b768`, `fd3d6dd1`.
+- They carry the 10-13 P0 fixes, the §8.2 mirror wiring, the gallery provenance guard, the closure gate rejecting pending unsafe audits, and the 10-13 section of this document.
+- The 10-13 tracker repairs exist only in that checkout's dirty JSONL and DB. Its DB also closes `fm-soa-mirrors-dead-p0gc`, `fm-sq8.7` and `fm-sq8.5` on code that is not on origin; origin correctly keeps them open.
+
+### Answers to the five questions
+1. **Working:**
+   - the native core (geometry, arena, 80/80 animations, 160/161 mobjects);
+   - the analytic renderer;
+   - certified determinism on one host;
+   - Reel;
+   - `fmn::render`;
+   - the portal surface, subclassing, views and pickle;
+   - the shipped README commands, apart from one path;
+   - Studio isolation;
+   - native spans.
+2. **Not working:**
+   - the quality bar (math faces, `\color`, the shipped Tex, Brace and cases bugs);
+   - every PG gate;
+   - Rev-4 levers on the CLI and portal;
+   - the annex;
+   - Studio restore;
+   - distribution breadth;
+   - WASM text;
+   - human Look verdicts;
+   - fresh corpus evidence;
+   - a green main.
+3. **Blocking:**
+   - (a) no trustworthy "main is correct" signal;
+   - (b) work and tracker state that do not converge on origin;
+   - (c) twelve owner decisions, aged up to 18 days, on every gate route;
+   - (d) a planner that rewards breadth: 530 commits since v0.5.0, 0 gates closed.
+4. **Would the open beads close the gap? No.** Many are owner decisions; several closures rest on stranded code; the process failures had no executable bead; and about 25 gaps had no bead.
+5. **Previously un-beaded:** listed in the bridge plan below. Each now has a bead.
+
+### Bridge plan (45 beads, label `reality-check-2026-10-17`; each is self-contained)
+
+**Mechanism first.** Six reality checks fixed instances; this plan installs a loud failure for each recurring class. The critical path is G2: `bv` independently ranks `fm-i1q` the top bottleneck, and every later gate chains behind it.
+
+- **Track 0: close the verification loop** (W1).
+  - `fm-land-stranded-1017-gx51` (P0; the planner's top pick);
+  - `fm-head-red-1017-exom` (P0);
+  - `fm-surface-camera-refusal-i17m` (P0: a newly visible test failure);
+  - `fm-check-split-jdcu` (P0: code and governance gates as separate required jobs);
+  - `fm-lander-impl-jeq8` (P0: the implementation half of fm-0qvo);
+  - `fm-jsonl-merge-driver-y8pt` (record-level merge: comment union, scalar conflicts fail, never concatenate);
+  - `fm-closure-evidence-audit-r5zi` (closures must cite evidence on origin);
+  - `fm-stranded-work-alarm-4hqe`.
+- **Track 1: ship what is fixed** (W11).
+  - `fm-7wm.9`, retitled to v0.6.0, and now also blocked by the studio-project ruling;
+  - `fm-readme-claims-ledger-np6t`;
+  - `fm-release-side-by-side-fsxk`;
+  - `fm-publish-aarch64-jxr1`;
+  - a weekly train, noted on `fm-7wm.11`.
+- **Track 2: one owner session**, about 2 h, WSJF-ordered with recommended defaults: `fm-owner-session-1017-8whm`. It covers D1–D12:
+  - the perf host, ADR-0028 CM faces, ADR-0026, the land gate;
+  - the Look Gallery session (`fm-owner-gallery-session-ep3e`), HTML MathML, OQ-12;
+  - `fm-studio-project-d2-tyn8` (P0), the planner ranking, ADR-0027;
+  - the gate chain (`fm-gate-chain-ruling-tpxt`) and the phantom AGENTS.md rules.
+- **Track 3: G2.** G2 now names its real blockers: the CM faces, `fm-5wq.60`, delimiters, and:
+  - `fm-tex-color-silent-i0p2`;
+  - `fm-tex-ink-oracle-5ehf` (registered Hausdorff + Wasserstein-1 + IoU);
+  - `fm-tex-2afc-kit-b9k2`. Blind 2AFC: pass iff ≤ 58/100 identified, so P(pass) = 0.956 if indistinguishable and 0.007 at a 70% identification rate;
+  - `fm-pg7-honest-mn4b`;
+  - `fm-portal-span-parity-sc4k`.
+  Also filed: `fm-tex-constructs-t2-1wfq` (`\textit` and others) and `fm-fmd-math-fuzz-budgets-k8fe`.
+- **Track 4: portal convergence** (W10).
+  - `fm-offload-payoff-4rve`: measure before ADR-0026;
+  - `fm-ratefn-tabulation-etob`: exact per-member raw-sub-alpha tabulation, replacing the bootstrap's grid interpolation;
+  - `fm-portal-wait-reuse-gija`;
+  - `fm-portal-dead-layers-3pwr`;
+  - `fm-portal-reference-flags-l3xe`.
+- **Track 5: Rev-4 on every door** (W5). This lane is **unclaimable until a workstream frees**: the active set is W1/W6/W10/W11, and W11 is held only by `fm-7wm.7`.
+  - `fm-cli-pure-segments-38sh`;
+  - `fm-render-team-pool-j9ub`;
+  - `fm-tile-key-exact-30es` (FNV-1a-64-only hits);
+  - `fm-retained-3d-route-8cne`;
+  - `fm-fast-engine-real-xhy6`;
+  - `fm-tile-reuse-observed-f3ci`;
+  - `fm-perf-calibration-lane-pkn8` (instruction counts plus Hodges–Lehmann under anytime-valid confidence sequences, labelled unqualified).
+- **Track 6: measure "correct".**
+  - `fm-dashboard-staleness-dew9`;
+  - `fm-g1-reverify-n8e9`;
+  - `fm-laptop-golden-zip-2f2i`;
+  - `fm-readme-rust-executed-s9ef`;
+  - `fm-prelude-coverage-c61z`.
+- **Track 8: doctrine repairs.**
+  - `fm-cache-eviction-wired-1w05`;
+  - `fm-ffmpeg-size-streaming-tgjk`;
+  - `fm-doctor-encoder-probe-q871`;
+  - `fm-svg-tolerance-scale-nqn5`;
+  - `fm-studio-real-checkpoints-lze4`;
+  - `fm-gif-roundtrip-tests-02db`.
+
+**Exit criteria (the next check asks only these):**
+- three consecutive green `ci.yml` runs on main;
+- zero closed beads whose evidence is off origin;
+- all twelve owner rulings recorded;
+- v0.6.0 shipped with the README claims ledger passing;
+- G2's 2AFC and ink-oracle bars met.
+
+**Not re-opened.** `fm-5wq.47` (the portal random helpers) keeps its 10-04 ruling. The facts are recorded on the bead.
 
 ## 2026-10-13 reality check
 

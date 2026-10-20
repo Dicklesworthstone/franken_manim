@@ -193,6 +193,7 @@ determinism.seed	DeterminismConfig	seed	u64
 render.engine	RenderConfig	engine	engine
 render.aa	RenderConfig	aa	aa_policy
 render.threads	RenderConfig	threads	thread_policy
+cache.max_bytes	CacheConfig	max_bytes	u64
 
 # ---------------------------------------------------------------------------
 # [config_status] — reviewed semantic rulings for config keys.

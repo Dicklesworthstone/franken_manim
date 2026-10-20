@@ -119,7 +119,8 @@ storage-reuse contract; minor-0 bundles retain their existing planar path.
 WASM playback remains standard-only, not part of the certified platform matrix.
 Other geometry-only consumers must adopt the paired reconstruction API before
 claiming support.
-Audio and arbitrary external effects are still not represented by this format.
+Minor-0/minor-1 pictures contain no audio. Minor 2 below packages final PCM
+with these pictures; arbitrary external effects remain unrepresented.
 
 Regression coverage lives in `crates/fmn-conformance/tests/camera_bundle.rs`:
 actual camera-rig captures versus decoded native frames at 1/4/16 threads,
@@ -139,3 +140,52 @@ failed and superseded loads retain the prior movie. Playback selects recorded
 frames from elapsed presentation time and the bundle FPS, not monitor refresh
 rate. A late display may skip presentation frames; this does not resample the
 scene, change FMTL reconstruction or alter offline output sampling.
+
+
+## Sound-bearing FMTL/1 minor 2
+
+Schema `(FMTL, 1, 0, 2)` is a nonrecursive envelope around a complete minor-0
+or minor-1 visual document. The visual bytes, their existing trailer, the
+picture clock, camera samples and reconstruction law remain unchanged.
+The envelope's canonical fields are:
+
+1. `engine_version: string`, checked before interpreting later fields.
+2. `pictures: bytes`, a complete minor-0 or minor-1 FMTL document. Another
+   minor-2 envelope is refused before recursive decoding. Only this nested
+   document field admits up to the 256 MiB total limit; the nested reader
+   retains its own original 64 MiB per-field/snapshot limit.
+3. `sample_rate: u32`, nonzero and representable as a native Float32 PCM byte rate.
+4. `channels: u16`, exactly 1 (mono) or 2 (interleaved left/right stereo).
+5. `sample_frames: u64`, the number of complete channel frames.
+6. Exactly `sample_frames * channels` finite canonical `f32` samples in
+   `[-1, 1]`, starting at movie time zero. No length prefix or trailing data.
+
+The outer trailer binds the pictures and PCM together. The entire artifact,
+not each component separately, must fit the 256 MiB production bound. An
+explicit writer cap is checked before copying either component. The reader
+checks count arithmetic and exact remaining payload before reserving samples.
+Negative zero is canonicalized on construction and rejected on input; NaN,
+infinities, unclamped PCM, incomplete channel frames and nested sound
+containers are named refusals. There is no media decoder or filesystem access
+in this codec, and no paths or source callbacks in the artifact.
+
+The sample clock is independent of picture FPS. PCM is already mixed:
+placement, gains, ducking and resampling are export-time operations. A shorter
+track ends in silence; a longer track retains its tail. A consumer must choose
+its presentation duration explicitly without inserting or resampling pictures.
+Existing minor-0/minor-1 writers remain byte-identical. Old strict readers
+reject minor 2, rather than showing a silent movie by accident.
+
+`TimelineBundle::soundtrack` exposes immutable samples. Picture-only APIs,
+including camera-paired reconstruction and conversion to worker inputs, refuse
+`SoundtrackRequired` while sound is attached. An audio-aware coordinator must
+call `take_soundtrack` before dispatching pictures, accepting responsibility
+for playing/publishing that PCM. Explicitly extracting and discarding it is the
+opt-in route for a caller intentionally producing stills. Loading a bundle
+alone does not authorize dropping audio. Consumers without sound support
+therefore fail closed through the shared reader/replay contract.
+
+`attach_bundle_soundtrack` packages a validated visual recording and a
+`BundleSoundtrack`. `fmn-scene/tests/soundtrack_bundle.rs` exercises exact PCM,
+legacy preservation, camera/geometry round trips, arbitrary frame order at
+1/4/16 workers, consumer refusals, nesting, corruption and output limits.

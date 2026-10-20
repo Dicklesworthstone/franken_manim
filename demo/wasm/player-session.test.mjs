@@ -170,3 +170,60 @@ test("viewport and byte-budget validation happens before any loading", () => {
   assert.throws(() => new TimelineSession(null, 4, 3), TypeError);
   assert.throws(() => new TimelineSession(fakePlayer, 4, 3, 0), RangeError);
 });
+
+test("sound without an explicit adapter is refused before rendering", async () => {
+  const player = fakePlayer({ has_soundtrack: true });
+  const session = new TimelineSession(() => player, 4, 3);
+  await assert.rejects(session.load(bytes), /audio adapter/);
+  assert.equal(player.rendered.length, 0); assert.equal(player.freed, 1);
+  assert.equal(session.current, null);
+});
+
+test("audio preparation precedes picture admission and replacement disposes the old device", async () => {
+  const first = fakePlayer({ has_soundtrack: true }), second = fakePlayer();
+  const players = [first, second]; const order = [];
+  const audio = { audio: { sampleRate: 48000, channels: 2, sampleFrames: 84000 },
+    play() { throw new Error('must not autoplay'); }, dispose() { order.push('dispose audio'); } };
+  first.free = function() { order.push('free player'); this.freed++; };
+  first.render_into = function(index, dst) { assert.equal(this.has_soundtrack, false); this.rendered.push(index); dst.fill(7); };
+  const session = new TimelineSession(() => players.shift(), 4, 3, 1024, player => {
+    assert.equal(player, first); assert.equal(player.rendered.length, 0);
+    player.has_soundtrack = false; return audio;
+  });
+  await session.load(bytes);
+  assert.equal(session.current.metadata.hasSoundtrack, true);
+  assert.equal(session.current.metadata.audio.sampleFrames, 84000);
+  assert.equal(session.current.audio, audio);
+  await session.load(bytes); assert.deepEqual(order, ['dispose audio', 'free player']);
+  assert.equal(session.current.audio, null); assert.equal(session.current.metadata.hasSoundtrack, false);
+  session.dispose(); assert.equal(second.freed, 1);
+});
+
+test("failed candidate audio or pixels preserve the previous device and clean the candidate", async () => {
+  for (const fault of ['prepare', 'render', 'metadata']) {
+    const original = fakePlayer(), next = fakePlayer({ has_soundtrack: true });
+    const players = [original, next]; let disposed = 0;
+    if (fault === 'render') next.render_into = () => { throw new Error('render refused'); };
+    if (fault === 'metadata') next.labels = () => { throw new Error('metadata refused'); };
+    const session = new TimelineSession(() => players.shift(), 4, 3, 1024, () => {
+      if (fault === 'prepare') throw new Error('audio refused');
+      next.has_soundtrack = false;
+      return { play() {}, dispose() { disposed++; } };
+    });
+    await session.load(bytes); const old = session.current;
+    await assert.rejects(session.load(bytes), /refused/);
+    assert.equal(session.current, old); assert.equal(original.freed, 0);
+    assert.equal(next.freed, 1); assert.equal(disposed, fault === 'prepare' ? 0 : 1);
+    session.dispose();
+  }
+});
+
+test("disposal during candidate preparation releases its audio and invalidates publication", async () => {
+  const next = fakePlayer({ has_soundtrack: true }); let disposed = 0;
+  const session = new TimelineSession(() => next, 4, 3, 1024, () => {
+    session.dispose(); next.has_soundtrack = false;
+    return { play() {}, dispose() { disposed++; } };
+  });
+  assert.equal(await session.load(bytes), false);
+  assert.equal(session.current, null); assert.equal(next.freed, 1); assert.equal(disposed, 1);
+});

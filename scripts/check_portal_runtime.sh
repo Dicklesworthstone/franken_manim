@@ -156,6 +156,12 @@ python3 crates/fmn-python/tests/native_svg_paints.py
 python3 crates/fmn-python/tests/svg_paint_ingress.py
 python3 crates/fmn-python/tests/svg_lifecycle.py
 
+# Certified parallel witnesses need a clean installed-payload import context,
+# before reduced protocol fixtures load source-only modules in their processes.
+python3 crates/fmn-python/tests/test_parallel_certified_native.py
+python3 crates/fmn-python/tests/test_parallel_certified_cli_native.py
+python3 crates/fmn-python/tests/test_parallel_certified_worker_native.py
+
 # Runtime inventories exercise real files; protocol sinks are explicitly doubled.
 python3 crates/fmn-python/tests/test_bundle_checkpoint_protocol.py
 python3 crates/fmn-python/tests/test_bundle_resume_cli_protocol.py

@@ -1,0 +1,109 @@
+name: Native CLI pure segments
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/patches/cli-pure/**'
+      - '.github/workflows/cli-pure-segments.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-cli-pure-publication
+  cancel-in-progress: false
+jobs:
+  implement-and-verify:
+    if: github.repository == 'Dicklesworthstone/franken_manim' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: write
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+      CARGO_BUILD_JOBS: '2'
+      CARGO_TERM_COLOR: never
+      RUST_BACKTRACE: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: studio-project-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Apply exact-parent implementation and commit a clean candidate locally
+        id: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/patches/cli-pure/apply.py
+          rustfmt --edition 2024 --config skip_children=true \
+            crates/fmn-cli/src/lib.rs crates/fmn-cli/src/offline_cpu.rs \
+            crates/fmn-cli/src/offline_cpu/pure.rs crates/fmn-cli/src/offline_cpu/pure/tests.rs \
+            crates/fmn-cli/tests/pure_segments.rs crates/fmn-conformance/tests/e2e_scenarios.rs
+          git diff --check
+          git add -- crates/fmn-cli/src/lib.rs crates/fmn-cli/src/offline_cpu.rs \
+            crates/fmn-cli/src/offline_cpu/pure.rs crates/fmn-cli/src/offline_cpu/pure/tests.rs \
+            crates/fmn-cli/tests/pure_segments.rs crates/fmn-conformance/tests/e2e_scenarios.rs \
+            docs/CLI_PURE_SEGMENTS.md
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'feat(cli): execute native pure segments on bounded CPU render teams' \
+            -m 'fm-cli-pure-segments-38sh: forward verified native programs through cancellation, keep stateful updaters serial, latch partial failures, and report actual native/compiled dispatch separately in robot output and nonsemantic FMNP detail. Includes serial-byte equivalence, range, camera, cancellation and Gauntlet coverage.'
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Test mixed-scene dispatch, fixed cameras, cancellation and CPU jobs
+        run: |
+          cargo test --locked -p fmn-cli --features cli,batch --lib offline_cpu -- --nocapture
+      - name: Exercise real binaries, existing CPU/FMTL/camera routes and CLI smoke
+        run: |
+          cargo test --locked -p fmn-cli --features cli,batch --test pure_segments --test cpu_pipeline --test compiled_pipeline --test camera_pipeline --test cli_smoke
+      - name: Run the Gauntlet dispatch scenario and existing builtin determinism scenarios
+        run: |
+          cargo test --locked -p fmn-conformance --test e2e_scenarios cli_pure_dispatch_scenario_passes
+          cargo test --locked -p fmn-conformance --test e2e_scenarios cli_builtin_scenarios_pass
+      - name: Check core scene purity and owner-thread fallback semantics
+        run: |
+          cargo test --locked -p fmn-scene --test pure_dispatch
+      - name: Lint the linked CLI library without weakening its gate
+        run: |
+          cargo clippy --locked -p fmn-cli --features cli,batch --lib -- -D warnings
+      - name: Publish only the exact tested commit to main without force or rebase
+        env:
+          EXPECTED_MAIN: ${{ github.sha }}
+          TESTED_COMMIT: ${{ steps.candidate.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TESTED_COMMIT"
+          git diff --exit-code
+          git diff --cached --exit-code
+          current="$(git ls-remote origin refs/heads/main | cut -f1)"
+          test "$current" = "$EXPECTED_MAIN" || { echo 'main advanced; refusing to publish an untested rebase' >&2; exit 1; }
+          git push origin HEAD:refs/heads/main
+          test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$TESTED_COMMIT"
+          echo "PUBLISHED_SHA=$TESTED_COMMIT"
+          echo "Tested implementation published directly to main: \`$TESTED_COMMIT\`" >> "$GITHUB_STEP_SUMMARY"
+      - name: Preserve candidate source and exact diff for inspection
+        if: always()
+        shell: bash
+        run: |
+          git diff "${{ github.sha }}" > "$RUNNER_TEMP/cli-pure-candidate.patch"
+          git log -1 --format='%H%n%B' > "$RUNNER_TEMP/cli-pure-candidate.txt"
+          tar -czf "$RUNNER_TEMP/cli-pure-candidate.tar.gz" \
+            crates/fmn-cli/src/lib.rs crates/fmn-cli/src/offline_cpu.rs \
+            crates/fmn-cli/src/offline_cpu/pure.rs crates/fmn-cli/src/offline_cpu/pure/tests.rs \
+            crates/fmn-cli/tests/pure_segments.rs crates/fmn-conformance/tests/e2e_scenarios.rs \
+            docs/CLI_PURE_SEGMENTS.md
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: cli-pure-candidate
+          path: |
+            ${{ runner.temp }}/cli-pure-candidate.patch
+            ${{ runner.temp }}/cli-pure-candidate.txt
+            ${{ runner.temp }}/cli-pure-candidate.tar.gz
+          retention-days: 3

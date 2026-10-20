@@ -1329,6 +1329,650 @@ fn failure_cli_ffmpeg_limits_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenari
         .with_counter("cli_ffmpeg_admitted_input", input))
 }
 
+/// Native equation and reordered-string transitions cross the public facade,
+/// materialize on a worker, and retain both nominal sampling and owner cleanup.
+fn native_matching_workers_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    struct Matching;
+    impl fmn::SceneConstruct for Matching {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let from = fmn_library::Tex::new("a^2+b^2=c^2")
+                .font_size(36.0)
+                .build(stage.tex_engine()?)?;
+            let to = fmn_library::Tex::new("c^2=a^2+b^2")
+                .font_size(36.0)
+                .build(stage.tex_engine()?)?;
+            let (from_spans, to_spans) = (from.span_map(), to.span_map());
+            let source = stage.add(from)?;
+            let target = stage.arena_mut().add(to);
+            stage.shift(source, [-0.4, 0.8, 0.0]);
+            stage.shift(target, [0.3, 0.8, 0.0]);
+            let timing = fmn_library::TextMatchingConfig {
+                run_time: 0.5,
+                lag_ratio: 0.2,
+                ..fmn_library::TextMatchingConfig::default()
+            };
+            let matching = fmn_library::TransformMatchingTex::with_config(
+                stage.arena_mut(),
+                source,
+                target,
+                &from_spans,
+                &to_spans,
+                timing.clone(),
+            )?;
+            stage.play_prepared(vec![Box::new(matching)])?;
+            if stage.roots() != [target] {
+                return Err(fmn::scene::SceneError::InvalidLifecycle(
+                    "native equation matching did not publish its original target",
+                )
+                .into());
+            }
+
+            let book =
+                fmn_library::FontBook::bundled().map_err(fmn_library::TextMobjectError::Text)?;
+            let from = fmn_library::Text::new("AB CD")
+                .font("IBM Plex Sans")
+                .font_size(32.0)
+                .build(&book)?;
+            let to = fmn_library::Text::new("CD AB!")
+                .font("IBM Plex Sans")
+                .font_size(32.0)
+                .build(&book)?;
+            let (from_spans, to_spans) = (from.span_map(), to.span_map());
+            let source = stage.add(from)?;
+            let text_target = stage.arena_mut().add(to);
+            stage.shift(source, [-0.4, -0.8, 0.0]);
+            stage.shift(text_target, [0.3, -0.8, 0.0]);
+            let matching = fmn_library::TransformMatchingStrings::with_config(
+                stage.arena_mut(),
+                source,
+                text_target,
+                &from_spans,
+                &to_spans,
+                timing,
+            )?;
+            stage.play_prepared(vec![Box::new(matching)])?;
+            if stage.roots() != [target, text_target] {
+                return Err(fmn::scene::SceneError::InvalidLifecycle(
+                    "native string matching lost target identity or unrelated roots",
+                )
+                .into());
+            }
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct Jobs {
+        programs: u64,
+        times: Vec<i64>,
+        owner_captures: u64,
+    }
+    impl fmn_scene::SceneSink for Jobs {
+        fn accepts_pure_segments(&self) -> bool {
+            true
+        }
+
+        fn capture_pure_segment(
+            &mut self,
+            segment: &fmn_anim::pure_frame::PureSegment,
+        ) -> Result<(), IntegrationError> {
+            self.programs += 1;
+            for frame in 1..=segment.frame_count() {
+                let job = segment
+                    .job(frame)
+                    .map_err(|error| IntegrationError::new("matching", error.to_string()))?;
+                self.times.push(job.time().frames());
+                let expected_time = job.time().to_f64();
+                let observed_time = std::thread::spawn(move || job.materialize().time())
+                    .join()
+                    .map_err(|_| IntegrationError::new("matching", "worker panicked"))?;
+                if observed_time.to_bits() != expected_time.to_bits() {
+                    return Err(IntegrationError::new(
+                        "matching",
+                        "worker did not retain its exact nominal time",
+                    ));
+                }
+            }
+            Ok(())
+        }
+
+        fn capture(
+            &mut self,
+            _: fmn_scene::CaptureReason,
+            _: FramePacket,
+        ) -> Result<(), IntegrationError> {
+            self.owner_captures += 1;
+            Err(IntegrationError::new(
+                "matching",
+                "native matching fell back to owner-thread capture",
+            ))
+        }
+    }
+
+    let mut jobs = Jobs::default();
+    let completed = fmn::run_scene(
+        &mut Matching,
+        RuntimeConfig {
+            fps: 8,
+            ..RuntimeConfig::default()
+        },
+        42,
+        &mut jobs,
+    )
+    .map_err(|error| fail(format!("native matching workers: {error}")))?;
+    if jobs.programs != 2
+        || jobs.times != (1..=8).collect::<Vec<_>>()
+        || jobs.owner_captures != 0
+        || completed.report().play_count != 2
+        || completed.report().time.frames() != 8
+    {
+        return Err(fail(
+            "native matching lost pure programs or nominal samples",
+        ));
+    }
+
+    let mut first_frames: Option<Vec<Vec<u8>>> = None;
+    let mut thread_counts = 0;
+    let mut rendered_frames = 0;
+    for (window, threads) in [(1, 1), (2, 4), (4, 16)] {
+        let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+        let mut options = fmn::RenderOptions::new("/matching")
+            .map_err(|error| fail(format!("native matching options: {error}")))?;
+        options.config.camera.resolution = (48, 32);
+        options.config.camera.fps = 8;
+        options.config.sizes.frame_height = 4.0;
+        options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+        options.frames_in_flight = window;
+        let report = fmn::render_with_fs(&mut Matching, options, fs.clone())
+            .map_err(|error| fail(format!("native matching render: {error}")))?;
+        let pipeline = report
+            .frame_pipeline
+            .as_ref()
+            .ok_or_else(|| fail("native matching did not use the frame pipeline"))?;
+        if report.artifact.frame_count != 8
+            || pipeline.submitted != 8
+            || pipeline.emitted != 8
+            || pipeline.outstanding_slots != 0
+            || pipeline.max_in_flight > report.execution_plan.frames_in_flight
+        {
+            return Err(fail("native matching lost bounded ordered publication"));
+        }
+        let mut frames = Vec::new();
+        for index in 0..8 {
+            let path = PathBuf::from("/matching").join(format!("frame_{index:06}.png"));
+            frames.push(
+                fs.read(&path)
+                    .map_err(|error| fail(format!("native matching frame: {error}")))?,
+            );
+        }
+        if frames[0] == frames[3] || frames[4] == frames[7] {
+            return Err(fail(
+                "native equation or string transition did not change pixels",
+            ));
+        }
+        if let Some(first) = &first_frames {
+            if *first != frames {
+                return Err(fail(format!(
+                    "native matching PNG bytes changed at {threads} threads"
+                )));
+            }
+        } else {
+            first_frames = Some(frames);
+        }
+        thread_counts += 1;
+        rendered_frames += report.artifact.frame_count;
+    }
+    let frames = first_frames.ok_or_else(|| fail("native matching rendered no frames"))?;
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_matching_workers")
+            .field("programs", jobs.programs)
+            .field("jobs", jobs.times.len() as u64)
+            .field("owner_captures", jobs.owner_captures)
+            .field("thread_counts", thread_counts)
+            .field("rendered_frames", rendered_frames),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("matching-first.png", frames[0].clone())
+        .with_artifact("matching-last.png", frames[7].clone())
+        .with_counter("native_matching_programs", jobs.programs)
+        .with_counter("native_matching_jobs", jobs.times.len() as u64)
+        .with_counter("native_matching_owner_captures", jobs.owner_captures)
+        .with_counter("native_matching_thread_counts", thread_counts)
+        .with_counter("native_matching_rendered_frames", rendered_frames))
+}
+
+/// The native still-image route executes every updater tick and captures
+/// construction's final edits. An independently authored static scene rendered
+/// through the existing sequence route supplies the expected artifact.
+fn native_final_png_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct Animated {
+        ticks: Arc<AtomicU64>,
+    }
+    impl fmn::SceneConstruct for Animated {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let circle = stage.add(Circle::new().radius(0.4).color(RED_C))?;
+            stage.set_fill(circle, Some(RED_C), Some(1.0), None, true);
+            stage.set_stroke(circle, None, Some(0.0), None, None, true);
+            let ticks = self.ticks.clone();
+            let updater = stage.arena_mut().add_dt_updater(
+                circle,
+                move |stage, mob, dt| {
+                    if dt > 0.0 {
+                        ticks.fetch_add(1, Ordering::SeqCst);
+                    }
+                    stage.shift(mob, [dt, 0.0, 0.0]);
+                },
+                false,
+            )?;
+            stage.wait(0.25)?;
+            stage.arena_mut().remove_updater(circle, updater);
+            stage.shift(circle, [1.0, 1.0, 0.0]);
+            stage.set_fill(circle, Some(BLUE_C), Some(1.0), None, true);
+            Ok(())
+        }
+    }
+
+    struct Expected;
+    impl fmn::SceneConstruct for Expected {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let circle = stage.add(Circle::new().radius(0.4).color(BLUE_C))?;
+            stage.set_fill(circle, Some(BLUE_C), Some(1.0), None, true);
+            stage.set_stroke(circle, None, Some(0.0), None, None, true);
+            stage.shift(circle, [1.25, 1.0, 0.0]);
+            Ok(())
+        }
+    }
+
+    let options = |path: &str, format: fmn::RenderFormat, threads| {
+        let mut options = fmn::RenderOptions::with_format(path, format)
+            .map_err(|error| fail(format!("native final PNG options: {error}")))?;
+        options.config.camera.resolution = (64, 48);
+        options.config.camera.fps = 8;
+        options.config.sizes.frame_height = 4.0;
+        options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+        Ok::<_, ScenarioError>(options)
+    };
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    fmn::render_with_fs(
+        &mut Expected,
+        options("/expected-final", fmn::RenderFormat::PngSequence, 1)?,
+        fs.clone(),
+    )
+    .map_err(|error| fail(format!("independent final geometry: {error}")))?;
+    let expected = fs
+        .read(std::path::Path::new("/expected-final/frame_000000.png"))
+        .map_err(|error| fail(format!("expected final PNG: {error}")))?;
+    let decoded = fmn_codec::decode_png(&expected, &fmn_codec::PngLimits::default())
+        .map_err(|error| fail(format!("expected PNG decode: {error}")))?;
+    if !decoded
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .windows(2)
+        .any(|pair| pair[0] != pair[1])
+    {
+        return Err(fail(
+            "the independently authored final circle is not visible",
+        ));
+    }
+
+    let mut checked = 0;
+    let mut total_ticks = 0;
+    let mut published_frames = 0;
+    let mut first_png = None;
+    for threads in [1, 4, 16] {
+        let path = format!("/native-final-{threads}.png");
+        let ticks = Arc::new(AtomicU64::new(0));
+        let report = fmn::render_with_fs(
+            &mut Animated {
+                ticks: ticks.clone(),
+            },
+            options(&path, fmn::RenderFormat::Png, threads)?,
+            fs.clone(),
+        )
+        .map_err(|error| fail(format!("native final PNG at {threads} threads: {error}")))?;
+        let png = fs
+            .read(std::path::Path::new(&path))
+            .map_err(|error| fail(format!("published final PNG: {error}")))?;
+        let observed_ticks = ticks.load(Ordering::SeqCst);
+        if png != expected
+            || report.artifact.frame_count != 1
+            || report.emission.stats.emitted != 1
+            || report.scene.play_count != 1
+            || report.scene.time.frames() != 2
+            || observed_ticks != 2
+        {
+            return Err(fail(format!(
+                "final PNG lost final geometry or lifecycle at {threads} threads"
+            )));
+        }
+        checked += 1;
+        total_ticks += observed_ticks;
+        published_frames += report.artifact.frame_count;
+        if first_png.is_none() {
+            first_png = Some(png);
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_final_png")
+            .field("thread_counts", checked)
+            .field("nominal_ticks", total_ticks)
+            .field("published_frames", published_frames),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact(
+            "native-final.png",
+            first_png.ok_or_else(|| fail("no final PNG was rendered"))?,
+        )
+        .with_counter("native_final_png_thread_counts", checked)
+        .with_counter("native_final_png_nominal_ticks", total_ticks)
+        .with_counter("native_final_png_published_frames", published_frames))
+}
+
+/// A complete shape replacement crosses the native authoring facade, runs
+/// prepared frames on workers, and leaves only the untouched original target.
+fn native_shape_matching_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    struct Shapes {
+        final_only: bool,
+    }
+    impl fmn::SceneConstruct for Shapes {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let source = stage.arena_mut().add(fmn_mobject::Mobject::new());
+            let circle = stage.arena_mut().add(Circle::new().radius(0.35));
+            let square = stage
+                .arena_mut()
+                .add(fmn_library::Square::new().side_length(0.65));
+            stage.arena_mut().attach(source, circle)?;
+            stage.arena_mut().attach(source, square)?;
+            stage.shift(circle, [-0.8, 0.55, 0.0]);
+            stage.shift(square, [-0.8, -0.55, 0.0]);
+            stage.set_fill(source, Some(RED_C), Some(1.0), None, true);
+            stage.set_stroke(source, None, Some(0.0), None, None, true);
+
+            let target = stage.arena_mut().add(fmn_mobject::Mobject::new());
+            let circle = stage.arena_mut().add(Circle::new().radius(0.35));
+            let triangle = stage
+                .arena_mut()
+                .add(fmn_library::triangle().radius(0.4).build()?);
+            stage.arena_mut().attach(target, circle)?;
+            stage.arena_mut().attach(target, triangle)?;
+            stage.shift(circle, [0.8, 0.55, 0.0]);
+            stage.shift(triangle, [0.8, -0.55, 0.0]);
+            stage.set_fill(target, Some(BLUE_C), Some(1.0), None, true);
+            stage.set_stroke(target, None, Some(0.0), None, None, true);
+            if self.final_only {
+                stage.arena_mut().add_to_scene(target)?;
+                return Ok(());
+            }
+            stage.arena_mut().add_to_scene(source)?;
+            let matching: fmn_anim::TransformMatchingShapes =
+                fmn_anim::TransformMatchingParts::with_config(
+                    stage.arena_mut(),
+                    source,
+                    target,
+                    &[],
+                    fmn_anim::MatchingPartsConfig {
+                        run_time: 0.5,
+                        lag_ratio: 0.15,
+                        ..fmn_anim::MatchingPartsConfig::default()
+                    },
+                )?;
+            let plan: Vec<_> = matching
+                .animations()
+                .iter()
+                .map(|animation| animation.state().config.name.as_str())
+                .collect();
+            if plan != ["Transform", "FadeOutToPoint", "FadeInFromPoint"] {
+                return Err(fmn::scene::SceneError::InvalidLifecycle(
+                    "shape replacement lost matching or unmatched-piece fades",
+                )
+                .into());
+            }
+            stage.play_prepared(vec![Box::new(matching)])?;
+            if stage.roots() != [target] {
+                return Err(fmn::scene::SceneError::InvalidLifecycle(
+                    "shape replacement did not publish the original target exactly once",
+                )
+                .into());
+            }
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct Jobs {
+        programs: u64,
+        frames: u64,
+    }
+    impl fmn_scene::SceneSink for Jobs {
+        fn accepts_pure_segments(&self) -> bool {
+            true
+        }
+        fn capture_pure_segment(
+            &mut self,
+            segment: &fmn_anim::pure_frame::PureSegment,
+        ) -> Result<(), IntegrationError> {
+            self.programs += 1;
+            for index in 1..=segment.frame_count() {
+                let job = segment
+                    .job(index)
+                    .map_err(|error| IntegrationError::new("shape-matching", error.to_string()))?;
+                let expected = job.time().to_f64().to_bits();
+                let observed = std::thread::spawn(move || job.materialize().time().to_bits())
+                    .join()
+                    .map_err(|_| IntegrationError::new("shape-matching", "worker panicked"))?;
+                if observed != expected {
+                    return Err(IntegrationError::new(
+                        "shape-matching",
+                        "worker changed nominal time",
+                    ));
+                }
+                self.frames += 1;
+            }
+            Ok(())
+        }
+        fn capture(
+            &mut self,
+            _: fmn_scene::CaptureReason,
+            _: FramePacket,
+        ) -> Result<(), IntegrationError> {
+            Err(IntegrationError::new(
+                "shape-matching",
+                "unexpected owner capture",
+            ))
+        }
+    }
+    let mut jobs = Jobs::default();
+    fmn::run_scene(
+        &mut Shapes { final_only: false },
+        RuntimeConfig {
+            fps: 8,
+            ..RuntimeConfig::default()
+        },
+        42,
+        &mut jobs,
+    )
+    .map_err(|error| fail(format!("shape worker lifecycle: {error}")))?;
+    if jobs.programs != 1 || jobs.frames != 4 {
+        return Err(fail(
+            "shape matching did not submit its complete prepared segment",
+        ));
+    }
+    let options = |path: &str, format: fmn::RenderFormat, threads| {
+        let mut options = fmn::RenderOptions::with_format(path, format)
+            .map_err(|error| fail(format!("shape render options: {error}")))?;
+        options.config.camera.resolution = (48, 32);
+        options.config.camera.fps = 8;
+        options.config.sizes.frame_height = 4.0;
+        options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+        Ok::<_, ScenarioError>(options)
+    };
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    fmn::render_with_fs(
+        &mut Shapes { final_only: true },
+        options("/shape-expected", fmn::RenderFormat::PngSequence, 1)?,
+        fs.clone(),
+    )
+    .map_err(|error| fail(format!("independent shape target: {error}")))?;
+    let expected = fs
+        .read(std::path::Path::new("/shape-expected/frame_000000.png"))
+        .map_err(|error| fail(format!("independent shape target bytes: {error}")))?;
+    let mut baseline = None;
+    let mut checked = 0;
+    for threads in [1, 4, 16] {
+        let path = format!("/shape-frames-{threads}");
+        let report = fmn::render_with_fs(
+            &mut Shapes { final_only: false },
+            options(&path, fmn::RenderFormat::PngSequence, threads)?,
+            fs.clone(),
+        )
+        .map_err(|error| fail(format!("shape animation render: {error}")))?;
+        if report.artifact.frame_count != 4 || report.scene.time.frames() != 4 {
+            return Err(fail("shape animation changed the nominal frame count"));
+        }
+        let frames: Vec<_> = (0..4)
+            .map(|index| {
+                fs.read(&PathBuf::from(&path).join(format!("frame_{index:06}.png")))
+                    .map_err(|error| fail(format!("shape frame: {error}")))
+            })
+            .collect::<Result<_, _>>()?;
+        if frames[0] == frames[3] {
+            return Err(fail("shape replacement did not change rendered pixels"));
+        }
+        if baseline.as_ref().is_some_and(|first| first != &frames) {
+            return Err(fail("shape animation PNG bytes depend on worker count"));
+        }
+        if baseline.is_none() {
+            baseline = Some(frames);
+        }
+        let path = format!("/shape-final-{threads}.png");
+        fmn::render_with_fs(
+            &mut Shapes { final_only: false },
+            options(&path, fmn::RenderFormat::Png, threads)?,
+            fs.clone(),
+        )
+        .map_err(|error| fail(format!("shape replacement final state: {error}")))?;
+        if fs
+            .read(std::path::Path::new(&path))
+            .map_err(|error| fail(format!("shape final PNG: {error}")))?
+            != expected
+        {
+            return Err(fail(
+                "shape replacement left altered target geometry or temporary pieces",
+            ));
+        }
+        checked += 1;
+    }
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_shape_matching")
+            .field("programs", jobs.programs)
+            .field("jobs", jobs.frames)
+            .field("thread_counts", checked),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("shape-matching-final.png", expected)
+        .with_counter("native_shape_matching_programs", jobs.programs)
+        .with_counter("native_shape_matching_jobs", jobs.frames)
+        .with_counter("native_shape_matching_thread_counts", checked))
+}
+
+/// Native scene cues reach canonical WAV bytes at every requested worker count.
+fn native_soundtrack_wav_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    struct Cues;
+    impl fmn::SceneConstruct for Cues {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            stage.scene_mut().add_sound("/pulse.wav", 0.0, None, None)?;
+            stage.wait(0.25)?;
+            stage
+                .scene_mut()
+                .add_sound("/pulse.wav", -0.125, None, None)?;
+            stage.wait(0.25)?;
+            Ok(())
+        }
+    }
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    let source = fmn_codec::encode_wav(1, 32, fmn_codec::SampleFormat::F32, &[0.25; 12]);
+    let source_bytes = source.len();
+    fs.insert("/pulse.wav", source);
+    // First cue occupies samples [0,12), the second [4,16): independently
+    // computed overlap on the 32 Hz sample grid, without invoking the mixer.
+    let mut expected_samples = vec![0.25_f32; 16];
+    expected_samples[4..12].fill(0.5);
+    let expected = fmn_codec::encode_wav(1, 32, fmn_codec::SampleFormat::S16, &expected_samples);
+    let mut checked = 0;
+    let mut total_cues = 0;
+    let mut total_samples = 0;
+    let mut first_wav = None;
+    for threads in [1, 4, 16] {
+        let path = format!("/native-soundtrack-{threads}.wav");
+        let mut options = fmn::SoundtrackRenderOptions::new(&path)
+            .map_err(|error| fail(format!("native soundtrack options: {error}")))?;
+        options.config.camera.fps = 8;
+        options.config.camera.resolution = (0, 0);
+        options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        options.mixer.sample_rate = 32;
+        options.mixer.channels = 1;
+        options.mixer.max_output_frames = 16;
+        options.threads = std::num::NonZeroUsize::new(threads)
+            .ok_or_else(|| fail("native soundtrack worker count is zero"))?;
+        options.max_scene_frames = 4;
+        options.max_output_bytes = expected.len() as u64;
+        options.preparation.max_cues = 2;
+        options.preparation.max_source_bytes = source_bytes;
+        options.preparation.max_decoded_samples = 12;
+        options.preparation.max_prepared_samples = 24;
+        options.typeset_cache = false;
+        let report = fmn::render_soundtrack_with_fs(&mut Cues, options, fs.clone())
+            .map_err(|error| fail(format!("native WAV at {threads} threads: {error}")))?;
+        let wav = fs
+            .read(std::path::Path::new(&path))
+            .map_err(|error| fail(format!("published native WAV: {error}")))?;
+        if wav != expected
+            || report.scene.time.frames() != 4
+            || report.scene.play_count != 2
+            || report.artifact.sample_frames != 16
+            || report.artifact.cues_mixed != 2
+            || report.artifact.clipped_samples != 0
+            || report.workers_used != threads
+            || report.inputs.len() != 2
+            || !Arc::ptr_eq(&report.inputs[0].bytes, &report.inputs[1].bytes)
+            || report
+                .inputs
+                .iter()
+                .any(|input| input.report.invocation.is_some())
+        {
+            return Err(fail(format!(
+                "native WAV lost cue timing, samples or receipts at {threads} threads"
+            )));
+        }
+        checked += 1;
+        total_cues += report.artifact.cues_mixed as u64;
+        total_samples += report.artifact.sample_frames;
+        if first_wav.is_none() {
+            first_wav = Some(wav);
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_soundtrack_wav")
+            .field("thread_counts", checked)
+            .field("cues_mixed", total_cues)
+            .field("sample_frames", total_samples),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact(
+            "native-soundtrack.wav",
+            first_wav.ok_or_else(|| fail("no native WAV was published"))?,
+        )
+        .with_counter("native_soundtrack_thread_counts", checked)
+        .with_counter("native_soundtrack_cues_mixed", total_cues)
+        .with_counter("native_soundtrack_sample_frames", total_samples))
+}
+
 /// The facade's MP4 request with no ffmpeg capability is a named capability
 /// refusal (D2) that runs no scene code and publishes nothing; a native
 /// format from the same options still renders.
@@ -2960,6 +3604,13 @@ fn python_scene_console_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErro
     Ok(RunOutcome::ok().with_counter("console_checks", checks))
 }
 
+fn python_reference_render_flags_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let checks = manimlib::run_portal_gauntlet_reference_flags()
+        .map_err(|error| fail(format!("Python Reference render flags: {error}")))?;
+    ctx.event(LogEvent::new("e2e.python.reference_flags").field("checks", checks));
+    Ok(RunOutcome::ok().with_counter("reference_flag_checks", checks))
+}
+
 /// Authored Surface hooks (fm-5wq.13): subclasses of the stock solids
 /// sample their authored `uv_func` and dispatch `init_points` once at
 /// construction, and render the same bytes as the equivalent
@@ -3888,6 +4539,105 @@ fn formula_sheet_render(
     Ok((record, frames))
 }
 
+/// fm-cache-eviction-wired-1w05: exercise the real render-completion hook
+/// with no disk retention, ordinary retention, and memory-only typesetting.
+/// All three render teams must publish exactly the same certified PNG.
+fn typeset_cache_retention_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    struct Formula;
+    impl fmn::SceneConstruct for Formula {
+        fn tex_preflight(&self) -> Vec<fmn::tex::TypesetRequest<'_>> {
+            vec![fmn::tex::TypesetRequest::math(r"\frac{x^2+1}{2}")]
+        }
+
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let formula = fmn::prelude::Tex::new(r"\frac{x^2+1}{2}").build(stage.tex_engine()?)?;
+            stage.add(formula)?;
+            Ok(())
+        }
+    }
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    let mut reference = None;
+    let mut evicted = 0;
+    for (index, threads) in [1, 4, 16].into_iter().enumerate() {
+        let destination = format!("/cache-retention-{threads}");
+        let mut options = fmn::RenderOptions::new(&destination)
+            .map_err(|error| fail(format!("retention render options: {error}")))?;
+        options.config.camera.resolution = (96, 54);
+        options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+        options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        options.config.directories.cache = if cfg!(windows) {
+            r"C:\typeset-retention".to_owned()
+        } else {
+            "/typeset-retention".to_owned()
+        };
+        if index == 0 {
+            options.config.cache.max_bytes = 0;
+        }
+        options.typeset_cache = index != 2;
+        let report = fmn::render_with_fs(&mut Formula, options, fs.clone())
+            .map_err(|error| fail(format!("retention render: {error}")))?;
+        let maintenance = &report.typesetting.maintenance;
+        if index == 0 {
+            if maintenance.runs != 1
+                || maintenance.errors != 0
+                || maintenance.evicted_entries == 0
+                || maintenance.retained_bytes != Some(0)
+            {
+                return Err(fail(format!(
+                    "retention did not run after rendering: {maintenance:?}"
+                )));
+            }
+            evicted = maintenance.evicted_entries;
+        }
+        if index == 1 {
+            if report.typesetting.persistent_hits != 0 {
+                return Err(fail(
+                    "the zero-ceiling render retained a reusable disk entry",
+                ));
+            }
+            let retained = maintenance.retained_bytes.unwrap_or(0);
+            if !report.typesetting.persistent
+                || maintenance.runs != 1
+                || maintenance.errors != 0
+                || retained == 0
+                || !report
+                    .typesetting
+                    .persistent_ceiling_bytes
+                    .is_some_and(|ceiling| retained <= ceiling)
+            {
+                return Err(fail(format!(
+                    "ordinary retention did not preserve its bounded disk cache: {maintenance:?}"
+                )));
+            }
+        }
+        if index == 2 && (report.typesetting.persistent || maintenance.runs != 0) {
+            return Err(fail("memory-only rendering performed disk maintenance"));
+        }
+        let frame = fs
+            .read(&PathBuf::from(destination).join("frame_000000.png"))
+            .map_err(|error| fail(format!("read retention PNG: {error}")))?;
+        if let Some(reference) = &reference {
+            if reference != &frame {
+                return Err(fail(
+                    "cache retention or thread count changed certified PNG bytes",
+                ));
+            }
+        } else {
+            reference = Some(frame);
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.typeset.retention")
+            .field("evicted", evicted)
+            .field("retained_bytes", 0_u64)
+            .field("identical_modes", 3_u64),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("cache_retention_modes", 3)
+        .with_counter("cache_retention_bytes", 0)
+        .with_counter("cache_retention_evicted", evicted))
+}
+
 /// One unsigned field of a render record's `typesetting` object.
 fn typesetting_field(record: &str, field: &str) -> Result<u64, ScenarioError> {
     let typesetting = record
@@ -4171,6 +4921,41 @@ fn cli_all_builtins() -> impl Iterator<Item = &'static str> {
     fmn::builtins::PRIMITIVE_SCENE_NAMES
         .into_iter()
         .chain(CLI_CAMERA_BUILTINS)
+}
+
+/// The production CLI, not an alternate renderer, consumes native programs.
+fn cli_pure_dispatch_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let mut baseline = None;
+    for threads in ["1", "4", "16"] {
+        let (output, frames) = cli_builtin_frames("circle_shift.v1", threads)?;
+        let dispatched = output.stdout.contains("\"pure_segments\":2")
+            && output.stdout.contains("\"serial_segments\":0")
+            && output.stdout.contains("\"pure_frames\":3")
+            && output.stdout.contains("\"compiled_frames\":0")
+            && output.stdout.contains("\"outstanding_slots\":0");
+        if output.code != 0 || !dispatched || frames.len() != 3 {
+            return Err(fail(format!(
+                "CLI pure dispatch {threads}: {:?} {:?}",
+                output.stdout, output.stderr
+            )));
+        }
+        if let Some(baseline) = &baseline {
+            if &frames != baseline {
+                return Err(fail("pure CLI artifacts changed with thread count"));
+            }
+        } else {
+            baseline = Some(frames);
+        }
+        ctx.event(
+            LogEvent::new("e2e.cli.pure_dispatch")
+                .field("threads", threads)
+                .field("pure_segments", 2_u64)
+                .field("pure_frames", 3_u64),
+        );
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("cli_pure_runs", 3)
+        .with_counter("cli_pure_frames", 9))
 }
 
 /// The CLI builtins' determinism drill (fm-cli-camera-route-i1zc,
@@ -4606,6 +5391,113 @@ fn render_certified_camera_doc(stage: &Stage) -> Vec<u8> {
         .render_with_camera(stage, &camera)
         .expect("the camera route renders the surface and vector frame");
     encode_frame(renderer.frame()).expect("the camera frame encodes into its canonical document")
+}
+
+/// Retained camera captures stay immutable while later poses and overlay
+/// edits reuse the same renderer. A fresh serial renderer supplies each
+/// expected frame; replay then reverses capture order on 1, 4, and 16 threads.
+fn retained_camera_frames_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::prelude::{Cube, RuntimeConfig, Scene};
+    use fmn_render::{Camera, CameraConfig, RetainedFrameRenderer, RetainedFrameRendererConfig};
+
+    let mut scene = Scene::new(RuntimeConfig::default(), 0)
+        .map_err(|error| fail(format!("retained camera scene: {error}")))?;
+    scene
+        .add_mobject(Cube::new(1.4))
+        .map_err(|error| fail(format!("retained camera cube: {error}")))?;
+    let overlay = scene
+        .add_mobject(Circle::new().radius(0.25))
+        .map_err(|error| fail(format!("retained camera overlay: {error}")))?;
+    scene.stage_mut().shift(overlay, [-1.2, 0.0, 0.0]);
+    let viewport = fmn_render::Viewport {
+        width: 64,
+        height: 36,
+    };
+    let frame_config = FrameConfig::new(
+        viewport,
+        fmn_render::ScreenMap {
+            scale: 9.0,
+            origin: [32.0, 18.0],
+            y_up: true,
+        },
+        fmn_core::color::LinearRgba {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        },
+    );
+    let config = RetainedFrameRendererConfig {
+        frame: frame_config,
+        tiling: TILING,
+        engine: EngineIdentity::certified(),
+        threads: 1,
+    };
+    let mut renderer = RetainedFrameRenderer::new(config)
+        .map_err(|error| fail(format!("retained camera renderer: {error}")))?;
+    let mut frames = Vec::new();
+    for index in 0..4 {
+        let mut camera = CameraConfig {
+            resolution: (viewport.width, viewport.height),
+            background: frame_config.background,
+            ..CameraConfig::default()
+        };
+        camera
+            .frame
+            .set_shape([64.0 / 9.0, 4.0])
+            .map_err(|error| fail(format!("retained camera shape: {error}")))?;
+        camera
+            .frame
+            .set_euler_angles(Some(f64::from(index.min(2)) * 0.3), Some(0.5), None)
+            .map_err(|error| fail(format!("retained camera orbit: {error}")))?;
+        if index == 3 {
+            scene.stage_mut().shift(overlay, [1.0, 0.5, 0.0]);
+        }
+        let camera =
+            Camera::new(camera).map_err(|error| fail(format!("retained camera pose: {error}")))?;
+        let captured = renderer
+            .prepare_with_camera(scene.stage(), &camera)
+            .map_err(|error| fail(format!("retained camera capture: {error}")))?;
+        let mut fresh = RetainedFrameRenderer::new(config)
+            .map_err(|error| fail(format!("serial camera renderer: {error}")))?;
+        fresh
+            .render_with_camera(scene.stage(), &camera)
+            .map_err(|error| fail(format!("serial camera frame: {error}")))?;
+        frames.push((captured, fresh.frame().as_bytes().to_vec()));
+    }
+    if frames[0].1 == frames[1].1 || frames[1].1 == frames[2].1 {
+        return Err(fail("camera orbit did not produce distinct visible frames"));
+    }
+    if frames[2].1 == frames[3].1 {
+        return Err(fail(
+            "overlay edit did not invalidate the retained camera frame",
+        ));
+    }
+    let layout = frames[0]
+        .0
+        .layout()
+        .map_err(|error| fail(error.to_string()))?;
+    let mut raster = FrameBuffer::new(layout);
+    let address = raster.as_bytes().as_ptr();
+    for threads in [1, 4, 16] {
+        for (frame, expected) in frames.iter().rev() {
+            frame
+                .render_into(threads, &mut raster)
+                .map_err(|error| fail(format!("retained camera replay: {error}")))?;
+            if raster.as_bytes() != expected || raster.as_bytes().as_ptr() != address {
+                return Err(fail(
+                    "frozen camera replay changed pixels or replaced the reusable raster",
+                ));
+            }
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.camera.retained")
+            .field("captures", 4_u64)
+            .field("replays", 12_u64)
+            .field("raster_reused", "true"),
+    );
+    Ok(RunOutcome::ok().with_counter("retained_camera_replays", 12))
 }
 
 /// A graph generated after native plane placement must occupy that plane's
@@ -7599,6 +8491,30 @@ fn spec(
 pub fn catalog() -> Vec<ScenarioSpec> {
     let mut specs = vec![
         spec(
+            "determinism.cli_pure_segments.v1",
+            ScenarioClass::DeterminismDrill,
+            Surface::CliInProcess,
+            Invocation::new(cli_pure_dispatch_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("cli_pure_runs", 3),
+                counter_eq("cli_pure_frames", 9),
+            ],
+            ["1", "4", "16"]
+                .into_iter()
+                .map(|threads| {
+                    LogExpect::span_present(
+                        "e2e.cli.pure_dispatch",
+                        vec![
+                            FieldPred::str_eq("threads", threads),
+                            FieldPred::u64_eq("pure_segments", 2),
+                            FieldPred::u64_eq("pure_frames", 3),
+                        ],
+                    )
+                })
+                .collect(),
+        ),
+        spec(
             "lifecycle.install_shared_family.v1",
             ScenarioClass::LifecycleDrill,
             Surface::RustApi,
@@ -7626,6 +8542,90 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )
         .tier(Tier::Fast),
     ];
+    specs.push(spec(
+        "render_matrix.native_matching_workers.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_matching_workers_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("native_matching_programs", 2),
+            counter_eq("native_matching_jobs", 8),
+            counter_eq("native_matching_owner_captures", 0),
+            counter_eq("native_matching_thread_counts", 3),
+            counter_eq("native_matching_rendered_frames", 24),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_matching_workers",
+            vec![
+                FieldPred::u64_eq("programs", 2),
+                FieldPred::u64_eq("jobs", 8),
+                FieldPred::u64_eq("owner_captures", 0),
+                FieldPred::u64_eq("thread_counts", 3),
+                FieldPred::u64_eq("rendered_frames", 24),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.native_final_png.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_final_png_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("native_final_png_thread_counts", 3),
+            counter_eq("native_final_png_nominal_ticks", 6),
+            counter_eq("native_final_png_published_frames", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_final_png",
+            vec![
+                FieldPred::u64_eq("thread_counts", 3),
+                FieldPred::u64_eq("nominal_ticks", 6),
+                FieldPred::u64_eq("published_frames", 3),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.native_shape_matching.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_shape_matching_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("native_shape_matching_programs", 1),
+            counter_eq("native_shape_matching_jobs", 4),
+            counter_eq("native_shape_matching_thread_counts", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_shape_matching",
+            vec![
+                FieldPred::u64_eq("programs", 1),
+                FieldPred::u64_eq("jobs", 4),
+                FieldPred::u64_eq("thread_counts", 3),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.native_soundtrack_wav.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_soundtrack_wav_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("native_soundtrack_thread_counts", 3),
+            counter_eq("native_soundtrack_cues_mixed", 6),
+            counter_eq("native_soundtrack_sample_frames", 48),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_soundtrack_wav",
+            vec![
+                FieldPred::u64_eq("thread_counts", 3),
+                FieldPred::u64_eq("cues_mixed", 6),
+                FieldPred::u64_eq("sample_frames", 48),
+            ],
+        )],
+    ));
     specs.push(spec(
         "render_matrix.coordinate_placement.v1",
         ScenarioClass::RenderMatrix,
@@ -7886,6 +8886,41 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 FieldPred::u64_eq("layouts_in_construct", 0),
                 FieldPred::u64_eq("layouts_inside_play", 0),
                 FieldPred::str_eq("before_first_frame", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.typeset_cache_retention.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(typeset_cache_retention_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("cache_retention_modes", 3),
+            counter_eq("cache_retention_bytes", 0),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.typeset.retention",
+            vec![
+                FieldPred::u64_eq("retained_bytes", 0),
+                FieldPred::u64_eq("identical_modes", 3),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.retained_camera_frames.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(retained_camera_frames_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("retained_camera_replays", 12),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.camera.retained",
+            vec![
+                FieldPred::u64_eq("captures", 4),
+                FieldPred::str_eq("raster_reused", "true"),
             ],
         )],
     ));
@@ -8362,6 +9397,20 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         vec![LogExpect::span_present(
             "e2e.python.scene_console",
             vec![FieldPred::u64_eq("checks", 7)],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.python_reference_render_flags.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_reference_render_flags_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("reference_flag_checks", 14),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.reference_flags",
+            vec![FieldPred::u64_eq("checks", 14)],
         )],
     ));
     specs.push(spec(
@@ -9740,6 +10789,46 @@ fn tracing_tail_lifecycle_scenario_passes() {
 }
 
 #[test]
+fn native_matching_workers_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.native_matching_workers.v1")
+        .expect("native matching workers scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn native_final_png_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.native_final_png.v1")
+        .expect("native final PNG scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn native_shape_matching_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.native_shape_matching.v1")
+        .expect("native shape matching scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn native_soundtrack_wav_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.native_soundtrack_wav.v1")
+        .expect("native soundtrack WAV scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
 fn piano_keyboard_scenario_passes() {
     let scenario = catalog()
         .into_iter()
@@ -10354,6 +11443,7 @@ fn typeset_cache_and_preflight_scenarios_pass() {
     for name in [
         "lifecycle.typeset_cache_warm_second_run.v1",
         "lifecycle.typeset_preflight_before_first_play.v1",
+        "lifecycle.typeset_cache_retention.v1",
     ] {
         let scenario = catalog()
             .into_iter()
@@ -10386,6 +11476,7 @@ fn phase2_and_phase3_e2e_scenarios_pass() {
 #[test]
 fn cli_builtin_scenarios_pass() {
     for name in [
+        "render_matrix.retained_camera_frames.v1",
         "render_matrix.cli_camera_builtins.v1",
         "render_matrix.cli_primitive_builtins.v1",
         "determinism.cli_builtins_threads_1_4.v1",
@@ -10432,4 +11523,14 @@ fn rebless_e2e_cli_builtins_panel() {
     let out = manifest.join("../..").join(REBLESS_ARTEFACT_DIR);
     std::fs::create_dir_all(&out).expect("re-bless artefact directory");
     std::fs::write(out.join(rebless_artefact_name(lock, &digest)), panel).expect("panel written");
+}
+
+#[test]
+fn cli_pure_dispatch_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "determinism.cli_pure_segments.v1")
+        .expect("native CLI pure dispatch scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
 }

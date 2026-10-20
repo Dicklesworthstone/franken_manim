@@ -300,3 +300,187 @@ fn mathematical_paragraphs_keep_document_reference_link_definitions() {
             .contains("[reference][result]")
     );
 }
+
+#[test]
+fn ordinary_tables_keep_the_existing_string_table_geometry() {
+    let book = book();
+    let source = "| full name | value |\n| --- | --- |\n| alpha beta | 2 |\n|  | 3 |\n";
+    let expected = fmn_library::TableMobject::from_grid(
+        vec!["full name".into(), "value".into()],
+        vec![
+            vec!["alpha beta".into(), "2".into()],
+            vec!["".into(), "3".into()],
+        ],
+    )
+    .build(&book)
+    .unwrap();
+    for size in [24.0, 48.0, 72.0] {
+        let doc = Markdown::new(source)
+            .font_size(size)
+            .build_with_math(&book, &engine())
+            .unwrap();
+        same_shape(
+            &doc.blocks[0].vmob,
+            &expected.clone().scaled_about(size / 48.0, [0.0; 3]),
+        );
+        assert_eq!(
+            doc.blocks[0].vmob.children().len(),
+            expected.children().len()
+        );
+    }
+}
+
+#[test]
+fn table_cells_keep_native_formulas_styles_code_and_source_order() {
+    let (book, engine) = (book(), engine());
+    let source = "| formula | strong | code |\n| --- | --- | --- |\n| $x_i+y_j$ | **bold** | `x_i $y_j$` |\n| *italic* | [label][ref] | ~~gone~~ |\n\n[ref]: https://example.invalid/result\n";
+    let doc = Markdown::new(source)
+        .build_with_math(&book, &engine)
+        .unwrap();
+    assert_eq!(doc.blocks.len(), 1);
+    let table = &doc.blocks[0].vmob;
+    let cells = &table.children()[table.children().len() - 9..];
+    same_shape(&cells[3], &Tex::new("x_i+y_j").build(&engine).unwrap().vmob);
+    same_shape(
+        &cells[4],
+        &Text::new("bold").bold(true).build(&book).unwrap().vmob,
+    );
+    same_shape(
+        &cells[5],
+        &Text::new("x_i $y_j$")
+            .font(fmn_text::font::MONO_FAMILY)
+            .build(&book)
+            .unwrap()
+            .vmob,
+    );
+    same_shape(
+        &cells[6],
+        &Text::new("italic").italic(true).build(&book).unwrap().vmob,
+    );
+    same_shape(&cells[7], &Text::new("label").build(&book).unwrap().vmob);
+    same_shape(
+        &cells[8],
+        &Text::markup("<s>gone</s>").build(&book).unwrap().vmob,
+    );
+    assert!(
+        source[doc.blocks[0].byte_range.0..doc.blocks[0].byte_range.1]
+            .contains("$x_i+y_j$ | **bold**")
+    );
+}
+
+#[test]
+fn math_tables_honor_column_alignment_and_make_room_for_tall_formulas() {
+    let (book, engine) = (book(), engine());
+    let source = "| left heading | centered heading | right heading |\n| :--- | :---: | ---: |\n| $x$ | **i** | `r` |\n| $\\frac{1}{1+\\frac{1}{x}}$ | $y_j$ | *end* |\n";
+    let doc = Markdown::new(source)
+        .build_with_math(&book, &engine)
+        .unwrap();
+    let table = &doc.blocks[0].vmob;
+    let cells = &table.children()[table.children().len() - 9..];
+    for row in 1..3 {
+        assert!(
+            (cells[row * 3].extent().unwrap().0[0] - cells[0].extent().unwrap().0[0]).abs() < 1e-10
+        );
+        assert!((cells[row * 3 + 1].center_point()[0] - cells[1].center_point()[0]).abs() < 1e-10);
+        assert!(
+            (cells[row * 3 + 2].extent().unwrap().1[0] - cells[2].extent().unwrap().1[0]).abs()
+                < 1e-10
+        );
+    }
+    for rows in cells.chunks_exact(3).collect::<Vec<_>>().windows(2) {
+        let bottom = rows[0]
+            .iter()
+            .map(|cell| cell.extent().unwrap().0[1])
+            .fold(f64::INFINITY, f64::min);
+        let top = rows[1]
+            .iter()
+            .map(|cell| cell.extent().unwrap().1[1])
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!(bottom > top, "adjacent table rows overlap");
+    }
+    for row in cells.chunks_exact(3) {
+        for pair in row.windows(2) {
+            assert!(pair[0].extent().unwrap().1[0] < pair[1].extent().unwrap().0[0]);
+        }
+    }
+}
+
+#[test]
+fn tables_preserve_empty_cells_and_color_without_losing_math_errors() {
+    let (book, engine) = (book(), engine());
+    let source = "|  | $x$ |\n| --- | --- |\n|  |  |\n| $y$ |  |\n";
+    let color = fmn_core::constants::TEAL;
+    let doc = Markdown::new(source)
+        .build_with_math_options(
+            &book,
+            &engine,
+            MarkdownMathOptions {
+                color,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let table = &doc.blocks[0].vmob;
+    let cells = &table.children()[table.children().len() - 6..];
+    for index in [0, 2, 3, 5] {
+        assert!(canonical(&cells[index]).is_empty());
+    }
+    same_shape(&cells[1], &Tex::new("x").build(&engine).unwrap().vmob);
+    same_shape(&cells[4], &Tex::new("y").build(&engine).unwrap().vmob);
+    fn check_color(v: &VMobject, color: fmn_core::color::Srgb) {
+        assert_eq!(v.style().fill_color, color);
+        assert_eq!(v.style().stroke_color, color);
+        for child in v.children() {
+            check_color(child, color);
+        }
+    }
+    check_color(table, color);
+    let error = Markdown::new("| math |\n| --- |\n| $\\thiscommanddoesnotexist{x}$ |\n")
+        .build_with_math(&book, &engine)
+        .err()
+        .expect("invalid table formula must fail")
+        .to_string();
+    assert!(error.contains("thiscommanddoesnotexist"), "{error}");
+    let error = Markdown::new("| asset |\n| --- |\n| ![missing](file.png) |\n")
+        .build_with_math(&book, &engine)
+        .err()
+        .expect("implicit table image must fail")
+        .to_string();
+    assert!(error.contains("explicit scene asset"), "{error}");
+}
+
+#[test]
+fn tables_admit_only_bounded_rectangular_grids() {
+    let (book, engine) = (book(), engine());
+    let source = format!("| math |\n| --- |\n{}", "| $x$ |\n".repeat(257));
+    assert!(
+        Markdown::new(&source)
+            .build_with_math(&book, &engine)
+            .is_err()
+    );
+    let source = format!(
+        "|{}\n|{}\n|{}\n",
+        " h |".repeat(65),
+        " --- |".repeat(65),
+        " b |".repeat(65)
+    );
+    let error = Markdown::new(&source)
+        .build_with_math(&book, &engine)
+        .err()
+        .expect("a table over the column budget must fail")
+        .to_string();
+    assert!(error.contains("64 columns"), "{error}");
+    assert!(
+        fmn_library::TableMobject::from_grid(Vec::new(), Vec::new())
+            .build(&book)
+            .is_err()
+    );
+    assert!(
+        fmn_library::TableMobject::from_grid(
+            vec!["one".into()],
+            vec![vec!["a".into(), "b".into()]]
+        )
+        .build(&book)
+        .is_err()
+    );
+}

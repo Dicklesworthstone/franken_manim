@@ -970,3 +970,419 @@ fn packet_rng_forks_are_pure_and_derivable() {
         assert_eq!(a.next_u64(), b.next_u64());
     }
 }
+
+fn updater_refusal() -> fmn_mobject::UpdaterError {
+    fmn_mobject::UpdaterError::Callback {
+        operation: "frame-order geometry",
+        detail: "authored sample was refused".to_owned(),
+    }
+}
+
+#[test]
+fn fallible_starting_copy_updater_aborts_before_interpolation_in_both_modes() {
+    for skip in [false, true] {
+        let mut stage = Stage::new();
+        let mob = square(&mut stage);
+        stage.add_to_scene(mob).unwrap();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let observed = Rc::clone(&calls);
+        let updater = stage
+            .add_try_dt_updater(
+                mob,
+                move |_stage, receiver, _dt| {
+                    observed.borrow_mut().push(receiver);
+                    Err(updater_refusal())
+                },
+                false,
+            )
+            .unwrap();
+        let mut animations = vec![shift_animation(&mut stage, mob, 2.0, 1.0)];
+        let mut clock = RationalFrameClock::new(4).unwrap();
+        let mut emitted = 0;
+        let error = play_segment(
+            &mut stage,
+            &mut clock,
+            &rng(),
+            &mut animations,
+            skip,
+            &mut |_| emitted += 1,
+        )
+        .unwrap_err();
+        let failure = stage.updater_error().unwrap().clone();
+        assert_eq!(error, AnimError::Updater(failure.clone()));
+        assert_eq!(failure.updater, updater);
+        assert_ne!(failure.mobject, mob, "the starting copy ticks in step one");
+        assert_eq!(*calls.borrow(), vec![failure.mobject]);
+        assert_eq!(clock.now().frames(), 0, "step three never ran");
+        assert_eq!(emitted, 0);
+        assert_eq!(stage.get_center(mob), [0.0; 3]);
+        assert!(!stage.is_animating(mob));
+        assert!(stage.roots().contains(&mob));
+        stage.update_mobject(mob, 0.0);
+        assert_eq!(calls.borrow().len(), 1, "the failure stays latched");
+    }
+}
+
+#[test]
+fn fallible_scene_updater_aborts_without_landing_the_animation_endpoint() {
+    for skip in [false, true] {
+        let mut stage = Stage::new();
+        let mob = square(&mut stage);
+        let follower = square(&mut stage);
+        stage.add_to_scene(mob).unwrap();
+        stage.add_to_scene(follower).unwrap();
+        let calls = Rc::new(RefCell::new(0));
+        let observed = Rc::clone(&calls);
+        stage
+            .add_try_dt_updater(
+                follower,
+                move |_stage, _receiver, _dt| {
+                    *observed.borrow_mut() += 1;
+                    if *observed.borrow() == 2 {
+                        Err(updater_refusal())
+                    } else {
+                        Ok(())
+                    }
+                },
+                false,
+            )
+            .unwrap();
+        let mut animations = vec![shift_animation(&mut stage, mob, 2.0, 1.0)];
+        let mut clock = RationalFrameClock::new(4).unwrap();
+        let mut boundaries = Vec::new();
+        let mut packets = Vec::new();
+        let error = fmn_anim::frame::play_segment_with_boundary(
+            &mut stage,
+            &mut clock,
+            &rng(),
+            &mut animations,
+            skip,
+            &mut |_, time| boundaries.push(time.frames()),
+            &mut |packet| packets.push(packet),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            AnimError::Updater(stage.updater_error().unwrap().clone())
+        );
+        assert_eq!(stage.updater_error().unwrap().mobject, follower);
+        assert_eq!(*calls.borrow(), 2, "abort performs no zero-dt callback");
+        assert_eq!(clock.now().frames(), 2);
+        assert_eq!(boundaries, vec![1]);
+        assert_eq!(packets.len(), usize::from(!skip));
+        assert_eq!(
+            stage.get_center(mob)[0],
+            1.0,
+            "keep the failed frame's partial state"
+        );
+        assert!(!stage.is_animating(mob));
+        if let Some(packet) = packets.first() {
+            assert_eq!(packet.materialize_stage().get_center(mob)[0], 0.5);
+        }
+    }
+}
+
+#[test]
+fn fallible_wait_updaters_refuse_initial_and_sample_passes_before_capture() {
+    for skip in [false, true] {
+        for initial_failure in [false, true] {
+            let mut stage = Stage::new();
+            let mob = square(&mut stage);
+            stage.add_to_scene(mob).unwrap();
+            let calls = Rc::new(RefCell::new(0));
+            let observed = Rc::clone(&calls);
+            stage
+                .add_try_dt_updater(
+                    mob,
+                    move |_stage, _receiver, _dt| {
+                        *observed.borrow_mut() += 1;
+                        if initial_failure || *observed.borrow() == 3 {
+                            Err(updater_refusal())
+                        } else {
+                            Ok(())
+                        }
+                    },
+                    false,
+                )
+                .unwrap();
+            let mut clock = RationalFrameClock::new(4).unwrap();
+            let mut boundaries = 0;
+            let mut emitted = 0;
+            let mut stops = 0;
+            let error = wait_segment_with_boundary(
+                &mut stage,
+                &mut clock,
+                &rng(),
+                1.0,
+                Some(&mut |_| {
+                    stops += 1;
+                    false
+                }),
+                skip,
+                &mut |_, _| boundaries += 1,
+                &mut |_| emitted += 1,
+            )
+            .unwrap_err();
+            assert!(matches!(error, AnimError::Updater(_)));
+            let completed = usize::from(!initial_failure);
+            assert_eq!(boundaries, completed);
+            assert_eq!(emitted, if skip { 0 } else { completed });
+            assert_eq!(
+                stops, completed,
+                "a refused frame does not call the stop condition"
+            );
+            assert_eq!(*calls.borrow(), if initial_failure { 1 } else { 3 });
+            assert_eq!(clock.now().frames(), if initial_failure { 0 } else { 2 });
+        }
+    }
+}
+
+#[test]
+fn marked_host_updaters_cannot_publish_a_failed_native_sample() {
+    let mut stage = Stage::new();
+    let mob = square(&mut stage);
+    stage.add_to_scene(mob).unwrap();
+    let mut animations = vec![shift_animation(&mut stage, mob, 2.0, 1.0)];
+    let mut clock = RationalFrameClock::new(4).unwrap();
+    let mut open = open_play(&mut stage, &clock, &mut animations).unwrap();
+    prepare_play_frame(&mut stage, &mut clock, &mut animations, &mut open).unwrap();
+    stage
+        .add_try_updater(mob, |_, _| Err(updater_refusal()), false)
+        .unwrap();
+    stage.update_mobject(mob, clock.dt().to_f64());
+    open.mark_scene_updaters_complete().unwrap();
+    let mut captured = 0;
+    let mut boundaries = 0;
+    let error = complete_play_frame(
+        &mut stage,
+        &clock,
+        &rng(),
+        &mut open,
+        true,
+        &mut |_, _| boundaries += 1,
+        &mut |_| captured += 1,
+    )
+    .unwrap_err();
+    assert!(matches!(error, AnimError::Updater(_)));
+    assert_eq!((boundaries, captured), (0, 0));
+    let _report = abort_open_play(&mut stage, &mut animations, open);
+    assert!(!stage.is_animating(mob));
+    assert_eq!(stage.get_center(mob)[0], 0.5);
+}
+
+#[test]
+fn capture_boundary_updater_failure_prevents_the_immutable_freeze() {
+    let mut stage = Stage::new();
+    let mob = square(&mut stage);
+    stage.add_to_scene(mob).unwrap();
+    let mut clock = RationalFrameClock::new(4).unwrap();
+    let mut emitted = 0;
+    let error = wait_segment_with_boundary(
+        &mut stage,
+        &mut clock,
+        &rng(),
+        1.0,
+        None,
+        false,
+        &mut |stage, _| {
+            assert!(
+                stage
+                    .add_try_updater(mob, |_, _| Err(updater_refusal()), true)
+                    .is_err()
+            );
+        },
+        &mut |_| emitted += 1,
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        AnimError::Updater(stage.updater_error().unwrap().clone())
+    );
+    assert_eq!(clock.now().frames(), 1);
+    assert_eq!(emitted, 0);
+}
+
+#[test]
+fn resumed_updater_failure_aborts_later_finish_and_remover_cleanup() {
+    let mut stage = Stage::new();
+    let first = square(&mut stage);
+    let second = square(&mut stage);
+    stage.add_to_scene(first).unwrap();
+    stage.add_to_scene(second).unwrap();
+    stage
+        .add_try_updater(
+            first,
+            move |_, receiver| {
+                if receiver == first {
+                    Err(updater_refusal())
+                } else {
+                    Ok(())
+                }
+            },
+            false,
+        )
+        .unwrap();
+    let mut first_animation = shift_animation(&mut stage, first, 2.0, 1.0);
+    first_animation.state_mut().config.suspend_mobject_updating = true;
+    let mut second_animation = shift_animation(&mut stage, second, 2.0, 1.0);
+    second_animation.state_mut().config.final_alpha_value = 0.25;
+    second_animation.state_mut().config.remover = true;
+    let mut animations = vec![first_animation, second_animation];
+    let mut clock = RationalFrameClock::new(1).unwrap();
+    let mut emitted = 0;
+    let error = play_segment(
+        &mut stage,
+        &mut clock,
+        &rng(),
+        &mut animations,
+        false,
+        &mut |_| emitted += 1,
+    )
+    .unwrap_err();
+    assert!(matches!(error, AnimError::Updater(_)));
+    assert_eq!(stage.updater_error().unwrap().mobject, first);
+    assert_eq!(emitted, 1, "the earlier successful sample remains valid");
+    assert_eq!(
+        stage.get_center(second)[0],
+        2.0,
+        "do not interpolate its final alpha"
+    );
+    assert!(
+        stage.roots().contains(&second),
+        "do not run remover cleanup"
+    );
+    assert!(!stage.is_animating(first));
+    assert!(!stage.is_animating(second));
+    assert!(!stage.is_updating_suspended(first));
+}
+
+struct UpdatingBegin {
+    state: AnimState,
+    fail_in_starting_copy: bool,
+    return_secondary_error: bool,
+}
+
+impl Animation for UpdatingBegin {
+    fn state(&self) -> &AnimState {
+        &self.state
+    }
+
+    fn state_mut(&mut self) -> &mut AnimState {
+        &mut self.state
+    }
+
+    fn setup(&mut self, stage: &mut Stage) -> Result<(), AnimError> {
+        if !self.fail_in_starting_copy {
+            stage.update_mobject(self.state.mobject(), 0.0);
+            if self.return_secondary_error {
+                return Err(AnimError::EmptyMobject);
+            }
+        }
+        Ok(())
+    }
+
+    fn create_starting_mobject(&self, stage: &mut Stage) -> Result<Mob, AnimError> {
+        if self.fail_in_starting_copy {
+            stage.update_mobject(self.state.mobject(), 0.0);
+            if self.return_secondary_error {
+                return Err(AnimError::EmptyMobject);
+            }
+        }
+        Ok(stage.copy_family(self.state.mobject())?)
+    }
+
+    fn interpolate_submobject(&mut self, _: &mut Stage, _: &[Mob], _: f64) {
+        panic!("a failed begin updater must stop before interpolation");
+    }
+}
+
+#[test]
+fn begin_rollback_preserves_the_first_updater_failure() {
+    for fail_in_starting_copy in [false, true] {
+        for return_secondary_error in [false, true] {
+            let mut stage = Stage::new();
+            let mob = square(&mut stage);
+            stage.add_to_scene(mob).unwrap();
+            let updater = stage
+                .add_try_updater(
+                    mob,
+                    |stage, receiver| {
+                        stage.shift(receiver, [9.0, 0.0, 0.0]);
+                        Err(updater_refusal())
+                    },
+                    false,
+                )
+                .unwrap();
+            let before = stage.snapshot_bytes().unwrap();
+            let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(UpdatingBegin {
+                state: AnimState::new(mob, AnimConfig::default()),
+                fail_in_starting_copy,
+                return_secondary_error,
+            })];
+            let mut clock = RationalFrameClock::new(4).unwrap();
+            let error = play_segment(
+                &mut stage,
+                &mut clock,
+                &rng(),
+                &mut animations,
+                false,
+                &mut |_| panic!("a failed begin cannot capture"),
+            )
+            .unwrap_err();
+            let failure = stage.updater_error().unwrap();
+            assert_eq!(error, AnimError::Updater(failure.clone()));
+            assert_eq!((failure.mobject, failure.updater), (mob, updater));
+            assert_eq!(stage.snapshot_bytes().unwrap(), before);
+            assert_eq!(clock.now().frames(), 0);
+        }
+    }
+}
+
+#[test]
+fn a_pending_failure_cannot_escape_through_pure_frame_reconstruction() {
+    let mut stage = Stage::new();
+    let mob = square(&mut stage);
+    stage.add_to_scene(mob).unwrap();
+    let mut animations = vec![shift_animation(&mut stage, mob, 2.0, 1.0)];
+    let mut clock = RationalFrameClock::new(4).unwrap();
+    let open = open_play(&mut stage, &clock, &mut animations).unwrap();
+    assert!(
+        fmn_anim::pure_frame::PureSegment::freeze(&stage, &clock, &rng(), &animations, &open)
+            .is_ok()
+    );
+    assert!(
+        stage
+            .add_try_updater(mob, |_, _| Err(updater_refusal()), true)
+            .is_err()
+    );
+    assert!(
+        fmn_anim::pure_frame::PureSegment::freeze(&stage, &clock, &rng(), &animations, &open)
+            .is_err()
+    );
+    let sample = open.segment().sample(1).unwrap();
+    assert!(matches!(
+        fmn_anim::purity::reconstruct_pure_frame(
+            &mut stage,
+            &mut animations,
+            open.report(),
+            &rng(),
+            &sample,
+        ),
+        Err(AnimError::Updater(_))
+    ));
+    assert_eq!(clock.now().frames(), 0);
+    let _report = abort_open_play(&mut stage, &mut animations, open);
+    // Refusal happens before the initial updater pass and clock movement,
+    // even after an immediate registration has already removed its slot.
+    assert!(matches!(
+        fmn_anim::frame::wait_segment_upto(
+            &mut stage,
+            &mut clock,
+            &rng(),
+            1.0,
+            1,
+            &mut |_| panic!("a pending failure cannot capture"),
+        ),
+        Err(AnimError::Updater(_))
+    ));
+}

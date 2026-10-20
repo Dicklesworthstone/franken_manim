@@ -14,7 +14,7 @@
 //!   pure optimization (a constant column lerps to the same values
 //!   row-wise) and is deliberately not replicated.
 //! - [`Transform::setup`] aligns (`align_data_and_family`) before the
-//!   starting copy is taken; `after_begin` locks matching data (skipped
+//!   starting copy is taken; `after_begin` locks matching fields (skipped
 //!   when the family has updaters), `teardown` unlocks — the Reference's
 //!   begin/finish order, hook for hook.
 //!
@@ -487,6 +487,10 @@ impl Animation for Transform {
     /// start/target pair and alpha.
     fn effect_signature(&self) -> AnimationSignature {
         AnimationSignature::Pure
+    }
+
+    fn freeze_interpolation(&self) -> Option<crate::pure_frame::FrozenAnimation> {
+        crate::pure_frame::FrozenAnimation::transform(self.clone())
     }
 
     /// transform.py:54 — target copy (shared when already aligned), then

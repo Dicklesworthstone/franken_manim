@@ -132,6 +132,7 @@ class RenderResult:
     audio_inputs: tuple[dict[str, Any], ...] = ()
     manifest: Path | None = None
     closure_digest: str | None = None
+    ffmpeg_limits: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         result = {
@@ -146,6 +147,8 @@ class RenderResult:
         }
         if self.animation_range is not None:
             result["animation_range"] = list(self.animation_range)
+        if self.ffmpeg_limits is not None:
+            result["ffmpeg_limits"] = copy.deepcopy(self.ffmpeg_limits)
         if self.format == "wav":
             result.update(sample_rate=48000, channels=2)
         if self.manifest is not None:
@@ -383,10 +386,11 @@ class RenderSession:
             self._state = "published"
             path, count, size, digest, engine, threads = receipt
             published_path = path
-            invocations, audio_inputs = (), ()
+            invocations, audio_inputs, ffmpeg_limits = (), (), None
             if self.format in _VIDEO_FORMATS or self.format == "wav":
                 invocations = tuple(copy.deepcopy(self.scene._render_invocations))
                 audio_inputs = tuple(copy.deepcopy(self.scene._render_audio_inputs))
+                ffmpeg_limits = copy.deepcopy(getattr(self.scene, "_render_ffmpeg_limits", None))
             manifest_path, closure_digest = None, None
             if self.reproducible:
                 cues = audio_inputs or getattr(self.scene, "_render_audio_inputs", ())
@@ -406,7 +410,7 @@ class RenderSession:
                 seed=self.seed, animation_range=self.animation_range,
                 certified=self.reproducible, manifest=manifest_path,
                 closure_digest=closure_digest, ffmpeg_invocations=invocations,
-                audio_inputs=audio_inputs,
+                audio_inputs=audio_inputs, ffmpeg_limits=ffmpeg_limits,
             )
             self.result = result
             self._state = "finished"

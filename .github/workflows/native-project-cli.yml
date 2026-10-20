@@ -1,0 +1,48 @@
+name: Native project CLI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fmn-cli/src/main.rs'
+      - 'crates/fmn-cli/src/studio_project.rs'
+      - 'crates/fmn-cli/src/studio_project/**'
+      - 'crates/fmn-studio/src/project*'
+      - 'crates/fmn-studio/src/project/**'
+      - '.github/workflows/native-project-cli.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-project:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install the repository-pinned toolchain
+        run: rustup show active-toolchain
+      - name: Preserve a formatted-source diagnostic without changing the checkout
+        run: |
+          mkdir -p "$RUNNER_TEMP/native-project-format"
+          cp crates/fmn-cli/src/studio_project.rs "$RUNNER_TEMP/native-project-format/"
+          if test -d crates/fmn-cli/src/studio_project; then
+            cp -r crates/fmn-cli/src/studio_project "$RUNNER_TEMP/native-project-format/"
+          fi
+          rustfmt --edition 2024 "$RUNNER_TEMP/native-project-format/studio_project.rs"
+      - name: Compile the shipping binary and run native-project tests
+        run: cargo test --locked -p fmn-cli --features batch --bin fmn studio_project::tests
+      - name: Publish formatter diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: native-project-format-${{ github.sha }}
+          path: ${{ runner.temp }}/native-project-format
+          if-no-files-found: ignore
+          retention-days: 7

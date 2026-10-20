@@ -11,19 +11,27 @@ PARALLEL_HELP = """Isolated parallel scene batches:
 --workers 1..64 opts into fresh spawned interpreters, one per scene. Without
 it, the existing sequential path is unchanged. --threads defaults to 1 per
 worker; an explicit --threads N still controls each native renderer. Source
-code is imported for discovery and again in each worker; global state is not
-shared. Robot stdout remains one ordered batch receipt; scene output streams
-to stderr. --keep-going admits later jobs after ordinary failures. Fail-fast
+code is imported in a disposable discovery worker and again in each render
+worker; no scene code runs in the coordinator and global state is not shared.
+Robot stdout remains one ordered batch receipt; scene output streams to stderr. --keep-going admits later jobs after ordinary failures. Fail-fast
 stops new jobs while already running scenes finish. Optional --job-timeout
-bounds each worker including startup. Crashed/timed-out outputs are never
-removed or silently reused, and may exist without a complete receipt.
+bounds discovery and each render worker including startup. Crashed/timed-out
+outputs are never removed or silently reused, and may exist without a complete receipt.
 Add --checkpoint PATH --resume-key INPUTS to save durable per-scene progress;
 add --resume to verify and reuse completed outputs without starting workers
 for them. Keep source bytes, cwd, scene selection and native render options
 unchanged. --workers and --job-timeout may change between attempts. Robot
 receipts name reused scenes explicitly. Sequential and parallel checkpoint
-plans are not interchangeable. Parallel batches do not support --reproducible,
-paired output or subdivision; omit --workers for those sequential capabilities.
+plans are not interchangeable. --save-last-frame adds a final PNG from the
+same scene execution; non-subdivided pairs support verified checkpoint reuse.
+--subdivide emits per-play/wait clips, retaining partial collection receipts
+on failure or interruption, and composes with --save-last-frame. Subdivided
+collections do not support checkpoint recovery.
+--reproducible supports fresh png, png_sequence and wav outputs with a native
+manifest per scene. Each worker captures imports/reads through the guarded
+session and must match the parent's installed runtime. The aggregate remains
+uncertified; all_scenes_certified requires every scene's complete receipt.
+Certification cannot combine with recovery, paired output or subdivision.
 """
 
 

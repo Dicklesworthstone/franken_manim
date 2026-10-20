@@ -5,6 +5,7 @@
 //! No callback, animation law, serializer, or frame clock is reimplemented.
 
 use super::*;
+use crate::portal_audio::BundleAudioOptions;
 use fmn_anim::SegmentKind;
 use fmn_platform::fs::{FileSystem, StdFs};
 use fmn_scene::recording::{RecordingError, SceneBundleRecorder};
@@ -27,6 +28,14 @@ pub(crate) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
         "_portal_finish_bundle",
         wrap_pyfunction!(_portal_finish_bundle, module)?,
     )?;
+    module.setattr(
+        "_portal_begin_soundtrack_bundle",
+        wrap_pyfunction!(_portal_begin_soundtrack_bundle, module)?,
+    )?;
+    module.setattr(
+        "_portal_finish_soundtrack_bundle",
+        wrap_pyfunction!(_portal_finish_soundtrack_bundle, module)?,
+    )?;
     Ok(())
 }
 
@@ -36,6 +45,8 @@ pub(super) struct BundleCapture {
     max_output_bytes: usize,
     expected_camera: Camera,
     camera_track: bool,
+    audio: Option<BundleAudioOptions>,
+    saw_show: bool,
     active: Option<(SegmentKind, u64)>,
     failure: Option<String>,
 }
@@ -99,6 +110,7 @@ impl BundleCapture {
             Self::validate_stage(stage)?;
         }
         let reason = if packet.segment_frame() == 0 {
+            self.saw_show = true;
             CaptureReason::Show
         } else {
             CaptureReason::Segment
@@ -146,6 +158,7 @@ fn _portal_begin_bundle(
         max_capture_bytes,
         max_output_bytes,
         false,
+        None,
     )
 }
 
@@ -173,6 +186,47 @@ fn _portal_begin_camera_bundle(
         max_capture_bytes,
         max_output_bytes,
         true,
+        None,
+    )
+}
+
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn _portal_begin_soundtrack_bundle(
+    scene: &Bound<'_, PyScene>,
+    destination: String,
+    width: u32,
+    height: u32,
+    fps: u32,
+    seed: u64,
+    max_frames: u64,
+    max_capture_bytes: usize,
+    max_output_bytes: usize,
+    camera_track: bool,
+    sample_rate: u32,
+    channels: u16,
+    workers: usize,
+    max_audio_bytes: usize,
+) -> PyResult<()> {
+    let audio = BundleAudioOptions {
+        sample_rate,
+        channels,
+        workers,
+        max_bytes: max_audio_bytes,
+    }
+    .validate()?;
+    begin_bundle(
+        scene,
+        destination,
+        width,
+        height,
+        fps,
+        seed,
+        max_frames,
+        max_capture_bytes,
+        max_output_bytes,
+        camera_track,
+        Some(audio),
     )
 }
 
@@ -188,6 +242,7 @@ fn begin_bundle(
     max_capture_bytes: usize,
     max_output_bytes: usize,
     camera_track: bool,
+    audio: Option<BundleAudioOptions>,
 ) -> PyResult<()> {
     if destination.is_empty() || destination.contains('\0') {
         return Err(PyValueError::new_err(
@@ -256,6 +311,8 @@ fn begin_bundle(
         max_output_bytes,
         expected_camera,
         camera_track,
+        audio,
+        saw_show: false,
         active: None,
         failure: None,
     });
@@ -338,10 +395,25 @@ fn _portal_bundle_segment(scene: &Bound<'_, PyScene>, kind: &str, begin: bool) -
     result
 }
 
+type BundleReceipt = (String, u32, usize, usize, String);
+type AudioFacts = (u32, u16, u64);
+
 #[pyfunction]
-fn _portal_finish_bundle(
+fn _portal_finish_bundle(scene: &Bound<'_, PyScene>) -> PyResult<BundleReceipt> {
+    finish_bundle(scene, false).map(|(receipt, _)| receipt)
+}
+
+#[pyfunction]
+fn _portal_finish_soundtrack_bundle(
     scene: &Bound<'_, PyScene>,
-) -> PyResult<(String, u32, usize, usize, String)> {
+) -> PyResult<(BundleReceipt, Option<AudioFacts>)> {
+    finish_bundle(scene, true)
+}
+
+fn finish_bundle(
+    scene: &Bound<'_, PyScene>,
+    audio_mode: bool,
+) -> PyResult<(BundleReceipt, Option<AudioFacts>)> {
     let engine = Rc::clone(&scene.borrow().engine);
     let slot = Arc::clone(&scene.borrow().render);
     // Validate ownership before invoking any authored camera descriptor.
@@ -351,6 +423,13 @@ fn _portal_finish_bundle(
             .map_err(|_| PyRuntimeError::new_err("bundle output lock poisoned"))?;
         if !matches!(slot.as_ref(), Some(PortalRenderSession::Preview(c)) if c.bundle.is_some()) {
             return Err(PyRuntimeError::new_err("no bundle capture is active"));
+        }
+        if !matches!(slot.as_ref(), Some(PortalRenderSession::Preview(c))
+            if c.bundle.as_ref().is_some_and(|b| b.audio.is_some() == audio_mode))
+        {
+            return Err(PyRuntimeError::new_err(
+                "bundle audio finish mode does not match its owner",
+            ));
         }
     }
     portal_playback::synchronize(scene)?;
@@ -385,8 +464,15 @@ fn _portal_finish_bundle(
             "skipped playback is not an exportable full timeline",
         ));
     }
-    if !live.sound_requests().is_empty() {
-        return Err(capability("audio is not carried by this format"));
+    if bundle.audio.is_none() && !live.sound_requests().is_empty() {
+        return Err(capability(
+            "picture-only export refuses sound; select audio=True",
+        ));
+    }
+    if bundle.saw_show && bundle.audio.is_some() && !live.sound_requests().is_empty() {
+        return Err(capability(
+            "soundtrack export cannot retime explicit show captures; use play/wait or a terminal still",
+        ));
     }
     if bundle.is_empty() {
         if bundle.camera_track {
@@ -399,7 +485,6 @@ fn _portal_finish_bundle(
         }
         .map_err(native_error)?;
     }
-    drop(live);
     let artifact = bundle
         .recorder
         .finish_with_max_bytes(bundle.max_output_bytes)
@@ -409,6 +494,27 @@ fn _portal_finish_bundle(
             RecordingError::OutputLimit { .. } => PyRuntimeError::new_err(error.to_string()),
             other => native_error(other),
         })?;
+    let soundtrack = bundle
+        .audio
+        .map(|audio| {
+            audio.mix(
+                &live,
+                artifact.frame_count,
+                bundle.max_output_bytes.saturating_sub(artifact.bytes.len()),
+            )
+        })
+        .transpose()?
+        .flatten();
+    drop(live);
+    let audio_facts = soundtrack
+        .as_ref()
+        .map(|pcm| (pcm.sample_rate(), pcm.channels(), pcm.sample_frames()));
+    let artifact = match soundtrack {
+        Some(pcm) => artifact
+            .with_soundtrack(&pcm, bundle.max_output_bytes)
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?,
+        None => artifact,
+    };
     let result = (
         bundle.destination.to_string_lossy().into_owned(),
         artifact.frame_count,
@@ -436,7 +542,7 @@ fn _portal_finish_bundle(
             }
             _ => native_error(error),
         })?;
-    Ok(result)
+    Ok((result, audio_facts))
 }
 
 #[cfg(test)]
@@ -451,7 +557,9 @@ mod tests {
         height: u32,
         threads: usize,
     ) -> PyResult<Vec<Vec<u8>>> {
-        let bundle = fmn_scene::TimelineBundle::from_bytes(&bytes).map_err(native_error)?;
+        let mut bundle = fmn_scene::TimelineBundle::from_bytes(&bytes).map_err(native_error)?;
+        // Test-only visual oracle explicitly discards sound before reconstruction.
+        let _ = bundle.take_soundtrack();
         assert!(!bundle.requires_camera());
         let identity = protocol_digest(&[]);
         let (mut output, _) = Capture::new(
@@ -485,7 +593,9 @@ mod tests {
         height: u32,
         threads: usize,
     ) -> PyResult<Vec<Vec<u8>>> {
-        let bundle = fmn_scene::TimelineBundle::from_bytes(&bytes).map_err(native_error)?;
+        let mut bundle = fmn_scene::TimelineBundle::from_bytes(&bytes).map_err(native_error)?;
+        // Test-only visual oracle explicitly discards sound before reconstruction.
+        let _ = bundle.take_soundtrack();
         assert!(bundle.has_camera_track());
         let identity = protocol_digest(&[]);
         let (mut output, _) = Capture::new(
@@ -522,6 +632,66 @@ mod tests {
         let image = fmn_codec::decode_png(&bytes, &fmn_codec::PngLimits::default())
             .map_err(native_error)?;
         Ok(image.rgba)
+    }
+
+    #[pyfunction]
+    fn _test_bundle_pcm(bytes: Vec<u8>) -> PyResult<Option<(u32, u16, Vec<f32>)>> {
+        let mut bundle = fmn_scene::TimelineBundle::from_bytes(&bytes).map_err(native_error)?;
+        Ok(bundle
+            .take_soundtrack()
+            .map(|s| (s.sample_rate(), s.channels(), s.into_samples())))
+    }
+
+    #[pyfunction]
+    fn _test_wav_pcm(path: &str) -> PyResult<Vec<f32>> {
+        let bytes = std::fs::read(path).map_err(native_error)?;
+        fmn_codec::decode_wav(&bytes, &fmn_codec::WavLimits::default())
+            .map(|w| w.samples)
+            .map_err(native_error)
+    }
+
+    #[test]
+    fn soundtrack_python_scene_bundle_export() {
+        crate::with_python_test_module("Audible Python bundle export", |py, module, globals| {
+            globals
+                .set_item(
+                    "_test_bundle_frames",
+                    wrap_pyfunction!(_test_bundle_frames, module).unwrap(),
+                )
+                .unwrap();
+            globals
+                .set_item(
+                    "_test_camera_bundle_frames",
+                    wrap_pyfunction!(_test_camera_bundle_frames, module).unwrap(),
+                )
+                .unwrap();
+            globals
+                .set_item(
+                    "_test_bundle_pcm",
+                    wrap_pyfunction!(_test_bundle_pcm, module).unwrap(),
+                )
+                .unwrap();
+            globals
+                .set_item(
+                    "_test_wav_pcm",
+                    wrap_pyfunction!(_test_wav_pcm, module).unwrap(),
+                )
+                .unwrap();
+            globals
+                .set_item(
+                    "__file__",
+                    concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/tests/soundtrack_bundle_export.py"
+                    ),
+                )
+                .unwrap();
+            let source =
+                CString::new(include_str!("../../tests/soundtrack_bundle_export.py")).unwrap();
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .expect("real Python audio capture, native PCM/picture replay and fail-closed publication");
+        });
     }
 
     #[test]

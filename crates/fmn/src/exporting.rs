@@ -9,8 +9,9 @@
 //! The original exports preserve FMTL/1 minor 0: geometry and the frame grid,
 //! with replay policy supplied separately. [`export_camera_bundle_bytes`] and
 //! its publication siblings record minor 1 with exact per-frame cameras, light
-//! and background. Neither format serializes callbacks or audio. Sound requests
-//! are refused rather than silently stripped.
+//! and background. Neither visual format serializes callbacks or audio. The explicit
+//! [`soundtrack`] APIs add mixed PCM with caller-provided asset capabilities.
+//! Picture-only entry points refuse sound rather than silently stripping it.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -22,6 +23,8 @@ use fmn_scene::recording::{RecordedSceneBundle, RecordingError, SceneBundleRecor
 use fmn_scene::{BundleExportLimits, RuntimeConfig, SceneRunReport};
 
 use crate::SceneConstruct;
+
+pub mod soundtrack;
 
 mod camera;
 pub use camera::{export_camera_bundle, export_camera_bundle_bytes, export_camera_bundle_with_fs};
@@ -102,6 +105,8 @@ pub enum BundleExportError {
     InvalidOptions(&'static str),
     /// The format cannot carry a requested side channel.
     Capability(&'static str),
+    /// Native audio asset, decoder, mixer or preparation failure.
+    Soundtrack(crate::rendering::RenderError),
     /// A native construction/lifecycle failure, in its original variant.
     Scene(crate::Error),
     /// Snapshot capture, allocation, clock or format validation failed.
@@ -116,6 +121,7 @@ impl fmt::Display for BundleExportError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidOptions(message) | Self::Capability(message) => f.write_str(message),
+            Self::Soundtrack(error) => error.fmt(f),
             Self::Scene(error) => error.fmt(f),
             Self::Recording(error) => error.fmt(f),
             Self::OutputLimit { needed, limit } => {
@@ -132,6 +138,7 @@ impl fmt::Display for BundleExportError {
 impl std::error::Error for BundleExportError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Soundtrack(error) => Some(error),
             Self::Scene(error) => Some(error),
             Self::Recording(error) => Some(error),
             Self::FileSystem(error) => Some(error),
@@ -158,6 +165,14 @@ pub fn export_bundle_bytes<P: SceneConstruct + ?Sized>(
     program: &mut P,
     options: BundleExportOptions,
 ) -> Result<SceneBundleExport, BundleExportError> {
+    export_bundle_bytes_inner(program, options, None)
+}
+
+fn export_bundle_bytes_inner<P: SceneConstruct + ?Sized>(
+    program: &mut P,
+    options: BundleExportOptions,
+    audio: Option<(&soundtrack::BundleSoundtrackOptions, &dyn FileSystem)>,
+) -> Result<SceneBundleExport, BundleExportError> {
     options.validate()?;
     let runtime = RuntimeConfig::from_config(&options.config);
     let mut recorder = SceneBundleRecorder::new(runtime.effective_fps(), options.limits)
@@ -180,9 +195,9 @@ pub fn export_bundle_bytes<P: SceneConstruct + ?Sized>(
             });
         }
     };
-    if !completed.scene().sound_requests().is_empty() {
+    if audio.is_none() && !completed.scene().sound_requests().is_empty() {
         return Err(BundleExportError::Capability(
-            "FMTL/1 cannot carry audio; use the audio-capable render/output path instead",
+            "picture-only export refuses audio; use exporting::soundtrack or the audio-capable render path",
         ));
     }
     if recorder.frame_count() == 0 {
@@ -198,6 +213,7 @@ pub fn export_bundle_bytes<P: SceneConstruct + ?Sized>(
             }
             error => BundleExportError::Recording(error),
         })?;
+    let bundle = soundtrack::finish_recording(bundle, completed.scene(), &options, audio)?;
     Ok(SceneBundleExport {
         scene: *completed.report(),
         bundle,

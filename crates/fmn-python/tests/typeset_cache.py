@@ -81,8 +81,46 @@ def run_rendered_cache_acceptance(m):
         configure_tex_cache(enabled=False)
 
 
+def run_cache_retention_boundaries(m):
+    from fmn_python import render_scene
+    from fmn_python.typesetting import configure_tex_cache, typesetting_receipt
+
+    class Formula(m.Scene):
+        def construct(self):
+            self.add(m.Tex(r"x^2 + y^2 = z^2"))
+
+    with tempfile.TemporaryDirectory(prefix="fmn-cache-retention-") as directory:
+        root, images = Path(directory), []
+        cache = root / "owned-cache"
+        try:
+            for name, enabled, ceiling in (("retained", True, 1024 * 1024),
+                                           ("evicted", True, 0), ("disabled", False, None)):
+                configure_tex_cache(cache, enabled=enabled, max_bytes=ceiling)
+                scene = Formula()
+                output = root / (name + ".png")
+                render_scene(scene, output, format="png", resolution=(120, 80), fps=12, threads=1)
+                images.append(output.read_bytes())
+                receipt = typesetting_receipt(scene)
+                assert receipt['persistent'] is enabled, receipt
+                assert receipt['persistent_ceiling_bytes'] == (ceiling if enabled else None), receipt
+                if name == "retained":
+                    assert receipt['maintenance']['runs'] >= 1, receipt
+                    assert any((cache / 'ns/typeset').rglob('objects/*/*'))
+                if name == "evicted":
+                    assert receipt['maintenance']['evicted_entries'] > 0, receipt
+                    assert receipt['maintenance']['evicted_bytes'] > 0, receipt
+                    assert receipt['maintenance']['retained_bytes'] == 0, receipt
+                    assert receipt['maintenance']['errors'] == 0, receipt
+                    assert not any((cache / 'ns/typeset').rglob('objects/*/*'))
+            assert images[0].startswith(b'\x89PNG\r\n\x1a\n')
+            assert images[0] == images[1] == images[2], 'disk retention changed rendered ink'
+        finally:
+            configure_tex_cache(enabled=False)
+
+
 if __name__ in ("__main__", "<run_path>"):
     import manimlib as m
     run_typeset_cache(m)
     run_rendered_cache_acceptance(m)
+    run_cache_retention_boundaries(m)
     print("native typeset cache and cold/warm/disabled PNG acceptance passed")

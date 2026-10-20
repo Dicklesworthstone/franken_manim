@@ -10,9 +10,11 @@ mod quality;
 mod conversion_tests;
 
 use fmn_frame::convert::{rgba16f_to_bgra8, rgba16f_to_nv12, rgba16f_to_p010, rgba16f_to_rgba8};
-use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameError, PixelFormat};
+use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameError, FrameLayout, PixelFormat};
 use fmn_output::{ColorDescription, Container, EncoderChoice, VideoJob, WireFormat};
+use pyo3::exceptions::{PyAttributeError, PyTypeError};
 use pyo3::prelude::*;
+use pyo3::types::PyBool;
 
 use crate::{CapabilityError, PortalFrameFormat, PyRuntimeError, PyScene, PyValueError};
 
@@ -20,6 +22,8 @@ pub(crate) struct PortalVideoConfig {
     pub(crate) ffmpeg_bin: String,
     pub(crate) job: VideoJob,
     pub(crate) audio_quality: fmn_output::AudioQuality,
+    pub(crate) job_limits: fmn_output::JobLimits,
+    pub(crate) max_input_bytes: u64,
 }
 
 impl PortalVideoConfig {
@@ -97,6 +101,21 @@ impl PortalVideoConfig {
         .map_err(PyValueError::new_err)?
         .with_quality(quality)
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let layout = FrameLayout::tight(job.wire.frame_format(), width, height)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let frame_bytes = u64::try_from(layout.total_bytes())
+            .map_err(|_| crate::PyOverflowError::new_err("render frame size exceeds u64"))?;
+        let default_input_bytes = frame_bytes
+            .checked_mul(crate::PORTAL_MAX_RENDER_FRAMES)
+            .ok_or_else(|| crate::PyOverflowError::new_err("render stream budget exceeds u64"))?;
+        let (limits, max_input_bytes) = limits_from_writer(&writer, default_input_bytes)?;
+        if max_input_bytes < frame_bytes {
+            return Err(PyValueError::new_err(
+                "file_writer.ffmpeg_max_input_bytes cannot hold one output frame",
+            ));
+        }
+        let job_limits = fmn_output::admit_render_ffmpeg_limits(&limits, max_input_bytes)
+            .map_err(PyValueError::new_err)?;
         // Python getters may adopt mobjects, advance time, or recursively
         // acquire a generation. Never replace that state or probe an encoder
         // against the now-stale preflight in begin_portal_render.
@@ -104,8 +123,56 @@ impl PortalVideoConfig {
             ffmpeg_bin,
             job,
             audio_quality,
+            job_limits,
+            max_input_bytes,
         })
     }
+}
+
+fn positive_limit(writer: &Bound<'_, PyAny>, name: &str) -> PyResult<Option<u64>> {
+    let value = match writer.getattr(name) {
+        Ok(value) if value.is_none() => return Ok(None),
+        Ok(value) => value,
+        Err(error) if error.is_instance_of::<PyAttributeError>(writer.py()) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if value.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err(format!(
+            "file_writer.{name} must be a positive integer, not bool"
+        )));
+    }
+    let value = value.extract::<u64>()?;
+    if value == 0 {
+        return Err(PyValueError::new_err(format!(
+            "file_writer.{name} must be nonzero"
+        )));
+    }
+    Ok(Some(value))
+}
+
+pub(crate) fn limits_from_writer(
+    writer: &Bound<'_, PyAny>,
+    default_input_bytes: u64,
+) -> PyResult<(fmn_output::JobLimits, u64)> {
+    let mut limits = fmn_output::default_render_ffmpeg_limits();
+    if let Some(seconds) = positive_limit(writer, "ffmpeg_timeout")? {
+        limits.timeout = std::time::Duration::from_secs(seconds);
+    }
+    if let Some(bytes) = positive_limit(writer, "ffmpeg_max_log_bytes")? {
+        limits.max_log_bytes = bytes;
+    }
+    if let Some(bytes) = positive_limit(writer, "ffmpeg_max_artifact_bytes")? {
+        limits.max_artifact_bytes = bytes;
+    }
+    let max_input_bytes = positive_limit(writer, "ffmpeg_max_input_bytes")?
+        .unwrap_or(default_input_bytes)
+        .min(default_input_bytes);
+    // A compressed audio source may expand well beyond its byte ceiling.
+    // Validate job bounds independently here; only the video adapter
+    // intersects its artifact allowance with cumulative raw-frame input.
+    let limits = fmn_output::admit_render_ffmpeg_limits(&limits, limits.max_artifact_bytes)
+        .map_err(PyValueError::new_err)?;
+    Ok((limits, max_input_bytes))
 }
 
 pub(crate) fn check_scene_ownership(scene: &Bound<'_, PyScene>) -> PyResult<()> {

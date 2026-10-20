@@ -341,12 +341,10 @@ pub(crate) fn build_stroke_bins_into(
     entries_pool: &mut crate::arena::Pool<u32>,
     ranges_scratch: &mut crate::arena::Pool<[u32; 4]>,
     prepared_segments: &[PreparedSegment],
-    viewport: crate::plan::Viewport,
+    viewport: crate::bin::Viewport,
     fine_tile: u32,
-) -> Result<
-    Option<(crate::arena::PoolRange, crate::arena::PoolRange)>,
-    crate::arena::PoolRangeError,
-> {
+) -> Result<Option<(crate::arena::PoolRange, crate::arena::PoolRange)>, crate::arena::PoolRangeError>
+{
     if prepared_segments.len() < STROKE_BIN_MIN_SEGMENTS
         || viewport.width == 0
         || viewport.height == 0
@@ -466,7 +464,9 @@ pub(crate) struct PreparedStroke<'a> {
 
 impl<'a> PreparedStroke<'a> {
     /// The view over caller-owned prepared segments and their aggregate slab.
-    #[cfg(test)]
+    ///
+    /// Production draws that have not built a fine-tile index use this. The
+    /// binned constructor is [`Self::from_parts_binned`].
     pub(crate) fn from_parts(segments: &'a [PreparedSegment], slab: [f64; 4]) -> Self {
         Self {
             segments,
@@ -710,7 +710,6 @@ impl<'a> PreparedStroke<'a> {
         admitted.then_some((best, best_s))
     }
 
-    #[cfg(test)]
     #[must_use]
     pub(crate) fn shade(
         &self,

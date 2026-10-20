@@ -2,7 +2,8 @@
 //!
 //! The Reference surface is kept where it is semantic: seven event types,
 //! insertion-ordered listeners, pointer hit testing, drag capture on press,
-//! pressed-key state, and propagation stopping only on an explicit refusal.
+//! pressed-key state, and propagation stopping on an explicit refusal or a
+//! retained native updater failure.
 //! The Rust surface deliberately uses the correctly spelled `listener`
 //! vocabulary (Appendix C-9); typo aliases belong only in `fmn-python`.
 //!
@@ -542,6 +543,13 @@ impl EventInbox {
         self.len() == 0
     }
 
+    // With a sole handle and no queued payload, no external producer can
+    // appear during a borrowed Scene::play. Empty alone would be insufficient:
+    // another thread could submit its first event after admission.
+    pub(crate) fn is_exclusive_empty(&self) -> bool {
+        Arc::strong_count(&self.queue) == 1 && self.is_empty()
+    }
+
     pub(crate) fn drain_if_at_most(
         &self,
         capacity: u128,
@@ -820,6 +828,23 @@ impl EventDispatcher {
         self.listeners.len() != before
     }
 
+    /// Remove a token only when its registered target also matches.
+    ///
+    /// Mobject binding handles use this after their geometry is deleted, or
+    /// when handed another Scene: listener ids are dispatcher-local, while a
+    /// mobject target also carries its arena identity and generation. Global
+    /// targets retain the ordinary dispatcher-local token semantics.
+    pub fn remove_listener_for_target(&mut self, id: EventListenerId, target: EventTarget) -> bool {
+        if !self
+            .listeners
+            .iter()
+            .any(|slot| slot.id == id && slot.listener.target == target)
+        {
+            return false;
+        }
+        self.remove_listener(id)
+    }
+
     /// Remove every listener matching a target and event class.
     pub fn remove_listeners(&mut self, target: EventTarget, event_type: EventType) -> usize {
         let removed: Vec<_> = self
@@ -872,9 +897,14 @@ impl EventDispatcher {
     ///
     /// Pointer listeners are hit-tested. Drag listeners are captured on press
     /// and remain the only eligible drag listeners until release. Key listeners
-    /// are not hit-tested. In every case, registration order is preserved and
-    /// only [`EventPropagation::Stop`] terminates propagation.
+    /// are not hit-tested. In every case, registration order is preserved.
+    /// An explicit [`EventPropagation::Stop`] or a retained native updater
+    /// failure stops later listeners. A pending failure refuses the event
+    /// before changing pointer, key, or drag-capture state.
     pub fn dispatch(&mut self, event: &InputEvent, stage: &mut Stage) -> EventPropagation {
+        if stage.updater_error().is_some() {
+            return EventPropagation::Stop;
+        }
         self.update_state(event, stage);
         let state = self.state();
         let event_type = event.event_type();
@@ -897,7 +927,7 @@ impl EventDispatcher {
                 continue;
             };
             let result = (slot.listener.callback)(event, slot.listener.target, &state, stage);
-            if result == EventPropagation::Stop {
+            if result == EventPropagation::Stop || stage.updater_error().is_some() {
                 return EventPropagation::Stop;
             }
         }
@@ -968,6 +998,267 @@ fn target_matches(target: EventTarget, point: Option<Vec3>, stage: &Stage) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use crate::{CaptureReason, IntegrationError, Scene, SceneError, SceneSink};
+    use fmn_anim::{AnimError, FramePacket};
+    use fmn_mobject::{Mobject, UpdaterError};
+
+    fn key_press(key: char) -> EventPayload {
+        EventPayload::KeyPress {
+            key: Key::Character(key),
+            modifiers: Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn target_checked_removal_refuses_coincident_foreign_ids_and_accepts_stale_targets() {
+        let mut first = Stage::new();
+        let mut second = Stage::new();
+        let first_mob = first.add(Mobject::new());
+        let second_mob = second.add(Mobject::new());
+        let mut first_dispatcher = EventDispatcher::new();
+        let mut second_dispatcher = EventDispatcher::new();
+        let listener = |mob| {
+            EventListener::new(
+                EventType::MouseDrag,
+                EventTarget::Mobject(mob),
+                |_, _, _, _| EventPropagation::Continue,
+            )
+        };
+        let first_id = first_dispatcher.add_listener(listener(first_mob)).unwrap();
+        let second_id = second_dispatcher
+            .add_listener(listener(second_mob))
+            .unwrap();
+        assert_eq!(first_id, second_id);
+        assert!(
+            !second_dispatcher
+                .remove_listener_for_target(first_id, EventTarget::Mobject(first_mob))
+        );
+        assert_eq!(second_dispatcher.listener_count(), 1);
+        first_dispatcher.drag_capture.push(first_id);
+        first.delete(first_mob).unwrap();
+        assert!(
+            first_dispatcher.remove_listener_for_target(first_id, EventTarget::Mobject(first_mob))
+        );
+        assert!(first_dispatcher.drag_capture.is_empty());
+        assert_eq!(first_dispatcher.listener_count(), 0);
+        assert!(
+            !first_dispatcher.remove_listener_for_target(first_id, EventTarget::Mobject(first_mob))
+        );
+        assert!(
+            second_dispatcher
+                .remove_listener_for_target(second_id, EventTarget::Mobject(second_mob))
+        );
+    }
+
+    #[test]
+    fn native_updater_failure_stops_listeners_and_preserves_pending_event_state() {
+        let mut stage = Stage::new();
+        let source = stage.add(Mobject::new());
+        let updater = stage
+            .add_try_updater(
+                source,
+                |_, _| Err(UpdaterError::callback("event geometry", "sample refused")),
+                false,
+            )
+            .unwrap();
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut dispatcher = EventDispatcher::new();
+        let first_log = Rc::clone(&log);
+        let first = dispatcher
+            .add_listener(EventListener::new(
+                EventType::KeyPress,
+                EventTarget::Global,
+                move |event, _, _, stage| {
+                    first_log.borrow_mut().push(("first", event.sequence));
+                    stage.update_mobject(source, 0.0);
+                    EventPropagation::Continue
+                },
+            ))
+            .unwrap();
+        let later_log = Rc::clone(&log);
+        let later = dispatcher
+            .add_listener(EventListener::new(
+                EventType::KeyPress,
+                EventTarget::Global,
+                move |event, _, _, _| {
+                    later_log.borrow_mut().push(("later", event.sequence));
+                    EventPropagation::Continue
+                },
+            ))
+            .unwrap();
+        let event = InputEvent::new(0, RationalTime::zero(30), key_press('a')).unwrap();
+
+        assert_eq!(
+            dispatcher.dispatch(&event, &mut stage),
+            EventPropagation::Stop
+        );
+
+        assert_eq!(*log.borrow(), vec![("first", 0)]);
+        assert_eq!(dispatcher.listener_count(), 2);
+        assert_eq!(
+            dispatcher.listener_ids(EventType::KeyPress),
+            vec![first, later]
+        );
+        assert_eq!(stage.updater_error().unwrap().updater, updater);
+        let state = dispatcher.state();
+        assert_eq!(state.pressed_keys(), &[Key::Character('a')]);
+        let release = InputEvent::new(
+            1,
+            RationalTime::zero(30),
+            EventPayload::KeyRelease {
+                key: Key::Character('a'),
+                modifiers: Modifiers::NONE,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            dispatcher.dispatch(&release, &mut stage),
+            EventPropagation::Stop
+        );
+        assert_eq!(dispatcher.state(), state);
+        assert_eq!(*log.borrow(), vec![("first", 0)]);
+
+        stage.remove_updater(source, updater);
+        stage.take_updater_error().unwrap().unwrap();
+        let next = InputEvent::new(2, RationalTime::zero(30), key_press('b')).unwrap();
+        assert_eq!(
+            dispatcher.dispatch(&next, &mut stage),
+            EventPropagation::Continue
+        );
+        assert_eq!(
+            *log.borrow(),
+            vec![("first", 0), ("first", 2), ("later", 2)]
+        );
+        assert_eq!(
+            dispatcher.state().pressed_keys(),
+            &[Key::Character('a'), Key::Character('b')]
+        );
+    }
+
+    #[derive(Default)]
+    struct CaptureCount(usize);
+
+    impl SceneSink for CaptureCount {
+        fn capture(
+            &mut self,
+            reason: CaptureReason,
+            _packet: FramePacket,
+        ) -> Result<(), IntegrationError> {
+            assert_eq!(reason, CaptureReason::Show);
+            self.0 += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn scene_retains_later_queued_events_until_native_failure_is_acknowledged() {
+        let mut scene = Scene::default();
+        // Detached content runs only when the first event listener requests it.
+        let source = scene.stage_mut().add(Mobject::new());
+        let updater = scene
+            .stage_mut()
+            .add_try_updater(
+                source,
+                |_, _| Err(UpdaterError::callback("event geometry", "sample refused")),
+                false,
+            )
+            .unwrap();
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let first_log = Rc::clone(&log);
+        scene
+            .event_dispatcher_mut()
+            .add_listener(EventListener::new(
+                EventType::KeyPress,
+                EventTarget::Global,
+                move |event, _, _, stage| {
+                    first_log.borrow_mut().push(("first", event.sequence));
+                    stage.update_mobject(source, 0.0);
+                    EventPropagation::Continue
+                },
+            ))
+            .unwrap();
+        let later_log = Rc::clone(&log);
+        scene
+            .event_dispatcher_mut()
+            .add_listener(EventListener::new(
+                EventType::KeyPress,
+                EventTarget::Global,
+                move |event, _, _, _| {
+                    later_log.borrow_mut().push(("later", event.sequence));
+                    EventPropagation::Continue
+                },
+            ))
+            .unwrap();
+        assert_eq!(scene.queue_event(key_press('a')).unwrap(), 0);
+        assert_eq!(scene.queue_event(key_press('b')).unwrap(), 1);
+        let mut sink = CaptureCount::default();
+
+        assert!(matches!(
+            scene.show(&mut sink),
+            Err(SceneError::Animation(AnimError::Updater(_)))
+        ));
+
+        assert_eq!(sink.0, 0);
+        assert_eq!(*log.borrow(), vec![("first", 0)]);
+        assert_eq!(scene.recorded_events().len(), 1);
+        assert_eq!(scene.recorded_events()[0].sequence, 0);
+        assert_eq!(
+            scene.event_dispatcher().state().pressed_keys(),
+            &[Key::Character('a')]
+        );
+        let failure = scene.stage().updater_error().unwrap().clone();
+        let inbox = scene.event_inbox();
+        inbox.submit(key_press('c')).unwrap();
+        assert_eq!(scene.dispatch_pending_events().unwrap(), 0);
+        assert_eq!(
+            inbox.len(),
+            1,
+            "a pending fault cannot drain new host input"
+        );
+        assert_eq!(scene.recorded_events().len(), 1);
+        assert_eq!(*log.borrow(), vec![("first", 0)]);
+
+        scene.stage_mut().remove_updater(source, updater);
+        assert_eq!(
+            scene.stage_mut().take_updater_error().unwrap(),
+            Some(failure)
+        );
+        scene.show(&mut sink).unwrap();
+
+        assert_eq!(sink.0, 1);
+        assert_eq!(
+            *log.borrow(),
+            vec![
+                ("first", 0),
+                ("first", 1),
+                ("later", 1),
+                ("first", 2),
+                ("later", 2)
+            ]
+        );
+        assert_eq!(
+            scene
+                .recorded_events()
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(
+            scene.event_dispatcher().state().pressed_keys(),
+            &[
+                Key::Character('a'),
+                Key::Character('b'),
+                Key::Character('c')
+            ]
+        );
+        assert_eq!(scene.event_dispatcher().listener_count(), 2);
+        assert_eq!(scene.time().frames(), 0);
+        assert!(inbox.is_empty());
+    }
 
     #[test]
     fn fixed_key_tags_require_the_canonical_zero_payload() {

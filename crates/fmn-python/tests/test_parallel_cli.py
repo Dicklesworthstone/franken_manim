@@ -5,6 +5,7 @@ covered independently by test_process_batch.py with real spawned interpreters.
 """
 import ast
 import contextlib
+from copy import deepcopy
 from functools import partial
 import hashlib
 import os
@@ -17,8 +18,14 @@ from unittest.mock import patch
 
 PYTHON = Path(__file__).resolve().parents[1] / "python"
 sys.path.insert(0, str(PYTHON))
+from fmn_python.batch_provenance import validate_batch_mode
+from fmn_python.paired_output import validate_paired_mode
+from fmn_python.subdivision_rendering import validate_subdivided_mode
 from fmn_python.checkpoint_cli import CHECKPOINT_VALUES, take_checkpoint_options
 from fmn_python.parallel_cli_options import PARALLEL_VALUES, take_parallel_options
+from fmn_python.video_cli import VIDEO_VALUE_FLAGS, take_video_options
+from fmn_python.console_rendering import _output_overrides, _output_paths, _single_destination
+from fmn_python.scene_loading import resolve_render_configuration
 
 
 class ParallelOptionsTests(unittest.TestCase):
@@ -52,11 +59,15 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
         self.source.write_text("# stable source\n", encoding="utf-8")
         self.loads, self.calls, self.parsed, self.emitted = [], [], [], []
         self.chdir_on_load = False
+        self.discovery_calls = []
+        self.discovery_error = None
+        self.effect_scopes = []
         case = self
 
         class Source:
-            def __init__(self, path, scene_type):
+            def __init__(self, path, scene_type, *, configuration=None):
                 self._source_bytes = {path: path.read_bytes()}
+                self.sources = {path.name: path.read_bytes()}
                 self.scenes = {"Second": type("Second", (), {}), "First": type("First", (), {})}
             def __enter__(self):
                 case.loads.append(self)
@@ -82,7 +93,8 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
             options = {"format": "png", "video_dir": str(case.root / "out"),
                        "reproducible": "--reproducible" in args}
             for flag, name in (("--format", "format"), ("--vcodec", "vcodec"),
-                               ("--pix_fmt", "pix_fmt"), ("--ffmpeg_bin", "ffmpeg_bin")):
+                               ("--pix_fmt", "pix_fmt"), ("--ffmpeg_bin", "ffmpeg_bin"),
+                               ("--config_file", "config_file"), ("-c", "color")):
                 if flag in args:
                     options[name] = args[args.index(flag) + 1]
             threads = int(args[args.index("--threads") + 1]) if "--threads" in args else 8
@@ -96,9 +108,11 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
             return [value for value in args if value != name], name in args
 
         self.native = types.SimpleNamespace(Scene=object, _portal_cli_render_arguments=parse,
-                                            _portal_cli_emit=emit)
+                                            _portal_cli_emit=emit, _portal_publish_manifest=lambda: None,
+                                            _portal_prepare_recording_scene=lambda: None,
+                                            _CameraCapture=types.SimpleNamespace(prepare_png=lambda: None))
         values = {"--threads", "--format", "--fps", "--resolution", "--video_dir", "--vcodec",
-                  "--pix_fmt", "--ffmpeg_bin", "-n"} | PARALLEL_VALUES | CHECKPOINT_VALUES
+                  "--pix_fmt", "--ffmpeg_bin", "-n", "--config_file", "--color", "-c"} | PARALLEL_VALUES | CHECKPOINT_VALUES | VIDEO_VALUE_FLAGS
         self.g = {
             "__name__": "fmn_python._console_contract_test", "__package__": "fmn_python",
             "Any": object, "Path": Path, "os": os, "sys": sys, "contextlib": contextlib,
@@ -107,20 +121,23 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
             "_CONTROL_FLAGS": {"--version", "--list-scenes", "--construct-only", "--audit-parity"},
             "_SELECTION_FLAGS": {"--robot", "--write_all", "-a", "--keep-going"},
             "_MAX_SELECTED_SCENES": 1024, "take_parallel_options": take_parallel_options,
-            "take_video_options": lambda args, flags: (args, {}),
+            "take_video_options": take_video_options,
             "take_last_frame_option": lambda args, flags: switch(args, "--save-last-frame"),
             "take_subdivision_option": lambda args, flags: switch(args, "--subdivide"),
             "take_checkpoint_options": take_checkpoint_options,
             "take_playback_options": lambda args: (args, None, False),
             "select_still_format": lambda options, args, still: options,
-            "_output_overrides": lambda options: {key: value for key, value in options.items()
-                                                  if key in {"vcodec", "pix_fmt", "ffmpeg_bin"}},
+            "_output_overrides": _output_overrides,
+            "_output_paths": _output_paths, "_single_destination": _single_destination,
+            "resolve_render_configuration": resolve_render_configuration,
             "_positive_integer": lambda value, name: value,
             "_name_key": lambda name: name.casefold(),
-            "validate_batch_mode": lambda *args: None,
+            "validate_batch_mode": validate_batch_mode,
+            "validate_paired_mode": validate_paired_mode,
+            "validate_subdivided_mode": validate_subdivided_mode,
             "_error_fields": lambda error: (type(error).__name__, str(error)),
             "_error_notes": lambda error: (), "_partial_output": lambda *args: {},
-            "recording_effects": lambda enabled: contextlib.nullcontext(),
+            "recording_effects": lambda enabled: (self.effect_scopes.append(enabled) or contextlib.nullcontext()),
             "SceneSource": Source, "render_scenes": render("sequential"),
             "BatchRenderResult": Result, "BatchRenderError": type("BatchError", (Exception,), {}),
             "_emit_result": lambda native, report, robot, source, destination, **kwargs:
@@ -132,7 +149,21 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
         exec(compile(tree, "console_rendering.py", "exec"), self.g)
         self.parallel = types.ModuleType("fmn_python.parallel_batch")
         self.parallel.render_source_scenes = render("parallel")
-        self.modules = patch.dict(sys.modules, {"fmn_python.parallel_batch": self.parallel})
+        discovery = types.ModuleType("fmn_python.parallel_discovery")
+        @contextlib.contextmanager
+        def discover(path, **options):
+            case.discovery_calls.append((path, options))
+            if case.discovery_error is not None:
+                raise case.discovery_error
+            yield types.SimpleNamespace(
+                scenes=("First", "Second"),
+                source_digest=hashlib.sha256(path.read_bytes()).hexdigest(),
+            )
+        discovery.discovery_source = discover
+        self.modules = patch.dict(sys.modules, {
+            "fmn_python.parallel_batch": self.parallel,
+            "fmn_python.parallel_discovery": discovery,
+        })
         self.modules.start()
 
     def tearDown(self):
@@ -143,16 +174,49 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
     def run_cli(self, *args):
         return self.g["try_render_cli"](self.native, [str(self.source), *args])
 
+    def test_discovery_and_render_jobs_receive_the_same_frozen_configuration(self):
+        config = {"values": {"camera": {"resolution": [120, 80], "fps": 24,
+                                         "background_color": "#333333", "background_opacity": 1.0},
+                              "resolution_options": {},
+                              "directories": {"base": "", "subdirs": {"output": "videos"}},
+                              "file_writer": {}},
+                  "overrides": {}, "explicit_overrides": {}, "warnings": []}
+        path = self.root / "selected.yml"
+        path.write_text("camera:\n  fps: 24\n")
+        documents = []
+        def resolve(custom, explicit):
+            documents.append((custom, explicit))
+            return deepcopy(config)
+        self.native._resolved_portal_config = resolve
+        self.native._portal_cli_color = lambda color: "#FF0000"
+        code = self.run_cli("--write_all", "--workers", "2", "--config_file", str(path), "-c", "red")
+        self.assertEqual(code, 0, self.emitted)
+        self.assertEqual(documents, [(None, "camera:\n  fps: 24\n")])
+        discovery = self.discovery_calls[0][1]["configuration"]
+        rendered = self.calls[0][2]["_configuration"]
+        self.assertEqual(discovery, rendered)
+        self.assertEqual(rendered["values"]["camera"]["background_color"], "#FF0000")
+        self.assertEqual(self.calls[0][2]["resolution"], (120, 80))
+        config["values"]["camera"]["background_color"] = "#0000FF"
+        path.write_text("camera:\n  fps: 60\n")
+        self.assertEqual(rendered["values"]["camera"]["background_color"], "#FF0000")
+
     def test_write_all_selects_parallel_and_preserves_native_output_options(self):
         code = self.run_cli("--write_all", "--workers", "2", "--robot", "--keep-going",
-                            "--format", "mp4", "--vcodec", "libx264", "--pix_fmt", "rgba")
+                            "--format", "mp4", "--vcodec", "libx264", "--pix_fmt", "rgba",
+                            "--ffmpeg-timeout=37", "--ffmpeg-max-log-bytes", "131072",
+                            "--ffmpeg-max-artifact-bytes=1048576", "--ffmpeg-max-input-bytes=2097152")
         self.assertEqual(code, 0)
         mode, args, options = self.calls[0]
         self.assertEqual(mode, "parallel")
         self.assertEqual(options["scene_names"], ["First", "Second"])
         self.assertEqual(options["workers"], 2)
         self.assertEqual(options["threads"], 1)
-        self.assertEqual(options["_output_options"], {"vcodec": "libx264", "pix_fmt": "rgba"})
+        self.assertEqual(options["_output_options"], {
+            "vcodec": "libx264", "pix_fmt": "rgba", "ffmpeg_timeout": 37,
+            "ffmpeg_max_log_bytes": 131072, "ffmpeg_max_artifact_bytes": 1048576,
+            "ffmpeg_max_input_bytes": 2097152,
+        })
         self.assertTrue(options["continue_on_error"])
         self.assertNotIn("--workers", self.parsed[0])
         self.assertEqual(args, (self.source, self.root / "out"))
@@ -173,11 +237,55 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
         self.assertNotIn("workers", options)
 
     def test_incompatible_modes_refuse_before_source_load(self):
-        for flags in (("--reproducible",), ("--subdivide",), ("--save-last-frame",)):
+        for flags in (("--format", "gif"), ("--format", "png_sequence", "--subdivide"),
+                      ("--format", "png_sequence", "--save-last-frame"),
+                      ("--checkpoint", "progress.json", "--resume-key", "inputs")):
             with self.subTest(flags=flags):
-                self.assertEqual(self.run_cli("--write_all", "--workers=2", *flags), 4)
+                self.assertEqual(self.run_cli("--write_all", "--workers=2", "--reproducible", *flags), 4)
                 self.assertFalse(self.loads)
                 self.assertFalse(self.calls)
+
+    def test_certification_uses_worker_sources_and_keeps_coordinator_outside_effect_audit(self):
+        self.assertEqual(self.run_cli("Second", "First", "--workers=2", "--reproducible"), 0)
+        mode, _, options = self.calls[0]
+        self.assertEqual(mode, "parallel")
+        self.assertIs(options["reproducible"], True)
+        self.assertNotIn("sources", options, "discovery has names, not render compilation bytes")
+        self.assertEqual(self.effect_scopes, [False])
+        self.assertFalse(self.loads)
+        self.assertEqual(len(self.discovery_calls), 1)
+
+    def test_sequential_certification_still_uses_live_source_provider_and_import_scope(self):
+        self.assertEqual(self.run_cli("--write_all", "--reproducible"), 0)
+        mode, _, options = self.calls[0]
+        self.assertEqual(mode, "sequential")
+        self.assertIs(options["reproducible"], True)
+        self.assertEqual(options["sources"](), {"scenes.py": b"# stable source\n"})
+        self.assertEqual(self.effect_scopes, [True])
+        self.assertEqual(len(self.loads), 1)
+        self.assertFalse(self.discovery_calls)
+
+    def test_parallel_output_modes_reach_the_shared_worker_owner(self):
+        self.assertEqual(self.run_cli("Second", "First", "--workers=2", "--format", "gif",
+                                     "--subdivide", "--save-last-frame"), 0)
+        mode, _, options = self.calls[0]
+        self.assertEqual(mode, "parallel")
+        self.assertIs(options["subdivide"], True)
+        self.assertIs(options["save_last_frame"], True)
+        self.assertEqual(options["scene_names"], ["Second", "First"])
+        self.assertFalse(self.loads)
+
+    def test_parallel_pair_recovery_is_supported_but_clip_recovery_refuses_before_discovery(self):
+        flags = ("--write_all", "--workers=2", "--format", "gif", "--save-last-frame",
+                 "--checkpoint", str(self.root / "pair.json"), "--resume-key", "inputs", "--resume")
+        self.assertEqual(self.run_cli(*flags), 0)
+        self.assertIs(self.calls[0][2]["save_last_frame"], True)
+        self.assertIs(self.calls[0][2]["resume"], True)
+        self.calls.clear()
+        self.discovery_calls.clear()
+        self.assertEqual(self.run_cli(*flags, "--subdivide"), 2)
+        self.assertFalse(self.calls)
+        self.assertFalse(self.discovery_calls)
 
     def test_single_scene_and_invalid_workers_refuse_before_source_load(self):
         self.assertEqual(self.run_cli("First", "--workers=2"), 2)
@@ -190,6 +298,21 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
         options = self.calls[0][2]
         self.assertEqual(options["_working_directory"], self.cwd)
         self.assertEqual(options["_expected_source_digest"], hashlib.sha256(b"# stable source\n").hexdigest())
+
+    def test_parallel_discovery_is_isolated_and_receives_the_timeout(self):
+        self.assertEqual(self.run_cli("-a", "--workers=2", "--job-timeout=5"), 0)
+        self.assertFalse(self.loads)
+        self.assertEqual(self.discovery_calls, [(self.source, {
+            "working_directory": self.cwd, "job_timeout": 5.0,
+        })])
+
+    def test_discovery_failure_never_admits_render_jobs(self):
+        self.discovery_error = RuntimeError("discovery worker crashed")
+        self.assertEqual(self.run_cli("-a", "--workers=2", "--robot"), 5)
+        self.assertFalse(self.loads)
+        self.assertFalse(self.calls)
+        self.assertEqual(self.emitted[-1][2], "scene-load-failed")
+        self.assertIn("discovery worker crashed", self.emitted[-1][3])
 
     def test_parallel_recovery_uses_existing_parser_and_forwards_frozen_options(self):
         checkpoint = self.root / "progress.json"
@@ -231,7 +354,8 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
         options = self.calls[0][2]
         self.assertEqual(options["checkpoint"], self.cwd / "progress.json")
         self.assertEqual(options["_working_directory"], self.cwd)
-        self.assertEqual(Path.cwd(), self.root)
+        self.assertEqual(Path.cwd(), self.cwd)
+        self.assertFalse(self.loads)
 
     def test_sequential_recovery_keeps_its_original_dispatch(self):
         checkpoint = self.root / "sequential.json"

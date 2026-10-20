@@ -312,6 +312,21 @@ pub struct Sub {
     pub span: Span,
 }
 
+/// Select whole native primitives by source identity, in their existing order.
+///
+/// Both the full typeset and compact span maps use UTF-8 byte intervals.
+/// A selection never takes partial ink from a macro, command or ligature.
+#[must_use]
+pub fn select_source_spans(spans: impl IntoIterator<Item = Span>, selection: Span) -> Vec<usize> {
+    spans
+        .into_iter()
+        .enumerate()
+        .filter_map(|(ordinal, span)| {
+            (selection.start <= span.start && span.end <= selection.end).then_some(ordinal)
+        })
+        .collect()
+}
+
 /// A typeset string: the layout, the submobject table, and the source.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Typeset {
@@ -364,6 +379,12 @@ impl Typeset {
         Self::new(owned, layout)
     }
 
+    /// Select the whole primitives contained in a source byte span.
+    #[must_use]
+    pub fn select(&self, span: Span) -> Vec<usize> {
+        select_source_spans(self.subs.iter().map(|sub| sub.span), span)
+    }
+
     /// The submobject ordinals selected by each occurrence of `needle` in
     /// the source — the `isolate=` / `tex_to_color_map` /
     /// `TransformMatchingTex` surface, by source identity (§11.3).
@@ -371,21 +392,7 @@ impl Typeset {
     pub fn occurrences(&self, needle: &str) -> Vec<Vec<usize>> {
         fmd_math::find_occurrences(&self.source, needle)
             .into_iter()
-            .map(|span| {
-                let sel = self.layout.select(span);
-                let mut ords = Vec::new();
-                for (ord, sub) in self.subs.iter().enumerate() {
-                    let hit = match sub.prim {
-                        Prim::Glyph(i) => sel.glyphs.contains(&i),
-                        Prim::Rule(i) => sel.rules.contains(&i),
-                        Prim::Path(i) => sel.paths.contains(&i),
-                    };
-                    if hit {
-                        ords.push(ord);
-                    }
-                }
-                ords
-            })
+            .map(|span| self.select(span))
             .collect()
     }
 

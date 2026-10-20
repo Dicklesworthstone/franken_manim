@@ -36,7 +36,13 @@
 //! path and N instances — and the same mechanism serves dots, arrow tips,
 //! repeated graph nodes and copied decorations.
 
+mod shared;
+
+use shared::SharedIndex;
+pub(crate) use shared::SharedRows;
+
 use crate::hint::Hint;
+use crate::revision::Revisions;
 use crate::texture::{SamplerPolicy, Texture, TextureEncoding, TextureWrap};
 use fmn_cache::CacheKey;
 use fmn_core::types::{Vec3, canonicalize_f64};
@@ -403,10 +409,13 @@ impl Default for Style {
 }
 
 /// Deduplicated styles, and the index that made them unique.
+///
+/// Cloned frame generations share both until a new style is inserted.
+/// Exact-bit interning and public row indices are unchanged.
 #[derive(Debug, Clone, Default)]
 pub struct StyleTable {
-    rows: Vec<Style>,
-    index: HashMap<Vec<u64>, u32>,
+    rows: SharedRows<Style>,
+    index: SharedIndex<Vec<u64>, u32>,
     profile_knots: usize,
 }
 
@@ -758,13 +767,11 @@ pub struct Instance {
     pub placement: Placement,
     /// Painter order: position in the draw sequence.
     pub order: u32,
-    /// A fold of this occurrence's seven revision axes at sync time.
+    /// This occurrence's seven revision axes at sync time.
     ///
-    /// Carried on the instance rather than looked up because the tile cache's
-    /// key (§10.8) is per *tile*, and a tile knows its commands rather than
-    /// their mobjects. One `u64` per occurrence is the cheapest thing that makes
-    /// the key complete.
-    pub revisions: u64,
+    /// The tile cache compares each axis. Folding them into one short hash
+    /// would discard the evidence needed to distinguish colliding keys.
+    pub revisions: Revisions,
     /// Whether a **writable live view** exists on this occurrence's buffer.
     ///
     /// §8.2: "while a *writable* live view exists, the affected object … is
@@ -788,10 +795,14 @@ pub struct Instance {
 /// in one type because an instance without its shape is not a thing, and because
 /// the dedup statistic — N occurrences, M compiled shapes — is the number this
 /// mechanism exists to move and should be readable in one place.
+///
+/// Cloning shares compiled outlines, arc-length tables and the dedup index.
+/// Painter-ordered instances remain private to each frame generation; changing
+/// placement or style never copies the shared geometry.
 #[derive(Debug, Clone, Default)]
 pub struct ShapeTable {
-    shapes: Vec<Shape>,
-    by_digest: HashMap<Digest, u32>,
+    shapes: SharedRows<Shape>,
+    by_digest: SharedIndex<Digest, u32>,
     instances: Vec<Instance>,
 }
 
@@ -1077,7 +1088,8 @@ pub fn compile_shape(
         let len = lengths.get(i).copied().unwrap_or(0.0);
         if breaks.contains(&(2 * i)) {
             // Not a drawn piece: dropping it is what keeps a stroked annulus
-            // from growing a radial spoke between its two rings.
+            // from growing a radial spoke between its two rings to its
+            // inner one.
             opens_subpath = true;
             continue;
         }
@@ -1573,7 +1585,7 @@ mod tests {
                     mob,
                     placement: Placement::from_translation([pts[0][0], pts[0][1], pts[0][2]]),
                     order: u32::try_from(i).expect("small fixture"),
-                    revisions: 0,
+                    revisions: Revisions::default(),
                     volatile: false,
                     hint_unsafe: false,
                 })

@@ -23,7 +23,7 @@ names and `--write_all`. With multiple names, the output directory contains one
 rendering. `--transparent` omits the background rather than rasterizing alpha.
 
 ```sh
-fmn-python lesson.py Diagram --format svg --video_dir diagram.svg
+fmn-python lesson.py Diagram --format svg --output diagram.svg
 fmn-python --robot lesson.py First Second --format svg --video_dir diagrams
 fmn-python lesson.py --write_all --format svg --transparent --video_dir diagrams
 ```

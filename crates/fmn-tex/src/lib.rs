@@ -42,7 +42,7 @@ mod request;
 mod session;
 mod typeset;
 
-pub use engine::{Mode, TexEngine, TypesetPreflightStats};
+pub use engine::{Mode, TexEngine, TypesetCacheMaintenance, TypesetPreflightStats};
 pub use error::{PreflightError, TexError};
 pub use memory_cache::{
     TYPESET_MEMORY_CACHE_MAX_BYTES, TYPESET_MEMORY_CACHE_MAX_ENTRIES, TypesetCacheStats,
@@ -52,10 +52,10 @@ pub use request::TypesetRequest;
 pub use session::{TexSession, TypesetSessionReport};
 pub use typeset::{
     KEYWORD_INK_COMMANDS, Prim, Sub, TYPESET_DOCUMENT_LIMIT_BYTES, TYPESET_FORMAT_VERSION, Typeset,
-    TypesetError,
+    TypesetError, select_source_spans,
 };
 
 // The math surface consumers need alongside the engine: placed-layout
 // types for the library tier's per-`Sub` resolution (fm-p5d), plus the
 // canonical-dump golden format.
-pub use fmd_math::{Layout, MacroSet, PathContour, PathSeg, Span, Style, paths};
+pub use fmd_math::{Layout, MacroSet, PathContour, PathSeg, Span, Style, find_occurrences, paths};

@@ -12,6 +12,7 @@
 //! `default_config.yml` without a binding fails the coverage check
 //! before it can reach this file.
 
+use crate::config::CacheConfig;
 use crate::config::CameraConfig;
 use crate::config::Config;
 use crate::config::ConfigError;
@@ -127,6 +128,9 @@ pub(crate) fn config_from_value(root: Value) -> Result<Config, ConfigError> {
             engine: cx.engine("render.engine")?,
             aa: cx.aa_policy("render.aa")?,
             threads: cx.thread_policy("render.threads")?,
+        },
+        cache: CacheConfig {
+            max_bytes: cx.u64("cache.max_bytes")?,
         },
         // Placed below, once the borrows of `root` have ended.
         raw: Value::Null,

@@ -63,9 +63,10 @@ pub use emitter::{
     SinkReport, SinkWrite,
 };
 pub use ffmpeg::{
-    Boundary, BoundaryError, BoundaryReport, EncoderCapabilities, FfmpegTool, HARDWARE_ENCODERS,
+    Boundary, BoundaryError, BoundaryReport, DEFAULT_RENDER_FFMPEG_TIMEOUT, EncoderCapabilities,
+    EncoderPixelFormats, EncoderProbe, FfmpegLimitsReport, FfmpegTool, HARDWARE_ENCODERS,
     InvocationReport, JobLimits, NATIVE_ALTERNATIVE, PreparedFfmpegArtifact, Provenance,
-    StreamingEncode,
+    StreamingEncode, admit_render_ffmpeg_limits, default_render_ffmpeg_limits,
 };
 pub use negotiate::{
     AudioQuality, ColorDescription, Container, EncoderChoice, NegotiationError, Primaries,

@@ -206,119 +206,142 @@ impl TableMobject {
 
     /// Lay the table out through Scribe: a header band, body rows, an outer
     /// rectangle, a heavy rule under the header, light rules between rows
-    /// and columns. Left-aligned cells; column widths derive from the
+    /// and columns. Centered cells; column widths derive from the
     /// widest cell.
     ///
     /// # Errors
     /// [`DataMobjectError::Geometry`] when Scribe refuses a cell.
     pub fn build(&self, book: &FontBook) -> Result<VMobject, DataMobjectError> {
-        let mut texts: Vec<VMobject> = Vec::new();
-        let column_count = self.headers.len();
-        let measure =
-            |cell: &str, texts: &mut Vec<VMobject>| -> Result<[f64; 2], DataMobjectError> {
-                let mob = Text::new(cell)
-                    .build(book)
-                    .map_err(|error| DataMobjectError::Geometry(error.to_string()))?
-                    .vmob;
-                let right = mob.bbox_point(RIGHT);
-                let left = mob.bbox_point(LEFT);
-                let up = mob.bbox_point(UP);
-                let down = mob.bbox_point(DOWN);
-                let width = match (right, left) {
-                    (Some(r), Some(l)) => r[0] - l[0],
-                    _ => 0.0,
-                };
-                let height = match (up, down) {
-                    (Some(u), Some(d)) => u[1] - d[1],
-                    _ => 0.0,
-                };
-                texts.push(mob);
-                Ok([width, height])
+        let rows = std::iter::once(&self.headers)
+            .chain(&self.rows)
+            .map(|row| {
+                row.iter()
+                    .map(|cell| {
+                        Text::new(cell)
+                            .build(book)
+                            .map(|built| built.vmob)
+                            .map_err(|error| DataMobjectError::Geometry(error.to_string()))
+                    })
+                    .collect::<Result<Vec<_>, DataMobjectError>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        layout_table_cells(
+            rows,
+            &vec![fmn_text::layout::Align::Center; self.headers.len()],
+        )
+    }
+}
+
+/// One ruled-grid layout for string tables and already-typeset document cells.
+/// Geometry stays in row-major order after the rules, including empty cells.
+/// Every cell is owned, so placement preserves its native child/span structure.
+pub(crate) fn layout_table_cells(
+    rows: Vec<Vec<VMobject>>,
+    alignments: &[fmn_text::layout::Align],
+) -> Result<VMobject, DataMobjectError> {
+    let column_count = alignments.len();
+    let row_count = rows.len();
+    if column_count == 0 || row_count == 0 {
+        return Err(DataMobjectError::EmptyFrame);
+    }
+    if rows.iter().any(|row| row.len() != column_count) {
+        return Err(DataMobjectError::Geometry(
+            "every table row must contain one cell per column".to_owned(),
+        ));
+    }
+
+    let mut widths = vec![0.0_f64; column_count];
+    let mut row_heights = vec![0.0_f64; row_count];
+    for (r, row) in rows.iter().enumerate() {
+        for (c, mob) in row.iter().enumerate() {
+            let w = match (mob.bbox_point(RIGHT), mob.bbox_point(LEFT)) {
+                (Some(right), Some(left)) => right[0] - left[0],
+                _ => 0.0,
             };
-
-        let mut widths = vec![0.0_f64; column_count];
-        let mut row_heights = vec![0.0_f64; self.rows.len() + 1];
-        for (c, header) in self.headers.iter().enumerate() {
-            let [w, h] = measure(header, &mut texts)?;
+            let h = match (mob.bbox_point(UP), mob.bbox_point(DOWN)) {
+                (Some(up), Some(down)) => up[1] - down[1],
+                _ => 0.0,
+            };
             widths[c] = widths[c].max(w);
-            row_heights[0] = row_heights[0].max(h);
+            row_heights[r] = row_heights[r].max(h);
         }
-        for (r, row) in self.rows.iter().enumerate() {
-            for (c, cell) in row.iter().enumerate() {
-                let [w, h] = measure(cell, &mut texts)?;
-                widths[c] = widths[c].max(w);
-                row_heights[r + 1] = row_heights[r + 1].max(h);
-            }
-        }
+    }
 
-        // Guard degenerate empties so rules never collapse onto themselves.
-        for width in &mut widths {
-            *width += 2.0 * CELL_PADDING_X;
+    // Guard degenerate empties so rules never collapse onto themselves.
+    for width in &mut widths {
+        *width += 2.0 * CELL_PADDING_X;
+    }
+    for height in &mut row_heights {
+        *height += CELL_PADDING_Y;
+    }
+    let total_width: f64 = widths.iter().sum();
+    let total_height: f64 = row_heights.iter().sum();
+    // Place cells: header band first, then body rows; origin at the
+    // table's lower-left corner.
+    let mut placed: Vec<VMobject> = Vec::with_capacity(row_count * column_count);
+    let mut cell_iter = rows.into_iter().flatten();
+    let mut y_cursor = total_height;
+    for height in row_heights.iter() {
+        let row_top = y_cursor;
+        let baseline_center = row_top - height / 2.0;
+        let mut x_cursor = 0.0;
+        for (width, alignment) in widths.iter().zip(alignments) {
+            let Some(mut mob) = cell_iter.next() else {
+                break;
+            };
+            let center_x = match alignment {
+                fmn_text::layout::Align::Left => {
+                    x_cursor + CELL_PADDING_X + mob.length_over_dim(0) / 2.0
+                }
+                fmn_text::layout::Align::Center => x_cursor + width / 2.0,
+                fmn_text::layout::Align::Right => {
+                    x_cursor + width - CELL_PADDING_X - mob.length_over_dim(0) / 2.0
+                }
+            };
+            mob = mob.moved_to([center_x, baseline_center, 0.0]);
+            placed.push(mob);
+            x_cursor += width;
         }
-        for height in &mut row_heights {
-            *height += CELL_PADDING_Y;
-        }
-        let total_width: f64 = widths.iter().sum();
-        let total_height: f64 = row_heights.iter().sum();
-        // Place cells: header band first, then body rows; origin at the
-        // table's lower-left corner.
-        let mut placed: Vec<VMobject> = Vec::with_capacity(texts.len());
-        let mut cell_iter = texts.into_iter();
-        let mut y_cursor = total_height;
-        for height in row_heights.iter() {
-            let row_top = y_cursor;
-            let baseline_center = row_top - height / 2.0;
-            let mut x_cursor = 0.0;
-            for width in widths.iter().take(column_count) {
-                let Some(mut mob) = cell_iter.next() else {
-                    break;
-                };
-                let center_x = x_cursor + width / 2.0;
-                mob = mob.moved_to([center_x, baseline_center, 0.0]);
-                placed.push(mob);
-                x_cursor += width;
-            }
-            y_cursor -= height;
-        }
+        y_cursor -= height;
+    }
 
-        // Rules: outline, header rule, row separators, column separators.
-        let mut rules: Vec<VMobject> = Vec::new();
-        let outline = Rectangle::new()
-            .width(total_width)
-            .height(total_height)
-            .build()
-            .map_err(|error| DataMobjectError::Geometry(error.to_string()))?
-            .moved_to([total_width / 2.0, total_height / 2.0, 0.0])
-            .map_style_deep(|style| style.stroke(BLACK, RULE_STROKE_WIDTH, 1.0));
-        rules.push(outline);
+    // Rules: outline, header rule, row separators, column separators.
+    let mut rules: Vec<VMobject> = Vec::new();
+    let outline = Rectangle::new()
+        .width(total_width)
+        .height(total_height)
+        .build()
+        .map_err(|error| DataMobjectError::Geometry(error.to_string()))?
+        .moved_to([total_width / 2.0, total_height / 2.0, 0.0])
+        .map_style_deep(|style| style.stroke(BLACK, RULE_STROKE_WIDTH, 1.0));
+    rules.push(outline);
 
-        let header_rule_height = row_heights[0];
+    let header_rule_height = row_heights[0];
+    rules.push(horizontal_rule(
+        total_width,
+        total_height - header_rule_height,
+        HEADER_RULE_STROKE_WIDTH,
+    )?);
+    for r in 1..row_count - 1 {
+        let top = row_heights[..=r].iter().sum::<f64>();
         rules.push(horizontal_rule(
             total_width,
-            total_height - header_rule_height,
-            HEADER_RULE_STROKE_WIDTH,
+            total_height - top,
+            RULE_STROKE_WIDTH,
         )?);
-        for r in 1..self.rows.len() {
-            let top = row_heights[..=r].iter().sum::<f64>();
-            rules.push(horizontal_rule(
-                total_width,
-                total_height - top,
-                RULE_STROKE_WIDTH,
-            )?);
-        }
-        let mut x_cursor = 0.0;
-        for width in &widths[..column_count - 1] {
-            x_cursor += width;
-            let line = Line::new([x_cursor, 0.0, 0.0], [x_cursor, total_height, 0.0])
-                .style(Style::default().stroke(BLACK, RULE_STROKE_WIDTH, 1.0))
-                .build()
-                .map_err(|error| DataMobjectError::Geometry(error.to_string()))?;
-            rules.push(line);
-        }
-
-        let group = v_group(rules);
-        Ok(group.with_children(placed))
     }
+    let mut x_cursor = 0.0;
+    for width in &widths[..column_count - 1] {
+        x_cursor += width;
+        let line = Line::new([x_cursor, 0.0, 0.0], [x_cursor, total_height, 0.0])
+            .style(Style::default().stroke(BLACK, RULE_STROKE_WIDTH, 1.0))
+            .build()
+            .map_err(|error| DataMobjectError::Geometry(error.to_string()))?;
+        rules.push(line);
+    }
+
+    let group = v_group(rules);
+    Ok(group.with_children(placed))
 }
 
 fn horizontal_rule(width: f64, y: f64, stroke: f64) -> Result<VMobject, DataMobjectError> {

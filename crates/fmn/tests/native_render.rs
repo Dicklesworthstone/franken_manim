@@ -1,6 +1,8 @@
 //! Exercise the public scene-to-artifact path, not a separately assembled sink.
 
+use std::cell::Cell;
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use fmn::prelude::*;
@@ -99,6 +101,102 @@ fn static_scene_produces_one_nonuniform_upright_png() {
 }
 
 #[test]
+fn final_png_keeps_updater_samples_and_post_play_edits_without_rendering_intermediates() {
+    struct Authored(Rc<Cell<u32>>);
+    impl SceneConstruct for Authored {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            let circle = stage.add(Circle::new().radius(0.6).color(WHITE))?;
+            stage.set_fill(circle, Some(WHITE), Some(1.0), None, true);
+            let count = Rc::clone(&self.0);
+            stage.arena_mut().add_dt_updater(
+                circle,
+                move |arena, mob, dt| {
+                    if dt > 0.0 {
+                        count.set(count.get() + 1);
+                    }
+                    arena.shift(mob, [dt, 0.0, 0.0]);
+                },
+                false,
+            )?;
+            stage.wait(0.25)?;
+            // No later capture: this author edit is absent from a movie's
+            // final sample and must nevertheless appear in the final still.
+            stage.shift(circle, [1.0, 1.0, 0.0]);
+            stage.set_fill(circle, Some(BLUE), None, None, true);
+            Ok(())
+        }
+    }
+    struct Expected;
+    impl SceneConstruct for Expected {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            let circle = stage.add(Circle::new().radius(0.6).color(WHITE))?;
+            stage.set_fill(circle, Some(BLUE), Some(1.0), None, true);
+            stage.shift(circle, [1.25, 1.0, 0.0]);
+            Ok(())
+        }
+    }
+    let fs = Arc::new(VirtualFs::new());
+    let mut expected = options("/expected.png", RenderFormat::Png, 1);
+    expected.config.camera.fps = 8;
+    render_with_fs(&mut Expected, expected, fs.clone()).unwrap();
+    let expected = fs.read(Path::new("/expected.png")).unwrap();
+    for threads in [1, 4, 16] {
+        let count = Rc::new(Cell::new(0));
+        let path = format!("/final-{threads}.png");
+        let mut config = options(&path, RenderFormat::Png, threads);
+        config.config.camera.fps = 8;
+        config.max_frames = 2;
+        let report = render_with_fs(&mut Authored(count.clone()), config, fs.clone()).unwrap();
+        assert_eq!(count.get(), 2, "the dt updater ran on both nominal samples");
+        assert_eq!(
+            (report.scene.time.frames(), report.scene.play_count),
+            (2, 1)
+        );
+        assert_eq!(
+            (report.artifact.frame_count, report.emission.stats.emitted),
+            (1, 1)
+        );
+        let pipeline = report.frame_pipeline.unwrap();
+        assert_eq!((pipeline.submitted, pipeline.emitted), (1, 1));
+        assert_eq!(fs.read(Path::new(&path)).unwrap(), expected);
+    }
+}
+
+#[test]
+fn final_png_matches_the_completed_pure_animation_and_retains_capture_limits() {
+    let fs = Arc::new(VirtualFs::new());
+    let sequence = render_with_fs(
+        &mut MovingCircle,
+        options("/sequence", RenderFormat::PngSequence, 1),
+        fs.clone(),
+    )
+    .unwrap();
+    let report = render_with_fs(
+        &mut MovingCircle,
+        options("/final.png", RenderFormat::Png, 4),
+        fs.clone(),
+    )
+    .unwrap();
+    assert_eq!(report.scene, sequence.scene);
+    assert_eq!(report.artifact.frame_count, 1);
+    assert_eq!(
+        fs.read(Path::new("/final.png")).unwrap(),
+        fs.read(&Path::new("/sequence").join(format!(
+            "frame_{:06}.png",
+            sequence.artifact.frame_count - 1,
+        )))
+        .unwrap(),
+    );
+    let mut limited = options("/limited.png", RenderFormat::Png, 1);
+    limited.max_frames = 1;
+    assert!(matches!(
+        render_with_fs(&mut MovingCircle, limited, fs.clone()),
+        Err(RenderError::InvalidOptions("scene exceeded max_frames")),
+    ));
+    assert!(!fs.exists(Path::new("/limited.png")));
+}
+
+#[test]
 fn animation_has_only_nominal_samples_and_changes_pixels() {
     let fs = Arc::new(VirtualFs::new());
     let report = render_with_fs(
@@ -192,6 +290,7 @@ impl SceneConstruct for FailingScene {
 #[test]
 fn scene_error_preserves_source_and_aborts_all_formats_before_return() {
     for format in [
+        RenderFormat::Png,
         RenderFormat::PngSequence,
         RenderFormat::Gif,
         RenderFormat::Y4m,
@@ -227,6 +326,19 @@ fn frame_budget_failure_does_not_publish_a_truncated_animation() {
 #[test]
 fn existing_artifacts_are_not_clobbered() {
     let fs = Arc::new(VirtualFs::new());
+    fs.insert("/keep.png", b"user-owned still".to_vec());
+    assert!(
+        render_with_fs(
+            &mut MovingCircle,
+            options("/keep.png", RenderFormat::Png, 1),
+            fs.clone(),
+        )
+        .is_err()
+    );
+    assert_eq!(
+        fs.read(Path::new("/keep.png")).unwrap(),
+        b"user-owned still"
+    );
     fs.insert("/keep.y4m", b"user-owned artifact".to_vec());
     assert!(
         render_with_fs(

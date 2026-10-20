@@ -79,7 +79,9 @@ fmn-python [--robot] --list-scenes SOURCE.py
 fmn-python [--robot] --construct-only SOURCE.py [SCENE]
 fmn-python [--robot] SOURCE.py [SCENE ...] [--format png_sequence|png|gif|y4m|wav|mp4|mov]
            [--resolution WIDTHxHEIGHT] [--fps FPS] [--threads N]
-           [--video_dir PATH] [--transparent]
+           [--video_dir DIRECTORY | --output PATH] [--file_name NAME] [--transparent]
+           [-w | -i] [-l | -m | --hd | --uhd] [-q]
+           [-c COLOR] [--config_file PATH]
            [--vcodec ENCODER] [--pix_fmt FORMAT] [--ffmpeg_bin PATH]
 ```
 
@@ -94,8 +96,79 @@ sinks. GIF records rational-frame delays in centiseconds; y4m uses limited-range
 BT.709 YUV 4:2:0 with left chroma siting and requires even dimensions. These
 success records report `rendered=true`, frame and byte counts, the artifact
 digest (ordered-tree digest for a sequence), engine identity, and render-team
-width. `--video_dir` names the output directory for a PNG sequence and the
-destination file for the other formats.
+width. `--video_dir` always names an output directory: a still lands at
+`DIRECTORY/SCENE.png`, a video at `DIRECTORY/SCENE.mp4`, and a PNG sequence at
+`DIRECTORY/SCENE/frames`. The same rule applies to named batches, FMTL exports
+and subdivided clips (`DIRECTORY/SCENE/clips`). Use `--output PATH` for one
+scene's exact file or frames/clips directory; use `--file_name NAME` to change
+its stem within `--video_dir`. These two single-output options refuse batches,
+and `--output` cannot combine with `--video_dir` or `--file_name`.
+
+The Reference's `-w/--write_file` selects MP4 through the governed ffmpeg
+boundary, or MOV with `-t`; `-i/--gif` selects native GIF. Missing ffmpeg is a
+named capability refusal rather than a format substitution. Quality flags
+`-l/--low_quality`, `-m/--medium_quality`, `--hd`, and `--uhd` select 854×480,
+1280×720, 1920×1080 and 3840×2160 respectively, preserving the configured frame
+rate (30 fps by default). `-r/--resolution WIDTHxHEIGHT` overrides them.
+`-q/--quiet` suppresses engine progress and human success messages; authored
+output, failures and robot receipts remain visible. File renders refuse
+`-p/--presenter_mode`, `-f/--full_screen` and `-e/--embed` with exit 4 and name
+the Studio route.
+
+`-c/--color COLOR` selects the global camera background using CSS color names
+or `#RGB`/`#RRGGBB`. For example, `-c red` means CSS `#FF0000`; scene palette
+constants keep their existing values. The Reference camera precedence remains
+global configuration, then the class's `default_camera_config`, then the
+constructor's `camera_config`. Class and constructor backgrounds therefore
+override `-c`. `-t` supplies a transparent global background.
+
+`--config_file PATH` overlays the current directory's `custom_config.yml` on
+the built-in native defaults. Both files use the existing typed YAML reader;
+the selected file must exist, be a regular UTF-8 file and fit the 1 MiB budget.
+The connected sections are `camera`, `resolution_options`, `directories`,
+`file_writer`, `scene` and `cache`. Camera dimensions, FPS, quality presets,
+scene wait/progress defaults, writer options and asset/output directories
+reach their existing runtime owners. Explicit resolution/FPS flags override
+the file values. Author-defined sections are also visible in `manim_config`.
+Explicit overrides of defaults frozen when the portal is imported, such as
+`text`, `tex`, `vmobject`, `sizes`, colors or logger/window settings, produce
+a named capability refusal instead of silently ignoring the setting.
+
+The configuration is installed before the scene source and its helpers are
+imported and remains active through construction and rendering. The original
+configuration objects and nested mappings are restored after success, failure
+or cancellation. Asset, output, cache and path-like ffmpeg locations are
+anchored before authored code can change the working directory; cache path
+ownership checks still see symlinks and parent components. Named batches,
+parallel discovery/render workers, clip recovery and FMTL export receive the
+same frozen configuration. Checkpoint reuse binds these values, so a changed
+background or configuration cannot reuse completed outputs from the old plan.
+FMTL's existing camera-track capability requirements still apply.
+
+The certified configuration-file/color provenance contract is tracked
+separately; combining `--reproducible` with `--config_file` or `-c` returns a
+precise capability refusal before source execution. Standard rendering accepts
+both flags.
+
+```sh
+fmn-python lesson.py Example --config_file render.yml -c '#112233' -l -s --output example.png
+fmn-python lesson.py First Second --config_file render.yml --workers 2 --format png --video_dir stills
+```
+
+Python typesetting uses the configured `directories.cache` and `cache.max_bytes`
+through the existing native template engines. The default disk ceiling is
+1 GiB. Maintenance runs at the end of the scene lifecycle, respects active pins
+and a nonblocking maintenance lock, and reports storage errors without changing
+rendered ink. `configure_tex_cache(path, max_bytes=0)` selects zero retained
+unpinned disk entries; `enabled=False` detaches persistence without deleting
+stored data. Robot/human typesetting receipts expose the ceiling and maintenance
+attempts, eviction, retained bytes and nonfatal failures. See
+[cache configuration](cache_config_conventions.md) for the store's ownership and
+retention rules.
+
+**Destination migration:** older portal commands used `--video_dir` as an exact
+single-scene destination. Replace that spelling with `--output` to keep the
+same path. This makes `--video_dir` mean a directory at both front doors.
 
 WAV output runs the sampled scene lifecycle without rasterization and mixes
 `Scene.add_sound` cues through Reel. PCM/float WAV inputs remain native-only;
@@ -127,9 +200,9 @@ Ordinary video requires even dimensions. Alpha cannot be introduced midway
 through an already-negotiated opaque video generation.
 
 ```bash
-fmn-python scene.py Example -s --transparent --video_dir still.png
-fmn-python scene.py Example --format mov -t --pix_fmt bgra --video_dir alpha.mov
-fmn-python scene.py Example --format mp4 --vcodec libx264 --pix_fmt p010le --video_dir tenbit.mp4
+fmn-python scene.py Example -s --transparent --output still.png
+fmn-python scene.py Example --format mov -t --pix_fmt bgra --output alpha.mov
+fmn-python scene.py Example --format mp4 --vcodec libx264 --pix_fmt p010le --output tenbit.mp4
 fmn-python scene.py First Second --format mov -t --video_dir batch
 ```
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+from copy import deepcopy
 import os
 import pickle
 import py_compile
@@ -205,6 +206,84 @@ class SceneLoading(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "only once"):
             with loaded:
                 pass
+
+    def configuration_fixture(self):
+        native = ModuleType("manimlib")
+        native.__path__ = []
+        native.Scene = Scene
+        live = {"camera": {"resolution": (1920, 1080), "fps": 30},
+                "directories": {"subdirs": {"output": "videos"}}, "text": {"font_size": 48}}
+        native.manim_config = live
+        module = ModuleType("manimlib.config")
+        module.manim_config = live
+        native.config = module
+        modules = patch.dict(sys.modules, {"manimlib": native, "manimlib.config": module})
+        modules.start()
+        self.addCleanup(modules.stop)
+        configuration = {"values": {"camera": {"resolution": [120, 80], "fps": 24},
+                                    "directories": {"subdirs": {"output": "configured"}}},
+                         "overrides": {"authored": {"answer": 42}}, "explicit_overrides": {}}
+        return native, module, configuration
+
+    def test_configuration_freezes_values_but_preserves_live_mapping_identities(self):
+        native, module, configuration = self.configuration_fixture()
+        original, camera, directories = native.manim_config, native.manim_config["camera"], native.manim_config["directories"]
+        snapshot = deepcopy(original)
+        path = self.source(
+            "from manimlib.config import manim_config\n"
+            "assert manim_config['camera']['fps'] == 24\n"
+            "assert manim_config['camera']['resolution'] == (120, 80)\n"
+            "assert manim_config['authored']['answer'] == 42\n"
+            "class Demo(Scene): pass\n"
+        )
+        loaded = SceneSource(path, Scene, configuration=configuration)
+        configuration["values"]["camera"]["fps"] = 99
+        with loaded:
+            self.assertIs(native.manim_config, original)
+            self.assertIs(module.manim_config, original)
+            self.assertIs(original["camera"], camera)
+            self.assertIs(original["directories"], directories)
+            original["directories"]["subdirs"]["output"] = "authored mutation"
+            original["text"]["font_size"] = 300
+        self.assertEqual(original, snapshot)
+        self.assertIs(original["camera"], camera)
+        self.assertIs(original["directories"], directories)
+        self.assertNotIn("_portal_cli_configuration", vars(native))
+
+    def test_configuration_restores_reassigned_globals_on_import_errors_and_interrupts(self):
+        native, module, configuration = self.configuration_fixture()
+        original, camera = native.manim_config, native.manim_config["camera"]
+        snapshot = deepcopy(original)
+        for exception in ("ValueError('failed')", "KeyboardInterrupt()", "SystemExit(0)"):
+            with self.subTest(exception=exception):
+                path = self.source(
+                    "import manimlib\n"
+                    "manimlib.manim_config['camera']['fps'] = 111\n"
+                    "manimlib.manim_config = {'replacement': True}\n"
+                    "manimlib.config.manim_config = {'replacement': True}\n"
+                    "raise " + exception + "\n"
+                )
+                with self.assertRaises(BaseException):
+                    with SceneSource(path, Scene, configuration=configuration):
+                        self.fail("failed source entered")
+                self.assertIs(native.manim_config, original)
+                self.assertIs(module.manim_config, original)
+                self.assertIs(original["camera"], camera)
+                self.assertEqual(original, snapshot)
+                self.assertNotIn("_portal_cli_configuration", vars(native))
+                self.assert_restored()
+
+    def test_rejected_concurrent_source_never_installs_its_configuration(self):
+        native, _, configuration = self.configuration_fixture()
+        path = self.source()
+        other = deepcopy(configuration)
+        other["values"]["camera"]["fps"] = 99
+        with SceneSource(path, Scene, configuration=configuration):
+            with self.assertRaisesRegex(RuntimeError, "another scene source"):
+                with SceneSource(path, Scene, configuration=other):
+                    self.fail("concurrent source admitted")
+            self.assertEqual(native.manim_config["camera"]["fps"], 24)
+        self.assertEqual(native.manim_config["camera"]["fps"], 30)
 
 
 if __name__ == "__main__":

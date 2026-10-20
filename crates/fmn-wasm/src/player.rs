@@ -41,6 +41,9 @@ use fmn_scene::{TIMELINE_BUNDLE_SCHEMA, bundle_engine_version};
 
 use crate::{render_stage_rgba8, render_stage_rgba8_into, rgba8_output_len};
 
+#[path = "audio_player.rs"]
+pub mod audio_player;
+
 #[path = "camera_player.rs"]
 mod camera_player;
 
@@ -156,6 +159,9 @@ impl std::error::Error for PlayerError {
 impl From<BundleReadError> for PlayerError {
     fn from(error: BundleReadError) -> Self {
         match error {
+            error @ (BundleReadError::Soundtrack(_) | BundleReadError::SoundtrackRequired) => {
+                Self::Render(error.to_string())
+            }
             BundleReadError::Camera(error) => Self::Render(error.to_string()),
             BundleReadError::CameraTrackRequired => Self::Render(
                 "camera-bearing FMTL requires paired camera/geometry reconstruction".to_owned(),
@@ -196,6 +202,9 @@ impl PlayerCore {
     /// is the deliberate second step.
     fn load(bytes: &[u8]) -> Result<Self, PlayerError> {
         let bundle = TimelineBundle::from_bytes(bytes)?;
+        if bundle.has_soundtrack() {
+            return Err(BundleReadError::SoundtrackRequired.into());
+        }
         Ok(Self {
             bundle,
             width: 0,
@@ -922,5 +931,33 @@ mod tests {
         let mut scratch = vec![0; pixels.len()];
         player.render_into(0, &mut scratch).unwrap();
         assert_eq!(scratch, pixels);
+    }
+}
+
+#[cfg(test)]
+mod soundtrack_admission {
+    use super::*;
+    use fmn_scene::BundleExportLimits;
+    use fmn_scene::recording::SceneBundleRecorder;
+    use fmn_scene::timeline_bundle::{BundleSoundtrack, attach_bundle_soundtrack};
+
+    #[test]
+    fn browser_without_audio_adapter_refuses_sound_at_load_not_during_playback() {
+        let mut recorder =
+            SceneBundleRecorder::new_render_only(8, BundleExportLimits::default()).unwrap();
+        recorder.capture_terminal_still(&Stage::new()).unwrap();
+        let visual = recorder.finish().unwrap().bytes;
+        assert!(PlayerCore::load(&visual).is_ok());
+        let pcm = BundleSoundtrack::new(8, 1, vec![0.125, -0.25]).unwrap();
+        let bytes = attach_bundle_soundtrack(&visual, &pcm, usize::MAX).unwrap();
+        let error = match PlayerCore::load(&bytes) {
+            Err(e) => e,
+            Ok(_) => panic!("silent browser load accepted"),
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("sound-bearing FMTL requires audio-aware playback")
+        );
     }
 }

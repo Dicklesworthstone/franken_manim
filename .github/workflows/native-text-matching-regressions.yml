@@ -31,8 +31,17 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: 3c0adef952cc607b2ea0bc6d074e8386dd25dada
+          ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Record the exact pushed sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/text-matching-evidence
+          git rev-parse HEAD > /tmp/text-matching-evidence/source-sha.txt
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          cp --parents crates/fmn-library/src/text_matching.rs crates/fmn-library/tests/text_matching.rs crates/fmn-library/tests/text_matching_overrides.rs /tmp/text-matching-evidence/
+          git diff --check
       - name: Install repository-pinned toolchain
         run: rustup show active-toolchain
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
@@ -44,16 +53,13 @@ jobs:
           key: native-text-matching-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
           restore-keys: |
             cargo-${{ runner.os }}-${{ runner.arch }}-portable-
-      - name: Prepare exact formatted candidate sources
+      - name: Check native matching formatting without changing the tested tree
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p /tmp/text-matching-evidence
-          git rev-parse HEAD > /tmp/text-matching-evidence/source-sha.txt
-          rustfmt --edition 2024 crates/fmn-library/src/text_matching.rs crates/fmn-library/tests/text_matching_overrides.rs
-          cp --parents crates/fmn-library/src/text_matching.rs crates/fmn-library/src/text_matching/selection.rs crates/fmn-library/tests/text_matching_overrides.rs /tmp/text-matching-evidence/
-          git diff --check
+          rustfmt --edition 2024 --check crates/fmn-library/src/text_matching.rs crates/fmn-library/tests/text_matching_overrides.rs 2>&1 | tee /tmp/text-matching-evidence/format.log
       - name: Native matching unit tests
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
