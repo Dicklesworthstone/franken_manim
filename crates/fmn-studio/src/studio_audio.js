@@ -105,8 +105,9 @@
     }
   }
   class Player {
-    constructor({transport, context, onState = () => {}, onFrame = () => {}, onReady = () => {}}) {
+    constructor({transport, context, onState = () => {}, onFrame = () => {}, onReady = () => {}, autoRebuffer = false}) {
       this.transport = transport; this.contextFactory = context; this.onState = onState; this.onFrame = onFrame; this.onReady = onReady;
+      this.autoRebuffer = autoRebuffer;
       this.context = null; this.info = null; this.position = 0; this.epoch = 0; this.controller = new AbortController();
       this.slots = new Set(); this.loading = false; this.checking = false; this.status = "idle";
       this.gain = null; this.volume = 1; this.lastPreview = -Infinity; this.lastFrame = -1; this.lastCheck = 0;
@@ -202,39 +203,78 @@
       try { node.start(when); } catch (error) { node.disconnect(); this.slots.delete(slot); throw error; }
       this.queuedEnd = chunk.start + chunk.frames;
     }
+    buffer() {
+      if (!this.autoRebuffer) {
+        this.pause("Buffering stopped playback. Press Play narration to resume without skipping samples.", this.queuedEnd);
+        return;
+      }
+      // All queued sound has ended. Keep the one in-flight request and its
+      // cancellation epoch: a late *verified* response can still fill this hole.
+      // The device clock may advance, but neither audio nor pictures may skip it.
+      for (const slot of this.slots) { try { slot.node.stop(); } catch {} slot.node.disconnect(); }
+      this.slots.clear(); this.position = this.queuedEnd; this.status = "buffering";
+      this.emit("Buffering narration; playback will resume without skipping samples.");
+    }
+    refill(chunk, epoch) {
+      if (epoch !== this.epoch || !["playing", "buffering"].includes(this.status)) return;
+      if (this.context.state !== "running") {
+        this.pause("Audio device suspended; press Play narration to resume."); return;
+      }
+      const when = this.anchorTime + (chunk.start - this.anchorSample) / this.info.sample_rate;
+      // A response may resolve before the animation-frame callback notices the
+      // underrun. Both arrival orders use the same first-unheard sample cursor.
+      if (this.status === "playing" && when < this.context.currentTime) this.buffer();
+      if (epoch !== this.epoch || !["playing", "buffering"].includes(this.status)) return;
+      if (this.status === "buffering") {
+        this.onReady(this.info);
+        if (epoch !== this.epoch || this.status !== "buffering") return;
+        this.anchorSample = this.position; this.anchorTime = this.context.currentTime + 0.06;
+        this.lastPreview = -Infinity;
+        this.schedule(chunk);
+        this.status = "playing"; this.emit("Playing recorded narration");
+      } else {
+        this.schedule(chunk);
+      }
+    }
     pump() {
-      if (this.status !== "playing") return;
+      if (!["playing", "buffering"].includes(this.status)) return;
       const epoch = this.epoch, now = this.context.currentTime, current = this.current();
       if (this.context.state !== "running") { this.pause("Audio device suspended; press Play narration to resume."); return; }
       for (const slot of this.slots) if (slot.endTime <= now) { slot.node.disconnect(); this.slots.delete(slot); }
-      if (current >= this.end) {
-        const last = this.info.picture_frames - 1;
-        if (last !== this.lastFrame) { this.lastFrame = last; this.onFrame(last); }
-        if (epoch === this.epoch) this.pause("Narration finished", this.end);
-        return;
+      if (this.status === "playing") {
+        if (current >= this.end) {
+          const last = this.info.picture_frames - 1;
+          if (last !== this.lastFrame) { this.lastFrame = last; this.onFrame(last); }
+          if (epoch === this.epoch) this.pause("Narration finished", this.end);
+          return;
+        }
+        if (current >= this.queuedEnd && now >= this.anchorTime && this.queuedEnd < this.info.sample_frames) {
+          this.buffer();
+        }
+        if (epoch !== this.epoch) return;
+        // At most ten picture requests/second. Buffering freezes the picture
+        // cursor too, rather than pretending that unheard narration advanced.
+        if (this.status === "playing" && now - this.lastPreview >= 0.1) {
+          this.lastPreview = now;
+          const frame = Math.min(this.info.picture_frames - 1, Math.floor(current * this.info.fps / this.info.sample_rate));
+          if (frame !== this.lastFrame) { this.lastFrame = frame; this.onFrame(frame); }
+        }
       }
-      if (current >= this.queuedEnd && now >= this.anchorTime && this.queuedEnd < this.info.sample_frames) {
-        this.pause("Buffering stopped playback. Press Play narration to resume without skipping samples.", this.queuedEnd); return;
-      }
-      // At most ten picture requests/second. These select existing samples,
-      // not a new render grid; late pictures catch up without slowing audio.
-      if (now - this.lastPreview >= 0.1) {
-        this.lastPreview = now;
-        const frame = Math.min(this.info.picture_frames - 1, Math.floor(current * this.info.fps / this.info.sample_rate));
-        if (frame !== this.lastFrame) { this.lastFrame = frame; this.onFrame(frame); }
-      }
-      if (epoch !== this.epoch || this.status !== "playing") return;
+      if (epoch !== this.epoch || !["playing", "buffering"].includes(this.status)) return;
       if (!this.loading && this.slots.size < MAX_SLOTS && this.queuedEnd < this.info.sample_frames) {
         this.loading = true;
         const start = this.queuedEnd, info = this.info;
         const count = Math.min(info.max_chunk_frames, Math.max(1, Math.ceil(info.sample_rate / 2)));
         void this.transport.chunk(info, start, count, this.controller.signal).then(chunk => {
-          if (epoch === this.epoch && this.status === "playing") this.schedule(chunk);
+          this.refill(chunk, epoch);
         }).catch(error => {
+          // Failed, expired or unverifiable responses still stop. Recovery is
+          // for latency, not an unauthenticated retry or an unbounded retry loop.
           if (epoch === this.epoch) this.pause(error.message, Math.min(this.current(), this.queuedEnd));
         }).finally(() => { if (epoch === this.epoch) this.loading = false; });
       }
-      // Check generation even during an audio tail or silent picture suffix.
+      // Check generation even while buffering, in an audio tail, or in a
+      // silent picture suffix. A replaced recording never resumes stale audio.
       if (!this.checking && now - this.lastCheck >= 1) {
         this.checking = true; this.lastCheck = now;
         void this.transport.info(this.controller.signal).then(info => {
@@ -259,7 +299,9 @@
   const Context = window.AudioContext || window.webkitAudioContext;
   let internalSeek = false, disposed = false, useSelectedFrame = true;
   const safe = value => String(value).split(capability).join("[session]").slice(0, 400);
+  const active = status => ["playing", "loading", "buffering"].includes(status);
   const player = new Player({
+    autoRebuffer: true,
     transport: new Transport(window.fetch.bind(window), capability, window.crypto),
     context: () => { if (!Context) throw new Error("This browser has no Web Audio playback support."); return new Context(); },
     onReady: info => {
@@ -271,8 +313,8 @@
       }
     },
     onState: event => {
-      $("audio-play").textContent = event.status === "playing" || event.status === "loading" ? "Pause narration" : "Play narration";
-      $("audio-play").setAttribute("aria-pressed", String(event.status === "playing"));
+      $("audio-play").textContent = active(event.status) ? "Pause narration" : "Play narration";
+      $("audio-play").setAttribute("aria-pressed", String(active(event.status)));
       $("audio-status").textContent = safe(event.message);
       $("audio-status").dataset.state = event.status;
     },
@@ -289,7 +331,7 @@
     },
   });
   $("audio-play").addEventListener("click", () => {
-    if (["playing", "loading"].includes(player.status)) { player.pause(); return; }
+    if (active(player.status)) { player.pause(); return; }
     if ($("timeline").disabled || $("display").dataset.synchronized !== "true") {
       player.pause("Wait for a synchronized picture before starting narration."); return;
     }
@@ -319,7 +361,7 @@
     if (event.persisted && disposed) { disposed = false; useSelectedFrame = true; requestAnimationFrame(tick); }
   });
   new MutationObserver(() => {
-    if (!["playing", "loading"].includes(player.status)) return;
+    if (!active(player.status)) return;
     const display = $("display");
     if (display.dataset.connected !== "true" || !$("error").hidden ||
         (player.info && Number(display.dataset.workerGeneration) !== player.info.worker_generation)) {
@@ -328,7 +370,7 @@
   }).observe(document.querySelector("main"), {attributes: true, subtree: true,
     attributeFilter: ["data-connected", "data-worker-generation"]});
   new MutationObserver(() => {
-    if (!$("error").hidden && ["playing", "loading"].includes(player.status)) player.pause("Narration paused: the picture request failed.");
+    if (!$("error").hidden && active(player.status)) player.pause("Narration paused: the picture request failed.");
   }).observe($("error"), {attributes: true, attributeFilter: ["hidden"]});
   function tick() { if (!disposed) { player.pump(); requestAnimationFrame(tick); } }
   requestAnimationFrame(tick);

@@ -40,9 +40,25 @@ Pause keeps the exact audio sample cursor, not the most recently displayed
 picture index. Seeking starts from the selected picture's absolute rational
 sample boundary. Editing, live playback, worker replacement, picture errors,
 connection loss, page hiding or leaving the window stop queued sound and abort
-pending fetches. A network underrun pauses at the last queued sample; a user
-can resume there without silently skipping unheard PCM. Delayed replies from
-an earlier play or seek cannot restart cancelled sound.
+pending fetches. Delayed replies from an earlier play or seek cannot restart
+cancelled sound.
+
+The embedded page recovers automatically from a delayed chunk or browser tick.
+An underrun enters **buffering** at the first unplayed sample and freezes the
+picture cursor there. It retains the single pending fetch rather than aborting
+and requesting the same window again. When that verified window arrives, the
+player rechecks picture-clock/worker ownership and resumes from the same sample
+on a fresh device-clock anchor. Repeated stalls cannot silently skip or repeat
+samples. A fully queued short soundtrack still admits its intentional silent
+picture suffix, and a longer soundtrack still holds the final picture.
+
+**Pause narration** remains available during buffering and cancels the pending
+recovery. Device suspension, a lost connection, stale ownership, HTTP refusal,
+checksum failure, or malformed PCM stops playback; these failures are not retried
+in a loop. Automatic recovery neither resumes a suspended device nor increases
+the three-buffer/one-fetch limit. Hosts using the controller directly retain
+manual-underrun behavior unless they explicitly select `autoRebuffer: true`;
+the embedded Studio page selects it.
 
 Volume is a playback gain, not an edit to the stored soundtrack. Web Audio may
 resample to the device's rate and apply device processing. Audible playback is
@@ -54,9 +70,13 @@ certification remain separate output paths.
 `node --test scripts/test_studio_audio.cjs` exercises the production transport
 and controller without npm packages. It checks actual WebCrypto hashes and
 Response streams, clock boundaries, cancellation races, bounded lookahead,
-generation changes, device suspension, EOF and preview request cadence. Device
-scheduling is replaced by a controllable test clock in that suite; it does not
-claim a real browser or physical audio-device acceptance result.
+generation changes, device suspension, EOF and preview request cadence. Repeated
+rebuffering is checked by reconstructing both original PCM channels across
+multiple delayed refills. The embedded-page script is also executed with minimal
+DOM/event adapters to check its buffering button, ownership checks, cancellation
+listeners, and fail-closed transport errors. Device scheduling is replaced by a
+controllable clock: these are not real-browser or physical audio-device
+acceptance results.
 
 The Rust embedded-asset test ensures the controls and player ship in the same
 versioned `/studio.js` asset without adding a filesystem-serving route. The

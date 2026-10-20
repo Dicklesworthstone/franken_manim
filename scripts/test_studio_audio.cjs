@@ -31,14 +31,14 @@ class Context {
       start(when){this.when=when;}};this.nodes.push(node);return node;
   }
 }
-function fixture(m=info()) {
+function fixture(m=info(), options={}) {
   const calls=[], context=new Context(), states=[], frames=[];
   let constructed=0;
   const transport={info:async()=>m,chunk:async(m,start,count)=> {
     calls.push({start,count}); const frames=Math.min(count,m.sample_frames-start);
     return {start,frames,channels:Array.from({length:m.channels},(_,c)=>Float32Array.from({length:frames},(_,i)=>(c?-1:1)*((start+i)%127)/128))};
   }};
-  const player=new Player({transport,context:()=>{constructed++;return context;},onState:s=>states.push(s),onFrame:f=>frames.push(f)});
+  const player=new Player({transport,context:()=>{constructed++;return context;},onState:s=>states.push(s),onFrame:f=>frames.push(f),...options});
   return {player,transport,context,calls,states,frames,get constructed(){return constructed;}};
 }
 
@@ -271,4 +271,272 @@ test("readiness callbacks can cancel loading before any audio fetch",async()=>{
   assert.equal(f.player.status,"paused");assert.equal(f.player.position,0);
   assert.equal(f.calls.length,0);assert.equal(f.context.nodes.length,0);
   assert.match(f.states.at(-1).message,/ownership/);
+});
+
+// Continuous preview is explicitly enabled by the embedded page. Embedders
+// retaining the original pause-on-underrun policy still exercise every test above.
+const continuous = (m=info()) => fixture(m,{autoRebuffer:true});
+
+async function pendingRefill(f) {
+  const original=f.transport.chunk, pending=deferred();
+  const requests=[];
+  f.transport.chunk=(m,start,count,signal)=> {
+    requests.push({m,start,count,signal});return pending.promise;
+  };
+  f.player.pump();
+  assert.equal(requests.length,1);
+  return {requests,pending,original,async deliver() {
+    const {m,start,count}=requests[0];
+    pending.resolve(await original(m,start,count));await flush();
+  }};
+}
+
+test("continuous playback holds an underrun cursor and keeps exactly one refill alive",async()=>{
+  const f=continuous();await f.player.play();
+  const refill=await pendingRefill(f);
+  f.context.currentTime=0.7;f.player.pump();
+  assert.equal(f.player.status,"buffering");assert.equal(f.player.current(),24000);
+  assert.equal(refill.requests[0].signal.aborted,false);
+  const pictures=f.frames.length;
+  for(let n=0;n<40;n++){f.context.currentTime+=0.1;f.player.pump();await flush();}
+  assert.equal(refill.requests.length,1);assert.equal(f.player.slots.size,0);
+  assert.equal(f.player.current(),24000);assert.equal(f.frames.length,pictures);
+  f.player.pause();assert.equal(refill.requests[0].signal.aborted,true);
+});
+
+test("a successful delayed refill resumes from its exact sample with a new device-clock anchor",async()=>{
+  const f=continuous();await f.player.play();
+  const refill=await pendingRefill(f);
+  f.context.currentTime=5;f.player.pump();assert.equal(f.player.status,"buffering");
+  await refill.deliver();
+  assert.equal(f.player.status,"playing");assert.equal(f.player.anchorSample,24000);
+  assert.equal(f.context.nodes.at(-1).when,5.06);assert.equal(f.player.current(),24000);
+  assert.equal(f.player.queuedEnd,48000);assert.equal(f.constructed,1);
+  assert.equal(f.context.buffers.at(-1).values[0][0],(24000%127)/128);
+  assert.equal(f.context.buffers.at(-1).values[1][0],-(24000%127)/128);
+  assert.equal(f.player.slots.size,1);f.player.pause();
+});
+
+test("a refill that arrives after its deadline before the next tick also rebuffers",async()=>{
+  const f=continuous();await f.player.play();const refill=await pendingRefill(f);
+  f.context.currentTime=2;await refill.deliver();
+  assert.equal(f.player.status,"playing");assert.equal(f.context.nodes.at(-1).when,2.06);
+  assert.equal(f.player.anchorSample,24000);assert.equal(f.player.current(),24000);
+  assert(f.states.some(s=>s.status==="buffering"));f.player.pause();
+});
+
+test("a long UI stall with no pending refill automatically requests the first unheard chunk",async()=>{
+  const f=continuous();await f.player.play();f.context.currentTime=10;f.player.pump();await flush();
+  assert.equal(f.player.status,"playing");assert.equal(f.calls.length,2);
+  assert.equal(f.calls[1].start,24000);assert.equal(f.context.nodes[1].when,10.06);
+  assert.equal(f.player.current(),24000);f.player.pause();
+});
+
+test("repeated automatic recoveries reconstruct both complete channels without gaps or duplicates",async()=>{
+  const m=info({sample_frames:121003,picture_frames:78}), f=continuous(m);
+  await f.player.play();
+  let recoveries=0;
+  while(f.player.queuedEnd<m.sample_frames) {
+    f.context.currentTime+=10;f.player.pump();await flush();
+    assert.equal(f.player.status,"playing");assert(f.player.slots.size<=3);
+    assert.equal(f.player.current(),f.calls.at(-1).start);
+    assert(++recoveries<10);
+  }
+  assert.equal(recoveries,5);
+  assert.deepEqual(f.calls.map(c=>c.start),[0,24000,48000,72000,96000,120000]);
+  for(let channel=0;channel<2;channel++) {
+    const joined=Float32Array.from(f.context.buffers.flatMap(b=>Array.from(b.values[channel])));
+    const expected=Float32Array.from({length:m.sample_frames},(_,i)=>(channel?-1:1)*(i%127)/128);
+    assert.deepEqual(joined,expected);
+  }
+  f.context.currentTime+=10;f.player.pump();
+  assert.equal(f.player.status,"paused");assert.match(f.states.at(-1).message,/finished/);
+  assert.equal(f.player.current(),sampleAtFrame(m,m.picture_frames));
+});
+
+test("pause, seek, invalidation and disposal cancel a buffering refill permanently",async()=>{
+  for(const stop of [f=>f.player.pause(),f=>f.player.seek(12),f=>f.player.invalidate(),f=>f.player.dispose()]) {
+    const f=continuous();await f.player.play();const refill=await pendingRefill(f);
+    f.context.currentTime=1;f.player.pump();assert.equal(f.player.status,"buffering");
+    await stop(f);const count=f.context.nodes.length, cursor=f.player.current();
+    await refill.deliver();
+    assert.equal(f.player.status,"paused");assert.equal(f.context.nodes.length,count);
+    assert.equal(f.player.current(),cursor);assert.equal(refill.requests[0].signal.aborted,true);
+  }
+});
+
+test("a buffering notification may cancel without starting new work",async()=>{
+  const f=continuous();await f.player.play();
+  f.player.onState=event=>{if(event.status==="buffering")f.player.pause("cancelled buffering");};
+  f.context.currentTime=1;f.player.pump();await flush();
+  assert.equal(f.player.status,"paused");assert.equal(f.calls.length,1);
+  assert.equal(f.player.current(),24000);assert.equal(f.context.nodes.length,1);
+});
+
+test("automatic recovery revalidates picture ownership before scheduling sound",async()=>{
+  for(const cancel of [false,true]) {
+    const f=continuous();await f.player.play();const refill=await pendingRefill(f);
+    f.context.currentTime=1;f.player.pump();
+    let checks=0;f.player.onReady=()=>{checks++;if(cancel)f.player.pause();else throw new Error("picture generation changed");};
+    await refill.deliver();
+    assert.equal(checks,1);assert.equal(f.player.status,"paused");assert.equal(f.context.nodes.length,1);
+    assert.equal(f.player.current(),24000);assert.equal(f.player.slots.size,0);
+  }
+});
+
+test("worker replacement while buffering invalidates the pending audio rather than resuming",async()=>{
+  const f=continuous();await f.player.play();const refill=await pendingRefill(f);
+  f.transport.info=async()=>info({worker_generation:4});
+  f.context.currentTime=2;f.player.pump();await flush();
+  assert.equal(f.player.status,"paused");assert.equal(f.player.info,null);
+  await refill.deliver();assert.equal(f.context.nodes.length,1);assert.equal(f.player.status,"paused");
+});
+
+test("a rejected refill is terminal and never starts a retry loop",async()=>{
+  const f=continuous();await f.player.play();const refill=await pendingRefill(f);
+  f.context.currentTime=0.7;f.player.pump();
+  refill.pending.reject(new Error("recording checksum changed"));await flush();
+  assert.equal(f.player.status,"paused");assert.equal(f.player.current(),24000);
+  for(let n=0;n<30;n++){f.context.currentTime++;f.player.pump();await flush();}
+  assert.equal(refill.requests.length,1);assert.equal(f.context.nodes.length,1);
+  assert.match(f.states.at(-1).message,/checksum/);
+});
+
+test("a suspended audio device during buffering needs an explicit user resume",async()=>{
+  for(const tick of [false,true]) {
+    const f=continuous();let resumed=0;const resume=f.context.resume.bind(f.context);
+    f.context.resume=()=>{resumed++;return resume();};
+    await f.player.play();const refill=await pendingRefill(f);
+    f.context.currentTime=0.7;f.player.pump();f.context.state="suspended";
+    if(tick)f.player.pump();await refill.deliver();
+    assert.equal(resumed,1);assert.equal(f.player.status,"paused");assert.equal(f.player.current(),24000);
+    assert.equal(f.context.nodes.length,1);assert.match(f.states.at(-1).message,/suspended/i);
+  }
+});
+
+test("recovery keeps three-slot lookahead and never buffers intentional silence past EOF",async()=>{
+  const f=continuous(info({sample_frames:74000,picture_frames:90}));await f.player.play();
+  f.context.currentTime=3;f.player.pump();await flush();
+  for(let n=0;n<50;n++){f.player.pump();await flush();assert(f.player.slots.size<=3);}
+  assert.deepEqual(f.calls.map(c=>c.start),[0,24000,48000,72000,96000].slice(0,4));
+  f.context.currentTime=4.8;f.player.pump();await flush();
+  assert.equal(f.player.status,"playing");assert.equal(f.calls.length,4);
+  f.context.currentTime=7;f.player.pump();assert.equal(f.player.status,"paused");
+  assert.equal(f.player.current(),144000);assert.match(f.states.at(-1).message,/finished/);
+});
+
+test("a paused buffering run cannot revive when a new run finishes first",async()=>{
+  const f=continuous();await f.player.play();const refill=await pendingRefill(f);
+  f.context.currentTime=0.7;f.player.pump();f.player.seek(20);
+  f.transport.chunk=refill.original;await f.player.play();
+  const samples=f.player.queuedEnd,nodes=f.context.nodes.length;
+  await refill.deliver();assert.equal(f.context.nodes.length,nodes);assert.equal(f.player.queuedEnd,samples);
+  assert.equal(f.player.anchorSample,32000);assert.equal(f.player.status,"playing");f.player.pause();
+});
+
+// Execute the actual browser entry (not its CommonJS export) with minimal DOM
+// event targets. WebCrypto and Response streams remain real; only the page,
+// audio device clock and host HTTP responses are controlled by this harness.
+function embeddedFixture() {
+  const {runInNewContext}=require("node:vm"), {readFileSync}=require("node:fs");
+  class Element extends EventTarget {
+    constructor() {super();this.dataset={};this.disabled=false;this.hidden=false;this.textContent="";this.attributes=new Map();}
+    setAttribute(name,value){this.attributes.set(name,value);}
+    getAttribute(name){return this.attributes.get(name);}
+    click(){this.dispatchEvent(new Event("click"));}
+  }
+  const nodes=new Map(), element=id=>{if(!nodes.has(id))nodes.set(id,new Element());return nodes.get(id);};
+  Object.assign(element("display").dataset,{connected:"true",synchronized:"true",workerGeneration:"3",fps:"30",frame:"0"});
+  Object.assign(element("timeline"),{max:"59",value:"0"});element("error").hidden=true;
+  const document=new EventTarget();document.getElementById=element;document.querySelector=element;
+  document.currentScript={src:"http://studio.test/studio.js?cap=test-capability"};document.hidden=false;
+  const window=new EventTarget(), frames=[], observers=[], requests=[], pending=deferred();
+  let context=null;
+  window.AudioContext=class extends Context {constructor(){super();context=this;}};
+  window.crypto=webcrypto;
+  window.fetch=async(url,options)=> {
+    requests.push({url,options});
+    if(url==="/api/audio")return new Response(JSON.stringify(info()),{headers:{"Content-Type":"application/json"}});
+    const query=new URL(url,"http://studio.test").searchParams,start=Number(query.get("start")),count=Number(query.get("frames"));
+    if(start===24000)return pending.promise;
+    return response(info(),start,Math.min(count,info().sample_frames-start));
+  };
+  class Observer {constructor(callback){this.callback=callback;observers.push(this);}observe(target){this.target=target;}}
+  runInNewContext(readFileSync(require.resolve("../crates/fmn-studio/src/studio_audio.js"),"utf8"),{
+    window,document,MutationObserver:Observer,requestAnimationFrame:callback=>frames.push(callback),
+    URL,URLSearchParams,AbortController,AbortSignal,TextDecoder,Event,DataView,Uint8Array,Float32Array,
+  });
+  return {element,window,document,requests,pending,get context(){return context;},
+    tick(time){context.currentTime=time;const callbacks=frames.splice(0);for(const callback of callbacks)callback();},
+    mutate(target){for(const observer of observers)if(observer.target===element(target))observer.callback();},
+    async deliver(headers={}){pending.resolve(await response(info(),24000,24000,headers));},
+  };
+}
+async function settleUntil(predicate) {
+  const deadline=Date.now()+5000;
+  while(Date.now()<deadline){if(predicate())return;await new Promise(resolve=>setTimeout(resolve,1));}
+  assert(predicate(),"embedded page never reached the expected state");
+}
+async function embeddedBuffering() {
+  const f=embeddedFixture();await settleUntil(()=>f.element("audio-status").textContent.includes("available"));
+  assert.equal(f.context,null);f.element("audio-play").click();
+  await settleUntil(()=>f.element("audio-status").dataset.state==="playing");
+  f.tick(0.1);await settleUntil(()=>f.requests.some(r=>r.url.includes("start=24000")));
+  f.tick(0.7);assert.equal(f.element("audio-status").dataset.state,"buffering");
+  return f;
+}
+
+test("the embedded page enables automatic buffering and its Pause button cancels the pending refill",async()=>{
+  const f=await embeddedBuffering();
+  assert.equal(f.element("audio-play").textContent,"Pause narration");
+  assert.equal(f.element("audio-play").getAttribute("aria-pressed"),"true");
+  f.element("audio-play").click();
+  assert.equal(f.element("audio-status").dataset.state,"paused");
+  assert.equal(f.element("audio-play").getAttribute("aria-pressed"),"false");
+  assert(f.requests.find(r=>r.url.includes("start=24000")).options.signal.aborted);
+  await f.deliver();for(let n=0;n<5;n++)await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(f.context.nodes.length,1);assert.equal(f.element("audio-status").dataset.state,"paused");
+});
+
+test("the embedded page resumes a successful late response and rechecks the real DOM picture binding",async()=>{
+  for(const changed of [false,true]) {
+    const f=await embeddedBuffering();if(changed)f.element("display").dataset.fps="60";
+    await f.deliver();await settleUntil(()=>f.element("audio-status").dataset.state!=="buffering");
+    assert.equal(f.element("audio-status").dataset.state,changed?"paused":"playing");
+    assert.equal(f.context.nodes.length,changed?1:2);
+    if(changed)assert.match(f.element("audio-status").textContent,/clocks/);
+    else assert.equal(f.context.nodes[1].when,0.76);
+    f.window.dispatchEvent(new Event("pagehide"));
+  }
+});
+
+test("every embedded edit and connection stop also cancels an automatic buffering state",async()=>{
+  const actions=[
+    f=>f.element("timeline").dispatchEvent(new Event("input")),
+    f=>f.element("restart").click(),
+    f=>f.element("preview").dispatchEvent(new Event("pointerdown")),
+    f=>f.window.dispatchEvent(new Event("blur")),
+    f=>f.window.dispatchEvent(new Event("offline")),
+    f=>{f.document.hidden=true;f.document.dispatchEvent(new Event("visibilitychange"));},
+    f=>f.window.dispatchEvent(new Event("pagehide")),
+    f=>{f.element("display").dataset.workerGeneration="4";f.mutate("main");},
+    f=>{f.element("display").dataset.connected="false";f.mutate("main");},
+    f=>{f.element("error").hidden=false;f.mutate("error");},
+  ];
+  for(const action of actions) {
+    const f=await embeddedBuffering();action(f);
+    assert.equal(f.element("audio-status").dataset.state,"paused");
+    await f.deliver();for(let n=0;n<5;n++)await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(f.context.nodes.length,1);assert.equal(f.element("audio-status").dataset.state,"paused");
+    f.window.dispatchEvent(new Event("pagehide"));
+  }
+});
+
+test("the embedded buffering path still rejects an actually checksummed-invalid transport response",async()=>{
+  const f=await embeddedBuffering();await f.deliver({"X-FMN-SHA256":"b".repeat(64)});
+  await settleUntil(()=>f.element("audio-status").dataset.state==="paused");
+  assert.match(f.element("audio-status").textContent,/checksum/);assert.equal(f.context.nodes.length,1);
+  f.tick(50);await flush();
+  assert.equal(f.requests.filter(r=>r.url.includes("start=24000")).length,1);
+  f.window.dispatchEvent(new Event("pagehide"));
 });
