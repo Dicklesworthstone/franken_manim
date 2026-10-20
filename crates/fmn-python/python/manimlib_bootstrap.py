@@ -16024,7 +16024,7 @@ class Scene(_SceneCore):
                 callbacks.append(None)
             specs.append(build_spec(proto, False))
         try:
-            return self._play_animations(
+            result = self._play_animations(
                 specs,
                 callbacks,
                 camera_pair,
@@ -16037,6 +16037,23 @@ class Scene(_SceneCore):
                 if isinstance(callback, _CompositionCallbackDriver):
                     callback.abort()
             raise
+        self._record_played_roots()
+        return result
+
+    def _record_played_roots(self):
+        # fm-v1aq: the Reference's begin_animations roots each animated
+        # mobject through Scene.add, which records its family in
+        # id_to_mobject_map; that map is also what keeps the Python objects
+        # alive. Native play roots them without Scene.add, so record each new
+        # root here, while the animation arguments still hold its proxy.
+        mapping = getattr(self, "id_to_mobject_map", None)
+        if mapping is None:
+            mapping = {}
+            self.id_to_mobject_map = mapping
+        for root in self.mobjects:
+            if mapping.get(id(root)) is not root:
+                for member in root.get_family():
+                    mapping[id(member)] = member
 
     def wait(
         self,

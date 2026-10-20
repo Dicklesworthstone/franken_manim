@@ -4197,6 +4197,33 @@ assert isinstance(id_group, manimlib.VGroup)
 assert list(id_group) == [id_circle, id_square]
 assert list(id_scene.i2g(id(id_circle))) == [id_circle]
 
+# fm-v1aq: play() roots a bound copy natively, without Scene.add. The
+# Reference's begin_animations roots it through Scene.add, which records its
+# family in id_to_mobject_map, and that map is what keeps the Python object
+# alive once the scene's code drops it: class, attributes and updaters
+# survive, and id_to_mobject finds it.
+played_scene = Scene()
+played_base = manimlib.Square()
+played_scene.add(played_base)
+played_copy = played_base.copy().shift([1.0, 0.0, 0.0])
+played_copy.custom_attribute = "kept"
+played_copy.add_updater(lambda mob, dt: mob.shift([dt, 0.0, 0.0]))
+played_ref = weakref.ref(played_copy)
+played_id = id(played_copy)
+played_scene.play(manimlib.FadeIn(played_copy))
+del played_copy
+gc.collect()
+assert played_ref() is not None, "play() let its rooted copy be collected"
+assert played_scene.id_to_mobject(played_id) is played_ref()
+played_last = played_scene.mobjects[-1]
+assert played_last is played_ref() and type(played_last) is manimlib.Square
+assert played_last.custom_attribute == "kept"
+played_x = played_last.get_center()[0]
+played_scene.wait(1.0)
+assert abs(played_scene.mobjects[-1].get_center()[0] - played_x - 1.0) < 1e-6, (
+    "the dropped copy's Python updater stopped running"
+)
+
 group_key_scene = InteractiveScene()
 group_key_scene.setup()
 group_left = manimlib.Circle().shift([-1.0, 0.0, 0.0])
