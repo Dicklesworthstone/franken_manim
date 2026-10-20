@@ -18,7 +18,7 @@ and outcome codes only. The side-by-side gallery is written under --out, outside
 Usage:
   corpus_differential.py --portal-python P --reference-python R --videos scripts/videos_ref \\
       --config custom_config.yml --out DIR [--candidates SWEEP.ndjson] [--jobs 16] \\
-      [--timeout 240] [--years 2015-2026] [--limit N]
+      [--timeout 240] [--years 2020-2026] [--limit N]
   corpus_differential.py --report DIR --dashboard docs/ratchet/differential_dashboard.md
 """
 from __future__ import annotations
@@ -29,6 +29,7 @@ import hashlib
 import html
 import itertools
 import json
+import math
 import os
 import pathlib
 import queue
@@ -66,7 +67,7 @@ def run_portal(args, module, scene, work):
     png = work / "portal.png"
     argv = [args.portal_python, str(FACTS_TOOL), "run-scene", "--facts", str(work / "portal.ndjson"),
             "--engine", "portal", "--", str(args.videos / module), scene, "-s",
-            "--format", "png", "--resolution", "320x180", "--video_dir", str(png)]
+            "--format", "png", "--resolution", "320x180", "--output", str(png)]
     env = dict(os.environ, PYTHONPATH=str(args.videos))
     return run_child(argv, args.workdir, env, args.timeout), png
 
@@ -173,6 +174,17 @@ def _tiers(ref, portal, exclusions):
     return tiers
 
 
+def ran_scene(exit_code, facts):
+    """An engine ran a scene when it exited 0 and its last facts record is not an error.
+    A timeout has no exit code; facts written before a later crash do not count."""
+    return exit_code == 0 and facts is not None and "error" not in facts
+
+
+def outcome(portal_ran, reference_ran):
+    return {(True, True): "both", (True, False): "portal-only",
+            (False, True): "reference-only"}.get((portal_ran, reference_ran), "neither")
+
+
 def run_one(args, module, scene):
     work = args.out / "scenes" / _slug(module, scene)
     work.mkdir(parents=True, exist_ok=True)
@@ -183,8 +195,7 @@ def run_one(args, module, scene):
     (r_code, r_err, _), ref_png = run_reference(args, module, scene, work)
     r_seconds = round(time.monotonic() - start, 1)
     portal, ref = _facts(work / "portal.ndjson"), _facts(work / "reference.ndjson")
-    ran = {"portal": portal is not None and "error" not in portal and p_code == 0,
-           "reference": ref is not None and "error" not in ref and r_code == 0}
+    ran = {"portal": ran_scene(p_code, portal), "reference": ran_scene(r_code, ref)}
     record = {
         "schema": SCHEMA, "version": VERSION, "module": module, "scene": scene,
         "era": module.split("/", 1)[0].lstrip("_"),
@@ -193,13 +204,11 @@ def run_one(args, module, scene):
         "reference": {"exit": r_code, "seconds": r_seconds, "facts_sha": _digest(work / "reference.ndjson"),
                       "error": _last_error(r_err) if not ran["reference"] else None},
     }
-    if ran["portal"] and ran["reference"]:
-        record["outcome"] = "both"
+    record["outcome"] = outcome(ran["portal"], ran["reference"])
+    if record["outcome"] == "both":
         record.update(_tiers(ref, portal, args.exclusions))
         record["smoke"] = _smoke(ref_png, portal_png)
     else:
-        record["outcome"] = {(True, False): "portal-only", (False, True): "reference-only"}.get(
-            (ran["portal"], ran["reference"]), "neither")
         record["triage"] = triage(record)
     record["engines"] = args.engine_ids
     record["frames"] ={"reference": str(ref_png) if ref_png.exists() else None,
@@ -254,11 +263,12 @@ def _last_error(stderr):
 
 
 def candidates(args):
+    if args.scene:
+        # Named scenes run as given, inside or outside the corpus's era layout; one that does
+        # not exist runs in neither engine and says so.
+        return sorted({tuple(spec.rsplit(":", 1)) for spec in args.scene})
     first, _, last = args.years.partition("-")
     scenes = enumerate_scenes(args.videos, range(int(first), int(last or first) + 1))
-    if args.scene:
-        chosen = {tuple(spec.rsplit(":", 1)) for spec in args.scene}
-        return [s for s in scenes if s in chosen]
     if args.candidates:
         wanted = set(args.candidate_outcome.split(","))
         keep = {(r["module"], r["scene"]) for r in map(json.loads, args.candidates.read_text().splitlines())
@@ -268,7 +278,9 @@ def candidates(args):
 
 
 def write_dashboard(records, path, title):
-    """Outcome codes and counts only (the corpus is CC BY-NC-SA)."""
+    """Outcome codes and counts only (the corpus is CC BY-NC-SA). The page depends only on
+    the set of records, not their order: every table breaks ties by its key."""
+    records = sorted(records, key=lambda r: (r["module"], r["scene"]))
     both = [r for r in records if r["outcome"] == "both"]
     count = lambda rs, tier, verdict: sum(1 for r in rs if r[tier]["verdict"] == verdict)  # noqa: E731
     lines = [f"# {title}", "",
@@ -290,8 +302,8 @@ def write_dashboard(records, path, title):
             triaged[key] = triaged.get(key, 0) + 1
     lines += ["", "## One-engine outcomes by triage label", "",
               "| outcome | label | scenes | rule |", "|---|---|---|---|"]
-    for (outcome, label, reason), n in sorted(triaged.items(), key=lambda kv: -kv[1]):
-        lines.append(f"| {outcome} | {label} | {n} | {reason} |")
+    for (code, label, reason), n in sorted(triaged.items(), key=lambda kv: (-kv[1], kv[0])):
+        lines.append(f"| {code} | {label} | {n} | {reason} |")
     clusters = {}
     for r in both:
         first = r["structure"]["first_difference"]
@@ -300,7 +312,7 @@ def write_dashboard(records, path, title):
             clusters.setdefault(key, []).append(f"{r['module']}:{r['scene']}")
     lines += ["", "## Structure differences by first differing (class, fact)", "",
               "| class | fact | scenes | example |", "|---|---|---|---|"]
-    for (cls, fact), scenes in sorted(clusters.items(), key=lambda kv: -len(kv[1])):
+    for (cls, fact), scenes in sorted(clusters.items(), key=lambda kv: (-len(kv[1]), kv[0])):
         lines.append(f"| {cls} | {fact} | {len(scenes)} | `{scenes[0]}` |")
     # A bbox outside every admitting row's envelope (fm-5wq.45): size or position, not outline.
     envelopes = {}
@@ -383,6 +395,28 @@ def _construct_of(tree, scene):
     return None
 
 
+def ddmin(count, reproduces, exhausted=lambda: False):
+    """A 1-minimal subset of range(count), in order, for which `reproduces` still holds.
+
+    ddmin over complements: drop one of n chunks while the target persists, refining the
+    split when no chunk can go. The full set is assumed to reproduce. Once `exhausted()`,
+    the current (still reproducing) subset is returned as is."""
+    items, n = list(range(count)), 2
+    while len(items) >= 2 and not exhausted():
+        size = math.ceil(len(items) / n)
+        chunks = [items[i:i + size] for i in range(0, len(items), size)]
+        for chunk in chunks:
+            complement = [i for i in items if i not in chunk]
+            if reproduces(complement):
+                items, n = complement, max(n - 1, 2)
+                break
+        else:
+            if n >= len(items):
+                break
+            n = min(len(items), 2 * n)
+    return items
+
+
 def minimize(args, module, scene, target=None, budget=60, envelope=False):
     """Delta-debug `construct` (ddmin over its top-level statements) while the structure
     difference with the same (class, fact) as the full scene's first one persists. With
@@ -393,7 +427,6 @@ def minimize(args, module, scene, target=None, budget=60, envelope=False):
     names the target difference, the statement counts, and the tests run.
     """
     import ast
-    import math
 
     source = (args.videos / module).read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -442,19 +475,7 @@ def minimize(args, module, scene, target=None, budget=60, envelope=False):
         result = differences_for(kept)
         return bool(result) and tuple(target) in keys(result)
 
-    items, n = list(range(len(statements))), 2
-    while len(items) >= 2 and tests["count"] < budget:
-        size = math.ceil(len(items) / n)
-        chunks = [items[i:i + size] for i in range(0, len(items), size)]
-        for chunk in chunks:
-            complement = [i for i in items if i not in chunk]
-            if reproduces(complement):
-                items, n = complement, max(n - 1, 2)
-                break
-        else:
-            if n >= len(items):
-                break
-            n = min(len(items), 2 * n)
+    items = ddmin(len(statements), reproduces, exhausted=lambda: tests["count"] >= budget)
     construct.body = [statements[i] for i in items] or [ast.Pass()]
     (work / "minimized.py").write_text(ast.unparse(tree), encoding="utf-8")
     return {"module": module, "scene": scene, "target": list(target),
@@ -473,7 +494,9 @@ def main():
     parser.add_argument("--out", type=pathlib.Path)
     parser.add_argument("--candidates", type=pathlib.Path)
     parser.add_argument("--candidate-outcome", default="ok")
-    parser.add_argument("--years", default="2015-2026")
+    # The corpus is the sweep's (corpus_scene_sweep.py): the 2020-2026 manimlib eras. Earlier
+    # eras import the pre-2020 manim; none of 2015's 179 scenes ran in either engine.
+    parser.add_argument("--years", default="2020-2026")
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--jobs", type=int, default=16)
     parser.add_argument("--timeout", type=int, default=240)

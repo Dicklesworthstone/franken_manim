@@ -86,6 +86,12 @@ python3 -m py_compile \
     scripts/test_corpus_speed_ratio.py
 python3 scripts/test_corpus_speed_ratio.py
 
+echo "==> corpus differential harness"
+python3 -m py_compile \
+    scripts/corpus_differential.py \
+    scripts/test_corpus_differential.py
+python3 scripts/test_corpus_differential.py
+
 echo "==> Python portal benchmark evidence contract"
 python3 -m py_compile \
     scripts/benchmark_python_portal.py \
