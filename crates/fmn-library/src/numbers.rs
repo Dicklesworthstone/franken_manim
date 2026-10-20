@@ -1194,6 +1194,34 @@ fn number_update_error(error: impl core::fmt::Display) -> AnimError {
     }
 }
 
+impl DecimalNumber {
+    /// Prepare a native numeric slot using an existing glyph as its paint
+    /// donor. Keep the background's own paint while propagating placement-
+    /// independent render settings to every member. The caller can validate
+    /// the complete detached result before editing an adopted formula.
+    pub(crate) fn with_live_paint(
+        &self,
+        stage: &Stage,
+        donor: Mob,
+    ) -> Result<Mobject, AnimError> {
+        let entry = stage.get(donor).ok_or(AnimError::StaleHandle(donor))?;
+        let uniforms = *entry.uniforms();
+        let paint = NumberPaint::capture(stage, donor)?;
+        let mut prepared: Mobject = self.vmob.clone().into();
+        paint.apply(&mut prepared, uniforms)?;
+        for (index, child) in prepared.submobjects.iter_mut().enumerate() {
+            if self.include_background_rectangle && index == 0 {
+                // The background is independent of the digits' live color.
+                child.uniforms = uniforms;
+                child.z_index = prepared.z_index;
+            } else {
+                paint.apply_family(child, uniforms)?;
+            }
+        }
+        Ok(prepared)
+    }
+}
+
 /// Add the current number's glyph family and return the stable root handle
 /// a value animation drives. Background, digit, ellipsis, and unit geometry
 /// retain their separate styles. The initial displayed value is validated

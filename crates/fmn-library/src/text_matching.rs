@@ -20,7 +20,7 @@
 //! A failed callback prevents replacement publication. Its first diagnostic
 //! remains attached to the failed run until a validated new begin.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use fmn_anim::{
     AnimError, AnimState, Animation, AnimationGroup, AnimationSignature, RateFunc, Transform,
@@ -29,8 +29,9 @@ use fmn_anim::{
 use fmn_mobject::{IdBuildHasher, Mob, Mobject, Stage, StageError};
 
 use crate::spans::SpanMapData;
+use crate::tex::{TexBindingError, TexSpanBinding};
 
-/// Maximum direct children on either operand of a matching animation.
+/// Maximum native parts and traversed family edges on either operand.
 pub const MAX_MATCHING_PARTS: usize = 65_536;
 /// Maximum equal-key comparisons in a longest-block search, across all rounds.
 pub const MAX_MATCHING_COMPARISONS: usize = 1_048_576;
@@ -142,9 +143,16 @@ impl From<AnimError> for TextMatchingError {
     }
 }
 
+struct BoundMember {
+    mob: Mob,
+    children: Vec<Mob>,
+    point_free: bool,
+}
+
 struct Binding {
     root: Mob,
     children: Vec<Mob>,
+    topology: Vec<BoundMember>,
 }
 
 impl Binding {
@@ -153,6 +161,7 @@ impl Binding {
         root: Mob,
         spans: &'a SpanMapData,
         side: &'static str,
+        numeric_slots: &[Mob],
     ) -> Result<(Self, Vec<&'a str>), TextMatchingError> {
         let entry = stage.get(root).ok_or(AnimError::StaleHandle(root))?;
         let children = entry.submobjects();
@@ -171,15 +180,51 @@ impl Binding {
         if spans.entries.len() > children.len() {
             return Err(invalid("there are more spans than direct children"));
         }
-        for &child in children {
+        let numeric_slots: HashSet<Mob, IdBuildHasher> =
+            numeric_slots.iter().copied().collect();
+        let mut topology = Vec::new();
+        let mut owners = HashMap::<Mob, usize, IdBuildHasher>::default();
+        let mut edges = children.len();
+        for (owner, &child) in children.iter().enumerate() {
             let part = stage.get(child).ok_or(AnimError::StaleHandle(child))?;
-            if !part.submobjects().is_empty() {
+            if !numeric_slots.contains(&child) && !part.submobjects().is_empty() {
                 return Err(invalid(
-                    "a native primitive was regrouped; rebuild its span map",
+                    "a native primitive was regrouped; use an explicit live TeX binding",
                 ));
             }
             if spans.entries.is_empty() && !part.buffer.is_empty() {
                 return Err(invalid("point-bearing strings require a native span map"));
+            }
+            let mut pending = vec![child];
+            while let Some(mob) = pending.pop() {
+                if let Some(previous) = owners.insert(mob, owner) {
+                    if previous != owner {
+                        return Err(invalid(
+                            "distinct source parts share a native descendant",
+                        ));
+                    }
+                    continue;
+                }
+                let member = stage.get(mob).ok_or(AnimError::StaleHandle(mob))?;
+                edges = edges.saturating_add(member.submobjects().len());
+                if edges > MAX_MATCHING_PARTS || topology.len() == MAX_MATCHING_PARTS {
+                    return Err(TextMatchingError::BudgetExceeded {
+                        resource: "native family members and edges per operand",
+                        limit: MAX_MATCHING_PARTS,
+                    });
+                }
+                let point_free = numeric_slots.contains(&mob);
+                if point_free && !member.buffer.is_empty() {
+                    return Err(invalid(
+                        "a live numeric slot must be a point-free container",
+                    ));
+                }
+                topology.push(BoundMember {
+                    mob,
+                    children: member.submobjects().to_vec(),
+                    point_free,
+                });
+                pending.extend(member.submobjects().iter().rev().copied());
             }
         }
         let keys = spans
@@ -198,6 +243,7 @@ impl Binding {
             Self {
                 root,
                 children: children.to_vec(),
+                topology,
             },
             keys,
         ))
@@ -210,14 +256,43 @@ impl Binding {
         if entry.submobjects() != self.children.as_slice() || !entry.buffer.is_empty() {
             return Err(AnimError::Stage(StageError::FamilyShapeMismatch));
         }
-        for &child in &self.children {
-            let part = stage.get(child).ok_or(AnimError::StaleHandle(child))?;
-            if !part.submobjects().is_empty() {
+        for member in &self.topology {
+            let part = stage
+                .get(member.mob)
+                .ok_or(AnimError::StaleHandle(member.mob))?;
+            if part.submobjects() != member.children.as_slice()
+                || (member.point_free && !part.buffer.is_empty())
+            {
                 return Err(AnimError::Stage(StageError::FamilyShapeMismatch));
             }
         }
         Ok(())
     }
+
+    fn members(&self) -> impl Iterator<Item = Mob> + '_ {
+        std::iter::once(self.root).chain(self.topology.iter().map(|member| member.mob))
+    }
+}
+
+fn validate_live_binding(
+    stage: &Stage,
+    binding: &TexSpanBinding,
+    side: &'static str,
+) -> Result<(), TextMatchingError> {
+    binding.validate(stage).map_err(|error| match error {
+        TexBindingError::Animation(error) => TextMatchingError::Animation(error),
+        TexBindingError::InvalidSpan { index } => TextMatchingError::InvalidSpan { side, index },
+        TexBindingError::InvalidLayout { reason } => {
+            TextMatchingError::InvalidLayout { side, reason }
+        }
+        TexBindingError::BudgetExceeded { resource, limit } => {
+            TextMatchingError::BudgetExceeded { resource, limit }
+        }
+        _ => TextMatchingError::InvalidLayout {
+            side,
+            reason: "the live TeX binding is invalid",
+        },
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -227,6 +302,13 @@ enum MatchingKind {
 }
 
 type PartPair = (Vec<usize>, Vec<usize>);
+
+struct MatchingPlan<'a> {
+    kind: MatchingKind,
+    key_map: &'a [(&'a str, &'a str)],
+    source_slots: &'a [Mob],
+    target_slots: &'a [Mob],
+}
 
 fn tex_pairs(source: &[&str], target: &[&str]) -> Vec<PartPair> {
     tex_pairs_remaining(
@@ -494,18 +576,20 @@ impl MatchingAnimation {
         source_spans: &SpanMapData,
         target_spans: &SpanMapData,
         config: TextMatchingConfig,
-        plan: (MatchingKind, &[(&str, &str)]),
+        plan: MatchingPlan<'_>,
     ) -> Result<Self, TextMatchingError> {
-        let (kind, key_map) = plan;
-        let (source, source_keys) = Binding::read(stage, source, source_spans, "source")?;
-        let (target, target_keys) = Binding::read(stage, target, target_spans, "target")?;
-        let source_family: HashSet<Mob, IdBuildHasher> = std::iter::once(source.root)
-            .chain(source.children.iter().copied())
-            .collect();
-        if std::iter::once(target.root)
-            .chain(target.children.iter().copied())
-            .any(|mob| source_family.contains(&mob))
-        {
+        let MatchingPlan {
+            kind,
+            key_map,
+            source_slots,
+            target_slots,
+        } = plan;
+        let (source, source_keys) =
+            Binding::read(stage, source, source_spans, "source", source_slots)?;
+        let (target, target_keys) =
+            Binding::read(stage, target, target_spans, "target", target_slots)?;
+        let source_family: HashSet<Mob, IdBuildHasher> = source.members().collect();
+        if target.members().any(|mob| source_family.contains(&mob)) {
             return Err(TextMatchingError::AliasedFamilies);
         }
         // Finish every fallible provenance/search check before editing the arena.
@@ -681,7 +765,78 @@ macro_rules! matching_animation {
                         source_spans,
                         target_spans,
                         config,
-                        (MatchingKind::$kind, key_map),
+                        MatchingPlan {
+                            kind: MatchingKind::$kind,
+                            key_map,
+                            source_slots: &[],
+                            target_slots: &[],
+                        },
+                    )?,
+                })
+            }
+
+            /// Match adopted formulas containing explicit live decimal slots.
+            /// Numeric descendants are captured now, after any prior numeric
+            /// animation, and must remain the same until begin. The ordinary
+            /// flat-map constructors continue to reject grouped primitives.
+            ///
+            /// # Errors
+            /// Stale bindings, shared descendants, or exceeded matching budgets.
+            pub fn from_bindings(
+                stage: &mut Stage,
+                source: &TexSpanBinding,
+                target: &TexSpanBinding,
+            ) -> Result<Self, TextMatchingError> {
+                Self::from_bindings_with_config(
+                    stage,
+                    source,
+                    target,
+                    TextMatchingConfig::default(),
+                )
+            }
+
+            /// Explicit live-slot matching with authored composition timing.
+            ///
+            /// # Errors
+            /// As [Self::from_bindings].
+            pub fn from_bindings_with_config(
+                stage: &mut Stage,
+                source: &TexSpanBinding,
+                target: &TexSpanBinding,
+                config: TextMatchingConfig,
+            ) -> Result<Self, TextMatchingError> {
+                Self::from_bindings_with_key_map(stage, source, target, &[], config)
+            }
+
+            /// Apply explicit source-expression mappings to live-slot formulas
+            /// before matching the remaining keys. Decimal placeholders denote
+            /// complete number groups; their current digits are not source keys.
+            ///
+            /// # Errors
+            /// As [Self::from_bindings] and [Self::with_key_map].
+            pub fn from_bindings_with_key_map(
+                stage: &mut Stage,
+                source: &TexSpanBinding,
+                target: &TexSpanBinding,
+                key_map: &[(&str, &str)],
+                config: TextMatchingConfig,
+            ) -> Result<Self, TextMatchingError> {
+                validate_live_binding(stage, source, "source")?;
+                validate_live_binding(stage, target, "target")?;
+                Ok(Self {
+                    inner: MatchingAnimation::new(
+                        stage,
+                        source.mobject(),
+                        target.mobject(),
+                        source.span_map(),
+                        target.span_map(),
+                        config,
+                        MatchingPlan {
+                            kind: MatchingKind::$kind,
+                            key_map,
+                            source_slots: source.numeric_slots(),
+                            target_slots: target.numeric_slots(),
+                        },
                     )?,
                 })
             }

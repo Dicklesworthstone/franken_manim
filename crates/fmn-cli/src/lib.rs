@@ -5384,16 +5384,6 @@ fn composition_budget(config: &fmn_config::Config) -> Result<(u64, u32, u32), Cl
         height,
     ))
 }
-/// The scene frame extent (width, height) in user units: the configured
-/// frame height scaled to the output aspect ratio.
-fn scene_frame_extent(config: &fmn_config::Config) -> (f64, f64) {
-    let (width, height) = config.camera.resolution;
-    let frame_height = config.sizes.frame_height;
-    (
-        frame_height * f64::from(width) / f64::from(height),
-        frame_height,
-    )
-}
 
 fn output_adapter_error(error: fmn_output::SinkAdapterError) -> CliError {
     let exit_name = match error {

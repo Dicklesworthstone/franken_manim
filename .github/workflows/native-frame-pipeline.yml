@@ -11,6 +11,11 @@ on:
       - 'crates/fmn-scene/**'
       - 'crates/fmn-mobject/**'
       - 'crates/fmn-library/src/fields.rs'
+      - 'crates/fmn-library/src/lib.rs'
+      - 'crates/fmn-library/src/tex.rs'
+      - 'crates/fmn-library/src/numbers.rs'
+      - 'crates/fmn-library/src/text_matching.rs'
+      - 'crates/fmn-library/tests/live_tex.rs'
       - 'crates/fmn/**'
   workflow_dispatch:
 permissions:
@@ -78,6 +83,9 @@ jobs:
       - name: Native trace and time-field updater failures
         if: ${{ !cancelled() }}
         run: cargo test --locked -p fmn-library --lib fields::tests
+      - name: Native live numeric TeX ownership and matching
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p fmn-library --test live_tex --test text_matching
       - name: Compiled ownership and reconstruction
         if: ${{ !cancelled() }}
         run: |

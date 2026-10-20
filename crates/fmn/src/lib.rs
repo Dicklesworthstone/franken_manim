@@ -55,7 +55,8 @@ use fmn_geom::{GeomError, SpaceOpsError};
 use fmn_library::{
     CoordsError, DashError, DataMobjectError, FieldError, GraphError, ImageError, MatrixError,
     MeshError, NetworkGraphError, NeuralNetworkError, ObjError, ProbabilityError, SamplingError,
-    SliderError, SpanCollectorError, TexMobjectError, TextMatchingError, TextMobjectError,
+    SliderError, SpanCollectorError, TexBindingError, TexMobjectError, TextMatchingError,
+    TextMobjectError,
 };
 use fmn_mobject::{AnimateError, Mob, Mobject, Stage as MobjectStage, StageError};
 use fmn_platform::fetch::FetchError;
@@ -1135,6 +1136,8 @@ pub enum LibraryError {
     Boolean(fmn_library::boolean_ops::BooleanMobjectError),
     /// `TransformMatchingTex`/`TransformMatchingStrings` planning.
     TextMatching(TextMatchingError),
+    /// Source-bound live numeric replacements inside native TeX families.
+    TexBinding(TexBindingError),
     /// `NetworkGraph`.
     NetworkGraph(NetworkGraphError),
     /// `NeuralNetworkMobject`.
@@ -1169,6 +1172,7 @@ impl LibraryError {
             | Self::Coordinates(CoordsError::Sampling(error))
             | Self::Graph(GraphError::Sampling(error)) => sampling(error),
             Self::TextMatching(TextMatchingError::BudgetExceeded { .. }) => true,
+            Self::TexBinding(error) => error.is_budget_exceeded(),
             _ => false,
         }
     }
@@ -1186,6 +1190,7 @@ impl LibraryError {
             Self::Markdown(error) => error,
             Self::Boolean(error) => error,
             Self::TextMatching(error) => error,
+            Self::TexBinding(error) => error,
             Self::NetworkGraph(error) => error,
             Self::NeuralNetwork(error) => error,
             Self::Slider(error) => error,
@@ -1236,6 +1241,7 @@ library_error_from!(ImageError, Image);
 library_error_from!(fmn_library::markdown::MarkdownError, Markdown);
 library_error_from!(fmn_library::boolean_ops::BooleanMobjectError, Boolean);
 library_error_from!(TextMatchingError, TextMatching);
+library_error_from!(TexBindingError, TexBinding);
 library_error_from!(NetworkGraphError, NetworkGraph);
 library_error_from!(NeuralNetworkError, NeuralNetwork);
 library_error_from!(SliderError, Slider);
