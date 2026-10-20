@@ -4540,6 +4540,81 @@ fn formula_sheet_render(
     Ok((record, frames))
 }
 
+/// fm-tex-color-silent-i0p2: a formula's own `\color` and `\textcolor` reach
+/// the certified final PNG. Opaque glyph interiors carry xcolor's orange and
+/// red where the source asks and the base white elsewhere, and the same
+/// formula without the commands renders no orange or red ink at all. The
+/// coloured frame is bit-locked.
+fn tex_color_final_png_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    const COLORED: &str = r"{\color{orange} x} + \textcolor{red}{y} = z";
+    const PLAIN: &str = r"x + y = z";
+    struct Formula(&'static str);
+    impl fmn::SceneConstruct for Formula {
+        fn tex_preflight(&self) -> Vec<fmn::tex::TypesetRequest<'_>> {
+            vec![fmn::tex::TypesetRequest::math(self.0)]
+        }
+
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let formula = fmn::prelude::Tex::new(self.0)
+                .font_size(144.0)
+                .build(stage.tex_engine()?)?;
+            stage.add(formula)?;
+            Ok(())
+        }
+    }
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    // Opaque pixels within 3 levels of xcolor's orange, xcolor's red and
+    // the base white.
+    let render = |source: &'static str, path: &str| -> Result<(Vec<u8>, [u64; 3]), ScenarioError> {
+        let mut options = fmn::RenderOptions::with_format(path, fmn::RenderFormat::Png)
+            .map_err(|error| fail(format!("tex colour options: {error}")))?;
+        options.config.camera.resolution = (384, 216);
+        options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        fmn::render_with_fs(&mut Formula(source), options, fs.clone())
+            .map_err(|error| fail(format!("render {source:?}: {error}")))?;
+        let png = fs
+            .read(std::path::Path::new(path))
+            .map_err(|error| fail(format!("read {path}: {error}")))?;
+        let image = fmn_codec::decode_png(&png, &fmn_codec::PngLimits::default())
+            .map_err(|error| fail(format!("decode {path}: {error}")))?;
+        let mut classes = [0_u64; 3];
+        for px in image.rgba.as_chunks::<4>().0 {
+            for (class, rgb) in [[255, 128, 0], [255, 0, 0], [255, 255, 255]]
+                .into_iter()
+                .enumerate()
+            {
+                if px[3] == 255 && px[..3].iter().zip(rgb).all(|(a, b)| a.abs_diff(b) <= 3) {
+                    classes[class] += 1;
+                }
+            }
+        }
+        Ok((png, classes))
+    };
+    let (png, colored) = render(COLORED, "/tex-color.png")?;
+    let (_, plain) = render(PLAIN, "/tex-plain.png")?;
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.tex_color")
+            .field("orange_px", colored[0])
+            .field("red_px", colored[1])
+            .field("white_px", colored[2])
+            .field("plain_orange_px", plain[0])
+            .field("plain_red_px", plain[1]),
+    );
+    if colored.iter().any(|&count| count < 20) {
+        return Err(fail(format!(
+            "the coloured formula lacks a colour class (orange, red, white): {colored:?}"
+        )));
+    }
+    if plain[0] != 0 || plain[1] != 0 || plain[2] < 20 {
+        return Err(fail(format!(
+            "the colourless formula has orange or red ink, or no white: {plain:?}"
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("tex_color_classes", 3)
+        .with_artifact("render_matrix.tex_color.v1", png))
+}
+
 /// fm-cache-eviction-wired-1w05: exercise the real render-completion hook
 /// with no disk retention, ordinary retention, and memory-only typesetting.
 /// All three render teams must publish exactly the same certified PNG.
@@ -8586,6 +8661,30 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 FieldPred::u64_eq("thread_counts", 3),
                 FieldPred::u64_eq("nominal_ticks", 6),
                 FieldPred::u64_eq("published_frames", 3),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.tex_color.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(tex_color_final_png_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tex_color_classes", 3),
+            Assertion::GoldenLock {
+                suite: E2E_SUITE,
+                scope: Scope::Certified,
+            },
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.tex_color",
+            vec![
+                FieldPred::u64_ge("orange_px", 20),
+                FieldPred::u64_ge("red_px", 20),
+                FieldPred::u64_ge("white_px", 20),
+                FieldPred::u64_eq("plain_orange_px", 0),
+                FieldPred::u64_eq("plain_red_px", 0),
             ],
         )],
     ));

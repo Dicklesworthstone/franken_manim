@@ -26,15 +26,18 @@
 //! a typed [`TypesetError`] (the cache treats every one as a miss), never a
 //! partial payload or a panic.
 
-use fmd_math::{Layout, PathContour, PathSeg, Placed, PlacedGlyph, PlacedPath, PlacedRule, Span};
+use fmd_math::{
+    Color, Layout, PathContour, PathSeg, Placed, PlacedGlyph, PlacedPath, PlacedRule, Span,
+};
 use std::collections::TryReserveError;
 use std::fmt;
 use std::str::Utf8Error;
 
 /// The serialization format tag; bump on any layout change to the byte
 /// format (the cache namespace version rides this). Version 2 adds the
-/// emission-order table (fm-aia1).
-pub const TYPESET_FORMAT_VERSION: u32 = 2;
+/// emission-order table (fm-aia1); version 3 the `\color` table
+/// (fm-tex-color-silent-i0p2).
+pub const TYPESET_FORMAT_VERSION: u32 = 3;
 
 /// Maximum encoded FMNTEX document size.
 ///
@@ -43,7 +46,7 @@ pub const TYPESET_FORMAT_VERSION: u32 = 2;
 pub const TYPESET_DOCUMENT_LIMIT_BYTES: usize = 64 * 1024 * 1024;
 
 // The last byte is TYPESET_FORMAT_VERSION.
-const MAGIC: &[u8; 8] = b"FMNTEX\x00\x02";
+const MAGIC: &[u8; 8] = b"FMNTEX\x00\x03";
 const U32_BYTES: usize = 4;
 const F64_BYTES: usize = 8;
 const GLYPH_BYTES: usize = 44;
@@ -54,6 +57,9 @@ const LINE_SEGMENT_BYTES: usize = 17;
 const QUAD_SEGMENT_BYTES: usize = 33;
 /// One emission-order entry: a primitive-kind tag and a u32 index.
 const ORDER_ENTRY_BYTES: usize = 5;
+/// One colour-table entry: a primitive-kind tag, a u32 index, and three f64
+/// channels.
+const COLOR_ENTRY_BYTES: usize = 5 + 3 * F64_BYTES;
 
 /// Failure to construct, encode, or decode a [`Typeset`] document.
 #[derive(Debug)]
@@ -379,6 +385,16 @@ impl Typeset {
         Self::new(owned, layout)
     }
 
+    /// The `\color` in force on a primitive, or `None` for the base style.
+    #[must_use]
+    pub fn color(&self, prim: Prim) -> Option<Color> {
+        match prim {
+            Prim::Glyph(i) => self.layout.glyphs.get(i)?.color,
+            Prim::Rule(i) => self.layout.rules.get(i)?.color,
+            Prim::Path(i) => self.layout.paths.get(i)?.color,
+        }
+    }
+
     /// Select the whole primitives contained in a source byte span.
     #[must_use]
     pub fn select(&self, span: Span) -> Vec<usize> {
@@ -478,6 +494,16 @@ impl Typeset {
             w.0.push(tag);
             w.count(index, "emission order index")?;
         }
+        // Version 3: every `\color`ed primitive once, glyphs then rules then
+        // paths, each in index order (the decoder refuses any other order).
+        w.count(colored(&self.layout).count(), "colour count")?;
+        for (tag, index, color) in colored(&self.layout) {
+            w.0.push(tag);
+            w.count(index, "colour index")?;
+            w.f64(color.r);
+            w.f64(color.g);
+            w.f64(color.b);
+        }
         // The submobject table is derivable from the layout; store only a
         // count for a structural cross-check on decode.
         w.count(self.subs.len(), "submobject count")?;
@@ -537,6 +563,7 @@ impl Typeset {
                 y: r.f64()?,
                 size: r.f64()?,
                 span: r.span()?,
+                color: None,
             });
         }
         let rule_count = r.count()?;
@@ -549,6 +576,7 @@ impl Typeset {
                 width: r.f64()?,
                 height: r.f64()?,
                 span: r.span()?,
+                color: None,
             });
         }
         let path_count = r.count()?;
@@ -581,7 +609,11 @@ impl Typeset {
                 }
                 contours.push(PathContour { start, segments });
             }
-            layout.paths.push(PlacedPath { contours, span });
+            layout.paths.push(PlacedPath {
+                contours,
+                span,
+                color: None,
+            });
         }
         let order_count = r.count()?;
         r.ensure_count("emission order", order_count, ORDER_ENTRY_BYTES)?;
@@ -600,6 +632,38 @@ impl Typeset {
                     });
                 }
             });
+        }
+        let color_count = r.count()?;
+        r.ensure_count("colours", color_count, COLOR_ENTRY_BYTES)?;
+        let mut previous: Option<(u8, usize)> = None;
+        for _ in 0..color_count {
+            let tag = r.take(1)?[0];
+            let index = r.count()?;
+            let color = Color {
+                r: r.f64()?,
+                g: r.f64()?,
+                b: r.f64()?,
+            };
+            if previous.is_some_and(|last| last >= (tag, index)) {
+                return Err(TypesetError::NonCanonical {
+                    field: "colour table",
+                    reason: "entries are not in strictly increasing primitive order",
+                });
+            }
+            previous = Some((tag, index));
+            let slot = match tag {
+                0 => layout.glyphs.get_mut(index).map(|g| &mut g.color),
+                1 => layout.rules.get_mut(index).map(|r| &mut r.color),
+                2 => layout.paths.get_mut(index).map(|p| &mut p.color),
+                _ => None,
+            };
+            let Some(slot) = slot else {
+                return Err(TypesetError::NonCanonical {
+                    field: "colour table",
+                    reason: "entry names no primitive",
+                });
+            };
+            *slot = Some(color);
         }
         let encoded_subs = r.count()?;
         if r.remaining() != 0 {
@@ -683,6 +747,13 @@ impl Typeset {
             self.layout.order.len(),
             ORDER_ENTRY_BYTES,
             "emission order table",
+        )?;
+        add_size(&mut bytes, U32_BYTES, "encoded document")?;
+        add_product(
+            &mut bytes,
+            colored(&self.layout).count(),
+            COLOR_ENTRY_BYTES,
+            "colour table",
         )?;
         add_size(&mut bytes, U32_BYTES, "encoded document")?;
         Ok(bytes)
@@ -798,6 +869,19 @@ impl<'a> Rd<'a> {
         }
         Ok(())
     }
+}
+
+/// Every `\color`ed primitive as `(kind tag, index, colour)`: glyphs, then
+/// rules, then paths, each in index order (the codec's canonical order).
+fn colored(layout: &Layout) -> impl Iterator<Item = (u8, usize, Color)> + '_ {
+    let glyphs = layout.glyphs.iter().map(|g| g.color);
+    let rules = layout.rules.iter().map(|r| r.color);
+    let paths = layout.paths.iter().map(|p| p.color);
+    glyphs
+        .enumerate()
+        .filter_map(|(i, c)| c.map(|c| (0, i, c)))
+        .chain(rules.enumerate().filter_map(|(i, c)| c.map(|c| (1, i, c))))
+        .chain(paths.enumerate().filter_map(|(i, c)| c.map(|c| (2, i, c))))
 }
 
 fn primitive_count(layout: &Layout) -> Result<usize, TypesetError> {
@@ -918,6 +1002,17 @@ fn validate_layout(source: &str, layout: &Layout) -> Result<(), TypesetError> {
     checked_u32("glyph count", layout.glyphs.len())?;
     checked_u32("rule count", layout.rules.len())?;
     checked_u32("path count", layout.paths.len())?;
+    for (_, _, color) in colored(layout) {
+        for channel in [color.r, color.g, color.b] {
+            validate_f64("colour channel", channel)?;
+            if !(0.0..=1.0).contains(&channel) {
+                return Err(TypesetError::NonCanonical {
+                    field: "colour channel",
+                    reason: "value is outside 0..1",
+                });
+            }
+        }
+    }
 
     for glyph in &layout.glyphs {
         checked_u32("glyph face id", glyph.face.0)?;

@@ -129,6 +129,34 @@ copying, numeric replacement and matching. The source-level matching protocol
 suites use explicit native-boundary doubles and are not rendering parity
 evidence. Broad Reference fixture coverage remains separate from these checks.
 
+## TeX colour commands
+
+`\color` and `\textcolor` colour their glyphs, rules and drawn paths. The
+pinned Reference loads xcolor but repaints every Tex glyph in its base colour:
+`Tex(r"\color{red} x + y")` measures `#FFFFFF` on all three submobjects there
+(measured 2026-10-20, fm-tex-color-silent-i0p2), so the commands are silently
+inert. FrankenManim does what the source asks:
+
+- The surface is plain xcolor's: the 19 base names (`red`, `orange`, `teal`,
+  `lightgray`, …), mixes such as `blue!70` and `red!30!blue` (linear in RGB, as
+  xcolor computes them), a leading `-` for the complement, and the `[rgb]`,
+  `[RGB]`, `[HTML]` and `[gray]` models. Anything else is a precise parse error
+  naming that set. That includes manim's palette names (`\color{RED}`), which
+  are an undefined-colour LaTeX error in the Reference too.
+- Scoping is TeX's. A declaration colours the rest of its group, so
+  `\color{red} x + y` is red throughout, while `{\color{red} x} + y` colours
+  only `x`. `\textcolor{c}{…}` is the group `{\color{c}…}`. Colour never moves
+  anything.
+- `tex_to_color_map` and `set_color_by_tex` apply on top of the source's
+  colours. In the portal, constructor colour keywords (`color=`,
+  `fill_color=`) are manim's `init_colors` and colour the whole family, as in
+  the Reference. Leave them out to keep the source's colours. The native
+  `Tex::style` is the base beneath `\color`.
+
+Migration: a Reference scene that writes `\color` and expects white keeps
+white only if it passes a constructor colour. No scene in the pinned
+3b1b/videos corpus uses either command.
+
 Reference source at the pinned revision:
 [string selectors](https://github.com/3b1b/manim/blob/6199a00d4c1b1127ebe45cb629c3f22538b10e13/manimlib/mobject/svg/string_mobject.py),
 [TeX counting](https://github.com/3b1b/manim/blob/6199a00d4c1b1127ebe45cb629c3f22538b10e13/manimlib/mobject/svg/tex_mobject.py),

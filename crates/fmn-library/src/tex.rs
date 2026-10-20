@@ -1062,7 +1062,14 @@ impl<'a> Tex<'a> {
         let mut children = Vec::with_capacity(typeset.subs.len());
         for (ord, sub) in typeset.subs.iter().enumerate() {
             let mut style = self.style;
-            if let Some(fill) = fills[ord] {
+            // tex_to_color_map over the source's own `\color`, over the base
+            // style (fm-tex-color-silent-i0p2; BN-05).
+            let own = typeset.color(sub.prim).map(|c| Srgb {
+                r: c.r,
+                g: c.g,
+                b: c.b,
+            });
+            if let Some(fill) = fills[ord].or(own) {
                 style.fill_color = fill;
             }
             children.push(prim_child(engine, &typeset, sub, style, scale)?);
@@ -1696,6 +1703,50 @@ mod tests {
                 fmn_core::constants::WHITE
             );
         }
+    }
+
+    /// fm-tex-color-silent-i0p2: the source's own `\color` fills its glyphs
+    /// over the base style, with TeX's group scoping, and `tex_to_color_map`
+    /// still wins on top. The span map keeps finding the source characters.
+    #[test]
+    fn tex_color_declarations_fill_their_glyphs_beneath_t2c() {
+        let engine = engine();
+        let fill = |m: &TexMobject, needle: &str| -> Vec<Srgb> {
+            m.occurrences(needle)
+                .concat()
+                .into_iter()
+                .map(|ord| m.vmob.children()[ord].style().fill_color)
+                .collect()
+        };
+        // xcolor's own red and orange, not manim's RED (#FC6255).
+        let red = Srgb {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+        };
+        let orange = Srgb {
+            r: 1.0,
+            g: 0.5,
+            b: 0.0,
+        };
+        let m = Tex::new(r"{\color{orange} x} + \textcolor{red}{y} = z")
+            .build(&engine)
+            .expect("builds");
+        assert_eq!(fill(&m, "x"), [orange]);
+        assert_eq!(fill(&m, "y"), [red]);
+        assert_eq!(fill(&m, "+"), [fmn_core::constants::WHITE]);
+        assert_eq!(fill(&m, "z"), [fmn_core::constants::WHITE]);
+        // A declaration runs to the end of its group: x, + and y alike.
+        let m = Tex::new(r"\color{red} x + y").build(&engine).expect("builds");
+        assert!(m.vmob.children().iter().all(|c| c.style().fill_color == red));
+        // tex_to_color_map over \color.
+        let t2c = [("y", BLUE)];
+        let m = Tex::new(r"\color{red} x + y")
+            .t2c(&t2c)
+            .build(&engine)
+            .expect("builds");
+        assert_eq!(fill(&m, "x"), [red]);
+        assert_eq!(fill(&m, "y"), [BLUE]);
     }
 
     #[test]

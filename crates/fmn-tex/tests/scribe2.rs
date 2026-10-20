@@ -12,7 +12,7 @@ use fmn_platform::fs::VirtualFs;
 use fmn_tex::{MacroSet, Mode, Style, TexEngine, Typeset, TypesetError};
 use std::sync::Arc;
 
-const MAGIC_V2: &[u8; 8] = b"FMNTEX\x00\x02";
+const MAGIC_V3: &[u8; 8] = b"FMNTEX\x00\x03";
 
 fn engine() -> TexEngine {
     TexEngine::new("fmd-math/pack/default", None).expect("engine")
@@ -251,6 +251,9 @@ fn the_codec_round_trips_exactly() {
         r"\left\{ \frac{1}{2} \right\}",
         r"\begin{cases} x & x > 0 \\ -x & x \le 0 \end{cases}",
         r"\widehat{abc}",
+        // Version 3's colour table: glyphs, a rule and nested scopes.
+        r"\color{red} x + \textcolor{blue}{y}",
+        r"\color[RGB]{0,128,255}\frac{a}{\color{orange!50!black} b}",
     ] {
         let t = e.typeset(Mode::Math(Style::Display), src).unwrap();
         let back = Typeset::from_bytes(&t.to_bytes().unwrap()).expect(src);
@@ -259,16 +262,58 @@ fn the_codec_round_trips_exactly() {
 }
 
 #[test]
-fn the_codec_preserves_the_v2_bytes_for_valid_values() {
+fn the_codec_preserves_the_v3_bytes_for_valid_values() {
     let t = Typeset::new("x".to_owned(), fmn_tex::Layout::default()).unwrap();
-    let mut expected = MAGIC_V2.to_vec();
+    let mut expected = MAGIC_V3.to_vec();
     expected.extend_from_slice(&1_u32.to_le_bytes());
     expected.push(b'x');
-    // Then width, height, depth and the glyph, rule, path, emission-order
-    // and submobject counts, all zero.
-    expected.resize(57, 0);
+    // Then width, height, depth and the glyph, rule, path, emission-order,
+    // colour and submobject counts, all zero.
+    expected.resize(61, 0);
 
     assert_eq!(t.to_bytes().unwrap(), expected);
+}
+
+#[test]
+fn the_codec_refuses_a_noncanonical_colour_table() {
+    let e = engine();
+    let t = e
+        .typeset(Mode::Math(Style::Display), r"\color{red} a + b")
+        .unwrap();
+    let colored = t.layout.glyphs.iter().filter(|g| g.color.is_some()).count();
+    assert_eq!(colored, 3);
+    let bytes = t.to_bytes().unwrap();
+    // The colour table: a u32 count, then 29-byte entries, before the
+    // four-byte submobject count.
+    let table = bytes.len() - 4 - 29 * colored;
+    let entry = |i: usize| table + 29 * i;
+    let refused = |bytes: &[u8]| {
+        matches!(
+            Typeset::from_bytes(bytes),
+            Err(TypesetError::NonCanonical {
+                field: "colour table" | "colour channel",
+                ..
+            })
+        )
+    };
+    // Entries out of order.
+    let mut swapped = bytes.clone();
+    let first: Vec<u8> = swapped[entry(0)..entry(1)].to_vec();
+    let second: Vec<u8> = swapped[entry(1)..entry(2)].to_vec();
+    swapped[entry(0)..entry(1)].copy_from_slice(&second);
+    swapped[entry(1)..entry(2)].copy_from_slice(&first);
+    assert!(refused(&swapped));
+    // An index past the glyph table.
+    let mut past = bytes.clone();
+    past[entry(2) + 1..entry(2) + 5].copy_from_slice(&99_u32.to_le_bytes());
+    assert!(refused(&past));
+    // A channel outside 0..1, and one that is not finite.
+    for bad in [2.0_f64, f64::NAN] {
+        let mut channel = bytes.clone();
+        channel[entry(0) + 5..entry(0) + 13].copy_from_slice(&bad.to_bits().to_le_bytes());
+        assert!(refused(&channel), "{bad}");
+    }
+    assert_eq!(Typeset::from_bytes(&bytes).unwrap(), t);
 }
 
 #[test]
@@ -342,10 +387,11 @@ fn the_codec_refuses_a_broken_emission_order() {
         })
     ));
     // An undefined primitive tag is refused on decode. The order table
-    // is the last section before the four-byte submobject count.
+    // comes before the (here empty) colour table's four-byte count and the
+    // four-byte submobject count.
     let mut bytes = t.to_bytes().unwrap();
     let entries = t.layout.order.len();
-    let first_tag = bytes.len() - 4 - 5 * entries;
+    let first_tag = bytes.len() - 4 - 4 - 5 * entries;
     bytes[first_tag] = 7;
     assert!(matches!(
         Typeset::from_bytes(&bytes),
