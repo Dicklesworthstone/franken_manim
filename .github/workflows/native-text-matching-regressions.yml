@@ -6,7 +6,11 @@ on:
     paths:
       - "crates/fmn-library/src/text_matching.rs"
       - "crates/fmn-library/src/text_matching/**"
+      - "crates/fmn-library/src/tex.rs"
+      - "crates/fmn-library/src/numbers.rs"
+      - "crates/fmn-library/src/style.rs"
       - "crates/fmn-library/tests/text_matching*.rs"
+      - "crates/fmn-library/tests/live_tex*.rs"
       - ".github/workflows/native-text-matching-regressions.yml"
   workflow_dispatch:
 
@@ -40,7 +44,7 @@ jobs:
           mkdir -p /tmp/text-matching-evidence
           git rev-parse HEAD > /tmp/text-matching-evidence/source-sha.txt
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          cp --parents crates/fmn-library/src/text_matching.rs crates/fmn-library/tests/text_matching.rs crates/fmn-library/tests/text_matching_overrides.rs /tmp/text-matching-evidence/
+          cp --parents crates/fmn-library/src/text_matching.rs crates/fmn-library/src/style.rs crates/fmn-library/tests/text_matching.rs crates/fmn-library/tests/text_matching_overrides.rs crates/fmn-library/tests/live_tex.rs crates/fmn-library/tests/live_tex_style.rs /tmp/text-matching-evidence/
           git diff --check
       - name: Install repository-pinned toolchain
         run: rustup show active-toolchain
@@ -57,25 +61,38 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rustfmt --edition 2024 --check crates/fmn-library/src/text_matching.rs crates/fmn-library/tests/text_matching_overrides.rs 2>&1 | tee /tmp/text-matching-evidence/format.log
+          rustfmt --edition 2024 --check crates/fmn-library/src/text_matching.rs crates/fmn-library/src/style.rs crates/fmn-library/tests/text_matching_overrides.rs crates/fmn-library/tests/live_tex_style.rs 2>&1 | tee /tmp/text-matching-evidence/format.log
       - name: Native matching unit tests
         if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
           cargo test --locked -p fmn-library --lib text_matching 2>&1 | tee /tmp/text-matching-evidence/unit.log
+      - name: Native style and number unit tests
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p fmn-library --lib style::tests 2>&1 | tee /tmp/text-matching-evidence/style.log
+          cargo test --locked -p fmn-library --lib numbers::tests 2>&1 | tee /tmp/text-matching-evidence/numbers.log
       - name: Native matching integration tests
         if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
           cargo test --locked -p fmn-library --test text_matching --test text_matching_overrides 2>&1 | tee /tmp/text-matching-evidence/integration.log
+      - name: Native live TeX lifecycle regressions
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p fmn-library --test live_tex --test live_tex_style 2>&1 | tee /tmp/text-matching-evidence/live-tex.log
       - name: Warning-denied native matching lint
         if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
-          cargo clippy --locked -p fmn-library --lib --test text_matching --test text_matching_overrides -- -D warnings 2>&1 | tee /tmp/text-matching-evidence/clippy.log
+          cargo clippy --locked -p fmn-library --lib --test text_matching --test text_matching_overrides --test live_tex --test live_tex_style -- -D warnings 2>&1 | tee /tmp/text-matching-evidence/clippy.log
       - name: Retain exact sources and terminal evidence
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
