@@ -72,8 +72,9 @@ pub struct CorpusRegressionCase {
 }
 
 /// Minimized constructs from corpus scenes the portal once refused or
-/// rendered differently (`tests/reference_corpus_regressions.py`), each
-/// checked against what the pinned Reference showed.
+/// rendered differently, and Reference helpers it once computed differently
+/// (`tests/reference_corpus_regressions.py`), each checked against what the
+/// pinned Reference showed.
 ///
 /// # Errors
 /// A case whose observation differs from its expectation, or no cases.
@@ -298,7 +299,12 @@ mod tests {
     #[test]
     fn embedded_portal_matches_the_reference_corpus_regressions() {
         let cases = super::run_portal_gauntlet_reference_corpus_regressions().unwrap();
-        assert!(cases.len() >= 4, "{cases:?}");
+        assert_eq!(cases.len(), 13, "{cases:?}");
+        assert_eq!(
+            cases.iter().filter(|case| case.bead == "fm-5wq.11").count(),
+            9,
+            "{cases:?}"
+        );
         for case in &cases {
             assert!(case.bead.starts_with("fm-"), "{case:?}");
             assert!(case.provenance.contains("manimlib/"), "{case:?}");

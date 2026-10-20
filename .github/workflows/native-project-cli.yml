@@ -28,21 +28,8 @@ jobs:
           persist-credentials: false
       - name: Install the repository-pinned toolchain
         run: rustup show active-toolchain
-      - name: Preserve a formatted-source diagnostic without changing the checkout
-        run: |
-          mkdir -p "$RUNNER_TEMP/native-project-format"
-          cp crates/fmn-cli/src/studio_project.rs "$RUNNER_TEMP/native-project-format/"
-          if test -d crates/fmn-cli/src/studio_project; then
-            cp -r crates/fmn-cli/src/studio_project "$RUNNER_TEMP/native-project-format/"
-          fi
-          rustfmt --edition 2024 "$RUNNER_TEMP/native-project-format/studio_project.rs"
+      - name: Check the tracked source's formatting
+        # The tracked file and its out-of-line modules, so a misformatted push fails here.
+        run: rustfmt --edition 2024 --check crates/fmn-cli/src/studio_project.rs
       - name: Compile the shipping binary and run native-project tests
         run: cargo test --locked -p fmn-cli --features batch --bin fmn studio_project::tests
-      - name: Publish formatter diagnostics
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: native-project-format-${{ github.sha }}
-          path: ${{ runner.temp }}/native-project-format
-          if-no-files-found: ignore
-          retention-days: 7

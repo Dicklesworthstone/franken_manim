@@ -681,10 +681,12 @@ impl RecordBuffer {
             }
         };
         if self.is_empty() {
-            if let Some(mut base) = self.default_record(field) {
-                update(&mut base);
-                self.write_default_record(field, &base);
-            }
+            // The first style write creates the phantom record, as
+            // `write_scalar_lanes` does: the Reference's `_data_defaults`
+            // exists from construction, so the write is never dropped.
+            let mut base = self.default_record(field).unwrap_or_else(|| vec![0.0; 4]);
+            update(&mut base);
+            self.write_default_record(field, &base);
             return;
         }
         if let Some(mut column) = self.read_column(field) {

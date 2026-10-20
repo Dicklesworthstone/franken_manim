@@ -726,7 +726,11 @@ mod tests {
             }
             for width_lanes in [0, 2, 3] {
                 let schema = fmn_mobject::RecordSchema::new(
-                    &[("point", 3), ("stroke_rgba", 4), ("stroke_width", width_lanes)],
+                    &[
+                        ("point", 3),
+                        ("stroke_rgba", 4),
+                        ("stroke_width", width_lanes),
+                    ],
                     &["point"],
                     &["point"],
                 )

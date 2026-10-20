@@ -442,7 +442,10 @@ impl Session {
         let binary = manifest.to_bytes()?;
         let text = manifest.to_text();
         let semantic = manifest.semantic_digest()?;
-        let sidecar = sidecar.map_or_else(|| destination(output.destination), |path| Ok(path.to_owned()))?;
+        let sidecar = sidecar.map_or_else(
+            || destination(output.destination),
+            |path| Ok(path.to_owned()),
+        )?;
         let publication_error = |error| {
             Failure::new(
                 "render",

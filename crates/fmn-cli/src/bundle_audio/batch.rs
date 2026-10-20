@@ -132,7 +132,12 @@ pub(super) fn run(
                 &|| task_control.checkpoint(),
             )
         }))
-        .unwrap_or_else(|_| Err(Failure::new("internal", "narrated batch scene job panicked")));
+        .unwrap_or_else(|_| {
+            Err(Failure::new(
+                "internal",
+                "narrated batch scene job panicked",
+            ))
+        });
         let _ = sender.send(CompletedJob::capture(result, stdout, &task_control));
     }) else {
         return initial_failure(Failure::new(
@@ -384,7 +389,11 @@ mod tests {
             assert!(fs.exists(&PathBuf::from(format!(
                 "/manifests/scene/{ordinal:05}/manifest.fmnp"
             ))));
-            assert!(result.stdout.contains(&format!("\"subdivision\":{ordinal}")));
+            assert!(
+                result
+                    .stdout
+                    .contains(&format!("\"subdivision\":{ordinal}"))
+            );
         }
         assert!(!fs.exists(Path::new("/manifests/scene/00000")));
         assert!(!fs.exists(Path::new("/out/scene_1_3/00001.wav.manifest")));
@@ -403,8 +412,16 @@ mod tests {
             &|| panic!("cancelled job acquired capability"),
         );
         assert_eq!(result.code, code("budget"));
-        assert!(result.stdout.contains("\"status\":\"cancelled\",\"reason\":\"budget\""));
-        assert!(result.stdout.contains("\"succeeded\":0,\"failed\":0,\"cancelled\":1"));
+        assert!(
+            result
+                .stdout
+                .contains("\"status\":\"cancelled\",\"reason\":\"budget\"")
+        );
+        assert!(
+            result
+                .stdout
+                .contains("\"succeeded\":0,\"failed\":0,\"cancelled\":1")
+        );
         assert_eq!(result.stdout.lines().count(), 3);
         assert!(!fs.exists(Path::new("/out")));
     }
@@ -424,7 +441,8 @@ mod tests {
         assert_terminal_failure(&result, "render", "scene");
         assert!(!fs.exists(Path::new("/out")));
         assert_eq!(
-            fs.read(Path::new("/manifests/scene/00002/foreign")).unwrap(),
+            fs.read(Path::new("/manifests/scene/00002/foreign"))
+                .unwrap(),
             b"winner"
         );
     }
@@ -511,7 +529,11 @@ mod tests {
         assert_eq!(result.code, 0, "{}", result.stdout);
         assert!(result.stdout.starts_with(receipt));
         assert!(result.stdout.contains("\"status\":\"succeeded\""));
-        assert!(result.stdout.contains("\"succeeded\":1,\"failed\":0,\"cancelled\":0"));
+        assert!(
+            result
+                .stdout
+                .contains("\"succeeded\":1,\"failed\":0,\"cancelled\":0")
+        );
         assert!(!result.stdout.contains("\"kind\":\"error\""));
         assert_eq!(result.stdout.lines().count(), 3);
     }
@@ -522,16 +544,31 @@ mod tests {
         let receipt = "{\"kind\":\"bundle-audio-render\",\"subdivision\":2}\n";
         control.cancel();
         let completed = CompletedJob::capture(
-            Err(Failure::new("render", "next clip publication was cancelled")),
+            Err(Failure::new(
+                "render",
+                "next clip publication was cancelled",
+            )),
             receipt.to_owned(),
             &control,
         );
         let result = completed.into_output(&command(&[]), "scene");
         assert_eq!(result.code, code("budget"));
         assert!(result.stdout.starts_with(receipt));
-        assert!(result.stdout.contains("next clip publication was cancelled"));
-        assert!(result.stdout.contains("\"status\":\"cancelled\",\"reason\":\"budget\""));
-        assert!(result.stdout.contains("\"succeeded\":0,\"failed\":0,\"cancelled\":1"));
+        assert!(
+            result
+                .stdout
+                .contains("next clip publication was cancelled")
+        );
+        assert!(
+            result
+                .stdout
+                .contains("\"status\":\"cancelled\",\"reason\":\"budget\"")
+        );
+        assert!(
+            result
+                .stdout
+                .contains("\"succeeded\":0,\"failed\":0,\"cancelled\":1")
+        );
         assert_eq!(result.stdout.matches("\"kind\":\"batch_job\"").count(), 1);
         assert_eq!(result.stdout.matches("\"kind\":\"batch\"").count(), 1);
         assert_eq!(result.stdout.lines().count(), 4);

@@ -60,7 +60,6 @@ def make_native():
             self.suspended = False
             self.updaters = []
             self.changes = 0
-            self.anchor = (0.0, 0.0, 0.0)
 
         def __iter__(self):
             return iter(self.submobjects)
@@ -92,23 +91,6 @@ def make_native():
 
         def family_members_with_points(self):
             return [member for member in self.get_family() if len(member.data)]
-
-        def has_points(self):
-            return len(self.data) > 0
-
-        def get_bounding_box(self):
-            if len(self.data):
-                pts = self.data["point"]
-                low, high = pts.min(axis=0), pts.max(axis=0)
-                return np.array([low, 0.5 * (low + high), high], dtype=float)
-            return np.array([self.anchor] * 3, dtype=float)
-
-        def get_center(self):
-            return self.get_bounding_box()[1]
-
-        def _set_point_free_anchor(self, point):
-            self.anchor = tuple(float(v) for v in point)
-            return True
 
         def set_animating_status(self, value):
             for member in self.get_family():

@@ -3680,10 +3680,11 @@ fn python_structural_envelope_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenar
     Ok(RunOutcome::ok().with_counter("envelope_violations_detected", 1))
 }
 
-/// Reference corpus regressions (fm-5wq.30 first; fm-5wq.27..29 and
-/// fm-sq8.10 add their cases): minimized constructs from corpus scenes the
-/// portal once refused or rendered differently, each checked against what the
-/// pinned Reference showed. One log event per case; a zero-case run fails.
+/// Reference corpus regressions (fm-5wq.30 first; fm-5wq.27..29, fm-sq8.10
+/// and fm-5wq.11 add their cases): minimized constructs from corpus scenes the
+/// portal once refused or rendered differently, and Reference helpers it once
+/// computed differently, each checked against what the pinned Reference
+/// showed. One log event per case; a zero-case run fails.
 fn python_reference_corpus_regressions_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let cases = manimlib::run_portal_gauntlet_reference_corpus_regressions()
         .map_err(|error| fail(format!("Reference corpus regressions: {error}")))?;
@@ -9479,15 +9480,35 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         Invocation::new(python_reference_corpus_regressions_run),
         vec![
             Assertion::ExitCode(0),
-            counter_eq("corpus_regression_cases", 4),
+            counter_eq("corpus_regression_cases", 13),
         ],
-        vec![LogExpect::span_present(
-            "e2e.python.reference_corpus_regression",
-            vec![
-                FieldPred::str_eq("bead", "fm-5wq.30"),
-                FieldPred::str_eq("verdict", "pass"),
-            ],
-        )],
+        vec![
+            LogExpect::span_present(
+                "e2e.python.reference_corpus_regression",
+                vec![
+                    FieldPred::str_eq("bead", "fm-5wq.30"),
+                    FieldPred::str_eq("verdict", "pass"),
+                ],
+            ),
+            // The corpus's WriteAntipode matching (fm-5wq.11): "Antipode" moves as
+            // one block, the quotes and the "s" fade out, "map" fades in.
+            LogExpect::span_present(
+                "e2e.python.reference_corpus_regression",
+                vec![
+                    FieldPred::str_eq("bead", "fm-5wq.11"),
+                    FieldPred::str_eq(
+                        "construct",
+                        "TransformMatchingStrings(Text(\"“Antipodes”\"), Text(\"Antipode map\"))",
+                    ),
+                    FieldPred::str_eq(
+                        "observed",
+                        "11>11: transform s1-8>t0-7; fade_out s0; fade_out s9; fade_out s10; \
+                         fade_in t8; fade_in t9; fade_in t10",
+                    ),
+                    FieldPred::str_eq("verdict", "pass"),
+                ],
+            ),
+        ],
     ));
     specs.push(spec(
         "render_matrix.python_svg.v1",
