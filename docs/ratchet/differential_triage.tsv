@@ -31,6 +31,7 @@ _2023/gauss_int/herschel.py:RationalNumbers	2 VGroup.class	bug	fm-1auv	a LaggedS
 _2023/gauss_int/integral.py:CartesianSlices	9.0 VMobjectFromSVGPath.string	behavior-note	BN-08	a natively drawn Brace (BN-08) puts its added label at child 0 where the Reference's six SVG pieces come first; the bn08-brace-glyph-children row omits `string`
 _2023/gauss_int/supplements.py:CompareThreeIntegrals	9 VGroup.style.fill_color	bug	fm-ns8q	a composition's fresh VGroup has the native default style, not the Reference VGroup's
 _2023/gauss_int/supplements.py:IntegralTitleCard	2.1 Integer.style.fill_opacity	bug	fm-v4lv	signature: every difference is a point-less Integer/DecimalNumber root at fill opacity 0 vs 1, in a scene that uses Write
+_2023/moser_reboot/main.py:BalancedEquation	14 Integer.style.stroke_color	behavior-note	BN-07 (C-31)	outer_label.match_style(face_labels[0]) on a point-less Integer root: the Reference drops it (C-31) and keeps white; FrankenManim takes the matched black backstroke
 _2023/moser_reboot/main.py:Polyhedra	1 VGroup.style.fill_color	bug	fm-ns8q	a composition's fresh VGroup has the native default style, not the Reference VGroup's
 _2023/numberphile/prime_race.py:PrimeRace	4.0.1 Integer.style.fill_opacity	bug	fm-v4lv	Write leaves point-less Integer roots at the outline's fill opacity 0; the Reference keeps 1
 _2023/optics_puzzles/annotations.py:SucroseAction	1 Line.n_points	behavior-note	BN-03	a tipped arced Line: the true-length cut drops the components it removes (205 vs 201 points); its later Line/Text order is fm-1auv

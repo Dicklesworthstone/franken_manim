@@ -72,7 +72,12 @@ ONE_THREAD = {"OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THRE
 
 
 def run_portal(args, module, scene, work):
-    png = work / "portal.png"
+    # The portal never overwrites an output, so a re-run into the same --out (a merge)
+    # takes the first unused name; an earlier run's frame stays as it was.
+    png, attempt = work / "portal.png", 1
+    while png.exists():
+        attempt += 1
+        png = work / f"portal.{attempt}.png"
     argv = [args.portal_python, str(FACTS_TOOL), "run-scene", "--facts", str(work / "portal.ndjson"),
             "--engine", "portal", "--", str(args.videos / module), scene, "-s",
             "--format", "png", "--resolution", "320x180", "--threads", "1", "--output", str(png)]
@@ -288,6 +293,9 @@ def triage(record):
         if record[name].get("exit") is None:
             return {"label": "timeout", "side": name, "rule": "exit is None",
                     "reason": "the run exceeded the differential's --timeout"}
+    if record.get("outcome") == "neither":
+        return {"label": "both-fail", "side": "both", "rule": "neither ran, with different errors",
+                "reason": "the Reference cannot run the scene either, so it carries no parity verdict"}
     return {"label": "untriaged"}
 
 

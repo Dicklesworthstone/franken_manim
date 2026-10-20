@@ -110,6 +110,23 @@ class ClassifierTests(unittest.TestCase):
         self.assertEqual(record["outcome"], "neither")
         self.assertEqual(record["triage"]["label"], "timeout")
 
+    def test_a_rerun_never_asks_the_portal_to_overwrite_a_frame(self):
+        work = pathlib.Path(tempfile.mkdtemp(prefix="fmn-cd-png-"))
+        self.addCleanup(shutil.rmtree, work, True)
+        args = types.SimpleNamespace(portal_python="python", videos=work, workdir=work, timeout=1)
+        seen = []
+        saved = cd.run_child
+        cd.run_child = lambda argv, cwd, env, timeout: (seen.append(argv) or (0, "", None))
+        try:
+            _, first = cd.run_portal(args, "m.py", "S", work)
+            first.write_bytes(b"earlier run")
+            _, second = cd.run_portal(args, "m.py", "S", work)
+        finally:
+            cd.run_child = saved
+        self.assertEqual((first.name, second.name), ("portal.png", "portal.2.png"))
+        self.assertEqual(seen[1][seen[1].index("--output") + 1], str(second))
+        self.assertEqual(first.read_bytes(), b"earlier run")
+
     def test_run_one_diffs_two_engine_scenes_in_both_tiers(self):
         record = self.run_with((0, "", facts("S", [member("0", "Square", 4)])),
                                (0, "", facts("S", [member("0", "Circle", 4)])))
@@ -168,6 +185,15 @@ class TriageTests(unittest.TestCase):
         self.assertEqual((ran["label"], ran["side"]), ("owner-ruling", "portal"))
         failed = cd.triage(self.record(portal_error=refusal, reference_error="IndexError: index 5 is out of bounds"))
         self.assertEqual(failed, {"label": "untriaged"})
+
+    def test_two_different_failures_carry_no_parity_verdict(self):
+        record = self.record(portal_error="ValueError: font family 'Consolas' is not available; bundled families: x",
+                             reference_error="IndexError: index 5 is out of bounds for axis 1 with size 5")
+        self.assertEqual(cd.triage(record), {"label": "untriaged"}, "without an outcome code, nothing is assumed")
+        record["outcome"] = "neither"
+        self.assertEqual(cd.triage(record)["label"], "both-fail")
+        record["outcome"] = "portal-only"
+        self.assertEqual(cd.triage(record), {"label": "untriaged"})
 
     def test_a_bare_assert_is_named_by_its_source_line(self):
         stderr = ('  File "vectorized_mobject.py", line 802, in get_nth_curve_points\n'
