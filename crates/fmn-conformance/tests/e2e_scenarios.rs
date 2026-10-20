@@ -11491,6 +11491,83 @@ fn cli_builtin_scenarios_pass() {
     }
 }
 
+/// The re-bless protocol's tooling for the e2e lock's certified
+/// render-matrix rows (GOVERNANCE.md §4). Every row renders
+/// [`run_matrix_scene`], so the low preset's three certified frames stand
+/// for the set; the higher presets draw the same scene at more pixels.
+///
+/// 1. At the old source, `FMN_E2E_FRAMES_DIR=<before>` writes each frame as
+///    `<before>/render_matrix.low.<index>.rgba`.
+/// 2. At the new source, bless the lock (`UPDATE_GOLDENS=1`), then run this
+///    test with `FMN_E2E_REBLESS_BEFORE_DIR=<before>`: the frames are
+///    stacked top to bottom, before | after, through [`side_by_side_png`],
+///    and written as the lock's artefact under `REBLESS_ARTEFACT_DIR`.
+///
+/// Neither switch set: nothing to do (an ordinary gate run).
+#[test]
+fn rebless_e2e_render_matrix_frames_and_panel() {
+    use fmn_conformance::golden::{REBLESS_ARTEFACT_DIR, rebless_artefact_name, side_by_side_png};
+    let frames_dir = std::env::var_os("FMN_E2E_FRAMES_DIR").map(PathBuf::from);
+    let before_dir = std::env::var_os("FMN_E2E_REBLESS_BEFORE_DIR").map(PathBuf::from);
+    if frames_dir.is_none() && before_dir.is_none() {
+        return;
+    }
+    let preset = PRESETS
+        .iter()
+        .find(|preset| preset.flag == "low")
+        .expect("the low preset");
+    let seed = e2e::scenario_seed("render_matrix.low.png_seq.certified.v1");
+    let frames: Vec<Vec<u8>> = run_matrix_scene(seed, false)
+        .expect("the matrix scene runs")
+        .iter()
+        .map(|packet| {
+            let frame = render_packet(
+                packet,
+                EngineIdentity::certified(),
+                preset_frame_config(preset),
+                1,
+            )
+            .expect("the certified engine renders");
+            convert_for_sink(
+                &frame,
+                SinkKind::PngSequence,
+                preset.width,
+                preset.height,
+            )
+            .expect("certified frames convert")
+            .as_bytes()
+            .to_vec()
+        })
+        .collect();
+    if let Some(dir) = frames_dir {
+        std::fs::create_dir_all(&dir).expect("frames directory");
+        for (index, frame) in frames.iter().enumerate() {
+            std::fs::write(dir.join(format!("render_matrix.low.{index}.rgba")), frame)
+                .expect("review frame written");
+        }
+    }
+    let Some(before_dir) = before_dir else {
+        return;
+    };
+    let (mut before, mut after) = (Vec::new(), Vec::new());
+    for (index, frame) in frames.iter().enumerate() {
+        let name = format!("render_matrix.low.{index}.rgba");
+        before.extend(std::fs::read(before_dir.join(&name)).expect("before frame"));
+        after.extend_from_slice(frame);
+    }
+    let rows = u32::try_from(frames.len()).expect("a few frames");
+    let panel = side_by_side_png(preset.width, preset.height * rows, &before, &after)
+        .expect("same-size before/after stacks");
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let lock = "e2e.certified.lock";
+    let digest =
+        fmn_hash::sha256(&std::fs::read(manifest.join("goldens").join(lock)).expect("lock"))
+            .to_hex();
+    let out = manifest.join("../..").join(REBLESS_ARTEFACT_DIR);
+    std::fs::create_dir_all(&out).expect("re-bless artefact directory");
+    std::fs::write(out.join(rebless_artefact_name(lock, &digest)), panel).expect("panel written");
+}
+
 /// Re-bless evidence for the e2e lock's `render_matrix.cli_primitive.*` and
 /// `render_matrix.cli_camera.*` entries (GOVERNANCE.md §4). Opt-in with
 /// `FMN_REBLESS_E2E_CLI_BUILTINS=1`, after the bless: every builtin frame is
