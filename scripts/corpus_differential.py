@@ -238,6 +238,12 @@ TRIAGE = (
     ("portal-alone", r"font family '[^']+' is not available; bundled families:", "owner-ruling",
      "the scene names a face that is not bundled: the portal refuses it by name (BN-05) where the "
      "Reference's Pango substitutes a host face; the policy awaits the owner's ADR (fm-mywm)"),
+    ("portal-alone", r"AttributeError: 'VMobject' object has no attribute 'submobjects'", "bug",
+     "fm-yynk: padding a family whose members carry native children (NumberLine numbers) crashes "
+     "_adopt_padding_ghosts"),
+    ("portal-alone", r"TexError: .+ is not supported", "tex-coverage",
+     "fmd-math refuses, by name, a TeX construct it does not support yet (§11.5); the coverage "
+     "ratchet counts it"),
     ("reference", "unexpected keyword argument", "portal-leniency",
      "the Reference rejects a keyword the portal accepts"),
     ("reference", r"^KeyError: 'stroke_color'$", "reference-defect",
@@ -246,6 +252,9 @@ TRIAGE = (
     ("reference", r"^Exception: Only VMobjects can be passed into VGroup$", "reference-defect",
      "AnimationGroup over a generator: the Reference checks for VMobjects on the exhausted "
      "generator (Appendix C-25)"),
+    ("reference", r"^AssertionError \(assert n < self\.get_num_curves\(\)\)$", "reference-defect",
+     "point_from_proportion on a non-empty path of zero length asks for the curve one past the last "
+     "(Appendix C-26)"),
     ("reference", r"^ValueError: not enough values to unpack \(expected 3, got 2\)$", "portal-leniency",
      "a two-value t_range or x_range, which the Reference's ParametricCurve rejects; the portal "
      "samples it with its default step"),
@@ -291,7 +300,15 @@ def _last_error(stderr):
         return None
     lines = [line.strip() for line in stderr.splitlines() if "Error" in line or "Exception" in line
              or line.startswith("fmn-python:")]
-    return lines[-1][:240] if lines else (stderr.strip().splitlines() or [""])[-1][:240]
+    if not lines:
+        return (stderr.strip().splitlines() or [""])[-1][:240]
+    last = lines[-1]
+    if last == "AssertionError":
+        # A bare assert names nothing; its source line, the traceback's last `assert`, does.
+        asserts = [line.strip() for line in stderr.splitlines() if line.strip().startswith("assert ")]
+        if asserts:
+            last = f"AssertionError ({asserts[-1]})"
+    return last[:240]
 
 
 def candidates(args):

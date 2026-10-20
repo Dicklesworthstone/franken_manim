@@ -1,0 +1,26 @@
+# Per-scene triage of the corpus differential's two-engine structure differences (fm-5wq.33).
+# Read by scripts/corpus_differential.py --report: every differing scene is listed with its label.
+# A row whose first difference no longer matches the scene's is reported stale; a row whose scene
+# ran in both engines and no longer differs is listed for removal. The corpus is CC BY-NC-SA:
+# scene ids and our own words only, never scene source.
+# scene	first difference (path class.fact)	label	bead / BN	note
+_2020/hamming.py:OneGroupPerParityBit	2.8.1 Integer.style.fill_opacity	behavior-note	BN-07 (C-29)	visible glyphs match; the Reference's restore() leaves point-less Integer roots at an earlier opacity
+_2021/bertrands_paradox.py:TransitiveSymmetries	1 Group.class	bug	fm-1auv	a Group over rooted members is rooted after a fresh mobject animated in the same play()
+_2021/shadows.py:ListernerEmail	11.14 DashedLine.member	behavior-note	BN-05	a DashedLine ends at a Text corner; native text metrics lengthen it by one dash (layout cascade)
+_2021/shadows.py:StartSimple	4 VGroup.class	bug	fm-1auv	a LaggedStart group is rooted after the plain animation that follows it in the same play()
+_2021/some1.py:Spotlight	2.0 ScreenRectangle.style.stroke_color	behavior-note	BN-10	AnimatedBoundary's colour follows accumulated updater time; the Reference's skip mode double-applies dt
+_2021/some1_winners.py:ProsConsOfContext	0 VGroup.style.fill_color	bug	fm-ns8q	a composition's fresh VGroup has the native default style, not the Reference VGroup's
+_2022/convolutions/discrete.py:AlgorithmOutline	29 VGroup.style.fill_color	bug	fm-ns8q	a composition's fresh VGroup has the native default style, not the Reference VGroup's
+_2022/convolutions/discrete.py:AltMovingAverageFast	(scene) (scene).time	behavior-note	BN-12	play(..., run_time=0) is honoured; the Reference's `or` keeps each such animation at 1 s
+_2022/convolutions/discrete.py:MovingAverageFast	(scene) (scene).time	behavior-note	BN-12	play(..., run_time=0) is honoured; the Reference's `or` keeps each such animation at 1 s
+_2022/convolutions/discrete.py:MovingAverageFast2	(scene) (scene).time	behavior-note	BN-12	play(..., run_time=0) is honoured; the Reference's `or` keeps each such animation at 1 s
+_2022/puzzles/subsets.py:ConjugatePairFact	5 VGroup.style.fill_color	bug	fm-ns8q	a composition's fresh VGroup has the native default style, not the Reference VGroup's
+_2022/puzzles/subsets.py:ToTheComplexPlane	1.4.0 DecimalNumber.style.fill_opacity	bug	fm-v4lv	Write leaves the coordinate labels' point-less DecimalNumber roots at the outline's fill opacity 0; the Reference keeps 1
+_2022/puzzles/subsets.py:TopicRolidex	2.4 Text.style.fill_opacity	behavior-note	BN-05	an updater sets each word's opacity from its height; native text metrics move the arranged words (layout cascade)
+_2022/some2/announcement.py:EndingAnimation	3.0 ScreenRectangle.style.stroke_color	behavior-note	BN-10	AnimatedBoundary's colour follows accumulated updater time; the Reference's skip mode double-applies dt
+_2022/visual_proofs/lies.py:IntegralExample	3.0 Rectangle.style.fill_color	behavior-note	BN-20	the zero-height Riemann rectangle at a zero of the curve: the Reference's world-space sign lookup gives negative_color
+_2022/visual_proofs/lies.py:IntegralExampleWithErrorBoxes	3.0 Rectangle.style.fill_color	behavior-note	BN-20	the zero-height Riemann rectangle at a zero of the curve: the Reference's world-space sign lookup gives negative_color
+_2023/clt/galton_board.py:GaltonBoard	1.4 Integer.style.fill_opacity	bug	fm-v4lv	Write leaves point-less Integer roots at the outline's fill opacity 0; the Reference keeps 1
+_2023/gauss_int/supplements.py:CompareThreeIntegrals	9 VGroup.style.fill_color	bug	fm-ns8q	a composition's fresh VGroup has the native default style, not the Reference VGroup's
+_2023/moser_reboot/main.py:Polyhedra	1 VGroup.style.fill_color	bug	fm-ns8q	a composition's fresh VGroup has the native default style, not the Reference VGroup's
+_2023/numberphile/prime_race.py:PrimeRace	4.0.1 Integer.style.fill_opacity	bug	fm-v4lv	Write leaves point-less Integer roots at the outline's fill opacity 0; the Reference keeps 1

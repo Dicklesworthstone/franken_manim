@@ -169,6 +169,16 @@ class TriageTests(unittest.TestCase):
         failed = cd.triage(self.record(portal_error=refusal, reference_error="IndexError: index 5 is out of bounds"))
         self.assertEqual(failed, {"label": "untriaged"})
 
+    def test_a_bare_assert_is_named_by_its_source_line(self):
+        stderr = ('  File "vectorized_mobject.py", line 802, in get_nth_curve_points\n'
+                  "    assert n < self.get_num_curves()\n           ^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n")
+        error = cd._last_error(stderr)
+        self.assertEqual(error, "AssertionError (assert n < self.get_num_curves())")
+        result = cd.triage(self.record(reference_error=error, portal_exit=0))
+        self.assertEqual((result["label"], result["side"]), ("reference-defect", "reference"))
+        self.assertEqual(cd._last_error("Traceback\nAssertionError: explicit message\n"),
+                         "AssertionError: explicit message")
+
     def test_timeout_is_the_fallback_and_untriaged_is_explicit(self):
         result = cd.triage(self.record(portal_exit=None))
         self.assertEqual((result["label"], result["side"]), ("timeout", "portal"))
