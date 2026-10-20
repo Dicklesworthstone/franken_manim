@@ -203,8 +203,9 @@ pub trait VStyle {
     /// Reference `has_fill`: any record with a nonzero fill alpha.
     /// A point-free object observes its own default record.
     fn has_fill(&self, mob: Mob) -> bool;
-    /// Reference `has_stroke`: any record with both a nonzero width and a
-    /// nonzero alpha. A point-free object observes its own default record.
+    /// Reference `has_stroke`: nonzero width and alpha occur in the columns.
+    /// This is conservative because continuous interpolation can overlap them
+    /// between records. A point-free object observes its own default record.
     fn has_stroke(&self, mob: Mob) -> bool;
 }
 
@@ -371,10 +372,10 @@ impl VStyle for Stage {
         let Some(widths) = entry.buffer.read_column("stroke_width") else {
             return false;
         };
-        widths
-            .iter()
-            .zip(rgba.as_chunks::<4>().0)
-            .any(|(width, rgba)| *width != 0.0 && rgba[3] != 0.0)
+        // Opposite endpoint profiles can overlap inside an interpolated curve.
+        // Do not turn this conservative admission into a point-sample test.
+        widths.iter().any(|width| *width != 0.0)
+            && rgba.as_chunks::<4>().0.iter().any(|rgba| rgba[3] != 0.0)
     }
 }
 
@@ -654,7 +655,7 @@ mod tests {
     }
 
     #[test]
-    fn populated_records_override_defaults_and_strokes_require_coincident_lanes() {
+    fn populated_records_override_defaults_without_culling_interpolated_strokes() {
         let mut stage = Stage::new();
         let root = stage.add(VMobject::new());
         stage.set_fill(root, Some(BLUE), Some(1.0), None, false);
@@ -669,11 +670,13 @@ mod tests {
         assert!(buffer.write_range(
             "stroke_rgba",
             0,
-            &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+            &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
         ));
-        assert!(!stage.has_stroke(root));
-        assert!(stage.get_mut(root).unwrap().buffer.write(1, "stroke_width", &[3.0]));
+        // Width falls to zero while alpha rises: both are positive in between.
         assert!(stage.has_stroke(root));
+        stage.set_stroke(root, None, None, Some(0.0), None, false);
+        assert!(!stage.has_stroke(root));
+        assert_eq!(stage.get_stroke_opacity(root), Some(0.0));
     }
 
     #[test]
@@ -689,5 +692,52 @@ mod tests {
         assert_eq!(foreign.get_stroke_width(root), None);
         assert!(!foreign.has_fill(root));
         assert!(!foreign.has_stroke(root));
+    }
+
+    #[test]
+    fn incompatible_custom_style_fields_refuse_on_empty_and_populated_records() {
+        for records in [0, 3] {
+            for color_width in [0, 1, 2, 3, 5] {
+                let schema = fmn_mobject::RecordSchema::new(
+                    &[
+                        ("point", 3),
+                        ("fill_rgba", color_width),
+                        ("stroke_rgba", color_width),
+                        ("stroke_width", 1),
+                    ],
+                    &["point"],
+                    &["point"],
+                )
+                .unwrap();
+                let mut buffer = RecordBuffer::new(schema, records).unwrap();
+                buffer.write_scalar_lanes("stroke_width", 2.5);
+                let mut stage = Stage::new();
+                let mob = stage.add(fmn_mobject::Mobject::from_buffer(buffer));
+                assert_eq!(stage.get_fill_color(mob), None);
+                assert_eq!(stage.get_fill_opacity(mob), None);
+                assert_eq!(stage.get_stroke_color(mob), None);
+                assert_eq!(stage.get_stroke_opacity(mob), None);
+                assert_eq!(stage.get_stroke_width(mob), Some(2.5));
+                assert!(!stage.has_fill(mob));
+                assert!(!stage.has_stroke(mob));
+                assert_eq!(stage.get(mob).unwrap().buffer.len(), records);
+            }
+            for width_lanes in [0, 2, 3] {
+                let schema = fmn_mobject::RecordSchema::new(
+                    &[("point", 3), ("stroke_rgba", 4), ("stroke_width", width_lanes)],
+                    &["point"],
+                    &["point"],
+                )
+                .unwrap();
+                let mut buffer = RecordBuffer::new(schema, records).unwrap();
+                buffer.write_color_lanes("stroke_rgba", Some([1.0, 0.0, 0.0]), Some(1.0));
+                let mut stage = Stage::new();
+                let mob = stage.add(fmn_mobject::Mobject::from_buffer(buffer));
+                assert_eq!(stage.get_stroke_width(mob), None);
+                assert_color(stage.get_stroke_color(mob), RED);
+                assert_eq!(stage.get_stroke_opacity(mob), Some(1.0));
+                assert!(!stage.has_stroke(mob));
+            }
+        }
     }
 }
