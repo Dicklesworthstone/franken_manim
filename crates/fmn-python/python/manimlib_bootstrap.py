@@ -24352,6 +24352,11 @@ def _install_reference_utils():
 def _install_config_module():
     class _ConfigDict(dict):
         def __getattr__(self, name):
+            # Protocol probes (copy's __deepcopy__/__setstate__, pickle's
+            # __reduce__ hooks) must miss, never auto-vivify: the Reference's
+            # addict Dict deep-copies, and so must manim_config.
+            if name.startswith("__") and name.endswith("__"):
+                raise AttributeError(name)
             if name in self:
                 val = self[name]
                 if isinstance(val, dict) and not isinstance(val, _ConfigDict):

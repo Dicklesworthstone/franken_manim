@@ -11048,8 +11048,11 @@ assert native_brace_text.submobjects == [
 ]
 
 # TransformMatchingTex consumes the source identities carried by Scribe's
-# native span map. Equal `x` spans pair even though their byte offsets differ;
-# the `+`/`-` leftovers remain distinct and therefore take the native fades.
+# native span map. It is the Reference's bare alias of TransformMatchingStrings
+# (transform_matching_parts.py:189), so it pairs matching blocks: the equal `x`
+# spans form the one shared block even though their byte offsets differ, and
+# the `+`/`-` leftovers stay side-only and therefore take the native fades
+# (BN-05; the Reference's syms [x, +, y] vs [z, -, x] give the same one block).
 matching_module = importlib.import_module(
     "manimlib.animation.transform_matching_parts"
 )
@@ -11065,11 +11068,23 @@ matching_animation = matching_module.TransformMatchingTex(
     rate_func=manimlib.linear,
 )
 matching_params = matching_animation._native_params()
-source_x = next(part for part, key in matching_params["source_keys"] if key == "x")
-target_x = next(part for part, key in matching_params["target_keys"] if key == "x")
+matching_shared = {key for _, key in matching_params["source_keys"]} & {
+    key for _, key in matching_params["target_keys"]
+}
+assert len(matching_shared) == 1, matching_params
+(matching_x_key,) = matching_shared
+assert matching_x_key.startswith("block:") and matching_x_key.endswith(":x"), matching_x_key
+source_x = next(part for part, key in matching_params["source_keys"] if key == matching_x_key)
+target_x = next(part for part, key in matching_params["target_keys"] if key == matching_x_key)
 assert source_x is not target_x
-assert any(key == "+" for _, key in matching_params["source_keys"])
-assert any(key == "-" for _, key in matching_params["target_keys"])
+assert any(
+    key.startswith("source-only:") and key.endswith(":+")
+    for _, key in matching_params["source_keys"]
+)
+assert any(
+    key.startswith("target-only:") and key.endswith(":-")
+    for _, key in matching_params["target_keys"]
+)
 matching_scene = Scene()
 matching_scene.play(matching_animation)
 assert np.allclose(source_x.get_center(), target_x.get_center())
