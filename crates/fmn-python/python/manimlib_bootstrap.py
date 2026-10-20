@@ -12387,15 +12387,6 @@ class StreamLines(VGroup):
         origin = self.coordinate_system.get_origin()
         return self.coordinate_system.c2p(*out_coords.T) - origin
 
-    def draw_lines(self):
-        pass
-
-    def get_sample_coords(self):
-        return _np.empty((0, 3))
-
-    def init_style(self):
-        pass
-
 
 class AnimatedStreamLines(VGroup):
     """vector_field.py:445 as a Python dt-updater over the native lines:
@@ -19960,9 +19951,6 @@ class TransformMatchingParts(_NativeAnimation):
                 result.append((c1, c2))
         return result
 
-    def add_transform(self, source, target):
-        pass
-
 
 class TransformMatchingShapes(TransformMatchingParts):
     _native_kind = "transform_matching_shapes"
@@ -20080,9 +20068,6 @@ class TransformMatchingStrings(_NativeAnimation):
             scope(source_keys, source_block, "source-only"),
             scope(target_keys, target_block, "target-only"),
         )
-
-    def matching_blocks(self, source, target, matched_keys=(), key_map=None):
-        return []
 
     def _claim_matched_pairs(self, source_keys, target_keys):
         """The explicit-pair native key override (fm-5wq.4.76): each user
