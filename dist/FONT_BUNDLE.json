@@ -4,7 +4,7 @@
   "hash_convention": "sha256 (fmn-hash, FIPS 180-4; lowercase hex via Digest::to_hex) over the exact bundled TTF bytes of fmd-font's ALL_FACES at the SUITE.lock pin — the same identity the §16.7 input closure and the typeset cache fingerprint key against",
   "suite_lock": {
     "repo": "franken_markdown",
-    "rev": "80cbadcd0d37c252cd2c46a9e533ebfa23ee825b"
+    "rev": "23c4d0c546a93e83c00770b9654a9def3ce1c297"
   },
   "faces": [
     {
@@ -86,6 +86,78 @@
       "byte_len": 72908,
       "sha256": "634b9964bd8af7e88520e82efe0967cf8cc280720e04158e05246144571b9e4d",
       "license": "licenses/fonts/noto-sans-math-OFL.txt"
+    },
+    {
+      "name": "cm-math-italic-10",
+      "family": "FMD CM Math Italic",
+      "version": "Version 1.000",
+      "byte_len": 29980,
+      "sha256": "1d14b3d8e91482ac12af4a9ed2970fd07e866b9629a654d5be0db4b1ffbf21cc",
+      "license": "licenses/fonts/cm-math-OFL.txt"
+    },
+    {
+      "name": "cm-math-italic-7",
+      "family": "FMD CM Math Italic",
+      "version": "Version 1.000",
+      "byte_len": 30492,
+      "sha256": "cf055194e32127200ef1fe9a280f3f3f33c54de4e4a880a5b960ae401a98942b",
+      "license": "licenses/fonts/cm-math-OFL.txt"
+    },
+    {
+      "name": "cm-math-italic-5",
+      "family": "FMD CM Math Italic",
+      "version": "Version 1.000",
+      "byte_len": 31064,
+      "sha256": "2a569e38c613bfa13cdb8cb853e7986135b14aacd7b0b51f9c5ca6c7769f291d",
+      "license": "licenses/fonts/cm-math-OFL.txt"
+    },
+    {
+      "name": "cm-math-symbols-10",
+      "family": "FMD CM Math Symbols",
+      "version": "Version 1.000",
+      "byte_len": 27212,
+      "sha256": "9d787e3c402c15201b040fa6e9806ddc96ad385163057ab3e19bdab899a061fa",
+      "license": "licenses/fonts/cm-math-OFL.txt"
+    },
+    {
+      "name": "cm-math-symbols-7",
+      "family": "FMD CM Math Symbols",
+      "version": "Version 1.000",
+      "byte_len": 27212,
+      "sha256": "e4fbf7054c0eccd29c3c2d733dce3ff666986dce4efd91defe96ef77c171b8a8",
+      "license": "licenses/fonts/cm-math-OFL.txt"
+    },
+    {
+      "name": "cm-math-symbols-5",
+      "family": "FMD CM Math Symbols",
+      "version": "Version 1.000",
+      "byte_len": 27392,
+      "sha256": "4b4b73fc0fc817461b478e09dd51d93224a260b07e49b2d22acd9e73eaf4777b",
+      "license": "licenses/fonts/cm-math-OFL.txt"
+    },
+    {
+      "name": "cm-math-extension-10",
+      "family": "FMD CM Math Extension",
+      "version": "Version 1.000",
+      "byte_len": 17444,
+      "sha256": "5ee9fc49f0e69186626e8b1f7b5a87c6bea0a3afd19679492788b3364c0ac6b6",
+      "license": "licenses/fonts/cm-math-OFL.txt"
+    },
+    {
+      "name": "cm-roman-7",
+      "family": "FMD CM Roman",
+      "version": "Version 1.000",
+      "byte_len": 23040,
+      "sha256": "181834b6bb73bada8445e7d451259be6d77da3fc6cceb6afee4ad783a209fd8f",
+      "license": "licenses/fonts/cm-math-OFL.txt"
+    },
+    {
+      "name": "cm-roman-5",
+      "family": "FMD CM Roman",
+      "version": "Version 1.000",
+      "byte_len": 22148,
+      "sha256": "bb9312999f9ef570cc79ce599beba77281259214d224caf54d2d48a0b0a139bb",
+      "license": "licenses/fonts/cm-math-OFL.txt"
     }
   ],
   "licenses": [
@@ -109,6 +181,13 @@
       "covers": ["noto-sans-math-symbols"],
       "byte_len": 4380,
       "sha256": "403a95275b469061b7d4371c328e0ada3bc7d63328abe2e88aad5cd243b2fe21"
+    },
+    {
+      "path": "licenses/fonts/cm-math-OFL.txt",
+      "license_id": "OFL-1.1",
+      "covers": ["cm-math-italic-10", "cm-math-italic-7", "cm-math-italic-5", "cm-math-symbols-10", "cm-math-symbols-7", "cm-math-symbols-5", "cm-math-extension-10", "cm-roman-7", "cm-roman-5"],
+      "byte_len": 12520,
+      "sha256": "aa783fdd47e92743bafe79277ac4067d20339344dc5b64a09c2d0f869b2999dc"
     },
     {
       "path": "licenses/LICENSE",

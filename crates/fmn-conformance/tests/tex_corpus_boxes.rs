@@ -37,11 +37,13 @@ use std::path::PathBuf;
 /// \scriptspace, cmsy's prime character and LaTeX's brace fills (3ed1d33),
 /// 281 with delimiters at the sizes TeX's variant search sets (e0dd66e),
 /// 299 with their cmex10 box widths (29385b3), 303 with big operators'
-/// cmex10 widths and italic corrections (80cbadc).
+/// cmex10 widths and italic corrections (80cbadc), 489 in TeX's own CM math
+/// faces (23c4d0c, ADR-0028).
 /// Raise it when layout improves; never lower it to land a change.
-const WITHIN_5_PERCENT_FLOOR: usize = 303;
-/// The same at 10%: 315, 316, 330, 365, 367, 385, 421, 423, 437, then 444.
-const WITHIN_10_PERCENT_FLOOR: usize = 444;
+const WITHIN_5_PERCENT_FLOOR: usize = 489;
+/// The same at 10%: 315, 316, 330, 365, 367, 385, 421, 423, 437, 444, then
+/// 543.
+const WITHIN_10_PERCENT_FLOOR: usize = 543;
 
 fn rows() -> Vec<OracleRow> {
     parse_oracle_fixture(ORACLE_FIXTURE).expect("the oracle fixture parses")

@@ -1169,11 +1169,12 @@ mod tests {
             // 126a530, then matrix_2x2.v1 and decimal_matrix.v1's brackets
             // at TeX's variant sizes at franken_markdown e0dd66e, then
             // tex_display_sum.v1's \sum at cmex10's width at franken_markdown
-            // 80cbadc)
+            // 80cbadc, then the six TeX scenes in the CM math faces at
+            // franken_markdown 23c4d0c)
             // and the journaled map orientation.
             assert_eq!(
                 definition.digest().to_string(),
-                "f955c3640b2c1bb379e117481aca18993df289f5e89dcad395ba443d008acc47"
+                "607d3d5e27e0a4b8387a231f102110544e1280982b4f9fb5ab87369ce17acb16"
             );
         }
     }

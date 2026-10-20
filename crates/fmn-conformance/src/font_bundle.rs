@@ -126,10 +126,63 @@ pub const FACE_POLICY: &[FacePolicy] = &[
         license_slug: "noto-sans-math",
         family: "Noto Sans Math",
     },
+    // The AMS Type 1 CM math faces, converted and renamed upstream
+    // (ADR-0028); one OFL text with the AMS copyright and its Reserved
+    // Font Names covers all nine.
+    FacePolicy {
+        name: "cm-math-italic-10",
+        license_slug: "cm-math",
+        family: "FMD CM Math Italic",
+    },
+    FacePolicy {
+        name: "cm-math-italic-7",
+        license_slug: "cm-math",
+        family: "FMD CM Math Italic",
+    },
+    FacePolicy {
+        name: "cm-math-italic-5",
+        license_slug: "cm-math",
+        family: "FMD CM Math Italic",
+    },
+    FacePolicy {
+        name: "cm-math-symbols-10",
+        license_slug: "cm-math",
+        family: "FMD CM Math Symbols",
+    },
+    FacePolicy {
+        name: "cm-math-symbols-7",
+        license_slug: "cm-math",
+        family: "FMD CM Math Symbols",
+    },
+    FacePolicy {
+        name: "cm-math-symbols-5",
+        license_slug: "cm-math",
+        family: "FMD CM Math Symbols",
+    },
+    FacePolicy {
+        name: "cm-math-extension-10",
+        license_slug: "cm-math",
+        family: "FMD CM Math Extension",
+    },
+    FacePolicy {
+        name: "cm-roman-7",
+        license_slug: "cm-math",
+        family: "FMD CM Roman",
+    },
+    FacePolicy {
+        name: "cm-roman-5",
+        license_slug: "cm-math",
+        family: "FMD CM Roman",
+    },
 ];
 
 /// Every license-set slug that must ship an OFL text, in canonical order.
-pub const LICENSE_SLUGS: &[&str] = &["computer-modern", "ibm-plex-sans", "noto-sans-math"];
+pub const LICENSE_SLUGS: &[&str] = &[
+    "computer-modern",
+    "ibm-plex-sans",
+    "noto-sans-math",
+    "cm-math",
+];
 
 /// The `dist/`-relative path a license set's OFL text ships at.
 #[must_use]

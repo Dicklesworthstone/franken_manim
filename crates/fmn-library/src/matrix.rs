@@ -28,11 +28,12 @@
 //! Reference typesets `\left[\begin{array}{c}\quad \\…\end{array}\right]`,
 //! stretches the result to `rows.height + bracket_v_buff`, and splits the
 //! submobjects in half — left half `[`, right half `]`. Here the same source
-//! goes through [`crate::tex::Tex`]; fmd-math's extensible-delimiter engine
-//! picks the natural glyph, a uniform scale of it (≤ 1.25×), or a drawn
-//! path, and the delimiter pair is located by [`Prim::Path`] identity in the
-//! drawn stage, falling back to the Reference's own half-split in the glyph
-//! stages. Each bracket is then scaled uniformly to exactly
+//! goes through [`crate::tex::Tex`]; fmd-math sizes the delimiters as TeX
+//! does from the CM math faces (ADR-0028): the natural glyph, a larger cmex
+//! variant, or cmex's extensible assembly of top, repeated extender and
+//! bottom pieces (tex.web §713). The Reference's own half-split locates the
+//! pair in those glyph stages. ADR-0005's drawn path serves only delimiters
+//! cmex cannot build; there the two [`Prim::Path`] children are the pair. Each bracket is then scaled uniformly to exactly
 //! `rows.height + bracket_v_buff` — equivalent to the Reference's group
 //! stretch, since the delimiters are the group's tallest children.
 //!
@@ -742,7 +743,8 @@ impl MatrixMobject {
     }
 
     /// True when the delimiter engine drew the brackets as paths
-    /// (ADR-0005's tall stage) rather than emitting glyphs.
+    /// (ADR-0005's stage for delimiters cmex cannot build) rather than
+    /// emitting glyphs.
     #[must_use]
     pub fn brackets_are_drawn_paths(&self) -> bool {
         self.brackets_drawn
@@ -1069,10 +1071,10 @@ fn swap_entries_for_ellipses(
 }
 
 /// The bracket pair: typeset the Reference's own source — one `\quad \\`
-/// row per matrix row — and locate the delimiters. In the drawn stage
-/// (ADR-0005) the two [`Prim::Path`] children *are* the delimiters; in
-/// the glyph stages the Reference's own half-split applies. The boolean
-/// reports which stage engaged.
+/// row per matrix row — and locate the delimiters. In the glyph stages
+/// (natural glyph, cmex variant, cmex extensible assembly) the Reference's
+/// own half-split applies; in ADR-0005's drawn stage the two [`Prim::Path`]
+/// children *are* the delimiters. The boolean reports the drawn stage.
 fn brackets(n_rows: usize, engine: &TexEngine) -> Result<(VMobject, VMobject, bool), MatrixError> {
     const PREFIX: &str = r"\left[\begin{array}{c}";
     const ROW: &str = "\\quad \\\\";
@@ -1303,21 +1305,32 @@ mod tests {
     }
 
     #[test]
-    fn the_drawn_path_stage_engages_for_tall_matrices() {
-        // ADR-0005: natural glyph → uniform scale (≤1.25×) → drawn path.
-        // Eight rows of quads far exceed the scale ceiling, so the
-        // delimiters are drawn paths; a single row stays a glyph.
+    fn tall_matrices_take_the_cmex_extensible_bracket() {
+        // TeX sizes `\left[` from cmex (ADR-0028): eight rows of quads pass
+        // the largest variant, so each bracket is an extensible assembly of
+        // top, repeated extender and bottom glyphs; a single row is one
+        // glyph. Neither reaches ADR-0005's drawn path.
         let tall = Matrix::new(grid_of(8, 1, 0.5, 0.4))
             .build(&engine())
             .expect("builds");
-        assert!(tall.brackets_are_drawn_paths(), "8 rows should draw paths");
+        assert!(
+            !tall.brackets_are_drawn_paths(),
+            "cmex builds `[` at any size"
+        );
+        for bracket in tall.get_brackets().children() {
+            assert!(
+                bracket.children().len() >= 3,
+                "8 rows: top, extender(s) and bottom, got {}",
+                bracket.children().len()
+            );
+        }
         let short = Matrix::new(grid_of(1, 1, 0.5, 0.4))
             .build(&engine())
             .expect("builds");
-        assert!(
-            !short.brackets_are_drawn_paths(),
-            "1 row should stay a natural glyph"
-        );
+        assert!(!short.brackets_are_drawn_paths());
+        for bracket in short.get_brackets().children() {
+            assert_eq!(bracket.children().len(), 1, "1 row: one natural glyph");
+        }
     }
 
     #[test]

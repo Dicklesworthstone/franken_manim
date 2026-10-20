@@ -47,9 +47,8 @@ fn submobject_counts_are_locked_for_corpus_shapes() {
         (r"\frac{d}{dx}", 3, 1, 0), // the fraction bar is a rule
         (r"\sqrt{x}", 2, 1, 0),     // surd glyph + overbar rule
         (r"\int_0^\infty e^{-x^2}\,dx", 9, 0, 0),
-        // Matrix parens exceed the scale ceiling: cells as glyphs, two
-        // drawn parens.
-        (r"\begin{pmatrix} a & b \\ c & d \end{pmatrix}", 4, 0, 2),
+        // TeX sizes the matrix parens from cmex (ADR-0028): two glyphs.
+        (r"\begin{pmatrix} a & b \\ c & d \end{pmatrix}", 6, 0, 0),
         (r"\overbrace{x+y}", 3, 0, 1), // three glyphs + the drawn band
     ] {
         let t = e.typeset(Mode::Math(Style::Display), src).unwrap();

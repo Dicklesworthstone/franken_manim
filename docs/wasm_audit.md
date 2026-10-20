@@ -1,6 +1,22 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-run, 2026-10-13, against `Cargo.lock` `558c0348` and `SUITE.lock`
+**Status:** re-run, 2026-10-19, against `Cargo.lock` `9bc3615a` and `SUITE.lock`
+`8a1c6af0`, for the franken_markdown repin from `80cbadcd` to `23c4d0c5`
+(fm-cm-math-faces-impl-n12u: the CM math faces of ADR-0028). The three lock files
+move the three franken_markdown packages' rev and version (franken_markdown
+0.5.0 -> 0.6.0, fmd-font 0.3.3 -> 0.3.4, fmd-math 0.1.2 -> 0.2.0), and no fmd or
+franken_markdown package is in this graph.
+**The release package gate still FAILS at its size budget** (fm-8j70), so this
+audit does not claim a passing package.
+
+- **VERIFIED (mechanical):** `cargo tree -p fmn-wasm --target
+  wasm32-unknown-unknown --edges normal --locked` is unchanged at 134 lines, with
+  no fmd or franken_markdown package. `wasm-smoke/Cargo.lock` has no
+  franken_markdown entry.
+- The `--locked` wasm32 build and wasm-smoke were not re-run: no package in the
+  wasm graph changed since the 2026-10-12 run below.
+
+Earlier re-run, 2026-10-13, against `Cargo.lock` `558c0348` and `SUITE.lock`
 `c7030d6c`, for the franken_markdown repin from `e0dd66e7` to `80cbadcd`
 (fm-tex-layout-oracle-bkbc). No package version changes. The three lock files move
 only the three franken_markdown packages' rev, and no fmd or franken_markdown
@@ -350,8 +366,8 @@ The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
-- `SUITE.lock` SHA-256: `c7030d6c1f7721090a21029dbcbfaaa258d938e847231071e3974688f0c30455`
-- `Cargo.lock` SHA-256: `558c034848a46c5333bcb94644f9f69cd1ed17019f5ec777a2d0bc00f1cd5d30`
+- `SUITE.lock` SHA-256: `8a1c6af076a75e51a7e444aeafd2bc72b56ca655341a09f7eef1b5ec65f5719d`
+- `Cargo.lock` SHA-256: `9bc3615a78c379a633562a64f57de1433a83942f9874a048d7da7c849261dcf2`
 - Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `b1fac18569682e3d2888881883f8b37e4abfb10884ed34a6f2e1eb7a4da942b5`
 
 The 0.5.0 release bump re-bound both lock identities above. That bump changed

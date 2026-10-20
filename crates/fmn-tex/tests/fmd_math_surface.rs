@@ -176,9 +176,9 @@ fn typeset_text_handles_the_textext_contract() {
 #[test]
 fn the_kg9_frontier_lays_out_through_the_pin() {
     // fm-kg9 crossed the extensions frontier: environments, stretchy
-    // constructions, drawn oversized delimiters, and macros all produce
-    // real layouts through the pin — while what remains outside the tier
-    // still refuses with its precise, tier-tagged name.
+    // constructions, TeX-sized delimiters, and macros all produce real
+    // layouts through the pin — while what remains outside the tier still
+    // refuses with its precise, tier-tagged name.
     let engine = fmd_math::Engine::bundled().unwrap();
     let m = engine
         .typeset(
@@ -186,10 +186,16 @@ fn the_kg9_frontier_lays_out_through_the_pin() {
             Style::Display,
         )
         .unwrap();
-    // Four cell glyphs; the parens exceed the 1.25× ceiling for a 2×2
-    // grid, so they arrive as drawn paths.
-    assert_eq!(m.glyphs.len(), 4, "the four cells");
-    assert_eq!(m.paths.len(), 2, "two drawn parens");
+    // Four cell glyphs and two parens: TeX picks a cmex variant for a 2×2
+    // grid (ADR-0028), so nothing is drawn.
+    assert_eq!(m.glyphs.len(), 6, "the four cells and two cmex parens");
+    assert!(m.paths.is_empty(), "no drawn delimiters");
+    let cmex = |g: &&fmd_math::PlacedGlyph| g.face == fmd_math::faces::FACE_MATH_EXTENSION;
+    assert_eq!(
+        m.glyphs.iter().filter(cmex).count(),
+        2,
+        "both parens are cmex"
+    );
     let b = engine.typeset(r"\overbrace{x+y}", Style::Display).unwrap();
     assert_eq!(b.paths.len(), 1, "the drawn brace band");
     let deep = engine
@@ -198,7 +204,13 @@ fn the_kg9_frontier_lays_out_through_the_pin() {
             Style::Display,
         )
         .unwrap();
-    assert!(!deep.paths.is_empty(), "drawn delimiters past the ceiling");
+    assert!(deep.paths.is_empty(), "cmex builds tall parens from glyphs");
+    for paren in ['(', ')'] {
+        assert!(
+            deep.glyphs.iter().filter(cmex).any(|g| g.ch == paren),
+            "{paren} comes from cmex"
+        );
+    }
     let pack = fmd_math::MacroSet::pack("fmd-math/pack/default").unwrap();
     let mac = engine
         .typeset_with_macros(r"a \minus b", Style::Display, &pack)

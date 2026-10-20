@@ -18,12 +18,14 @@ use fmn_library::{Tex, TexEngine, TexText};
 /// \big sizes and array struts (bd00a24), 49 with TeX's \scriptspace,
 /// cmsy's prime character and LaTeX's brace fills (3ed1d33), 50 with
 /// delimiters at the sizes TeX's variant search sets (e0dd66e), 52 with
-/// their cmex10 box widths (29385b3). Raise it when layout improves; never
-/// lower it to land a change.
-const WITHIN_5_PERCENT_FLOOR: usize = 52;
+/// their cmex10 box widths (29385b3), 98 in TeX's own CM math faces
+/// (23c4d0c, ADR-0028). Raise it when layout improves; never lower it to
+/// land a change.
+const WITHIN_5_PERCENT_FLOOR: usize = 98;
 /// The same at ±10%: 57, then 60, then 65, then 67, then 70, then 73, then 75,
-/// then 77, then 80, then 84 with big operators' cmex10 widths (80cbadc).
-const WITHIN_10_PERCENT_FLOOR: usize = 84;
+/// then 77, then 80, then 84 with big operators' cmex10 widths (80cbadc),
+/// then 108 in the CM math faces (23c4d0c).
+const WITHIN_10_PERCENT_FLOOR: usize = 108;
 
 struct Row {
     width: f64,
