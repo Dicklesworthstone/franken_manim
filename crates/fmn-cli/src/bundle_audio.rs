@@ -488,9 +488,9 @@ fn execute(
         &request.config,
         source_digest,
         &bundle,
-        soundtrack.as_ref().ok_or_else(|| {
-            Failure::new("scene", "recording has no embedded soundtrack")
-        })?,
+        soundtrack
+            .as_ref()
+            .ok_or_else(|| Failure::new("scene", "recording has no embedded soundtrack"))?,
         fs.as_ref(),
     )?;
     let source = command

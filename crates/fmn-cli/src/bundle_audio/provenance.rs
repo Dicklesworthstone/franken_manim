@@ -12,8 +12,8 @@ use fmn::rendering::RenderReport;
 use fmn_config::config::DeterminismMode;
 use fmn_hash::Digest;
 use fmn_output::{
-    ClosureItem, ManifestError, ManifestIdentity, ManifestMode, ManifestOutput,
-    ProvenanceManifest, StructuralField, frames_to_samples,
+    ClosureItem, ManifestError, ManifestIdentity, ManifestMode, ManifestOutput, ProvenanceManifest,
+    StructuralField, frames_to_samples,
 };
 use fmn_platform::fs::FileSystem;
 use fmn_render::engine::{EngineIdentity, Tier, journal};
@@ -172,7 +172,9 @@ impl Session {
             ClosureItem::structural(
                 6,
                 "PCM and picture assets are inside C1; compiled font inventory follows",
-                &[StructuralField::Absent("external asset or original audio reads during replay")],
+                &[StructuralField::Absent(
+                    "external asset or original audio reads during replay",
+                )],
             )?,
             ClosureItem::structural_at(
                 7,
@@ -222,8 +224,9 @@ impl Session {
             frames_to_samples(i64::from(frame), self.fps, self.sample_rate)
                 .map_err(|error| Failure::new("render", error.to_string()))
                 .and_then(|samples| {
-                    u64::try_from(samples)
-                        .map_err(|_| Failure::new("internal", "negative provenance sample boundary"))
+                    u64::try_from(samples).map_err(|_| {
+                        Failure::new("internal", "negative provenance sample boundary")
+                    })
                 })
         };
         let end = boundary(output.frames.end)?;
@@ -246,7 +249,10 @@ impl Session {
             ));
         }
         if self.mode == ManifestMode::Certified && !matches!(output.target, Target::Wav) {
-            return Err(Failure::new("capability", "ffmpeg products are never certified"));
+            return Err(Failure::new(
+                "capability",
+                "ffmpeg products are never certified",
+            ));
         }
         let mut items = self.items.clone();
         let engine = match (output.target, output.video) {
@@ -256,7 +262,9 @@ impl Session {
                     "native PCM extraction and canonical S16 publication, without rasterization",
                     &[
                         StructuralField::Text(WAV_ENGINE),
-                        StructuralField::Absent("rasterization, resampling, gain, mixing and dithering"),
+                        StructuralField::Absent(
+                            "rasterization, resampling, gain, mixing and dithering",
+                        ),
                     ],
                 )?);
                 items.push(ClosureItem::structural(
@@ -274,11 +282,15 @@ impl Session {
                 if report.artifact.format != format
                     || report.artifact.path.as_path() != output.destination
                     || report.artifact.digest != output.digest
-                    || report.artifact.frame_count != u64::from(output.frames.end - output.frames.start)
+                    || report.artifact.frame_count
+                        != u64::from(output.frames.end - output.frames.start)
                     || !report.artifact.audio_decodes.is_empty()
                     || report.artifact.ffmpeg.is_empty()
                 {
-                    return Err(Failure::new("internal", "compiled video receipt disagrees with its provenance"));
+                    return Err(Failure::new(
+                        "internal",
+                        "compiled video receipt disagrees with its provenance",
+                    ));
                 }
                 let sound = report.artifact.soundtrack.as_ref().ok_or_else(|| {
                     Failure::new("internal", "compiled video omitted its soundtrack receipt")
@@ -287,17 +299,26 @@ impl Session {
                     || sound.channels != self.channels
                     || sound.sample_frames != output.sample_frames
                 {
-                    return Err(Failure::new("internal", "compiled video soundtrack metadata changed"));
+                    return Err(Failure::new(
+                        "internal",
+                        "compiled video soundtrack metadata changed",
+                    ));
                 }
                 let identity = match report.execution_plan.engine {
                     fmn_runtime::ExecutionEngine::CertifiedCpu => EngineIdentity::certified(),
                     fmn_runtime::ExecutionEngine::FastCpu => EngineIdentity::fast(),
-                    _ => return Err(Failure::new("capability", "compiled replay has no accelerator provenance adapter")),
+                    _ => {
+                        return Err(Failure::new(
+                            "capability",
+                            "compiled replay has no accelerator provenance adapter",
+                        ));
+                    }
                 };
                 let (width, height) = self.config.camera.resolution;
-                let background = fmn_core::color::Srgb::from_hex(&self.config.camera.background_color)
-                    .map_err(|error| Failure::new("config", error.to_string()))?
-                    .to_linear(self.config.camera.background_opacity);
+                let background =
+                    fmn_core::color::Srgb::from_hex(&self.config.camera.background_color)
+                        .map_err(|error| Failure::new("config", error.to_string()))?
+                        .to_linear(self.config.camera.background_opacity);
                 let frame = FrameConfig::new(
                     Viewport { width, height },
                     ScreenMap {
@@ -306,21 +327,34 @@ impl Session {
                         y_up: true,
                     },
                     background,
-                ).with_aa_policy(self.config.render.aa);
-                let backend = journal(identity, &frame, Tiling {
-                    macro_tile: report.execution_plan.macro_tile,
-                    fine_tile: report.execution_plan.fine_tile,
-                });
+                )
+                .with_aa_policy(self.config.render.aa);
+                let backend = journal(
+                    identity,
+                    &frame,
+                    Tiling {
+                        macro_tile: report.execution_plan.macro_tile,
+                        fine_tile: report.execution_plan.fine_tile,
+                    },
+                );
                 let engine = identity.closure_string();
                 items.push(ClosureItem::structural(
                     7,
                     "actual native execution engine and frame policy; recorded cameras are in C1",
-                    &[StructuralField::Text(&engine), StructuralField::Bytes(&backend)],
+                    &[
+                        StructuralField::Text(&engine),
+                        StructuralField::Bytes(&backend),
+                    ],
                 )?);
                 append_video_capabilities(&mut items, self.filesystem, report)?;
                 engine
             }
-            _ => return Err(Failure::new("internal", "artifact kind and provenance backend disagree")),
+            _ => {
+                return Err(Failure::new(
+                    "internal",
+                    "artifact kind and provenance backend disagree",
+                ));
+            }
         };
         let declared = ClosureItem::structural(
             10,
@@ -332,16 +366,27 @@ impl Session {
                 StructuralField::U64(u64::from(self.fps)),
                 StructuralField::U64(u64::from(output.frames.start)),
                 StructuralField::U64(u64::from(output.frames.end)),
-                StructuralField::U64(u64::try_from(output.segments.start).map_err(|_| Failure::new("budget", "segment index exceeds u64"))?),
-                StructuralField::U64(u64::try_from(output.segments.end).map_err(|_| Failure::new("budget", "segment index exceeds u64"))?),
+                StructuralField::U64(
+                    u64::try_from(output.segments.start)
+                        .map_err(|_| Failure::new("budget", "segment index exceeds u64"))?,
+                ),
+                StructuralField::U64(
+                    u64::try_from(output.segments.end)
+                        .map_err(|_| Failure::new("budget", "segment index exceeds u64"))?,
+                ),
                 StructuralField::Bool(output.keep_tail),
-                StructuralField::Text("absolute rational frame-to-sample boundaries; zero padding; no remix"),
+                StructuralField::Text(
+                    "absolute rational frame-to-sample boundaries; zero padding; no remix",
+                ),
                 StructuralField::Text("native S16 WAV without dither; video uses governed AAC mux"),
             ],
         )?;
         let declared_config_digest = declared.digest;
         items.push(declared);
-        let leaf = output.destination.file_name().and_then(|leaf| leaf.to_str())
+        let leaf = output
+            .destination
+            .file_name()
+            .and_then(|leaf| leaf.to_str())
             .filter(|leaf| !leaf.is_empty())
             .ok_or_else(|| Failure::new("usage", "artifact leaf must be nonempty UTF-8"))?;
         Ok(ProvenanceManifest::new(
@@ -359,7 +404,12 @@ impl Session {
             },
             vec![ManifestOutput {
                 virtual_path: leaf.to_owned(),
-                kind: if matches!(output.target, Target::Wav) { "wav" } else { "encoded_video" }.to_owned(),
+                kind: if matches!(output.target, Target::Wav) {
+                    "wav"
+                } else {
+                    "encoded_video"
+                }
+                .to_owned(),
                 digest: output.digest,
                 certified: self.mode == ManifestMode::Certified,
             }],
@@ -373,22 +423,40 @@ impl Session {
         output: Artifact<'_>,
     ) -> Result<Publication, Failure> {
         if fs.identity() != self.filesystem {
-            return Err(Failure::new("capability", "provenance filesystem identity changed during replay"));
+            return Err(Failure::new(
+                "capability",
+                "provenance filesystem identity changed during replay",
+            ));
         }
         let manifest = self.seal(&output)?;
         let binary = manifest.to_bytes()?;
         let text = manifest.to_text();
         let semantic = manifest.semantic_digest()?;
         let sidecar = destination(output.destination)?;
-        let publication_error = |error| Failure::new(
-            "render",
-            format!("artifact {} was published, but provenance {} was not completed: {error}",
-                output.destination.display(), sidecar.display()),
-        );
-        let mut writer = fs.begin_atomic_directory(&sidecar).map_err(publication_error)?;
-        writer.write_file(Path::new("manifest.fmnp"), &binary).map_err(publication_error)?;
-        writer.write_file(Path::new("manifest.txt"), text.as_bytes()).map_err(publication_error)?;
-        writer.prepare().map_err(publication_error)?.commit().map_err(publication_error)?;
+        let publication_error = |error| {
+            Failure::new(
+                "render",
+                format!(
+                    "artifact {} was published, but provenance {} was not completed: {error}",
+                    output.destination.display(),
+                    sidecar.display()
+                ),
+            )
+        };
+        let mut writer = fs
+            .begin_atomic_directory(&sidecar)
+            .map_err(publication_error)?;
+        writer
+            .write_file(Path::new("manifest.fmnp"), &binary)
+            .map_err(publication_error)?;
+        writer
+            .write_file(Path::new("manifest.txt"), text.as_bytes())
+            .map_err(publication_error)?;
+        writer
+            .prepare()
+            .map_err(publication_error)?
+            .commit()
+            .map_err(publication_error)?;
         Ok(Publication {
             path: sidecar.join("manifest.fmnp"),
             certified: manifest.mode == ManifestMode::Certified,
@@ -403,9 +471,17 @@ fn append_video_capabilities(
     filesystem: &str,
     report: &RenderReport,
 ) -> Result<(), Failure> {
-    let limits = report.artifact.ffmpeg_limits.as_ref().ok_or_else(|| {
-        Failure::new("internal", "video receipt omitted its effective ffmpeg limits")
-    })?.to_json();
+    let limits = report
+        .artifact
+        .ffmpeg_limits
+        .as_ref()
+        .ok_or_else(|| {
+            Failure::new(
+                "internal",
+                "video receipt omitted its effective ffmpeg limits",
+            )
+        })?
+        .to_json();
     items.push(ClosureItem::structural(
         9,
         "filesystem and governed encode/mux; decoded source media and scene callbacks are absent",
@@ -439,8 +515,13 @@ fn append_video_capabilities(
             StructuralField::U64(u64::from(p.native_image.policy_version)),
             StructuralField::Text(&p.process_mechanism),
             StructuralField::U64(u64::from(p.process_policy_version)),
-            p.encoder.as_deref().map_or(StructuralField::Absent("encoder"), StructuralField::Text),
-            StructuralField::U64(u64::try_from(p.argv.len()).map_err(|_| Failure::new("budget", "ffmpeg argv exceeds u64"))?),
+            p.encoder
+                .as_deref()
+                .map_or(StructuralField::Absent("encoder"), StructuralField::Text),
+            StructuralField::U64(
+                u64::try_from(p.argv.len())
+                    .map_err(|_| Failure::new("budget", "ffmpeg argv exceeds u64"))?,
+            ),
         ];
         fields.extend(p.argv.iter().map(|arg| StructuralField::Text(arg)));
         items.push(ClosureItem::structural_at(
@@ -468,7 +549,10 @@ fn pinned_toolchain() -> Result<&'static str, Failure> {
             }
         }
     }
-    Err(Failure::new("internal", "SUITE.lock omitted its pinned rustc identity"))
+    Err(Failure::new(
+        "internal",
+        "SUITE.lock omitted its pinned rustc identity",
+    ))
 }
 
 fn target_features() -> &'static str {
@@ -484,16 +568,21 @@ fn admit_certified_build(build_id: &str, target: &str) -> Result<(), Failure> {
     if let Some(reason) = fmn_output::certified_build_refusal(build_id) {
         return Err(Failure::new("capability", reason));
     }
-    if !matches!(target,
-        "x86_64-unknown-linux-gnu" | "x86_64-unknown-linux-musl"
-        | "aarch64-unknown-linux-gnu" | "aarch64-unknown-linux-musl"
-        | "aarch64-apple-darwin")
-    {
-        return Err(Failure::new("capability", "certified narrated WAV requires a target in the existing certified matrix"));
+    if !matches!(
+        target,
+        "x86_64-unknown-linux-gnu"
+            | "x86_64-unknown-linux-musl"
+            | "aarch64-unknown-linux-gnu"
+            | "aarch64-unknown-linux-musl"
+            | "aarch64-apple-darwin"
+    ) {
+        return Err(Failure::new(
+            "capability",
+            "certified narrated WAV requires a target in the existing certified matrix",
+        ));
     }
     Ok(())
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -501,16 +590,28 @@ mod tests {
 
     #[test]
     fn certified_admission_preserves_identified_build_and_existing_platform_contracts() {
-        for target in ["x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl",
-            "aarch64-unknown-linux-gnu", "aarch64-unknown-linux-musl", "aarch64-apple-darwin"] {
+        for target in [
+            "x86_64-unknown-linux-gnu",
+            "x86_64-unknown-linux-musl",
+            "aarch64-unknown-linux-gnu",
+            "aarch64-unknown-linux-musl",
+            "aarch64-apple-darwin",
+        ] {
             assert!(admit_certified_build("release:known-test-input", target).is_ok());
             for build in ["unidentified:fmn-cli:0.5.0", "git:deadbeef+unverified"] {
                 let error = admit_certified_build(build, target).err().unwrap();
                 assert_eq!(error.identity, "capability");
             }
         }
-        for target in ["x86_64-pc-windows-msvc", "x86_64-apple-darwin", "wasm32-unknown-unknown", ""] {
-            let error = admit_certified_build("release:known-test-input", target).err().unwrap();
+        for target in [
+            "x86_64-pc-windows-msvc",
+            "x86_64-apple-darwin",
+            "wasm32-unknown-unknown",
+            "",
+        ] {
+            let error = admit_certified_build("release:known-test-input", target)
+                .err()
+                .unwrap();
             assert_eq!(error.identity, "capability");
         }
     }
