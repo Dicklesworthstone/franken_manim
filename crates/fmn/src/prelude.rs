@@ -4,6 +4,10 @@
 //! crates. Less-common surfaces remain discoverable under `fmn::animation`,
 //! `fmn::library`, `fmn::scene`, and the other named modules.
 
+pub use crate::controls::{
+    ButtonBinding, ScalarControlBinding, add_button, add_checkbox, add_enable_disable_button,
+    add_slider, add_try_button,
+};
 pub use crate::exporting::{
     export_camera_bundle, export_camera_bundle_bytes, export_camera_bundle_with_fs,
 };
@@ -27,16 +31,16 @@ pub use fmn_core::constants::*;
 pub use fmn_core::rng::{Pcg64Dxsm, RngRoot};
 pub use fmn_core::types::{Record, Semantic, Vec3};
 pub use fmn_library::{
-    Annulus, Arc, ArcBetweenPoints, Arrow, Axes, BarChart, Brace, BraceLabel, Circle, Code,
-    CodeTheme, ComplexPlane, CoordinateFrame, CoordinateFrameError, CoordinateSystem, Cube,
-    Cylinder, DashedLine, DecimalNumber, Dot, Ellipse, FunctionGraph, GraphLayout, ImageMobject,
-    Integer, Line, LiveCoordinateSystem, Markdown, MarkdownMobject, MarkupText, NetworkGraph,
-    NumberLine, NumberPlane, ParametricCurve, Polygon, Rectangle, RegularPolygon, SampleSpace,
-    Sphere, Square, StreamLines, Style, SurroundingRectangle, TableMobject, Tex, TexMobject,
-    TexText, Text, TextMobject, ThreeDAxes, ThreeDModel, VMobject, VStyle, VectorField,
-    curved_arrow, curved_double_arrow, curves_as_submobjects, dashed_vmobject, group, polyline,
-    rounded_rectangle, sector, small_dot, svg_mobject, tangent_line, triangle, v_group,
-    v_highlight, vector, vectorized_point,
+    Annulus, Arc, ArcBetweenPoints, Arrow, Axes, BarChart, Brace, BraceLabel, Button, Checkbox,
+    Circle, Code, CodeTheme, ComplexPlane, CoordinateFrame, CoordinateFrameError, CoordinateSystem,
+    Cube, Cylinder, DashedLine, DecimalNumber, Dot, Ellipse, EnableDisableButton, FunctionGraph,
+    GraphLayout, ImageMobject, Integer, Line, LinearNumberSlider, LiveCoordinateSystem, Markdown,
+    MarkdownMobject, MarkupText, NetworkGraph, NumberLine, NumberPlane, ParametricCurve, Polygon,
+    Rectangle, RegularPolygon, SampleSpace, Sphere, Square, StreamLines, Style,
+    SurroundingRectangle, TableMobject, Tex, TexMobject, TexText, Text, TextMobject, ThreeDAxes,
+    ThreeDModel, VMobject, VStyle, VectorField, curved_arrow, curved_double_arrow,
+    curves_as_submobjects, dashed_vmobject, group, polyline, rounded_rectangle, sector, small_dot,
+    svg_mobject, tangent_line, triangle, v_group, v_highlight, vector, vectorized_point,
 };
 pub use fmn_mobject::{
     AnimBuilder, AnimateArgs, AnimateError, Mob, Mobject, PosTarget, StageError, UpdaterError,

@@ -828,6 +828,23 @@ impl EventDispatcher {
         self.listeners.len() != before
     }
 
+    /// Remove a token only when its registered target also matches.
+    ///
+    /// Mobject binding handles use this after their geometry is deleted, or
+    /// when handed another Scene: listener ids are dispatcher-local, while a
+    /// mobject target also carries its arena identity and generation. Global
+    /// targets retain the ordinary dispatcher-local token semantics.
+    pub fn remove_listener_for_target(&mut self, id: EventListenerId, target: EventTarget) -> bool {
+        if !self
+            .listeners
+            .iter()
+            .any(|slot| slot.id == id && slot.listener.target == target)
+        {
+            return false;
+        }
+        self.remove_listener(id)
+    }
+
     /// Remove every listener matching a target and event class.
     pub fn remove_listeners(&mut self, target: EventTarget, event_type: EventType) -> usize {
         let removed: Vec<_> = self
@@ -993,6 +1010,47 @@ mod tests {
             key: Key::Character(key),
             modifiers: Modifiers::NONE,
         }
+    }
+
+    #[test]
+    fn target_checked_removal_refuses_coincident_foreign_ids_and_accepts_stale_targets() {
+        let mut first = Stage::new();
+        let mut second = Stage::new();
+        let first_mob = first.add(Mobject::new());
+        let second_mob = second.add(Mobject::new());
+        let mut first_dispatcher = EventDispatcher::new();
+        let mut second_dispatcher = EventDispatcher::new();
+        let listener = |mob| {
+            EventListener::new(
+                EventType::MouseDrag,
+                EventTarget::Mobject(mob),
+                |_, _, _, _| EventPropagation::Continue,
+            )
+        };
+        let first_id = first_dispatcher.add_listener(listener(first_mob)).unwrap();
+        let second_id = second_dispatcher
+            .add_listener(listener(second_mob))
+            .unwrap();
+        assert_eq!(first_id, second_id);
+        assert!(
+            !second_dispatcher
+                .remove_listener_for_target(first_id, EventTarget::Mobject(first_mob))
+        );
+        assert_eq!(second_dispatcher.listener_count(), 1);
+        first_dispatcher.drag_capture.push(first_id);
+        first.delete(first_mob).unwrap();
+        assert!(
+            first_dispatcher.remove_listener_for_target(first_id, EventTarget::Mobject(first_mob))
+        );
+        assert!(first_dispatcher.drag_capture.is_empty());
+        assert_eq!(first_dispatcher.listener_count(), 0);
+        assert!(
+            !first_dispatcher.remove_listener_for_target(first_id, EventTarget::Mobject(first_mob))
+        );
+        assert!(
+            second_dispatcher
+                .remove_listener_for_target(second_id, EventTarget::Mobject(second_mob))
+        );
     }
 
     #[test]

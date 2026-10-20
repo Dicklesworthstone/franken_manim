@@ -68,6 +68,7 @@ use fmn_scene::{
 };
 use fmn_tex::{TexEngine, TexError, TexSession, TypesetRequest, TypesetSessionReport};
 
+pub mod controls;
 pub mod exporting;
 pub mod prelude;
 pub mod rendering;
