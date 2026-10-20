@@ -28,15 +28,23 @@ fn root() -> PathBuf {
 fn recording(root: &Path) -> (PathBuf, Vec<f32>) {
     let mut records = RecordBuffer::new(RecordSchema::vmobject(), 3).unwrap();
     records.write_range(
-        "point", 0, &[-2.0, -1.0, 0.0, -0.5, 1.0, 0.0, 1.0, -1.0, 0.0],
+        "point",
+        0,
+        &[-2.0, -1.0, 0.0, -0.5, 1.0, 0.0, 1.0, -1.0, 0.0],
     );
     records.write_range("fill_rgba", 0, &[0.2, 0.6, 1.0, 1.0].repeat(3));
     let mut stage = Stage::new();
     let mob = stage.add(Mobject::from_buffer(records));
     stage.add_to_scene(mob).unwrap();
-    stage.add_dt_updater(mob, |stage, mob, dt| {
-        stage.shift(mob, [dt, 0.0, 0.0]);
-    }, false).unwrap();
+    stage
+        .add_dt_updater(
+            mob,
+            |stage, mob, dt| {
+                stage.shift(mob, [dt, 0.0, 0.0]);
+            },
+            false,
+        )
+        .unwrap();
     let mut timeline = Timeline::new(8).unwrap();
     timeline.wait(0.375).unwrap();
     timeline.wait(0.625).unwrap();
@@ -58,10 +66,24 @@ fn recording(root: &Path) -> (PathBuf, Vec<f32>) {
     (source, pcm)
 }
 
-fn invoke(source: &Path, directory: &Path, format: &str, extra: &[&str], empty_path: bool) -> Output {
+fn invoke(
+    source: &Path,
+    directory: &Path,
+    format: &str,
+    extra: &[&str],
+    empty_path: bool,
+) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_fmn"));
-    command.current_dir(source.parent().unwrap())
-        .args(["--robot", "--format", format, "--resolution", "32x24", "--video_dir"])
+    command
+        .current_dir(source.parent().unwrap())
+        .args([
+            "--robot",
+            "--format",
+            format,
+            "--resolution",
+            "32x24",
+            "--video_dir",
+        ])
         .arg(directory)
         .args(extra)
         .arg(source)
@@ -76,10 +98,20 @@ fn invoke(source: &Path, directory: &Path, format: &str, extra: &[&str], empty_p
 
 fn success(output: Output) -> String {
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(output.status.success(), "{stdout}\n{}", String::from_utf8_lossy(&output.stderr));
-    assert!(stdout.contains("\"kind\":\"bundle-audio-render\""), "{stdout}");
+    assert!(
+        output.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("\"kind\":\"bundle-audio-render\""),
+        "{stdout}"
+    );
     assert!(stdout.contains("\"certified\":false"), "{stdout}");
-    assert!(stdout.contains("\"sample_rate\":48000,\"channels\":2"), "{stdout}");
+    assert!(
+        stdout.contains("\"sample_rate\":48000,\"channels\":2"),
+        "{stdout}"
+    );
     stdout
 }
 
@@ -89,7 +121,10 @@ fn assert_wav(path: &Path, expected: &[f32]) {
     assert_eq!((audio.sample_rate, audio.channels), (48_000, 2));
     assert_eq!(audio.samples.len(), expected.len());
     for (&actual, &original) in audio.samples.iter().zip(expected) {
-        assert!((actual - original).abs() <= 1.0 / 32768.0, "canonical S16 quantization drift");
+        assert!(
+            (actual - original).abs() <= 1.0 / 32768.0,
+            "canonical S16 quantization drift"
+        );
     }
 }
 
@@ -120,8 +155,11 @@ fn ffmpeg() -> Option<PathBuf> {
             .find(|path| path.is_file())
     });
     if found.is_none() {
-        assert_ne!(std::env::var("FMN_REQUIRE_FULL_INPUTS").as_deref(), Ok("1"),
-            "real narrated video acceptance requires ffmpeg");
+        assert_ne!(
+            std::env::var("FMN_REQUIRE_FULL_INPUTS").as_deref(),
+            Ok("1"),
+            "real narrated video acceptance requires ffmpeg"
+        );
         eprintln!("real narrated video acceptance skipped: ffmpeg is not installed");
     }
     found.map(|path| path.canonicalize().unwrap())
@@ -129,39 +167,81 @@ fn ffmpeg() -> Option<PathBuf> {
 
 fn decoded(ffmpeg: &Path, artifact: &Path, audio: bool) -> Vec<u8> {
     let mut command = Command::new(ffmpeg);
-    command.args(["-v", "error", "-nostdin", "-i"]).arg(artifact);
+    command
+        .args(["-v", "error", "-nostdin", "-i"])
+        .arg(artifact);
     if audio {
-        command.args(["-map", "0:a:0", "-c:a", "pcm_f32le", "-f", "f32le", "pipe:1"]);
+        command.args([
+            "-map",
+            "0:a:0",
+            "-c:a",
+            "pcm_f32le",
+            "-f",
+            "f32le",
+            "pipe:1",
+        ]);
     } else {
-        command.args(["-map", "0:v:0", "-fps_mode", "passthrough", "-pix_fmt", "rgba", "-f", "rawvideo", "pipe:1"]);
+        command.args([
+            "-map",
+            "0:v:0",
+            "-fps_mode",
+            "passthrough",
+            "-pix_fmt",
+            "rgba",
+            "-f",
+            "rawvideo",
+            "pipe:1",
+        ]);
     }
     let output = command.output().unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     output.stdout
 }
 
 fn assert_encoded_audio(ffmpeg: &Path, artifact: &Path, expected: &[f32]) {
     let bytes = decoded(ffmpeg, artifact, true);
     assert_eq!(bytes.len() % 4, 0);
-    let samples: Vec<_> = bytes.chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap())).collect();
-    assert!(samples.len() >= expected.len(), "encoded soundtrack was truncated");
-    assert!(samples.len() <= expected.len() + 4096, "unexpected encoded duration");
+    let samples: Vec<_> = bytes
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+        .collect();
+    assert!(
+        samples.len() >= expected.len(),
+        "encoded soundtrack was truncated"
+    );
+    assert!(
+        samples.len() <= expected.len() + 4096,
+        "unexpected encoded duration"
+    );
     let start = 2048;
     let end = expected.len() - 2048;
-    let squared_error: f64 = samples[start..end].iter().zip(&expected[start..end])
-        .map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2)).sum();
+    let squared_error: f64 = samples[start..end]
+        .iter()
+        .zip(&expected[start..end])
+        .map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2))
+        .sum();
     let mse = squared_error / f64::from(u32::try_from(end - start).unwrap());
-    assert!(mse < 0.001, "wrong, silent, shifted or channel-swapped soundtrack: MSE={mse}");
+    assert!(
+        mse < 0.001,
+        "wrong, silent, shifted or channel-swapped soundtrack: MSE={mse}"
+    );
 }
 
 #[test]
 fn shipping_mp4_and_alpha_mov_preserve_pictures_channels_and_audio_tail() {
-    let Some(ffmpeg) = ffmpeg() else { return; };
+    let Some(ffmpeg) = ffmpeg() else {
+        return;
+    };
     let root = root();
     let (source, pcm) = recording(&root);
-    for (extension, extra) in [("mp4", vec!["--threads", "1"]),
-                               ("mov", vec!["--threads", "4", "--transparent"])] {
+    for (extension, extra) in [
+        ("mp4", vec!["--threads", "1"]),
+        ("mov", vec!["--threads", "4", "--transparent"]),
+    ] {
         let directory = root.join(extension);
         let stdout = success(invoke(&source, &directory, "video", &extra, false));
         assert!(stdout.contains("\"frames\":8"), "{stdout}");
@@ -182,15 +262,26 @@ fn shipping_mp4_and_alpha_mov_preserve_pictures_channels_and_audio_tail() {
 
 #[test]
 fn shipping_video_subdivision_preserves_original_audio_offsets() {
-    let Some(ffmpeg) = ffmpeg() else { return; };
+    let Some(ffmpeg) = ffmpeg() else {
+        return;
+    };
     let root = root();
     let (source, pcm) = recording(&root);
     let clips = root.join("video-clips");
-    let stdout = success(invoke(&source, &clips, "video", &["--subdivide", "--threads", "4"], false));
+    let stdout = success(invoke(
+        &source,
+        &clips,
+        "video",
+        &["--subdivide", "--threads", "4"],
+        false,
+    ));
     assert_eq!(stdout.lines().count(), 2);
     for (index, start, end, frame_count) in [(0, 0, 36_000, 3), (1, 36_000, 96_000, 5)] {
         let artifact = clips.join(format!("Narrated/{index:05}.mp4"));
-        assert_eq!(decoded(&ffmpeg, &artifact, false).len(), frame_count * 32 * 24 * 4);
+        assert_eq!(
+            decoded(&ffmpeg, &artifact, false).len(),
+            frame_count * 32 * 24 * 4
+        );
         assert_encoded_audio(&ffmpeg, &artifact, &pcm[start..end]);
     }
 }
@@ -208,27 +299,49 @@ fn shipping_range_selection_extracts_exact_wav_without_a_source_runtime() {
         assert_wav(&directory.join(format!("{name}.wav")), &pcm[36_000..96_000]);
     }
     let clips = root.join("selected-clips");
-    let stdout = success(invoke(&source, &clips, "wav", &["-n", "1,2", "--subdivide"], true));
+    let stdout = success(invoke(
+        &source,
+        &clips,
+        "wav",
+        &["-n", "1,2", "--subdivide"],
+        true,
+    ));
     assert_eq!(stdout.lines().count(), 1);
     assert!(stdout.contains("\"subdivision\":1"), "{stdout}");
     assert!(!clips.join("Narrated_1_2/00000.wav").exists());
     assert_wav(&clips.join("Narrated_1_2/00001.wav"), &pcm[36_000..96_000]);
     let invalid = root.join("outside");
-    assert!(!invoke(&source, &invalid, "wav", &["-n", "1,3"], true).status.success());
+    assert!(
+        !invoke(&source, &invalid, "wav", &["-n", "1,3"], true)
+            .status
+            .success()
+    );
     assert!(!invalid.exists());
 }
 
 #[test]
 fn shipping_selected_alpha_video_matches_full_frame_slice_and_original_sound() {
-    let Some(ffmpeg) = ffmpeg() else { return; };
+    let Some(ffmpeg) = ffmpeg() else {
+        return;
+    };
     let root = root();
     let (source, pcm) = recording(&root);
     let full = root.join("full");
-    success(invoke(&source, &full, "video", &["--transparent", "--threads", "1"], false));
+    success(invoke(
+        &source,
+        &full,
+        "video",
+        &["--transparent", "--threads", "1"],
+        false,
+    ));
     let reference = decoded(&ffmpeg, &full.join("Narrated.mov"), false);
     assert_eq!(reference.len(), 8 * 32 * 24 * 4);
     for subdivide in [false, true] {
-        let directory = root.join(if subdivide { "selected-clips" } else { "selected" });
+        let directory = root.join(if subdivide {
+            "selected-clips"
+        } else {
+            "selected"
+        });
         let mut arguments = vec!["--transparent", "--threads", "4", "-n", "1,2"];
         if subdivide {
             arguments.push("--subdivide");
@@ -238,7 +351,11 @@ fn shipping_selected_alpha_video_matches_full_frame_slice_and_original_sound() {
         assert!(stdout.contains("\"source_frames\":[3,8]"), "{stdout}");
         assert!(stdout.contains("\"sample_frames\":30000"), "{stdout}");
         assert!(stdout.contains("\"outstanding_slots\":0"), "{stdout}");
-        let path = directory.join(if subdivide { "Narrated_1_2/00001.mov" } else { "Narrated_1_2.mov" });
+        let path = directory.join(if subdivide {
+            "Narrated_1_2/00001.mov"
+        } else {
+            "Narrated_1_2.mov"
+        });
         // qtrle's lossless alpha path permits an exact decoded-pixel comparison.
         assert_eq!(decoded(&ffmpeg, &path, false), reference[3 * 32 * 24 * 4..]);
         assert_encoded_audio(&ffmpeg, &path, &pcm[36_000..96_000]);

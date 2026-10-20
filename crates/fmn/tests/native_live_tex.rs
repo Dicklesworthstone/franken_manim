@@ -75,13 +75,11 @@ impl SceneConstruct for LiveFormula {
         match self.0 {
             NumberMode::Animate => {
                 stage.play(
-                    change_decimal_to_value(slot, decimal, book, 1234.5)?.with_config(
-                        AnimConfig {
-                            run_time: 0.5,
-                            rate_func: RateFunc::linear(),
-                            ..AnimConfig::default()
-                        },
-                    ),
+                    change_decimal_to_value(slot, decimal, book, 1234.5)?.with_config(AnimConfig {
+                        run_time: 0.5,
+                        rate_func: RateFunc::linear(),
+                        ..AnimConfig::default()
+                    }),
                 )?;
             }
             NumberMode::Endpoint => {
@@ -162,11 +160,11 @@ fn second_live_tex_number_matches_independently_placed_endpoint_pixels() {
     assert_eq!(actual, pixels(&fs, "/live-tex-parallel.png"));
     assert_ne!(actual, pixels(&fs, "/original-tex.png"));
     let rgba = actual.as_chunks::<4>().0;
-    assert!(rgba.iter().any(|pixel| pixel[2] > pixel[0] && pixel[2] > 64));
     assert!(
         rgba.iter()
-            .any(|pixel| pixel[0] > 128 && pixel[1] > 128)
+            .any(|pixel| pixel[2] > pixel[0] && pixel[2] > 64)
     );
+    assert!(rgba.iter().any(|pixel| pixel[0] > 128 && pixel[1] > 128));
 }
 
 struct MatchLiveFormula;

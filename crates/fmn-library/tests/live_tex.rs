@@ -115,8 +115,14 @@ fn second_occurrence_uses_installed_root_live_paint_and_affine_fit_without_first
         binding.occurrences(&stage, "12.0").unwrap(),
         [occurrences[0].clone()],
     );
-    assert_eq!(binding.occurrences(&stage, r"\decimalmob").unwrap(), [vec![slot]]);
-    assert_eq!(stage.get_fill_color(slot).unwrap().to_rgb8(), BLUE.to_rgb8());
+    assert_eq!(
+        binding.occurrences(&stage, r"\decimalmob").unwrap(),
+        [vec![slot]]
+    );
+    assert_eq!(
+        stage.get_fill_color(slot).unwrap().to_rgb8(),
+        BLUE.to_rgb8()
+    );
     assert!((stage.get_fill_opacity(slot).unwrap() - 0.6).abs() < 1e-6);
     let members = stage.get(slot).unwrap().submobjects();
     let background = members[0];
@@ -172,7 +178,10 @@ fn second_occurrence_uses_installed_root_live_paint_and_affine_fit_without_first
     assert!(animation.deferred_error().is_none());
     close(stage.get_bounding_box_point(slot, LEFT), anchor);
     assert_ne!(family_points(&stage, slot), initial);
-    assert_eq!(binding.occurrences(&stage, r"\decimalmob").unwrap(), [vec![slot]]);
+    assert_eq!(
+        binding.occurrences(&stage, r"\decimalmob").unwrap(),
+        [vec![slot]]
+    );
     for (mob, points, placement, color) in untouched {
         assert!(stage.get(root).unwrap().submobjects().contains(&mob));
         assert_eq!(stage.get_points(mob).unwrap(), points);
@@ -236,13 +245,13 @@ fn fraction_rules_and_macro_enclosing_ink_keep_identity_and_emission_order() {
         ),
     ] {
         let mut stage = Stage::new();
-        let built = Tex::new(source)
-            .preamble(preamble)
-            .build(&engine)
-            .unwrap();
+        let built = Tex::new(source).preamble(preamble).build(&engine).unwrap();
         let spans = built.span_map();
         assert!(
-            spans.entries.iter().any(|entry| entry.kind == SpanKindU8::MathRule),
+            spans
+                .entries
+                .iter()
+                .any(|entry| entry.kind == SpanKindU8::MathRule),
         );
         let root = stage.add(built);
         let mut binding = TexSpanBinding::new(&stage, root, spans).unwrap();
@@ -280,7 +289,13 @@ fn fraction_rules_and_macro_enclosing_ink_keep_identity_and_emission_order() {
             assert_eq!(stage.get_points(mob).unwrap(), points);
         }
         for span in &binding.span_map().entries {
-            assert!(binding.span_map().source.get(span.start..span.end).is_some());
+            assert!(
+                binding
+                    .span_map()
+                    .source
+                    .get(span.start..span.end)
+                    .is_some()
+            );
         }
         if !preamble.is_empty() {
             assert!(
@@ -301,11 +316,7 @@ fn synthetic(stage: &mut Stage, source: &str, ranges: &[(usize, usize)]) -> TexS
         .enumerate()
         .map(|(index, _)| {
             let x = index as f64;
-            Mobject::from_points(&[
-                [x, 0.0, 0.0],
-                [x + 0.25, 1.0, 0.0],
-                [x + 0.5, 0.0, 0.0],
-            ])
+            Mobject::from_points(&[[x, 0.0, 0.0], [x + 0.25, 1.0, 0.0], [x + 0.5, 0.0, 0.0]])
         })
         .collect();
     let mut tree = Mobject::new();
@@ -360,7 +371,10 @@ fn unicode_source_offsets_are_rewritten_without_reordering_native_parts() {
         .unwrap();
     let numbers = [first, second];
     assert_eq!(family_points(&stage, numbers[1].mobject()), second_points);
-    assert_eq!(binding.span_map().source.as_ref(), "é\\decimalmob+λ\\decimalmob");
+    assert_eq!(
+        binding.span_map().source.as_ref(),
+        "é\\decimalmob+λ\\decimalmob"
+    );
     assert_eq!(binding.occurrences(&stage, "é").unwrap(), [vec![before[0]]]);
     assert_eq!(binding.occurrences(&stage, "λ").unwrap(), [vec![before[3]]]);
     assert_eq!(
@@ -384,13 +398,7 @@ fn invalid_index_number_format_geometry_and_source_ownership_are_transactional()
     for result in [
         binding.make_number_changeable(&mut stage, "1.0", 2, decimal(), &book()),
         binding.make_number_changeable(&mut stage, "a", 0, decimal(), &book()),
-        binding.make_number_changeable(
-            &mut stage,
-            "1.0",
-            0,
-            decimal().font_size(1e100),
-            &book(),
-        ),
+        binding.make_number_changeable(&mut stage, "1.0", 0, decimal().font_size(1e100), &book()),
     ] {
         assert!(result.is_err());
     }
@@ -498,7 +506,10 @@ fn copied_binding_remaps_slots_and_snapshot_restore_requires_matching_provenance
     assert!(original_binding.for_copy(&stage, &copied).is_err());
     stage.restore(&snapshot);
     assert!(binding.occurrences(&stage, "1.0").is_err());
-    assert_eq!(original_binding.occurrences(&stage, "1.0").unwrap().len(), 1);
+    assert_eq!(
+        original_binding.occurrences(&stage, "1.0").unwrap().len(),
+        1
+    );
 }
 
 #[test]

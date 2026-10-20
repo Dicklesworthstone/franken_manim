@@ -634,7 +634,10 @@ impl MonoTable {
         map: ScreenMap,
         limits: MonoTableLimits,
     ) -> Result<(), MonoTableError> {
-        if self.matches_plan(plan) && self.map == map && self.ranges.len() == plan.shapes().shapes().len() {
+        if self.matches_plan(plan)
+            && self.map == map
+            && self.ranges.len() == plan.shapes().shapes().len()
+        {
             return Ok(());
         }
         let shapes = plan.shapes().shapes();
@@ -666,12 +669,12 @@ impl MonoTable {
                 resource: "monotone shape ranges",
                 requested: shapes.len(),
             })?;
-        self.curves
-            .try_reserve(max_subpath_segments)
-            .map_err(|_| MonoTableError::AllocationFailed {
+        self.curves.try_reserve(max_subpath_segments).map_err(|_| {
+            MonoTableError::AllocationFailed {
                 resource: "monotone subpath scratch",
                 requested: max_subpath_segments,
-            })?;
+            }
+        })?;
 
         self.pieces.clear();
         self.ranges.clear();

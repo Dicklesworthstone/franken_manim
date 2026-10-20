@@ -8374,15 +8374,17 @@ fn frozen_render_packet_pipeline_run(ctx: &mut RunCtx) -> Result<RunOutcome, Sce
         engine: EngineIdentity::certified(),
     };
     let frozen = built.stage.freeze_render_state();
-    let mut compiler_a = VectorFrameCompiler::new(rcfg)
-        .map_err(|error| fail(format!("compiler_a new: {error}")))?;
+    let mut compiler_a =
+        VectorFrameCompiler::new(rcfg).map_err(|error| fail(format!("compiler_a new: {error}")))?;
     let _via_stage = compiler_a
         .capture(&built.stage, 0)
         .map_err(|error| fail(format!("capture stage: {error}")))?;
     let worker_stats = std::thread::spawn(move || {
         let worker_stage = frozen.materialize();
         let mut compiler_b = VectorFrameCompiler::new(rcfg).expect("compiler_b new");
-        let _via_frozen = compiler_b.capture(&worker_stage, 0).expect("capture frozen");
+        let _via_frozen = compiler_b
+            .capture(&worker_stage, 0)
+            .expect("capture frozen");
         compiler_b.stats()
     })
     .join()
@@ -11528,15 +11530,10 @@ fn rebless_e2e_render_matrix_frames_and_panel() {
                 1,
             )
             .expect("the certified engine renders");
-            convert_for_sink(
-                &frame,
-                SinkKind::PngSequence,
-                preset.width,
-                preset.height,
-            )
-            .expect("certified frames convert")
-            .as_bytes()
-            .to_vec()
+            convert_for_sink(&frame, SinkKind::PngSequence, preset.width, preset.height)
+                .expect("certified frames convert")
+                .as_bytes()
+                .to_vec()
         })
         .collect();
     if let Some(dir) = frames_dir {

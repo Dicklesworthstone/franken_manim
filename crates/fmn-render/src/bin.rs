@@ -707,7 +707,10 @@ impl Binning {
                 })?;
         }
         self.scratch.macro_offsets[coarse.count()] = macro_running;
-        let macro_slack = instances.len().saturating_mul(coarse.count().max(1)).max(64);
+        let macro_slack = instances
+            .len()
+            .saturating_mul(coarse.count().max(1))
+            .max(64);
         reuse_filled(
             &mut self.scratch.macro_members_flat,
             "macrotile references",
@@ -906,7 +909,13 @@ impl Binning {
         let offset_count = n.checked_add(1).ok_or(BinningError::CountOverflow {
             resource: "tile offsets",
         })?;
-        reuse_filled(&mut self.offsets, "tile offsets", offset_count, 0u32, offset_count)?;
+        reuse_filled(
+            &mut self.offsets,
+            "tile offsets",
+            offset_count,
+            0u32,
+            offset_count,
+        )?;
         reuse_filled(
             &mut self.scratch.tile_cursors,
             "partition cursor cells",
@@ -918,11 +927,11 @@ impl Binning {
         self.offsets[0] = 0;
         for t in 0..n {
             self.scratch.tile_cursors[t] = running;
-            running = running
-                .checked_add(self.scratch.tile_counts[t])
-                .ok_or(BinningError::CountOverflow {
+            running = running.checked_add(self.scratch.tile_counts[t]).ok_or(
+                BinningError::CountOverflow {
                     resource: "CSR command count",
-                })?;
+                },
+            )?;
             self.offsets[t + 1] = running;
         }
 
@@ -930,7 +939,13 @@ impl Binning {
             resource: "draw indices",
             requested: u64::from(running),
         })?;
-        reuse_filled(&mut self.draws, "draw indices", draw_count, 0u32, fine_slack)?;
+        reuse_filled(
+            &mut self.draws,
+            "draw indices",
+            draw_count,
+            0u32,
+            fine_slack,
+        )?;
         for i in 0..instances.len() {
             let instance = u32::try_from(i).map_err(|_| BinningError::AddressSpace {
                 resource: "instance index",

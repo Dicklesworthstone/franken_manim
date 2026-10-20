@@ -290,7 +290,8 @@ fn real_ffmpeg_p010_hevc_retains_more_than_256_luma_levels_and_color_tags() {
     }
 
     let (width, height) = (512u32, 64u32);
-    let mut src = FrameBuffer::new(FrameLayout::tight(PixelFormat::Rgba16F, width, height).unwrap());
+    let mut src =
+        FrameBuffer::new(FrameLayout::tight(PixelFormat::Rgba16F, width, height).unwrap());
     let src_stride = src.layout().stride(0);
     for x in 0..width as usize {
         let bits = f16_from_f32(srgb_decode(x as f64 / (width - 1) as f64) as f32);
@@ -370,4 +371,3 @@ fn real_ffmpeg_p010_hevc_retains_more_than_256_luma_levels_and_color_tags() {
         levels.len()
     );
 }
-

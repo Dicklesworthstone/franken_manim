@@ -1040,4 +1040,3 @@ fn top_level_reference_captures_match_provenance_when_present() {
         );
     }
 }
-

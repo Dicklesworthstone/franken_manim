@@ -422,10 +422,17 @@ mod tests {
         let b = compiled_soundtrack(pcm(), 3, &(1..2), false).unwrap();
         let c = compiled_soundtrack(pcm(), 3, &(2..3), false).unwrap();
         assert_eq!(
-            (a.audio.samples.len(), b.audio.samples.len(), c.audio.samples.len()),
+            (
+                a.audio.samples.len(),
+                b.audio.samples.len(),
+                c.audio.samples.len()
+            ),
             (6, 8, 6)
         );
-        let joined: Vec<_> = a.audio.samples.into_iter()
+        let joined: Vec<_> = a
+            .audio
+            .samples
+            .into_iter()
             .chain(b.audio.samples)
             .chain(c.audio.samples)
             .collect();
@@ -455,7 +462,10 @@ mod tests {
 
     #[test]
     fn frame_admission_has_no_prefix_charge_or_empty_range_escape() {
-        assert_eq!(admitted_frames(1000, Some(997..1000), 3).unwrap(), 997..1000);
+        assert_eq!(
+            admitted_frames(1000, Some(997..1000), 3).unwrap(),
+            997..1000
+        );
         assert!(admitted_frames(1000, None, 3).is_err());
         assert!(admitted_frames(1000, Some(997..1000), 2).is_err());
         assert!(admitted_frames(0, None, 1).is_err());
@@ -468,17 +478,39 @@ mod tests {
     fn borrowed_audio_is_reusable_and_matches_owned_replay_bit_for_bit() {
         let source = pcm();
         let original: Vec<_> = source.samples().iter().map(|v| v.to_bits()).collect();
-        for (range, full) in [(1..2, false), (0..3, true), (0..3, false), (1000..1001, false)] {
+        for (range, full) in [
+            (1..2, false),
+            (0..3, true),
+            (0..3, false),
+            (1000..1001, false),
+        ] {
             let borrowed = borrowed_soundtrack(&source, 3, &range, full).unwrap();
             let owned = compiled_soundtrack(pcm(), 3, &range, full).unwrap();
             assert_eq!(
-                borrowed.audio.samples.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-                owned.audio.samples.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+                borrowed
+                    .audio
+                    .samples
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>(),
+                owned
+                    .audio
+                    .samples
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>()
             );
             assert_eq!(borrowed.workers_used, 0);
             assert_eq!(borrowed.audio.sample_rate, source.sample_rate());
             assert_eq!(borrowed.audio.channels, source.channels());
-            assert_eq!(source.samples().iter().map(|v| v.to_bits()).collect::<Vec<_>>(), original);
+            assert_eq!(
+                source
+                    .samples()
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>(),
+                original
+            );
         }
     }
 }

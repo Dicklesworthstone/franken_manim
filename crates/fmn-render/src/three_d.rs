@@ -561,12 +561,12 @@ impl PreparationBudget {
         additional: usize,
     ) -> Result<(), ThreeDError> {
         let (requested, working_bytes) = self.admitted::<T>(resource, additional)?;
-        output.try_reserve(additional).map_err(|_| {
-            ThreeDError::PreparationAllocationFailed {
+        output
+            .try_reserve(additional)
+            .map_err(|_| ThreeDError::PreparationAllocationFailed {
                 resource: resource.resource(),
                 requested,
-            }
-        })?;
+            })?;
         self.set_rows(resource, requested);
         self.working_bytes = working_bytes;
         Ok(())
@@ -612,12 +612,12 @@ impl PreparationBudget {
             .checked_add(additional)
             .and_then(|value| u64::try_from(value).ok())
             .unwrap_or(u64::MAX);
-        output.try_reserve(additional).map_err(|_| {
-            ThreeDError::PreparationAllocationFailed {
+        output
+            .try_reserve(additional)
+            .map_err(|_| ThreeDError::PreparationAllocationFailed {
                 resource,
                 requested,
-            }
-        })?;
+            })?;
         self.working_bytes = working_bytes;
         Ok(())
     }

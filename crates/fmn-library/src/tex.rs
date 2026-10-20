@@ -249,7 +249,10 @@ impl core::fmt::Display for TexBindingError {
                 write!(f, "TeX literal {literal:?} is not a finite number")
             }
             Self::MissingOccurrence { index, count } => {
-                write!(f, "TeX occurrence {index} does not exist ({count} available)")
+                write!(
+                    f,
+                    "TeX occurrence {index} does not exist ({count} available)"
+                )
             }
             Self::AmbiguousSelection { reason } => {
                 write!(f, "TeX number selection is ambiguous: {reason}")
@@ -511,8 +514,7 @@ impl TexSpanBinding {
         if unique.len() != self.children.len() {
             return Err(invalid("a native child appears more than once"));
         }
-        if slots.len() != self.numeric_slots.len()
-            || slots.iter().any(|mob| !unique.contains(mob))
+        if slots.len() != self.numeric_slots.len() || slots.iter().any(|mob| !unique.contains(mob))
         {
             return Err(invalid("a numeric slot no longer belongs to the formula"));
         }
@@ -556,11 +558,7 @@ impl TexSpanBinding {
     }
 
     fn literal_ranges(&self, literal: &str) -> Result<Vec<(usize, usize)>, TexBindingError> {
-        tex_budget(
-            literal.len(),
-            MAX_TEX_BINDING_SOURCE_BYTES,
-            "query bytes",
-        )?;
+        tex_budget(literal.len(), MAX_TEX_BINDING_SOURCE_BYTES, "query bytes")?;
         let mut ranges = Vec::new();
         if !literal.is_empty() {
             for (start, matched) in self.spans.source.match_indices(literal) {
@@ -634,12 +632,14 @@ impl TexSpanBinding {
                 literal: literal.to_owned(),
             })?;
         let ranges = if let Some(index) = selected {
-            vec![*ranges
-                .get(index)
-                .ok_or(TexBindingError::MissingOccurrence {
-                    index,
-                    count: ranges.len(),
-                })?]
+            vec![
+                *ranges
+                    .get(index)
+                    .ok_or(TexBindingError::MissingOccurrence {
+                        index,
+                        count: ranges.len(),
+                    })?,
+            ]
         } else {
             ranges
         };
@@ -723,7 +723,9 @@ impl TexSpanBinding {
         // Shared, separately rooted, and pinned handles keep Stage's normal
         // ownership and deferred-deletion semantics.
         for mob in retired {
-            if stage.get(mob).is_some_and(|entry| entry.parents().is_empty())
+            if stage
+                .get(mob)
+                .is_some_and(|entry| entry.parents().is_empty())
                 && !stage.roots().contains(&mob)
             {
                 // The just-checked live leaf cannot become stale here:
@@ -747,7 +749,6 @@ fn tex_budget(count: usize, limit: usize, resource: &'static str) -> Result<(), 
         Ok(())
     }
 }
-
 
 fn rewrite_decimal_source(
     source: &str,
@@ -806,7 +807,11 @@ fn detached_number_points(
             "replacement family members",
         )?;
         *point_count = point_count.saturating_add(member.buffer.len());
-        tex_budget(*point_count, MAX_TEX_BINDING_POINTS, "point records examined")?;
+        tex_budget(
+            *point_count,
+            MAX_TEX_BINDING_POINTS,
+            "point records examined",
+        )?;
         if let Some(column) = member.buffer.read_column("point") {
             for xyz in column.as_chunks::<3>().0 {
                 let point = [f64::from(xyz[0]), f64::from(xyz[1]), f64::from(xyz[2])];
@@ -884,18 +889,28 @@ fn fit_number_to_parts(
     for &mob in selected {
         let entry = stage.get(mob).ok_or(AnimError::StaleHandle(mob))?;
         *point_count = point_count.saturating_add(entry.buffer.len());
-        tex_budget(*point_count, MAX_TEX_BINDING_POINTS, "point records examined")?;
+        tex_budget(
+            *point_count,
+            MAX_TEX_BINDING_POINTS,
+            "point records examined",
+        )?;
         if !entry
             .placement()
             .coefficients()
             .iter()
             .all(|value| value.is_finite())
         {
-            return Err(invalid("a selected glyph has nonfinite affine coefficients"));
+            return Err(invalid(
+                "a selected glyph has nonfinite affine coefficients",
+            ));
         }
         for point in stage.get_object_points(mob).unwrap_or_default() {
             let world = entry.placement().apply_point(point);
-            if !point.iter().chain(world.iter()).all(|value| value.is_finite()) {
+            if !point
+                .iter()
+                .chain(world.iter())
+                .all(|value| value.is_finite())
+            {
                 return Err(invalid("a selected glyph has nonfinite points"));
             }
             selected_points.push(if same_placement { point } else { world });
@@ -915,8 +930,7 @@ fn fit_number_to_parts(
     }
     let number_center = number.center();
     let target_center = target.center();
-    let translation =
-        std::array::from_fn(|axis| target_center[axis] - scale * number_center[axis]);
+    let translation = std::array::from_fn(|axis| target_center[axis] - scale * number_center[axis]);
     let placement = outer.compose(Placement::new(
         [[scale, 0.0, 0.0], [0.0, scale, 0.0], [0.0, 0.0, scale]],
         translation,

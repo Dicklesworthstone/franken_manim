@@ -354,8 +354,7 @@ fn runtime_or_consumed_row_with_pending_unsafe_audit_is_rejected() {
         "a consumed fuzz row with unsafe_audit=pending must be rejected"
     );
 
-    let preauthorized_pending =
-        "demo\t1.0.0\tcrates-io\tTBD\t-\tMIT\tno\tno\tno\tno\tpending\tpending\treason\tfm\tpolicy\n";
+    let preauthorized_pending = "demo\t1.0.0\tcrates-io\tTBD\t-\tMIT\tno\tno\tno\tno\tpending\tpending\treason\tfm\tpolicy\n";
     assert!(
         parse_allowlist(preauthorized_pending).is_ok(),
         "an unconsumed class=pending row may defer unsafe_audit until consumption"

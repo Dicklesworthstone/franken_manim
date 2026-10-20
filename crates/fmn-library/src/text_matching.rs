@@ -180,8 +180,7 @@ impl Binding {
         if spans.entries.len() > children.len() {
             return Err(invalid("there are more spans than direct children"));
         }
-        let numeric_slots: HashSet<Mob, IdBuildHasher> =
-            numeric_slots.iter().copied().collect();
+        let numeric_slots: HashSet<Mob, IdBuildHasher> = numeric_slots.iter().copied().collect();
         let mut topology = Vec::new();
         let mut owners = HashMap::<Mob, usize, IdBuildHasher>::default();
         let mut edges = children.len();
@@ -199,9 +198,7 @@ impl Binding {
             while let Some(mob) = pending.pop() {
                 if let Some(previous) = owners.insert(mob, owner) {
                     if previous != owner {
-                        return Err(invalid(
-                            "distinct source parts share a native descendant",
-                        ));
+                        return Err(invalid("distinct source parts share a native descendant"));
                     }
                     continue;
                 }

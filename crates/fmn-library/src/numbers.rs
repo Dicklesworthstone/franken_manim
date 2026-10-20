@@ -1199,11 +1199,7 @@ impl DecimalNumber {
     /// donor. Keep the background's own paint while propagating placement-
     /// independent render settings to every member. The caller can validate
     /// the complete detached result before editing an adopted formula.
-    pub(crate) fn with_live_paint(
-        &self,
-        stage: &Stage,
-        donor: Mob,
-    ) -> Result<Mobject, AnimError> {
+    pub(crate) fn with_live_paint(&self, stage: &Stage, donor: Mob) -> Result<Mobject, AnimError> {
         let entry = stage.get(donor).ok_or(AnimError::StaleHandle(donor))?;
         let uniforms = *entry.uniforms();
         let paint = NumberPaint::capture(stage, donor)?;

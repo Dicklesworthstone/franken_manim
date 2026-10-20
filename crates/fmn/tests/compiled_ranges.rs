@@ -106,7 +106,11 @@ fn selected_frames_equal_the_full_recording_without_replaying_callbacks_or_prefi
             assert_eq!(frame(&fs, &path, local), frame(&fs, "/full", local + 5));
         }
         assert!(!fs.exists(Path::new(&format!("{path}/frame_000004.png"))));
-        assert_eq!(calls.get(), callbacks_after_export, "compiled replay invoked scene code");
+        assert_eq!(
+            calls.get(),
+            callbacks_after_export,
+            "compiled replay invoked scene code"
+        );
     }
 }
 
@@ -175,8 +179,11 @@ fn a_range_never_authorizes_silent_picture_only_replay_of_attached_audio() {
     let pcm = BundleSoundtrack::new(48_000, 1, vec![0.25; 8]).unwrap();
     let bytes = attach_bundle_soundtrack(&pictures, &pcm, DEFAULT_MAX_BUNDLE_BYTES).unwrap();
     let fs = Arc::new(VirtualFs::new());
-    let result = options("/refused", RenderFormat::PngSequence, 1, 1)
-        .render_bundle_range_with_fs(&bytes, 5..9, fs.clone());
+    let result = options("/refused", RenderFormat::PngSequence, 1, 1).render_bundle_range_with_fs(
+        &bytes,
+        5..9,
+        fs.clone(),
+    );
     assert!(matches!(result, Err(RenderError::InvalidOptions(_))));
     assert!(!fs.exists(Path::new("/refused")));
 }
@@ -220,7 +227,10 @@ fn one_shared_recording_serves_concurrent_reordered_outputs_after_source_release
                 assert_eq!(report.artifact.frame_count, 4);
                 assert_eq!(report.frame_pipeline.unwrap().outstanding_slots, 0);
                 for index in 0..4 {
-                    assert_eq!(frame(&fs, &root, index), frame(&fs, "/reference", range.start + index));
+                    assert_eq!(
+                        frame(&fs, &root, index),
+                        frame(&fs, "/reference", range.start + index)
+                    );
                 }
             }));
         }
@@ -235,12 +245,19 @@ fn one_shared_recording_serves_concurrent_reordered_outputs_after_source_release
 #[test]
 fn failed_shared_output_does_not_consume_pictures_or_soundtrack() {
     let (bytes, _) = recording();
-    let shared = TimelineBundle::from_bytes(&bytes).unwrap().into_shared().unwrap();
+    let shared = TimelineBundle::from_bytes(&bytes)
+        .unwrap()
+        .into_shared()
+        .unwrap();
     let pcm = BundleSoundtrack::new(48_000, 1, vec![0.25; 8]).unwrap();
     let fs = Arc::new(VirtualFs::new());
     assert!(matches!(
-        options("/refused", RenderFormat::PngSequence, 1, 1)
-            .render_shared_bundle_with_fs(&shared, Some(&pcm), Some(5..9), fs.clone()),
+        options("/refused", RenderFormat::PngSequence, 1, 1).render_shared_bundle_with_fs(
+            &shared,
+            Some(&pcm),
+            Some(5..9),
+            fs.clone()
+        ),
         Err(RenderError::InvalidOptions(_))
     ));
     assert!(!fs.exists(Path::new("/refused")));
@@ -249,9 +266,11 @@ fn failed_shared_output_does_not_consume_pictures_or_soundtrack() {
         .render_shared_bundle_with_fs(&shared, None, Some(5..9), fs.clone())
         .unwrap();
     let kept = frame(&fs, "/kept", 0);
-    assert!(options("/kept", RenderFormat::PngSequence, 1, 1)
-        .render_shared_bundle_with_fs(&shared, None, Some(9..13), fs.clone())
-        .is_err());
+    assert!(
+        options("/kept", RenderFormat::PngSequence, 1, 1)
+            .render_shared_bundle_with_fs(&shared, None, Some(9..13), fs.clone())
+            .is_err()
+    );
     assert_eq!(frame(&fs, "/kept", 0), kept);
     let next = options("/next", RenderFormat::PngSequence, 4, 2)
         .render_shared_bundle_with_fs(&shared, None, Some(5..9), fs.clone())

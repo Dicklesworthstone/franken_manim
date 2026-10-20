@@ -707,9 +707,9 @@ impl Stage {
     }
 
     fn apply_affine_member(&mut self, member: Mob, affine: Placement) {
-        let has_live_view = self.get(member).is_some_and(|entry| {
-            !entry.buffer.is_empty() && entry.buffer.live_view_count() > 0
-        });
+        let has_live_view = self
+            .get(member)
+            .is_some_and(|entry| !entry.buffer.is_empty() && entry.buffer.live_view_count() > 0);
         if has_live_view {
             let _ = self.map_world_pointlikes(member, |point| affine.apply_point(point));
             return;

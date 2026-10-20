@@ -336,8 +336,9 @@ pub fn measure_pg6(
         let mut arena = FrameArena::new();
 
         let (mut frame, warm_frame_digest, warm, warm_mirrors) = {
-            plan.sync(&built.stage, 0)
-                .map_err(|error| Pg6Error::Fixture(format!("{} render plan: {error}", case.name)))?;
+            plan.sync(&built.stage, 0).map_err(|error| {
+                Pg6Error::Fixture(format!("{} render plan: {error}", case.name))
+            })?;
             mono.rebuild_in_place(&plan, config.map).map_err(|error| {
                 Pg6Error::Fixture(format!("{} monotone table: {error}", case.name))
             })?;
@@ -366,8 +367,9 @@ pub fn measure_pg6(
         };
 
         let (measured_frame_digest, measured) = {
-            plan.sync(&built.stage, 0)
-                .map_err(|error| Pg6Error::Fixture(format!("{} render plan: {error}", case.name)))?;
+            plan.sync(&built.stage, 0).map_err(|error| {
+                Pg6Error::Fixture(format!("{} render plan: {error}", case.name))
+            })?;
             mono.rebuild_in_place(&plan, config.map).map_err(|error| {
                 Pg6Error::Fixture(format!("{} monotone table: {error}", case.name))
             })?;
