@@ -756,7 +756,7 @@ mod tests {
             &fmn_core::rng::RngRoot::from_seed(0),
         )
         .unwrap();
-        let pcm = BundleSoundtrack::new(10, 2, vec![0.25, -0.5].repeat(14)).unwrap();
+        let pcm = BundleSoundtrack::new(10, 2, [0.25, -0.5].repeat(14)).unwrap();
         fmn_scene::timeline_bundle::attach_bundle_soundtrack(
             &pictures,
             &pcm,
@@ -781,7 +781,7 @@ mod tests {
         let decoded = fmn_codec::decode_wav(&wav, &fmn_codec::WavLimits::default()).unwrap();
         assert_eq!(decoded.sample_rate, 10);
         assert_eq!(decoded.channels, 2);
-        assert_eq!(decoded.samples, vec![0.25, -0.5].repeat(14));
+        assert_eq!(decoded.samples, [0.25, -0.5].repeat(14));
         assert!(output.stdout.contains("\"sample_frames\":14"));
         assert!(output.stdout.contains("\"certified\":false"));
         assert!(output.stdout.contains("\"manifest\":null"));
@@ -812,7 +812,7 @@ mod tests {
             joined.extend(audio.samples);
         }
         assert_eq!(counts, [3, 4, 3]);
-        assert_eq!(joined, vec![0.25, -0.5].repeat(10));
+        assert_eq!(joined, [0.25, -0.5].repeat(10));
         assert_eq!(output.stdout.lines().count(), 3);
     }
 

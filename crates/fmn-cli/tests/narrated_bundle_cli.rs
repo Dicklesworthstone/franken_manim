@@ -204,11 +204,9 @@ fn decoded(ffmpeg: &Path, artifact: &Path, audio: bool) -> Vec<u8> {
 
 fn assert_encoded_audio(ffmpeg: &Path, artifact: &Path, expected: &[f32]) {
     let bytes = decoded(ffmpeg, artifact, true);
-    assert_eq!(bytes.len() % 4, 0);
-    let samples: Vec<_> = bytes
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
-        .collect();
+    let (words, rest) = bytes.as_chunks::<4>();
+    assert!(rest.is_empty());
+    let samples: Vec<_> = words.iter().map(|word| f32::from_le_bytes(*word)).collect();
     assert!(
         samples.len() >= expected.len(),
         "encoded soundtrack was truncated"
@@ -253,8 +251,9 @@ fn shipping_mp4_and_alpha_mov_preserve_pictures_channels_and_audio_tail() {
         assert_eq!(pictures.len(), 8 * 32 * 24 * 4);
         assert_ne!(&pictures[..32 * 24 * 4], &pictures[7 * 32 * 24 * 4..]);
         if extension == "mov" {
-            assert!(pictures.chunks_exact(4).any(|pixel| pixel[3] == 0));
-            assert!(pictures.chunks_exact(4).any(|pixel| pixel[3] > 0));
+            let (pixels, _) = pictures.as_chunks::<4>();
+            assert!(pixels.iter().any(|pixel| pixel[3] == 0));
+            assert!(pixels.iter().any(|pixel| pixel[3] > 0));
         }
         assert_encoded_audio(&ffmpeg, &artifact, &pcm);
     }
