@@ -349,6 +349,10 @@ pub struct TexSpanBinding {
     numeric_slots: Vec<Mob>,
 }
 
+/// Per selected occurrence, the span-map entries it owns; per native child,
+/// the occurrence that owns it.
+type SelectedParts = (Vec<Vec<usize>>, Vec<Option<usize>>);
+
 impl TexSpanBinding {
     /// Bind a native map saved before adopting a Tex or TexText value. Entry
     /// i must still describe direct child i; mapped primitives must be leaves.
@@ -573,10 +577,7 @@ impl TexSpanBinding {
         Ok(ranges)
     }
 
-    fn selected_parts(
-        &self,
-        ranges: &[(usize, usize)],
-    ) -> Result<(Vec<Vec<usize>>, Vec<Option<usize>>), TexBindingError> {
+    fn selected_parts(&self, ranges: &[(usize, usize)]) -> Result<SelectedParts, TexBindingError> {
         let mut groups = vec![Vec::new(); ranges.len()];
         let mut owners = vec![None; self.children.len()];
         let mut seen_spans = vec![std::collections::BTreeSet::new(); ranges.len()];
