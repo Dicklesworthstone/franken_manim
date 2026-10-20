@@ -21,7 +21,8 @@
 //! Styling a **point-less** mobject is remembered until it gains points,
 //! as the Reference's one-record `_data_defaults` does (fm-sjl): the write
 //! lands in the buffer's phantom default record, which growth from zero
-//! adopts. The column writes themselves are Marionette's
+//! adopts. Getters observe that same record without creating geometry or
+//! inheriting a child's paint. The column writes themselves are Marionette's
 //! (`RecordBuffer::write_color_lanes` / `write_scalar_lanes`), shared with
 //! the `.animate` builder's style commands.
 
@@ -144,6 +145,8 @@ fn write_scalar(buffer: &mut RecordBuffer, field: &str, value: f64) {
 ///
 /// Every setter takes `recurse`, exactly as the Reference's do, and
 /// recursing means "the whole family", not "the direct children".
+/// Getters read the first actual record, or this object's own phantom
+/// default record when point-free. Missing or incompatible fields return None.
 pub trait VStyle {
     /// Reference `set_fill`: colour and/or opacity, plus the inner border
     /// width. `None` leaves that aspect untouched.
@@ -198,9 +201,10 @@ pub trait VStyle {
     /// stroke colour.
     fn get_color(&self, mob: Mob) -> Option<Srgb>;
     /// Reference `has_fill`: any record with a nonzero fill alpha.
+    /// A point-free object observes its own default record.
     fn has_fill(&self, mob: Mob) -> bool;
     /// Reference `has_stroke`: any record with both a nonzero width and a
-    /// nonzero alpha.
+    /// nonzero alpha. A point-free object observes its own default record.
     fn has_stroke(&self, mob: Mob) -> bool;
 }
 
@@ -212,9 +216,21 @@ fn family_of(stage: &Stage, mob: Mob, recurse: bool) -> Vec<Mob> {
     }
 }
 
+fn first_style_record<const N: usize>(stage: &Stage, mob: Mob, field: &str) -> Option<[f32; N]> {
+    let buffer = &stage.get(mob)?.buffer;
+    if buffer.schema().field_width(field) != Some(N) {
+        return None;
+    }
+    let values = if buffer.is_empty() {
+        buffer.default_record(field)?
+    } else {
+        buffer.read(0, field)?
+    };
+    values.try_into().ok()
+}
+
 fn first_rgba(stage: &Stage, mob: Mob, field: &str) -> Option<[f32; 4]> {
-    let v = stage.get(mob)?.buffer.read(0, field)?;
-    Some([v[0], v[1], v[2], v[3]])
+    first_style_record(stage, mob, field)
 }
 
 impl VStyle for Stage {
@@ -309,7 +325,7 @@ impl VStyle for Stage {
     }
 
     fn get_stroke_width(&self, mob: Mob) -> Option<f64> {
-        Some(f64::from(self.get(mob)?.buffer.read(0, "stroke_width")?[0]))
+        Some(f64::from(first_style_record::<1>(self, mob, "stroke_width")?[0]))
     }
 
     fn get_color(&self, mob: Mob) -> Option<Srgb> {
@@ -321,8 +337,18 @@ impl VStyle for Stage {
     }
 
     fn has_fill(&self, mob: Mob) -> bool {
-        self.get(mob)
-            .and_then(|e| e.buffer.read_column("fill_rgba"))
+        let Some(entry) = self.get(mob) else {
+            return false;
+        };
+        if entry.buffer.schema().field_width("fill_rgba") != Some(4) {
+            return false;
+        }
+        if entry.buffer.is_empty() {
+            return first_rgba(self, mob, "fill_rgba").is_some_and(|rgba| rgba[3] > 0.0);
+        }
+        entry
+            .buffer
+            .read_column("fill_rgba")
             .is_some_and(|c| c.as_chunks::<4>().0.iter().any(|rgba| rgba[3] > 0.0))
     }
 
@@ -330,14 +356,25 @@ impl VStyle for Stage {
         let Some(entry) = self.get(mob) else {
             return false;
         };
+        if entry.buffer.schema().field_width("stroke_rgba") != Some(4)
+            || entry.buffer.schema().field_width("stroke_width") != Some(1)
+        {
+            return false;
+        }
+        if entry.buffer.is_empty() {
+            return first_rgba(self, mob, "stroke_rgba").is_some_and(|rgba| rgba[3] != 0.0)
+                && self.get_stroke_width(mob).is_some_and(|width| width != 0.0);
+        }
         let Some(rgba) = entry.buffer.read_column("stroke_rgba") else {
             return false;
         };
         let Some(widths) = entry.buffer.read_column("stroke_width") else {
             return false;
         };
-        widths.iter().any(|w| *w != 0.0)
-            && rgba.as_chunks::<4>().0.iter().any(|rgba| rgba[3] != 0.0)
+        widths
+            .iter()
+            .zip(rgba.as_chunks::<4>().0)
+            .any(|(width, rgba)| *width != 0.0 && rgba[3] != 0.0)
     }
 }
 
@@ -376,8 +413,8 @@ mod tests {
     #[test]
     fn color_sets_both_stroke_and_fill() {
         let s = Style::default().color(RED);
-        assert_eq!(s.stroke_color, RED);
         assert_eq!(s.fill_color, RED);
+        assert_eq!(s.stroke_color, RED);
     }
 
     #[test]
@@ -549,7 +586,7 @@ mod tests {
 
         stage.set_fill(outline, Some(WHITE), Some(1.0), None, true);
         assert!(stage.has_fill(outline));
-        assert_color(stage.get_color(outline), WHITE); // fill wins once present
+        assert_color(stage.get_color(outline), WHITE);
 
         stage.set_stroke(outline, None, Some(0.0), None, None, true);
         assert!(!stage.has_stroke(outline), "zero width is no stroke");
@@ -567,5 +604,90 @@ mod tests {
         stage.set_backstroke(mob, WHITE, 3.0);
         assert!(stage.get(mob).unwrap().uniforms().stroke_behind);
         assert!(close(stage.get_stroke_width(mob).unwrap(), 3.0));
+    }
+
+    #[test]
+    fn point_free_getters_observe_own_paint_without_mutating_geometry() {
+        let mut stage = Stage::new();
+        let root = stage.add(
+            VMobject::new().with_child(
+                VMobject::from_points(vec![[0.0; 3], [1.0; 3], [2.0; 3]])
+                    .with_style(Style::default().fill(WHITE, 1.0)),
+            ),
+        );
+        stage.set_fill(root, Some(BLUE), Some(0.6), None, false);
+        stage.set_stroke(root, Some(RED), Some(2.5), Some(0.4), None, false);
+        let before = stage.snapshot_bytes().unwrap();
+        assert_color(stage.get_fill_color(root), BLUE);
+        assert_color(stage.get_stroke_color(root), RED);
+        assert!(close(stage.get_fill_opacity(root).unwrap(), 0.6));
+        assert!(close(stage.get_stroke_opacity(root).unwrap(), 0.4));
+        assert_eq!(stage.get_stroke_width(root), Some(2.5));
+        assert!(stage.has_fill(root));
+        assert!(stage.has_stroke(root));
+        assert_color(stage.get_color(root), BLUE);
+        assert_eq!(stage.snapshot_bytes().unwrap(), before);
+        assert!(stage.get(root).unwrap().buffer.is_empty());
+        let child = stage.get(root).unwrap().submobjects()[0];
+        assert_color(stage.get_fill_color(child), WHITE);
+        stage.set_fill(root, None, Some(0.0), None, false);
+        assert!(!stage.has_fill(root));
+        assert_color(stage.get_color(root), RED);
+        stage.set_stroke(root, None, Some(0.0), None, None, false);
+        assert!(!stage.has_stroke(root));
+    }
+
+    #[test]
+    fn copied_phantom_paint_reads_independently_before_growth() {
+        let mut stage = Stage::new();
+        let root = stage.add(VMobject::new());
+        stage.set_fill(root, Some(BLUE), Some(0.5), None, false);
+        let buffer = stage.get(root).unwrap().buffer.snapshot_clone();
+        let copy = stage.add(fmn_mobject::Mobject::from_buffer(buffer));
+        stage.set_fill(root, Some(RED), Some(0.25), None, false);
+        assert_color(stage.get_fill_color(root), RED);
+        assert_color(stage.get_fill_color(copy), BLUE);
+        assert_eq!(stage.get_fill_opacity(copy), Some(0.5));
+        stage.get_mut(copy).unwrap().buffer.resize(3).unwrap();
+        assert_color(stage.get_fill_color(copy), BLUE);
+        assert_eq!(stage.get_fill_opacity(copy), Some(0.5));
+    }
+
+    #[test]
+    fn populated_records_override_defaults_and_strokes_require_coincident_lanes() {
+        let mut stage = Stage::new();
+        let root = stage.add(VMobject::new());
+        stage.set_fill(root, Some(BLUE), Some(1.0), None, false);
+        stage.set_stroke(root, Some(RED), Some(4.0), Some(1.0), None, false);
+        stage.get_mut(root).unwrap().buffer.resize(3).unwrap();
+        stage.set_fill(root, Some(WHITE), Some(0.0), None, false);
+        assert_color(stage.get_fill_color(root), WHITE);
+        assert_eq!(stage.get_fill_opacity(root), Some(0.0));
+        assert!(!stage.has_fill(root));
+        let buffer = &mut stage.get_mut(root).unwrap().buffer;
+        assert!(buffer.write_range("stroke_width", 0, &[2.0, 0.0, 0.0]));
+        assert!(buffer.write_range(
+            "stroke_rgba",
+            0,
+            &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+        ));
+        assert!(!stage.has_stroke(root));
+        assert!(stage.get_mut(root).unwrap().buffer.write(1, "stroke_width", &[3.0]));
+        assert!(stage.has_stroke(root));
+    }
+
+    #[test]
+    fn absent_style_fields_and_foreign_handles_stay_absent() {
+        let mut stage = Stage::new();
+        let root = stage.add(fmn_mobject::Mobject::new());
+        assert_eq!(stage.get_fill_color(root), None);
+        assert_eq!(stage.get_stroke_width(root), None);
+        assert!(!stage.has_fill(root));
+        assert!(!stage.has_stroke(root));
+        let foreign = Stage::new();
+        assert_eq!(foreign.get_fill_color(root), None);
+        assert_eq!(foreign.get_stroke_width(root), None);
+        assert!(!foreign.has_fill(root));
+        assert!(!foreign.has_stroke(root));
     }
 }
