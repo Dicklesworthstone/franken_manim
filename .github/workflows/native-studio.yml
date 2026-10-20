@@ -6,6 +6,10 @@ on:
     paths:
       - 'crates/fmn-studio/**'
       - 'crates/fmn-scene/**'
+      - 'crates/fmn-cli/src/studio_recorded*'
+      - 'crates/fmn-cli/src/studio_recorded/**'
+      - 'crates/fmn-cli/src/main.rs'
+      - 'crates/fmn-cli/tests/narrated_studio_cli.rs'
       - 'scripts/check_native_project_host.py'
       - 'scripts/test_studio_audio.cjs'
       - '.github/workflows/native-studio.yml'
@@ -29,7 +33,7 @@ jobs:
       - name: Exercise bounded narration transport and device-clock scheduling
         run: node --test scripts/test_studio_audio.cjs
       - name: Archive exact tracked integration sources
-        run: git archive --format=tar.gz --output=native-studio-source.tar.gz HEAD crates/fmn-studio
+        run: git archive --format=tar.gz --output=native-studio-source.tar.gz HEAD crates/fmn-studio crates/fmn-cli
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: native-studio-source-${{ github.sha }}
@@ -80,3 +84,67 @@ jobs:
           python3 scripts/check_native_project_host.py \
             --host target/pg5/debug/examples/native_project \
             --cargo "$(rustup which cargo)"
+  narrated-cli:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+      CARGO_BUILD_JOBS: '2'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_TARGET_DIR: target/camera-acceptance-native
+      RUST_BACKTRACE: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install repository-pinned toolchain
+        run: rustup show active-toolchain
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/camera-acceptance-native
+          key: camera-acceptance-native-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      - name: Record exact tested revision
+        run: |
+          mkdir -p /tmp/narrated-studio
+          git rev-parse HEAD | tee /tmp/narrated-studio/source-sha.txt
+          git diff --check
+      - name: Exercise recorded Studio composition and worker protocol
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p fmn-cli --features cli,batch --bin fmn studio_recorded \
+            2>&1 | tee /tmp/narrated-studio/unit.log
+      - name: Check the binary with warnings denied
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --locked -p fmn-cli --features cli,batch --bin fmn -- -D warnings \
+            2>&1 | tee /tmp/narrated-studio/clippy.log
+      - name: Check formatting without changing tested sources
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustfmt --edition 2024 --check crates/fmn-cli/src/studio_recorded.rs \
+            2>&1 | tee /tmp/narrated-studio/format.log
+      - name: Retain exact sources and canonical-format suggestions
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          git archive --format=tar.gz --output=/tmp/narrated-studio/source.tar.gz HEAD crates/fmn-cli/src/studio_recorded.rs crates/fmn-cli/src/studio_recorded crates/fmn-cli/src/main.rs
+          mkdir -p /tmp/narrated-studio/formatted
+          for file in crates/fmn-cli/src/studio_recorded.rs crates/fmn-cli/src/studio_recorded/*.rs; do
+            rustfmt --edition 2024 --config skip_children=true --emit stdout "$file" > "/tmp/narrated-studio/formatted/$(basename "$file")"
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: narrated-studio-${{ github.sha }}
+          path: /tmp/narrated-studio/
+          retention-days: 7
+          if-no-files-found: error
