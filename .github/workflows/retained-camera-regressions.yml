@@ -10,8 +10,10 @@ on:
       - "crates/fmn/tests/native_cpu_pipeline.rs"
       - "crates/fmn/tests/compiled_ranges.rs"
       - "crates/fmn-cli/src/bundle_audio.rs"
+      - "crates/fmn-cli/src/bundle_audio/**"
       - "crates/fmn-cli/src/main.rs"
       - "crates/fmn-cli/tests/narrated_bundle_cli.rs"
+      - "crates/fmn-cli/tests/narrated_manifest_cli.rs"
       - "rust-toolchain.toml"
       - "Cargo.lock"
       - ".github/workflows/retained-camera-regressions.yml"
@@ -89,13 +91,20 @@ jobs:
             2>&1 | tee /tmp/camera-acceptance/compiled-pcm.log
           cargo test --locked -p fmn --test compiled_ranges \
             2>&1 | tee /tmp/camera-acceptance/compiled-ranges.log
-      - name: Execute standalone narrated WAV and subdivision tests
+      - name: Execute narrated replay and provenance unit tests
         if: ${{ !cancelled() && matrix.suite == 'native' }}
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --locked -p fmn-cli --features cli,batch --bin fmn bundle_audio::tests \
+          cargo test --locked -p fmn-cli --features cli,batch --bin fmn bundle_audio:: \
             2>&1 | tee /tmp/camera-acceptance/cli-bundle-audio.log
+      - name: Execute shipping certified WAV and manifest comparisons
+        if: ${{ !cancelled() && matrix.suite == 'native' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p fmn-cli --features cli,batch --test narrated_manifest_cli \
+            2>&1 | tee /tmp/camera-acceptance/cli-narrated-manifests.log
       - name: Install optional video tool for required media acceptance
         if: ${{ !cancelled() && matrix.suite == 'native' }}
         timeout-minutes: 10
@@ -114,6 +123,19 @@ jobs:
           set -euo pipefail
           cargo test --locked -p fmn-cli --features cli,batch --test narrated_bundle_cli \
             2>&1 | tee /tmp/camera-acceptance/cli-narrated-media.log
+      - name: Check narrated source formatting without changing tested files
+        if: ${{ !cancelled() && matrix.suite == 'native' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sources=(crates/fmn-cli/src/bundle_audio.rs crates/fmn-cli/src/bundle_audio/provenance.rs crates/fmn-cli/src/bundle_audio/tests.rs crates/fmn-cli/tests/narrated_manifest_cli.rs)
+          mkdir -p /tmp/camera-acceptance/formatted
+          for source in "${sources[@]}"; do
+            cp --parents "$source" /tmp/camera-acceptance/formatted/
+            rustfmt --edition 2024 --config skip_children=true "/tmp/camera-acceptance/formatted/$source"
+          done
+          rustfmt --edition 2024 --config skip_children=true --check "${sources[@]}" \
+            2>&1 | tee /tmp/camera-acceptance/narrated-format.log
       - name: Check affected targets with warnings denied
         if: ${{ !cancelled() }}
         shell: bash
@@ -127,7 +149,7 @@ jobs:
           else
             cargo clippy --locked -p fmn --lib --test native_camera_pipeline --test native_cpu_pipeline --test compiled_ranges -- -D warnings \
               2>&1 | tee /tmp/camera-acceptance/clippy.log
-            cargo clippy --locked -p fmn-cli --features cli,batch --bin fmn -- -D warnings \
+            cargo clippy --locked -p fmn-cli --features cli,batch --bin fmn --test narrated_manifest_cli -- -D warnings \
               2>&1 | tee /tmp/camera-acceptance/cli-clippy.log
           fi
       - name: Preserve test evidence

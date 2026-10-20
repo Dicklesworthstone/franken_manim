@@ -18,6 +18,8 @@ fmn lecture.fmtl --format wav --subdivide --video_dir media/audio-clips
 fmn lecture.fmtl --format video -n 2,5 --video_dir media/excerpt
 fmn lecture.fmtl --format wav -n 2 --video_dir media/audio-excerpt
 fmn lecture.fmtl --format video -n 2,5 --subdivide --video_dir media/selected-clips
+fmn lecture.fmtl --format wav --reproducible --video_dir media/certified
+fmn lecture.fmtl --format wav --reproducible -n 2,5 --subdivide --video_dir media/certified-clips
 ```
 
 `-w` also selects video. Opaque video is MP4; `--transparent` selects the existing
@@ -61,33 +63,76 @@ Each clip starts its output sequence at zero and cuts PCM at independently
 rounded absolute start/end boundaries. At 10 audio samples/second and 3 picture
 frames/second, adjacent one-frame clips have 3, 4 and 3 sample frames, not 3 each.
 
-Video subdivision now decodes and freezes the recording once for the entire
+Video subdivision decodes and freezes the recording once for the entire
 invocation. All outputs borrow the same immutable pictures, recorded camera
 track and retained PCM; each owns only its render pipeline and selected sample
 window. The source file is never reopened and the whole snapshot table is never
 re-decoded per clip. This describes eliminated work, not a measured speedup.
 
-Every destination is preflighted before publication. Existing files, dangling
-links and non-directory/link parents are refused. Native publication remains
-atomic and create-only, so a competing writer cannot be overwritten after that
-advisory preflight. Earlier published clips survive a later failure.
+## Provenance and reproducible WAV
+
+Every successful standalone narrated output has a sibling immutable directory,
+for example `lecture.wav.manifest`, containing canonical `manifest.fmnp`, readable
+`manifest.txt`, and the filesystem's `FMN_COMPLETE` marker. The existing FMNP
+reader and manifest comparison tools consume these files; there is no second
+manifest schema or hash algorithm.
+
+The closure binds all C1-C10 classes. C1 is the hash of the complete recording
+already read and validated, addressed as `compiled/recording.fmtl`, not its host
+path. C2/C3 identify the compiled source, complete SUITE.lock, pinned toolchain,
+profile and build target. C4 uses the shared canonical resolved configuration;
+thread and output-location normalization are not reimplemented here. Seeds,
+compiled font inventory, source reconstruction law, actual native execution
+engine, locale, filesystem/process capabilities and the selected source frame
+and segment ranges are recorded. The audio-tail and S16/no-dither policies are
+explicit inputs. Encoded video adds the actual ffmpeg native-image fingerprint,
+process policy, ordered invocation arguments and effective resource limits.
+
+Output hashes remain output evidence, never inputs to the closure digest.
+Soundtrack receipt rate/channel/frame counts are checked against independently
+computed source-clock expectations before sealing. Scheduling counters remain
+robot diagnostics and cannot change the semantic input identity.
+
+`--format wav --reproducible` and a resolved `determinism.mode: certified` select
+the existing canonical S16 WAV path, with a certified FMNP output. This adds no
+resampling, mixing, randomness or new audio arithmetic. The promise applies to
+replay of the complete, self-contained recording: it does not retroactively
+certify the scene, Python process, source-media processing or narration generator
+that originally created that recording. Full replay, exact excerpts and
+subdivision use the same sample-boundary and tail rules described above.
+
+Certification requires an identified build and an existing certified target:
+Linux x86-64/aarch64 with glibc or musl, or macOS aarch64. Unidentified/unverified
+builds and other targets are refused before publication. Standard-mode extraction
+remains available there. MP4/MOV are always uncertified ffmpeg products, and a
+certified video request is refused before acquiring ffmpeg, never downgraded.
+
+Every media destination and every manifest destination is preflighted before
+any selected clip is published. Existing files, dangling links and non-directory
+or link parents are refused. Both publication boundaries remain create-only,
+so a post-preflight competitor cannot be overwritten. Binary and text manifest
+representations publish together as one directory generation.
+
+Media and its sidecar are two publication boundaries, not one filesystem
+transaction. If media publication succeeds but its sidecar fails, the command
+fails without a successful render receipt for that clip. The media is retained,
+not deleted or replaced, and the error identifies the incomplete provenance
+publication. Earlier fully completed clips and their receipts survive a later
+failure. A successful receipt therefore means both media and manifest completed.
 
 `--robot` emits `fmn.cli` records with kind `bundle-audio-render`, source/output
-hashes, original `source_frames` and `source_segments` half-open ranges, and
-soundtrack rate/channel/sample counts. Video records include actual ffmpeg
-invocation provenance, effective resource limits and joined frame-pipeline
-counters. `--prerun` reports the selected stored schedule and its original ranges;
-it never runs a Scene. `--quiet` suppresses human success decoration, not robot
-records or errors.
+hashes, original `source_frames` and `source_segments` half-open ranges,
+soundtrack rate/channel/sample counts, and actual `certified` status. The
+`manifest` object contains `path`, `closure_digest` and `semantic_digest`.
+Video records also include ffmpeg provenance and joined frame-pipeline counters.
+`--prerun` reports the selected stored schedule; it never runs a Scene. `--quiet`
+suppresses human success decoration, not robot records or errors.
 
-This executable adapter is standard-mode only. It reports `certified: false`
-and `manifest: null`; full FMNP input-closure manifests and `--reproducible` are
-not implemented here. `fmn batch` and Studio audio transport remain separate
-work. The `fmn_cli::run_os` library entry itself is unchanged; the shipping
-executable owns this adapter, as it owns its Studio project adapter. Invalid
-files and picture-only recordings retain the existing CLI route. No-cue Python
-exports remain picture-only and therefore use that route, including its existing
-range restrictions.
+`fmn batch` and Studio audio transport remain separate work. The `fmn_cli::run_os`
+library entry itself is unchanged; the shipping executable owns this adapter,
+as it owns its Studio project adapter. Invalid files and picture-only recordings
+retain the existing CLI route. No-cue Python exports remain picture-only and
+therefore use that route, including its existing range restrictions.
 
 ## Native frame-range and reusable-input APIs
 
@@ -111,6 +156,8 @@ be borrowed by concurrent independent renders. No source-file access or complete
 recording decode occurs during those renders. Supplying audio to a picture-only
 format still refuses; explicitly omitting the extracted soundtrack is the host's
 choice, not a certification that independently supplied inputs belong together.
+These native render APIs still return artifact receipts, not the standalone
+adapter's complete FMNP manifests.
 
 The scene report retains the absolute ending clock frame; a range counts the
 intersected nonempty recorded segments and marks an ending before the recording's
@@ -123,11 +170,13 @@ PCM windows retain the production bundle byte ceiling.
 ```sh
 cargo test --locked -p fmn --lib rendering::compiled::tests
 cargo test --locked -p fmn --test compiled_ranges
-cargo test --locked -p fmn-cli --features cli,batch --bin fmn bundle_audio::tests
+cargo test --locked -p fmn-cli --features cli,batch --bin fmn bundle_audio::
+cargo test --locked -p fmn-cli --features cli,batch --test narrated_manifest_cli
 FMN_REQUIRE_FULL_INPUTS=1 cargo test --locked -p fmn-cli --features cli,batch --test narrated_bundle_cli
 ```
 
-The final command requires real ffmpeg. It exercises the shipping executable,
-WAV excerpts with an empty PATH, decoded video frames and audio, and exact
-lossless-alpha frame slicing. Source review or compiling tests alone does not
-establish an executed media acceptance result.
+The manifest executable tests need no ffmpeg and run extraction with an empty
+PATH. They compare sealed manifests and WAV samples at multiple thread counts,
+including excerpts and subdivisions. The final command requires real ffmpeg and
+checks decoded video/audio and exact lossless-alpha slicing. Source review or
+compiling tests alone does not establish an executed media acceptance result.

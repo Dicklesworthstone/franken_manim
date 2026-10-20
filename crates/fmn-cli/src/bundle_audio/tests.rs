@@ -96,7 +96,7 @@ fn file_parent_refuses_before_native_publication() {
 
 #[test]
 fn unsupported_modes_and_clock_overrides_refuse_before_output() {
-    for extra in [vec!["--reproducible"], vec!["--fps", "4"], vec!["--write_all"]] {
+    for extra in [vec!["--fps", "4"], vec!["--write_all"]] {
         let fs = Arc::new(VirtualFs::new());
         let bytes = recording();
         let output = run(command(&extra), &bytes, TimelineBundle::from_bytes(&bytes).unwrap(), fs.clone(),
@@ -442,4 +442,99 @@ fn sidecar_publication_never_overwrites_a_post_preflight_winner() {
     assert_eq!(fs.read(Path::new("/race.wav.manifest/winner.txt")).unwrap(), b"other generation");
     assert!(!fs.exists(Path::new("/race.wav.manifest/manifest.fmnp")));
     assert_eq!(fs.read(path).unwrap(), b"published media");
+}
+
+
+#[test]
+fn certified_video_is_refused_before_any_process_or_output() {
+    let bytes = recording();
+    for transparent in [false, true] {
+        let mut request = command(&["--reproducible"]);
+        request.format = OutputFormat::Video;
+        request.transparent = transparent;
+        let fs = Arc::new(VirtualFs::new());
+        let output = run(request, &bytes, TimelineBundle::from_bytes(&bytes).unwrap(),
+            fs.clone(), &|| panic!("certified video acquired a process capability"));
+        assert_eq!(output.code, code("capability"));
+        assert!(output.stdout.contains("outside the certified artifact set"));
+        assert!(!fs.exists(Path::new("/out")));
+    }
+}
+
+#[cfg(any(
+    all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")),
+    all(target_os = "macos", target_arch = "aarch64"),
+))]
+#[test]
+fn certified_wav_full_cut_and_subdivisions_have_comparable_bits_at_every_thread_count() {
+    let (bytes, samples) = varying_recording(false);
+    for extra in [vec![], vec!["-n", "1,2"], vec!["-n", "1", "--subdivide"]] {
+        let mut first: Option<Vec<ProvenanceManifest>> = None;
+        let fs = Arc::new(VirtualFs::new());
+        for threads in [1, 4, 16] {
+            let directory = format!("/certified-{threads}");
+            let mut arguments = vec!["--reproducible"];
+            arguments.extend_from_slice(&extra);
+            let mut request = command(&arguments);
+            request.common.threads = Some(threads);
+            request.video_dir = Some(PathBuf::from(&directory));
+            let bundle = TimelineBundle::from_bytes(&bytes).unwrap();
+            let planned = prepare(&request, &bundle, fs.as_ref()).unwrap();
+            let output = run(request, &bytes, bundle, fs.clone(),
+                &|| panic!("certified WAV acquired ffmpeg"));
+            assert_eq!(output.code, 0, "{}", output.stdout);
+            assert!(output.stdout.contains("\"certified\":true"));
+            let manifests: Vec<_> = planned.outputs.iter().map(|(path, _)| {
+                let m = manifest(&fs, path.to_str().unwrap());
+                assert_eq!(m.mode, ManifestMode::Certified);
+                assert!(m.outputs[0].certified);
+                assert_eq!(m.identity.engine, "compiled-pcm:scalar:s16-no-dither/v1");
+                m
+            }).collect();
+            if let Some(first) = &first {
+                for (a, b) in first.iter().zip(&manifests) {
+                    assert!(a.compare(b).unwrap().certified_bits_agree());
+                    assert_eq!(a.closure_digest, b.closure_digest);
+                }
+            } else {
+                first = Some(manifests);
+            }
+            let mut actual = Vec::new();
+            for (path, _) in &planned.outputs {
+                actual.extend(wav_samples(&fs, path.to_str().unwrap()));
+            }
+            let expected = if extra.is_empty() {
+                &samples[..]
+            } else if extra.contains(&"--subdivide") {
+                &samples[6..20]
+            } else {
+                &samples[6..14]
+            };
+            assert_eq!(actual, expected);
+        }
+    }
+}
+
+#[cfg(any(
+    all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")),
+    all(target_os = "macos", target_arch = "aarch64"),
+))]
+#[test]
+fn certified_config_layer_and_standard_mode_keep_identical_native_wav_bytes() {
+    let fs = Arc::new(VirtualFs::new());
+    let bytes = recording();
+    let standard = run(command(&[]), &bytes, TimelineBundle::from_bytes(&bytes).unwrap(),
+        fs.clone(), &|| None);
+    assert_eq!(standard.code, 0, "{}", standard.stdout);
+    fs.insert("/certified.yml", b"determinism:\n  mode: certified\n".to_vec());
+    let mut request = command(&["--config_file", "/certified.yml"]);
+    request.video_dir = Some(PathBuf::from("/certified"));
+    assert!(!request.common.reproducible);
+    let output = run(request, &bytes, TimelineBundle::from_bytes(&bytes).unwrap(),
+        fs.clone(), &|| panic!("configured certified WAV acquired ffmpeg"));
+    assert_eq!(output.code, 0, "{}", output.stdout);
+    assert_eq!(fs.read(Path::new("/out/scene.wav")).unwrap(),
+        fs.read(Path::new("/certified/scene.wav")).unwrap());
+    assert_eq!(manifest(&fs, "/certified/scene.wav").mode, ManifestMode::Certified);
+    assert_eq!(manifest(&fs, "/out/scene.wav").mode, ManifestMode::Standard);
 }

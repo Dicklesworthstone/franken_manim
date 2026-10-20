@@ -277,10 +277,12 @@ fn prepare(
     let mut effective = command.clone();
     effective.fps = Some(bundle.fps());
     let config = fmn_cli::resolve_render_config(fs, &effective)?;
-    if command.common.reproducible || config.determinism.mode == DeterminismMode::Certified {
+    if (command.common.reproducible || config.determinism.mode == DeterminismMode::Certified)
+        && !matches!(target, Target::Wav)
+    {
         return Err(Failure::new(
             "capability",
-            "narrated standalone replay currently admits standard-mode manifests only; --reproducible is not supported by this adapter",
+            "ffmpeg products are outside the certified artifact set; use --format wav for reproducible narrated extraction",
         ));
     }
     if config.render.engine != Engine::Cpu {

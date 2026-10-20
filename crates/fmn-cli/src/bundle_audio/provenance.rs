@@ -190,7 +190,7 @@ impl Session {
             items.push(ClosureItem::byte_input(
                 6,
                 format!("bundled-font/{name}"),
-                bytes.as_ref(),
+                bytes,
                 "compiled font face; conservative native font inventory",
             )?);
         }
@@ -492,4 +492,26 @@ fn admit_certified_build(build_id: &str, target: &str) -> Result<(), Failure> {
         return Err(Failure::new("capability", "certified narrated WAV requires a target in the existing certified matrix"));
     }
     Ok(())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn certified_admission_preserves_identified_build_and_existing_platform_contracts() {
+        for target in ["x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl",
+            "aarch64-unknown-linux-gnu", "aarch64-unknown-linux-musl", "aarch64-apple-darwin"] {
+            assert!(admit_certified_build("release:known-test-input", target).is_ok());
+            for build in ["unidentified:fmn-cli:0.5.0", "git:deadbeef+unverified"] {
+                let error = admit_certified_build(build, target).err().unwrap();
+                assert_eq!(error.identity, "capability");
+            }
+        }
+        for target in ["x86_64-pc-windows-msvc", "x86_64-apple-darwin", "wasm32-unknown-unknown", ""] {
+            let error = admit_certified_build("release:known-test-input", target).err().unwrap();
+            assert_eq!(error.identity, "capability");
+        }
+    }
 }
