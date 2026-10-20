@@ -104,6 +104,11 @@ compile_error!(
 pub const RESAMPLER_NAME: &str = "blackman-windowed-sinc-64";
 
 const RESAMPLER_RADIUS: i64 = 32;
+const RESAMPLER_TAPS: usize = (2 * RESAMPLER_RADIUS) as usize;
+// Exact rational phases cover common audio-rate pairs (e.g. 2 for 24→48 kHz,
+// 160 for 44.1→48 kHz). Bound coefficient storage to 1 MiB per conversion;
+// unusual coprime rates keep the direct scalar evaluator.
+const MAX_RESAMPLER_PHASES: usize = 2_048;
 const DEFAULT_SAMPLE_RATE: u32 = 48_000;
 const DEFAULT_CHANNELS: u16 = 2;
 const DEFAULT_MAX_OUTPUT_FRAMES: u64 = 48_000_u64 * 60 * 60;
@@ -845,6 +850,7 @@ fn resample(
     let input_frames_i64 =
         i64::try_from(input_frames).map_err(|_| SoundError::SampleCountOverflow)?;
     let cutoff = (f64::from(output_rate) / f64::from(input_rate)).min(1.0);
+    let phases = resampler_phases(input_rate, output_rate, input_frames, output_frames, cutoff);
     let mut output = vec![0.0_f64; output_samples];
     for output_frame in 0..output_frames {
         let source_numerator = (output_frame as u128) * u128::from(input_rate);
@@ -852,26 +858,18 @@ fn resample(
         let remainder = source_numerator % u128::from(output_rate);
         let base = i64::try_from(base).map_err(|_| SoundError::SampleCountOverflow)?;
         let fraction = remainder as f64 / f64::from(output_rate);
+        let weights = phases
+            .as_ref()
+            .map(|phases| &phases[output_frame % phases.len()]);
         let mut sums = [0.0_f64; 2];
         let mut weight_sum = 0.0_f64;
-        for delta in (-RESAMPLER_RADIUS + 1)..=RESAMPLER_RADIUS {
+        for (tap, delta) in ((-RESAMPLER_RADIUS + 1)..=RESAMPLER_RADIUS).enumerate() {
             let source_frame = base + delta;
             if !(0..input_frames_i64).contains(&source_frame) {
                 continue;
             }
-            let distance = delta as f64 - fraction;
-            let window_phase = std::f64::consts::PI * distance / RESAMPLER_RADIUS as f64;
-            let window = 0.42
-                + 0.5 * fmn_dmath::cos(window_phase)
-                + 0.08 * fmn_dmath::cos(2.0 * window_phase);
-            let sinc_x = cutoff * distance;
-            let sinc = if sinc_x == 0.0 {
-                1.0
-            } else {
-                let phase = std::f64::consts::PI * sinc_x;
-                fmn_dmath::sin(phase) / phase
-            };
-            let weight = cutoff * sinc * window;
+            let weight =
+                weights.map_or_else(|| resampler_weight(delta, fraction, cutoff), |row| row[tap]);
             let source_frame =
                 usize::try_from(source_frame).map_err(|_| SoundError::SampleCountOverflow)?;
             let source_at = source_frame * channels;
@@ -886,6 +884,65 @@ fn resample(
         }
     }
     Ok(output)
+}
+
+fn resampler_weight(delta: i64, fraction: f64, cutoff: f64) -> f64 {
+    let distance = delta as f64 - fraction;
+    let window_phase = std::f64::consts::PI * distance / RESAMPLER_RADIUS as f64;
+    let window =
+        0.42 + 0.5 * fmn_dmath::cos(window_phase) + 0.08 * fmn_dmath::cos(2.0 * window_phase);
+    let sinc_x = cutoff * distance;
+    let sinc = if sinc_x == 0.0 {
+        1.0
+    } else {
+        let phase = std::f64::consts::PI * sinc_x;
+        fmn_dmath::sin(phase) / phase
+    };
+    cutoff * sinc * window
+}
+
+fn resampler_phases(
+    input_rate: u32,
+    output_rate: u32,
+    input_frames: usize,
+    output_frames: usize,
+    cutoff: f64,
+) -> Option<Vec<[f64; RESAMPLER_TAPS]>> {
+    let (mut a, mut b) = (input_rate, output_rate);
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    let count = usize::try_from(output_rate / a).ok()?;
+    if count > MAX_RESAMPLER_PHASES || count >= output_frames {
+        return None;
+    }
+    // The direct loop skips out-of-range taps. A short clip can therefore
+    // cost less than a full phase table even when phases repeat. Every output
+    // frame has at least min(input_frames, radius) valid taps; only cache when
+    // table construction costs less than this conservative direct-work bound.
+    let table_weights = (count as u128) * RESAMPLER_TAPS as u128;
+    let direct_weights =
+        (output_frames as u128) * input_frames.min(RESAMPLER_RADIUS as usize) as u128;
+    if table_weights >= direct_weights {
+        return None;
+    }
+    // Store rows in output-index order. After `output_rate / gcd` frames,
+    // the integer remainder repeats exactly. Use the ORIGINAL rate in the
+    // division: reducing the floating ratio or advancing an accumulated phase
+    // would introduce a different rounding history. Boundaries still sum only
+    // in-range taps, in their original order, including normalization weights.
+    Some(
+        (0..count)
+            .map(|frame| {
+                let numerator = (frame as u128) * u128::from(input_rate);
+                let remainder = numerator % u128::from(output_rate);
+                let fraction = remainder as f64 / f64::from(output_rate);
+                std::array::from_fn(|tap| {
+                    resampler_weight(tap as i64 - RESAMPLER_RADIUS + 1, fraction, cutoff)
+                })
+            })
+            .collect(),
+    )
 }
 
 fn resampled_frame_count(
@@ -1426,6 +1483,201 @@ mod tests {
             ))
             .expect("resample");
         mixer.mix(4).expect("mix").audio.samples
+    }
+
+    // Frozen pre-phase-cache scalar algorithm. Deliberately do not call the
+    // production coefficient helper: this oracle locks its expression order,
+    // boundary normalization and f64 bits independently of the cached route.
+    fn resample_direct_oracle(
+        input: &[f64],
+        channels: u16,
+        input_rate: u32,
+        output_rate: u32,
+    ) -> Vec<f64> {
+        if input_rate == output_rate || input.is_empty() {
+            return input.to_vec();
+        }
+        let channels = usize::from(channels);
+        let input_frames = input.len() / channels;
+        let output_frames = ((input_frames as u128) * u128::from(output_rate))
+            .div_ceil(u128::from(input_rate)) as usize;
+        let cutoff = (f64::from(output_rate) / f64::from(input_rate)).min(1.0);
+        let mut output = vec![0.0_f64; output_frames * channels];
+        for output_frame in 0..output_frames {
+            let source_numerator = (output_frame as u128) * u128::from(input_rate);
+            let base = (source_numerator / u128::from(output_rate)) as i64;
+            let remainder = source_numerator % u128::from(output_rate);
+            let fraction = remainder as f64 / f64::from(output_rate);
+            let mut sums = [0.0_f64; 2];
+            let mut weight_sum = 0.0_f64;
+            for delta in -31..=32 {
+                let source_frame = base + delta;
+                if !(0..input_frames as i64).contains(&source_frame) {
+                    continue;
+                }
+                let distance = delta as f64 - fraction;
+                let window_phase = std::f64::consts::PI * distance / 32.0;
+                let window = 0.42
+                    + 0.5 * fmn_dmath::cos(window_phase)
+                    + 0.08 * fmn_dmath::cos(2.0 * window_phase);
+                let sinc_x = cutoff * distance;
+                let sinc = if sinc_x == 0.0 {
+                    1.0
+                } else {
+                    let phase = std::f64::consts::PI * sinc_x;
+                    fmn_dmath::sin(phase) / phase
+                };
+                let weight = cutoff * sinc * window;
+                let source_at = source_frame as usize * channels;
+                for channel in 0..channels {
+                    sums[channel] += input[source_at + channel] * weight;
+                }
+                weight_sum += weight;
+            }
+            let output_at = output_frame * channels;
+            for channel in 0..channels {
+                output[output_at + channel] = sums[channel] / weight_sum;
+            }
+        }
+        output
+    }
+
+    #[test]
+    fn exact_resampler_phases_preserve_direct_scalar_bits() {
+        for (input_rate, output_rate) in [
+            (24_000, 48_000),
+            (48_000, 24_000),
+            (44_100, 48_000),
+            (48_000, 44_100),
+            (48_000, 48_000),
+            (47_999, 48_000), // Coprime: direct fallback, no unbounded table.
+            (u32::MAX - 1, u32::MAX),
+        ] {
+            for frames in [0, 1, 2, 31, 32, 33, 65, 521] {
+                for channels in [1_u16, 2] {
+                    let input: Vec<f64> = (0..frames * usize::from(channels))
+                        .map(|index| ((index * 73 % 257) as f64 - 128.0) / 512.0)
+                        .collect();
+                    let expected =
+                        resample_direct_oracle(&input, channels, input_rate, output_rate);
+                    let actual =
+                        resample(&input, channels, input_rate, output_rate).expect("resample");
+                    assert_eq!(actual.len(), expected.len());
+                    for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+                        assert_eq!(
+                            actual.to_bits(),
+                            expected.to_bits(),
+                            "{input_rate}→{output_rate}, {frames} frames, {channels} channels, sample {index}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn resampler_phase_storage_is_bounded_and_requires_reuse() {
+        assert_eq!(
+            resampler_phases(24_000, 48_000, 47_000, 94_000, 1.0)
+                .expect("two phases")
+                .len(),
+            2
+        );
+        assert_eq!(
+            resampler_phases(44_100, 48_000, 44_100, 48_000, 1.0)
+                .expect("160 phases")
+                .len(),
+            160
+        );
+        assert!(
+            resampler_phases(24_000, 48_000, 1, 2, 1.0).is_none(),
+            "no phase repeats"
+        );
+        assert!(
+            resampler_phases(47_999, 48_000, 95_998, 96_000, 1.0).is_none(),
+            "coprime rate budget"
+        );
+        assert!(
+            resampler_phases(
+                1,
+                MAX_RESAMPLER_PHASES as u32 + 1,
+                4,
+                4 * (MAX_RESAMPLER_PHASES + 1),
+                1.0,
+            )
+            .is_none()
+        );
+        assert!(
+            resampler_phases(24_000, 48_000, 2, 4, 1.0).is_none(),
+            "8 valid direct coefficients cost less than a 128-coefficient table"
+        );
+        assert!(
+            resampler_phases(1, 2_048, 2, 4_096, 1.0).is_none(),
+            "extreme short upsampling must not build a 1 MiB table"
+        );
+    }
+
+    #[test]
+    fn short_extreme_upsampling_preserves_direct_scalar_bits() {
+        for channels in [1_u16, 2] {
+            let input: Vec<f64> = (0..2 * usize::from(channels))
+                .map(|index| index as f64 / 8.0 - 0.25)
+                .collect();
+            let expected = resample_direct_oracle(&input, channels, 1, 2_048);
+            let actual = resample(&input, channels, 1, 2_048).expect("short upsample");
+            assert_eq!(actual.len(), expected.len());
+            for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+                assert_eq!(
+                    actual.to_bits(),
+                    expected.to_bits(),
+                    "short upsample, {channels} channels, sample {index}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cached_resampling_keeps_channel_mapping_placement_and_wav_bytes() {
+        for (input_channels, output_channels) in [(1, 2), (2, 1), (2, 2)] {
+            let source: Vec<f32> = (0..521 * usize::from(input_channels))
+                .map(|index| ((index * 73 % 257) as f32 - 128.0) / 512.0)
+                .collect();
+            let audio = audio(24_000, input_channels, SampleFormat::F32, &source);
+            let mapped = map_channels(&audio, output_channels).expect("map channels");
+            let expected = resample_direct_oracle(&mapped, output_channels, 24_000, 48_000);
+            let mut reference = SoundMixer::new(config(48_000, output_channels))
+                .expect("reference")
+                .with_timeline_frames(1_100);
+            reference.cues.push(PreparedCue {
+                start: -4,
+                frames: 1_042,
+                samples: expected,
+                gain: 1.0,
+                background_gain: None,
+            });
+            let mut actual = SoundMixer::new(config(48_000, output_channels))
+                .expect("mixer")
+                .with_timeline_frames(1_100);
+            let mut cue = SoundCue::new(audio, -3, 48_000);
+            cue.time_offset = -1.0 / 48_000.0;
+            actual.add(cue).expect("resampled cue");
+            let expected = reference
+                .mix(1)
+                .expect("reference mix")
+                .wav_bytes(SampleFormat::F32, DitherPolicy::None)
+                .expect("reference WAV");
+            for threads in [1, 4, 16] {
+                let wav = actual
+                    .mix(threads)
+                    .expect("mix")
+                    .wav_bytes(SampleFormat::F32, DitherPolicy::None)
+                    .expect("WAV");
+                assert_eq!(
+                    wav, expected,
+                    "{input_channels}→{output_channels} channels, {threads} threads"
+                );
+            }
+        }
     }
 
     #[test]
