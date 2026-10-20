@@ -94,6 +94,9 @@ jobs:
           cargo test --locked -p fmn-render --lib table::shared
           cargo test --locked -p fmn-render --lib plan::generation
           cargo test --locked -p fmn-render --lib retained
+      - name: SVG export through the scene camera
+        if: ${{ !cancelled() }}
+        run: 'cargo test --locked -p fmn-render --lib svg::'
       - name: Native executable examples
         if: ${{ !cancelled() }}
         run: cargo check --locked -p fmn --examples

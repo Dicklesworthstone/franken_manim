@@ -5326,31 +5326,10 @@ fn publish_scene_soundtrack(
     Ok((artifact, cue_assets))
 }
 
-/// The pixel viewport and world-frame extent one SVG still is sized by.
-#[derive(Clone, Copy, Debug)]
-struct StillViewport {
-    pixel_width: u32,
-    pixel_height: u32,
-    frame_width: f64,
-    frame_height: f64,
-}
-
-impl StillViewport {
-    fn new(pixel_width: u32, pixel_height: u32, frame_width: f64, frame_height: f64) -> Self {
-        Self {
-            pixel_width,
-            pixel_height,
-            frame_width,
-            frame_height,
-        }
-    }
-}
-
 /// Export the final scene state as one deterministic SVG still.
 ///
-/// Geometry stays in the geometry crates: the CLI hands the live stage to
-/// `fmn::library::svg_export` and publishes the emitted bytes through the
-/// Reel `SvgPublication` boundary.
+/// Lumen projects and admits the actual camera/records; Chisel emits the
+/// detached painter sequence, and Reel publishes the document create-only.
 ///
 /// # Errors
 /// Geometry or publication refusals, both typed.
@@ -5359,14 +5338,19 @@ fn publish_scene_still_svg(
     destination: &Path,
     max_artifact_bytes: u64,
     stage: &fmn_scene::studio_bridge::Stage,
-    viewport: StillViewport,
+    camera: &fmn_render::Camera,
 ) -> Result<RenderArtifactReport, CliError> {
-    let document = fmn::library::svg_export::stage_svg_document(
-        stage,
-        f64::from(viewport.pixel_width),
-        f64::from(viewport.pixel_height),
-        viewport.frame_width,
-        viewport.frame_height,
+    let projected =
+        fmn_render::svg::project_svg_stage(stage, camera, fmn_render::svg::SvgLimits::default())
+            .map_err(|error| CliError::new("capability", error.to_string()))?;
+    let (width, height) = camera.pixel_shape();
+    let document = fmn::library::svg_export::stage_svg_document_with_background(
+        &projected,
+        f64::from(width),
+        f64::from(height),
+        f64::from(width),
+        f64::from(height),
+        Some(camera.background()),
     )
     .map_err(|error| CliError::new("scene", error.to_string()))?;
     // Create-only for the same reason as the WAV soundtrack (issue #4).
@@ -6711,8 +6695,7 @@ fn execute_native_render_with_cancellation(
                         cancellation.cli_checkpoint()?;
                     }
                     let scene = completed.into_scene();
-                    let (max_artifact_bytes, pixel_width, pixel_height) =
-                        composition_budget(&config)?;
+                    let (max_artifact_bytes, _, _) = composition_budget(&config)?;
                     let (artifact, cue_assets) = match target {
                         RenderTarget::Wav => publish_scene_soundtrack(
                             fs.as_ref(),
@@ -6722,20 +6705,14 @@ fn execute_native_render_with_cancellation(
                             render_threads,
                         )?,
                         _ => {
-                            let (frame_width, frame_height) = scene_frame_extent(&config);
-                            let viewport = StillViewport::new(
-                                pixel_width,
-                                pixel_height,
-                                frame_width,
-                                frame_height,
-                            );
+                            let svg_camera = camera_route::camera(&config)?;
                             (
                                 publish_scene_still_svg(
                                     fs.as_ref(),
                                     &artifact_destination,
                                     max_artifact_bytes,
                                     scene.stage(),
-                                    viewport,
+                                    &svg_camera,
                                 )?,
                                 Vec::new(),
                             )
@@ -6873,17 +6850,20 @@ fn execute_native_render_with_cancellation(
                         "the compiled timeline has no frame to publish as a final-state SVG",
                     )
                 })?;
-                let stage = bundle.stage_at(final_frame).map_err(bundle_read_error)?;
                 let (max_artifact_bytes, pixel_width, pixel_height) = composition_budget(&config)?;
-                let (frame_width, frame_height) = scene_frame_extent(&config);
-                let viewport =
-                    StillViewport::new(pixel_width, pixel_height, frame_width, frame_height);
+                let (stage, captured_camera) = bundle
+                    .stage_at_with_camera(final_frame, (pixel_width, pixel_height))
+                    .map_err(bundle_read_error)?;
+                let svg_camera = match captured_camera {
+                    Some(camera) => camera,
+                    None => camera_route::camera(&config)?,
+                };
                 let artifact = publish_scene_still_svg(
                     fs.as_ref(),
                     &artifact_destination,
                     max_artifact_bytes,
                     &stage,
-                    viewport,
+                    &svg_camera,
                 )?;
                 let summary = PreRunSummary {
                     frames: u64::from(bundle.frame_count()),

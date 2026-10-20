@@ -6,12 +6,9 @@
 //! reproduce Lumen's antialiasing or linear-light compositing in a browser.
 
 use super::*;
-use fmn_library::VStyle;
 use fmn_library::svg_export::stage_svg_document_with_background;
-use fmn_mobject::RenderPrimitive;
+use fmn_render::svg::{SvgLimits, SvgProjectionError, project_svg_stage};
 
-const MAX_POINTS: usize = 262_144;
-const MAX_SHAPES: usize = 32_768;
 const MAX_SVG_BYTES: u64 = 64 * 1024 * 1024;
 
 pub(super) struct SvgSession {
@@ -118,134 +115,16 @@ impl SvgSession {
     }
 }
 
-fn unsupported(detail: &str) -> PyErr {
-    CapabilityError::new_err(format!(
-        "SVG export: {detail}; use PNG for raster/3D rendering"
-    ))
-}
-
-/// Validate before copying geometry. Never silently turn an image, point
-/// cloud, shaded surface or a per-vertex gradient into an ordinary flat path.
-fn validate_stage(stage: &Stage) -> PyResult<()> {
-    let mut points = 0usize;
-    let mut shapes = 0usize;
-    for root in stage.roots() {
-        for mob in stage.family(*root) {
-            let entry = stage
-                .get(mob)
-                .ok_or_else(|| unsupported("stale scene member"))?;
-            if entry.buffer.is_empty() {
-                continue;
-            }
-            shapes = shapes
-                .checked_add(1)
-                .ok_or_else(|| unsupported("shape budget exceeded"))?;
-            points = points
-                .checked_add(entry.buffer.len())
-                .ok_or_else(|| unsupported("point budget exceeded"))?;
-            if shapes > MAX_SHAPES || points > MAX_POINTS {
-                return Err(unsupported("vector geometry budget exceeded"));
-            }
-            if entry.render_primitive() != RenderPrimitive::Vector {
-                return Err(unsupported("only quadratic vector families are supported"));
-            }
-            let uniforms = entry.uniforms();
-            if uniforms.depth_test
-                || uniforms.shading != [0.0; 3]
-                || uniforms.clip_planes != [[0.0; 4]; 4]
-            {
-                return Err(unsupported(
-                    "depth, lighting and user clip planes require Lumen",
-                ));
-            }
-            for (name, width) in [("fill_rgba", 4), ("stroke_rgba", 4), ("stroke_width", 1)] {
-                let Some(values) = entry.buffer.read_column(name) else {
-                    return Err(unsupported("non-vector record schema"));
-                };
-                if values.len() != entry.buffer.len() * width
-                    || !values.iter().all(|v| v.is_finite())
-                {
-                    return Err(unsupported("invalid vector style records"));
-                }
-                if values
-                    .chunks_exact(width)
-                    .any(|row| row != &values[..width])
-                {
-                    return Err(unsupported("per-vertex paint and stroke-width variation"));
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Project a private CoW snapshot once per identity, retaining the original
-/// family/painter sequence (including intentional repeated root placements).
+/// All front doors share Lumen's camera/record admission; Chisel owns syntax.
 fn scene_document(stage: &Stage, camera: &Camera) -> PyResult<String> {
-    validate_stage(stage)?;
-    let mut projected = stage.snapshot().materialize();
+    let projected =
+        project_svg_stage(stage, camera, SvgLimits::default()).map_err(|error| match error {
+            SvgProjectionError::Unsupported(_) | SvgProjectionError::GeometryLimit => {
+                CapabilityError::new_err(error.to_string())
+            }
+            error => native_error(error),
+        })?;
     let (width, height) = camera.pixel_shape();
-    let mut seen = HashSet::new();
-    for root in stage.roots() {
-        for mob in stage.family(*root) {
-            if !seen.insert(mob) {
-                continue;
-            }
-            let points = stage
-                .get_points(mob)
-                .ok_or_else(|| unsupported("stale point records"))?;
-            if points.is_empty() {
-                continue;
-            }
-            let uniforms = *stage
-                .uniforms(mob)
-                .ok_or_else(|| unsupported("stale uniforms"))?;
-            let mut weight = None;
-            let mut mapped = Vec::new();
-            mapped
-                .try_reserve_exact(points.len())
-                .map_err(native_error)?;
-            for point in points {
-                let clip = camera.project(point, uniforms.is_fixed_in_frame);
-                let w = clip.clip[3];
-                // A constant homogeneous weight makes the entire quadratic
-                // projection affine. Projecting nonconstant-weight controls as
-                // an ordinary SVG Q command would draw a different curve.
-                if !clip.clip.iter().all(|v| v.is_finite())
-                    || w <= 0.0
-                    || clip.clip[2].abs() > w
-                    || weight.is_some_and(|old| old != w)
-                {
-                    return Err(unsupported("perspective-varying or depth-clipped paths"));
-                }
-                weight = Some(w);
-                let pixel = clip
-                    .pixel((width, height))
-                    .ok_or_else(|| unsupported("invalid camera projection"))?;
-                let point = [
-                    pixel[0] - f64::from(width) / 2.0,
-                    f64::from(height) / 2.0 - pixel[1],
-                    0.0,
-                ];
-                if point
-                    .iter()
-                    .any(|value| !value.is_finite() || value.abs() > f64::from(f32::MAX))
-                {
-                    return Err(unsupported(
-                        "projected coordinates exceed native record precision",
-                    ));
-                }
-                mapped.push(point);
-            }
-            projected.set_points(mob, &mapped).map_err(native_error)?;
-            if uniforms.scale_stroke_with_zoom {
-                let scale = (1.0 - uniforms.is_fixed_in_frame) / camera.frame().scale()
-                    + uniforms.is_fixed_in_frame;
-                let width = stage.get_stroke_width(mob).unwrap_or(0.0) * scale;
-                projected.set_stroke(mob, None, Some(width), None, None, false);
-            }
-        }
-    }
     // The native exporter owns SVG syntax, y inversion, style and pass order.
     // Both frame extents are now pixel units, so its conventional SVG stroke
     // widths remain pixels. No frame buffer or PNG is embedded in the document.

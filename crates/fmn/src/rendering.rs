@@ -59,6 +59,7 @@ mod compiled;
 mod ffmpeg_limits;
 mod pipeline;
 mod soundtrack;
+mod svg;
 pub use camera_animation::{render_camera, render_camera_with_fs};
 pub use compiled::{render_bundle, render_bundle_with_fs};
 pub use ffmpeg_limits::{
@@ -69,6 +70,11 @@ pub use pipeline::{NativeFrameError, NativeFramePipeline};
 pub use soundtrack::{
     PreparedSceneSoundtrack, SoundtrackInput, SoundtrackPreparationLimits, SoundtrackRenderOptions,
     SoundtrackRenderReport, SoundtrackTimeline, render_soundtrack, render_soundtrack_with_fs,
+};
+
+pub use svg::{
+    SvgRenderError, SvgRenderOptions, SvgRenderReport, render_svg, render_svg_camera,
+    render_svg_camera_with_fs, render_svg_with_fs,
 };
 
 pub use fmn_output::negotiate::{AudioQuality, EncoderPreset, EncoderTune, VideoQuality};

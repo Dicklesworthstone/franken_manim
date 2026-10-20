@@ -42,6 +42,7 @@ pub mod retained;
 pub mod revision;
 pub mod snapshot;
 pub mod stroke;
+pub mod svg;
 pub use fill_profile::{FillKnot, FillProfile, FillProfileError};
 pub mod stroke_profile;
 pub use stroke_profile::{StrokeKnot, StrokeProfile, StrokeProfileError};

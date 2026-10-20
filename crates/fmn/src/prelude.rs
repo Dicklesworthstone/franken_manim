@@ -11,9 +11,10 @@ pub use crate::{
     BundleExportError, BundleExportOptions, BundleExportReport, CompletedScene, Error, ErrorKind,
     FfmpegCapability, LibraryError, RenderError, RenderFormat, RenderOptions, RenderReport,
     SceneBundleExport, SceneConstruct, SoundtrackRenderOptions, SoundtrackRenderReport, Stage,
-    TexPreflightError, export_bundle, export_bundle_bytes, export_bundle_with_fs, render,
-    render_soundtrack, render_soundtrack_with_fs, render_with_fs, run_scene,
-    run_scene_with_typesetting,
+    SvgRenderError, SvgRenderOptions, SvgRenderReport, TexPreflightError, export_bundle,
+    export_bundle_bytes, export_bundle_with_fs, render, render_soundtrack,
+    render_soundtrack_with_fs, render_svg, render_svg_camera, render_svg_camera_with_fs,
+    render_svg_with_fs, render_with_fs, run_scene, run_scene_with_typesetting,
 };
 pub use fmn_anim::{
     AnimConfig, AnimError, Animation, AnimationGroup, ApplyMethod, FramePacket, IntoAnimation,
