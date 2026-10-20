@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 
 pub mod advance;
+pub mod audio;
 pub mod camera_bundle;
 pub mod host;
 pub mod inspect;
@@ -29,6 +30,10 @@ pub mod tui;
 pub mod ui;
 pub mod worker;
 
+pub use audio::{
+    MAX_AUDIO_CHUNK_BYTES, MAX_AUDIO_CHUNK_FRAMES, StudioAudioChunk, StudioAudioError,
+    StudioAudioInfo, StudioAudioTrack,
+};
 pub use host::{
     CapabilityToken, FrameHub, HostError, MULTIPART_BOUNDARY, PngFrame, StudioHost,
     StudioHostConfig, StudioWorkerSession, TokenError,
@@ -51,7 +56,7 @@ pub use scrub::{
 };
 pub use supervisor::{
     BuildError, ChannelError, ChannelFailureKind, CheckpointSource, LaunchError, RebuildDriver,
-    RecoveryReport, StdWorkerLauncher, Supervisor, SupervisorConfig, SupervisorError,
+    RecoveryReport, StdWorkerLauncher, Supervisor,SupervisorConfig, SupervisorError,
     SupervisorReply, WorkerArtifact, WorkerChannel, WorkerLauncher,
 };
 pub use tui::{TerminalPreview, TerminalProtocol, TuiError, TuiLimits};
