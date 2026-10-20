@@ -759,8 +759,10 @@ mod wire_precision {
         );
         assert!(
             actual
-                .chunks_exact(2)
-                .any(|bytes| { u16::from_le_bytes(bytes.try_into().unwrap()) & 3 != 0 }),
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .any(|bytes| u16::from_le_bytes(*bytes) & 3 != 0),
             "decoded samples retain precision beyond an 8-bit grid"
         );
         assert_eq!(
