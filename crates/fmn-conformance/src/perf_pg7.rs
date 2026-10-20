@@ -65,10 +65,13 @@ const TEXT_CACHE_STATE: &str = "none";
 
 // Locked after exercising the real committed fmn-tex/fmn-text paths. Any
 // semantic or fixture drift must be reviewed explicitly rather than silently
-// changing the workload being timed.
+// changing the workload being timed. Re-pinned for FMNTEX v3 (the `\color`
+// table, fm-tex-color-silent-i0p2): the 261-byte v3 document with its magic
+// set back to v2 and its empty colour table dropped hashes to the old pin
+// d7b4ad29, so the q^7+z layout itself did not move.
 const FORMULA_EXPECTED_RESULT_DIGEST: Digest = Digest::from_bytes([
-    0xd7, 0xb4, 0xad, 0x29, 0x38, 0x31, 0x2b, 0xa7, 0xb8, 0x9e, 0xee, 0x78, 0x92, 0x7f, 0x3e, 0xf1,
-    0xdc, 0x28, 0xb8, 0x5c, 0x92, 0x6e, 0x1c, 0x3b, 0x31, 0x77, 0x9c, 0x71, 0x87, 0x44, 0x4e, 0x4b,
+    0x19, 0x8e, 0x2a, 0x69, 0x64, 0x5a, 0x3b, 0xc6, 0xb3, 0x28, 0x4e, 0x2f, 0x53, 0x79, 0x78, 0x64,
+    0x22, 0x37, 0xff, 0x6f, 0xe4, 0x47, 0xda, 0xd3, 0x2a, 0x76, 0xb4, 0xb2, 0xef, 0xa0, 0x89, 0x01,
 ]);
 const TEXT_EXPECTED_RESULT_DIGEST: Digest = Digest::from_bytes([
     0x31, 0xc6, 0xd1, 0xaa, 0x62, 0xd1, 0x13, 0x6d, 0x6f, 0x23, 0x6f, 0x96, 0x5a, 0xdd, 0x48, 0xa9,
@@ -1194,7 +1197,7 @@ mod tests {
         assert!(cold.to_tsv().contains("timed_layer\tlayout\n"));
         assert_eq!(
             cold.digest().to_string(),
-            "a28ca92a4fb5501643269700c27f9c320233118d929f68de3a75e8287bc205ad"
+            "a3c23961f2d904b6548e3bde02e09aeac683a8745cf2a8c83cc2f62554d1896f"
         );
 
         let cached = Pg7Definition::new(Pg7Scenario::FormulaCached).expect("cached definition");
@@ -1221,7 +1224,7 @@ mod tests {
         );
         assert_eq!(
             cached.digest().to_string(),
-            "52f04944dfb8eea62864b89736c99b31312a2f3d807664d65eccfd70ad6634b1"
+            "b22b9ef4f06d9b9f87078a14f0b52b9678954a889807f1cf88ab2bb32d221ad8"
         );
 
         let text = Pg7Definition::new(Pg7Scenario::Text10kGlyph).expect("text definition");

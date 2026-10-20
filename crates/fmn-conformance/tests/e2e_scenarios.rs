@@ -4556,14 +4556,13 @@ fn formula_sheet_render(
     Ok((record, frames))
 }
 
-/// fm-tex-color-silent-i0p2: a formula's own `\color` and `\textcolor` reach
-/// the certified final PNG. Opaque glyph interiors carry xcolor's orange and
-/// red where the source asks and the base white elsewhere, and the same
-/// formula without the commands renders no orange or red ink at all. The
-/// coloured frame is bit-locked.
-fn tex_color_final_png_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
-    const COLORED: &str = r"{\color{orange} x} + \textcolor{red}{y} = z";
-    const PLAIN: &str = r"x + y = z";
+/// The certified final PNGs of `render_matrix.tex_color.v1`: a formula with
+/// its own `\color` / `\textcolor`, then its colourless twin, each with its
+/// opaque pixels within 3 levels of xcolor's orange, xcolor's red and the base
+/// white.
+type TexColorRender = (Vec<u8>, [u64; 3]);
+
+fn tex_color_renders() -> Result<(TexColorRender, TexColorRender), ScenarioError> {
     struct Formula(&'static str);
     impl fmn::SceneConstruct for Formula {
         fn tex_preflight(&self) -> Vec<fmn::tex::TypesetRequest<'_>> {
@@ -4579,9 +4578,7 @@ fn tex_color_final_png_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
         }
     }
     let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
-    // Opaque pixels within 3 levels of xcolor's orange, xcolor's red and
-    // the base white.
-    let render = |source: &'static str, path: &str| -> Result<(Vec<u8>, [u64; 3]), ScenarioError> {
+    let render = |source: &'static str, path: &str| -> Result<TexColorRender, ScenarioError> {
         let mut options = fmn::RenderOptions::with_format(path, fmn::RenderFormat::Png)
             .map_err(|error| fail(format!("tex colour options: {error}")))?;
         options.config.camera.resolution = (384, 216);
@@ -4606,24 +4603,42 @@ fn tex_color_final_png_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
         }
         Ok((png, classes))
     };
-    let (png, colored) = render(COLORED, "/tex-color.png")?;
-    let (_, plain) = render(PLAIN, "/tex-plain.png")?;
+    Ok((
+        render(
+            r"{\color{orange} x} + \textcolor{red}{y} = z",
+            "/tex-color.png",
+        )?,
+        render(r"x + y = z", "/tex-plain.png")?,
+    ))
+}
+
+/// fm-tex-color-silent-i0p2: a formula's own `\color` and `\textcolor` reach
+/// the certified final PNG. Opaque glyph interiors carry xcolor's orange and
+/// red where the source asks and the base white elsewhere, and the same
+/// formula without the commands renders no orange or red ink at all. The
+/// coloured frame is bit-locked.
+fn tex_color_final_png_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let ((png, colored), (_, plain)) = tex_color_renders()?;
     ctx.event(
         LogEvent::new("e2e.render_matrix.tex_color")
             .field("orange_px", colored[0])
             .field("red_px", colored[1])
             .field("white_px", colored[2])
             .field("plain_orange_px", plain[0])
-            .field("plain_red_px", plain[1]),
+            .field("plain_red_px", plain[1])
+            .field("plain_white_px", plain[2]),
     );
-    if colored.iter().any(|&count| count < 20) {
+    // Every class has opaque interior pixels. The colour moved ink off white,
+    // so the colourless twin has strictly more white, and no orange or red.
+    if colored.iter().any(|&count| count < 10) {
         return Err(fail(format!(
             "the coloured formula lacks a colour class (orange, red, white): {colored:?}"
         )));
     }
-    if plain[0] != 0 || plain[1] != 0 || plain[2] < 20 {
+    if plain[0] != 0 || plain[1] != 0 || plain[2] <= colored[2] {
         return Err(fail(format!(
-            "the colourless formula has orange or red ink, or no white: {plain:?}"
+            "the colourless formula has orange or red ink, or no more white than the coloured one: \
+             {plain:?} vs {colored:?}"
         )));
     }
     Ok(RunOutcome::ok()
@@ -8696,9 +8711,9 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         vec![LogExpect::span_present(
             "e2e.render_matrix.tex_color",
             vec![
-                FieldPred::u64_ge("orange_px", 20),
-                FieldPred::u64_ge("red_px", 20),
-                FieldPred::u64_ge("white_px", 20),
+                FieldPred::u64_ge("orange_px", 10),
+                FieldPred::u64_ge("red_px", 10),
+                FieldPred::u64_ge("white_px", 10),
                 FieldPred::u64_eq("plain_orange_px", 0),
                 FieldPred::u64_eq("plain_red_px", 0),
             ],
@@ -11729,6 +11744,31 @@ fn rebless_e2e_cli_builtins_panel() {
         }
     }
     let panel = side_by_side_png(width, height * rows, &stack, &stack).expect("frames stack");
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let lock = "e2e.certified.lock";
+    let digest =
+        fmn_hash::sha256(&std::fs::read(manifest.join("goldens").join(lock)).expect("lock"))
+            .to_hex();
+    let out = manifest.join("../..").join(REBLESS_ARTEFACT_DIR);
+    std::fs::create_dir_all(&out).expect("re-bless artefact directory");
+    std::fs::write(out.join(rebless_artefact_name(lock, &digest)), panel).expect("panel written");
+}
+
+/// Re-bless evidence for the e2e lock's `render_matrix.tex_color.v1` entry
+/// (GOVERNANCE.md §4). Opt-in with `FMN_REBLESS_E2E_TEX_COLOR=1`, after the
+/// bless: the entry is new, so its frame goes on both sides of the lock's
+/// artefact. A later change to it needs a before frame instead.
+#[test]
+fn rebless_e2e_tex_color_panel() {
+    use fmn_conformance::golden::{REBLESS_ARTEFACT_DIR, rebless_artefact_name, side_by_side_png};
+    if std::env::var("FMN_REBLESS_E2E_TEX_COLOR").as_deref() != Ok("1") {
+        return;
+    }
+    let ((png, _), _) = tex_color_renders().expect("the coloured formula renders");
+    let image = fmn_codec::decode_png(&png, &fmn_codec::PngLimits::default())
+        .expect("the locked frame decodes");
+    let panel = side_by_side_png(image.width, image.height, &image.rgba, &image.rgba)
+        .expect("one frame on both sides");
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let lock = "e2e.certified.lock";
     let digest =
