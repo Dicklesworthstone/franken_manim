@@ -285,7 +285,10 @@ fn real_ffmpeg_p010_hevc_retains_more_than_256_luma_levels_and_color_tags() {
     let program = tool.path().to_path_buf();
     let caps = EncoderCapabilities::probe(&tool, runner.as_ref()).unwrap();
     if !caps.offers("libx265") {
-        eprintln!("SKIP real P010 roundtrip: libx265 is not offered by installed ffmpeg");
+        fmn_core::test_inputs::skip_or_fail(
+            "fmn-output::real_ffmpeg_p010_hevc_retains_more_than_256_luma_levels_and_color_tags",
+            "libx265 offered by the installed ffmpeg",
+        );
         return;
     }
 
