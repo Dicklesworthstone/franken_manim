@@ -2782,10 +2782,6 @@ fn write_dynamic_geometry(
     Ok(())
 }
 
-fn write_points(stage: &mut Stage, mob: Mob, points: &[Vec3]) {
-    let _ = stage.set_points(mob, points);
-}
-
 fn write_stroke_widths(stage: &mut Stage, mob: Mob, widths: &[f64]) {
     let Some(entry) = stage.get_mut(mob) else {
         return;

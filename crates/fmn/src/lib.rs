@@ -77,7 +77,8 @@ pub use typesetting::TexPreflightError;
 
 pub use exporting::{
     BundleExportError, BundleExportOptions, BundleExportReport, SceneBundleExport, export_bundle,
-    export_bundle_bytes, export_bundle_with_fs,
+    export_bundle_bytes, export_bundle_with_fs, export_camera_bundle, export_camera_bundle_bytes,
+    export_camera_bundle_with_fs,
 };
 
 pub use rendering::{
@@ -1409,6 +1410,12 @@ impl From<fmn_mobject::UpdaterFailure> for Error {
 impl From<AnimateError> for Error {
     fn from(error: AnimateError) -> Self {
         Self::Animation(error.into())
+    }
+}
+
+impl From<fmn_render::CameraError> for Error {
+    fn from(error: fmn_render::CameraError) -> Self {
+        Self::Scene(SceneError::Camera(error))
     }
 }
 
