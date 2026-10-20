@@ -104,7 +104,7 @@ def render_portal(fmn_python, source, scene, resolution, work):
     """The portal's certified final still and the build id its provenance names."""
     png = work / "portal.png"
     argv = [fmn_python, "--robot", str(ROOT / source), scene, "--format", "png", "--reproducible",
-            "--resolution", resolution, "--video_dir", str(png)]
+            "--resolution", resolution, "--output", str(png)]
     done = subprocess.run(argv, cwd=ROOT, capture_output=True, text=True, timeout=900)
     lines = [line for line in done.stdout.splitlines() if line.startswith("{")]
     receipt = json.loads(lines[-1]) if lines else {}
