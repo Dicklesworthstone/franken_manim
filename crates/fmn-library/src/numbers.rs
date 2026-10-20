@@ -1277,7 +1277,6 @@ pub fn changing_decimal(
         mob,
         move |stage, mob, alpha| {
             let entry = stage.get(mob).ok_or(AnimError::StaleHandle(mob))?;
-            let placement = entry.placement();
             let uniforms = *entry.uniforms();
             let anchor = stage.get_bounding_box_point(mob, decimal.edge_to_fix);
             let root_paint = NumberPaint::capture(stage, mob)?;
@@ -1295,6 +1294,15 @@ pub fn changing_decimal(
                 .find(|child| Some(*child) != background)
                 .unwrap_or(mob);
             let digit_paint = NumberPaint::capture(stage, digit)?;
+            // The family's affine lives on its members with records: a
+            // point-free root returns to identity on every box refresh,
+            // which a general `apply_affine` performs.
+            let placement = stage
+                .family(digit)
+                .into_iter()
+                .filter_map(|member| stage.get(member))
+                .find(|member| !member.buffer.is_empty())
+                .map_or_else(|| entry.placement(), |member| member.placement());
 
             // All fallible layout and paint preparation precedes publication.
             // Stage::install accepts an owned, acyclic family over this already
