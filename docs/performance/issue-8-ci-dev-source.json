@@ -1,0 +1,473 @@
+{
+  "schema": "fmn-issue8-source-dev-observation-v1",
+  "scope": "Full installed Python-portal correctness and work counts on a genuine CI-built dev wheel. Not a release-speed comparison.",
+  "source": {
+    "commit": "4537d024632aa9f019e78ae4530ccf930f9bf84f",
+    "profile": "dev",
+    "profile_observation": "Finished dev profile [unoptimized + debuginfo]",
+    "workflow_run": "https://github.com/Dicklesworthstone/franken_manim/actions/runs/39491324238",
+    "artifact_id": 12298522210,
+    "artifact_zip_sha256": "37623b517828fecf615f6a559c46aafb2d36c2601315a38c359c7bf56c34f040",
+    "wheel_filename": "franken_manim-0.5.0-cp313-cp313-manylinux_2_39_x86_64.whl",
+    "wheel_sha256": "8eefa7c72d112365cd829872b872180c47af1d7b4dab5b374b643fb2b27bb9b5",
+    "modules": {
+      "fmn_python": "07774711a217541abf9b1bda5a9b6ad80a7fe8e3612c038fae1be671dc7d7d36",
+      "manimlib.manimlib": "1bc7dfc2b09d6c8f0932807b4dbaeeea550a6cf3a6b0f32d1d27f46912fce03b"
+    },
+    "embedded_build_identity": {
+      "build_id": "git:4537d024632aa9f019e78ae4530ccf930f9bf84f",
+      "toolchain": "nightly-2026-08-31",
+      "target_triple": "x86_64-unknown-linux-gnu",
+      "target_features": "baseline",
+      "engine": "certified-cpu:scalar:7",
+      "simd_tier": "portable"
+    },
+    "embedded_source_matches": true
+  },
+  "runtime": {
+    "platform": "Linux-6.18.55-x86_64-with-glibc2.39",
+    "python": "3.13.16 (main, Oct  3 2026, 01:06:22) [Clang 22.1.3 ]",
+    "packages": {
+      "ManimPango": "0.7.0",
+      "Pygments": "2.21.0",
+      "audioop-lts": "0.2.2",
+      "av": "19.0.1",
+      "beautifulsoup4": "4.15.0",
+      "click": "8.5.0",
+      "cloup": "4.0.0",
+      "decorator": "5.3.1",
+      "franken-manim": "0.5.0",
+      "glcontext": "3.1.0",
+      "iniconfig": "2.3.1",
+      "isosurfaces": "0.1.2",
+      "manim": "0.21.0",
+      "mapbox_earcut": "2.1.0",
+      "markdown-it-py": "4.2.0",
+      "maturin": "1.14.1",
+      "mdurl": "0.1.2",
+      "moderngl": "5.13.0",
+      "moderngl-window": "3.1.1",
+      "networkx": "3.7",
+      "numpy": "2.5.2",
+      "packaging": "26.3",
+      "pillow": "13.0.0",
+      "pluggy": "1.7.0",
+      "pycairo": "1.29.2",
+      "pydub": "0.25.1",
+      "pyglet": "2.1.19",
+      "pyglm": "2.8.3",
+      "pytest": "9.1.1",
+      "rich": "15.0.0",
+      "scipy": "1.18.1",
+      "screeninfo": "0.8.1",
+      "skia-pathops": "0.9.2",
+      "soupsieve": "3.0.3",
+      "srt": "3.5.3",
+      "svgelements": "1.9.6",
+      "tqdm": "4.70.1",
+      "typing_extensions": "4.16.0",
+      "watchdog": "6.0.0"
+    }
+  },
+  "workload": {
+    "archive_url": "https://github.com/user-attachments/files/33727698/frankenmanim-640x360-evidence.tar.gz",
+    "archive_sha256": "78e62e32f9e1d3a274c1c599e09aa06b1b682823c658d36c228476f0dd0ce16e",
+    "source": "fmn_part2.py",
+    "scene": "GetPaidThenSell",
+    "width": 640,
+    "height": 360,
+    "fps": 15,
+    "render_threads": 4,
+    "inputs": {
+      "fmn_part2.py": {
+        "sha256": "29ccd5f4e8e815aa6027a5fcfcd505f6f46159bd9f69c2eadb45ec2880ba9567",
+        "bytes": 4255
+      },
+      "manim_part2.py": {
+        "sha256": "f63597d436b0ac235a7c1287847798ae2dfa222d1731ec5386e91124ac4901fb",
+        "bytes": 751
+      },
+      "stock_valuation.py": {
+        "sha256": "bf4f388525be1c3a443f021b20a67e306dc6ff9ffc5fe74731948f2401376b39",
+        "bytes": 3375
+      },
+      "beginner_stock_valuation.py": {
+        "sha256": "54b636757b048437a4659a7eff1164244a1eb8e3b35a19e01dac247ddaddf683",
+        "bytes": 3783
+      },
+      "audio_beginner/timed_manifest.json": {
+        "sha256": "8807e73b51a2fbd2c4f9eec8d5c204d83d33c5ef4340e7e77770353dbf7e8a64",
+        "bytes": 1018
+      },
+      "audio_beginner/normalized/02_part2_where_value_comes_from.wav": {
+        "sha256": "29fa7b0b4eb00fcf7899f60c07e3d397d27200522f44d3cccedf67259ac8ad4b",
+        "bytes": 2256078
+      }
+    },
+    "inputs_unchanged": true
+  },
+  "original_mp4": {
+    "command_template": [
+      "SOURCE_PYTHON",
+      "-m",
+      "cProfile",
+      "-o",
+      "profile.pstats",
+      "-m",
+      "fmn_python",
+      "--robot",
+      "fmn_part2.py",
+      "GetPaidThenSell",
+      "--format",
+      "mp4",
+      "--resolution",
+      "640x360",
+      "--fps",
+      "15",
+      "--threads",
+      "4",
+      "--output",
+      "output.mp4"
+    ],
+    "exit_code": 0,
+    "full_decode_valid": true,
+    "streams": [
+      {
+        "codec_name": "h264",
+        "codec_type": "video",
+        "width": 640,
+        "height": 360,
+        "pix_fmt": "yuv420p",
+        "r_frame_rate": "15/1",
+        "avg_frame_rate": "15/1",
+        "duration": "47.733333",
+        "nb_frames": "716",
+        "nb_read_frames": "716"
+      },
+      {
+        "codec_name": "aac",
+        "codec_type": "audio",
+        "sample_rate": "48000",
+        "channels": 2,
+        "r_frame_rate": "0/0",
+        "avg_frame_rate": "0/0",
+        "duration": "47.733000",
+        "nb_frames": "2239",
+        "nb_read_frames": "2238"
+      }
+    ],
+    "work_counters": {
+      "camera_frames": 0,
+      "conversion_cache_bytes": 345600,
+      "conversion_reuses": 598,
+      "converted_frames": 118,
+      "empty_tiles": 501122,
+      "frames": 716,
+      "planar_frames": 716,
+      "raw_frame_reuses": 598,
+      "schema_version": 1,
+      "tile_cache_hits": 152103,
+      "tile_cache_misses": 5495,
+      "tile_cache_poisoned": 0
+    },
+    "static_reuse_floor": 595,
+    "static_reuse_derivation": "Seven static waits produce 602 frames; conservatively allow one changed first frame per wait (602 - 7). The observed 598 is not the threshold.",
+    "decoded_video_rgba_sha256": "6e6f2c87e3550116409bdbb78b41b7f53e6049e21154e96a265c15ce5891b3d8",
+    "decoded_audio_s16_sha256": "d3924840aa1b9f0206ff78d7eb094bd1b27349747b56f03201643edd6a11f779",
+    "decoded_hash_scope": "Complete decoded streams from this single instrumented run; repeated-run determinism is not claimed by this observation."
+  },
+  "profile_observations": {
+    "instrumented": true,
+    "included_in_performance_means": false,
+    "process_wall_seconds": 46.37046805200043,
+    "total_cprofile_seconds": 46.045423045000085,
+    "disjoint_authoring_regions_seconds": {
+      "waits_including_callbacks": 17.909481737,
+      "plays_including_callbacks": 12.719387422,
+      "text_constructors": 0.151681536,
+      "tex_constructor": 0.003975537,
+      "construct_body_self": 0.000886935,
+      "other_inside_construct": 0.051440726000000055,
+      "native_output_begin": 0.720053389,
+      "native_finish": 12.403986103000001,
+      "outside_construct_setup_import_receipt_residual": 2.084529660000083
+    },
+    "native_owner_thread_intervals_seconds": {
+      "audio_mix_ns": 10.517567578,
+      "capture_prepare_ns": 2.206615417,
+      "conversion_ns": 2.809838653,
+      "native_render_ns": 21.514757572,
+      "output_finish_ns": 1.88498496,
+      "output_submit_ns": 0.186556136
+    },
+    "public_callback_dispatch": {
+      "calls": 724,
+      "inclusive_seconds": 2.007566073,
+      "wait_calls": 602,
+      "play_calls": 122
+    },
+    "public_callback_admission": {
+      "calls": 739,
+      "inclusive_seconds": 2.036885079
+    },
+    "interpretation": "Native intervals and callback observations overlap the disjoint authoring-region partition and must not be added to it. Encoding can overlap frame submission; output_finish is remaining drain/mux work, not total encoder CPU. Dev/opt0 and profiler overhead prevent a release-speed conclusion."
+  },
+  "native_wav": {
+    "complete_file_sha256": "e0adff5a80fa8e757d3d3b63b737a065d84464ad06d2e38e1fd3307163e80bfb",
+    "bytes": 9164844,
+    "wave": {
+      "sample_frames": 2291200,
+      "sample_rate": 48000,
+      "channels": 2,
+      "sample_width": 2
+    },
+    "duration_seconds": 47.733333333333334,
+    "matches_known_published_oracle": true,
+    "actual_full_bytes_equal_to_recovered_published_output": true,
+    "source_full_decode_exit_code": 0,
+    "released_full_decode_exit_code": 0,
+    "released_native_module_sha256": "889f2ad148fdfdc593e401cfb24c9266a532b400583977b77be7315c28e4d296"
+  },
+  "installed_retained_conversion_acceptance": {
+    "path": "crates/fmn-python/tests/retained_conversion.py",
+    "script_sha256": "5c5ab1bd64c0ea63e6025041d9e42fda8921d8aebe64f7496e1d17157ce950cf",
+    "exit_code": 0,
+    "native_execution": true,
+    "coverage": [
+      "fresh renderer and converter cold oracles",
+      "live NumPy foreign writes",
+      "style, membership, camera and background invalidation",
+      "callback clock and animation completion",
+      "1, 4 and 16 rendering threads"
+    ]
+  },
+  "local_artifact_sha256": {
+    "ci-dev-4537d024-build-identity/identity.png.manifest/manifest.txt": "df0bf74809fec6128d602e40afed701a324ca7162143ec6e4c6321983606a511",
+    "ci-dev-4537d024-original-profile/output.mp4": "35bd11bf8866b9a8c7ca498e2ec5fc90a5afdf650940c43b5397e7f6c7ee312b",
+    "ci-dev-4537d024-original-profile/profile.pstats": "c997a250ac299e6d527abe4a73acdf48bb7a162a999f869733ac50b1073cf45d",
+    "ci-dev-4537d024-original-profile/render.log": "5d7eb6506ae891758ef67471877fc58b9ef3afc6afe38f746081374085bc968c",
+    "ci-dev-4537d024-original-profile/profile-evidence.json": "88f812b4155cc4d51182165dcf80b1a121302fd7a2598b3c3e1347b42bfaf6a4",
+    "ci-dev-4537d024-original-profile/attribution.json": "1404856b6e8ffe70e5bb351675d7a6d570bf9f065de4543b23e944e3dbd085fd",
+    "ci-dev-4537d024-retained-acceptance/acceptance.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "ci-dev-4537d024-wav-oracle/output.wav": "e0adff5a80fa8e757d3d3b63b737a065d84464ad06d2e38e1fd3307163e80bfb",
+    "recovered-wheel-wav-oracle/output.wav": "e0adff5a80fa8e757d3d3b63b737a065d84464ad06d2e38e1fd3307163e80bfb"
+  },
+  "limits": [
+    "Local ordinary source release-wheel compilation was OOM-killed in the pinned asupersync dependency. No current-main release-speed improvement is claimed.",
+    "This wheel embeds commit 4537d024632aa9f019e78ae4530ccf930f9bf84f. It is not an e4dc7bb or later-main artifact.",
+    "The attribution above describes the initial instrumented source-dev observation. The separate entrypoint validation records real warmups, three unprofiled runs and one separate profile per engine, all using the same unoptimized dev source wheel; it still cannot establish source release performance.",
+    "Published 0.5.0 and current source can legitimately render different pixels; this observation does not assert cross-version pixel identity.",
+    "The permanent issue8 entry point now passed complete dev/reference orchestration and every final reviewed gate on actual outputs. Ordinary source release measurements still require the capable-host workflow."
+  ],
+  "entrypoint_validation": {
+    "status": "passed",
+    "scope": "Real dev/public/CE orchestration and correctness validation; not a source release performance result",
+    "source_profile": "dev",
+    "warmups_per_engine": 1,
+    "unprofiled_measured_repetitions_per_engine": 3,
+    "separate_profile_runs_per_engine": 1,
+    "profile_runs_excluded_from_means": true,
+    "outputs_checked": 15,
+    "installed_source_wheel_payload_files_checked": 136,
+    "build_log_sha256": "8074bca040ffab75a110718944c2728fe5ea6cfe64cc307b25870a43567eb8aa",
+    "frozen_entrypoint_results_sha256": "aa6318a8c43eea6fd600c40eae83f5287ebe7b3b553e3fc3b9c348223582802a",
+    "amended_verification_sha256": "7f8ad5330ece679bdfeb57710787f7315859a966dd5ebb45da3006dd00988098",
+    "frozen_runner_sha256": "01eb2e5488b20a2128f6442aafb9a87b331fc2a9a974b1e15eac9810a6be989c",
+    "reviewed_runner_sha256": "1e1a7360c15269bc8b3cda4eda935f92cc374dff47b6087b576a305eac45f974",
+    "reviewed_tests_sha256": "b7d001a36d7c3bf82c7d022f4bff03fb4211151447543ad30c4f20f6880719ef",
+    "negative_control_tests_passed": 6,
+    "all_media_formats_valid": true,
+    "media_format": {
+      "video_codec": "h264",
+      "pixel_format": "yuv420p",
+      "audio_codec": "aac",
+      "sample_rate": 48000,
+      "channels": 2,
+      "channel_layout": "stereo"
+    },
+    "all_source_work_counters_valid": true,
+    "complete_decoded_video_and_audio_repeatable_within_each_engine": true,
+    "complete_source_and_released_native_wav_sha256": "e0adff5a80fa8e757d3d3b63b737a065d84464ad06d2e38e1fd3307163e80bfb",
+    "final_gate_application": "The full run used the initial frozen runner before review added loaded-native coverage, codec/layout checks, declared-profile metadata and the coarse frozen-movie floor. This separate check applies the final reviewed validation functions to all retained real outputs without rerendering or changing those timing records.",
+    "raw_engine_label_note": "The generic source-current key in the raw driver output identifies the explicitly verified dev wheel at commit 4537d024; it does not identify later main or a release build.",
+    "timing_observations": {
+      "ce-0.21.0": {
+        "complete": true,
+        "measured_seconds": [
+          5.836843449000298,
+          5.533417640001062,
+          5.762673333001658
+        ],
+        "mean_seconds": 5.710978140667673,
+        "timing_scope": "Released reference measured in the same orchestration validation"
+      },
+      "wheel-0.5.0": {
+        "complete": true,
+        "measured_seconds": [
+          36.81334634800078,
+          36.90464360900114,
+          37.08758859900081
+        ],
+        "mean_seconds": 36.93519285200091,
+        "timing_scope": "Released reference measured in the same orchestration validation"
+      },
+      "source-dev-4537d024": {
+        "complete": true,
+        "measured_seconds": [
+          43.125429056999565,
+          43.877561323999544,
+          42.73394393499984
+        ],
+        "mean_seconds": 43.24564477199965,
+        "timing_scope": "Unoptimized source dev diagnostic, not release-speed evidence"
+      }
+    },
+    "outputs": [
+      {
+        "engine": "ce-0.21.0",
+        "kind": "warmup",
+        "round": 1,
+        "frames": 714,
+        "valid": true,
+        "video_sha256": "202d82971a292776a0b5175c7713667b13fadb13ef6ac8ce71cfb5e245a7af96",
+        "audio_sha256": "960b2b2715dc7de7a59f77278e524ab8c5ecc0431544193054b30dc1978bb9d3"
+      },
+      {
+        "engine": "wheel-0.5.0",
+        "kind": "warmup",
+        "round": 1,
+        "frames": 716,
+        "valid": true,
+        "video_sha256": "0b5536c9d46097585adc270acc1fb8c9ddf3c013d61f25756e6b6dfbf2517048",
+        "audio_sha256": "d3924840aa1b9f0206ff78d7eb094bd1b27349747b56f03201643edd6a11f779"
+      },
+      {
+        "engine": "source-dev-4537d024",
+        "kind": "warmup",
+        "round": 1,
+        "frames": 716,
+        "valid": true,
+        "video_sha256": "6e6f2c87e3550116409bdbb78b41b7f53e6049e21154e96a265c15ce5891b3d8",
+        "audio_sha256": "d3924840aa1b9f0206ff78d7eb094bd1b27349747b56f03201643edd6a11f779",
+        "conversion_reuses": 598,
+        "converted_frames": 118
+      },
+      {
+        "engine": "ce-0.21.0",
+        "kind": "measured",
+        "round": 1,
+        "frames": 714,
+        "valid": true,
+        "video_sha256": "202d82971a292776a0b5175c7713667b13fadb13ef6ac8ce71cfb5e245a7af96",
+        "audio_sha256": "960b2b2715dc7de7a59f77278e524ab8c5ecc0431544193054b30dc1978bb9d3"
+      },
+      {
+        "engine": "wheel-0.5.0",
+        "kind": "measured",
+        "round": 1,
+        "frames": 716,
+        "valid": true,
+        "video_sha256": "0b5536c9d46097585adc270acc1fb8c9ddf3c013d61f25756e6b6dfbf2517048",
+        "audio_sha256": "d3924840aa1b9f0206ff78d7eb094bd1b27349747b56f03201643edd6a11f779"
+      },
+      {
+        "engine": "source-dev-4537d024",
+        "kind": "measured",
+        "round": 1,
+        "frames": 716,
+        "valid": true,
+        "video_sha256": "6e6f2c87e3550116409bdbb78b41b7f53e6049e21154e96a265c15ce5891b3d8",
+        "audio_sha256": "d3924840aa1b9f0206ff78d7eb094bd1b27349747b56f03201643edd6a11f779",
+        "conversion_reuses": 598,
+        "converted_frames": 118
+      },
+      {
+        "engine": "source-dev-4537d024",
+        "kind": "measured",
+        "round": 2,
+        "frames": 716,
+        "valid": true,
+        "video_sha256": "6e6f2c87e3550116409bdbb78b41b7f53e6049e21154e96a265c15ce5891b3d8",
+        "audio_sha256": "d3924840aa1b9f0206ff78d7eb094bd1b27349747b56f03201643edd6a11f779",
+        "conversion_reuses": 598,
+        "converted_frames": 118
+      },
+      {
+        "engine": "wheel-0.5.0",
+        "kind": "measured",
+        "round": 2,
+        "frames": 716,
+        "valid": true,
+        "video_sha256": "0b5536c9d46097585adc270acc1fb8c9ddf3c013d61f25756e6b6dfbf2517048",
+        "audio_sha256": "d3924840aa1b9f0206ff78d7eb094bd1b27349747b56f03201643edd6a11f779"
+      },
+      {
+        "engine": "ce-0.21.0",
+        "kind": "measured",
+        "round": 2,
+        "frames": 714,
+        "valid": true,
+        "video_sha256": "202d82971a292776a0b5175c7713667b13fadb13ef6ac8ce71cfb5e245a7af96",
+        "audio_sha256": "960b2b2715dc7de7a59f77278e524ab8c5ecc0431544193054b30dc1978bb9d3"
+      },
+      {
+        "engine": "ce-0.21.0",
+        "kind": "measured",
+        "round": 3,
+        "frames": 714,
+        "valid": true,
+        "video_sha256": "202d82971a292776a0b5175c7713667b13fadb13ef6ac8ce71cfb5e245a7af96",
+        "audio_sha256": "960b2b2715dc7de7a59f77278e524ab8c5ecc0431544193054b30dc1978bb9d3"
+      },
+      {
+        "engine": "wheel-0.5.0",
+        "kind": "measured",
+        "round": 3,
+        "frames": 716,
+        "valid": true,
+        "video_sha256": "0b5536c9d46097585adc270acc1fb8c9ddf3c013d61f25756e6b6dfbf2517048",
+        "audio_sha256": "d3924840aa1b9f0206ff78d7eb094bd1b27349747b56f03201643edd6a11f779"
+      },
+      {
+        "engine": "source-dev-4537d024",
+        "kind": "measured",
+        "round": 3,
+        "frames": 716,
+        "valid": true,
+        "video_sha256": "6e6f2c87e3550116409bdbb78b41b7f53e6049e21154e96a265c15ce5891b3d8",
+        "audio_sha256": "d3924840aa1b9f0206ff78d7eb094bd1b27349747b56f03201643edd6a11f779",
+        "conversion_reuses": 598,
+        "converted_frames": 118
+      },
+      {
+        "engine": "ce-0.21.0",
+        "kind": "profile",
+        "round": 1,
+        "frames": 714,
+        "valid": true,
+        "video_sha256": "202d82971a292776a0b5175c7713667b13fadb13ef6ac8ce71cfb5e245a7af96",
+        "audio_sha256": "960b2b2715dc7de7a59f77278e524ab8c5ecc0431544193054b30dc1978bb9d3"
+      },
+      {
+        "engine": "wheel-0.5.0",
+        "kind": "profile",
+        "round": 1,
+        "frames": 716,
+        "valid": true,
+        "video_sha256": "0b5536c9d46097585adc270acc1fb8c9ddf3c013d61f25756e6b6dfbf2517048",
+        "audio_sha256": "d3924840aa1b9f0206ff78d7eb094bd1b27349747b56f03201643edd6a11f779"
+      },
+      {
+        "engine": "source-dev-4537d024",
+        "kind": "profile",
+        "round": 1,
+        "frames": 716,
+        "valid": true,
+        "video_sha256": "6e6f2c87e3550116409bdbb78b41b7f53e6049e21154e96a265c15ce5891b3d8",
+        "audio_sha256": "d3924840aa1b9f0206ff78d7eb094bd1b27349747b56f03201643edd6a11f779",
+        "conversion_reuses": 598,
+        "converted_frames": 118
+      }
+    ]
+  }
+}

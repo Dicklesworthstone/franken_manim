@@ -1,0 +1,218 @@
+name: Python portal issue 8 workload
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/python-portal-performance.yml'
+      - 'scripts/benchmark_python_portal.py'
+      - 'scripts/benchmark_issue8.py'
+      - 'scripts/test_benchmark_issue8.py'
+      - 'crates/fmn-python/**'
+      - 'crates/fmn-render/**'
+      - 'crates/fmn-output/**'
+      - 'crates/fmn-frame/**'
+      - 'crates/fmn-codec/**'
+      - 'crates/fmn-anim/**'
+      - 'crates/fmn-mobject/**'
+      - 'crates/fmn-scene/**'
+      - 'crates/fmn-text/**'
+      - 'crates/fmn-tex/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'SUITE.lock'
+      - 'pyproject.toml'
+      - 'rust-toolchain.toml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: python-portal-issue8-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  original-workload:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_TARGET_DIR: target/portal-issue8
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+      CARGO_BUILD_JOBS: '1'
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      RUSTFLAGS: '-Z threads=1'
+      PYO3_PYTHON: python
+      FMN_REQUIRE_FFMPEG: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: '3.13.16'
+      - name: Install the benchmark's host capabilities
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install --yes ffmpeg pkg-config libcairo2-dev libpango1.0-dev \
+            texlive-latex-extra texlive-fonts-recommended dvisvgm fonts-dejavu-core
+          python -m pip install 'numpy==2.5.2' 'maturin==1.14.1'
+          rustup show active-toolchain
+      - name: Check the workload evidence contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/test_benchmark_python_portal.py
+          python scripts/test_benchmark_issue8.py
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/portal-issue8
+          key: portal-issue8-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'SUITE.lock', '.github/workflows/python-portal-performance.yml') }}
+      - name: Recover and verify the contributor's original evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/issue8-inputs" "$RUNNER_TEMP/issue8-build"
+          curl --fail --location --retry 3 \
+            --user-agent 'franken_manim-agent (+https://github.com/Dicklesworthstone/franken_manim)' \
+            https://github.com/user-attachments/files/33727698/frankenmanim-640x360-evidence.tar.gz \
+            --output "$RUNNER_TEMP/issue8-inputs/evidence.tar.gz"
+          python - <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path
+          import tarfile
+
+          root = Path(os.environ['RUNNER_TEMP']) / 'issue8-inputs'
+          archive = root / 'evidence.tar.gz'
+          expected = '78e62e32f9e1d3a274c1c599e09aa06b1b682823c658d36c228476f0dd0ce16e'
+          if hashlib.sha256(archive.read_bytes()).hexdigest() != expected:
+              raise SystemExit('The contributor benchmark archive hash changed')
+          with tarfile.open(archive, 'r:gz') as source:
+              source.extractall(root, filter='data')
+          PY
+          python -m venv "$RUNNER_TEMP/issue8-reference-env"
+          "$RUNNER_TEMP/issue8-reference-env/bin/python" -m pip install \
+            -r "$RUNNER_TEMP/issue8-inputs/frankenmanim-640x360-20261020/requirements.txt"
+          python -m venv "$RUNNER_TEMP/issue8-source-env"
+          "$RUNNER_TEMP/issue8-source-env/bin/python" -m pip install 'numpy==2.5.2'
+      - name: Build and preserve the exact source release wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD | tee "$RUNNER_TEMP/issue8-build/source-commit.txt"
+          git diff --exit-code
+          rustc -vV > "$RUNNER_TEMP/issue8-build/rustc.txt"
+          cargo -vV > "$RUNNER_TEMP/issue8-build/cargo.txt"
+          python -m maturin build --locked --release --interpreter python \
+            --out "$RUNNER_TEMP/issue8-wheels" 2>&1 | tee "$RUNNER_TEMP/issue8-build/release.log"
+          wheels=("$RUNNER_TEMP"/issue8-wheels/*.whl)
+          test "${#wheels[@]}" -eq 1
+          sha256sum "${wheels[0]}" > "$RUNNER_TEMP/issue8-build/wheel.sha256"
+          "$RUNNER_TEMP/issue8-source-env/bin/python" -m pip install --no-deps "${wheels[0]}"
+      - name: Exercise the real native and installed Python portal
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --release -p fmn-python --lib -- --list \
+            > "$RUNNER_TEMP/issue8-build/test-inventory.txt"
+          grep -Fx 'portal_video::tests::portal_retained_conversion_production_acceptance: test' \
+            "$RUNNER_TEMP/issue8-build/test-inventory.txt"
+          cargo test --locked --release -p fmn-python --lib portal_video:: -- \
+            --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/issue8-build/native-portal.log"
+          "$RUNNER_TEMP/issue8-source-env/bin/python" -I \
+            crates/fmn-python/tests/retained_conversion.py \
+            2>&1 | tee "$RUNNER_TEMP/issue8-build/installed-portal.log"
+      - name: Measure the original workload through installed Python wheels
+        shell: bash
+        run: |
+          set -euo pipefail
+          wheels=("$RUNNER_TEMP"/issue8-wheels/*.whl)
+          python scripts/benchmark_issue8.py \
+            --archive "$RUNNER_TEMP/issue8-inputs/evidence.tar.gz" \
+            --input-dir "$RUNNER_TEMP/issue8-inputs/frankenmanim-640x360-20261020" \
+            --source-python "$RUNNER_TEMP/issue8-source-env/bin/python" \
+            --released-python "$RUNNER_TEMP/issue8-reference-env/bin/python" \
+            --ce-python "$RUNNER_TEMP/issue8-reference-env/bin/python" \
+            --source-commit "$GITHUB_SHA" \
+            --source-profile release \
+            --source-wheel "${wheels[0]}" \
+            --output "$RUNNER_TEMP/issue8-results" --profile
+      - name: Retain the actual wheel, measurements and validation logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: python-portal-issue8-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/issue8-wheels/*.whl
+            ${{ runner.temp }}/issue8-build
+            ${{ runner.temp }}/issue8-results
+          retention-days: 14
+          if-no-files-found: warn
+
+  # Keep the full dev/test workspace on a separate runner: the large pinned
+  # dependency checkouts and release artifacts must not compete for its disk.
+  # This is an independent required job, not a substitute for portal acceptance.
+  workspace-gates:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_TARGET_DIR: target/portal-issue8-workspace
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+      CARGO_BUILD_JOBS: '1'
+      CARGO_TERM_COLOR: never
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      RUSTFLAGS: '-Z threads=1'
+      PYO3_PYTHON: python
+      FMN_REQUIRE_FFMPEG: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: '3.13.16'
+      - name: Install the pinned toolchain and native test capabilities
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install --yes ffmpeg
+          python -m pip install 'numpy==2.5.2'
+          rustup show active-toolchain
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/portal-issue8-workspace
+          key: portal-issue8-workspace-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'SUITE.lock', '.github/workflows/python-portal-performance.yml') }}
+      - name: Run the workspace Rust gates on this exact checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/issue8-workspace"
+          git rev-parse HEAD > "$RUNNER_TEMP/issue8-workspace/source-commit.txt"
+          cargo fmt --check 2>&1 | tee "$RUNNER_TEMP/issue8-workspace/fmt.log"
+          cargo check --locked --all-targets 2>&1 | tee "$RUNNER_TEMP/issue8-workspace/check.log"
+          cargo clippy --locked --all-targets -- -D warnings \
+            2>&1 | tee "$RUNNER_TEMP/issue8-workspace/clippy.log"
+          cargo test --locked 2>&1 | tee "$RUNNER_TEMP/issue8-workspace/test.log"
+      - name: Retain workspace gate logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: python-portal-issue8-workspace-${{ github.sha }}
+          path: ${{ runner.temp }}/issue8-workspace
+          retention-days: 14
+          if-no-files-found: warn

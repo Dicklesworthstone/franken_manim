@@ -95,8 +95,11 @@ python3 scripts/test_corpus_differential.py
 echo "==> Python portal benchmark evidence contract"
 python3 -m py_compile \
     scripts/benchmark_python_portal.py \
-    scripts/test_benchmark_python_portal.py
+    scripts/test_benchmark_python_portal.py \
+    scripts/benchmark_issue8.py \
+    scripts/test_benchmark_issue8.py
 python3 scripts/test_benchmark_python_portal.py
+python3 scripts/test_benchmark_issue8.py
 
 echo "==> Python portal runtime-parity audit contract"
 python3 -m py_compile \

@@ -17,10 +17,21 @@ also completes: mean time fell from 4.943363 to 0.383634 seconds, with identical
 complete WAV bytes. That 12.89× audio improvement does not establish a complete
 Python-render improvement factor or performance-gate verdict.
 
-**Pending:** source-built Python wheels, the four-engine comparison, and
-source-portal before/after frame and PCM checks. Source-wheel builds were
-terminated during the pinned `asupersync` dependency compilation under the
-available resource limit. The pristine source comparator is upstream main
+The actual source-built Python portal has now completed the unchanged supplied
+scene: **716 frames, 598 raw-frame reuses, 598 conversion reuses and 118
+conversions**. Its complete native WAV matches the published wheel byte for
+byte, and the installed retained-conversion acceptance passes at 1, 4 and 16
+threads. This wheel was built from `4537d024632aa9f019e78ae4530ccf930f9bf84f`
+with the **unoptimized development profile**. These are correctness and work
+elimination results, not a release-speed comparison.
+
+**Pending:** a source release-wheel comparison with the published wheel and
+live CE, and complete before/after source-frame equivalence. Local release-wheel
+builds were terminated in the pinned `asupersync` prerequisite before reaching
+the portal. The permanent [issue #8 workflow](../../.github/workflows/python-portal-performance.yml)
+builds the exact checked-out release wheel and runs the original workload through
+installed Python packages. A queued job is not a passed gate. The pristine
+source comparator for the separate native audio measurement remains upstream
 `fb151d131d988e626bae390e083413910423ca5f`.
 
 ## Supplied evidence and workload
@@ -184,6 +195,56 @@ native rendering, conversion, submission, audio mixing and finish, while robot
 receipts retain exact FFmpeg argv and tool identity. Those intervals still
 must not be presented as independently measured encoder CPU.
 
+### Actual source-built Python portal
+
+[Portable source observation](issue-8-ci-dev-source.json) records the retrieved
+[CI artifact](https://github.com/Dicklesworthstone/franken_manim/actions/runs/39491324238),
+wheel and extension hashes, embedded build identity, unchanged input hashes,
+complete output checks and instrumented observations. A certified one-frame PNG
+manifest independently identifies the compiled commit as
+`4537d024632aa9f019e78ae4530ccf930f9bf84f`; a package version of `0.5.0` alone
+does not distinguish this source wheel from the public release.
+
+The original MP4 fully decodes with 716 frames and the expected audio timeline.
+The native receipt reports 598 raw-frame reuses and 598 conversion reuses, leaving
+118 conversions, with a single 345,600-byte conversion cache and no poisoned
+tiles. The conservative regression floor is 595 reused frames: seven static
+waits produce 602 frames, allowing each wait's first frame to have changed.
+The observed 598 is not itself the gate threshold.
+At least eight conversions are also required for the eight visible play
+intervals. This coarse guard rejects a wholly frozen export; it does not replace
+the moving-pixel correctness oracles in the installed acceptance fixture.
+
+The entire source WAV is identical to the recovered published-wheel WAV, including
+padding: SHA-256 `e0adff5a80fa8e757d3d3b63b737a065d84464ad06d2e38e1fd3307163e80bfb`.
+The installed [retained-conversion fixture](../../crates/fmn-python/tests/retained_conversion.py)
+passes cold-render oracles, external writable point views, camera/background/
+membership invalidation, callback clocks and animation completion at 1, 4 and
+16 threads. Separately, the [native portal job](https://github.com/Dicklesworthstone/franken_manim/actions/runs/39487933027)
+at `a066063fe25a17451e298b7d71dce1c9c288b835` passed all 14 portal-video tests,
+including the production retained-conversion acceptance, plus the production
+native-output acceptance and registered output E2E scenario.
+
+One development-wheel MP4 profile took 46.370 seconds of process wall time.
+Its native owner-thread intervals were 2.207 seconds of capture preparation,
+21.515 rendering, 2.810 conversion, 0.187 submission, 10.518 audio mixing and
+1.885 final output completion. The Python profile separately reports 17.909
+seconds in waits, 12.719 in plays, 0.152 in Text constructors and 0.004 in Tex.
+It records 724 public update dispatches and 739 admission checks. Native and
+callback intervals overlap those Python regions; do not sum the two partitions.
+These development-profile observations identify executed work and do not supply
+an optimized release timing or an independently measured encoding CPU cost.
+
+The complete three-engine entry point subsequently passed one warmup, three
+measured repetitions and one separate profile for each engine: **15 valid
+exports**. Each engine's five complete decoded video streams match one another,
+as do its decoded PCM streams. Every source export reports 598 conversion reuses
+and 118 conversions. Both full native WAV exports match the same published
+oracle. The final wheel-identity, media-layout and work-accounting checks were
+also applied to every retained output after review; the portable record names
+the frozen runner and final validator hashes. This validates orchestration and
+correctness with the development wheel, not source release performance.
+
 ## Implementation and correctness argument
 
 [`retained.rs`](../../crates/fmn-render/src/retained.rs) exposes whether the
@@ -232,18 +293,66 @@ coefficient helper.
 | Combined Python driver/session/provenance checks | 63 tests + 21 subtests passed: 10 driver, 27 session, 26 provenance tests |
 | `test_console_rendering_protocol.py` | 48 passed |
 | Workspace `cargo fmt --check` | Passed |
+| Actual source-built installed portal | Original 716-frame workload fully decodes; 598 raw/conversion reuses; complete WAV matches the published oracle |
+| Installed retained-conversion acceptance | Passed at 1/4/16 threads against the genuine `4537d024` development wheel |
+| Native portal CI at `a066063f` | 14 portal-video tests, production native-output acceptance and registered output E2E passed |
+| Original-workload entry-point contract | Six tests passed, including native-wheel identity, media-layout, static-reuse and frozen-output negative controls |
+| Complete three-engine entry-point execution | 15 valid exports; repeated decoded video and PCM match within each engine; both native WAVs match the oracle; final amended checks pass on all retained outputs |
 
 Protocol tests use controlled doubles and do not replace installed-native
 execution. The new [real portal regression](../../crates/fmn-python/tests/retained_conversion.py)
 compares retained output with fresh one-frame scene/renderer/converter oracles,
 checks live point writes, camera/background/membership changes, callback clocks,
 animation completion and conversion work counts at 1, 4 and 16 threads.
-Its installed-source acceptance and original-workload source-wheel timing/
-raw-frame/PCM checks remain **blocked and unpassed**. Full-workspace `cargo check`,
-`cargo clippy` and `cargo test` are also **unpassed**; component validation does
-not establish these gates. The benchmark driver is registered in `scripts/check.sh`.
+Installed-source acceptance and complete source WAV checks have now passed.
+Release-wheel timing and whole-scene before/after raw-frame equivalence remain
+**pending**. Full-workspace `cargo check`, `cargo clippy` and `cargo test` are
+also **unpassed**; the completed native and installed tests do not establish
+these gates. Both benchmark drivers' contract tests are registered in
+`scripts/check.sh`.
 
 ## Reproduce through the Python front door
+
+The [issue #8 entry point](../../scripts/benchmark_issue8.py) runs the exact
+supplied workload without reconstructing it again. The caller downloads and
+extracts the archive, installs dependencies and builds the source release wheel
+before the benchmark. All these operations stay outside measured intervals.
+
+```bash
+python scripts/benchmark_issue8.py \
+  --archive /absolute/path/frankenmanim-640x360-evidence.tar.gz \
+  --input-dir /absolute/path/frankenmanim-640x360-20261020 \
+  --source-python /absolute/env/source/bin/python \
+  --released-python /absolute/env/released/bin/python \
+  --ce-python /absolute/env/ce/bin/python \
+  --source-commit FULL_SOURCE_COMMIT_SHA \
+  --source-profile release \
+  --source-wheel /absolute/path/source.whl \
+  --output results/issue8-run1 --profile
+```
+
+The entry point verifies the archive and six scene/audio inputs, the installed
+source payload against its wheel, the compiled source commit via a certified PNG
+manifest, the public wheel's native extension and CE version. The source profile
+is explicitly recorded; the manifest identifies the commit, not the compiler's
+optimization profile, so retain the associated build log and wheel hash. Use
+`--source-profile dev` for development-wheel correctness investigations. It delegates to
+the general driver below for one warmup and three sequential measured rounds,
+reversing engine order on alternate rounds. Separate profiles are excluded from
+the means. It then checks source reuse accounting, H.264/yuv420p video and
+48-kHz stereo AAC layout, complete decoded-video and PCM repeatability within
+each engine, exact stream timelines and both native
+WAVs against the whole-file oracle. A failure retains diagnostic evidence and
+prevents a successful result. No shared-host wall-time threshold is used, and
+different engines or source versions are not required to render identical pixels.
+
+The dedicated read-only workflow builds the unchanged release profile with the
+pinned toolchain and dependencies, executes actual native and installed portal
+acceptance, and runs this entry point. A separate required job attempts the exact
+workspace Rust gates without competing for the release job's disk or benchmark CPU.
+It retains the actual wheel, build records, logs, profiles and measurements even
+when a later gate fails. It neither edits source nor publishes artifacts as a
+release, and it does not replace the repository's full verification policy.
 
 Verify and extract the archive without changing scenes or audio. Install its
 Cairo/Pango, FFmpeg, LaTeX/dvisvgm and font requirements. Use separate Python
