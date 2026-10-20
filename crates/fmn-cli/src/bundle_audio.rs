@@ -22,12 +22,12 @@ use fmn_platform::fs::{FileSystem, FsNodeKind, StdFs};
 use fmn_scene::timeline_bundle::BundleSoundtrack;
 use fmn_scene::{DEFAULT_MAX_BUNDLE_BYTES, OutputNaming, TimelineBundle};
 
-mod provenance;
-mod replay;
 #[cfg(feature = "batch")]
 mod batch;
 #[cfg(feature = "batch")]
 mod control;
+mod provenance;
+mod replay;
 #[cfg(test)]
 mod tests;
 
@@ -115,7 +115,9 @@ pub(crate) fn try_run_os(arguments: &[OsString]) -> Option<RunOutput> {
             })
         }));
     }
-    let Invocation::Render(command) = invocation else { return None; };
+    let Invocation::Render(command) = invocation else {
+        return None;
+    };
     Some(run(command, &bytes, bundle, fs, &|| {
         Some(FfmpegCapability {
             runner: Arc::new(fmn_platform::process::StdProcessRunner),
@@ -412,14 +414,18 @@ fn prepare_with_manifests(
         ));
     }
     let manifests = manifest_root.map(|root| {
-        outputs.iter().enumerate().map(|(index, _)| {
-            let path = root.join(&scene);
-            if command.subdivide {
-                path.join(format!("{:05}", segments.start + index))
-            } else {
-                path
-            }
-        }).collect::<Vec<_>>()
+        outputs
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                let path = root.join(&scene);
+                if command.subdivide {
+                    path.join(format!("{:05}", segments.start + index))
+                } else {
+                    path
+                }
+            })
+            .collect::<Vec<_>>()
     });
     // Refuse known media/sidecar aliases before any output is published.
     // Filesystem publication is still create-only if a path changes later.
@@ -427,7 +433,10 @@ fn prepare_with_manifests(
         for path in paths {
             for (media, _) in &outputs {
                 if path.starts_with(media) || media.starts_with(path) {
-                    return Err(Failure::new("config", "manifest and media destinations overlap"));
+                    return Err(Failure::new(
+                        "config",
+                        "manifest and media destinations overlap",
+                    ));
                 }
             }
         }
@@ -500,7 +509,11 @@ fn run(
     completed_output(&command, result, stdout)
 }
 
-fn completed_output(command: &RenderCommand, result: Result<(), Failure>, mut stdout: String) -> RunOutput {
+fn completed_output(
+    command: &RenderCommand,
+    result: Result<(), Failure>,
+    mut stdout: String,
+) -> RunOutput {
     match result {
         Ok(()) => RunOutput {
             code: code("success"),

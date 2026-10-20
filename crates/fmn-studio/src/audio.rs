@@ -100,9 +100,7 @@ impl StudioAudioTrack {
     ///
     /// # Errors
     /// Preserves the production reader's schema, integrity and resource errors.
-    pub fn read_recording(
-        bytes: &[u8],
-    ) -> Result<(TimelineBundle, Option<Self>), BundleReadError> {
+    pub fn read_recording(bytes: &[u8]) -> Result<(TimelineBundle, Option<Self>), BundleReadError> {
         let mut bundle = TimelineBundle::from_bytes(bytes)?;
         let audio = bundle
             .take_soundtrack()
@@ -322,7 +320,10 @@ mod tests {
             );
         }
         for start in [1001, u64::MAX] {
-            assert_eq!(track.chunk(source, start, 1), Err(StudioAudioError::Position));
+            assert_eq!(
+                track.chunk(source, start, 1),
+                Err(StudioAudioError::Position)
+            );
         }
         assert_eq!(track.chunk(source, 0, 1).unwrap().frames(), 1);
     }
@@ -342,7 +343,12 @@ mod tests {
             sha256(b"empty"),
             BundleSoundtrack::new(48_000, 1, Vec::new()).unwrap(),
         );
-        assert!(empty.chunk(empty.info().source, 0, 32).unwrap().is_terminal());
+        assert!(
+            empty
+                .chunk(empty.info().source, 0, 32)
+                .unwrap()
+                .is_terminal()
+        );
     }
 
     #[test]

@@ -60,7 +60,17 @@ pub(super) fn prepare_replay(
         drop(bundle);
         None
     };
-    Ok(PreparedReplay { request, fps, total_frames, source_digest, source, soundtrack, provenance, shared, needs_camera })
+    Ok(PreparedReplay {
+        request,
+        fps,
+        total_frames,
+        source_digest,
+        source,
+        soundtrack,
+        provenance,
+        shared,
+        needs_camera,
+    })
 }
 
 pub(super) fn execute_prepared(
@@ -71,7 +81,17 @@ pub(super) fn execute_prepared(
     stdout: &mut String,
     checkpoint: &dyn Fn() -> Result<(), Failure>,
 ) -> Result<(), Failure> {
-    let PreparedReplay { request, fps, total_frames, source_digest, source, mut soundtrack, provenance, shared, needs_camera } = prepared;
+    let PreparedReplay {
+        request,
+        fps,
+        total_frames,
+        source_digest,
+        source,
+        mut soundtrack,
+        provenance,
+        shared,
+        needs_camera,
+    } = prepared;
     if command.prerun {
         let selected_frames = request.frames.end - request.frames.start;
         if command.common.robot {
@@ -94,7 +114,11 @@ pub(super) fn execute_prepared(
         }
     }
     checkpoint()?;
-    let ffmpeg = if matches!(request.target, Target::Video(_)) { capability() } else { None };
+    let ffmpeg = if matches!(request.target, Target::Video(_)) {
+        capability()
+    } else {
+        None
+    };
     for (index, (destination, selection)) in request.outputs.iter().enumerate() {
         checkpoint()?;
         let range = selection.clone().unwrap_or(0..total_frames);
@@ -137,7 +161,10 @@ pub(super) fn execute_prepared(
                     .map_err(|error| Failure::new("render", error.to_string()))?;
                     let publication = provenance.publish_with_destination(
                         Arc::clone(&fs),
-                        request.manifests.as_ref().map(|paths| paths[index].as_path()),
+                        request
+                            .manifests
+                            .as_ref()
+                            .map(|paths| paths[index].as_path()),
                         provenance::Artifact {
                             destination,
                             target: request.target,
@@ -195,7 +222,10 @@ pub(super) fn execute_prepared(
                     })?;
                     let publication = provenance.publish_with_destination(
                         Arc::clone(&fs),
-                        request.manifests.as_ref().map(|paths| paths[index].as_path()),
+                        request
+                            .manifests
+                            .as_ref()
+                            .map(|paths| paths[index].as_path()),
                         provenance::Artifact {
                             destination,
                             target: request.target,
