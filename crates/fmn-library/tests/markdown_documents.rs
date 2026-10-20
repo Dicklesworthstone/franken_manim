@@ -368,6 +368,24 @@ fn table_cells_keep_native_formulas_styles_code_and_source_order() {
     );
 }
 
+/// franken_markdown's `---.` (decimal alignment for financial columns) has no
+/// native table equivalent: a named refusal, never a silent right alignment.
+#[test]
+fn decimal_aligned_table_columns_refuse_by_name() {
+    let (book, engine) = (book(), engine());
+    let source = "| item | amount |\n| :--- | ---. |\n| a | 1.50 |\n| b | 12.25 |\n";
+    let error = Markdown::new(source)
+        .build_with_math(&book, &engine)
+        .err()
+        .expect("decimal alignment is refused");
+    assert!(
+        error
+            .to_string()
+            .contains("decimal-aligned table columns (`---.`)"),
+        "{error}"
+    );
+}
+
 #[test]
 fn math_tables_honor_column_alignment_and_make_room_for_tall_formulas() {
     let (book, engine) = (book(), engine());

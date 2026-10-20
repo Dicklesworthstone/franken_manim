@@ -460,6 +460,24 @@ impl<'a> Composer<'a> {
                         "Markdown table rows must match their declared columns",
                     ));
                 }
+                let alignments = table
+                    .align
+                    .iter()
+                    .map(|alignment| match alignment {
+                        franken_markdown::ast::Align::Left => Ok(fmn_text::layout::Align::Left),
+                        franken_markdown::ast::Align::Right => Ok(fmn_text::layout::Align::Right),
+                        // Unspecified alignment keeps the existing native
+                        // table's centered cells; explicit GFM choices win.
+                        franken_markdown::ast::Align::None
+                        | franken_markdown::ast::Align::Center => Ok(fmn_text::layout::Align::Center),
+                        // fmd's `---.` aligns financial values at their decimal
+                        // point. The native table layout has no decimal tab, so
+                        // refuse by name instead of approximating it.
+                        franken_markdown::ast::Align::Decimal => Err(MathDocumentError::Unsupported(
+                            "Markdown decimal-aligned table columns (`---.`) are not supported by the native table layout; use `---:` to right-align",
+                        )),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
                 let mut rows = Vec::with_capacity(table.rows.len() + 1);
                 for row in std::iter::once(&table.head).chain(&table.rows) {
                     let mut cells = Vec::with_capacity(row.len());
@@ -468,18 +486,6 @@ impl<'a> Composer<'a> {
                     }
                     rows.push(cells);
                 }
-                let alignments = table
-                    .align
-                    .iter()
-                    .map(|alignment| match alignment {
-                        franken_markdown::ast::Align::Left => fmn_text::layout::Align::Left,
-                        franken_markdown::ast::Align::Right => fmn_text::layout::Align::Right,
-                        // Unspecified alignment keeps the existing native
-                        // table's centered cells; explicit GFM choices win.
-                        franken_markdown::ast::Align::None
-                        | franken_markdown::ast::Align::Center => fmn_text::layout::Align::Center,
-                    })
-                    .collect::<Vec<_>>();
                 let cells = rows.len() * table.head.len();
                 let geometry = layout_table_cells(rows, &alignments)
                     .map_err(|e| MathDocumentError::Geometry(e.to_string()))?

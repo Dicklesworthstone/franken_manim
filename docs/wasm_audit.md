@@ -1,6 +1,20 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-run, 2026-10-19, against `Cargo.lock` `9bc3615a` and `SUITE.lock`
+**Status:** re-run, 2026-10-20, against `Cargo.lock` `1887214b` and `SUITE.lock`
+`8ee4f259`, for the franken_markdown repin from `23c4d0c5` to `206bb639`
+(fm-tex-color-silent-i0p2: xcolor `\color`/`\textcolor` in fmd-math). The three lock
+files move only the three franken_markdown packages' rev; their versions and manifests are
+unchanged, and no fmd or franken_markdown package is in this graph.
+**The release package gate still FAILS at its size budget** (fm-8j70), so this
+audit does not claim a passing package.
+
+- **VERIFIED (mechanical):** `cargo tree -p fmn-wasm --target
+  wasm32-unknown-unknown --edges normal --locked` is unchanged at 134 lines, with
+  no fmd or franken_markdown package.
+- The `--locked` wasm32 build and wasm-smoke were not re-run: no package in the
+  wasm graph changed since the 2026-10-12 run below.
+
+Earlier re-run, 2026-10-19, against `Cargo.lock` `9bc3615a` and `SUITE.lock`
 `8a1c6af0`, for the franken_markdown repin from `80cbadcd` to `23c4d0c5`
 (fm-cm-math-faces-impl-n12u: the CM math faces of ADR-0028). The three lock files
 move the three franken_markdown packages' rev and version (franken_markdown
@@ -366,8 +380,8 @@ The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
-- `SUITE.lock` SHA-256: `8a1c6af076a75e51a7e444aeafd2bc72b56ca655341a09f7eef1b5ec65f5719d`
-- `Cargo.lock` SHA-256: `9bc3615a78c379a633562a64f57de1433a83942f9874a048d7da7c849261dcf2`
+- `SUITE.lock` SHA-256: `8ee4f259b6c898046ffb15f091bcaf1463c0682b2189dc6118c171b5a1deae45`
+- `Cargo.lock` SHA-256: `1887214b2a44c0cccd86b845419b493c06fe79bf4f0d44310763f4a6bf4f6a18`
 - Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `b1fac18569682e3d2888881883f8b37e4abfb10884ed34a6f2e1eb7a4da942b5`
 
 The 0.5.0 release bump re-bound both lock identities above. That bump changed

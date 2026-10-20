@@ -440,7 +440,7 @@ fn corrupt_cache_payloads_decode_to_none_never_panic() {
 
 #[test]
 fn impossible_declared_counts_fail_before_collection_reservation() {
-    let mut bytes = MAGIC_V2.to_vec();
+    let mut bytes = MAGIC_V3.to_vec();
     bytes.extend_from_slice(&0_u32.to_le_bytes()); // empty source
     bytes.extend_from_slice(&0_f64.to_bits().to_le_bytes());
     bytes.extend_from_slice(&0_f64.to_bits().to_le_bytes());
