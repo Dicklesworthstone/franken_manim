@@ -53,6 +53,7 @@ use fmn_geom::arclength::ArcLengthTable;
 use fmn_geom::{QuadPath, space_ops};
 use fmn_mobject::stage::{Mob, Stage};
 use fmn_mobject::uniforms::JointType;
+use fmn_mobject::{StageError, UpdaterError};
 
 use crate::coords::CoordinateSystem;
 use crate::graphs::{SamplingBudget, SamplingError};
@@ -108,6 +109,8 @@ pub enum FieldError {
     Sampling(SamplingError),
     /// A stage operation failed inside an `add_*` helper.
     Stage(fmn_mobject::StageError),
+    /// A fallible updater could not be registered or evaluated immediately.
+    Updater(UpdaterError),
 }
 
 impl fmt::Display for FieldError {
@@ -127,6 +130,7 @@ impl fmt::Display for FieldError {
             Self::Integration(msg) => write!(f, "integration failed: {msg}"),
             Self::Sampling(e) => write!(f, "sampling: {e}"),
             Self::Stage(e) => write!(f, "stage: {e}"),
+            Self::Updater(e) => write!(f, "updater: {e}"),
         }
     }
 }
@@ -142,6 +146,15 @@ impl From<SamplingError> for FieldError {
 impl From<fmn_mobject::StageError> for FieldError {
     fn from(e: fmn_mobject::StageError) -> Self {
         Self::Stage(e)
+    }
+}
+
+impl From<UpdaterError> for FieldError {
+    fn from(error: UpdaterError) -> Self {
+        match error {
+            UpdaterError::Stage(error) => Self::Stage(error),
+            error => Self::Updater(error),
+        }
     }
 }
 
@@ -928,11 +941,13 @@ impl TimeVaryingVectorField {
     ///
     /// # Errors
     /// [`FieldError`] on the same refusals as [`VectorField::build`], or a
-    /// stale stage handle.
+    /// stale stage handle. Later malformed or non-finite samples are retained
+    /// by [`Stage::updater_error`], preserving the last valid field and clock.
     pub fn add_to_stage(self, stage: &mut Stage) -> Result<Mob, FieldError> {
         let time_func = std::rc::Rc::new(self.time_func);
         let cs = self.cs;
         let time = self.time;
+        ensure_finite("TimeVaryingVectorField initial time", time)?;
         let tf_for_build = std::rc::Rc::clone(&time_func);
         let func = move |coords: &[[f64; 3]]| tf_for_build(coords, time);
         let built = build_field(
@@ -959,30 +974,70 @@ impl TimeVaryingVectorField {
         let sample_points = built.sample_points.clone();
         let mob = built.add_to_stage(stage);
 
-        let update = move |stage: &mut Stage, mob: Mob, id, dt: f64| {
-            let time = stage
-                .updater_state_mut::<f64>(mob, id)
-                .expect("time-varying field clock is installed");
-            *time += dt;
-            let time = *time;
+        let update = move |stage: &mut Stage, mob: Mob, id, dt: f64| -> Result<(), UpdaterError> {
+            const OPERATION: &str = "TimeVaryingVectorField";
+            if !dt.is_finite() || dt < 0.0 {
+                return Err(UpdaterError::callback(
+                    OPERATION,
+                    "dt must be finite and nonnegative",
+                ));
+            }
+            let time = *stage
+                .updater_state::<f64>(mob, id)
+                .ok_or(StageError::UpdaterBindingMismatch)?
+                + dt;
+            if !time.is_finite() {
+                return Err(UpdaterError::callback(OPERATION, "field time overflowed"));
+            }
             let outputs = time_func(&sample_coords, time);
             if outputs.len() != sample_coords.len() {
-                return; // the Reference would raise next frame; hold the last good frame
+                return Err(UpdaterError::callback(
+                    OPERATION,
+                    FieldError::FuncShapeMismatch {
+                        expected: sample_coords.len(),
+                        got: outputs.len(),
+                    },
+                ));
+            }
+            if !outputs.iter().flatten().all(|value| value.is_finite()) {
+                return Err(UpdaterError::callback(
+                    OPERATION,
+                    "field function returned non-finite coordinates",
+                ));
             }
             let output_norms: Vec<f64> = outputs.iter().map(|o| space_ops::get_norm(*o)).collect();
+            if !output_norms.iter().all(|value| value.is_finite()) {
+                return Err(UpdaterError::callback(
+                    OPERATION,
+                    "field magnitude overflowed",
+                ));
+            }
             let origin = cs.origin();
             let out_vects: Vec<Vec3> = outputs.iter().map(|o| sub3(cs.c2p(o), origin)).collect();
+            if !out_vects.iter().flatten().all(|value| value.is_finite()) {
+                return Err(UpdaterError::callback(
+                    OPERATION,
+                    "coordinate mapping returned non-finite vectors",
+                ));
+            }
             let geometry =
                 vector_field_geometry(&style, &sample_points, &out_vects, &output_norms, max_len);
-            write_points(stage, mob, &geometry.points);
-            write_stroke_widths(stage, mob, &geometry.stroke_widths);
-            if !geometry.stroke_rgba.is_empty() {
-                write_stroke_rgba(stage, mob, &geometry.stroke_rgba);
-            }
+            write_dynamic_geometry(
+                stage,
+                mob,
+                &geometry.points,
+                &geometry.stroke_widths,
+                &geometry.stroke_rgba,
+                OPERATION,
+            )?;
+            *stage
+                .updater_state_mut::<f64>(mob, id)
+                .ok_or(StageError::UpdaterBindingMismatch)? = time;
+            Ok(())
         };
         // One immediate pass so the arrows match `time` even before the
         // first tick (the Reference's constructor drew at time 0).
-        stage.add_dt_updater_with_state(mob, time, |_, _| {}, update, true)?;
+        stage.add_try_dt_updater_with_state(mob, time, |_, _| {}, update, true)?;
         Ok(mob)
     }
 }
@@ -1920,11 +1975,11 @@ impl TailSamples {
     /// The caller validates the finite, positive delta before reading its
     /// source. Neither work nor storage is proportional to `window / dt` or
     /// `dt / spacing`: samples already older than the cutoff are never built.
-    fn advance(&mut self, point: Vec3, dt: f64) -> Vec<Vec3> {
+    fn advance(&mut self, point: Vec3, dt: f64) -> Result<Vec<Vec3>, SamplingError> {
         if self.window == 0.0 {
             self.previous = point;
             self.anchors[0] = point;
-            return vec![point];
+            return Ok(vec![point]);
         }
 
         // Reduce before addition so even huge finite steps cannot overflow
@@ -1956,7 +2011,7 @@ impl TailSamples {
             .take_while(|&index| phase + index as f64 * self.spacing < dt)
             .count();
         if !self.window.is_finite() && new_count > self.limit - self.anchors.len() {
-            std::panic::panic_any(SamplingError::LimitExceeded {
+            return Err(SamplingError::LimitExceeded {
                 context: "TracedPath history; use a finite window or increase time_per_anchor",
                 max_samples: MAX_TRACE_ANCHORS,
             });
@@ -2002,7 +2057,7 @@ impl TailSamples {
         if phase > 0.0 {
             points.push(point);
         }
-        points
+        Ok(points)
     }
 }
 
@@ -2083,12 +2138,10 @@ impl TracedPath {
     /// [`FieldError::Sampling`] when the finite window exceeds the shared
     /// 100,000-anchor resource ceiling. Refusal precedes stage adoption.
     ///
-    /// # Panics
-    /// The installed updater requires finite, nonnegative deltas and finite
-    /// source coordinates. An infinite-duration trace also refuses a step
-    /// that exceeds its anchor budget. These refusals preserve its previous
-    /// history and geometry; the infallible [`Stage::update`] API does not
-    /// roll back its clock or arbitrary effects of the source callback.
+    /// The installed updater retains a typed failure in [`Stage::updater_error`]
+    /// for invalid deltas, non-finite source coordinates, or exhausted history.
+    /// Refusals preserve its previous history and geometry. The scene clock
+    /// and arbitrary effects of the source callback are not rolled back.
     pub fn add_to_stage(
         self,
         stage: &mut Stage,
@@ -2144,7 +2197,7 @@ impl TracedPath {
             TraceSource::Mobject(target) => (Some(target), None),
         };
         let config = self;
-        stage.add_dt_updater_with_state(
+        stage.add_try_dt_updater_with_state(
             mob,
             TraceState {
                 samples: tail_samples,
@@ -2156,37 +2209,49 @@ impl TracedPath {
                 }
             },
             move |stage: &mut Stage, mob: Mob, id, dt: f64| {
-                // Stage's updater API is infallible. Refuse invalid deltas
-                // before source sampling or changing trace history/geometry.
-                assert!(
-                    dt.is_finite() && dt >= 0.0,
-                    "TracedPath/TracingTail updater dt must be finite and nonnegative"
-                );
+                const OPERATION: &str = "TracedPath/TracingTail";
+                if !dt.is_finite() || dt < 0.0 {
+                    return Err(UpdaterError::callback(
+                        OPERATION,
+                        "dt must be finite and nonnegative",
+                    ));
+                }
                 // changing.py:92 update_path: dt == 0 is an explicit no-op.
                 if dt == 0.0 {
-                    return;
+                    return Ok(());
                 }
                 let target = stage
                     .updater_state::<TraceState>(mob, id)
-                    .expect("trace updater attributes are installed")
+                    .ok_or(StageError::UpdaterBindingMismatch)?
                     .target;
                 let point = if let Some(target) = target {
+                    stage.try_get(target)?;
                     stage.get_center(target)
                 } else {
-                    point_func.as_ref().expect("point-function trace source")(stage)
+                    point_func
+                        .as_ref()
+                        .ok_or(StageError::UpdaterBindingMismatch)?(stage)
                 };
-                assert!(
-                    point.iter().all(|coordinate| coordinate.is_finite()),
-                    "TracedPath/TracingTail source must return a finite 3D point"
-                );
+                if !point.iter().all(|coordinate| coordinate.is_finite()) {
+                    return Err(UpdaterError::callback(
+                        OPERATION,
+                        "source must return a finite 3D point",
+                    ));
+                }
 
-                let state = stage
-                    .updater_state_mut::<TraceState>(mob, id)
-                    .expect("trace updater attributes are installed");
-                let points = if let Some(samples) = state.samples.as_mut() {
-                    samples.advance(point, dt)
+                // Prepare on an independent history. Neither a sampling-budget
+                // failure nor a geometry refusal publishes a partial next tick.
+                let mut next_samples = stage
+                    .updater_state::<TraceState>(mob, id)
+                    .ok_or(StageError::UpdaterBindingMismatch)?
+                    .samples
+                    .clone();
+                let points = if let Some(samples) = next_samples.as_mut() {
+                    samples
+                        .advance(point, dt)
+                        .map_err(|error| UpdaterError::callback(OPERATION, error))?
                 } else {
-                    state.samples = Some(TailSamples::first_observation(
+                    next_samples = Some(TailSamples::first_observation(
                         config.time_traced,
                         config.time_per_anchor,
                         intervals,
@@ -2196,9 +2261,8 @@ impl TracedPath {
                 };
 
                 if !points.is_empty() {
-                    let path = smooth_polyline(&points);
-                    let _ = stage.set_points(mob, path.points());
-                    write_stroke_widths(stage, mob, &config.stroke_width.values(&path));
+                    let path = smooth_polyline(&points).map_err(StageError::Geometry)?;
+                    let widths = config.stroke_width.values(&path);
                     let opacities = config.stroke_opacity.values(&path);
                     let rgba: Vec<[f64; 4]> = opacities
                         .iter()
@@ -2211,8 +2275,13 @@ impl TracedPath {
                             ]
                         })
                         .collect();
-                    write_stroke_rgba(stage, mob, &rgba);
+                    write_dynamic_geometry(stage, mob, path.points(), &widths, &rgba, OPERATION)?;
                 }
+                stage
+                    .updater_state_mut::<TraceState>(mob, id)
+                    .ok_or(StageError::UpdaterBindingMismatch)?
+                    .samples = next_samples;
+                Ok(())
             },
             false,
         )?;
@@ -2338,16 +2407,16 @@ impl Default for TracingTail {
 
 /// `set_points_smoothly` (vectorized_mobject.py:681): corners plus approx
 /// smoothing.
-fn smooth_polyline(points: &[Vec3]) -> QuadPath {
+fn smooth_polyline(points: &[Vec3]) -> Result<QuadPath, fmn_geom::GeomError> {
     let mut path = QuadPath::new();
     if let Some(&first) = points.first() {
         path.start_new_path(first);
-        let _ = path.add_points_as_corners(&points[1..]);
+        path.add_points_as_corners(&points[1..])?;
         if points.len() > 2 {
-            let _ = path.make_smooth(true);
+            path.make_smooth(true)?;
         }
     }
-    path
+    Ok(path)
 }
 
 /// `AnimatedBoundary` (changing.py:17): two ghost copies of a mobject —
@@ -2663,6 +2732,55 @@ pub fn move_points_along_vector_field(
 }
 
 // ------------------------------------------------------- stage plumbing
+
+/// Validate every authored column before publishing a dynamic path. Once the
+/// schema and lengths agree, the record writes after `set_points` cannot refuse.
+fn write_dynamic_geometry(
+    stage: &mut Stage,
+    mob: Mob,
+    points: &[Vec3],
+    widths: &[f64],
+    rgba: &[[f64; 4]],
+    operation: &'static str,
+) -> Result<(), UpdaterError> {
+    if widths.len() != points.len() || (!rgba.is_empty() && rgba.len() != points.len()) {
+        return Err(UpdaterError::callback(
+            operation,
+            "geometry and stroke columns have different lengths",
+        ));
+    }
+    let finite_record = |value: &f64| (*value as f32).is_finite();
+    if !points.iter().flatten().all(finite_record)
+        || !widths.iter().all(finite_record)
+        || !rgba.iter().flatten().all(finite_record)
+    {
+        return Err(UpdaterError::callback(
+            operation,
+            "geometry or stroke cannot be represented by finite records",
+        ));
+    }
+    let schema = stage.try_get(mob)?.buffer.schema();
+    if schema.field_width("point") != Some(3)
+        || schema.field_width("stroke_width") != Some(1)
+        || (!rgba.is_empty() && schema.field_width("stroke_rgba") != Some(4))
+    {
+        return Err(UpdaterError::callback(
+            operation,
+            "target no longer has the required vector record schema",
+        ));
+    }
+    let widths: Vec<f32> = widths.iter().map(|&width| width as f32).collect();
+    let rgba: Vec<f32> = rgba.iter().flatten().map(|&value| value as f32).collect();
+    stage.set_points(mob, points)?;
+    let buffer = &mut stage.get_mut(mob).ok_or(StageError::StaleHandle)?.buffer;
+    let written = buffer.write_range("stroke_width", 0, &widths);
+    debug_assert!(written, "validated stroke-width write");
+    if !rgba.is_empty() {
+        let written = buffer.write_range("stroke_rgba", 0, &rgba);
+        debug_assert!(written, "validated stroke-color write");
+    }
+    Ok(())
+}
 
 fn write_points(stage: &mut Stage, mob: Mob, points: &[Vec3]) {
     let _ = stage.set_points(mob, points);
@@ -3384,12 +3502,28 @@ mod tests {
         stage.update(0.125);
         let before = stage.get_points(traced).unwrap();
         for dt in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            assert!(catch_unwind(AssertUnwindSafe(|| stage.update(dt))).is_err());
+            assert!(catch_unwind(AssertUnwindSafe(|| stage.update(dt))).is_ok());
+            let failure = stage.take_updater_error().unwrap().unwrap();
+            assert_eq!(failure.mobject, traced);
+            assert_eq!(
+                failure.error,
+                UpdaterError::callback(
+                    "TracedPath/TracingTail",
+                    "dt must be finite and nonnegative"
+                )
+            );
             assert_eq!(calls.get(), 1, "invalid dt must not sample the source");
             assert_eq!(stage.get_points(traced).unwrap(), before);
         }
         point.set([f64::NAN, 0.0, 0.0]);
-        assert!(catch_unwind(AssertUnwindSafe(|| stage.update(0.125))).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| stage.update(0.125))).is_ok());
+        assert_eq!(
+            stage.take_updater_error().unwrap().unwrap().error,
+            UpdaterError::callback(
+                "TracedPath/TracingTail",
+                "source must return a finite 3D point"
+            )
+        );
         assert_eq!(stage.get_points(traced).unwrap(), before);
         point.set([1.0, 0.0, 0.0]);
         stage.update(0.25);
@@ -3417,7 +3551,19 @@ mod tests {
         stage.add_to_scene(traced).unwrap();
         stage.update(0.125);
         point.set([99.0, 0.0, 0.0]);
-        assert!(catch_unwind(AssertUnwindSafe(|| stage.update(f64::MAX))).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| stage.update(f64::MAX))).is_ok());
+        let failure = stage.take_updater_error().unwrap().unwrap();
+        assert_eq!(failure.mobject, traced);
+        assert_eq!(
+            failure.error,
+            UpdaterError::callback(
+                "TracedPath/TracingTail",
+                SamplingError::LimitExceeded {
+                    context: "TracedPath history; use a finite window or increase time_per_anchor",
+                    max_samples: MAX_TRACE_ANCHORS,
+                }
+            )
+        );
         assert_eq!(stage.get_points(traced).unwrap(), vec![[0.0; 3]]);
         point.set([1.0, 0.0, 0.0]);
         stage.update(0.25);
@@ -3644,7 +3790,7 @@ mod tests {
         // Direct sample values avoid f32 geometry rounding masking a narrow
         // temporal window after a very large observed displacement in time.
         let mut samples = TailSamples::new(1.0, 0.25, 4, [0.0; 3]);
-        let points = samples.advance([64.0, 0.0, 0.0], 1e6);
+        let points = samples.advance([64.0, 0.0, 0.0], 1e6).unwrap();
         assert_eq!(points.len(), 5);
         for (index, point) in points.iter().enumerate() {
             let age = 1.0 - index as f64 * 0.25;
@@ -3656,7 +3802,7 @@ mod tests {
         let spacing = f64::from_bits(1);
         let mut samples = TailSamples::new(8.0 * spacing, spacing, 8, [0.0; 3]);
         for point in [[1.0, 2.0, 0.0], [3.0, 4.0, 0.0]] {
-            let points = samples.advance(point, f64::MAX);
+            let points = samples.advance(point, f64::MAX).unwrap();
             assert!(points.len() <= 11);
             assert!(points.iter().flatten().all(|value| value.is_finite()));
             assert_eq!(points.last(), Some(&point));
@@ -3708,7 +3854,16 @@ mod tests {
             let before = stage.get_points(tail).unwrap();
             source.set([99.0, 99.0, 0.0]);
             for invalid in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-                assert!(catch_unwind(AssertUnwindSafe(|| stage.update(invalid))).is_err());
+                assert!(catch_unwind(AssertUnwindSafe(|| stage.update(invalid))).is_ok());
+                let failure = stage.take_updater_error().unwrap().unwrap();
+                assert_eq!(failure.mobject, tail);
+                assert_eq!(
+                    failure.error,
+                    UpdaterError::callback(
+                        "TracedPath/TracingTail",
+                        "dt must be finite and nonnegative"
+                    )
+                );
                 assert_eq!(calls.get(), step);
                 assert_eq!(stage.get_points(tail).unwrap(), before);
             }
@@ -3827,6 +3982,178 @@ mod tests {
             "the field did not redraw at the new time"
         );
         assert!(after.iter().all(|p| p.iter().all(|v| v.is_finite())));
+    }
+
+    #[test]
+    fn time_varying_field_refusals_preserve_copied_clock_geometry_and_snapshot() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let mode = Rc::new(Cell::new(0));
+        let sample_mode = Rc::clone(&mode);
+        let mut stage = Stage::new();
+        let field = TimeVaryingVectorField::new(
+            move |coords, time| match sample_mode.get() {
+                1 => Vec::new(),
+                2 => vec![[f64::NAN, 0.0, 0.0]; coords.len()],
+                3 => vec![[f64::MAX, f64::MAX, 0.0]; coords.len()],
+                _ => vec![[1.0, time, 0.0]; coords.len()],
+            },
+            axes(),
+        )
+        .with_sample_coords(vec![[0.0; 3], [1.0, 0.0, 0.0]])
+        .add_to_stage(&mut stage)
+        .unwrap();
+        let updater = stage.updater_ids(field)[0];
+        stage.update_mobject(field, 0.25);
+        let copied = stage.copy_family(field).unwrap();
+        let snapshot = stage.snapshot();
+        let before = stage.get_points(field).unwrap();
+        let before_widths = stage
+            .get(field)
+            .unwrap()
+            .buffer
+            .read_column("stroke_width")
+            .unwrap();
+        for (refusal, diagnostic) in [
+            (1, "field function returned 0 rows for 2 coordinate rows"),
+            (2, "field function returned non-finite coordinates"),
+            (3, "field magnitude overflowed"),
+        ] {
+            mode.set(refusal);
+            stage.update_mobject(copied, 0.5);
+            let failure = stage.updater_error().unwrap();
+            assert_eq!(failure.mobject, copied);
+            assert_eq!(failure.updater, updater);
+            assert_eq!(
+                failure.error,
+                UpdaterError::callback("TimeVaryingVectorField", diagnostic)
+            );
+            assert_eq!(stage.updater_state::<f64>(copied, updater), Some(&0.25));
+            assert_eq!(stage.updater_state::<f64>(field, updater), Some(&0.25));
+            assert_eq!(stage.get_points(copied).unwrap(), before);
+            assert_eq!(
+                stage
+                    .get(copied)
+                    .unwrap()
+                    .buffer
+                    .read_column("stroke_width")
+                    .unwrap(),
+                before_widths
+            );
+            // Retention prevents an ignored failure from advancing a later tick.
+            mode.set(0);
+            stage.update_mobject(copied, 0.5);
+            assert_eq!(stage.updater_state::<f64>(copied, updater), Some(&0.25));
+            stage.take_updater_error().unwrap().unwrap();
+        }
+        stage.update_mobject(copied, 0.5);
+        let mut control = snapshot.materialize();
+        control.update_mobject(copied, 0.5);
+        assert_eq!(stage.updater_state::<f64>(copied, updater), Some(&0.75));
+        assert_eq!(stage.get_points(copied), control.get_points(copied));
+        assert_eq!(stage.get_points(field).unwrap(), before);
+    }
+
+    #[test]
+    fn time_varying_field_invalid_delta_does_not_sample_or_advance_its_clock() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let calls = Rc::new(Cell::new(0));
+        let sample_calls = Rc::clone(&calls);
+        let mut stage = Stage::new();
+        let field = TimeVaryingVectorField::new(
+            move |coords, time| {
+                sample_calls.set(sample_calls.get() + 1);
+                vec![[1.0, time, 0.0]; coords.len()]
+            },
+            axes(),
+        )
+        .with_sample_coords(vec![[0.0; 3], [1.0, 0.0, 0.0]])
+        .add_to_stage(&mut stage)
+        .unwrap();
+        let updater = stage.updater_ids(field)[0];
+        let calls_before = calls.get();
+        let before = stage.get_points(field).unwrap();
+        for dt in [-1.0, f64::NAN, f64::INFINITY] {
+            stage.update_mobject(field, dt);
+            assert_eq!(calls.get(), calls_before);
+            assert_eq!(stage.updater_state::<f64>(field, updater), Some(&0.0));
+            assert_eq!(stage.get_points(field).unwrap(), before);
+            assert_eq!(
+                stage.take_updater_error().unwrap().unwrap().error,
+                UpdaterError::callback(
+                    "TimeVaryingVectorField",
+                    "dt must be finite and nonnegative"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn copied_trace_geometry_refusal_preserves_history_until_explicit_recovery() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let point = Rc::new(Cell::new([0.0; 3]));
+        let source = Rc::clone(&point);
+        let mut stage = Stage::new();
+        let trace = TracedPath::new()
+            .with_time_traced(0.5)
+            .with_time_per_anchor(0.25)
+            .add_to_stage(&mut stage, move |_| source.get())
+            .unwrap();
+        stage.update_mobject(trace, 0.125);
+        let copied = stage.copy_family(trace).unwrap();
+        let updater = stage.updater_ids(copied)[0];
+        let snapshot = stage.snapshot();
+        let before = stage.get_points(copied).unwrap();
+        // Finite f64 input can still overflow the engine's f32 record lanes.
+        point.set([1e100, 0.0, 0.0]);
+        stage.update_mobject(copied, 0.25);
+        let failure = stage.updater_error().unwrap();
+        assert_eq!(failure.mobject, copied);
+        assert_eq!(failure.updater, updater);
+        assert_eq!(
+            failure.error,
+            UpdaterError::callback(
+                "TracedPath/TracingTail",
+                "geometry or stroke cannot be represented by finite records"
+            )
+        );
+        assert_eq!(stage.get_points(copied).unwrap(), before);
+        assert_eq!(stage.get_points(trace).unwrap(), before);
+
+        point.set([1.0, 0.0, 0.0]);
+        stage.update_mobject(copied, 0.25);
+        assert_eq!(stage.get_points(copied).unwrap(), before);
+        stage.take_updater_error().unwrap().unwrap();
+        stage.update_mobject(copied, 0.25);
+        let mut control = snapshot.materialize();
+        control.update_mobject(copied, 0.25);
+        assert_eq!(stage.get_points(copied), control.get_points(copied));
+        assert_eq!(
+            stage.get_points(copied).unwrap().last(),
+            Some(&[1.0, 0.0, 0.0])
+        );
+    }
+
+    #[test]
+    fn tracing_tail_deleted_source_reports_a_retained_ownership_error() {
+        let mut stage = Stage::new();
+        let target = stage.add(VMobject::from_points(vec![[1.0, 2.0, 0.0]]));
+        let tail = TracingTail::new().add_to_stage(&mut stage, target).unwrap();
+        stage.update_mobject(tail, 0.125);
+        let before = stage.get_points(tail).unwrap();
+        stage.delete(target).unwrap();
+        stage.update_mobject(tail, 0.125);
+        assert_eq!(stage.updater_error().unwrap().mobject, tail);
+        assert_eq!(
+            stage.updater_error().unwrap().error,
+            UpdaterError::Stage(StageError::StaleHandle)
+        );
+        assert_eq!(stage.get_points(tail).unwrap(), before);
     }
 
     #[test]

@@ -547,3 +547,78 @@ fn fallible_native_redraw_aborts_staged_output_and_allows_a_fresh_render() {
     assert!(fs.exists(Path::new("/refused-redraw")));
     assert_eq!(calls.get(), 3);
 }
+
+#[test]
+fn dynamic_field_and_trace_failures_abort_real_native_publication() {
+    use fmn::library::{TimeVaryingVectorField, TracedPath};
+
+    struct RefusedDynamics {
+        trace: bool,
+    }
+
+    impl SceneConstruct for RefusedDynamics {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            stage.add(Circle::new().radius(0.5).color(WHITE))?;
+            // Exercise cancellation after an earlier segment has emitted pixels.
+            stage.wait(0.125)?;
+            let dynamic = if self.trace {
+                TracedPath::new().add_to_stage(stage.arena_mut(), |arena| {
+                    if arena.time() > 0.35 {
+                        [f64::NAN, 0.0, 0.0]
+                    } else {
+                        [arena.time(), 0.0, 0.0]
+                    }
+                })?
+            } else {
+                TimeVaryingVectorField::new(
+                    |coordinates, time| {
+                        if time > 0.125 {
+                            Vec::new()
+                        } else {
+                            vec![[1.0, time, 0.0]; coordinates.len()]
+                        }
+                    },
+                    Axes::new(),
+                )
+                .with_sample_coords(vec![[0.0; 3], [1.0, 0.0, 0.0]])
+                .add_to_stage(stage.arena_mut())?
+            };
+            stage.add_to_scene(dynamic)?;
+            stage.wait(0.75)?;
+            panic!("a refused dynamic sample must not complete the scene")
+        }
+    }
+
+    for (trace, operation) in [
+        (false, "TimeVaryingVectorField"),
+        (true, "TracedPath/TracingTail"),
+    ] {
+        let fs = Arc::new(VirtualFs::new());
+        let error = render_with_fs(
+            &mut RefusedDynamics { trace },
+            options("/refused-dynamics", RenderFormat::PngSequence, 2, 2),
+            fs.clone(),
+        )
+        .unwrap_err();
+        match error {
+            RenderError::Scene(Error::Animation(AnimError::Updater(UpdaterFailure {
+                error:
+                    UpdaterError::Callback {
+                        operation: actual, ..
+                    },
+                ..
+            }))) => assert_eq!(actual, operation),
+            other => panic!("expected retained {operation} failure, got {other:?}"),
+        }
+        assert!(!fs.exists(Path::new("/refused-dynamics")));
+        let report = render_with_fs(
+            &mut Static,
+            options("/refused-dynamics", RenderFormat::PngSequence, 2, 2),
+            fs.clone(),
+        )
+        .unwrap();
+        assert_eq!(report.artifact.frame_count, 1);
+        assert_eq!(report.frame_pipeline.unwrap().outstanding_slots, 0);
+        assert!(fs.exists(Path::new("/refused-dynamics")));
+    }
+}

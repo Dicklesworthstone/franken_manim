@@ -2121,6 +2121,52 @@ impl Stage {
         Ok(id)
     }
 
+    /// Register a fallible dt updater with mobject-owned native attributes.
+    ///
+    /// State has [`Self::add_dt_updater_with_state`]'s copy, handle-remapping,
+    /// and snapshot semantics. It is installed before the optional immediate
+    /// zero-dt family pass, so the callback can read it on its first invocation.
+    /// Errors have [`Self::add_try_updater`]'s retention and ordering semantics:
+    /// the first failure stops the pass and names the actual receiving copy.
+    ///
+    /// An immediate failure removes only the new callable registration. Its
+    /// attributes remain ordinary mobject state, as when removing any updater;
+    /// callback mutations are not rolled back. Prepare fallible work before
+    /// publishing new attributes when the last valid state must be preserved.
+    ///
+    /// # Errors
+    /// A stale target, exhausted identity space, an already-pending failure,
+    /// or a callback failure during the immediate pass.
+    pub fn add_try_dt_updater_with_state<T: Clone + 'static>(
+        &mut self,
+        mob: Mob,
+        state: T,
+        remap: fn(&mut T, &CopyMap),
+        mut updater: impl FnMut(&mut Stage, Mob, UpdaterId, f64) -> Result<(), UpdaterError> + 'static,
+        call: bool,
+    ) -> Result<UpdaterId, UpdaterError> {
+        // No user code runs between reserving the next identity and installing
+        // the state. The ordinary fallible registration performs every guard.
+        let id = UpdaterId(self.next_updater_id);
+        self.add_try_dt_updater(
+            mob,
+            move |stage, receiver, dt| updater(stage, receiver, id, dt),
+            false,
+        )?;
+        if let Err(error) = self.set_updater_state(mob, id, state, remap) {
+            self.remove_updater(mob, id);
+            return Err(error.into());
+        }
+        if call {
+            self.update_mob(mob, 0.0);
+            if let Some(error) = self.updater_error().map(|failure| failure.error.clone()) {
+                self.remove_updater(mob, id);
+                return Err(error);
+            }
+        }
+        Ok(id)
+    }
+
     /// Install native attributes for an existing updater identity. This is
     /// also the explicit state-rebinding seam after a durable snapshot's
     /// callable manifest has been resolved. No native state is inferred from
@@ -2846,6 +2892,146 @@ mod updater_tests {
     use super::*;
     use std::cell::Cell;
     use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    #[test]
+    fn fallible_stateful_updaters_remap_copies_and_keep_snapshot_state_independent() {
+        #[derive(Clone)]
+        struct Clock {
+            tracker: Mob,
+            samples: Vec<f64>,
+        }
+
+        let mut stage = Stage::new();
+        let root = stage.add(Mobject::new());
+        let tracker = stage.add_value_tracker(10.0);
+        stage.attach(root, tracker).unwrap();
+        let updater = stage
+            .add_try_dt_updater_with_state(
+                root,
+                Clock {
+                    tracker,
+                    samples: Vec::new(),
+                },
+                |clock, map| clock.tracker = map.get(clock.tracker).unwrap_or(clock.tracker),
+                |stage, receiver, id, dt| {
+                    if dt > 1.0 {
+                        return Err(UpdaterError::callback("owned clock", "step refused"));
+                    }
+                    let tracker = stage.updater_state::<Clock>(receiver, id).unwrap().tracker;
+                    stage.increment_tracker_value(tracker, dt)?;
+                    stage
+                        .updater_state_mut::<Clock>(receiver, id)
+                        .unwrap()
+                        .samples
+                        .push(dt);
+                    Ok(())
+                },
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            stage.updater_state::<Clock>(root, updater).unwrap().samples,
+            [0.0]
+        );
+        let map = stage.copy_family_mapped(root).unwrap();
+        let copied = map.get(root).unwrap();
+        let copied_tracker = map.get(tracker).unwrap();
+        let snapshot = stage.snapshot();
+
+        stage.update_mobject(copied, 0.25);
+        assert_eq!(stage.tracker_value(tracker), Some(10.0));
+        assert_eq!(stage.tracker_value(copied_tracker), Some(10.25));
+        assert_eq!(
+            stage.updater_state::<Clock>(root, updater).unwrap().samples,
+            [0.0]
+        );
+        assert_eq!(
+            stage
+                .updater_state::<Clock>(copied, updater)
+                .unwrap()
+                .samples,
+            [0.0, 0.25]
+        );
+
+        let mut independent = snapshot.materialize();
+        independent.update_mobject(copied, 0.5);
+        assert_eq!(independent.tracker_value(copied_tracker), Some(10.5));
+        assert_eq!(stage.tracker_value(copied_tracker), Some(10.25));
+        assert_eq!(
+            independent
+                .updater_state::<Clock>(copied, updater)
+                .unwrap()
+                .samples,
+            [0.0, 0.5]
+        );
+
+        stage.update_mobject(copied, 2.0);
+        let failure = stage.updater_error().unwrap();
+        assert_eq!(failure.mobject, copied);
+        assert_eq!(failure.updater, updater);
+        assert_eq!(stage.tracker_value(copied_tracker), Some(10.25));
+        assert_eq!(
+            stage
+                .updater_state::<Clock>(copied, updater)
+                .unwrap()
+                .samples,
+            [0.0, 0.25]
+        );
+        assert!(independent.updater_error().is_none());
+    }
+
+    #[test]
+    fn fallible_stateful_immediate_failure_removes_only_its_callable() {
+        let mut stage = Stage::new();
+        let mob = stage.add_value_tracker(0.0);
+        let older = stage
+            .add_updater(
+                mob,
+                |stage, me| stage.increment_tracker_value(me, 1.0).unwrap(),
+                false,
+            )
+            .unwrap();
+        let id = UpdaterId(stage.next_updater_id);
+        let error = UpdaterError::callback("owned state", "initial sample refused");
+        let callback_error = error.clone();
+        let result = stage.add_try_dt_updater_with_state(
+            mob,
+            vec![4usize],
+            |_, _| {},
+            move |stage, receiver, id, dt| {
+                assert_eq!(dt, 0.0);
+                stage
+                    .updater_state_mut::<Vec<usize>>(receiver, id)
+                    .unwrap()
+                    .push(5);
+                Err(callback_error.clone())
+            },
+            true,
+        );
+        assert_eq!(result, Err(error.clone()));
+        assert_eq!(
+            stage.tracker_value(mob),
+            Some(1.0),
+            "one immediate family pass"
+        );
+        assert_eq!(stage.updater_ids(mob), [older]);
+        assert_eq!(stage.updater_state::<Vec<usize>>(mob, id).unwrap(), &[4, 5]);
+        assert_eq!(stage.updater_error().unwrap().updater, id);
+        assert_eq!(stage.updater_error().unwrap().error, error);
+
+        let next = stage.next_updater_id;
+        let result = stage.add_try_dt_updater_with_state(
+            mob,
+            0usize,
+            |_, _| {},
+            |_, _, _, _| panic!("a pending error must prevent registration"),
+            true,
+        );
+        assert!(result.is_err());
+        assert_eq!(stage.next_updater_id, next);
+        assert_eq!(stage.updater_ids(mob), [older]);
+        assert!(stage.updater_state::<usize>(mob, UpdaterId(next)).is_none());
+    }
 
     #[test]
     fn fallible_updaters_stop_the_whole_ordered_pass_until_acknowledged() {

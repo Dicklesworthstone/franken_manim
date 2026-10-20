@@ -10,6 +10,7 @@ on:
       - 'crates/fmn-render/**'
       - 'crates/fmn-scene/**'
       - 'crates/fmn-mobject/**'
+      - 'crates/fmn-library/src/fields.rs'
       - 'crates/fmn/**'
   workflow_dispatch:
 permissions:
@@ -71,6 +72,12 @@ jobs:
       - name: Snapshot draw metadata and painter order
         if: ${{ !cancelled() }}
         run: cargo test --locked -p fmn-mobject --test render_order
+      - name: Fallible stateful updater lifecycle
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p fmn-mobject --lib fallible_stateful
+      - name: Native trace and time-field updater failures
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p fmn-library --lib fields::tests
       - name: Compiled ownership and reconstruction
         if: ${{ !cancelled() }}
         run: |
