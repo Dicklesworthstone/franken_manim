@@ -220,4 +220,15 @@ this Behavior Note and enforced by `crates/fmn-conformance/tests/api_schema.rs`:
   portal-specific scene discovery and parity-audit queries; `--bundle-camera`
   includes the camera track in FMTL bundle exports; `--ffmpeg_bin` is the
   portal's config-matching spelling for `--ffmpeg`.
+- **Narrated FMTL bundles (`--bundle-audio`, `--bundle-audio-sample-rate`,
+  `--bundle-audio-channels`, `--bundle-audio-threads`, `--bundle-audio-max-bytes`).**
+  With `--format fmtl`, `--bundle-audio` mixes the scene's native WAV cues into a
+  self-contained minor-2 soundtrack (camera bundles included), so audio-aware
+  replay needs neither the source WAVs nor scene code. The four settings require
+  `--bundle-audio` and take unsigned decimals: sample rate 1..384000 Hz
+  (default 48000), channels 1 or 2 (default 2), mixer workers 1..64 (default 1),
+  and a per-scene audio budget of 8..268435456 bytes (default 64 MiB). They are
+  bound into batch checkpoint identity. Duplicate, malformed or out-of-range
+  values, and audio settings without `--bundle-audio`, refuse before any source
+  loads. Compressed cues refuse; no transcoder runs during bundle export.
 

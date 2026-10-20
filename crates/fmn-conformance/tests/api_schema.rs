@@ -730,6 +730,11 @@ fn portal_cli_flags_are_governed_by_schema_or_bn15_portal_contract() {
     let bn15 = repo_file("docs/behavior_notes/BN-15-cli-contract.md");
     const PORTAL_BN15_EXTENSION_FLAGS: &[&str] = &[
         "--audit-parity",
+        "--bundle-audio",
+        "--bundle-audio-channels",
+        "--bundle-audio-max-bytes",
+        "--bundle-audio-sample-rate",
+        "--bundle-audio-threads",
         "--bundle-camera",
         "--checkpoint",
         "--construct-only",
