@@ -28,6 +28,10 @@ SYNTHETIC = textwrap.dedent('''
 
     def area(shape):
         return shape.width() ** 2
+
+    class Disc(Shape):
+        def width(self):
+            return 3.0
 ''')
 
 
@@ -58,11 +62,8 @@ class Harness(unittest.TestCase):
         rows = self.rows()
         probes = pw.Probes(rows)
         recorder = pw.Recorder(probes, __file__, render_rows=set())
-        sys.setprofile(recorder)
-        try:
+        with recorder:
             body()
-        finally:
-            sys.setprofile(None)
         return rows, probes, recorder
 
     def test_a_method_counts_for_the_rows_whose_class_the_instance_is(self):
@@ -93,11 +94,8 @@ class Harness(unittest.TestCase):
         recorder = pw.Recorder(pw.Probes(rows), "suite_under_test.py", render_rows={0})
         code = compile("mod.Square().width()\nmod.area(mod.Circle())\n", "suite_under_test.py",
                        "exec")
-        sys.setprofile(recorder)
-        try:
+        with recorder:
             exec(code, {"mod": self.mod})
-        finally:
-            sys.setprofile(None)
         hits = {identity: {rows[i]["symbol"] for i in found}
                 for identity, found in recorder.hits.items()}
         self.assertEqual(hits, {"<module>:L1": {"Square.width", "Square"},
@@ -127,6 +125,47 @@ class Harness(unittest.TestCase):
         self.assertEqual(table["Square.width"]["example"], "s::T.test_a")
         self.assertNotIn("Shape.width", table)
 
+    def test_an_override_witnesses_the_base_row_it_answers_for(self):
+        # CoordinateSystem.c2p is answered by Axes.c2p: calling the name on an instance of the
+        # row's class is what the row means, whichever override runs.
+        rows = [row("Shape.width", "method"), row("Disc", "class")]
+        recorder = pw.Recorder(pw.Probes(rows), __file__, render_rows=set())
+
+        def test_disc(mod=self.mod):
+            mod.Disc().width()
+        with recorder:
+            test_disc()
+        self.assertEqual({rows[i]["symbol"] for i in recorder.hits["test_disc"]},
+                         {"Shape.width", "Disc"})
+
+    def test_an_installer_wrapper_with_star_args_still_names_its_receiver(self):
+        rows = [row("Square.width", "method")]
+        recorder = pw.Recorder(pw.Probes(rows), __file__, render_rows=set())
+        original = self.mod.Square.width
+
+        def install():
+            def width(*args, **kwargs):
+                return original(*args, **kwargs)
+            return width
+        self.mod.Square.width = install()
+        try:
+            with recorder:
+                self.mod.Square().width()
+        finally:
+            del self.mod.Square.width
+        self.assertEqual(recorder.hits["<module>"], {0})
+
+    def test_a_mutant_counts_only_the_results_it_changed(self):
+        rows = self.rows()
+        probes = pw.Probes(rows)
+        pw.MUTANT_CALLS["applied"] = 0
+        pw.mutate(probes, 1, "shifted")  # Circle.width returns a float, not an array
+        try:
+            self.assertEqual(self.mod.Circle().width(), 2.0)
+            self.assertEqual(pw.MUTANT_CALLS["applied"], 0)
+        finally:
+            del self.mod.Circle.width
+
     def test_a_trivial_mutant_replaces_the_implementation(self):
         rows = self.rows()
         probes = pw.Probes(rows)
@@ -146,9 +185,16 @@ class Harness(unittest.TestCase):
             python3 crates/fmn-python/tests/gamma.py
             python3 crates/fmn-python/tests/alpha.py
         ''')
-        self.assertEqual(pw.gate_suites(script), ["alpha", "beta", "gamma"])
+        self.assertEqual(pw.gate_suites(script),
+                         [("alpha", "runpy"), ("beta", "runpy"), ("gamma", "main")])
         with self.assertRaises(ValueError):
             pw.gate_suites("python3 crates/fmn-python/tests/gamma.py\n")
+
+    def test_the_installed_wheel_gate_runs_the_witness_check(self):
+        # The registry is only honest while the gate both runs its suites and checks them.
+        script = pw.GATE.read_text(encoding="utf-8")
+        self.assertGreater(len(pw.gate_suites(script)), 100)
+        self.assertIn("scripts/portal_witnesses.py check", script)
 
     def test_the_ledger_parser_keeps_manimlib_rows_and_needs_its_header(self):
         text = ("# preamble\n# module\tsymbol\tcanonical\tkind\texported\tsignature_defaults\t"

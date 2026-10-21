@@ -206,3 +206,9 @@ if [[ "$audit_status" -ne 0 ]]; then
 fi
 
 python3 scripts/verify_portal_runtime_receipt.py "$report_file"
+
+# The Parity Ledger's behavioral witnesses (fm-5wq.12): rerun these suites under a call tracer.
+# Every symbol docs/api/portal_witnesses.tsv records as witnessed must still be invoked by a
+# passing test, every same/improved symbol must resolve to a real implementation, and sampled
+# trivial-body mutants must make a witness test fail.
+python3 scripts/portal_witnesses.py check --mutants 20

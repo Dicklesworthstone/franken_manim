@@ -92,6 +92,12 @@ python3 -m py_compile \
     scripts/test_offload_payoff.py
 python3 scripts/test_offload_payoff.py
 
+echo "==> Parity Ledger witness registry (its installed-wheel run is check_portal_runtime.sh's)"
+python3 -m py_compile \
+    scripts/portal_witnesses.py \
+    scripts/test_portal_witnesses.py
+python3 scripts/test_portal_witnesses.py
+
 echo "==> TeX 2AFC review kit and scorer"
 python3 -m py_compile \
     scripts/tex_2afc_kit.py \
