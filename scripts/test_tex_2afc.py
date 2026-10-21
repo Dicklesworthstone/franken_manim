@@ -164,25 +164,33 @@ class SamplingTests(unittest.TestCase):
                           for seed in range(200))
         self.assertGreaterEqual(heavy_first, 195)
 
-    def test_sides_and_order(self):
-        order, sides = kit.assign(1000, 3)
-        self.assertEqual(sorted(order), list(range(1000)))
-        self.assertEqual((order, sides), kit.assign(1000, 3))
-        self.assertNotEqual(order, kit.assign(1000, 4)[0])
-        # Exactly balanced, so a reviewer who always picks one side scores at chance.
-        for seed in range(50):
-            self.assertEqual(sum(kit.assign(100, seed)[1]), 50)
-        self.assertEqual(sum(kit.assign(101, 0)[1]), 50)
-        self.assertNotEqual(kit.assign(100, 1)[1], kit.assign(100, 2)[1])
+    STRATA = [f"s{i // 20}" for i in range(100)]
 
-    def test_a_constant_chooser_scores_exactly_chance(self):
-        order, sides = kit.assign(100, 20261020)
-        key = {"kit": "k", "pairs": [{"pair": f"p{i:03d}", "latex_side": "left" if s else "right",
-                                      "formula": f"{i:064x}", "stratum": f"s{i % 5}"} for i, s in enumerate(sides)]}
-        for choice in ("left", "right"):
-            answers = {"kit": "k", "answers": {p["pair"]: {"choice": choice} for p in key["pairs"]}}
-            report = score.score(answers, key)
-            self.assertEqual((report["correct"], report["verdict"]), (50, "pass"))
+    def test_sides_and_order(self):
+        order, sides = kit.assign(self.STRATA, 3)
+        self.assertEqual(sorted(order), list(range(100)))
+        self.assertEqual((order, sides), kit.assign(self.STRATA, 3))
+        self.assertNotEqual(order, kit.assign(self.STRATA, 4)[0])
+        self.assertNotEqual(sides, kit.assign(self.STRATA, 4)[1])
+        # Exactly balanced within every stratum, so a constant chooser scores chance everywhere.
+        for seed in range(50):
+            sides = kit.assign(self.STRATA, seed)[1]
+            for j in range(5):
+                self.assertEqual(sum(sides[20 * j:20 * j + 20]), 10)
+        odd = kit.assign(["a"] * 3 + ["b"] * 5, 0)[1]
+        self.assertEqual((sum(odd[:3]), sum(odd[3:])), (1, 2))
+
+    def test_a_constant_chooser_scores_exactly_chance_overall_and_per_stratum(self):
+        for seed in (20261020, 1, 2, 3):
+            order, sides = kit.assign(self.STRATA, seed)
+            key = {"kit": "k", "pairs": [{"pair": f"p{i:03d}", "latex_side": "left" if s else "right",
+                                          "formula": f"{i:064x}", "stratum": self.STRATA[i]}
+                                         for i, s in enumerate(sides)]}
+            for choice in ("left", "right"):
+                answers = {"kit": "k", "answers": {p["pair"]: {"choice": choice} for p in key["pairs"]}}
+                report = score.score(answers, key)
+                self.assertEqual((report["correct"], report["verdict"]), (50, "pass"))
+                self.assertEqual({row["correct"] for row in report["strata"].values()}, {10})
 
 
 def png_uri(array):

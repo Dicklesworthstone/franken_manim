@@ -86,16 +86,23 @@ def rng_for(seed: int, name: str):
     return np.random.Generator(np.random.PCG64DXSM(np.random.SeedSequence(seed, spawn_key=(key,))))
 
 
-def assign(count: int, seed: int) -> tuple[list[int], list[bool]]:
-    """Presentation order (a permutation of the pairs) and, per presented position, whether the
-    LaTeX render sits on the left. Each comes from its own named substream of the seed.
+def assign(strata: list[str], seed: int) -> tuple[list[int], list[bool]]:
+    """Presentation order (a permutation of the pairs) and, per pair, whether the LaTeX render
+    sits on the left. Each comes from its own named substream of the seed.
 
-    The sides are balanced exactly (half left, the odd one out on the right), then shuffled.
-    Independent coin flips let a reviewer who always picks one side score above the pass
-    limit by luck: one seed put LaTeX on the left 59 times of 100."""
-    order = [int(i) for i in rng_for(seed, "tex-2afc/order").permutation(count)]
-    sides = [True] * (count // 2) + [False] * (count - count // 2)
-    return order, [bool(s) for s in rng_for(seed, "tex-2afc/sides").permutation(sides)]
+    Sides are balanced exactly within every stratum (half left, the odd one out on the right),
+    then shuffled within it, so a reviewer who always picks one side scores chance overall and
+    in each stratum. Coin flips let such a reviewer fail with no information: one seed put LaTeX
+    on the left 59 times of 100, and a balanced-overall draw put it left 16 of 20 in one stratum,
+    the stratum rule's limit."""
+    order = [int(i) for i in rng_for(seed, "tex-2afc/order").permutation(len(strata))]
+    sides = [False] * len(strata)
+    for name in sorted(set(strata)):
+        members = [i for i, s in enumerate(strata) if s == name]
+        balanced = [True] * (len(members) // 2) + [False] * (len(members) - len(members) // 2)
+        for i, side in zip(members, rng_for(seed, f"tex-2afc/sides/{name}").permutation(balanced)):
+            sides[i] = bool(side)
+    return order, sides
 
 
 def eligible(record) -> bool:
@@ -351,11 +358,12 @@ def build(args) -> int:
         if kept < args.per_stratum:
             sys.exit(f"stratum {name}: only {kept} usable pairs; raise --backups")
 
-    order, sides = assign(len(pairs), args.seed)
+    order, sides = assign([item["stratum"] for item, _ in pairs], args.seed)
     kit_id = hashlib.sha256(json.dumps([args.seed, [item["id"] for item, _ in pairs], args.control or ""]).encode()).hexdigest()[:16]
     key, blocks = [], []
-    for number, (index, latex_left) in enumerate(zip(order, sides), 1):
+    for number, index in enumerate(order, 1):
         item, (latex_img, other_img) = pairs[index]
+        latex_left = sides[index]
         left, right = (latex_img, other_img) if latex_left else (other_img, latex_img)
         pid = f"p{number:03d}"
         blocks.append(PAIR_HTML.format(pid=pid, number=number, left=png_data_uri(left), right=png_data_uri(right)))
