@@ -73,3 +73,51 @@ spawned interpreters. Its explicitly reduced source/compiler/render boundary
 writes NOT-FMTL bytes; these tests do not establish native image/audio acceptance.
 The installed-wheel test separately compares native variants with sequential
 `RenderJob` exports. Missing native tooling is an error with `FMN_TEST_NATIVE=1`.
+
+## JSON job files and the FMTL CLI
+
+A job file keeps constructor data separate from Python source:
+
+```json
+{
+  "schema": "fmn-python.source-jobs",
+  "version": 1,
+  "jobs": [
+    {"name": "seed7", "scene": "Lesson", "scene_kwargs": {"random_seed": 7}},
+    {"name": "seed11", "scene": "Lesson", "scene_kwargs": {"random_seed": 11}}
+  ]
+}
+```
+
+```sh
+fmn-python lessons.py --format fmtl --workers 4 --jobs-file variants.json \
+  --bundle-camera --bundle-audio --video_dir recordings \
+  --checkpoint recordings-progress.json --resume-key lessons-assets-v1 --keep-going
+```
+
+Append `--resume` to reuse hash-verified completed variants. The CLI reads and
+validates the job file before isolated source discovery, checks every selected
+class against discovery, then uses the same process API. One-job files are still
+isolated batches. Receipts and filenames use job names, while lookup uses class
+names. Common capture/audio options apply to every job. Omitting this flag leaves
+ordinary single-scene, named-scene and write-all behavior unchanged.
+
+`--jobs-file` requires `--workers`, and cannot combine with positional scene names,
+`--write_all`, `--output` or `--file_name`. This CLI option currently belongs to
+`--format fmtl`. Other standard output modes can use the same data programmatically:
+`load_source_jobs(path)` from `fmn_python.source_job_file` returns a tuple accepted
+by `render_source_scenes`. No new render loop is involved.
+
+Files must be stable regular UTF-8 files of at most 8 MiB. Symlinks, special files,
+unknown fields/versions, duplicate JSON keys, invalid values, colliding names and
+excessive job counts are refused before scene discovery. `scene_kwargs` is
+optional and defaults to an empty object. File whitespace, key order and the file
+path itself do not affect checkpoint identity; the admitted ordered job values
+do. A file changed after admission cannot change jobs already snapshotted.
+
+Malformed or unreadable job documents use CLI exit 2 and retain robot error
+reporting. Other existing batch exit/partial-receipt behavior is unchanged.
+`test_source_job_file_protocol.py` covers the shipping wrapper and process API;
+its parser/inventory/native-capture boundaries remain explicit fixtures. The
+native test invokes the installed CLI independently and must be run against a
+matching built wheel; protocol success does not establish that acceptance.

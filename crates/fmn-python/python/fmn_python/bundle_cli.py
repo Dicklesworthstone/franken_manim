@@ -19,6 +19,7 @@ from .checkpoint_cli import CHECKPOINT_HELP, take_checkpoint_options
 from .parallel_cli_options import take_parallel_options
 from .batch_rendering import BatchRenderError, BatchRenderResult, _error_notes, _name_key, render_scenes
 from .scene_loading import SceneSource, resolve_render_configuration
+from .source_job_file import JOBS_FILE_FLAG, JOBS_FILE_HELP, load_source_jobs, take_jobs_file_options
 
 BUNDLE_HELP = """Portable scene bundles:
   fmn-python [--robot] SOURCE.py [SCENE] --format fmtl
@@ -131,7 +132,7 @@ def _audio_configuration(switches, values):
 def _bundle_options(arguments):
     """Recognize an actual format option, not 'fmtl' inside another value."""
     normalized, formats = [], []
-    value_flags = _VALUE_FLAGS | _AUDIO_VALUE_FLAGS.keys()
+    value_flags = _VALUE_FLAGS | _AUDIO_VALUE_FLAGS.keys() | {JOBS_FILE_FLAG}
     index = 0
     while index < len(arguments):
         token = arguments[index]
@@ -163,17 +164,18 @@ def _bundle_options(arguments):
 
 def try_bundle_cli(native, arguments):
     arguments, formats = _bundle_options(arguments)
+    arguments, job_files = take_jobs_file_options(arguments, _VALUE_FLAGS | _AUDIO_VALUE_FLAGS.keys())
     arguments, audio_switches, audio_values = _take_audio_options(arguments)
     native_options, selectors, switches = _tokens(
         arguments, {"--robot", "--bundle-camera", "--write_all", "-a", "--keep-going"}
     )
     camera = "--bundle-camera" in switches
     audio = bool(audio_switches)
-    if "fmtl" not in formats and not camera and not audio and not audio_values:
+    if "fmtl" not in formats and not camera and not audio and not audio_values and not job_files:
         return None
     robot = "--robot" in switches
     if "--help" in switches or "-h" in switches:
-        text = BUNDLE_HELP + "\n" + CHECKPOINT_HELP
+        text = BUNDLE_HELP + "\n" + CHECKPOINT_HELP + "\n" + JOBS_FILE_HELP
         return native._portal_cli_emit(0, "success", "help", text, robot, help=text)
     source = selected = destination = None
     session = report = None
@@ -190,7 +192,7 @@ def try_bundle_cli(native, arguments):
         if write_all > 1 or keep_going > 1:
             raise ValueError("--write_all/-a and --keep-going must not be repeated")
         requested = selectors[1:]
-        batch = bool(write_all or len(requested) > 1)
+        batch = bool(write_all or len(requested) > 1 or job_files)
         if write_all and requested:
             raise ValueError("--write_all/-a cannot be combined with explicit scene names")
         if keep_going and not batch:
@@ -204,6 +206,15 @@ def try_bundle_cli(native, arguments):
         native_options, parallel = take_parallel_options(native_options, _VALUE_FLAGS)
         if parallel and not batch:
             raise ValueError("--workers requires multiple scene names or --write_all")
+        source_jobs = None
+        if job_files:
+            if len(job_files) != 1 or not job_files[0]:
+                raise ValueError("--jobs-file requires one path and must not be repeated")
+            if not parallel:
+                raise ValueError("--jobs-file requires --workers")
+            if write_all or requested:
+                raise ValueError("--jobs-file cannot combine with explicit scene names or --write_all")
+            source_jobs = load_source_jobs(job_files[0], max_jobs=_MAX_SELECTED_SCENES)
         native_options, recovery = take_checkpoint_options(native_options, _VALUE_FLAGS)
         if recovery and not batch:
             raise ValueError("checkpoint recovery requires multiple scene names or --write_all")
@@ -259,12 +270,13 @@ def try_bundle_cli(native, arguments):
             names = sorted(loaded.scenes)
             phase = "select"
             if batch:
-                requested = names if write_all else requested
+                requested = source_jobs if source_jobs is not None else names if write_all else requested
                 if not requested:
                     raise ValueError("no locally declared Scene classes found in " + source)
                 if len(requested) > _MAX_SELECTED_SCENES:
                     raise ValueError(f"scene selection exceeds {_MAX_SELECTED_SCENES} names")
-                missing = [name for name in requested if name not in loaded.scenes]
+                selected_classes = ([job.scene for job in source_jobs] if source_jobs is not None else requested)
+                missing = [name for name in selected_classes if name not in loaded.scenes]
                 if missing:
                     raise ValueError("selected scenes were not declared by " + source + ": " + ", ".join(missing))
                 destination = default_root if destination is None else destination
@@ -343,7 +355,8 @@ def try_bundle_cli(native, arguments):
             code, identity = 130, "interrupted"
         elif isinstance(error, native._CapabilityError):
             code, identity = 4, "capability"
-        elif phase in {"options", "select", "batch"} and isinstance(error, (ValueError, TypeError)):
+        elif (phase in {"options", "select", "batch"} and isinstance(error, (ValueError, TypeError))
+              or phase == "options" and job_files and isinstance(error, OSError)):
             code, identity = 2, "usage"
         elif phase in {"start", "finish"} or (phase == "batch" and isinstance(error, OSError)):
             code, identity = 6, "render"
