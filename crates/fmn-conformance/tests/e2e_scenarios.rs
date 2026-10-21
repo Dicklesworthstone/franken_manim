@@ -11870,8 +11870,10 @@ fn rebless_e2e_cli_builtins_panel() {
 
 /// Re-bless evidence for the e2e lock's `render_matrix.tex_color.v1` entry
 /// (GOVERNANCE.md §4). Opt-in with `FMN_REBLESS_E2E_TEX_COLOR=1`, after the
-/// bless: the entry is new, so its frame goes on both sides of the lock's
-/// artefact. A later change to it needs a before frame instead.
+/// bless. A new entry puts its frame on both sides of the lock's artefact. A
+/// changed one names the panel that carried its old frame in
+/// `FMN_REBLESS_E2E_TEX_COLOR_BEFORE`, whose left half is that frame (the
+/// panels are before | 4 px divider | after).
 #[test]
 fn rebless_e2e_tex_color_panel() {
     use fmn_conformance::golden::{REBLESS_ARTEFACT_DIR, rebless_artefact_name, side_by_side_png};
@@ -11881,8 +11883,31 @@ fn rebless_e2e_tex_color_panel() {
     let ((png, _), _) = tex_color_renders().expect("the coloured formula renders");
     let image = fmn_codec::decode_png(&png, &fmn_codec::PngLimits::default())
         .expect("the locked frame decodes");
-    let panel = side_by_side_png(image.width, image.height, &image.rgba, &image.rgba)
-        .expect("one frame on both sides");
+    let before = match std::env::var_os("FMN_REBLESS_E2E_TEX_COLOR_BEFORE") {
+        None => image.rgba.clone(),
+        Some(path) => {
+            let old = fmn_codec::decode_png(
+                &std::fs::read(&path).expect("the before panel"),
+                &fmn_codec::PngLimits::default(),
+            )
+            .expect("the before panel decodes");
+            assert!(
+                old.width == 2 * image.width + 4 && old.height == image.height,
+                "the before panel is {}x{}, not a {}x{} pair",
+                old.width,
+                old.height,
+                image.width,
+                image.height
+            );
+            let (row, half) = (old.width as usize * 4, image.width as usize * 4);
+            old.rgba
+                .chunks_exact(row)
+                .flat_map(|line| line[..half].iter().copied())
+                .collect()
+        }
+    };
+    let panel = side_by_side_png(image.width, image.height, &before, &image.rgba)
+        .expect("before and after are the same size");
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let lock = "e2e.certified.lock";
     let digest =

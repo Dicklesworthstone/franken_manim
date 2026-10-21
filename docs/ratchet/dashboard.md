@@ -18,7 +18,7 @@ real 3b1b formula corpus typesets natively. The denominator is **frozen**
 
 ## Glyph fallback
 
-148 strings (255 occurrences) lay out with at least one glyph from a face outside Computer Modern; the standard relation set has 1 such characters. Fewer is better. The standard relation set may fall back only where a bead owns the gap: ≅ (fm-shqq).
+148 strings (255 occurrences) lay out with at least one glyph from a face outside Computer Modern. Standard relations among those glyphs: 1. Fewer is better. The standard relation set may fall back only where a bead owns the gap: ≅ (fm-shqq).
 
 | Character | Code point | Occurrences |
 |---|---|---|
