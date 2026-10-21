@@ -93,9 +93,8 @@ Labels come from `docs/ratchet/differential_triage.tsv`. A stale label must be r
 
 | label | scenes |
 |---|---|
-| bug | 58 |
-| behavior-note | 38 |
-| untriaged | 2 |
+| bug | 59 |
+| behavior-note | 39 |
 
 | scene | first difference | label | bead / BN |
 |---|---|---|---|
@@ -139,7 +138,7 @@ Labels come from `docs/ratchet/differential_triage.tsv`. A stale label must be r
 | `_2024/holograms/supplements.py:ContrastPhotographyAndHolography` | `1 VMobjectFromSVGPath.class` | behavior-note | BN-08 |
 | `_2024/holograms/supplements.py:ShowALens` | `3 VGroup.style.fill_color` | bug | fm-ns8q |
 | `_2024/holograms/supplements.py:WhatAHologramReconstructs` | `6.0 Text.class` | bug | fm-1auv |
-| `_2024/holograms/supplements.py:WhatThisExplanationLacks` | `3 VGroup.class` | untriaged |  |
+| `_2024/holograms/supplements.py:WhatThisExplanationLacks` | `3 VGroup.class` | behavior-note | BN-08 |
 | `_2024/puzzles/added_dimension.py:GeneralCentersOfSimilarity` | `4 Circle.n_points` | behavior-note | BN-05 |
 | `_2024/puzzles/added_dimension.py:TriangleAreaFormula` | `7 VCube.style.fill_opacity` | bug | fm-v4lv |
 | `_2024/puzzles/max_rand.py:MaxProcess` | `7.3 DashedLine.style.stroke_opacity` | behavior-note | BN-07 (C-31) |
@@ -163,7 +162,7 @@ Labels come from `docs/ratchet/differential_triage.tsv`. A stale label must be r
 | `_2025/guest_videos/misc_animations.py:IMOGoldOrganizations` | `1 VGroup.style.fill_color` | bug | fm-ns8q |
 | `_2025/laplace/derivative_supplements.py:ODEToAlgebra` | `2 VGroup.style.fill_color` | bug | fm-ns8q |
 | `_2025/laplace/derivatives.py:FromPropertyToLaplaceTransform` | `7 SurroundingRectangle.class` | bug | fm-v1aq |
-| `_2025/laplace/derivatives.py:PartialFractionDecomposition` | `23.0 VMobjectFromSVGPath.class` | untriaged |  |
+| `_2025/laplace/derivatives.py:PartialFractionDecomposition` | `23.0 VMobjectFromSVGPath.class` | bug | fm-1auv |
 | `_2025/laplace/derivatives.py:PreviewStrategy` | `2 VGroup.style.fill_color` | bug | fm-ns8q |
 | `_2025/laplace/exponentials.py:AltComplexExpGraph` | `3 TracedPath.n_points` | behavior-note | BN-10 |
 | `_2025/laplace/exponentials.py:BreakingDownFunctions` | `1 ComplexPlane.class` | bug | fm-1auv |
