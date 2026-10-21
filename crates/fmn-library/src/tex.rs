@@ -1406,17 +1406,18 @@ impl<'a> OldTex<'a> {
 }
 
 /// The ems→scene-units scale, calibrated the Reference's way: typeset a
-/// reference "0" (text-style math, the Reference's calibration surface)
-/// and scale so its height is `font_size / font_size_for_unit_height`.
-/// The height is the "0"'s ink, as the Reference's
-/// `get_svg_content_height` measures the rendered SVG's content, not
-/// TeX's box (cmr10's 0.644 em, below the ink's overshoot).
+/// reference "0" and scale so its height is
+/// `font_size / font_size_for_unit_height`. The "0" is text, as the
+/// Reference's `latex_to_svg("0")` sets it in its text font, not in math,
+/// whose family 0 is cmr10 itself (fm-8zy2). The height is the "0"'s ink,
+/// as the Reference's `get_svg_content_height` measures the rendered SVG's
+/// content, not TeX's box (cmr10's 0.644 em, below the ink's overshoot).
 pub(crate) fn calibrate(
     engine: &TexEngine,
     font_size: f64,
     fsuh: f64,
 ) -> Result<f64, TexMobjectError> {
-    let probe = engine.typeset(Mode::Math(MathStyle::Text), "0")?;
+    let probe = engine.typeset(Mode::Text, "0")?;
     let mut low = f64::INFINITY;
     let mut high = f64::NEG_INFINITY;
     for sub in &probe.subs {
@@ -1810,20 +1811,37 @@ mod tests {
         }
     }
 
+    /// The calibration surface is the text "0", as the Reference's
+    /// `latex_to_svg("0")` is: it stands exactly `font_size / fsuh` tall. A
+    /// math "0" is cmr10's (family 0, fm-8zy2), whose ink is within 1e-3
+    /// of CM Unicode's, as the Reference's `Tex("0")` (cmr10) differs from its
+    /// calibration digit (T1 ecrm).
     #[test]
     fn the_calibration_makes_a_digit_font_size_over_fsuh_tall() {
         let engine = engine();
         for font_size in [48.0, 96.0] {
-            let m = Tex::new("0")
+            let want = font_size / DEFAULT_FONT_SIZE_FOR_UNIT_HEIGHT;
+            let height = |vmob: &VMobject| {
+                let (min, max) = vmob.children()[0].extent().expect("has extent");
+                max[1] - min[1]
+            };
+            let text = TexText::new("0")
                 .font_size(font_size)
                 .build(&engine)
                 .expect("builds");
-            let (min, max) = m.vmob.children()[0].extent().expect("has extent");
-            let height = max[1] - min[1];
-            let want = font_size / DEFAULT_FONT_SIZE_FOR_UNIT_HEIGHT;
             assert!(
-                (height - want).abs() < 1e-9,
-                "font_size {font_size}: \"0\" height {height} != {want}"
+                (height(&text.vmob) - want).abs() < 1e-9,
+                "font_size {font_size}: text \"0\" height {} != {want}",
+                height(&text.vmob)
+            );
+            let math = Tex::new("0")
+                .font_size(font_size)
+                .build(&engine)
+                .expect("builds");
+            let ratio = height(&math.vmob) / want;
+            assert!(
+                (ratio - 1.0).abs() < 1e-3,
+                "font_size {font_size}: math \"0\" height ratio {ratio}"
             );
         }
     }

@@ -71,10 +71,12 @@ const TEXT_CACHE_STATE: &str = "none";
 // d7b4ad29, so the q^7+z layout itself did not move. Re-pinned when fmd-math
 // took TeX's TFM metrics (franken_markdown 216c7c3, fm-tex-metrics-glyphs-ru72):
 // q's 0.0359 em italic correction moves the 7, and every box takes its TFM
-// height and depth.
+// height and depth. Re-pinned when math-mode family 0 became cmr10 itself
+// (franken_markdown 49466bc, fm-8zy2): the + is cmr10's glyph, its face and
+// outline in the typeset data; every box and position is unchanged.
 const FORMULA_EXPECTED_RESULT_DIGEST: Digest = Digest::from_bytes([
-    0x5d, 0x3e, 0xc7, 0xad, 0x22, 0xb9, 0x59, 0xed, 0x33, 0x31, 0x01, 0xfa, 0xcb, 0xb4, 0x52, 0x4b,
-    0xf6, 0x61, 0x84, 0xba, 0x89, 0x8e, 0x2f, 0x7d, 0xb8, 0x79, 0x45, 0xe3, 0xfa, 0x03, 0xce, 0x93,
+    0x7c, 0x42, 0xf1, 0x5f, 0xa2, 0xeb, 0x41, 0x71, 0x7a, 0x0b, 0x37, 0x25, 0x45, 0x34, 0x54, 0x7f,
+    0x60, 0xa0, 0xde, 0xcb, 0x2d, 0x4f, 0xa6, 0x79, 0x0f, 0x93, 0xb7, 0xa4, 0x61, 0xbb, 0x98, 0x4c,
 ]);
 const TEXT_EXPECTED_RESULT_DIGEST: Digest = Digest::from_bytes([
     0x31, 0xc6, 0xd1, 0xaa, 0x62, 0xd1, 0x13, 0x6d, 0x6f, 0x23, 0x6f, 0x96, 0x5a, 0xdd, 0x48, 0xa9,
@@ -1200,7 +1202,7 @@ mod tests {
         assert!(cold.to_tsv().contains("timed_layer\tlayout\n"));
         assert_eq!(
             cold.digest().to_string(),
-            "7211ed939beb5bdec8a4ae61146f42ea0953d0ee7e129e334e0a8f1b9f6c9a5a"
+            "6b01e8048a22d3ce1d5a3098d457f7a6b25e77375ce81c0b801b44b764371a2f"
         );
 
         let cached = Pg7Definition::new(Pg7Scenario::FormulaCached).expect("cached definition");
@@ -1227,7 +1229,7 @@ mod tests {
         );
         assert_eq!(
             cached.digest().to_string(),
-            "5e2fbb3dcba1e26ca90418360d71a7922c8afddd21b995471b7c79d06dc6f38d"
+            "b89d54b63975bfb99736878031092705259dbc95c45aa3e12b1ee6f298e1eb55"
         );
 
         let text = Pg7Definition::new(Pg7Scenario::Text10kGlyph).expect("text definition");

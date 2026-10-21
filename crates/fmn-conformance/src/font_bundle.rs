@@ -165,6 +165,11 @@ pub const FACE_POLICY: &[FacePolicy] = &[
         family: "FMD CM Math Extension",
     },
     FacePolicy {
+        name: "cm-roman-10",
+        license_slug: "cm-math",
+        family: "FMD CM Roman",
+    },
+    FacePolicy {
         name: "cm-roman-7",
         license_slug: "cm-math",
         family: "FMD CM Roman",

@@ -98,3 +98,24 @@ the AMS faces are closer to what the Reference renders and stay within OFL.
 - **Plan true-up:** §11.1's face list gains "CM math (cmmi/cmsy/cmex, 10/7/5)"
   when this ADR is Accepted. The true-up lands with the acceptance commit; it is
   deferred while the ADR is Proposed.
+
+## Amendment (2026-10-21): cmr10
+
+Decision 1 listed cmr7 and cmr5 but not cmr10. CM Unicode's Regular was meant
+to stand in for it in math mode as well as in text. It cannot. Its outlines are
+not cmr10's: `+` and `=` carry 0.57 of cmr10's ink (bars 0.023 em against TeX's
+0.4 pt rule) and the brackets 1.48 (fontTools AreaPen against cmr10.pfb). The
+ink oracle (fm-tex-ink-oracle-5ehf) found it in every formula that uses them.
+
+So cmr10 joins the bundle on the same terms (fm-8zy2, franken_markdown
+49466bc, UPSTREAM_LEDGER row 40):
+- the same release, licence and conversion (`convert-cm-math.py`, fonttools
+  4.65.0; the nine earlier faces reproduce byte for byte);
+- renamed "FMD CM Roman 10".
+
+fmd-math sets math-mode family 0 from it at display and text size. Text mode
+keeps CM Unicode, which stands in for the Reference's T1 ecrm text face
+(fm-q364). The Tex scale still calibrates on a text "0", as the Reference's
+`latex_to_svg("0")` does, so it did not move.
+
+The bundle grows by one face of 23 KiB.

@@ -98,9 +98,10 @@ no public construct-sprint amendment is required at these numbers.
   `scripts/capture_tex_ink.py`) and fmd-math's are registered on their ink
   boxes and drawn by the certified engine. It measures boundary Hausdorff,
   sliced W1 and IoU. At franken_markdown `216c7c3`, 71/123 public formulas
-  match and 398/643 of the private corpus set. The median IoU is 0.987 and
-  0.986. Most misses are CM Unicode's `+` and `=` standing in for cmr10's at
-  0.57 of the ink (`fm-8zy2`). Three planted defects (θ as ϑ, stems 10%
+  matched and 398/643 of the private corpus set. Most misses were CM Unicode's
+  `+` and `=` standing in for cmr10's at 0.57 of the ink. Since cmr10 itself
+  sets math-mode family 0 (`49466bc`, `fm-8zy2`), 96/123 and 486/643 match, at a
+  median IoU of 0.990 and 0.989. Three planted defects (θ as ϑ, stems 10%
   thicker, a missing superscript) each break the floors.
 - **Style.** Every `Tex` used to be laid out in TeX text style, while the
   Reference's `Tex` is `align*` display math: `Tex(\sum…\frac)` was 0.588

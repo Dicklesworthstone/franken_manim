@@ -43,8 +43,6 @@ const FALLBACK_TOLERANCE: f64 = 0.06;
 const OWNED: &[(&str, &str)] = &[
     // `\Longrightarrow`: LaTeX's \Relbar\joinrel\Rightarrow.
     ("6dd733048688bc3e", "fm-aia1"),
-    // `[]`: CM Unicode's brackets, not cmr10's.
-    ("d52d5791cce33eaa", "fm-8zy2"),
 ];
 
 struct Row<'a> {

@@ -38,31 +38,32 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// The public set's floors, measured when the oracle landed (2026-10-21,
-/// franken_markdown 216c7c3): 71 of 123 formulas match. Most misses are
-/// fmd-math's `+` and `=`, whose bars carry 0.57 of cmr10's ink, so every
-/// formula with one fails the W1 bound. Improve the floors when the ink
-/// improves; never loosen one to land a change.
+/// The public set's floors. 71 of 123 formulas matched when the oracle
+/// landed (2026-10-21, franken_markdown 216c7c3); most misses were CM
+/// Unicode's `+` and `=` at 0.57 of cmr10's ink. 96 match since math-mode
+/// family 0 is cmr10 itself (49466bc, fm-8zy2). Improve the floors when the
+/// ink improves; never loosen one to land a change.
 const PUBLIC_FLOORS: InkFloors = InkFloors {
-    matches: 71,
+    matches: 96,
     median_hausdorff_px: 1.0,
     p95_hausdorff_px: 7.072,
-    median_sliced_w1_px: 0.113,
-    p95_sliced_w1_px: 7.178,
-    median_iou: 0.987,
+    median_sliced_w1_px: 0.068,
+    p95_sliced_w1_px: 4.334,
+    median_iou: 0.990,
     p05_iou: 0.285,
 };
 
 /// The private corpus set's floors (the TeX box oracle's sample and the 60
-/// most frequent TexText strings), measured when the oracle landed
-/// (2026-10-21, franken_markdown 216c7c3): 398 of 643 match.
+/// most frequent TexText strings): 398 of 643 matched when the oracle landed
+/// (franken_markdown 216c7c3), 486 since math-mode family 0 is cmr10
+/// (49466bc, fm-8zy2).
 const CORPUS_FLOORS: InkFloors = InkFloors {
-    matches: 398,
+    matches: 486,
     median_hausdorff_px: 1.0,
     p95_hausdorff_px: 11.181,
-    median_sliced_w1_px: 0.098,
-    p95_sliced_w1_px: 8.509,
-    median_iou: 0.985,
+    median_sliced_w1_px: 0.075,
+    p95_sliced_w1_px: 7.345,
+    median_iou: 0.988,
     p05_iou: 0.142,
 };
 

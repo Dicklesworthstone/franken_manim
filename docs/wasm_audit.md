@@ -1,10 +1,10 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-run, 2026-10-20, against `Cargo.lock` `284b9c98` and `SUITE.lock`
-`20d8fec5`, for the franken_markdown repin from `206bb639` to `216c7c3b`
-(fm-tex-metrics-glyphs-ru72: fmd-math lays out from TeX's TFM metrics). The three lock
-files move only the three franken_markdown packages' rev; their versions and manifests are
-unchanged, and no fmd or franken_markdown package is in this graph.
+**Status:** re-run, 2026-10-21, against `Cargo.lock` `a15ed74a` and `SUITE.lock`
+`27cdf3b2`, for the franken_markdown repin from `216c7c3b` to `49466bc2`
+(fm-8zy2: math-mode family 0 from cmr10 itself). The three lock files move only the
+three franken_markdown packages' rev; their versions and manifests are unchanged, and
+no fmd or franken_markdown package is in this graph.
 **The release package gate still FAILS at its size budget** (fm-8j70), so this
 audit does not claim a passing package.
 
@@ -13,6 +13,13 @@ audit does not claim a passing package.
   no fmd or franken_markdown package.
 - The `--locked` wasm32 build and wasm-smoke were not re-run: no package in the
   wasm graph changed since the 2026-10-12 run below.
+
+Earlier re-run, 2026-10-20, against `Cargo.lock` `284b9c98` and `SUITE.lock`
+`20d8fec5`, for the franken_markdown repin from `206bb639` to `216c7c3b`
+(fm-tex-metrics-glyphs-ru72: fmd-math lays out from TeX's TFM metrics). The three lock
+files move only the three franken_markdown packages' rev; their versions and manifests are
+unchanged, and no fmd or franken_markdown package is in this graph. The tree was unchanged
+at 134 lines.
 
 Earlier re-run, 2026-10-20, against `Cargo.lock` `1887214b` and `SUITE.lock`
 `8ee4f259`, for the franken_markdown repin from `23c4d0c5` to `206bb639`
@@ -394,8 +401,8 @@ The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
-- `SUITE.lock` SHA-256: `20d8fec5c17c2557524c239f5230d7d8126e0329e9c1981042f75f5ede508670`
-- `Cargo.lock` SHA-256: `284b9c9850b8e1adfe0cb9f1a83dd045aa005b4d128b70fb25a5f1c5b7b950fe`
+- `SUITE.lock` SHA-256: `27cdf3b2726c9035aead4ce0040c7029d7ebad47d987803bc88ea078440fb0a6`
+- `Cargo.lock` SHA-256: `a15ed74a184f3be168b15a0a83cf4ec4839fae88c13d0d8ddea19a527d879572`
 - Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `b1fac18569682e3d2888881883f8b37e4abfb10884ed34a6f2e1eb7a4da942b5`
 
 The 0.5.0 release bump re-bound both lock identities above. That bump changed

@@ -42,13 +42,13 @@ repository = "https://github.com/Dicklesworthstone/franken_manim"
 # else enters.
 [workspace.dependencies]
 asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "c48399f20a9780ef420de64fe504ff922e5afe5e", default-features = false }
-fmd-font = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "216c7c3b0d99ddb56d85d8ff04b81a0984cfea8e", features = ["bundled-faces"] }
-fmd-math = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "216c7c3b0d99ddb56d85d8ff04b81a0984cfea8e" }
+fmd-font = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "49466bc2dc4e9a34e070904bf6524a5c2a451168", features = ["bundled-faces"] }
+fmd-math = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "49466bc2dc4e9a34e070904bf6524a5c2a451168" }
 fnp-dtype = { git = "https://github.com/Dicklesworthstone/franken_numpy", rev = "a15d5c32e9330b555b0a653058bcfcff22fcb4ec" }
 fnp-ndarray = { git = "https://github.com/Dicklesworthstone/franken_numpy", rev = "a15d5c32e9330b555b0a653058bcfcff22fcb4ec" }
 fnp-io = { git = "https://github.com/Dicklesworthstone/franken_numpy", rev = "a15d5c32e9330b555b0a653058bcfcff22fcb4ec" }
 fnp-random-core = { git = "https://github.com/Dicklesworthstone/franken_numpy", rev = "a15d5c32e9330b555b0a653058bcfcff22fcb4ec" }
-franken_markdown = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "216c7c3b0d99ddb56d85d8ff04b81a0984cfea8e" }
+franken_markdown = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "49466bc2dc4e9a34e070904bf6524a5c2a451168" }
 fsci-integrate = { git = "https://github.com/Dicklesworthstone/frankenscipy", rev = "ae52b65454841cd4976f6fbac907be0539508d9b" }
 fsci-linalg = { git = "https://github.com/Dicklesworthstone/frankenscipy", rev = "ae52b65454841cd4976f6fbac907be0539508d9b" }
 fsci-opt = { git = "https://github.com/Dicklesworthstone/frankenscipy", rev = "ae52b65454841cd4976f6fbac907be0539508d9b" }
