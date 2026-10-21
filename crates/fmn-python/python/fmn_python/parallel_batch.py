@@ -53,10 +53,11 @@ def _render_source_job(job):
         options = dict(job["options"])
         reproducible = options.get("reproducible", False)
         from .effect_audit import recording
-        snapshot = None
+        snapshot = invocation = None
         if reproducible:
-            from .parallel_provenance import worker_runtime
+            from .parallel_provenance import freeze_invocation, worker_runtime
 
+            invocation = freeze_invocation(job)
             snapshot = worker_runtime(native, job["runtime_identities"])
         source = Path(job["source"])
         if _source_digest(source) != job["source_digest"]:
@@ -83,7 +84,7 @@ def _render_source_job(job):
             if reproducible:
                 from .parallel_provenance import executed_sources
 
-                options.update(sources=lambda: executed_sources(loaded, job),
+                options.update(sources=lambda: executed_sources(loaded, job, invocation=invocation),
                                runtime_identities=snapshot.identities)
             try:
                 report = render_scenes(
@@ -101,8 +102,10 @@ def _render_source_job(job):
             if reproducible and row["status"] == "succeeded":
                 from .parallel_provenance import worker_proof
 
-                row["provenance"] = worker_proof(snapshot, job["source_digest"],
-                                                 report.outcomes[0].result)
+                row["provenance"] = worker_proof(
+                    snapshot, job["source_digest"], report.outcomes[0].result,
+                    **({"invocation": invocation} if "invocation_sha256" in job else {}),
+                )
             return row
 
 
@@ -325,10 +328,6 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
             if parent.exists() and not parent.is_dir():
                 raise NotADirectoryError(str(parent))
     provenance = None
-    if reproducible:
-        from .parallel_provenance import ParallelProvenance
-
-        provenance = ParallelProvenance(native, format, destinations, digest)
     options = dict(format=format, resolution=resolution, fps=fps, threads=threads,
                    animation_range=selection, _output_options=_output_options)
     if bundle_options is not None:
@@ -351,9 +350,16 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
     if variants is not None:
         for job, variant in zip(jobs, variants):
             job.update(scene_name=variant["scene"], scene_kwargs=variant["scene_kwargs"])
-    if provenance is not None:
+    if reproducible:
+        from .parallel_provenance import ParallelProvenance, freeze_invocation
+
+        invocation_digests = {job["name"]: hashlib.sha256(freeze_invocation(job)).hexdigest()
+                              for job in jobs}
+        provenance = ParallelProvenance(native, format, destinations, digest,
+                                        invocation_digests=invocation_digests)
         for job in jobs:
             job["runtime_identities"] = provenance.identities
+            job["invocation_sha256"] = invocation_digests[job["name"]]
     owner = (contextlib.nullcontext(None) if checkpoint is None else
              BatchCheckpoint(checkpoint, resume=resume, key=resume_key))
     if checkpoint is not None:

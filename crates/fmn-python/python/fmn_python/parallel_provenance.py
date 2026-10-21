@@ -49,13 +49,38 @@ def _manifest_fingerprint(path):
     return {"bytes": size, "sha256": digest.hexdigest()}
 
 
-def executed_sources(loaded, job):
-    """Bind the selected class and output-affecting invocation to C1 inputs.
+def freeze_invocation(job):
+    """Snapshot the admitted invocation BEFORE imports or constructors run.
 
-    One source module can contain different Scene classes. Its bytes alone do
-    not identify which program ran. Keep a reserved virtual input alongside,
-    never in place of, the loader's exact compilation bytes and lazy imports.
-    Worker count, timeout and CPU thread budget are scheduling, not scene code.
+    Keep legacy class-name inputs byte-identical. Version 2 also identifies
+    the selected class and typed constructor values of an explicit variant.
+    Native source closure publication still owns hashing these input bytes.
+    """
+    options = job["options"]
+    invocation = {"schema": "fmn-python.source-invocation", "version": 1,
+                  "scene": job["name"], "source_sha256": job["source_digest"],
+                  "options": {key: options.get(key) for key in
+                              ("format", "resolution", "fps", "animation_range", "_output_options")}}
+    if "scene_name" in job:
+        from .source_jobs import _kwargs
+
+        invocation.update(version=2, scene=job["scene_name"], output_name=job["name"],
+                          scene_kwargs=_kwargs(job["scene_kwargs"], [0, 0]))
+    raw = json.dumps(invocation, sort_keys=True, separators=(",", ":"),
+                     ensure_ascii=True, allow_nan=False).encode("ascii")
+    if "invocation_sha256" in job:
+        expected = job["invocation_sha256"]
+        if not _digest(expected) or hashlib.sha256(raw).hexdigest() != expected:
+            raise ValueError("certified worker invocation differs from the admitted job")
+    return raw
+
+
+def executed_sources(loaded, job, *, invocation=None):
+    """Append frozen invocation inputs without losing late executed imports.
+
+    Worker code passes immutable pre-execution bytes. Never reserialize live
+    constructor dictionaries here: authored code may have mutated their nested
+    lists while running. Scheduling knobs do not enter the semantic inputs.
     """
     from .rendering import _source_snapshot
 
@@ -63,13 +88,7 @@ def executed_sources(loaded, job):
     name = "__fmn_parallel__/invocation.json"
     if name in sources:
         raise ValueError("scene sources collide with the parallel invocation identity")
-    options = job["options"]
-    invocation = {"schema": "fmn-python.source-invocation", "version": 1,
-                  "scene": job["name"], "source_sha256": job["source_digest"],
-                  "options": {key: options.get(key) for key in
-                              ("format", "resolution", "fps", "animation_range", "_output_options")}}
-    sources[name] = json.dumps(invocation, sort_keys=True, separators=(",", ":"),
-                               ensure_ascii=True, allow_nan=False).encode("ascii")
+    sources[name] = freeze_invocation(job) if invocation is None else invocation
     return _source_snapshot(sources)
 
 
@@ -82,16 +101,21 @@ def worker_runtime(native, expected):
     return snapshot
 
 
-def worker_proof(snapshot, source_digest, receipt):
+def worker_proof(snapshot, source_digest, receipt, *, invocation=None):
     """Attest transport only after the guarded session returned its receipt."""
     if (not has_provenance(receipt)
             or receipt.manifest != _sidecar(receipt.destination) / "manifest.fmnp"):
         raise RuntimeError("certified worker did not return complete native provenance")
     with paused():
         snapshot.verify()
-    return {"schema": _SCHEMA, "version": 1, "runtime": snapshot.identities,
-            "source_digest": source_digest,
-            "manifest": _manifest_fingerprint(receipt.manifest)}
+    proof = {"schema": _SCHEMA, "version": 1, "runtime": snapshot.identities,
+             "source_digest": source_digest,
+             "manifest": _manifest_fingerprint(receipt.manifest)}
+    if invocation is not None:
+        if type(invocation) is not bytes:
+            raise TypeError("worker invocation proof requires immutable admitted bytes")
+        proof.update(version=2, invocation_sha256=hashlib.sha256(invocation).hexdigest())
+    return proof
 
 
 def _restore_receipt(name, destination, format, row):
@@ -133,7 +157,14 @@ def _restore_receipt(name, destination, format, row):
 
 class ParallelProvenance:
     """One parent runtime generation, with independently certified scene outputs."""
-    def __init__(self, native, format, destinations, source_digest):
+    def __init__(self, native, format, destinations, source_digest, *, invocation_digests=None):
+        if invocation_digests is not None:
+            if (type(invocation_digests) is not dict or not invocation_digests
+                    or any(type(name) is not str or not name or not _digest(digest)
+                           for name, digest in invocation_digests.items())):
+                raise ValueError("certified batch requires valid admitted invocation digests")
+            invocation_digests = dict(invocation_digests)
+        self._invocation_digests = invocation_digests
         validate_batch_mode(native, format, True)
         for destination in destinations:
             _available(destination)
@@ -152,10 +183,18 @@ class ParallelProvenance:
 
     def restore(self, name, destination, row):
         proof = row.get("provenance")
+        admitted = getattr(self, "_invocation_digests", None)
+        fields = {"schema", "version", "runtime", "source_digest", "manifest"}
+        if admitted is not None:
+            fields.add("invocation_sha256")
+            if (name not in admitted or type(proof) is not dict
+                    or proof.get("invocation_sha256") != admitted[name]):
+                raise ValueError("certified worker invocation proof disagrees with its admitted job")
         if (type(proof) is not dict
-                or set(proof) != {"schema", "version", "runtime", "source_digest", "manifest"}
+                or set(proof) != fields
                 or proof["schema"] != _SCHEMA or type(proof["version"]) is not int
-                or proof["version"] != 1 or proof["runtime"] != self.identities
+                or proof["version"] != (2 if admitted is not None else 1)
+                or proof["runtime"] != self.identities
                 or proof["source_digest"] != self.source_digest):
             raise ValueError("certified worker provenance disagrees with the planned inputs")
         receipt = _restore_receipt(name, destination, self.format, row)
