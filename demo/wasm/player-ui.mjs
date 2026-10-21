@@ -9,22 +9,28 @@ export function mountTimelinePlayer({document = globalThis.document, window = gl
   readDemo = async signal => readBundleResponse(await fetch('./bundle.fmtl', {signal}), signal)} = {}) {
   const $ = id => document.getElementById(id);
   const canvas = $('canvas'), ctx = canvas.getContext('2d');
-  const status = $('status'), scrub = $('scrub'), play = $('play'), labels = $('labels');
+  const status = $('status'), scrub = $('scrub'), play = $('play'), labels = $('labels'), restartButton = $('restartWorker');
   const lifetime = new AbortController();
   let session = null, clock = null, raf = 0, loading = false, disposed = false;
-  let loadEpoch = 0, playEpoch = 0, seeking = null, lastRequested = -1;
+  let loadEpoch = 0, playEpoch = 0, restartEpoch = 0, recovering = false, seeking = null, lastRequested = -1;
   const on = (element, type, fn) => element.addEventListener(type, fn, {signal: lifetime.signal});
   function message(text, error = false) {
     status.classList.toggle('err', error); status.textContent = text;
   }
   function controls() {
-    const available = Boolean(!disposed && !loading && session?.current && !session.current.renderer.error);
+    const available = Boolean(!disposed && !loading && !recovering && session?.current && !session.current.renderer.error);
     play.disabled = !available || seeking !== null;
     scrub.disabled = !available;
+    restartButton.disabled = Boolean(disposed || loading || !session?.current);
+    restartButton.textContent = recovering ? 'Cancel restart' : 'Restart picture worker';
     for (const button of labels.children) button.disabled = !available || button.dataset.unresolved === 'true';
   }
   function stop() {
     ++playEpoch;
+    if (recovering) {
+      ++restartEpoch; recovering = false; session?.cancelRestart();
+      message('Picture worker restart cancelled; playback remains paused.');
+    }
     try { clock?.pause(); } catch (error) { message(`Playback stopped: ${error}`, true); }
     session?.invalidate(); seeking = null; lastRequested = -1;
     window.cancelAnimationFrame(raf); raf = 0; play.textContent = 'Play'; controls();
@@ -38,7 +44,7 @@ export function mountTimelinePlayer({document = globalThis.document, window = gl
     controls();
   }
   function seek(index) {
-    if (loading || !session?.current || session.current.renderer.error) return;
+    if (loading || recovering || !session?.current || session.current.renderer.error) return;
     stop();
     try {
       clock.seek(index); seeking = index; lastRequested = index; controls();
@@ -47,7 +53,7 @@ export function mountTimelinePlayer({document = globalThis.document, window = gl
   }
   function tick(now) {
     raf = 0;
-    if (disposed || loading || !clock?.playing || !session?.current) return;
+    if (disposed || loading || recovering || !clock?.playing || !session?.current) return;
     try {
       const index = clock.frameAt(now);
       if (index !== lastRequested) { lastRequested = index; session.render(index); }
@@ -84,6 +90,27 @@ export function mountTimelinePlayer({document = globalThis.document, window = gl
       return false;
     } finally { if (epoch === loadEpoch) { loading = false; controls(); } }
   }
+  async function restart() {
+    if (disposed || loading || !session?.current) return false;
+    if (recovering) { stop(); return false; }
+    stop();
+    const epoch = ++restartEpoch;
+    recovering = true; controls(); message('Restarting picture worker; narration remains paused…');
+    try {
+      // Audio keeps its fractional position; a silent clock keeps the selected
+      // grid index, including a picture that was still rendering at failure.
+      const frame = session.current.audio ? null : clock?.frame ?? session.current.renderer.frame;
+      if (!await session.restart(frame) || epoch !== restartEpoch || disposed) return false;
+      recovering = false; lastRequested = session.current.renderer.frame;
+      session.present();
+      message(`Picture worker restarted at frame ${lastRequested}; playback is paused.`);
+      return true;
+    } catch (error) {
+      if (epoch !== restartEpoch || disposed) return false;
+      message(`Picture worker restart failed: ${error}. The recording and paused narration were retained.`, true);
+      return false;
+    } finally { if (epoch === restartEpoch) { recovering = false; controls(); } }
+  }
   function dispose() {
     if (disposed) return;
     stop(); disposed = true; ++loadEpoch; lifetime.abort(); session?.dispose(); controls();
@@ -92,10 +119,11 @@ export function mountTimelinePlayer({document = globalThis.document, window = gl
     if (!ctx) throw new Error('A Canvas 2D context is required.');
     session = createSession({width: canvas.width, height: canvas.height,
       prepareAudio: player => prepareSoundtrack(player, createContext), onFrame: draw,
-      onError: error => { stop(); message(`Playback stopped: ${error}. Reload the recording to retry.`, true); }});
+      onError: error => { stop(); message(`Playback stopped: ${error}. Restart the picture worker to retry.`, true); }});
     on(scrub, 'input', () => seek(Number(scrub.value)));
+    on(restartButton, 'click', () => { void restart(); });
     on(play, 'click', async () => {
-      if (loading || seeking !== null || !clock || !session.current || session.current.renderer.error) return;
+      if (loading || recovering || seeking !== null || !clock || !session.current || session.current.renderer.error) return;
       if (clock.playing || clock.starting) { stop(); return; }
       const active = clock, current = session.current, epoch = ++playEpoch;
       try {
@@ -119,5 +147,5 @@ export function mountTimelinePlayer({document = globalThis.document, window = gl
     $('bundleFile').disabled = false; $('loadDemo').disabled = false;
     void load(readDemo, 'bundle.fmtl');
   } catch (error) { message(`Player initialization failed: ${error}`, true); controls(); }
-  return Object.freeze({load, seek, stop, dispose, get current() { return session?.current; }});
+  return Object.freeze({load, seek, stop, restart, dispose, get restarting() { return recovering; }, get current() { return session?.current; }});
 }

@@ -160,3 +160,19 @@ returns false, a new load supersedes it, and `cancelRestart()` aborts its read
 signal and terminates any candidate. Late results cannot replace the current
 movie. Disposal releases both workers and the single audio owner. Restart has
 no automatic retry loop: deterministic rendering failures remain visible.
+
+The player page exposes **Restart picture worker** even when a worker failure
+has disabled playback and scrubbing. During recovery the same button becomes
+**Cancel restart**; other playback controls wait for the replacement picture.
+Success returns to a paused, usable recording without requiring the file picker
+again. Hiding the page, stopping, loading another recording or disposing the page
+cancels recovery. A late success/failure cannot change a newer load's controls or
+status. A persistent failure at the requested picture remains a reported failure,
+not a hidden frame substitution or automatic retry loop.
+
+`node --test demo/wasm/player-recovery.test.mjs` exercises restart/cancel
+control ownership and late-result races with explicit DOM/session fixtures. The
+Chromium page check additionally clicks the real controls after a worker protocol
+failure, verifies the same paused audio owner and device, cancels recovery, and
+checks changed-source refusal and retry. These checks retain the native-decoder
+fixture boundary described above; they do not establish native Wasm acceptance.
