@@ -68,10 +68,13 @@ const TEXT_CACHE_STATE: &str = "none";
 // changing the workload being timed. Re-pinned for FMNTEX v3 (the `\color`
 // table, fm-tex-color-silent-i0p2): the 261-byte v3 document with its magic
 // set back to v2 and its empty colour table dropped hashes to the old pin
-// d7b4ad29, so the q^7+z layout itself did not move.
+// d7b4ad29, so the q^7+z layout itself did not move. Re-pinned when fmd-math
+// took TeX's TFM metrics (franken_markdown 216c7c3, fm-tex-metrics-glyphs-ru72):
+// q's 0.0359 em italic correction moves the 7, and every box takes its TFM
+// height and depth.
 const FORMULA_EXPECTED_RESULT_DIGEST: Digest = Digest::from_bytes([
-    0x19, 0x8e, 0x2a, 0x69, 0x64, 0x5a, 0x3b, 0xc6, 0xb3, 0x28, 0x4e, 0x2f, 0x53, 0x79, 0x78, 0x64,
-    0x22, 0x37, 0xff, 0x6f, 0xe4, 0x47, 0xda, 0xd3, 0x2a, 0x76, 0xb4, 0xb2, 0xef, 0xa0, 0x89, 0x01,
+    0x5d, 0x3e, 0xc7, 0xad, 0x22, 0xb9, 0x59, 0xed, 0x33, 0x31, 0x01, 0xfa, 0xcb, 0xb4, 0x52, 0x4b,
+    0xf6, 0x61, 0x84, 0xba, 0x89, 0x8e, 0x2f, 0x7d, 0xb8, 0x79, 0x45, 0xe3, 0xfa, 0x03, 0xce, 0x93,
 ]);
 const TEXT_EXPECTED_RESULT_DIGEST: Digest = Digest::from_bytes([
     0x31, 0xc6, 0xd1, 0xaa, 0x62, 0xd1, 0x13, 0x6d, 0x6f, 0x23, 0x6f, 0x96, 0x5a, 0xdd, 0x48, 0xa9,
@@ -1197,7 +1200,7 @@ mod tests {
         assert!(cold.to_tsv().contains("timed_layer\tlayout\n"));
         assert_eq!(
             cold.digest().to_string(),
-            "a3c23961f2d904b6548e3bde02e09aeac683a8745cf2a8c83cc2f62554d1896f"
+            "7211ed939beb5bdec8a4ae61146f42ea0953d0ee7e129e334e0a8f1b9f6c9a5a"
         );
 
         let cached = Pg7Definition::new(Pg7Scenario::FormulaCached).expect("cached definition");
@@ -1224,7 +1227,7 @@ mod tests {
         );
         assert_eq!(
             cached.digest().to_string(),
-            "b22b9ef4f06d9b9f87078a14f0b52b9678954a889807f1cf88ab2bb32d221ad8"
+            "5e2fbb3dcba1e26ca90418360d71a7922c8afddd21b995471b7c79d06dc6f38d"
         );
 
         let text = Pg7Definition::new(Pg7Scenario::Text10kGlyph).expect("text definition");

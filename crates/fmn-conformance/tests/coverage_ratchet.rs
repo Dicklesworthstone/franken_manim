@@ -16,9 +16,10 @@
 //! dashboard in one stroke).
 
 use fmn_conformance::ratchet::{
-    Baseline, ORACLE_FIXTURE, OracleSummary, Pending, corpus_digest, oracle_error,
-    parse_corpus_entry, parse_oracle_fixture, parse_trend_tsv, ratchet_violations,
-    render_dashboard, run_layout_oracle, summarize_oracle,
+    Baseline, FallbackSummary, ORACLE_FIXTURE, OracleSummary, Pending, corpus_digest,
+    fallback_chars, fallback_dashboard_line, oracle_error, parse_corpus_entry,
+    parse_oracle_fixture, parse_trend_tsv, ratchet_violations, render_dashboard, run_layout_oracle,
+    summarize_oracle,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
@@ -263,6 +264,7 @@ fn recompute_and_enforce_the_ratchet() -> Result<(), String> {
         layout_unique: 0,
         layout_occurrences: 0,
     };
+    let mut fallback = FallbackSummary::default();
     let mut parse_pending: BTreeMap<String, u64> = BTreeMap::new();
     let mut layout_pending: BTreeMap<String, u64> = BTreeMap::new();
     for (lineno, line) in data.lines().enumerate() {
@@ -293,16 +295,15 @@ fn recompute_and_enforce_the_ratchet() -> Result<(), String> {
             }
         }
         let laid = if entry.mode == "text" {
-            engine.typeset_text(&entry.text).map(|_| ())
+            engine.typeset_text(&entry.text)
         } else {
-            engine
-                .typeset(&entry.text, fmd_math::Style::Display)
-                .map(|_| ())
+            engine.typeset(&entry.text, fmd_math::Style::Display)
         };
         match laid {
-            Ok(()) => {
+            Ok(layout) => {
                 current.layout_unique += 1;
                 current.layout_occurrences += entry.count;
+                fallback.add(&fallback_chars(&layout), entry.count);
             }
             Err(fmd_math::MathError::UnmappedChar { ch, .. }) => {
                 *layout_pending
@@ -326,6 +327,12 @@ fn recompute_and_enforce_the_ratchet() -> Result<(), String> {
         );
         assert_eq!(current.occurrence_total, committed.occurrence_total);
     }
+    let relations = fallback.relation_violations();
+    assert!(
+        relations.is_empty(),
+        "the standard relation set: {}",
+        relations.join("; ")
+    );
     let violations = ratchet_violations(&committed, &current);
     assert!(
         violations.is_empty(),
@@ -351,8 +358,22 @@ fn recompute_and_enforce_the_ratchet() -> Result<(), String> {
             .map(|(row, &laid)| oracle_error(row, laid))
             .collect();
         let oracle = summarize_oracle(&rows, &errors);
-        bless(&current, &oracle, &parse_pending, &layout_pending)?;
+        bless(
+            &current,
+            &oracle,
+            &fallback,
+            &parse_pending,
+            &layout_pending,
+        )?;
         eprintln!("ratchet blessed at {}", current.franken_markdown_rev);
+    } else if !repo_file("docs/ratchet/dashboard.md", MAX_DASHBOARD_BYTES)?
+        .contains(&fallback_dashboard_line(&fallback))
+    {
+        return Err(format!(
+            "docs/ratchet/dashboard.md does not publish the glyph fallback counts \
+             ({}); re-bless with RATCHET_UPDATE=1",
+            fallback_dashboard_line(&fallback)
+        ));
     } else if advanced {
         return Err(
             "coverage advanced (or the pin moved) — bless deliberately with \
@@ -368,6 +389,7 @@ fn recompute_and_enforce_the_ratchet() -> Result<(), String> {
 fn bless(
     current: &Baseline,
     oracle: &OracleSummary,
+    fallback: &FallbackSummary,
     parse_pending: &BTreeMap<String, u64>,
     layout_pending: &BTreeMap<String, u64>,
 ) -> Result<(), String> {
@@ -428,6 +450,7 @@ fn bless(
     let dashboard = render_dashboard(
         current,
         oracle,
+        fallback,
         &to_pending(parse_pending),
         &to_pending(layout_pending),
         &trend,

@@ -18,7 +18,7 @@
 //! fixture (§15.3): the committed artifacts carry numbers, construct
 //! names, and hashes only.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 const BASELINE_FIELDS: [&str; 9] = [
@@ -432,6 +432,112 @@ pub struct Pending {
     pub tracked: String,
 }
 
+/// The corpus's glyphs from faces outside Computer Modern (fm-tex-metrics-glyphs-ru72): fmd-math's
+/// fallback faces, the Noto math subset and the sans, stand in where no bundled CM face has the
+/// character. The counts are occurrence-weighted by the strings that lay out with such a glyph.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FallbackSummary {
+    /// Distinct strings with at least one fallback glyph.
+    pub unique: u64,
+    /// Their occurrences.
+    pub occurrences: u64,
+    /// Per fallback character: the occurrences of the strings it appears in.
+    pub chars: BTreeMap<char, u64>,
+}
+
+impl FallbackSummary {
+    /// Tally one laid-out string's fallback characters (`chars`, from
+    /// [`fallback_chars`]) at `count` occurrences.
+    pub fn add(&mut self, chars: &BTreeSet<char>, count: u64) {
+        if chars.is_empty() {
+            return;
+        }
+        self.unique += 1;
+        self.occurrences += count;
+        for &ch in chars {
+            *self.chars.entry(ch).or_insert(0) += count;
+        }
+    }
+
+    /// The fallback characters of the standard relation set. TeX sets every
+    /// one from cmsy, cmmi and cmr, and so must fmd-math.
+    #[must_use]
+    pub fn standard_relations(&self) -> Vec<char> {
+        self.chars
+            .keys()
+            .copied()
+            .filter(|ch| STANDARD_RELATIONS.contains(ch))
+            .collect()
+    }
+
+    /// The ratchet's verdict on the standard relation set. Each fallback
+    /// relation must be a named gap in [`STANDARD_RELATION_GAPS`], and each
+    /// gap must still fall back, so it is removed the day its bead lands.
+    #[must_use]
+    pub fn relation_violations(&self) -> Vec<String> {
+        let fallen = self.standard_relations();
+        let mut out: Vec<String> = fallen
+            .iter()
+            .filter(|ch| !STANDARD_RELATION_GAPS.iter().any(|(gap, _)| gap == *ch))
+            .map(|ch| {
+                format!(
+                    "{ch} (U+{:04X}) falls back outside Computer Modern",
+                    u32::from(*ch)
+                )
+            })
+            .collect();
+        out.extend(
+            STANDARD_RELATION_GAPS
+                .iter()
+                .filter(|(gap, _)| !fallen.contains(gap))
+                .map(|(gap, bead)| format!("{gap} no longer falls back: drop its {bead} gap")),
+        );
+        out
+    }
+}
+
+/// Standard relations fmd-math still draws from a fallback face, each owned
+/// by the bead that builds it from TeX's fonts.
+pub const STANDARD_RELATION_GAPS: &[(char, &str)] = &[
+    // TeX's \@vereq stacks cmsy's ∼ over cmr's =.
+    ('≅', "fm-shqq"),
+];
+
+/// The standard relation set. TeX sets every one from cmsy, cmmi or cmr: as
+/// one character, or as a construction of them (`\neq` overprints cmsy's
+/// slash on `=`, `\cong` stacks `∼` over `=`, `\mapsto` joins `\mapstochar`
+/// and `\rightarrow`).
+pub const STANDARD_RELATIONS: &[char] = &[
+    '=', '<', '>', '≤', '≥', '≠', '≡', '≈', '∼', '≃', '≅', '∝', '≺', '≻', '⪯', '⪰', '≪', '≫', '⊂',
+    '⊃', '⊆', '⊇', '∈', '∉', '∋', '⊥', '∣', '∥', '→', '←', '↔', '⇒', '⇐', '⇔', '↦', '↑', '↓',
+];
+
+/// The characters of `layout` drawn from a fallback face.
+#[must_use]
+pub fn fallback_chars(layout: &fmd_math::Layout) -> BTreeSet<char> {
+    layout
+        .glyphs
+        .iter()
+        .filter(|glyph| {
+            glyph.face == fmd_math::faces::FACE_SYMBOLS || glyph.face == fmd_math::faces::FACE_SANS
+        })
+        .map(|glyph| glyph.ch)
+        .collect()
+}
+
+/// The dashboard's fallback sentence, which the corpus-bearing ratchet run
+/// checks is current.
+#[must_use]
+pub fn fallback_dashboard_line(f: &FallbackSummary) -> String {
+    format!(
+        "{} strings ({} occurrences) lay out with at least one glyph from a face outside Computer \
+         Modern. Standard relations among those glyphs: {}.",
+        f.unique,
+        f.occurrences,
+        f.standard_relations().len()
+    )
+}
+
 /// Render the public dashboard (numbers, construct names, hashes — never
 /// the corpus strings; §15.3) plus the trend log and the R1 escalation
 /// path.
@@ -439,6 +545,7 @@ pub struct Pending {
 pub fn render_dashboard(
     baseline: &Baseline,
     oracle: &OracleSummary,
+    fallback: &FallbackSummary,
     parse_pending: &[Pending],
     layout_pending: &[Pending],
     trend: &[Baseline],
@@ -482,12 +589,37 @@ pub fn render_dashboard(
     );
     let _ = writeln!(
         out,
+        "| **Glyph fallback (a glyph outside Computer Modern)** | {:.3} % | {:.3} % |",
+        share(fallback.occurrences, baseline.occurrence_total),
+        share(fallback.unique, baseline.unique_total)
+    );
+    let _ = writeln!(
+        out,
         "\n\"Typeset returned Ok\" means fmd-math produced a layout without an \
          error. It does not show that the layout is right. {} The oracle row \
          counts only those verified strings against the whole corpus; \
          unsampled strings count as unverified.",
         oracle_dashboard_line(oracle)
     );
+    let _ = writeln!(out, "\n## Glyph fallback\n");
+    let _ = writeln!(
+        out,
+        "{} Fewer is better. The standard relation set may fall back only where a bead owns \
+         the gap: {}.\n",
+        fallback_dashboard_line(fallback),
+        STANDARD_RELATION_GAPS
+            .iter()
+            .map(|(ch, bead)| format!("{ch} ({bead})"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let _ = writeln!(out, "| Character | Code point | Occurrences |");
+    let _ = writeln!(out, "|---|---|---|");
+    let mut chars: Vec<(char, u64)> = fallback.chars.iter().map(|(&c, &n)| (c, n)).collect();
+    chars.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    for (ch, occurrences) in chars {
+        let _ = writeln!(out, "| {ch} | U+{:04X} | {occurrences} |", u32::from(ch));
+    }
     let _ = writeln!(out, "\n## Pending constructs (parse plane)\n");
     let _ = writeln!(out, "| Construct | Occurrences blocked | Tracked at |");
     let _ = writeln!(out, "|---|---|---|");
@@ -1177,9 +1309,14 @@ mod tests {
             occurrences: 400,
             occurrences_within_5: 250,
         };
+        let mut fallback = FallbackSummary::default();
+        fallback.add(&BTreeSet::from(['ℝ', '✓']), 50);
+        fallback.add(&BTreeSet::from(['ℝ']), 30);
+        fallback.add(&BTreeSet::new(), 900);
         let d = render_dashboard(
             &base(),
             &oracle,
+            &fallback,
             &[Pending {
                 construct: "\\substack".to_owned(),
                 occurrences: 5,
@@ -1195,6 +1332,26 @@ mod tests {
         // verified within 5%.
         assert!(d.contains("| 25.000 % | 8.000 % |"));
         assert!(d.contains(&oracle_dashboard_line(&oracle)));
+        // 80 of 1000 occurrences, 2 of 100 strings; ℝ ranks first.
+        assert!(d.contains("| 8.000 % | 2.000 % |"));
+        assert!(d.contains("| ℝ | U+211D | 80 |\n| ✓ | U+2713 | 50 |"));
+        assert!(d.contains(&fallback_dashboard_line(&fallback)));
+        assert!(fallback.standard_relations().is_empty());
+        // A gap that no longer falls back is a violation, so is a relation
+        // that falls back without a gap.
+        assert_eq!(
+            fallback.relation_violations().len(),
+            STANDARD_RELATION_GAPS.len()
+        );
+        fallback.add(&BTreeSet::from(['≤']), 1);
+        assert_eq!(fallback.standard_relations(), ['≤']);
+        for &(gap, _) in STANDARD_RELATION_GAPS {
+            fallback.add(&BTreeSet::from([gap]), 1);
+        }
+        assert_eq!(
+            fallback.relation_violations(),
+            ["≤ (U+2264) falls back outside Computer Modern"]
+        );
     }
 
     #[test]

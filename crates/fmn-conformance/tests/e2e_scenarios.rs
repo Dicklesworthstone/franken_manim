@@ -8074,6 +8074,109 @@ fn parity_tex_span_map_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
     Ok(RunOutcome::ok().with_counter("parity_t2c_source_identity", 1))
 }
 
+/// fm-tex-metrics-glyphs-ru72: the ten formulas the bead first measured,
+/// set as one strip and rendered certified. Each formula's width holds the
+/// pinned Reference's (`fixtures/tex_reference_widths.v1.tsv`) within its
+/// row's tolerance, 3% when TeX set it only in Computer Modern and 6%
+/// otherwise. The frame's ink spans the strip's geometric width to within
+/// three pixels, so the frame draws what the layout measures.
+fn parity_tex_formula_strip_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    struct Strip(VMobject);
+    impl fmn::SceneConstruct for Strip {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            stage.add(self.0.clone())?;
+            Ok(())
+        }
+    }
+    let engine = &scene_goldens::corpus().tex;
+    let mut members = Vec::new();
+    let mut worst_permille = 0_u64;
+    for line in include_str!("../fixtures/tex_reference_widths.v1.tsv")
+        .lines()
+        .filter(|line| line.starts_with("authored\t"))
+    {
+        let fields: Vec<&str> = line.split('\t').collect();
+        let (source, class) = (fields[1], fields[5]);
+        let reference: f64 = fields[3]
+            .parse()
+            .map_err(|error| fail(format!("{source:?}: Reference width: {error}")))?;
+        let tolerance = if class == "fallback" { 0.06 } else { 0.03 };
+        let tex = fmn_library::Tex::new(source)
+            .build(engine)
+            .map_err(|error| fail(format!("{source:?} typesets: {error}")))?;
+        let (min, max) = tex
+            .vmob
+            .extent()
+            .ok_or_else(|| fail(format!("{source:?} has no extent")))?;
+        let error = (max[0] - min[0]) / reference - 1.0;
+        if error.abs() > tolerance {
+            return Err(fail(format!(
+                "{source:?}: native width {:+.2}% off the Reference's {reference} (tolerance {:.0}%)",
+                error * 100.0,
+                tolerance * 100.0
+            )));
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let permille = (error.abs() * 1000.0).round() as u64;
+        worst_permille = worst_permille.max(permille);
+        members.push(tex.vmob);
+    }
+    if members.len() != 10 {
+        return Err(fail(format!(
+            "{} authored formulas, expected 10",
+            members.len()
+        )));
+    }
+    let strip = VMobject::arranged(members, RIGHT, 0.25, [0.0; 3])
+        .scaled_about(0.75, [0.0; 3])
+        .moved_to([0.0; 3]);
+    let (min, max) = strip
+        .extent()
+        .ok_or_else(|| fail("the strip has no extent"))?;
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    let mut options = fmn::RenderOptions::with_format("/tex-strip.png", fmn::RenderFormat::Png)
+        .map_err(|error| fail(format!("strip options: {error}")))?;
+    options.config.camera.resolution = (960, 540);
+    options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+    fmn::render_with_fs(&mut Strip(strip), options, fs.clone())
+        .map_err(|error| fail(format!("render the strip: {error}")))?;
+    let png = fs
+        .read(std::path::Path::new("/tex-strip.png"))
+        .map_err(|error| fail(format!("read the strip: {error}")))?;
+    let image = fmn_codec::decode_png(&png, &fmn_codec::PngLimits::default())
+        .map_err(|error| fail(format!("decode the strip: {error}")))?;
+    let (width, height) = (image.width as usize, image.height as usize);
+    let inked = |column: usize| {
+        (0..height).any(|row| {
+            let px = &image.rgba[(row * width + column) * 4..][..3];
+            px.iter().map(|&c| u32::from(c)).sum::<u32>() > 3 * 128
+        })
+    };
+    let first = (0..width).find(|&column| inked(column));
+    let last = (0..width).rev().find(|&column| inked(column));
+    let (Some(first), Some(last)) = (first, last) else {
+        return Err(fail("the strip frame has no ink"));
+    };
+    let px_per_unit = width as f64 / (2.0 * FRAME_X_RADIUS);
+    let ink_px = (last - first + 1) as f64;
+    let geometric_px = (max[0] - min[0]) * px_per_unit;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let (ink, geometric) = (ink_px.round() as u64, geometric_px.round() as u64);
+    ctx.event(
+        LogEvent::new("e2e.parity.tex_formula_strip")
+            .field("formulas", 10_u64)
+            .field("worst_width_error_permille", worst_permille)
+            .field("ink_px", ink)
+            .field("geometric_px", geometric),
+    );
+    if (ink_px - geometric_px).abs() > 3.0 {
+        return Err(fail(format!(
+            "the strip's ink spans {ink_px} px against its geometric {geometric_px:.1} px"
+        )));
+    }
+    Ok(RunOutcome::ok().with_counter("tex_strip_formulas", 10))
+}
+
 /// §11.7 — Markdown composes `$…$` through fmd-math under fmd's own
 /// delimiter rule. An inline island is exactly the text-style `Tex` of its
 /// source, and prose dollars (`$5 and $10`) lay out as their escaped spelling
@@ -10492,6 +10595,17 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 FieldPred::str_eq("equal_steps", "true"),
                 FieldPred::u64_eq("animation_matches", 3),
             ],
+        )],
+    ));
+    specs.push(spec(
+        "parity.tex_formula_strip.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(parity_tex_formula_strip_run),
+        vec![Assertion::ExitCode(0), counter_eq("tex_strip_formulas", 10)],
+        vec![LogExpect::span_present(
+            "e2e.parity.tex_formula_strip",
+            vec![FieldPred::u64_eq("formulas", 10)],
         )],
     ));
     specs.push(spec(

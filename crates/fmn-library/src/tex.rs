@@ -1408,17 +1408,59 @@ impl<'a> OldTex<'a> {
 /// The ems→scene-units scale, calibrated the Reference's way: typeset a
 /// reference "0" (text-style math, the Reference's calibration surface)
 /// and scale so its height is `font_size / font_size_for_unit_height`.
+/// The height is the "0"'s ink, as the Reference's
+/// `get_svg_content_height` measures the rendered SVG's content, not
+/// TeX's box (cmr10's 0.644 em, below the ink's overshoot).
 pub(crate) fn calibrate(
     engine: &TexEngine,
     font_size: f64,
     fsuh: f64,
 ) -> Result<f64, TexMobjectError> {
     let probe = engine.typeset(Mode::Math(MathStyle::Text), "0")?;
-    let height = probe.layout.height + probe.layout.depth;
+    let mut low = f64::INFINITY;
+    let mut high = f64::NEG_INFINITY;
+    for sub in &probe.subs {
+        for contour in engine.resolve_prim(&probe, sub.prim)? {
+            let (lo, hi) = contour_y_extent(&contour);
+            low = low.min(lo);
+            high = high.max(hi);
+        }
+    }
+    let height = high - low;
     if !height.is_finite() || height <= 0.0 {
         return Err(TexMobjectError::Calibration);
     }
     Ok(font_size / (fsuh * height))
+}
+
+/// A contour's vertical ink extent: its line ends, and each quad's true
+/// extremum where the curve bulges past its ends.
+fn contour_y_extent(contour: &PathContour) -> (f64, f64) {
+    let mut at = contour.start.1;
+    let (mut lo, mut hi) = (at, at);
+    for seg in &contour.segments {
+        let to = match *seg {
+            PathSeg::Line { to } => to.1,
+            PathSeg::Quad { ctrl, to } => {
+                let denom = at - 2.0 * ctrl.1 + to.1;
+                if denom != 0.0 {
+                    let t = (at - ctrl.1) / denom;
+                    if t > 0.0 && t < 1.0 {
+                        let y = (1.0 - t) * (1.0 - t) * at
+                            + 2.0 * (1.0 - t) * t * ctrl.1
+                            + t * t * to.1;
+                        lo = lo.min(y);
+                        hi = hi.max(y);
+                    }
+                }
+                to.1
+            }
+        };
+        lo = lo.min(to);
+        hi = hi.max(to);
+        at = to;
+    }
+    (lo, hi)
 }
 
 /// One `Sub` child: its resolved contours as a positioned [`QuadPath`],
@@ -1643,13 +1685,14 @@ mod tests {
         let rule = &m.typeset.layout.rules[r];
         let child = &m.vmob.children()[rule_ord];
         let (min, max) = child.extent().expect("has extent");
-        // The child is the rule's rectangle at the calibrated scale:
-        // recompute the scale from the "0" probe, exactly as build does.
-        let probe = engine()
-            .typeset(Mode::Math(MathStyle::Text), "0")
-            .expect("probe");
-        let scale = DEFAULT_FONT_SIZE
-            / (DEFAULT_FONT_SIZE_FOR_UNIT_HEIGHT * (probe.layout.height + probe.layout.depth));
+        // The child is the rule's rectangle at the calibrated scale, the
+        // one build computes.
+        let scale = calibrate(
+            &engine(),
+            DEFAULT_FONT_SIZE,
+            DEFAULT_FONT_SIZE_FOR_UNIT_HEIGHT,
+        )
+        .expect("calibrates");
         assert!((min[0] - rule.x * scale).abs() < 1e-9);
         assert!((max[0] - (rule.x + rule.width) * scale).abs() < 1e-9);
         assert!((min[1] - rule.y * scale).abs() < 1e-9);

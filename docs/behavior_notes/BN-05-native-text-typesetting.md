@@ -75,8 +75,21 @@ ligature is one submobject), so scene code indexes identically.
     measured 1.28 and 1.049 wide on two hosts.
   - A glyph regrouped out of its text stays within 25% and 0.1 units.
   - A larger difference is a bug with its own bead. For example,
-    `fm-tex-metrics-glyphs-ru72` covers fallback glyphs that widen formulas
-    by up to 35%.
+    `fm-tex-metrics-glyphs-ru72` covered fallback glyphs and measured-ink
+    boxes. Since fmd-math lays out from TeX's TFM metrics, 105 of the 111
+    authored formulas in `tex_reference_boxes` are within 5% of the
+    Reference's `Tex` box.
+- **`Tex` is 0.5% smaller than on the Reference's capture host.** Both
+  engines scale a formula so that a "0" is `font_size /
+  font_size_for_unit_height` tall. FrankenManim measures its own "0": the
+  Computer Modern design, 0.688 em of ink.
+  - The Reference measures `latex_to_svg("0")`, a T1 text "0". Without
+    cm-super's outline fonts, dvisvgm traces that glyph from a METAFONT
+    bitmap, and it measures 0.6846 em. That is the pinned capture host's case.
+  - Every Reference `Tex` there is therefore 0.49% larger than its design
+    proportions.
+  - This is a property of the host's font installation, not of manim, and is
+    not replicated.
 - Pango-only markup (arbitrary attributes, `<gravity>`, etc.) is out of
   the compatibility claim; the supported set is documented in
   `fmn_text::markup`.

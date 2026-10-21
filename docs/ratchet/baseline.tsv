@@ -4,7 +4,7 @@
 # test pins this file to the SUITE.lock franken_markdown rev.
 rules_version	1
 corpus_hash	a8325e49e0ce78fcc735533952740e9adeaaa5cb10f9c13d73aaa3ba4bf883fc
-franken_markdown_rev	206bb6396c3ba1547dde8eca25c0b4e8facb62d6
+franken_markdown_rev	216c7c3b0d99ddb56d85d8ff04b81a0984cfea8e
 unique_total	9269
 occurrence_total	17711
 parse_unique	9268
