@@ -482,9 +482,9 @@ checks remain outside the timed regions and are recorded separately in the
 
 | Scenario | Timed production path | Required state | Strict target |
 |---|---|---|---|
-| `formula-cold` | `fmn-tex` math-display layout of the fixed synthetic structural isomorph of the G0-4 corpus median | content cache disabled; engine and CPU warmed; engine memory front cleared before every repetition | < 3 ms |
+| `formula-cold` | `fmn-tex` math-display layout of the fixed synthetic structural isomorph of the G0-4 corpus median, the first typeset of a fresh engine | content cache disabled; a fresh engine per repetition, built outside the timed region, so its glyph memo, memory front and store are empty; three untimed fresh-engine warmups warm only the CPU and allocator | < 3 ms |
 | `formula-cached` | `fmn-tex` verified store read and bit-exact payload decode for that formula | exact-key miss proven, one-item production `preflight` succeeds, exact stored payload decodes and matches the self-golden, the entry is pinned against in-process eviction, engine memory front cleared before every repetition, exact-key hit proven again after timing | < 100 µs |
-| `text-10k-glyph` | `fmn-text::layout_text` with the bundled `FontBook` and plain-text defaults | cache absent; deterministic ASCII source produces exactly 10,000 non-whitespace glyphs, one line, and no decorations | < 20 ms |
+| `text-10k-glyph` | `fmn-text::layout_text` with the bundled `FontBook`, markup, and a 60 em measure (greedy breaking) | cache absent; a project-authored English sentence cycled at 4.5 characters a word, every seventh word bold and every eleventh italic, cut to exactly 10,000 non-whitespace glyphs over many lines with no decorations | < 20 ms |
 
 The formula result digest is SHA-256 over `Typeset::to_bytes`; the native-text
 digest is a versioned canonical hash of every layout, line, glyph, face,
@@ -524,3 +524,54 @@ explicit host-quality failures. Zero elapsed time or a value outside `u64` is
 retained as an invalid sample. A native typesetting error is preserved
 verbatim inside the typed PG-7 workload error, including unsupported-construct
 name and tier; it is never converted into an empty layout or a timing sample.
+
+Before fm-pg7-honest-mn4b, `formula-cold` reused one warmed engine (its glyph
+memo stayed warm) and `text-10k-glyph` was one unbroken a-z line. Neither old
+observation describes the current workload.
+
+### The PG-7 calibration lane
+
+`perf_pg7::calibrate_pg7`, run by the non-ignored
+`tests/perf_pg7.rs::calibration_holds_every_budget_within_twice_the_plan` on
+every `cargo test`, times five workloads with nine repetitions each. Rows are
+`fmn.perf.pg7-calibration` NDJSON (`name, mode, n, median_us, p90_us,
+instructions, budget_us, limit_us, verdict`), printed with `--nocapture` and on
+failure. The workloads:
+
+- the canonical median formula `q^7+z`;
+- public synthetic isomorphs of three more G0-4 selections: the lower median
+  by unique string (13 bytes), the 90th percentile by occurrence (27 bytes,
+  with its exact construct set), and the lower median of the formulas with an
+  environment (a 170-byte `array`, with its exact construct set);
+- the canonical paragraph.
+
+Each formula is timed `cold` (a fresh engine per repetition), `warm` (one
+engine, memory front cleared) and `cached` (a verified store hit). The
+paragraph is timed `cold` (a fresh `FontBook`) and `warm`.
+
+The lane is calibration-unqualified and alert-only. A row fails only when its
+median exceeds twice the plan's budget: the median formula's 3 ms cold and
+100 µs cached, and the paragraph's 20 ms. An unoptimized build judges only the
+cold median formula, which is more than an order of magnitude inside its
+budget there. Its unoptimized cached hit and paragraph are logged as
+`unjudged-unoptimized-build`. The weekly release-perf CI lane judges every row
+and also runs the ignored producer probe. A planted 10 ms sleep inside every
+timed region must breach every judged median-formula row
+(`a_planted_ten_millisecond_sleep_breaches_the_formula_budgets`).
+
+Instructions retired are `null`. An in-process counter needs
+`perf_event_open`, which D3 rules out; fm-perf-calibration-lane-pkn8 runs
+producers under `perf stat`.
+
+Measured on 2026-10-21 under release-perf on an rch worker (shared and
+unqualified), medians in µs:
+
+| workload | cold | warm | cached |
+|---|---:|---:|---:|
+| median by occurrence | 6.3 | 3.5 | 10.2 |
+| median by unique string | 8.3 | 4.8 | 10.8 |
+| p90 by occurrence | 8.5 | 4.9 | 10.7 |
+| array | 37.1 | 22.8 | 28.1 |
+| 10k-glyph paragraph | 6,687 | 5,328 | — |
+
+For a formula this small, a verified store hit costs more than a warm layout.

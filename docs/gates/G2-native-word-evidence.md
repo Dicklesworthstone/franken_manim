@@ -295,6 +295,22 @@ Further evidence, 2026-10-09:
   - `text-10k-glyph`: unchanged workload and definition, 2.28 ms before,
     2.37 ms after.
 
+- **PG-7 truly cold, and a calibration lane (`fm-pg7-honest-mn4b`).** The
+  `formula-cold` above still reused one warmed engine, so its glyph memo was
+  warm. It now builds a fresh engine for every repetition, outside the timed
+  region. `text-10k-glyph` is now a marked-up English paragraph wrapped to a
+  60 em measure; it was one unbroken a-z line. Both definitions moved, so the
+  numbers above describe the old workloads.
+
+  A non-ignored calibration test (`calibration_holds_every_budget_within_twice_the_plan`)
+  times five workloads cold, warm and cached, and fails past twice the plan's
+  budget. A planted 10 ms sleep fails it. The rows (`docs/performance/PERFORMANCE_GATES.md`,
+  "The PG-7 calibration lane") are unqualified. Medians under release-perf on
+  a shared rch worker:
+  - median formula: 6.3 µs cold, 3.5 µs warm, 10.2 µs cached;
+  - array: 37 µs cold;
+  - 10k-glyph paragraph: 6.7 ms cold.
+
 What keeps this row partial:
 - No qualified PG-7 observation exists (`fm-inr.1`).
 - Native scenes are preflighted only from their declared manifest. Rust

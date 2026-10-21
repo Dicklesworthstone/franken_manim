@@ -4,13 +4,15 @@ use fmn_conformance::perf::{
     GateScope, MeasurementBatch, MetricUnit, Sample, Verdict,
 };
 use fmn_conformance::perf_pg7::{
-    PG7_MAX_INVALID_SAMPLES, PG7_MIN_VALID_SAMPLES, PG7_SAMPLE_COUNT, PG7_TRACE_SCHEMA,
-    Pg7Definition, Pg7Scenario, measure_pg7,
+    PG7_CALIBRATION_REPETITIONS, PG7_MAX_INVALID_SAMPLES, PG7_MIN_VALID_SAMPLES, PG7_SAMPLE_COUNT,
+    PG7_TRACE_SCHEMA, Pg7CalibrationRow, Pg7Definition, Pg7Mode, Pg7Scenario, Pg7Workload,
+    calibrate_pg7, measure_pg7,
 };
 use fmn_hash::sha256;
 use fmn_platform::clock::FakeClock;
 use fmn_platform::fs::VirtualFs;
 use std::sync::Arc;
+use std::time::Duration;
 
 const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 
@@ -155,6 +157,58 @@ fn injected_pg7_slowdown_blocks_through_the_common_verifier() {
                 .any(|finding| finding.code == "baseline-regression"),
             "{scenario}"
         );
+    }
+}
+
+/// The calibration lane (fm-pg7-honest-mn4b): every workload in every mode,
+/// on whatever host and build runs the suite, one NDJSON row each (shown with
+/// `--nocapture`, and on failure). Unqualified and alert-only: it fails only
+/// when a judged row's median exceeds twice the plan's budget. An unoptimized
+/// build judges the cold median formula and logs the rest unjudged
+/// (`Pg7CalibrationRow::judged`); the release-perf lane judges every row. The
+/// qualified observation belongs to the pinned host (fm-inr.1).
+#[test]
+fn calibration_holds_every_budget_within_twice_the_plan() {
+    let store = fresh_store();
+    let rows = calibrate_pg7(PG7_CALIBRATION_REPETITIONS, &store, &|| {}).expect("calibration");
+    for row in &rows {
+        println!("{}", row.to_ndjson());
+    }
+    assert_eq!(
+        rows.len(),
+        14,
+        "four formulas in three modes, the paragraph in two"
+    );
+    assert_eq!(
+        rows.iter().filter(|row| row.budget_ns().is_some()).count(),
+        4
+    );
+    let breaches: Vec<String> = rows
+        .iter()
+        .filter(|row| row.breached())
+        .map(Pg7CalibrationRow::to_ndjson)
+        .collect();
+    assert!(
+        breaches.is_empty(),
+        "PG-7 calibration: over twice the plan's budget\n{}",
+        breaches.join("\n")
+    );
+}
+
+/// The planted negative: a 10 ms sleep inside every timed region puts every
+/// judged median-formula row over twice its budget.
+#[test]
+fn a_planted_ten_millisecond_sleep_breaches_the_formula_budgets() {
+    let store = fresh_store();
+    let rows = calibrate_pg7(3, &store, &|| std::thread::sleep(Duration::from_millis(10)))
+        .expect("planted calibration");
+    let judged: Vec<&Pg7CalibrationRow> = rows
+        .iter()
+        .filter(|row| row.workload == Pg7Workload::MedianByOccurrence && row.judged())
+        .collect();
+    assert!(judged.iter().any(|row| row.mode == Pg7Mode::Cold));
+    for row in judged {
+        assert!(row.breached(), "{}", row.to_ndjson());
     }
 }
 

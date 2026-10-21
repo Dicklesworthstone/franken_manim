@@ -1,16 +1,24 @@
 //! Canonical PG-7 native-typesetting latency producers.
 //!
-//! Workload identity is fixed before the clock is read. Formula-cold keeps
-//! the engine and CPU warm while deliberately leaving the content cache
-//! disabled. Formula-cached proves an exact-key miss, primes through the real
-//! preflight mechanism, verifies and decodes the exact stored payload, then
-//! times verified store hits. Both formula workloads clear the engine's
-//! memory front before every repetition, outside the timed region, and refuse
-//! a repetition unless the engine's own counters show it was served by
+//! Workload identity is fixed before the clock is read. Formula-cold is
+//! truly cold (fm-pg7-honest-mn4b): every repetition builds a fresh engine
+//! outside the timed region and times that engine's first typeset, so its
+//! glyph memo, memory front and store are all empty. Formula-cached proves an
+//! exact-key miss, primes through the real preflight mechanism, verifies and
+//! decodes the exact stored payload, then times verified store hits with the
+//! memory front cleared before every repetition. Both formula workloads
+//! refuse a repetition unless the engine's own counters show it was served by
 //! exactly the layer the scenario names: one layout, or one verified store
-//! hit, and never a memory-front hit. Native text lays out exactly 10,000
-//! non-whitespace glyphs through `fmn-text`. All three paths verify a
-//! bit-level result self-golden before and after timing.
+//! hit, and never a memory-front hit. Native text lays out a marked-up
+//! paragraph of exactly 10,000 non-whitespace glyphs, wrapped to a measure,
+//! through `fmn-text`. All three paths verify a bit-level result self-golden
+//! before and after timing.
+//!
+//! [`calibrate_pg7`] is the calibration lane: the same mechanisms over five
+//! workloads (the corpus median by occurrence and by unique string, the p90
+//! by occurrence, a matrix formula, and the paragraph) in cold, warm and
+//! cached modes, on any host and build. It is unqualified and alert-only: a
+//! row fails only past twice the plan's budget.
 
 use crate::perf::{
     Baseline, EvidenceKind, EvidenceRef, GateId, MeasurementBatch, MetricUnit, PerfError, Sample,
@@ -54,7 +62,17 @@ const FORMULA_OCCURRENCE_RANK: &str = "6010-of-12020";
 const FORMULA_FIXTURE_RELATION: &str = "synthetic-utf8-byte-and-construct-count-isomorph";
 const FORMULA_SOURCE_BYTES: usize = 5;
 const FORMULA_CONSTRUCT_COUNT: usize = 1;
-const TEXT_PATTERN: &str = "Abcdefghijklmnopqrstuvwxyz";
+/// The words the 10k-glyph paragraph cycles through: project-authored
+/// English at 4.5 characters a word, punctuation included, so line breaking
+/// and interword spacing see realistic word lengths.
+const TEXT_WORDS: &str = "Every frame is a pure function of its begin state, the clock and the \
+                          input closure; the scheduler may reorder the work, but never the bits \
+                          it emits.";
+/// Every seventh word of the paragraph is bold, every eleventh italic.
+const TEXT_BOLD_EVERY: usize = 7;
+const TEXT_ITALIC_EVERY: usize = 11;
+/// The measure the paragraph wraps to, in ems.
+const TEXT_WIDTH_EM: f64 = 60.0;
 const THREAD_PROFILE: &str = "single-thread";
 const BUILD_PROFILE: &str = "release-perf";
 const FORMULA_OUTPUT_MODE: &str = "typeset-data";
@@ -78,19 +96,22 @@ const FORMULA_EXPECTED_RESULT_DIGEST: Digest = Digest::from_bytes([
     0x7c, 0x42, 0xf1, 0x5f, 0xa2, 0xeb, 0x41, 0x71, 0x7a, 0x0b, 0x37, 0x25, 0x45, 0x34, 0x54, 0x7f,
     0x60, 0xa0, 0xde, 0xcb, 0x2d, 0x4f, 0xa6, 0x79, 0x0f, 0x93, 0xb7, 0xa4, 0x61, 0xbb, 0x98, 0x4c,
 ]);
+// The marked-up, wrapped paragraph of fm-pg7-honest-mn4b.
 const TEXT_EXPECTED_RESULT_DIGEST: Digest = Digest::from_bytes([
-    0x31, 0xc6, 0xd1, 0xaa, 0x62, 0xd1, 0x13, 0x6d, 0x6f, 0x23, 0x6f, 0x96, 0x5a, 0xdd, 0x48, 0xa9,
-    0x48, 0xb9, 0x2d, 0xb8, 0xd0, 0xda, 0x25, 0x29, 0x52, 0x97, 0x9d, 0xc8, 0xe2, 0x03, 0xac, 0x91,
+    0x9e, 0x67, 0x3c, 0x70, 0xc3, 0x5d, 0xf8, 0xc5, 0xcc, 0x09, 0x46, 0x47, 0x82, 0x0a, 0x8c, 0xc0,
+    0x2b, 0x02, 0x00, 0x2e, 0x65, 0x12, 0x07, 0x7f, 0xd8, 0x11, 0x70, 0xf5, 0xc0, 0xe1, 0x68, 0x16,
 ]);
 
 /// One of the three policy-catalog PG-7 workloads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pg7Scenario {
-    /// A cache-disabled layout of the canonical corpus-representative formula.
+    /// The first layout of the canonical corpus-representative formula by a
+    /// fresh engine.
     FormulaCold,
     /// A verified exact-key hit for that formula after production preflight.
     FormulaCached,
-    /// Native layout of exactly 10,000 non-whitespace glyphs.
+    /// Native layout of a marked-up, wrapped paragraph of exactly 10,000
+    /// non-whitespace glyphs.
     Text10kGlyph,
 }
 
@@ -253,9 +274,17 @@ impl Pg7Definition {
                 row(
                     "timed_operation",
                     &if self.scenario == Pg7Scenario::FormulaCold {
-                        "cache-disabled-layout"
+                        "fresh-engine-first-layout"
                     } else {
                         "verified-cache-hit"
+                    },
+                );
+                row(
+                    "engine_lifetime",
+                    &if self.scenario == Pg7Scenario::FormulaCold {
+                        "fresh-per-repetition-construction-untimed"
+                    } else {
+                        "one-engine"
                     },
                 );
                 row(
@@ -274,19 +303,28 @@ impl Pg7Definition {
                         "none"
                     },
                 );
-                row("memory_front", &"cleared-before-each-repetition");
+                row(
+                    "memory_front",
+                    &if self.scenario == Pg7Scenario::FormulaCold {
+                        "empty-fresh-engine"
+                    } else {
+                        "cleared-before-each-repetition"
+                    },
+                );
                 row(
                     "timed_layer",
                     &self.scenario.timed_layer().map_or("none", TimedLayer::name),
                 );
             }
             Pg7Scenario::Text10kGlyph => {
-                row("text_pattern", &TEXT_PATTERN);
-                row("source_bytes", &PG7_TEXT_GLYPHS);
+                row("text_words", &TEXT_WORDS);
+                row("text_bold_every", &TEXT_BOLD_EVERY);
+                row("text_italic_every", &TEXT_ITALIC_EVERY);
+                row("source_bytes", &text_source().len());
                 row("expected_glyphs", &PG7_TEXT_GLYPHS);
-                row("markup", &false);
+                row("markup", &true);
                 row("ligatures", &false);
-                row("width", &"none");
+                row("width_em_f64_bits", &TEXT_WIDTH_EM.to_bits());
                 row("line_breaker", &"greedy");
                 row("alignment", &"left");
                 row("justify", &false);
@@ -478,33 +516,30 @@ pub fn measure_pg7(
 }
 
 fn measure_formula_cold(definition: &Pg7Definition) -> Result<Measured, Pg7Error> {
-    let setup_start = Instant::now();
-    let engine = build_tex_engine()?;
-    let mut phases = vec![PhaseTiming::new(
-        "engine-initialization-cache-disabled",
-        setup_start.elapsed(),
-    )];
-
     let golden_start = Instant::now();
-    let (_, prime, _) = formula_repetition(&engine, TimedLayer::Layout)?;
+    let (_, prime, _) = cold_formula_repetition(FORMULA_SOURCE, &|| {})?;
     let prime_digest = typeset_digest(&prime)?;
     require_self_golden(definition, prime_digest)?;
-    phases.push(PhaseTiming::new(
-        "prime-self-golden-check",
+    let mut phases = vec![PhaseTiming::new(
+        "prime-fresh-engine-self-golden-check",
         golden_start.elapsed(),
-    ));
+    )];
 
+    // Warm-ups warm the CPU and the allocator, never an engine: each one
+    // builds its own.
     let warmup_start = Instant::now();
     for _ in 0..PG7_WARMUP_ITERATIONS {
-        let (_, output, _) = formula_repetition(&engine, TimedLayer::Layout)?;
+        let (_, output, _) = cold_formula_repetition(FORMULA_SOURCE, &|| {})?;
         black_box(output);
     }
     phases.push(PhaseTiming::new(
-        "warmup-cache-disabled-layout",
+        "warmup-fresh-engine-layouts",
         warmup_start.elapsed(),
     ));
 
-    let timed = formula_samples(&engine, TimedLayer::Layout, prime)?;
+    let timed = formula_samples(PG7_SAMPLE_COUNT, prime, || {
+        cold_formula_repetition(FORMULA_SOURCE, &|| {})
+    })?;
     let result_digest = typeset_digest(&timed.final_output)?;
     require_unchanged(definition, prime_digest, result_digest)?;
     Ok(Measured {
@@ -586,7 +621,8 @@ fn measure_formula_cached(definition: &Pg7Definition, store: &Store) -> Result<M
 
     let warmup_start = Instant::now();
     for _ in 0..PG7_WARMUP_ITERATIONS {
-        let (_, output, _) = formula_repetition(&engine, TimedLayer::StoreHit)?;
+        let (_, output, _) =
+            formula_repetition(&engine, TimedLayer::StoreHit, FORMULA_SOURCE, &|| {})?;
         black_box(output);
     }
     phases.push(PhaseTiming::new(
@@ -594,7 +630,9 @@ fn measure_formula_cached(definition: &Pg7Definition, store: &Store) -> Result<M
         warmup_start.elapsed(),
     ));
 
-    let timed = formula_samples(&engine, TimedLayer::StoreHit, decoded)?;
+    let timed = formula_samples(PG7_SAMPLE_COUNT, decoded, || {
+        formula_repetition(&engine, TimedLayer::StoreHit, FORMULA_SOURCE, &|| {})
+    })?;
 
     let after_start = Instant::now();
     let after_payload = namespace
@@ -629,7 +667,7 @@ fn measure_text(definition: &Pg7Definition) -> Result<Measured, Pg7Error> {
     let setup_start = Instant::now();
     let source = text_source();
     let book = FontBook::bundled().map_err(|error| Pg7Error::Fixture(error.to_string()))?;
-    let request = TextRequest::plain(&source);
+    let request = text_request(&source);
     let mut phases = vec![PhaseTiming::new(
         "font-book-and-source-initialization",
         setup_start.elapsed(),
@@ -788,20 +826,35 @@ fn require_timed_layer(layer: TimedLayer, delta: LayerCounters) -> Result<(), Pg
 }
 
 /// One formula repetition with a cold memory front. Clearing the front and
-/// both counter readings stay outside the timed region.
+/// both counter readings stay outside the timed region; `inject` runs inside
+/// it (the calibration lane's planted slowdown).
 fn formula_repetition(
     engine: &TexEngine,
     layer: TimedLayer,
+    source: &str,
+    inject: &dyn Fn(),
 ) -> Result<(u128, Typeset, LayerCounters), Pg7Error> {
     engine.clear_memory_cache();
     let before = LayerCounters::read(engine);
     let start = Instant::now();
-    let output = typeset_formula(engine, FORMULA_SOURCE)?;
+    let output = typeset_formula(engine, source)?;
+    inject();
     let elapsed = start.elapsed().as_nanos();
     black_box(&output);
     let delta = LayerCounters::read(engine).since(before)?;
     require_timed_layer(layer, delta)?;
     Ok((elapsed, output, delta))
+}
+
+/// One truly cold formula repetition: a fresh engine, built outside the
+/// timed region, whose first typeset is timed. Its glyph memo, memory front
+/// and store are all empty.
+fn cold_formula_repetition(
+    source: &str,
+    inject: &dyn Fn(),
+) -> Result<(u128, Typeset, LayerCounters), Pg7Error> {
+    let engine = build_tex_engine()?;
+    formula_repetition(&engine, TimedLayer::Layout, source, inject)
 }
 
 struct FormulaSamples {
@@ -811,17 +864,17 @@ struct FormulaSamples {
 }
 
 fn formula_samples(
-    engine: &TexEngine,
-    layer: TimedLayer,
+    count: usize,
     initial: Typeset,
+    mut repetition: impl FnMut() -> Result<(u128, Typeset, LayerCounters), Pg7Error>,
 ) -> Result<FormulaSamples, Pg7Error> {
     let mut samples = FormulaSamples {
-        elapsed_ns: Vec::with_capacity(PG7_SAMPLE_COUNT),
+        elapsed_ns: Vec::with_capacity(count),
         final_output: initial,
         layers: LayerCounters::default(),
     };
-    for _ in 0..PG7_SAMPLE_COUNT {
-        let (elapsed, output, delta) = formula_repetition(engine, layer)?;
+    for _ in 0..count {
+        let (elapsed, output, delta) = repetition()?;
         samples.elapsed_ns.push(elapsed);
         samples.final_output = output;
         samples.layers = samples.layers.saturating_add(delta);
@@ -829,18 +882,46 @@ fn formula_samples(
     Ok(samples)
 }
 
+/// The paragraph: [`TEXT_WORDS`] cycled, with every seventh word in `<b>`
+/// and every eleventh in `<i>`, the last word cut so that exactly
+/// [`PG7_TEXT_GLYPHS`] non-whitespace glyphs remain.
 fn text_source() -> String {
-    let mut source = String::with_capacity(PG7_TEXT_GLYPHS);
-    while source.len() + TEXT_PATTERN.len() <= PG7_TEXT_GLYPHS {
-        source.push_str(TEXT_PATTERN);
+    let mut source = String::new();
+    let mut glyphs = 0;
+    for (index, word) in TEXT_WORDS.split_whitespace().cycle().enumerate() {
+        // TEXT_WORDS is ASCII, so a byte is a glyph.
+        let word = &word[..word.len().min(PG7_TEXT_GLYPHS - glyphs)];
+        let bold = index % TEXT_BOLD_EVERY == TEXT_BOLD_EVERY - 1;
+        let italic = index % TEXT_ITALIC_EVERY == TEXT_ITALIC_EVERY - 1;
+        if index > 0 {
+            source.push(' ');
+        }
+        source.push_str(match (bold, italic) {
+            (true, true) => "<b><i>",
+            (true, false) => "<b>",
+            (false, true) => "<i>",
+            (false, false) => "",
+        });
+        source.push_str(word);
+        source.push_str(match (bold, italic) {
+            (true, true) => "</i></b>",
+            (true, false) => "</b>",
+            (false, true) => "</i>",
+            (false, false) => "",
+        });
+        glyphs += word.len();
+        if glyphs == PG7_TEXT_GLYPHS {
+            return source;
+        }
     }
-    for byte in TEXT_PATTERN
-        .bytes()
-        .take(PG7_TEXT_GLYPHS.saturating_sub(source.len()))
-    {
-        source.push(char::from(byte));
+    unreachable!("a cycled word list never ends")
+}
+
+fn text_request(source: &str) -> TextRequest<'_> {
+    TextRequest {
+        width: Some(TEXT_WIDTH_EM),
+        ..TextRequest::markup(source)
     }
-    source
 }
 
 fn require_text_shape(layout: &TextLayout) -> Result<(), Pg7Error> {
@@ -850,7 +931,7 @@ fn require_text_shape(layout: &TextLayout) -> Result<(), Pg7Error> {
             layout.glyphs.len()
         )));
     }
-    if layout.lines.len() != 1 || !layout.decorations.is_empty() {
+    if layout.lines.len() < 2 || !layout.decorations.is_empty() {
         return Err(Pg7Error::Workload(format!(
             "10k fixture shape drifted: {} lines, {} decorations",
             layout.lines.len(),
@@ -988,13 +1069,14 @@ fn text_config_digest(roster: &[String]) -> Result<Digest, Pg7Error> {
         hash_field(&mut hash, family.as_bytes())?;
     }
     hash.update(&[
-        0, // markup
+        1, // markup
         0, // ligatures
-        0, // width absent
+        1, // width present
         0, // greedy
         0, // left
         0, // justify
     ]);
+    hash.update(&TEXT_WIDTH_EM.to_bits().to_be_bytes());
     hash.update(&0_f64.to_bits().to_be_bytes());
     hash.update(&1_f64.to_bits().to_be_bytes());
     Ok(hash.finalize())
@@ -1114,6 +1196,353 @@ fn render_trace(definition: &Pg7Definition, measured: &Measured, samples: &[Samp
     output
 }
 
+/// Calibration-lane NDJSON schema.
+pub const PG7_CALIBRATION_SCHEMA: &str = "fmn.perf.pg7-calibration";
+/// A calibration row fails only past this multiple of the plan's budget: the
+/// lane runs on shared, loaded hosts and in any build profile.
+pub const PG7_CALIBRATION_HEADROOM: u64 = 2;
+/// Timed repetitions per calibration row.
+pub const PG7_CALIBRATION_REPETITIONS: usize = 9;
+
+const FORMULA_MEDIAN_STRING_SOURCE: &str = r"\sqrt{a}^2+bc";
+const FORMULA_P90_SOURCE: &str = r"|v\rangle\!\circlearrowleft";
+const FORMULA_ARRAY_SOURCE: &str = r"\left[\begin{array}{ccc}\lambda & 1 & 0 \\ 0 & \lambda & 1 \\ 0 & 0 & \lambda\end{array}\right] \text{ is the Jordan block of size three for the eigenvalue } \lambda = -1";
+
+/// A calibration workload. The formulas are public synthetic isomorphs of
+/// private G0-4 corpus selections (rules v1: math entries ordered by UTF-8
+/// bytes, construct count, then `sha256(mode + NUL + string)`, weighted by
+/// occurrence), with the selection's byte length and, except for the median
+/// by unique string, its exact construct set:
+///
+/// | workload | selection | bytes | constructs | pair sha256 |
+/// |---|---|---:|---|---|
+/// | median-occurrence | occurrence 6,010 of 12,020 | 5 | sup | `5d79ab0a…` |
+/// | median-string | string 2,281 of 4,562 | 13 | 2 (`\right`, sup; a lone `\right` cannot lay out, so `\sqrt`, sup) | `fd9eabc7…` |
+/// | p90-occurrence | occurrence 10,818 of 12,020 | 27 | `\!`, `\circlearrowleft`, `\rangle` | `3088d1e5…` |
+/// | array | the environments' occurrence 22 of 45 | 170 | `\\`, `\lambda`, `\left`, `\right`, `\text`, `&`, `array` | `6e016a01…` |
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pg7Workload {
+    /// The canonical PG-7 formula, `q^7+z`.
+    MedianByOccurrence,
+    /// The lower median by unique string.
+    MedianByString,
+    /// The 90th percentile by occurrence.
+    P90ByOccurrence,
+    /// The lower median of the formulas with an environment (an `array`).
+    Array,
+    /// The canonical marked-up, wrapped 10,000-glyph paragraph.
+    Text10k,
+}
+
+impl Pg7Workload {
+    /// Every calibration workload, in report order.
+    pub const ALL: [Self; 5] = [
+        Self::MedianByOccurrence,
+        Self::MedianByString,
+        Self::P90ByOccurrence,
+        Self::Array,
+        Self::Text10k,
+    ];
+
+    /// Stable report spelling.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::MedianByOccurrence => "formula-median-occurrence",
+            Self::MedianByString => "formula-median-string",
+            Self::P90ByOccurrence => "formula-p90-occurrence",
+            Self::Array => "formula-array",
+            Self::Text10k => "text-10k-glyph",
+        }
+    }
+
+    /// The formula source, or `None` for the paragraph.
+    #[must_use]
+    pub const fn formula(self) -> Option<&'static str> {
+        match self {
+            Self::MedianByOccurrence => Some(FORMULA_SOURCE),
+            Self::MedianByString => Some(FORMULA_MEDIAN_STRING_SOURCE),
+            Self::P90ByOccurrence => Some(FORMULA_P90_SOURCE),
+            Self::Array => Some(FORMULA_ARRAY_SOURCE),
+            Self::Text10k => None,
+        }
+    }
+
+    /// The modes this workload is timed in.
+    #[must_use]
+    pub const fn modes(self) -> &'static [Pg7Mode] {
+        match self {
+            Self::Text10k => &[Pg7Mode::Cold, Pg7Mode::Warm],
+            _ => &[Pg7Mode::Cold, Pg7Mode::Warm, Pg7Mode::Cached],
+        }
+    }
+}
+
+/// How a calibration repetition finds its engine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pg7Mode {
+    /// A fresh engine (or font book) per repetition, built outside the timed
+    /// region: the first typeset of a process, every cache empty.
+    Cold,
+    /// One engine that has typeset the source before, with its memory front
+    /// cleared before each repetition: a warm process meeting an uncached
+    /// string.
+    Warm,
+    /// A verified hit in the content-addressed typeset store.
+    Cached,
+}
+
+impl Pg7Mode {
+    /// Stable report spelling.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Cold => "cold",
+            Self::Warm => "warm",
+            Self::Cached => "cached",
+        }
+    }
+}
+
+/// One calibration row: a workload timed in one mode.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pg7CalibrationRow {
+    /// The workload.
+    pub workload: Pg7Workload,
+    /// The mode.
+    pub mode: Pg7Mode,
+    /// Elapsed nanoseconds per repetition, in repetition order.
+    pub samples_ns: Vec<u64>,
+}
+
+impl Pg7CalibrationRow {
+    fn sorted(&self) -> Vec<u64> {
+        let mut sorted = self.samples_ns.clone();
+        sorted.sort_unstable();
+        sorted
+    }
+
+    /// The lower median.
+    #[must_use]
+    pub fn median_ns(&self) -> u64 {
+        let sorted = self.sorted();
+        sorted
+            .get(sorted.len().saturating_sub(1) / 2)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// The nearest-rank 90th percentile.
+    #[must_use]
+    pub fn p90_ns(&self) -> u64 {
+        let sorted = self.sorted();
+        let rank = (sorted.len() * 9).div_ceil(10);
+        sorted.get(rank.saturating_sub(1)).copied().unwrap_or(0)
+    }
+
+    /// The plan's budget for this row (§17.2 PG-7): the median formula under
+    /// 3 ms cold and 100 µs cached, the 10k-glyph text under 20 ms. Other
+    /// rows are reported, not budgeted.
+    #[must_use]
+    pub const fn budget_ns(&self) -> Option<u64> {
+        match (self.workload, self.mode) {
+            (Pg7Workload::MedianByOccurrence, Pg7Mode::Cold) => Some(3_000_000),
+            (Pg7Workload::MedianByOccurrence, Pg7Mode::Cached) => Some(100_000),
+            (Pg7Workload::Text10k, _) => Some(20_000_000),
+            _ => None,
+        }
+    }
+
+    /// Whether this build can judge the row's budget. The plan's budgets
+    /// are for optimized code. An unoptimized build judges only the cold
+    /// median formula, which sits more than an order of magnitude inside its
+    /// budget there (60-170 µs against 3 ms, 2026-10-21). It logs the cached
+    /// hit, whose unoptimized SHA-256 verification takes 60-80 µs against
+    /// 100 µs, and the paragraph, 54-85 ms against 20 ms, without judging
+    /// them. The release-perf lane judges every row.
+    #[must_use]
+    pub const fn judged(&self) -> bool {
+        self.budget_ns().is_some()
+            && (!cfg!(debug_assertions)
+                || matches!(
+                    (self.workload, self.mode),
+                    (Pg7Workload::MedianByOccurrence, Pg7Mode::Cold)
+                ))
+    }
+
+    /// Whether a judged row's median exceeds [`PG7_CALIBRATION_HEADROOM`]
+    /// times the budget.
+    #[must_use]
+    pub fn breached(&self) -> bool {
+        self.judged()
+            && self.budget_ns().is_some_and(|budget| {
+                self.median_ns() > budget.saturating_mul(PG7_CALIBRATION_HEADROOM)
+            })
+    }
+
+    /// One NDJSON line. Instructions retired are `null`: an in-process
+    /// counter needs `perf_event_open`, which the unsafe posture (D3) rules
+    /// out; fm-perf-calibration-lane-pkn8 runs producers under `perf stat`.
+    #[must_use]
+    pub fn to_ndjson(&self) -> String {
+        let micros = |ns: u64| format!("{:.3}", ns as f64 / 1_000.0);
+        let budget = self.budget_ns();
+        format!(
+            "{{\"schema\":\"{PG7_CALIBRATION_SCHEMA}\",\"version\":1,\
+             \"qualification\":\"calibration-unqualified\",\"build_profile\":\"{}\",\
+             \"name\":\"{}\",\"mode\":\"{}\",\"n\":{},\"median_us\":{},\"p90_us\":{},\
+             \"instructions\":null,\"budget_us\":{},\"limit_us\":{},\"verdict\":\"{}\"}}",
+            crate::perf::COMPILED_CARGO_PROFILE,
+            self.workload.name(),
+            self.mode.name(),
+            self.samples_ns.len(),
+            micros(self.median_ns()),
+            micros(self.p90_ns()),
+            budget.map_or_else(|| "null".to_owned(), micros),
+            budget.map_or_else(
+                || "null".to_owned(),
+                |budget| micros(budget.saturating_mul(PG7_CALIBRATION_HEADROOM))
+            ),
+            match budget {
+                None => "unbudgeted",
+                Some(_) if !self.judged() => "unjudged-unoptimized-build",
+                Some(_) if self.breached() => "breach",
+                Some(_) => "within",
+            }
+        )
+    }
+}
+
+/// Time every [`Pg7Workload`] in each of its modes, `repetitions` times.
+///
+/// `store` serves the cached mode and must not already hold the workloads'
+/// keys; `inject` runs inside every timed region (a planted slowdown proves
+/// the budgets bite). Each repetition must be served by the layer its mode
+/// names, and every repetition of a row must produce the same result.
+///
+/// # Errors
+/// A workload, cache-state or result-drift failure, never a timing.
+pub fn calibrate_pg7(
+    repetitions: usize,
+    store: &Store,
+    inject: &dyn Fn(),
+) -> Result<Vec<Pg7CalibrationRow>, Pg7Error> {
+    let mut rows = Vec::new();
+    for workload in Pg7Workload::ALL {
+        for &mode in workload.modes() {
+            let samples_ns = match workload.formula() {
+                Some(source) => calibrate_formula(source, mode, repetitions, store, inject)?,
+                None => calibrate_text(mode, repetitions, inject)?,
+            };
+            rows.push(Pg7CalibrationRow {
+                workload,
+                mode,
+                samples_ns,
+            });
+        }
+    }
+    Ok(rows)
+}
+
+fn calibrate_formula(
+    source: &str,
+    mode: Pg7Mode,
+    repetitions: usize,
+    store: &Store,
+    inject: &dyn Fn(),
+) -> Result<Vec<u64>, Pg7Error> {
+    let warm = match mode {
+        Pg7Mode::Cold => None,
+        Pg7Mode::Warm => Some(build_tex_engine()?),
+        Pg7Mode::Cached => {
+            let engine = build_tex_engine()?
+                .with_cache(store)
+                .map_err(|error| Pg7Error::CacheState(error.to_string()))?;
+            let mut outcomes = engine
+                .preflight(&[(Mode::Math(Style::Display), source)])
+                .map_err(|error| Pg7Error::Workload(error.to_string()))?;
+            outcomes
+                .pop()
+                .ok_or_else(|| Pg7Error::CacheState("preflight returned no outcome".to_owned()))?
+                .map_err(|error| Pg7Error::Workload(error.to_string()))?;
+            Some(engine)
+        }
+    };
+    if mode == Pg7Mode::Warm
+        && let Some(engine) = &warm
+    {
+        black_box(typeset_formula(engine, source)?);
+    }
+    let mut first = None;
+    let mut samples = Vec::with_capacity(repetitions);
+    for _ in 0..repetitions {
+        let (elapsed, output, _) = match (&warm, mode) {
+            (None, _) => cold_formula_repetition(source, inject)?,
+            (Some(engine), Pg7Mode::Cached) => {
+                formula_repetition(engine, TimedLayer::StoreHit, source, inject)?
+            }
+            (Some(engine), _) => formula_repetition(engine, TimedLayer::Layout, source, inject)?,
+        };
+        let digest = typeset_digest(&output)?;
+        if *first.get_or_insert(digest) != digest {
+            return Err(Pg7Error::Workload(format!(
+                "{source:?} {} result changed between repetitions",
+                mode.name()
+            )));
+        }
+        samples.push(u64::try_from(elapsed).unwrap_or(u64::MAX));
+    }
+    Ok(samples)
+}
+
+fn calibrate_text(
+    mode: Pg7Mode,
+    repetitions: usize,
+    inject: &dyn Fn(),
+) -> Result<Vec<u64>, Pg7Error> {
+    let source = text_source();
+    let request = text_request(&source);
+    let bundled = || FontBook::bundled().map_err(|error| Pg7Error::Fixture(error.to_string()));
+    let warm = match mode {
+        Pg7Mode::Cold => None,
+        _ => {
+            let book = bundled()?;
+            black_box(
+                layout_text(&book, &request)
+                    .map_err(|error| Pg7Error::Workload(error.to_string()))?,
+            );
+            Some(book)
+        }
+    };
+    let mut first = None;
+    let mut samples = Vec::with_capacity(repetitions);
+    for _ in 0..repetitions {
+        let fresh;
+        let book = match &warm {
+            Some(book) => book,
+            None => {
+                fresh = bundled()?;
+                &fresh
+            }
+        };
+        let start = Instant::now();
+        let output =
+            layout_text(book, &request).map_err(|error| Pg7Error::Workload(error.to_string()))?;
+        inject();
+        let elapsed = start.elapsed().as_nanos();
+        require_text_shape(&output)?;
+        let digest = text_layout_digest(&output)?;
+        if *first.get_or_insert(digest) != digest {
+            return Err(Pg7Error::Workload(format!(
+                "text-10k-glyph {} result changed between repetitions",
+                mode.name()
+            )));
+        }
+        samples.push(u64::try_from(elapsed).unwrap_or(u64::MAX));
+    }
+    Ok(samples)
+}
+
 /// PG-7 producer failure.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Pg7Error {
@@ -1163,11 +1592,104 @@ mod tests {
     }
 
     #[test]
-    fn text_source_is_exactly_ten_thousand_ascii_glyphs() {
+    fn text_source_is_exactly_ten_thousand_marked_up_ascii_glyphs() {
         let source = text_source();
-        assert_eq!(source.len(), PG7_TEXT_GLYPHS);
-        assert_eq!(source.chars().count(), PG7_TEXT_GLYPHS);
-        assert!(source.chars().all(|character| !character.is_whitespace()));
+        assert!(source.is_ascii());
+        let mut glyphs = 0;
+        let mut in_tag = false;
+        for character in source.chars() {
+            match character {
+                '<' => in_tag = true,
+                '>' => in_tag = false,
+                _ if !in_tag && !character.is_whitespace() => glyphs += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(glyphs, PG7_TEXT_GLYPHS);
+        assert_eq!(
+            source.matches("<b>").count(),
+            source.matches("</b>").count()
+        );
+        assert_eq!(
+            source.matches("<i>").count(),
+            source.matches("</i>").count()
+        );
+        assert!(source.matches("<b>").count() > 200 && source.matches("<i>").count() > 150);
+        // Realistic word lengths: words of 4 to 5 glyphs on average.
+        let words = source.split_whitespace().count();
+        assert!(
+            (4..=5).contains(&(PG7_TEXT_GLYPHS / words)),
+            "{words} words"
+        );
+    }
+
+    #[test]
+    fn calibration_isomorphs_have_their_selections_shapes() {
+        assert_eq!(FORMULA_MEDIAN_STRING_SOURCE.len(), 13);
+        assert_eq!(FORMULA_P90_SOURCE.len(), 27);
+        assert_eq!(FORMULA_ARRAY_SOURCE.len(), 170);
+        for command in [r"\!", r"\circlearrowleft", r"\rangle"] {
+            assert!(FORMULA_P90_SOURCE.contains(command), "{command}");
+        }
+        for command in [
+            r"\\",
+            r"\lambda",
+            r"\left",
+            r"\right",
+            r"\text",
+            "&",
+            r"\begin{array}",
+        ] {
+            assert!(FORMULA_ARRAY_SOURCE.contains(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn calibration_rows_report_robust_statistics_and_bite_past_twice_the_budget() {
+        let row = |workload, mode, samples_ns: Vec<u64>| Pg7CalibrationRow {
+            workload,
+            mode,
+            samples_ns,
+        };
+        let cold = row(
+            Pg7Workload::MedianByOccurrence,
+            Pg7Mode::Cold,
+            vec![9, 1, 8, 2, 7, 3, 6, 4, 5, 6_000_001],
+        );
+        assert_eq!(cold.median_ns(), 5, "the lower median of ten");
+        assert_eq!(cold.p90_ns(), 9);
+        assert!(!cold.breached(), "one slow repetition is not a breach");
+        let slow = row(
+            Pg7Workload::MedianByOccurrence,
+            Pg7Mode::Cold,
+            vec![6_000_001; 3],
+        );
+        assert!(slow.breached());
+        assert!(slow.to_ndjson().contains("\"verdict\":\"breach\""));
+        let at_limit = row(
+            Pg7Workload::MedianByOccurrence,
+            Pg7Mode::Cold,
+            vec![6_000_000; 3],
+        );
+        assert!(!at_limit.breached());
+        let cached = row(
+            Pg7Workload::MedianByOccurrence,
+            Pg7Mode::Cached,
+            vec![200_001; 3],
+        );
+        assert_eq!(cached.breached(), !cfg!(debug_assertions));
+        // An unoptimized build logs the paragraph without judging it.
+        let text = row(Pg7Workload::Text10k, Pg7Mode::Cold, vec![50_000_000; 3]);
+        assert_eq!(text.breached(), !cfg!(debug_assertions));
+        assert_eq!(
+            text.to_ndjson().contains("unjudged-unoptimized-build"),
+            cfg!(debug_assertions)
+        );
+        let unbudgeted = row(Pg7Workload::Array, Pg7Mode::Cold, vec![u64::MAX; 3]);
+        assert!(!unbudgeted.breached());
+        let line = unbudgeted.to_ndjson();
+        assert!(line.contains("\"budget_us\":null") && line.contains("\"verdict\":\"unbudgeted\""));
+        assert!(line.contains("\"qualification\":\"calibration-unqualified\""));
     }
 
     #[test]
@@ -1181,7 +1703,11 @@ mod tests {
         let cold = Pg7Definition::new(Pg7Scenario::FormulaCold).expect("cold definition");
         assert!(
             cold.to_tsv()
-                .contains("timed_operation\tcache-disabled-layout\n")
+                .contains("timed_operation\tfresh-engine-first-layout\n")
+        );
+        assert!(
+            cold.to_tsv()
+                .contains("engine_lifetime\tfresh-per-repetition-construction-untimed\n")
         );
         assert!(cold.to_tsv().contains("cache_state\tdisabled-cold\n"));
         assert!(
@@ -1195,15 +1721,8 @@ mod tests {
             cold.to_tsv()
                 .contains(&format!("fixture_relation\t{FORMULA_FIXTURE_RELATION}\n"))
         );
-        assert!(
-            cold.to_tsv()
-                .contains("memory_front\tcleared-before-each-repetition\n")
-        );
+        assert!(cold.to_tsv().contains("memory_front\tempty-fresh-engine\n"));
         assert!(cold.to_tsv().contains("timed_layer\tlayout\n"));
-        assert_eq!(
-            cold.digest().to_string(),
-            "6b01e8048a22d3ce1d5a3098d457f7a6b25e77375ce81c0b801b44b764371a2f"
-        );
 
         let cached = Pg7Definition::new(Pg7Scenario::FormulaCached).expect("cached definition");
         assert!(
@@ -1227,20 +1746,24 @@ mod tests {
                 .to_tsv()
                 .contains("timed_layer\tverified-store-hit\n")
         );
-        assert_eq!(
-            cached.digest().to_string(),
-            "b89d54b63975bfb99736878031092705259dbc95c45aa3e12b1ee6f298e1eb55"
-        );
 
         let text = Pg7Definition::new(Pg7Scenario::Text10kGlyph).expect("text definition");
         assert!(text.to_tsv().contains("expected_glyphs\t10000\n"));
         assert!(text.to_tsv().contains("ligatures\tfalse\n"));
+        assert!(text.to_tsv().contains("markup\ttrue\n"));
         assert!(text.to_tsv().contains("cache_state\tnone\n"));
         assert!(!text.to_tsv().contains("memory_front"));
-        // The text workload is unchanged by fm-a87y, so its digest is too.
+        // The compiled definitions. fm-pg7-honest-mn4b moved all three: the
+        // cold formula takes a fresh engine per repetition, the cached one
+        // names its single engine, and the text is the marked-up, wrapped
+        // paragraph.
         assert_eq!(
-            text.digest().to_string(),
-            "763bca0fd907333fe2f4fcd881e3376da684b84a5b87e13b635ddc20804e6248"
+            [cold.digest(), cached.digest(), text.digest()].map(|digest| digest.to_string()),
+            [
+                "bc398bc9336b2c65c3aa73ae9dac9a897e45004b4c73ca07c350e5d27167338e",
+                "1edb9369c8054d8943880c03ccec31fafb7bc9c0b1f36037f86dcd4d4ebce4a6",
+                "0fa22e64fe9e1901eea58a596899ec843bc0d6db46f1cd91607925a50fea3e6f",
+            ]
         );
     }
 
@@ -1252,8 +1775,7 @@ mod tests {
             .expect("canonical formula");
         let source = text_source();
         let book = FontBook::bundled().expect("font book");
-        let layout =
-            layout_text(&book, &TextRequest::plain(&source)).expect("canonical text layout");
+        let layout = layout_text(&book, &text_request(&source)).expect("canonical text layout");
         require_text_shape(&layout).expect("canonical text shape");
         let formula_digest = typeset_digest(&formula).expect("formula digest");
         let text_digest = text_layout_digest(&layout).expect("text digest");
@@ -1374,12 +1896,13 @@ mod tests {
 
         // A store probe that silently fell back to a layout is refused too.
         let (_, _, layout) =
-            formula_repetition(&engine, TimedLayer::Layout).expect("cleared-front layout");
+            formula_repetition(&engine, TimedLayer::Layout, FORMULA_SOURCE, &|| {})
+                .expect("cleared-front layout");
         assert_eq!(layout, TimedLayer::Layout.one_repetition());
         let error = require_timed_layer(TimedLayer::StoreHit, layout)
             .expect_err("a layout is not a verified store hit");
         assert!(error.to_string().contains("verified-store-hit"), "{error}");
-        let error = formula_repetition(&engine, TimedLayer::StoreHit)
+        let error = formula_repetition(&engine, TimedLayer::StoreHit, FORMULA_SOURCE, &|| {})
             .expect_err("an engine without a store cannot produce store hits");
         assert!(error.to_string().contains("1 layout(s)"), "{error}");
 

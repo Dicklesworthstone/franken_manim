@@ -560,7 +560,7 @@ jobs:
     # verdicts: no pinned-host qualification is claimed from a shared
     # runner — the lane proves the rigs RUN and replay, and that schedule
     # mismatches cannot regress silently. No bless env is set anywhere.
-    name: PG-5/PG-6 release-perf producers
+    name: PG-5/PG-6/PG-7 release-perf producers
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -585,6 +585,11 @@ jobs:
 
       - name: Run the release-perf PG-5/PG-6 producers
         run: cargo test --profile release-perf --locked -p fmn-conformance --test perf_pg5 --test perf_pg6 -- --ignored
+
+      - name: Run the PG-7 calibration lane and producer probe (fm-pg7-honest-mn4b)
+        # Optimized, so every calibration row is judged against twice the
+        # plan's budget; the ignored probe drives the canonical producers.
+        run: cargo test --profile release-perf --locked -p fmn-conformance --test perf_pg7 -- --include-ignored --nocapture
 
       - name: Upload the producer traces
         if: always()

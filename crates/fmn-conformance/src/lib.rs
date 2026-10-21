@@ -48,9 +48,11 @@
 //!   [`perf_pg6_peak`]: eleven real passes over a certified three-view UHD 3D
 //!   gallery through the public library/renderer path, with concurrent
 //!   resident-set sampling and no duplicated pseudo-samples.
-//! - the canonical PG-7 producer (fm-inr.2.2) — [`perf_pg7`]: cold formula,
-//!   cache-proven formula-hit, and exact 10,000-glyph native-text fixtures
-//!   with result self-goldens and bounded integer latency samples.
+//! - the canonical PG-7 producer (fm-inr.2.2) — [`perf_pg7`]: fresh-engine
+//!   cold formula, cache-proven formula-hit, and an exact 10,000-glyph
+//!   marked-up paragraph, with result self-goldens and bounded integer latency
+//!   samples; and its calibration lane (fm-pg7-honest-mn4b), five workloads
+//!   in cold, warm and cached modes judged against twice the plan's budgets.
 //! - the canonical PG-8 producer (fm-zoi) — [`perf_pg8`]: the Python
 //!   boundary's four scene classes — native built-ins against a pure-Rust
 //!   twin, per-frame and point-transform callbacks, dynamic subclasses —
