@@ -96,12 +96,25 @@ class Harness(unittest.TestCase):
                        "exec")
         with recorder:
             exec(code, {"mod": self.mod})
-        hits = {identity: {rows[i]["symbol"] for i in found}
-                for identity, found in recorder.hits.items()}
+        hits = {recorder.spell(key): {rows[i]["symbol"] for i in found}
+                for key, found in recorder.hits.items()}
         self.assertEqual(hits, {"<module>:L1": {"Square.width", "Square"},
                                 "<module>:L2": {"Circle.width", "area"}})
         # Square.width is a render marker here: only the first statement rendered.
-        self.assertEqual(recorder.renders, {"<module>:L1"})
+        self.assertEqual({recorder.spell(key) for key in recorder.renders}, {"<module>:L1"})
+
+    def test_a_location_disabled_under_one_statement_comes_back_for_the_next(self):
+        rows = self.rows()
+        recorder = pw.Recorder(pw.Probes(rows), "suite_under_test.py", render_rows=set())
+        code = compile("for _ in range(10): mod.Square().width()\nmod.Circle().width()\n",
+                       "suite_under_test.py", "exec")
+        with recorder:
+            exec(code, {"mod": self.mod})
+        hits = {recorder.spell(key): {rows[i]["symbol"] for i in found}
+                for key, found in recorder.hits.items()}
+        # width is disabled after IDENTITY_CALLS calls in the loop, and restarted by line 2.
+        self.assertEqual(hits, {"<module>:L1": {"Square.width", "Square"},
+                                "<module>:L2": {"Circle.width"}})
 
     def test_placeholders_and_unwitnessed_statuses_are_never_probed(self):
         rows, probes, recorder = self.record(lambda: None)

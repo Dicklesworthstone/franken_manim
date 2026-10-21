@@ -58,6 +58,7 @@ import sys
 import tomllib
 import types
 import unittest
+import weakref
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 LEDGER = ROOT / "docs" / "api" / "ledger.tsv"
@@ -75,6 +76,7 @@ RENDER_SYMBOLS = frozenset({"Scene.get_image", "Camera.get_image", "Camera.get_r
                             "Camera.capture", "Scene.update_frame", "Scene.emit_frame"})
 SUITE_TIMEOUT_S = 900
 MUTANT_SUITES = 8  # witness suites rerun per mutant
+IDENTITY_CALLS = 4  # calls traced per code object or call site under one identity
 
 
 def ledger_rows(text: str) -> list[dict]:
@@ -121,9 +123,13 @@ class Probes:
         self.code = collections.defaultdict(list)     # function code object -> [row]
         self.native = collections.defaultdict(list)   # native function name -> [row]
         self.members = collections.defaultdict(list)  # member name -> [(row, owner class)]
+        self.native_members = set()                   # member names with a native implementation
         self.classes = collections.defaultdict(list)  # class -> [row]
         self.status = {}                              # row -> ok | placeholder | error: ...
         self.implementation = {}                      # row -> (owner, attribute name, value)
+        # member name -> {id(type): (weak reference, rows)}: the suites assert that the classes
+        # they define are collected, so the memo must never keep one alive.
+        self._matches = collections.defaultdict(dict)
         for index, row in enumerate(rows):
             if row["status"] not in WITNESSED_STATUSES:
                 continue
@@ -144,10 +150,28 @@ class Probes:
                 # A member is called through its name on an instance, whichever override
                 # (or installer wrapper) of that name then runs.
                 self.members[name].append((index, owner))
+                if getattr(function, "__code__", None) is None:
+                    self.native_members.add(name)
             elif getattr(function, "__code__", None) is not None:
                 self.code[function.__code__].append(index)
             elif callable(function):
                 self.native[getattr(function, "__name__", name)].append(index)
+
+    def matches(self, name: str, cls: type) -> tuple[int, ...]:
+        """The rows a call of member `name` on an instance of `cls` witnesses: the member rows of
+        every class it is an instance of, and the class rows of exactly `cls`. Memoized: the
+        tracer asks for the same pairs millions of times."""
+        memo = self._matches[name]
+        entry = memo.get(id(cls))
+        if entry is not None and entry[0]() is cls:
+            return entry[1]
+        found = tuple(row for row, owner in self.members.get(name, ())
+                      if issubclass(cls, owner)) + tuple(self.classes.get(cls, ()))
+        try:
+            memo[id(cls)] = (weakref.ref(cls), found)
+        except TypeError:  # a type that refuses weak references is not memoized
+            pass
+        return found
 
 
 def resolve(module: str, symbol: str):
@@ -190,6 +214,9 @@ class Recorder:
         self.module_frame = None                      # the suite file's <module> frame
         self.hits = collections.defaultdict(set)      # identity -> rows
         self.renders = set()                          # identities that captured a frame
+        self.seen = set()                             # (identity, member, id(class)) recorded
+        self.calls = {}                               # location -> calls under this identity
+        self.module_line = None
         self.module_identity = "<module>"
 
     def __enter__(self):
@@ -198,38 +225,62 @@ class Recorder:
         MONITOR.register_callback(TOOL, MONITOR.events.PY_START, self._start)
         MONITOR.register_callback(TOOL, MONITOR.events.PY_RETURN, self._return)
         MONITOR.register_callback(TOOL, MONITOR.events.CALL, self._call)
+        MONITOR.register_callback(TOOL, MONITOR.events.LINE, self._line)
         MONITOR.set_events(TOOL, MONITOR.events.PY_START | MONITOR.events.CALL)
         return self
 
     def __exit__(self, *exc):
         MONITOR.set_events(TOOL, 0)
-        for event in (MONITOR.events.PY_START, MONITOR.events.PY_RETURN, MONITOR.events.CALL):
+        for event in (MONITOR.events.PY_START, MONITOR.events.PY_RETURN, MONITOR.events.CALL,
+                      MONITOR.events.LINE):
             MONITOR.register_callback(TOOL, event, None)
         MONITOR.free_tool_id(TOOL)
         return False
 
-    def identity(self) -> str:
+    def _key(self):
+        """The current identity, cheaply: a test name, or the suite's top-level line number
+        (spelled `<module>:L<line>` only when the records are written)."""
         if self.current is not None:
             return self.current
         if self.stack:
             return self.stack[-1][1]
         if self.module_frame is not None:
-            return f"{self.module_identity}:L{self.module_frame.f_lineno}"
+            return self.module_frame.f_lineno
         return self.module_identity
 
-    def _hit(self, row: int) -> None:
-        identity = self.identity()
-        self.hits[identity].add(row)
-        if row in self.render_rows:
-            self.renders.add(identity)
+    def spell(self, key) -> str:
+        return f"{self.module_identity}:L{key}" if isinstance(key, int) else key
+
+    def _hit_all(self, rows) -> None:
+        if not rows:
+            return
+        key = self._key()
+        self.hits[key].update(rows)
+        if not self.render_rows.isdisjoint(rows):
+            self.renders.add(key)
 
     def _instance(self, instance, name: str) -> None:
-        """A call of member `name` on `instance`: its member rows, and its exact class's rows."""
-        for row, cls in self.probes.members.get(name, ()):
-            if isinstance(instance, cls):
-                self._hit(row)
-        for row in self.probes.classes.get(type(instance), ()):
-            self._hit(row)
+        """A call of member `name` on `instance`: its member rows, and its exact class's rows.
+        A repeat of the same member on the same class under the same identity adds nothing."""
+        cls = type(instance)
+        seen = (self._key(), name, id(cls))
+        if seen in self.seen:
+            return
+        self.seen.add(seen)
+        self._hit_all(self.probes.matches(name, cls))
+
+    def new_identity(self) -> None:
+        """The identity changed: everything disabled under the previous one may matter now."""
+        self.calls.clear()
+        MONITOR.restart_events()
+
+    def _enough(self, location) -> bool:
+        """Count a call at `location` under the current identity; after IDENTITY_CALLS of them
+        the location is disabled until the identity changes. A few calls see the receiver
+        classes a statement uses; thousands more add nothing."""
+        count = self.calls.get(location, 0) + 1
+        self.calls[location] = count
+        return count >= IDENTITY_CALLS
 
     def _start(self, code, offset):
         rows = self.probes.code.get(code)
@@ -242,43 +293,55 @@ class Recorder:
         frame = sys._getframe(1)
         if module:
             self.module_frame = frame
+            MONITOR.set_local_events(TOOL, code, MONITOR.events.LINE)
             return None
         if test:
             self.stack.append((frame, frame_identity(frame)))
             MONITOR.set_local_events(TOOL, code, MONITOR.events.PY_RETURN)
-        for row in rows or ():
-            self._hit(row)
+            self.new_identity()
+            return None
+        self._hit_all(rows)
         if member:
             instance = first_argument(frame)
             if instance is not None:
                 self._instance(instance, code.co_name)
-        return None
+        return MONITOR.DISABLE if self._enough(code) else None
+
+    def _line(self, code, line):
+        """A new top-level line of the suite: a new statement identity, unless a test or a
+        test* function is running."""
+        if self.current is None and not self.stack and line != self.module_line:
+            self.module_line = line
+            self.new_identity()
 
     def _return(self, code, offset, value):
         if self.stack and self.stack[-1][0] is sys._getframe(1):
             self.stack.pop()
+            self.new_identity()
 
     def _call(self, code, offset, function, arg0):
+        """Calls PY_START cannot see: constructions of probed classes (a native __init__ has no
+        Python frame) and native members. Any other call site is disabled after its first call;
+        a Python member is seen at its PY_START. A matching site is disabled once it has had
+        IDENTITY_CALLS calls under the current identity."""
         if isinstance(function, type):
             rows = self.probes.classes.get(function)
-            if rows:
-                for row in rows:
-                    self._hit(row)
-                return None
-        name = getattr(function, "__name__", None)
-        if name in self.probes.members:
-            if isinstance(function, NATIVE_CALLABLES):
+            if not rows:
+                return MONITOR.DISABLE
+            self._hit_all(rows)
+        else:
+            name = getattr(function, "__name__", None)
+            if name in self.probes.native_members and isinstance(function, NATIVE_CALLABLES):
                 instance = getattr(function, "__self__", None)
                 if instance is None or isinstance(instance, types.ModuleType):
                     instance = arg0
                 if instance is not MONITOR.MISSING:
                     self._instance(instance, name)
-            return None  # a Python member is seen at its PY_START
-        if name in self.probes.native and isinstance(function, NATIVE_CALLABLES):
-            for row in self.probes.native[name]:
-                self._hit(row)
-            return None
-        return MONITOR.DISABLE
+            elif name in self.probes.native and isinstance(function, NATIVE_CALLABLES):
+                self._hit_all(self.probes.native[name])
+            else:
+                return MONITOR.DISABLE
+        return MONITOR.DISABLE if self._enough((code, offset)) else None
 
 
 def first_argument(frame):
@@ -379,14 +442,16 @@ def trace_suite(name: str, mode: str, mutation: str | None) -> list[dict]:
         error = f"{type(caught).__name__}: {str(caught)[:200]}"
     unittest_cases = result.passed | result.failed
     records = []
-    for identity, hit in sorted(recorder.hits.items()):
+    for key, hit in recorder.hits.items():
+        identity = recorder.spell(key)
         if unittest_cases:
             # A unittest suite's witnesses are its passing tests; import-time work is not one.
             ok = error is None and identity in result.passed
         else:
             ok = error is None
         records.append({"suite": name, "test": identity, "passed": ok,
-                        "renders": identity in recorder.renders, "rows": sorted(hit)})
+                        "renders": key in recorder.renders, "rows": sorted(hit)})
+    records.sort(key=lambda record: record["test"])
     cases = len(unittest_cases) if unittest_cases else len(recorder.hits)
     records.append({"suite": name, "summary": True, "cases": cases,
                     "failed": sorted(result.failed), "error": error,
@@ -409,6 +474,7 @@ class _Result(unittest.TestResult):
     def startTest(self, test):
         super().startTest(test)
         self.recorder.current = self._identity(test)
+        self.recorder.new_identity()
 
     def stopTest(self, test):
         super().stopTest(test)
