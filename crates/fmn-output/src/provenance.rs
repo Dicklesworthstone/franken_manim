@@ -252,14 +252,15 @@ pub struct ManifestComparison {
     /// Both manifests are certified, so their certified outputs are bound
     /// to be bit-identical when the semantic digests agree.
     pub certified_both: bool,
-    /// Certified output paths whose digests differ or which only one side
-    /// published.
+    /// Certified output paths whose kind or digest differs, or which only
+    /// one side published as certified.
     pub differing_outputs: Vec<String>,
 }
 
 impl ManifestComparison {
     /// The certified promise holds: same semantic input, both certified,
-    /// every certified output bit-identical.
+    /// every certified output has the same kind and digest. A comparison
+    /// with no certified outputs on either side is refused by `compare`.
     #[must_use]
     pub fn certified_bits_agree(&self) -> bool {
         self.semantic_equal && self.certified_both && self.differing_outputs.is_empty()
@@ -303,12 +304,7 @@ impl ProvenanceManifest {
         validate_items(&items)?;
         validate_identity(&items, &identity)?;
         validate_outputs(&outputs)?;
-        if mode == ManifestMode::Certified && certified_build_refusal(&identity.build_id).is_some()
-        {
-            return Err(ManifestError::Invalid(
-                "a certified manifest requires an identified build (ADR-0025)",
-            ));
-        }
+        validate_mode(mode, &identity)?;
         let closure_digest = closure_digest(&items)?;
         Ok(Self {
             mode,
@@ -320,17 +316,31 @@ impl ProvenanceManifest {
         })
     }
 
-    /// Serialize the durable canonical FMNP/1 document.
+    /// Recheck a sealed manifest, including values changed through public fields.
+    ///
+    /// Output digests remain evidence, not closure inputs. This validates their
+    /// identities and the input seal; it does not read or authenticate artifacts.
     ///
     /// # Errors
-    /// Canonical serialization failure.
-    pub fn to_bytes(&self) -> Result<Vec<u8>, ManifestError> {
+    /// Invalid structure, duplicate output paths, an unidentified certified
+    /// build, or an input-closure digest that no longer matches its items.
+    pub fn validate(&self) -> Result<(), ManifestError> {
         validate_items(&self.items)?;
         validate_identity(&self.items, &self.identity)?;
         validate_outputs(&self.outputs)?;
+        validate_mode(self.mode, &self.identity)?;
         if closure_digest(&self.items)? != self.closure_digest {
             return Err(ManifestError::DigestMismatch);
         }
+        Ok(())
+    }
+
+    /// Serialize the durable canonical FMNP/1 document.
+    ///
+    /// # Errors
+    /// As [`Self::validate`], or canonical serialization failure.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, ManifestError> {
+        self.validate()?;
         let mut writer = Writer::new(PROVENANCE_SCHEMA);
         writer.put_u8(self.mode.code());
         writer.put_digest(&self.closure_digest);
@@ -412,6 +422,9 @@ impl ProvenanceManifest {
             None
         };
         reader.finish()?;
+        // A writer may sort authoring inputs, but a decoder must not repair an
+        // already-sealed, noncanonical document into an apparently valid one.
+        validate_items(&items)?;
         let manifest = Self::new(mode, items, identity, outputs, journal_ref)?;
         if manifest.closure_digest != stated_digest {
             return Err(ManifestError::DigestMismatch);
@@ -425,44 +438,74 @@ impl ProvenanceManifest {
     /// outputs must be bit-identical (plan §16.7).
     ///
     /// # Errors
-    /// Canonical serialization failure.
+    /// As [`Self::validate`], or canonical serialization failure.
     pub fn semantic_digest(&self) -> Result<Digest, ManifestError> {
+        self.validate()?;
         semantic_digest(&self.items)
     }
 
-    /// Compare two manifests the way the certified-matrix verifier does:
-    /// equal semantic digests, and then every certified output digest.
+    /// Compare sealed input closures and the kind/digest of each certified output.
+    ///
+    /// Output order is immaterial. Missing certification on one side is a
+    /// difference, while unrelated uncertified products remain outside the bit
+    /// promise. This compares declarations, not bytes read from the filesystem.
     ///
     /// # Errors
-    /// Canonical serialization failure.
+    /// As [`Self::validate`] for either operand, canonical serialization or
+    /// allocation failure, or two certified manifests with no certified output
+    /// on either side. An empty comparison cannot establish reproducibility.
     pub fn compare(&self, other: &Self) -> Result<ManifestComparison, ManifestError> {
-        let semantic_equal = self.semantic_digest()? == other.semantic_digest()?;
-        let certified = |manifest: &Self| -> std::collections::BTreeMap<String, Digest> {
-            manifest
-                .outputs
-                .iter()
-                .filter(|output| output.certified)
-                .map(|output| (output.virtual_path.clone(), output.digest))
-                .collect()
-        };
-        let (left, right) = (certified(self), certified(other));
-        let mut differing_outputs: Vec<String> = left
-            .iter()
-            .filter(|(path, digest)| right.get(*path) != Some(*digest))
-            .map(|(path, _)| path.clone())
-            .collect();
-        differing_outputs.extend(
-            right
-                .keys()
-                .filter(|path| !left.contains_key(*path))
-                .cloned(),
-        );
-        differing_outputs.sort();
+        self.validate()?;
+        other.validate()?;
+        let semantic_equal = semantic_digest(&self.items)? == semantic_digest(&other.items)?;
+        let certified_both =
+            self.mode == ManifestMode::Certified && other.mode == ManifestMode::Certified;
+        let left = output_index(&self.outputs, true)?;
+        let right = output_index(&other.outputs, true)?;
+        if certified_both && left.is_empty() && right.is_empty() {
+            return Err(ManifestError::NoCertifiedOutputs);
+        }
+        let mut differing_outputs = Vec::new();
+        differing_outputs
+            .try_reserve_exact(left.len() + right.len())
+            .map_err(|_| ManifestError::AllocationFailed("output comparison"))?;
+        let (mut a, mut b) = (0, 0);
+        while a < left.len() || b < right.len() {
+            let difference = match (left.get(a), right.get(b)) {
+                (Some(x), Some(y)) => match x.virtual_path.cmp(&y.virtual_path) {
+                    std::cmp::Ordering::Less => {
+                        a += 1;
+                        Some(x.virtual_path.as_str())
+                    }
+                    std::cmp::Ordering::Greater => {
+                        b += 1;
+                        Some(y.virtual_path.as_str())
+                    }
+                    std::cmp::Ordering::Equal => {
+                        a += 1;
+                        b += 1;
+                        (x.kind != y.kind || x.digest != y.digest)
+                            .then_some(x.virtual_path.as_str())
+                    }
+                },
+                (Some(x), None) => {
+                    a += 1;
+                    Some(x.virtual_path.as_str())
+                }
+                (None, Some(y)) => {
+                    b += 1;
+                    Some(y.virtual_path.as_str())
+                }
+                (None, None) => break,
+            };
+            if let Some(path) = difference {
+                differing_outputs.push(owned(path, "differing output path")?);
+            }
+        }
         Ok(ManifestComparison {
             semantic_equal,
             closure_equal: self.closure_digest == other.closure_digest,
-            certified_both: self.mode == ManifestMode::Certified
-                && other.mode == ManifestMode::Certified,
+            certified_both,
             differing_outputs,
         })
     }
@@ -540,6 +583,9 @@ pub enum ManifestError {
     AllocationFailed(&'static str),
     /// The stated headline digest did not match the canonical item list.
     DigestMismatch,
+    /// Neither certified manifest contains a certified artifact to compare.
+    /// The documents may be valid, but cannot establish a bit-equality promise.
+    NoCertifiedOutputs,
 }
 
 impl fmt::Display for ManifestError {
@@ -554,6 +600,7 @@ impl fmt::Display for ManifestError {
                 write!(f, "FMNP could not reserve storage for {field}")
             }
             Self::DigestMismatch => f.write_str("FMNP closure digest does not match its item list"),
+            Self::NoCertifiedOutputs => f.write_str("FMNP has no certified output artifacts to compare"),
         }
     }
 }
@@ -596,6 +643,9 @@ fn validate_items(items: &[ClosureItem]) -> Result<(), ManifestError> {
         if item.detail.is_empty() {
             return Err(ManifestError::Invalid("closure item detail is empty"));
         }
+        if item.virtual_path.as_deref() == Some("") {
+            return Err(ManifestError::Invalid("closure item has an empty virtual path"));
+        }
         let identity = (item.item_id, item.virtual_path.as_deref());
         if let Some(previous) = previous {
             if previous == identity {
@@ -635,6 +685,37 @@ fn validate_outputs(outputs: &[ManifestOutput]) -> Result<(), ManifestError> {
         .any(|output| output.virtual_path.is_empty() || output.kind.is_empty())
     {
         return Err(ManifestError::Invalid("manifest output identity is empty"));
+    }
+    let sorted = output_index(outputs, false)?;
+    if sorted
+        .windows(2)
+        .any(|pair| pair[0].virtual_path == pair[1].virtual_path)
+    {
+        return Err(ManifestError::Invalid("duplicate manifest output path"));
+    }
+    Ok(())
+}
+
+// Reference-only indices preserve authored output order and avoid cloning paths
+// into maps that silently discard duplicate keys. Callers enforce MAX_OUTPUTS.
+fn output_index(
+    outputs: &[ManifestOutput],
+    certified_only: bool,
+) -> Result<Vec<&ManifestOutput>, ManifestError> {
+    let mut sorted = Vec::new();
+    sorted
+        .try_reserve_exact(outputs.len())
+        .map_err(|_| ManifestError::AllocationFailed("output index"))?;
+    sorted.extend(outputs.iter().filter(|output| !certified_only || output.certified));
+    sorted.sort_unstable_by(|a, b| a.virtual_path.cmp(&b.virtual_path));
+    Ok(sorted)
+}
+
+fn validate_mode(mode: ManifestMode, identity: &ManifestIdentity) -> Result<(), ManifestError> {
+    if mode == ManifestMode::Certified && certified_build_refusal(&identity.build_id).is_some() {
+        return Err(ManifestError::Invalid(
+            "a certified manifest requires an identified build (ADR-0025)",
+        ));
     }
     Ok(())
 }
