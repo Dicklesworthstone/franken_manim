@@ -17,6 +17,7 @@ import sys
 
 from ._process_batch import positive_integer, run_process_jobs, validate_job_timeout
 from .batch_checkpoint import BatchCheckpoint
+from .cancellation import _check_cancelled, _validate_cancellation
 from .batch_rendering import (
     BatchRenderError, BatchRenderResult, SceneRenderOutcome, _name_key, _restored_outcome,
 )
@@ -158,6 +159,7 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
                          format="png_sequence", resolution=None, fps=None,
                          threads=None, continue_on_error=False, on_result=None,
                          max_jobs=1024, animation_range=None, job_timeout=None,
+                         cancellation=None,
                          checkpoint=None, resume=False, resume_key=None,
                          subdivide=False, max_segments=10_000, save_last_frame=False,
                          reproducible=False, bundle_camera=False, bundle_limits=None,
@@ -229,7 +231,17 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
     receipt validation binds camera/audio mode, layout and capture limits to the
     admitted job. Checkpoint recovery preserves these settings and hash-verifies
     completed bundles; no-cue scenes may return ordinary picture-only receipts.
+
+    cancellation accepts a parent-owned CancellationToken. Call cancel() from
+    another thread or on_result to stop admission and clean up in-flight workers.
+    BatchCancelled (a KeyboardInterrupt subtype) carries render_batch_result
+    once the scene plan is admitted; returned publications are checkpointed
+    before it propagates. A pre-cancelled call acquires no worker or journal.
+    Tokens are not serialized or included in checkpoint identity. Use a fresh
+    token for resume; no completed artifact is removed or silently overwritten.
     """
+    _validate_cancellation(cancellation)
+    _check_cancelled(cancellation)
     workers = positive_integer(workers, "workers", 64)
     maximum = positive_integer(max_jobs, "max_jobs", 65536)
     job_timeout = validate_job_timeout(job_timeout)
@@ -364,6 +376,7 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
              BatchCheckpoint(checkpoint, resume=resume, key=resume_key))
     if checkpoint is not None:
         owner.validate_destinations(all_destinations)
+    _check_cancelled(cancellation)
     with owner as journal:
         existing = set() if journal is None else journal.existing_destinations
         for destination in all_destinations:
@@ -411,18 +424,24 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
                 provenance.verify()
 
         try:
+            _check_cancelled(cancellation)
             record()
             if on_result is not None:
                 for index, name in enumerate(names):
                     if name in completed:
+                        _check_cancelled(cancellation)
                         on_result(outcomes[index])
+            _check_cancelled(cancellation)
             if pending:
                 rows = run_process_jobs([jobs[index] for index in pending], _render_source_job,
                                         workers=workers, continue_on_error=continue_on_error,
-                                        on_result=accept, job_timeout=job_timeout)
+                                        on_result=accept, job_timeout=job_timeout,
+                                        **({"cancellation": cancellation} if cancellation is not None else {}))
                 for index, row in zip(pending, rows):
                     outcomes[index] = restore(names[index], destinations[index], row)
+            _check_cancelled(cancellation)
             record()
+            _check_cancelled(cancellation)
         except BaseException as error:
             # The scheduler drains in-flight workers on interruption or a failed
             # observer. Merge those receipts through the pending-index map, not

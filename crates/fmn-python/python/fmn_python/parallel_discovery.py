@@ -17,6 +17,7 @@ import sys
 
 from ._process_batch import positive_integer, run_process_jobs, validate_job_timeout
 from .batch_checkpoint import _open_regular
+from .cancellation import _check_cancelled, _validate_cancellation
 
 _MAX_SOURCE_BYTES = 16 * 1024 * 1024
 _SCHEMA = "fmn-python.scene-discovery"
@@ -75,14 +76,20 @@ def _discover_source_job(job):
 
 
 def discover_source_scenes(source, *, working_directory=None, job_timeout=None,
-                           max_scenes=65536, configuration=None):
+                           max_scenes=65536, configuration=None, cancellation=None):
     """Import in a fresh worker and return an immutable, data-only inventory.
 
     job_timeout includes interpreter/native startup and source import. A child
     interrupt propagates as KeyboardInterrupt; other failures are reported as
     SceneDiscoveryError without reconstructing worker-supplied exceptions.
+    cancellation accepts the same parent-owned CancellationToken as rendering;
+    interrupted discovery is reaped before BatchCancelled reaches the caller.
+    A pre-cancelled request does not read source or start a worker. The same
+    one-way token may cover both discovery and subsequent render admission.
     Call from a spawn-safe main guard, just like render_source_scenes.
     """
+    _validate_cancellation(cancellation)
+    _check_cancelled(cancellation)
     limit = positive_integer(max_scenes, "max_scenes", 65536)
     timeout = validate_job_timeout(job_timeout)
     text = os.fspath(source)
@@ -100,7 +107,8 @@ def discover_source_scenes(source, *, working_directory=None, job_timeout=None,
     if configuration is not None:
         import json
         job["configuration"] = json.loads(json.dumps(configuration, allow_nan=False))
-    rows = run_process_jobs([job], _discover_source_job, workers=1, job_timeout=timeout)
+    rows = run_process_jobs([job], _discover_source_job, workers=1, job_timeout=timeout,
+                            **({"cancellation": cancellation} if cancellation is not None else {}))
     row = rows[0]
     if row["status"] == "cancelled":
         raise KeyboardInterrupt("scene discovery worker interrupted")
