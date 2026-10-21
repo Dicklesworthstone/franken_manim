@@ -1,5 +1,6 @@
 """Unit tests for scripts/portal_witnesses.py (fm-5wq.12), on synthetic modules."""
 import pathlib
+import runpy
 import sys
 import tempfile
 import textwrap
@@ -89,13 +90,19 @@ class Harness(unittest.TestCase):
         self.assertEqual({rows[i]["symbol"] for i in recorder.hits["<module>"]},
                          {"Square.width", "Square"})
 
-    def test_top_level_statements_of_a_script_suite_are_separate_identities(self):
+    def run_script_suite(self, source, render_rows):
+        """A script suite run the way the harness runs one: runpy over its file."""
         rows = self.rows()
-        recorder = pw.Recorder(pw.Probes(rows), "suite_under_test.py", render_rows={0})
-        code = compile("mod.Square().width()\nmod.area(mod.Circle())\n", "suite_under_test.py",
-                       "exec")
+        suite = pathlib.Path(self.tmp.name) / "suite_under_test.py"
+        suite.write_text(source)
+        recorder = pw.Recorder(pw.Probes(rows), str(suite), render_rows=render_rows)
         with recorder:
-            exec(code, {"mod": self.mod})
+            runpy.run_path(str(suite), init_globals={"mod": self.mod})
+        return rows, recorder
+
+    def test_top_level_statements_of_a_script_suite_are_separate_identities(self):
+        rows, recorder = self.run_script_suite("mod.Square().width()\nmod.area(mod.Circle())\n",
+                                               render_rows={0})
         hits = {recorder.spell(key): {rows[i]["symbol"] for i in found}
                 for key, found in recorder.hits.items()}
         self.assertEqual(hits, {"<module>:L1": {"Square.width", "Square"},
@@ -103,16 +110,12 @@ class Harness(unittest.TestCase):
         # Square.width is a render marker here: only the first statement rendered.
         self.assertEqual({recorder.spell(key) for key in recorder.renders}, {"<module>:L1"})
 
-    def test_a_location_disabled_under_one_statement_comes_back_for_the_next(self):
-        rows = self.rows()
-        recorder = pw.Recorder(pw.Probes(rows), "suite_under_test.py", render_rows=set())
-        code = compile("for _ in range(10): mod.Square().width()\nmod.Circle().width()\n",
-                       "suite_under_test.py", "exec")
-        with recorder:
-            exec(code, {"mod": self.mod})
+    def test_a_loop_on_one_line_is_one_statement_and_the_next_line_another(self):
+        rows, recorder = self.run_script_suite(
+            "for _ in range(10): mod.Square().width()\nmod.Circle().width()\n", render_rows=set())
         hits = {recorder.spell(key): {rows[i]["symbol"] for i in found}
                 for key, found in recorder.hits.items()}
-        # width is disabled after IDENTITY_CALLS calls in the loop, and restarted by line 2.
+        # The ten iterations repeat line 1's LINE event without making new identities.
         self.assertEqual(hits, {"<module>:L1": {"Square.width", "Square"},
                                 "<module>:L2": {"Circle.width"}})
 
@@ -202,6 +205,34 @@ class Harness(unittest.TestCase):
                          [("alpha", "runpy"), ("beta", "runpy"), ("gamma", "main")])
         with self.assertRaises(ValueError):
             pw.gate_suites("python3 crates/fmn-python/tests/gamma.py\n")
+
+    def test_each_registry_failure_class_fails_the_check(self):
+        # Negative controls for check's non-mutant failure classes, one planted defect each.
+        rows = [r for r in self.rows() if r["symbol"] != "refused"]
+        probes = pw.Probes(rows)
+        area = next(i for i, r in enumerate(rows) if r["symbol"] == "area")
+        passing = [{"suite": "s", "test": "T.test_a", "passed": True, "renders": False,
+                    "rows": [0, area]},
+                   {"suite": "s", "summary": True, "unittest": True, "cases": 1, "failed": [],
+                    "error": None}]
+        table = pw.registry(rows, probes, passing)
+        committed = pw.read_registry(pw.write_registry(table, passing))
+        self.assertEqual(pw.registry_problems(table, passing, committed), [])
+        # A witness lost: the same suite now invokes only area.
+        lost = [dict(passing[0], rows=[area]), passing[1]]
+        self.assertEqual(
+            pw.registry_problems(pw.registry(rows, probes, lost), lost, committed),
+            ["fmn_witness_synthetic.Square.width: lost every semantic witness"])
+        # A suite that defines tests and runs none.
+        skipped = [dict(passing[1], cases=0)]
+        self.assertIn("s: defines tests but executed none",
+                      pw.registry_problems(table, skipped, {}))
+        # A same/improved symbol that resolves to a placeholder (planted in the synthetic module).
+        planted = rows + [row("refused", "function")]
+        problems = pw.registry_problems(pw.registry(planted, pw.Probes(planted), passing),
+                                        passing, {})
+        self.assertEqual(problems, ["fmn_witness_synthetic.refused: same in the ledger, but it "
+                                    "resolves to placeholder"])
 
     def test_the_installed_wheel_gate_runs_the_witness_check(self):
         # The registry is only honest while the gate both runs its suites and checks them.

@@ -26,11 +26,12 @@ Witness kinds per symbol, each with its own denominator:
 
 Mutation controls: `check --mutants N` replaces the implementation of N deterministically sampled
 witnessed members (Python implementations; a native one cannot be patched) with a trivial body
-(returns None) and with a plausible-but-wrong one (a numeric array result shifted by 0.01). It
-then reruns the suites that witness each member. A mutant is killed when a witness test fails that
-passed without it. A surviving mutant marks witnesses that invoke a symbol without checking what
-it does. A mutant that changed no result in any witness run (a shifted mutant of a member that
-returns no float array) is reported as inapplicable, not as a survivor.
+(returns None), and of N members whose name says they return positions with a plausible-but-wrong
+one (a float array result shifted by 0.1 scene units). It then reruns, untraced, up to
+MUTANT_SUITES of the suites that witness each member. A mutant is killed when a witness test fails
+that passed without it; a surviving mutant marks witnesses that invoke a symbol without checking
+what it does. A mutant that changed no result in any witness run (a shifted mutant of a member
+that returned no float array) is reported as inapplicable, not as a survivor.
 
     portal_witnesses.py build [--jobs N]              write docs/api/portal_witnesses.tsv
     portal_witnesses.py check [--jobs N] [--mutants N]
@@ -38,13 +39,15 @@ returns no float array) is reported as inapplicable, not as a survivor.
 
 `check` exits 1 when a symbol the committed registry records as witnessed has lost every
 semantic witness, when a ledger symbol resolves to a placeholder or does not resolve, when a suite
-executes zero test cases, or when a sampled trivial-body mutant survives every witness test.
+that defines unittest cases executes none of them, or when an applied sampled mutant (trivial or
+shifted) survives every witness test it reran.
 """
 from __future__ import annotations
 
 import argparse
 import collections
 import concurrent.futures
+import contextlib
 import hashlib
 import importlib
 import inspect
@@ -76,7 +79,6 @@ RENDER_SYMBOLS = frozenset({"Scene.get_image", "Camera.get_image", "Camera.get_r
                             "Camera.capture", "Scene.update_frame", "Scene.emit_frame"})
 SUITE_TIMEOUT_S = 900
 MUTANT_SUITES = 8  # witness suites rerun per mutant
-IDENTITY_CALLS = 4  # calls traced per code object or call site under one identity
 
 
 def ledger_rows(text: str) -> list[dict]:
@@ -211,11 +213,9 @@ class Recorder:
         self.render_rows = render_rows
         self.current = None                           # the running unittest test, if any
         self.stack = []                               # running test* frames of the suite file
-        self.module_frame = None                      # the suite file's <module> frame
         self.hits = collections.defaultdict(set)      # identity -> rows
         self.renders = set()                          # identities that captured a frame
         self.seen = set()                             # (identity, member, id(class)) recorded
-        self.calls = {}                               # location -> calls under this identity
         self.module_line = None
         self.module_identity = "<module>"
 
@@ -244,8 +244,8 @@ class Recorder:
             return self.current
         if self.stack:
             return self.stack[-1][1]
-        if self.module_frame is not None:
-            return self.module_frame.f_lineno
+        if self.module_line is not None:
+            return self.module_line
         return self.module_identity
 
     def spell(self, key) -> str:
@@ -269,19 +269,6 @@ class Recorder:
         self.seen.add(seen)
         self._hit_all(self.probes.matches(name, cls))
 
-    def new_identity(self) -> None:
-        """The identity changed: everything disabled under the previous one may matter now."""
-        self.calls.clear()
-        MONITOR.restart_events()
-
-    def _enough(self, location) -> bool:
-        """Count a call at `location` under the current identity; after IDENTITY_CALLS of them
-        the location is disabled until the identity changes. A few calls see the receiver
-        classes a statement uses; thousands more add nothing."""
-        count = self.calls.get(location, 0) + 1
-        self.calls[location] = count
-        return count >= IDENTITY_CALLS
-
     def _start(self, code, offset):
         rows = self.probes.code.get(code)
         member = code.co_name in self.probes.members and "." in code.co_qualname
@@ -290,58 +277,52 @@ class Recorder:
         module = in_suite and code.co_name == "<module>"
         if not (rows or member or test or module):
             return MONITOR.DISABLE
-        frame = sys._getframe(1)
         if module:
-            self.module_frame = frame
+            # LINE events on the module code alone give the running top-level statement.
+            # Reading the frame's f_lineno instead scans bridge.py's whole line table per hit.
             MONITOR.set_local_events(TOOL, code, MONITOR.events.LINE)
             return None
+        frame = sys._getframe(1)
         if test:
             self.stack.append((frame, frame_identity(frame)))
             MONITOR.set_local_events(TOOL, code, MONITOR.events.PY_RETURN)
-            self.new_identity()
             return None
         self._hit_all(rows)
         if member:
             instance = first_argument(frame)
             if instance is not None:
                 self._instance(instance, code.co_name)
-        return MONITOR.DISABLE if self._enough(code) else None
+        return None
 
     def _line(self, code, line):
-        """A new top-level line of the suite: a new statement identity, unless a test or a
-        test* function is running."""
-        if self.current is None and not self.stack and line != self.module_line:
-            self.module_line = line
-            self.new_identity()
+        self.module_line = line
 
     def _return(self, code, offset, value):
         if self.stack and self.stack[-1][0] is sys._getframe(1):
             self.stack.pop()
-            self.new_identity()
 
     def _call(self, code, offset, function, arg0):
         """Calls PY_START cannot see: constructions of probed classes (a native __init__ has no
         Python frame) and native members. Any other call site is disabled after its first call;
-        a Python member is seen at its PY_START. A matching site is disabled once it has had
-        IDENTITY_CALLS calls under the current identity."""
+        a Python member is seen at its PY_START."""
         if isinstance(function, type):
             rows = self.probes.classes.get(function)
             if not rows:
                 return MONITOR.DISABLE
             self._hit_all(rows)
-        else:
-            name = getattr(function, "__name__", None)
-            if name in self.probes.native_members and isinstance(function, NATIVE_CALLABLES):
-                instance = getattr(function, "__self__", None)
-                if instance is None or isinstance(instance, types.ModuleType):
-                    instance = arg0
-                if instance is not MONITOR.MISSING:
-                    self._instance(instance, name)
-            elif name in self.probes.native and isinstance(function, NATIVE_CALLABLES):
-                self._hit_all(self.probes.native[name])
-            else:
-                return MONITOR.DISABLE
-        return MONITOR.DISABLE if self._enough((code, offset)) else None
+            return None
+        name = getattr(function, "__name__", None)
+        if name in self.probes.native_members and isinstance(function, NATIVE_CALLABLES):
+            instance = getattr(function, "__self__", None)
+            if instance is None or isinstance(instance, types.ModuleType):
+                instance = arg0
+            if instance is not MONITOR.MISSING:
+                self._instance(instance, name)
+            return None
+        if name in self.probes.native and isinstance(function, NATIVE_CALLABLES):
+            self._hit_all(self.probes.native[name])
+            return None
+        return MONITOR.DISABLE
 
 
 def first_argument(frame):
@@ -368,7 +349,7 @@ MUTANT_CALLS = {"applied": 0}
 
 
 def mutate(probes: Probes, row: int, kind: str) -> None:
-    """Replace row's implementation on its owner: `trivial` returns None, `shifted` adds 0.01 to
+    """Replace row's implementation on its owner: `trivial` returns None, `shifted` adds 0.1 to
     a numeric array result. MUTANT_CALLS counts the calls the mutation changed, so a mutant that
     never changed a result is inapplicable, not a survivor."""
     owner, name, value = probes.implementation[row]
@@ -383,7 +364,7 @@ def mutate(probes: Probes, row: int, kind: str) -> None:
         result = original(*args, **kwargs)
         if isinstance(result, np.ndarray) and result.dtype.kind == "f":
             MUTANT_CALLS["applied"] += 1
-            return result + 0.01
+            return result + 0.1
         return result
 
     replacement = trivial if kind == "trivial" else shifted
@@ -415,24 +396,29 @@ def trace_suite(name: str, mode: str, mutation: str | None) -> list[dict]:
     error = None
     # unittest.main runs the calling module's own cases into _Result, for per-test pass/fail.
     result = _Result(recorder)
+    defined = []  # the TestCase classes the suite defines
 
-    def run_cases(*args, **kwargs):
-        namespace = sys._getframe(1).f_globals
+    def run_cases(namespace):
         cases = unittest.TestSuite()
         for value in list(namespace.values()):
             if (isinstance(value, type) and issubclass(value, unittest.TestCase)
                     and value.__module__ == namespace.get("__name__")):
+                defined.append(value)
                 cases.addTests(unittest.TestLoader().loadTestsFromTestCase(value))
         cases.run(result)
 
-    unittest.main = run_cases
+    unittest.main = lambda *args, **kwargs: run_cases(sys._getframe(1).f_globals)
     sys.argv = [str(suite)]
     sys.path.insert(0, str(TESTS))
     try:
-        with recorder:
+        # A mutant run needs only pass/fail, so it runs untraced.
+        with recorder if mutation is None else contextlib.nullcontext():
             if mode == "main":
                 # `python3 suite.py`: classes pickle and multiprocessing children re-import it.
-                runpy.run_path(str(suite), run_name="__main__")
+                namespace = runpy.run_path(str(suite), run_name="__main__")
+                if not defined:
+                    # No unittest.main call: the gate's `unittest discover` runs its cases.
+                    run_cases(namespace)
             else:
                 runpy.run_path(str(suite), init_globals={"_expected_package_version": version})
     except SystemExit as caught:
@@ -440,11 +426,11 @@ def trace_suite(name: str, mode: str, mutation: str | None) -> list[dict]:
             error = f"SystemExit: {caught.code}"
     except BaseException as caught:  # noqa: BLE001 — a raising script suite witnesses nothing
         error = f"{type(caught).__name__}: {str(caught)[:200]}"
-    unittest_cases = result.passed | result.failed
+    unittest_suite = bool(defined)
     records = []
     for key, hit in recorder.hits.items():
         identity = recorder.spell(key)
-        if unittest_cases:
+        if unittest_suite:
             # A unittest suite's witnesses are its passing tests; import-time work is not one.
             ok = error is None and identity in result.passed
         else:
@@ -452,8 +438,10 @@ def trace_suite(name: str, mode: str, mutation: str | None) -> list[dict]:
         records.append({"suite": name, "test": identity, "passed": ok,
                         "renders": key in recorder.renders, "rows": sorted(hit)})
     records.sort(key=lambda record: record["test"])
-    cases = len(unittest_cases) if unittest_cases else len(recorder.hits)
-    records.append({"suite": name, "summary": True, "cases": cases,
+    # A unittest suite's cases are its tests run (skips excluded); a script suite's, the
+    # statements that invoked a ledger symbol.
+    cases = len(result.passed | result.failed) if unittest_suite else len(recorder.hits)
+    records.append({"suite": name, "summary": True, "unittest": unittest_suite, "cases": cases,
                     "failed": sorted(result.failed), "error": error,
                     "mutant_applied": MUTANT_CALLS["applied"]})
     return records
@@ -474,7 +462,6 @@ class _Result(unittest.TestResult):
     def startTest(self, test):
         super().startTest(test)
         self.recorder.current = self._identity(test)
-        self.recorder.new_identity()
 
     def stopTest(self, test):
         super().stopTest(test)
@@ -505,8 +492,13 @@ def run_suites(suites: list[tuple[str, str]], jobs: int, mutation: str | None = 
         except subprocess.TimeoutExpired:
             return [{"suite": name, "summary": True, "cases": 0, "failed": [],
                      "error": f"timeout after {SUITE_TIMEOUT_S} s"}]
-        records = [json.loads(line) for line in done.stdout.splitlines()
-                   if line.startswith('{"suite"')]
+        records = []
+        for line in done.stdout.splitlines():
+            if line.startswith('{"suite"'):
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue  # a suite's own output that happened to start like a record
         if not any(r.get("summary") for r in records):
             records.append({"suite": name, "summary": True, "cases": 0, "failed": [],
                             "error": f"exit {done.returncode}: {done.stderr.strip()[-200:]}"})
@@ -590,11 +582,39 @@ def read_registry(text: str) -> dict[tuple[str, str], dict]:
     return rows
 
 
-def sample_mutants(table: list[dict], python_rows: set[tuple[str, str]], count: int) -> list[str]:
+def registry_problems(table: list[dict], records: list[dict],
+                      committed: dict[tuple[str, str], dict]) -> list[str]:
+    """What `check` fails on, before the mutants: a suite that defines tests and executes none
+    (every one skipped, say), a same/improved symbol that resolves to a placeholder or does not
+    resolve, and a symbol the committed registry records as witnessed that no passing test
+    invokes now. A script suite that never runs is refused by the gate's own runner."""
+    problems = []
+    for record in records:
+        if (record.get("summary") and record.get("unittest") and record["cases"] == 0
+                and not record["error"]):
+            problems.append(f"{record['suite']}: defines tests but executed none")
+    for row in table:
+        if row["import"] != "ok":
+            problems.append(f"{row['module']}.{row['symbol']}: {row['status']} in the ledger, but "
+                            f"it resolves to {row['import']}")
+    now = {(r["module"], r["symbol"]): r for r in table}
+    for key, row in committed.items():
+        if int(row["semantic"]) > 0 and now.get(key, {}).get("semantic", 0) == 0:
+            problems.append(f"{key[0]}.{key[1]}: lost every semantic witness")
+    return problems
+
+
+GEOMETRY_NAMES = re.compile(r"point|coord|center|corner|anchor|bounding_box|vector|direction|_to_")
+
+
+def sample_mutants(table: list[dict], python_rows: set[tuple[str, str]], count: int,
+                   geometry: bool = False) -> list[str]:
     """`count` witnessed members with a Python implementation, picked by a stable hash so every
-    run picks the same ones."""
+    run picks the same ones. `geometry` keeps only members whose name says they return
+    positions (where a shifted result is the plausible-but-wrong mutant)."""
     members = [r for r in table if r["semantic"] > 0 and r["kind"] in ("method", "property")
-               and r["import"] == "ok" and (r["module"], r["symbol"]) in python_rows]
+               and r["import"] == "ok" and (r["module"], r["symbol"]) in python_rows
+               and (not geometry or GEOMETRY_NAMES.search(r["symbol"].split(".")[-1]))]
     members.sort(key=lambda r: hashlib.sha256(f"{r['module']}.{r['symbol']}".encode()).hexdigest())
     return [f"{r['module']}.{r['symbol']}" for r in members[:count]]
 
@@ -637,19 +657,7 @@ def main(argv=None) -> int:
         REGISTRY.write_text(write_registry(table, records), encoding="utf-8")
         return 0
 
-    problems = []
-    for record in records:
-        if record.get("summary") and record["cases"] == 0 and not record["error"]:
-            problems.append(f"{record['suite']}: zero executed test cases")
-    for row in table:
-        if row["import"] != "ok":
-            problems.append(f"{row['module']}.{row['symbol']}: {row['status']} in the ledger, but "
-                            f"it resolves to {row['import']}")
-    committed = read_registry(REGISTRY.read_text(encoding="utf-8"))
-    now = {(r["module"], r["symbol"]): r for r in table}
-    for key, row in committed.items():
-        if int(row["semantic"]) > 0 and now.get(key, {}).get("semantic", 0) == 0:
-            problems.append(f"{key[0]}.{key[1]}: lost every semantic witness")
+    problems = registry_problems(table, records, read_registry(REGISTRY.read_text(encoding="utf-8")))
     if args.mutants:
         index_of = {f"{r['module']}.{r['symbol']}": i for i, r in enumerate(rows)}
         python_rows = {(rows[i]["module"], rows[i]["symbol"])
@@ -662,34 +670,39 @@ def main(argv=None) -> int:
                     witnesses[row].add((record["suite"], mode_of[record["suite"]]))
         baseline = {r["suite"]: r for r in records if r.get("summary")}
         killed = tried = 0
-        for name in sample_mutants(table, python_rows, args.mutants):
+        # Trivial bodies over every kind of member; shifted results over members that return
+        # positions, where a small offset is the plausible-but-wrong substitution.
+        plan = [(name, "trivial") for name in sample_mutants(table, python_rows, args.mutants)]
+        plan += [(name, "shifted")
+                 for name in sample_mutants(table, python_rows, args.mutants, geometry=True)]
+        for name, kind in plan:
             row = index_of[name]
             # One failing witness kills a mutant, so a bounded set of them is enough to rerun.
             suites_for_row = sorted(witnesses[row])[:MUTANT_SUITES]
-            for kind in ("trivial", "shifted"):
-                mutant = [r for r in run_suites(suites_for_row, args.jobs, f"{row}:{kind}")
-                          if r.get("summary")]
-                if any(r.get("unmutable") for r in mutant):
-                    print(json.dumps({"schema": SCHEMA, "mutant": name, "kind": kind,
-                                      "unmutable": mutant[0]["unmutable"]}))
-                    continue
-                if not any(r.get("mutant_applied") for r in mutant):
-                    # No witness run reached a changed result (a shifted mutant of a member that
-                    # returns no float array changes nothing), so there was nothing to kill.
-                    print(json.dumps({"schema": SCHEMA, "mutant": name, "kind": kind,
-                                      "inapplicable": True}))
-                    continue
-                died = any(set(r["failed"]) - set(baseline[r["suite"]]["failed"])
-                           or (r["error"] and not baseline[r["suite"]]["error"]) for r in mutant)
-                tried += 1
-                killed += died
+            mutant = [r for r in run_suites(suites_for_row, args.jobs, f"{row}:{kind}")
+                      if r.get("summary")]
+            if any(r.get("unmutable") for r in mutant):
                 print(json.dumps({"schema": SCHEMA, "mutant": name, "kind": kind,
-                                  "suites": len(suites_for_row), "killed": bool(died)}))
-                if not died and kind == "trivial":
-                    problems.append(f"{name}: a trivial body survives its witnesses")
+                                  "unmutable": mutant[0]["unmutable"]}))
+                continue
+            if not any(r.get("mutant_applied") for r in mutant):
+                # No witness run reached a changed result (a shifted mutant of a member that
+                # returned no float array changes nothing), so there was nothing to kill.
+                print(json.dumps({"schema": SCHEMA, "mutant": name, "kind": kind,
+                                  "inapplicable": True}))
+                continue
+            died = any(set(r["failed"]) - set(baseline[r["suite"]]["failed"])
+                       or (r["error"] and not baseline[r["suite"]]["error"]) for r in mutant)
+            tried += 1
+            killed += died
+            print(json.dumps({"schema": SCHEMA, "mutant": name, "kind": kind,
+                              "suites": len(suites_for_row), "killed": bool(died)}))
+            if not died:
+                problems.append(f"{name}: a {kind} mutant survives its witnesses")
         print(json.dumps({"schema": SCHEMA, "mutants": tried, "killed": killed}))
+    sys.stdout.flush()
     for problem in problems:
-        print(problem, file=sys.stderr)
+        print(problem, file=sys.stderr, flush=True)
     return 1 if problems else 0
 
 
