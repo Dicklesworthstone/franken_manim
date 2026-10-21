@@ -11843,6 +11843,15 @@ saved_bits.set_fill(opacity=0)
 saved_bits.restore()
 assert [m.get_fill_opacity() for m in saved_bits] == [1.0, 0.0]
 assert saved_bits[0][0].get_fill_opacity() == 1.0
+# Appendix C-35: the box follows an in-place write through a get_points() view. The
+# Reference caches the box and refreshes it only when a setter flags it, so after
+# `view += shift` its get_center() still reports the old centre.
+viewed = manimlib.Square()
+assert np.allclose(viewed.get_center(), [0, 0, 0])
+viewed_points = viewed.get_points()
+viewed_points += np.array([1.0, 2.0, 0.0])
+assert np.allclose(viewed.get_center(), [1, 2, 0])
+assert np.isclose(viewed.get_width(), 2.0)
 
 single_insert = topology.insert_n_curves_to_point_list(
     2, np.array([[2.0, 3.0, 0.0]], dtype=np.float32)

@@ -1,4 +1,4 @@
-# BN-07 — Corrected mobject behavior (C-5, C-6, C-14, C-15, C-17, C-18, C-19, C-20, C-21, C-23, C-24, C-26, C-29, C-30, C-31, C-32, C-33)
+# BN-07 — Corrected mobject behavior (C-5, C-6, C-14, C-15, C-17, C-18, C-19, C-20, C-21, C-23, C-24, C-26, C-29, C-30, C-31, C-32, C-33, C-35)
 
 **Status:** Draft (W3, fm-yra; W10, fm-23ev, fm-5wq.4.39, fm-easc, fm-gm0v, and fm-pointless-box-interpolation-hccu). Consumed by Choreo (§9.1's
 `suspend_mobject_updating` interaction), fmn-python (whose `manimlib`
@@ -420,3 +420,26 @@ scene-bound) and `point_less_box_interpolates_along_the_path` in
 **Migration:** none needed. A scene that animated an empty group and then
 positioned things relative to it gets the animated position, not the
 origin.
+
+## C-35 — the box follows an in-place point write
+
+In the Reference, `get_points()` returns the live point array
+(`mobject.py:319-320`), and the box is a cache that `get_bounding_box()`
+recomputes only when a setter has flagged it (`mobject.py:338-342`). A
+write through the view moves the points without flagging the box:
+
+| code | Reference `get_center()` |
+|---|---|
+| `s = Square(); s.get_points()[:] += (1, 2, 0)` | origin |
+| the same write, then `s.set_points(s.get_points())` | (1, 2, 0) |
+
+The corpus differential found it as a stale box beside equal points
+(fm-5wq.33).
+
+**FrankenManim:** the box follows the points after any write, including
+one through a view: the first row's centre is (1, 2, 0). Locked by the
+C-35 assertions in `crates/fmn-python/tests/bridge.py`.
+
+**Migration:** none needed. A scene that moved points through a view and
+then positioned something against the box gets the box of the points it
+drew.
