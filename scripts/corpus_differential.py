@@ -231,9 +231,10 @@ def run_one(args, module, scene):
 
 # Rule-based triage for scenes that ran in one engine only. First match wins; `side` is the
 # engine whose error is matched ("portal-alone": the portal's, and only when the Reference
-# ran, so a portal policy never labels a scene the Reference cannot run either). After the
-# rules, a scene both engines fail with the same error is "agree-error"; one no rule covers
-# stays "untriaged".
+# ran, so a portal policy never labels a scene the Reference cannot run either). An optional
+# fifth element scopes a rule to the `module:scene` keys it matches: for an error too generic to
+# label anywhere else, whose cause was traced in those scenes. After the rules, a scene both
+# engines fail with the same error is "agree-error"; one no rule covers stays "untriaged".
 TRIAGE = (
     ("reference", "Must specify either a file_name or svg_string SVGMobject", "reference-defect",
      "the pinned Reference cannot construct OldTex/OldTexText (Appendix C-18, BN-07)"),
@@ -270,6 +271,14 @@ TRIAGE = (
     ("reference", r"^ValueError: not enough values to unpack \(expected 3, got 2\)$", "portal-leniency",
      "a two-value t_range or x_range, which the Reference's ParametricCurve rejects; the portal "
      "samples it with its default step"),
+    ("reference", r"^IndexError: index \d+ is out of bounds for axis 0 with size \d+$",
+     "reference-defect",
+     "the strip updater's match_points leaves stale subpath ends, and the next joint refresh "
+     "indexes past the points (Appendix C-23, BN-07)",
+     r"^_2024/puzzles/added_dimension\.py:StruggleWithStrips$"),
+    ("portal-alone", r"IndexError: invalid index to scalar variable|'int' object is not subscriptable",
+     "bug", "fm-mumk: Mobject.shift with a scalar argument fails inside the portal",
+     r"^_2026/print_gallery/misc_scenes\.py:(MobiusTransformation1|NaiveLinearScaling)$"),
 )
 
 
@@ -277,8 +286,11 @@ def triage(record):
     import re
 
     reference_ran = record["reference"].get("exit") == 0 and not record["reference"].get("error")
-    for side, pattern, label, reason in TRIAGE:
+    key = f"{record.get('module', '')}:{record.get('scene', '')}"
+    for side, pattern, label, reason, *where in TRIAGE:
         if side == "portal-alone" and not reference_ran:
+            continue
+        if where and not re.search(where[0], key):
             continue
         sides = {"any": ("portal", "reference"), "portal-alone": ("portal",)}.get(side, (side,))
         for name in sides:

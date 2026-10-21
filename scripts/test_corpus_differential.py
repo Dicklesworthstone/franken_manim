@@ -146,6 +146,16 @@ class TriageTests(unittest.TestCase):
         return {"portal": {"exit": portal_exit, "error": portal_error},
                 "reference": {"exit": reference_exit, "error": reference_error}}
 
+    def test_a_scene_scoped_rule_labels_only_its_traced_scenes(self):
+        error = "IndexError: index 18 is out of bounds for axis 0 with size 15"
+        traced = dict(self.record(reference_error=error, portal_exit=0),
+                      module="_2024/puzzles/added_dimension.py", scene="StruggleWithStrips")
+        elsewhere = dict(traced, scene="SomeOtherScene")
+        self.assertEqual(cd.triage(traced)["label"], "reference-defect")
+        self.assertIn("C-23", cd.triage(traced)["reason"])
+        # The same generic error anywhere else is not assumed to have the same cause.
+        self.assertEqual(cd.triage(elsewhere), {"label": "untriaged"})
+
     def test_a_reference_side_rule_never_matches_the_portal(self):
         error = "Exception: Must specify either a file_name or svg_string SVGMobject"
         self.assertEqual(cd.triage(self.record(reference_error=error))["label"], "reference-defect")
