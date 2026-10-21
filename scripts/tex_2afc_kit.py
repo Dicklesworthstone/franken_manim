@@ -105,6 +105,13 @@ def assign(strata: list[str], seed: int) -> tuple[list[int], list[bool]]:
     return order, sides
 
 
+def kit_identity(seed: int, control, key: list[dict]) -> str:
+    """The kit id covers the whole key (pairs, formulas, strata and LaTeX sides), so answers can
+    only ever be scored against the build whose page produced them."""
+    payload = json.dumps([seed, control or "", key], sort_keys=True).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:16]
+
+
 def eligible(record) -> bool:
     text = record["text"].strip()
     return (record["mode"] == "math" and bool(text) and len(text) <= MAX_CHARS
@@ -359,7 +366,6 @@ def build(args) -> int:
             sys.exit(f"stratum {name}: only {kept} usable pairs; raise --backups")
 
     order, sides = assign([item["stratum"] for item, _ in pairs], args.seed)
-    kit_id = hashlib.sha256(json.dumps([args.seed, [item["id"] for item, _ in pairs], args.control or ""]).encode()).hexdigest()[:16]
     key, blocks = [], []
     for number, index in enumerate(order, 1):
         item, (latex_img, other_img) = pairs[index]
@@ -369,7 +375,8 @@ def build(args) -> int:
         blocks.append(PAIR_HTML.format(pid=pid, number=number, left=png_data_uri(left), right=png_data_uri(right)))
         key.append({"pair": pid, "latex_side": "left" if latex_left else "right", "formula": item["id"],
                     "stratum": item["stratum"]})
-    renders = {render_identity(png) for item, _ in pairs for png in rendered[item["id"]].values()}
+    kit_id = kit_identity(args.seed, args.control, key)
+    renders ={render_identity(png) for item, _ in pairs for png in rendered[item["id"]].values()}
     if any(mode != "certified" for _, mode in renders) or len(renders) != 1:
         sys.exit(f"renders are not all certified from one build: {sorted(renders)}")
     engines = {"reference": "3b1b/manim@6199a00d4c1b1127ebe45cb629c3f22538b10e13",

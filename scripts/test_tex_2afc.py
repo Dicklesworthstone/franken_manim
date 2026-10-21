@@ -180,6 +180,13 @@ class SamplingTests(unittest.TestCase):
         odd = kit.assign(["a"] * 3 + ["b"] * 5, 0)[1]
         self.assertEqual((sum(odd[:3]), sum(odd[3:])), (1, 2))
 
+    def test_the_kit_id_covers_the_sides(self):
+        key = [{"pair": "p001", "latex_side": "left", "formula": "f", "stratum": "s"}]
+        flipped = [dict(key[0], latex_side="right")]
+        self.assertNotEqual(kit.kit_identity(1, None, key), kit.kit_identity(1, None, flipped))
+        self.assertNotEqual(kit.kit_identity(1, None, key), kit.kit_identity(1, "latex-vs-latex", key))
+        self.assertEqual(kit.kit_identity(1, None, key), kit.kit_identity(1, None, [dict(key[0])]))
+
     def test_a_constant_chooser_scores_exactly_chance_overall_and_per_stratum(self):
         for seed in (20261020, 1, 2, 3):
             order, sides = kit.assign(self.STRATA, seed)
