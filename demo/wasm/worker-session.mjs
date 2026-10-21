@@ -1,5 +1,5 @@
 import {WORKER_PROTOCOL, MAX_BUNDLE_BYTES, MAX_PCM_BYTES, integer, viewport,
-  metadata, pixels, channelBuffers, audioInfo} from './worker-protocol.mjs';
+  metadata, pixels, channelBuffers, audioInfo, recordingSource, sourceIdentity, sameSource} from './worker-protocol.mjs';
 
 export {MAX_BUNDLE_BYTES};
 const cancelled = () => new DOMException('Recording load cancelled.', 'AbortError');
@@ -46,7 +46,9 @@ class PictureConnection {
   #onError;
   #width;
   #height;
+  #source = null;
   metadata = null;
+  get source() { return this.#source; }
   frame = 0;
   error = null;
 
@@ -57,13 +59,15 @@ class PictureConnection {
     worker.onerror = event => { event.preventDefault?.(); this.#fail(new Error(`Picture worker failed: ${String(event.message || 'execution error').slice(0, 600)}`)); };
     worker.onmessageerror = () => this.#fail(new Error('Picture worker response could not be decoded.'));
   }
-  load(bytes, maxBundleBytes, maxAudioBytes) {
+  load(bytes, maxBundleBytes, maxAudioBytes, restore = null) {
     return new Promise((resolve, reject) => {
       this.#resolve = resolve; this.#reject = reject;
       // Never transfer unrelated bytes outside a caller's subarray.
       const owned = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes : bytes.slice();
-      this.#send({kind: 'load', bytes: owned.buffer, width: this.#width, height: this.#height,
-        maxBundleBytes, maxAudioBytes}, [owned.buffer]);
+      this.#source = recordingSource(owned);
+      if (restore && !sameSource(this.source, restore.source)) throw new Error('Recording changed; reopen it instead of restarting with old narration.');
+      this.#send({kind: restore ? 'restore' : 'load', bytes: owned.buffer, width: this.#width, height: this.#height,
+        maxBundleBytes, maxAudioBytes, ...(restore ? {frame: restore.frame, source: restore.source} : {})}, [owned.buffer]);
     });
   }
   #send(fields, transfer) {
@@ -71,7 +75,7 @@ class PictureConnection {
     try {
       integer(id, 'request identity', 1, Number.MAX_SAFE_INTEGER);
       this.#active = {id, kind: fields.kind, frame: fields.frame, epoch: this.#epoch};
-      this.#timer = setTimeout(() => this.#fail(new Error('Picture worker request timed out; reload the recording.')), this.#timeout);
+      this.#timer = setTimeout(() => this.#fail(new Error('Picture worker request timed out; restart the picture worker to retry.')), this.#timeout);
       this.#worker.postMessage({protocol: WORKER_PROTOCOL, id, ...fields}, transfer);
     } catch (error) { this.#fail(error); }
   }
@@ -83,17 +87,22 @@ class PictureConnection {
       if (value.kind === 'error') throw new Error(String(value.message || 'Native picture rendering failed.').slice(0, 600));
       if (value.width !== this.#width || value.height !== this.#height) throw new Error('Picture worker changed the viewport.');
       pixels(value.pixels, this.#width, this.#height);
-      if (active.kind === 'load') {
-        if (value.kind !== 'ready' || value.frame !== 0) throw new Error('Invalid first picture response.');
+      if (active.kind === 'load' || active.kind === 'restore') {
+        const restoring = active.kind === 'restore';
+        if (value.kind !== 'ready' || value.frame !== (restoring ? active.frame : 0) || value.audioReused !== restoring) {
+          throw new Error('Invalid first picture response.');
+        }
+        if (!sameSource(sourceIdentity(value.source), this.source)) throw new Error('Picture worker returned a different recording.');
         this.metadata = metadata(value.metadata);
-        if (this.metadata.audio) channelBuffers(value.channels, this.metadata.audio);
+        if (this.metadata.audio && !restoring) channelBuffers(value.channels, this.metadata.audio);
         else if (!Array.isArray(value.channels) || value.channels.length) throw new Error('Unexpected transferred audio.');
       } else if (value.kind !== 'frame' || value.frame !== active.frame) {
         throw new Error('Picture worker returned a different frame.');
       }
       clearTimeout(this.#timer); this.#timer = null;
       this.#active = null; this.#pixels = value.pixels; this.#bufferFrame = value.frame;
-      if (active.kind === 'load') {
+      if (active.kind === 'load' || active.kind === 'restore') {
+        this.frame = value.frame;
         const resolve = this.#resolve; this.#resolve = null; this.#reject = null;
         resolve(value.channels);
       } else if (active.epoch === this.#epoch) {
@@ -172,6 +181,8 @@ export class WorkerTimelineSession {
   #current = null;
   #candidate = null;
   #controller = null;
+  #readBytes = null;
+  #restarting = null;
 
   constructor({width, height, createWorker = defaultWorker, prepareAudio = null,
     onFrame = () => {}, onError = () => {}, maxBytes = MAX_BUNDLE_BYTES,
@@ -188,9 +199,31 @@ export class WorkerTimelineSession {
     this.#maxAudioBytes = maxAudioBytes; this.#timeout = timeoutMs;
   }
   get current() { return this.#current; }
-  async load(readBytes) {
+  get restarting() { return this.#restarting !== null; }
+  load(readBytes) { return this.#replace(readBytes, null); }
+  async restart(frame = null) {
     if (this.#disposed) throw new Error('Worker timeline session is disposed.');
+    if (!this.#current || !this.#readBytes) throw new Error('No recording is loaded.');
+    if (this.#restarting) return false;
+    const previous = this.#current;
+    if (frame !== null) integer(frame, 'restart frame', 0, previous.metadata.frameCount - 1);
+    previous.audio?.pause();
+    const index = frame ?? previous.audio?.frame ?? previous.renderer.frame;
+    integer(index, 'restart frame', 0, previous.metadata.frameCount - 1);
+    previous.renderer.invalidate();
+    return this.#replace(this.#readBytes, {previous, frame: index, source: previous.renderer.source});
+  }
+  cancelRestart() {
+    if (!this.#restarting) return false;
+    ++this.#generation; this.#restarting = null;
+    this.#controller?.abort(); this.#candidate?.dispose(); this.#candidate = null;
+    return true;
+  }
+  async #replace(readBytes, restore) {
+    if (this.#disposed) throw new Error('Worker timeline session is disposed.');
+    if (typeof readBytes !== 'function') throw new TypeError('A repeatable recording reader is required.');
     const generation = ++this.#generation;
+    this.#restarting = restore ? generation : null;
     this.#controller?.abort(); this.#candidate?.dispose();
     const controller = new AbortController(); this.#controller = controller;
     let renderer = null, audio = null, pcm = null;
@@ -202,14 +235,17 @@ export class WorkerTimelineSession {
         frame => { if (this.#current?.renderer === renderer) this.#onFrame(frame); },
         error => {
           if (this.#current?.renderer === renderer) {
-            try { this.#current.audio?.pause(); } finally { this.#onError(error); }
+            try { this.#current.audio?.pause(); } finally { if (!this.#restarting) this.#onError(error); }
           }
         });
       this.#candidate = renderer;
-      let channels = await renderer.load(bytes, this.#maxBytes, this.#maxAudioBytes);
+      let channels = await renderer.load(bytes, this.#maxBytes, this.#maxAudioBytes, restore);
       if (this.#disposed || generation !== this.#generation) return false;
       const info = renderer.metadata;
-      if (info.audio) {
+      if (restore) {
+        if (JSON.stringify(info) !== JSON.stringify(restore.previous.metadata)) throw new Error('Restarted recording metadata changed.');
+        audio = restore.previous.audio;
+      } else if (info.audio) {
         audioInfo(info.audio, this.#maxAudioBytes);
         pcm = transferredSoundtrack(info.audio, channels);
         // Drop the transfer envelope: a small eager soundtrack may free its
@@ -228,10 +264,11 @@ export class WorkerTimelineSession {
       if (this.#disposed || generation !== this.#generation) return false;
       const previous = this.#current;
       this.#current = Object.freeze({renderer, metadata: info, audio});
-      this.#candidate = null;
+      this.#candidate = null; this.#readBytes = readBytes;
       // Closures above keep the renderer identity. Ownership is marked by the
       // current object rather than nulling that captured variable.
-      release(previous);
+      if (restore) previous.renderer.dispose();
+      else release(previous);
       return true;
     } catch (error) {
       if (this.#disposed || generation !== this.#generation) return false;
@@ -239,16 +276,20 @@ export class WorkerTimelineSession {
     } finally {
       pcm?.free();
       if (renderer && this.#current?.renderer !== renderer) {
-        try { audio?.dispose?.(); } finally { renderer.dispose(); }
+        try { if (!restore) audio?.dispose?.(); } finally { renderer.dispose(); }
       }
       if (this.#candidate === renderer) this.#candidate = null;
+      if (this.#restarting === generation) this.#restarting = null;
     }
   }
   present() { this.#current?.renderer.present(); }
-  render(frame) { this.#current?.renderer.request(frame); }
+  render(frame) {
+    if (this.#restarting) throw new Error('Picture worker restart is in progress.');
+    this.#current?.renderer.request(frame);
+  }
   invalidate() { this.#current?.renderer.invalidate(); }
   dispose() {
-    this.#disposed = true; ++this.#generation;
+    this.#disposed = true; ++this.#generation; this.#restarting = null; this.#readBytes = null;
     this.#controller?.abort(); this.#candidate?.dispose(); this.#candidate = null;
     const previous = this.#current; this.#current = null;
     release(previous);

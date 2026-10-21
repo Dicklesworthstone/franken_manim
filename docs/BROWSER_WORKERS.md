@@ -124,3 +124,39 @@ device cleanup. It does not substitute for native decoder/render acceptance.
 The existing `scripts/check_browser_soundtrack.mjs` keeps its native PCM and
 pixel assertions and now serves the worker modules and initializes its separate
 main-thread native oracle explicitly.
+
+
+## Restart a failed picture worker without reopening the recording
+
+`await session.restart()` starts one replacement worker, rereads the current
+source through its original reader, and reconstructs the paused picture before
+publishing the replacement. Narration stays paused at its exact fractional
+position. The existing audio owner is reused: the replacement decodes and frees
+its native soundtrack without copying or transferring another set of channel
+buffers. No new audio device is created and restart never starts playback.
+For silent recordings, the default restore position is the last delivered
+picture; `restart(frame)` may name an explicit recorded frame.
+
+The worker protocol is `fmn.picture-worker.v2`. The loaded source identity binds
+its byte length and the canonical envelope's trailing SHA-256 checksum over all
+preceding header/payload bytes. Both initial load and restart must pass the
+native FMTL decoder. Reading a trailer is **not verification**: altered bytes
+with an unchanged trailer still reach and must pass native checksum validation.
+A different validated checksum, byte length, engine, clock, camera metadata,
+labels or audio layout refuses replacement rather than pairing new pictures
+with retained narration. This is content identity, not publisher authentication.
+
+Readers supplied to `load` must produce a fresh `Uint8Array` each time to support
+restart; the original buffer was transferred. A `File` reader naturally retains
+its immutable local source, and a URL reader fetches and validates the current
+bytes again. The session retains the reader, not an extra owned recording-sized
+copy. Storage retained by a caller's closure is still the caller's storage.
+Failed candidate reads, decoding, rendering or metadata checks preserve the
+previous session and its soundtrack. A failed old worker stays failed until a
+replacement succeeds; a healthy old worker stays usable if replacement fails.
+
+There is at most one restart candidate. A repeated restart during recovery
+returns false, a new load supersedes it, and `cancelRestart()` aborts its read
+signal and terminates any candidate. Late results cannot replace the current
+movie. Disposal releases both workers and the single audio owner. Restart has
+no automatic retry loop: deterministic rendering failures remain visible.

@@ -17,12 +17,13 @@ FIXTURE = r"""
 export default async function init() {}
 export class FmnPlayer {
   static from_bundle_with_audio(bytes) {
-    if (bytes[0] === 255) throw new Error('fixture decoder refusal');
+    if (bytes[24] === 255) throw new Error('fixture decoder refusal');
     const until = performance.now() + 160;
     while (performance.now() < until) {}
-    return new FmnPlayer(bytes[0] === 2);
+    return new FmnPlayer(bytes[24] === 2 || bytes[24] === 3, bytes[24] === 3);
   }
-  constructor(sound) {
+  constructor(sound, fail = false) {
+    this.fail = fail;
     this.fps=8;this.frame_count=32;this.duration_seconds=4;
     this.engine_version='explicit-decoder-fixture';this.has_camera_track=true;this.has_soundtrack=sound;
   }
@@ -31,6 +32,7 @@ export class FmnPlayer {
   frame_of_label(n){return n==='begin'?0:16;}
   seek_frame(n){this.current_frame=n;}
   render_into(frame,out){
+    if(this.fail && frame===13) throw new Error('fixture native render trap');
     const until=performance.now()+(frame?120:0);while(performance.now()<until){}
     for(let i=0;i<out.length;i++)out[i]=(frame*31+i)%256;
   }
@@ -39,7 +41,16 @@ export class FmnPlayer {
   free(){}
 }
 """
-CASES = r"""async ({sessionURL, audioURL, workerURL}) => {
+def fixture_recording(marker):
+    body = bytearray(25)
+    body[:4] = b'FMTL'
+    body[16:24] = (1).to_bytes(8, 'little')
+    body[24] = marker
+    return bytes(body) + hashlib.sha256(body).digest()
+
+
+CASES = r"""async ({sessionURL, audioURL, workerURL, recordings}) => {
+  const encoded=marker=>new Uint8Array(recordings[marker]);
   const {WorkerTimelineSession}=await import(sessionURL);
   const {prepareSoundtrack}=await import(audioURL);
   const check=(ok,message)=>{if(!ok)throw new Error(message);};
@@ -63,7 +74,7 @@ CASES = r"""async ({sessionURL, audioURL, workerURL}) => {
       return prepareSoundtrack({fps:player.fps,frame_count:player.frame_count,take_soundtrack:()=>pcm},()=>context);
     }});
   try {
-    let before=heartbeat;const bytes=new Uint8Array([1]);
+    let before=heartbeat;const bytes=encoded(1);
     check(await session.load(async()=>bytes),'silent load failed');
     const decodingTicks=heartbeat-before;check(decodingTicks>0,'native decode blocked UI heartbeat');
     check(bytes.byteLength===0,'bundle did not transfer ownership');session.present();
@@ -76,17 +87,29 @@ CASES = r"""async ({sessionURL, audioURL, workerURL}) => {
     session.render(25);session.invalidate();session.render(4);const previous=frames.length;
     await wait(()=>frames.at(-1).index===4);check(frames.length===previous+1,'cancelled raster leaked into canvas');
     const prior=session.current;
-    let refused=false;try{await session.load(async()=>new Uint8Array([255]));}catch{refused=true;}
+    let refused=false;try{await session.load(async()=>encoded(255));}catch{refused=true;}
     check(refused&&session.current===prior,'failed replacement destroyed previous movie');
     session.render(7);await wait(()=>frames.at(-1).index===7);
-    check(await session.load(async()=>new Uint8Array([2])),'audible replacement failed');
+    check(await session.load(async()=>encoded(2)),'audible replacement failed');
     check(copied===300000,'missing transferred audio samples');check(workers[0].terminated===1,'old picture worker survived replacement');
     check(!session.current.audio.playing,'load started audio without a gesture');
-    session.dispose();await wait(()=>devices[0].state==='closed');
+    check(errors.length===0,'unexpected active-worker error before restart checks');
+    let marker=3;
+    check(await session.load(async()=>encoded(marker)),'recovery fixture failed');
+    const audio=session.current.audio;audio.seek(6);const phase=audio.positionSeconds, copies=copied;
+    session.render(13);await wait(()=>errors.length===1);
+    check(!!session.current.renderer.error,'native render trap did not fail the connection');
+    check(await session.restart(),'restart failed');session.present();
+    check(session.current.audio===audio&&audio.positionSeconds===phase&&!audio.playing,'restart replaced or retimed paused narration');
+    check(copied===copies,'restart transferred audio again');check(frames.at(-1).index===6,'restart lost the selected picture');
+    marker=2;let changed=false;try{await session.restart();}catch(e){changed=e.message.includes('Recording changed');}
+    check(changed&&session.current.audio===audio,'changed source was not refused atomically');
+    marker=3;check(await session.restart(),'retry after changed source failed');
+    session.dispose();await wait(()=>devices.every(c=>c.state==='closed'));
     check(workers.every(w=>w.terminated===1),'worker disposal count differs');
-    check(errors.length===0,'unexpected active-worker error');
+    check(errors.length===1,'unexpected recovery error');
     return {decodingTicks,renderingTicks,copiedSamples:copied,workers:workers.length,
-      renderedIndices:frames.map(f=>f.index),nativeDecoder:'explicit fixture',passed:true};
+      renderedIndices:frames.map(f=>f.index), recovery:['native trap', 'same audio owner', 'exact paused phase', 'no repeated PCM transfer', 'changed source refusal', 'retry'],nativeDecoder:'explicit fixture',passed:true};
   } finally {clearInterval(timer);session.dispose();}
 }"""
 
@@ -109,9 +132,9 @@ def main():
       const entry = module(sources['picture-worker.mjs'].replace("'./picture-worker-core.mjs'",JSON.stringify(core)).replace("'./pkg/fmn_wasm.js'",JSON.stringify(decoder)));
       // Opaque-origin pages cannot start module Workers in Chromium. Import
       // the production module from a classic worker; buffer its one init event.
-      const workerURL = module(`const pending=[]; self.onmessage=e=>pending.push(e); import(${JSON.stringify(entry)}).then(()=>{const receive=self.onmessage;for(const event of pending)receive(event);}).catch(error=>{self.postMessage({protocol:'fmn.picture-worker.v1',id:pending[0]?.data.id,kind:'error',message:String(error)});});`);
+      const workerURL = module(`const pending=[]; self.onmessage=e=>pending.push(e); import(${JSON.stringify(entry)}).then(()=>{const receive=self.onmessage;for(const event of pending)receive(event);}).catch(error=>{self.postMessage({protocol:'fmn.picture-worker.v2',id:pending[0]?.data.id,kind:'error',message:String(error)});});`);
       const sessionURL = module(sources['worker-session.mjs'].replace("'./worker-protocol.mjs'",JSON.stringify(protocol)));
-      try {return await (""" + CASES + """)({sessionURL,audioURL,workerURL});}
+      try {return await (""" + CASES + """)({sessionURL,audioURL,workerURL,recordings:sources.recordings});}
       finally {for(const url of urls)URL.revokeObjectURL(url);}
     }"""
     with sync_playwright() as p:
@@ -124,7 +147,7 @@ def main():
             page.on('console', lambda msg: print('browser:', msg.type, msg.text, file=sys.stderr))
             page.on('pageerror', lambda err: print('pageerror:', err, file=sys.stderr))
             page.set_content('<!doctype html><title>Picture-worker browser acceptance</title>')
-            result = page.evaluate(expression, {**sources, 'fixture': FIXTURE})
+            result = page.evaluate(expression, {**sources, 'fixture': FIXTURE, 'recordings': {str(n): list(fixture_recording(n)) for n in [1, 2, 3, 255]}})
             result.update(schema='fmn.picture-worker-browser', version=1, browser=browser.version,
                 source_sha256={name: hashlib.sha256(text.encode()).hexdigest() for name, text in sources.items()})
             print(json.dumps(result, sort_keys=True))

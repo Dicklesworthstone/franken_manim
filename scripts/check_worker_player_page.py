@@ -11,7 +11,7 @@ import json
 import re
 import shutil
 from pathlib import Path
-from check_picture_worker_browser import FIXTURE
+from check_picture_worker_browser import FIXTURE, fixture_recording
 
 BOOTSTRAP = r"""async sources => {
   const urls=[];
@@ -37,7 +37,7 @@ BOOTSTRAP = r"""async sources => {
     createContext(){const c=new AudioContext({sampleRate:48000});contexts.push(c);
       const create=c.createBufferSource.bind(c);c.createBufferSource=()=>{const n=create(),start=n.start.bind(n);
         n.start=(when,offset,...rest)=>{starts.push({when,offset,frames:n.buffer.length});return start(when,offset,...rest);};return n;};return c;},
-    readDemo:signal=>readBundleResponse(new Response(new Uint8Array([1])),signal),
+    readDemo:signal=>readBundleResponse(new Response(new Uint8Array(sources.recordings[1])),signal),
   });
   window.workerPageEvidence={owner,workers,contexts,starts,errors,urls};
   return true;
@@ -69,7 +69,7 @@ def main():
             failures = []
             page.on('pageerror', lambda error: failures.append(str(error)))
             page.set_content(markup)
-            page.evaluate(BOOTSTRAP, {**sources, 'fixture': FIXTURE})
+            page.evaluate(BOOTSTRAP, {**sources, 'fixture': FIXTURE, 'recordings': {str(n): list(fixture_recording(n)) for n in [1, 2, 3, 255]}})
             page.wait_for_function("!document.getElementById('play').disabled")
             assert page.locator('#status').inner_text().endswith('worker rendering')
             assert page.evaluate('workerPageEvidence.contexts.length') == 0
@@ -86,7 +86,7 @@ def main():
             page.locator('#labels button', has_text='middle').click()
             page.wait_for_function("document.getElementById('frameLabel').textContent==='16 / 31'")
             checks.append('rapid seek and authored label navigation')
-            page.locator('#bundleFile').set_input_files({'name':'narrated.fmtl','mimeType':'application/octet-stream','buffer':bytes([2])})
+            page.locator('#bundleFile').set_input_files({'name':'narrated.fmtl','mimeType':'application/octet-stream','buffer':fixture_recording(2)})
             page.wait_for_function("document.getElementById('status').textContent.includes('2-channel sound @ 48000')")
             assert page.evaluate('workerPageEvidence.starts.length') == 0
             page.locator('#play').click()
@@ -107,7 +107,7 @@ def main():
             page.wait_for_function("document.getElementById('play').textContent==='Play' && document.getElementById('scrub').value==='31'", timeout=15000)
             assert page.evaluate('Math.max(...workerPageEvidence.starts.map(s=>s.frames))') <= 65536
             checks.append('exact seek and final picture after silent suffix')
-            page.locator('#bundleFile').set_input_files({'name':'broken.fmtl','mimeType':'application/octet-stream','buffer':bytes([255])})
+            page.locator('#bundleFile').set_input_files({'name':'broken.fmtl','mimeType':'application/octet-stream','buffer':fixture_recording(255)})
             page.wait_for_function("document.getElementById('status').textContent.includes('previous recording is still loaded')")
             assert not page.locator('#play').is_disabled()
             assert page.evaluate('workerPageEvidence.contexts[0].state') != 'closed'

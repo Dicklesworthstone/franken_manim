@@ -1,5 +1,5 @@
 // The browser worker transports validated native output, never scene code.
-export const WORKER_PROTOCOL = 'fmn.picture-worker.v1';
+export const WORKER_PROTOCOL = 'fmn.picture-worker.v2';
 export const MAX_BUNDLE_BYTES = 256 * 1024 * 1024;
 export const MAX_PCM_BYTES = 256 * 1024 * 1024;
 export const COPY_FRAMES = 65_536;
@@ -57,4 +57,25 @@ export function channelBuffers(buffers, info) {
     throw new Error('Invalid transferred soundtrack buffers.');
   }
   return buffers;
+}
+
+// fmn-hash canonical envelopes end in SHA-256(header + payload). This is
+// only an identity after the native FMTL decoder has verified the envelope;
+// reading its trailer never substitutes for native integrity/schema admission.
+export function recordingSource(bytes) {
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength < 56 || bytes.byteLength > MAX_BUNDLE_BYTES) {
+    throw new RangeError('Invalid framed recording bytes.');
+  }
+  const checksum = [...bytes.subarray(bytes.length - 32)].map(n => n.toString(16).padStart(2, '0')).join('');
+  return sourceIdentity({byteLength: bytes.byteLength, checksum});
+}
+export function sourceIdentity(value) {
+  integer(value?.byteLength, 'recording byte length', 56, MAX_BUNDLE_BYTES);
+  if (typeof value.checksum !== 'string' || !/^[0-9a-f]{64}$/.test(value.checksum)) {
+    throw new Error('Invalid recording checksum identity.');
+  }
+  return Object.freeze({byteLength: value.byteLength, checksum: value.checksum});
+}
+export function sameSource(left, right) {
+  return left.byteLength === right.byteLength && left.checksum === right.checksum;
 }
