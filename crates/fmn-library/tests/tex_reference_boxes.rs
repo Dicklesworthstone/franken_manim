@@ -20,12 +20,13 @@ use fmn_library::{Tex, TexEngine, TexText};
 /// delimiters at the sizes TeX's variant search sets (e0dd66e), 52 with
 /// their cmex10 box widths (29385b3), 98 in TeX's own CM math faces
 /// (23c4d0c, ADR-0028), 105 laid out from TeX's TFM metrics with clean boxes
-/// that keep a lone character's italic correction (216c7c3). Most rows now
+/// that keep a lone character's italic correction (216c7c3), 106 with rule
+/// 18a's drops read at the script size (4db6f43, fm-4ptw). Most rows now
 /// sit at -0.5% in both width and height: the Reference's scale calibrates
 /// on its T1 text "0", which its capture host traced from a bitmap at
 /// 0.6846 em, against Computer Modern's 0.688 em design (BN-05). Raise it
 /// when layout improves; never lower it to land a change.
-const WITHIN_5_PERCENT_FLOOR: usize = 105;
+const WITHIN_5_PERCENT_FLOOR: usize = 106;
 /// The same at ±10%: 57, then 60, then 65, then 67, then 70, then 73, then 75,
 /// then 77, then 80, then 84 with big operators' cmex10 widths (80cbadc),
 /// then 108 in the CM math faces (23c4d0c), still 108 with the TFM metrics

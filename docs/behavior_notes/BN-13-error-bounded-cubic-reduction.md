@@ -51,6 +51,17 @@ look-study corpus. The 0.1-pixel default is 77 times tighter and sits well
 inside the analytic antialiasing transition. One bound across every cubic
 source makes curve quality a system property instead of a call-site accident.
 
+Glyph outlines show the same gap. The Reference imports its TeX glyphs from
+dvisvgm's cubic paths through the same two-quad split. cmex10's display
+integral is 2.2 em tall. Against its Type 1 cubics, one of its 18 curves
+deviates by 0.84 px at the ink oracle's scale (font_size 48 at 1080p); the
+median curve deviates by 0.015 px. FrankenManim's CM faces are converted at
+1/1000 em, about 0.065 px. With every glyph box equal to the Reference's
+within 0.01 px, the ink oracle still measures a sliced W1 of 0.72-0.89 px on
+every formula with a display integral. That residual is the Reference's
+outline, so those rows cannot meet the oracle's 0.5 px bound without copying
+its approximation (measured 2026-10-21, fm-4ptw).
+
 ## Evidence
 
 - `crates/fmn-geom/src/cubic.rs`: the construction, proof, deterministic

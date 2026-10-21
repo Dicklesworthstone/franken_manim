@@ -1756,12 +1756,14 @@ mod tests {
         // The compiled definitions. fm-pg7-honest-mn4b moved all three: the
         // cold formula takes a fresh engine per repetition, the cached one
         // names its single engine, and the text is the marked-up, wrapped
-        // paragraph.
+        // paragraph. The formula pair moves with the TeX engine's fingerprint
+        // (franken_markdown 4db6f43, fm-4ptw: rule 18a's drops), while q^7+z's
+        // layout does not (q is a character nucleus).
         assert_eq!(
             [cold.digest(), cached.digest(), text.digest()].map(|digest| digest.to_string()),
             [
-                "bc398bc9336b2c65c3aa73ae9dac9a897e45004b4c73ca07c350e5d27167338e",
-                "1edb9369c8054d8943880c03ccec31fafb7bc9c0b1f36037f86dcd4d4ebce4a6",
+                "742e9f690b2470eb7c61ebf0403d9b3b00b44327825d7d694ff636a9540b98c1",
+                "3ce2fb18488fe078547cb4a271773d69844f19bd0c949f01a729fe4156f13cf7",
                 "0fa22e64fe9e1901eea58a596899ec843bc0d6db46f1cd91607925a50fea3e6f",
             ]
         );

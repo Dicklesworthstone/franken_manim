@@ -39,12 +39,13 @@ use std::path::PathBuf;
 /// 299 with their cmex10 box widths (29385b3), 303 with big operators'
 /// cmex10 widths and italic corrections (80cbadc), 489 in TeX's own CM math
 /// faces (23c4d0c, ADR-0028), 540 laid out from TeX's TFM metrics with clean
-/// boxes that keep a lone character's italic correction (216c7c3).
+/// boxes that keep a lone character's italic correction (216c7c3), 543 with
+/// rule 18a's drops read at the script size (4db6f43, fm-4ptw).
 /// Raise it when layout improves; never lower it to land a change.
-const WITHIN_5_PERCENT_FLOOR: usize = 540;
+const WITHIN_5_PERCENT_FLOOR: usize = 543;
 /// The same at 10%: 315, 316, 330, 365, 367, 385, 421, 423, 437, 444, 543,
-/// then 564.
-const WITHIN_10_PERCENT_FLOOR: usize = 564;
+/// 564, then 565.
+const WITHIN_10_PERCENT_FLOOR: usize = 565;
 
 fn rows() -> Vec<OracleRow> {
     parse_oracle_fixture(ORACLE_FIXTURE).expect("the oracle fixture parses")

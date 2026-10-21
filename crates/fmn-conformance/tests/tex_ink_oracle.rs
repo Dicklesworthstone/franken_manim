@@ -41,30 +41,32 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// The public set's floors. 71 of 123 formulas matched when the oracle
 /// landed (2026-10-21, franken_markdown 216c7c3); most misses were CM
 /// Unicode's `+` and `=` at 0.57 of cmr10's ink. 96 match since math-mode
-/// family 0 is cmr10 itself (49466bc, fm-8zy2). Improve the floors when the
-/// ink improves; never loosen one to land a change.
+/// family 0 is cmr10 itself (49466bc, fm-8zy2), 98 since rule 18a reads its
+/// drops at the script size (4db6f43, fm-4ptw): a display integral's upper
+/// limit is in place. Improve the floors when the ink improves; never loosen
+/// one to land a change.
 const PUBLIC_FLOORS: InkFloors = InkFloors {
-    matches: 96,
+    matches: 98,
     median_hausdorff_px: 1.0,
-    p95_hausdorff_px: 7.072,
-    median_sliced_w1_px: 0.068,
-    p95_sliced_w1_px: 4.334,
+    p95_hausdorff_px: 7.0,
+    median_sliced_w1_px: 0.067,
+    p95_sliced_w1_px: 3.218,
     median_iou: 0.990,
-    p05_iou: 0.285,
+    p05_iou: 0.355,
 };
 
 /// The private corpus set's floors (the TeX box oracle's sample and the 60
 /// most frequent TexText strings): 398 of 643 matched when the oracle landed
 /// (franken_markdown 216c7c3), 486 since math-mode family 0 is cmr10
-/// (49466bc, fm-8zy2).
+/// (49466bc, fm-8zy2), 487 with rule 18a's drops (4db6f43, fm-4ptw).
 const CORPUS_FLOORS: InkFloors = InkFloors {
-    matches: 486,
+    matches: 487,
     median_hausdorff_px: 1.0,
-    p95_hausdorff_px: 11.181,
-    median_sliced_w1_px: 0.075,
-    p95_sliced_w1_px: 7.345,
+    p95_hausdorff_px: 11.0,
+    median_sliced_w1_px: 0.074,
+    p95_sliced_w1_px: 6.548,
     median_iou: 0.988,
-    p05_iou: 0.142,
+    p05_iou: 0.143,
 };
 
 /// cmr10's stem (`stem# = 25/36 pt`) in scene units at font size 48: an em

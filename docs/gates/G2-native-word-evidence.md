@@ -101,8 +101,13 @@ no public construct-sprint amendment is required at these numbers.
   matched and 398/643 of the private corpus set. Most misses were CM Unicode's
   `+` and `=` standing in for cmr10's at 0.57 of the ink. Since cmr10 itself
   sets math-mode family 0 (`49466bc`, `fm-8zy2`), 96/123 and 486/643 match, at a
-  median IoU of 0.990 and 0.989. Three planted defects (θ as ϑ, stems 10%
-  thicker, a missing superscript) each break the floors.
+  median IoU of 0.990 and 0.989. Since rule 18a reads its drops at the script
+  size (`4db6f43`, `fm-4ptw`), 98/123 and 487/643 match. The display integral's
+  upper limit was 0.139 em low (IoU 0.29 for `\int_0^1 x\,dx`); now every glyph
+  box equals the Reference's, at IoU 0.984. The integral rows' remaining sliced
+  W1 (0.72-0.89 px) is the Reference's two-quad outline of the integral
+  (BN-13). Three planted defects (θ as ϑ, stems 10% thicker, a missing
+  superscript) each break the floors.
 - **Style.** Every `Tex` used to be laid out in TeX text style, while the
   Reference's `Tex` is `align*` display math: `Tex(\sum…\frac)` was 0.588
   tall against the Reference's 1.331. `f3ef1f30` makes display the default.
