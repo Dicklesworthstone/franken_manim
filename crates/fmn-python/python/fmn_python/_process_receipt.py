@@ -59,6 +59,7 @@ class ReceiptReader:
         self.budget_exhausted = False
         self.group_started = False
         self.failed = False
+        self.incomplete = False
 
     def fileno(self):
         return self.connection.fileno()

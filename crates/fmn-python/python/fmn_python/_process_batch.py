@@ -15,6 +15,7 @@ import signal
 import sys
 import time
 
+from .cancellation import BatchCancelled, _check_cancelled, _validate_cancellation
 from ._process_receipt import (
     MAX_RECEIPT_BYTES as _MAX_RECEIPT_BYTES, receipt_channel, send_receipt,
     send_group_ready,
@@ -98,6 +99,7 @@ def _receive(connection, *, exited=False):
         return row
     except (EOFError, OSError, ValueError, RecursionError) as error:
         connection.failed = True
+        connection.incomplete = isinstance(error, EOFError)
         return failure(RuntimeError("worker exited without a complete receipt: " + str(error)))
 
 
@@ -195,7 +197,7 @@ def _timeout_outcome(item, duration):
 
 
 def run_process_jobs(jobs, worker, *, workers, continue_on_error=False,
-                     on_result=None, job_timeout=None):
+                     on_result=None, job_timeout=None, cancellation=None):
     """Run bounded JSON jobs in fresh spawned interpreters, in input order.
 
     on_result(index, row) runs in completion order in the parent. Fail-fast
@@ -205,8 +207,13 @@ def run_process_jobs(jobs, worker, *, workers, continue_on_error=False,
     Cancellation escalates concurrently while other workers remain supervised.
     On POSIX, crashed/cancelled workers' acknowledged private groups are stopped;
     deliberately detached descendants and Windows process trees are not covered.
+    cancellation is a parent-owned CancellationToken; observing it stops new
+    admission and raises BatchCancelled after the same bounded cleanup as Ctrl-C.
+    Complete receipts survive shutdown, including successes collected during it.
+    Unstarted jobs stay not_run; forced stops without a receipt are cancelled.
     This function is for importable worker functions, not lambdas or closures.
     """
+    _validate_cancellation(cancellation)
     workers = positive_integer(workers, "workers", 64)
     if not isinstance(jobs, (list, tuple)) or not 1 <= len(jobs) <= 65536:
         raise ValueError("process batch requires 1..65536 jobs")
@@ -217,17 +224,20 @@ def run_process_jobs(jobs, worker, *, workers, continue_on_error=False,
     if not callable(worker):
         raise TypeError("worker must be callable")
     job_timeout = validate_job_timeout(job_timeout)
-    # Freeze plain job data before launching anything, including nested values.
-    jobs = json.loads(json.dumps(jobs, allow_nan=False))
-    context = mp.get_context("spawn")
     rows = [{"status": "not_run", "result": None, "error": None} for _ in jobs]
     active, started, cancelling = {}, {}, {}
     timed_out = set()
     next_job, stopped = 0, False
     try:
+        _check_cancelled(cancellation)
+        # Freeze plain job data before launching anything, including nested values.
+        jobs = json.loads(json.dumps(jobs, allow_nan=False))
+        context = mp.get_context("spawn")
         while active or (not stopped and next_job < len(jobs)):
+            _check_cancelled(cancellation)
             while (not stopped and (continue_on_error or not timed_out)
                    and next_job < len(jobs) and len(active) < workers):
+                _check_cancelled(cancellation)
                 index = next_job
                 receive, send = receipt_channel()
                 process = context.Process(target=_child, args=(send, worker, jobs[index]))
@@ -242,6 +252,7 @@ def run_process_jobs(jobs, worker, *, workers, continue_on_error=False,
                 active[index] = [process, receive, None]
                 started[index] = time.monotonic()
                 next_job += 1
+            _check_cancelled(cancellation)
             handles = [handle for process, connection, row in active.values()
                        for handle in ([process.sentinel, connection] if row is None else [process.sentinel])]
             ready = wait(handles, timeout=0.05)
@@ -294,9 +305,14 @@ def run_process_jobs(jobs, worker, *, workers, continue_on_error=False,
             # First collect every ready receipt, then call observers. A failing
             # observer cannot discard another job's already reported success.
             for index in completed:
+                _check_cancelled(cancellation)
                 if on_result is not None:
                     on_result(index, rows[index])
+            # Also observe requests made by the final observer, when no next
+            # loop iteration would otherwise run. Rows already collected stay.
+            _check_cancelled(cancellation)
     except BaseException as error:
+        awaiting = {index for index, item in active.items() if item[2] is None}
         try:
             _stop(active, cancelling=cancelling)
         finally:
@@ -304,6 +320,14 @@ def run_process_jobs(jobs, worker, *, workers, continue_on_error=False,
                 if index in timed_out:
                     _timeout_outcome(item, job_timeout)
                 process, connection, row = item
+                if (isinstance(error, BatchCancelled) and index in awaiting
+                        and index not in timed_out and connection.incomplete):
+                    # EOF caused by stopping an unreceipted worker is not a
+                    # reported rendering failure. Preserve every complete row,
+                    # earlier protocol failure and already-observed timeout.
+                    row = failure(BatchCancelled("worker stopped by caller"), "cancelled")
+                    row["error"]["notes"].append(
+                        "Worker stopped without a complete receipt; outputs were not removed.")
                 rows[index] = row if row is not None else failure(
                     RuntimeError("worker stopped without a receipt; outputs may exist"), "cancelled")
                 connection.close()
