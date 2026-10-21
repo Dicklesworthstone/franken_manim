@@ -1171,11 +1171,13 @@ mod tests {
             // tex_display_sum.v1's \sum at cmex10's width at franken_markdown
             // 80cbadc, then the six TeX scenes in the CM math faces at
             // franken_markdown 23c4d0c, then five of them laid out from TeX's
-            // TFM metrics at franken_markdown 216c7c3)
+            // TFM metrics at franken_markdown 216c7c3, then tex_display_sum and
+            // tex_overbrace with cmr10's own + and = at franken_markdown
+            // 49466bc)
             // and the journaled map orientation.
             assert_eq!(
                 definition.digest().to_string(),
-                "b1944ab2435a7384968f580373b22be85e12e1563a36eae6034a9a0704aeefaf"
+                "e27ddf8d3f725a2cd8cb90f631ee2e2e28de53552ff445e06cf1394cd2915e15"
             );
         }
     }
