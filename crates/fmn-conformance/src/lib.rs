@@ -121,4 +121,5 @@ pub mod ratchet;
 pub mod scene_goldens;
 pub mod schema;
 pub mod semantic;
+pub mod tex_ink;
 pub mod tolerance;

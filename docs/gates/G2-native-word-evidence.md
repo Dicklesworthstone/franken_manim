@@ -92,6 +92,16 @@ no public construct-sprint amendment is required at these numbers.
   ratchet floors (26 and 60 at `68fe29b8`). Run it
   with `cargo test -p fmn-library --test tex_reference_boxes -- --nocapture`.
   The output logs every row.
+- **Ink oracle** (`fm-tex-ink-oracle-5ehf`).
+  `crates/fmn-conformance/tests/tex_ink_oracle.rs` compares the ink itself:
+  the Reference's own `Tex`/`TexText` outlines (captured once by
+  `scripts/capture_tex_ink.py`) and fmd-math's are registered on their ink
+  boxes and drawn by the certified engine. It measures boundary Hausdorff,
+  sliced W1 and IoU. At franken_markdown `216c7c3`, 71/123 public formulas
+  match and 398/643 of the private corpus set. The median IoU is 0.987 and
+  0.986. Most misses are CM Unicode's `+` and `=` standing in for cmr10's at
+  0.57 of the ink (`fm-8zy2`). Three planted defects (θ as ϑ, stems 10%
+  thicker, a missing superscript) each break the floors.
 - **Style.** Every `Tex` used to be laid out in TeX text style, while the
   Reference's `Tex` is `align*` display math: `Tex(\sum…\frac)` was 0.588
   tall against the Reference's 1.331. `f3ef1f30` makes display the default.
