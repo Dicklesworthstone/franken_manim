@@ -93,9 +93,9 @@ Labels come from `docs/ratchet/differential_triage.tsv`. A stale label must be r
 
 | label | scenes |
 |---|---|
-| bug | 55 |
-| behavior-note | 35 |
-| untriaged | 8 |
+| bug | 58 |
+| behavior-note | 38 |
+| untriaged | 2 |
 
 | scene | first difference | label | bead / BN |
 |---|---|---|---|
@@ -116,7 +116,7 @@ Labels come from `docs/ratchet/differential_triage.tsv`. A stale label must be r
 | `_2022/visual_proofs/lies.py:IntegralExample` | `3.0 Rectangle.style.fill_color` | behavior-note | BN-20 |
 | `_2022/visual_proofs/lies.py:IntegralExampleWithErrorBoxes` | `3.0 Rectangle.style.fill_color` | behavior-note | BN-20 |
 | `_2023/clt/galton_board.py:GaltonBoard` | `1.4 Integer.style.fill_opacity` | bug | fm-v4lv |
-| `_2023/clt/main.py:AnalyzeHundreDiceQuestion` | `16 Integer.class` | untriaged |  |
+| `_2023/clt/main.py:AnalyzeHundreDiceQuestion` | `16 Integer.class` | bug | fm-1auv |
 | `_2023/clt/wordy_scenes.py:ErdosKac` | `5.1.1 Integer.class` | bug | fm-yuin |
 | `_2023/clt_proof/main.py:DirectMGFInterpretation` | `4 Group.class` | bug | fm-1auv |
 | `_2023/convolutions2/continuous.py:TransitionToContinuousProbability` | `7 ParametricCurve.class` | behavior-note | BN-20 |
@@ -136,14 +136,14 @@ Labels come from `docs/ratchet/differential_triage.tsv`. A stale label must be r
 | `_2024/holograms/supplements.py:BinaryVsSinusoidalDiffraction` | `6 VGroup.style.fill_color` | bug | fm-ns8q |
 | `_2024/holograms/supplements.py:ComplexAlgebra` | `8 Tex.string` | bug | fm-1auv |
 | `_2024/holograms/supplements.py:ComplexConjugateFact` | `6 Arrow.class` | bug | fm-1auv |
-| `_2024/holograms/supplements.py:ContrastPhotographyAndHolography` | `1 VMobjectFromSVGPath.class` | untriaged |  |
+| `_2024/holograms/supplements.py:ContrastPhotographyAndHolography` | `1 VMobjectFromSVGPath.class` | behavior-note | BN-08 |
 | `_2024/holograms/supplements.py:ShowALens` | `3 VGroup.style.fill_color` | bug | fm-ns8q |
 | `_2024/holograms/supplements.py:WhatAHologramReconstructs` | `6.0 Text.class` | bug | fm-1auv |
 | `_2024/holograms/supplements.py:WhatThisExplanationLacks` | `3 VGroup.class` | untriaged |  |
-| `_2024/puzzles/added_dimension.py:GeneralCentersOfSimilarity` | `4 Circle.n_points` | untriaged |  |
+| `_2024/puzzles/added_dimension.py:GeneralCentersOfSimilarity` | `4 Circle.n_points` | behavior-note | BN-05 |
 | `_2024/puzzles/added_dimension.py:TriangleAreaFormula` | `7 VCube.style.fill_opacity` | bug | fm-v4lv |
 | `_2024/puzzles/max_rand.py:MaxProcess` | `7.3 DashedLine.style.stroke_opacity` | behavior-note | BN-07 (C-31) |
-| `_2024/puzzles/supplements.py:TwoDToThreeDInsight` | `4 Arrow.class` | untriaged |  |
+| `_2024/puzzles/supplements.py:TwoDToThreeDInsight` | `4 Arrow.class` | bug | fm-1auv |
 | `_2025/colliding_blocks_v2/blocks.py:Blocks` | `17 TracedPath.n_points` | behavior-note | BN-10 |
 | `_2025/colliding_blocks_v2/blocks.py:IntroduceSetup` | `7 VGroup.member` | bug | fm-j6lm |
 | `_2025/colliding_blocks_v2/blocks.py:MovementOfWall` | `6 VGroup.member` | bug | fm-j6lm |
@@ -156,7 +156,7 @@ Labels come from `docs/ratchet/differential_triage.tsv`. A stale label must be r
 | `_2025/colliding_blocks_v2/supplements.py:Confetti` | `1 VGroup.style.fill_color` | bug | fm-ns8q |
 | `_2025/colliding_blocks_v2/supplements.py:PiTime1e5` | `1 Integer.style.fill_opacity` | bug | fm-v4lv |
 | `_2025/cosmic_distance/supplements.py:CopernicusConclusions` | `2 VGroup.class` | behavior-note | BN-08 |
-| `_2025/cosmic_distance/supplements.py:CountUpDates` | `1.0.1 VMobjectFromSVGPath.style.fill_opacity` | untriaged |  |
+| `_2025/cosmic_distance/supplements.py:CountUpDates` | `1.0.1 VMobjectFromSVGPath.style.fill_opacity` | behavior-note | BN-10 |
 | `_2025/cosmic_distance/supplements.py:FullLunarEclipseDistance` | `3.0 VMobjectFromSVGPath.string` | behavior-note | BN-08 |
 | `_2025/grover/polarization.py:BeamSplitter` | `4 TimeVaryingVectorField.style.stroke_width` | behavior-note | BN-10 |
 | `_2025/guest_videos/euclid.py:SquareOnASphere` | `11 ParametricCurve.class` | bug | fm-v1aq |
@@ -190,7 +190,7 @@ Labels come from `docs/ratchet/differential_triage.tsv`. A stale label must be r
 | `_2026/print_gallery/misc_scenes.py:RightAngles` | `1 VGroup.style.fill_color` | bug | fm-ns8q |
 | `_2026/print_gallery/supplements.py:CyclidElementsQuote` | `180 VGroup.class` | bug | fm-1auv |
 | `_2026/print_gallery/supplements.py:DistributeZoomOverlay` | `4 VGroup.class` | bug | fm-1auv |
-| `_2026/print_gallery/supplements.py:EscherToSonQuote` | `5 VMobjectFromSVGPath.class` | untriaged |  |
+| `_2026/print_gallery/supplements.py:EscherToSonQuote` | `5 VMobjectFromSVGPath.class` | bug | fm-1auv |
 | `_2026/print_gallery/supplements.py:ReferenceDerivatives` | `5 VGroup.style.fill_color` | bug | fm-ns8q |
 | `_2026/print_gallery/supplements.py:ZoomInLine` | `3 Dot.class` | bug | fm-v1aq |
 | `_2026/spheres_talk/random_puzzles.py:SumOfTwoSquares` | `1.2.1.0 VGroup.style.stroke_color` | behavior-note | BN-07 (C-31) |
