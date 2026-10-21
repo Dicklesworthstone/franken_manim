@@ -102,7 +102,7 @@ def _render_source_job(job):
 
 
 def _outcome(name, destination, row, *, format=None, subdivide=False,
-             save_last_frame=False, max_segments=10_000):
+             save_last_frame=False, max_segments=10_000, bundle_options=None):
     if subdivide or save_last_frame:
         from .parallel_output import restore_output
 
@@ -127,6 +127,14 @@ def _outcome(name, destination, row, *, format=None, subdivide=False,
         # never unpickle a worker-supplied Scene or arbitrary exception.
         if row.get("name") != name or row.get("destination") != str(destination):
             raise ValueError("worker receipt does not identify its planned scene destination")
+        if format == "fmtl":
+            from .bundle_checkpoint import restore_bundle_receipt
+
+            if bundle_options is None:
+                raise ValueError("FMTL worker receipt requires its admitted bundle options")
+            receipt = restore_bundle_receipt(row.get("result"), destination=destination,
+                                             options=bundle_options)
+            return SceneRenderOutcome(name, destination, "succeeded", result=receipt)
         result = _restored_outcome(row)
         if result.destination != destination:
             raise ValueError("worker publication receipt changed destination")
@@ -140,11 +148,12 @@ def _outcome(name, destination, row, *, format=None, subdivide=False,
 
 def render_source_scenes(source, directory, scene_names, *, workers=2,
                          format="png_sequence", resolution=None, fps=None,
-                         threads=1, continue_on_error=False, on_result=None,
+                         threads=None, continue_on_error=False, on_result=None,
                          max_jobs=1024, animation_range=None, job_timeout=None,
                          checkpoint=None, resume=False, resume_key=None,
                          subdivide=False, max_segments=10_000, save_last_frame=False,
-                         reproducible=False,
+                         reproducible=False, bundle_camera=False, bundle_limits=None,
+                         bundle_audio=False, bundle_audio_options=None,
                          _output_options=None, _expected_source_digest=None,
                          _working_directory=None, _configuration=None):
     """Render explicitly named local Scene classes in bounded fresh processes.
@@ -191,6 +200,16 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
     Supply resume_key for helper/asset versions, as in sequential recovery:
     this is explicit reuse, not source-closure certification or a render cache.
     An output without a completed journal receipt still fails no-clobber.
+
+    format="fmtl" exports complete portable recordings through each worker's
+    existing render_scenes/BundleExportSession. bundle_camera, bundle_limits,
+    bundle_audio and bundle_audio_options have the same meanings and defaults
+    as sequential export. Explicit raster threads, ranges, subdivision, paired
+    output and source certification are refused before launching a worker.
+    Audio mixer workers are controlled separately by audio_threads. Parent-side
+    receipt validation binds camera/audio mode, layout and capture limits to the
+    admitted job. Checkpoint recovery preserves these settings and hash-verifies
+    completed bundles; no-cue scenes may return ordinary picture-only receipts.
     """
     workers = positive_integer(workers, "workers", 64)
     maximum = positive_integer(max_jobs, "max_jobs", 65536)
@@ -203,7 +222,7 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
         raise TypeError("continue_on_error must be bool")
     if on_result is not None and not callable(on_result):
         raise TypeError("on_result must be callable or None")
-    if not isinstance(format, str) or format not in _FORMATS:
+    if not isinstance(format, str) or format not in _FORMATS | {"fmtl"}:
         raise ValueError("unsupported parallel batch render format")
     if not isinstance(subdivide, bool) or not isinstance(save_last_frame, bool):
         raise TypeError("subdivide and save_last_frame must be bool")
@@ -213,6 +232,16 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
         raise ValueError("max_segments requires subdivide=True")
     if not isinstance(reproducible, bool):
         raise TypeError("reproducible must be bool")
+    if type(bundle_camera) is not bool or type(bundle_audio) is not bool:
+        raise TypeError("bundle_camera and bundle_audio must be bool")
+    if format != "fmtl" and (bundle_camera or bundle_audio or bundle_limits is not None
+                             or bundle_audio_options is not None):
+        raise ValueError("bundle camera, audio and limits require format='fmtl'")
+    if format == "fmtl" and (reproducible or subdivide or save_last_frame):
+        native = importlib.import_module("manimlib")
+        raise native._CapabilityError(
+            "FMTL process batches exclude source certification, subdivision and paired output"
+        )
     if reproducible:
         native = importlib.import_module("manimlib")
         from .batch_provenance import validate_batch_mode
@@ -240,7 +269,19 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
     if subdivide and resolution is not None and resolution[0] * resolution[1] > 16_777_216:
         raise ValueError("subdivision requires at most 16777216 pixels")
     fps = None if fps is None else positive_integer(fps, "fps", (1 << 32) - 1)
-    threads = positive_integer(1 if threads is None else threads, "threads", 96)
+    bundle_options = None
+    if format == "fmtl":
+        from .parallel_bundle import prepare_bundle_options
+
+        bundle_options = prepare_bundle_options(
+            importlib.import_module("manimlib"), camera=bundle_camera, audio=bundle_audio,
+            limits=bundle_limits, audio_options=bundle_audio_options, resolution=resolution,
+            fps=fps, threads=threads, animation_range=selection, subdivide=subdivide,
+            save_last_frame=save_last_frame, reproducible=reproducible,
+            output_options=_output_options,
+        )
+    else:
+        threads = positive_integer(1 if threads is None else threads, "threads", 96)
     if isinstance(scene_names, (str, bytes)):
         raise TypeError("scene_names must be an iterable of class names, not a string")
     names = list(islice(iter(scene_names), maximum + 1))
@@ -277,6 +318,8 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
         provenance = ParallelProvenance(native, format, destinations, digest)
     options = dict(format=format, resolution=resolution, fps=fps, threads=threads,
                    animation_range=selection, _output_options=_output_options)
+    if bundle_options is not None:
+        options.update(bundle_options)
     if _configuration is not None:
         options["_configuration"] = _configuration
     if reproducible:
@@ -313,7 +356,8 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
             if provenance is not None and row["status"] == "succeeded":
                 return provenance.restore(name, path, row)
             return _outcome(name, path, row, format=format, subdivide=subdivide,
-                            save_last_frame=save_last_frame, max_segments=max_segments)
+                            save_last_frame=save_last_frame, max_segments=max_segments,
+                            bundle_options=options if format == "fmtl" else None)
 
         outcomes = [restore(name, path, completed[name]) if name in completed else
                     SceneRenderOutcome(name, path, "not_run")

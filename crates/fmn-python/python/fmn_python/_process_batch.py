@@ -250,8 +250,12 @@ def run_process_jobs(jobs, worker, *, workers, continue_on_error=False,
                 process, connection, row = item
                 if row is None and connection in ready:
                     item[2] = row = _receive(connection)
-                if row is not None and (row["status"] == "cancelled" or
-                                        (row["status"] != "succeeded" and not continue_on_error)):
+                # A timeout's own cleanup SIGINT may return a cancelled row.
+                # It becomes a timeout failure after cleanup, not a user request
+                # to stop unrelated work. Genuine worker cancellation still stops
+                # admission even under keep-going.
+                if row is not None and ((row["status"] == "cancelled" and index not in timed_out)
+                                        or (row["status"] != "succeeded" and not continue_on_error)):
                     stopped = True
                 if (index not in cancelling and job_timeout is not None
                         and time.monotonic() - started[index] >= job_timeout and process.is_alive()):
