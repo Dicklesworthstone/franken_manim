@@ -171,7 +171,7 @@ def try_bundle_cli(native, arguments):
     )
     camera = "--bundle-camera" in switches
     audio = bool(audio_switches)
-    if "fmtl" not in formats and not camera and not audio and not audio_values and not job_files:
+    if "fmtl" not in formats and not camera and not audio and not audio_values:
         return None
     robot = "--robot" in switches
     if "--help" in switches or "-h" in switches:

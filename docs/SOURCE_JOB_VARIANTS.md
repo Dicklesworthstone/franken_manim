@@ -74,7 +74,7 @@ writes NOT-FMTL bytes; these tests do not establish native image/audio acceptanc
 The installed-wheel test separately compares native variants with sequential
 `RenderJob` exports. Missing native tooling is an error with `FMN_TEST_NATIVE=1`.
 
-## JSON job files and the FMTL CLI
+## JSON job files and the CLI
 
 A job file keeps constructor data separate from Python source:
 
@@ -103,10 +103,10 @@ names. Common capture/audio options apply to every job. Omitting this flag leave
 ordinary single-scene, named-scene and write-all behavior unchanged.
 
 `--jobs-file` requires `--workers`, and cannot combine with positional scene names,
-`--write_all`, `--output` or `--file_name`. This CLI option currently belongs to
-`--format fmtl`. Other standard output modes can use the same data programmatically:
-`load_source_jobs(path)` from `fmn_python.source_job_file` returns a tuple accepted
-by `render_source_scenes`. No new render loop is involved.
+`--write_all`, `--output` or `--file_name`. The same job files work with standard PNG stills/sequences, GIF, Y4M, WAV,
+SVG, MP4, MOV and FMTL. Omitting `--format` keeps the existing PNG-sequence
+default. `load_source_jobs(path)` from `fmn_python.source_job_file` also returns
+a tuple accepted by `render_source_scenes`. No new render loop is involved.
 
 Files must be stable regular UTF-8 files of at most 8 MiB. Symlinks, special files,
 unknown fields/versions, duplicate JSON keys, invalid values, colliding names and
@@ -121,3 +121,55 @@ reporting. Other existing batch exit/partial-receipt behavior is unchanged.
 its parser/inventory/native-capture boundaries remain explicit fixtures. The
 native test invokes the installed CLI independently and must be run against a
 matching built wheel; protocol success does not establish that acceptance.
+
+
+## Parameterized media output
+
+The ordinary media renderer accepts the same JSON job document, without an
+intermediate FMTL export or another scene execution:
+
+```sh
+fmn-python lessons.py --workers 4 --jobs-file variants.json --format mp4 \
+  --crf 18 --preset slow --threads 2 --video_dir videos \
+  --checkpoint video-progress.json --resume-key lessons-assets-v1 --keep-going
+```
+
+This writes `videos/seed7.mp4` and `videos/seed11.mp4`, using independent
+instances of `Lesson`. Each worker receives the original typed JSON constructor
+values. `--workers` controls scene concurrency; `--threads` controls each native
+renderer and defaults to one on the process path. MP4/MOV still require the
+existing governed ffmpeg capability. Audio in media outputs follows the ordinary
+scene/media pipeline; `--bundle-audio` and `--bundle-camera` remain FMTL-only.
+
+Use `-n START,END` or `-n START` for a segment excerpt, `-s` for a final PNG, or
+`--save-last-frame` for a companion PNG from the same scene execution. Subdivided
+media output also accepts job files:
+
+```sh
+fmn-python lessons.py --workers 2 --jobs-file variants.json --format y4m \
+  -n 2,5 --subdivide --save-last-frame --video_dir excerpts
+```
+
+Clips use each job's output name, not its class name. These options delegate to
+the existing playback, paired-output and subdivision owners and retain their
+format restrictions. Non-subdivided single outputs and pairs support verified
+checkpoint recovery. Subdivided collections still refuse checkpoints. Explicit
+constructor variants refuse `--reproducible` before source discovery; this does
+not change certification for ordinary class-name batches.
+
+All job-file classes must be present in isolated discovery before any render
+worker starts. Output collisions stop admission without overwriting files.
+Job data is read once before discovery, so subsequent edits to the document do
+not alter admitted work. Robot output retains the ordered batch report and
+partial outcomes on failure/cancellation; `--quiet` does not suppress it.
+Malformed documents or conflicting selection options fail before discovery.
+Help describes the format without opening the job file.
+
+`test_media_job_file_protocol.py` runs the full bundle/media dispatch wrappers,
+production job reader, range/video option consumers, worker dispatch, real
+spawned interpreters, receipt transport and filesystem checkpoint owner. Native
+common-option parsing, capture/rendering, discovery inventory and paired/clip
+owners are explicit fixtures; emitted NOT-MEDIA files are not image/audio
+acceptance evidence. `test_media_job_file_native.py` separately exercises the
+installed module entry point and native outputs, with `FMN_TEST_NATIVE=1`
+requiring a matching native wheel rather than silently skipping acceptance.

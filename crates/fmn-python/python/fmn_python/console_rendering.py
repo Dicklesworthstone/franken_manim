@@ -247,35 +247,48 @@ def _partial_output(session, subdivide):
 
 def try_render_cli(native: Any, arguments: list[str]) -> int | None:
     """Own ordinary renders; leave non-render commands on their native route."""
+    from .source_job_file import JOBS_FILE_HELP, load_source_jobs, take_jobs_file_options
+
+    arguments, job_files = take_jobs_file_options(arguments, _VALUE_FLAGS)
     native_options, raw_positionals, switches = _tokens(arguments, _SELECTION_FLAGS)
     if (_CONTROL_FLAGS.intersection(switches)
             or (raw_positionals and raw_positionals[0] == "studio")):
         return None
-    if not arguments or arguments == ["--robot"]:
+    if (not arguments or arguments == ["--robot"]) and not job_files:
         return None
     robot = switches.count("--robot") != 0
     write_all = switches.count("--write_all") + switches.count("-a")
     keep_going = switches.count("--keep-going")
     if max(switches.count("--robot"), write_all, keep_going) > 1:
         return native._portal_cli_emit(2, "usage", "usage-error", "render switches must not be repeated", robot)
-    if not raw_positionals and native_options in (["--help"], ["-h"]):
+    if ((not raw_positionals and native_options in (["--help"], ["-h"]))
+            or (job_files and {"--help", "-h"}.intersection(switches))):
         text = native._portal_cli_help().replace(
             "Certified output, opener flags, write-all, and Studio",
             "Certified output, opener flags, and Studio",
         ).replace("Certified output, opener flags, and Studio", "Certified output and opener flags")
         from .studio import _HELP as _STUDIO_HELP
         text += "\n\n" + _BATCH_HELP + "\n" + _SELECTION_HELP + "\n" + PLAYBACK_HELP + "\n" + _OUTPUT_HELP + "\n" + SUBDIVISION_HELP + "\n" + PAIRED_HELP + "\n" + CHECKPOINT_HELP + "\n" + _STUDIO_HELP
-        text += "\n" + VIDEO_HELP + "\n" + PARALLEL_HELP + "\n" + _REFERENCE_HELP
+        text += "\n" + VIDEO_HELP + "\n" + PARALLEL_HELP + "\n" + _REFERENCE_HELP + "\n" + JOBS_FILE_HELP
         if robot:
             return native._portal_cli_emit(0, "success", "help", "fmn-python usage", True, help=text)
         print(text)
         return 0
-    batch = bool(write_all or len(raw_positionals) > 2)
+    batch = bool(write_all or len(raw_positionals) > 2 or job_files)
     try:
         invocation_directory = Path.cwd()
         native_options, parallel = take_parallel_options(native_options, _VALUE_FLAGS)
         if parallel and not batch:
             raise ValueError("--workers requires multiple scene names or --write_all")
+        source_jobs = None
+        if job_files:
+            if len(job_files) != 1 or not job_files[0]:
+                raise ValueError("--jobs-file requires one path and must not be repeated")
+            if not parallel:
+                raise ValueError("--jobs-file requires --workers")
+            if write_all or len(raw_positionals) != 1:
+                raise ValueError("--jobs-file requires one source without scene names or --write_all")
+            source_jobs = load_source_jobs(job_files[0], max_jobs=_MAX_SELECTED_SCENES)
         native_options, video_options = take_video_options(native_options, _VALUE_FLAGS)
         native_options, paired = take_last_frame_option(native_options, _VALUE_FLAGS)
         native_options, subdivide = take_subdivision_option(native_options, _VALUE_FLAGS)
@@ -292,6 +305,9 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
         options.update(video_options)
         configuration, width, height, fps = resolve_render_configuration(native, options, width, height, fps)
         output_options = _output_overrides(options)
+        if source_jobs is not None and options.get("reproducible"):
+            raise RuntimeError("CAPABILITY: constructor variants require standard mode; "
+                               "their JSON inputs do not establish a certified source closure")
         if parallel:
             if "--threads" not in native_options:
                 threads = 1
@@ -371,10 +387,13 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
             scenes = loaded.scenes
             names = sorted(scenes)
             if batch:
-                requested = names if write_all else requested
+                requested = source_jobs if source_jobs is not None else names if write_all else requested
+                if source_jobs is not None:
+                    phase = "batch"  # Invalid variant selection is an admission error.
                 if not requested:
                     raise ValueError(f"no locally declared Scene classes found in {source}")
-                missing = [name for name in requested if name not in scenes]
+                selected_classes = ([job.scene for job in source_jobs] if source_jobs is not None else requested)
+                missing = [name for name in selected_classes if name not in scenes]
                 if missing:
                     raise ValueError("selected scenes were not declared by " + source + ": " + ", ".join(missing))
                 destination = default_root if destination is None else destination
