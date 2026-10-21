@@ -124,6 +124,69 @@ pub fn run_portal_gauntlet_reference_corpus_regressions()
     })
 }
 
+/// What the Tex selection parity check observed (fm-portal-span-parity-sc4k).
+#[derive(Debug)]
+pub struct TexSelectionReport {
+    /// Rows compared: selections, path counts and matching pairings.
+    pub rows: u64,
+    /// Rows where the portal gives the Reference's answer.
+    pub matches: u64,
+    /// Rows where the Reference contradicts its own label-based answer and
+    /// the portal gives that answer (Appendix C-36), or where the
+    /// Reference's labelling braces make LaTeX refuse the formula (C-37).
+    pub reference_defects: u64,
+    /// Matching pairings that differ only by the Reference's leftover shape
+    /// matching, which the portal deliberately drops (BN-05).
+    pub behavior_notes: u64,
+    /// Mismatches an open bead owns.
+    pub owned: u64,
+    /// Mismatches raised by a planted portal whose `getitem` answer is one
+    /// glyph off; the check fails when they are too few to notice it.
+    pub planted_mismatches: u64,
+}
+
+/// `tests/tex_selection_reference.py` in the embedded portal, against the
+/// pinned Reference's selections
+/// (`fixtures/tex_selection_reference.v1.ndjson`): `tex[sel]`, `t2c`,
+/// `isolate`, `substr_to_path_count` and `TransformMatchingTex` pairings.
+///
+/// # Errors
+/// Rows that mismatch with no owner or recorded cause, a stale owned row,
+/// fewer than 95% of rows agreeing, or a planted one-glyph shift that the
+/// comparison does not notice.
+pub fn run_portal_gauntlet_tex_selection() -> Result<TexSelectionReport, String> {
+    crate::with_python_test_module("tex selection reference", |py, _module, globals| {
+        let code = std::ffi::CString::new(include_str!("../tests/tex_selection_reference.py"))
+            .map_err(|error| error.to_string())?;
+        py.run(code.as_c_str(), Some(globals), Some(globals))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        let summary = globals
+            .get_item("run_tex_selection_reference")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "tex selection entry point is absent".to_owned())?
+            .call1((include_str!(
+                "../../fmn-conformance/fixtures/tex_selection_reference.v1.ndjson"
+            ),))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        let count = |key: &str| -> Result<u64, String> {
+            summary
+                .get_item(key)
+                .and_then(|value| value.extract::<u64>())
+                .map_err(|error| format!("{key}: {error}"))
+        };
+        Ok(TexSelectionReport {
+            rows: count("rows")?,
+            matches: count("match")?,
+            reference_defects: count("reference_defect")?,
+            behavior_notes: count("behavior_note")?,
+            owned: count("owned")?,
+            planted_mismatches: count("planted_mismatches")?,
+        })
+    })
+}
+
 /// What the envelope drill observed.
 #[derive(Debug)]
 pub struct EnvelopeDrillReport {

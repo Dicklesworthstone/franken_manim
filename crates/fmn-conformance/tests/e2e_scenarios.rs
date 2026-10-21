@@ -3641,6 +3641,33 @@ fn python_structural_facts_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioE
         .with_counter("structural_equal", report.equal))
 }
 
+/// Tex substring selection against the pinned Reference
+/// (fm-portal-span-parity-sc4k): `tex[sel]`, `t2c`, `isolate`,
+/// `substr_to_path_count` and `TransformMatchingTex` pairings for the
+/// Reference box oracle's authored formulas, run through the embedded
+/// portal's native span maps. Glyphs are matched by position. A mismatch
+/// passes only as Appendix C-36 (the Reference's symbol-count heuristic
+/// contradicting its own isolated selection), C-37 (the Reference's
+/// labelling braces making LaTeX refuse), BN-05 (no leftover shape
+/// matching) or an open bead's row, and at least 95% of rows must agree. A
+/// planted portal one glyph off in `getitem` must fail the comparison.
+fn python_tex_selection_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let report = manimlib::run_portal_gauntlet_tex_selection()
+        .map_err(|error| fail(format!("Tex selection against the Reference: {error}")))?;
+    ctx.event(
+        LogEvent::new("e2e.python.tex_selection")
+            .field("rows", report.rows)
+            .field("matches", report.matches)
+            .field("reference_defects", report.reference_defects)
+            .field("behavior_notes", report.behavior_notes)
+            .field("owned", report.owned)
+            .field("planted_mismatches", report.planted_mismatches),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("tex_selection_rows", report.rows)
+        .with_counter("tex_selection_matches", report.matches))
+}
+
 /// The Appendix-A class sweep (fm-5wq.26): every public mobject class's
 /// default and declared constructions, public methods included, match the
 /// pinned Reference's facts in the embedded portal. Anything else must be
@@ -9675,6 +9702,23 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "parity.tex_selection_reference.v1",
+        ScenarioClass::ParityDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_tex_selection_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tex_selection_rows", 2352),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.tex_selection",
+            vec![
+                FieldPred::u64_eq("rows", 2352),
+                FieldPred::u64_ge("planted_mismatches", 100),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "parity.class_sweep.v1",
         ScenarioClass::ParityDrill,
         Surface::PythonInProcess,
@@ -11673,6 +11717,16 @@ fn python_reference_corpus_regressions_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "parity.reference_corpus_regressions.v1")
         .expect("Reference corpus regressions scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn python_tex_selection_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "parity.tex_selection_reference.v1")
+        .expect("Tex selection scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

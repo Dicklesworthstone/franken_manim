@@ -140,7 +140,23 @@ The independent native selection regression is in
 `crates/fmn-python/tests/text_selection.py` cover selection, coloring, counts,
 copying, numeric replacement and matching. The source-level matching protocol
 suites use explicit native-boundary doubles and are not rendering parity
-evidence. Broad Reference fixture coverage remains separate from these checks.
+evidence.
+
+Against the pinned Reference, `crates/fmn-python/tests/tex_selection_reference.py`
+runs `tex[sel]`, `t2c`, `isolate`, `substr_to_path_count` and
+`TransformMatchingTex` over the box oracle's 111 authored formulas, 631
+selectors and 50 formula pairs, and compares glyphs by position with the
+Reference's recorded selections
+(`crates/fmn-conformance/fixtures/tex_selection_reference.v1.ndjson`, captured by
+`scripts/capture_tex_selection.py`). Of 2352 rows, 1998 agree. 296 differ
+because the Reference's symbol-count slicing contradicts its own isolated
+selection (Appendix C-36): `Tex(r"e^{i\pi} + 1 = 0")["i"]` selects the i and
+the `+` there and the i here. 36 differ because the Reference's labelling braces
+make LaTeX refuse the formula (C-37): `t2c={"(": RED}` on
+`\left( \frac{a}{b} \right)` raises there and colours the parenthesis here. 22
+rows of `\iint_D f\,dA` are fm-zxxy's (the glyph-count gap). The check runs in
+the e2e catalog as `parity.tex_selection_reference.v1` and in the
+installed-wheel gate.
 
 ## TeX colour commands
 

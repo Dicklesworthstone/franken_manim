@@ -165,6 +165,16 @@ class NativeTexSelectionTests(unittest.TestCase):
         self.assertEqual(set(map(id, matched)), set(map(id, expected)))
         self.assertEqual(len(matched), len(expected))
 
+    def test_a_macro_expansion_is_selected_by_its_call_site(self):
+        formula = m.Tex(r'\newcommand{\R}{\mathbb{R}} x \in \R')
+        self.assertEqual(len(formula), 3)
+        self.assertIs(formula.select_part(r'\R')[0], formula[2])
+        self.assertEqual(formula.substr_to_path_count(r'\R'), 1)
+        # The R of the definition and of the command name owns no ink.
+        self.assertEqual(formula['R'].family_members_with_points(), [])
+        formula.set_color_by_tex(r'\R', m.RED)
+        self.assertEqual([part.get_fill_color() == m.RED for part in formula], [False, False, True])
+
     def test_invalid_utf8_native_metadata_is_refused(self):
         text = m.Text('é')
         text._string_sub_spans = [(0, 1)]
