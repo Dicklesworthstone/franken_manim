@@ -1010,11 +1010,12 @@ mod tests {
             // at TeX's variant sizes at franken_markdown e0dd66e, then
             // tex_display_sum.v1's \sum at cmex10's width at franken_markdown
             // 80cbadc, then the six TeX scenes in the CM math faces at
-            // franken_markdown 23c4d0c)
+            // franken_markdown 23c4d0c, then five of them laid out from TeX's
+            // TFM metrics at franken_markdown 216c7c3)
             // and the journaled map orientation.
             assert_eq!(
                 definition.digest().to_string(),
-                "1a9554b56967d22c3807760d9a9094b81c953f7a09011619ccc0689af31265af"
+                "e2a4282dd66ca6d162608dff5edfd7278680f2e95c817a2d397daea86f1c6b09"
             );
         }
     }
