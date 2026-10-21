@@ -43,6 +43,16 @@ What this costs, measured (calibration-unqualified, ADR-0024):
   wrappers in `_STEPS` order. A family's cycle handling, builder normalization or admission rule can differ
   from its neighbours', and no file states the whole behavior. The layer count grew 54 → 77 steps between
   2026-09-23 and 2026-09-29.
+- **What native segment offload would buy (fm-offload-payoff-4rve, 2026-10-21).** The census and
+  prediction are in `docs/ratchet/offload_payoff.md`. The census classified every segment of 1,017 of
+  the 1,079 corpus scenes that run in the portal (94%). Segments that must run Python carry 96% of
+  segment wall time, and 86% of that is in segments with updaters the library itself defines.
+  Measured: the portal/Reference median is 1.15× (95% CI 1.11–1.20), at 320x180, 15 fps and one
+  render thread. Offloading every segment that is native-backed today leaves it at 1.15×. Making the
+  library's own updaters native as well gives 1.09×. PG-1 asks for ≤ 0.50× at G2. Offload (fm-5wq.51)
+  is therefore not the PG-1 lever by itself: the per-frame Python cost of library-defined updaters
+  is. Both numbers are calibration-unqualified, from one repetition on a loaded shared host, with
+  the native/portal ratio taken from one scene.
 
 ## Options considered
 

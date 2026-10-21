@@ -36,6 +36,24 @@ class Prediction(unittest.TestCase):
         p = op.predict(1.0, 1.0, [segment("python", 1.2, ["stop-condition"])], 0.5)
         self.assertAlmostEqual(p["strict"], 1.2)
 
+    def test_a_later_run_replaces_a_scene_whole(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first, rerun = pathlib.Path(tmp) / "first", pathlib.Path(tmp) / "rerun"
+            for run_dir, records in (
+                    (first, [("A", "portal", None, 300.0), ("A", "reference", 0, 20.0),
+                             ("B", "portal", 0, 4.0), ("B", "reference", 0, 2.0)]),
+                    (rerun, [("A", "portal", 0, 900.0), ("A", "reference", 0, 21.0)])):
+                run_dir.mkdir()
+                (run_dir / "runs.ndjson").write_text("".join(
+                    json.dumps({"module": "m.py", "scene": s, "engine": e, "rep": 0, "exit": x,
+                                "seconds": t}) + "\n" for s, e, x, t in records))
+            runs, owner = op.merged_runs([first, rerun])
+        a_runs = sorted((r["engine"], r["seconds"]) for r in runs if r["scene"] == "A")
+        self.assertEqual(a_runs, [("portal", 900.0), ("reference", 21.0)])
+        self.assertEqual(owner[("m.py", "A")], rerun)
+        self.assertEqual(owner[("m.py", "B")], first)
+        self.assertEqual(len(runs), 4)
+
     def test_report_from_a_synthetic_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = pathlib.Path(tmp)
@@ -54,7 +72,7 @@ class Prediction(unittest.TestCase):
                  {"engine": "portal", "exit": 0, "wall_s": 4.0, "cpu_s": 4.0, "load1": 1.0}]))
             out = tmp / "payoff.md"
             result = op.write_report(type("Args", (), {
-                "runs": run, "portal_scenes": 4, "same_scene": [f"{same}:one"],
+                "runs": [run], "portal_scenes": 4, "same_scene": [f"{same}:one"],
                 "ratio_from": "one", "out": out})())
             text = out.read_text()
         self.assertEqual(result["census_scenes"], 2)

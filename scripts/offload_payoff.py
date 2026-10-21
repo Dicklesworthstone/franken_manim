@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """The native-offload payoff (fm-offload-payoff-4rve): segment census plus prediction.
 
-Input: one `corpus_speed_ratio.py --frames --census` run directory. Its runs.ndjson pairs each
+Input: `corpus_speed_ratio.py --frames --census` run directories. A runs.ndjson pairs each
 scene's portal and Reference wall times, and each portal run left the segment census the portal
 records under FMN_SEGMENT_CENSUS (fmn_python/segment_census.py, schema fmn.segment-census v1).
+A later `--runs` directory re-measures scenes (say, the first run's timeouts at a longer
+timeout): its records replace every earlier record of the same scene, both engines.
 Also: the same-scene native/portal measurements (`--same-scene`, runs.json files of
 native-vs-portal pairs on one scene).
 
@@ -18,7 +20,7 @@ in Python. "Library updaters native" also offloads the python segments whose onl
 updater the library itself defines (InteractiveScene's selection highlight). The report states
 both, with the PG-1 bars (<= 0.50x at G2, <= 0.35x at G4).
 
-Usage: offload_payoff.py --runs DIR --portal-scenes N --same-scene FILE[:LABEL]...
+Usage: offload_payoff.py --runs DIR [--runs RERUN_DIR]... --portal-scenes N --same-scene FILE[:LABEL]...
                          --ratio-from LABEL --out docs/ratchet/offload_payoff.md
 """
 from __future__ import annotations
@@ -47,6 +49,18 @@ def load_census(run_dir: pathlib.Path, module: str, scene: str) -> list[dict]:
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
+def merged_runs(run_dirs: list[pathlib.Path]) -> tuple[list[dict], dict]:
+    """Run records across `run_dirs`, and the directory each scene's records come from: a later
+    directory's records replace every earlier record of the same scene."""
+    runs, owner = [], {}
+    for run_dir in run_dirs:
+        records = load_runs(run_dir / "runs.ndjson")
+        scenes = {(r["module"], r["scene"]) for r in records}
+        runs = [r for r in runs if (r["module"], r["scene"]) not in scenes] + records
+        owner.update((scene, run_dir) for scene in scenes)
+    return runs, owner
 
 
 def library_only(segment: dict) -> bool:
@@ -84,12 +98,11 @@ def same_scene(files: list[str]) -> list[dict]:
 
 
 def write_report(args) -> dict:
-    run_dir = args.runs
-    header = json.loads((run_dir / "header.json").read_text(encoding="utf-8"))
-    runs = load_runs(run_dir / "runs.ndjson")
+    header = json.loads((args.runs[0] / "header.json").read_text(encoding="utf-8"))
+    runs, owner = merged_runs(args.runs)
     portal_ok = sorted({(r["module"], r["scene"]) for r in runs
                         if r["engine"] == "portal" and r["exit"] == 0})
-    censuses = {scene: load_census(run_dir, *scene) for scene in portal_ok}
+    censuses = {scene: load_census(owner[scene], *scene) for scene in portal_ok}
     segments = [s for records in censuses.values() for s in records]
     pairs = same_scene(args.same_scene)
     r = next(row["ratio"] for row in pairs if row["label"] == args.ratio_from)
@@ -105,7 +118,7 @@ def write_report(args) -> dict:
                 sum(v <= 0.50 for v in values), sum(v <= 0.35 for v in values))
 
     commit = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"],
-                            capture_output=True, text=True).stdout.strip()
+                            capture_output=True, text=True, timeout=30).stdout.strip()
     total = sum(s["wall_s"] for s in segments) or 1.0
     lines = [
         "# Native-offload payoff: segment census and prediction",
@@ -121,6 +134,14 @@ def write_report(args) -> dict:
     for key in ("cpu", "logical_cpus", "platform", "portal_id", "reference_id", "mode", "reps",
                 "timeout_s"):
         lines.append(f"| {key} | {header.get(key, '')} |")
+    for run_dir in args.runs[1:]:
+        rerun = json.loads((run_dir / "header.json").read_text(encoding="utf-8"))
+        differ = [key for key in ("portal_id", "reference_id", "mode", "reps")
+                  if rerun.get(key) != header.get(key)]
+        if differ:
+            sys.exit(f"{run_dir} re-measures with a different {', '.join(differ)}")
+        count = sum(1 for d in owner.values() if d == run_dir)
+        lines.append(f"| re-measured | {count} scenes at timeout_s {rerun.get('timeout_s', '')} |")
     lines += [
         "",
         "## Census",
@@ -203,7 +224,8 @@ def write_report(args) -> dict:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--runs", type=pathlib.Path, required=True)
+    parser.add_argument("--runs", type=pathlib.Path, action="append", required=True,
+                        help="a census run directory; repeat for re-measurements, later wins")
     parser.add_argument("--portal-scenes", type=int, required=True,
                         help="corpus scenes that run in the portal (the coverage denominator)")
     parser.add_argument("--same-scene", action="append", default=[],
