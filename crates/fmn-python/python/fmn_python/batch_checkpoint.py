@@ -289,7 +289,7 @@ class BatchCheckpoint(_CheckpointFile):
         self._prepare_plan(plan, [job.name for job in jobs], destinations, options)
 
     def prepare_sources(self, names, destinations, options, *, source,
-                        source_digest, working_directory):
+                        source_digest, working_directory, variants=None):
         """Bind data-only worker identities without importing a Scene class.
 
         Entry-source bytes and invocation cwd are part of this plan, unlike a
@@ -309,6 +309,17 @@ class BatchCheckpoint(_CheckpointFile):
                           "scene": {"qualname": name}, "scene_kwargs": {}}
                          for name, path in zip(names, destinations)],
                 "options": options}
+        if variants is not None:
+            if not isinstance(variants, list) or len(variants) != len(names):
+                raise ValueError("checkpoint variants must match their source jobs")
+            plan["constructor_inputs"] = "source-variants-v1"
+            for row, variant in zip(plan["jobs"], variants):
+                if (not isinstance(variant, dict) or set(variant) != {"scene", "scene_kwargs"}
+                        or type(variant["scene"]) is not str or not variant["scene"].isidentifier()
+                        or type(variant["scene_kwargs"]) is not dict):
+                    raise ValueError("invalid checkpoint source variant")
+                row["scene"] = {"qualname": variant["scene"]}
+                row["scene_kwargs"] = _constructor_values(variant["scene_kwargs"])
         self._prepare_plan(plan, names, destinations, options)
 
     def _prepare_plan(self, plan, names, destinations, options):

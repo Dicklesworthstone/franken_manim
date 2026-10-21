@@ -11,7 +11,6 @@ from dataclasses import dataclass
 import hashlib
 import importlib
 import json
-from itertools import islice
 import os
 from pathlib import Path
 import sys
@@ -73,8 +72,14 @@ def _render_source_job(job):
             if compiled is None or hashlib.sha256(compiled).hexdigest() != job["source_digest"]:
                 raise RuntimeError("scene entry source changed during batch loading")
             name = job["name"]
-            if name not in loaded.scenes:
-                raise ValueError(f"no locally declared Scene named {name!r} in {source}")
+            scene_name = job.get("scene_name", name)
+            if scene_name not in loaded.scenes:
+                raise ValueError(f"no locally declared Scene named {scene_name!r} in {source}")
+            selected = {name: loaded.scenes[scene_name]}
+            if "scene_name" in job:
+                from .batch_rendering import RenderJob
+
+                selected = [RenderJob(name, loaded.scenes[scene_name], job["scene_kwargs"])]
             if reproducible:
                 from .parallel_provenance import executed_sources
 
@@ -82,7 +87,7 @@ def _render_source_job(job):
                                runtime_identities=snapshot.identities)
             try:
                 report = render_scenes(
-                    {name: loaded.scenes[name]}, job["directory"],
+                    selected, job["directory"],
                     continue_on_error=True, **options,
                 )
             except BaseException as error:
@@ -156,7 +161,18 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
                          bundle_audio=False, bundle_audio_options=None,
                          _output_options=None, _expected_source_digest=None,
                          _working_directory=None, _configuration=None):
-    """Render explicitly named local Scene classes in bounded fresh processes.
+    """Render local Scene classes or named parameter variants in fresh processes.
+
+    scene_names accepts strings or SourceRenderJob(name, scene, scene_kwargs).
+    Distinct names can select the same locally declared class with independent
+    constructor inputs. All names and plain JSON values are validated and
+    snapshotted before source loading or observer callbacks. Outcomes and paths
+    use job names; source lookup uses each job's scene identifier. Variants use
+    the existing RenderJob path inside each child, never dynamic eval or pickle.
+    Checkpoints bind both selected class and type-preserving constructor values;
+    changing either refuses reuse, even with an unchanged resume_key. String-only
+    calls retain their existing checkpoint format. Explicit parameter variants
+    are standard-mode only until constructor-input certification is defined.
 
     Use this API under ``if __name__ == '__main__':`` in Python scripts. The
     CLI supplies that spawn-safe entry point automatically. Unlike an iterable
@@ -232,6 +248,11 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
         raise ValueError("max_segments requires subdivide=True")
     if not isinstance(reproducible, bool):
         raise TypeError("reproducible must be bool")
+    from .source_jobs import prepare_source_jobs
+
+    names, variants = prepare_source_jobs(scene_names, maximum)
+    if variants is not None and reproducible:
+        raise RuntimeError("CAPABILITY: parameterized source jobs do not certify constructor inputs")
     if type(bundle_camera) is not bool or type(bundle_audio) is not bool:
         raise TypeError("bundle_camera and bundle_audio must be bool")
     if format != "fmtl" and (bundle_camera or bundle_audio or bundle_limits is not None
@@ -282,14 +303,6 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
         )
     else:
         threads = positive_integer(1 if threads is None else threads, "threads", 96)
-    if isinstance(scene_names, (str, bytes)):
-        raise TypeError("scene_names must be an iterable of class names, not a string")
-    names = list(islice(iter(scene_names), maximum + 1))
-    if not names or len(names) > maximum:
-        raise ValueError(f"parallel batch requires 1..{maximum} scene names")
-    keys = [_name_key(name) for name in names]
-    if len(set(keys)) != len(keys):
-        raise ValueError("parallel batch scene names collide")
     for path, label in ((source, "source"), (directory, "directory")):
         value = os.fspath(path)
         if not isinstance(value, str) or not value or "\0" in value:
@@ -335,6 +348,9 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
     options = json.loads(json.dumps(options, allow_nan=False))
     jobs = [dict(source=str(source), source_digest=digest, directory=str(root),
                  name=name, options=options, working_directory=str(working_directory)) for name in names]
+    if variants is not None:
+        for job, variant in zip(jobs, variants):
+            job.update(scene_name=variant["scene"], scene_kwargs=variant["scene_kwargs"])
     if provenance is not None:
         for job in jobs:
             job["runtime_identities"] = provenance.identities
@@ -349,7 +365,8 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
                 raise FileExistsError(f"render destination already exists: {destination}")
         if journal is not None:
             journal.prepare_sources(names, destinations, options, source=source,
-                                    source_digest=digest, working_directory=working_directory)
+                                    source_digest=digest, working_directory=working_directory,
+                                    **({"variants": variants} if variants is not None else {}))
         completed = {} if journal is None else journal.completed
 
         def restore(name, path, row):
