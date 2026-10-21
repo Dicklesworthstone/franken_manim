@@ -325,7 +325,7 @@ def run_process_jobs(jobs, worker, *, workers, continue_on_error=False,
                     # EOF caused by stopping an unreceipted worker is not a
                     # reported rendering failure. Preserve every complete row,
                     # earlier protocol failure and already-observed timeout.
-                    row = failure(BatchCancelled("worker stopped by caller"), "cancelled")
+                    row = failure(error, "cancelled")
                     row["error"]["notes"].append(
                         "Worker stopped without a complete receipt; outputs were not removed.")
                 rows[index] = row if row is not None else failure(

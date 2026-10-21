@@ -5,14 +5,11 @@ sending a signal to its own process. This belongs to the optional Python portal;
 it does not add a Python dependency or another scheduler to native `fmn`.
 
 ```python
-from threading import Timer
 from fmn_python import render_source_scenes
 from fmn_python.cancellation import BatchCancelled, CancellationToken
 
 if __name__ == "__main__":
-    cancellation = CancellationToken()
-    timer = Timer(60, cancellation.cancel)
-    timer.start()
+    cancellation = CancellationToken(timeout=60)
     try:
         report = render_source_scenes(
             "lessons.py", "recordings", ["FirstScene", "SecondScene"],
@@ -25,13 +22,10 @@ if __name__ == "__main__":
         report = getattr(error, "render_batch_result", None)
         if report is not None:
             print(report.as_dict())
-    finally:
-        timer.cancel()
-        timer.join()
 ```
 
-The timer is merely an example of a caller. An application stop button, an
-ordinary thread, or the parent's `on_result` callback may call `cancel()`.
+An application stop button, an ordinary thread, or the parent's `on_result`
+callback may call `cancel()`, with or without the optional time budget.
 `cancel()` returns immediately; the rendering/discovery call returns or raises
 only after its owned workers have been reaped. The token is thread-safe,
 idempotent and one-way. There is no reset operation; use a fresh token for a
@@ -115,4 +109,50 @@ coordinator and discovery wrapper with real workers, filesystem checkpoints,
 locking, hashing and resume. The existing explicit byte-artifact fixture stands
 in for native capture; its files are NOT FMTL. These tests do not claim native
 renderer/mixer acceptance, an installed CLI pass, or cross-platform execution.
-No CLI cancellation flag is added: CLI users retain Ctrl-C and `--job-timeout`.
+CLI users retain Ctrl-C and per-worker `--job-timeout`, and can also use the
+shared time budget below.
+
+## One deadline across discovery and the whole batch
+
+`CancellationToken(timeout=SECONDS)` starts one positive finite monotonic budget
+at construction. Pass that same token to discovery and rendering: neither phase,
+a later scene, nor a checkpoint reuse check resets its deadline. The token uses
+no timer thread or parent signal handler. Expiry latches `BatchDeadlineExceeded`,
+a `BatchCancelled` subtype carrying `timeout` and the same available progress
+reports. A caller cancellation before expiry stays a caller cancellation; a
+manual call after expiry cannot disguise the budget overrun. Untimed tokens keep
+their existing behavior. A new invocation or resume uses a new token.
+
+Both media and FMTL console batches support `--batch-timeout SECONDS`:
+
+```sh
+fmn-python lessons.py --write_all --format fmtl --workers 4 \
+  --bundle-audio --batch-timeout 1800 --job-timeout 300 \
+  --video_dir recordings --checkpoint progress.json --resume-key assets-v1
+```
+
+The same flag works with named scenes and `--jobs-file`, including ordinary
+media output. It requires `--workers`. The clock starts after parallel option
+parsing, before discovery; all subsequent planning, checkpoint verification and
+worker execution consume that one budget. A per-job timeout can still honor
+`--keep-going`, but an invocation deadline stops the entire batch. Completed
+artifacts remain valid and are not relabelled; unstarted jobs remain `not_run`.
+
+A deadline exits **6** with robot kind `batch-deadline-exceeded`, its
+`timeout_seconds`, phase and any typed partial `batch` report. Caller/keyboard
+interruption keeps exit **130**. Expired discovery has no fabricated render
+report. Changing or omitting the budget on `--resume` does not alter checkpoint
+identity or permit unverified reuse. Deadlines are not certified scene inputs.
+
+This is a supervised stop budget, not a hard promise to return at that instant:
+blocking coordinator filesystem calls and user observers must return before
+expiry can be observed; cooperative shutdown/escalation and final journal writes
+also take time. After expiry is observed, no new work is admitted. Receipt
+collection and cleanup continue so an output published immediately before the
+stop is not discarded or silently overwritten on retry.
+
+`test_batch_deadline.py` checks typed expiry, first-cause semantics, real-process
+shutdown and receipt retention. `test_batch_deadline_cli_protocol.py` exercises
+both complete production wrappers with actual process supervision/checkpoints
+and explicit native parsing/rendering/discovery fixtures. These tests are not
+installed-wheel or native-media acceptance evidence.

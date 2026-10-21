@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 
-PARALLEL_VALUES = frozenset({"--workers", "--job-timeout"})
+PARALLEL_VALUES = frozenset({"--workers", "--job-timeout", "--batch-timeout"})
 PARALLEL_HELP = """Isolated parallel scene batches:
   fmn-python SOURCE.py --write_all --workers N [--job-timeout SECONDS]
   fmn-python SOURCE.py FirstScene SecondScene --workers N
@@ -15,7 +15,16 @@ code is imported in a disposable discovery worker and again in each render
 worker; no scene code runs in the coordinator and global state is not shared.
 Robot stdout remains one ordered batch receipt; scene output streams to stderr. --keep-going admits later jobs after ordinary failures. Fail-fast
 stops new jobs while already running scenes finish. Optional --job-timeout
-bounds discovery and each render worker including startup. Crashed/timed-out
+bounds discovery and each render worker including startup. --batch-timeout
+SECONDS instead sets ONE shared wall-clock budget starting after parallel option
+parsing, covering discovery, planning and all scene workers. It requires
+--workers and composes with --job-timeout. Per-job timeouts still honor
+--keep-going; the shared deadline always stops the entire invocation. Expiry
+stops admission, reaps active workers, retains publications and journals partial
+progress, then exits 6 with batch-deadline-exceeded (not user-interrupt 130).
+Host I/O/observers must return before expiry is observed; cleanup grace is extra.
+The batch timeout is not stored in checkpoints or certified scene identities.
+Crashed/timed-out
 outputs are never removed or silently reused, and may exist without a complete receipt.
 Add --checkpoint PATH --resume-key INPUTS to save durable per-scene progress;
 add --resume to verify and reuse completed outputs without starting workers
@@ -41,7 +50,7 @@ def take_parallel_options(arguments, value_flags=frozenset()):
         token = arguments[index]
         flag, separator, text = token.partition("=")
         if flag in PARALLEL_VALUES:
-            name = "workers" if flag == "--workers" else "job_timeout"
+            name = flag[2:].replace("-", "_")
             if name in options:
                 raise ValueError(flag + " must not be repeated")
             if not separator:
@@ -57,13 +66,13 @@ def take_parallel_options(arguments, value_flags=frozenset()):
                     raise ValueError("--workers must lie between 1 and 64")
             else:
                 if not text or len(text) > 32:
-                    raise ValueError("--job-timeout requires positive finite seconds")
+                    raise ValueError(flag + " requires positive finite seconds")
                 try:
                     value = float(text)
                 except ValueError:
-                    raise ValueError("--job-timeout requires positive finite seconds") from None
+                    raise ValueError(flag + " requires positive finite seconds") from None
                 if not math.isfinite(value) or value <= 0:
-                    raise ValueError("--job-timeout requires positive finite seconds")
+                    raise ValueError(flag + " requires positive finite seconds")
             options[name] = value
         else:
             forwarded.append(token)
@@ -71,6 +80,28 @@ def take_parallel_options(arguments, value_flags=frozenset()):
                 index += 1
                 forwarded.append(arguments[index])
         index += 1
-    if "job_timeout" in options and "workers" not in options:
-        raise ValueError("--job-timeout requires --workers")
+    for name in ("job_timeout", "batch_timeout"):
+        if name in options and "workers" not in options:
+            raise ValueError("--" + name.replace("_", "-") + " requires --workers")
     return forwarded, options
+
+
+def start_batch_budget(options):
+    """Consume one scheduling option and share its token across CLI phases."""
+    from .cancellation import CancellationToken
+
+    duration = options.pop("batch_timeout", None)
+    return None if duration is None else CancellationToken(timeout=duration)
+
+
+def emit_deadline_failure(native, error, robot, *, source, destination, phase):
+    """Report a budget stop without discarding already published outcomes."""
+    details = {"source": None if source is None else str(source),
+               "destination": None if destination is None else str(destination),
+               "phase": phase, "timeout_seconds": error.timeout,
+               "notes": list(getattr(error, "__notes__", ()))}
+    report = getattr(error, "render_batch_result", None)
+    if report is not None:
+        details.update(batch=report.as_dict(), all_succeeded=report.ok)
+    return native._portal_cli_emit(6, "render", "batch-deadline-exceeded",
+                                  str(error), robot, **details)

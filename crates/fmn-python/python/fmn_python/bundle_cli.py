@@ -163,6 +163,9 @@ def _bundle_options(arguments):
 
 
 def try_bundle_cli(native, arguments):
+    from .cancellation import BatchDeadlineExceeded
+    from .parallel_cli_options import emit_deadline_failure, start_batch_budget
+
     arguments, formats = _bundle_options(arguments)
     arguments, job_files = take_jobs_file_options(arguments, _VALUE_FLAGS | _AUDIO_VALUE_FLAGS.keys())
     arguments, audio_switches, audio_values = _take_audio_options(arguments)
@@ -175,7 +178,8 @@ def try_bundle_cli(native, arguments):
         return None
     robot = "--robot" in switches
     if "--help" in switches or "-h" in switches:
-        text = BUNDLE_HELP + "\n" + CHECKPOINT_HELP + "\n" + JOBS_FILE_HELP
+        from .parallel_cli_options import PARALLEL_HELP
+        text = BUNDLE_HELP + "\n" + CHECKPOINT_HELP + "\n" + JOBS_FILE_HELP + "\n" + PARALLEL_HELP
         return native._portal_cli_emit(0, "success", "help", text, robot, help=text)
     source = selected = destination = None
     session = report = None
@@ -204,6 +208,7 @@ def try_bundle_cli(native, arguments):
             if len(set(keys)) != len(keys):
                 raise ValueError("selected scene names collide; each output must be unique")
         native_options, parallel = take_parallel_options(native_options, _VALUE_FLAGS)
+        cancellation = start_batch_budget(parallel)
         if parallel and not batch:
             raise ValueError("--workers requires multiple scene names or --write_all")
         source_jobs = None
@@ -263,6 +268,7 @@ def try_bundle_cli(native, arguments):
 
             loading = discovery_source(source, working_directory=invocation_directory,
                                        job_timeout=parallel.get("job_timeout"),
+                                       **({"cancellation": cancellation} if cancellation is not None else {}),
                                        **({} if configuration is None else {"configuration": configuration}))
         else:
             loading = SceneSource(source, native.Scene, configuration=configuration)
@@ -292,6 +298,7 @@ def try_bundle_cli(native, arguments):
                         render_source_scenes, source, scene_names=requested,
                         _expected_source_digest=loaded.source_digest,
                         _working_directory=invocation_directory, **parallel,
+                        **({"cancellation": cancellation} if cancellation is not None else {}),
                     )
                     batch_args = (destination,)
                 else:
@@ -340,6 +347,9 @@ def try_bundle_cli(native, arguments):
     except BatchRenderError as error:
         return _emit_result(native, error.result, robot, source, destination)
     except BaseException as error:
+        if isinstance(error, BatchDeadlineExceeded):
+            return emit_deadline_failure(native, error, robot, source=source,
+                                         destination=destination, phase=phase)
         partial = getattr(error, "render_batch_result", None)
         if phase == "batch" and isinstance(partial, BatchRenderResult):
             if isinstance(error, (KeyboardInterrupt, SystemExit)):

@@ -249,6 +249,9 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
     """Own ordinary renders; leave non-render commands on their native route."""
     from .source_job_file import JOBS_FILE_HELP, load_source_jobs, take_jobs_file_options
 
+    from .cancellation import BatchDeadlineExceeded
+    from .parallel_cli_options import emit_deadline_failure, start_batch_budget
+
     arguments, job_files = take_jobs_file_options(arguments, _VALUE_FLAGS)
     native_options, raw_positionals, switches = _tokens(arguments, _SELECTION_FLAGS)
     if (_CONTROL_FLAGS.intersection(switches)
@@ -278,6 +281,7 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
     try:
         invocation_directory = Path.cwd()
         native_options, parallel = take_parallel_options(native_options, _VALUE_FLAGS)
+        cancellation = start_batch_budget(parallel)
         if parallel and not batch:
             raise ValueError("--workers requires multiple scene names or --write_all")
         source_jobs = None
@@ -380,6 +384,7 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
             from .parallel_discovery import discovery_source
             loading = discovery_source(source_path, working_directory=invocation_directory,
                                        job_timeout=parallel.get("job_timeout"),
+                                       **({"cancellation": cancellation} if cancellation is not None else {}),
                                        **({} if configuration is None else {"configuration": configuration}))
         else:
             loading = SceneSource(source_path, native.Scene, configuration=configuration)
@@ -404,6 +409,7 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                         render_source_scenes, source_path, scene_names=requested,
                         _expected_source_digest=loaded.source_digest,
                         _working_directory=invocation_directory, **parallel,
+                        **({"cancellation": cancellation} if cancellation is not None else {}),
                     )
                     batch_args = (destination,)
                 else:
@@ -483,6 +489,9 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                     raise RuntimeError("scene execution ended without publishing its render generation")
     except BatchRenderError as error:
         return _emit_result(native, error.result, robot, source, destination)
+    except BatchDeadlineExceeded as error:
+        return emit_deadline_failure(native, error, robot, source=source,
+                                     destination=destination, phase=phase)
     except (KeyboardInterrupt, SystemExit) as error:
         code = 130 if isinstance(error, KeyboardInterrupt) else 5
         partial = getattr(error, "render_batch_result", None)
