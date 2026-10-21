@@ -14,10 +14,10 @@ The returned `FmnSoundtrack` exposes `sample_rate`, `channels`, `sample_frames`
 and `duration_seconds`. `copy_channel_into(channel, start_frame, destination)`
 copies a sample-frame window into a Float32Array without mixing, gain,
 resampling or quantization. Mono is channel zero; stereo is left then right.
-Invalid channels or ranges leave the destination unchanged. Call `free()` after
-copying to release Wasm PCM. The host then owns scheduling and storage. The
-bridge marshals the supplied slice; this is bounded copying, not a zero-copy
-memory view. Chunked transfers bound the bridge's scratch buffer.
+Invalid channels or ranges leave the destination unchanged. Call `free()` when
+the host no longer needs to copy or seek the retained Wasm PCM. The bridge
+marshals the supplied slice; this is bounded copying, not a zero-copy memory
+view. Chunked transfers bound the bridge's scratch buffer.
 
 Generate a moving-geometry recording with a stereo tone:
 
@@ -46,18 +46,41 @@ and choose the exported `.fmtl`. The page accepts camera-bearing recordings
 and sound-bearing recordings through the same transactional session. Files stay
 local. Silent bundles retain their existing looping presentation clock.
 
-Sound is copied into a Web Audio buffer in channel windows of at most 65,536
-frames. The transfer frees the original Wasm PCM after preparation. The 256 MiB
-audio-buffer admission limit is independent of the 256 MiB bundle input limit;
-decoded pictures, the input bytes, bridge scratch and replacement candidates
-are additional storage, not a claimed process-memory ceiling. Browser-supported
-sample rates and device capabilities are checked by Web Audio; unsupported
-rates or missing devices reject the candidate instead of reinterpreting samples.
+The 256 MiB decoded-PCM admission limit is independent of the 256 MiB bundle
+input limit. Small soundtracks, up to 1 MiB of PCM, use the existing eager Web
+Audio buffer and release the Wasm track after preparation. Larger tracks retain
+one immutable Wasm PCM owner and copy bounded windows as playback advances.
+They no longer allocate a second whole-soundtrack AudioBuffer.
+
+The windowed path owns at most three device buffers of at most 65,536 sample
+frames each, including interpolation padding: at most 1.5 MiB of application-
+owned stereo device PCM. The first window is prepared before replacing the old
+movie, without resuming the device. Each bridge copy is also bounded to 65,536
+frames. Decoded pictures, retained Wasm PCM, input bytes, replacement candidates,
+bridge scratch, garbage awaiting collection, and browser-internal device storage
+are additional memory; this is not a process-RSS ceiling. Retained PCM is freed
+once on replacement or disposal, not on pause or completion, so backward seeks
+and restart remain available without decoding the recording again.
+
+Windows target half a second, adjusted to whole cycles of both source and device
+sample clocks and capped by the frame bound. Neighboring samples pad buffer
+edges for browser resampling; device-clock stops prevent that padding from being
+played twice. Fractional seek/resume phase is carried across windows rather than
+reset at each node. A source/device rate ratio whose smallest common window
+exceeds the bound is explicitly refused during preparation. Unsupported buffer
+rates or device/allocation failures likewise reject the candidate; samples are
+never silently reinterpreted at another rate.
 
 Playback starts only from Play, after `AudioContext.resume()` succeeds. One audio
 context clock selects the recorded picture indices, independent of monitor
-refresh. Late presentation may skip display frames, not change the recorded
-scene. Pause keeps fractional audio time; resume does not jump back to the last
+refresh. The windowed path reserves 60 ms of scheduling headroom at start and
+buffer recovery. Late presentation may skip display frames, not change the
+recorded scene. When a render/UI stall exhausts lookahead, playback holds at the
+first unplayed sample phase and resumes there when the next tick refills the
+queue; elapsed device time is not treated as evidence that unqueued sound played.
+No detached refill timer can restart a paused or replaced movie.
+
+Pause keeps fractional audio time; resume does not jump back to the last
 displayed picture. Scrubbing stops sound and selects an exact frame-grid offset.
 A short track ends in silence while pictures finish. A long track holds the last
 picture through its tail. Audible recordings stop at the longer duration;
@@ -67,23 +90,36 @@ Pause, seek, replacement and disposal invalidate pending resume operations.
 A late resume cannot start old sound over the replacement. Preparation and
 frame-zero rendering must both succeed before the previous player is released.
 Failures preserve the previous movie; successful replacement stops and releases
-its audio device. Page hiding pauses playback. The existing picture-only Rust
-constructor remains intentionally strict for consumers without an audio adapter.
+its audio device. Page hiding pauses playback. A later refill failure stops all
+queued sound and preserves the first unplayed position for an explicit retry.
+The existing picture-only Rust constructor remains strict for consumers without
+an audio adapter.
 
 ## Executable checks
 
 ```sh
 node --test demo/wasm/*.test.mjs
+python3 scripts/check_windowed_audio_browser.py --chromium /path/to/chromium
 node scripts/check_browser_soundtrack.mjs /tmp/audible.fmtl
 ```
 
-The browser check requires the generated web-target bindings under
-`demo/wasm/pkg`, Playwright and its Chromium installation, and the exact native
-`export_audio_bundle` example above. `FMN_PLAYWRIGHT_MODULE` may name the module
-file of an existing Playwright installation outside the repository. These are
-test tools, not runtime or shipped Rust dependencies. The script serves only an
-allowlist of demo assets on an ephemeral loopback port and closes its browser
-and server on success or failure. Missing tooling or artifacts fail the check.
+The windowed browser check requires Python Playwright and Chromium as test tools,
+not runtime dependencies. It loads the production JavaScript module in memory,
+without a local HTTP server or generated Wasm package. Nine real
+OfflineAudioContext runs compare bounded-node output with a full-buffer browser
+reference, including fractional seeks, stereo channel order, 8/44.1/48/192/384 kHz
+source clocks, and different device rates. The deterministic PCM provider is a
+fixture, not the native Wasm decoder. Missing browser tooling, an oversized
+playback allocation, incorrect cleanup, or output differences above the declared
+1e-5 sample tolerance fail the check. Browser resampling is not bit-certified.
+
+The full bundle browser check requires the generated web-target bindings under
+`demo/wasm/pkg`, Node Playwright and its Chromium installation, and the exact
+native `export_audio_bundle` example above. `FMN_PLAYWRIGHT_MODULE` may name the
+module file of an existing Playwright installation outside the repository.
+These are test tools, not runtime or shipped Rust dependencies. The script
+serves only an allowlist of demo assets on an ephemeral loopback port and closes
+its browser and server on success or failure. Missing tooling or artifacts fail.
 
 It compares all 168,000 transferred PCM samples with the fixture's canonical
 bits, validates unchanged pictures, and uses a real OfflineAudioContext to
