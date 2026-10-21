@@ -185,3 +185,6 @@ spikes/g0-5-python-ext/py/*.so
 
 # br doctor per-run artifacts
 .doctor/
+
+# Playwright MCP session logs and page snapshots (browser tooling, never source)
+.playwright-mcp/
