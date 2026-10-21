@@ -92,6 +92,8 @@ _STEPS = (
     ("typesetting", "install_typesetting"),
     ("runtime_provenance", "install_runtime_provenance"),
     ("paired_output", "install_paired_output"),
+    # Last, so it observes the completed runtime; a no-op unless FMN_SEGMENT_CENSUS is set.
+    ("segment_census", "install_segment_census"),
 )
 _STATE = "_FMN_PORTAL_RUNTIME_STATE"
 

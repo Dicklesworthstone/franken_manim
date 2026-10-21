@@ -69,6 +69,10 @@ BOOTSTRAP_RESAMPLES = 2000
 BOOTSTRAP_SEED = 20260928
 SKIP_MODE = "final-state -s, 320x180"
 FRAME_GRID_MODE = SKIP_MODE + ", Reference stepped on the frame grid (BN-10 work-matched)"
+# --frames: every frame rendered and encoded to MP4 by both engines, through ffmpeg. The portal's
+# ffmpeg boundary refuses a group- or other-writable output ancestor, so run under umask 022.
+FRAMES_MODE = "every frame rendered to MP4, 320x180 at 15 fps (portal on one render thread)"
+FRAMES_FPS = "15"
 # `python -c` program for --reference-frame-grid. The pinned Reference's
 # source is not edited; two Scene methods are replaced in-process before its
 # own entry point runs.
@@ -444,8 +448,16 @@ def make_runners(args, display):
         target = work / f"{module.replace('/', '__')}__{name}" / f"portal-{rep}.png"
         target.parent.mkdir(parents=True, exist_ok=True)
         env = dict(os.environ, PYTHONPATH=str(args.videos))
-        argv = [args.portal_python, "-m", "fmn_python", str(args.videos / module), name, "-s",
-                "--format", "png", "--resolution", "320x180", "--video_dir", str(target)]
+        if args.census:
+            # The portal's segment census (fm-offload-payoff-4rve), one file per run.
+            env["FMN_SEGMENT_CENSUS"] = str(target.with_name(f"census-{rep}.ndjson"))
+        if args.frames:
+            argv = [args.portal_python, "-m", "fmn_python", str(args.videos / module), name,
+                    "--format", "mp4", "--resolution", "320x180", "--fps", FRAMES_FPS,
+                    "--threads", "1", "--video_dir", str(target.with_name(f"portal-{rep}"))]
+        else:
+            argv = [args.portal_python, "-m", "fmn_python", str(args.videos / module), name, "-s",
+                    "--format", "png", "--resolution", "320x180", "--video_dir", str(target)]
         return run_child(argv, args.workdir, env, args.timeout)[:2]
 
     def reference(scene, rep):
@@ -463,6 +475,9 @@ def make_runners(args, display):
 
 def reference_argv(args, module, name, target):
     entry = ["-c", REFERENCE_FRAME_GRID] if args.reference_frame_grid else ["-m", "manimlib"]
+    if args.frames:
+        return [args.reference_python, *entry, str(args.videos / module), name,
+                "-w", "-r", "320x180", "--fps", FRAMES_FPS, "--video_dir", str(target)]
     return [args.reference_python, *entry, str(args.videos / module), name, "-s",
             "-w", "-r", "320x180", "--video_dir", str(target)]
 
@@ -502,6 +517,10 @@ def main():
     parser.add_argument("--jobs", type=int, default=1)
     parser.add_argument("--portal-id", default="unlabeled-portal")
     parser.add_argument("--reference-id", default="3b1b/manim@6199a00d4c1b1127ebe45cb629c3f22538b10e13")
+    parser.add_argument("--frames", action="store_true",
+                        help="render every frame in both engines instead of the final state")
+    parser.add_argument("--census", action="store_true",
+                        help="record the portal's segment census beside each portal run")
     parser.add_argument("--reference-frame-grid", action="store_true",
                         help="step the Reference's skipped segments on the frame grid, as the"
                              " portal does (BN-10), so both engines do the same work")
@@ -526,7 +545,8 @@ def main():
     scenes, selection = select_scenes(args)
     header = dict(host_facts(), portal_id=args.portal_id, reference_id=args.reference_id,
                   reps=args.reps, timeout_s=args.timeout,
-                  mode=FRAME_GRID_MODE if args.reference_frame_grid else SKIP_MODE,
+                  mode=(FRAMES_MODE if args.frames else
+                        FRAME_GRID_MODE if args.reference_frame_grid else SKIP_MODE),
                   selection=selection, label=LABEL, schema=SCHEMA, version=VERSION)
     header_path, log_path = args.out / "header.json", args.out / "runs.ndjson"
     if log_path.exists() and header_path.exists():

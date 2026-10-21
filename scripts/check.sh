@@ -86,6 +86,12 @@ python3 -m py_compile \
     scripts/test_corpus_speed_ratio.py
 python3 scripts/test_corpus_speed_ratio.py
 
+echo "==> native-offload payoff report"
+python3 -m py_compile \
+    scripts/offload_payoff.py \
+    scripts/test_offload_payoff.py
+python3 scripts/test_offload_payoff.py
+
 echo "==> TeX 2AFC review kit and scorer"
 python3 -m py_compile \
     scripts/tex_2afc_kit.py \

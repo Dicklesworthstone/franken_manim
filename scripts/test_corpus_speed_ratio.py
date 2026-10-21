@@ -110,9 +110,16 @@ class SpeedRatioTests(unittest.TestCase):
 
     def test_frame_grid_mode_runs_the_reference_through_the_replacement_program(self):
         args = type("Args", (), {"reference_python": "py", "videos": pathlib.Path("/v"),
-                                 "reference_frame_grid": False})()
+                                 "reference_frame_grid": False, "frames": False})()
         plain = csr.reference_argv(args, "m.py", "A", pathlib.Path("/t"))
         self.assertEqual(plain[:3], ["py", "-m", "manimlib"])
+        # --frames renders every frame: no -s, the frame rate pinned.
+        args.frames = True
+        frames = csr.reference_argv(args, "m.py", "A", pathlib.Path("/t"))
+        self.assertNotIn("-s", frames)
+        self.assertEqual(frames[frames.index("--fps") + 1], csr.FRAMES_FPS)
+        self.assertIn("-s", plain)
+        args.frames = False
         args.reference_frame_grid = True
         grid = csr.reference_argv(args, "m.py", "A", pathlib.Path("/t"))
         self.assertEqual(grid[:3], ["py", "-c", csr.REFERENCE_FRAME_GRID])
