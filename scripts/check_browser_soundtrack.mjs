@@ -17,6 +17,9 @@ const { chromium } = await import(process.env.FMN_PLAYWRIGHT_MODULE
 const allowed = new Set([
   '/demo/wasm/player.html', '/demo/wasm/playback.mjs', '/demo/wasm/player-session.mjs',
   '/demo/wasm/audio-playback.mjs', '/demo/wasm/bundle.fmtl',
+  '/demo/wasm/player-ui.mjs', '/demo/wasm/bundle-input.mjs',
+  '/demo/wasm/worker-session.mjs', '/demo/wasm/worker-protocol.mjs',
+  '/demo/wasm/picture-worker.mjs', '/demo/wasm/picture-worker-core.mjs',
   '/demo/wasm/pkg/fmn_wasm.js', '/demo/wasm/pkg/fmn_wasm_bg.wasm',
 ]);
 const server = http.createServer(async (request, response) => {
@@ -63,7 +66,8 @@ try {
   assert.equal(await page.evaluate(() => window.audioEvidence.contexts.length), 0);
 
   const waveform = await page.evaluate(async () => {
-    const { FmnPlayer } = await import('./pkg/fmn_wasm.js');
+    const { default: init, FmnPlayer } = await import('./pkg/fmn_wasm.js');
+    await init(); // The page now initializes its own Wasm instance in the worker.
     const bytes = new Uint8Array(await (await fetch('/audible.fmtl')).arrayBuffer());
     const visualBytes = new Uint8Array(await (await fetch('./bundle.fmtl')).arrayBuffer());
     function check(value, message) { if (!value) throw new Error(message); }

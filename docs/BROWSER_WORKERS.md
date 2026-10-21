@@ -51,6 +51,24 @@ failure. A wrong response identity, frame, viewport or buffer shape is refused
 before presentation. There is no silent fallback to UI-thread rasterization.
 Playback remains presentation, not an encoded or certified artifact.
 
+## The shipped player page
+
+`demo/wasm/player.html` mounts `player-ui.mjs` and uses this worker session by
+default for both silent and narrated recordings. The UI no longer imports or
+instantiates the native Wasm module. Audio still advances on its device clock;
+late raster responses update only the preview. During an explicit seek, Play is
+held until the selected picture arrives. Pause invalidates outstanding display
+work, and the final requested picture may complete after the soundtrack stops.
+Labels, camera metadata, local-file loading and failed-replacement recovery are
+preserved. The synchronous `TimelineSession` API remains available independently.
+
+Local files and the demo response are read through `bundle-input.mjs`. Known
+lengths allocate one exact bounded byte buffer; unknown lengths retain bounded
+chunks then assemble one input buffer. A superseding load aborts and cancels the
+old reader. Actual bytes, declared size, chunk count and EOF are checked before
+worker admission, including responses without Content-Length. The file picker
+never uploads recording bytes.
+
 ## API
 
 ```js
@@ -96,3 +114,13 @@ bootstrap because Chromium disallows module-worker startup from an opaque-origin
 page. It does not validate hosted module-worker startup, native Wasm decoding,
 physical audio hardware or other browsers. The shipping entry point is a module
 worker served alongside the generated Wasm package.
+
+`python scripts/check_worker_player_page.py` mounts the production UI in the
+actual page markup and drives its file picker, labels, Play/Pause and scrubber
+through Chromium. It uses the same explicit decoder fixture and offline module
+bootstrap described above. Real Web Audio verifies gesture-controlled playback,
+phase-preserving pause/resume, seek offsets, the silent suffix, replacement and
+device cleanup. It does not substitute for native decoder/render acceptance.
+The existing `scripts/check_browser_soundtrack.mjs` keeps its native PCM and
+pixel assertions and now serves the worker modules and initializes its separate
+main-thread native oracle explicitly.
