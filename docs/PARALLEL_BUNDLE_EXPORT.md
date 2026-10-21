@@ -65,3 +65,46 @@ native bundles; this is orchestration evidence, not native rendering acceptance.
 `FMN_TEST_NATIVE=1 python crates/fmn-python/tests/test_parallel_bundle_native.py`
 requires an installed matching wheel and exercises camera/audio scene capture,
 recovery, worker-count replay and artifact hashes without a substitute renderer.
+
+## Console batches
+
+The installed `fmn-python` command uses the same process path when `--workers`
+is supplied with multiple named scenes or `--write_all`:
+
+```sh
+fmn-python lessons.py --write_all --format fmtl --workers 4 \
+  --bundle-camera --bundle-audio --job-timeout 600 \
+  --video_dir recordings --checkpoint recordings-progress.json \
+  --resume-key lessons-and-assets-v1 --keep-going
+```
+
+Append `--resume` to verify and reuse completed bundles. Named selections keep
+their requested order; `--write_all` sorts locally declared names. Discovery is
+itself isolated, and the exact entry-source digest it reports is checked before
+render admission and again in every worker. Configuration and the invocation
+working directory are passed explicitly. The parent does not import authored
+source. A completed resume still performs isolated discovery to validate scene
+selection, but does not construct already-completed scenes.
+
+`--workers` controls scene processes, while `--bundle-audio-threads` controls
+each scene's native mixer. `--job-timeout` requires `--workers` and bounds both
+discovery and each render, including startup. An explicit raster `--threads`,
+partial range, subdivision, paired output or certification request is refused.
+`--output` and `--file_name` retain their single-scene-only meaning and cannot
+be combined with this batch route. Omitting `--workers` retains sequential and
+single-scene behavior, including exact single-file destinations.
+
+Robot stdout remains the terminal batch document. Progress and source stdout
+are routed to stderr; `--quiet` suppresses progress but not robot receipts.
+A completed batch exits 0; ordinary scene failures (including keep-going)
+exit 5, user interruption exits 130, malformed options exit 2, unavailable
+capabilities exit 4, and output/reporting errors exit 6. Completed receipts are
+preserved on interruption and checkpoint/reporting failure.
+
+`test_parallel_bundle_cli_protocol.py` exercises the full bundle CLI wrapper,
+shared parallel/checkpoint option consumers, production token/path/receipt
+functions and actual spawned artifact workers. Native common-option parsing,
+source inventory and capture are explicit fixtures. The separate native test
+also invokes the installed `python -m fmn_python` entry point and checks that
+source import occurs only in discovery/render workers. Neither protocol tests
+nor syntax checks replace that installed-wheel acceptance.

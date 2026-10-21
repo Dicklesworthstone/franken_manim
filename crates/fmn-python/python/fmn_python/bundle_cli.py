@@ -7,6 +7,7 @@ or fallback. The only output acquired here is BundleExportSession.
 from __future__ import annotations
 
 import contextlib
+from functools import partial as _partial_call
 import os
 from pathlib import Path
 import sys
@@ -15,6 +16,7 @@ from .bundle_export import BundleExportSession, _validated_audio_options, requir
 from .console_rendering import _tokens, _VALUE_FLAGS, _message, _MAX_SELECTED_SCENES, _output_paths, _single_destination
 from .batch_cli import _emit_result
 from .checkpoint_cli import CHECKPOINT_HELP, take_checkpoint_options
+from .parallel_cli_options import take_parallel_options
 from .batch_rendering import BatchRenderError, BatchRenderResult, _error_notes, _name_key, render_scenes
 from .scene_loading import SceneSource, resolve_render_configuration
 
@@ -27,8 +29,15 @@ BUNDLE_HELP = """Portable scene bundles:
   fmn-python [--robot] SOURCE.py --write_all --format fmtl
              [--bundle-camera] [--bundle-audio] [--keep-going] [--video_dir DIRECTORY]
 
-Runs setup/construct/tear_down once in the host interpreter. Actual captured
-frames become a bounded, code-free FMTL/1 artifact for standalone fmn/WASM.
+Without --workers, setup/construct/tear_down runs once in the host interpreter.
+With multiple named scenes or --write_all, --workers 1..64 runs each scene in a
+fresh spawned interpreter. Discovery also runs in a disposable worker; authored
+source never runs in the coordinator. --job-timeout SECONDS bounds discovery and
+each scene job, including startup. --bundle-audio-threads controls each mixer
+separately; --threads does not apply to recording capture. Receipts keep selected
+order while progress follows completion order. Checkpoint/resume uses the parent
+journal; worker count and timeout may change, capture/audio settings may not.
+Captured frames become a bounded, code-free FMTL/1 artifact for standalone fmn/WASM.
 --video_dir names a directory containing SCENE.fmtl for each selected scene
 (default: media/videos/SOURCE). --output names an exact single-scene output;
 --file_name changes its stem. Names run in
@@ -170,6 +179,7 @@ def try_bundle_cli(native, arguments):
     session = report = None
     phase = "options"
     try:
+        invocation_directory = Path.cwd()
         if len(formats) != 1 or formats[0] != "fmtl":
             raise ValueError("bundle export requires exactly one --format fmtl")
         if switches.count("--robot") > 1 or switches.count("--bundle-camera") > 1:
@@ -191,6 +201,9 @@ def try_bundle_cli(native, arguments):
             keys = [_name_key(name) for name in requested]
             if len(set(keys)) != len(keys):
                 raise ValueError("selected scene names collide; each output must be unique")
+        native_options, parallel = take_parallel_options(native_options, _VALUE_FLAGS)
+        if parallel and not batch:
+            raise ValueError("--workers requires multiple scene names or --write_all")
         native_options, recovery = take_checkpoint_options(native_options, _VALUE_FLAGS)
         if recovery and not batch:
             raise ValueError("checkpoint recovery requires multiple scene names or --write_all")
@@ -234,7 +247,15 @@ def try_bundle_cli(native, arguments):
                 raise NotADirectoryError(str(destination))
         phase = "load"
         redirect = contextlib.redirect_stdout(sys.stderr) if robot else contextlib.nullcontext()
-        with redirect, SceneSource(source, native.Scene, configuration=configuration) as loaded:
+        if parallel:
+            from .parallel_discovery import discovery_source
+
+            loading = discovery_source(source, working_directory=invocation_directory,
+                                       job_timeout=parallel.get("job_timeout"),
+                                       **({} if configuration is None else {"configuration": configuration}))
+        else:
+            loading = SceneSource(source, native.Scene, configuration=configuration)
+        with redirect, loading as loaded:
             names = sorted(loaded.scenes)
             phase = "select"
             if batch:
@@ -250,9 +271,22 @@ def try_bundle_cli(native, arguments):
                 phase = "batch"
                 # The shared planner validates every destination before any
                 # constructor. It also owns cancellation, no-clobber publication
-                # and partial receipts; keep the source loader alive for all jobs.
-                report = render_scenes(
-                    {name: loaded.scenes[name] for name in requested}, destination,
+                # and partial receipts. Parallel discovery yields names only,
+                # never classes or native proxies imported by the coordinator.
+                if parallel:
+                    from .parallel_batch import render_source_scenes
+
+                    render_batch = _partial_call(
+                        render_source_scenes, source, scene_names=requested,
+                        _expected_source_digest=loaded.source_digest,
+                        _working_directory=invocation_directory, **parallel,
+                    )
+                    batch_args = (destination,)
+                else:
+                    render_batch = render_scenes
+                    batch_args = ({name: loaded.scenes[name] for name in requested}, destination)
+                report = render_batch(
+                    *batch_args,
                     format="fmtl", resolution=(width, height), fps=fps,
                     bundle_camera=camera, continue_on_error=bool(keep_going),
                     **({"bundle_audio": True, "bundle_audio_options": audio_options} if audio else {}),
