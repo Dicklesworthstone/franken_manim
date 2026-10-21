@@ -88,10 +88,14 @@ def rng_for(seed: int, name: str):
 
 def assign(count: int, seed: int) -> tuple[list[int], list[bool]]:
     """Presentation order (a permutation of the pairs) and, per presented position, whether the
-    LaTeX render sits on the left. Each comes from its own named substream of the seed."""
+    LaTeX render sits on the left. Each comes from its own named substream of the seed.
+
+    The sides are balanced exactly (half left, the odd one out on the right), then shuffled.
+    Independent coin flips let a reviewer who always picks one side score above the pass
+    limit by luck: one seed put LaTeX on the left 59 times of 100."""
     order = [int(i) for i in rng_for(seed, "tex-2afc/order").permutation(count)]
-    side_rng = rng_for(seed, "tex-2afc/sides")
-    return order, [bool(side_rng.integers(0, 2)) for _ in range(count)]
+    sides = [True] * (count // 2) + [False] * (count - count // 2)
+    return order, [bool(s) for s in rng_for(seed, "tex-2afc/sides").permutation(sides)]
 
 
 def eligible(record) -> bool:

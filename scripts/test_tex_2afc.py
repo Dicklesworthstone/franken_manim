@@ -169,7 +169,20 @@ class SamplingTests(unittest.TestCase):
         self.assertEqual(sorted(order), list(range(1000)))
         self.assertEqual((order, sides), kit.assign(1000, 3))
         self.assertNotEqual(order, kit.assign(1000, 4)[0])
-        self.assertTrue(450 <= sum(sides) <= 550)
+        # Exactly balanced, so a reviewer who always picks one side scores at chance.
+        for seed in range(50):
+            self.assertEqual(sum(kit.assign(100, seed)[1]), 50)
+        self.assertEqual(sum(kit.assign(101, 0)[1]), 50)
+        self.assertNotEqual(kit.assign(100, 1)[1], kit.assign(100, 2)[1])
+
+    def test_a_constant_chooser_scores_exactly_chance(self):
+        order, sides = kit.assign(100, 20261020)
+        key = {"kit": "k", "pairs": [{"pair": f"p{i:03d}", "latex_side": "left" if s else "right",
+                                      "formula": f"{i:064x}", "stratum": f"s{i % 5}"} for i, s in enumerate(sides)]}
+        for choice in ("left", "right"):
+            answers = {"kit": "k", "answers": {p["pair"]: {"choice": choice} for p in key["pairs"]}}
+            report = score.score(answers, key)
+            self.assertEqual((report["correct"], report["verdict"]), (50, "pass"))
 
 
 def png_uri(array):
