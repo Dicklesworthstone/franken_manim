@@ -1,0 +1,117 @@
+name: Manifest comparison integrity
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fmn-output/src/provenance.rs'
+      - 'crates/fmn-output/src/bin/fmn-manifest-compare.rs'
+      - 'crates/fmn-output/tests/provenance_integrity.rs'
+      - 'crates/fmn-output/tests/manifest_compare_integrity.rs'
+      - 'crates/fmn-output/tests/support/manifest_integrity_fixture.rs'
+      - '.github/workflows/provenance-integrity.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provenance-integrity-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+  CARGO_BUILD_JOBS: '2'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_TARGET_DIR: target/camera-acceptance-native
+  RUST_BACKTRACE: '1'
+
+jobs:
+  verifier:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Install repository-pinned toolchain
+        run: rustup show active-toolchain
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/camera-acceptance-native
+          key: provenance-integrity-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: |
+            camera-acceptance-native-${{ runner.os }}-
+      - name: Record exact sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/provenance-integrity
+          git rev-parse HEAD | tee /tmp/provenance-integrity/source-sha.txt
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git diff --check
+          git archive --format=tar.gz --output=/tmp/provenance-integrity/source.tar.gz HEAD \
+            crates/fmn-output/src/provenance.rs \
+            crates/fmn-output/src/bin/fmn-manifest-compare.rs \
+            crates/fmn-output/tests/provenance_integrity.rs \
+            crates/fmn-output/tests/manifest_compare_integrity.rs \
+            crates/fmn-output/tests/support/manifest_integrity_fixture.rs
+      - name: Execute existing provenance tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p fmn-output --lib provenance:: \
+            2>&1 | tee /tmp/provenance-integrity/unit.log
+          grep -E 'test result: ok\. [1-9][0-9]* passed' /tmp/provenance-integrity/unit.log
+      - name: Execute adversarial manifest and real binary tests
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p fmn-output --test provenance_integrity --test manifest_compare_integrity --no-fail-fast \
+            2>&1 | tee /tmp/provenance-integrity/integration.log
+          test "$(grep -cE 'test result: ok\. [1-9][0-9]* passed' /tmp/provenance-integrity/integration.log)" = 2
+      - name: Deny warnings in affected targets
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --locked -p fmn-output --lib --bin fmn-manifest-compare \
+            --test provenance_integrity --test manifest_compare_integrity -- -D warnings \
+            2>&1 | tee /tmp/provenance-integrity/clippy.log
+      - name: Check exact-source formatting
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustfmt --edition 2024 --check crates/fmn-output/src/provenance.rs \
+            crates/fmn-output/src/bin/fmn-manifest-compare.rs \
+            crates/fmn-output/tests/provenance_integrity.rs \
+            crates/fmn-output/tests/manifest_compare_integrity.rs \
+            2>&1 | tee /tmp/provenance-integrity/format.log
+      - name: Retain separate canonical-format suggestions
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/provenance-integrity/formatted
+          for file in crates/fmn-output/src/provenance.rs \
+            crates/fmn-output/src/bin/fmn-manifest-compare.rs \
+            crates/fmn-output/tests/provenance_integrity.rs \
+            crates/fmn-output/tests/manifest_compare_integrity.rs \
+            crates/fmn-output/tests/support/manifest_integrity_fixture.rs; do
+            cp --parents "$file" /tmp/provenance-integrity/formatted/
+            rustfmt --edition 2024 --config skip_children=true "/tmp/provenance-integrity/formatted/$file"
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: ${{ !cancelled() }}
+        with:
+          name: provenance-integrity-${{ github.sha }}
+          path: /tmp/provenance-integrity/
+          if-no-files-found: error
+          retention-days: 7
