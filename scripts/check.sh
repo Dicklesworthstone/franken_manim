@@ -86,6 +86,13 @@ python3 -m py_compile \
     scripts/test_corpus_speed_ratio.py
 python3 scripts/test_corpus_speed_ratio.py
 
+echo "==> TeX 2AFC review kit and scorer"
+python3 -m py_compile \
+    scripts/tex_2afc_kit.py \
+    scripts/score_tex_2afc.py \
+    scripts/test_tex_2afc.py
+python3 scripts/test_tex_2afc.py
+
 echo "==> corpus differential harness"
 python3 -m py_compile \
     scripts/corpus_differential.py \
