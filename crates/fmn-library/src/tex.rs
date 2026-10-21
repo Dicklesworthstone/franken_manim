@@ -1417,7 +1417,13 @@ pub(crate) fn calibrate(
     font_size: f64,
     fsuh: f64,
 ) -> Result<f64, TexMobjectError> {
-    let probe = engine.typeset(Mode::Text, "0")?;
+    let request = fmn_tex::TypesetRequest::calibration();
+    let probe = engine.typeset_aligned(
+        request.mode,
+        request.source,
+        request.preamble,
+        request.align,
+    )?;
     let mut low = f64::INFINITY;
     let mut high = f64::NEG_INFINITY;
     for sub in &probe.subs {

@@ -202,10 +202,10 @@ fn _preflight_tex<'py>(
         request.align = align;
         requests.push(request);
     }
-    // Tex::build and TexText::build share the text-style zero calibration.
-    // Warm it too so the first constructor does not need a hidden cold layout.
+    // Tex::build and TexText::build share the zero calibration. Warm it too
+    // so the first constructor does not need a hidden cold layout.
     if !owned.is_empty() {
-        requests.push(fmn_library::TypesetRequest::inline_math("0"));
+        requests.push(fmn_library::TypesetRequest::calibration());
     }
     let limit = std::num::NonZeroUsize::new(max_workers)
         .ok_or_else(|| PyValueError::new_err("Tex preflight needs at least one worker"))?;

@@ -29,12 +29,28 @@ impl<'a> TypesetRequest<'a> {
         }
     }
 
-    /// Text-style mathematics, including the library's scale calibration.
+    /// Text-style mathematics.
     #[must_use]
     pub const fn inline_math(source: &'a str) -> Self {
         Self {
             mode: Mode::Math(Style::Text),
             ..Self::math(source)
+        }
+    }
+
+    /// The Tex and TexText scale-calibration probe: a "0" in text, as the
+    /// Reference's `latex_to_svg("0")` sets it in its text font. Math-mode
+    /// family 0 is cmr10 itself (fm-8zy2), so a math "0" would not be the
+    /// Reference's calibration digit. The library calibrates through exactly
+    /// this request, and every preflight warms it, so the two cannot name
+    /// different layouts.
+    #[must_use]
+    pub const fn calibration() -> TypesetRequest<'static> {
+        TypesetRequest {
+            mode: Mode::Text,
+            source: "0",
+            preamble: "",
+            align: LineAlign::Left,
         }
     }
 

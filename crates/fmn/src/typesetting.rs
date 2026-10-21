@@ -4,7 +4,7 @@ use std::fmt;
 use std::num::NonZeroUsize;
 
 use fmn_tex::{
-    Mode, PreflightError, Style, TEX_PREAMBLE_MAX_BYTES, TEX_PREAMBLE_SOURCE_MAX_BYTES, TexSession,
+    PreflightError, TEX_PREAMBLE_MAX_BYTES, TEX_PREAMBLE_SOURCE_MAX_BYTES, TexSession,
     TypesetRequest,
 };
 
@@ -170,9 +170,10 @@ fn warm_requests(
         // even when an earlier source failed. Surface the first native error.
         outcome?;
     }
-    // Tex and TexText calibrate scene-unit scale with this same text-style
-    // probe. Warm it too, so an ordinary build does not introduce a surprise
-    // calibration layout after the declared preflight has completed.
-    engine.typeset(Mode::Math(Style::Text), "0")?;
+    // Tex and TexText calibrate scene-unit scale with this same probe. Warm
+    // it too, so an ordinary build does not introduce a surprise calibration
+    // layout after the declared preflight has completed.
+    let probe = TypesetRequest::calibration();
+    engine.typeset_aligned(probe.mode, probe.source, probe.preamble, probe.align)?;
     Ok(())
 }
