@@ -43,14 +43,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// Unicode's `+` and `=` at 0.57 of cmr10's ink. 96 match since math-mode
 /// family 0 is cmr10 itself (49466bc, fm-8zy2), 98 since rule 18a reads its
 /// drops at the script size (4db6f43, fm-4ptw): a display integral's upper
-/// limit is in place. Improve the floors when the ink improves; never loosen
-/// one to land a change.
+/// limit is in place. 101 since TeX's own small delimiters and brace pieces
+/// (2f1e00c, fm-u5sb): \underbrace, \overbrace and \left[ x \right] match.
+/// Improve the floors when the ink improves; never loosen one to land a change.
 const PUBLIC_FLOORS: InkFloors = InkFloors {
-    matches: 98,
+    matches: 101,
     median_hausdorff_px: 1.0,
-    p95_hausdorff_px: 7.0,
-    median_sliced_w1_px: 0.067,
-    p95_sliced_w1_px: 3.218,
+    p95_hausdorff_px: 5.1,
+    median_sliced_w1_px: 0.060,
+    p95_sliced_w1_px: 2.954,
     median_iou: 0.990,
     p05_iou: 0.355,
 };
@@ -62,13 +63,14 @@ const PUBLIC_FLOORS: InkFloors = InkFloors {
 /// with Appendix G's parameters read at the current size (abbb957, fm-giir):
 /// e^{-x^2} matches. 489 since `\cong` is cmsy's ∼ over cmr's = (83d363c,
 /// fm-shqq): its one corpus row went from IoU 0.190 to 0.984, and the p95
-/// Hausdorff fell from 11 to 10.05 px.
+/// Hausdorff fell from 11 to 10.05 px. 493 with TeX's small delimiters and
+/// brace pieces (2f1e00c, fm-u5sb).
 const CORPUS_FLOORS: InkFloors = InkFloors {
-    matches: 489,
+    matches: 493,
     median_hausdorff_px: 1.0,
-    p95_hausdorff_px: 10.05,
-    median_sliced_w1_px: 0.073,
-    p95_sliced_w1_px: 6.548,
+    p95_hausdorff_px: 10.0,
+    median_sliced_w1_px: 0.072,
+    p95_sliced_w1_px: 5.971,
     median_iou: 0.988,
     p05_iou: 0.143,
 };
