@@ -240,8 +240,71 @@ class ExactRateDispatch(unittest.TestCase):
 
 
 
-_result = unittest.TextTestRunner(verbosity=2).run(
-    unittest.defaultTestLoader.loadTestsFromTestCase(ExactRateDispatch)
-)
+class UpdatersThroughTransformCopies(unittest.TestCase):
+    """fm-k00v: values measured on the pinned Reference (6199a00d) in playback.
+
+    Animation.update_mobjects updates the starting copy and the target, which carry the
+    mobject's updaters, so an updater keeps acting through a Transform-family animation.
+    """
+
+    def play(self, construct, skip=False):
+        with tempfile.TemporaryDirectory() as tmp:
+            scene = m.Scene(skip_animations=skip)
+            with render_session(scene, Path(tmp) / "updaters.y4m", resolution=(32, 18), fps=24, threads=1):
+                return construct(scene)
+
+    @staticmethod
+    def fade_in(scene, **options):
+        square = m.Square()
+        square.add_updater(lambda mob, dt: mob.shift(dt * m.RIGHT))
+        scene.play(m.FadeIn(square, **options))
+        after = float(square.get_center()[0])
+        scene.wait(1)
+        return after, float(square.get_center()[0])
+
+    @staticmethod
+    def animate(scene):
+        square = m.Square()
+        scene.add(square)
+        square.add_updater(lambda mob, dt: mob.shift(dt * m.UP))
+        scene.play(square.animate.shift(m.RIGHT))
+        return tuple(float(value) for value in square.get_center()[:2])
+
+    @staticmethod
+    def alpha_func(scene, suspend):
+        square = m.Square()
+        scene.add(square)
+        square.add_updater(lambda mob, dt: mob.shift(dt * m.RIGHT))
+        scene.play(m.UpdateFromAlphaFunc(square, lambda mob, alpha: None, suspend_mobject_updating=suspend))
+        return float(square.get_center()[0])
+
+    def test_updater_motion_continues_through_fade_in_and_animate(self):
+        for skip in (False, True):  # BN-10: skip mode equals playback
+            with self.subTest(skip=skip):
+                np.testing.assert_allclose(self.play(self.fade_in, skip), (1.0, 2.0), atol=1e-6)
+                np.testing.assert_allclose(self.play(self.animate, skip), (1.0, 1.0), atol=1e-6)
+
+    def test_the_suspend_flag_freezes_where_the_reference_freezes(self):
+        # The Reference copies before it suspends, so Transform-family motion still arrives
+        # through the copies; an animation that interpolates no copy stays frozen.
+        np.testing.assert_allclose(self.play(lambda scene: self.fade_in(
+            scene, suspend_mobject_updating=True)), (1.0, 2.0), atol=1e-6)
+        self.assertAlmostEqual(self.play(lambda scene: self.alpha_func(scene, True)), 0.0, places=6)
+        self.assertAlmostEqual(self.play(lambda scene: self.alpha_func(scene, False)), 1.0, places=6)
+
+    def test_only_an_updater_carrying_family_takes_the_callback_route(self):
+        requires = m._native._requires_python_animation
+        plain, carried = m.Square(), m.Square()
+        carried.add_updater(lambda mob, dt: None)
+        self.assertFalse(requires(m.FadeIn(plain)))
+        self.assertTrue(requires(m.FadeIn(carried)))
+        group = m.VGroup(m.Square(), carried.copy())
+        self.assertTrue(requires(m.FadeIn(group)))
+
+
+_result = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite(
+    unittest.defaultTestLoader.loadTestsFromTestCase(case)
+    for case in (ExactRateDispatch, UpdatersThroughTransformCopies)
+))
 if not _result.wasSuccessful():
     raise AssertionError("exact native-family easing acceptance failed")

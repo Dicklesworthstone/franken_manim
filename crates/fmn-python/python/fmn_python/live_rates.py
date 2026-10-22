@@ -90,8 +90,17 @@ def install_live_rates(native: Any) -> None:
         # decision instead of reverting its play-level rate to a native table.
         return previous_requires(animation)
 
+    def updating(animation):
+        # fm-k00v: the Reference's Animation.update_mobjects updates the starting copy and the
+        # target, which carry the mobject's updaters, so the updater's motion continues through
+        # a Transform-family animation. That holds with suspend_mobject_updating too: begin()
+        # copies before it suspends the mobject (measured on 6199a00d). Only the callback
+        # lifecycle runs Python updaters on those copies; the native one drops them.
+        mobject = getattr(animation, "mobject", None)
+        return mobject is not None and any(member.get_updaters() for member in mobject.get_family())
+
     def requires(animation):
-        if supported(animation) and custom(getattr(animation, "rate_func", None)):
+        if supported(animation) and (custom(getattr(animation, "rate_func", None)) or updating(animation)):
             return True
         return previous_requires(animation)
 

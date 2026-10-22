@@ -30,6 +30,11 @@ def environment(install=True):
             self.bound = False
         def _is_bound(self):
             return self.bound
+        # live_rates routes an updater-carrying family through callbacks (fm-k00v).
+        def get_family(self):
+            return [self]
+        def get_updaters(self):
+            return []
     class CameraFrame(Mobject):
         pass
     class Animation:

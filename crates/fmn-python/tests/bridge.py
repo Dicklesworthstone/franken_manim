@@ -7176,11 +7176,14 @@ for tracker, expected in tracker_cases:
         assert clone.get_value() == expected + 0.5
         assert tracker.get_value() == expected
 
+# fm-k00v: as in the Reference, the animation's starting copy and target carry the
+# tracker's updater and are updated every frame too. Record which object each call was for:
+# the tracker's own observations are the interpolated values.
 plain_tracker_scene = Scene()
 plain_tracker = manimlib.ValueTracker(1.0)
-plain_tracker_values = []
+plain_tracker_calls = []
 plain_tracker.add_updater(
-    lambda mob: plain_tracker_values.append(float(mob.get_value())),
+    lambda mob: plain_tracker_calls.append((mob is plain_tracker, float(mob.get_value()))),
     call=False,
 )
 plain_tracker_scene.play(
@@ -7188,14 +7191,17 @@ plain_tracker_scene.play(
     run_time=2.0 / 30.0,
     rate_func=manimlib.linear,
 )
+plain_tracker_values = [value for own, value in plain_tracker_calls if own]
 assert np.allclose(plain_tracker_values, [3.0, 5.0, 5.0])
+assert np.allclose(sorted({value for own, value in plain_tracker_calls if not own}), [1.0, 5.0])
 assert plain_tracker.get_value() == 5.0
 
 exponential_tracker_scene = Scene()
 exponential_tracker = manimlib.ExponentialValueTracker(4.0)
-exponential_tracker_values = []
+exponential_tracker_calls = []
 exponential_tracker.add_updater(
-    lambda mob: exponential_tracker_values.append(float(mob.get_value())),
+    lambda mob: exponential_tracker_calls.append(
+        (mob is exponential_tracker, float(mob.get_value()))),
     call=False,
 )
 exponential_tracker_scene.play(
@@ -7203,16 +7209,21 @@ exponential_tracker_scene.play(
     run_time=2.0 / 30.0,
     rate_func=manimlib.linear,
 )
+exponential_tracker_values = [value for own, value in exponential_tracker_calls if own]
 assert np.allclose(exponential_tracker_values, [8.0, 16.0, 16.0])
+exponential_copy_values = [value for own, value in exponential_tracker_calls if not own]
+assert all(math.isclose(value, 4.0) or math.isclose(value, 16.0) for value in exponential_copy_values)
+assert any(math.isclose(value, 4.0) for value in exponential_copy_values)
+assert any(math.isclose(value, 16.0) for value in exponential_copy_values)
 assert math.isclose(
     exponential_tracker.get_value(), 16.0, rel_tol=0.0, abs_tol=1e-12
 )
 
 complex_tracker_scene = Scene()
 complex_tracker = manimlib.ComplexValueTracker(1.0 - 2.0j)
-complex_tracker_values = []
+complex_tracker_calls = []
 complex_tracker.add_updater(
-    lambda mob: complex_tracker_values.append(complex(mob.get_value())),
+    lambda mob: complex_tracker_calls.append((mob is complex_tracker, complex(mob.get_value()))),
     call=False,
 )
 complex_tracker_scene.play(
@@ -7220,10 +7231,12 @@ complex_tracker_scene.play(
     run_time=2.0 / 30.0,
     rate_func=manimlib.linear,
 )
+complex_tracker_values = [value for own, value in complex_tracker_calls if own]
 assert np.allclose(
     complex_tracker_values,
     [3.0 + 2.0j, 5.0 + 6.0j, 5.0 + 6.0j],
 )
+assert {value for own, value in complex_tracker_calls if not own} == {1.0 - 2.0j, 5.0 + 6.0j}
 assert complex_tracker.get_value() == 5.0 + 6.0j
 
 # A vector value makes a vector tracker, as the Reference stores it in the
@@ -7332,16 +7345,20 @@ assert finish_derived.get_value() == 7.0
 # Engine-driven plays release the Scene RefCell after interpolation and the
 # rational clock advance, then invoke Python scene updaters before native
 # scene updaters and immutable capture. This used to refuse every such play.
+# The updater sits on an observer, not on the mover: an animated mobject that carries
+# updaters plays through the callback lifecycle instead (fm-k00v), and this case is about
+# the engine-driven path.
 release_scene = Scene()
 release_mover = geometry.Rectangle(width=1.0, height=1.0)
+release_observer = manimlib.Mobject()
 release_observations = []
-release_mover.add_updater(
+release_observer.add_updater(
     lambda mob, dt: release_observations.append(
-        (dt, release_scene.time, mob.get_x())
+        (dt, release_scene.time, release_mover.get_x())
     ),
     call=False,
 )
-release_scene.add(release_mover)
+release_scene.add(release_mover, release_observer)
 release_scene.play(
     release_mover.animate.shift(manimlib.RIGHT),
     run_time=1.0 / 30.0,
@@ -7567,10 +7584,14 @@ native_rotating_mobject = geometry.Line(
     2.0 * manimlib.RIGHT,
 )
 native_rotation_samples = []
-native_rotating_mobject.add_updater(
-    lambda mob, dt: native_rotation_samples.append((dt, mob.get_center().copy())),
+# An observer samples the line: an updater on the rotating mobject itself would send the play
+# through the callback lifecycle (fm-k00v), and this case covers the native one.
+native_rotation_observer = manimlib.Mobject()
+native_rotation_observer.add_updater(
+    lambda mob, dt: native_rotation_samples.append((dt, native_rotating_mobject.get_center().copy())),
     call=False,
 )
+native_rotation_scene.add(native_rotation_observer)
 native_rotation_scene.play(
     rotation.Rotating(
         native_rotating_mobject,
@@ -7592,8 +7613,11 @@ suspended_rotating_mobject = geometry.Line(
     2.0 * manimlib.RIGHT,
 )
 suspended_rotation_updates = []
+# fm-k00v: the starting copy carries this updater and keeps updating, as in the Reference,
+# whose begin() copies before it suspends; the suspension is about the mobject's own calls.
 suspended_rotating_mobject.add_updater(
-    lambda mob, dt: suspended_rotation_updates.append((dt, mob.get_center().copy())),
+    lambda mob, dt: suspended_rotation_updates.append((dt, mob.get_center().copy()))
+    if mob is suspended_rotating_mobject else None,
     call=False,
 )
 suspended_rotation_scene.play(
@@ -7968,8 +7992,10 @@ assert np.allclose(vfade_in.data["fill_rgba"][:, 3], 0.8)
 
 suspended_vfade = geometry.Circle(fill_opacity=0.7)
 suspended_vfade_updates = []
+# fm-k00v: only the circle's own calls; its starting copy carries the updater too.
 suspended_vfade.add_updater(
-    lambda _mob, dt: suspended_vfade_updates.append(dt), call=False
+    lambda mob, dt: suspended_vfade_updates.append(dt) if mob is suspended_vfade else None,
+    call=False,
 )
 Scene().play(
     fading.VFadeIn(
@@ -8305,10 +8331,12 @@ assert tracked_flash.rectangle.get_stroke_color() == manimlib.BLUE
 tracked_full_path = tracked_flash.rectangle.get_points().copy()
 tracked_full_length = tracked_flash.rectangle.get_arc_length()
 tracked_samples = []
+# fm-k00v: the rectangle's tracking updater (Reference indication.py) also rides on the
+# flash's starting copy, which follows the target; sample only the live rectangle.
 tracked_flash.rectangle.add_updater(
     lambda mob: tracked_samples.append((
         mob.get_arc_length(), mob.get_center().copy(), tracked_target.get_center().copy(),
-    )),
+    )) if mob is tracked_flash.rectangle else None,
     call=False,
 )
 tracked_target.add_updater(
@@ -8321,9 +8349,11 @@ assert any(
     for length, _, _ in tracked_samples
 )
 assert all(np.allclose(center, target) for _, center, target in tracked_samples)
-# ShowPassingFlash restores its original complete path after the final sample,
-# then removes the helper. Tracking is asserted above while the helper is live.
-assert np.array_equal(tracked_flash.rectangle.get_points(), tracked_full_path)
+# ShowPassingFlash restores the complete path from its starting copy after the final
+# sample, then removes the helper. That copy followed the target through the first frame,
+# so, as measured on the pinned Reference (fm-k00v), the restored path is the original one
+# moved 1/30 to the right, not the original position.
+assert np.allclose(tracked_flash.rectangle.get_points(), tracked_full_path + [1.0 / 30.0, 0.0, 0.0])
 assert tracked_flash.rectangle not in tracked_scene.get_mobjects()
 assert tracked_target in tracked_scene.get_mobjects()
 
@@ -15520,8 +15550,10 @@ def verify_portal_console_scene():
         updater_events.append(("frame", dt))
 
     def record_root_updater(mobject, dt):
-        del mobject
-        updater_events.append(("root", dt))
+        # fm-k00v: an animated root's starting copy and target carry this updater too, as
+        # in the Reference; the order under test is the root's own.
+        if mobject is updater_root:
+            updater_events.append(("root", dt))
 
     updater_frame.add_updater(record_frame_updater)
     updater_root.add_updater(record_root_updater)

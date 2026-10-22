@@ -335,6 +335,11 @@ def _install_fade_effects(g):
         try:
             Animation.finish(self)
             vector_abort(self)
+            if self.suspend_mobject_updating:
+                # The Reference's finish resumes with resume_updating(), whose
+                # call_updater runs one update(dt=0) pass over the family. The
+                # per-member resume above deliberately skips it; an abort does too.
+                self.mobject.update(0)
         except BaseException:
             try:
                 vector_abort(self)

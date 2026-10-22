@@ -38,14 +38,17 @@ def removal():
 def timed_window_and_suspension():
     scene, square, samples = m.Scene(), m.Square(), []
     scene.add(square)
-    square.add_updater(lambda obj: samples.append((scene.get_time(), obj.get_x())), call=False)
+    # fm-k00v: the animation's starting copy and target carry this updater as well, as in the
+    # Reference; the window is about the square itself.
+    square.add_updater(lambda obj: samples.append((scene.get_time(), obj.get_x())) if obj is square else None,
+                       call=False)
     scene.play(square.animate(run_time=.25, rate_func=m.linear, time_span=(.125, .25)).shift(4 * m.RIGHT))
     assert len(samples) >= 4
     assert all(abs(x) < 2e-5 for time, x in samples if 0 < time < .125), samples
     close(square.get_x(), 4)
     calls = []
     square.clear_updaters()
-    square.add_updater(lambda obj, dt: calls.append(dt), call=False)
+    square.add_updater(lambda obj, dt: calls.append(dt) if obj is square else None, call=False)
     scene.play(square.animate(run_time=.125, rate_func=m.linear, suspend_mobject_updating=True).shift(m.RIGHT))
     assert calls and all(dt == 0 for dt in calls), calls
     assert not square._is_updating_suspended()

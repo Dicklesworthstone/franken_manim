@@ -32,6 +32,11 @@ def environment(install=True):
             self.submobjects, self.anchor = [], (0.0, 0.0, 0.0)
         def init_uniforms(self):
             pass
+        # live_rates routes an updater-carrying family through callbacks (fm-k00v).
+        def get_family(self):
+            return [self, *(member for child in self.submobjects for member in child.get_family())]
+        def get_updaters(self):
+            return []
         def get_bounding_box(self):
             return np.array([self.anchor] * 3)
         def _set_point_free_anchor(self, point):

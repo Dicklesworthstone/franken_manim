@@ -9799,7 +9799,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         Invocation::new(python_reference_corpus_regressions_run),
         vec![
             Assertion::ExitCode(0),
-            counter_eq("corpus_regression_cases", 13),
+            counter_eq("corpus_regression_cases", 17),
         ],
         vec![
             LogExpect::span_present(
@@ -9824,6 +9824,16 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                         "11>11: transform s1-8>t0-7; fade_out s0; fade_out s9; fade_out s10; \
                          fade_in t8; fade_in t9; fade_in t10",
                     ),
+                    FieldPred::str_eq("verdict", "pass"),
+                ],
+            ),
+            // fm-k00v: a Square's RIGHT-shift updater keeps acting through its 1 s
+            // FadeIn, as the Reference's starting copy and target carry it.
+            LogExpect::span_present(
+                "e2e.python.reference_corpus_regression",
+                vec![
+                    FieldPred::str_eq("bead", "fm-k00v"),
+                    FieldPred::str_eq("observed", "2.0000"),
                     FieldPred::str_eq("verdict", "pass"),
                 ],
             ),

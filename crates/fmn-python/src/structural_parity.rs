@@ -424,10 +424,15 @@ mod tests {
     #[test]
     fn embedded_portal_matches_the_reference_corpus_regressions() {
         let cases = super::run_portal_gauntlet_reference_corpus_regressions().unwrap();
-        assert_eq!(cases.len(), 13, "{cases:?}");
+        assert_eq!(cases.len(), 17, "{cases:?}");
         assert_eq!(
             cases.iter().filter(|case| case.bead == "fm-5wq.11").count(),
             9,
+            "{cases:?}"
+        );
+        assert_eq!(
+            cases.iter().filter(|case| case.bead == "fm-k00v").count(),
+            4,
             "{cases:?}"
         );
         for case in &cases {

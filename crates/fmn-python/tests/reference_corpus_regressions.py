@@ -84,6 +84,43 @@ def _distances(metric):
     return " ".join(f"{float(value):.6g}" for value in np.asarray(values).ravel())
 
 
+def _updated_through(play, read):
+    """Play one animation in a fresh Scene, in playback, and read one coordinate after it."""
+    observed = []
+
+    class Probe(m.Scene):
+        def construct(self):
+            observed.append(play(self))
+
+    Probe().run()
+    return f"{read(observed[0]):.4f}"
+
+
+def _fade_in_with_updater(scene):
+    square = m.Square()
+    square.add_updater(lambda mob, dt: mob.shift(dt * m.RIGHT))
+    scene.play(m.FadeIn(square))
+    after = float(square.get_center()[0])
+    scene.wait(1)
+    return after, float(square.get_center()[0])
+
+
+def _animate_with_updater(scene):
+    square = m.Square()
+    scene.add(square)
+    square.add_updater(lambda mob, dt: mob.shift(dt * m.UP))
+    scene.play(square.animate.shift(m.RIGHT))
+    return float(square.get_center()[1])
+
+
+def _alpha_func_suspended(scene):
+    square = m.Square()
+    scene.add(square)
+    square.add_updater(lambda mob, dt: mob.shift(dt * m.RIGHT))
+    scene.play(m.UpdateFromAlphaFunc(square, lambda mob, alpha: None, suspend_mobject_updating=True))
+    return float(square.get_center()[0])
+
+
 # (bead, construct, observe, expected, provenance). Expected values were
 # measured on the pinned Reference; _2023/clt/wordy_scenes.py AverageDiceValues
 # shows a DecimalNumber of an empty average, which is nan.
@@ -119,6 +156,20 @@ CASES = (
     ("fm-5wq.11", f"linear_sum_assignment({_COST}, maximize=True)",
      lambda: _assignment(True), "rows [0, 1, 2] cols [3, 2, 0] total 15",
      REFERENCE + ":manimlib/mobject/svg/string_mobject.py:linear_sum_assignment (scipy 1.18.1, measured)"),
+    # fm-k00v: an updater keeps acting through a Transform-family animation, because
+    # Animation.update_mobjects updates the starting copy and the target that carry it.
+    ("fm-k00v", "Square with a RIGHT-shift updater, play(FadeIn(square)): x after the play",
+     lambda: _updated_through(_fade_in_with_updater, lambda value: value[0]), "1.0000",
+     REFERENCE + ":manimlib/animation/animation.py:update_mobjects (measured, playback)"),
+    ("fm-k00v", "the same, then wait(1): x",
+     lambda: _updated_through(_fade_in_with_updater, lambda value: value[1]), "2.0000",
+     REFERENCE + ":manimlib/animation/animation.py:update_mobjects (measured, playback)"),
+    ("fm-k00v", "Square with an UP-shift updater, play(square.animate.shift(RIGHT)): y",
+     lambda: _updated_through(_animate_with_updater, float), "1.0000",
+     REFERENCE + ":manimlib/animation/animation.py:update_mobjects (measured, playback)"),
+    ("fm-k00v", "UpdateFromAlphaFunc(..., suspend_mobject_updating=True) on an updating Square: x",
+     lambda: _updated_through(_alpha_func_suspended, float), "0.0000",
+     REFERENCE + ":manimlib/animation/animation.py:begin (measured, playback)"),
     *(
         ("fm-5wq.11", f"cdist({_XA}, {_XB}, metric={metric!r})",
          (lambda metric=metric: _distances(metric)), expected,
