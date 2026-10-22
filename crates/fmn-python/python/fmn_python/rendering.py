@@ -526,7 +526,9 @@ def _validate_writer_options(scene: Any, format: str, native: Any, *,
     for name in ("subdivide_output", "open_file_upon_completion", "show_file_location_upon_completion"):
         if getattr(writer, name, False) and not (allow_subdivide and name == "subdivide_output"):
             unsupported.append(name)
-    if format != "wav":
+    # The Reference applies saturation and gamma only in its ffmpeg movie pipe
+    # (scene_file_writer.py:211, `-vf eq=...`); a saved still image ignores them.
+    if format not in {"wav", "png", "png_sequence"}:
         for name in ("saturation", "gamma"):
             if getattr(writer, name, 1.0) != 1.0:
                 unsupported.append(name)

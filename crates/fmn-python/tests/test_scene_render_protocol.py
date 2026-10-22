@@ -169,6 +169,16 @@ class SceneRenderTests(unittest.TestCase):
         result = self.scene.render("audio.wav")
         self.assertEqual(result.format, "wav")
 
+    def test_color_transform_knobs_do_not_block_still_images(self):
+        # The Reference's saturation/gamma live only in its ffmpeg movie pipe; a corpus
+        # custom_config.yml sets file_writer.saturation for every scene.
+        for format in ("png", "png_sequence"):
+            with self.subTest(format=format):
+                scene = self.native.Scene()
+                scene.file_writer.saturation, scene.file_writer.gamma = 1.5, 1.2
+                result = scene.render("still", format=format)
+                self.assertEqual(result.format, format)
+
     def test_public_render_scene_also_validates_writer_configuration(self):
         self.scene.file_writer.gamma = 2.0
         with self.assertRaisesRegex(RuntimeError, "gamma"):
