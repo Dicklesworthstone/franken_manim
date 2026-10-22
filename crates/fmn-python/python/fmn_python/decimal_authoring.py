@@ -38,7 +38,17 @@ def install_decimal_authoring(native):
             raise ValueError("pass font_size to DecimalNumber, not its text_config")
         return dict(options)
 
-    def normalize(value):
+    def normalize(self, value):
+        # Integer is a semantic integer readout, not an f64 input. Keep Python
+        # and NumPy integral values exact before either formatting or storing
+        # them; DecimalNumber deliberately retains its floating-point route.
+        if isinstance(self, g.get("Integer", ())) and isinstance(value, (int, np.integer)):
+            result = int(value)
+            # Reject certainly over-budget values before decimal conversion.
+            # The exact character check below also counts signs and commas.
+            if result.bit_length() > (_MAX_CHARACTERS * 3322 // 1000 + 1):
+                raise ValueError("decimal-number characters exceed the declared limit of 4096")
+            return result
         if isinstance(value, (complex, np.complexfloating)):
             result = complex(value)
             valid = math.isfinite(result.real) and math.isfinite(result.imag)
@@ -82,7 +92,8 @@ def install_decimal_authoring(native):
         # same digits, including integer truncation and negative-zero handling.
         displayed = int(value) if self._decimal_params[0] == 0 else value
         text = self.get_formatter(include_sign=sign).format(displayed)
-        if text.startswith("-") and np.round(value, self._decimal_params[0]) == 0:
+        if text.startswith("-") and (value == 0 if type(value) is int
+                                      else np.round(value, self._decimal_params[0]) == 0):
             text = ("+" if sign else "") + text[1:]
         return text.replace("-", "–")
 
@@ -173,7 +184,7 @@ def install_decimal_authoring(native):
         return root
 
     def get_num_string(self, number):
-        number = normalize(number)
+        number = normalize(self, number)
         validate_format(self)
         if isinstance(number, complex) and len(components(self, number)) == 2:
             formatter = self.get_complex_formatter
@@ -250,13 +261,17 @@ def install_decimal_authoring(native):
         return root
 
     def set_submobjects_from_number(self, number):
-        number = normalize(number)
+        number = normalize(self, number)
         validate_format(self)
-        symbolic = not isinstance(number, complex) and not math.isfinite(number)
-        if text_options(self) or _changed(self, protocols) or symbolic:
+        exact_large_integer = type(number) is int and abs(number) > (1 << 53)
+        symbolic = isinstance(number, float) and not math.isfinite(number)
+        if text_options(self) or _changed(self, protocols) or symbolic or exact_large_integer:
             # The native f64 number shelf intentionally accepts finite values.
             # Infinity and NaN follow the existing authored-string composition
             # path; only their finite glyph records reach the geometry engine.
+            # Large integers use that same native Text composition, never an
+            # f64 approximation of their value. Small integers keep the fast
+            # number shelf and its existing layout unchanged.
             text = self.get_num_string(number)
             check_string(self, text)
             scratch = build_authored(self, text)
@@ -399,7 +414,7 @@ def install_decimal_authoring(native):
         config = bound.arguments
         self.text_config = {} if config["text_config"] is None else config["text_config"]
         self.text_config = text_options(self)
-        number = normalize(config["number"])
+        number = normalize(self, config["number"])
         self.hide_zero_components_on_complex = bool(config["hide_zero_components_on_complex"])
         self.font_size = float(config["font_size"])
         self.edge_to_fix = np.array(g["_vec3"](config["edge_to_fix"]))
@@ -440,6 +455,20 @@ def install_decimal_authoring(native):
         method.__qualname__ = Decimal.__qualname__ + "." + name
         method.__module__ = Decimal.__module__
         setattr(Decimal, name, method)
+
+    Integer = g.get("Integer")
+    if Integer is not None:
+        previous_integer_value = Integer.get_value
+
+        @wraps(previous_integer_value)
+        def integer_value(self):
+            # np.round promotes wide integers to f64/object arrays. It is only
+            # needed for the pre-existing nonintegral input behavior.
+            if type(self.number) is int:
+                return self.number
+            return previous_integer_value(self)
+
+        Integer.get_value = integer_value
 
     # Keep the tuple used by native constructors and decorated Matrix cells as
     # the single source of truth, while exposing the Reference's authoring
