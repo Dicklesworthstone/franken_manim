@@ -314,6 +314,14 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
         options.update(video_options)
         configuration, width, height, fps = resolve_render_configuration(native, options, width, height, fps)
         output_options = _output_overrides(options)
+        if "clip_checkpoint_dir" in recovery:
+            from .parallel_clip_recovery import validate_clip_recovery
+
+            if not parallel:
+                raise ValueError("--clip-checkpoint-dir requires --workers")
+            validate_clip_recovery(checkpoint=recovery.get("checkpoint"), subdivide=subdivide,
+                                   save_last_frame=paired, reproducible=bool(options.get("reproducible")),
+                                   format=options["format"])
         if source_jobs is not None and options.get("reproducible"):
             raise RuntimeError("CAPABILITY: constructor variants require standard mode; "
                                "their JSON inputs do not establish a certified source closure")

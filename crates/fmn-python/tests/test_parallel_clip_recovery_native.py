@@ -1,5 +1,8 @@
 """Installed-wheel acceptance for parallel per-scene clip-prefix recovery."""
 import hashlib
+import json
+import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -72,6 +75,25 @@ class ParallelClipRecoveryNativeTests(unittest.TestCase):
         self.assertEqual(resumed.outcomes[0].status, "failed")
         self.assertFalse((self.output / "Lesson/clips/segment-000001.gif").exists())
         self.assertEqual(path.read_bytes(), b"tampered native clip")
+
+    def test_installed_cli_recovers_each_partial_scene(self):
+        (self.root / "fail").touch()
+        command = [sys.executable, "-m", "fmn_python", str(self.source), "Lesson", "Other",
+                   "--workers", "2", "--subdivide", "--format", "gif", "--resolution", "64x48",
+                   "--fps", "8", "--video_dir", str(self.output), "--clip-checkpoint-dir", str(self.state),
+                   "--resume-key", "native-v1", "--keep-going", "--robot"]
+        first = subprocess.run(command, cwd=self.root, capture_output=True, text=True, timeout=90)
+        self.assertEqual(first.returncode, 5, first.stderr + first.stdout)
+        data = json.loads(first.stdout)["batch"]
+        self.assertEqual(data["counts"]["failed"], 2)
+        path = self.output / "Lesson/clips/segment-000000.gif"
+        saved = path.stat().st_mtime_ns, path.read_bytes()
+        (self.root / "fail").rename(self.root / "fixed")
+        second = subprocess.run(command + ["--resume"], cwd=self.root,
+                                capture_output=True, text=True, timeout=90)
+        self.assertEqual(second.returncode, 0, second.stderr + second.stdout)
+        self.assertTrue(json.loads(second.stdout)["batch"]["ok"])
+        self.assertEqual((path.stat().st_mtime_ns, path.read_bytes()), saved)
 
 
 if __name__ == "__main__":

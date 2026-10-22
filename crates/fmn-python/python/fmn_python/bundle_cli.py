@@ -221,6 +221,8 @@ def try_bundle_cli(native, arguments):
                 raise ValueError("--jobs-file cannot combine with explicit scene names or --write_all")
             source_jobs = load_source_jobs(job_files[0], max_jobs=_MAX_SELECTED_SCENES)
         native_options, recovery = take_checkpoint_options(native_options, _VALUE_FLAGS)
+        if "clip_checkpoint_dir" in recovery:
+            raise ValueError("--clip-checkpoint-dir requires subdivided media output, not FMTL")
         if recovery and not batch:
             raise ValueError("checkpoint recovery requires multiple scene names or --write_all")
         # Refuse unsupported semantics before importing or constructing source.

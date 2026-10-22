@@ -1,7 +1,7 @@
 """Checkpoint options for the existing ordered multi-scene console route."""
 from pathlib import Path
 
-CHECKPOINT_VALUES = frozenset({"--checkpoint", "--resume-key"})
+CHECKPOINT_VALUES = frozenset({"--checkpoint", "--clip-checkpoint-dir", "--resume-key"})
 CHECKPOINT_HELP = """Resumable batches:
   fmn-python SOURCE.py --write_all --checkpoint progress.json --resume-key INPUTS
   fmn-python SOURCE.py --write_all --checkpoint progress.json --resume-key INPUTS --resume
@@ -18,11 +18,23 @@ and checkpoint for a new input version. Keep the journal outside frame folders.
 With --save-last-frame, non-subdivided batches checkpoint the primary and final
 PNG together. Both must still match before a completed scene is skipped. Keep
 the journal and its lock outside BOTH outputs. Paired and single-output plans
-are distinct; --subdivide and --reproducible still do not support recovery.
+are distinct; certification does not support recovery. With --workers,
+--subdivide can recover completed whole-scene collections through this journal.
 With --workers, the parent owns the same durable journal and verifies every
 completed artifact before launching pending jobs. Entry-source bytes and cwd
 must also match; worker count and timeout may change. Reused scene names appear
 in the robot receipt. Sequential and parallel checkpoint plans are distinct.
+
+To recover INSIDE unfinished scenes, choose --clip-checkpoint-dir DIRECTORY
+instead of --checkpoint. It requires --workers and --subdivide, with the same
+--resume-key INPUTS and explicit --resume on retries. Each job gets an existing
+per-clip journal; its saved clips are verified and its commands replay to rebuild
+state without rasterizing/encoding the saved prefix. Python side effects repeat,
+including for completed scenes, so the whole-scene reused list stays empty.
+Named scene batches, --write_all and --jobs-file are supported. Final-image pairs,
+certification and FMTL do not combine with this mode. Keep the state directory
+outside every clip collection; missing journals never authorize existing outputs.
+A shared --batch-timeout or per-job --job-timeout retains durably journaled clips.
 """
 
 
@@ -50,14 +62,18 @@ def take_checkpoint_options(arguments, value_flags):
             index += 1
     if not found:
         return remaining, {}
-    if "--checkpoint" not in found or "--resume-key" not in found:
-        raise ValueError("batch recovery requires both --checkpoint PATH and --resume-key INPUTS")
-    path, key = found["--checkpoint"], found["--resume-key"]
+    modes = [flag for flag in ("--checkpoint", "--clip-checkpoint-dir") if flag in found]
+    if len(modes) != 1 or "--resume-key" not in found:
+        raise ValueError("batch recovery requires exactly one of --checkpoint PATH or "
+                         "--clip-checkpoint-dir DIRECTORY, and --resume-key INPUTS")
+    mode = modes[0]
+    path, key = found[mode], found["--resume-key"]
     if not path or "\0" in path:
-        raise ValueError("--checkpoint must be a nonempty path without NUL")
+        raise ValueError(mode + " must be a nonempty path without NUL")
     if not key or len(key.encode("utf-8")) > 4096:
         raise ValueError("--resume-key must contain 1 to 4096 UTF-8 bytes")
     # Source module code may chdir. Preserve the leaf so the journal owner can
     # reject a symlink rather than resolving it into an overwrite target.
     path = Path(path).absolute()
-    return remaining, {"checkpoint": path, "resume_key": key, "resume": bool(found.get("--resume"))}
+    return remaining, {mode[2:].replace("-", "_"): path, "resume_key": key,
+                       "resume": bool(found.get("--resume"))}
