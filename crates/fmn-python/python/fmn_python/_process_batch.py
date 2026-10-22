@@ -155,6 +155,39 @@ def _drain_exited(item):
             break
 
 
+def _close_after_error(resource, error):
+    try:
+        resource.close()
+    except BaseException as cleanup:
+        BaseException.add_note(error, "worker resource cleanup also failed: " + type(cleanup).__name__)
+
+
+def _start_worker(context, active, started, index, worker, job):
+    """Transfer ownership before start can spawn and then raise.
+
+    A KeyboardInterrupt can arrive after Process.start has installed a live
+    child but before it returns. Both that child and its unread receipt must
+    reach the batch's ordinary concurrent cleanup, never Process.close while
+    running. A candidate with no PID is still owned, but remains not_run.
+    """
+    receive, send = receipt_channel()
+    process = None
+    try:
+        process = context.Process(target=_child, args=(send, worker, job))
+        active[index] = [process, receive, None]
+        # The per-job timeout includes interpreter startup, as documented.
+        started[index] = time.monotonic()
+        process.start()
+        send.close()
+    except BaseException as error:
+        _close_after_error(send, error)
+        if index not in active:
+            _close_after_error(receive, error)
+            if process is not None:
+                _close_after_error(process, error)
+        raise
+
+
 def _stop(active, *, cancelling=None):
     """Cancel concurrently while continuing to collect published receipts.
 
@@ -162,8 +195,11 @@ def _stop(active, *, cancelling=None):
     64 uncooperative jobs must not multiply a two-second cleanup allowance.
     """
     cancelling = {} if cancelling is None else dict(cancelling)
-    for index in active:
-        cancelling.setdefault(index, [0.0, -1])
+    for index, item in active.items():
+        # Failed admission can own a Process whose start never acquired a PID.
+        # It has no worker/group to signal or join; final cleanup closes it.
+        if item[0].pid is not None:
+            cancelling.setdefault(index, [0.0, -1])
     while cancelling:
         try:
             for index, state in list(cancelling.items()):
@@ -239,18 +275,7 @@ def run_process_jobs(jobs, worker, *, workers, continue_on_error=False,
                    and next_job < len(jobs) and len(active) < workers):
                 _check_cancelled(cancellation)
                 index = next_job
-                receive, send = receipt_channel()
-                process = context.Process(target=_child, args=(send, worker, jobs[index]))
-                try:
-                    process.start()
-                except BaseException:
-                    receive.close()
-                    send.close()
-                    process.close()
-                    raise
-                send.close()
-                active[index] = [process, receive, None]
-                started[index] = time.monotonic()
+                _start_worker(context, active, started, index, worker, jobs[index])
                 next_job += 1
             _check_cancelled(cancellation)
             handles = [handle for process, connection, row in active.values()
@@ -320,6 +345,12 @@ def run_process_jobs(jobs, worker, *, workers, continue_on_error=False,
                 if index in timed_out:
                     _timeout_outcome(item, job_timeout)
                 process, connection, row = item
+                if process.pid is None:
+                    # No worker executed this job. Do not invent a cancelled or
+                    # failed rendering receipt for an unstarted candidate.
+                    _close_after_error(connection, error)
+                    _close_after_error(process, error)
+                    continue
                 if (isinstance(error, BatchCancelled) and index in awaiting
                         and index not in timed_out and connection.incomplete):
                     # EOF caused by stopping an unreceipted worker is not a
@@ -330,8 +361,8 @@ def run_process_jobs(jobs, worker, *, workers, continue_on_error=False,
                         "Worker stopped without a complete receipt; outputs were not removed.")
                 rows[index] = row if row is not None else failure(
                     RuntimeError("worker stopped without a receipt; outputs may exist"), "cancelled")
-                connection.close()
-                process.close()
+                _close_after_error(connection, error)
+                _close_after_error(process, error)
             try:
                 error.process_batch_outcomes = rows
             except BaseException:
