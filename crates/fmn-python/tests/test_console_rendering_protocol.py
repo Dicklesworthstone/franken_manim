@@ -464,11 +464,15 @@ class ConsoleRenderingProtocol(unittest.TestCase):
         self.assertEqual(Path(report["destination"]), self.root / "chosen.png")
 
     def test_unknown_writer_options_fail_before_native_start(self):
+        # A video format has no route for gamma, so it refuses before native start. A still
+        # image ignores it, as the Reference's save_final_image does (fm-l6p9).
         self.native.Scene.writer_options = {"gamma": 2.0}
-        code, report, _, _ = self.render()
+        code, report, _, _ = self.render("--format", "y4m")
         self.assertEqual(code, 4)
         self.assertIn("gamma", report["message"])
         self.assertEqual(self.native.instances[0].events, [])
+        code, report, _, _ = self.render("--format", "png")
+        self.assertEqual(code, 0, report)
 
     def test_repeated_robot_rejected_before_source_load(self):
         self.source.write_text("raise AssertionError('must not load')\n")
