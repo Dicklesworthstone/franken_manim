@@ -54,7 +54,9 @@ class B(A):
         argv = ["fmn-python", "--robot", str(self.source), *selectors,
                 "--format", format, "--resolution", "96x54", "--fps", "8", "--threads", "1"]
         if destination is not None:
-            output_flag = "--video_dir" if len(selectors) > 1 or any(value in {"-a", "--write_all"} for value in selectors) else "--output"
+            # A batch (several selectors, or -a/--write_all anywhere on the line) writes into a
+            # directory; --output names one scene's file and the CLI refuses it for a batch.
+            output_flag = "--video_dir" if len(selectors) > 1 or any(value in {"-a", "--write_all"} for value in (*selectors, *extra)) else "--output"
             argv += [output_flag, str(destination)]
         if paired:
             argv.append("--save-last-frame")
