@@ -24194,7 +24194,13 @@ def _cwd_custom_config():
 
 
 def _portal_configuration_section(name):
-    if vars(_FMN_ROOT).get("_portal_cli_configuration") is None:
+    # fmn_python.scene_loading.SceneSource installs the CLI configuration on the
+    # manimlib package, which shares this module's manim_config. Reading the
+    # flag only here (the native module) dropped every --config_file scene:
+    # value, such as default_wait_time (fm-upbk).
+    holders = (_FMN_ROOT, _sys.modules.get("manimlib"))
+    if all(holder is None or vars(holder).get("_portal_cli_configuration") is None
+           for holder in holders):
         return {}
     # The scoped live mapping also observes authored import-time edits.
     return dict(_FMN_ROOT.manim_config.get(name, {}))
