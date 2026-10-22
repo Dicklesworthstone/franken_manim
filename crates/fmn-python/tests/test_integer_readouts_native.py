@@ -20,8 +20,14 @@ class NativeIntegerReadouts(unittest.TestCase):
             self.assertEqual(number.get_tex(), expected)
             self.assertEqual(len(number), len(expected))
             for char, child in zip(expected, number):
+                # Points are stored as float32. Re-centering a glyph that sat at |x| = R can
+                # move each coordinate by one f32 ULP of R (3.7e-6 for 10**400's farthest
+                # glyph, at |x| = 38.9). So allow two ULPs of the glyph's own magnitude,
+                # and never less than the 1e-6 kept near the origin.
+                reach = float(np.max(np.abs(child.get_all_points())))
+                tolerance = max(1e-6, 2 * float(np.spacing(np.float32(reach))))
                 np.testing.assert_allclose(child.copy().center().get_all_points(),
-                                           m.Text(char).get_all_points(), atol=1e-6)
+                                           m.Text(char).get_all_points(), atol=tolerance)
             self.assertTrue(all(np.isfinite(part.get_points()).all()
                                 for part in number.family_members_with_points()))
 
