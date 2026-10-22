@@ -15,11 +15,13 @@ from fmn_python import render_session
 class LiveFadeRates(unittest.TestCase):
     def test_stock_fades_sample_the_actual_frame_clock(self):
         for fps in (24, 60, 120):
-            for kind in (m.FadeIn, m.FadeOut, m.FadeInFromLarge):
+            # FadeInFromPoint is the Reference's FadeIn with a scale/shift
+            # start (fading.py:71); the portal-only FadeInFromLarge is gone.
+            for kind, extra in ((m.FadeIn, ()), (m.FadeOut, ()), (m.FadeInFromPoint, (2 * m.UP,))):
                 with self.subTest(fps=fps, kind=kind.__name__), tempfile.TemporaryDirectory() as tmp:
                     scene = m.Scene()
                     square = m.Square(fill_opacity=.8, stroke_opacity=.6)
-                    animation = kind(square, run_time=.5)
+                    animation = kind(square, *extra, run_time=.5)
                     sampled, observed = [], []
 
                     def rate(t):
