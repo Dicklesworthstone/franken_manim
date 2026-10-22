@@ -44,6 +44,21 @@ objects keep their native updater route. The same rational frame driver still
 owns animation ordering, time advance, event delivery, capture and emission.
 The independent Studio idle/presenter loop is not changed by this dispatch.
 
+## Authored `update_frame`
+
+An authored `Scene.update_frame(dt, force_draw)` override is a public scene
+protocol too (fm-j6lm). Native play and wait call it once per frame in step 4,
+with that frame's `dt`, in playback and skip alike (BN-10). Choreo has already
+advanced the clock, so the base `update_frame` the override chains to runs only
+`update_mobjects(dt)`. Until that call, `self.time` reads the previous frame's
+time, which is what the Reference's override sees before `super()`. A sound added
+there starts at that time. As in the Reference, skip mode mixes no sounds.
+
+Under D18 such a segment is stateful, like every externally updated segment.
+It keeps no pure-frame snapshot, so it never takes the frame-parallel path. Its
+output is a function of the ordered per-frame calls, which makes a certified
+render reproducible exactly when the override is deterministic.
+
 ## Regression coverage
 
 `crates/fmn-python/tests/public_update_dispatch.py` covers recursive overrides,

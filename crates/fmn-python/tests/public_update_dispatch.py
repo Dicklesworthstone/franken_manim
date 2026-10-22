@@ -2,8 +2,10 @@
 from pathlib import Path
 import copy
 import gc
+import struct
 import tempfile
 import unittest
+import wave
 import weakref
 
 import numpy as np
@@ -754,6 +756,38 @@ class AuthoredUpdateFrameTests(unittest.TestCase):
                 # A sound added before super() lands at the previous frame's time.
                 np.testing.assert_allclose(sounds, -1 / 30, atol=1e-12)
                 self.assertAlmostEqual(scene.time, 2.0, places=9)
+
+    def test_a_sound_added_by_the_override_reaches_the_soundtrack(self):
+        # The colliding-blocks scenes add their clack in update_frame. Before super() the
+        # override reads the previous frame's time, so a cue at time 0.5 starts at 0.5 s.
+        rate = 48000
+        with tempfile.TemporaryDirectory() as tmp:
+            clack = Path(tmp) / "clack.wav"
+            with wave.open(str(clack), "wb") as stream:
+                stream.setparams((1, 2, rate, 0, "NONE", "not compressed"))
+                stream.writeframes(struct.pack("<h", 8000) * 480)
+
+            class Clacks(m.Scene):
+                cued = None
+
+                def update_frame(self, dt=0, force_draw=False):
+                    if dt > 0 and self.cued is None and self.time >= 0.5 - 1e-9:
+                        self.cued = self.time
+                        self.add_sound(str(clack))
+                    super().update_frame(dt, force_draw)
+
+                def construct(self):
+                    self.play(m.ValueTracker(0).animate.set_value(1), run_time=1)
+
+            scene = Clacks()
+            result = scene.render(Path(tmp) / "soundtrack.wav", threads=1)
+            with wave.open(str(result.destination), "rb") as reader:
+                self.assertEqual((reader.getframerate(), reader.getsampwidth()), (rate, 2))
+                channels, data = reader.getnchannels(), reader.readframes(reader.getnframes())
+        samples = struct.unpack(f"<{len(data) // 2}h", data)
+        self.assertAlmostEqual(scene.cued, 0.5, places=9)
+        first = next(i for i, sample in enumerate(samples) if sample)
+        self.assertEqual(first // channels, rate // 2)
 
     def test_scenes_without_the_override_keep_the_native_frame(self):
         scene = m.Scene()
