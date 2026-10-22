@@ -11,11 +11,15 @@ import ast
 from dataclasses import replace
 import hashlib
 import importlib.util
+import math
+import os
 from pathlib import Path
+import stat
 import sys
 import tempfile
 import types
 import unittest
+from typing import Any
 from unittest.mock import patch
 
 _PYTHON = Path(__file__).resolve().parents[1] / "python/fmn_python"
@@ -58,6 +62,16 @@ def load_batch():
     def no_checkpoint(*args, **kwargs):
         raise AssertionError("certified tests must not acquire a checkpoint lock")
     checkpoint.BatchCheckpoint = no_checkpoint
+    # Regular-file admission and constructor-value copying are production code
+    # that job files and subdivision share (6ce17d8c); only the lock is a double.
+    names = {"_open_regular", "_signature", "_constructor_values"}
+    helpers = [node for node in ast.parse((_PYTHON / "batch_checkpoint.py").read_text()).body
+               if isinstance(node, ast.FunctionDef) and node.name in names]
+    if {node.name for node in helpers} != names:
+        raise RuntimeError("production checkpoint helpers are missing")
+    vars(checkpoint).update(os=os, stat=stat, math=math, Path=Path, Any=Any)
+    exec(compile(ast.Module(body=helpers, type_ignores=[]), str(_PYTHON / "batch_checkpoint.py"), "exec"),
+         vars(checkpoint))
     sys.modules[checkpoint.__name__] = checkpoint
     runtime = types.ModuleType(name + ".runtime_identity")
     class RuntimeIdentityError(RuntimeError):

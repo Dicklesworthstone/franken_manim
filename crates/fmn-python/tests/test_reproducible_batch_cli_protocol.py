@@ -4,9 +4,11 @@ No native parsing/rendering claim: the unchanged native parser and SceneSource
 have their own acceptance suites. This tests forwarding, preflight, output
 redirection and progress receipts through the production Python call chain.
 """
+import ast
 from contextlib import redirect_stdout, redirect_stderr
 import io
 import json
+import os
 from pathlib import Path
 import sys
 import types
@@ -28,9 +30,11 @@ class BatchCliTests(unittest.TestCase):
         self.loaded = False
         self.load_count = 0
         self.loaded_sources = {"scene.py": self.source.read_bytes()}
+        self.configurations = []
         outer = self
         class Source:
-            def __init__(self, path, Scene):
+            def __init__(self, path, Scene, configuration=None):
+                outer.configurations.append(configuration)
                 self.scenes = outer.classes
             def __enter__(self):
                 outer.loaded = True
@@ -45,7 +49,19 @@ class BatchCliTests(unittest.TestCase):
                     raise AssertionError("provider ran after source loader closed")
                 return outer.loaded_sources
         loader = types.ModuleType("_fmn_batch_protocol.scene_loading")
+        loader.__package__ = "_fmn_batch_protocol"
         loader.SceneSource = Source
+        # The batch CLI freezes configuration-file layers before any source
+        # import (297039f8). Run the production resolver, not a stand-in.
+        production = core._PYTHON / "scene_loading.py"
+        resolver = [node for node in ast.parse(production.read_text()).body
+                    if (isinstance(node, ast.FunctionDef) and node.name == "resolve_render_configuration")
+                    or (isinstance(node, ast.Assign) and any(
+                        getattr(target, "id", None) == "_MAX_CONFIG_BYTES" for target in node.targets))]
+        if len(resolver) != 2:
+            raise RuntimeError("production configuration resolution is missing")
+        vars(loader).update(Path=Path, os=os, json=json)
+        exec(compile(ast.Module(body=resolver, type_ignores=[]), str(production), "exec"), vars(loader))
         sys.modules[loader.__name__] = loader
         self.rendering.RenderSession = lambda *a, **k: self.fail("batch entered single-scene CLI path")
         self.rendering._apply_output_options = lambda *a: None
@@ -125,6 +141,10 @@ class BatchCliTests(unittest.TestCase):
         code, receipt, _ = self.invoke(["-a"])
         self.assertEqual(code, 0)
         self.assertTrue(receipt["batch"]["all_scenes_certified"])
+        # A certified batch never carries configuration-file layers into the
+        # source scope (scene_loading.resolve_render_configuration).
+        self.assertTrue(self.configurations)
+        self.assertTrue(all(value is None for value in self.configurations), self.configurations)
 
     def test_legacy_write_all_delegates_same_provenance_path(self):
         code, receipt, _ = self.invoke(["--write_all"], legacy=True)
