@@ -71,6 +71,7 @@ def native_boundary():
     native._cwd_custom_config = lambda: None
     native._itertools = itertools
     native._pathlib = __import__("pathlib")
+    native._sys = sys
     selected = [node for node in TREE.body if isinstance(node, ast.FunctionDef)
                 and node.name in {"_portal_configuration_section", "_reference_camera_layer"}]
     utilities = next(node for node in TREE.body if isinstance(node, ast.FunctionDef)
@@ -127,6 +128,22 @@ class SceneConfigurationProtocolTests(unittest.TestCase):
             self.assertEqual(scene.file_writer.audio_bitrate, 192000)
             self.assertIs(scene.mobjects[0], scene.frame)
             self.assertNotIn("_camera", vars(scene))
+
+    def test_scope_installed_on_a_distinct_package_reaches_the_native_reader(self):
+        # In the installed wheel the manimlib package is not the native module
+        # that defines the reader; SceneSource marks the package (fm-upbk).
+        package = ModuleType("manimlib")
+        package.__path__ = []
+        package.Scene, package.config = self.native.Scene, self.config_module
+        package.manim_config = self.native.manim_config
+        with patch.dict(sys.modules, {"manimlib": package}):
+            with self.source() as source:
+                self.assertNotIn("_portal_cli_configuration", vars(self.native))
+                scene = source.scenes["Lesson"]()
+                self.assertEqual(scene.default_wait_time, .25)
+                self.assertEqual(scene.file_writer.video_preset, "slow")
+            self.assertNotIn("_portal_cli_configuration", vars(package))
+        self.assertEqual(self.native.Scene().default_wait_time, 1.)
 
     def test_constructor_options_win_including_false_and_zero(self):
         with self.source() as source:
