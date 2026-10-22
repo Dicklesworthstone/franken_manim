@@ -470,6 +470,46 @@ def install_decimal_authoring(native):
 
         Integer.get_value = integer_value
 
+    Change = g.get("ChangeDecimalToValue")
+    if Integer is not None and Change is not None:
+        previous_change_init = Change.__init__
+
+        @wraps(previous_change_init)
+        def change_integer_init(self, decimal_mob, target_number, **kwargs):
+            exact = (isinstance(decimal_mob, Integer)
+                     and isinstance(decimal_mob.number, (int, np.integer))
+                     and isinstance(target_number, (int, np.integer)))
+            if not exact:
+                return previous_change_init(self, decimal_mob, target_number, **kwargs)
+            start = normalize(decimal_mob, decimal_mob.number)
+            target = normalize(decimal_mob, target_number)
+            previous_change_init(self, decimal_mob, target, **kwargs)
+            ordinary = self.number_update_func
+            wide = max(abs(start), abs(target)) > (1 << 53)
+
+            def value_at(alpha):
+                # Preserve both endpoints even for a one-unit change at 10^400.
+                # Rate functions and time windows already selected this alpha;
+                # do not clamp it or install another clock/interpolation loop.
+                if alpha == 0:
+                    return start
+                if alpha == 1:
+                    return target
+                if not wide:
+                    return ordinary(alpha)
+                # The phase is binary64, but the integer endpoints need not be.
+                # Evaluate its exact rational affine combination, then truncate
+                # toward zero, as the zero-decimal display does. This keeps
+                # intermediate digits meaningful without overflowing f64.
+                numerator, denominator = float(alpha).as_integer_ratio()
+                value = start * denominator + (target - start) * numerator
+                magnitude = abs(value) // denominator
+                return -magnitude if value < 0 else magnitude
+
+            self.number_update_func = value_at
+
+        Change.__init__ = change_integer_init
+
     # Keep the tuple used by native constructors and decorated Matrix cells as
     # the single source of truth, while exposing the Reference's authoring
     # attributes. Changes take effect on the next rebuild, not mid-frame.

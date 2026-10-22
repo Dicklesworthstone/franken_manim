@@ -22,7 +22,7 @@ SOURCE = Path(os.environ.get("FMN_DECIMAL_SOURCE", str(
 
 
 @contextmanager
-def host():
+def host(*, animations=False):
     package = ModuleType("fmn_python")
     package.__path__ = [str(SOURCE.parent)]
     copying = ModuleType("fmn_python.copying")
@@ -147,6 +147,13 @@ def host():
                             BLACK="black", WHITE="white",
                             _init_native_vmobject=lambda obj, options: VMobject.__init__(obj),
                             _apply_vmobject_style_kwargs=lambda obj, options: obj.set_style(**options))
+        if animations:
+            class ChangeDecimalToValue:
+                def __init__(self, decimal_mob, target_number, **kwargs):
+                    start = decimal_mob.number
+                    self.mobject, self.options = decimal_mob, kwargs
+                    self.number_update_func = lambda alpha: (1 - alpha) * start + alpha * target_number
+            g.ChangeDecimalToValue = ChangeDecimalToValue
         owner.install_decimal_authoring(g)
         yield SimpleNamespace(native=g, owner=owner, events=events)
 
