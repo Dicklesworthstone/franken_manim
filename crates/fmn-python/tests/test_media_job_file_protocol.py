@@ -413,7 +413,10 @@ class MediaJobFileTests(unittest.TestCase):
         self.assertEqual(options["animation_range"], (2, 5))
         self.assertEqual([job.name for job in options["scene_names"]], ["seed7", "seed11"])
         self.assertEqual(options["scene_names"][1].scene_kwargs, {"value": 11})
-        self.assertEqual(self.invoke("--subdivide", "--checkpoint", str(self.checkpoint), "--resume-key", "v1"), 2)
+        # Parallel collections now support recovery; the sequential refusal
+        # remains, and dedicated CLI recovery tests exercise the positive path.
+        self.assertEqual(self.invoke("--subdivide", "--checkpoint", str(self.checkpoint), "--resume-key", "v1",
+                                     workers=False, job_file=False, names=("Lesson", "Other"), format="mp4"), 2)
         self.assertEqual(len(self.discoveries), 1)
 
     def test_quiet_keeps_robot_receipt_and_legacy_single_mode_is_not_a_job_batch(self):

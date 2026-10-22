@@ -168,8 +168,12 @@ Use one or more named scenes, or --write_all, with a supported clip format.
 an output root containing <Scene>/clips/. Source ranges retain original call
 indices and apply to each scene; nested AnimationGroups remain one clip.
 --keep-going preserves partial clips and proceeds after ordinary scene failures.
---skip_animations, batch --checkpoint recovery and certified output do not
-combine with subdivision. For recovery WITHIN one named scene, use
+--skip_animations and certified output do not combine with subdivision.
+For batches WITH --workers, --checkpoint JOURNAL --resume-key INPUTS saves
+completed scene collections. Add --resume to verify every clip (and optional
+final PNG) before skipping those scenes. Partial collections remain no-clobber;
+this is not within-scene replay. Sequential batches still refuse checkpoint
+recovery for subdivision. For recovery WITHIN one named scene, use
 --subdivide --clip-checkpoint JOURNAL --resume-key INPUTS, adding --resume on
 later attempts. The journal must be outside the clip directory. Python code
 and updates replay; verified prefix clips do not render again. This mode does

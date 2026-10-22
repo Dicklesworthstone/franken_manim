@@ -53,7 +53,7 @@ def collection_receipt(data, destination, options):
         if segment.render.animation_range is not None:
             raise ValueError("checkpoint clips must not carry an outer animation range")
         if selection is not None and (segment.play_index < selection[0] or (
-                selection[1] is not None and segment.play_index > selection[1])):
+                selection[1] is not None and segment.play_index >= selection[1])):
             raise ValueError("checkpoint clip is outside the admitted animation range")
     return receipt
 

@@ -81,7 +81,7 @@ class CollectionJournalTests(unittest.TestCase):
         self.destination = self.root / "A" / "clips"
         self.path = self.root / "progress.json"
         self.options = dict(format="y4m", subdivide=True, max_segments=8,
-                            resolution=[64, 36], fps=8, animation_range=[2, 4])
+                            resolution=[64, 36], fps=8, animation_range=[2, 5])
         self.result = None
 
     def save(self, *, paired=False, empty=False, complete=True):
@@ -212,7 +212,7 @@ class CollectionJournalTests(unittest.TestCase):
     def test_plan_changes_refuse_before_reuse(self):
         self.save()
         for key, value in (("fps", 9), ("resolution", [80, 45]), ("max_segments", 9),
-                           ("animation_range", [2, 5]), ("save_last_frame", True), ("format", "wav")):
+                           ("animation_range", [2, 6]), ("save_last_frame", True), ("format", "wav")):
             with self.subTest(key=key), patch.dict(self.options, {key: value}):
                 with self.assertRaisesRegex(ValueError, "plan or render options"):
                     self.resume()
@@ -256,6 +256,15 @@ class CollectionJournalTests(unittest.TestCase):
         with patch.dict(self.options, animation_range=[3, 4]):
             with self.assertRaisesRegex(ValueError, "outside"):
                 collection_inventory(result.as_dict(), self.destination, self.options)
+
+    def test_selection_end_is_exclusive_even_when_clip_path_and_digest_are_valid(self):
+        result = collection(self.destination)
+        with patch.dict(self.options, animation_range=[2, 4]):
+            with self.assertRaisesRegex(ValueError, "outside"):
+                collection_inventory(result.as_dict(), self.destination, self.options)
+        with patch.dict(self.options, animation_range=[2, None]):
+            self.assertEqual(len(collection_inventory(result.as_dict(), self.destination,
+                                                     self.options)["segments"]), 2)
 
     def test_segment_and_combined_file_budgets(self):
         result = collection(self.destination, paired=True)
@@ -313,7 +322,7 @@ class ParallelCollectionRecoveryTests(unittest.TestCase):
 
     def run_batch(self, **options):
         settings = dict(workers=1, format="y4m", resolution=(64, 36), fps=8, subdivide=True,
-                        max_segments=8, animation_range=(2, 4), checkpoint=self.journal,
+                        max_segments=8, animation_range=(2, 5), checkpoint=self.journal,
                         resume_key="inputs-v1", continue_on_error=True)
         settings.update(options)
         with patch.dict(sys.modules, manimlib=self.native), patch.object(

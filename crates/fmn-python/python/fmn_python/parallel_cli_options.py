@@ -32,10 +32,13 @@ for them. Keep source bytes, cwd, scene selection and native render options
 unchanged. --workers and --job-timeout may change between attempts. Robot
 receipts name reused scenes explicitly. Sequential and parallel checkpoint
 plans are not interchangeable. --save-last-frame adds a final PNG from the
-same scene execution; non-subdivided pairs support verified checkpoint reuse.
---subdivide emits per-play/wait clips, retaining partial collection receipts
-on failure or interruption, and composes with --save-last-frame. Subdivided
-collections do not support checkpoint recovery.
+same scene execution. --subdivide emits per-play/wait clips and composes
+with --save-last-frame. Parallel checkpoint recovery verifies every clip and
+optional final PNG before reusing a completed scene collection, including an
+empty selection. Incomplete collections retain their files but are not reused;
+retrying them still refuses no-clobber. This is whole-scene recovery, not the
+single-scene --clip-checkpoint prefix-replay mode. Sequential subdivided
+batches still refuse --checkpoint.
 --reproducible supports fresh png, png_sequence and wav outputs with a native
 manifest per scene. Each worker captures imports/reads through the guarded
 session and must match the parent's installed runtime. The aggregate remains
