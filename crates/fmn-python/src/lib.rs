@@ -48,9 +48,9 @@ pub use portal_texture::{run_portal_gauntlet_surface_lifecycle, run_portal_gaunt
 #[cfg(feature = "gauntlet")]
 pub use structural_parity::{
     CorpusRegressionCase, EnvelopeDrillReport, StructuralParityReport, TexSelectionReport,
-    run_portal_gauntlet_class_sweep, run_portal_gauntlet_envelope_drill,
+    WitnessRegistryReport, run_portal_gauntlet_class_sweep, run_portal_gauntlet_envelope_drill,
     run_portal_gauntlet_reference_corpus_regressions, run_portal_gauntlet_structural_facts,
-    run_portal_gauntlet_tex_selection,
+    run_portal_gauntlet_tex_selection, run_portal_gauntlet_witness_registry,
 };
 mod portal_provenance;
 mod report;

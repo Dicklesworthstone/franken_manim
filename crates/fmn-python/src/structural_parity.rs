@@ -124,6 +124,61 @@ pub fn run_portal_gauntlet_reference_corpus_regressions()
     })
 }
 
+/// What the Parity Ledger's witness-registry drill observed (fm-5wq.12).
+#[derive(Debug)]
+pub struct WitnessRegistryReport {
+    /// Unit cases run from `scripts/test_portal_witnesses.py`.
+    pub cases: u64,
+    /// Cases that failed or raised; zero on a pass.
+    pub failed: u64,
+}
+
+/// Run the witness registry's unit suite in the embedded portal.
+///
+/// The suite drives the registry over synthetic modules and plants one defect per failure class
+/// the gate's check must catch: a lost witness, a suite that ran no case, a placeholder or
+/// unresolved row, and trivial or shifted mutants. The full check, over every gate suite and the
+/// installed wheel, stays the last step of `scripts/check_portal_runtime.sh`.
+///
+/// # Errors
+/// The suite cannot load or its summary cannot be read. Failing cases are counted in the
+/// report, so the scenario logs them before it fails.
+pub fn run_portal_gauntlet_witness_registry() -> Result<WitnessRegistryReport, String> {
+    crate::with_python_test_module("witness registry", |py, _module, globals| {
+        let scripts = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scripts");
+        let scripts = scripts
+            .canonicalize()
+            .map_err(|error| format!("scripts directory: {error}"))?;
+        globals
+            .set_item("_fmn_scripts", scripts.to_string_lossy().as_ref())
+            .map_err(|error| error.to_string())?;
+        py.run(
+            c"import importlib, sys, unittest\n\
+              sys.path.insert(0, _fmn_scripts)\n\
+              try:\n\
+              \x20   _tests = importlib.import_module('test_portal_witnesses')\n\
+              \x20   _result = unittest.TextTestRunner(verbosity=1).run(\n\
+              \x20       unittest.defaultTestLoader.loadTestsFromModule(_tests))\n\
+              finally:\n\
+              \x20   sys.path.remove(_fmn_scripts)\n\
+              \x20   for _name in ('test_portal_witnesses', 'portal_witnesses'):\n\
+              \x20       sys.modules.pop(_name, None)\n\
+              _summary = (_result.testsRun, len(_result.failures) + len(_result.errors))\n",
+            Some(globals),
+            Some(globals),
+        )
+        .inspect_err(|error| error.print(py))
+        .map_err(|error| error.to_string())?;
+        let (cases, failed) = globals
+            .get_item("_summary")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "witness registry summary is absent".to_owned())?
+            .extract::<(u64, u64)>()
+            .map_err(|error| error.to_string())?;
+        Ok(WitnessRegistryReport { cases, failed })
+    })
+}
+
 /// What the Tex selection parity check observed (fm-portal-span-parity-sc4k).
 #[derive(Debug)]
 pub struct TexSelectionReport {
@@ -357,6 +412,13 @@ mod tests {
         assert_eq!(report.planted_verdict, "differs", "{report:?}");
         assert_eq!(report.violated_row, "bn05-text-geometry", "{report:?}");
         assert!(report.size_rel > 0.9, "{report:?}");
+    }
+
+    #[test]
+    fn witness_registry_drill_catches_every_planted_failure_class() {
+        let report = super::run_portal_gauntlet_witness_registry().unwrap();
+        assert!(report.cases >= 15, "{report:?}");
+        assert_eq!(report.failed, 0, "{report:?}");
     }
 
     #[test]

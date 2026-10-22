@@ -3729,6 +3729,25 @@ fn python_reference_corpus_regressions_run(ctx: &mut RunCtx) -> Result<RunOutcom
     Ok(RunOutcome::ok().with_counter("corpus_regression_cases", cases.len() as u64))
 }
 
+/// The Parity Ledger's witness registry (fm-5wq.12): its unit suite plants one defect per
+/// failure class the gate's check must catch, and every planted defect must fail the check.
+fn python_witness_registry_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let report = manimlib::run_portal_gauntlet_witness_registry()
+        .map_err(|error| fail(format!("witness registry drill: {error}")))?;
+    ctx.event(
+        LogEvent::new("e2e.python.witness_registry")
+            .field("cases", report.cases)
+            .field("failed", report.failed),
+    );
+    if report.failed != 0 {
+        return Err(fail(format!(
+            "{} of {} witness registry cases failed",
+            report.failed, report.cases
+        )));
+    }
+    Ok(RunOutcome::ok().with_counter("witness_registry_cases", report.cases))
+}
+
 fn python_svg_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let report = manimlib::run_portal_gauntlet_svg()
         .map_err(|error| fail(format!("Python native SVG: {error}")))?;
@@ -9811,6 +9830,20 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         ],
     ));
     specs.push(spec(
+        "failure_path.python_witness_registry.v1",
+        ScenarioClass::FailurePath,
+        Surface::PythonInProcess,
+        Invocation::new(python_witness_registry_run),
+        vec![Assertion::ExitCode(0)],
+        vec![LogExpect::span_present(
+            "e2e.python.witness_registry",
+            vec![
+                FieldPred::u64_ge("cases", 15),
+                FieldPred::u64_eq("failed", 0),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.python_svg.v1",
         ScenarioClass::RenderMatrix,
         Surface::PythonInProcess,
@@ -11399,6 +11432,16 @@ fn python_subclass_hooks_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.python_subclass_hooks.v1")
         .expect("library subclass hook scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn python_witness_registry_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "failure_path.python_witness_registry.v1")
+        .expect("witness registry scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }
