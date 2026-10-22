@@ -14,17 +14,22 @@ if _SOURCE_PYTHON not in sys.path:
 
 
 def native_wheel_available():
-    for entry in sys.path:
-        if Path(entry).resolve() == Path(_SOURCE_PYTHON).resolve():
-            continue
-        package = PathFinder.find_spec("manimlib", [entry])
-        if package is None or package.submodule_search_locations is None:
-            continue
+    """Whether the manimlib this process would import is the built native wheel.
+
+    Judge the first manimlib on sys.path, as the certified parallel suites do. Under `unittest
+    discover`, protocol suites put the source tree's python/ first, and its manimlib has no
+    compiled extension. A native test there, and every worker it spawns (spawn copies sys.path),
+    would import that package and fail, so native suites skip under discover and
+    check_portal_runtime.sh runs each one in its own process with FMN_TEST_NATIVE=1.
+    sys.modules is bypassed: protocol doubles may stand there.
+    """
+    package = PathFinder.find_spec("manimlib", sys.path)
+    if package is not None and package.submodule_search_locations is not None:
         extension = PathFinder.find_spec("manimlib.manimlib", package.submodule_search_locations)
         if extension is not None and isinstance(extension.loader, ExtensionFileLoader):
             return True
     if os.environ.get("FMN_TEST_NATIVE") == "1":
-        raise RuntimeError("FMN_TEST_NATIVE=1 requires the built FrankenManim native wheel")
+        raise RuntimeError("FMN_TEST_NATIVE=1 requires the built FrankenManim native wheel first on sys.path")
     return False
 
 
