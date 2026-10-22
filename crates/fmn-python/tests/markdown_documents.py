@@ -97,13 +97,22 @@ class MathematicalDocumentTests(unittest.TestCase):
         self.assertTrue(doc.math_mode)
         self.assertEqual(doc.line_width, 3)
 
+    def test_math_inside_a_table_cell_typesets_natively(self):
+        # 1f959d3e: table cells carry native math, not the cell's literal text.
+        math = self.doc('| x |\n|---|\n| $x_i$ |\n')
+        literal = self.doc('| x |\n|---|\n| x_i |\n')
+        self.assertIn('$x_i$', math.source)
+        self.assertTrue(geometry(math))
+        self.assertFalse(np.array_equal(shape(math), shape(literal)))
+
     def test_invalid_math_and_assets_refuse_before_any_live_geometry_or_catalog_change(self):
         doc = self.doc(); scene = m.Scene(); scene.add(doc)
         before = geometry(doc); source = doc.source
         ranges, owners = doc.block_ranges, tuple(doc.get_blocks())
         for target in [r'$\unknownmathematicaldocumentcommand{x}$',
                        '![external](https://example.invalid/asset.png)',
-                       '| x |\n|---|\n| $x_i$ |\n', 'x' * 32769]:
+                       '| x |\n|---|\n| $\\unknownmathematicaldocumentcommand{x}$ |\n',
+                       'x' * 32769]:
             with self.subTest(target=target[:60]):
                 with self.assertRaises((ValueError, RuntimeError)):
                     doc.set_source(target)
