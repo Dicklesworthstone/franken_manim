@@ -12951,6 +12951,10 @@ pub struct PortalDefaultsGauntletReport {
     pub display_fraction_height: f64,
     /// The README quick example's formula: `(width, height)`.
     pub readme_formula: (f64, f64),
+    /// `Brace(Matrix(...).to_corner(UR), DOWN).get_text("A")`: the matrix's
+    /// bottom y, the label's top y, and the label's horizontal offset from the
+    /// matrix centre.
+    pub matrix_label: (f64, f64, f64),
 }
 
 /// Reference-default parity through the production portal route
@@ -12967,7 +12971,7 @@ pub fn run_portal_gauntlet_reference_defaults(
             .set_item("_fmn_destination", destination.to_string_lossy().as_ref())
             .map_err(|error| error.to_string())?;
         let source = CString::new(
-            r#"from manimlib import Brace, Circle, DOWN, RIGHT, Scene, Square, Tex, VGroup
+            r#"from manimlib import Brace, Circle, DOWN, Matrix, RIGHT, Scene, Square, Tex, UR, VGroup
 from fmn_python import render_scene
 
 
@@ -12988,6 +12992,10 @@ _fmn_camera = (tuple(int(n) for n in _camera["resolution"]), int(_camera["fps"])
 _fmn_display_fraction_height = float(Tex(r"\frac{1}{2}").get_height())
 _readme = Tex(r"\int_0^\infty e^{-x^2}\,dx = \frac{\sqrt{\pi}}{2}")
 _fmn_readme_formula = (float(_readme.get_width()), float(_readme.get_height()))
+_matrix = Matrix([[1, 2], [3, 4]]).to_corner(UR)
+_label = Brace(_matrix, DOWN).get_text("A")
+_fmn_matrix_label = (float(_matrix.get_bottom()[1]), float(_label.get_top()[1]),
+                     float(abs(_label.get_center()[0] - _matrix.get_center()[0])))
 "#,
         )
         .expect("reference defaults scene contains no NUL");
@@ -13018,6 +13026,12 @@ _fmn_readme_formula = (float(_readme.get_width()), float(_readme.get_height()))
             .ok_or_else(|| "reference defaults scene emitted no README formula box".to_owned())?
             .extract()
             .map_err(|error: PyErr| error.to_string())?;
+        let matrix_label: (f64, f64, f64) = globals
+            .get_item("_fmn_matrix_label")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "reference defaults scene emitted no matrix label".to_owned())?
+            .extract()
+            .map_err(|error: PyErr| error.to_string())?;
         Ok(PortalDefaultsGauntletReport {
             fps,
             frame_count,
@@ -13026,6 +13040,7 @@ _fmn_readme_formula = (float(_readme.get_width()), float(_readme.get_height()))
             scene_camera,
             display_fraction_height,
             readme_formula,
+            matrix_label,
         })
     })
 }
