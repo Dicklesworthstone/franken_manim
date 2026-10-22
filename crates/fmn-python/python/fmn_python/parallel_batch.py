@@ -208,8 +208,12 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
     save_last_frame=True adds a final PNG without executing a scene twice.
     Both compose in each worker through render_scenes, retaining the shared
     clock, recording and publication owners. Every primary/companion path is
-    preflighted before spawning. Checkpoint/resume verifies non-subdivided
-    pairs as a unit; subdivided collections do not support recovery.
+    preflighted before spawning. Checkpoint/resume verifies every completed
+    collection, including each clip and an optional final PNG, before skipping
+    that scene. Empty completed selections are reusable. Partial collections
+    remain create-only: this batch journal does not replay a saved clip prefix,
+    and an unfinished scene with published files fails no-clobber preflight.
+    Use the separate single-scene clip journal for within-scene recovery.
 
     checkpoint uses the same locked, atomic journal and artifact verifier as
     render_scenes, owned ONLY by the parent. Each completed receipt is recorded
@@ -291,7 +295,7 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
         from .subdivision_rendering import validate_subdivided_mode
 
         if subdivide:
-            validate_subdivided_mode(native, format, checkpoint=checkpoint)
+            validate_subdivided_mode(native, format)
         if save_last_frame:
             validate_paired_mode(native, format, checkpoint=checkpoint)
     selection = _animation_range(animation_range)

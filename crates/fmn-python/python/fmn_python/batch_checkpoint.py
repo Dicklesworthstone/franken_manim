@@ -267,7 +267,11 @@ class BatchCheckpoint(_CheckpointFile):
             destinations = {Path(row["destination"]) for row in self.document["outcomes"]
                             if row["status"] == "succeeded"}
             options = self.document.get("plan", {}).get("options", {})
-            if options.get("save_last_frame") is True:
+            if options.get("subdivide") is True:
+                from .subdivision_checkpoint import collection_destinations
+                destinations.update(member for path in tuple(destinations)
+                                    for member in collection_destinations(path, options))
+            elif options.get("save_last_frame") is True:
                 from .paired_checkpoint import paired_destinations
                 destinations.update(paired_destinations(path, options["format"])[1]
                                     for path in tuple(destinations))
@@ -346,6 +350,14 @@ class BatchCheckpoint(_CheckpointFile):
                 raise ValueError("invalid checkpoint outcome status")
             if status == "succeeded":
                 receipt = row.get("result")
+                if options.get("subdivide") is True:
+                    from .subdivision_checkpoint import collection_inventory
+                    actual = collection_inventory(receipt, destination, options)
+                    if _json(artifacts.get(name)) != _json(actual):
+                        raise ValueError(f"checkpoint clip collection is missing or modified: {destination}")
+                    self.artifacts[name] = actual
+                    self.completed[name] = row
+                    continue
                 if options.get("save_last_frame") is True:
                     from .paired_checkpoint import pair_inventory
                     actual = pair_inventory(receipt, destination, options)
@@ -383,6 +395,11 @@ class BatchCheckpoint(_CheckpointFile):
         for outcome in outcomes:
             if outcome.status == "succeeded" and outcome.name not in self.artifacts:
                 receipt = outcome.result
+                if self.plan["options"].get("subdivide") is True:
+                    from .subdivision_checkpoint import collection_inventory
+                    self.artifacts[outcome.name] = collection_inventory(
+                        receipt.as_dict(), outcome.destination, self.plan["options"])
+                    continue
                 if self.plan["options"].get("save_last_frame") is True:
                     from .paired_checkpoint import pair_inventory
                     self.artifacts[outcome.name] = pair_inventory(
