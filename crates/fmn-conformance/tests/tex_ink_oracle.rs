@@ -58,12 +58,14 @@ const PUBLIC_FLOORS: InkFloors = InkFloors {
 /// The private corpus set's floors (the TeX box oracle's sample and the 60
 /// most frequent TexText strings): 398 of 643 matched when the oracle landed
 /// (franken_markdown 216c7c3), 486 since math-mode family 0 is cmr10
-/// (49466bc, fm-8zy2), 487 with rule 18a's drops (4db6f43, fm-4ptw).
+/// (49466bc, fm-8zy2), 487 with rule 18a's drops (4db6f43, fm-4ptw), 488
+/// with Appendix G's parameters read at the current size (abbb957, fm-giir):
+/// e^{-x^2} matches.
 const CORPUS_FLOORS: InkFloors = InkFloors {
-    matches: 487,
+    matches: 488,
     median_hausdorff_px: 1.0,
     p95_hausdorff_px: 11.0,
-    median_sliced_w1_px: 0.074,
+    median_sliced_w1_px: 0.073,
     p95_sliced_w1_px: 6.548,
     median_iou: 0.988,
     p05_iou: 0.143,

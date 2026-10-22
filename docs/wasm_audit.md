@@ -1,12 +1,10 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-run, 2026-10-21, against `Cargo.lock` `618c7824` and `SUITE.lock`
-`04dca2ad`, for the franken_markdown repin from `49466bc2` to `4db6f439`
-(fm-4ptw: rule 18a's drops read at the script size). The three lock files move only
-the three franken_markdown packages' rev; their versions and manifests are unchanged,
-and no fmd or franken_markdown package is in this graph. The previous re-run, the same
-day against `Cargo.lock` `a15ed74a` and `SUITE.lock` `27cdf3b2` for the repin from
-`216c7c3b` to `49466bc2` (fm-8zy2), found the same 134 lines.
+**Status:** re-run, 2026-10-22, against `Cargo.lock` `78326ad1` and `SUITE.lock`
+`7b54391a`, for the franken_markdown repin from `4db6f439` to `abbb957d`
+(fm-giir: Appendix G parameters read at the current size). The three lock files move
+only the three franken_markdown packages' rev; their versions and manifests are
+unchanged, and no fmd or franken_markdown package is in this graph.
 **The release package gate still FAILS at its size budget** (fm-8j70), so this
 audit does not claim a passing package.
 
@@ -15,6 +13,12 @@ audit does not claim a passing package.
   no fmd or franken_markdown package.
 - The `--locked` wasm32 build and wasm-smoke were not re-run: no package in the
   wasm graph changed since the 2026-10-12 run below.
+
+Earlier re-run, 2026-10-21, against `Cargo.lock` `618c7824` and `SUITE.lock`
+`04dca2ad`, for the franken_markdown repin from `49466bc2` to `4db6f439`
+(fm-4ptw: rule 18a's drops read at the script size). The previous re-run, the same
+day against `Cargo.lock` `a15ed74a` and `SUITE.lock` `27cdf3b2` for the repin from
+`216c7c3b` to `49466bc2` (fm-8zy2), found the same 134 lines.
 
 Earlier re-run, 2026-10-20, against `Cargo.lock` `284b9c98` and `SUITE.lock`
 `20d8fec5`, for the franken_markdown repin from `206bb639` to `216c7c3b`
@@ -403,8 +407,8 @@ The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
-- `SUITE.lock` SHA-256: `04dca2ad2dd159665487f606b7037dd53e870737f2803647c0b9d7554acdeea6`
-- `Cargo.lock` SHA-256: `618c7824f1a312d5feb6b40a74400ca238bd49ccb39c5bccdb95099072797529`
+- `SUITE.lock` SHA-256: `7b54391a66880e874167bb4ceb14207e5fd0d0456dd78926d84de5baecd97444`
+- `Cargo.lock` SHA-256: `78326ad1b1583d31f3124d93688caf91d59777513d10c7281be5e4976f34127e`
 - Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `b1fac18569682e3d2888881883f8b37e4abfb10884ed34a6f2e1eb7a4da942b5`
 
 The 0.5.0 release bump re-bound both lock identities above. That bump changed

@@ -92,9 +92,11 @@ const TEXT_CACHE_STATE: &str = "none";
 // height and depth. Re-pinned when math-mode family 0 became cmr10 itself
 // (franken_markdown 49466bc, fm-8zy2): the + is cmr10's glyph, its face and
 // outline in the typeset data; every box and position is unchanged.
+// Re-pinned when mu became cmsy10's quad over 18 (franken_markdown abbb957,
+// fm-giir): z moves 2e-6 em right across the two medium spaces of the +.
 const FORMULA_EXPECTED_RESULT_DIGEST: Digest = Digest::from_bytes([
-    0x7c, 0x42, 0xf1, 0x5f, 0xa2, 0xeb, 0x41, 0x71, 0x7a, 0x0b, 0x37, 0x25, 0x45, 0x34, 0x54, 0x7f,
-    0x60, 0xa0, 0xde, 0xcb, 0x2d, 0x4f, 0xa6, 0x79, 0x0f, 0x93, 0xb7, 0xa4, 0x61, 0xbb, 0x98, 0x4c,
+    0xa3, 0xb9, 0xc6, 0x20, 0x81, 0x81, 0xb4, 0xa4, 0xa8, 0x76, 0xdb, 0xf2, 0x3e, 0xd8, 0x35, 0x23,
+    0x98, 0x82, 0xa9, 0x41, 0x4a, 0xaa, 0xf8, 0x5c, 0x9d, 0x22, 0xe0, 0xbd, 0x24, 0xcb, 0x33, 0x57,
 ]);
 // The marked-up, wrapped paragraph of fm-pg7-honest-mn4b.
 const TEXT_EXPECTED_RESULT_DIGEST: Digest = Digest::from_bytes([
@@ -1757,13 +1759,13 @@ mod tests {
         // cold formula takes a fresh engine per repetition, the cached one
         // names its single engine, and the text is the marked-up, wrapped
         // paragraph. The formula pair moves with the TeX engine's fingerprint
-        // (franken_markdown 4db6f43, fm-4ptw: rule 18a's drops), while q^7+z's
-        // layout does not (q is a character nucleus).
+        // and q^7+z's result digest (franken_markdown abbb957, fm-giir:
+        // Appendix G parameters and mu at the current size).
         assert_eq!(
             [cold.digest(), cached.digest(), text.digest()].map(|digest| digest.to_string()),
             [
-                "742e9f690b2470eb7c61ebf0403d9b3b00b44327825d7d694ff636a9540b98c1",
-                "3ce2fb18488fe078547cb4a271773d69844f19bd0c949f01a729fe4156f13cf7",
+                "3cd90761bbc39022fc85083d7224e0a3fdc5dec4f4d20a57d9320b003ac1e9d2",
+                "401aa4eeb60b3450f4859f010ffc87dde08f5d4a52bb0e8a6edfa634f865da11",
                 "0fa22e64fe9e1901eea58a596899ec843bc0d6db46f1cd91607925a50fea3e6f",
             ]
         );

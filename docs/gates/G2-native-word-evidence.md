@@ -106,7 +106,12 @@ no public construct-sprint amendment is required at these numbers.
   upper limit was 0.139 em low (IoU 0.29 for `\int_0^1 x\,dx`); now every glyph
   box equals the Reference's, at IoU 0.984. The integral rows' remaining sliced
   W1 (0.72-0.89 px) is the Reference's two-quad outline of the integral
-  (BN-13). Three planted defects (θ as ϑ, stems 10% thicker, a missing
+  (BN-13). Since every Appendix G parameter, θ and mu are read at the current
+  size (`abbb957`, `fm-giir`: cmsy7/cmsy5 and cmex7, not cmsy10 scaled),
+  98/123 and 488/643 match. `e^{-x^2}`'s inner superscript sits where TeX's
+  `\showbox` puts it, so that formula matches (IoU 0.988), and the README's
+  Gaussian integral rises from IoU 0.939 to 0.987, its rest the integral
+  outline again. Three planted defects (θ as ϑ, stems 10% thicker, a missing
   superscript) each break the floors.
 - **Style.** Every `Tex` used to be laid out in TeX text style, while the
   Reference's `Tex` is `align*` display math: `Tex(\sum…\frac)` was 0.588
