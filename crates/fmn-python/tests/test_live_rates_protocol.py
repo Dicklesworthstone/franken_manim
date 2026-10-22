@@ -88,6 +88,9 @@ def environment(install=True):
         def __init__(self, fps=60):
             self.fps, self.playing, self.executions = fps, False, []
             self.lower_only = False
+            # This double binds mobjects without rooting them; the rooting
+            # record is covered by the composition and movement doubles.
+            self.mobjects = []
         def add(self, mob):
             mob.bound = True
         _adopt = add
@@ -131,9 +134,11 @@ def environment(install=True):
              prepare_animation=lambda builder:builder.build(), np=np, _vec3=tuple)
     bootstrap = ROOT / "python/manimlib_bootstrap.py"
     scene_node = next(node for node in ast.parse(bootstrap.read_text()).body if isinstance(node, ast.ClassDef) and node.name == "Scene")
-    method = next(node for node in scene_node.body if isinstance(node, ast.FunctionDef) and node.name == "play")
-    exec(compile(ast.Module([method], []), str(bootstrap), "exec"), g)
-    Scene.play = g["play"]
+    # play() records the roots it played (fm-v1aq); both run as production code.
+    methods = [node for node in scene_node.body if isinstance(node, ast.FunctionDef)
+               and node.name in {"play", "_record_played_roots"}]
+    exec(compile(ast.Module(methods, []), str(bootstrap), "exec"), g)
+    Scene.play, Scene._record_played_roots = g["play"], g["_record_played_roots"]
     source = ROOT / "python/manimlib/_animation_semantics.py"
     installer = next(node for node in ast.parse(source.read_text()).body if isinstance(node, ast.FunctionDef) and node.name == "install")
     names = {"get_sub_alpha", "time_spanned_alpha", "interpolate_mobject"}

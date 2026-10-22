@@ -17,9 +17,12 @@ def frontend():
     path = ROOT / "python/manimlib_bootstrap.py"
     scene = next(node for node in ast.parse(path.read_text()).body
                  if isinstance(node, ast.ClassDef) and node.name == "Scene")
-    play = next(node for node in scene.body if isinstance(node, ast.FunctionDef) and node.name == "play")
-    exec(compile(ast.Module([play], []), str(path), "exec"), g)
-    native.Scene.play = g["play"]
+    # play() records the roots it played (fm-v1aq); both run as production code.
+    methods = [node for node in scene.body if isinstance(node, ast.FunctionDef)
+               and node.name in {"play", "_record_played_roots"}]
+    exec(compile(ast.Module(methods, []), str(path), "exec"), g)
+    native.Scene.play, native.Scene._record_played_roots = g["play"], g["_record_played_roots"]
+    native.Scene.mobjects = property(lambda scene: scene.roots)
     old_play = native.Scene.play
     native.Mobject._is_bound = lambda mob:getattr(mob,"_scene",None) is not None
     native.Scene._adopt = lambda scene,mob:setattr(mob,"_scene",scene)

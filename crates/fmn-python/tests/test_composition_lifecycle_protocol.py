@@ -164,6 +164,9 @@ def environment():
                     self.roots.append(obj)
         def remove(self, *objects):
             self.roots[:] = [obj for obj in self.roots if obj not in objects]
+        @property
+        def mobjects(self):
+            return self.roots
         def _native_animation_driver(self, spec):
             core = Core(spec)
             self.cores.append(core)
@@ -203,9 +206,12 @@ def environment():
         raise RuntimeError("Production composition definitions are missing")
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(BOOTSTRAP), "exec"), g)
     scene_class = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Scene")
-    play = next(node for node in scene_class.body if isinstance(node, ast.FunctionDef) and node.name == "play")
-    exec(compile(ast.Module(body=[play], type_ignores=[]), str(BOOTSTRAP), "exec"), g)
-    Scene = type("Scene", (SceneCore,), {"play": g.pop("play")})
+    # play() records the roots it played (fm-v1aq); both run as production code.
+    methods = [node for node in scene_class.body if isinstance(node, ast.FunctionDef)
+               and node.name in {"play", "_record_played_roots"}]
+    exec(compile(ast.Module(body=methods, type_ignores=[]), str(BOOTSTRAP), "exec"), g)
+    Scene = type("Scene", (SceneCore,), {"play": g.pop("play"),
+                                         "_record_played_roots": g.pop("_record_played_roots")})
     g["Scene"] = Scene
     semantics._install_matching_parts(g)
     return g
