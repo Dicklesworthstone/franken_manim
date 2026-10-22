@@ -22,59 +22,20 @@ def _method(cls, name, function):
 
 
 def _freeze_value(np, value, memo=None):
-    """Freeze mutable uniform containers; opaque host objects stay by identity."""
-    memo = {} if memo is None else memo
-    if id(value) in memo:
-        return memo[id(value)]
-    if isinstance(value, np.ndarray):
-        result = value.copy()
-    elif type(value) is dict:
-        result = {}
-        memo[id(value)] = result
-        result.update((key, _freeze_value(np, item, memo)) for key, item in value.items())
-    elif type(value) is list:
-        result = []
-        memo[id(value)] = result
-        result.extend(_freeze_value(np, item, memo) for item in value)
-    elif type(value) is tuple:
-        items = tuple(_freeze_value(np, item, memo) for item in value)
-        result = memo.get(id(value), items)
-    elif type(value) is set:
-        result = value.copy()
-    else:
-        return value
-    memo[id(value)] = result
-    return result
+    """Use the same bounded owned-data policy for attributes and uniforms."""
+    return scene_attributes.freeze(value, np, memo)
 
 
 def _same_value(np, left, right, seen=None):
-    if left is right:
-        return True
-    if isinstance(left, np.ndarray) or isinstance(right, np.ndarray):
-        return (isinstance(left, np.ndarray) and isinstance(right, np.ndarray)
-                and left.dtype == right.dtype and np.array_equal(left, right))
-    if type(left) is not type(right):
-        return False
-    seen = set() if seen is None else seen
-    pair = (id(left), id(right))
-    if pair in seen:
-        return True
-    seen.add(pair)
-    if isinstance(left, np.generic):
-        return left.dtype == right.dtype and bool(np.array_equal(left, right))
-    if isinstance(left, dict):
-        return left.keys() == right.keys() and all(
-            _same_value(np, left[key], right[key], seen) for key in left
-        )
-    if isinstance(left, (tuple, list)):
-        return len(left) == len(right) and all(
-            _same_value(np, a, b, seen) for a, b in zip(left, right)
-        )
-    if isinstance(left, (str, bytes, bool, int, float, complex, set, frozenset)) or left is None:
-        return bool(left == right)
-    # Arbitrary Python objects in extension uniforms are identity-bearing;
-    # never call their possibly stateful or array-valued equality operators.
-    return False
+    """Compare exact data/aliases, without ndarray object equality callbacks."""
+    return scene_attributes.same(np, left, right)
+
+
+def _projection(attributes, uniforms, identities=None):
+    if identities is None:
+        return attributes, uniforms
+    return ({key: attributes[key] for key in identities},
+            {key: uniforms[key] for key in identities})
 
 
 def _same_mobject(np, left, right, resources_equal=None):
@@ -170,7 +131,7 @@ def install_scene_state(native: Any) -> None:
         if id(frame) not in ignored and all(frame is not member for member in members):
             attribute_members.append(frame)
         self._attribute_members = tuple(attribute_members)
-        self._attributes = scene_attributes.capture(attribute_members, np)
+        self._attributes, self._uniforms = scene_attributes.capture_projection(attribute_members, np)
         self._scene, self.time, self.num_plays = scene, scene.get_time(), int(scene.num_plays)
         self._root_topologies = {
             id(root): tuple((id(member), tuple(id(child) for child in member.submobjects))
@@ -204,10 +165,9 @@ def install_scene_state(native: Any) -> None:
         # extension uniforms. Freeze those without copying executable objects.
         self._python_projections = []
         for member in members:
-            extras = getattr(member.uniforms, "_extras", None)
             self._python_projections.append((
                 member, tuple(member.submobjects), tuple(member.updaters),
-                None if extras is None else _freeze_value(np, extras),
+                self._uniforms[id(member)],
                 tuple(set(getattr(member, name, ())) for name in (
                     "locked_data_keys", "const_data_keys", "locked_uniform_keys",
                 )),
@@ -229,10 +189,11 @@ def install_scene_state(native: Any) -> None:
     def attributes_match(self, other, root_id):
         ids = [row[0] for row in self._root_topologies[root_id]]
         other_values = getattr(other, "_attributes", {})
-        return (all(key in other_values for key in ids)
+        other_uniforms = getattr(other, "_uniforms", {})
+        return (all(key in other_values and key in other_uniforms for key in ids)
                 and scene_attributes.same(np,
-                    {key: self._attributes[key] for key in ids},
-                    {key: other_values[key] for key in ids}))
+                    _projection(self._attributes, self._uniforms, ids),
+                    _projection(other_values, other_uniforms, ids)))
 
     def camera_matches(self, other):
         a, b = self._camera_snapshot, other._camera_snapshot
@@ -241,8 +202,9 @@ def install_scene_state(native: Any) -> None:
         return (a[0] is b[0] and _same_value(np, a[1], b[1])
                 and len(a[2]) == len(b[2])
                 and all(x is y for x, y in zip(a[2], b[2]))
-                and scene_attributes.same(np, self._attributes[id(a[0])],
-                                           other._attributes[id(b[0])]))
+                and scene_attributes.same(np,
+                    (self._attributes[id(a[0])], self._uniforms[id(a[0])]),
+                    (other._attributes[id(b[0])], other._uniforms[id(b[0])])))
 
     def mobjects_match(self, state):
         if not isinstance(state, State):
@@ -253,7 +215,9 @@ def install_scene_state(native: Any) -> None:
                 and self._root_topologies == state._root_topologies
                 and all(a is b and _same_mobject(np, ac, bc, g["_raster_images_equal"])
                         for (a, ac), (b, bc) in zip(left.items(), right.items()))
-                and scene_attributes.same(np, self._attributes, state._attributes)
+                and scene_attributes.same(np,
+                    _projection(self._attributes, self._uniforms),
+                    _projection(state._attributes, state._uniforms))
                 and camera_matches(self, state))
 
     def equals(self, state):
@@ -266,19 +230,24 @@ def install_scene_state(native: Any) -> None:
         if not isinstance(state, State):
             raise TypeError("n_changes expects a SceneState")
         if self is state:
-            live = scene_attributes.capture(self._attribute_members, np)
-            count = sum(not _same_mobject(np, mob, saved, g["_raster_images_equal"]) or not scene_attributes.same(
-                np, {key: self._attributes[key] for key, _ in self._root_topologies[id(mob)]},
-                {key: live[key] for key, _ in self._root_topologies[id(mob)]})
-                for mob, saved in self.mobjects_to_copies.items())
+            live, live_uniforms = scene_attributes.capture_projection(self._attribute_members, np)
+            count = sum(not _same_mobject(np, mob, saved, g["_raster_images_equal"])
+                        or not scene_attributes.same(np,
+                            _projection(self._attributes, self._uniforms,
+                                        [key for key, _ in self._root_topologies[id(mob)]]),
+                            _projection(live, live_uniforms,
+                                        [key for key, _ in self._root_topologies[id(mob)]]))
+                        for mob, saved in self.mobjects_to_copies.items())
             if self._camera_snapshot is not None:
                 frame, values, callbacks = self._camera_snapshot
                 count += int(not _same_value(np, values, _camera_values(frame._core))
                              or len(callbacks) != len(frame.updaters)
                              or any(a is not b for a, b in zip(callbacks, frame.updaters))
-                             or not scene_attributes.same(np, self._attributes[id(frame)],
-                                                          live[id(frame)]))
-            return count or int(not scene_attributes.same(np, self._attributes, live))
+                             or not scene_attributes.same(np,
+                                 (self._attributes[id(frame)], self._uniforms[id(frame)]),
+                                 (live[id(frame)], live_uniforms[id(frame)])))
+            return count or int(not scene_attributes.same(np,
+                _projection(self._attributes, self._uniforms), _projection(live, live_uniforms)))
         other = state.mobjects_to_copies
         # Compare two captured states, not a source object edited afterward.
         count = sum(mob not in other
@@ -289,7 +258,9 @@ def install_scene_state(native: Any) -> None:
         count += int(not camera_matches(self, state))
         # Cross-root container aliasing can change while each root still has
         # equal values in isolation. It must still register as a state edit.
-        return count or int(not scene_attributes.same(np, self._attributes, state._attributes))
+        return count or int(not scene_attributes.same(np,
+            _projection(self._attributes, self._uniforms),
+            _projection(state._attributes, state._uniforms)))
 
     @wraps(original_restore)
     def restore(self, scene):
@@ -300,22 +271,27 @@ def install_scene_state(native: Any) -> None:
             raise error("SceneState belongs to another Scene; copy its mobjects instead")
         # Allocate and validate the complete Python projection first. A
         # refusal must not leave restored geometry with newer authored data.
-        prepared = scene_attributes.prepare_restore(self._attributes, np, self._attribute_members)
+        prepared, uniforms = scene_attributes.prepare_projection(
+            self._attributes, self._uniforms, np, self._attribute_members)
         original_restore(self, scene)
         if self._checkpoint is not None:
             # Native restore has already restored all graph edges and records.
             # Refresh ONLY Python projections, without become/alignment writes
             # that would replace identities or invalidate restored view epochs.
-            for member, children, updaters, extras, locks in self._python_projections:
+            for member, children, updaters, _extras, locks in self._python_projections:
                 member.submobjects._replace_projection(children)
                 member.updaters[:] = updaters
-                if extras is not None:
-                    member.uniforms._extras = _freeze_value(np, extras)
                 for name, values in zip(("locked_data_keys", "const_data_keys", "locked_uniform_keys"), locks):
                     setattr(member, name, set(values))
             # Rehydrate native-only roots and refresh back-edges before a caller
             # reads a retained child reference without first reading mobjects.
             _ = scene.mobjects
+        # These copies were fully prepared before original_restore mutated
+        # records/time/RNG. One memo also preserves aliases to authored data
+        # and between different members, including a non-root camera frame.
+        for member in self._attribute_members:
+            if uniforms[id(member)] is not None:
+                member.uniforms._extras = uniforms[id(member)]
         scene_attributes.restore(self._attribute_members, prepared)
         if self._camera_snapshot is not None:
             frame, values, updaters = self._camera_snapshot

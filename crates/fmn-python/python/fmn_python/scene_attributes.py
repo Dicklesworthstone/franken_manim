@@ -38,17 +38,30 @@ class _Copier:
         if self.nodes > _MAX_NODES or depth > _MAX_DEPTH:
             raise ValueError("SceneState Python data exceeds its structural budget")
         kind, np = type(value), self.np
-        if isinstance(value, np.ndarray):
+        if isinstance(value, (np.ndarray, np.void)):
             self.bytes += value.nbytes
             if self.bytes > _MAX_BYTES:
                 raise ValueError("SceneState Python arrays exceed the 64 MiB budget")
             # Strip ndarray subclasses; never run an authored copy/deepcopy.
-            result = np.array(value, copy=True, subok=False, order="K")
+            if isinstance(value, np.void):
+                result = np.empty((), dtype=value.dtype)
+                result[()] = value
+            else:
+                result = np.array(value, copy=True, subok=False, order="K")
+            # A structured scalar is a mutable view, even without object
+            # fields. Register its detached view BEFORE visiting object slots:
+            # a record may name itself, another record, or an owning array.
+            target = result
+            if isinstance(value, np.void):
+                target = result.view()
+                result.setflags(write=bool(value.flags.writeable))
+                result = result[()]
             self.memo[key] = result
             self.retained.append(value)
             if value.dtype.hasobject:
-                self._objects(value, result, depth + 1)
-            result.setflags(write=bool(value.flags.writeable))
+                self._objects(np.asarray(value), target, depth + 1)
+            if isinstance(result, np.ndarray):
+                result.setflags(write=bool(value.flags.writeable))
             return result
         if kind is dict:
             result = {}
@@ -72,9 +85,6 @@ class _Copier:
             if self.bytes > _MAX_BYTES:
                 raise ValueError("SceneState Python buffers exceed the 64 MiB budget")
             result = value.copy()
-        elif isinstance(value, np.void) and value.dtype.hasobject:
-            holder = self.copy(np.asarray(value), depth + 1)
-            result = holder[()]
         else:
             # Mobjects, functions, bound methods, modules, and opaque external
             # objects retain identity. Checkpoints do not rewind their state.
@@ -84,6 +94,8 @@ class _Copier:
         return result
 
     def _objects(self, source, target, depth):
+        if depth > _MAX_DEPTH:
+            raise ValueError("SceneState Python data exceeds its structural budget")
         if source.dtype.names:
             for name in source.dtype.names:
                 if source.dtype[name].hasobject:
@@ -93,21 +105,64 @@ class _Copier:
                 target[index] = self.copy(source[index], depth + 1)
 
 
+def freeze(value, np, memo=None):
+    """Detach owned Python data without invoking authored copy/equality hooks."""
+    copier = _Copier(np)
+    if memo is not None:
+        copier.memo = memo
+    return copier.copy(value)
+
+
+def _attribute_values(members):
+    return {id(member): {key: value for key, value in vars(member).items() if owned(key)}
+            for member in members}
+
+
+def _validate_attributes(snapshot, members):
+    if (type(snapshot) is not dict or set(snapshot) != {id(member) for member in members}
+            or any(type(values) is not dict or any(not owned(key) for key in values)
+                   for values in snapshot.values())):
+        raise ValueError("SceneState Python projection does not match its captured family")
+
+
+def _validate_uniforms(uniforms, members):
+    if (type(uniforms) is not dict or set(uniforms) != {id(member) for member in members}
+            or any(value is not None and type(value) is not dict for value in uniforms.values())):
+        raise ValueError("SceneState uniform projection does not match its captured family")
+
+
 def capture(members, np):
     """Capture every member dictionary with one cross-family alias memo."""
-    source = {id(member): {key: value for key, value in vars(member).items() if owned(key)}
-              for member in members}
-    return _Copier(np).copy(source)
+    return freeze(_attribute_values(members), np)
+
+
+def capture_projection(members, np):
+    """Freeze attributes AND extension uniforms as one bounded alias graph.
+
+    Native uniforms remain native checkpoint data. Only the Python mapping of
+    extension values is included, with the same structural policy as attributes.
+    Shared arrays/containers keep their identity across both projections.
+    """
+    members = tuple(members)
+    uniforms = {id(member): getattr(getattr(member, "uniforms", None), "_extras", None)
+                for member in members}
+    _validate_uniforms(uniforms, members)
+    return freeze((_attribute_values(members), uniforms), np)
 
 
 def prepare_restore(snapshot, np, members=None):
     """Validate and allocate the projection before any native mutation."""
     if members is not None:
-        if (type(snapshot) is not dict or set(snapshot) != {id(member) for member in members}
-                or any(type(values) is not dict or any(not owned(key) for key in values)
-                       for values in snapshot.values())):
-            raise ValueError("SceneState Python projection does not match its captured family")
-    return _Copier(np).copy(snapshot)
+        _validate_attributes(snapshot, members)
+    return freeze(snapshot, np)
+
+
+def prepare_projection(attributes, uniforms, np, members):
+    """Allocate both restored projections before entering native restoration."""
+    members = tuple(members)
+    _validate_attributes(attributes, members)
+    _validate_uniforms(uniforms, members)
+    return freeze((attributes, uniforms), np)
 
 
 def restore(members, prepared):
@@ -126,11 +181,13 @@ def same(np, left, right):
     forward, backward, retained = {}, {}, []
 
     def equal(a, b):
-        if type(a) is not type(b):
+        # Snapshot arrays intentionally lose authored subclasses. Compare
+        # their owned data without making an unchanged live subclass dirty.
+        if type(a) is not type(b) and not (isinstance(a, np.ndarray) and isinstance(b, np.ndarray)):
             return False
         kind = type(a)
         structural = (kind in (dict, list, tuple, set, bytearray)
-                      or isinstance(a, np.ndarray))
+                      or isinstance(a, (np.ndarray, np.void)))
         if structural:
             x, y = id(a), id(b)
             if x in forward:
@@ -152,7 +209,8 @@ def same(np, left, right):
             # Signed zero and NaN payloads may affect subsequent computation.
             return a.tobytes() == b.tobytes()
         if isinstance(a, np.generic):
-            if a.dtype != b.dtype:
+            if (a.dtype != b.dtype or (isinstance(a, np.void)
+                    and a.flags.writeable != b.flags.writeable)):
                 return False
             if a.dtype.names:
                 return all(equal(a[name], b[name]) for name in a.dtype.names)
