@@ -40,7 +40,10 @@ arena state requires the same ordered calls.
 
 The `finish_animations` pass then runs at `dt = 0` in **both** modes. Total
 updater time and the sequence of updater inputs are identical, while all
-renderer and emitter work remains absent. The frame order itself (steps 1–6),
+renderer and emitter work remains absent. This includes an authored
+`Scene.update_frame` override (fm-j6lm). The Reference's skip path calls it
+once per segment with `dt = run_time`; FrankenManim calls it on every frame
+of the grid in both modes, exactly as the Reference's playback does. The frame order itself (steps 1–6),
 the no-capture/no-emit skip behavior, and the `dt = 0` finish pass are all
 kept exactly.
 

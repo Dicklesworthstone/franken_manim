@@ -126,7 +126,7 @@ MoveAlongPath.__init__	MoveAlongPath	bootstrap	1	bootstrap
 MoveAlongPath.interpolate_mobject	MoveAlongPath	bootstrap	1	bootstrap
 PhaseFlow.__init__	PhaseFlow	fmn_python.movement	1	fmn_python.movement
 PhaseFlow.interpolate_mobject	PhaseFlow	bootstrap	1	bootstrap
-ChangeDecimalToValue.__init__	ChangeDecimalToValue	bootstrap	1	bootstrap
+ChangeDecimalToValue.__init__	ChangeDecimalToValue	fmn_python.decimal_authoring	2	fmn_python.decimal_authoring > bootstrap
 ChangingDecimal.__init__	ChangingDecimal	bootstrap	1	bootstrap
 ChangingDecimal.interpolate_mobject	ChangingDecimal	bootstrap	1	bootstrap
 CountInFrom.__init__	CountInFrom	bootstrap	1	bootstrap
@@ -785,7 +785,7 @@ DecimalNumber.interpolate	DecimalNumber	bootstrap	1	bootstrap
 DecimalNumber.set_submobjects_from_number	DecimalNumber	fmn_python.decimal_authoring	1	fmn_python.decimal_authoring
 DecimalNumber.set_value	DecimalNumber	bootstrap	1	bootstrap
 Integer.__init__	Integer	bootstrap	1	bootstrap
-Integer.get_value	Integer	bootstrap	1	bootstrap
+Integer.get_value	Integer	fmn_python.decimal_authoring	2	fmn_python.decimal_authoring > bootstrap
 BarChart.__init__	BarChart	fmn_python.bar_chart	2	fmn_python.bar_chart > bootstrap
 BarChart.add_axes	BarChart	bootstrap	1	bootstrap
 BarChart.add_bars	BarChart	bootstrap	1	bootstrap
@@ -1271,7 +1271,7 @@ InteractiveScene.update_selection_rectangle	InteractiveScene	bootstrap	1	bootstr
 Scene.__init__	Scene	fmn_python.typesetting	2	fmn_python.typesetting > fmn_python.camera_lifecycle
 Scene.add	Scene	bootstrap	1	bootstrap
 Scene.add_mobjects_among	Scene	bootstrap	1	bootstrap
-Scene.add_sound	Scene	bootstrap	1	bootstrap
+Scene.add_sound	Scene	fmn_python.updater_dispatch	2	fmn_python.updater_dispatch > bootstrap
 Scene.affects_mobject_list	Scene	bootstrap	1	bootstrap
 Scene.assemble_render_groups	Scene	bootstrap	1	bootstrap
 Scene.begin_animations	Scene	bootstrap	1	bootstrap
@@ -1341,7 +1341,7 @@ Scene.temp_progress_bar	Scene	contextlib	2	contextlib > bootstrap
 Scene.temp_record	Scene	contextlib	2	contextlib > bootstrap
 Scene.temp_skip	Scene	contextlib	2	contextlib > bootstrap
 Scene.undo	Scene	fmn_python.scene_state	1	fmn_python.scene_state
-Scene.update_frame	Scene	bootstrap	1	bootstrap
+Scene.update_frame	Scene	fmn_python.updater_dispatch	2	fmn_python.updater_dispatch > bootstrap
 Scene.update_mobjects	Scene	fmn_python.updater_dispatch	1	fmn_python.updater_dispatch
 Scene.update_skipping_status	Scene	bootstrap	1	bootstrap
 Scene.wait	Scene	fmn_python.scene_execution	2	fmn_python.scene_execution > bootstrap

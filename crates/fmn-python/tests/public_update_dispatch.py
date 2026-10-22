@@ -706,5 +706,67 @@ class PublicSceneUpdateTests(unittest.TestCase):
         self.assertEqual(len(set(actual)), 3)
 
 
+class AuthoredUpdateFrameTests(unittest.TestCase):
+    """fm-j6lm: an authored Scene.update_frame runs on every native frame.
+
+    Measured on the pinned Reference (6199a00d) for a 1 s play then wait(1) at 30 fps: 60
+    calls with dt 1/30 summing to 2.0. Code before super().update_frame sees the previous
+    frame's time (0, 1/30, ...), and code after it sees this frame's time. Skip mode makes the
+    same calls as playback (BN-10).
+    """
+
+    def run_override(self, skip):
+        calls, sounds = [], []
+
+        class Override(m.Scene):
+            def update_frame(self, dt=0, force_draw=False):
+                if dt > 0:
+                    calls.append(("before", dt, self.time))
+                    self.add_sound("clack.wav")
+                super().update_frame(dt, force_draw)
+                if dt > 0:
+                    calls.append(("after", dt, self.time))
+
+            def construct(self):
+                tracker = m.ValueTracker(0)
+                self.play(tracker.animate.set_value(1), run_time=1)
+                self.wait(1)
+
+        scene = Override(skip_animations=skip)
+        # The native sound boundary needs a real file; record what reaches it instead.
+        scene._add_sound = lambda sound_file, time_offset, gain, gain_to_background: sounds.append(time_offset)
+        with tempfile.TemporaryDirectory() as tmp:
+            with scene.render_session(Path(tmp) / "frames.y4m", resolution=(32, 18), fps=30, threads=1):
+                scene.run()
+        return scene, calls, sounds
+
+    def test_override_runs_each_frame_with_the_reference_time_view(self):
+        for skip in (False, True):
+            with self.subTest(skip=skip):
+                scene, calls, sounds = self.run_override(skip)
+                before = [(dt, time) for kind, dt, time in calls if kind == "before"]
+                after = [time for kind, _, time in calls if kind == "after"]
+                self.assertEqual(len(before), 60)
+                self.assertAlmostEqual(sum(dt for dt, _ in before), 2.0, places=9)
+                expected = np.arange(60) / 30
+                np.testing.assert_allclose([time for _, time in before], expected, atol=1e-9)
+                np.testing.assert_allclose(after, expected + 1 / 30, atol=1e-9)
+                # A sound added before super() lands at the previous frame's time.
+                np.testing.assert_allclose(sounds, -1 / 30, atol=1e-12)
+                self.assertAlmostEqual(scene.time, 2.0, places=9)
+
+    def test_scenes_without_the_override_keep_the_native_frame(self):
+        scene = m.Scene()
+        self.assertIs(scene._fmn_requires_public_scene_update(), False)
+
+        class Override(m.Scene):
+            def update_frame(self, dt=0, force_draw=False):
+                super().update_frame(dt, force_draw)
+
+        self.assertIs(Override()._fmn_requires_public_scene_update(), True)
+        with self.assertRaises(AttributeError):
+            scene.time = 1.0
+
+
 if __name__ == '__main__':
     unittest.main()

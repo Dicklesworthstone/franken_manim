@@ -215,6 +215,50 @@ def install_updater_dispatch(native):
         function.__qualname__ = Scene.__qualname__ + "." + name
         function.__module__ = Scene.__module__
         setattr(Scene, name, function)
+
+    # fm-j6lm: an authored Scene.update_frame override runs on every native frame, at the
+    # scene-updater step. The Reference's update_frame advances time, updates mobjects and
+    # captures; here the rational clock has already advanced this frame and capture follows
+    # natively, so the base does only the mobject pass. Until the override reaches the base,
+    # self.time and add_sound read the time before this frame's advance, as in the Reference,
+    # where code before super().update_frame sees the previous time (colliding_blocks
+    # timestamps its clack flashes and sounds there).
+    base_update_frame = Scene.update_frame
+    base_add_sound = Scene.add_sound
+    core_time = getattr_static(g["_SceneCore"], "time")
+
+    def pending_frame(self):
+        return object.__getattribute__(self, "__dict__").get("_fmn_frame_pending")
+
+    def update_frame(self, dt=0, force_draw=False):
+        own = object.__getattribute__(self, "__dict__")
+        if "_fmn_frame_pending" in own:
+            del own["_fmn_frame_pending"]
+            self.update_mobjects(float(dt))
+            return None
+        return base_update_frame(self, dt, force_draw)
+
+    def scene_time(self):
+        value = core_time.__get__(self, type(self))
+        pending = pending_frame(self)
+        return value if pending is None else value - pending
+
+    def assign_time(self, value):
+        core_time.__set__(self, value)
+
+    def add_sound(self, sound_file, time_offset=0, gain=None, gain_to_background=None):
+        pending = pending_frame(self)
+        if pending is not None:
+            time_offset = time_offset - pending
+        return base_add_sound(self, sound_file, time_offset, gain, gain_to_background)
+
+    for name, function in (("update_frame", update_frame), ("add_sound", add_sound)):
+        function.__name__ = name
+        function.__qualname__ = Scene.__qualname__ + "." + name
+        function.__module__ = Scene.__module__
+        function.__doc__ = getattr(getattr(Scene, name), "__doc__", None)
+        setattr(Scene, name, function)
+    Scene.time = property(scene_time, assign_time, doc=core_time.__doc__)
     from .movement import (_changed, _class_implementation, _implementation,
                            _plain_instance_dict, _protocols, _scan_implementation)
 
@@ -227,9 +271,12 @@ def install_updater_dispatch(native):
     _instance_dict = object.__getattribute__
     public_update_scan = g["_public_update_scan"]
 
+    frame_baselines = {}
+
     def finalize():
         nonlocal object_protocols, scene_protocols, child_descriptors, scene_descriptors
         nonlocal hook_names
+        frame_baselines.clear()
         object_protocols = _protocols(g, Mobject, object_hooks)
         # The names movement._changed looks for in an object's own __dict__.
         hook_names = tuple({name for baseline in object_protocols.values() for name in baseline})
@@ -239,11 +286,21 @@ def install_updater_dispatch(native):
         scene_descriptors = {cls: {name: _implementation(cls, name)
                                   for name in ("frame", "mobjects")}
                              for cls in scene_protocols}
+        frame_baselines.update({cls: _implementation(cls, "update_frame") for cls in scene_protocols})
         child_protocols.clear()
         for cls in (list, tuple, g.get("_LiveSubmobjects")):
             if cls is not None:
                 child_protocols[cls] = {name: _implementation(cls, name)
                                         for name in ("__iter__", "__len__")}
+
+    def frame_overridden(self, memo=None):
+        # Admission never runs authored code: compare the class's implementation, without
+        # calling a getter, with the portal's own for the nearest portal class in its MRO.
+        cls = type(self)
+        if "update_frame" in object.__getattribute__(self, "__dict__"):
+            return True
+        expected = next(frame_baselines[base] for base in cls.__mro__ if base in frame_baselines)
+        return _class_implementation(cls, "update_frame", memo) is not expected
 
     def requires_public_update(self):
         # Admission must not execute an authored getter, family walker, or
@@ -252,7 +309,7 @@ def install_updater_dispatch(native):
         # per-class lookups are resolved once per scan (fm-5wq.31), not once
         # per family member per frame.
         memo = {}
-        if _changed(self, scene_protocols, memo):
+        if _changed(self, scene_protocols, memo) or frame_overridden(self, memo):
             return True
         expected = next(scene_descriptors[cls] for cls in type(self).__mro__
                         if cls in scene_descriptors)
@@ -289,6 +346,14 @@ def install_updater_dispatch(native):
     def dispatch_public_update(self, dt):
         # A true result means BOTH host and native slots have completed. The
         # caller must then capture without a second native scene-updater pass.
+        if frame_overridden(self):
+            own = object.__getattribute__(self, "__dict__")
+            own["_fmn_frame_pending"] = float(dt)
+            try:
+                self.update_frame(float(dt))
+            finally:
+                own.pop("_fmn_frame_pending", None)
+            return True
         if not requires_public_update(self):
             return False
         self.update_mobjects(float(dt))
