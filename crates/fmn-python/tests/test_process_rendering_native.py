@@ -6,7 +6,10 @@ import tempfile
 import time
 import unittest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
+# Append: the source tree's manimlib must never shadow the installed wheel's native one.
+_SOURCE_PYTHON = str(Path(__file__).resolve().parents[1] / "python")
+if _SOURCE_PYTHON not in sys.path:
+    sys.path.append(_SOURCE_PYTHON)
 from fmn_python._process_batch import run_process_jobs
 from test_parallel_batch_native import native_wheel_available
 

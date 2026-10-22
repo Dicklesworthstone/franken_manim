@@ -14,7 +14,10 @@ from unittest.mock import patch
 from test_parallel_batch_native import native_wheel_available
 
 PYTHON = Path(__file__).resolve().parents[1] / "python"
-sys.path.insert(0, str(PYTHON))
+# Append, as test_parallel_batch_native does: the source tree's manimlib has no compiled
+# extension, so it must never shadow the installed wheel being tested.
+if str(PYTHON) not in sys.path:
+    sys.path.append(str(PYTHON))
 from fmn_python.parallel_discovery import discover_source_scenes, SceneDiscoveryError
 from fmn_python.scene_loading import SceneSource
 
@@ -94,7 +97,8 @@ class NativeDiscoveryTests(unittest.TestCase):
         self.source.write_text(source, encoding="utf-8")
 
     def cli(self, *options):
-        environment = dict(os.environ, PYTHONPATH=str(PYTHON))
+        # The installed CLI; a source PYTHONPATH would shadow the wheel's native manimlib.
+        environment = dict(os.environ)
         return subprocess.run(
             [sys.executable, "-m", "fmn_python", str(self.source), "--write_all",
              "--workers", "2", "--robot", "--format", "png", "--resolution", "64x48",

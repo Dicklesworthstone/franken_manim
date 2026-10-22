@@ -46,8 +46,12 @@ class SceneProjectCli(unittest.TestCase):
         if legacy:
             handler = importlib.import_module(fixtures.PACKAGE + ".batch_cli").try_batch_cli
         out, err = io.StringIO(), io.StringIO()
+        # --output names one scene's file; a batch (several names or -a/--write_all) takes
+        # --video_dir, as console_rendering._output_paths requires.
+        selectors = [value for value in extra if not value.startswith("-")]
+        batch = len(selectors) > 1 or any(value in {"-a", "--write_all"} for value in extra)
         arguments = ["--robot", str(self.source), "--format", "png",
-                     "--output", str(self.root / destination), *extra]
+                     "--video_dir" if batch else "--output", str(self.root / destination), *extra]
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = handler(self.native, arguments)
         self.assertEqual(len(out.getvalue().splitlines()), 1, out.getvalue())

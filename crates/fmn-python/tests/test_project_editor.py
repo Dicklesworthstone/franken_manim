@@ -574,21 +574,28 @@ class ProjectEditCliTests(unittest.TestCase):
     def test_production_dispatcher_routes_edit_before_other_commands(self):
         import fmn_python.__main__ as main
         modules = {}
-        for name in ('console_rendering', 'scene_controls', 'studio', 'bundle_cli'):
+        for name in ('console_rendering', 'scene_controls', 'studio', 'bundle_cli', 'clip_recovery_cli'):
             module = ModuleType('fmn_python.' + name)
             modules[module.__name__] = module
         def uncalled(*args):
             raise AssertionError('edit reached the wrong dispatcher')
+        consulted = []
+        def declined(native, arguments):
+            # Clip recovery is consulted first and declines every other command.
+            consulted.append(list(arguments))
+            return None
         modules['fmn_python.console_rendering']._tokens = uncalled
         modules['fmn_python.console_rendering'].try_render_cli = uncalled
         modules['fmn_python.scene_controls'].try_scene_cli = uncalled
         modules['fmn_python.studio'].try_studio_cli = uncalled
         modules['fmn_python.bundle_cli'].try_bundle_cli = uncalled
+        modules['fmn_python.clip_recovery_cli'].try_clip_recovery_cli = declined
         with patch.dict(sys.modules, modules), \
                 patch.object(main, '_ensure_exclusive_manimlib_namespace'), \
                 patch('sys.argv', ['fmn-python', 'edit', '--help', '--robot']):
             self.assertEqual(main.main(), 0)
         self.assertEqual(self.reports[-1]['kind'], 'help')
+        self.assertEqual(consulted, [['edit', '--help', '--robot']])
 
 
 if __name__ == '__main__':

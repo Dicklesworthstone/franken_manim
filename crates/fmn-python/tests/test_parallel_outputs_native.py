@@ -14,7 +14,10 @@ from unittest.mock import patch
 from test_parallel_batch_native import native_wheel_available
 
 PYTHON = Path(__file__).resolve().parents[1] / "python"
-sys.path.insert(0, str(PYTHON))
+# Append, as test_parallel_batch_native does: the source tree's manimlib has no compiled
+# extension, so it must never shadow the installed wheel being tested.
+if str(PYTHON) not in sys.path:
+    sys.path.append(str(PYTHON))
 
 SOURCE = '''from pathlib import Path
 from manimlib import Scene, Square, RIGHT
@@ -261,7 +264,7 @@ RenderSession.finish = collide
             "Second", "First", "--workers", "2", "--subdivide", "--save-last-frame",
             "--format", "gif", "--resolution", "64x48", "--fps", "10", "--robot",
             "--video_dir", str(self.root / "cli")], cwd=self.root,
-            env=dict(os.environ, PYTHONPATH=str(PYTHON)), capture_output=True, text=True, timeout=30)
+            capture_output=True, text=True, timeout=30)
         self.assertEqual(process.returncode, 0, process.stderr)
         data = json.loads(process.stdout)["batch"]
         self.assertEqual([item["name"] for item in data["outcomes"]], ["Second", "First"])
