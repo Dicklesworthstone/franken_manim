@@ -1758,14 +1758,15 @@ mod tests {
         // The compiled definitions. fm-pg7-honest-mn4b moved all three: the
         // cold formula takes a fresh engine per repetition, the cached one
         // names its single engine, and the text is the marked-up, wrapped
-        // paragraph. The formula pair moves with the TeX engine's fingerprint
-        // and q^7+z's result digest (franken_markdown abbb957, fm-giir:
-        // Appendix G parameters and mu at the current size).
+        // paragraph. The formula pair moves with the TeX engine's fingerprint,
+        // which names the franken_markdown pin, and with q^7+z's result digest.
+        // Last moved by the pin alone (83d363c, fm-shqq: \cong); q^7+z's
+        // result is unchanged since abbb957 (fm-giir).
         assert_eq!(
             [cold.digest(), cached.digest(), text.digest()].map(|digest| digest.to_string()),
             [
-                "400daae93b8172d1c4d55f886ea981853df8bb7c97a1ddbc6e08b465843d7a82",
-                "abb4659a4799222c3669928491f8d78c8be16ac423561d3ae650e58ba5a45242",
+                "3263c957d8e35dd082b427c62ade17ab4aa4b648946d70f979b11327372154f5",
+                "bd6cea64f1c120935ed7be4f2a2febe0ffa548403e249a9b5b69e268a024b394",
                 "0fa22e64fe9e1901eea58a596899ec843bc0d6db46f1cd91607925a50fea3e6f",
             ]
         );

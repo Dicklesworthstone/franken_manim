@@ -60,11 +60,13 @@ const PUBLIC_FLOORS: InkFloors = InkFloors {
 /// (franken_markdown 216c7c3), 486 since math-mode family 0 is cmr10
 /// (49466bc, fm-8zy2), 487 with rule 18a's drops (4db6f43, fm-4ptw), 488
 /// with Appendix G's parameters read at the current size (abbb957, fm-giir):
-/// e^{-x^2} matches.
+/// e^{-x^2} matches. 489 since `\cong` is cmsy's ∼ over cmr's = (83d363c,
+/// fm-shqq): its one corpus row went from IoU 0.190 to 0.984, and the p95
+/// Hausdorff fell from 11 to 10.05 px.
 const CORPUS_FLOORS: InkFloors = InkFloors {
-    matches: 488,
+    matches: 489,
     median_hausdorff_px: 1.0,
-    p95_hausdorff_px: 11.0,
+    p95_hausdorff_px: 10.05,
     median_sliced_w1_px: 0.073,
     p95_sliced_w1_px: 6.548,
     median_iou: 0.988,
