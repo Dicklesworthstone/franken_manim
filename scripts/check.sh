@@ -92,6 +92,13 @@ python3 -m py_compile \
     scripts/test_offload_payoff.py
 python3 scripts/test_offload_payoff.py
 
+echo "==> measured-dashboard staleness (fm-dashboard-staleness-dew9)"
+python3 -m py_compile \
+    scripts/check_measurement_staleness.py \
+    scripts/test_check_measurement_staleness.py
+python3 scripts/test_check_measurement_staleness.py
+python3 scripts/check_measurement_staleness.py >/dev/null
+
 echo "==> Parity Ledger witness registry (its installed-wheel run is check_portal_runtime.sh's)"
 python3 -m py_compile \
     scripts/portal_witnesses.py \

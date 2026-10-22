@@ -333,7 +333,7 @@ def cluster_label(record):
     return detail[:140]
 
 
-def write_report(records, dashboard, tsv, title, note=None):
+def write_report(records, dashboard, tsv, title, note=None, measured_commit=None):
     counts = {name: 0 for name in OUTCOMES}
     for record in records:
         counts[record["outcome"]] += 1
@@ -383,6 +383,10 @@ def write_report(records, dashboard, tsv, title, note=None):
         lines += ["", f"## {outcome}: top clusters", "", "| scenes | cluster |", "|---:|---|"]
         for label, count in sorted(clusters.items(), key=lambda item: (-item[1], item[0]))[:10]:
             lines.append(f"| {count} | {label.replace('|', '/')} |")
+    if measured_commit:
+        from check_measurement_staleness import producer_header
+        ids = [f"{record['module']}:{record['scene']}" for record in records]
+        lines.insert(0, producer_header(measured_commit, ids))
     with open(dashboard, "w", encoding="utf-8") as handle:
         handle.write("\n".join(lines) + "\n")
 
@@ -396,6 +400,9 @@ def main():
     parser.add_argument("--dashboard", type=pathlib.Path)
     parser.add_argument("--tsv", type=pathlib.Path)
     parser.add_argument("--title", default="Corpus scene sweep")
+    parser.add_argument("--measured-commit",
+                        help="the commit the measured wheel was built from; stamps the"
+                             " dashboard's staleness header (check_measurement_staleness.py)")
     parser.add_argument("--note", type=pathlib.Path,
                         help="a Markdown paragraph describing the run's environment")
     parser.add_argument("--years", default="2020-2026")
@@ -423,7 +430,7 @@ def main():
             if record.get("raised_in") in ("scene", "portal"):
                 record["outcome"] = attributed_outcome(record)
         note = args.note.read_text(encoding="utf-8") if args.note else None
-        write_report(records, args.dashboard, args.tsv, args.title, note)
+        write_report(records, args.dashboard, args.tsv, args.title, note, args.measured_commit)
         return 0
     if not (args.portal and args.videos and args.out):
         parser.error("a sweep requires --portal, --videos and --out")

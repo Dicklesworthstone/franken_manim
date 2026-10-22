@@ -216,6 +216,9 @@ def write_report(args) -> dict:
         " on one render thread, so the prediction leaves out frame parallelism.",
     ]
     args.out.parent.mkdir(parents=True, exist_ok=True)
+    from check_measurement_staleness import producer_header
+    measured = getattr(args, "measured_commit", None) or commit
+    lines.insert(0, producer_header(measured, [f"{m}:{s}" for m, s in portal_ok]))
     args.out.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return {"census_scenes": len(portal_ok), "segments": len(segments),
             "predicted_scenes": len(predictions), "r": r, "current": current[0],
@@ -232,6 +235,9 @@ def main(argv=None) -> int:
                         help="runs.json of a native-vs-portal pairing, optionally :LABEL")
     parser.add_argument("--ratio-from", required=True, help="the same-scene LABEL whose r to use")
     parser.add_argument("--out", type=pathlib.Path, default=ROOT / "docs" / "ratchet" / "offload_payoff.md")
+    parser.add_argument("--measured-commit",
+                        help="the commit the measured wheel was built from (default: HEAD); stamps"
+                             " the report's staleness header (check_measurement_staleness.py)")
     print(json.dumps(write_report(parser.parse_args(argv))))
     return 0
 

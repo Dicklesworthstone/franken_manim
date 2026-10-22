@@ -570,7 +570,7 @@ def corpus_summary(included):
 
 # ------------------------------------------------------------------ report
 
-def write_dashboard(out_dir: pathlib.Path, dashboard: pathlib.Path):
+def write_dashboard(out_dir: pathlib.Path, dashboard: pathlib.Path, measured_commit=None):
     logged = load_runs(out_dir / "runs.ndjson")
     runs = timing_runs(logged)
     pairs, calibration = scene_calibration(logged)
@@ -670,6 +670,10 @@ def write_dashboard(out_dir: pathlib.Path, dashboard: pathlib.Path):
             lines.append(f"| {scene[0]}:{scene[1]} | {', '.join(reasons)} | {portal} |"
                          f" {reference} | {error} |")
     dashboard.parent.mkdir(parents=True, exist_ok=True)
+    if measured_commit:
+        from check_measurement_staleness import producer_header
+        ids = sorted({f"{r['module']}:{r['scene']}" for r in runs})
+        lines.insert(0, producer_header(measured_commit, ids))
     dashboard.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return summary, len(excluded)
 
@@ -917,11 +921,14 @@ def main():
                              " allows), or one warm cachegrind run per engine after the pairs")
     parser.add_argument("--report", type=pathlib.Path, help="derive the dashboard from DIR")
     parser.add_argument("--dashboard", type=pathlib.Path)
+    parser.add_argument("--measured-commit",
+                        help="the commit the measured portal wheel was built from; stamps the"
+                             " dashboard's staleness header (check_measurement_staleness.py)")
     args = parser.parse_args()
 
     if args.report:
         dashboard = args.dashboard or args.report / "speed_ratio.md"
-        summary, excluded = write_dashboard(args.report, dashboard)
+        summary, excluded = write_dashboard(args.report, dashboard, args.measured_commit)
         print(json.dumps({"schema": SCHEMA, "summary": summary, "excluded": excluded,
                           "dashboard": str(dashboard)}, default=list))
         return 0

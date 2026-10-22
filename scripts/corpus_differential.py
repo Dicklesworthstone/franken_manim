@@ -406,7 +406,7 @@ def triage_lines(both, triage):
     return lines
 
 
-def write_dashboard(records, path, title, triage=None):
+def write_dashboard(records, path, title, triage=None, measured_commit=None):
     """Outcome codes and counts only (the corpus is CC BY-NC-SA). The page depends only on
     the set of records, not their order: every table breaks ties by its key."""
     records = sorted(records, key=lambda r: (r["module"], r["scene"]))
@@ -487,6 +487,9 @@ def write_dashboard(records, path, title, triage=None):
                      f"{size} | {c['centre']:.3f} | `{c['scenes'][0]}` |")
     engines = sorted({r["engines"] for r in records if r.get("engines")})
     lines += ["", f"Engine identities: {', '.join(engines) or 'recorded per run'}.", ""]
+    if measured_commit:
+        from check_measurement_staleness import producer_header
+        lines.insert(0, producer_header(measured_commit, [f"{r['module']}:{r['scene']}" for r in records]))
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -646,6 +649,9 @@ def main():
                         help="recompute DIR's verdicts from its saved facts under the current exclusions")
     parser.add_argument("--dashboard", type=pathlib.Path)
     parser.add_argument("--title", default="Corpus differential")
+    parser.add_argument("--measured-commit",
+                        help="the commit the measured portal wheel was built from; stamps the"
+                             " dashboard's staleness header (check_measurement_staleness.py)")
     parser.add_argument("--triage-file", type=pathlib.Path, default=SCENE_TRIAGE,
                         help="per-scene triage of two-engine structure differences")
     args = parser.parse_args()
@@ -677,7 +683,8 @@ def main():
     if args.report:
         records = sf.read_ndjson(args.report / "records.ndjson")
         if args.dashboard:
-            write_dashboard(records, args.dashboard, args.title, load_scene_triage(args.triage_file))
+            write_dashboard(records, args.dashboard, args.title, load_scene_triage(args.triage_file),
+                            args.measured_commit)
         write_gallery(records, args.report / "gallery.html")
         return 0
     if not (args.portal_python and args.reference_python and args.out):
