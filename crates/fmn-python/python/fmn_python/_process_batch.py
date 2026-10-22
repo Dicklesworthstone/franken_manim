@@ -322,11 +322,19 @@ def run_process_jobs(jobs, worker, *, workers, continue_on_error=False,
                             rows[index]["status"] != "succeeded" and not continue_on_error):
                         stopped = True
                     completed.append(index)
-                    connection.close()
-                    process.close()
+                    # The process is joined and its receipt is durable in rows.
+                    # Retire ownership before close: an interrupt after closing
+                    # the Process must not make error cleanup inspect a closed
+                    # handle and abandon still-running siblings.
                     del active[index]
                     cancelling.pop(index, None)
                     timed_out.discard(index)
+                    try:
+                        connection.close()
+                    except BaseException as error:
+                        _close_after_error(process, error)
+                        raise
+                    process.close()
             # First collect every ready receipt, then call observers. A failing
             # observer cannot discard another job's already reported success.
             for index in completed:

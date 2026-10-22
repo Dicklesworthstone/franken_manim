@@ -45,13 +45,13 @@ def admission_worker(job):
         signal.signal(signal.SIGINT, signal.SIG_IGN)
     row = {"status": "succeeded", "result": {"name": name}, "error": None}
     (root / (name + ".ready")).write_text(str(os.getpid()))
-    if mode in {"success", "failure", "large"}:
-        if mode == "failure":
+    if mode in {"success", "failure", "large", "complete", "failed_complete"}:
+        if mode in {"failure", "failed_complete"}:
             row.update(status="failed", result=None,
                        error={"type": "ValueError", "message": "authored failure", "notes": []})
         if mode == "large":
             row["result"]["payload"] = "x" * (2 * 1024 * 1024)
-        if mode != "large":
+        if mode in {"success", "failure"}:
             Finalize(None, blocked_teardown, args=(str(root), name), exitpriority=20)
         return row
     try:
@@ -87,7 +87,7 @@ class ProcessAdmissionTests(unittest.TestCase):
         return pair
 
     @contextmanager
-    def fault_context(self, *, before_start=None, after_start=None, construct=None):
+    def fault_context(self, *, before_start=None, after_start=None, construct=None, after_close=None):
         owner = self
         class Process:
             def __init__(self, **options):
@@ -104,6 +104,10 @@ class ProcessAdmissionTests(unittest.TestCase):
                 self.process.start()
                 if after_start is not None:
                     after_start(self.index)
+            def close(self):
+                self.process.close()
+                if after_close is not None:
+                    after_close(self.index)
         class Context:
             pass
         context = Context()
@@ -287,6 +291,76 @@ class ProcessAdmissionTests(unittest.TestCase):
             self.assertEqual(row["status"], "succeeded")
             self.assertEqual(len(row["result"]["payload"]), 2 * 1024 * 1024)
             self.assert_released()
+
+    @unittest.skipUnless(os.name == "posix", "sibling cleanup uses POSIX signals")
+    def test_retirement_interrupt_keeps_success_and_reaps_live_sibling(self):
+        primary = KeyboardInterrupt("interrupted after completed Process.close")
+        raised = []
+        def after(index):
+            name = ("done", "running")[index]
+            wait_for((self.root / (name + ".ready")).exists)
+        def after_close(index):
+            if index == 0 and not raised:
+                raised.append(True)
+                raise primary
+        with self.fault_context(after_start=after, after_close=after_close):
+            with self.assertRaises(KeyboardInterrupt) as caught:
+                self.run_jobs([self.job("done", "complete"), self.job("running")])
+            self.assertIs(caught.exception, primary)
+            rows = primary.process_batch_outcomes
+            self.assertEqual([row["status"] for row in rows], ["succeeded", "cancelled"])
+            self.assertEqual(rows[0]["result"], {"name": "done"})
+            self.assertEqual(rows[1]["result"], {"partial": ["running"]})
+            self.assert_released()
+
+    def test_last_worker_close_error_keeps_completed_failure_receipt(self):
+        primary = OSError("completed process handle close error")
+        raised = []
+        def after_close(_):
+            if not raised:
+                raised.append(True)
+                raise primary
+        with self.fault_context(after_close=after_close):
+            with self.assertRaises(OSError) as caught:
+                self.run_jobs([self.job("failed", "failed_complete")])
+            self.assertIs(caught.exception, primary)
+            row = primary.process_batch_outcomes[0]
+            self.assertEqual(row["status"], "failed")
+            self.assertEqual(row["error"]["type"], "ValueError")
+            self.assert_released()
+
+    def test_retirement_closes_process_even_when_receipt_close_also_raises(self):
+        primary = OSError("completed receipt close error")
+        secondary = RuntimeError("completed process close error")
+        real_close, raised = ReceiptReader.close, []
+        def close(reader):
+            real_close(reader)
+            if not raised:
+                raised.append(True)
+                raise primary
+        def after_close(_):
+            raise secondary
+        with self.fault_context(after_close=after_close):
+            with patch.object(ReceiptReader, "close", close):
+                with self.assertRaises(OSError) as caught:
+                    self.run_jobs([self.job("done", "complete")])
+            self.assertIs(caught.exception, primary)
+            self.assertEqual(primary.process_batch_outcomes[0]["status"], "succeeded")
+            self.assertTrue(any("RuntimeError" in note for note in primary.__notes__))
+            self.assert_released()
+
+    def test_normal_retirement_still_reports_each_receipt_once(self):
+        observed = []
+        jobs = [self.job(name, "complete") for name in ("one", "two", "three")]
+        with self.fault_context():
+            rows = scheduler.run_process_jobs(jobs, admission_worker, workers=2,
+                                              on_result=lambda index, row: observed.append((index, row)))
+            self.assertEqual([row["status"] for row in rows], ["succeeded"] * 3)
+            self.assertEqual(sorted(index for index, _ in observed), [0, 1, 2])
+            for index, row in observed:
+                self.assertIs(row, rows[index])
+            self.assert_released()
+
 
 
 if __name__ == "__main__":
