@@ -51,10 +51,13 @@ class BundleBatchConsole(unittest.TestCase):
         self.directory = self.root / "output"
         self.assertTrue(callable(getattr(m, "_portal_begin_camera_bundle", None)))
 
-    def arguments(self, *extra, camera=True, names=(), directory=None):
+    def arguments(self, *extra, camera=True, names=(), directory=None, output=None):
+        # --video_dir is a directory for every selection; an exact single-scene
+        # destination is --output, as in the shared render planner.
+        destination = (("--output", str(output)) if output is not None else
+                       ("--video_dir", str(self.directory if directory is None else directory)))
         return ["--robot", str(self.source), *names, "--format", "fmtl",
-                "--resolution", "96x54", "--fps", "8", "--video_dir",
-                str(self.directory if directory is None else directory),
+                "--resolution", "96x54", "--fps", "8", *destination,
                 *(("--bundle-camera",) if camera else ()), *extra]
 
     def invoke(self, *extra, **options):
@@ -96,7 +99,7 @@ class BundleBatchConsole(unittest.TestCase):
         self.assertEqual([r["name"] for r in report["batch"]["outcomes"]], ["Zulu", "Beta"])
         self.compare_independent(report, False)
         exact = self.root / "exact.fmtl"
-        code, single, err = self.invoke(camera=False, names=("Zulu",), directory=exact)
+        code, single, err = self.invoke(camera=False, names=("Zulu",), output=exact)
         self.assertEqual(code, 0, (single, err))
         self.assertEqual(single["kind"], "bundle-export")
         self.assertEqual(single["destination"], str(exact))
