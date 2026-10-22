@@ -531,6 +531,15 @@ Numbers below are the CI **gates** (§17.2 of the plan), to be enforced on pinne
 - **Output:** decoded frames are byte-identical to the old route.
 - **Whole video:** all eight chapters of the shipped cut (30,431 frames) rendered concurrently in 141 s.
 
+**A calibration measurement (calibration-unqualified, not a gate observation).** Two README scenes and a gallery text still against the pinned Reference:
+- **Setup.** Final-state mode at 320×180, on the shared 64-core dev host, on 2026-10-22, portal `git:b315b337`. It ran through `scripts/corpus_speed_ratio.py --max-pairs 30 --instructions cachegrind`, with ABBA pairs and Hodges-Lehmann log-ratios under an anytime-valid confidence sequence.
+- **Wall clock.** The portal's time relative to the Reference:
+  - TextSample 0.53× (0.51–0.54);
+  - Hello 0.62× (0.55–0.67);
+  - SquareToCircle 0.66× (0.65–0.69).
+  Each sequence lies above 0.5× and below 1×, so this is not yet PG-1's 0.5× bar, which counts full 1080p exports.
+- **Instructions.** Single-threaded instruction ratios are 0.66, 0.77 and 0.86. They were unchanged within 0.03% when the run was repeated at load 49 instead of 6.
+
 GPU annex engines are measured under their own profiles (PG-A), gate **annex changes only**, and never gate core merges; the CPU engine must stand on its own so acceleration can never mask a core regression. The scaling hierarchy, outermost first: multi-scene batch → frame-parallel pure segments → pipelined frame stages → the tile pool → SIMD within a tile.
 
 ## Determinism, verification & the look

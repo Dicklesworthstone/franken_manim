@@ -209,17 +209,19 @@ class SpeedRatioTests(unittest.TestCase):
             csr.write_dashboard(out, out / "dash.md")
             self.assertIn("| 1 | 2.0 | 1.0 | portal:timeout |", (out / "dash.md").read_text())
 
-    def test_runs_interleave_engines_in_the_log(self):
+    def test_runs_alternate_engine_order_abba_in_the_log(self):
         self.assertEqual(csr.interleaved_plan([("m.py", "A")], 2),
                          [(("m.py", "A"), 0, "portal"), (("m.py", "A"), 0, "reference"),
-                          (("m.py", "A"), 1, "portal"), (("m.py", "A"), 1, "reference")])
+                          (("m.py", "A"), 1, "reference"), (("m.py", "A"), 1, "portal")])
         collect = Collect()
         runners = {engine: (lambda scene, rep: (0, "")) for engine in csr.ENGINES}
         csr.measure_scene(("m.py", "A"), 3, runners, collect, collect.done, collect.lock)
-        self.assertEqual([(r["engine"], r["rep"]) for r in collect.records],
-                         [("portal", 0), ("reference", 0), ("portal", 1), ("reference", 1),
-                          ("portal", 2), ("reference", 2)])
+        self.assertEqual([(r["engine"], r["rep"], r["order"]) for r in collect.records],
+                         [("portal", 0, "AB"), ("reference", 0, "AB"), ("reference", 1, "BA"),
+                          ("portal", 1, "BA"), ("portal", 2, "AB"), ("reference", 2, "AB")])
         self.assertTrue(all(r["label"] == csr.LABEL for r in collect.records))
+        self.assertTrue(all(r["qualification"] == "calibration-unqualified"
+                            for r in collect.records))
 
     def test_resume_skips_finished_runs_and_failure_stops_the_scene(self):
         collect = Collect()
@@ -341,6 +343,190 @@ class SpeedRatioTests(unittest.TestCase):
         self.assertIn(csr.LABEL, text)
         self.assertIn("| m.py:B | 2.00 |", text)
         self.assertIn("| m.py:D | portal:timeout | timeout 9.0 s | not run | stuck \\| in a loop |", text)
+
+
+class FakeClock:
+    """A monotonic clock that runners advance by exact amounts."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+
+class CalibrationStatisticsTests(unittest.TestCase):
+    # Two-sided 0.05 critical values of the Wilcoxon signed-rank statistic: the largest c
+    # with P(T+ <= c) <= 0.025 (standard tables, e.g. Hollander & Wolfe, Table A.4).
+    CRITICAL_005 = {6: 0, 7: 2, 8: 3, 9: 5, 10: 8, 11: 10, 12: 13, 13: 17, 14: 21, 15: 25,
+                    20: 52}
+
+    def test_hodges_lehmann_is_the_median_of_walsh_averages(self):
+        # Walsh averages of (1, 2, 4): 1, 1.5, 2.5, 2, 3, 4 -> median (2 + 2.5) / 2.
+        self.assertEqual(csr.walsh_averages([1, 2, 4]), [1, 1.5, 2, 2.5, 3, 4])
+        self.assertEqual(csr.hodges_lehmann([1, 2, 4]), 2.25)
+        self.assertEqual(csr.hodges_lehmann([3.0]), 3.0)
+        # One outlier moves the mean (1.81) far more than the estimate: the 8th of the 15
+        # sorted Walsh averages of (-0.1, 0, 0.05, 0.1, 9) is 0.05.
+        self.assertAlmostEqual(csr.hodges_lehmann([0.0, 0.1, -0.1, 0.05, 9.0]), 0.05)
+        with self.assertRaises(ValueError):
+            csr.hodges_lehmann([])
+
+    def test_signed_rank_null_matches_the_published_critical_values(self):
+        for n, critical in self.CRITICAL_005.items():
+            counts = csr.signed_rank_counts(n)
+            self.assertEqual(sum(counts), 2 ** n)
+            self.assertEqual(counts, counts[::-1], "the null is symmetric")
+            below = sum(counts[:critical + 1])
+            self.assertLessEqual(below / 2 ** n, 0.025, n)
+            self.assertGreater((below + counts[critical + 1]) / 2 ** n, 0.025, n)
+        self.assertEqual(csr.signed_rank_counts(3), [1, 1, 1, 2, 1, 1, 1])
+
+    def test_wilcoxon_interval_takes_the_kth_walsh_averages(self):
+        values = [0.31, -0.12, 0.08, 0.44, 0.27, -0.05, 0.19, 0.36, 0.02, 0.23]
+        walsh = csr.walsh_averages(values)
+        low, high, coverage = csr.wilcoxon_interval(values)
+        # n = 10: c = 8 (P(T+ <= 8) = 25/1024), so k = 9 of M = 55.
+        self.assertEqual((low, high), (walsh[8], walsh[46]))
+        self.assertAlmostEqual(coverage, 1 - 50 / 1024)
+        six = [0.5, 0.1, 0.4, 0.2, 0.6, 0.3]
+        self.assertEqual(csr.wilcoxon_interval(six), (0.1, 0.6, 1 - 2 / 64))
+        self.assertIsNone(csr.wilcoxon_interval(six[:5]), "no 95% interval from 5 pairs")
+
+    def test_confidence_sequence_covers_under_optional_stopping(self):
+        # 1,000 simulated runs of up to 60 pairs, looked at after every pair. A run fails
+        # when the true median leaves the running sequence at any look. Ville's inequality
+        # bounds that probability by alpha = 0.05.
+        rng = __import__("random").Random(20261022)
+        failures = 0
+        for run_index in range(1000):
+            if run_index % 2:
+                true_median = -0.4
+                values = [true_median + rng.gauss(0.0, 0.15) for _ in range(60)]
+            else:
+                # Skewed: an exponential shifted so its median is the target.
+                true_median = 0.1
+                values = [true_median - __import__("math").log(2) / 3 + rng.expovariate(3.0)
+                          for _ in range(60)]
+            sequence = csr.median_confidence_sequence(values)
+            if sequence is None or not sequence[0] <= true_median <= sequence[1]:
+                failures += 1
+        self.assertGreaterEqual(1 - failures / 1000, 0.95, failures)
+
+    def test_sequence_needs_seven_unanimous_pairs_to_exclude_at_alpha_005(self):
+        # The e-value of n unanimous signs is C(2n, n) / 2**n: 14.4 at n = 6, 26.8 at n = 7.
+        below = [-1.0 - 0.01 * i for i in range(7)]
+        self.assertEqual(csr.median_confidence_sequence(below[:6]), (float("-inf"), float("inf")))
+        # At 7 neither unanimous count is accepted: the sequence is [min, max].
+        self.assertEqual(csr.median_confidence_sequence(below), (-1.06, -1.0))
+
+    def test_decision_reports_below_above_and_within_tolerance(self):
+        clear = [-1.0 - 0.01 * i for i in range(8)]  # ratio about 0.36
+        verdicts, decided = csr.sequential_decision(clear)
+        self.assertEqual(verdicts, {"0.5x": "below", "1x": "below"})
+        self.assertTrue(decided)
+        rng = __import__("random").Random(5)
+        near_parity = [rng.uniform(-0.01, 0.01) for _ in range(200)]
+        verdicts, decided = csr.sequential_decision(near_parity)
+        self.assertEqual(verdicts, {"0.5x": "above", "1x": "within 5%"})
+        self.assertTrue(decided)
+        verdicts, decided = csr.sequential_decision(near_parity[:5])
+        self.assertFalse(decided)
+        self.assertEqual(csr.sequential_decision([]), ({"0.5x": None, "1x": None}, False))
+
+    def run_sequential(self, portal_s, reference_s, max_pairs, reps=1):
+        clock = FakeClock()
+
+        def runner(seconds):
+            def call(scene, rep):
+                clock.now += seconds[rep % len(seconds)]
+                return 0, ""
+            return call
+
+        collect = Collect()
+        runners = {"portal": runner(portal_s), "reference": runner(reference_s)}
+        original = csr.time.monotonic
+        csr.time.monotonic = clock
+        try:
+            finished = csr.measure_scene(("m.py", "A"), reps, runners, collect, collect.done,
+                                         collect.lock, max_pairs=max_pairs)
+        finally:
+            csr.time.monotonic = original
+        return finished, collect.records
+
+    def test_sequential_lane_stops_early_on_a_clear_answer(self):
+        finished, records = self.run_sequential([1.0], [3.0], max_pairs=40)
+        self.assertTrue(finished)
+        self.assertEqual(len(records), 14, "seven unanimous pairs decide both thresholds")
+        self.assertEqual([r["order"] for r in records][:4], ["AB", "AB", "BA", "BA"])
+
+    def test_sequential_lane_runs_long_on_a_close_answer(self):
+        # Alternating 0.9x and 1.1x pairs straddle parity and stay wider than +-5%.
+        finished, records = self.run_sequential([0.9, 1.1], [1.0], max_pairs=12)
+        self.assertTrue(finished)
+        self.assertEqual(len(records), 24, "an undecided scene runs to --max-pairs")
+
+    def test_calibration_report_rows_and_instruction_ratios(self):
+        json = __import__("json")
+        runs = []
+        for rep, (portal, reference) in enumerate([(1.0, 2.0), (1.1, 2.0), (0.9, 2.1)]):
+            order = "AB" if rep % 2 == 0 else "BA"
+            runs += [dict(run("m.py", "P", "portal", rep, portal), order=order,
+                          instructions=100 + rep, load_start=1.0, load_end=2.0),
+                     dict(run("m.py", "P", "reference", rep, reference), order=order,
+                          instructions=200, load_start=3.0, load_end=4.0)]
+            runs += [dict(run("m.py", "C", "portal", rep, portal), order=order),
+                     dict(run("m.py", "C", "reference", rep, reference), order=order)]
+        runs += [dict(run("m.py", "C", "portal", "instructions", 40.0), kind="instructions",
+                      instructions=50),
+                 dict(run("m.py", "C", "reference", "instructions", 80.0), kind="instructions",
+                      instructions=200)]
+        pairs, summaries = csr.scene_calibration(runs)
+        p_rows = [row for row in pairs if row["scene"] == "P"]
+        self.assertEqual([row["pair_index"] for row in p_rows], [0, 1, 2])
+        # pair 1 ran B first, so its load window runs from the Reference's start to the
+        # portal's end
+        self.assertEqual((p_rows[1]["order"], p_rows[1]["load_start"], p_rows[1]["load_end"]),
+                         ("BA", 3.0, 2.0))
+        self.assertAlmostEqual(p_rows[0]["log_ratio"], __import__("math").log(0.5))
+        self.assertEqual(summaries[("m.py", "P")]["instruction_source"], "perf stat on the timed runs")
+        self.assertAlmostEqual(summaries[("m.py", "P")]["instruction_ratio"], 101 / 200)
+        self.assertEqual(summaries[("m.py", "C")]["instruction_ratio"], 0.25)
+        self.assertIsNone(summaries[("m.py", "C")]["ci_low"], "no Wilcoxon interval from 3 pairs")
+        # Instruction runs are 30x slower and never enter the timed ratios.
+        included, _ = csr.scene_ratios(runs)
+        self.assertEqual(included[("m.py", "C")]["pairs"], 3)
+        with tempfile.TemporaryDirectory() as tmp:
+            out = pathlib.Path(tmp)
+            (out / "runs.ndjson").write_text("".join(json.dumps(r) + "\n" for r in runs))
+            csr.write_dashboard(out, out / "dash.md")
+            written = [json.loads(line) for line in (out / "pairs.ndjson").read_text().splitlines()]
+            self.assertEqual(len(written), 6)
+            self.assertTrue(all(row["qualification"] == "calibration-unqualified" for row in written))
+            self.assertIn("Paired calibration (calibration-unqualified", (out / "dash.md").read_text())
+
+    def test_instrument_parsers_and_argv(self):
+        self.assertEqual(csr.parse_perf_instructions("8217949418,,instructions:u,1408290454,100.00,,"),
+                         8217949418)
+        self.assertIsNone(csr.parse_perf_instructions("<not supported>,,instructions:u,0,0.00,,"))
+        self.assertIsNone(csr.parse_perf_instructions(""))
+        with tempfile.TemporaryDirectory() as tmp:
+            stem = pathlib.Path(tmp) / "portal-0"
+            argv, env, read = csr.instrument(["python", "x.py"], {"A": "1"}, "cachegrind", stem)
+            self.assertEqual(argv[:4], ["valgrind", "--tool=cachegrind", "--cache-sim=no",
+                                        "--trace-children=yes"])
+            self.assertEqual(argv[-2:], ["python", "x.py"])
+            self.assertEqual(env, {"A": "1", "PYTHONHASHSEED": "0", "OMP_NUM_THREADS": "1",
+                                   "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
+                                   "LP_NUM_THREADS": "1"})
+            out_dir = pathlib.Path(argv[4].split("=", 1)[1]).parent
+            self.assertIsNone(read(), "no files yet")
+            (out_dir / "cg.11").write_text("events: Ir\nsummary: 1000\n")
+            (out_dir / "cg.12").write_text("cmd: /sbin/ldconfig -p\nevents: Ir\nsummary: 25\n")
+            self.assertEqual(read(), 1025, "children count toward the run")
+            argv, env, _ = csr.instrument(["python"], {}, "perf", stem)
+            self.assertEqual(argv[:5], ["perf", "stat", "-x", ",", "-e"])
+            self.assertEqual(csr.instrument(["python"], {}, None, stem)[:2], (["python"], {}))
 
 
 if __name__ == "__main__":
