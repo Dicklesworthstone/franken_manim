@@ -454,10 +454,10 @@ mod tests {
     #[test]
     fn embedded_portal_matches_the_reference_class_sweep() {
         let report = super::run_portal_gauntlet_class_sweep().unwrap();
-        assert_eq!(report.compared, 289, "{}", report.summary);
+        assert_eq!(report.compared, 309, "{}", report.summary);
         assert_eq!(
             report.equal + report.equal_with_exclusions,
-            289,
+            309,
             "{}",
             report.summary
         );

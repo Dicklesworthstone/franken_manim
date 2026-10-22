@@ -105,7 +105,7 @@ violation under `envelope_violations`.
 # base directory (its latex_cache) and SVG cache. The default cache, ~/.cache/manim,
 # is shared by every Reference run on the host, and concurrent runs poison it
 # (Appendix C-22, fm-0v8k).
-mkdir ref-facts && cd ref-facts
+mkdir -p ref-facts/out/latex_cache && cd ref-facts  # the Reference never creates latex_cache
 printf 'directories:\n  base: "%s/out"\n  cache: "%s/svg"\n' "$PWD" "$PWD" > custom_config.yml
 PYTHONPATH=$REPO/scripts/manim_ref xvfb-run -a <ref-venv>/bin/python \
   $REPO/crates/fmn-conformance/python/structural_facts.py extract \
@@ -122,7 +122,7 @@ embedded portal. `test_structural_facts.py` holds the unit tests.
 
 ## Class sweep (fm-5wq.26)
 
-`crates/fmn-conformance/fixtures/structural_facts/class_sweep.json` lists every public mobject class in plan Appendix A (153 classes; private helpers such as `_AnimationBuilder` are excluded) and declares parameterized calls for the classes whose arguments matter (131 calls). Each class is constructed with its default call (subject `Class`), and each declared call gets subject `Class#n`. A default call that raises in both engines with the same exception class is equal; the error text records why the class is unconstructible without arguments.
+`crates/fmn-conformance/fixtures/structural_facts/class_sweep.json` lists every public mobject class in plan Appendix A (153 classes; private helpers such as `_AnimationBuilder` are excluded) and declares parameterized calls for the classes whose arguments matter (156 calls). Brace, BraceLabel, BraceText, SurroundingRectangle, BackgroundRectangle, Underline and Cross are also called on composite targets (matrices, a Tex group, shapes, Axes, a Group of Groups; fm-5wq.43), whose size comes from their whole family. Each class is constructed with its default call (subject `Class`), and each declared call gets subject `Class#n`. A default call that raises in both engines with the same exception class is equal; the error text records why the class is unconstructible without arguments.
 
 Sweep records add `public_methods`: the public callables of the instance's class, recorded once per class on the default call. A Reference method missing from the portal is a difference (`public_methods.<name>`). Portal extras are not compared. Instance data attributes are not compared either: the Reference's include GL renderer state that the portal deliberately lacks (ADR-0021).
 

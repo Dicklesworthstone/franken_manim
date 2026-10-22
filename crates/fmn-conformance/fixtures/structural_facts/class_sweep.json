@@ -339,26 +339,46 @@
   ],
   "SurroundingRectangle": [
    "SurroundingRectangle(Circle())",
-   "SurroundingRectangle(Square(), buff=0.5)"
+   "SurroundingRectangle(Square(), buff=0.5)",
+   "SurroundingRectangle(VGroup(Square(), Circle()).arrange(RIGHT).shift(DOWN))",
+   "SurroundingRectangle(Axes((-2, 2), (-1, 1)))",
+   "SurroundingRectangle(Group(Group(Square()), Group(Circle().shift(RIGHT))))"
   ],
   "BackgroundRectangle": [
-   "BackgroundRectangle(Circle())"
+   "BackgroundRectangle(Circle())",
+   "BackgroundRectangle(VGroup(Square(), Circle()).arrange(RIGHT).shift(DOWN))",
+   "BackgroundRectangle(Axes((-2, 2), (-1, 1)))"
   ],
   "Cross": [
-   "Cross(Square())"
+   "Cross(Square())",
+   "Cross(VGroup(Square(), Circle()).arrange(RIGHT).shift(DOWN))",
+   "Cross(Group(Group(Square()), Group(Circle().shift(RIGHT))))"
   ],
   "Underline": [
-   "Underline(Square())"
+   "Underline(Square())",
+   "Underline(VGroup(Square(), Circle()).arrange(RIGHT).shift(DOWN))",
+   "Underline(Axes((-2, 2), (-1, 1)))"
   ],
   "Brace": [
    "Brace(Square(), DOWN)",
-   "Brace(Square(), LEFT)"
+   "Brace(Square(), LEFT)",
+   "Brace(Matrix([[1, 2], [3, 4]]).to_corner(UR), DOWN)",
+   "Brace(IntegerMatrix([[1, 2], [3, 4]]).to_corner(DL), DOWN)",
+   "Brace(DecimalMatrix([[1.5, 2.25], [3.0, 4.75]]), DOWN)",
+   "Brace(MobjectMatrix(VGroup(Square(), Circle(), Circle(), Square())), DOWN)",
+   "Brace(VGroup(Tex('a+b'), Tex('c^2')).arrange(RIGHT).shift(LEFT), DOWN)",
+   "Brace(VGroup(Square(), Circle()).arrange(RIGHT).shift(DOWN), DOWN)",
+   "Brace(Axes((-2, 2), (-1, 1)), DOWN)",
+   "Brace(Group(Group(Square()), Group(Circle().shift(RIGHT))), DOWN)",
+   "Brace(Matrix([[1, 2], [3, 4]]).to_corner(UR), LEFT)"
   ],
   "BraceLabel": [
-   "BraceLabel(Square(), 'x')"
+   "BraceLabel(Square(), 'x')",
+   "BraceLabel(Matrix([[1, 2], [3, 4]]).to_corner(UR), 'x')"
   ],
   "BraceText": [
-   "BraceText(Square(), 'side')"
+   "BraceText(Square(), 'side')",
+   "BraceText(VGroup(Tex('a+b'), Tex('c^2')).arrange(RIGHT).shift(LEFT), 'side')"
   ],
   "LineBrace": [
    "LineBrace(Line(LEFT, RIGHT))"

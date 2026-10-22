@@ -132,7 +132,10 @@ impl Brace {
             rotated.bbox_point([1.0, -1.0, 0.0]),
         ) {
             (Some(left), Some(right)) => (right[0] - left[0], Some(left)),
-            _ => (0.0, None),
+            // A point-less target's corners are the origin in the Reference
+            // (`get_bounding_box` of no points is zeros), so its degenerate
+            // brace still sits `buff` beyond it (fm-5wq.43).
+            _ => (0.0, Some(ORIGIN)),
         };
         Self {
             width: width.max(0.0),
@@ -663,6 +666,29 @@ mod tests {
                 .iter()
                 .all(|p| p.iter().all(|c| c.is_finite()))
         );
+    }
+
+    #[test]
+    fn an_empty_target_places_its_point_brace_buff_beyond_the_origin() {
+        // The Reference anchors a brace over a point-less target at the
+        // origin; at width 0 the parametric brace is a single point there.
+        let empty = VMobject::from_points(Vec::new());
+        for (direction, expected) in [
+            ([0.0, -1.0, 0.0], [0.0, -0.2, 0.0]),
+            ([-1.0, 0.0, 0.0], [-0.2, 0.0, 0.0]),
+            ([0.0, 1.0, 0.0], [0.0, 0.2, 0.0]),
+        ] {
+            let built = Brace::around(&empty, direction).buff(0.2).build();
+            assert!(!built.points().is_empty(), "{direction:?}");
+            for point in built.points() {
+                for axis in 0..3 {
+                    assert!(
+                        (point[axis] - expected[axis]).abs() < 1e-12,
+                        "{direction:?}: {point:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

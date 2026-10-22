@@ -47,6 +47,16 @@ class BraceLifecycleTests(unittest.TestCase):
                     label = brace.get_text("A")
                     self.assertLess(label.get_top()[1], target.get_bottom()[1])
 
+    def test_an_empty_target_puts_its_point_brace_buff_beyond_the_origin(self):
+        # fm-5wq.43: the Reference anchors a brace over a point-less target at the origin and
+        # keeps its glyph's height there. At width 0 the parametric brace (BN-08) is one point,
+        # buff beyond that anchor; it once sat on the origin itself.
+        for direction, expected in ((m.DOWN, [0, -.2, 0]), (m.LEFT, [-.2, 0, 0])):
+            with self.subTest(direction=direction):
+                brace = m.Brace(m.VGroup(), direction, buff=.2)
+                np.testing.assert_allclose(brace.get_center(), expected, atol=1e-9)
+                np.testing.assert_allclose(brace.get_tip(), expected, atol=1e-9)
+
     def test_native_geometry_tip_and_default_paint_are_preserved(self):
         target = m.Rectangle(width=3, height=.75).shift(m.RIGHT)
         for cls, target in ((m.Brace, target), (m.LineBrace, m.Line([-2,1,0],[1,3,0]))):

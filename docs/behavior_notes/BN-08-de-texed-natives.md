@@ -185,7 +185,11 @@ mouse/keyboard wiring is Proscenium's (W9), not the library's.
   much narrower or much wider than its natural size now keeps its curl's
   proportions, and a tall matrix's brackets keep their weight. If a scene
   relied on the Reference's distortion for a visual effect, it will look
-  different — better, but different.
+  different — better, but different. Below its natural width (1.0) a brace
+  is therefore shallower than the Reference's, which keeps 0.267 at every
+  width: 0.235 deep at width 0.83. At width 0, over a point-less target such
+  as an empty `VGroup`, it is a single point `buff` beyond the target's
+  corner. That corner is the origin, as in the Reference.
 - **Stroke tapers are reproduced.** `Cross` and `Underline` keep their
   variable stroke widths (`[0, 6, 0]` and `[0, 3, 3, 0]`), resized onto the
   path by linear interpolation the way `set_stroke(width=[...])` does. The
