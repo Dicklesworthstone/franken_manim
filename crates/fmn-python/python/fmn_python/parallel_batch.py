@@ -77,6 +77,10 @@ def _render_source_job(job):
             scene_name = job.get("scene_name", name)
             if scene_name not in loaded.scenes:
                 raise ValueError(f"no locally declared Scene named {scene_name!r} in {source}")
+            if "clip_recovery" in job:
+                from .parallel_clip_recovery import render_clip_job
+
+                return render_clip_job(job, loaded.scenes[scene_name])
             selected = {name: loaded.scenes[scene_name]}
             if "scene_name" in job:
                 from .batch_rendering import RenderJob
@@ -160,7 +164,7 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
                          threads=None, continue_on_error=False, on_result=None,
                          max_jobs=1024, animation_range=None, job_timeout=None,
                          cancellation=None,
-                         checkpoint=None, resume=False, resume_key=None,
+                         checkpoint=None, resume=False, resume_key=None, clip_checkpoint_dir=None,
                          subdivide=False, max_segments=10_000, save_last_frame=False,
                          reproducible=False, bundle_camera=False, bundle_limits=None,
                          bundle_audio=False, bundle_audio_options=None,
@@ -236,6 +240,18 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
     admitted job. Checkpoint recovery preserves these settings and hash-verifies
     completed bundles; no-cue scenes may return ordinary picture-only receipts.
 
+    clip_checkpoint_dir provides recovery WITHIN each subdivided scene instead
+    of whole-scene checkpoint reuse. Each worker owns a distinct existing clip
+    journal; the parent holds one locked source/variant/options plan. Resume
+    reexecutes authored commands to reconstruct scene state, verifies saved
+    clip indices and clocks, and renders only their missing suffix. An unstarted
+    scene with no journal may start only when its destination is absent.
+    Unrecorded outputs are never adopted or overwritten. Completed scenes also
+    replay (report.reused remains empty); this is not certified Python replay.
+    It requires subdivide=True, excludes checkpoint, final-image pairs and
+    certification, and uses the same explicit resume/resume_key contract.
+    Interrupted workers retain per-clip progress even without a terminal receipt.
+
     cancellation accepts a parent-owned CancellationToken. Call cancel() from
     another thread or on_result to stop admission and clean up in-flight workers.
     BatchCancelled (a KeyboardInterrupt subtype) carries render_batch_result
@@ -251,7 +267,7 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
     job_timeout = validate_job_timeout(job_timeout)
     if not isinstance(resume, bool):
         raise TypeError("resume must be bool")
-    if checkpoint is None and (resume or resume_key is not None):
+    if checkpoint is None and clip_checkpoint_dir is None and (resume or resume_key is not None):
         raise ValueError("resume and resume_key require a checkpoint path")
     if not isinstance(continue_on_error, bool):
         raise TypeError("continue_on_error must be bool")
@@ -267,6 +283,11 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
         raise ValueError("max_segments requires subdivide=True")
     if not isinstance(reproducible, bool):
         raise TypeError("reproducible must be bool")
+    if clip_checkpoint_dir is not None:
+        from .parallel_clip_recovery import validate_clip_recovery
+
+        validate_clip_recovery(checkpoint=checkpoint, subdivide=subdivide,
+                               save_last_frame=save_last_frame, reproducible=reproducible, format=format)
     from .source_jobs import prepare_source_jobs
 
     names, variants = prepare_source_jobs(scene_names, maximum)
@@ -380,9 +401,18 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
              BatchCheckpoint(checkpoint, resume=resume, key=resume_key))
     if checkpoint is not None:
         owner.validate_destinations(all_destinations)
+    clip_owner = contextlib.nullcontext(None)
+    if clip_checkpoint_dir is not None:
+        from .parallel_clip_recovery import ParallelClipPlan
+
+        clip_owner = ParallelClipPlan(clip_checkpoint_dir, resume=resume, key=resume_key)
+        clip_owner.validate_destinations(all_destinations)
     _check_cancelled(cancellation)
-    with owner as journal:
+    with clip_owner as clip_journal, owner as journal:
         existing = set() if journal is None else journal.existing_destinations
+        if clip_journal is not None:
+            clip_journal.prepare(jobs, destinations)
+            existing.update(clip_journal.existing_destinations)
         for destination in all_destinations:
             if os.path.lexists(destination) and destination not in existing:
                 raise FileExistsError(f"render destination already exists: {destination}")
@@ -390,6 +420,11 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
             journal.prepare_sources(names, destinations, options, source=source,
                                     source_digest=digest, working_directory=working_directory,
                                     **({"variants": variants} if variants is not None else {}))
+        if clip_journal is not None:
+            _check_cancelled(cancellation)
+            clip_journal.admit()
+            for job in jobs:
+                job["clip_recovery"] = clip_journal.recovery[job["name"]]
         completed = {} if journal is None else journal.completed
 
         def restore(name, path, row):
