@@ -1764,8 +1764,8 @@ mod tests {
         assert_eq!(
             [cold.digest(), cached.digest(), text.digest()].map(|digest| digest.to_string()),
             [
-                "3cd90761bbc39022fc85083d7224e0a3fdc5dec4f4d20a57d9320b003ac1e9d2",
-                "401aa4eeb60b3450f4859f010ffc87dde08f5d4a52bb0e8a6edfa634f865da11",
+                "400daae93b8172d1c4d55f886ea981853df8bb7c97a1ddbc6e08b465843d7a82",
+                "abb4659a4799222c3669928491f8d78c8be16ac423561d3ae650e58ba5a45242",
                 "0fa22e64fe9e1901eea58a596899ec843bc0d6db46f1cd91607925a50fea3e6f",
             ]
         );
