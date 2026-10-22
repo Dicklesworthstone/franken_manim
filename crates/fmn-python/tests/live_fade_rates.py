@@ -1,4 +1,7 @@
-"""Installed-extension fade easing over the production renderer, not a 30-Hz table.
+"""Installed-extension authored easing over the production renderer, not a 30-Hz table.
+
+Fades, a `.animate` builder Transform and a lagged group's members each ease with the authored
+curve at every frame the clock samples, at several frame rates (fm-5wq.13).
 
 Run against the freshly built wheel: python crates/fmn-python/tests/live_fade_rates.py
 Missing native dependencies are errors, not skipped acceptance cases.
@@ -62,6 +65,45 @@ class LiveFadeRates(unittest.TestCase):
                                run_time=.5, rate_func=lambda t: t ** 3)
                 expected = (np.arange(1, fps // 2 + 1) / (fps / 2)) ** 3
                 np.testing.assert_allclose(observed, np.column_stack((expected, -3 + expected)), atol=2e-6)
+
+    def test_builder_transform_eases_with_the_authored_curve_at_each_frame(self):
+        for fps in (24, 30, 60):
+            with self.subTest(fps=fps), tempfile.TemporaryDirectory() as tmp:
+                scene, square = m.Scene(), m.Square()
+                observed = []
+                probe = m.Mobject()
+                probe.add_updater(lambda obj, dt: observed.append(square.get_center()[0]) if dt > 0 else None)
+                with render_session(scene, Path(tmp) / "builder.y4m", fps=fps,
+                                    resolution=(32, 18), threads=1):
+                    scene.add(square, probe)
+                    scene.play(square.animate.shift(2 * m.RIGHT), rate_func=lambda t: t ** 3, run_time=.5)
+                frames = np.arange(1, fps // 2 + 1) / (fps / 2)
+                # float32 point storage. A 1/30-grid table interpolated between samples would
+                # miss t**3 by ~1e-3 per unit of travel at 24 and 60 fps.
+                np.testing.assert_allclose(observed, 2 * frames ** 3, atol=1e-6)
+
+    def test_lagged_members_ease_on_their_own_windows_at_each_frame(self):
+        for fps in (24, 30, 60):
+            with self.subTest(fps=fps), tempfile.TemporaryDirectory() as tmp:
+                scene = m.Scene()
+                first, second = m.Square(fill_opacity=1), m.Circle(fill_opacity=1)
+                observed = []
+                probe = m.Mobject()
+                probe.add_updater(lambda obj, dt: observed.append(
+                    (first.get_fill_opacity(), second.get_fill_opacity())) if dt > 0 else None)
+                with render_session(scene, Path(tmp) / "lagged.y4m", fps=fps,
+                                    resolution=(32, 18), threads=1):
+                    scene.add(first, second, probe)
+                    scene.play(m.LaggedStart(m.FadeIn(first, rate_func=lambda t: t ** 3),
+                                             m.FadeIn(second, rate_func=lambda t: t ** 3),
+                                             lag_ratio=0.5), run_time=.75)
+                # Reference AnimationGroup timing: run_time-1 members start at 0 and 0.5, so
+                # max_end_time is 1.5. The group's alpha maps to time = 1.5 * alpha, and member
+                # i eases clip(time - 0.5 * i, 0, 1). The clock emits ceil(fps * run_time) frames
+                # and clamps the last alpha to 1.
+                alpha = np.minimum(np.arange(1, int(np.ceil(fps * .75)) + 1) / (fps * .75), 1)
+                expected = np.column_stack([np.clip(1.5 * alpha - 0.5 * i, 0, 1) ** 3 for i in (0, 1)])
+                np.testing.assert_allclose(observed, expected, atol=2e-6)
 
 
 if __name__ == "__main__":

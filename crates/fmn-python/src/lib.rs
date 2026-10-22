@@ -69,6 +69,11 @@ pub use tex_preamble::run_portal_gauntlet_tex_preamble;
 #[cfg(feature = "gauntlet")]
 pub use portal_svg::{PortalSvgReport, run_portal_gauntlet_svg};
 
+#[cfg(any(test, feature = "gauntlet"))]
+mod subclass_hooks;
+#[cfg(feature = "gauntlet")]
+pub use subclass_hooks::{SubclassHookReport, run_portal_gauntlet_subclass_hooks};
+
 use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString, c_int, c_void};

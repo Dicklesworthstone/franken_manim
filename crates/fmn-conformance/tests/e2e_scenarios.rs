@@ -3748,6 +3748,29 @@ fn python_svg_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         .with_artifact("diagram.svg", report.document))
 }
 
+/// Library-class subclass hooks and authored easing (fm-5wq.13): an `init_points` override on
+/// each required library base is called once and renders, an `interpolate` override drives a
+/// Transform's frames, and authored rate functions are exact at 24/30/60 fps.
+fn python_subclass_hooks_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let report = manimlib::run_portal_gauntlet_subclass_hooks()
+        .map_err(|error| fail(format!("library subclass hooks: {error}")))?;
+    ctx.event(
+        LogEvent::new("e2e.python.subclass_hooks")
+            .field("cases", report.cases)
+            .field("failed", report.failed)
+            .field("bases", report.bases),
+    );
+    if report.failed != 0 {
+        return Err(fail(format!(
+            "{} of {} library subclass hook cases failed",
+            report.failed, report.cases
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("subclass_hook_cases", report.cases)
+        .with_counter("subclass_hook_bases", report.bases))
+}
+
 fn python_surface_mesh_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let root = scenario_dir("python_surface_mesh")?;
     let (png, checks) = manimlib::run_portal_gauntlet_surface_mesh(&root, ctx.seed)
@@ -9807,6 +9830,24 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.python_subclass_hooks.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_subclass_hooks_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("subclass_hook_bases", 11),
+            counter_eq("subclass_hook_cases", 7),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.subclass_hooks",
+            vec![
+                FieldPred::u64_eq("failed", 0),
+                FieldPred::u64_eq("bases", 11),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.python_live_tex.v1",
         ScenarioClass::RenderMatrix,
         Surface::PythonInProcess,
@@ -11348,6 +11389,16 @@ fn python_tex_preamble_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.python_tex_preamble.v1")
         .expect("Python TeX preamble scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn python_subclass_hooks_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.python_subclass_hooks.v1")
+        .expect("library subclass hook scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

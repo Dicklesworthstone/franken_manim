@@ -219,6 +219,23 @@ class PublicUpdateTests(unittest.TestCase):
         events.clear(); root.update(.1)
         self.assertEqual(events, ['a', 'c'])
 
+    def test_a_child_leaving_mid_pass_does_not_skip_its_sibling(self):
+        # C-38: the Reference's live walk skips `b` when `a` removes itself.
+        events = []
+        class Child(m.Square):
+            def update(self, dt):
+                events.append(self.label)
+                if self.label == 'a':
+                    root.remove(self)
+                return super().update(dt)
+        a, b = Child(), Child()
+        a.label, b.label = 'a', 'b'
+        root = ticking(m.Group(a, b))
+        root.update(.1)
+        self.assertEqual(events, ['a', 'b'])
+        events.clear(); root.update(.1)
+        self.assertEqual(events, ['b'])
+
     def test_late_instance_and_class_updates_are_live(self):
         events = []
         child = m.Square(); root = ticking(m.Group(child))

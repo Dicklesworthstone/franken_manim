@@ -1,4 +1,4 @@
-# BN-07 — Corrected mobject behavior (C-5, C-6, C-14, C-15, C-17, C-18, C-19, C-20, C-21, C-23, C-24, C-26, C-29, C-30, C-31, C-32, C-33, C-35)
+# BN-07 — Corrected mobject behavior (C-5, C-6, C-14, C-15, C-17, C-18, C-19, C-20, C-21, C-23, C-24, C-26, C-29, C-30, C-31, C-32, C-33, C-35, C-38)
 
 **Status:** Draft (W3, fm-yra; W10, fm-23ev, fm-5wq.4.39, fm-easc, fm-gm0v, and fm-pointless-box-interpolation-hccu). Consumed by Choreo (§9.1's
 `suspend_mobject_updating` interaction), fmn-python (whose `manimlib`
@@ -443,3 +443,31 @@ C-35 assertions in `crates/fmn-python/tests/bridge.py`.
 **Migration:** none needed. A scene that moved points through a view and
 then positioned something against the box gets the box of the points it
 drew.
+
+## C-38 — a child leaving its parent mid-update does not make a sibling miss a frame
+
+The Reference's `Mobject.update` iterates the live child list
+(`mobject.py:828-830`). When a child's update removes that child, or an
+earlier sibling, from the parent, the list shifts under the iterator and the
+next remaining child is skipped for that pass. Measured on the pinned
+Reference with `holder = Group(a, b)` and an updater on `holder` (fm-5wq.13):
+
+| `a`'s update does | Reference pass | FrankenManim pass |
+|---|---|---|
+| `holder.remove(a)` | `a` (`b` skipped) | `a`, `b` |
+| `holder.remove(b); holder.add(c)` | `a`, `c` | `a`, `b` |
+
+On the following pass both engines update the children then present.
+
+**FrankenManim:** a pass updates exactly the children present when the
+parent's pass began, in that order (`updater_dispatch.host_visit` iterates a
+snapshot). No sibling's edits can make a child miss a frame. A child added
+during the pass first updates on the next pass, and a child removed during
+the pass still finishes the pass it began in. Locked by
+`test_children_snapshot_survives_family_edits` and
+`test_a_child_leaving_mid_pass_does_not_skip_its_sibling` in
+`crates/fmn-python/tests/public_update_dispatch.py`.
+
+**Migration:** none needed for scenes that do not edit a family from inside
+its own update pass. A scene that relied on the skip, or on a just-added
+child updating in the same pass, sees the documented order instead.
