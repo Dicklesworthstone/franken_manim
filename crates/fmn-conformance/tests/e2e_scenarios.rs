@@ -9719,11 +9719,11 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         Invocation::new(python_reference_render_flags_run),
         vec![
             Assertion::ExitCode(0),
-            counter_eq("reference_flag_checks", 14),
+            counter_eq("reference_flag_checks", 15),
         ],
         vec![LogExpect::span_present(
             "e2e.python.reference_flags",
-            vec![FieldPred::u64_eq("checks", 14)],
+            vec![FieldPred::u64_eq("checks", 15)],
         )],
     ));
     specs.push(spec(
@@ -11388,6 +11388,16 @@ fn python_reference_defaults_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "parity.python_portal_reference_defaults.v1")
         .expect("Python reference defaults scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn python_reference_render_flags_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.python_reference_render_flags.v1")
+        .expect("Python Reference render flags scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

@@ -76,6 +76,51 @@ portal command's exact output file or frames/clips directory, replace its
 stem. `--output` and `--file_name` reject batches so selected scenes cannot
 silently share a destination.
 
+### fmn-python outcome for every Reference option
+
+Every option of the generated table (`docs/api/cli_flags.md`, Reference flags)
+has exactly one row here. `console_rendering.py`'s
+`every_reference_option_has_its_documented_portal_outcome` (e2e
+`lifecycle.python_reference_render_flags.v1`) checks two things. First, that this
+table and the generated one name the same options. Second, that each option
+gives this outcome through the real console entrypoint, with its effect checked.
+"Refused" means exit 4, with a message that names the option.
+
+| Reference option | fmn-python | Effect checked |
+|---|---|---|
+| `--autoreload` | refused | Studio reload (OOT-CLI-AUTORELOAD) |
+| `--clear-cache` | refused | native `fmn` content-store operation |
+| `--config_file` | accepted | a YAML camera fps reaches the render |
+| `--file_name` | accepted | the output stem |
+| `--finder` | refused | native `fmn` host action |
+| `--fps` | accepted | the render's frame rate |
+| `--hd` | accepted | 1920x1080 |
+| `--leave_progress_bars` | refused | no progress bars in file renders (OOT-CLI-PROGRESS) |
+| `--log-level` | accepted | the `manimgl` logger's level |
+| `--pix_fmt` | accepted | an MP4 with ffmpeg; without it, a capability error naming ffmpeg |
+| `--prerun` | refused | native `fmn` count-only pass |
+| `--show_animation_progress` | refused | no progress bars in file renders (OOT-CLI-PROGRESS) |
+| `--subdivide` | accepted | one clip per animation |
+| `--uhd` | accepted | 3840x2160 |
+| `--vcodec` | accepted | an MP4 with ffmpeg; without it, a capability error naming ffmpeg |
+| `--video_dir` | accepted | a directory holding SCENE.png |
+| `-a,--write_all` | accepted | every scene, in declaration order |
+| `-c,--color` | accepted | the background colour |
+| `-e,--embed` | refused | Studio or the Python front door (OOT-CLI-EMBED) |
+| `-f,--full_screen` | refused | live window (OOT-CLI-WINDOW) |
+| `-i,--gif` | accepted | a native GIF |
+| `-l,--low_quality` | accepted | 854x480 at the configured fps |
+| `-m,--medium_quality` | accepted | 1280x720 |
+| `-n,--start_at_animation_number` | accepted | the play range in the receipt |
+| `-o,--open` | refused | native `fmn` host action |
+| `-p,--presenter_mode` | refused | live window (OOT-CLI-WINDOW) |
+| `-q,--quiet` | accepted | no human decoration |
+| `-r,--resolution` | accepted | an explicit size that overrides presets |
+| `-s,--skip_animations` | accepted | a final-state PNG |
+| `-t,--transparent` | accepted | an RGBA PNG |
+| `-v,--version` | accepted | the version, without a scene |
+| `-w,--write_file` | accepted | an MP4 with ffmpeg; without it, a capability error naming ffmpeg |
+
 - Treat a nonzero exit as a stable category, not as arbitrary argparse text;
   robot-mode errors carry the same identity in structured output.
 - Fix conflicting flags instead of relying on last-option-wins behavior. In

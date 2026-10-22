@@ -505,6 +505,165 @@ def reference_configuration_and_css_color():
     assert '_portal_cli_configuration' not in vars(m)
 
 
+def _doc(name, relative):
+    """A repository doc: injected by the embedded e2e harness, else read beside this file."""
+    text = globals().get(name)
+    if text is None:
+        text = (Path(__file__).resolve().parents[3] / relative).read_text(encoding='utf-8')
+    return text
+
+
+def _png_facts(path):
+    """(colour type, first pixel) of a PNG. Every row filter leaves the first pixel literal."""
+    import zlib
+    data, offset, idat = path.read_bytes(), 8, b''
+    color_type = data[25]
+    while offset < len(data):
+        length = struct.unpack('>I', data[offset:offset + 4])[0]
+        kind = data[offset + 4:offset + 8]
+        if kind == b'IDAT':
+            idat += data[offset + 8:offset + 8 + length]
+        offset += 12 + length
+    channels = {2: 3, 6: 4}[color_type]
+    return color_type, tuple(zlib.decompress(idat)[1:1 + channels])
+
+
+def every_reference_option_has_its_documented_portal_outcome():
+    # fm-portal-reference-flags-l3xe: BN-15 rules on every Reference option of the
+    # generated flag table; each ruling is checked through the console entrypoint.
+    import logging
+    import re
+    generated_text = _doc('_FMN_CLI_FLAGS_MD', 'docs/api/cli_flags.md')
+    reference_section = generated_text.split('## Reference flags', 1)[1].split('\n## ', 1)[0]
+    generated = set(re.findall(r'^\| `([^`]+)` \|', reference_section, re.M)) - {'file', 'scene_names'}
+    bn15_text = _doc('_FMN_BN15_MD', 'docs/behavior_notes/BN-15-cli-contract.md')
+    bn15 = bn15_text.split('### fmn-python outcome for every Reference option', 1)[1]
+    documented = dict(re.findall(r'^\| `([^`]+)` \| (accepted|refused) \|', bn15, re.M))
+    assert set(documented) == generated, (sorted(generated - set(documented)),
+                                          sorted(set(documented) - generated))
+    root = ROOT / 'every-reference-option'
+    root.mkdir()
+    path = root / 'flags.py'
+    path.write_text(textwrap.dedent('''\
+        import manimlib as m
+
+        class X(m.Scene):
+            def construct(self):
+                self.add(m.Square(side_length=1))
+
+        class Y(m.Scene):
+            def construct(self):
+                self.play(m.FadeIn(m.Circle(radius=0.5)), run_time=0.25)
+    '''))
+    config = root / 'fps12.yml'
+    config.write_text('camera:\n  fps: 12\n')
+
+    def cli(*argv, robot=True):
+        before, out, err = sys.argv, io.StringIO(), io.StringIO()
+        try:
+            sys.argv = ['fmn-python', *(['--robot'] if robot else []), *argv]
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = main()
+        finally:
+            sys.argv = before
+        lines = [line for line in (out.getvalue() + err.getvalue()).splitlines() if line.startswith('{')]
+        return code, (json.loads(lines[-1]) if robot and lines else {}), out.getvalue()
+
+    def still(option, *flags, scene='X'):
+        out = root / option.split(',')[0].strip('-').replace('-', '_')
+        code, report, text = cli(str(path), scene, *flags, '--threads', '1', '--video_dir', str(out))
+        return code, report, out, text
+
+    def video(option, *flags):
+        # The portal validates its own ffmpeg (a PATH entry it cannot canonicalize is
+        # absent), so the outcome, not shutil.which, says which branch applies. Either
+        # way the option is accepted: never a usage error.
+        code, report, out, _ = still(option, '-w', *flags, '-r', '160x90')
+        if code == 0:
+            assert (out / 'X.mp4').read_bytes()[4:8] == b'ftyp', (option, report)
+        else:
+            assert code == 4 and 'ffmpeg' in report['message'], (option, report)
+        return code
+
+    def resolution(size, *flags):
+        def check(option):
+            code, report, _, _ = still(option, '-s', *flags)
+            assert code == 0 and report['resolution'] == list(size), (option, report)
+        return check
+
+    def accepted(option):
+        checks = {
+            '--config_file': lambda: still(option, '-s', '-r', '160x90', '--config_file', str(config)),
+            '--fps': lambda: still(option, '-s', '-r', '160x90', '--fps', '12'),
+        }
+        if option in checks:
+            code, report, _, _ = checks[option]()
+            assert code == 0 and report['fps'] == 12, (option, report)
+        elif option in ('--hd', '--uhd', '-l,--low_quality', '-m,--medium_quality'):
+            size = {'--hd': (1920, 1080), '--uhd': (3840, 2160), '-l,--low_quality': (854, 480),
+                    '-m,--medium_quality': (1280, 720)}[option]
+            resolution(size, option.split(',')[0])(option)
+        elif option == '-r,--resolution':
+            resolution((160, 90), '--hd', '-r', '160x90')(option)
+        elif option == '--file_name':
+            code, _, out, _ = still(option, '-s', '-r', '160x90', '--file_name', 'Custom')
+            assert code == 0 and (out / 'Custom.png').is_file(), option
+        elif option in ('--video_dir', '-s,--skip_animations'):
+            code, _, out, _ = still(option, '-s', '-r', '160x90')
+            assert code == 0 and (out / 'X.png').read_bytes().startswith(b'\x89PNG'), option
+        elif option == '--log-level':
+            code, _, _, _ = still(option, '-s', '-r', '160x90', '--log-level', 'WARNING')
+            assert code == 0 and logging.getLogger('manimgl').level == logging.WARNING, option
+            assert still(option + '-bad', '-s', '--log-level', 'loud')[0] == 2, option
+        elif option in ('--pix_fmt', '--vcodec', '-w,--write_file'):
+            extra = {'--pix_fmt': ('--pix_fmt', 'yuv420p'), '--vcodec': ('--vcodec', 'libx264')}
+            video(option, *extra.get(option, ()))
+        elif option == '--subdivide':
+            code, report, out, _ = still(option, '--subdivide', '-r', '160x90', '--fps', '8', scene='Y')
+            assert code == 0 and (out / 'Y' / 'clips').is_dir(), (option, report)
+        elif option == '-a,--write_all':
+            out = root / 'write_all'
+            code, report, _ = cli(str(path), '--write_all', '-s', '-r', '160x90', '--threads', '1',
+                                  '--video_dir', str(out))
+            assert code == 0 and (out / 'X.png').is_file() and (out / 'Y.png').is_file(), report
+        elif option == '-c,--color':
+            code, _, out, _ = still(option, '-s', '-r', '160x90', '-c', '#FF0000')
+            assert code == 0 and _png_facts(out / 'X.png')[1][:3] == (255, 0, 0), option
+        elif option == '-i,--gif':
+            code, _, out, _ = still(option, '-i', '-r', '160x90', scene='Y')
+            assert code == 0 and (out / 'Y.gif').read_bytes()[:6] == b'GIF89a', option
+        elif option == '-n,--start_at_animation_number':
+            code, report, _, _ = still(option, '-s', '-r', '160x90', '-n', '0')
+            assert code == 0 and report['animation_range'] == [0, None], (option, report)
+        elif option == '-q,--quiet':
+            code, _, out, text = still(option, '-s', '-r', '160x90', '-q')
+            assert code == 0 and (out / 'X.png').is_file(), option
+            loud = cli(str(path), 'X', '-s', '-r', '160x90', '--threads', '1',
+                       '--video_dir', str(root / 'loud'), robot=False)
+            quiet = cli(str(path), 'X', '-s', '-q', '-r', '160x90', '--threads', '1',
+                        '--video_dir', str(root / 'quiet'), robot=False)
+            assert loud[0] == quiet[0] == 0 and loud[2].startswith('rendered') and quiet[2] == '', option
+        elif option == '-t,--transparent':
+            code, _, out, _ = still(option, '-s', '-t', '-r', '160x90')
+            assert code == 0 and _png_facts(out / 'X.png')[0] == 6, option
+        elif option == '-v,--version':
+            for spelling in ('-v', '--version'):
+                code, report, _ = cli(spelling)
+                assert code == 0 and report['kind'] == 'version', (spelling, report)
+            assert cli(str(path), 'X', '-v')[0] == 2, 'the version is printed alone'
+        else:
+            raise AssertionError(f'no effect check for accepted option {option}')
+
+    for option, outcome in sorted(documented.items()):
+        if outcome == 'accepted':
+            accepted(option)
+            continue
+        flag = option.split(',')[0]
+        code, report, _, _ = still(option, '-s', flag, *(['3'] if flag == '-e' else []))
+        assert code == 4 and report['exit']['identity'] == 'capability', (option, report)
+        assert flag in report['message'], (option, report['message'])
+
+
 CASES = (
     ordinary_scene_capture, selected_order_and_output,
     write_all_alias_and_thread_repeatability, missing_selection_starts_no_scene,
@@ -512,9 +671,9 @@ CASES = (
     system_exit_zero_is_not_success, batch_fail_fast_and_keep_going,
     batch_interrupt_retains_completed_artifacts, later_destination_preflight_preserves_files,
     wav_output_keeps_native_sample_units, reference_camera_defaults, reference_flags_and_destinations,
-    reference_configuration_and_css_color,
+    reference_configuration_and_css_color, every_reference_option_has_its_documented_portal_outcome,
 )
-assert len(CASES) == 14
+assert len(CASES) == 15
 for case in CASES:
     case()
     print("native console acceptance:", case.__name__)

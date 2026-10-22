@@ -32,6 +32,22 @@ pub fn run_portal_gauntlet_console() -> Result<u64, String> {
 /// Returns the actual Python/native acceptance failure.
 pub fn run_portal_gauntlet_reference_flags() -> Result<u64, String> {
     crate::with_python_test_module("Reference console flags", |py, _module, globals| {
+        // The per-option case reads both tables; the embedded run has no
+        // __file__ to find them by.
+        for (name, text) in [
+            (
+                "_FMN_CLI_FLAGS_MD",
+                include_str!("../../../docs/api/cli_flags.md"),
+            ),
+            (
+                "_FMN_BN15_MD",
+                include_str!("../../../docs/behavior_notes/BN-15-cli-contract.md"),
+            ),
+        ] {
+            globals
+                .set_item(name, text)
+                .map_err(|error| error.to_string())?;
+        }
         let source = std::ffi::CString::new(include_str!("../tests/console_rendering.py"))
             .map_err(|error| error.to_string())?;
         py.run(source.as_c_str(), Some(globals), Some(globals))
@@ -153,7 +169,7 @@ mod tests {
 
     #[test]
     fn native_reference_flags_acceptance() {
-        assert_eq!(super::run_portal_gauntlet_reference_flags().unwrap(), 14);
+        assert_eq!(super::run_portal_gauntlet_reference_flags().unwrap(), 15);
     }
 
     #[test]

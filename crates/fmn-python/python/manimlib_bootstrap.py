@@ -24703,6 +24703,7 @@ def _portal_cli_render_arguments(arguments):
         "ffmpeg_bin": None,
         "transparent": False,
         "reproducible": False,
+        "log_level": None,
     }
     positionals = []
     value_flags = {name: name[2:] for name in (
@@ -24712,6 +24713,7 @@ def _portal_cli_render_arguments(arguments):
     )}
     value_flags["-r"] = "resolution"
     value_flags["-c"] = "color"
+    value_flags["--log-level"] = "log_level"
     quality_flags = {
         "-l": "low", "--low_quality": "low", "-m": "med", "--medium_quality": "med",
         "--hd": "high", "--uhd": "4k",
@@ -24753,7 +24755,14 @@ def _portal_cli_render_arguments(arguments):
                 f"CAPABILITY: {argument.partition('=')[0]} requires an interactive window or "
                 "embedded console; use fmn-python studio SOURCE.py SCENE"
             )
-        if argument in ("-o", "-so", "--open", "--finder", "--write_all", "--autoreload"):
+        if argument in ("--show_animation_progress", "--leave_progress_bars"):
+            # OOT-CLI-PROGRESS, as native fmn refuses them (BN-15).
+            raise RuntimeError(
+                f"CAPABILITY: {argument} needs per-animation progress bars, which file "
+                "renders do not draw (OOT-CLI-PROGRESS)"
+            )
+        if argument in ("-o", "-so", "--open", "--finder", "--write_all", "--autoreload",
+                        "--prerun", "--clear-cache"):
             raise RuntimeError(
                 f"CAPABILITY: {argument} is not connected in the Python portal"
             )
@@ -24783,6 +24792,16 @@ def _portal_cli_render_arguments(arguments):
         )
     elif gif and values["format"] != ("mov" if values["transparent"] else "gif"):
         raise ValueError("--gif/-i conflicts with the explicit --format")
+    if values["log_level"] is not None:
+        # The Reference's get_configuration: log.setLevel(args.log_level) on
+        # the "manimgl" logger, whose names are the five upper-case levels.
+        if values["log_level"] not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
+            raise ValueError(
+                "--log-level must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL"
+            )
+        import logging as _logging
+
+        _logging.getLogger("manimgl").setLevel(values["log_level"])
     values["_resolution_explicit"] = values["resolution"] is not None
     values["_quality"] = next((name for name in ("low", "med", "high", "4k") if name in qualities), None)
     if values["resolution"] is None:
@@ -24856,13 +24875,13 @@ def _console_main():
             "missing command or scene source; use --help",
             robot,
         )
-    if "--version" in arguments:
-        if arguments != ["--version"]:
+    if "--version" in arguments or "-v" in arguments:
+        if arguments not in (["--version"], ["-v"]):
             return _portal_cli_emit(
                 2,
                 "usage",
                 "usage-error",
-                "--version cannot be combined with a scene or another flag",
+                "--version/-v cannot be combined with a scene or another flag",
                 robot,
             )
         version = getattr(_FMN_ROOT, "__version__", "unknown")

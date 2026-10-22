@@ -45,7 +45,7 @@ from .parallel_cli_options import PARALLEL_HELP, PARALLEL_VALUES, take_parallel_
 
 _VALUE_FLAGS = _VALUE_FLAGS | CHECKPOINT_VALUES | VIDEO_VALUE_FLAGS | PARALLEL_VALUES
 
-_CONTROL_FLAGS = frozenset({"--version", "--list-scenes", "--construct-only", "--audit-parity"})
+_CONTROL_FLAGS = frozenset({"--version", "-v", "--list-scenes", "--construct-only", "--audit-parity"})
 _SELECTION_FLAGS = frozenset({"--robot", "--write_all", "-a", "--keep-going"})
 _MAX_SELECTED_SCENES = 1024
 _SELECTION_HELP = """Named scene selection:
@@ -69,6 +69,8 @@ _REFERENCE_HELP = """Reference render flags:
   -c, --color COLOR        Camera background: CSS name or #RGB/#RRGGBB.
   --config_file PATH      Overlay a UTF-8 YAML file on cwd custom_config.yml.
   -q, --quiet              Suppress progress and human success decoration.
+  --log-level LEVEL        The manimgl logger: DEBUG, INFO, WARNING, ERROR, CRITICAL.
+  -v, --version            Print the version (alone, without a scene).
 
 Quality presets preserve the configured frame rate (30 fps by default).
 Config files connect camera, resolution_options, directories, file_writer,
@@ -81,7 +83,10 @@ with an explicit format other than GIF (or transparent MOV with -t).
 --video_dir is always a directory. For a previous command that used it as
 an exact output file or frames directory, replace that flag with --output.
 --output and --file_name require one scene. -p/-f/-e require the Studio;
-file renders refuse them with exit 4. Unknown options return exit 2.
+file renders refuse them with exit 4, as they refuse --show_animation_progress
+and --leave_progress_bars. -o, --finder, --prerun, --clear-cache and
+--autoreload are native fmn features the portal refuses with exit 4.
+Unknown options return exit 2.
 """
 
 

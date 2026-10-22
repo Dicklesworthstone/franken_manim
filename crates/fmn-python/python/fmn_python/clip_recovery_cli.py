@@ -25,7 +25,7 @@ _VALUES = _VALUE_FLAGS | {_FLAG}
 _FORBIDDEN = frozenset({
     "--checkpoint", "--workers", "--job-timeout", "--write_all", "-a", "--keep-going",
     "--save-last-frame", "--reproducible", "--list-scenes", "--construct-only",
-    "--audit-parity", "--version",
+    "--audit-parity", "--version", "-v",
 })
 _HELP = """Resumable clips within one scene:
   fmn-python SOURCE.py SCENE --subdivide --clip-checkpoint JOURNAL
