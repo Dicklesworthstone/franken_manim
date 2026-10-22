@@ -475,10 +475,16 @@ impl FallbackSummary {
     /// gap must still fall back, so it is removed the day its bead lands.
     #[must_use]
     pub fn relation_violations(&self) -> Vec<String> {
+        self.relation_violations_with(STANDARD_RELATION_GAPS)
+    }
+
+    /// [`Self::relation_violations`] against an explicit gap list.
+    #[must_use]
+    pub fn relation_violations_with(&self, gaps: &[(char, &str)]) -> Vec<String> {
         let fallen = self.standard_relations();
         let mut out: Vec<String> = fallen
             .iter()
-            .filter(|ch| !STANDARD_RELATION_GAPS.iter().any(|(gap, _)| gap == *ch))
+            .filter(|ch| !gaps.iter().any(|(gap, _)| gap == *ch))
             .map(|ch| {
                 format!(
                     "{ch} (U+{:04X}) falls back outside Computer Modern",
@@ -487,8 +493,7 @@ impl FallbackSummary {
             })
             .collect();
         out.extend(
-            STANDARD_RELATION_GAPS
-                .iter()
+            gaps.iter()
                 .filter(|(gap, _)| !fallen.contains(gap))
                 .map(|(gap, bead)| format!("{gap} no longer falls back: drop its {bead} gap")),
         );
@@ -497,11 +502,9 @@ impl FallbackSummary {
 }
 
 /// Standard relations fmd-math still draws from a fallback face, each owned
-/// by the bead that builds it from TeX's fonts.
-pub const STANDARD_RELATION_GAPS: &[(char, &str)] = &[
-    // TeX's \@vereq stacks cmsy's ∼ over cmr's =.
-    ('≅', "fm-shqq"),
-];
+/// by the bead that builds it from TeX's fonts. Empty since fm-shqq built
+/// `\cong` from cmsy's ∼ and cmr's = (franken_markdown 83d363c).
+pub const STANDARD_RELATION_GAPS: &[(char, &str)] = &[];
 
 /// The standard relation set. TeX sets every one from cmsy, cmmi or cmr: as
 /// one character, or as a construction of them (`\neq` overprints cmsy's
@@ -602,16 +605,20 @@ pub fn render_dashboard(
         oracle_dashboard_line(oracle)
     );
     let _ = writeln!(out, "\n## Glyph fallback\n");
+    let gaps = STANDARD_RELATION_GAPS
+        .iter()
+        .map(|(ch, bead)| format!("{ch} ({bead})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let relations = if gaps.is_empty() {
+        "The standard relation set never falls back.".to_owned()
+    } else {
+        format!("The standard relation set may fall back only where a bead owns the gap: {gaps}.")
+    };
     let _ = writeln!(
         out,
-        "{} Fewer is better. The standard relation set may fall back only where a bead owns \
-         the gap: {}.\n",
-        fallback_dashboard_line(fallback),
-        STANDARD_RELATION_GAPS
-            .iter()
-            .map(|(ch, bead)| format!("{ch} ({bead})"))
-            .collect::<Vec<_>>()
-            .join(", ")
+        "{} Fewer is better. {relations}\n",
+        fallback_dashboard_line(fallback)
     );
     let _ = writeln!(out, "| Character | Code point | Occurrences |");
     let _ = writeln!(out, "|---|---|---|");
@@ -1338,19 +1345,27 @@ mod tests {
         assert!(d.contains(&fallback_dashboard_line(&fallback)));
         assert!(fallback.standard_relations().is_empty());
         // A gap that no longer falls back is a violation, so is a relation
-        // that falls back without a gap.
+        // that falls back without a gap. The real gap list is empty, so a
+        // planted gap exercises the first rule.
+        assert!(fallback.relation_violations().is_empty());
+        let planted = [('≅', "fm-planted")];
         assert_eq!(
-            fallback.relation_violations().len(),
-            STANDARD_RELATION_GAPS.len()
+            fallback.relation_violations_with(&planted),
+            ["≅ no longer falls back: drop its fm-planted gap"]
         );
         fallback.add(&BTreeSet::from(['≤']), 1);
         assert_eq!(fallback.standard_relations(), ['≤']);
-        for &(gap, _) in STANDARD_RELATION_GAPS {
-            fallback.add(&BTreeSet::from([gap]), 1);
-        }
+        fallback.add(&BTreeSet::from(['≅']), 1);
+        assert_eq!(
+            fallback.relation_violations_with(&planted),
+            ["≤ (U+2264) falls back outside Computer Modern"]
+        );
         assert_eq!(
             fallback.relation_violations(),
-            ["≤ (U+2264) falls back outside Computer Modern"]
+            [
+                "≅ (U+2245) falls back outside Computer Modern",
+                "≤ (U+2264) falls back outside Computer Modern"
+            ]
         );
     }
 
