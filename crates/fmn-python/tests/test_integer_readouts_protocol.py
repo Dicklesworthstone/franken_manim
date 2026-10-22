@@ -209,15 +209,18 @@ class IntegerReadoutTests(unittest.TestCase):
                 self.assertEqual(m.get_value(), int(np.round(value)))
                 self.assertEqual(m.get_tex(), str(int(value)).replace("-", "–"))
 
-    def test_decimal_number_still_has_float_semantics(self):
+    def test_decimal_number_keeps_an_integral_value_like_the_reference(self):
+        # Measured on the pinned Reference: DecimalNumber(10**18 + 99) keeps the int, spells
+        # it exactly with zero decimals and through float with decimals (fm-yuin).
         with host() as h:
             value = 10**16 + 1
             for cls in (h.native.DecimalNumber, type("Child", (h.native.DecimalNumber,), {})):
                 m = cls(value, num_decimal_places=0)
-                self.assertIs(type(m.number), float)
-                self.assertEqual(m.get_tex(), "10,000,000,000,000,000")
-                self.assertNotEqual(m.get_value(), value)
-                with self.assertRaises(TypeError): m.set_value(10**400)
+                self.assertIs(type(m.number), int)
+                self.assertEqual(m.get_value(), value)
+                self.assertEqual(m.get_tex(), "10,000,000,000,000,001")
+                self.assertEqual(cls(value).get_tex(), "10,000,000,000,000,000.00")
+                self.assertIs(type(cls(1.5).number), float)
 
     def test_format_width_grouping_sign_and_negative_values(self):
         with host() as h:

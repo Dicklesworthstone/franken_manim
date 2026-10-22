@@ -112,8 +112,11 @@ class NativeIntegerReadouts(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "characters"):
             number.set_value(1 << 1_000_000)
         self.assertEqual(snapshot(), before)
+        # DecimalNumber keeps an integral value too, as the Reference does (fm-yuin).
         ordinary = m.DecimalNumber(10**16 + 1, num_decimal_places=0)
-        self.assertEqual(ordinary.get_tex(), "10,000,000,000,000,000")
+        self.assertEqual(ordinary.get_tex(), "10,000,000,000,000,001")
+        self.assertEqual(ordinary.get_value(), 10**16 + 1)
+        self.assertEqual(m.DecimalNumber(10**18 + 99).get_tex(), "1,000,000,000,000,000,128.00")
 
 
 if __name__ == "__main__":

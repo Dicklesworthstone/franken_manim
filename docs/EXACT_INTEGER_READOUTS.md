@@ -15,11 +15,13 @@ record format is introduced. Subclass formatting/glyph hooks still dispatch.
 Excessive integer bit lengths are refused before decimal expansion, and the
 complete formatted string is admitted before glyph allocation.
 
-This deliberately does **not** change `DecimalNumber`: it continues to normalize
-real inputs to float. Passing an already-rounded float to `Integer` cannot
-recover its original integer digits. Explicit nonzero decimal precision and
-custom format specifications retain their own formatting semantics; exact
-integer digit guarantees concern zero-decimal integer formatting.
+`DecimalNumber` keeps an integral input the same way, as the pinned Reference does
+(it stores the number as given): `DecimalNumber(10**18 + 99).get_value()` is the
+exact int, and with `num_decimal_places=0` it displays `1,000,000,000,000,000,099`.
+With decimal places, Python's `format()` goes through float, so the default
+displays `1,000,000,000,000,000,128.00` in both engines. Float inputs stay floats.
+Passing an already-rounded float cannot recover its original integer digits.
+Custom format specifications retain their own formatting semantics.
 
 ## Animated counters
 

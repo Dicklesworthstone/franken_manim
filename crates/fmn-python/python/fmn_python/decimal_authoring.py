@@ -39,10 +39,12 @@ def install_decimal_authoring(native):
         return dict(options)
 
     def normalize(self, value):
-        # Integer is a semantic integer readout, not an f64 input. Keep Python
-        # and NumPy integral values exact before either formatting or storing
-        # them; DecimalNumber deliberately retains its floating-point route.
-        if isinstance(self, g.get("Integer", ())) and isinstance(value, (int, np.integer)):
+        # The Reference stores the number as given, so an integral value stays
+        # an int in DecimalNumber as well as Integer (fm-yuin): get_value()
+        # returns it exactly, zero-decimal formatting ("d") spells it exactly,
+        # and nonzero decimal places format it through float, as Python's
+        # format() does there. Floats and complex values keep their route.
+        if isinstance(value, (int, np.integer)):
             result = int(value)
             # Reject certainly over-budget values before decimal conversion.
             # The exact character check below also counts signs and commas.
