@@ -200,9 +200,11 @@ class Harness(unittest.TestCase):
             done
             python3 crates/fmn-python/tests/gamma.py
             python3 crates/fmn-python/tests/alpha.py
+            FMN_REQUIRE_FFMPEG=1 FMN_X= python3 crates/fmn-python/tests/delta.py
+            # python3 crates/fmn-python/tests/commented.py
         ''')
         self.assertEqual(pw.gate_suites(script),
-                         [("alpha", "runpy"), ("beta", "runpy"), ("gamma", "main")])
+                         [("alpha", "runpy"), ("beta", "runpy"), ("gamma", "main"), ("delta", "main")])
         with self.assertRaises(ValueError):
             pw.gate_suites("python3 crates/fmn-python/tests/gamma.py\n")
 

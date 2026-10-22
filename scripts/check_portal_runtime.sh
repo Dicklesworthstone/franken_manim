@@ -156,6 +156,34 @@ python3 crates/fmn-python/tests/native_svg_paints.py
 python3 crates/fmn-python/tests/svg_paint_ingress.py
 python3 crates/fmn-python/tests/svg_lifecycle.py
 
+# Installed-wheel acceptance suites that only hosted workflows ran, or nothing ran (fm-5wq.12).
+# A hosted run is not the correctness contract, so this gate runs them, with ffmpeg required
+# rather than optional. Still outside: studio_editing (fm-obww), video_quality (fm-4e2y), and
+# bundle_cli_native / camera_bundle_cli_native, which need a built fmn binary (FMN_TEST_BIN).
+FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/live_fade_rates.py
+FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/console_scene.py
+FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/configured_subdivision.py
+FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/live_streamlines.py
+FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/raster_path_protocol.py
+FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/recording_preview.py
+FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/recording_sessions.py
+FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/stroke_profile_pixels.py
+FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/studio_clock.py
+FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/studio_input_identity.py
+FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/studio_live.py
+FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/studio_preview.py
+FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/subdivided_audio.py
+FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/subdivided_batch.py
+FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/subdivided_batch_cli.py
+FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/subdivided_recording.py
+FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/subdivided_rendering.py
+FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/surface_pointlikes.py
+FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/svg_console.py
+FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/terminal_editor.py
+FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/video_cli_unit.py
+FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/video_quality_console.py
+FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/camera_bundle_console.py
+
 # Certified parallel witnesses need a clean installed-payload import context,
 # before reduced protocol fixtures load source-only modules in their processes.
 python3 crates/fmn-python/tests/test_parallel_certified_native.py

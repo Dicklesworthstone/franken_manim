@@ -107,7 +107,9 @@ def gate_suites(script: str, tests: pathlib.Path = TESTS) -> list[tuple[str, str
     if loop is None:
         raise ValueError("check_portal_runtime.sh has no suite loop")
     suites = [(name, "runpy") for name in loop.group(1).split()]
-    direct = re.findall(r"^python3 crates/fmn-python/tests/(\w+)\.py", script, re.M)
+    # A direct run may carry environment assignments (`FMN_REQUIRE_FFMPEG=1 python3 ...`).
+    direct = re.findall(r"^(?:[A-Z_][A-Z0-9_]*=\S* )*python3 crates/fmn-python/tests/(\w+)\.py",
+                        script, re.M)
     if re.search(r"unittest discover -s crates/fmn-python/tests -p 'test_\*\.py'", script):
         direct += sorted(path.stem for path in tests.glob("test_*.py"))
     seen = {name for name, _ in suites}
