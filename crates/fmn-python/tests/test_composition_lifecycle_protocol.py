@@ -176,6 +176,12 @@ def environment():
             for callback in callbacks:
                 if callback is not None:
                     callback.begin()
+            # Choreo's begin_animations then roots each animated mobject not
+            # yet in the scene, in animation order; play() only binds (fm-1auv).
+            for spec in specs:
+                mob = spec[1]
+                if mob is not None and not any(mob in root.get_family() for root in self.roots):
+                    self.roots.append(mob)
             for alpha in (.25, .5, .75, 1.):
                 for callback in callbacks:
                     if callback is not None:

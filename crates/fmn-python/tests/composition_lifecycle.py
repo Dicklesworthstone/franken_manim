@@ -1,10 +1,15 @@
 """Real-extension acceptance for authored AnimationGroup lifecycles."""
 import unittest
 import numpy as np
+from pathlib import Path
+import tempfile
+
 from manimlib import (
-    LEFT, RIGHT, AnimationGroup, Circle, FadeIn, Flash, Group, LaggedStart, Line, Point, Scene,
-    ShowCreation, Square, Succession, Transform, VGroup,
+    BLUE, LEFT, RED, RIGHT, UP, AnimationGroup, Arrow, Circle, DrawBorderThenFill, FadeIn, Flash,
+    Group, LaggedStart, Line, Point, Rotate, Scene, ShowCreation, Square, Succession, Transform,
+    VGroup, VShowPassingFlash, WiggleOutThenIn,
 )
+from fmn_python import render_session
 
 
 class RecordingGroup(AnimationGroup):
@@ -171,8 +176,52 @@ class CompositionLifecycleAcceptance(unittest.TestCase):
         self.assertEqual([type(root) for root in roots], [VGroup, VGroup, Group])
         self.assertEqual([len(root.submobjects) for root in roots], [2, 2, 2])
 
+    def test_a_later_plain_animation_draws_over_an_earlier_composition(self):
+        # fm-1auv: the Reference roots animated mobjects in animation order, so the arrow
+        # played after the LaggedStart is drawn over its squares.
+        width, height = 320, 180
+        scene = Scene()
+        squares = VGroup(*[Square(side_length=2, fill_color=BLUE, fill_opacity=1, stroke_width=0)
+                           for _ in range(3)])
+        arrow = Arrow(3 * LEFT, 3 * RIGHT, buff=0, stroke_width=40, stroke_color=RED)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "order.y4m"
+            with render_session(scene, path, resolution=(width, height), fps=8, threads=1):
+                scene.play(LaggedStart(*map(DrawBorderThenFill, squares)), ShowCreation(arrow),
+                           run_time=0.5)
+            data = path.read_bytes()
+        self.assertEqual([type(root).__name__ for root in scene.mobjects][-2:], ["VGroup", "Arrow"])
+        frame = data[data.rindex(b"FRAME\n") + 6:][:width * height]
+        luma = np.frombuffer(frame, dtype=np.uint8).reshape(height, width).astype(int)
+        units = width / scene.frame.get_width()
+
+        def pixel(point):
+            return luma[int(round(height / 2 - point[1] * units)), int(round(width / 2 + point[0] * units))]
+
+        overlap = pixel(0.4 * RIGHT)
+        arrow_only, square_only = pixel(2 * RIGHT), pixel(0.4 * RIGHT + 0.6 * UP)
+        self.assertLess(abs(overlap - arrow_only), abs(overlap - square_only),
+                        (overlap, arrow_only, square_only))
+
+    def test_an_unadded_animated_mobject_runs_its_updaters_during_the_play(self):
+        # fm-1auv: native begin roots the mobject, so the play must release for its
+        # updaters before it is rooted. In the Reference every kind runs them once per
+        # frame; a remover leaves the scene before the finishing dt = 0 pass.
+        def played(make):
+            scene, mob, calls = Scene(), Square(), []
+            mob.add_updater(lambda obj, dt: calls.append(dt) if obj is mob else None, call=False)
+            scene.play(make(mob), run_time=0.25)
+            return calls, any(mob in root.get_family() for root in scene.mobjects)
+
+        rotate, in_scene = played(lambda mob: Rotate(mob, 1.0))
+        self.assertTrue(in_scene)
+        self.assertGreater(len(rotate), 2)
+        self.assertEqual(rotate[-1], 0.0)
+        self.assertEqual(played(WiggleOutThenIn), (rotate, True))
+        self.assertEqual(played(VShowPassingFlash), (rotate[:-1], False))
+
 
 suite = unittest.defaultTestLoader.loadTestsFromTestCase(CompositionLifecycleAcceptance)
 result = unittest.TextTestRunner(verbosity=2).run(suite)
-if result.testsRun != 10 or not result.wasSuccessful():
+if result.testsRun != 12 or not result.wasSuccessful():
     raise AssertionError("Native composition lifecycle acceptance failed")

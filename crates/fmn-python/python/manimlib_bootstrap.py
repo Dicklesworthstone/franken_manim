@@ -15815,7 +15815,11 @@ class Scene(_SceneCore):
                         "composition; play frame.animate at the top level"
                     )
                 if not mobject._is_bound():
-                    self.add(mobject)
+                    # fm-1auv: bind without rooting. Native begin_animations
+                    # roots each animated mobject in animation order, as the
+                    # Reference does, so a later plain animation lands after
+                    # an earlier composition's group.
+                    self._adopt(mobject)
                 target = mobject.target
                 if not target._is_bound():
                     self._adopt(target)
@@ -15875,7 +15879,8 @@ class Scene(_SceneCore):
                         "composition; play frame.animate at the top level"
                     )
                 if not mobject._is_bound():
-                    self.add(mobject)
+                    # fm-1auv: native begin_animations roots it in animation order.
+                    self._adopt(mobject)
                 if proto._native_kind == "restore":
                     saved_state = getattr(mobject, "saved_state", None)
                     if saved_state is not None:
@@ -15922,7 +15927,8 @@ class Scene(_SceneCore):
                         "target"
                     )
                 if not mobject._is_bound():
-                    self.add(mobject)
+                    # fm-1auv: native begin_animations roots it in animation order.
+                    self._adopt(mobject)
                 # The Python lifecycle owns cleanup, including authored
                 # overrides and publishing replacement families. A native
                 # placeholder remover would run after that cleanup and

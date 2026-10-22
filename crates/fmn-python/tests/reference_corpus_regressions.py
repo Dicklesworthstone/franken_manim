@@ -151,6 +151,21 @@ def _padded_structure(animation, axes):
     return observed[0]
 
 
+def _root_order(make):
+    """Play one composition-plus-plain construct in a fresh Scene; report the root class order."""
+    observed = []
+
+    class Probe(m.Scene):
+        def construct(self):
+            squares = m.VGroup(*[m.Square() for _ in range(3)])
+            arrow = m.Arrow(m.LEFT, m.RIGHT)
+            self.play(*make(squares, arrow), run_time=0.5)
+            observed.append(",".join(type(root).__name__ for root in self.mobjects))
+
+    Probe().run()
+    return observed[0]
+
+
 # (bead, construct, observe, expected, provenance). Expected values were
 # measured on the pinned Reference; _2023/clt/wordy_scenes.py AverageDiceValues
 # shows a DecimalNumber of an empty average, which is nan.
@@ -215,6 +230,23 @@ CASES = (
      lambda: _padded_structure(m.Transform, True),
      "roots CameraFrame,Axes; DecimalNumber 11; NumberLine 2",
      REFERENCE + ":manimlib/mobject/mobject.py:align_family (measured)"),
+    # fm-1auv: the Reference roots animated mobjects in animation order, so a plain animation
+    # after a composition lands (and draws) after the composition's group.
+    # 3b1b/videos _2021/shadows.py StartSimple differed at top-level slot 4.
+    ("fm-1auv", "play(LaggedStart(*map(DrawBorderThenFill, VGroup(squares))), ShowCreation(arrow))",
+     lambda: _root_order(lambda squares, arrow: (
+         m.LaggedStart(*map(m.DrawBorderThenFill, squares)), m.ShowCreation(arrow))),
+     "CameraFrame,VGroup,Arrow",
+     REFERENCE + ":manimlib/scene/scene.py:begin_animations (measured)"),
+    ("fm-1auv", "play(LaggedStart(*map(DrawBorderThenFill, Group(squares))), ShowCreation(arrow))",
+     lambda: _root_order(lambda squares, arrow: (
+         m.LaggedStart(*map(m.DrawBorderThenFill, m.Group(*squares))), m.ShowCreation(arrow))),
+     "CameraFrame,VGroup,Arrow",
+     REFERENCE + ":manimlib/scene/scene.py:begin_animations (measured)"),
+    ("fm-1auv", "play(FadeIn(squares), ShowCreation(arrow))",
+     lambda: _root_order(lambda squares, arrow: (m.FadeIn(squares), m.ShowCreation(arrow))),
+     "CameraFrame,VGroup,Arrow",
+     REFERENCE + ":manimlib/scene/scene.py:begin_animations (measured)"),
     *(
         ("fm-5wq.11", f"cdist({_XA}, {_XB}, metric={metric!r})",
          (lambda metric=metric: _distances(metric)), expected,

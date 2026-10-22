@@ -8225,9 +8225,22 @@ fn run_resumed_python_updaters(scene: &Bound<'_, PyScene>, roots: &[Mob]) -> PyR
     Ok(())
 }
 
-fn has_python_updaters(scene: &Bound<'_, PyScene>) -> PyResult<bool> {
+/// Whether any updater-dispatch target carries Python updaters. `pending`
+/// names animated mobjects that are bound but not yet rooted: native begin
+/// roots them in animation order (fm-1auv), so a play must release for
+/// their updaters before they reach the draw list.
+fn has_python_updaters(scene: &Bound<'_, PyScene>, pending: &[Mob]) -> PyResult<bool> {
     let py = scene.py();
-    for target in update_targets(scene) {
+    let mut targets = update_targets(scene);
+    if !pending.is_empty() {
+        let scene_cell = scene.borrow();
+        let runtime = scene_cell.engine.borrow();
+        let mut seen: HashSet<Mob> = targets.iter().copied().collect();
+        for &mob in pending {
+            collect_update_targets(runtime.stage(), mob, &mut targets, &mut seen);
+        }
+    }
+    for target in targets {
         if let Some(proxy) = live_proxy(py, scene, target)
             && proxy.getattr("updaters")?.is_truthy()?
         {
@@ -9286,8 +9299,10 @@ impl PyScene {
             resolved.push(parse_anim_spec(&engine, spec)?);
         }
 
+        let mut pending = Vec::new();
+        animated_mobjects(&resolved, &mut pending);
         let release_for_python_updaters = portal_playback::requires_public_scene_update(slf)?
-            || has_python_updaters(slf)?
+            || has_python_updaters(slf, &pending)?
             || portal_has_frame_render(slf)?;
         for callback in callbacks.iter().flatten() {
             crossing::record(CrossingClass::MethodDispatch);
@@ -9667,7 +9682,7 @@ impl PyScene {
         let engine = Rc::clone(&slf.borrow().engine);
         portal_playback::synchronize(slf)?;
         let needs_host_updates =
-            portal_playback::requires_public_scene_update(slf)? || has_python_updaters(slf)?;
+            portal_playback::requires_public_scene_update(slf)? || has_python_updaters(slf, &[])?;
         if !needs_host_updates && stop_condition.is_none() && !portal_has_frame_render(slf)? {
             let mut sink = PortalSceneSink {
                 render: Arc::clone(&slf.borrow().render),
@@ -9967,6 +9982,15 @@ struct AnimSpec {
     source_keys: Vec<(Mob, String)>,
     target_keys: Vec<(Mob, String)>,
     members: Vec<AnimSpec>,
+}
+
+/// Every spec's animated mobject, composition members included: the
+/// mobjects native begin roots.
+fn animated_mobjects(specs: &[AnimSpec], out: &mut Vec<Mob>) {
+    for spec in specs {
+        out.extend(spec.mob);
+        animated_mobjects(&spec.members, out);
+    }
 }
 
 #[allow(clippy::type_complexity)]
