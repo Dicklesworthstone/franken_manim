@@ -1,5 +1,6 @@
 """Real native NumberLine hooks, factory-produced ticks and sampled output."""
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 
@@ -181,6 +182,51 @@ class NumberLineLifecycleTests(unittest.TestCase):
         self.assertEqual(first,render(root/'four',True,4))
         self.assertEqual(first,render(root/'expected',False,1))
         self.assertEqual(len(first),2);self.assertNotEqual(first[0],first[1])
+
+    def test_numbered_lines_of_different_counts_transform_with_the_reference_structure(self):
+        # fm-yynk: the engine pads a padded number's glyphs from a sibling pad, so one batch can
+        # hold a pair whose source is an earlier pair's still-uninstalled pad. Roots and
+        # DecimalNumber/NumberLine counts measured on the pinned Reference (6199a00d).
+        def numbered(end, width, axes):
+            if axes:
+                obj = m.Axes((0, end), (0, 3), width=width, height=3)
+                obj.x_axis.add_numbers(font_size=24, excluding=[0])
+            else:
+                obj = m.NumberLine((0, end), width=width)
+                obj.add_numbers(font_size=24, excluding=[0])
+            return obj
+        native = vars(sys.modules["manimlib.manimlib"])
+        adopt = native["_adopt_padding_ghosts"]
+        cases = (
+            ("Transform", m.Transform, False, ["CameraFrame", "NumberLine"], 11, 1),
+            ("TransformFromCopy", m.TransformFromCopy, False, ["CameraFrame", "NumberLine", "NumberLine"], 17, 2),
+            ("Axes", m.Transform, True, ["CameraFrame", "Axes"], 11, 2),
+        )
+        for name, animation, axes, roots, decimals, lines in cases:
+            with self.subTest(case=name):
+                chained = []
+                def recording(pairs, adopt=adopt):
+                    pads = {id(new) for _, new in pairs}
+                    chained.append(any(id(old) in pads for old, _ in pairs))
+                    return adopt(pairs)
+                native["_adopt_padding_ghosts"] = recording
+                try:
+                    scene = m.Scene()
+                    small, wide = numbered(6, 5, axes), numbered(11, 10, axes)
+                    # Read the roots every frame, as the CLI's public-update check does mid-play.
+                    observer = m.Mobject()
+                    observer.add_updater(lambda mob, dt: list(scene.mobjects), call=False)
+                    scene.add(small, observer)
+                    scene.play(animation(small, wide), run_time=1 / 15)
+                    scene.remove(observer)
+                    mobjects = list(scene.mobjects)
+                finally:
+                    native["_adopt_padding_ghosts"] = adopt
+                self.assertTrue(any(chained), "no batch held a pad sourced from another pad")
+                family = [member for root in mobjects for member in root.get_family()]
+                self.assertEqual([type(root).__name__ for root in mobjects], roots)
+                self.assertEqual(sum(type(member).__name__ == "DecimalNumber" for member in family), decimals)
+                self.assertEqual(sum(type(member).__name__ == "NumberLine" for member in family), lines)
 
 
 if __name__=='__main__':unittest.main()

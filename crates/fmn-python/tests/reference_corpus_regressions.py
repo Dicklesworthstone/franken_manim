@@ -121,6 +121,36 @@ def _alpha_func_suspended(scene):
     return float(square.get_center()[0])
 
 
+def _numbered(end, width, axes):
+    if axes:
+        numbered = m.Axes((0, end), (0, 3), width=width, height=3)
+        numbered.x_axis.add_numbers(font_size=24, excluding=[0])
+    else:
+        numbered = m.NumberLine((0, end), width=width)
+        numbered.add_numbers(font_size=24, excluding=[0])
+    return numbered
+
+
+def _padded_structure(animation, axes):
+    """Transform a numbered line or axes into a longer one; report the final structure."""
+    observed = []
+
+    class Probe(m.Scene):
+        def construct(self):
+            small, wide = _numbered(6, 5, axes), _numbered(11, 10, axes)
+            self.add(small)
+            self.play(animation(small, wide))
+            family = [member for root in self.mobjects for member in root.get_family()]
+            counts = {name: sum(type(member).__name__ == name for member in family)
+                      for name in ("DecimalNumber", "NumberLine")}
+            roots = ",".join(type(root).__name__ for root in self.mobjects)
+            observed.append(f"roots {roots}; DecimalNumber {counts['DecimalNumber']}; "
+                            f"NumberLine {counts['NumberLine']}")
+
+    Probe().run()
+    return observed[0]
+
+
 # (bead, construct, observe, expected, provenance). Expected values were
 # measured on the pinned Reference; _2023/clt/wordy_scenes.py AverageDiceValues
 # shows a DecimalNumber of an empty average, which is nan.
@@ -170,6 +200,21 @@ CASES = (
     ("fm-k00v", "UpdateFromAlphaFunc(..., suspend_mobject_updating=True) on an updating Square: x",
      lambda: _updated_through(_alpha_func_suspended, float), "0.0000",
      REFERENCE + ":manimlib/animation/animation.py:begin (measured, playback)"),
+    # fm-yynk: the engine pads a padded number's glyphs from a sibling pad. Reading the roots
+    # then walked a source that had no Python state yet. 3b1b/videos _2023/clt/main.py
+    # HowVarianceAdds stopped there.
+    ("fm-yynk", "Transform(NumberLine((0, 6)) with numbers, NumberLine((0, 11)) with numbers)",
+     lambda: _padded_structure(m.Transform, False),
+     "roots CameraFrame,NumberLine; DecimalNumber 11; NumberLine 1",
+     REFERENCE + ":manimlib/mobject/mobject.py:align_family (measured)"),
+    ("fm-yynk", "TransformFromCopy(NumberLine((0, 6)) with numbers, NumberLine((0, 11)) with numbers)",
+     lambda: _padded_structure(m.TransformFromCopy, False),
+     "roots CameraFrame,NumberLine,NumberLine; DecimalNumber 17; NumberLine 2",
+     REFERENCE + ":manimlib/mobject/mobject.py:align_family (measured)"),
+    ("fm-yynk", "Transform(Axes((0, 6)) with x numbers, Axes((0, 11)) with x numbers)",
+     lambda: _padded_structure(m.Transform, True),
+     "roots CameraFrame,Axes; DecimalNumber 11; NumberLine 2",
+     REFERENCE + ":manimlib/mobject/mobject.py:align_family (measured)"),
     *(
         ("fm-5wq.11", f"cdist({_XA}, {_XB}, metric={metric!r})",
          (lambda metric=metric: _distances(metric)), expected,

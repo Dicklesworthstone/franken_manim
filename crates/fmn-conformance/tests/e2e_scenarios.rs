@@ -9799,7 +9799,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         Invocation::new(python_reference_corpus_regressions_run),
         vec![
             Assertion::ExitCode(0),
-            counter_eq("corpus_regression_cases", 17),
+            counter_eq("corpus_regression_cases", 20),
         ],
         vec![
             LogExpect::span_present(

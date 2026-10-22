@@ -424,7 +424,7 @@ mod tests {
     #[test]
     fn embedded_portal_matches_the_reference_corpus_regressions() {
         let cases = super::run_portal_gauntlet_reference_corpus_regressions().unwrap();
-        assert_eq!(cases.len(), 17, "{cases:?}");
+        assert_eq!(cases.len(), 20, "{cases:?}");
         assert_eq!(
             cases.iter().filter(|case| case.bead == "fm-5wq.11").count(),
             9,
@@ -433,6 +433,11 @@ mod tests {
         assert_eq!(
             cases.iter().filter(|case| case.bead == "fm-k00v").count(),
             4,
+            "{cases:?}"
+        );
+        assert_eq!(
+            cases.iter().filter(|case| case.bead == "fm-yynk").count(),
+            3,
             "{cases:?}"
         );
         for case in &cases {

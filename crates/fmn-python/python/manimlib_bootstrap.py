@@ -879,6 +879,12 @@ def _adopt_padding_ghosts(pairs):
     source seen again, or one outside the current root's family, starts the
     next pad.
     """
+    # fm-yynk: a pad can be the source of a later pad in the same batch (the
+    # engine pads a padded DecimalNumber's children from a sibling pad), so
+    # every pad needs its live state before grouping walks a source's family.
+    # Each group still re-seeds its own pads right before copying into them.
+    for _old, new in pairs:
+        _install_live_state(new)
     groups = []
     for old, new in pairs:
         if not groups or old in groups[-1][1] or id(old) not in groups[-1][0]:
