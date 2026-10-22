@@ -78,9 +78,24 @@ def _install_family_preorder(g):
     if Mobject is None:
         return  # A reduced copier table owns its supplied family traversal.
     cycle_error = g["_FamilyCycleError"]
+    # Child-list types whose emptiness and iteration are list's own, with no
+    # authored side effects. The live projection overrides only mutators.
+    plain_lists = tuple(kind for kind in (list, g.get("_LiveSubmobjects")) if kind is not None
+                        and all(getattr(kind, name, None) is getattr(list, name, None)
+                                for name in ("__iter__", "__len__", "__bool__")))
 
     @wraps(g["_family_preorder"])
     def family_preorder(root):
+        if not isinstance(root, Mobject):
+            raise TypeError("submobjects must be Mobject instances")
+        children = root.submobjects
+        if type(children) in plain_lists and not children:
+            # A leaf: the walk below would read submobjects once and stop
+            # there. Skip its sets, closure and stack. Every style setter
+            # walks the family, so constructing a Line took about six walks
+            # (fm-5wq.31).
+            return [root]
+        family_preorder.walks += 1
         result, seen, visiting = [], set(), set()
 
         def enter(member):
@@ -97,7 +112,7 @@ def _install_family_preorder(g):
             return True
 
         enter(root)
-        stack = [(id(root), iter(root.submobjects))]
+        stack = [(id(root), iter(children))]
         while stack:
             marker, children = stack[-1]
             try:
@@ -110,6 +125,7 @@ def _install_family_preorder(g):
                 stack.append((id(child), iter(child.submobjects)))
         return result
 
+    family_preorder.walks = 0  # general (non-leaf) walks, a work counter for tests
     g["_family_preorder"] = family_preorder
 
 

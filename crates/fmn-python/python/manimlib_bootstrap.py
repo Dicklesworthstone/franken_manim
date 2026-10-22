@@ -3611,7 +3611,7 @@ class VMobject(Mobject):
         fill_border_width=0.0,
         **kwargs,
     ):
-        config = _pinned_manim_config().vmobject
+        config = _pinned_vmobject_defaults()
         self.fill_color = (
             fill_color
             if fill_color is not None
@@ -4476,7 +4476,7 @@ def _apply_vmobject_style_kwargs(mob, kwargs, recurse=True):
         and "stroke_color" not in vars(mob)
         and not isinstance(mob, (StringMobject, DecimalNumber))
     ):
-        defaults = _pinned_manim_config().vmobject
+        defaults = _pinned_vmobject_defaults()
         if stroke_color is None:
             mob.set_stroke(color=defaults.default_stroke_color, recurse=False)
         if fill_color is None:
@@ -8383,7 +8383,7 @@ class VMobjectFromSVGPath(VMobject):
         if joint_type not in self.joint_type_map:
             raise ValueError(f"unknown VMobject joint type: {joint_type}")
         style = dict(kwargs)
-        config = _pinned_manim_config().vmobject
+        config = _pinned_vmobject_defaults()
         color = style.get("color")
         style.setdefault(
             "fill_color", color if color is not None else config.default_fill_color
@@ -21639,6 +21639,21 @@ class _AttrDict(dict):
             return self[name]
         except KeyError as error:
             raise AttributeError(name) from error
+
+
+_PINNED_VMOBJECT_DEFAULTS = []
+
+
+def _pinned_vmobject_defaults():
+    """The pinned config's vmobject section, built once.
+
+    VMobject and its style helpers read it for every object they construct
+    (fm-5wq.31). Rebuilding the whole namespace tree each time cost about
+    15 us per Line. Callers only read it.
+    """
+    if not _PINNED_VMOBJECT_DEFAULTS:
+        _PINNED_VMOBJECT_DEFAULTS.append(_pinned_manim_config().vmobject)
+    return _PINNED_VMOBJECT_DEFAULTS[0]
 
 
 def _pinned_manim_config():

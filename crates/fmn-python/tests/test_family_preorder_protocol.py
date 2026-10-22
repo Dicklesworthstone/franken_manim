@@ -243,6 +243,55 @@ class FamilyPreorderTests(unittest.TestCase):
         copying._install_family_preorder(g)
         self.assertIs(g["_family_preorder"], recursive_preorder)
 
+    def test_a_leaf_takes_no_general_walk(self):
+        # fm-5wq.31: every style setter walks the family, so constructing one Line
+        # walked about six times. A plain empty child list returns at once.
+        leaf, parent = Member(), Member(Member())
+        before = self.walk.walks
+        for _ in range(5):
+            self.assertEqual(self.walk(leaf), [leaf])
+        self.assertEqual(self.walk.walks, before)
+        self.assertEqual(self.walk(parent), [parent, parent.submobjects[0]])
+        self.assertEqual(self.walk.walks, before + 1)
+
+    def test_an_authored_child_list_keeps_the_general_walk(self):
+        # Only list's own iteration is side-effect free; an authored empty sequence
+        # is still iterated, exactly as before.
+        events = []
+
+        class Observed(list):
+            def __iter__(self):
+                events.append("iter")
+                return super().__iter__()
+
+        leaf = Member()
+        leaf.submobjects = Observed()
+        before = self.walk.walks
+        self.assertEqual(self.walk(leaf), [leaf])
+        self.assertEqual((events, self.walk.walks), (["iter"], before + 1))
+
+    def test_the_live_projection_takes_the_fast_path_only_while_it_is_a_plain_list(self):
+        class Live(list):
+            def __setitem__(self, index, value):
+                raise AssertionError("not read")
+
+        class Counted(list):
+            def __len__(self):
+                return super().__len__()
+
+        class Truthy(list):  # list itself has no __bool__; an authored one is still authored
+            def __bool__(self):
+                return False
+
+        for kind, fast in ((Live, True), (Counted, False), (Truthy, False)):
+            with self.subTest(kind=kind.__name__):
+                g = dict(self.g, _LiveSubmobjects=kind, _family_preorder=recursive_preorder)
+                copying._install_family_preorder(g)
+                walk, leaf = g["_family_preorder"], Member()
+                leaf.submobjects = kind()
+                self.assertEqual(walk(leaf), [leaf])
+                self.assertEqual(walk.walks, 0 if fast else 1)
+
 
 if __name__ == "__main__":
     unittest.main()
