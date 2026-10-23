@@ -220,6 +220,39 @@ class StringsSvgWitnesses(unittest.TestCase):
         VGroup(lone).ensure_positive_orientation(recurse=False)
         self.assertLess(lone.get_unit_normal()[2], 0)
 
+    def test_svg_paths_and_glyphs_run_counter_clockwise(self):
+        from manimlib import Tex, Text
+        from manimlib.mobject.svg.svg_mobject import SVGMobject
+
+        # svg_mobject.py:100: SVGMobject applies ensure_positive_orientation after its flip,
+        # and Tex and Text are built through it, so every path and glyph normal is +z on the
+        # pinned Reference (Text("ox"): [+1, +1]; the two paths below: [+1, +1]) (fm-hc78).
+        svg = ('<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0 L4 0 L4 2 Z"/>'
+               '<path d="M0 0 L0 2 L4 2 Z"/></svg>')
+        for mob in [*SVGMobject(svg_string=svg), *Text("ox"), *Tex(r"\int x\,dx = \frac{x^2}{2}")]:
+            if mob.get_num_points() >= 3:
+                self.assertGreater(mob.get_unit_normal()[2], 0, type(mob).__name__)
+
+    def test_glyph_contours_trace_like_the_reference(self):
+        import numpy as np
+        from manimlib import Tex
+
+        # The pinned Reference's Tex("0") (cmr10 through dvisvgm): the outer contour first,
+        # counter-clockwise from the east point of its box, then the counter clockwise from
+        # the south point. So Write draws the outline first, the hole after (fm-hc78).
+        def trace(sub):
+            anchors = sub[0::2]
+            area = 0.5 * float(np.sum(anchors[:-1, 0] * anchors[1:, 1]
+                                      - anchors[1:, 0] * anchors[:-1, 1]))
+            lo, hi = sub.min(0), sub.max(0)
+            start = (sub[0] - (lo + hi) / 2)[:2] / ((hi - lo)[:2] / 2)
+            return area, np.round(start).tolist()
+
+        outer, counter = (trace(sub) for sub in Tex("0")[0].get_subpaths())
+        self.assertGreater(outer[0], -counter[0])
+        self.assertEqual((outer[0] > 0, outer[1]), (True, [1.0, 0.0]))
+        self.assertEqual((counter[0] < 0, counter[1]), (True, [0.0, -1.0]))
+
     def test_svg_mobject_handle_transform(self):
         from manimlib import VMobject
         from manimlib.mobject.svg.svg_mobject import SVGMobject

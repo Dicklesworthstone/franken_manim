@@ -580,9 +580,11 @@ fn self_goldens_lock_each_class_s_canonical_output() {
             "dartboard",
             "6e7aebb6d059b3fe28cbab2028714a701766cffb553b377b0246d1539beded64",
         ),
+        // Re-locked when the Integer label glyphs turned counter-clockwise
+        // like the Reference's (fm-hc78).
         (
             "speedometer",
-            "2d99fe1c318856ade256a1d324e18e939c54f61f0a5c176febde73cf288b4672",
+            "66f7ee1b252cc0c7934f0eabe6adb59be4831ea5907c553cbb3472489544ad4b",
         ),
         (
             "piano",
@@ -746,6 +748,54 @@ fn lightbulb_applies_the_reference_defaults() {
     assert!((style.stroke_width - 3.0).abs() < 1e-9);
 }
 
+/// The Reference's SVGMobject flips y, turns every path counter-clockwise
+/// and centres (svg_mobject.py `__init__`). GLOBE_SVG's land sits above the
+/// circle's centre on the page (smaller SVG y), so it must sit above it on
+/// screen; every path's unit normal points out of the screen.
+#[test]
+fn svg_drawings_are_upright_centred_and_counter_clockwise() {
+    let globe = fixture_document(GLOBE_SVG);
+    let bulb = lightbulb_from_document(&globe);
+    let earth = vectorized_earth_from_document(&globe).expect("builds");
+    let icon = video_icon_from_document(&fixture_document(ICON_SVG));
+    let bubble_root = fixture_root("upright", "Bubbles_speech.svg", BUBBLE_BODY_SVG);
+    let bubble = old_speech_bubble(Some(&bubble_root), None, LEFT, 1.0).expect("builds");
+    for (name, drawing) in [("lightbulb", &bulb), ("video_icon", &icon)] {
+        let center = drawing.center_point();
+        assert!(
+            center.iter().all(|c| c.abs() < 1e-9),
+            "{name} is centred: {center:?}"
+        );
+    }
+    for (name, circle, land) in [
+        ("lightbulb", &bulb.children()[0], &bulb.children()[1]),
+        (
+            "vectorized_earth",
+            &earth.children()[1].children()[0],
+            &earth.children()[1].children()[1],
+        ),
+    ] {
+        assert!(
+            land.center_point()[1] > circle.center_point()[1],
+            "{name}: the land is above the globe's centre"
+        );
+    }
+    for (name, drawing) in [
+        ("lightbulb", &bulb),
+        ("vectorized_earth", &earth.children()[1]),
+        ("video_icon", &icon),
+        ("old_speech_bubble", &bubble.children()[0]),
+    ] {
+        for (index, member) in drawing.children().iter().enumerate() {
+            let normal = member.path().expect("a path").unit_normal();
+            assert!(
+                normal[2] > 0.0,
+                "{name} path {index} runs clockwise: {normal:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn video_series_arranges_gradients_and_width_in_reference_order() {
     let document = fixture_document(ICON_SVG);
@@ -869,26 +919,29 @@ fn self_goldens_lock_each_asset_family_over_its_fixture() {
     let earth = vectorized_earth_from_document(&fixture_document(GLOBE_SVG)).expect("builds");
     let earth_digest = digest(&earth);
 
+    // Re-locked when the SVG families took SVGMobject's flip, orientation
+    // and centring (fm-hc78); svg_drawings_are_upright_centred_and_counter_clockwise
+    // states what moved.
     let goldens: &[(&str, &str)] = &[
         (
             "lightbulb",
-            "eec85a0bcadea2c5d7e7a1f9e1cff054fb903b10d579d5ede0c4203b37f3f5db",
+            "fbffdf756f674d9d0faaf8825493888880fe33c04155df0d9e209c7e035b7e3a",
         ),
         (
             "video_icon",
-            "9e726cacf90e5fa4c413d8afdb0d90aae58cd4659bde569496cd73334ffaca52",
+            "15c50d6f312c69120442b7354f26267ff0b8085cae11f1f0a0b2b33cd6461f0b",
         ),
         (
             "video_series",
-            "82926faadd0b825d97af65da0681eb00acbfcab694f8682f78011cbd3a417efa",
+            "eea734acd57560322473a9dc068336acd04ffa475bb26bef7bb46393ca9c50fe",
         ),
         (
             "old_speech_bubble",
-            "33155870c657fb1f03c43e2a82f5597406c69f298d3bdaadac355a4542641bc0",
+            "96300291203860bcb0480aee86b724bcea840986eadb18b0eda68bfe1a245ec6",
         ),
         (
             "vectorized_earth",
-            "7783c05d5070e51ebfb0633e271fcc57aef2adf72dfd302feb8548b6b52d863b",
+            "1872f76cfd457a9a0b7c713938e430802c25b6819b7869f11b5bf0ba8425e90b",
         ),
     ];
     for (name, golden) in goldens {

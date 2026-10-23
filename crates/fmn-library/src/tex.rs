@@ -1488,6 +1488,9 @@ fn prim_child(
     for contour in &contours {
         append_contour(&mut path, contour, scale)?;
     }
+    // The Reference's TeX glyphs, rules and drawn paths run
+    // counter-clockwise, outer contour first, holes clockwise (fm-hc78).
+    path.ensure_positive_contour_orientation();
     Ok(VMobject::from_path(&path).with_style(style))
 }
 

@@ -9,8 +9,8 @@
 //! shapes that resolved to no geometry are skipped, as the Reference skips
 //! pointless mobjects. Geometry stays in the document's viewport user-space
 //! coordinates (y-down) — the caller applies the Reference's y-flip,
-//! centring, and height normalization, which are mobject-level choices, not
-//! document facts.
+//! orientation and centring ([`svg_reference_frame`]) and its height
+//! normalization, which are mobject-level choices, not document facts.
 //!
 //! Style mapping follows the Reference's `apply_style_to_mobject`: SVG
 //! `stroke-width` passes through as manim stroke-width units unconverted
@@ -30,6 +30,7 @@ pub use paint::{
     svg_document_with_paints, svg_mobject_with_paints,
 };
 
+use fmn_core::constants::ORIGIN;
 use fmn_geom::svg::{Paint, SvgShape, SvgStyle};
 // Consumers above this crate (the fmn-python portal) reach the processor's
 // document, budgets, and typed refusals through this seam rather than
@@ -51,6 +52,21 @@ pub fn svg_document_mobject(document: &SvgDocument) -> VMobject {
             .filter(|shape| shape.path.has_points())
             .map(shape_child),
     )
+}
+
+/// The Reference `SVGMobject`'s frame over a family built from a document
+/// (svg_mobject.py `__init__`): flip y about the family centre
+/// (`flip(RIGHT)`), turn every path counter-clockwise
+/// (`ensure_positive_orientation`, so Write and ShowCreation trace it the
+/// Reference's way) and centre it on the origin (`should_center`). Sizing
+/// stays with the caller, which knows its class default.
+#[must_use]
+pub fn svg_reference_frame(family: VMobject) -> VMobject {
+    let center = family.center_point();
+    family
+        .stretched_about(-1.0, 1, center)
+        .positively_oriented()
+        .moved_to(ORIGIN)
 }
 
 /// Parse SVG bytes and build the detached `SVGMobject` family in one call,

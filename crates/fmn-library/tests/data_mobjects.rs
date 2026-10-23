@@ -169,8 +169,10 @@ fn self_goldens_lock_the_canonical_table_and_chart() {
         sha256(&bytes).to_hex()
     };
 
-    const TABLE_GOLDEN: &str = "d2a42ffd84ae8b6f45e5aec370d66d5c8cd87fe760b41830c32c66ed8a82ec6a";
-    const CHART_GOLDEN: &str = "1546065087e3328dac330f5a40dc66208d159489c9ed503b0d4784add0b3266e";
+    // Re-locked when every glyph runs counter-clockwise like the Reference's
+    // (fm-hc78): the cell text and the chart's axis numbers.
+    const TABLE_GOLDEN: &str = "0666319d002cf912236c27849a6232c01c70162efd76213838dd9b721b393b2c";
+    const CHART_GOLDEN: &str = "143b324c742525e7b516bef6898216797cec65ba2398ea40e4890f92976c16a3";
     assert_eq!(digest_of(&table_family), TABLE_GOLDEN, "table drifted");
     assert_eq!(digest_of(&chart), CHART_GOLDEN, "chart drifted");
 }

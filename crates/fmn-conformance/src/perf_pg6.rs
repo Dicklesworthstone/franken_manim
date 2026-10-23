@@ -1016,11 +1016,13 @@ mod tests {
             // 49466bc, then tex_fraction, tex_display_sum and tex_overbrace
             // with mu and the Appendix G parameters at the current size,
             // sub-micro shifts, at franken_markdown abbb957, then tex_overbrace
-            // with cmex's brace pieces at franken_markdown 2f1e00c)
+            // with cmex's brace pieces at franken_markdown 2f1e00c, then the
+            // sixteen text and TeX scenes with every glyph contour turned
+            // counter-clockwise in place, fm-hc78)
             // and the journaled map orientation.
             assert_eq!(
                 definition.digest().to_string(),
-                "7bf54bf9fbe6db9ae91277133902f76ac580db7801d7ba1547335f4315487edf"
+                "835046d82d6cac06dda471dc1254975dbdd4fb0202edaf39e149348d7fa8426a"
             );
         }
     }

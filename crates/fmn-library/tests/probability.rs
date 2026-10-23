@@ -177,8 +177,9 @@ fn self_golden_locks_the_canonical_divided_space() {
 
     const BASE_GOLDEN: &str = "b3df7f2dd1a21dc91464a55d92d3a4e4d9f087a0d49705412728aab4836b997a";
     const PARTS_GOLDEN: &str = "d2cfdcb45dba0739b88ed304294509058405c5622b8e35fca55b447dd9ebe3fc";
-    // Re-locked when Brace depth moved to the Reference's 0.2668 (fm-5wq.53).
-    const LABELS_GOLDEN: &str = "11c0ac834c33efdb477117a0aeca4834082678eb9a987c9c21bdef1ff96fa2e5";
+    // Re-locked when Brace depth moved to the Reference's 0.2668 (fm-5wq.53),
+    // and when glyphs turned counter-clockwise like the Reference's (fm-hc78).
+    const LABELS_GOLDEN: &str = "2e0484eac0be331bca712f782a105a1d32ab9efc825ff98fe03e891b4e0baec7";
     if BASE_GOLDEN.starts_with("PLACEHOLDER") {
         fail(format!(
             "SELF GOLDEN SEEDS sample_space: base={} parts={} labels={}",

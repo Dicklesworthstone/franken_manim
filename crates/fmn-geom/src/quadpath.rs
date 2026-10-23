@@ -1208,6 +1208,58 @@ impl QuadPath {
         self.points.reverse();
         self
     }
+
+    /// Reverse every subpath in place, keeping their order: inside each one
+    /// anchors and handles swap roles, a closed subpath keeps its start
+    /// point, and the break handle after it moves onto its new end anchor
+    /// (the shared-anchor break layout).
+    pub fn reverse_each_subpath(&mut self) -> &mut Self {
+        if !self.has_points() {
+            return self;
+        }
+        let mut start = 0;
+        for end in self.subpath_end_indices() {
+            self.points[start..=end].reverse();
+            if end + 1 < self.points.len() {
+                self.points[end + 1] = self.points[end];
+            }
+            start = end + 2;
+        }
+        self
+    }
+
+    /// `ensure_positive_orientation` for one path: reverse it, every subpath
+    /// together, when its unit normal points into the screen. The
+    /// Reference's SVGMobject applies this to every path it builds
+    /// (svg_mobject.py:100, vectorized_mobject.py:957), which fixes the
+    /// direction Write and ShowCreation trace them. Glyphs use
+    /// [`QuadPath::ensure_positive_contour_orientation`]. Returns whether
+    /// the points were reversed.
+    pub fn ensure_positive_orientation(&mut self) -> bool {
+        if self.num_points() >= 3 && self.unit_normal()[2] < 0.0 {
+            self.reverse_points();
+            return true;
+        }
+        false
+    }
+
+    /// The glyph form of [`QuadPath::ensure_positive_orientation`]: when the
+    /// unit normal points into the screen, reverse each contour in place
+    /// ([`QuadPath::reverse_each_subpath`]) instead of the whole run.
+    /// TrueType outlines list the contours of the PostScript outlines the
+    /// Reference draws (Type 1 Computer Modern through dvisvgm) in the same
+    /// order and from the same start points, with every direction flipped.
+    /// Reversing each contour gives the Reference's traversal: the outer
+    /// contour first and counter-clockwise, its holes clockwise. Reversing
+    /// the whole run would draw the holes first. Returns whether the
+    /// contours were reversed.
+    pub fn ensure_positive_contour_orientation(&mut self) -> bool {
+        if self.num_points() >= 3 && self.unit_normal()[2] < 0.0 {
+            self.reverse_each_subpath();
+            return true;
+        }
+        false
+    }
 }
 
 #[cfg(test)]
@@ -1485,5 +1537,83 @@ mod tests {
         for angle in path.joint_angles() {
             assert!(angle.abs() < 1e-12);
         }
+    }
+
+    fn ring(path: &mut QuadPath, corners: &[[f64; 2]]) {
+        path.start_new_path([corners[0][0], corners[0][1], 0.0]);
+        for corner in corners[1..].iter().chain(&corners[..1]) {
+            path.add_line_to([corner[0], corner[1], 0.0], true).unwrap();
+        }
+    }
+
+    #[test]
+    fn ensure_positive_orientation_reverses_a_clockwise_path_whole() {
+        // An outer clockwise square around a counter-clockwise hole, as a
+        // TrueType "o" runs: the net normal is -z, so the whole path turns.
+        let mut glyph = QuadPath::new();
+        ring(
+            &mut glyph,
+            &[[0.0, 0.0], [0.0, 4.0], [4.0, 4.0], [4.0, 0.0]],
+        );
+        ring(
+            &mut glyph,
+            &[[1.0, 1.0], [3.0, 1.0], [3.0, 3.0], [1.0, 3.0]],
+        );
+        assert!(glyph.unit_normal()[2] < 0.0);
+        let before = glyph.points().to_vec();
+        assert!(glyph.ensure_positive_orientation());
+        assert!(glyph.unit_normal()[2] > 0.0);
+        assert_eq!(glyph.subpaths().len(), 2, "the hole survives the reversal");
+        let mut expected = QuadPath::new();
+        expected.set_points(before).unwrap();
+        expected.reverse_points();
+        assert_eq!(glyph.points(), expected.points());
+        // Already counter-clockwise: untouched.
+        let after = glyph.points().to_vec();
+        assert!(!glyph.ensure_positive_orientation());
+        assert_eq!(glyph.points(), after.as_slice());
+        // Too few points to have an orientation.
+        assert!(!QuadPath::new().ensure_positive_orientation());
+    }
+
+    fn signed_area(points: &[Vec3]) -> f64 {
+        points
+            .windows(2)
+            .map(|pair| pair[0][0] * pair[1][1] - pair[1][0] * pair[0][1])
+            .sum::<f64>()
+            / 2.0
+    }
+
+    #[test]
+    fn ensure_positive_contour_orientation_reverses_each_contour_in_order() {
+        // The same TrueType-style "o": each contour turns in place, so the
+        // outer one is still drawn first, from the same start point.
+        let mut glyph = QuadPath::new();
+        ring(
+            &mut glyph,
+            &[[0.0, 0.0], [0.0, 4.0], [4.0, 4.0], [4.0, 0.0]],
+        );
+        ring(
+            &mut glyph,
+            &[[1.0, 1.0], [3.0, 1.0], [3.0, 3.0], [1.0, 3.0]],
+        );
+        let before: Vec<Vec<Vec3>> = glyph.subpaths().iter().map(|s| s.to_vec()).collect();
+        assert!(glyph.ensure_positive_contour_orientation());
+        assert!(glyph.unit_normal()[2] > 0.0);
+        let after = glyph.subpaths();
+        assert_eq!(after.len(), 2, "the hole stays its own subpath");
+        for (old, new) in before.iter().zip(&after) {
+            assert_eq!(new[0], old[0], "each contour keeps its start point");
+            let reversed: Vec<Vec3> = old.iter().rev().copied().collect();
+            assert_eq!(*new, reversed.as_slice());
+        }
+        assert!(
+            signed_area(after[0]) > 0.0,
+            "outer first, counter-clockwise"
+        );
+        assert!(signed_area(after[1]) < 0.0, "its hole clockwise");
+        let settled = glyph.points().to_vec();
+        assert!(!glyph.ensure_positive_contour_orientation());
+        assert_eq!(glyph.points(), settled.as_slice());
     }
 }

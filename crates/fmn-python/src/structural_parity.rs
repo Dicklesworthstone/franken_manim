@@ -462,4 +462,18 @@ mod tests {
             report.summary
         );
     }
+
+    #[test]
+    fn embedded_portal_matches_the_reference_tex_selections() {
+        // The check itself refuses unowned mismatches, under 95% agreement and
+        // an unnoticed planted shift; this binds it to the lib test build.
+        let report = super::run_portal_gauntlet_tex_selection().unwrap();
+        // Every row is a match, a Reference defect (C-36/C-37), a BN-05
+        // difference or a row an open bead owns.
+        let agree = report.matches + report.reference_defects + report.behavior_notes;
+        assert!(report.rows > 0, "{report:?}");
+        assert_eq!(agree + report.owned, report.rows, "{report:?}");
+        assert!(agree * 100 >= report.rows * 95, "{report:?}");
+        assert!(report.planted_mismatches > 0, "{report:?}");
+    }
 }

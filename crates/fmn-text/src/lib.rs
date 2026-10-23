@@ -87,5 +87,8 @@ pub fn glyph_quadpath(book: &FontBook, glyph: &PlacedTextGlyph) -> Result<QuadPa
             }
         }
     }
+    // TrueType outer contours run clockwise. The Reference's glyphs run
+    // counter-clockwise, outer contour first, holes clockwise (fm-hc78).
+    path.ensure_positive_contour_orientation();
     Ok(path)
 }

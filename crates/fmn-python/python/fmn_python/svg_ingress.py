@@ -203,6 +203,9 @@ def install_svg_ingress(native):
             g["_init_native_vmobject"](self, options)
             self.init_svg_mobject()
             self.flip(g["_RIGHT"])
+            # Reference svg_mobject.py:100, after generate_mobject's flip: every
+            # clockwise path turns counter-clockwise (fm-hc78).
+            self.ensure_positive_orientation()
             self.set_style(
                 fill_color=p["color"] or p["fill_color"], fill_opacity=p["fill_opacity"],
                 stroke_color=p["color"] or p["stroke_color"], stroke_width=p["stroke_width"],

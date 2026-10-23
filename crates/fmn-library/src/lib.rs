@@ -197,7 +197,7 @@ pub use solids::{
 };
 pub use special_tex::{BulletedList, BulletedListMobject, Title, TitleMobject};
 pub use style::{Style, VStyle};
-pub use svg::{svg_document_mobject, svg_mobject, vmobject_from_svg_path};
+pub use svg::{svg_document_mobject, svg_mobject, svg_reference_frame, vmobject_from_svg_path};
 pub use tex::{
     LineAlign, OldTex, OldTexMobject, Tex, TexBindingError, TexMobject, TexMobjectError,
     TexNumberBinding, TexSpanBinding, TexText,

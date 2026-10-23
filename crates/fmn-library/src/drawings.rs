@@ -25,7 +25,7 @@ use crate::boolean_ops::BooleanMobjectError;
 use crate::line::Line;
 use crate::poly::Rectangle;
 use crate::style::Style;
-use crate::svg::{SvgDocument, SvgError, svg_document_mobject};
+use crate::svg::{SvgDocument, SvgError, svg_document_mobject, svg_reference_frame};
 use crate::vmobject::{VMobject, v_group};
 
 /// drawings.py:309's tick direction: `cos(angle)·UP + sin(angle)·RIGHT`.
@@ -750,7 +750,7 @@ fn mirrored_horizontally(vmob: VMobject) -> VMobject {
 /// tolerance at import time, so no refinement pass exists.
 #[must_use]
 pub fn lightbulb_from_document(document: &SvgDocument) -> VMobject {
-    svg_document_mobject(document)
+    svg_reference_frame(svg_document_mobject(document))
         .map_style_deep(|style| style.fill(YELLOW, 0.0).stroke(YELLOW, 3.0, 1.0))
         .with_height(1.0, false)
 }
@@ -770,7 +770,7 @@ pub fn lightbulb(root: Option<&std::path::Path>) -> Result<VMobject, DrawingsAss
 /// then sized to `width`.
 #[must_use]
 pub fn video_icon_from_document(document: &SvgDocument) -> VMobject {
-    svg_document_mobject(document)
+    svg_reference_frame(svg_document_mobject(document))
         .map_style_deep(|style| style.color(BLUE_A))
         .with_width(1.2, false)
 }
@@ -845,7 +845,7 @@ fn bubble_body_from_document(
     direction: Vec3,
     buff: f64,
 ) -> VMobject {
-    let mut body = svg_document_mobject(document);
+    let mut body = svg_reference_frame(svg_document_mobject(document));
     if direction[0] > 0.0 {
         body = mirrored_horizontally(body);
     }
@@ -991,7 +991,7 @@ pub fn bubble_make_green_screen(bubble: &VMobject) -> VMobject {
 pub fn vectorized_earth_from_document(
     document: &SvgDocument,
 ) -> Result<VMobject, DrawingsAssetError> {
-    let globe = svg_document_mobject(document).with_height(2.0, false);
+    let globe = svg_reference_frame(svg_document_mobject(document)).with_height(2.0, false);
     let center = globe.center_point();
     let (half_width, half_height) = {
         let (width, height) = family_extents(&globe);

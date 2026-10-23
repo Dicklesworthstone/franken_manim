@@ -399,6 +399,25 @@ impl VMobject {
         self
     }
 
+    /// `ensure_positive_orientation`: every family member whose path runs
+    /// clockwise (unit normal into the screen) is reversed whole, subpaths
+    /// together, through [`QuadPath::ensure_positive_orientation`]. A run
+    /// that is not a shared-anchor path is left as it is.
+    #[must_use]
+    pub fn positively_oriented(mut self) -> Self {
+        if let Ok(mut path) = QuadPath::from_points(self.points.clone())
+            && path.ensure_positive_orientation()
+        {
+            self.points = path.points().to_vec();
+        }
+        self.submobjects = self
+            .submobjects
+            .into_iter()
+            .map(VMobject::positively_oriented)
+            .collect();
+        self
+    }
+
     /// Shift every point (including children's).
     #[must_use]
     pub fn shifted(self, offset: Vec3) -> Self {

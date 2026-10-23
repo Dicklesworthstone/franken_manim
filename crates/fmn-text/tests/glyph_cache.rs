@@ -8,6 +8,14 @@ use fmn_text::{FontBook, PlacedTextGlyph, TextRequest, glyph_quadpath, layout_te
 // The pre-cache implementation, kept independent of the command cache so a
 // floating-point association change cannot pass by comparing two warm hits.
 fn uncached(book: &FontBook, glyph: &PlacedTextGlyph) -> QuadPath {
+    let mut path = raw_outline(book, glyph);
+    // Glyphs run like the Reference's: outer contours counter-clockwise (fm-hc78).
+    path.ensure_positive_contour_orientation();
+    path
+}
+
+// The font's own contours, as TrueType draws them.
+fn raw_outline(book: &FontBook, glyph: &PlacedTextGlyph) -> QuadPath {
     let font = &book
         .family(&glyph.face.family)
         .unwrap()
@@ -32,6 +40,15 @@ fn uncached(book: &FontBook, glyph: &PlacedTextGlyph) -> QuadPath {
         }
     }
     path
+}
+
+// Shoelace over a subpath's points; its sign is the contour's direction.
+fn signed_area(points: &[[f64; 3]]) -> f64 {
+    points
+        .windows(2)
+        .map(|pair| pair[0][0] * pair[1][1] - pair[1][0] * pair[0][1])
+        .sum::<f64>()
+        / 2.0
 }
 
 fn bits(path: &QuadPath) -> Vec<[u64; 3]> {
@@ -64,6 +81,57 @@ fn cached_paths_match_the_uncached_arithmetic_at_every_placement() {
         .glyph_cache_stats();
     assert_eq!(stats.decodes, 8);
     assert_eq!(stats.hits, 40);
+}
+
+#[test]
+fn glyph_paths_run_counter_clockwise_like_the_references_glyphs() {
+    // The Reference's glyphs come from PostScript outlines: its Tex("0") is the
+    // outer contour counter-clockwise from the east, then the counter
+    // clockwise from the south. TrueType lists the same contours in the same
+    // order from the same points, each the other way round, so every contour
+    // turns in place: the outer one is still drawn first (fm-hc78).
+    let book = FontBook::bundled().unwrap();
+    let layout = layout_text(&book, &TextRequest::plain("AoB8gjfi")).unwrap();
+    for glyph in &layout.glyphs {
+        let path = glyph_quadpath(&book, glyph).unwrap();
+        let raw = raw_outline(&book, glyph);
+        assert!(
+            raw.unit_normal()[2] < 0.0,
+            "{:?}: TrueType runs clockwise",
+            glyph.ch
+        );
+        assert!(path.unit_normal()[2] > 0.0, "{:?} runs clockwise", glyph.ch);
+        let (oriented, font) = (path.subpaths(), raw.subpaths());
+        assert_eq!(
+            oriented.len(),
+            font.len(),
+            "{:?}: every contour, holes included",
+            glyph.ch
+        );
+        for (index, (new, old)) in oriented.iter().zip(&font).enumerate() {
+            assert_eq!(
+                new[0], old[0],
+                "{:?} contour {index} keeps its start",
+                glyph.ch
+            );
+            let (new_area, old_area) = (signed_area(new), signed_area(old));
+            assert!(
+                new_area * old_area < 0.0,
+                "{:?} contour {index} turns: {old_area} -> {new_area}",
+                glyph.ch
+            );
+        }
+    }
+    // "o": the outer contour first and counter-clockwise, its hole clockwise.
+    let o = layout.glyphs.iter().find(|glyph| glyph.ch == 'o').unwrap();
+    let path = glyph_quadpath(&book, o).unwrap();
+    let contours = path.subpaths();
+    assert_eq!(contours.len(), 2);
+    assert!(signed_area(contours[0]) > 0.0 && signed_area(contours[1]) < 0.0);
+    assert!(
+        signed_area(contours[0]) > -signed_area(contours[1]),
+        "outer first"
+    );
 }
 
 #[test]
