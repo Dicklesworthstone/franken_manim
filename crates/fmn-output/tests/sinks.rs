@@ -1491,6 +1491,7 @@ mod ffmpeg_boundary {
         runs: Arc<Mutex<Vec<ProcessSpec>>>,
         stdin_chunks: Arc<Mutex<Vec<usize>>>,
         fail_encode: AtomicBool,
+        stdin_total_cap: AtomicU64,
     }
 
     impl PublishingRunner {
@@ -1516,8 +1517,12 @@ mod ffmpeg_boundary {
             &self,
             spec: &ProcessSpec,
             cancellation: ProcessCancellation,
-            stdin_limits: ProcessStdinLimits,
+            mut stdin_limits: ProcessStdinLimits,
         ) -> Result<Box<dyn RunningProcess>, ProcessError> {
+            let cap = self.stdin_total_cap.load(Ordering::Relaxed);
+            if cap > 0 {
+                stdin_limits.max_total_bytes = stdin_limits.max_total_bytes.min(cap);
+            }
             Ok(Box::new(PublishingProcess {
                 spec: spec.clone(),
                 input: Vec::new(),
@@ -2303,6 +2308,72 @@ mod ffmpeg_boundary {
             b"old-video"
         );
         assert!(matches!(receipt.take(), Err(ReceiptError::Aborted)));
+    }
+
+    #[test]
+    fn ffmpeg_input_limit_survives_the_process_cancellation_it_causes() {
+        let (root, tool, runner) = fake_tool("input-limit-cancellation");
+        let destination = root.join("existing.mp4");
+        std::fs::write(&destination, b"prior video").unwrap();
+        // Exercise the process guard, independently of the adapter's own
+        // larger frame budget: one 32-byte frame fits, the next row does not.
+        runner.stdin_total_cap.store(40, Ordering::Relaxed);
+        let mut config = ffmpeg_config(
+            tool,
+            &root,
+            WireFormat::Rgba8,
+            destination.clone(),
+            None,
+            None,
+        );
+        config.limits = exact_limits(2);
+        let mut sink = FfmpegSink::new(runner.clone(), config).unwrap();
+        let cancellation = ProcessCancellation::new();
+        sink.set_cancellation(cancellation.clone());
+        let receipt = sink.receipt();
+        let (frame, _) = padded_frame(PixelFormat::Rgba8, 8);
+        write_direct(&mut sink, 7, &frame);
+        let error = sink.write_frame(8, &frame).expect_err("stdin limit");
+        assert!(cancellation.is_cancelled(), "the failed process is stopped");
+        assert_eq!(error.code(), "sink.ffmpeg");
+        assert!(
+            error.message().contains("stdin total of 48 bytes"),
+            "{error}"
+        );
+        assert!(error.message().contains("exceeds limit 40"), "{error}");
+        assert_eq!(runner.stdin_chunks(), [16, 16]);
+        assert_eq!(std::fs::read(destination).unwrap(), b"prior video");
+        sink.abort();
+        assert!(matches!(receipt.take(), Err(ReceiptError::Failed(cause)) if cause == error));
+    }
+
+    #[test]
+    fn ffmpeg_external_cancellation_stays_a_cancellation() {
+        let (root, tool, runner) = fake_tool("external-cancellation");
+        let destination = root.join("existing.mp4");
+        std::fs::write(&destination, b"prior video").unwrap();
+        let mut config = ffmpeg_config(
+            tool,
+            &root,
+            WireFormat::Rgba8,
+            destination.clone(),
+            None,
+            None,
+        );
+        config.limits = exact_limits(2);
+        let mut sink = FfmpegSink::new(runner, config).unwrap();
+        let cancellation = ProcessCancellation::new();
+        sink.set_cancellation(cancellation.clone());
+        let receipt = sink.receipt();
+        let (frame, _) = padded_frame(PixelFormat::Rgba8, 8);
+        write_direct(&mut sink, 7, &frame);
+        cancellation.cancel();
+        let error = sink
+            .write_frame(8, &frame)
+            .expect_err("cancelled externally");
+        assert_eq!(error.code(), "sink.cancelled");
+        assert!(matches!(receipt.take(), Err(ReceiptError::Aborted)));
+        assert_eq!(std::fs::read(destination).unwrap(), b"prior video");
     }
 
     #[test]

@@ -1238,6 +1238,7 @@ impl RenderSink {
             .take()
             .map(NativeFramePipeline::finish)
             .transpose()?;
+        let mut soundtrack_result = Ok(());
         let soundtrack = match self.video.as_mut() {
             Some(video) => {
                 let mix = match scene {
@@ -1257,18 +1258,19 @@ impl RenderSink {
                     channels: mix.audio.channels,
                     clipped_samples: mix.clipped_samples,
                 });
-                video
+                soundtrack_result = video
                     .soundtrack
                     .take()
                     .ok_or(RenderError::InvalidOptions(
                         "video soundtrack was already supplied",
                     ))?
-                    .finish(mix)
-                    .map_err(RenderError::Sink)?;
+                    .finish(mix);
                 report
             }
             None => None,
         };
+        // A closed soundtrack channel can be the consequence of an earlier
+        // sink failure. Join the output worker first to retain that cause.
         let emission = self
             .emitter
             .take()
@@ -1277,6 +1279,7 @@ impl RenderSink {
             ))?
             .finish()
             .map_err(RenderError::Drain)?;
+        soundtrack_result.map_err(RenderError::Sink)?;
         let mut artifact = match &self.receipt {
             RenderReceipt::Native(receipt) => {
                 RenderArtifact::native(self.format, receipt.take().map_err(RenderError::Receipt)?)?

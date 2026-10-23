@@ -4770,12 +4770,14 @@ impl RenderSink {
                 digest: input.report.source_digest,
             })
             .collect();
-        if let Some(completion) = self.soundtrack.take() {
-            // Complete the audio producer before the emitter prepares and
-            // publishes video. A decode/mix failure instead takes Drop's
-            // cancellation path, leaving no successful video generation.
-            completion.finish(mix).map_err(output_adapter_error)?;
-        }
+        // Supply audio before publication, but join the emitter even if a
+        // failed video sink already disconnected its soundtrack receiver.
+        // The drain carries the original failure, not just its cancellation.
+        let soundtrack_result = self
+            .soundtrack
+            .take()
+            .map(|completion| completion.finish(mix))
+            .transpose();
         let emitter = self
             .emitter
             .take()
@@ -4783,6 +4785,7 @@ impl RenderSink {
         emitter
             .finish()
             .map_err(|error| CliError::new("render", error.to_string()))?;
+        soundtrack_result.map_err(output_adapter_error)?;
         let artifact = match &self.receipt {
             RenderReceipt::Native(receipt) => receipt
                 .take()

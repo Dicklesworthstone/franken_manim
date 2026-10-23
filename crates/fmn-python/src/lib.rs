@@ -955,14 +955,18 @@ impl PortalFrameSession {
             None
         };
         let finish_start = Instant::now();
-        if let Some(soundtrack) = soundtrack {
-            soundtrack.finish(mix).map_err(native_error)?;
-        }
+        let soundtrack_result = soundtrack
+            .map(|soundtrack| soundtrack.finish(mix))
+            .transpose();
+        // A failed video sink drops its soundtrack receiver. Always join the
+        // emitter before reporting that disconnected channel, so its original
+        // budget/process error survives the cancellation it caused.
         self.emitter
             .take()
             .ok_or_else(|| PyRuntimeError::new_err("portal render generation is already closed"))?
             .finish()
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        soundtrack_result.map_err(native_error)?;
         self.routes.performance.output_finish_ns += portal_elapsed_ns(finish_start);
         let mut report: PortalArtifactReport = match &self.receipt {
             PortalReceipt::Native(receipt) => receipt.take().map_err(native_error)?.into(),

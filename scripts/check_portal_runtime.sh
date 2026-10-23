@@ -159,8 +159,8 @@ python3 crates/fmn-python/tests/svg_lifecycle.py
 
 # Installed-wheel acceptance suites that only hosted workflows ran, or nothing ran (fm-5wq.12).
 # A hosted run is not the correctness contract, so this gate runs them, with ffmpeg required
-# rather than optional. Still outside: studio_editing (fm-obww), video_quality (fm-4e2y), and
-# bundle_cli_native / camera_bundle_cli_native, which need a built fmn binary (FMN_TEST_BIN).
+# rather than optional. bundle_cli_native / camera_bundle_cli_native still need
+# a built fmn binary (FMN_TEST_BIN).
 FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/live_fade_rates.py
 FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/console_scene.py
 FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/configured_subdivision.py
@@ -184,6 +184,7 @@ FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/svg_console.py
 FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/terminal_editor.py
 FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/video_cli_unit.py
 FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/video_quality_console.py
+FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/video_quality.py
 FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/camera_bundle_console.py
 
 # Certified parallel witnesses need a clean installed-payload import context,

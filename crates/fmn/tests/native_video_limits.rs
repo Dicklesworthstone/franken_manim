@@ -201,15 +201,43 @@ fn video_receipts_record_the_admitted_policy_and_tiny_artifacts_never_publish() 
             assert!(report.artifact.path.is_file());
         }
     }
-    let (mut options, _) = options(RenderFormat::Mp4);
+    let (mut artifact_limited, _) = options(RenderFormat::Mp4);
     let refused = root.join("over-budget.mp4");
-    options.output = refused.clone();
-    options.ffmpeg = Some(capability);
-    options.ffmpeg_limits.max_artifact_bytes = 1;
-    assert!(render_with_fs(&mut Still, options, Arc::new(StdFs)).is_err());
+    artifact_limited.output = refused.clone();
+    artifact_limited.ffmpeg = Some(capability.clone());
+    artifact_limited.ffmpeg_limits.max_artifact_bytes = 1;
+    assert!(render_with_fs(&mut Still, artifact_limited, Arc::new(StdFs)).is_err());
     assert!(
         !refused.exists(),
         "a rejected encode published a partial movie"
     );
+
+    struct TwoFrames;
+    impl SceneConstruct for TwoFrames {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            stage.add(Circle::new().radius(0.4).color(BLUE))?;
+            stage.wait(0.25)?;
+            Ok(())
+        }
+    }
+
+    // One tightly packed NV12 frame fits. Failure on the second frame must
+    // remain an input-budget error even if the encoder has already dropped
+    // the deferred soundtrack channel when scene construction returns.
+    let (mut limited, _) = options(RenderFormat::Mp4);
+    limited.config.camera.resolution = (96, 54);
+    limited.config.camera.fps = 8;
+    limited.output = root.join("input-budget.mp4");
+    limited.ffmpeg = Some(capability);
+    limited.max_output_bytes = 7_776;
+    let refused = limited.output.clone();
+    let error = render_with_fs(&mut TwoFrames, limited, Arc::new(StdFs)).unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("cumulative input"), "{message}");
+    assert!(
+        message.contains("15552") && message.contains("7776"),
+        "{message}"
+    );
+    assert!(!refused.exists(), "input-budget failure published a movie");
     // Preserve the unique evidence directory; never remove another run's output.
 }

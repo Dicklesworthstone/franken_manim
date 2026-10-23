@@ -1958,19 +1958,16 @@ impl FfmpegSink {
             .profile
             .as_ref()
             .and_then(|profile| profile.span(Some(sequence), ProfilePhase::FfmpegFeed));
-        let feed = feed_tight(
+        // The boundary already distinguishes an external cancellation from a
+        // concrete failure which cancelled its own process (stdin limits,
+        // timeout, disk budget). The shared token cannot make that distinction.
+        feed_tight(
             self.stream
                 .as_mut()
                 .ok_or(SinkAdapterError::AlreadyFinalized)?,
             frame,
             &self.expected_layout,
-        );
-        if let Err(error) = feed {
-            if self.cancellation.is_cancelled() {
-                return Err(SinkAdapterError::Cancelled);
-            }
-            return Err(error);
-        }
+        )?;
         self.input_bytes = self.input_bytes.checked_add(frame_bytes).ok_or(
             SinkAdapterError::StreamBytesExceeded {
                 attempted: u64::MAX,

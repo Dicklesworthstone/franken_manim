@@ -220,6 +220,8 @@ with tempfile.TemporaryDirectory(prefix="fmn-portal-quality-") as directory:
                 render_scene(scene, target, resolution=(96, 54), fps=8, threads=1)
             except RuntimeError as error:
                 assert fragment in str(error).lower(), error
+                if fragment == "cumulative input":
+                    assert "15552" in str(error) and "7776" in str(error), error
             else:
                 raise AssertionError("ffmpeg byte limit was ignored")
             assert not target.exists()
