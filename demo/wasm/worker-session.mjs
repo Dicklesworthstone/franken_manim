@@ -1,5 +1,5 @@
 import {WORKER_PROTOCOL, MAX_BUNDLE_BYTES, MAX_PCM_BYTES, integer, viewport,
-  metadata, pixels, channelBuffers, audioInfo, recordingSource, sourceIdentity, sameSource} from './worker-protocol.mjs';
+  metadata, pixels, channelBuffers, audioInfo, recordingSource, sourceIdentity, sameSource, audioWindow, windowChannels} from './worker-protocol.mjs';
 
 export {MAX_BUNDLE_BYTES};
 const cancelled = () => new DOMException('Recording load cancelled.', 'AbortError');
@@ -26,6 +26,42 @@ export function transferredSoundtrack(info, buffers) {
   };
 }
 
+
+// Stable PCM identity across a transactional picture-worker restart. The audio
+// scheduler keeps its device and fractional phase; only this transport changes.
+class WorkerSoundtrack {
+  #connection;
+  #pending = null;
+  #freed = false;
+  constructor(info, connection) {
+    this.sample_rate = info.sampleRate; this.channels = info.channels;
+    this.sample_frames = info.sampleFrames; this.#connection = connection;
+  }
+  async read_window(start, count, signal) {
+    if (this.#freed) throw new Error('Worker soundtrack is freed.');
+    if (this.#pending) throw new Error('A soundtrack window is already pending.');
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    this.#pending = controller;
+    signal?.addEventListener('abort', abort, {once: true});
+    if (signal?.aborted) controller.abort();
+    try { return await this.#connection.readAudio(start, count, controller.signal); }
+    finally {
+      signal?.removeEventListener('abort', abort);
+      if (this.#pending === controller) this.#pending = null;
+    }
+  }
+  rebind(connection) {
+    if (this.#freed) throw new Error('Worker soundtrack is freed.');
+    this.#pending?.abort(); this.#pending = null;
+    this.#connection = connection;
+  }
+  free() {
+    if (this.#freed) return;
+    this.#freed = true; this.#pending?.abort(); this.#pending = null; this.#connection = null;
+  }
+}
+
 // Exactly one in-flight raster and one latest pending frame number. Pixel
 // ownership moves back and forth; observers borrow a view only during onFrame.
 class PictureConnection {
@@ -34,6 +70,8 @@ class PictureConnection {
   #timer = null;
   #active = null;
   #pending = null;
+  #pendingAudio = null;
+  #audioMode = 'eager';
   #pixels = null;
   #bufferFrame = 0;
   #presenting = false;
@@ -59,22 +97,23 @@ class PictureConnection {
     worker.onerror = event => { event.preventDefault?.(); this.#fail(new Error(`Picture worker failed: ${String(event.message || 'execution error').slice(0, 600)}`)); };
     worker.onmessageerror = () => this.#fail(new Error('Picture worker response could not be decoded.'));
   }
-  load(bytes, maxBundleBytes, maxAudioBytes, restore = null) {
+  load(bytes, maxBundleBytes, maxAudioBytes, restore = null, streamAudio = false) {
     return new Promise((resolve, reject) => {
       this.#resolve = resolve; this.#reject = reject;
+      this.#audioMode = streamAudio ? 'windowed' : 'eager';
       // Never transfer unrelated bytes outside a caller's subarray.
       const owned = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes : bytes.slice();
       this.#source = recordingSource(owned);
       if (restore && !sameSource(this.source, restore.source)) throw new Error('Recording changed; reopen it instead of restarting with old narration.');
       this.#send({kind: restore ? 'restore' : 'load', bytes: owned.buffer, width: this.#width, height: this.#height,
-        maxBundleBytes, maxAudioBytes, ...(restore ? {frame: restore.frame, source: restore.source} : {})}, [owned.buffer]);
+        maxBundleBytes, maxAudioBytes, audioMode: this.#audioMode, ...(restore ? {frame: restore.frame, source: restore.source} : {})}, [owned.buffer]);
     });
   }
-  #send(fields, transfer) {
+  #send(fields, transfer, audio = null) {
     const id = ++this.#id;
     try {
       integer(id, 'request identity', 1, Number.MAX_SAFE_INTEGER);
-      this.#active = {id, kind: fields.kind, frame: fields.frame, epoch: this.#epoch};
+      this.#active = {id, kind: fields.kind, frame: fields.frame, epoch: this.#epoch, audio};
       this.#timer = setTimeout(() => this.#fail(new Error('Picture worker request timed out; restart the picture worker to retry.')), this.#timeout);
       this.#worker.postMessage({protocol: WORKER_PROTOCOL, id, ...fields}, transfer);
     } catch (error) { this.#fail(error); }
@@ -85,6 +124,17 @@ class PictureConnection {
     try {
       if (!active || value?.protocol !== WORKER_PROTOCOL || value.id !== active.id) throw new Error('Uncorrelated picture worker response.');
       if (value.kind === 'error') throw new Error(String(value.message || 'Native picture rendering failed.').slice(0, 600));
+      if (active.kind === 'audio') {
+        const request = active.audio;
+        if (value.kind !== 'audio' || value.start !== request.start || value.count !== request.count) {
+          throw new Error('Worker returned a different audio window.');
+        }
+        windowChannels(value.channels, request.start, request.count, this.metadata.audio);
+        clearTimeout(this.#timer); this.#timer = null; this.#active = null;
+        this.#settleAudio(request, null, value.channels.map(buffer => new Float32Array(buffer)));
+        this.#drain();
+        return;
+      }
       if (value.width !== this.#width || value.height !== this.#height) throw new Error('Picture worker changed the viewport.');
       pixels(value.pixels, this.#width, this.#height);
       if (active.kind === 'load' || active.kind === 'restore') {
@@ -94,7 +144,8 @@ class PictureConnection {
         }
         if (!sameSource(sourceIdentity(value.source), this.source)) throw new Error('Picture worker returned a different recording.');
         this.metadata = metadata(value.metadata);
-        if (this.metadata.audio && !restoring) channelBuffers(value.channels, this.metadata.audio);
+        if (this.#audioMode === 'windowed' && value.audioMode !== 'windowed') throw new Error('Worker does not support bounded audio windows.');
+        if (this.metadata.audio && !restoring && this.#audioMode === 'eager') channelBuffers(value.channels, this.metadata.audio);
         else if (!Array.isArray(value.channels) || value.channels.length) throw new Error('Unexpected transferred audio.');
       } else if (value.kind !== 'frame' || value.frame !== active.frame) {
         throw new Error('Picture worker returned a different frame.');
@@ -132,8 +183,40 @@ class PictureConnection {
     this.#pending = frame;
     this.#drain();
   }
+  readAudio(start, count, signal) {
+    return new Promise((resolve, reject) => {
+      if (this.#closed) throw this.error || new Error('Picture worker is closed.');
+      if (this.#audioMode !== 'windowed' || !this.metadata?.audio) throw new Error('Worker has no retained soundtrack.');
+      audioWindow(start, count, this.metadata.audio);
+      if (signal?.aborted) throw cancelled();
+      if (this.#pendingAudio || this.#active?.audio?.resolve) throw new Error('An audio window is already pending.');
+      const request = {start, count, resolve, reject, signal, abort: null};
+      request.abort = () => {
+        if (this.#pendingAudio === request) this.#pendingAudio = null;
+        this.#settleAudio(request, cancelled());
+      };
+      signal?.addEventListener('abort', request.abort, {once: true});
+      this.#pendingAudio = request;
+      this.#drain();
+    });
+  }
+  #settleAudio(request, error, channels) {
+    if (!request) return;
+    request.signal?.removeEventListener('abort', request.abort);
+    const resolve = request.resolve, reject = request.reject;
+    request.resolve = null; request.reject = null;
+    if (error) reject?.(error); else resolve?.(channels);
+  }
   #drain() {
-    if (this.#closed || this.#active || this.#presenting || this.#pending === null) return;
+    if (this.#closed || this.#active || this.#presenting) return;
+    // Audio gets the next slot ahead of a pending preview. An executing raster
+    // is never duplicated or preempted; its completion/timeout is still bounded.
+    if (this.#pendingAudio) {
+      const request = this.#pendingAudio; this.#pendingAudio = null;
+      this.#send({kind: 'audio', start: request.start, count: request.count}, [], request);
+      return;
+    }
+    if (this.#pending === null) return;
     const frame = this.#pending; this.#pending = null;
     if (frame === this.#bufferFrame && this.#pixels) {
       this.frame = frame; this.present();
@@ -152,6 +235,9 @@ class PictureConnection {
   #close(error) {
     this.#closed = true;
     clearTimeout(this.#timer); this.#timer = null;
+    this.#settleAudio(this.#pendingAudio, error);
+    this.#settleAudio(this.#active?.audio, error);
+    this.#pendingAudio = null;
     this.#pending = null; this.#active = null; this.#pixels = null;
     this.#worker.onmessage = null; this.#worker.onerror = null; this.#worker.onmessageerror = null;
     this.#worker.terminate();
@@ -169,6 +255,7 @@ function release(current) {
 export class WorkerTimelineSession {
   #workerFactory;
   #prepareAudio;
+  #streamAudio;
   #onFrame;
   #onError;
   #width;
@@ -186,7 +273,9 @@ export class WorkerTimelineSession {
 
   constructor({width, height, createWorker = defaultWorker, prepareAudio = null,
     onFrame = () => {}, onError = () => {}, maxBytes = MAX_BUNDLE_BYTES,
-    maxAudioBytes = MAX_PCM_BYTES, timeoutMs = 30_000}) {
+    maxAudioBytes = MAX_PCM_BYTES, timeoutMs = 30_000, streamAudio = false}) {
+    if (typeof streamAudio !== 'boolean') throw new TypeError('streamAudio must be boolean.');
+    this.#streamAudio = streamAudio;
     viewport(width, height);
     integer(maxBytes, 'bundle byte limit', 1, MAX_BUNDLE_BYTES);
     integer(maxAudioBytes, 'PCM byte limit', 1, MAX_PCM_BYTES);
@@ -226,7 +315,7 @@ export class WorkerTimelineSession {
     this.#restarting = restore ? generation : null;
     this.#controller?.abort(); this.#candidate?.dispose();
     const controller = new AbortController(); this.#controller = controller;
-    let renderer = null, audio = null, pcm = null;
+    let renderer = null, audio = null, pcm = null, soundtrack = null;
     try {
       const bytes = await readBytes(controller.signal);
       if (this.#disposed || generation !== this.#generation) return false;
@@ -239,21 +328,23 @@ export class WorkerTimelineSession {
           }
         });
       this.#candidate = renderer;
-      let channels = await renderer.load(bytes, this.#maxBytes, this.#maxAudioBytes, restore);
+      let channels = await renderer.load(bytes, this.#maxBytes, this.#maxAudioBytes, restore, this.#streamAudio);
       if (this.#disposed || generation !== this.#generation) return false;
       const info = renderer.metadata;
       if (restore) {
         if (JSON.stringify(info) !== JSON.stringify(restore.previous.metadata)) throw new Error('Restarted recording metadata changed.');
         audio = restore.previous.audio;
+        soundtrack = restore.previous.soundtrack;
       } else if (info.audio) {
         audioInfo(info.audio, this.#maxAudioBytes);
-        pcm = transferredSoundtrack(info.audio, channels);
+        pcm = this.#streamAudio ? new WorkerSoundtrack(info.audio, renderer) : transferredSoundtrack(info.audio, channels);
+        if (this.#streamAudio && info.audio.sampleFrames) soundtrack = pcm;
         // Drop the transfer envelope: a small eager soundtrack may free its
         // backing buffers during preparation; the session must not retain them.
         channels = null;
         if (!this.#prepareAudio) throw new Error('Sound-bearing FMTL requires an audio adapter.');
         let taken = false;
-        audio = this.#prepareAudio({fps: info.fps, frame_count: info.frameCount,
+        audio = await this.#prepareAudio({fps: info.fps, frame_count: info.frameCount,
           take_soundtrack: () => { if (taken) return null; taken = true; return pcm; }});
         if (!taken || !audio || typeof audio.dispose !== 'function' || typeof audio.pause !== 'function' ||
             typeof audio.play !== 'function' || typeof audio.seek !== 'function' || typeof audio.frameAt !== 'function') {
@@ -263,7 +354,8 @@ export class WorkerTimelineSession {
       }
       if (this.#disposed || generation !== this.#generation) return false;
       const previous = this.#current;
-      this.#current = Object.freeze({renderer, metadata: info, audio});
+      if (restore) soundtrack?.rebind(renderer);
+      this.#current = Object.freeze({renderer, metadata: info, audio, soundtrack});
       this.#candidate = null; this.#readBytes = readBytes;
       // Closures above keep the renderer identity. Ownership is marked by the
       // current object rather than nulling that captured variable.

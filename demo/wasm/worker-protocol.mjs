@@ -79,3 +79,15 @@ export function sourceIdentity(value) {
 export function sameSource(left, right) {
   return left.byteLength === right.byteLength && left.checksum === right.checksum;
 }
+
+// One request owns at most 512 KiB of stereo float32 data, independent of the
+// recording length. Both endpoints check the interval before native allocation.
+export function audioWindow(start, count, info) {
+  integer(start, 'audio window start', 0, info.sampleFrames);
+  integer(count, 'audio window length', 1, COPY_FRAMES);
+  if (count > info.sampleFrames - start) throw new RangeError('Audio window exceeds the soundtrack.');
+}
+export function windowChannels(buffers, start, count, info) {
+  audioWindow(start, count, info);
+  return channelBuffers(buffers, {...info, sampleFrames: count});
+}
