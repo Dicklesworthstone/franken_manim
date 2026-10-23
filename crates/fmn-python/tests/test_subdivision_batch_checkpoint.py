@@ -373,7 +373,8 @@ class ParallelCollectionRecoveryTests(unittest.TestCase):
     def test_all_saved_artifacts_are_verified_before_any_retry(self):
         self.behavior({"B": "fail"})
         self.run_batch()
-        path = self.output / "C" / "clips" / "segment-000004.y4m"
+        # run_batch selects (2, 5): collections are SCENE_2_5/clips (fm-7w26).
+        path = self.output / "C_2_5" / "clips" / "segment-000004.y4m"
         path.write_bytes(b"tampered")
         self.behavior({})
         with self.assertRaises(ValueError):
@@ -384,7 +385,7 @@ class ParallelCollectionRecoveryTests(unittest.TestCase):
         self.behavior({"B": "partial"})
         report = self.run_batch()
         self.assertFalse(report.outcomes[1].result.completed)
-        path = self.output / "B" / "clips" / "segment-000002.y4m"
+        path = self.output / "B_2_5" / "clips" / "segment-000002.y4m"
         before = path.read_bytes()
         self.behavior({})
         with self.assertRaises(FileExistsError):
