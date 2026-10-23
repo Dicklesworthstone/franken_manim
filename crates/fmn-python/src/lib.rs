@@ -12094,6 +12094,16 @@ fn config_value_to_python(py: Python<'_>, value: &fmn_config::yaml::Value) -> Py
     }
 }
 
+/// Parse one YAML document with the one native YAML-subset reader (maps of
+/// scalars), for `manimlib.config.load_yaml`. Syntax outside the subset, or
+/// past its resource budgets, is a precise `ValueError` with its line.
+#[pyfunction]
+fn _parse_yaml_subset(py: Python<'_>, text: &str) -> PyResult<Py<PyAny>> {
+    let (document, _) =
+        fmn_config::yaml::parse(text).map_err(|error| PyValueError::new_err(error.to_string()))?;
+    config_value_to_python(py, &document)
+}
+
 /// Resolve frozen console documents with the one native YAML reader. Workers
 /// receive complete values and authored overrides as data before source import.
 #[pyfunction]
@@ -12302,6 +12312,7 @@ fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<(
     module.add_function(wrap_pyfunction!(_resolved_directories, module)?)?;
     module.add_function(wrap_pyfunction!(_resolved_camera, module)?)?;
     module.add_function(wrap_pyfunction!(_resolved_portal_config, module)?)?;
+    module.add_function(wrap_pyfunction!(_parse_yaml_subset, module)?)?;
     module.add_function(wrap_pyfunction!(_portal_cli_color, module)?)?;
     module.add_function(wrap_pyfunction!(
         portal_assignment::_linear_sum_assignment,

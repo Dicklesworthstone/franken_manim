@@ -24469,15 +24469,15 @@ def _install_config_module():
         return None
 
     def load_yaml(file_path):
+        # Reference config.py: the parsed document, or {} for a missing or empty file;
+        # malformed YAML raises. The one native YAML reader parses FrankenManim's subset
+        # (maps of scalars, BN-15); anything outside it is a precise ValueError.
         try:
-            import yaml
-
-            if _pathlib.Path(file_path).exists():
-                with open(file_path, "r", encoding="utf-8") as f:
-                    return yaml.safe_load(f) or {}
-        except Exception:
-            pass
-        return {}
+            with open(file_path, "r", encoding="utf-8") as handle:
+                text = handle.read()
+        except FileNotFoundError:
+            return {}
+        return _FMN_ROOT._parse_yaml_subset(text) or {}
 
     def parse_cli():
         import argparse
