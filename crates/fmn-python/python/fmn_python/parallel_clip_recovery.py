@@ -17,8 +17,8 @@ from .batch_checkpoint import _CheckpointFile, _MAX_FILES, _json, _read_document
 def validate_clip_recovery(*, checkpoint, subdivide, save_last_frame, reproducible, format):
     if checkpoint is not None:
         raise ValueError("clip_checkpoint_dir and the whole-scene checkpoint are mutually exclusive")
-    if not subdivide or save_last_frame or format not in {"gif", "y4m", "png_sequence", "wav", "mp4", "mov"}:
-        raise ValueError("clip_checkpoint_dir requires subdivide=True without a final-image pair")
+    if not subdivide or format not in {"gif", "y4m", "png_sequence", "wav", "mp4", "mov"}:
+        raise ValueError("clip_checkpoint_dir requires subdivide=True with an animated clip format")
     if reproducible:
         raise RuntimeError("CAPABILITY: clip-prefix replay is standard-only, not certified execution")
 
@@ -86,6 +86,8 @@ class ParallelClipPlan(_CheckpointFile):
                         _temporary(entry.name, {"plan.json"}) and entry.is_file(follow_symlinks=False)):
                     raise ValueError("clip checkpoint directory contains unrecorded state")
         stems = {job["name"] + ".json" for job in jobs}
+        stems.update(job["name"] + ".still.json" for job in jobs
+                     if job["options"].get("save_last_frame"))
         allowed = stems | {name + ".lock" for name in stems}
         if self.jobs_directory.exists():
             with os.scandir(self.jobs_directory) as entries:
@@ -111,7 +113,43 @@ class ParallelClipPlan(_CheckpointFile):
                 self.existing_destinations.add(destination)
             elif os.path.lexists(destination):
                 raise FileExistsError("unrecorded clip destination already exists: " + str(destination))
-            self.recovery[job["name"]] = {"checkpoint": str(path), "resume": saved, "resume_key": self.key}
+            recovery = {"checkpoint": str(path), "resume": saved, "resume_key": self.key}
+            if job["options"].get("save_last_frame"):
+                from .paired_clip_recovery import _SCHEMA, final_checkpoint_path
+                from .paired_output import companion_png_path
+
+                final_path = final_checkpoint_path(path)
+                still = companion_png_path(destination, job["options"]["format"], subdivide=True)
+                final_saved = os.path.lexists(final_path)
+                paired = False
+                if final_saved:
+                    if not self.resume or not saved:
+                        raise ValueError("final-image journal requires its saved clip journal and resume=True")
+                    final = _read_document(final_path)
+                    if (type(final) is not dict or final.get("schema") != _SCHEMA
+                            or type(final.get("version")) is not int or final["version"] != 1
+                            or final.get("key") != self.key or type(final.get("plan")) is not dict
+                            or type(final["plan"].get("clip_plan")) is not dict
+                            or final["plan"]["clip_plan"].get("destination") != str(destination)
+                            or final["plan"].get("still_destination") != str(still)
+                            or set(final) != {"schema", "version", "key", "plan", "pair", "artifacts"}):
+                        raise ValueError("final-image journal does not identify its planned output and input key")
+                    paired = final["pair"] is not None
+                    if paired and (type(final["pair"]) is not dict
+                            or final["pair"].get("destination") != str(destination)
+                            or final["pair"].get("still_destination") != str(still)
+                            or final["pair"].get("completed") is not True):
+                        raise ValueError("invalid completed final-image pair receipt")
+                    if not paired and final["artifacts"] is not None:
+                        raise ValueError("final-image journal has artifacts without a pair receipt")
+                if paired:
+                    # Permission for preflight only: the locked worker owner
+                    # validates the entire plan, receipts and both artifacts.
+                    self.existing_destinations.add(still)
+                elif os.path.lexists(still):
+                    raise FileExistsError("unrecorded final PNG already exists: " + str(still))
+                recovery.update(final_checkpoint=str(final_path), resume_final=final_saved)
+            self.recovery[job["name"]] = recovery
 
     def admit(self):
         if self.document is None:
@@ -123,7 +161,7 @@ def render_clip_job(job, scene):
     """Delegate the one admitted scene to the existing resumable clip owner."""
     from ._process_batch import failure
     from .subdivision import SubdividedRenderResult
-    from .subdivision_rendering import render_subdivided_scene
+    from .paired_output import PairedRenderResult, companion_png_path, render_scene_with_still
 
     name, options = job["name"], job["options"]
     destination = Path(job["directory"]) / name / "clips"
@@ -133,16 +171,28 @@ def render_clip_job(job, scene):
     identity.update(scene=job.get("scene_name", name), configuration=options.get("_configuration"))
     render_options = {key: options[key] for key in (
         "format", "resolution", "fps", "threads", "animation_range", "max_segments", "_output_options")}
+    paired = options.get("save_last_frame", False)
+    still = companion_png_path(destination, options["format"], subdivide=True) if paired else None
     try:
-        result = render_subdivided_scene(
-            scene, destination, scene_kwargs=job.get("scene_kwargs"),
-            _source_identity=identity, **render_options, **job["clip_recovery"],
-        )
+        if paired:
+            result = render_scene_with_still(
+                scene, destination, still, scene_kwargs=job.get("scene_kwargs"),
+                subdivide=True, _source_identity=identity,
+                _clip_recovery=job["clip_recovery"], **render_options,
+            )
+        else:
+            from .subdivision_rendering import render_subdivided_scene
+
+            result = render_subdivided_scene(
+                scene, destination, scene_kwargs=job.get("scene_kwargs"),
+                _source_identity=identity, **render_options, **job["clip_recovery"],
+            )
     except BaseException as error:
         row = failure(error, "failed" if isinstance(error, Exception) else "cancelled")
-        result = getattr(error, "render_subdivision_result", None)
-        if not (isinstance(result, SubdividedRenderResult) and result.destination == destination
-                and not result.completed):
+        result = getattr(error, "render_pair_result" if paired else "render_subdivision_result", None)
+        if not (isinstance(result, PairedRenderResult if paired else SubdividedRenderResult)
+                and result.destination == destination and not result.completed
+                and (not paired or result.still_destination == still)):
             result = None
         notes = getattr(error, "__notes__", ())
         if isinstance(notes, (list, tuple)):

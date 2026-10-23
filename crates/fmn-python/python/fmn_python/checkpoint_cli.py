@@ -31,9 +31,13 @@ instead of --checkpoint. It requires --workers and --subdivide, with the same
 per-clip journal; its saved clips are verified and its commands replay to rebuild
 state without rasterizing/encoding the saved prefix. Python side effects repeat,
 including for completed scenes, so the whole-scene reused list stays empty.
-Named scene batches, --write_all and --jobs-file are supported. Final-image pairs,
-certification and FMTL do not combine with this mode. Keep the state directory
-outside every clip collection; missing journals never authorize existing outputs.
+Named scene batches, --write_all and --jobs-file are supported. --save-last-frame
+adds an adjacent final PNG with a separate durable receipt. Completed final
+images are verified and reused; absent images are captured after scene replay.
+Unrecorded existing images are refused, including after a publication-to-journal
+crash. Certification and FMTL do not combine with this mode. Keep the state
+directory outside every clip collection AND final image; missing journals never
+authorize existing outputs.
 A shared --batch-timeout or per-job --job-timeout retains durably journaled clips.
 """
 

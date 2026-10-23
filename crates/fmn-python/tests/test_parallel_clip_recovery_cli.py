@@ -89,7 +89,7 @@ class ParallelClipCliTests(unittest.TestCase):
                          ["succeeded", "succeeded"])
 
     def test_conflicting_modes_refuse_before_source_discovery(self):
-        for extra, options in (((), {"subdivide": False}), (("--save-last-frame",), {}),
+        for extra, options in (((), {"subdivide": False}),
                                (("--checkpoint", "other.json"), {}), (("-s",), {}),
                                ((), {"workers": False, "job_file": False, "names": ("Lesson", "Other")})):
             with self.subTest(extra=extra, options=options):

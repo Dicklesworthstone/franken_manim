@@ -248,8 +248,12 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
     scene with no journal may start only when its destination is absent.
     Unrecorded outputs are never adopted or overwritten. Completed scenes also
     replay (report.reused remains empty); this is not certified Python replay.
-    It requires subdivide=True, excludes checkpoint, final-image pairs and
-    certification, and uses the same explicit resume/resume_key contract.
+    It requires subdivide=True, excludes checkpoint and certification, and uses
+    the same explicit resume/resume_key contract. save_last_frame=True composes
+    the existing paired owner with an adjacent final-image journal: a completed
+    PNG is verified against its exact clip collection and reused after replay;
+    an absent image is captured only after the scene runs. An unjournaled PNG
+    is refused, including after a publication-to-journal crash.
     Interrupted workers retain per-clip progress even without a terminal receipt.
 
     cancellation accepts a parent-owned CancellationToken. Call cancel() from
