@@ -1760,13 +1760,14 @@ mod tests {
         // names its single engine, and the text is the marked-up, wrapped
         // paragraph. The formula pair moves with the TeX engine's fingerprint,
         // which names the franken_markdown pin, and with q^7+z's result digest.
-        // Last moved by the pin alone (83d363c, fm-shqq: \cong); q^7+z's
-        // result is unchanged since abbb957 (fm-giir).
+        // Last moved by the pin and the fingerprint's \overbrace probe
+        // (2f1e00c, fm-u5sb: cmex's brace pieces); q^7+z's result is
+        // unchanged since abbb957 (fm-giir).
         assert_eq!(
             [cold.digest(), cached.digest(), text.digest()].map(|digest| digest.to_string()),
             [
-                "3263c957d8e35dd082b427c62ade17ab4aa4b648946d70f979b11327372154f5",
-                "bd6cea64f1c120935ed7be4f2a2febe0ffa548403e249a9b5b69e268a024b394",
+                "41ff241056637d8080c5375ff9730a681b3b98262c48995aec2eaad77f257c65",
+                "ebbc1082a14acad5080b486ab6b2c6b18ce552a90283b55bdfe495332b02a974",
                 "0fa22e64fe9e1901eea58a596899ec843bc0d6db46f1cd91607925a50fea3e6f",
             ]
         );
