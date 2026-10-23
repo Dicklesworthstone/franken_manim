@@ -597,6 +597,18 @@ pub trait PlayCapture {
     /// Consume an ordinary owner-thread capture.
     fn capture(&mut self, packet: crate::FramePacket);
 
+    /// Whether the next ordinary capture needs an immutable scene snapshot.
+    ///
+    /// The default preserves existing full-packet consumers. Opting out only
+    /// elides freezing: every animation, updater, clock and boundary still runs.
+    /// This is checked after the boundary for each individual frame.
+    fn capture_state_required(&self) -> bool {
+        true
+    }
+
+    /// Observe one capture for which [`Self::capture_state_required`] was false.
+    fn capture_metadata(&mut self, _metadata: crate::FrameMetadata) {}
+
     /// Whether preparing a compact program could be useful to this consumer.
     fn accepts_pure_segments(&self) -> bool {
         false
@@ -640,16 +652,7 @@ pub fn play_segment_with_pure_dispatch(
     {
         return segment.finish_on_owner(stage, clock, animations, open);
     }
-    crate::frame::drive_open_play(
-        stage,
-        clock,
-        rng,
-        animations,
-        skip,
-        boundary,
-        &mut |packet| capture.capture(packet),
-        open,
-    )
+    crate::frame::drive_open_play(stage, clock, rng, animations, skip, boundary, capture, open)
 }
 
 /// Drive a wait with the same frame jobs as pure plays. The caller must exclude
@@ -680,14 +683,8 @@ pub fn wait_segment_with_pure_dispatch(
         return segment.finish_wait_on_owner(stage, clock, open);
     }
     while crate::prepare_wait_frame(stage, clock, &mut open)?.is_some() {
-        crate::complete_wait_frame(
-            stage,
-            clock,
-            rng,
-            &mut open,
-            !skip,
-            boundary,
-            &mut |packet| capture.capture(packet),
+        crate::complete_wait_frame_with_capture(
+            stage, clock, rng, &mut open, !skip, boundary, capture,
         )?;
     }
     crate::finish_open_wait(open)

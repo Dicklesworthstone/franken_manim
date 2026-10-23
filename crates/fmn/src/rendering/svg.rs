@@ -429,6 +429,18 @@ impl SvgCapture {
 }
 
 impl SceneSink for SvgCapture {
+    fn capture_state_required(&self) -> bool {
+        false
+    }
+
+    fn capture_metadata(
+        &mut self,
+        _: CaptureReason,
+        _: fmn_anim::FrameMetadata,
+    ) -> Result<(), IntegrationError> {
+        self.capture_count(1)
+    }
+
     fn event(&mut self, event: LifecycleEvent) -> Result<(), IntegrationError> {
         self.checkpoint(u64::try_from(event.time.frames()).is_ok_and(|n| n <= self.limit))
     }

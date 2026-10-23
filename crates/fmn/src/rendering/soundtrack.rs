@@ -677,6 +677,19 @@ impl SoundtrackCapture {
 }
 
 impl SceneSink for SoundtrackCapture {
+    fn capture_state_required(&self) -> bool {
+        false
+    }
+
+    fn capture_metadata(
+        &mut self,
+        _: CaptureReason,
+        _: fmn_anim::FrameMetadata,
+    ) -> Result<(), IntegrationError> {
+        let result = self.observe_captures(1);
+        self.retain_error(result)
+    }
+
     fn event(&mut self, event: LifecycleEvent) -> Result<(), IntegrationError> {
         let result = self.observe_time(event.time.frames(), event.skipping);
         self.retain_error(result)

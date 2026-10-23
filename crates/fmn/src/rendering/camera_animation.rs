@@ -133,6 +133,25 @@ impl RigSink {
 }
 
 impl fmn_scene::SceneSink for RigSink {
+    fn capture_state_required(&self) -> bool {
+        self.inner.format != RenderFormat::Png
+    }
+
+    fn capture_metadata(
+        &mut self,
+        _: CaptureReason,
+        _: fmn_anim::FrameMetadata,
+    ) -> Result<(), IntegrationError> {
+        if let Some(error) = &self.inner.failure {
+            return Err(IntegrationError::new("native-camera", error.to_string()));
+        }
+        self.inner.defer_captures(1).map_err(|error| {
+            let message = error.to_string();
+            self.inner.failure = Some(error);
+            IntegrationError::new("native-camera", message)
+        })
+    }
+
     fn event(&mut self, event: fmn_scene::LifecycleEvent) -> Result<(), IntegrationError> {
         fmn_scene::SceneSink::event(&mut self.inner, event)
     }

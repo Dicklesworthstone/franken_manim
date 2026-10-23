@@ -1451,6 +1451,25 @@ fn negotiate_video(
 }
 
 impl SceneSink for RenderSink {
+    fn capture_state_required(&self) -> bool {
+        self.format != RenderFormat::Png
+    }
+
+    fn capture_metadata(
+        &mut self,
+        _: CaptureReason,
+        _: fmn_anim::FrameMetadata,
+    ) -> Result<(), IntegrationError> {
+        if let Some(error) = &self.failure {
+            return Err(IntegrationError::new("native-render", error.to_string()));
+        }
+        self.defer_captures(1).map_err(|error| {
+            let message = error.to_string();
+            self.failure = Some(error);
+            IntegrationError::new("native-render", message)
+        })
+    }
+
     fn event(&mut self, event: fmn_scene::LifecycleEvent) -> Result<(), IntegrationError> {
         if let Some(error) = &self.failure {
             return Err(IntegrationError::new("native-render", error.to_string()));

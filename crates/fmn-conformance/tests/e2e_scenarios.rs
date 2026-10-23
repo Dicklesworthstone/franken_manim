@@ -1542,6 +1542,182 @@ fn native_matching_workers_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioE
         .with_counter("native_matching_rendered_frames", rendered_frames))
 }
 
+/// Discarded captures retain every nominal sample, callback and lifecycle
+/// boundary while avoiding immutable packets across the native front door.
+fn metadata_only_capture_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_anim::{AnimConfig, FrameMetadata, Transform};
+    use fmn_mobject::Mobject;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    #[derive(Default)]
+    struct Trace {
+        metadata_only: bool,
+        packets: u64,
+        samples: Vec<(CaptureReason, FrameMetadata)>,
+        events: Vec<fmn_scene::LifecycleEvent>,
+    }
+    impl SceneSink for Trace {
+        fn capture_state_required(&self) -> bool {
+            !self.metadata_only
+        }
+        fn event(&mut self, event: fmn_scene::LifecycleEvent) -> Result<(), IntegrationError> {
+            self.events.push(event);
+            Ok(())
+        }
+        fn capture(
+            &mut self,
+            reason: CaptureReason,
+            packet: FramePacket,
+        ) -> Result<(), IntegrationError> {
+            self.packets += 1;
+            self.samples.push((reason, packet.metadata()));
+            Ok(())
+        }
+        fn capture_metadata(
+            &mut self,
+            reason: CaptureReason,
+            metadata: FrameMetadata,
+        ) -> Result<(), IntegrationError> {
+            self.samples.push((reason, metadata));
+            Ok(())
+        }
+    }
+
+    struct Program {
+        ticks: Rc<RefCell<Vec<(u64, u64)>>>,
+        terminal: Vec<[u64; 3]>,
+    }
+    impl SceneProgram for Program {
+        fn name(&self) -> &str {
+            "MetadataCapture"
+        }
+        fn construct(
+            &mut self,
+            scene: &mut Scene,
+            sink: &mut dyn SceneSink,
+        ) -> Result<(), SceneError> {
+            let animated = scene.add_mobject(Mobject::from_points(&[[0.0; 3]]))?;
+            let updated = scene.add_mobject(Mobject::from_points(&[[0.0; 3]]))?;
+            let trace = Rc::clone(&self.ticks);
+            scene.stage_mut().add_dt_updater(
+                updated,
+                move |stage, mob, dt| {
+                    trace
+                        .borrow_mut()
+                        .push((dt.to_bits(), stage.time().to_bits()));
+                    let position = stage.get_center(mob);
+                    stage.shift(mob, [0.0, dt * (1.0 + position[1]), 0.0]);
+                },
+                false,
+            )?;
+            let target = scene.stage_mut().copy_family(animated)?;
+            scene.stage_mut().shift(target, [3.0, 0.0, 0.0]);
+            let animation = Transform::new(animated, target).with_config(AnimConfig {
+                run_time: 0.375,
+                rate_func: RateFunc::linear(),
+                ..AnimConfig::default()
+            });
+            scene.play(vec![Box::new(animation)], PlayOverrides::default(), sink)?;
+            scene.wait(Some(0.25), sink)?;
+            scene.wait_until(1.0, &mut |stage| stage.time() >= 0.875, sink)?;
+            scene.show(sink)?;
+            self.terminal = [animated, updated]
+                .into_iter()
+                .map(|mob| scene.stage().get_center(mob).map(f64::to_bits))
+                .collect();
+            Ok(())
+        }
+    }
+
+    let mut runs = Vec::new();
+    let mut full_packets = 0;
+    let mut metadata_packets = 0;
+    for metadata_only in [false, true] {
+        let mut scene = Scene::new(
+            RuntimeConfig {
+                fps: FPS,
+                ..RuntimeConfig::default()
+            },
+            ctx.seed,
+        )
+        .map_err(|error| fail(format!("metadata scene: {error}")))?;
+        let mut program = Program {
+            ticks: Rc::new(RefCell::new(Vec::new())),
+            terminal: Vec::new(),
+        };
+        let mut sink = Trace {
+            metadata_only,
+            ..Trace::default()
+        };
+        let report = scene
+            .run(&mut program, &mut sink)
+            .map_err(|error| fail(format!("metadata capture lifecycle: {error}")))?;
+        if sink.samples.len() != 8 || report.time.frames() != 7 || report.play_count != 3 {
+            return Err(fail(
+                "metadata capture lost a nominal sample or lifecycle boundary",
+            ));
+        }
+        if metadata_only {
+            metadata_packets = sink.packets;
+        } else {
+            full_packets = sink.packets;
+        }
+        runs.push((
+            sink.samples,
+            sink.events,
+            program.ticks.borrow().clone(),
+            program.terminal,
+            report,
+        ));
+    }
+
+    struct Facade;
+    impl fmn::SceneConstruct for Facade {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            stage.wait(0.25)?;
+            Ok(())
+        }
+    }
+    let mut facade = Trace {
+        metadata_only: true,
+        ..Trace::default()
+    };
+    fmn::run_scene(
+        &mut Facade,
+        RuntimeConfig {
+            fps: FPS,
+            ..RuntimeConfig::default()
+        },
+        ctx.seed,
+        &mut facade,
+    )
+    .map_err(|error| fail(format!("metadata facade: {error}")))?;
+    let equivalent = runs[0] == runs[1];
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.metadata_only_capture")
+            .field("equivalent", truth(equivalent))
+            .field("full_packets", full_packets)
+            .field("metadata_packets", metadata_packets)
+            .field("facade_packets", facade.packets),
+    );
+    if !equivalent
+        || full_packets != 8
+        || metadata_packets != 0
+        || facade.packets != 0
+        || facade.samples.len() != 2
+    {
+        return Err(fail(
+            "metadata-only capture changed observations or froze discarded frames",
+        ));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("metadata_capture_samples", 8)
+        .with_counter("metadata_capture_packets", metadata_packets)
+        .with_counter("metadata_capture_equivalent", u64::from(equivalent))
+        .with_counter("metadata_facade_samples", 2))
+}
+
 /// The native still-image route executes every updater tick and captures
 /// construction's final edits. An independently authored static scene rendered
 /// through the existing sequence route supplies the expected artifact.
@@ -8972,6 +9148,26 @@ fn spec(
 pub fn catalog() -> Vec<ScenarioSpec> {
     let mut specs = vec![
         spec(
+            "lifecycle.metadata_only_capture.v1",
+            ScenarioClass::LifecycleDrill,
+            Surface::RustApi,
+            Invocation::new(metadata_only_capture_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("metadata_capture_samples", 8),
+                counter_eq("metadata_capture_packets", 0),
+                counter_eq("metadata_capture_equivalent", 1),
+                counter_eq("metadata_facade_samples", 2),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.lifecycle.metadata_only_capture",
+                vec![
+                    FieldPred::str_eq("equivalent", "true"),
+                    FieldPred::u64_eq("metadata_packets", 0),
+                ],
+            )],
+        ),
+        spec(
             "determinism.cli_pure_segments.v1",
             ScenarioClass::DeterminismDrill,
             Surface::CliInProcess,
@@ -11446,6 +11642,16 @@ fn native_matching_workers_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.native_matching_workers.v1")
         .expect("native matching workers scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn metadata_only_capture_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.metadata_only_capture.v1")
+        .expect("metadata-only capture scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

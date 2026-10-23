@@ -10754,6 +10754,20 @@ struct PortalSceneSink {
 }
 
 impl PortalSceneSink {
+    fn observe_capture(&mut self, metadata: fmn_scene::studio_bridge::FrameMetadata) {
+        self.alphas.push(metadata.alpha());
+        if self.camera.is_some() && self.camera_error.is_none() && !self.camera_preapplied {
+            // Capture demand does not change the camera or alpha protocol.
+            // A construct-only run observes the same exact nominal samples
+            // without cloning an arena whose geometry nobody consumes.
+            Python::attach(|py| {
+                if let Err(error) = self.apply_camera_at_time(py, metadata.time().to_f64()) {
+                    self.camera_error = Some(error);
+                }
+            });
+        }
+    }
+
     fn apply_camera_at_time(&self, py: Python<'_>, time: f64) -> PyResult<()> {
         let Some(camera) = &self.camera else {
             return Ok(());
@@ -10782,22 +10796,27 @@ impl PortalSceneSink {
 }
 
 impl fmn_scene::SceneSink for PortalSceneSink {
+    fn capture_state_required(&self) -> bool {
+        // Poison must reach the ordinary capture error path, not silently
+        // turn an active renderer into a discarded metadata-only capture.
+        self.render.lock().map_or(true, |render| render.is_some())
+    }
+
+    fn capture_metadata(
+        &mut self,
+        _reason: fmn_scene::CaptureReason,
+        metadata: fmn_scene::studio_bridge::FrameMetadata,
+    ) -> Result<(), fmn_scene::IntegrationError> {
+        self.observe_capture(metadata);
+        Ok(())
+    }
+
     fn capture(
         &mut self,
         _reason: fmn_scene::CaptureReason,
         packet: fmn_scene::studio_bridge::FramePacket,
     ) -> Result<(), fmn_scene::IntegrationError> {
-        self.alphas.push(packet.alpha());
-        if self.camera.is_some() && self.camera_error.is_none() && !self.camera_preapplied {
-            // The GIL is held by the pymethod driving this segment;
-            // attach re-enters it. Only the camera core cell is borrowed
-            // — never the Scene.
-            Python::attach(|py| {
-                if let Err(error) = self.apply_camera_at_time(py, packet.time().to_f64()) {
-                    self.camera_error = Some(error);
-                }
-            });
-        }
+        self.observe_capture(packet.metadata());
         let mut render = self.render.lock().map_err(|_| {
             fmn_scene::IntegrationError::new("portal-render", "render session lock was poisoned")
         })?;

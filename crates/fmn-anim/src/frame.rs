@@ -52,9 +52,103 @@ use fmn_mobject::{Mob, Snapshot, Stage};
 
 use crate::animation::{AnimError, Animation, check_updater_error};
 use crate::clock::{FrameSample, FrameSegment, RationalFrameClock, RationalTime};
+use crate::pure_frame::PlayCapture;
 use crate::purity::{
     ImpureEffect, Purity, SegmentKind, SegmentReport, classify_play, classify_wait,
 };
+
+/// The allocation-free part of a capture boundary.
+///
+/// Consumers that only count frames or observe the clock can explicitly request
+/// this value instead of retaining a scene snapshot. Animation interpolation,
+/// scene updaters, input dispatch and nominal sampling still happen normally.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FrameMetadata {
+    frame_index: i64,
+    segment_frame: i64,
+    alpha: f64,
+    time: RationalTime,
+    rng_seed: u64,
+}
+
+impl FrameMetadata {
+    /// Observe a sampled frame after its updater and input-event boundary.
+    #[must_use]
+    pub fn capture(clock: &RationalFrameClock, rng: &RngRoot, sample: &FrameSample) -> Self {
+        Self {
+            frame_index: clock.now().frames(),
+            segment_frame: sample.frame,
+            alpha: sample.alpha,
+            time: clock.now(),
+            rng_seed: rng.seed(),
+        }
+    }
+
+    /// Observe a show/presenter/idle boundary without a sampled segment.
+    #[must_use]
+    pub fn capture_barrier(clock: &RationalFrameClock, rng: &RngRoot) -> Self {
+        Self {
+            frame_index: clock.now().frames(),
+            segment_frame: 0,
+            alpha: 1.0,
+            time: clock.now(),
+            rng_seed: rng.seed(),
+        }
+    }
+
+    #[must_use]
+    pub const fn frame_index(&self) -> i64 {
+        self.frame_index
+    }
+
+    #[must_use]
+    pub const fn segment_frame(&self) -> i64 {
+        self.segment_frame
+    }
+
+    #[must_use]
+    pub const fn alpha(&self) -> f64 {
+        self.alpha
+    }
+
+    #[must_use]
+    pub const fn time(&self) -> RationalTime {
+        self.time
+    }
+
+    /// The same keyed per-frame RNG fork an immutable packet provides.
+    #[must_use]
+    pub fn rng_fork(&self, substream: &str) -> Pcg64Dxsm {
+        RngRoot::from_seed(self.rng_seed)
+            .substream(substream)
+            .fork_frame(self.frame_index.cast_unsigned())
+    }
+}
+
+/// Preserve the existing full-packet callback API at the demand-aware driver.
+struct PacketCapture<'a>(&'a mut dyn FnMut(FramePacket));
+
+impl PlayCapture for PacketCapture<'_> {
+    fn capture(&mut self, packet: FramePacket) {
+        self.0(packet);
+    }
+}
+
+fn capture_sample(
+    stage: &Stage,
+    clock: &RationalFrameClock,
+    rng: &RngRoot,
+    sample: &FrameSample,
+    capture: &mut dyn PlayCapture,
+) {
+    // Ask only after the boundary: an updater or input event may have attached
+    // a render/recording consumer during this very frame.
+    if capture.capture_state_required() {
+        capture.capture(FramePacket::freeze(stage, clock, rng, sample));
+    } else {
+        capture.capture_metadata(FrameMetadata::capture(clock, rng, sample));
+    }
+}
 
 /// The immutable frame boundary (§9.3 step 5): everything after capture
 /// consumes only this. Cheap to hold several in flight (CoW snapshot
@@ -107,6 +201,18 @@ impl FramePacket {
             time: clock.now(),
             rng_seed: rng.seed(),
             state: Rc::new(stage.snapshot()),
+        }
+    }
+
+    /// Capture timing and RNG identity without retaining the frozen arena.
+    #[must_use]
+    pub const fn metadata(&self) -> FrameMetadata {
+        FrameMetadata {
+            frame_index: self.frame_index,
+            segment_frame: self.segment_frame,
+            alpha: self.alpha,
+            time: self.time,
+            rng_seed: self.rng_seed,
         }
     }
 
@@ -694,6 +800,32 @@ pub fn complete_play_frame(
     boundary: &mut dyn FnMut(&mut Stage, RationalTime),
     emit: &mut dyn FnMut(FramePacket),
 ) -> Result<(), AnimError> {
+    complete_play_frame_with_capture(
+        stage,
+        clock,
+        rng,
+        open,
+        capture,
+        boundary,
+        &mut PacketCapture(emit),
+    )
+}
+
+/// Complete a prepared play frame, freezing scene state only when the consumer
+/// requests it. Metadata-only captures preserve the entire six-step frame order.
+///
+/// # Errors
+/// As [`complete_play_frame`].
+#[allow(clippy::too_many_arguments)]
+pub fn complete_play_frame_with_capture(
+    stage: &mut Stage,
+    clock: &RationalFrameClock,
+    rng: &RngRoot,
+    open: &mut OpenSegment,
+    capture: bool,
+    boundary: &mut dyn FnMut(&mut Stage, RationalTime),
+    emit: &mut dyn PlayCapture,
+) -> Result<(), AnimError> {
     check_updater_error(stage)?;
     let plan = open.prepared.take().ok_or(AnimError::InvalidFramePhase(
         "prepare a frame before completing it",
@@ -705,7 +837,7 @@ pub fn complete_play_frame(
     boundary(stage, clock.now());
     check_updater_error(stage)?;
     if capture {
-        emit(FramePacket::freeze(stage, clock, rng, &plan.sample));
+        capture_sample(stage, clock, rng, &plan.sample, emit);
     }
     open.stepped += 1;
     open.current_sample = None;
@@ -966,6 +1098,31 @@ pub fn complete_wait_frame(
     boundary: &mut dyn FnMut(&mut Stage, RationalTime),
     emit: &mut dyn FnMut(FramePacket),
 ) -> Result<(), AnimError> {
+    complete_wait_frame_with_capture(
+        stage,
+        clock,
+        rng,
+        open,
+        capture,
+        boundary,
+        &mut PacketCapture(emit),
+    )
+}
+
+/// Complete a prepared wait frame with the consumer's current state demand.
+///
+/// # Errors
+/// As [`complete_wait_frame`].
+#[allow(clippy::too_many_arguments)]
+pub fn complete_wait_frame_with_capture(
+    stage: &mut Stage,
+    clock: &RationalFrameClock,
+    rng: &RngRoot,
+    open: &mut OpenWait,
+    capture: bool,
+    boundary: &mut dyn FnMut(&mut Stage, RationalTime),
+    emit: &mut dyn PlayCapture,
+) -> Result<(), AnimError> {
     check_updater_error(stage)?;
     let plan = open.prepared.take().ok_or(AnimError::InvalidFramePhase(
         "prepare a wait frame before completing it",
@@ -977,7 +1134,7 @@ pub fn complete_wait_frame(
     boundary(stage, clock.now());
     check_updater_error(stage)?;
     if capture {
-        emit(FramePacket::freeze(stage, clock, rng, &plan.sample));
+        capture_sample(stage, clock, rng, &plan.sample, emit);
     }
     open.stepped += 1;
     Ok(())
@@ -1044,7 +1201,15 @@ pub fn advance_play_with_boundary(
     emit: &mut dyn FnMut(FramePacket),
 ) -> Result<(), AnimError> {
     advance_play_with_boundary_mode(
-        stage, animations, clock, rng, open, upto, true, boundary, emit,
+        stage,
+        animations,
+        clock,
+        rng,
+        open,
+        upto,
+        true,
+        boundary,
+        &mut PacketCapture(emit),
     )
 }
 
@@ -1058,7 +1223,7 @@ fn advance_play_with_boundary_mode(
     upto: i64,
     capture: bool,
     boundary: &mut dyn FnMut(&mut Stage, RationalTime),
-    emit: &mut dyn FnMut(FramePacket),
+    emit: &mut dyn PlayCapture,
 ) -> Result<(), AnimError> {
     check_updater_error(stage)?;
     let target = upto.clamp(open.stepped, open.segment.n_frames());
@@ -1066,7 +1231,7 @@ fn advance_play_with_boundary_mode(
         prepare_play_frame(stage, clock, animations, open)?.ok_or(AnimError::InvalidFramePhase(
             "the segment ended before the requested target",
         ))?;
-        complete_play_frame(stage, clock, rng, open, capture, boundary, emit)?;
+        complete_play_frame_with_capture(stage, clock, rng, open, capture, boundary, emit)?;
     }
     match animations.iter().find_map(|a| a.deferred_error()) {
         Some(err) => Err(err),
@@ -1160,7 +1325,16 @@ pub fn play_segment_with_boundary(
     emit: &mut dyn FnMut(FramePacket),
 ) -> Result<SegmentReport, AnimError> {
     let open = open_play_with_mode(stage, clock, animations, skip)?;
-    drive_open_play(stage, clock, rng, animations, skip, boundary, emit, open)
+    drive_open_play(
+        stage,
+        clock,
+        rng,
+        animations,
+        skip,
+        boundary,
+        &mut PacketCapture(emit),
+        open,
+    )
 }
 
 // Shared serial continuation, including failure cleanup, for ordinary play and
@@ -1174,7 +1348,7 @@ pub(crate) fn drive_open_play(
     animations: &mut [Box<dyn Animation>],
     skip: bool,
     boundary: &mut dyn FnMut(&mut Stage, RationalTime),
-    emit: &mut dyn FnMut(FramePacket),
+    emit: &mut dyn PlayCapture,
     mut open: OpenSegment,
 ) -> Result<SegmentReport, AnimError> {
     let report = open.report.clone();
@@ -1257,10 +1431,40 @@ pub fn wait_segment_with_boundary(
     clock: &mut RationalFrameClock,
     rng: &RngRoot,
     duration: f64,
-    mut stop_condition: Option<&mut dyn FnMut(&Stage) -> bool>,
+    stop_condition: Option<&mut dyn FnMut(&Stage) -> bool>,
     skip: bool,
     boundary: &mut dyn FnMut(&mut Stage, RationalTime),
     emit: &mut dyn FnMut(FramePacket),
+) -> Result<SegmentReport, AnimError> {
+    wait_segment_with_capture(
+        stage,
+        clock,
+        rng,
+        duration,
+        stop_condition,
+        skip,
+        boundary,
+        &mut PacketCapture(emit),
+    )
+}
+
+/// Run a wait or stop-condition wait with dynamic capture-state demand.
+///
+/// The metadata consumer observes every emitted sample before the stop
+/// condition, exactly where a full-packet consumer would observe it.
+///
+/// # Errors
+/// As [`wait_segment_with_boundary`].
+#[allow(clippy::too_many_arguments)]
+pub fn wait_segment_with_capture(
+    stage: &mut Stage,
+    clock: &mut RationalFrameClock,
+    rng: &RngRoot,
+    duration: f64,
+    mut stop_condition: Option<&mut dyn FnMut(&Stage) -> bool>,
+    skip: bool,
+    boundary: &mut dyn FnMut(&mut Stage, RationalTime),
+    emit: &mut dyn PlayCapture,
 ) -> Result<SegmentReport, AnimError> {
     update_scene_mobjects(stage, 0.0)?;
     let segment = clock.segment(duration).map_err(AnimError::Clock)?;
@@ -1285,7 +1489,7 @@ pub fn wait_segment_with_boundary(
         boundary(stage, clock.now());
         check_updater_error(stage)?;
         if !skip {
-            emit(FramePacket::freeze(stage, clock, rng, &sample));
+            capture_sample(stage, clock, rng, &sample, emit);
         }
         if let Some(condition) = stop_condition.as_deref_mut()
             && condition(stage)

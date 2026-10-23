@@ -1635,6 +1635,18 @@ pub(crate) struct SegmentAccountingSink<'a> {
 }
 
 impl SceneSink for SegmentAccountingSink<'_> {
+    fn capture_state_required(&self) -> bool {
+        self.inner.capture_state_required()
+    }
+
+    fn capture_metadata(
+        &mut self,
+        reason: CaptureReason,
+        metadata: fmn_anim::FrameMetadata,
+    ) -> std::result::Result<(), IntegrationError> {
+        self.inner.capture_metadata(reason, metadata)
+    }
+
     fn accepts_pure_segments(&self) -> bool {
         self.inner.accepts_pure_segments()
     }

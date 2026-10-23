@@ -1,7 +1,7 @@
 //! Pure-program sink handoff; the ordinary capture error policy is unchanged.
 use super::{CaptureReason, IntegrationError, SceneSink};
-use fmn_anim::FramePacket;
 use fmn_anim::pure_frame::{PlayCapture, PureSegment};
+use fmn_anim::{FrameMetadata, FramePacket};
 
 pub(super) struct NativeSegmentCapture<'a> {
     sink: &'a mut dyn SceneSink,
@@ -18,6 +18,18 @@ impl<'a> NativeSegmentCapture<'a> {
 }
 
 impl PlayCapture for NativeSegmentCapture<'_> {
+    fn capture_state_required(&self) -> bool {
+        self.error.is_none() && self.sink.capture_state_required()
+    }
+
+    fn capture_metadata(&mut self, metadata: FrameMetadata) {
+        if self.error.is_none()
+            && let Err(error) = self.sink.capture_metadata(CaptureReason::Segment, metadata)
+        {
+            *self.error = Some(error);
+        }
+    }
+
     fn capture(&mut self, packet: FramePacket) {
         if self.error.is_none()
             && let Err(error) = self.sink.capture(CaptureReason::Segment, packet)

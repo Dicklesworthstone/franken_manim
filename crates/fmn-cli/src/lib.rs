@@ -3057,6 +3057,19 @@ impl<S> SceneSink for CancellableSceneSink<'_, S>
 where
     S: SceneSink + ?Sized,
 {
+    fn capture_state_required(&self) -> bool {
+        !self.cancellation.is_cancelled() && self.inner.capture_state_required()
+    }
+
+    fn capture_metadata(
+        &mut self,
+        reason: CaptureReason,
+        metadata: fmn_scene::studio_bridge::FrameMetadata,
+    ) -> Result<(), IntegrationError> {
+        self.cancellation.scene_checkpoint()?;
+        self.inner.capture_metadata(reason, metadata)
+    }
+
     fn accepts_pure_segments(&self) -> bool {
         !self.cancellation.is_cancelled() && self.inner.accepts_pure_segments()
     }
@@ -4925,9 +4938,32 @@ impl PreRunCounter {
             play_indices: self.play_indices,
         }
     }
+
+    fn count_capture(&mut self) -> Result<(), IntegrationError> {
+        if self.segments_only && !self.segment_active {
+            return Ok(());
+        }
+        self.frames = self
+            .frames
+            .checked_add(1)
+            .ok_or_else(|| IntegrationError::new("prerun", "frame count exhausted"))?;
+        Ok(())
+    }
 }
 
 impl SceneSink for PreRunCounter {
+    fn capture_state_required(&self) -> bool {
+        false
+    }
+
+    fn capture_metadata(
+        &mut self,
+        _: CaptureReason,
+        _: fmn_scene::studio_bridge::FrameMetadata,
+    ) -> Result<(), IntegrationError> {
+        self.count_capture()
+    }
+
     fn event(&mut self, event: LifecycleEvent) -> Result<(), IntegrationError> {
         if event.phase == LifecyclePhase::DriveSegment && !event.skipping {
             self.play_indices
@@ -4946,14 +4982,7 @@ impl SceneSink for PreRunCounter {
         _reason: CaptureReason,
         _packet: fmn_scene::studio_bridge::FramePacket,
     ) -> Result<(), IntegrationError> {
-        if self.segments_only && !self.segment_active {
-            return Ok(());
-        }
-        self.frames = self
-            .frames
-            .checked_add(1)
-            .ok_or_else(|| IntegrationError::new("prerun", "frame count exhausted"))?;
-        Ok(())
+        self.count_capture()
     }
 }
 

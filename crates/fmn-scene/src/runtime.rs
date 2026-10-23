@@ -27,12 +27,13 @@ mod parallel;
 pub use idle::IdleFrame;
 
 use fmn_anim::{
-    AnimError, Animation, AnimationBoundary, FramePacket, ImpureEffect, OpenSegment, OpenWait,
-    Purity, RateFunc, RationalFrameClock, RationalTime, SceneUpdaterBoundary, SegmentKind,
-    SegmentReport, abort_open_play, abort_open_wait, complete_play_frame, complete_wait_frame,
-    finish_open_play, finish_open_play_animations, finish_open_wait, open_play_with_mode,
-    open_wait, open_wait_after_updaters, prepare_play_animation, prepare_play_frame,
-    prepare_wait_frame, validate_play, wait_segment_with_boundary,
+    AnimError, Animation, AnimationBoundary, FrameMetadata, FramePacket, ImpureEffect, OpenSegment,
+    OpenWait, Purity, RateFunc, RationalFrameClock, RationalTime, SceneUpdaterBoundary,
+    SegmentKind, SegmentReport, abort_open_play, abort_open_wait, complete_play_frame_with_capture,
+    complete_wait_frame_with_capture, finish_open_play, finish_open_play_animations,
+    finish_open_wait, open_play_with_mode, open_wait, open_wait_after_updaters,
+    prepare_play_animation, prepare_play_frame, prepare_wait_frame, validate_play,
+    wait_segment_with_capture,
 };
 use fmn_core::rng::{Pcg64Dxsm, RngRoot};
 use fmn_hash::SerialError;
@@ -441,6 +442,28 @@ pub trait SceneSink {
         packet: FramePacket,
     ) -> Result<(), IntegrationError>;
 
+    /// Whether the next capture requires immutable scene state.
+    ///
+    /// Existing rendering, recording and custom sinks retain full packets by
+    /// default. A frame counter or construct-only consumer may opt out; Scene
+    /// then calls [`Self::capture_metadata`] without freezing the arena. The
+    /// decision is made after each updater/input boundary, so attaching a
+    /// renderer during an authored callback takes effect on that same frame.
+    fn capture_state_required(&self) -> bool {
+        true
+    }
+
+    /// Consume capture timing without an arena snapshot, after explicitly
+    /// opting out through [`Self::capture_state_required`]. The default discards
+    /// metadata; all scene transitions still occur at their nominal times.
+    fn capture_metadata(
+        &mut self,
+        _reason: CaptureReason,
+        _metadata: FrameMetadata,
+    ) -> Result<(), IntegrationError> {
+        Ok(())
+    }
+
     /// Opt in to callback-free native play and static-wait programs. Interactive, recording
     /// and custom sinks remain on the ordinary per-frame path by default.
     fn accepts_pure_segments(&self) -> bool {
@@ -467,12 +490,30 @@ pub trait SceneSink {
 pub struct NullSceneSink;
 
 impl SceneSink for NullSceneSink {
+    fn capture_state_required(&self) -> bool {
+        false
+    }
+
     fn capture(
         &mut self,
         _reason: CaptureReason,
         _packet: FramePacket,
     ) -> Result<(), IntegrationError> {
         Ok(())
+    }
+}
+
+fn capture_barrier(
+    sink: &mut dyn SceneSink,
+    reason: CaptureReason,
+    stage: &Stage,
+    clock: &RationalFrameClock,
+    rng: &RngRoot,
+) -> Result<(), IntegrationError> {
+    if sink.capture_state_required() {
+        sink.capture(reason, FramePacket::freeze_barrier(stage, clock, rng))
+    } else {
+        sink.capture_metadata(reason, FrameMetadata::capture_barrier(clock, rng))
     }
 }
 
@@ -1204,14 +1245,8 @@ impl Scene {
                 time,
             );
         };
-        let mut emit = |packet| {
-            if play.sink_error.is_none()
-                && let Err(error) = sink.capture(CaptureReason::Segment, packet)
-            {
-                play.sink_error = Some(error);
-            }
-        };
-        complete_play_frame(
+        let mut emit = parallel::NativeSegmentCapture::new(sink, &mut play.sink_error);
+        complete_play_frame_with_capture(
             stage,
             clock,
             rng_root,
@@ -1470,14 +1505,8 @@ impl Scene {
                 time,
             );
         };
-        let mut emit = |packet| {
-            if wait.sink_error.is_none()
-                && let Err(error) = sink.capture(CaptureReason::Segment, packet)
-            {
-                wait.sink_error = Some(error);
-            }
-        };
-        complete_wait_frame(
+        let mut emit = parallel::NativeSegmentCapture::new(sink, &mut wait.sink_error);
+        complete_wait_frame_with_capture(
             stage,
             clock,
             rng_root,
@@ -1610,7 +1639,7 @@ impl Scene {
                 if let Some(stop_condition) = stop_condition {
                     // A stop callback observes owner state after each emitted
                     // frame. Never offer its wait to the compact program path.
-                    wait_segment_with_boundary(
+                    wait_segment_with_capture(
                         stage,
                         clock,
                         rng_root,
@@ -1618,9 +1647,7 @@ impl Scene {
                         Some(stop_condition),
                         skipping,
                         &mut boundary,
-                        &mut |packet| {
-                            fmn_anim::pure_frame::PlayCapture::capture(&mut capture, packet);
-                        },
+                        &mut capture,
                     )?
                 } else {
                     fmn_anim::pure_frame::wait_segment_with_pure_dispatch(
@@ -1665,9 +1692,12 @@ impl Scene {
         self.sync_stage_time();
         self.dispatch_pending_events()?;
         self.ensure_updaters_ready()?;
-        sink.capture(
+        capture_barrier(
+            sink,
             CaptureReason::Show,
-            FramePacket::freeze_barrier(&self.stage, &self.clock, &self.rng_root),
+            &self.stage,
+            &self.clock,
+            &self.rng_root,
         )?;
         Ok(())
     }
@@ -1929,9 +1959,12 @@ impl Scene {
                     self.sync_stage_time();
                     self.dispatch_pending_events()?;
                     self.ensure_updaters_ready()?;
-                    sink.capture(
+                    capture_barrier(
+                        sink,
                         CaptureReason::SkippedPreview,
-                        FramePacket::freeze_barrier(&self.stage, &self.clock, &self.rng_root),
+                        &self.stage,
+                        &self.clock,
+                        &self.rng_root,
                     )?;
                 }
                 self.emit_event(sink, LifecyclePhase::PostPlay, Some(kind))
@@ -2000,9 +2033,12 @@ impl Scene {
                     self.dispatch_pending_events()?;
                     self.ensure_updaters_ready()?;
                     if !self.skipping {
-                        sink.capture(
+                        capture_barrier(
+                            sink,
                             CaptureReason::PresenterHold,
-                            FramePacket::freeze_barrier(&self.stage, &self.clock, &self.rng_root),
+                            &self.stage,
+                            &self.clock,
+                            &self.rng_root,
                         )?;
                     }
                 }

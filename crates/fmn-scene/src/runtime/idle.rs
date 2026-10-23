@@ -75,9 +75,12 @@ impl Scene {
         self.ensure_updaters_ready()?;
         self.dispatch_pending_events()?;
         self.ensure_updaters_ready()?;
-        sink.capture(
+        capture_barrier(
+            sink,
             CaptureReason::PresenterHold,
-            FramePacket::freeze_barrier(&self.stage, &self.clock, &self.rng_root),
+            &self.stage,
+            &self.clock,
+            &self.rng_root,
         )?;
         Ok(())
     }
