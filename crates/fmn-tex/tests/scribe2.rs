@@ -49,7 +49,9 @@ fn submobject_counts_are_locked_for_corpus_shapes() {
         (r"\int_0^\infty e^{-x^2}\,dx", 9, 0, 0),
         // TeX sizes the matrix parens from cmex (ADR-0028): two glyphs.
         (r"\begin{pmatrix} a & b \\ c & d \end{pmatrix}", 6, 0, 0),
-        (r"\overbrace{x+y}", 3, 0, 1), // three glyphs + the drawn band
+        // Three glyphs, then LaTeX's \upbracefill: four cmex pieces and two
+        // fill rules (franken_markdown 2f1e00c).
+        (r"\overbrace{x+y}", 7, 2, 0),
     ] {
         let t = e.typeset(Mode::Math(Style::Display), src).unwrap();
         assert_eq!(

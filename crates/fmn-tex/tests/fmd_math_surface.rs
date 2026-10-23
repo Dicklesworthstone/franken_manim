@@ -196,8 +196,16 @@ fn the_kg9_frontier_lays_out_through_the_pin() {
         2,
         "both parens are cmex"
     );
+    // Since franken_markdown 2f1e00c the brace is LaTeX's \upbracefill:
+    // four cmex pieces joined by two fill rules, nothing drawn.
     let b = engine.typeset(r"\overbrace{x+y}", Style::Display).unwrap();
-    assert_eq!(b.paths.len(), 1, "the drawn brace band");
+    assert!(b.paths.is_empty(), "no drawn brace band");
+    assert_eq!(
+        b.glyphs.iter().filter(cmex).count(),
+        4,
+        "the four cmex brace pieces"
+    );
+    assert_eq!(b.rules.len(), 2, "the two fill rules");
     let deep = engine
         .typeset(
             r"\left(\frac{\frac{1}{2}}{\frac{3}{4}}\right)",

@@ -87,6 +87,9 @@ class Harness(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         sys.path.remove(cls.tmp.name)
+        # The drill reruns this suite in one interpreter: the next run imports
+        # its own copy rather than this one, whose directory is about to go.
+        sys.modules.pop("fmn_witness_synthetic", None)
         cls.tmp.cleanup()
 
     def rows(self):
@@ -233,6 +236,9 @@ class Harness(unittest.TestCase):
         # (manimlib.mobject.numbers.char_to_cahced_mob): the wrapped function's code answers.
         rows = [row("cached_area", "function")]
         recorder = pw.Recorder(pw.Probes(rows), __file__, render_rows=set())
+
+        # A run earlier in the same interpreter may have cached this call already.
+        self.mod.cached_area.cache_clear()
 
         def test_cached(mod=self.mod):
             mod.cached_area(3.0)

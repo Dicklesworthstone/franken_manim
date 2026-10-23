@@ -1709,28 +1709,30 @@ mod tests {
     }
 
     #[test]
-    fn a_stretchy_overbrace_is_a_drawn_path_child() {
-        // Past the glyph-scaling ceiling, the delimiter engine draws the
-        // construction parametrically (ADR-0005): one PlacedPath sub
-        // (scribe2's fixture: overbrace = 3 glyphs / 0 rules / 1 path).
-        let m = Tex::new(r"\overbrace{abc}")
-            .build(&engine())
-            .expect("builds");
-        let path_ords: Vec<usize> = m
-            .typeset
-            .subs
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| matches!(s.prim, Prim::Path(_)))
-            .map(|(i, _)| i)
-            .collect();
-        assert_eq!(path_ords.len(), 1, "one drawn radical path");
-        let child = &m.vmob.children()[path_ords[0]];
-        assert!(!child.points().is_empty(), "the radical has geometry");
+    fn an_overbrace_is_cmex_pieces_and_fill_rules() {
+        // Since franken_markdown 2f1e00c, fmd-math sets \overbrace as
+        // LaTeX's \upbracefill: four cmex10 brace pieces, joined by two rules
+        // that fill the rest of the base's width. A base no wider than the
+        // pieces ships no rules. Nothing is drawn as a path.
+        let count = |source: &str| {
+            let m = Tex::new(source).build(&engine()).expect("builds");
+            let (mut glyphs, mut rules, mut paths) = (0, 0, 0);
+            for sub in &m.typeset.subs {
+                match sub.prim {
+                    Prim::Glyph(_) => glyphs += 1,
+                    Prim::Rule(_) => rules += 1,
+                    Prim::Path(_) => paths += 1,
+                }
+            }
+            (glyphs, rules, paths)
+        };
+        let (glyphs, rules, paths) = count(r"\overbrace{abc}");
+        assert_eq!((glyphs, paths), (3 + 4, 0), "three letters and four pieces");
+        assert!(rules == 0 || rules == 2, "the fill ships as a rule pair");
         assert_eq!(
-            child.points().len() % 2,
-            1,
-            "shared-anchor runs have odd length"
+            count(r"\overbrace{abcdefghijklmnop}"),
+            (16 + 4, 2, 0),
+            "a wide base is filled by two rules"
         );
     }
 
