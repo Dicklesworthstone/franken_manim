@@ -14,7 +14,7 @@
   }
   h1 { font-size: 18px; font-weight: 600; margin: 0; }
   .controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; justify-content: center; }
-  button {
+  button, select {
     background: #1c1c24; color: inherit; border: 1px solid #3a3a48;
     border-radius: 6px; padding: 6px 10px; font: inherit; cursor: pointer;
   }
@@ -22,7 +22,7 @@
   input[type="range"] { width: 280px; }
   canvas {
     background: #000; border: 1px solid #2a2a36; border-radius: 8px;
-    max-width: 100%; image-rendering: pixelated;
+    width: min(100%, 960px); height: auto; aspect-ratio: 16 / 9;
   }
   #status { color: #9a9ab0; min-height: 1.5em; max-width: 900px; overflow-wrap: anywhere; }
   #status.err { color: #ff7a7a; }
@@ -41,6 +41,17 @@
     <button id="play" disabled>Play</button>
     <button id="restartWorker" disabled>Restart picture worker</button>
     <span id="frameLabel">0 / 0</span>
+  </div>
+  <div class="controls">
+    <label>Preview resolution <select id="resolution">
+      <option value="auto" selected>Auto (high-DPI, up to 1080p)</option>
+      <option value="640x360">640 × 360 (fast)</option>
+      <option value="1280x720">1280 × 720</option>
+      <option value="1920x1080">1920 × 1080</option>
+      <option value="1080x1920">1080 × 1920 (portrait)</option>
+      <option value="1080x1080">1080 × 1080 (square)</option>
+    </select></label>
+    <span id="viewportLabel" aria-live="polite">640 × 360</span>
   </div>
   <div class="controls" id="labels"></div>
   <canvas id="canvas" width="640" height="360"></canvas>

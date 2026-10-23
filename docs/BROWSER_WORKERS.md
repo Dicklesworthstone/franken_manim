@@ -221,3 +221,56 @@ Blob modules through a classic-worker bootstrap and explicitly reports
 `normalModuleWorkers: false`. That mode does not prove hosted module-worker
 startup. Both modes use a named native-decoder fixture, not generated Wasm,
 physical audio hardware, cross-browser evidence or a native acceptance gate.
+
+## Live viewport changes and responsive previews
+
+`session.resize(width, height)` changes the existing worker's preview viewport
+through native `FmnPlayer.set_viewport` and `render_into`. It does not reread the
+FMTL source, decode another player, transfer the soundtrack again, seek audio,
+or create another audio device. The selected frame is rerasterized at the new
+resolution. Recorded camera tracks, frame sampling, and bundle bytes are not
+edited; projection and aspect-ratio fitting remain the native player's policy.
+
+Each dimension must be an integer in 1..4096, validated before changing the
+requested viewport. The method returns whether the requested dimensions changed;
+completion arrives through `onFrame`, not through that boolean. Consumers must
+size their canvas backing store to the callback's width/height before presenting
+its pixels. The old displayed picture remains available until a complete new
+picture arrives. A failed raster follows the existing visible worker-failure and
+restart path, rather than presenting partially resized pixels.
+
+Resize and seek storms share one latest pending frame/viewport pair behind the
+single active request. A superseded image cannot repaint the page at an obsolete
+size. Returned buffers are reused where their byte length permits, or replaced
+in the worker. Audio keeps priority for the next available request slot; an
+already executing raster is not preempted. A native resize may transiently hold
+the returned old RGBA buffer plus its newly allocated replacement, each bounded
+by the existing viewport limit (64 MiB at 4096 by 4096). Native renderer storage,
+Wasm allocator capacity, canvas backing storage and browser allocations are
+additional: this is not a total-memory or latency guarantee.
+
+A viewport can also be selected before loading. Changes during admission or
+restart reach the candidate, and later loads/restarts keep the selected size.
+`invalidate()` still cancels outstanding presentation intents; call `render()`
+to request a picture again. The page does that after Pause when a viewport change
+is pending, without resuming or seeking narration.
+
+The shipping page's **Preview resolution** control offers automatic high-DPI
+16:9 preview, 640x360, 1280x720, 1920x1080, 1080x1920 portrait, and 1080x1080
+square. Automatic mode follows the canvas's CSS width and device pixel ratio,
+rounds to a 16:9 pixel grid, and caps at 1920x1080. Hidden zero-width containers
+wait for a positive measurement. ResizeObserver, window changes and pixel-density
+changes coalesce to one measurement per animation frame, and all observers and
+queued callbacks are released on disposal. Explicit presets ignore CSS/density
+changes. Higher resolutions cost more raster work; the 640x360 preset retains
+the earlier fast preview size. These are preview controls, not new export modes.
+
+`worker-viewport.test.mjs` checks native-adapter dispatch, buffer ownership,
+coalescing, stale response rejection, audio priority, and load/restart races.
+`player-viewport.test.mjs` covers the shipping controller, sizing policy and
+observer cleanup. `python scripts/check_player_viewport_browser.py` drives the
+actual page in Chromium, including high-DPI mobile resizing, landscape/portrait
+pixels, running/paused Web Audio and worker recovery. It uses the explicit
+native-decoder/raster fixture and offline Blob-module bootstrap described above;
+it does not establish native Wasm, hosted module-worker, other-browser or
+physical-device acceptance.

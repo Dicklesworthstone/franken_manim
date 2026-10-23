@@ -3,6 +3,21 @@ import {WorkerTimelineSession} from './worker-session.mjs';
 import {prepareSoundtrack} from './audio-playback.mjs';
 import {readBundleFile, readBundleResponse} from './bundle-input.mjs';
 
+// Automatic preview stays on the 16:9 pixel grid and caps at 1080p. This is
+// presentation quality, not a change to recorded camera or animation data.
+export function choosePlayerViewport(mode, cssWidth, pixelRatio = 1) {
+  const presets = {'640x360': [640, 360], '1280x720': [1280, 720],
+    '1920x1080': [1920, 1080], '1080x1920': [1080, 1920], '1080x1080': [1080, 1080]};
+  if (Object.hasOwn(presets, mode)) return presets[mode];
+  if (mode !== 'auto') throw new RangeError('Unknown preview resolution.');
+  if (!Number.isFinite(cssWidth) || cssWidth < 0 || !Number.isFinite(pixelRatio) || pixelRatio <= 0) {
+    throw new RangeError('Invalid display dimensions or pixel density.');
+  }
+  if (cssWidth === 0) return null; // Hidden containers do not allocate 0-sized frames.
+  const width = Math.max(16, Math.min(1920, Math.round(Math.min(cssWidth, 1920) * Math.min(pixelRatio, 4) / 16) * 16));
+  return [width, width * 9 / 16];
+}
+
 export function mountTimelinePlayer({document = globalThis.document, window = globalThis.window,
   createSession = options => new WorkerTimelineSession(options),
   createContext = () => new AudioContext(),
@@ -10,7 +25,9 @@ export function mountTimelinePlayer({document = globalThis.document, window = gl
   const $ = id => document.getElementById(id);
   const canvas = $('canvas'), ctx = canvas.getContext('2d');
   const status = $('status'), scrub = $('scrub'), play = $('play'), labels = $('labels'), restartButton = $('restartWorker');
+  const resolution = $('resolution'), viewportLabel = $('viewportLabel');
   const lifetime = new AbortController();
+  let resizeObserver = null, resizeRaf = 0, densityQuery = null;
   let session = null, clock = null, raf = 0, loading = false, disposed = false;
   let loadEpoch = 0, playEpoch = 0, restartEpoch = 0, recovering = false, seeking = null, lastRequested = -1;
   const on = (element, type, fn) => element.addEventListener(type, fn, {signal: lifetime.signal});
@@ -20,6 +37,7 @@ export function mountTimelinePlayer({document = globalThis.document, window = gl
   function controls() {
     const available = Boolean(!disposed && !loading && !recovering && session?.current && !session.current.renderer.error);
     play.disabled = !available || seeking !== null;
+    if (resolution) resolution.disabled = disposed;
     scrub.disabled = !available;
     restartButton.disabled = Boolean(disposed || loading || !session?.current);
     restartButton.textContent = recovering ? 'Cancel restart' : 'Restart picture worker';
@@ -34,10 +52,17 @@ export function mountTimelinePlayer({document = globalThis.document, window = gl
     try { clock?.pause(); } catch (error) { message(`Playback stopped: ${error}`, true); }
     session?.invalidate(); seeking = null; lastRequested = -1;
     window.cancelAnimationFrame(raf); raf = 0; play.textContent = 'Play'; controls();
+    queueViewport();
   }
   function draw({index, width, height, rgba}) {
     if (disposed || loading || !session.current) return;
-    ctx.putImageData(new ImageData(new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.byteLength), width, height), 0, 0);
+    const image = new ImageData(new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.byteLength), width, height);
+    // Keep the previous picture until a complete validated replacement arrives.
+    if (canvas.width !== width) canvas.width = width;
+    if (canvas.height !== height) canvas.height = height;
+    if (canvas.style) canvas.style.aspectRatio = `${width} / ${height}`;
+    ctx.putImageData(image, 0, 0);
+    if (viewportLabel) viewportLabel.textContent = `${width} × ${height}`;
     $('frameLabel').textContent = `${index} / ${session.current.metadata.frameCount - 1}`;
     scrub.value = String(index);
     if (seeking === index) seeking = null;
@@ -111,15 +136,56 @@ export function mountTimelinePlayer({document = globalThis.document, window = gl
       return false;
     } finally { if (epoch === restartEpoch) { recovering = false; controls(); } }
   }
+  function updateViewport() {
+    if (disposed || !resolution || !session) return;
+    try {
+      const size = choosePlayerViewport(resolution.value, canvas.clientWidth, window.devicePixelRatio ?? 1);
+      if (!size) return;
+      const [width, height] = size;
+      session.resize(width, height);
+      if (canvas.width !== width || canvas.height !== height) {
+        if (viewportLabel) viewportLabel.textContent = `${width} × ${height} pending`;
+        // Pause invalidates old display work. Reissue the selected picture,
+        // without seeking the audio clock or creating a new device.
+        if (!loading && !recovering && session.current && !session.current.renderer.error) {
+          const frame = seeking ?? clock?.frame ?? session.current.renderer.frame;
+          lastRequested = frame; session.render(frame);
+        }
+      }
+    } catch (error) { message(`Preview resolution refused: ${error}`, true); }
+  }
+  function queueViewport() {
+    if (disposed || !resolution || resizeRaf) return;
+    resizeRaf = window.requestAnimationFrame(() => { resizeRaf = 0; updateViewport(); });
+  }
+  function watchDensity() {
+    densityQuery?.removeEventListener('change', densityChanged);
+    densityQuery = typeof window.matchMedia === 'function' ?
+      window.matchMedia(`(resolution: ${window.devicePixelRatio ?? 1}dppx)`) : null;
+    densityQuery?.addEventListener('change', densityChanged);
+  }
+  function densityChanged() { watchDensity(); queueViewport(); }
   function dispose() {
     if (disposed) return;
-    stop(); disposed = true; ++loadEpoch; lifetime.abort(); session?.dispose(); controls();
+    stop(); disposed = true; ++loadEpoch; lifetime.abort();
+    window.cancelAnimationFrame(resizeRaf); resizeRaf = 0; resizeObserver?.disconnect();
+    densityQuery?.removeEventListener('change', densityChanged); densityQuery = null;
+    session?.dispose(); controls();
   }
   try {
     if (!ctx) throw new Error('A Canvas 2D context is required.');
     session = createSession({streamAudio: true, width: canvas.width, height: canvas.height,
       prepareAudio: player => prepareSoundtrack(player, createContext), onFrame: draw,
       onError: error => { stop(); message(`Playback stopped: ${error}. Restart the picture worker to retry.`, true); }});
+    if (resolution) {
+      on(resolution, 'change', updateViewport);
+      on(window, 'resize', queueViewport);
+      on(window, 'pageshow', queueViewport);
+      if (typeof window.ResizeObserver === 'function') {
+        resizeObserver = new window.ResizeObserver(queueViewport); resizeObserver.observe(canvas);
+      }
+      watchDensity(); updateViewport();
+    }
     on(scrub, 'input', () => seek(Number(scrub.value)));
     on(restartButton, 'click', () => { void restart(); });
     on(play, 'click', async () => {
@@ -142,7 +208,7 @@ export function mountTimelinePlayer({document = globalThis.document, window = gl
       if (file) void load(signal => readBundleFile(file, signal), file.name);
     });
     on($('loadDemo'), 'click', () => { void load(readDemo, 'bundle.fmtl'); });
-    on(document, 'visibilitychange', () => { if (document.hidden) stop(); });
+    on(document, 'visibilitychange', () => { if (document.hidden) stop(); else queueViewport(); });
     on(window, 'pagehide', event => { if (event.persisted) stop(); else dispose(); });
     $('bundleFile').disabled = false; $('loadDemo').disabled = false;
     void load(readDemo, 'bundle.fmtl');
