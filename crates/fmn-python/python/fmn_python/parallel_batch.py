@@ -214,10 +214,10 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
     clock, recording and publication owners. Every primary/companion path is
     preflighted before spawning. Checkpoint/resume verifies every completed
     collection, including each clip and an optional final PNG, before skipping
-    that scene. Empty completed selections are reusable. Partial collections
-    remain create-only: this batch journal does not replay a saved clip prefix,
-    and an unfinished scene with published files fails no-clobber preflight.
-    Use the separate single-scene clip journal for within-scene recovery.
+    that scene. Empty completed selections are reusable. With checkpoint alone,
+    partial collections remain create-only: that journal does not replay a saved
+    clip prefix, and unfinished published files fail no-clobber preflight.
+    Add clip_checkpoint_dir for within-scene recovery, as described below.
 
     checkpoint uses the same locked, atomic journal and artifact verifier as
     render_scenes, owned ONLY by the parent. Each completed receipt is recorded
@@ -240,21 +240,32 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
     admitted job. Checkpoint recovery preserves these settings and hash-verifies
     completed bundles; no-cue scenes may return ordinary picture-only receipts.
 
-    clip_checkpoint_dir provides recovery WITHIN each subdivided scene instead
-    of whole-scene checkpoint reuse. Each worker owns a distinct existing clip
+    clip_checkpoint_dir provides recovery WITHIN each subdivided scene.
+    Each worker owns a distinct existing clip
     journal; the parent holds one locked source/variant/options plan. Resume
     reexecutes authored commands to reconstruct scene state, verifies saved
     clip indices and clocks, and renders only their missing suffix. An unstarted
     scene with no journal may start only when its destination is absent.
     Unrecorded outputs are never adopted or overwritten. Completed scenes also
-    replay (report.reused remains empty); this is not certified Python replay.
-    It requires subdivide=True, excludes checkpoint and certification, and uses
+    replay when used alone; this is not certified Python replay.
+    It requires subdivide=True, excludes certification, and uses
     the same explicit resume/resume_key contract. save_last_frame=True composes
     the existing paired owner with an adjacent final-image journal: a completed
     PNG is verified against its exact clip collection and reused after replay;
     an absent image is captured only after the scene runs. An unjournaled PNG
     is refused, including after a publication-to-journal crash.
     Interrupted workers retain per-clip progress even without a terminal receipt.
+
+    Supply BOTH checkpoint and clip_checkpoint_dir from the initial invocation
+    for two-level recovery. The parent batch journal hash-verifies and skips
+    completed scenes without importing or constructing them; only unfinished
+    scenes replay their saved clip prefix. report.reused names the whole-scene
+    skips, not the clips reused inside workers. Both journals bind each other's
+    location and must be retained; changing or removing either mode refuses
+    resume. The batch journal and its lock must be outside the clip state tree
+    as well as all outputs. A completed child journal without a terminal batch
+    receipt remains an unfinished job: it replays, never guesses whole-scene
+    success. Each receipt is durably recorded before its observer is called.
 
     cancellation accepts a parent-owned CancellationToken. Call cancel() from
     another thread or on_result to stop admission and clean up in-flight workers.
@@ -411,17 +422,28 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
 
         clip_owner = ParallelClipPlan(clip_checkpoint_dir, resume=resume, key=resume_key)
         clip_owner.validate_destinations(all_destinations)
+        if checkpoint is not None:
+            # Check namespaces before either owner creates directories/locks.
+            # A completion journal inside the prefix tree is foreign state,
+            # and aliasing plan.json(.lock) would acquire the same lock twice.
+            clip_owner.validate_destinations([owner.path, owner.lock_path])
+    journal_options = options
+    if checkpoint is not None and clip_checkpoint_dir is not None:
+        # Recovery identity is parent-only: do not send checkpoint paths as
+        # renderer kwargs or change existing single-mode plan representations.
+        journal_options = dict(options, clip_checkpoint_dir=str(clip_owner.directory))
     _check_cancelled(cancellation)
     with clip_owner as clip_journal, owner as journal:
         existing = set() if journal is None else journal.existing_destinations
         if clip_journal is not None:
-            clip_journal.prepare(jobs, destinations)
+            clip_journal.prepare(jobs, destinations,
+                                 **({"completion_checkpoint": owner.path} if journal is not None else {}))
             existing.update(clip_journal.existing_destinations)
         for destination in all_destinations:
             if os.path.lexists(destination) and destination not in existing:
                 raise FileExistsError(f"render destination already exists: {destination}")
         if journal is not None:
-            journal.prepare_sources(names, destinations, options, source=source,
+            journal.prepare_sources(names, destinations, journal_options, source=source,
                                     source_digest=digest, working_directory=working_directory,
                                     **({"variants": variants} if variants is not None else {}))
         if clip_journal is not None:

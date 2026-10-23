@@ -15,8 +15,6 @@ from .batch_checkpoint import _CheckpointFile, _MAX_FILES, _json, _read_document
 
 
 def validate_clip_recovery(*, checkpoint, subdivide, save_last_frame, reproducible, format):
-    if checkpoint is not None:
-        raise ValueError("clip_checkpoint_dir and the whole-scene checkpoint are mutually exclusive")
     if not subdivide or format not in {"gif", "y4m", "png_sequence", "wav", "mp4", "mov"}:
         raise ValueError("clip_checkpoint_dir requires subdivide=True with an animated clip format")
     if reproducible:
@@ -70,9 +68,14 @@ class ParallelClipPlan(_CheckpointFile):
         self._check_directories()
         return super().__enter__()
 
-    def prepare(self, jobs, destinations):
+    def prepare(self, jobs, destinations, *, completion_checkpoint=None):
         self._check_directories()
         self.plan = json.loads(_json({"jobs": jobs, "destinations": [str(path) for path in destinations]}))
+        if completion_checkpoint is not None:
+            # Both owners bind the other journal's location. Switching modes or
+            # borrowing a completion journal from another run must not make
+            # authored side effects disappear (or unexpectedly execute again).
+            self.plan["completion_checkpoint"] = str(completion_checkpoint)
         if self.document is not None:
             if (set(self.document) != {"schema", "version", "key", "plan"}
                     or _json(self.document["plan"]) != _json(self.plan)):

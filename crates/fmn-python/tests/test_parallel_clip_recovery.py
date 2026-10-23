@@ -296,7 +296,7 @@ class ParallelClipProcessTests(unittest.TestCase):
             self.render([SourceRenderJob("seed7", "Lesson", {"seed": 8}), names[1]], resume=True)
 
     def test_incompatible_modes_refuse_before_worker_admission(self):
-        for changes in ({"subdivide": False}, {"checkpoint": self.root / "batch.json"},
+        for changes in ({"subdivide": False}, {"checkpoint": self.state / "plan.json"},
                         {"format": "fmtl"}, {"reproducible": True}):
             with self.subTest(changes=changes), patch.object(parallel_batch, "run_process_jobs") as workers:
                 with self.assertRaises((ValueError, RuntimeError)):
