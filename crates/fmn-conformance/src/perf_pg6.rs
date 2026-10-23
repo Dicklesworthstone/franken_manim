@@ -1015,11 +1015,12 @@ mod tests {
             // tex_overbrace with cmr10's own + and = at franken_markdown
             // 49466bc, then tex_fraction, tex_display_sum and tex_overbrace
             // with mu and the Appendix G parameters at the current size,
-            // sub-micro shifts, at franken_markdown abbb957)
+            // sub-micro shifts, at franken_markdown abbb957, then tex_overbrace
+            // with cmex's brace pieces at franken_markdown 2f1e00c)
             // and the journaled map orientation.
             assert_eq!(
                 definition.digest().to_string(),
-                "b5bfc7c095dab69af90f1fc4004644885662030e3b50de22076ac9d653b44720"
+                "7bf54bf9fbe6db9ae91277133902f76ac580db7801d7ba1547335f4315487edf"
             );
         }
     }
