@@ -130,6 +130,10 @@ class Probes:
         self.members = collections.defaultdict(list)  # member name -> [(row, owner class)]
         self.native_members = set()                   # member names with a native implementation
         self.classes = collections.defaultdict(list)  # class -> [row]
+        # code object -> member names it answers for, when its own name differs: the portal's
+        # installers rename __name__ and __qualname__ but not co_name (Animation.copy runs code
+        # named animation_copy).
+        self.renamed = collections.defaultdict(set)
         self.status = {}                              # row -> ok | placeholder | error: ...
         self.implementation = {}                      # row -> (owner, attribute name, value)
         # member name -> {id(type): (weak reference, rows)}: the suites assert that the classes
@@ -155,8 +159,11 @@ class Probes:
                 # A member is called through its name on an instance, whichever override
                 # (or installer wrapper) of that name then runs.
                 self.members[name].append((index, owner))
-                if getattr(function, "__code__", None) is None:
+                code = getattr(function, "__code__", None)
+                if code is None:
                     self.native_members.add(name)
+                elif code.co_name != name:
+                    self.renamed[code].add(name)
             elif getattr(function, "__code__", None) is not None:
                 # A function, or a staticmethod member, which runs with no instance receiver
                 # (StringMobject.span_contains, the Mobject.affects_data decorator): calling
@@ -164,6 +171,10 @@ class Probes:
                 self.code[function.__code__].append(index)
             elif callable(function):
                 self.native[getattr(function, "__name__", name)].append(index)
+        # A code object installed under several names (a getter factory, a decorator's shared
+        # wrapper) cannot say which member ran, so it answers for none of them.
+        self.renamed = {code: tuple(names) for code, names in self.renamed.items()
+                        if len(names) == 1}
 
     def matches(self, name: str, cls: type) -> tuple[int, ...]:
         """The rows a call of member `name` on an instance of `cls` witnesses: the member rows of
@@ -192,10 +203,16 @@ def resolve(module: str, symbol: str):
 
 
 def callable_of(value):
-    """The function a call or attribute read runs: unwrap property, classmethod, staticmethod."""
+    """The function a call or attribute read runs: unwrap property, classmethod, staticmethod,
+    and a code-less caching wrapper (functools.lru_cache), whose wrapped function runs on a
+    miss."""
     if isinstance(value, property):
         return value.fget
-    return getattr(value, "__func__", value)
+    function = getattr(value, "__func__", value)
+    wrapped = getattr(function, "__wrapped__", None)
+    if getattr(function, "__code__", None) is None and getattr(wrapped, "__code__", None) is not None:
+        return wrapped
+    return function
 
 
 MONITOR = sys.monitoring
@@ -277,11 +294,13 @@ class Recorder:
 
     def _start(self, code, offset):
         rows = self.probes.code.get(code)
-        member = code.co_name in self.probes.members and "." in code.co_qualname
+        names = self.probes.renamed.get(code, ())
+        if code.co_name in self.probes.members and "." in code.co_qualname:
+            names = (code.co_name, *names)
         in_suite = code.co_filename == self.suite_file
         test = in_suite and code.co_name.startswith("test")
         module = in_suite and code.co_name == "<module>"
-        if not (rows or member or test or module):
+        if not (rows or names or test or module):
             return MONITOR.DISABLE
         if module:
             # LINE events on the module code alone give the running top-level statement.
@@ -294,10 +313,11 @@ class Recorder:
             MONITOR.set_local_events(TOOL, code, MONITOR.events.PY_RETURN)
             return None
         self._hit_all(rows)
-        if member:
+        if names:
             instance = first_argument(frame)
             if instance is not None:
-                self._instance(instance, code.co_name)
+                for name in names:
+                    self._instance(instance, name)
         return None
 
     def _line(self, code, line):

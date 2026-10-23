@@ -38,6 +38,36 @@ SYNTHETIC = textwrap.dedent('''
         @staticmethod
         def contains(outer, inner):
             return outer[0] <= inner[0] and inner[1] <= outer[1]
+
+    import functools
+
+    def _install_area(cls):
+        def tile_area(self):
+            return self.width() ** 2
+        tile_area.__name__ = "area"
+        tile_area.__qualname__ = cls.__qualname__ + ".area"
+        cls.area = tile_area
+
+    class Tile(Shape):
+        pass
+
+    _install_area(Tile)
+
+    def _getter(attribute):
+        def get(self):
+            return getattr(self, attribute)
+        return get
+
+    class Box(Shape):
+        side = 1.0
+        depth = 2.0
+
+    Box.get_side = _getter("side")
+    Box.get_depth = _getter("depth")
+
+    @functools.lru_cache(maxsize=None)
+    def cached_area(side):
+        return side * side
 ''')
 
 
@@ -181,6 +211,35 @@ class Harness(unittest.TestCase):
             self.assertIsNone(self.mod.Span.contains((0, 3), (1, 2)))
         finally:
             self.mod.Span.contains = original
+
+    def test_an_installer_renamed_member_counts_by_its_code(self):
+        # The portal installs implementations whose code keeps its own name: Animation.copy
+        # runs code named animation_copy, FadeTransform.clean_up_from_scene runs `cleanup`. The
+        # row's code object answers for the member's name. One code object installed under two
+        # names (a getter factory, a decorator's wrapper) is ambiguous and witnesses neither.
+        rows = [row("Tile.area", "method"), row("Box.get_side", "method"),
+                row("Box.get_depth", "method")]
+        recorder = pw.Recorder(pw.Probes(rows), __file__, render_rows=set())
+
+        def test_tile(mod=self.mod):
+            mod.Tile().area()
+            mod.Box().get_side()
+        with recorder:
+            test_tile()
+        self.assertEqual({rows[i]["symbol"] for i in recorder.hits["test_tile"]}, {"Tile.area"})
+
+    def test_a_cached_function_counts_when_its_wrapped_code_runs(self):
+        # functools.lru_cache wraps a function in a C object with no code
+        # (manimlib.mobject.numbers.char_to_cahced_mob): the wrapped function's code answers.
+        rows = [row("cached_area", "function")]
+        recorder = pw.Recorder(pw.Probes(rows), __file__, render_rows=set())
+
+        def test_cached(mod=self.mod):
+            mod.cached_area(3.0)
+        with recorder:
+            test_cached()
+        self.assertEqual({rows[i]["symbol"] for i in recorder.hits["test_cached"]},
+                         {"cached_area"})
 
     def test_an_installer_wrapper_with_star_args_still_names_its_receiver(self):
         rows = [row("Square.width", "method")]
