@@ -1097,6 +1097,8 @@ pub(crate) struct StrokeRef {
     pub(crate) segments: PoolRange,
     /// The aggregate conservative slab.
     pub(crate) slab: [f64; 4],
+    /// Optional fine-tile CSR ranges (starts, segment indices), in outline order.
+    pub(crate) bins: Option<(PoolRange, PoolRange)>,
 }
 
 /// The arena coordinates of a draw's [`GradientField`] stations.
@@ -1641,11 +1643,29 @@ impl<'a> FrameJob<'a> {
                     translate,
                     straight_segments,
                 );
+                let segments = arena
+                    .stroke_segments
+                    .range_from("prepared stroke rows", start)?;
+                let bins = if matches!(
+                    identity.engine,
+                    EngineKind::CertifiedCpu | EngineKind::FastCpu
+                ) {
+                    stroke::build_stroke_bins_into(
+                        &mut arena.stroke_bin_starts,
+                        &mut arena.stroke_bin_entries,
+                        &mut arena.stroke_bin_ranges,
+                        arena.stroke_segments.slice(segments),
+                        config.viewport,
+                        binning.tiling().fine_tile,
+                    )?
+                } else {
+                    // Annex renderers derive their own device-side candidates.
+                    None
+                };
                 Some(StrokeRef {
-                    segments: arena
-                        .stroke_segments
-                        .range_from("prepared stroke rows", start)?,
+                    segments,
                     slab,
+                    bins,
                 })
             } else {
                 None
@@ -1785,9 +1805,15 @@ impl<'a> FrameJob<'a> {
     /// One draw's prepared stroke, reconstituted as the borrowed view.
     pub(crate) fn stroke_of(&self, rec: &Draw) -> Option<stroke::PreparedStroke<'_>> {
         rec.stroke.map(|stroke| {
-            stroke::PreparedStroke::from_parts(
+            stroke::PreparedStroke::from_parts_binned(
                 self.arena().stroke_segments.slice(stroke.segments),
                 stroke.slab,
+                stroke.bins.map(|(starts, entries)| {
+                    stroke::StrokeBins::new(
+                        self.arena().stroke_bin_starts.slice(starts),
+                        self.arena().stroke_bin_entries.slice(entries),
+                    )
+                }),
             )
         })
     }
@@ -2322,11 +2348,11 @@ impl<'a> FrameJob<'a> {
             // R-5: within one object the fill draws before the stroke, unless
             // `stroke_behind` swaps them (docs/RENDER_ORDER.md).
             if rec.style.stroke_behind {
-                self.stroke_pass::<K>(worker, rec, py, x_lo, x_hi, classify);
+                self.stroke_pass::<K>(worker, rec, tile, py, x_lo..x_hi, classify);
                 self.fill_pass::<K>(worker, rec, interior, py, x_lo..x_hi, classify);
             } else {
                 self.fill_pass::<K>(worker, rec, interior, py, x_lo..x_hi, classify);
-                self.stroke_pass::<K>(worker, rec, py, x_lo, x_hi, classify);
+                self.stroke_pass::<K>(worker, rec, tile, py, x_lo..x_hi, classify);
             }
         }
     }
@@ -2428,11 +2454,12 @@ impl<'a> FrameJob<'a> {
         &self,
         worker: &mut Worker<K>,
         rec: &Draw,
+        tile: usize,
         py: u32,
-        x_lo: u32,
-        x_hi: u32,
+        x: std::ops::Range<u32>,
         classify: bool,
     ) {
+        let (x_lo, x_hi) = (x.start, x.end);
         let Some(stroke) = self.stroke_of(rec) else {
             return;
         };
@@ -2450,7 +2477,7 @@ impl<'a> FrameJob<'a> {
         let classify = classify && stroke_may_contribute_complexity(&rec.style, self.config.map);
         // Only cells meeting the stroke's row span can receive coverage or an
         // edge count; every other pixel of the row is an exact no-op.
-        let Some((span_lo, span_hi)) = stroke.row_span(f64::from(py)) else {
+        let Some((span_lo, span_hi)) = stroke.row_span_in_tile(tile, f64::from(py)) else {
             return;
         };
         let w = (x_hi - x_lo) as usize;
@@ -2465,7 +2492,8 @@ impl<'a> FrameJob<'a> {
             if p[0] < slab[0] || p[0] > slab[2] {
                 continue;
             }
-            let (coverage, s) = stroke.shade(
+            let (coverage, s) = stroke.shade_in_tile(
+                tile,
                 segments,
                 joins,
                 &rec.style,
@@ -2481,6 +2509,7 @@ impl<'a> FrameJob<'a> {
                     || self.stroke_has_eligible_subcell_edge(
                         rec,
                         segments,
+                        tile,
                         py,
                         x_lo + i as u32,
                         coverage,
@@ -2507,6 +2536,7 @@ impl<'a> FrameJob<'a> {
         &self,
         rec: &Draw,
         segments: &[Segment],
+        tile: usize,
         py: u32,
         px: u32,
         centre_coverage: f64,
@@ -2530,7 +2560,8 @@ impl<'a> FrameJob<'a> {
         for dy in [0.25, 0.75] {
             for dx in [0.25, 0.75] {
                 let p = [f64::from(px) + dx, f64::from(py) + dy];
-                let (coverage, s) = stroke.shade(
+                let (coverage, s) = stroke.shade_in_tile(
+                    tile,
                     segments,
                     joins,
                     &rec.style,
@@ -2587,11 +2618,11 @@ impl<'a> FrameJob<'a> {
                     };
                     let interior = flags.get(k).copied() == Some(CLASS_INTERIOR);
                     if rec.style.stroke_behind {
-                        acc = self.stroke_sample::<K>(rec, subcell, acc);
+                        acc = self.stroke_sample::<K>(tile, rec, subcell, acc);
                         acc = self.fill_sample::<K>(rec, interior, subcell, acc);
                     } else {
                         acc = self.fill_sample::<K>(rec, interior, subcell, acc);
-                        acc = self.stroke_sample::<K>(rec, subcell, acc);
+                        acc = self.stroke_sample::<K>(tile, rec, subcell, acc);
                     }
                 }
                 let acc = K::to_premul(acc);
@@ -2667,6 +2698,7 @@ impl<'a> FrameJob<'a> {
     /// One stroke pass at one subcell centre.
     fn stroke_sample<K: PixelKernel>(
         &self,
+        tile: usize,
         rec: &Draw,
         subcell: Subcell,
         dst: K::Pixel,
@@ -2675,7 +2707,8 @@ impl<'a> FrameJob<'a> {
             return dst;
         };
         let p = subcell.centre();
-        let (coverage, s) = stroke.shade(
+        let (coverage, s) = stroke.shade_in_tile(
+            tile,
             self.segments_of(rec),
             self.joins_of(rec),
             &rec.style,
@@ -3570,6 +3603,213 @@ mod tests {
         Tiling {
             macro_tile: 64,
             fine_tile: 16,
+        }
+    }
+
+    /// Long curved and sharp-cornered outlines with observable arc-length
+    /// colour/width stations, affine placement, overlap, and offscreen caps.
+    fn long_stroke_corpus() -> Stage {
+        let mut stage = Stage::new();
+        let curve = ring(34.0, 29.0, 25.0, 72, true);
+        let mut zigzag = fmn_geom::quadpath::QuadPath::new();
+        zigzag.start_new_path([-8.0, 20.0, 0.0]);
+        // The tail extends completely beyond the 73-pixel matrix viewport:
+        // skipped slabs must not participate in the CSR count/scatter pass.
+        for i in 1..=96u32 {
+            zigzag
+                .add_line_to(
+                    [
+                        -8.0 + f64::from(i),
+                        if i % 2 == 0 { 20.0 } else { 39.0 },
+                        0.0,
+                    ],
+                    false,
+                )
+                .expect("bounded zigzag");
+        }
+        for (index, points) in [curve.as_slice(), zigzag.points()].into_iter().enumerate() {
+            let mob = stage.add(vmob(
+                points,
+                if index == 0 {
+                    [0.1, 0.2, 0.6, 0.35]
+                } else {
+                    [0.0; 4]
+                },
+                [1.0, 0.2, 0.1, 0.8],
+                310.0,
+            ));
+            let entry = stage.get_mut(mob).expect("long stroke");
+            entry
+                .buffer
+                .write(points.len() - 1, "stroke_width", &[620.0]);
+            entry
+                .buffer
+                .write(points.len() - 1, "stroke_rgba", &[0.1, 0.8, 1.0, 0.65]);
+            let uniforms = stage.uniforms_mut(mob).expect("long stroke uniforms");
+            uniforms.joint_type = if index == 0 {
+                fmn_mobject::JointType::Bevel
+            } else {
+                fmn_mobject::JointType::Miter
+            };
+            uniforms.stroke_behind = index == 0;
+            stage.add_to_scene(mob).expect("rooted stroke");
+            if index == 0 {
+                stage.apply_affine(
+                    mob,
+                    Placement::new(
+                        [[1.0, 0.125, 0.0], [-0.125, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                        [-2.0, 4.0, 0.0],
+                    ),
+                );
+            }
+        }
+        // The short path keeps the unbinned fallback live beside indexed
+        // draws, including at an exact fine-tile boundary.
+        let short = stage.add(vmob(
+            &[[16.0, -4.0, 0.0], [16.0, 30.0, 0.0], [16.0, 64.0, 0.0]],
+            [0.0; 4],
+            [0.9, 0.9, 0.2, 0.75],
+            350.0,
+        ));
+        stage.add_to_scene(short).expect("short stroke");
+        stage
+    }
+
+    /// Exercise the original production scan without a separate rasterizer or
+    /// public optimization switch: only the optional candidate index is absent.
+    fn without_stroke_bins(mut job: FrameJob<'_>) -> FrameJob<'_> {
+        let ArenaStorage::Owned(arena) = &mut job.arena else {
+            panic!("the unbinned test reference must own its preparation");
+        };
+        for draw in arena.draws.slice_mut(job.draws).iter_mut().flatten() {
+            if let Some(stroke) = &mut draw.stroke {
+                stroke.bins = None;
+            }
+        }
+        job
+    }
+
+    #[test]
+    fn tile_binned_strokes_match_unbinned_frames_and_aa_at_every_thread_count() {
+        let stage = long_stroke_corpus();
+        for (fine_tile, y_up) in [(16, false), (19, true)] {
+            let cfg = FrameConfig::new(
+                Viewport {
+                    width: 73,
+                    height: 61,
+                },
+                ScreenMap {
+                    scale: 1.0,
+                    origin: [0.0, if y_up { 61.0 } else { 0.0 }],
+                    y_up,
+                },
+                config().background,
+            );
+            let tiling = Tiling {
+                macro_tile: fine_tile * 4,
+                fine_tile,
+            };
+            let (plan, mono, binning) = derive(&stage, cfg, tiling);
+            for (engine, aa) in [
+                (EngineKind::CertifiedCpu, AaPolicy::Adaptive),
+                (EngineKind::FastCpu, AaPolicy::Adaptive),
+                (EngineKind::FastCpu, AaPolicy::Ssaa2x),
+                (EngineKind::FastCpu, AaPolicy::Ssaa4x),
+            ] {
+                let cfg = cfg.with_aa_policy(aa);
+                let identity = EngineIdentity {
+                    engine,
+                    ..EngineIdentity::certified()
+                };
+                let job = FrameJob::with_identity(&plan, &mono, &binning, cfg, identity)
+                    .expect("indexed long strokes");
+                let indexed: Vec<_> = job
+                    .draws()
+                    .iter()
+                    .flatten()
+                    .filter_map(|draw| draw.stroke)
+                    .filter(|stroke| stroke.bins.is_some())
+                    .collect();
+                assert_eq!(
+                    indexed.len(),
+                    2,
+                    "long strokes must use the production CSR path"
+                );
+                let all_candidates: usize = indexed
+                    .iter()
+                    .map(|stroke| stroke.segments.len as usize * binning.tile_count())
+                    .sum();
+                let local_candidates: usize = indexed
+                    .iter()
+                    .map(|stroke| stroke.bins.expect("indexed").1.len as usize)
+                    .sum();
+                assert!(
+                    local_candidates < all_candidates / 2,
+                    "tile bins did not eliminate distant segments: {local_candidates}/{all_candidates}"
+                );
+                let reference = without_stroke_bins(
+                    FrameJob::with_identity(&plan, &mono, &binning, cfg, identity)
+                        .expect("original unbinned path"),
+                );
+                let (expected, expected_stats) =
+                    reference.render_with_stats(1).expect("unbinned frame");
+                if engine == EngineKind::FastCpu && aa == AaPolicy::Adaptive {
+                    assert!(
+                        expected_stats.ssaa2x_cells + expected_stats.ssaa4x_cells > 0,
+                        "the fixture must exercise adaptive subcell strokes"
+                    );
+                }
+                for threads in [1, 4, 16] {
+                    let (actual, stats) = job.render_with_stats(threads).expect("indexed frame");
+                    assert_frames_equal(
+                        &actual,
+                        &expected,
+                        &format!(
+                            "indexed stroke differs: {engine:?}, {aa:?}, tile {fine_tile}, threads {threads}"
+                        ),
+                    );
+                    assert_eq!(
+                        stats, expected_stats,
+                        "candidate culling changed adaptive classification or sample counts"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tile_binned_strokes_reuse_arena_storage_and_retained_pixels() {
+        let stage = long_stroke_corpus();
+        let cfg = config();
+        let (plan, mono, binning) = derive(&stage, cfg, default_tiling());
+        let expected = without_stroke_bins(
+            FrameJob::new(&plan, &mono, &binning, cfg).expect("unbinned artifacts"),
+        )
+        .render(1)
+        .expect("unbinned frame");
+        let mut arena = FrameArena::new();
+        let mut cache = PixelTileCache::new();
+        let mut frame = FrameBuffer::new(cfg.layout().expect("layout"));
+        let mut warm = None;
+        for index in 0..4 {
+            let job = FrameJob::new_in(&mut arena, &plan, &mono, &binning, cfg)
+                .expect("reused indexed artifacts");
+            let stats = job
+                .render_into_cached(4, &mut frame, 0, &mut cache)
+                .expect("retained indexed frame");
+            assert_frames_equal(&frame, &expected, "retention changed indexed stroke bytes");
+            let allocations = job.allocation_stats();
+            match warm {
+                None => warm = Some(allocations.arena_buffer_bytes),
+                Some(bytes) => {
+                    assert_eq!(
+                        allocations.heap_allocs_this_frame, 0,
+                        "CSR preparation allocated after frame {index}"
+                    );
+                    assert_eq!(allocations.arena_buffer_bytes, bytes);
+                    assert_eq!(stats.cache.misses, 0, "unchanged strokes rerasterized");
+                }
+            }
         }
     }
 

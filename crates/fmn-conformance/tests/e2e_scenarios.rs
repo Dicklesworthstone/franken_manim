@@ -9106,6 +9106,211 @@ fn frozen_render_packet_pipeline_run(ctx: &mut RunCtx) -> Result<RunOutcome, Sce
         .with_counter("steady_clean", 1))
 }
 
+/// Long native strokes exercise the production tile index across repeated
+/// export frames, worker counts, and style/geometry invalidation.
+fn tile_binned_stroke_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_render::{RetainedFrameRenderer, RetainedFrameRendererConfig, Tiling};
+
+    let config = RetainedFrameRendererConfig {
+        frame: FrameConfig::new(
+            Viewport {
+                width: 128,
+                height: 96,
+            },
+            ScreenMap {
+                scale: 16.0,
+                origin: [64.0, 48.0],
+                y_up: true,
+            },
+            fmn_core::color::LinearRgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+        ),
+        tiling: Tiling {
+            macro_tile: 64,
+            fine_tile: 16,
+        },
+        engine: EngineIdentity::certified(),
+        threads: 1,
+    };
+    let cold = |stage: &Stage| -> Result<Vec<u8>, ScenarioError> {
+        let mut renderer = RetainedFrameRenderer::new(config)
+            .map_err(|error| fail(format!("cold stroke renderer: {error}")))?;
+        renderer
+            .render(stage, 0)
+            .map_err(|error| fail(format!("cold stroke frame: {error}")))?;
+        Ok(renderer.frame().as_bytes().to_vec())
+    };
+    let mut stage = Stage::new();
+    // A black opaque backdrop gives every tile retained content, allowing an
+    // unchanged frame to prove zero raster cells as well as cache hits.
+    let backdrop = [
+        [-4.0, -3.0],
+        [0.0, -3.0],
+        [4.0, -3.0],
+        [4.0, 0.0],
+        [4.0, 3.0],
+        [0.0, 3.0],
+        [-4.0, 3.0],
+        [-4.0, 0.0],
+        [-4.0, -3.0],
+    ];
+    let mut records = RecordBuffer::new(RecordSchema::vmobject(), backdrop.len())
+        .map_err(|error| fail(format!("stroke backdrop records: {error}")))?;
+    for (index, point) in backdrop.iter().enumerate() {
+        records.write(index, "point", &[point[0], point[1], 0.0]);
+        records.write(index, "fill_rgba", &[0.0, 0.0, 0.0, 1.0]);
+        records.write(index, "stroke_rgba", &[0.0; 4]);
+        records.write(index, "stroke_width", &[0.0]);
+    }
+    let backdrop = stage.add(Mobject::from_buffer(records));
+    stage
+        .add_to_scene(backdrop)
+        .map_err(|error| fail(error.to_string()))?;
+    let blank = cold(&stage)?;
+
+    const SEGMENTS: usize = 96;
+    let mut points = Vec::with_capacity(2 * SEGMENTS + 1);
+    let secant = 1.0 / fmn_dmath::cos(std::f64::consts::PI / SEGMENTS as f64);
+    for index in 0..=2 * SEGMENTS {
+        let angle = std::f64::consts::PI * index as f64 / SEGMENTS as f64;
+        let radius = 2.2 * if index % 2 == 0 { 1.0 } else { secant };
+        points.push([
+            radius * fmn_dmath::cos(angle),
+            radius * fmn_dmath::sin(angle),
+            0.0,
+        ]);
+    }
+    let mut records = RecordBuffer::new(RecordSchema::vmobject(), points.len())
+        .map_err(|error| fail(format!("long stroke records: {error}")))?;
+    for (index, point) in points.iter().enumerate() {
+        records.write(index, "point", &[point[0] as f32, point[1] as f32, 0.0]);
+        records.write(index, "fill_rgba", &[0.0; 4]);
+        records.write(
+            index,
+            "stroke_rgba",
+            if index + 1 == points.len() {
+                &[1.0, 0.3, 0.1, 0.8]
+            } else {
+                &[0.1, 0.7, 1.0, 0.8]
+            },
+        );
+        records.write(
+            index,
+            "stroke_width",
+            &[if index + 1 == points.len() {
+                48.0
+            } else {
+                24.0
+            }],
+        );
+    }
+    let stroke = stage.add(Mobject::from_buffer(records));
+    stage
+        .add_to_scene(stroke)
+        .map_err(|error| fail(error.to_string()))?;
+    let initial = stage.snapshot();
+    let expected = cold(&stage)?;
+    let visible_pixels = expected
+        .chunks_exact(8)
+        .zip(blank.chunks_exact(8))
+        .filter(|(actual, background)| actual != background)
+        .count();
+    if visible_pixels < 100 {
+        return Err(fail(
+            "the long-stroke scenario produced no substantial visible stroke",
+        ));
+    }
+    let mut thread_counts = 0_u64;
+    let mut retained_replays = 0_u64;
+    let mut edited_frames = 0_u64;
+    for threads in [1, 4, 16] {
+        stage.restore(&initial);
+        let mut renderer =
+            RetainedFrameRenderer::new(RetainedFrameRendererConfig { threads, ..config })
+                .map_err(|error| fail(format!("indexed stroke renderer: {error}")))?;
+        renderer
+            .render(&stage, 0)
+            .map_err(|error| fail(format!("indexed stroke render: {error}")))?;
+        if renderer.frame().as_bytes() != expected {
+            return Err(fail(format!(
+                "long stroke changed pixels at {threads} workers"
+            )));
+        }
+        let replay = renderer
+            .render(&stage, 0)
+            .map_err(|error| fail(format!("retained long-stroke replay: {error}")))?;
+        if renderer.frame().as_bytes() != expected
+            || replay.cache.hits == 0
+            || replay.cache.misses != 0
+            || replay.cache.poisoned != 0
+            || replay.raster.output_cells != 0
+            || renderer.allocation_stats().heap_allocs_this_frame != 0
+        {
+            return Err(fail(format!(
+                "long-stroke replay did not preserve pixels and eliminate work at {threads} workers"
+            )));
+        }
+        retained_replays += 1;
+        let mut previous = expected.clone();
+        for edit in 0..2 {
+            if edit == 0 {
+                let entry = stage
+                    .get_mut(stroke)
+                    .ok_or_else(|| fail("long stroke disappeared"))?;
+                for index in 0..points.len() {
+                    entry.buffer.write(
+                        index,
+                        "stroke_width",
+                        &[if index + 1 == points.len() {
+                            72.0
+                        } else {
+                            40.0
+                        }],
+                    );
+                }
+            } else {
+                let mut deformed = points.clone();
+                deformed[1][0] += 0.6;
+                deformed[2][0] += 0.4;
+                stage
+                    .set_points(stroke, &deformed)
+                    .map_err(|error| fail(format!("long-stroke geometry edit: {error}")))?;
+            }
+            let edited = renderer
+                .render(&stage, 0)
+                .map_err(|error| fail(format!("edited long stroke: {error}")))?;
+            let reference = cold(&stage)?;
+            if renderer.frame().as_bytes() != reference
+                || reference == previous
+                || edited.cache.misses == 0
+            {
+                return Err(fail(format!(
+                    "stroke edit {edit} failed cold equivalence or invalidation at {threads} workers"
+                )));
+            }
+            previous = reference;
+            edited_frames += 1;
+        }
+        thread_counts += 1;
+    }
+    ctx.event(
+        LogEvent::new("e2e.render.tile_binned_strokes")
+            .field("thread_counts", thread_counts)
+            .field("retained_replays", retained_replays)
+            .field("edited_frames", edited_frames)
+            .field("visible_pixels", visible_pixels as u64)
+            .field("sha256", sha256(&expected).to_hex()),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("stroke_thread_counts", thread_counts)
+        .with_counter("stroke_retained_replays", retained_replays)
+        .with_counter("stroke_edited_frames", edited_frames))
+}
+
 /// fm-p010-precision-transfer-tag-8n7u, fm-nv12-passthrough-encoders-4s3b,
 /// fm-allowlist-runtime-unsafe-audit-pending-nloe, fm-look-gallery-clean-provenance-guard-kbig.
 fn video_color_and_gallery_provenance_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -11418,6 +11623,27 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )
         .tier(Tier::Fast),
     );
+    specs.push(spec(
+        "lifecycle.tile_binned_stroke_render.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(tile_binned_stroke_render_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("stroke_thread_counts", 3),
+            counter_eq("stroke_retained_replays", 3),
+            counter_eq("stroke_edited_frames", 6),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render.tile_binned_strokes",
+            vec![
+                FieldPred::u64_eq("thread_counts", 3),
+                FieldPred::u64_eq("retained_replays", 3),
+                FieldPred::u64_eq("edited_frames", 6),
+                FieldPred::u64_ge("visible_pixels", 100),
+            ],
+        )],
+    ));
     specs.push(
         spec(
             "lifecycle.video_color_and_gallery_provenance.v1",
@@ -12438,6 +12664,16 @@ fn phase2_and_phase3_e2e_scenarios_pass() {
         let report = Runner::from_env().run(scenario);
         assert!(report.is_pass(), "{}", report.summary());
     }
+}
+
+#[test]
+fn tile_binned_stroke_render_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.tile_binned_stroke_render.v1")
+        .expect("tile-binned stroke scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
 }
 
 #[test]

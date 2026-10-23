@@ -282,12 +282,10 @@ impl ChordStrip {
 }
 
 /// Minimum segment count before a planar stroke builds a fine-tile CSR index.
-#[expect(dead_code, reason = "fm-q2l6: tile-binned strokes have no caller yet")]
 pub(crate) const STROKE_BIN_MIN_SEGMENTS: usize = 64;
 
 /// Hard cap on CSR entry count for a single stroke draw so pathological full-frame
 /// slabs fall back to linear scan rather than blowing up the arena.
-#[expect(dead_code, reason = "fm-q2l6: tile-binned strokes have no caller yet")]
 const MAX_STROKE_BIN_ENTRIES: usize = 1 << 24;
 
 /// Borrowed fine-tile CSR index over a draw's [`PreparedSegment`] slice.
@@ -297,13 +295,11 @@ const MAX_STROKE_BIN_ENTRIES: usize = 1 << 24;
 /// [`PreparedStroke::shade_in_tile`] visit candidate segments in the exact
 /// same order as the unbinned scan.
 #[derive(Debug, Clone, Copy)]
-#[expect(dead_code, reason = "fm-q2l6: tile-binned strokes have no caller yet")]
 pub(crate) struct StrokeBins<'a> {
     starts: &'a [u32],
     entries: &'a [u32],
 }
 
-#[expect(dead_code, reason = "fm-q2l6: tile-binned strokes have no caller yet")]
 impl<'a> StrokeBins<'a> {
     #[must_use]
     pub(crate) fn new(starts: &'a [u32], entries: &'a [u32]) -> Self {
@@ -329,7 +325,6 @@ impl<'a> StrokeBins<'a> {
 
 /// Build a fine-tile CSR index for `prepared_segments` into `starts_pool` and
 /// `entries_pool`, using `ranges_scratch` as construction-only temporary storage.
-#[expect(dead_code, reason = "fm-q2l6: tile-binned strokes have no caller yet")]
 pub(crate) fn build_stroke_bins_into(
     starts_pool: &mut crate::arena::Pool<u32>,
     entries_pool: &mut crate::arena::Pool<u32>,
@@ -360,7 +355,8 @@ pub(crate) fn build_stroke_bins_into(
     let _ = ranges_scratch.fill_range(
         "stroke bin ranges scratch",
         prepared_segments.len(),
-        [1, 0, 1, 0],
+        // x0 > x1 and y0 > y1: offscreen segments never enter the scatter.
+        [1, 1, 0, 0],
     )?;
     let starts_range = starts_pool.fill_range("stroke bin starts", starts_len, 0)?;
 
@@ -380,8 +376,12 @@ pub(crate) fn build_stroke_bins_into(
         });
         for (prepared, range) in prepared_segments.iter().zip(ranges.iter_mut()) {
             let slab = prepared.slab;
-            if !slab.iter().all(|v| v.is_finite())
-                || slab[2] < 0.0
+            // An unbounded slab cannot prove any tile empty. Keep the ordinary
+            // scan rather than silently dropping a segment from every tile.
+            if !slab.iter().all(|v| v.is_finite()) {
+                return Ok(None);
+            }
+            if slab[2] < 0.0
                 || slab[3] < 0.0
                 || slab[0] > width_f
                 || slab[1] > height_f
@@ -464,7 +464,6 @@ pub(crate) fn build_stroke_bins_into(
 pub(crate) struct PreparedStroke<'a> {
     segments: &'a [PreparedSegment],
     slab: [f64; 4],
-    #[expect(dead_code, reason = "fm-q2l6: tile-binned strokes have no caller yet")]
     bins: Option<StrokeBins<'a>>,
 }
 
@@ -483,17 +482,14 @@ impl<'a> PreparedStroke<'a> {
 
     /// The view over caller-owned prepared segments, their aggregate slab, and
     /// an optional fine-tile CSR index.
-    #[expect(dead_code, reason = "fm-q2l6: tile-binned strokes have no caller yet")]
     pub(crate) fn from_parts_binned(
         segments: &'a [PreparedSegment],
         slab: [f64; 4],
         bins: Option<StrokeBins<'a>>,
     ) -> Self {
-        Self {
-            segments,
-            slab,
-            bins,
-        }
+        let mut stroke = Self::from_parts(segments, slab);
+        stroke.bins = bins;
+        stroke
     }
 
     /// Derive every segment's slab and total arc length into `out`, returning
@@ -583,7 +579,6 @@ impl<'a> PreparedStroke<'a> {
     /// Tile-scoped counterpart to [`Self::row_span`]: when a fine-tile CSR
     /// index is present, only segments overlapping `tile` are inspected.
     #[must_use]
-    #[expect(dead_code, reason = "fm-q2l6: tile-binned strokes have no caller yet")]
     pub(crate) fn row_span_in_tile(&self, tile: usize, y0: f64) -> Option<(f64, f64)> {
         let Some(bins) = self.bins else {
             return self.row_span(y0);
@@ -659,7 +654,6 @@ impl<'a> PreparedStroke<'a> {
         admitted.then_some((best, best_s))
     }
 
-    #[expect(dead_code, reason = "fm-q2l6: tile-binned strokes have no caller yet")]
     fn nearest_in_tile(
         &self,
         tile: usize,
@@ -746,7 +740,6 @@ impl<'a> PreparedStroke<'a> {
 
     #[must_use]
     #[allow(clippy::too_many_arguments)]
-    #[expect(dead_code, reason = "fm-q2l6: tile-binned strokes have no caller yet")]
     pub(crate) fn shade_in_tile(
         &self,
         tile: usize,
@@ -757,6 +750,9 @@ impl<'a> PreparedStroke<'a> {
         translate: [f64; 2],
         p: [f64; 2],
     ) -> (f64, f64) {
+        if self.bins.is_none() {
+            return self.shade(segments, joins, style, map, translate, p);
+        }
         if style.maximum_stroke_width() <= 0.0 {
             return (0.0, 0.0);
         }
@@ -1457,6 +1453,119 @@ mod tests {
         p.start_new_path([0.0, 0.0, 0.0]);
         p.add_line_to([len, 0.0, 0.0], false).unwrap();
         p
+    }
+
+    #[test]
+    fn stroke_bins_preserve_segment_order_and_boundary_shading() {
+        let mut segments = Vec::new();
+        for index in 0..STROKE_BIN_MIN_SEGMENTS {
+            // Repeated, coincident segments make tie-breaking observable in
+            // the colour station, while the other slabs span different tiles.
+            let x = if index % 4 == 0 { 16.0 } else { index as f64 };
+            segments.push(Segment {
+                p0: [x, -4.0, 0.0],
+                p1: [x, 16.0, 0.0],
+                p2: [x, 36.0, 0.0],
+                s0: index as f64 / STROKE_BIN_MIN_SEGMENTS as f64,
+                s1: (index + 1) as f64 / STROKE_BIN_MIN_SEGMENTS as f64,
+            });
+        }
+        let style = Style {
+            stroke_rgba_end: [0.1, 0.5, 0.9, 0.75],
+            ..flat_stroke_style(350.0)
+        };
+        let (backing, slab) = prepared(&segments, &style, unit(), [0.0, 0.0], true);
+        let mut starts = crate::arena::Pool::default();
+        let mut entries = crate::arena::Pool::default();
+        let mut ranges = crate::arena::Pool::default();
+        let viewport = crate::bin::Viewport {
+            width: 49,
+            height: 33,
+        };
+        let (starts_range, entries_range) = build_stroke_bins_into(
+            &mut starts,
+            &mut entries,
+            &mut ranges,
+            &backing,
+            viewport,
+            16,
+        )
+        .expect("bounded index")
+        .expect("long stroke is indexed");
+        let bins = StrokeBins::new(starts.slice(starts_range), entries.slice(entries_range));
+        let scanned = PreparedStroke::from_parts(&backing, slab);
+        let indexed = PreparedStroke::from_parts_binned(&backing, slab, Some(bins));
+        for tile in 0..12 {
+            let candidates = bins.tile_entries(tile);
+            assert!(
+                candidates.windows(2).all(|pair| pair[0] < pair[1]),
+                "tile {tile} changed outline-order tie-breaking"
+            );
+        }
+        // Exact boundaries and all the subcell offsets used by 2x/4x AA,
+        // including the partially covered right/bottom tiles.
+        for y in [0.0, 0.125, 15.75, 16.0, 16.25, 31.875, 32.0, 32.75] {
+            for x in [0.0, 0.125, 15.75, 16.0, 16.25, 31.875, 32.0, 32.75, 48.5] {
+                let tile = (y as usize / 16) * 4 + x as usize / 16;
+                let point = [x, y];
+                let expected = scanned.shade(&segments, &[], &style, unit(), [0.0, 0.0], point);
+                let actual =
+                    indexed.shade_in_tile(tile, &segments, &[], &style, unit(), [0.0, 0.0], point);
+                assert_eq!(
+                    (actual.0.to_bits(), actual.1.to_bits()),
+                    (expected.0.to_bits(), expected.1.to_bits()),
+                    "sample {point:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stroke_bins_fall_back_for_short_or_unbounded_strokes() {
+        let style = flat_stroke_style(350.0);
+        let segments = segs_of(&line(24.0));
+        let (backing, _) = prepared(&segments, &style, unit(), [0.0, 0.0], true);
+        let mut starts = crate::arena::Pool::default();
+        let mut entries = crate::arena::Pool::default();
+        let mut ranges = crate::arena::Pool::default();
+        let viewport = crate::bin::Viewport {
+            width: 32,
+            height: 32,
+        };
+        assert_eq!(
+            build_stroke_bins_into(
+                &mut starts,
+                &mut entries,
+                &mut ranges,
+                &backing,
+                viewport,
+                16,
+            )
+            .expect("short stroke"),
+            None
+        );
+        assert_eq!(
+            starts.len(),
+            0,
+            "short strokes should not allocate an index"
+        );
+        assert_eq!(entries.len(), 0);
+        let mut unbounded = vec![backing[0]; STROKE_BIN_MIN_SEGMENTS];
+        unbounded[0].slab[0] = f64::NEG_INFINITY;
+        assert_eq!(
+            build_stroke_bins_into(
+                &mut starts,
+                &mut entries,
+                &mut ranges,
+                &unbounded,
+                viewport,
+                16,
+            )
+            .expect("unbounded stroke"),
+            None,
+            "uncertain bounds must retain the original scan"
+        );
+        assert_eq!(entries.len(), 0, "fallback must not scatter any candidates");
     }
 
     #[test]
