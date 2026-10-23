@@ -229,6 +229,12 @@ FMN_TEST_NATIVE=1 python3 crates/fmn-python/tests/test_media_job_file_native.py
 FMN_TEST_NATIVE=1 python3 crates/fmn-python/tests/test_source_job_variants_native.py
 FMN_TEST_NATIVE=1 python3 crates/fmn-python/tests/test_native_uniform_checkpoint.py
 FMN_TEST_NATIVE=1 python3 crates/fmn-python/tests/test_integer_readouts_native.py
+FMN_TEST_NATIVE=1 python3 crates/fmn-python/tests/test_ledger_witnesses_animation.py
+FMN_TEST_NATIVE=1 python3 crates/fmn-python/tests/test_ledger_witnesses_mobject_scene.py
+FMN_TEST_NATIVE=1 python3 crates/fmn-python/tests/test_ledger_witnesses_drawings_interactive.py
+FMN_TEST_NATIVE=1 python3 crates/fmn-python/tests/test_ledger_witnesses_strings_svg.py
+FMN_TEST_NATIVE=1 python3 crates/fmn-python/tests/test_ledger_witnesses_runtime_config.py
+FMN_TEST_NATIVE=1 python3 crates/fmn-python/tests/test_ledger_witnesses_geometry_camera.py
 
 # Every protocol suite, not only the ones named above, so a fake Scene or
 # lifted namespace that falls behind production code fails here (fm-fmgv:
