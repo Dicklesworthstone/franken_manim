@@ -1073,6 +1073,144 @@ impl Default for IntegratorTune {
     }
 }
 
+/// Dimension-independent samples from an adaptive ODE solution.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OdeSamples {
+    /// Requested sample times, on the endpoint-exclusive `0, dt, 2 * dt, …` grid.
+    pub times: Vec<f64>,
+    /// One state vector per requested time, with the initial state's dimension.
+    pub states: Vec<Vec<f64>>,
+    /// Right-hand-side evaluations performed by the adaptive solver.
+    pub nfev: usize,
+}
+
+/// A native ODE failure or the original error from an authored callback.
+#[derive(Debug)]
+pub enum OdeError<E> {
+    /// Invalid controls, samples, or an unsuccessful native integration.
+    Field(FieldError),
+    /// The first callback error, preserved without conversion or further calls.
+    Callback(E),
+}
+
+impl<E: fmt::Display> fmt::Display for OdeError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Field(error) => error.fmt(formatter),
+            Self::Callback(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl<E: std::error::Error + 'static> std::error::Error for OdeError<E> {}
+
+impl<E> From<FieldError> for OdeError<E> {
+    fn from(error: FieldError) -> Self {
+        Self::Field(error)
+    }
+}
+
+/// Integrate an autonomous, fallible ODE in any positive dimension using
+/// fsci's adaptive RK45 and dense output on `arange(0, time, dt)`.
+///
+/// `dt` selects output samples; it is not the solver step size. The sampling
+/// budget counts scalar output values (rows times state dimension), and is
+/// checked before any callback. No partial solution is returned on failure.
+/// The first callback error stops authored evaluation and is returned intact.
+///
+/// # Errors
+/// [`OdeError::Field`] for invalid controls, an empty/non-finite state, a
+/// derivative with the wrong dimension or non-finite values, an exceeded
+/// output budget, or an unsuccessful solve. [`OdeError::Callback`] preserves
+/// the authored callback's first error.
+pub fn try_ode_solution_points<F, E>(
+    mut function: F,
+    state0: &[f64],
+    time: f64,
+    dt: f64,
+    tune: IntegratorTune,
+    budget: SamplingBudget,
+) -> Result<OdeSamples, OdeError<E>>
+where
+    F: FnMut(&[f64]) -> Result<Vec<f64>, E>,
+{
+    ensure_positive("ODE solution_time", time)?;
+    ensure_positive("ODE dt", dt)?;
+    ensure_positive("ODE rtol", tune.rtol)?;
+    ensure_positive("ODE atol", tune.atol)?;
+    if state0.is_empty() || state0.iter().any(|value| !value.is_finite()) {
+        return Err(FieldError::Integration(
+            "ODE initial state must be a nonempty finite vector".to_owned(),
+        )
+        .into());
+    }
+    let dimension = state0.len();
+    let times = arange(
+        "ODE output samples",
+        0.0,
+        time,
+        dt,
+        SamplingBudget::new(budget.max_samples() / dimension),
+    )?;
+    let mut first_error = None;
+    let mut rhs = |_time: f64, state: &[f64]| {
+        if first_error.is_some() {
+            return Vec::new();
+        }
+        let values = match function(state) {
+            Ok(values) => values,
+            Err(error) => {
+                first_error = Some(OdeError::Callback(error));
+                return Vec::new();
+            }
+        };
+        if values.len() != dimension || values.iter().any(|value| !value.is_finite()) {
+            first_error = Some(OdeError::Field(FieldError::Integration(format!(
+                "ODE derivative must contain exactly {dimension} finite values"
+            ))));
+            // fsci validates RHS length at every stage. An empty derivative
+            // terminates it promptly; the original error below takes priority.
+            return Vec::new();
+        }
+        values
+    };
+    let options = fsci_integrate::SolveIvpOptions {
+        t_span: (0.0, time),
+        y0: state0,
+        method: fsci_integrate::SolverKind::Rk45,
+        t_eval: Some(&times),
+        dense_output: tune.dense_output,
+        rtol: tune.rtol,
+        atol: fsci_integrate::ToleranceValue::Scalar(tune.atol),
+        max_step: tune.max_step,
+        ..fsci_integrate::SolveIvpOptions::default()
+    };
+    let result = fsci_integrate::solve_ivp(&mut rhs, &options);
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    let result = result.map_err(|error| FieldError::Integration(error.to_string()))?;
+    if !result.success {
+        return Err(FieldError::Integration(result.message).into());
+    }
+    if result.y.len() != times.len()
+        || result
+            .y
+            .iter()
+            .any(|row| row.len() != dimension || row.iter().any(|value| !value.is_finite()))
+    {
+        return Err(FieldError::Integration(
+            "ODE solver did not return the complete finite sample grid".to_owned(),
+        )
+        .into());
+    }
+    Ok(OdeSamples {
+        times,
+        states: result.y,
+        nfev: result.nfev,
+    })
+}
+
 /// One integrated stream line, in coordinate space.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StreamSolution {

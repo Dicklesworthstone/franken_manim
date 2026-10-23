@@ -24071,6 +24071,9 @@ _install_debug_functions()
 def _install_vector_field_functions():
     """Bind the Reference's field helpers over native geometry and live
     updater surfaces without importing SciPy or matplotlib."""
+    # _FMN_MODULE is a temporary bootstrap binding. Keep the native callable
+    # itself alive after bootstrap cleanup removes that global name.
+    native_ode_solution_points = _FMN_MODULE._ode_solution_points
 
     def get_vectorized_rgb_gradient_function(min_value, max_value, color_map):
         if color_map != "3b1b_colormap":
@@ -24142,16 +24145,10 @@ def _install_vector_field_functions():
         return vectorized
 
     def ode_solution_points(function, state0, time, dt=0.01):
-        points = [state0]
-        curr = _np.asarray(state0, dtype=float)
-        t = 0.0
-        while t < time:
-            step = float(min(dt, time - t))
-            k = _np.asarray(function(curr), dtype=float)
-            curr = curr + k * step
-            points.append(curr)
-            t += step
-        return _np.asarray(points)
+        return _np.asarray(
+            native_ode_solution_points(function, state0, time, dt),
+            dtype=float,
+        )
 
     functions = {
         "get_rgb_gradient_function": get_rgb_gradient_function,

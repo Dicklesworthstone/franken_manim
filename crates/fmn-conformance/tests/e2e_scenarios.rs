@@ -4039,6 +4039,13 @@ fn python_portal_animation_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome,
     python_portal_sequence_run(ctx, true)
 }
 
+fn python_ode_solution_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let checks = manimlib::run_portal_gauntlet_ode_solution()
+        .map_err(|error| fail(format!("Python ODE trajectories: {error}")))?;
+    ctx.event(LogEvent::new("e2e.python.ode_solution").field("checks", checks));
+    Ok(RunOutcome::ok().with_counter("ode_checks", checks))
+}
+
 fn python_portal_native_outputs_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let root = scenario_dir("python_native_outputs")?;
     let manimlib::PortalOutputGauntletReport {
@@ -10699,6 +10706,17 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "parity.python_ode_solution.v1",
+        ScenarioClass::ParityDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_ode_solution_run),
+        vec![Assertion::ExitCode(0), counter_eq("ode_checks", 8)],
+        vec![LogExpect::span_present(
+            "e2e.python.ode_solution",
+            vec![FieldPred::u64_eq("checks", 8)],
+        )],
+    ));
+    specs.push(spec(
         "parity.python_portal_reference_defaults.v1",
         ScenarioClass::ParityDrill,
         Surface::PythonInProcess,
@@ -12249,6 +12267,17 @@ fn python_surface_mesh_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.python_surface_mesh.v1")
         .expect("Python surface mesh scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+/// Native adaptive trajectories, arbitrary dimensions, and callback failures.
+#[test]
+fn python_ode_solution_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "parity.python_ode_solution.v1")
+        .expect("Python ODE solution scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

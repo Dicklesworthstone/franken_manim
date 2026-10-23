@@ -27,7 +27,10 @@ mod portal_audio;
 #[cfg(any(test, feature = "gauntlet"))]
 mod portal_console;
 mod portal_network;
+mod portal_ode;
 mod portal_offload;
+#[cfg(feature = "gauntlet")]
+pub use portal_ode::run_portal_gauntlet_ode_solution;
 #[cfg(feature = "gauntlet")]
 pub use portal_console::{
     run_portal_gauntlet_console, run_portal_gauntlet_parallel_batch_checkpoint,
@@ -12492,6 +12495,7 @@ fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<(
         portal_assignment::_linear_sum_assignment,
         module
     )?)?;
+    module.add_function(wrap_pyfunction!(portal_ode::_ode_solution_points, module)?)?;
     module.add_function(wrap_pyfunction!(
         portal_streamlines::_stream_line_samples,
         module
