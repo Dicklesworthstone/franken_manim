@@ -21,7 +21,7 @@ from .bundle_export import (
     BundleExportResult, _validated_audio_options, _validated_limits, export_bundle,
     require_bundle_capability,
 )
-from .render_selection import animation_range as _animation_range
+from .render_selection import animation_range as _animation_range, output_stem, planned_destination
 from .rendering import RenderResult, SourceInputs, _FORMATS, _positive_integer, render_scene
 from .paired_output import (
     PairedRenderResult, companion_png_path, render_scene_with_still, validate_paired_mode,
@@ -115,7 +115,8 @@ def _name_key(name: Any) -> str:
     return key
 
 
-def _plan(scenes: Any, directory: Any, format: str, native: Any, maximum: int, existing=frozenset(), *, subdivide=False):
+def _plan(scenes: Any, directory: Any, format: str, native: Any, maximum: int, existing=frozenset(), *,
+          subdivide=False, selection=None):
     text = os.fspath(directory)
     if not isinstance(text, str):
         raise TypeError("batch output directory must be a text path")
@@ -157,8 +158,10 @@ def _plan(scenes: Any, directory: Any, format: str, native: Any, maximum: int, e
             if not isinstance(kwargs, Mapping) or any(not isinstance(key, str) for key in kwargs):
                 raise TypeError("scene_kwargs must be a mapping with string keys")
             kwargs = dict(kwargs)
-        destination = (root / job.name / "clips" if subdivide else
-                       root / job.name / "frames" if format == "png_sequence" else root / (job.name + "." + format))
+        # A -n range suffixes the job's name, as the Reference's writer does;
+        # parallel workers plan with the same range and reach the same path.
+        destination = planned_destination(root, output_stem(job.name, selection), format,
+                                          subdivide=subdivide)
         # This is an early diagnostic, not a replacement for Reel's atomic
         # no-clobber check (another process may create a destination later).
         if existing is not None and os.path.lexists(destination) and destination not in existing:
@@ -367,7 +370,8 @@ def render_scenes(
         validate_paired_mode(native, format, reproducible=reproducible, checkpoint=checkpoint)
     validate_batch_mode(native, format, reproducible, checkpoint)
     owner = nullcontext(None) if checkpoint is None else BatchCheckpoint(checkpoint, resume=resume, key=resume_key)
-    jobs, destinations = _plan(scenes, directory, format, native, maximum, None, subdivide=subdivide)
+    jobs, destinations = _plan(scenes, directory, format, native, maximum, None, subdivide=subdivide,
+                               selection=selection)
     still_destinations = ([companion_png_path(path, format, subdivide=subdivide) for path in destinations]
                           if save_last_frame else [])
     if checkpoint is not None:

@@ -7,6 +7,7 @@ not this adapter, owns the sampling, updater order, and effective clock.
 from __future__ import annotations
 
 import operator
+from pathlib import Path
 import re
 from typing import Any
 
@@ -42,6 +43,32 @@ def animation_range(value: Any) -> tuple[int, int | None] | None:
     if end is not None and end <= start:
         raise ValueError("animation range end is exclusive and must be greater than start")
     return start, end
+
+
+def output_stem(name: str, selection: tuple[int, int | None] | None) -> str:
+    """The output name of a render of ``name`` over ``selection``.
+
+    The Reference's SceneFileWriter.get_output_file_name (scene_file_writer.py:
+    103-115): the scene name, then ``_START`` when a start is set and ``_END``
+    when an end is, so ``-n 3,5`` writes ``Hello_3_5`` beside a full render's
+    ``Hello``. An explicit file name replaces the whole stem; callers apply it.
+    """
+    if selection is None:
+        return name
+    start, end = selection
+    return f"{name}_{start}" + ("" if end is None else f"_{end}")
+
+
+def planned_destination(root: Any, stem: str, format: str, *, subdivide: bool = False) -> Path:
+    """Where one render publishes under ``root``: its clip collection, its
+    frame directory, or its single file. Every planner uses this one layout,
+    so a parallel worker derives exactly the path its parent planned."""
+    root = Path(root)
+    if subdivide:
+        return root / stem / "clips"
+    if format == "png_sequence":
+        return root / stem / "frames"
+    return root / (stem + "." + format)
 
 
 def apply_animation_range(scene: Any, selection: tuple[int, int | None]) -> None:

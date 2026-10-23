@@ -21369,11 +21369,19 @@ class SceneFileWriter:
             )
 
     def get_output_file_name(self):
+        # Reference scene_file_writer.py:103-115: the scene's name, then a -n
+        # range's start and end, so a range render never lands on the full
+        # render's file (fm-7w26).
         if self.file_name:
             return self.file_name
-        # The Reference also appends a -n range's start and end
-        # (scene_file_writer.py:103); OOT-RANGE-OUTPUT-NAMES.
-        return str(self.scene)
+        name = str(self.scene)
+        start = getattr(self.scene, "start_at_animation_number", None)
+        end = getattr(self.scene, "end_at_animation_number", None)
+        if start is not None:
+            name += f"_{start}"
+        if end is not None:
+            name += f"_{end}"
+        return name
 
     def get_output_file_rootname(self):
         return str(_pathlib.Path(self.output_directory) / self.get_output_file_name())

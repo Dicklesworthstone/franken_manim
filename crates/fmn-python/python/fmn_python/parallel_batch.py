@@ -21,7 +21,7 @@ from .cancellation import _check_cancelled, _validate_cancellation
 from .batch_rendering import (
     BatchRenderError, BatchRenderResult, SceneRenderOutcome, _name_key, _restored_outcome,
 )
-from .render_selection import animation_range as _animation_range
+from .render_selection import animation_range as _animation_range, output_stem, planned_destination
 from .rendering import _FORMATS
 
 
@@ -371,9 +371,8 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
     working_directory = Path.cwd() if _working_directory is None else Path(_working_directory).resolve()
     if not working_directory.is_dir():
         raise NotADirectoryError(str(working_directory))
-    destinations = [root / name / "clips" if subdivide else
-                    root / name / "frames" if format == "png_sequence" else
-                    root / (name + "." + format) for name in names]
+    destinations = [planned_destination(root, output_stem(name, selection), format, subdivide=subdivide)
+                    for name in names]
     still_destinations = ([companion_png_path(path, format, subdivide=subdivide) for path in destinations]
                           if save_last_frame else [])
     all_destinations = [*destinations, *still_destinations]

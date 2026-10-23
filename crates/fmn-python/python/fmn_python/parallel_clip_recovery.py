@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 
 from .batch_checkpoint import _CheckpointFile, _MAX_FILES, _json, _read_document
+from .render_selection import animation_range as _animation_range, output_stem, planned_destination
 
 
 def validate_clip_recovery(*, checkpoint, subdivide, save_last_frame, reproducible, format):
@@ -167,7 +168,9 @@ def render_clip_job(job, scene):
     from .paired_output import PairedRenderResult, companion_png_path, render_scene_with_still
 
     name, options = job["name"], job["options"]
-    destination = Path(job["directory"]) / name / "clips"
+    destination = planned_destination(
+        job["directory"], output_stem(name, _animation_range(options.get("animation_range"))),
+        options["format"], subdivide=True)
     # This identity supplements the native session's resolved camera/writer,
     # class and constructor plan. Helpers/assets still belong to resume_key.
     identity = {key: job[key] for key in ("source", "source_digest", "working_directory", "name")}

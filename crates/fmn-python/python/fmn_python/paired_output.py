@@ -355,11 +355,12 @@ def install_paired_output(native):
         writer = getattr(scene, "file_writer", None)
         if (destination is None and format is None and writer is not None
                 and writer.write_to_movie and writer.save_last_frame):
-            movie = _path(writer.get_movie_file_path())
-            still = _path(writer.get_image_file_path())
+            with rendering._range_naming(scene, animation_range):
+                movie = _path(writer.get_movie_file_path())
+                still = _path(writer.get_image_file_path())
+                rootname = _path(writer.get_output_file_rootname())
             format = movie.suffix.lower().lstrip(".")
-            destination = (_path(writer.get_output_file_rootname()) / "clips"
-                           if writer.subdivide_output else movie)
+            destination = rootname / "clips" if writer.subdivide_output else movie
             primary = original(scene, destination, format, resolution, fps,
                                threads, animation_range, owner, **options)
             return PairedRenderSession(primary, still)

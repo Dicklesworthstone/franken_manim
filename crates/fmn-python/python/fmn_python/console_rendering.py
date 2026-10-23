@@ -26,7 +26,8 @@ from .rendering import (
 )
 from .scene_loading import SceneSource, resolve_render_configuration
 from .typesetting import describe_receipt, typesetting_receipt
-from .render_selection import PLAYBACK_HELP, take_playback_options, select_still_format
+from .render_selection import (PLAYBACK_HELP, output_stem, planned_destination, select_still_format,
+                               take_playback_options)
 
 from .paired_output import (
     PAIRED_HELP, PairedRenderResult, PairedRenderSession, companion_png_path,
@@ -123,17 +124,18 @@ def _output_paths(options, source, *, batch=False):
     return root, path
 
 
-def _single_destination(root, exact, selected, options, *, subdivide=False):
+def _single_destination(root, exact, selected, options, *, subdivide=False, selection=None):
     if exact is not None:
         return exact
     format = options["format"]
-    name = options.get("file_name") or selected
+    # An explicit --file_name is the whole stem, as in the Reference; otherwise
+    # a -n range suffixes the scene name (OOT-RANGE-OUTPUT-NAMES, fm-7w26).
+    name = options.get("file_name") or output_stem(selected, selection)
     if name.endswith("." + format):
         name = name[:-len(format) - 1]
     if not name:
         raise ValueError("--file_name requires a nonempty output stem")
-    return (root / name / "clips" if subdivide else root / name / "frames" if format == "png_sequence"
-            else root / (name + "." + format))
+    return planned_destination(root, name, format, subdivide=subdivide)
 
 _OUTPUT_HELP = """Native output profiles:
   --transparent, -t       Preserve alpha in PNG, SVG or qtrle MOV.
@@ -458,7 +460,8 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                 if selected not in scenes:
                     raise ValueError(f"scene {selected!r} was not declared by {source}; discovered: "
                                      + (", ".join(names) or "none"))
-                destination = _single_destination(default_root, destination, selected, options, subdivide=subdivide)
+                destination = _single_destination(default_root, destination, selected, options,
+                                                  subdivide=subdivide, selection=selection)
                 if options.get("reproducible"):
                     sidecar = destination.parent / (destination.name + ".manifest")
                     if os.path.lexists(sidecar):

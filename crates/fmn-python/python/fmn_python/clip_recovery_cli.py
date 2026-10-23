@@ -130,7 +130,7 @@ def try_clip_recovery_cli(native, arguments):
         if source_path.suffix.lower() not in {".py", ".pyw"}:
             raise ValueError("clip recovery requires a .py or .pyw source")
         root, exact = _output_paths(options, source_path)
-        supplied = _single_destination(root, exact, selected, options, subdivide=True)
+        supplied = _single_destination(root, exact, selected, options, subdivide=True, selection=selection)
         text = os.fspath(supplied)
         if not isinstance(text, str) or not text or "\0" in text:
             raise ValueError("clip output must be a nonempty text path without NUL")

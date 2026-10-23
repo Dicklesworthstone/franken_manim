@@ -9,6 +9,7 @@ frame budgets, codecs, and ffmpeg remain native responsibilities.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+import contextlib
 import copy
 import hashlib
 import importlib
@@ -544,6 +545,28 @@ def _validate_writer_options(scene: Any, format: str, native: Any, *,
         )
 
 
+@contextlib.contextmanager
+def _range_naming(scene: Any, selection: Any):
+    """Name a default output for a render over ``selection``.
+
+    An explicit animation_range replaces the scene's authored range when the
+    session applies it (apply_animation_range), so the writer's default name
+    is the Reference's for that range (``SCENE_START[_END]``). The scene keeps
+    its own range until then.
+    """
+    selection = _animation_range(selection)
+    if selection is None:
+        yield
+        return
+    saved = (getattr(scene, "start_at_animation_number", None),
+             getattr(scene, "end_at_animation_number", None))
+    scene.start_at_animation_number, scene.end_at_animation_number = selection
+    try:
+        yield
+    finally:
+        scene.start_at_animation_number, scene.end_at_animation_number = saved
+
+
 def _configured_destination(scene: Any, destination: Any, format: str | None, native: Any):
     if destination is not None:
         # An explicit destination/format selects ONE output, independently of
@@ -621,12 +644,14 @@ def _configured_scene_session(scene, destination, format, resolution, fps, threa
             else:
                 format = "png_sequence"
         if destination is None:
-            destination = Path(writer.get_output_file_rootname()) / "clips"
+            with _range_naming(scene, animation_range):
+                destination = Path(writer.get_output_file_rootname()) / "clips"
         return subdivided_render_session(
             scene, destination, format=format, resolution=resolution, fps=fps,
             threads=threads, animation_range=animation_range, _native=native,
         )
-    destination, format = _configured_destination(scene, destination, format, native)
+    with _range_naming(scene, animation_range):
+        destination, format = _configured_destination(scene, destination, format, native)
     return RenderSession(scene, destination, format=format, resolution=resolution,
                          fps=fps, threads=threads, animation_range=animation_range, _native=native,
                          reproducible=reproducible, sources=sources,
