@@ -36,6 +36,8 @@ class SubdivisionBatchCliTests(unittest.TestCase):
         host.media.companion_png_path = companion_png_path
 
     def invoke(self, *extra, **options):
+        # Every run selects -n 2,5, so its collections are named
+        # SCENE_2_5/clips, as the Reference's writer names them (fm-7w26).
         host = self.host
         return host.invoke("--subdivide", "--checkpoint", str(host.checkpoint),
                            "--resume-key", "stable-inputs", "--fps", "8", "-n", "2,5",
@@ -49,14 +51,14 @@ class SubdivisionBatchCliTests(unittest.TestCase):
         host = self.host
         host.behavior(Other="fail")
         self.assertEqual(self.invoke("--keep-going", job_file=False, names=("Lesson", "Other")), 5)
-        saved = (host.output / "Lesson/clips/segment-000004.y4m").read_bytes()
+        saved = (host.output / "Lesson_2_5/clips/segment-000004.y4m").read_bytes()
         host.behavior()
         self.assertEqual(self.invoke("--resume", job_file=False, names=("Lesson", "Other")), 0)
         report = host.records[-1]["batch"]
         self.assertTrue(report["ok"])
         self.assertEqual(report["reused"], ["Lesson"])
         self.assertEqual([len(self.attempts(name)) for name in ("Lesson", "Other")], [1, 2])
-        self.assertEqual((host.output / "Lesson/clips/segment-000004.y4m").read_bytes(), saved)
+        self.assertEqual((host.output / "Lesson_2_5/clips/segment-000004.y4m").read_bytes(), saved)
         host.loading.SceneSource.assert_not_called()
         arguments = host.process_calls[-1][1]
         self.assertEqual(arguments["animation_range"], (2, 5))
@@ -73,7 +75,7 @@ class SubdivisionBatchCliTests(unittest.TestCase):
             self.assertEqual(self.invoke("--save-last-frame", "--resume"), 0)
         self.assertEqual(host.records[-1]["batch"]["reused"], ["seed7", "seed11"])
         self.assertEqual(host.records[-1]["batch"]["outcomes"], saved)
-        self.assertTrue((host.output / "seed11/clips.png").is_file())
+        self.assertTrue((host.output / "seed11_2_5/clips.png").is_file())
         self.assertEqual([len(self.attempts(name)) for name in ("seed7", "seed11")], [1, 1])
 
     def test_write_all_retry_uses_same_collection_owner(self):
@@ -89,7 +91,7 @@ class SubdivisionBatchCliTests(unittest.TestCase):
         host = self.host
         host.behavior(Other="fail")
         self.assertEqual(self.invoke("--keep-going", job_file=False, names=("Lesson", "Other")), 5)
-        (host.output / "Lesson/clips/segment-000002.y4m").write_bytes(b"modified")
+        (host.output / "Lesson_2_5/clips/segment-000002.y4m").write_bytes(b"modified")
         host.behavior()
         self.assertNotEqual(self.invoke("--resume", job_file=False, names=("Lesson", "Other")), 0)
         self.assertEqual(len(self.attempts("Other")), 1)
@@ -99,7 +101,7 @@ class SubdivisionBatchCliTests(unittest.TestCase):
         host = self.host
         host.behavior(Other="partial")
         self.assertEqual(self.invoke("--keep-going", job_file=False, names=("Lesson", "Other")), 5)
-        path = host.output / "Other/clips/segment-000002.y4m"
+        path = host.output / "Other_2_5/clips/segment-000002.y4m"
         saved = path.read_bytes()
         host.behavior()
         self.assertNotEqual(self.invoke("--resume", job_file=False, names=("Lesson", "Other")), 0)

@@ -308,7 +308,9 @@ class ParallelClipProcessTests(unittest.TestCase):
 class ClipWorkerDelegationTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp(prefix="fmn-clip-worker-"))
-        self.destination = self.root / "out/A/clips"
+        # The job selects -n 1,3: its collection is A_1_3/clips, the
+        # Reference's writer name for that range (fm-7w26).
+        self.destination = self.root / "out/A_1_3/clips"
         self.job = dict(name="A", scene_name="Lesson", scene_kwargs={"seed": 7}, source="/source.py",
                         source_digest="a" * 64, working_directory="/work", directory=str(self.root / "out"),
                         options=dict(format="y4m", resolution=[64, 36], fps=8, threads=1,

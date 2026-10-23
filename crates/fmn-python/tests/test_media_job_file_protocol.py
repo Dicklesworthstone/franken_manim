@@ -63,8 +63,11 @@ def execute_media_variant(job):
             scene = entry.scene(**(entry.scene_kwargs or {}))
             scene.run()
             format = options["format"]
-            path = (Path(directory) / entry.name / "frames" if format == "png_sequence"
-                    else Path(directory) / (entry.name + "." + format))
+            # The worker names its output with the shipping helpers, so a -n
+            # range lands where the parent planned it (fm-7w26).
+            naming = sys.modules["fmn_python.render_selection"]
+            path = naming.planned_destination(
+                directory, naming.output_stem(entry.name, options.get("animation_range")), format)
             raw = b"NOT-MEDIA:" + json.dumps({"values": scene.values, "options": options}, sort_keys=True).encode()
             if format == "png_sequence":
                 path.mkdir(parents=True, exist_ok=False)
@@ -265,7 +268,8 @@ class MediaJobFileTests(unittest.TestCase):
             "--crf=0", "--preset", "slow", "--tune", "animation", "--audio-bitrate", "192000",
             "--ffmpeg-timeout=73", "--ffmpeg-max-log-bytes", "2048", "--ffmpeg-max-input-bytes", "8192",
             "--ffmpeg-max-artifact-bytes=4096", "--threads", "4", "-n", "2,5", format="mp4"), 0)
-        options = self.payload(format="mp4")["options"]
+        # The Reference's -n naming: SCENE_START_END (fm-7w26).
+        options = self.payload("seed7_2_5", format="mp4")["options"]
         self.assertEqual(options["threads"], 4)
         self.assertEqual(options["animation_range"], [2, 5])
         self.assertEqual(options["_output_options"], dict(vcodec="libx264", pix_fmt="rgba", ffmpeg_bin=str(encoder),
@@ -274,13 +278,13 @@ class MediaJobFileTests(unittest.TestCase):
 
     def test_transparent_mov_and_open_range_keep_their_native_profiles(self):
         self.assertEqual(self.invoke("--transparent", "--vcodec", "qtrle", "--pix_fmt", "bgra", "-n2", format="mov"), 0)
-        options = self.payload(format="mov")["options"]
+        options = self.payload("seed7_2", format="mov")["options"]
         self.assertEqual(options["animation_range"], [2, None])
         self.assertEqual(options["_output_options"], dict(transparent=True, vcodec="qtrle", pix_fmt="bgra"))
 
     def test_final_still_selection_uses_existing_png_mode(self):
         self.assertEqual(self.invoke("-s", "-n", "1,3", format=None), 0)
-        self.assertEqual(self.payload()["options"]["animation_range"], [1, 3])
+        self.assertEqual(self.payload("seed7_1_3")["options"]["animation_range"], [1, 3])
         self.assertEqual(self.records[-1]["batch"]["outcomes"][0]["result"]["format"], "png")
 
     def test_quality_and_format_conflicts_refuse_before_discovery(self):

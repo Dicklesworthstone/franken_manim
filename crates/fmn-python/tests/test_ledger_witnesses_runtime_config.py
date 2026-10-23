@@ -187,6 +187,36 @@ class RuntimeConfigWitnesses(unittest.TestCase):
         from manimlib import FRAME_WIDTH
         self.assertEqual(FRAME_WIDTH, 16 * 8 / 9, "the render's frame stays with its source")
 
+    def test_main_range_render_publishes_beside_the_full_render(self):
+        # scene_file_writer.py:103-115: `-n 1,2` names the output STEM_1_2, so it lands
+        # beside the full render instead of on it, which no-clobber would refuse (fm-7w26).
+        from manimlib.__main__ import main
+
+        work = Path(self._tempdir("fm7w26-range-"))
+        source = work / "steps.py"
+        source.write_text(textwrap.dedent("""\
+            from manimlib import *
+
+            class Steps(Scene):
+                def construct(self):
+                    self.wait(0.1)
+                    self.add(Square(side_length=2, fill_color=RED, fill_opacity=1, stroke_width=0))
+                    self.wait(0.1)
+        """))
+        (work / "custom_config.yml").write_text("directories:\n  cache: %s\n" % (work / "cache"))
+        previous = os.getcwd()
+        os.chdir(work)
+        self.addCleanup(os.chdir, previous)
+        out = work / "out"
+        for extra in ((), ("-n", "1,2")):
+            self._with_argv(["manimgl", str(source), "Steps", "-w", "-s",
+                             "--video_dir", str(out), "-r", "64x36", *extra])
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                code = main()
+            self.assertIn(code, (None, 0), extra)
+        self.assertEqual(sorted(p.name for p in out.iterdir()), ["Steps.png", "Steps_1_2.png"])
+        self._assert_scene_png(out / "Steps_1_2.png", _RED, square=True)
+
     def test_run_scenes(self):
         # Reference __main__.run_scenes: run every scene the run config selects;
         # with -a (write_all) that is every scene in the file.
@@ -290,8 +320,8 @@ class RuntimeConfigWitnesses(unittest.TestCase):
         from manimlib import Scene
         from manimlib.scene.scene_file_writer import SceneFileWriter
 
-        # scene_file_writer.py:103: an explicit file_name wins, otherwise str(scene), the class
-        # name (scene.py:143). The Reference's -n suffix is OOT-RANGE-OUTPUT-NAMES. :241
+        # scene_file_writer.py:103-115: an explicit file_name wins, otherwise str(scene), the
+        # class name (scene.py:143), then a -n range's _START and _END (fm-7w26). :241
         # use_fast_encoding selects libx264rgb over rgb32 and returns None (fm-fxov).
         class Lesson(Scene):
             pass
@@ -306,6 +336,13 @@ class RuntimeConfigWitnesses(unittest.TestCase):
         self.assertEqual(writer.get_movie_file_path(), (root / "Lesson.mp4").as_posix())
         named = SceneFileWriter(scene, file_name="take", output_directory=root.as_posix())
         self.assertEqual(named.get_output_file_name(), "take")
+        for start, end, expected in ((2, 5, "Lesson_2_5"), (3, None, "Lesson_3"), (0, None, "Lesson_0")):
+            ranged = Lesson(start_at_animation_number=start, end_at_animation_number=end)
+            ranged_writer = SceneFileWriter(ranged, output_directory=root.as_posix())
+            self.assertEqual(ranged_writer.get_output_file_name(), expected)
+            self.assertEqual(ranged_writer.get_image_file_path(), (root / (expected + ".png")).as_posix())
+            taken = SceneFileWriter(ranged, file_name="take", output_directory=root.as_posix())
+            self.assertEqual(taken.get_output_file_name(), "take")
         self.assertIsNone(writer.use_fast_encoding())
         self.assertEqual((writer.video_codec, writer.pixel_format), ("libx264rgb", "rgb32"))
 

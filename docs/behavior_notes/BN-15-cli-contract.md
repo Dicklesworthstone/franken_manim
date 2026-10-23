@@ -80,9 +80,11 @@ A clip is `segment-NNNNNN.FORMAT`, numbered by play count, where the Reference
 writes partial movies as `DIRECTORY/SCENE/NNNNN.FORMAT`.
 `SceneFileWriter.init_partial_movie_directory()` and
 `get_next_partial_movie_path()` report the clip layout (fm-fxov). A `-n
-START[,END]` render keeps the scene's output name, where the Reference
-appends `_START[_END]` (OOT-RANGE-OUTPUT-NAMES): pass `--file_name` to keep
-a range's output apart from a full render.
+START[,END]` render names its output `SCENE_START[_END]`, as the Reference's
+`SceneFileWriter.get_output_file_name` does (fm-7w26), so it lands beside a full
+render. Single, batch, parallel, job-file and subdivided renders compute the name
+once, so receipts, checkpoints and `--resume` name it the same. An explicit
+`--file_name` or `--output` still wins.
 
 ### fmn-python outcome for every Reference option
 
@@ -119,7 +121,7 @@ gives this outcome through the real console entrypoint, with its effect checked.
 | `-i,--gif` | accepted | a native GIF |
 | `-l,--low_quality` | accepted | 854x480 at the configured fps |
 | `-m,--medium_quality` | accepted | 1280x720 |
-| `-n,--start_at_animation_number` | accepted | the play range in the receipt |
+| `-n,--start_at_animation_number` | accepted | the play range in the receipt; outputs named `SCENE_START[_END]` |
 | `-o,--open` | refused | native `fmn` host action |
 | `-p,--presenter_mode` | refused | live window (OOT-CLI-WINDOW) |
 | `-q,--quiet` | accepted | no human decoration |

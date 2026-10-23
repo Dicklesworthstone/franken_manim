@@ -150,7 +150,8 @@ fmn-python lessons.py --workers 2 --jobs-file variants.json --format y4m \
   -n 2,5 --subdivide --save-last-frame --video_dir excerpts
 ```
 
-Clips use each job's output name, not its class name. These options delegate to
+Clips use each job's output name, not its class name, with a `-n` range's
+`_START[_END]` appended (`seed7_2_5/clips`), as the Reference names range renders. These options delegate to
 the existing playback, paired-output and subdivision owners and retain their
 format restrictions. Non-subdivided single outputs and pairs support verified
 checkpoint recovery. Subdivided collections still refuse checkpoints. Explicit

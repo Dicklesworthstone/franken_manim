@@ -129,7 +129,7 @@ def _single_destination(root, exact, selected, options, *, subdivide=False, sele
         return exact
     format = options["format"]
     # An explicit --file_name is the whole stem, as in the Reference; otherwise
-    # a -n range suffixes the scene name (OOT-RANGE-OUTPUT-NAMES, fm-7w26).
+    # a -n range suffixes the scene name (scene_file_writer.py:103-115, fm-7w26).
     name = options.get("file_name") or output_stem(selected, selection)
     if name.endswith("." + format):
         name = name[:-len(format) - 1]

@@ -128,6 +128,9 @@ def load_coordinator():
     batch.SceneRenderOutcome, batch._restored_outcome = Outcome, restore_outcome
     batch._name_key = lambda name: name.casefold()
     selection = types.ModuleType("fmn_python.render_selection")
+    # The shipping output naming (fm-7w26); only range validation is reduced.
+    source = PYTHON / "fmn_python/render_selection.py"
+    exec(compile(source.read_text(), str(source), "exec"), vars(selection))
     selection.animation_range = lambda value: value
     rendering = types.ModuleType("fmn_python.rendering")
     rendering._FORMATS = {"png", "png_sequence"}

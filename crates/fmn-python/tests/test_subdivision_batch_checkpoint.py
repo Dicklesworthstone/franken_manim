@@ -66,7 +66,11 @@ def publish_clip_job(job):
     mode = json.loads((root / "behavior.json").read_text()).get(name, "ok")
     if mode == "fail":
         raise RuntimeError("fixture scene failed before output")
-    destination = Path(job["directory"]) / name / "clips"
+    # Named with the shipping helpers, so a -n range lands where the parent
+    # planned it (fm-7w26).
+    from fmn_python.render_selection import output_stem, planned_destination
+    destination = planned_destination(job["directory"], output_stem(name, options.get("animation_range")),
+                                      options["format"], subdivide=True)
     result = collection(destination, options["format"], paired=options.get("save_last_frame", False),
                         empty=mode == "empty", complete=mode != "partial")
     if mode == "partial":
