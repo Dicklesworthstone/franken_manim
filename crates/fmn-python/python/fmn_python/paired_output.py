@@ -75,6 +75,9 @@ PAIRED_HELP = """Animation plus final image:
       remain no-clobber failures. Each artifact is independently no-clobber.
       Late still-publication failure retains the primary output and reports
       an incomplete pair, never whole-scene success or destructive rollback.
+      With --workers --subdivide --clip-checkpoint-dir, saved clips and a
+      journaled final PNG can both be reused on explicit --resume. Commands
+      replay to reconstruct state; unjournaled images remain no-clobber errors.
 """
 
 
@@ -156,12 +159,7 @@ class PairedRenderSession:
             raise RuntimeError("a PairedRenderSession can be entered only once")
         if vars(self.scene).get(_OWNER) is not None:
             raise RuntimeError("this Scene already has a paired output owner")
-        for path in (self.destination, self.still_destination):
-            if os.path.lexists(path):
-                raise FileExistsError(f"paired output destination already exists: {path}")
-        # Freeze the primary path too: authored constructors may later chdir.
-        self.primary.destination = self.destination
-        self.primary.__enter__()
+        self._enter_primary()
         self._state = "active"
         try:
             vars(self.scene)[_OWNER] = self
@@ -169,6 +167,14 @@ class PairedRenderSession:
             self.abort()
             raise
         return self
+
+    def _enter_primary(self):
+        for path in (self.destination, self.still_destination):
+            if os.path.lexists(path):
+                raise FileExistsError(f"paired output destination already exists: {path}")
+        # Freeze the primary path too: authored constructors may later chdir.
+        self.primary.destination = self.destination
+        self.primary.__enter__()
 
     def abort(self):
         self.primary._check_owner()
@@ -212,31 +218,13 @@ class PairedRenderSession:
             raise RuntimeError("paired output must finish between play/wait calls")
         self._finishing = True
         try:
-            camera = self.scene.camera
-            capture_threads = rendering._positive_integer(getattr(camera, "capture_threads", 1), "capture_threads", 96)
-            snapshot = camera.capture_snapshot(*tuple(self.scene.mobjects))
-            if not isinstance(snapshot, self._native._CameraCapture):
-                raise TypeError("paired output requires a native immutable camera capture")
-            if tuple(snapshot.size) != self._config.resolution:
-                raise ValueError("final PNG dimensions differ from the selected render resolution")
-            if self._state != "active":
-                raise RuntimeError("paired output was cancelled during final capture")
-            self._pending = snapshot.prepare_png(self.still_destination, threads=capture_threads)
+            capture_threads = self._prepare_still()
             self.primary.finish()
             if self._state != "active":
                 raise RuntimeError("paired output was cancelled during primary finalization")
             if self.primary.result is None:
                 raise RuntimeError("primary output finished without a complete receipt")
-            receipt = self._pending.commit()
-            self._still_published = True
-            path, size, digest = receipt
-            self._still = rendering.RenderResult(
-                destination=Path(path), format="png", resolution=self._config.resolution,
-                fps=self._config.fps, threads=capture_threads, engine="camera-capture/fast-cpu",
-                bytes=int(size), digest=digest, frame_count=1, sample_frames=None,
-                seed=self._config.seed, certified=False,
-                animation_range=self._config.animation_range,
-            )
+            self._commit_still(capture_threads)
             self._state = "finished"
             self.result = self.partial_result
             return self.result
@@ -247,6 +235,31 @@ class PairedRenderSession:
             self._pending = None
             self._finishing = False
             self._release()
+
+    def _prepare_still(self):
+        camera = self.scene.camera
+        capture_threads = rendering._positive_integer(getattr(camera, "capture_threads", 1), "capture_threads", 96)
+        snapshot = camera.capture_snapshot(*tuple(self.scene.mobjects))
+        if not isinstance(snapshot, self._native._CameraCapture):
+            raise TypeError("paired output requires a native immutable camera capture")
+        if tuple(snapshot.size) != self._config.resolution:
+            raise ValueError("final PNG dimensions differ from the selected render resolution")
+        if self._state != "active":
+            raise RuntimeError("paired output was cancelled during final capture")
+        self._pending = snapshot.prepare_png(self.still_destination, threads=capture_threads)
+        return capture_threads
+
+    def _commit_still(self, capture_threads):
+        receipt = self._pending.commit()
+        self._still_published = True
+        path, size, digest = receipt
+        self._still = rendering.RenderResult(
+            destination=Path(path), format="png", resolution=self._config.resolution,
+            fps=self._config.fps, threads=capture_threads, engine="camera-capture/fast-cpu",
+            bytes=int(size), digest=digest, frame_count=1, sample_frames=None,
+            seed=self._config.seed, certified=False,
+            animation_range=self._config.animation_range,
+        )
 
     def __exit__(self, exc_type, error, traceback):
         if error is not None:
@@ -268,8 +281,13 @@ def paired_render_session(scene, destination, still_destination, *, format=None,
 def render_scene_with_still(scene, destination, still_destination, *, scene_kwargs=None,
                             format=None, resolution=None, fps=None, threads=None,
                             animation_range=None, subdivide=False, max_segments=10_000,
-                            _output_options=None):
-    """Execute a scene exactly once and return the receipts of both artifacts."""
+                            _output_options=None, _clip_recovery=None, _source_identity=None):
+    """Execute a scene once per invocation and return both artifact receipts.
+
+    The process-batch owner alone supplies _clip_recovery. Its admitted plan
+    selects resumable clips plus a separately journaled final image; ordinary
+    paired calls keep their existing fresh-output contract.
+    """
     native = importlib.import_module("manimlib")
     # Freeze caller paths and admit the whole mode before an authored constructor.
     destination, still_destination = _path(destination), _path(still_destination)
@@ -284,6 +302,18 @@ def render_scene_with_still(scene, destination, still_destination, *, scene_kwar
         max_segments = rendering._positive_integer(max_segments, "max_segments", 100_000)
     elif max_segments != 10_000:
         raise ValueError("max_segments requires subdivide=True")
+    identity = None
+    if _clip_recovery is not None:
+        from .batch_checkpoint import _constructor_values
+        from .paired_clip_recovery import prepare_paired_recovery
+
+        if not subdivide:
+            raise ValueError("paired clip recovery requires subdivision")
+        _clip_recovery = prepare_paired_recovery(_clip_recovery, destination, still_destination)
+        identity = _constructor_values({"scene_kwargs": dict(scene_kwargs or {}),
+                                        "source": _source_identity})
+        if scene_kwargs is not None:
+            scene_kwargs = _constructor_values(identity["scene_kwargs"])
     if isinstance(scene, type) and issubclass(scene, native.Scene):
         scene = scene(**({} if scene_kwargs is None else dict(scene_kwargs)))
     elif scene_kwargs is not None:
@@ -292,8 +322,17 @@ def render_scene_with_still(scene, destination, still_destination, *, scene_kwar
         rendering._apply_output_options(scene, _output_options)
     if subdivide:
         from .subdivision_rendering import subdivided_render_session
-        primary = subdivided_render_session(scene, destination, max_segments=max_segments, **options)
-        session = PairedRenderSession(primary, still_destination)
+        recovery = {} if _clip_recovery is None else {
+            key: _clip_recovery[key] for key in ("checkpoint", "resume", "resume_key")}
+        primary = subdivided_render_session(scene, destination, max_segments=max_segments, **options,
+            **({"_input_identity": identity} if _clip_recovery is not None else {}), **recovery)
+        if _clip_recovery is None:
+            session = PairedRenderSession(primary, still_destination)
+        else:
+            from .paired_clip_recovery import PairedClipRenderSession
+
+            session = PairedClipRenderSession(primary, still_destination,
+                checkpoint=_clip_recovery["final_checkpoint"], resume=_clip_recovery["resume_final"])
     else:
         session = paired_render_session(scene, destination, still_destination, **options)
     return rendering._run_owned_scene_render(scene, session, native)
