@@ -775,7 +775,7 @@ pub fn run_portal_gauntlet_studio_editing() -> Result<u64, String> {
             .get_item("_checks")
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "Studio editing produced no acceptance count".to_owned())?
-            .extract()
+            .extract::<u64>()
             .map_err(|error| error.to_string())
     })
 }
