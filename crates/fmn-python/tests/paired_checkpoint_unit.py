@@ -58,7 +58,8 @@ rendering.render_scene = unavailable
 provenance = definitions("batch_provenance", {"validate_batch_mode"}, sys=sys)
 provenance.BatchProvenance = unavailable
 provenance.has_provenance = lambda value: False
-selection = definitions("render_selection", {"animation_range", "_MAX_INDEX"}, operator=operator, Any=Any)
+selection = definitions("render_selection", {"animation_range", "_MAX_INDEX", "output_stem", "planned_destination"},
+                        operator=operator, Any=Any, Path=Path)
 subdivision = types.ModuleType(PACKAGE + ".subdivision")
 subdivision.SubdividedRenderResult = type("SubdividedRenderResult", (), {})
 sys.modules[subdivision.__name__] = subdivision
