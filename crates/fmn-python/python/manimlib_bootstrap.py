@@ -9035,10 +9035,13 @@ class Tex(StringMobject):
                         + repr(self.string)
                     )
 
-    def get_color_command(self, color: str) -> str:
-        color_str = str(color)
-        hex_code = color_str[1:] if color_str.startswith("#") else color_str
-        return f"\\color[HTML]{{{hex_code}}}"
+    @staticmethod
+    def get_color_command(rgb_hex: str) -> str:
+        # Reference tex_mobject.py:163, digit for digit; fmd-math honours the RGB model.
+        rgb = int(rgb_hex[1:], 16)
+        rg, b = divmod(rgb, 256)
+        r, g = divmod(rg, 256)
+        return f"\\color[RGB]{{{r}, {g}, {b}}}"
 
     def get_parts_by_tex(self, selector):
         return self.select_parts(selector)
@@ -15518,9 +15521,13 @@ class Scene(_SceneCore):
 
     @staticmethod
     def affects_mobject_list(func):
+        # Reference scene.py:319 runs func, regroups the shader wrappers and returns the
+        # scene. Lumen's Stage draw plan owns render order (assemble_render_groups refuses),
+        # so the wrapper keeps the call and the chaining contract.
         @_functools.wraps(func)
         def wrapper(self, *args, **kwargs):
-            return func(self, *args, **kwargs)
+            func(self, *args, **kwargs)
+            return self
         return wrapper
 
     def assemble_render_groups(self):
@@ -21359,6 +21366,9 @@ class SceneFileWriter:
 
     def write_frame(self, camera):
         del camera
+        # Reference scene_file_writer.py:284 writes only when write_to_movie is set.
+        if not self.write_to_movie:
+            return
         raise _CapabilityError(
             "SceneFileWriter movie encode is the ffmpeg Reel boundary; "
             "use native PNG/y4m output or the fmn CLI"
@@ -24437,7 +24447,9 @@ def _install_config_module():
         return ".mp4"
 
     def get_manim_dir():
-        return str(_pathlib.Path(__file__).parent.resolve())
+        # Reference config.py: the directory that holds the manimlib package.
+        manimlib_dir = _os.path.dirname(_inspect.getabsfile(_importlib.import_module("manimlib")))
+        return _os.path.abspath(_os.path.join(manimlib_dir, ".."))
 
     def get_output_directory(args, config):
         dir_config = config.directories
