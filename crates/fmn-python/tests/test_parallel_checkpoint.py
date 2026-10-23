@@ -129,8 +129,11 @@ def load_coordinator():
     batch._name_key = lambda name: name.casefold()
     selection = types.ModuleType("fmn_python.render_selection")
     # The shipping output naming (fm-7w26); only range validation is reduced.
-    source = PYTHON / "fmn_python/render_selection.py"
-    exec(compile(source.read_text(), str(source), "exec"), vars(selection))
+    naming_spec = importlib.util.spec_from_file_location(
+        "fmn_python._checkpoint_naming_test", PYTHON / "fmn_python/render_selection.py")
+    naming = importlib.util.module_from_spec(naming_spec)
+    naming_spec.loader.exec_module(naming)
+    selection.output_stem, selection.planned_destination = naming.output_stem, naming.planned_destination
     selection.animation_range = lambda value: value
     rendering = types.ModuleType("fmn_python.rendering")
     rendering._FORMATS = {"png", "png_sequence"}

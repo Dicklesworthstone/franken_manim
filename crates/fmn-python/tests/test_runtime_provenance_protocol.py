@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 from collections.abc import Mapping
+import contextlib
 import copy
 import importlib.util
 import os
@@ -42,13 +43,13 @@ _LEGACY = {"cpython": "CPython 3.13", "abi": "cpython-3.13-full-abi", "wheel": "
 def production_session():
     source = ast.parse((_ROOT / "rendering.py").read_text())
     nodes = [node for node in source.body if isinstance(node, (ast.ClassDef, ast.FunctionDef))
-             and node.name in {"RenderSession", "_source_snapshot",
+             and node.name in {"RenderSession", "_source_snapshot", "_range_naming",
                                "_configured_scene_session", "_run_owned_scene_render"}]
-    if len(nodes) != 4:
-        raise AssertionError("expected the production session, freezer and Scene routing helpers")
+    if len(nodes) != 5:
+        raise AssertionError("expected the production session, freezer, range naming and Scene routing helpers")
     module = types.ModuleType(_PACKAGE + ".rendering")
     module.__dict__.update(
-        Mapping=Mapping, Path=Path, os=os, sys=sys, threading=threading, copy=copy,
+        Mapping=Mapping, Path=Path, os=os, sys=sys, threading=threading, copy=copy, contextlib=contextlib,
         _MAX_PROVENANCE_INPUTS=4096, _MAX_PROVENANCE_BYTES=64 * 1024 * 1024,
         _FORMATS={"png", "png_sequence", "gif", "mp4", "wav"}, _VIDEO_FORMATS={"mp4", "mov"},
         _positive_integer=lambda value, name: value, _seed=lambda value: value,
