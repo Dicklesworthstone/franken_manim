@@ -122,6 +122,29 @@ Locked by `frame_rotation_ends_at_its_angle_whatever_the_frame_count` in
 **Migration:** none needed for scenes that meant the angle they wrote. A scene
 tuned to the Reference's accumulated result rotates by its written angle.
 
+## 8. `Transform.update_config` applies its arguments
+
+The Reference (`transform.py:95`):
+
+```python
+def update_config(self, **kwargs) -> None:
+    Animation.update_config(self, **kwargs)
+    if "path_arc" in kwargs:
+        self.path_func = path_along_arc(
+            kwargs["path_arc"],
+            kwargs.get("path_arc_axis", OUT)
+        )
+```
+
+At the pin `Animation` has no `update_config`, so every call raises `AttributeError`.
+
+FrankenManim does what the method body is written to do:
+- each keyword becomes an attribute;
+- a `path_arc` rebuilds `path_func` as `path_along_arc(path_arc, path_arc_axis or OUT)`, so `path_func` and the arc that native playback follows agree;
+- a `path_arc_axis` on its own changes only the axis.
+
+Evidence: `crates/fmn-python/tests/test_ledger_witnesses_animation.py` (`test_transform_update_config`), fm-6u1g.
+
 ## Complete native method transforms
 
 Native `.animate` recordings use the same Transform implementation as explicit
