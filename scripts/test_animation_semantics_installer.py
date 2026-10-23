@@ -64,6 +64,12 @@ def make_native():
         def __iter__(self):
             return iter(self.submobjects)
 
+        def add(self, *mobjects):
+            for mobject in mobjects:
+                if mobject not in self.submobjects:
+                    self.submobjects.append(mobject)
+            return self
+
         def copy(self):
             return copy.deepcopy(self)
 
@@ -72,6 +78,13 @@ def make_native():
 
         def has_points(self):
             return len(self.data) > 0
+
+        def _style_data(self):
+            if len(self.data):
+                return self.data
+            if not hasattr(self, "_data_defaults"):
+                self._data_defaults = np.zeros(1, dtype=self.data.dtype)
+            return self._data_defaults
 
         def get_bounding_box(self):
             # The fixture stores world-space points directly. A family with
@@ -222,7 +235,7 @@ class NativeCompositionContractTests(unittest.TestCase):
     def setUp(self):
         self.native = make_native()
 
-    def test_compositions_preserve_native_timing_and_deferred_root(self):
+    def test_compositions_preserve_native_timing_with_constructor_root(self):
         n = self.native
         first, second = n.Animation(n.Mobject()), n.Animation(n.Mobject())
         for cls, lag, duration in (
@@ -232,11 +245,13 @@ class NativeCompositionContractTests(unittest.TestCase):
         ):
             with self.subTest(cls=cls.__name__):
                 group = cls(first, second)
-                self.assertIsNone(group.mobject)
+                self.assertIsInstance(group.mobject, n.Group)
+                self.assertIs(group.mobject, group.group)
+                self.assertEqual(group.mobject.submobjects, [first.mobject, second.mobject])
                 self.assertEqual(n.interval_calls[-1], ((1.0, 1.0), lag))
                 self.assertEqual(group.run_time, duration)
                 self.assertEqual(group.max_end_time, duration)
-                self.assertIsNone(group.rate_func)
+                self.assertIs(group.rate_func, n.linear)
                 self.assertEqual(group.lag_ratio, lag)
                 self.assertEqual(group.animations, [first, second])
                 self.assertEqual(str(group), cls.__name__)
@@ -363,13 +378,16 @@ class TransformDispatchTests(unittest.TestCase):
         np.testing.assert_allclose(source.uniforms["shading"], [0.5, 0.25, 0.125])
         self.assertEqual(calls, [((1, 3), (1, 3), 0.0), ((1, 3), (1, 3), 0.5)])
 
-    def test_empty_constant_records_still_interpolate_uniforms(self):
+    def test_empty_constant_records_interpolate_style_and_uniforms(self):
         n = self.native
         source, target = n.Mobject(points=()), n.Mobject(points=())
         source.const_data_keys = ("rgba",)
+        target._style_data()["rgba"] = [1., .5, .25, .75]
         target.uniforms["shading"] = (1.0, 0.5, 0.25)
         self.assertIs(source.interpolate(source.copy(), target, 0.5), source)
-        self.assertEqual(source.changes, 0)
+        self.assertEqual(source.changes, 1)
+        self.assertEqual(len(source.data), 0)
+        np.testing.assert_allclose(source._style_data()["rgba"], [[.5, .25, .125, .375]])
         np.testing.assert_allclose(source.uniforms["shading"], [0.5, 0.25, 0.125])
 
     def test_point_free_classification_uses_the_real_bootstrap_family_walk(self):
@@ -401,6 +419,8 @@ class TransformDispatchTests(unittest.TestCase):
         target = source.copy()
         target._set_point_free_anchor((2.0, 4.0, 3.0))
         target.submobjects[0]._set_point_free_anchor((6.0, 3.0, 2.0))
+        for member in target.get_family():
+            member._style_data()["rgba"] = [0.2, 0.4, 0.6, 0.8]
 
         def curve(start, end, alpha):
             value = n.straight_path(start, end, alpha)
@@ -419,10 +439,13 @@ class TransformDispatchTests(unittest.TestCase):
         np.testing.assert_array_equal(target.get_center(), [2.0, 4.0, 3.0])
         np.testing.assert_array_equal(target.submobjects[0].get_center(), [6.0, 3.0, 2.0])
         self.assertTrue(all(not member.has_points() for member in source.get_family()))
-        self.assertTrue(all(member.changes == 0 for member in source.get_family()))
+        for member in source.get_family():
+            np.testing.assert_allclose(member._style_data()["rgba"], [[0.1, 0.2, 0.3, 0.4]])
         transform.finish()
         np.testing.assert_array_equal(source.get_center(), [2.0, 4.0, 3.0])
         np.testing.assert_array_equal(source.submobjects[0].get_center(), [6.0, 3.0, 2.0])
+        for member in source.get_family():
+            np.testing.assert_allclose(member._style_data()["rgba"], [[0.2, 0.4, 0.6, 0.8]])
 
     def test_locked_fields_and_uniforms_are_preserved(self):
         n = self.native

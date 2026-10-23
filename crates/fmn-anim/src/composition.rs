@@ -615,12 +615,27 @@ impl Succession {
         animations: Vec<Box<dyn Animation>>,
         lag_ratio: f64,
     ) -> Result<Self, AnimError> {
+        Self::in_group(stage, animations, lag_ratio, None)
+    }
+
+    /// A succession over an existing container, preserving the root's
+    /// identity, member order, style and auxiliary children during playback.
+    ///
+    /// # Errors
+    /// As [`Succession::new`], plus [`AnimError::StaleHandle`] for a dead
+    /// explicit `group` handle.
+    pub fn in_group(
+        stage: &mut Stage,
+        animations: Vec<Box<dyn Animation>>,
+        lag_ratio: f64,
+        group: Option<Mob>,
+    ) -> Result<Self, AnimError> {
         // Unlike a simultaneous group, a succession must have an active
         // member. Refuse before allocating a container or indexing member 0.
         if animations.is_empty() {
             return Err(AnimError::EmptyComposition);
         }
-        let (timings, max_end_time, group) = assemble(stage, &animations, lag_ratio, None)?;
+        let (timings, max_end_time, group) = assemble(stage, &animations, lag_ratio, group)?;
         Ok(Self {
             state: AnimState::new(group, group_config("Succession", max_end_time, lag_ratio)),
             animations,

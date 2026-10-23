@@ -164,7 +164,7 @@ def _install_rooted_effect(g, name, root_attribute, kind):
     @wraps(original_init)
     def initialize(self, *args, **kwargs):
         original_init(self, *args, **kwargs)
-        if self.mobject is None and root_attribute is not None:
+        if root_attribute is not None and not getattr(self, "_composition_authored_root", False):
             root = getattr(self, root_attribute)
         else:
             # This also preserves explicit group/group_type arguments. For

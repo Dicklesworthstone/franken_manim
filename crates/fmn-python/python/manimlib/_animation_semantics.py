@@ -65,6 +65,10 @@ def install(native, subsystems=True):
             **kwargs,
         )
         self.path_func = path_func
+        # The public path is usable immediately after construction. Resolve
+        # only the shipped default here: authored init_path_func hooks still
+        # run from begin(), once the subclass has finished initializing.
+        init_path_func(self)
 
     def requires_python_animation(animation):
         if not getattr(animation, "_native_kind", None):
@@ -401,7 +405,7 @@ def install(native, subsystems=True):
         )
         self.mobject = mobject
         self.run_time = run_time
-        self.rate_func = rate_func
+        self.rate_func = rate_func if rate_func is not None else g.get("smooth", smooth_rate)
         self.lag_ratio = lag_ratio
         self.time_span = (
             None
@@ -539,12 +543,12 @@ def install(native, subsystems=True):
             scene.add(self.target_mobject)
 
     def transform_all_mobjects(self):
-        return (
+        return [
             self.mobject,
             self.starting_mobject,
             self.target_mobject,
             self.target_copy,
-        )
+        ]
 
     def transform_families(self):
         return zip(*[
@@ -1285,6 +1289,8 @@ def _install_composition_lifecycle(g):
             raise TypeError("AnimationGroup group must be a Mobject")
         if group is None and group_type is not None and not callable(group_type):
             raise TypeError("AnimationGroup group_type must be callable")
+        if kwargs.get("rate_func") is None:
+            kwargs["rate_func"] = g["_linear_rate"]
         original_init(self, *animations, run_time=run_time, lag_ratio=lag_ratio, **kwargs)
         self._composition_authored_root = group is not None or group_type is not None
         self._composition_initial_timings = timing_profile(self)
@@ -1295,6 +1301,10 @@ def _install_composition_lifecycle(g):
             if not isinstance(root, Mobject):
                 raise TypeError("AnimationGroup group_type must return a Mobject")
             self.mobject = self.group = root
+        # Group membership is constructor state, just like the child
+        # animations. Authors can arrange/add the root before Scene.play;
+        # begin must keep that same object and the original member identities.
+        ensure_root(self)
 
     def member_objects(animation, visiting=None):
         visiting = set() if visiting is None else visiting
@@ -2136,8 +2146,15 @@ def _install_partial_reveals(g):
                 raise ValueError("unknown rate function: " + name)
             self.rate_func = function
 
+    shipped_smooth = g.get("smooth", g["_smooth_rate"])
+
     def reverse_smooth(alpha):
-        return g.get("smooth", g["_smooth_rate"])(1.0 - alpha)
+        return shipped_smooth(1.0 - alpha)
+
+    # This shipped callable is the native Uncreate default, not an authored
+    # easing callback. Keep exact evaluation on Choreo's frame clock when it
+    # becomes visible at construction, including lagged and nested reveals.
+    g["_RATE_FUNC_NAMES"][reverse_smooth] = "smooth_reversed"
 
     def ensure_defaults(self):
         if self.rate_func is None and isinstance(self, Uncreate):
@@ -2224,7 +2241,9 @@ def _install_partial_reveals(g):
 
     def uncreate_init(self, mobject, rate_func=None, remover=True,
                       should_match_start=True, **kwargs):
-        Creation.__init__(self, mobject, rate_func=rate_func, remover=remover,
+        Creation.__init__(self, mobject,
+                          rate_func=reverse_smooth if rate_func is None else rate_func,
+                          remover=remover,
                           should_match_start=should_match_start, **kwargs)
         # ShowPartial leaves a point cloud or plain Group Python-driven.
         if self._native_kind is not None:
@@ -2355,6 +2374,7 @@ def _install_border_write(g):
     Scene = g["Scene"]
     original_requires = g["_requires_python_animation"]
     original_play = Scene.play
+    original_border_init = Border.__init__
     original_write_init = Write.__init__
     original_border_params = Border._native_params
 
@@ -2484,6 +2504,17 @@ def _install_border_write(g):
                             stroke_color=stroke_color, **kwargs)
         self._explicit_stroke_color = explicit_stroke_color
 
+    def border_init(self, vmobject, run_time=2.0, rate_func=None,
+                    stroke_width=2.0, stroke_color=None,
+                    draw_border_animation_config=None, fill_animation_config=None,
+                    **kwargs):
+        original_border_init(self, vmobject, run_time=run_time,
+                             rate_func=g["double_smooth"] if rate_func is None else rate_func,
+                             stroke_width=stroke_width, stroke_color=stroke_color,
+                             draw_border_animation_config=draw_border_animation_config,
+                             fill_animation_config=fill_animation_config,
+                             **kwargs)
+
     def native_params(self):
         return {**original_border_params(self), "remover": self.remover,
                 "final_alpha_value": self.final_alpha_value}
@@ -2496,7 +2527,7 @@ def _install_border_write(g):
         return {"stroke_color": tuple(self.stroke_color)}
 
     methods = {
-        Border: {"begin": begin, "finish": finish, "abort": abort,
+        Border: {"__init__": border_init, "begin": begin, "finish": finish, "abort": abort,
                  "get_all_mobjects": get_all_mobjects, "interpolate": interpolate,
                  "interpolate_submobject": interpolate_submobject,
                  "update_mobjects": update_mobjects, "_ensure_runtime_defaults": ensure_defaults,
@@ -2524,6 +2555,21 @@ def _install_border_write(g):
         cls: {name: implementation(getattr(cls, name)) for name in object_hooks}
         for cls in tuple(g.values()) if isinstance(cls, type) and issubclass(cls, VMobject)
     }
+
+    def finalize_protocols():
+        # Raster material support replaces Mobject.interpolate later in the
+        # production initializer. Snapshot the completed shipping methods at
+        # its one-shot publication barrier, before authored code can run.
+        # Keep the original class set: authored subclasses are never baselines.
+        nonlocal protocols, object_protocols
+        protocols = {
+            cls: {name: implementation(getattr(cls, name)) for name in hooks}
+            for cls in protocols
+        }
+        object_protocols = {
+            cls: {name: implementation(getattr(cls, name)) for name in object_hooks}
+            for cls in object_protocols
+        }
 
     def requires_python(animation):
         if not isinstance(animation, Border):
@@ -2581,4 +2627,5 @@ def _install_border_write(g):
     scene_play.__qualname__ = Scene.__qualname__ + ".play"
     scene_play.__module__ = Scene.__module__
     g["_requires_python_animation"] = requires_python
+    g["_fmn_finalize_border_dispatch"] = finalize_protocols
     Scene.play = scene_play

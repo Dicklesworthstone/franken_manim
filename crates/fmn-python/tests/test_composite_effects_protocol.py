@@ -109,7 +109,11 @@ def table():
     class AnimationGroup(Animation):
         def __init__(self, *animations, run_time=-1, lag_ratio=0, group=None, **kwargs):
             self.animations = list(animations)
-            self.mobject = self.group = group
+            # Production groups expose a complete root at construction. A
+            # rooted effect must still retain its named original container,
+            # rather than accidentally keeping this generic eager wrapper.
+            self.mobject = self.group = group if group is not None else VGroup(
+                *(child.mobject for child in animations))
             self.run_time, self.lag_ratio = run_time, lag_ratio
             self.kwargs = kwargs
             self._composition_authored_root = group is not None

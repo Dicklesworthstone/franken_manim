@@ -16004,6 +16004,15 @@ class Scene(_SceneCore):
                 if proto.time_span is not None:
                     params["time_span"] = proto.time_span
                 if isinstance(proto, AnimationGroup):
+                    group_root = proto.mobject
+                    if group_root is not None and not getattr(proto, "_fmn_unstaged_root", False):
+                        if not group_root._is_bound():
+                            # Bind the authored group before its members. The
+                            # native composition must animate this same root,
+                            # including its order, styles and extra children.
+                            self._adopt(group_root)
+                    else:
+                        group_root = None
                     params["members"] = composition_members if composition_members is not None else [
                         build_spec(member, True) for member in proto.animations
                     ]
@@ -16014,7 +16023,7 @@ class Scene(_SceneCore):
                     )
                     return (
                         proto._native_kind,
-                        None,
+                        group_root,
                         None,
                         None if proto.run_time is None else float(proto.run_time),
                         rate_payload(
@@ -20453,7 +20462,8 @@ class ClockPassesTime(AnimationGroup):
             **kwargs,
         )
         self.clock = clock
-        self.group = clock
+        if not getattr(self, "_composition_authored_root", False):
+            self.mobject = self.group = clock
 
 
 class LaggedStart(AnimationGroup):

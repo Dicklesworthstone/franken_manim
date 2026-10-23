@@ -30,12 +30,12 @@ mod portal_network;
 mod portal_ode;
 mod portal_offload;
 #[cfg(feature = "gauntlet")]
-pub use portal_ode::run_portal_gauntlet_ode_solution;
-#[cfg(feature = "gauntlet")]
 pub use portal_console::{
     run_portal_gauntlet_console, run_portal_gauntlet_parallel_batch_checkpoint,
     run_portal_gauntlet_reference_flags,
 };
+#[cfg(feature = "gauntlet")]
+pub use portal_ode::run_portal_gauntlet_ode_solution;
 mod portal_playback;
 mod portal_readback;
 mod portal_recording;
@@ -10362,7 +10362,7 @@ fn build_native_animation(
                 members.push(build_native_animation(stage, member)?);
             }
             let mut group =
-                fmn_anim::AnimationGroup::with_lag_ratio(stage, members, spec.group_lag)
+                fmn_anim::AnimationGroup::in_group(stage, members, spec.group_lag, spec.mob)
                     .map_err(anim_error)?;
             if spec.kind == "lagged_start" {
                 group = group.with_name("LaggedStart");
@@ -10375,7 +10375,7 @@ fn build_native_animation(
                 members.push(build_native_animation(stage, member)?);
             }
             Box::new(
-                fmn_anim::Succession::with_lag_ratio(stage, members, spec.group_lag)
+                fmn_anim::Succession::in_group(stage, members, spec.group_lag, spec.mob)
                     .map_err(anim_error)?,
             )
         }
@@ -10384,17 +10384,25 @@ fn build_native_animation(
             for member in spec.members {
                 members.push(build_native_animation(stage, member)?);
             }
-            Box::new(fmn_anim::flash(stage, members, spec.group_lag).map_err(anim_error)?)
+            Box::new(
+                fmn_anim::AnimationGroup::in_group(stage, members, spec.group_lag, spec.mob)
+                    .map_err(anim_error)?
+                    .with_name("Flash")
+                    .with_run_time(1.0),
+            )
         }
         "show_creation_then_fade_out" => {
             let mut members = Vec::with_capacity(spec.members.len());
             for member in spec.members {
                 members.push(build_native_animation(stage, member)?);
             }
-            Box::new(
-                fmn_anim::show_creation_then_fade_out(stage, members, spec.group_lag, spec.remover)
-                    .map_err(anim_error)?,
-            )
+            let mut group =
+                fmn_anim::Succession::in_group(stage, members, spec.group_lag, spec.mob)
+                    .map_err(anim_error)?;
+            let config = &mut fmn_anim::Animation::state_mut(&mut group).config;
+            config.name = "ShowCreationThenFadeOut".to_owned();
+            config.remover = spec.remover;
+            Box::new(group)
         }
         "broadcast"
         | "flashy_fade_in"
@@ -10412,7 +10420,7 @@ fn build_native_animation(
                 _ => unreachable!(),
             };
             let mut group =
-                fmn_anim::AnimationGroup::with_lag_ratio(stage, members, spec.group_lag)
+                fmn_anim::AnimationGroup::in_group(stage, members, spec.group_lag, spec.mob)
                     .map_err(anim_error)?
                     .with_name(name);
             fmn_anim::Animation::state_mut(&mut group).config.remover = spec.remover;
@@ -10789,6 +10797,14 @@ fn rate_func_from_py(value: &Bound<'_, PyAny>) -> PyResult<fmn_anim::RateFunc> {
 
 fn named_rate_func(name: &str) -> PyResult<fmn_anim::RateFunc> {
     use fmn_core::rate::CatalogRate;
+    // Uncreate exposes its shipped default callable before begin. Preserve
+    // the native smooth(1 - alpha) expression rather than tabulating it or
+    // routing a built-in reveal through Python. This is not an FMTL tag.
+    if name == "smooth_reversed" {
+        return Ok(fmn_anim::RateFunc::Base(|alpha| {
+            fmn_core::rate::smooth(1.0 - alpha)
+        }));
+    }
     let rate = match name {
         "linear" => CatalogRate::Linear,
         "smooth" => CatalogRate::Smooth,

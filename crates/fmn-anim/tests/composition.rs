@@ -1369,6 +1369,57 @@ fn an_empty_group_still_validates_its_time_span_before_begin() {
 // ---------------------------------------------------------- named refusals
 
 #[test]
+fn succession_retains_an_existing_root_and_its_unanimated_children() {
+    let mut stage = Stage::new();
+    let root = stage.add(Mobject::new());
+    let first = square(&mut stage);
+    let second = square(&mut stage);
+    let decoration = square(&mut stage);
+    let children = [decoration, second, first];
+    for child in children {
+        stage.attach(root, child).unwrap();
+    }
+    stage.add_to_scene(root).unwrap();
+    let members = vec![
+        move_to_x(&mut stage, first, 2.0, 1.0),
+        move_to_x(&mut stage, second, 6.0, 1.0),
+    ];
+    let mut succession = Succession::in_group(&mut stage, members, 1.0, Some(root)).unwrap();
+    assert_eq!(succession.group(), root);
+    assert_eq!(stage.get(root).unwrap().submobjects(), children);
+    succession.begin(&mut stage).unwrap();
+    succession.interpolate(&mut stage, 0.25);
+    assert_x(&stage, first, 1.0);
+    assert_x(&stage, second, 0.0);
+    succession.interpolate(&mut stage, 0.75);
+    assert_x(&stage, first, 2.0);
+    assert_x(&stage, second, 3.0);
+    succession.finish(&mut stage);
+    succession.clean_up_from_scene(&mut stage);
+    assert!(succession.deferred_error().is_none());
+    assert_x(&stage, second, 6.0);
+    assert_x(&stage, decoration, 0.0);
+    assert_eq!(stage.get(root).unwrap().submobjects(), children);
+    assert_eq!(stage.roots(), [root]);
+    assert!(!stage.is_animating(root));
+}
+
+#[test]
+fn succession_refuses_a_stale_explicit_root_without_starting_members() {
+    let mut stage = Stage::new();
+    let root = stage.add(Mobject::new());
+    stage.delete(root).unwrap();
+    let member = square(&mut stage);
+    let animation = move_to_x(&mut stage, member, 2.0, 1.0);
+    assert_eq!(
+        Succession::in_group(&mut stage, vec![animation], 1.0, Some(root)).err(),
+        Some(AnimError::StaleHandle(root)),
+    );
+    assert_x(&stage, member, 0.0);
+    assert!(!stage.is_animating(member));
+}
+
+#[test]
 fn an_empty_succession_is_still_refused_by_name() {
     let mut stage = Stage::new();
     assert_eq!(

@@ -23,6 +23,14 @@ class BorderWriteTests(unittest.TestCase):
                             and n.func.id == "_install_border_write" for n in ast.walk(install)))
     def test_public_class_identities_are_unchanged(self):
         self.assertEqual((self.g["DrawBorderThenFill"], self.g["Write"]), self.original)
+    def test_constructor_defaults_are_catalog_callables(self):
+        for cls, rate in ((self.Border, self.g["double_smooth"]),
+                          (self.Write, self.g["linear"])):
+            with self.subTest(animation=cls.__name__):
+                animation = cls(self.curve())
+                self.assertIs(animation.rate_func, rate)
+                self.assertIn(rate, self.g["_RATE_FUNC_NAMES"])
+                self.assertFalse(self.g["_requires_python_animation"](animation))
     def test_first_phase_draws_only_the_outline(self):
         animation = self.drawing()
         animation.begin()
@@ -83,6 +91,26 @@ class BorderWriteTests(unittest.TestCase):
     def test_default_native_routes_stay_native(self):
         self.assertFalse(self.g["_requires_python_animation"](self.Border(self.curve())))
         self.assertFalse(self.g["_requires_python_animation"](self.Write(self.curve())))
+    def test_shipping_interpolation_is_finalized_before_authored_hooks(self):
+        base = self.g["Mobject"]
+        original = base.interpolate
+        def shipping_interpolate(self, *args, **kwargs):
+            return original(self, *args, **kwargs)
+        base.interpolate = shipping_interpolate
+        for cls in (self.Border, self.Write):
+            self.assertTrue(self.g["_requires_python_animation"](cls(self.curve())))
+        self.g.pop("_fmn_finalize_border_dispatch")()
+        for cls in (self.Border, self.Write):
+            self.assertFalse(self.g["_requires_python_animation"](cls(self.curve())))
+        class AuthoredObject(base):
+            def interpolate(self, *args, **kwargs):
+                return original(self, *args, **kwargs)
+        # A later authored class/instance override still needs its callback.
+        curve = self.curve()
+        curve.interpolate = lambda *args, **kwargs: original(curve, *args, **kwargs)
+        self.assertTrue(self.g["_requires_python_animation"](self.Border(curve)))
+        base.interpolate = AuthoredObject.interpolate
+        self.assertTrue(self.g["_requires_python_animation"](self.Border(self.curve())))
     def test_late_class_and_instance_hooks_force_python(self):
         animation = self.drawing()
         original = animation.get_outline

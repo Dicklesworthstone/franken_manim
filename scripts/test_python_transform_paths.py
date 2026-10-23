@@ -308,11 +308,35 @@ class TransformPathProtocolTests(unittest.TestCase):
     def test_default_and_native_factory_keep_native_route(self):
         for path in (None, self.n.straight_path):
             animation = self.n.Transform(self.source, self.target, path_func=path)
+            self.assertIs(animation.path_func, self.n.straight_path)
+            self.assertIs(animation.rate_func, self.n._smooth_rate)
             self.assertFalse(self.n._requires_python_animation(animation))
             animation.begin()
             self.assertEqual(self.source.lock_calls, 1)
             animation.finish()
             self.source.lock_calls = 0
+
+    def test_constructor_resolves_default_path_without_authored_setup(self):
+        calls = []
+        class Authored(self.n.Transform):
+            def init_path_func(self):
+                calls.append("path")
+                self.path_func = excursion
+            def create_target(self):
+                calls.append("target")
+                return super().create_target()
+        animation = Authored(self.source, self.target)
+        self.assertIs(animation.path_func, self.n.straight_path)
+        self.assertEqual(calls, [])
+        np.testing.assert_allclose(animation.path_func(self.source.data["point"],
+                                                       self.target.data["point"], .25),
+                                   [[1., 0., 0.]])
+        animation.begin()
+        self.assertEqual(calls, ["path", "target"])
+        self.assertIs(animation.path_func, excursion)
+        self.assertIsInstance(animation.get_all_mobjects(), list)
+        self.assertEqual(animation.get_all_mobjects(), [self.source,
+                         animation.starting_mobject, self.target, animation.target_copy])
 
     def test_native_arc_metadata_is_preserved(self):
         def arc(start, end, alpha):

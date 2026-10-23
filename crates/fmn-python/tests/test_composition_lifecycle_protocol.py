@@ -249,14 +249,39 @@ class CompositionLifecycleTests(unittest.TestCase):
         install = next(n for n in ast.parse(SOURCE.read_text()).body if isinstance(n, ast.FunctionDef) and n.name == "install")
         self.assertTrue(any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
                             and n.func.id == "_install_composition_lifecycle" for n in ast.walk(install)))
-    def test_unmodified_group_keeps_native_route_and_lazy_root(self):
-        group = self.Group(self.Transform(self.Mob()))
-        self.assertIsNone(group.mobject)
+    def test_unmodified_group_has_constructor_root_and_keeps_native_route(self):
+        mob = self.Mob()
+        group = self.Group(self.Transform(mob))
+        root = group.mobject
+        self.assertIsInstance(root, self.g["Group"])
+        self.assertIs(group.group, root)
+        self.assertEqual(root.children, [mob])
+        self.assertIs(group.rate_func, self.g["_linear_rate"])
         self.assertFalse(self.g["_requires_python_animation"](group))
         scene = self.Scene()
         scene.play(group)
         self.assertEqual(scene.calls[0][0][0][0], "animation_group")
         self.assertEqual(scene.calls[0][1], [None])
+        self.assertIs(group.mobject, root)
+    def test_nested_constructor_roots_preserve_member_identity_and_order(self):
+        first, second = self.g["VMobject"](), self.g["VMobject"]()
+        inner = self.Group(self.Transform(first), self.Transform(second), self.Transform(first))
+        self.assertIs(type(inner.mobject), self.g["VGroup"])
+        self.assertEqual(inner.mobject.children, [second, first])
+        for name in ("AnimationGroup", "LaggedStart", "Succession"):
+            with self.subTest(group=name):
+                outer = self.g[name](inner)
+                self.assertEqual(outer.mobject.children, [inner.mobject])
+                self.assertIs(outer.group, outer.mobject)
+                self.assertIs(outer.rate_func, self.g["_linear_rate"])
+                self.assertEqual(outer.get_all_mobjects().get_family(),
+                                 [outer.mobject, inner.mobject, second, first])
+    def test_constructor_keeps_explicit_rate_without_evaluation(self):
+        def rate(alpha):
+            raise AssertionError("construction must not evaluate easing")
+        group = self.Group(self.Transform(self.Mob()), rate_func=rate)
+        self.assertIs(group.rate_func, rate)
+        self.assertIsNotNone(group.mobject)
     def test_authored_group_executes_native_leaves_and_hooks(self):
         mob = self.Mob()
         group = self.authored()(self.Transform(mob))

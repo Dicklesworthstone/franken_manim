@@ -53,6 +53,73 @@ else:
     raise AssertionError("Animation accepted a non-Mobject target")
 assert str(Animation(Mobject())) == "AnimationMobject"
 
+# fm-v3oj / fm-kfx7: an animation is usable as an authoring object before
+# begin(). Public defaults stay the actual catalog objects, so inspecting
+# them does not demote an otherwise native segment to Python callbacks.
+_animation_native = getattr(_style_runtime, "_native", _style_runtime)
+from manimlib import (
+    Broadcast, Clock, ClockPassesTime,
+    ShowCreationThenDestructionAround, ShowCreationThenFadeAround,
+    ShowPassingFlashAround, Uncreate, double_smooth, smooth, straight_path,
+)
+
+for animation_type, expected_rate in (
+    (Transform, smooth), (FadeIn, smooth), (ShowCreation, smooth),
+    (DrawBorderThenFill, double_smooth), (Write, linear),
+):
+    animation = animation_type(Square())
+    assert animation.rate_func is expected_rate, animation_type.__name__
+    assert not _animation_native._requires_python_animation(animation), animation_type.__name__
+    if isinstance(animation, Transform):
+        assert animation.path_func is straight_path
+        assert np.allclose(animation.path_func(np.zeros((2, 3)), np.ones((2, 3)), .25), .25)
+        assert not hasattr(animation, "starting_mobject")
+
+uncreate = Uncreate(Square())
+assert callable(uncreate.rate_func)
+assert uncreate.rate_func(0) == 1 and uncreate.rate_func(1) == 0
+assert not _animation_native._requires_python_animation(uncreate)
+arc_transform = Transform(Square(), path_arc=math.pi / 2)
+assert callable(arc_transform.path_func)
+assert arc_transform.path_func._fmn_path_arc == math.pi / 2
+assert not _animation_native._requires_python_animation(arc_transform)
+
+for group_type in (AnimationGroup, LaggedStart, Succession):
+    first, second = Square(), Circle().shift((3, 0, 0))
+    group = group_type(FadeIn(first), FadeIn(second))
+    root = group.mobject
+    assert isinstance(root, VGroup) and root is group.group
+    assert root.submobjects == [first, second]
+    assert group.rate_func is linear
+    root.shift((0, 2, 0))
+    assert np.allclose(first.get_center(), [0, 2, 0])
+    scene = Scene()
+    scene.add(root)
+    scene.play(group, run_time=2 / 30)
+    assert group.mobject is root and group.get_all_mobjects() is root
+    assert [mob for mob in scene.mobjects if mob is not scene.frame] == [root]
+    assert np.allclose(first.get_center(), [0, 2, 0])
+    assert np.allclose(second.get_center(), [3, 2, 0])
+    # The ordinary native path must also adopt the public root when it was
+    # not explicitly added, instead of constructing an invisible duplicate.
+    unrooted = group_type(FadeIn(Square()), FadeIn(Circle()))
+    unrooted_scene = Scene()
+    unrooted_scene.play(unrooted, run_time=2 / 30)
+    assert [mob for mob in unrooted_scene.mobjects if mob is not unrooted_scene.frame] == [unrooted.mobject]
+
+clock = Clock()
+clock_animation = ClockPassesTime(clock)
+assert clock_animation.mobject is clock and clock_animation.group is clock
+broadcast = Broadcast((0, 0, 0), n_circles=3)
+assert broadcast.mobject is broadcast.circles and broadcast.group is broadcast.circles
+
+for around_type in (ShowPassingFlashAround, ShowCreationThenDestructionAround,
+                    ShowCreationThenFadeAround):
+    effect = around_type(Square())
+    assert isinstance(effect.mobject, VGroup), around_type.__name__
+    assert effect.mobject is effect.group
+    assert effect.rectangle in effect.mobject.get_family()
+
 # Public helpers must operate on real native-backed copies and records. A
 # successful animation endpoint alone never exercises these callable contracts.
 outline_source = VGroup(
@@ -408,13 +475,15 @@ replacement.clean_up_from_scene(scene_probe)
 assert scene_probe.removed == [replacement_source]
 assert scene_probe.added == [replacement_target]
 
-# The wheel installer must preserve the native composition specification.
-# Choreo derives the mobject root at lowering. Public timing is available
-# immediately from that same native interval builder, as in the Reference.
+# The wheel installer exposes the stable composition root before lowering.
+# Public timing still comes from the same native interval builder.
 composition_children = [Animation(Mobject()), Animation(Mobject())]
 for composition_class, duration in ((AnimationGroup, 1.0), (LaggedStart, 1.05), (Succession, 2.0)):
     composition = composition_class(*composition_children)
-    assert composition.mobject is None
+    assert isinstance(composition.mobject, Group)
+    assert composition.group is composition.mobject
+    assert list(composition.mobject) == [child.mobject for child in composition_children]
+    assert composition.get_all_mobjects() is composition.mobject
     assert composition.run_time == composition.max_end_time == duration
     assert composition.get_run_time() == duration
     assert composition.animations == composition_children

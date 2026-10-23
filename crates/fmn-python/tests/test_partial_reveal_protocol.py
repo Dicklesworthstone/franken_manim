@@ -33,6 +33,14 @@ class PartialRevealTests(unittest.TestCase):
         self.assertTrue(issubclass(self.g["ShowCreationThenDestruction"], self.Partial))
         with self.assertRaises(TypeError):
             self.Partial(self.curve())
+    def test_constructor_reveal_defaults_stay_native(self):
+        creation = self.Creation(self.curve())
+        self.assertIs(creation.rate_func, self.g["smooth"])
+        uncreate = self.g["Uncreate"](self.curve())
+        self.assertEqual(uncreate.rate_func(0.), 1.)
+        self.assertEqual(uncreate.rate_func(1.), 0.)
+        self.assertEqual(self.g["_RATE_FUNC_NAMES"][uncreate.rate_func], "smooth_reversed")
+        self.assertFalse(self.g["_requires_python_animation"](uncreate))
     def test_four_probe_negative_control(self):
         probes = self.Partial._BOUNDS_PROBES
         def rule(t):

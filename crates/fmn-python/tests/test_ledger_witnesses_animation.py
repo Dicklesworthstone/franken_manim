@@ -18,6 +18,42 @@ class AnimationWitnesses(unittest.TestCase):
 
     # manimlib.animation.animation ------------------------------------------------------------
 
+    def test_constructor_defaults_are_available_before_begin(self):
+        # fm-v3oj: shipped rate/path callables are public constructor state.
+        from manimlib import ApplyMethod, FadeIn, ShowCreation, Square, Transform, UP
+        from manimlib import manimlib as native
+        from manimlib.utils.paths import straight_path
+        from manimlib.utils.rate_functions import smooth
+
+        source, target = Square(), Square().shift(UP)
+        animations = (FadeIn(source), ShowCreation(source), Transform(source, target),
+                      ApplyMethod(source.shift, UP))
+        for animation in animations:
+            with self.subTest(animation=type(animation).__name__):
+                self.assertIs(animation.rate_func, smooth)
+                # ApplyMethod's target must be deferred until begin so a
+                # preceding Succession child can change its source state.
+                self.assertEqual(native._requires_python_animation(animation),
+                                 isinstance(animation, ApplyMethod))
+                self.assertFalse(hasattr(animation, "starting_mobject"))
+                if isinstance(animation, Transform):
+                    self.assertIs(animation.path_func, straight_path)
+                    self.assertNear(animation.path_func(np.zeros((1, 3)), np.ones((1, 3)), .25),
+                                    [[.25, .25, .25]])
+
+    def test_transform_get_all_mobjects_returns_list(self):
+        from manimlib import Square, Transform
+
+        animation = Transform(Square(), Square())
+        animation.begin()
+        try:
+            members = animation.get_all_mobjects()
+            self.assertIs(type(members), list)
+            self.assertEqual(ids(members), ids([animation.mobject, animation.starting_mobject,
+                                               animation.target_mobject, animation.target_copy]))
+        finally:
+            animation.finish()
+
     def test_animation_copy(self):
         # animation.py:122: copy() is deepcopy(self). The copy is a new animation of the same
         # class whose mobjects are independent copies, with deepcopy's memo keeping internal
@@ -87,6 +123,35 @@ class AnimationWitnesses(unittest.TestCase):
         twin.finish()
 
     # manimlib.animation.composition ----------------------------------------------------------
+
+    def test_composition_constructor_sets_root_and_parent_relationships(self):
+        from manimlib import AnimationGroup, Circle, FadeIn, LaggedStart, Square, Succession, VGroup
+        from manimlib.utils.rate_functions import linear
+
+        for cls in (AnimationGroup, LaggedStart, Succession):
+            with self.subTest(animation=cls.__name__):
+                a, b = Square(), Circle()
+                animation = cls(FadeIn(a), FadeIn(b))
+                root = animation.mobject
+                self.assertIs(type(root), VGroup)
+                self.assertIs(animation.group, root)
+                self.assertEqual(ids(root.submobjects), ids([a, b]))
+                self.assertIn(id(root), ids(a.parents))
+                self.assertIn(id(root), ids(b.parents))
+                self.assertIs(animation.rate_func, linear)
+
+    def test_surrounding_rectangle_effects_have_roots_before_begin(self):
+        from manimlib import (ShowCreationThenDestructionAround, ShowCreationThenFadeAround,
+                              ShowPassingFlashAround, Square, VGroup)
+
+        for cls in (ShowPassingFlashAround, ShowCreationThenDestructionAround,
+                    ShowCreationThenFadeAround):
+            with self.subTest(animation=cls.__name__):
+                animation = cls(Square())
+                self.assertIsInstance(animation.mobject, VGroup)
+                self.assertIs(animation.group, animation.mobject)
+                self.assertIn(id(animation.rectangle), ids(animation.mobject.get_family()))
+                self.assertEqual(animation.mobject.get_points().shape, (0, 3))
 
     def test_animation_group_get_all_mobjects(self):
         # composition.py:61: get_all_mobjects returns self.group, a single Mobject: VGroup of

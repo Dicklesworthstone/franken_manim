@@ -138,6 +138,9 @@ def initialize(native: ModuleType) -> ModuleType:
         # Dispatch compares authored hooks against the completed runtime, not
         # intermediate implementations replaced by later shipping adapters.
         # Consume this one-shot barrier before publishing the native module.
+        finalize_border = namespace.pop("_fmn_finalize_border_dispatch", None)
+        if finalize_border is not None:
+            finalize_border()
         finalize_dispatch = namespace.pop("_fmn_finalize_transform_dispatch", None)
         if finalize_dispatch is not None:
             finalize_dispatch()
