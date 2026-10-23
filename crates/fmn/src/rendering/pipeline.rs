@@ -1,5 +1,8 @@
 //! Owned Lumen jobs between the serial scene owner and the existing runtime.
 
+mod adaptive;
+pub use adaptive::{NativeAdaptiveCamera, NativeAdaptiveRoutes, planar_stage_refusal};
+
 use std::cell::RefCell;
 use std::fmt;
 use std::sync::{Arc, Mutex, Weak};
@@ -39,6 +42,8 @@ pub enum NativeFrameError {
     Bundle(BundleReadError),
     /// Lumen refused the frozen input.
     Renderer(RetainedFrameRendererError),
+    /// A frozen camera/light capture was invalid.
+    Camera(fmn_render::CameraError),
     /// Frame layout or output conversion failed.
     Frame(FrameError),
     /// The ordered output stream failed or was cancelled.
@@ -52,6 +57,7 @@ impl fmt::Display for NativeFrameError {
         match self {
             Self::Bundle(error) => error.fmt(f),
             Self::Renderer(error) => error.fmt(f),
+            Self::Camera(error) => error.fmt(f),
             Self::Frame(error) => error.fmt(f),
             Self::Emitter(error) => error.fmt(f),
             Self::WorkerState(message) => f.write_str(message),
@@ -64,6 +70,7 @@ impl std::error::Error for NativeFrameError {
         match self {
             Self::Bundle(error) => Some(error),
             Self::Renderer(error) => Some(error),
+            Self::Camera(error) => Some(error),
             Self::Frame(error) => Some(error),
             Self::Emitter(error) => Some(error),
             Self::WorkerState(_) => None,
@@ -83,6 +90,11 @@ pub(super) enum NativeFrame {
         job: PureFrameJob,
         config: RetainedFrameRendererConfig,
         camera: Option<Camera>,
+    },
+    AdaptivePure {
+        job: PureFrameJob,
+        config: RetainedFrameRendererConfig,
+        camera: NativeAdaptiveCamera,
     },
 }
 
@@ -405,6 +417,17 @@ impl PipelineStages for NativeFrameStages {
                 // team, not on the ordered preparation worker or scene owner.
                 let stage = job.materialize();
                 self.rasterize_reconstructed(&stage, config, camera, team, &mut output)?;
+            }
+            NativeFrame::AdaptivePure {
+                job,
+                mut config,
+                camera,
+            } => {
+                let stage = job.materialize();
+                let (pose, refusal) = camera.for_stage(&stage)?;
+                config.frame.background = camera.background();
+                self.rasterize_reconstructed(&stage, config, pose, team, &mut output)?;
+                camera.record(output.sequence(), refusal)?;
             }
             NativeFrame::Vector(frame) => {
                 let TeamRole::Render(index) = team.role else {
@@ -782,6 +805,39 @@ impl NativeFramePipeline {
             job,
             config: self.renderer_config,
             camera: self.camera.clone(),
+        };
+        self.capture_ready(frame, sequence)
+    }
+
+    /// Queue a pure sample whose planar/camera route is selected after native
+    /// interpolation on the render worker. The supplied camera is immutable
+    /// capture data, never a host callback. Its native light handle is sampled
+    /// from that frame's reconstructed Stage, including animated lights.
+    ///
+    /// This is the portal's existing adaptive policy: planar geometry under
+    /// the default camera uses the selected CPU engine; camera-bound geometry
+    /// uses Lumen's ordinary camera renderer. A Transform may enter and leave
+    /// the camera route within one segment without changing either behavior.
+    /// The fixed-route `capture_pure` contract is unchanged.
+    ///
+    /// # Errors
+    /// Rejects incompatible camera dimensions before reserving output. Native
+    /// geometry/light/worker failures are joined by `finish` as usual.
+    pub fn capture_pure_adaptive(
+        &mut self,
+        job: PureFrameJob,
+        sequence: u64,
+        camera: NativeAdaptiveCamera,
+    ) -> Result<(), RenderError> {
+        if camera.pixel_shape() != (self.viewport.width, self.viewport.height) {
+            return Err(RenderError::InvalidOptions(
+                "adaptive camera dimensions must match the frame execution plan",
+            ));
+        }
+        let frame = NativeFrame::AdaptivePure {
+            job,
+            config: self.renderer_config,
+            camera,
         };
         self.capture_ready(frame, sequence)
     }

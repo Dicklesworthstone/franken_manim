@@ -92,6 +92,7 @@ _STEPS = (
     ("typesetting", "install_typesetting"),
     ("runtime_provenance", "install_runtime_provenance"),
     ("paired_output", "install_paired_output"),
+    ("native_playback", "install_native_playback"),
     # Last, so it observes the completed runtime; a no-op unless FMN_SEGMENT_CENSUS is set.
     ("segment_census", "install_segment_census"),
 )
@@ -143,6 +144,9 @@ def initialize(native: ModuleType) -> ModuleType:
         finalize_updaters = namespace.pop("_fmn_finalize_updater_dispatch", None)
         if finalize_updaters is not None:
             finalize_updaters()
+        finalize_native_playback = namespace.pop("_fmn_finalize_native_playback", None)
+        if finalize_native_playback is not None:
+            finalize_native_playback()
     except BaseException:
         # Do not retain an exception/traceback cycle owning native proxies. A
         # failed instance must be discarded, never retried as a success-shaped

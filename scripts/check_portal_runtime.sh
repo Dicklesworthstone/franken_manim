@@ -235,6 +235,7 @@ FMN_TEST_NATIVE=1 python3 crates/fmn-python/tests/test_ledger_witnesses_drawings
 FMN_TEST_NATIVE=1 python3 crates/fmn-python/tests/test_ledger_witnesses_strings_svg.py
 FMN_TEST_NATIVE=1 python3 crates/fmn-python/tests/test_ledger_witnesses_runtime_config.py
 FMN_TEST_NATIVE=1 python3 crates/fmn-python/tests/test_ledger_witnesses_geometry_camera.py
+FMN_TEST_NATIVE=1 python3 crates/fmn-python/tests/test_native_pure_offload.py
 
 # Every protocol suite, not only the ones named above, so a fake Scene or
 # lifted namespace that falls behind production code fails here (fm-fmgv:

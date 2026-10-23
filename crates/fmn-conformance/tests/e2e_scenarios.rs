@@ -4327,6 +4327,33 @@ fn python_portal_planar_route_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenar
         .with_counter("python_planar_surface_camera", 1))
 }
 
+/// Native pure plays must actually reach the bounded worker pipeline while
+/// retaining serial pixels, exact clocks and authored observer fallback.
+fn python_portal_native_offload_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let root = scenario_dir("python_portal_native_offload")?;
+    let (pure_frames, compared_frames, fallback_cases) =
+        manimlib::run_portal_gauntlet_native_offload(&root)
+            .map_err(|error| fail(format!("run Python portal native offload: {error}")))?;
+    if (pure_frames, compared_frames, fallback_cases) != (45, 51, 5) {
+        return Err(fail(format!(
+            "portal native offload: pure={pure_frames}, compared={compared_frames}, \
+             fallbacks={fallback_cases}; expected 45, 51, 5"
+        )));
+    }
+    ctx.event(
+        LogEvent::new("e2e.python.native_offload")
+            .field("pure_frames", pure_frames)
+            .field("compared_frames", compared_frames)
+            .field("fallback_cases", fallback_cases)
+            .field("serial_pixels_identical", truth(true))
+            .field("authored_observers_preserved", truth(true)),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("python_offload_pure_frames", pure_frames)
+        .with_counter("python_offload_compared_frames", compared_frames)
+        .with_counter("python_offload_fallback_cases", fallback_cases))
+}
+
 /// The portal's final-state still route: semantic construction completes with
 /// intermediate raster work skipped, then the same Lumen/Reel composition root
 /// atomically publishes exactly one canonical PNG.
@@ -10497,6 +10524,28 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.python_portal_native_offload.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_portal_native_offload_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("python_offload_pure_frames", 45),
+            counter_eq("python_offload_compared_frames", 51),
+            counter_eq("python_offload_fallback_cases", 5),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.native_offload",
+            vec![
+                FieldPred::u64_eq("pure_frames", 45),
+                FieldPred::u64_eq("compared_frames", 51),
+                FieldPred::u64_eq("fallback_cases", 5),
+                FieldPred::str_eq("serial_pixels_identical", "true"),
+                FieldPred::str_eq("authored_observers_preserved", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.python_portal_planar_route.v1",
         ScenarioClass::RenderMatrix,
         Surface::PythonInProcess,
@@ -11825,6 +11874,17 @@ fn cli_window_flag_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "failure_path.cli_window_flag_refused_timing_kept.v1")
         .expect("CLI window-flag scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+/// Portal admission must produce real native jobs and preserve serial output.
+#[test]
+fn python_native_offload_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.python_portal_native_offload.v1")
+        .expect("Python native offload scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

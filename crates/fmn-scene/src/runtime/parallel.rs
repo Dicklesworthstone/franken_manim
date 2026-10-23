@@ -54,6 +54,18 @@ impl PlayCapture for NativeSegmentCapture<'_> {
 }
 
 impl super::Scene {
+    /// Whether Scene's current event and presentation state permits a native
+    /// pure-segment handoff without losing an owner-thread boundary observer.
+    ///
+    /// Host-language front doors can use this before choosing their stepped
+    /// callback protocol. This is only the Scene-side proof: animation purity,
+    /// live views, host callbacks and sink capabilities still require their
+    /// separate checks, and Scene rechecks its proof at actual dispatch.
+    #[must_use]
+    pub fn allows_pure_segments(&self) -> bool {
+        self.allows_pure_dispatch()
+    }
+
     // An empty inbox may still have an external producer. Share this proof
     // between plays and waits rather than giving quiet segments weaker rules.
     pub(super) fn allows_pure_dispatch(&self) -> bool {

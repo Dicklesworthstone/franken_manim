@@ -936,6 +936,7 @@ dependencies = [
 name = "fmn-python"
 version = "0.5.0"
 dependencies = [
+ "fmn",
  "fmn-anim",
  "fmn-codec",
  "fmn-config",

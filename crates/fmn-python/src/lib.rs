@@ -27,6 +27,7 @@ mod portal_audio;
 #[cfg(any(test, feature = "gauntlet"))]
 mod portal_console;
 mod portal_network;
+mod portal_offload;
 #[cfg(feature = "gauntlet")]
 pub use portal_console::{
     run_portal_gauntlet_console, run_portal_gauntlet_parallel_batch_checkpoint,
@@ -203,6 +204,9 @@ struct PortalRoutes {
 /// concurrently; its CPU time is not inferred by adding these wall times.
 #[derive(Clone, Copy, Default, Debug)]
 struct PortalPerformance {
+    pure_play_segments: u64,
+    pure_play_frames: u64,
+    native_offload_ns: u64,
     raw_frame_reuses: u64,
     converted_frames: u64,
     conversion_reuses: u64,
@@ -429,6 +433,7 @@ impl PortalRenderSession {
 /// portal adapter owns only their lifetime and the Python-facing report.
 struct PortalFrameSession {
     renderer: RetainedFrameRenderer,
+    plan: fmn_runtime::ExecutionPlan,
     camera: Camera,
     emitter: Option<OrderedEmitter>,
     receipt: PortalReceipt,
@@ -505,11 +510,16 @@ impl PortalFrameSession {
         // planner budgets per in-flight slot, so charging its rounded-up cost
         // to each working surface is conservative (we allocate exactly one).
         let mut surface = fmn_runtime::SurfaceSpec::lumen(width, height);
-        surface.working_bytes_per_pixel += match wire {
-            fmn_output::WireFormat::Rgba8 | fmn_output::WireFormat::Bgra8 => 4,
-            fmn_output::WireFormat::Nv12 => 2,
-            fmn_output::WireFormat::P010 => 3,
-        };
+        // Pure-play workers may retain one camera compiler and one raw raster
+        // per team alongside the serial renderer. Teams never outnumber the
+        // in-flight slots; charging three extra RGBA16F surfaces per slot also
+        // covers the retained serial frame conservatively.
+        surface.working_bytes_per_pixel += 24
+            + match wire {
+                fmn_output::WireFormat::Rgba8 | fmn_output::WireFormat::Bgra8 => 4,
+                fmn_output::WireFormat::Nv12 => 2,
+                fmn_output::WireFormat::P010 => 3,
+            };
         let request = if reproducible {
             fmn_runtime::PlanRequest::certified(
                 fmn_runtime::RenderIntent::Offline,
@@ -797,8 +807,8 @@ impl PortalFrameSession {
                 timeline: OutputTimeline::new(single_frame),
                 planar_baseline,
                 planar_map_matches,
-                // One renderer on the first team: fm-sq8.5 item 6 routes the
-                // portal through every team.
+                // Stateful captures retain the first renderer. Eligible pure
+                // plays use every planned team through NativeFramePipeline.
                 routes: PortalRoutes {
                     teams_used: 1,
                     teams_planned: plan.render_teams.len() as u64,
@@ -814,6 +824,7 @@ impl PortalFrameSession {
                     },
                     ..PortalRoutes::default()
                 },
+                plan,
             },
             runtime_config,
         ))
@@ -933,6 +944,56 @@ impl PortalFrameSession {
         }
         self.light_mob = light_mob;
         Ok(())
+    }
+
+    fn capture_pure(
+        &mut self,
+        segment: &fmn_anim::pure_frame::PureSegment,
+    ) -> Result<Vec<f64>, fmn_scene::IntegrationError> {
+        let output = self
+            .emitter
+            .as_ref()
+            .ok_or_else(|| {
+                fmn_scene::IntegrationError::new("reel", "render generation is already closed")
+            })?
+            .handle();
+        let plan = self.plan.clone();
+        let config = self.renderer.config();
+        let camera = fmn::rendering::NativeAdaptiveCamera::new(
+            self.camera.clone(),
+            self.planar_map_matches,
+            self.light_mob,
+        );
+        let segment = segment.clone();
+        let first_sequence = self.next_sequence;
+        let started = Instant::now();
+        // No Scene borrow, Python handle or callback enters the detached
+        // closure. The same bounded pipeline joins before begin/finish-owned
+        // authored state can be observed or mutated again.
+        let completed = Python::attach(|py| {
+            py.detach(move || {
+                portal_offload::render(plan, config, output, segment, camera, first_sequence)
+            })
+        })?;
+        self.routes.performance.native_offload_ns += portal_elapsed_ns(started);
+        self.next_sequence = completed.next_sequence;
+        self.routes.planar += completed.routes.planar;
+        self.routes.camera += completed.routes.camera;
+        if self.routes.first_camera_reason.is_none() {
+            self.routes.first_camera_reason = completed.routes.first_camera_reason;
+        }
+        self.routes.teams_used = self.routes.teams_used.max(
+            completed
+                .pipeline
+                .render_team_frames
+                .iter()
+                .filter(|frames| **frames != 0)
+                .count() as u64,
+        );
+        self.routes.performance.pure_play_segments += 1;
+        self.routes.performance.pure_play_frames += completed.pipeline.emitted;
+        self.routes.performance.converted_frames += completed.pipeline.converted;
+        Ok(completed.alphas)
     }
 
     const fn frame_count(&self) -> u64 {
@@ -1134,38 +1195,7 @@ struct PyScene {
 /// clip planes, with every drawn point at world z = 0. Planar FMTL export and
 /// the portal's planar render route share this one rule (fm-sq8.11).
 pub(crate) fn planar_stage_refusal(stage: &Stage) -> Option<&'static str> {
-    for item in stage.draw_plan().items() {
-        let Some(entry) = stage.get(item.mob) else {
-            return Some("stale drawable");
-        };
-        let uniforms = entry.uniforms();
-        if item.key.program != fmn_mobject::ProgramKind::Vector
-            || uniforms.depth_test
-            || uniforms.shading != [0.0; 3]
-            || uniforms.clip_planes != [[0.0; 4]; 4]
-        {
-            return Some(
-                "depth, raster primitives, lighting or clip planes require a camera-bearing bundle",
-            );
-        }
-        if uniforms.is_fixed_in_frame != 0.0 || uniforms.scale_stroke_with_zoom {
-            return Some("fixed-in-frame or zoom-scaled strokes require a camera-bearing bundle");
-        }
-        // Test world z: positional operations compose into the entry's
-        // object-to-world placement, so a shift(OUT) leaves the stored record
-        // points planar while the drawn geometry is not.
-        let placement = entry.placement();
-        if let Some(points) = entry.buffer.read_column("point")
-            && points
-                .as_chunks::<3>()
-                .0
-                .iter()
-                .any(|point| placement.apply_point(point.map(f64::from))[2] != 0.0)
-        {
-            return Some("nonplanar geometry requires a camera-bearing bundle");
-        }
-    }
-    None
+    fmn::rendering::planar_stage_refusal(stage)
 }
 
 /// Owns one pinned RecordBuffer generation while a NumPy array exports it.
@@ -8280,6 +8310,91 @@ fn portal_has_frame_render(scene: &Bound<'_, PyScene>) -> PyResult<bool> {
     ))
 }
 
+/// Prove that the render-only release boundary has no authored observer before
+/// choosing Scene's native play driver. Any uncertain case keeps the existing
+/// stepped path, including an implicitly added animation source whose public
+/// update protocol was absent from the rooted host admission scan.
+fn portal_allows_native_play(
+    scene: &Bound<'_, PyScene>,
+    animations: &[Box<dyn fmn_anim::Animation>],
+    pending: &[Mob],
+) -> PyResult<bool> {
+    let render = Arc::clone(&scene.borrow().render);
+    if !render
+        .lock()
+        .map_err(|_| PyRuntimeError::new_err("portal render session lock was poisoned"))?
+        .as_ref()
+        .is_some_and(|session| {
+            matches!(session, PortalRenderSession::Frames(session)
+                if !session.timeline.final_state_only && session.emitter.is_some())
+        })
+    {
+        return Ok(false);
+    }
+    let engine = Rc::clone(&scene.borrow().engine);
+    let observed = {
+        let runtime = engine.borrow();
+        if !runtime.allows_pure_segments()
+            || !fmn_anim::classify_play(runtime.stage(), animations).is_pure()
+        {
+            return Ok(false);
+        }
+        let observed: HashSet<Mob> = runtime
+            .stage()
+            .roots()
+            .iter()
+            .flat_map(|&root| runtime.stage().family(root))
+            .collect();
+        if pending.iter().any(|mob| !observed.contains(mob)) {
+            return Ok(false);
+        }
+        observed
+    };
+    // Completed-runtime identity checks do not invoke authored accessors. In
+    // particular, a custom light.get_center remains a per-frame callback.
+    let light = scene
+        .py()
+        .import("manimlib")?
+        .getattr("_fmn_native_playback_light")?
+        .call1((
+            scene,
+            PyList::new(
+                scene.py(),
+                observed
+                    .into_iter()
+                    .filter_map(|mob| live_proxy(scene.py(), scene, mob)),
+            )?,
+        ))?;
+    if light.is_none() {
+        return Ok(false);
+    }
+    let light = light.cast::<BridgeMobject>()?;
+    if light
+        .borrow()
+        .engine
+        .as_ref()
+        .is_some_and(|owner| !Rc::ptr_eq(owner, &engine))
+    {
+        return Ok(false);
+    }
+    // The default light is usually outside the Scene draw list, so Choreo's
+    // source/target/root live-view guard cannot cover its storage. Never freeze
+    // a light whose NumPy view can still mutate that storage while detached.
+    let stable_light = with_stage(light, |stage, mob| {
+        stage.family(mob).len() == 1
+            && stage
+                .get(mob)
+                .is_some_and(|entry| entry.buffer.live_view_count() == 0)
+    })?;
+    if !stable_light {
+        return Ok(false);
+    }
+    // All actual host reads happen before borrowing Scene for play. Native
+    // light animation is sampled from each immutable worker Stage afterward.
+    synchronize_portal_camera(scene)?;
+    Ok(true)
+}
+
 /// Freeze host camera state while no Scene borrow is live. The existing
 /// stepped release boundary then runs native updaters and captures the frame.
 fn synchronize_portal_camera(scene: &Bound<'_, PyScene>) -> PyResult<()> {
@@ -8701,6 +8816,9 @@ impl PyScene {
             ("frames", routes.planar + routes.camera),
             ("planar_frames", routes.planar),
             ("camera_frames", routes.camera),
+            ("pure_play_segments", stats.pure_play_segments),
+            ("pure_play_frames", stats.pure_play_frames),
+            ("native_offload_ns", stats.native_offload_ns),
             ("raw_frame_reuses", stats.raw_frame_reuses),
             ("converted_frames", stats.converted_frames),
             ("conversion_reuses", stats.conversion_reuses),
@@ -9305,9 +9423,9 @@ impl PyScene {
 
         let mut pending = Vec::new();
         animated_mobjects(&resolved, &mut pending);
-        let release_for_python_updaters = portal_playback::requires_public_scene_update(slf)?
-            || has_python_updaters(slf, &pending)?
-            || portal_has_frame_render(slf)?;
+        let host_updates = portal_playback::requires_public_scene_update(slf)?
+            || has_python_updaters(slf, &pending)?;
+        let render_observes_frames = portal_has_frame_render(slf)?;
         for callback in callbacks.iter().flatten() {
             crossing::record(CrossingClass::MethodDispatch);
             callback.bind(slf.py()).call_method0("begin")?;
@@ -9340,9 +9458,16 @@ impl PyScene {
             rate_func: play_rate,
             lag_ratio,
         };
+        let pure_play = callback_count == 0
+            && !host_updates
+            && camera_lerp.is_none()
+            && !animations.is_empty()
+            && portal_allows_native_play(slf, &animations, &pending)?;
+        let release_for_python_updaters = host_updates || (render_observes_frames && !pure_play);
         let mut sink = PortalSceneSink {
             camera: camera_lerp,
             render: Arc::clone(&slf.borrow().render),
+            pure_play,
             ..PortalSceneSink::default()
         };
         let map_play_error = |error: fmn_scene::SceneError| {
@@ -9568,6 +9693,7 @@ impl PyScene {
             render: _,
             camera_preapplied: _,
             camera_finished_before_updaters,
+            pure_play: _,
         } = sink;
         if let Some(error) = camera_error {
             return Err(error);
@@ -10751,6 +10877,9 @@ struct PortalSceneSink {
     render: Arc<Mutex<Option<PortalRenderSession>>>,
     camera_preapplied: bool,
     camera_finished_before_updaters: bool,
+    // Opt in only for callback-free plays. Cached static waits retain their
+    // single-render/conversion reuse, and live/recording paths remain serial.
+    pure_play: bool,
 }
 
 impl PortalSceneSink {
@@ -10796,6 +10925,33 @@ impl PortalSceneSink {
 }
 
 impl fmn_scene::SceneSink for PortalSceneSink {
+    fn accepts_pure_segments(&self) -> bool {
+        self.pure_play
+            && self.camera.is_none()
+            && self.camera_error.is_none()
+            && self.render.lock().is_ok_and(|render| {
+                matches!(render.as_ref(), Some(PortalRenderSession::Frames(session))
+                    if !session.timeline.final_state_only && session.emitter.is_some())
+            })
+    }
+
+    fn capture_pure_segment(
+        &mut self,
+        segment: &fmn_anim::pure_frame::PureSegment,
+    ) -> Result<(), fmn_scene::IntegrationError> {
+        let mut render = self.render.lock().map_err(|_| {
+            fmn_scene::IntegrationError::new("portal-render", "render session lock was poisoned")
+        })?;
+        let Some(PortalRenderSession::Frames(session)) = render.as_mut() else {
+            return Err(fmn_scene::IntegrationError::new(
+                "portal-render",
+                "native pure plays require an active frame generation",
+            ));
+        };
+        self.alphas.extend(session.capture_pure(segment)?);
+        Ok(())
+    }
+
     fn capture_state_required(&self) -> bool {
         // Poison must reach the ordinary capture error path, not silently
         // turn an active renderer into a discarded metadata-only capture.
@@ -12878,6 +13034,18 @@ for _scene in (RingHook, ShuffleLiveD):
             .extract::<Vec<(String, u64)>>()
             .map_err(|error| error.to_string())
     })
+}
+
+/// Compare native portal pure plays with serial pixels and callback fallbacks.
+/// Returns `(pure_frames, compared_frames, fallback_cases)`.
+///
+/// # Errors
+/// A real render, byte/clock comparison or authored-observer assertion failed.
+#[cfg(feature = "gauntlet")]
+pub fn run_portal_gauntlet_native_offload(
+    directory: &std::path::Path,
+) -> Result<(u64, u64, u64), String> {
+    portal_offload::run_acceptance(directory)
 }
 
 /// Render one pure-2D Python scene through the portal, export the same scene

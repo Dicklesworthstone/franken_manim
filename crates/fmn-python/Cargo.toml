@@ -15,6 +15,9 @@ crate-type = ["cdylib", "rlib"]
 gauntlet = []
 
 [dependencies]
+# Reuse the governed native frame pipeline; never duplicate its worker/output
+# lifecycle inside the CPython composition root.
+fmn.workspace = true
 fmn-core.workspace = true
 fmn-hash.workspace = true
 fmn-config.workspace = true

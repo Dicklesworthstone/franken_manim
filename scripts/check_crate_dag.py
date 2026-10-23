@@ -143,6 +143,8 @@ EXPECTED: dict[str, set[str]] = {
     # including the optional governed ffmpeg boundary. ADR-0017 forbids the
     # standalone CLI from consuming or launching this host-CPython front door.
     "fmn-python": {
+        # Shared native frame pipeline; the facade never depends on Python.
+        "fmn",
         "fmn-core",
         "fmn-hash",
         "fmn-config",

@@ -66,7 +66,10 @@ pub use ffmpeg_limits::{
     DEFAULT_RENDER_FFMPEG_TIMEOUT, FfmpegLimitsReport, admit_render_ffmpeg_limits,
     default_render_ffmpeg_limits,
 };
-pub use pipeline::{NativeFrameError, NativeFramePipeline};
+pub use pipeline::{
+    NativeAdaptiveCamera, NativeAdaptiveRoutes, NativeFrameError, NativeFramePipeline,
+    planar_stage_refusal,
+};
 pub use soundtrack::{
     PreparedSceneSoundtrack, SoundtrackInput, SoundtrackPreparationLimits, SoundtrackRenderOptions,
     SoundtrackRenderReport, SoundtrackTimeline, render_soundtrack, render_soundtrack_with_fs,
