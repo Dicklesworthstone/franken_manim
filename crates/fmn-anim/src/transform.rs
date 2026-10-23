@@ -74,6 +74,10 @@ pub fn interpolate_fields(
     let Some(entry) = stage.get(submob) else {
         return;
     };
+    // C-29: a point-less group still owns its constructor/style record. It
+    // must follow the same interpolation as a visible member, including
+    // after Write temporarily installs the outline's transparent style.
+    let defaults_only = entry.buffer.is_empty();
     let Some((from_placement, to_placement)) = stage.placement(from).zip(stage.placement(to))
     else {
         return;
@@ -121,15 +125,22 @@ pub fn interpolate_fields(
         // Equal object-space normals are normally locked. They still need a
         // world-space write whenever vertices are materialized for a live view.
         .filter(|field| {
-            (sync_world && pointlike.contains(&field.name)) || !entry.buffer.is_locked(&field.name)
+            (!defaults_only || !pointlike.contains(&field.name))
+                && ((sync_world && pointlike.contains(&field.name))
+                    || !entry.buffer.is_locked(&field.name))
         })
         .map(|field| field.name.clone())
         .collect();
     for field in fields {
-        let (Some(a), Some(b)) = (
-            stage.get(from).and_then(|e| e.buffer.read_column(&field)),
-            stage.get(to).and_then(|e| e.buffer.read_column(&field)),
-        ) else {
+        let read = |mob| {
+            let buffer = &stage.get(mob)?.buffer;
+            if defaults_only {
+                buffer.is_empty().then(|| buffer.default_record(&field))?
+            } else {
+                buffer.read_column(&field)
+            }
+        };
+        let (Some(a), Some(b)) = (read(from), read(to)) else {
             continue;
         };
         if a.len() != b.len() {
@@ -162,10 +173,14 @@ pub fn interpolate_fields(
         } else {
             interpolate_linear_column(&a, &b, alpha)
         };
-        if let Some(entry) = stage.get_mut(submob)
-            && !entry.buffer.column_slice_eq(&field, &out)
-        {
-            entry.buffer.write_range(&field, 0, &out);
+        if let Some(entry) = stage.get_mut(submob) {
+            if defaults_only {
+                if entry.buffer.default_record(&field).as_deref() != Some(out.as_slice()) {
+                    entry.buffer.write_default_record(&field, &out);
+                }
+            } else if !entry.buffer.column_slice_eq(&field, &out) {
+                entry.buffer.write_range(&field, 0, &out);
+            }
         }
     }
     let placement = if sync_world {
@@ -245,7 +260,11 @@ fn lock_matching_data(stage: &mut Stage, mobject: Mob, m1: Mob, m2: Mob) {
             .fields()
             .iter()
             .map(|f| f.name.clone())
-            .filter(|name| ea.buffer.column_eq(&eb.buffer, name))
+            .filter(|name| {
+                ea.buffer.column_eq(&eb.buffer, name)
+                    && (!ea.buffer.is_empty()
+                        || ea.buffer.default_record(name) == eb.buffer.default_record(name))
+            })
             .collect();
         if let Some(entry) = stage.get_mut(sub) {
             entry.buffer.lock_data(matching.iter().map(String::as_str));
@@ -322,12 +341,9 @@ pub(crate) fn set_family_rgb(stage: &mut Stage, mob: Mob, rgb: [f32; 3]) {
             .map(|f| f.name.clone())
             .collect();
         for field in fields {
-            if let Some(mut column) = entry.buffer.read_column(&field) {
-                for row in column.as_chunks_mut::<4>().0 {
-                    row[..3].copy_from_slice(&rgb);
-                }
-                entry.buffer.write_range(&field, 0, &column);
-            }
+            entry
+                .buffer
+                .write_color_lanes(&field, Some(rgb.map(f64::from)), None);
         }
     }
 }

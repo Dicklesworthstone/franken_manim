@@ -7,6 +7,7 @@ made. This module owns no interpolation, geometry, renderer, or frame clock.
 from __future__ import annotations
 
 from functools import wraps
+from inspect import getattr_static
 from typing import Any
 
 
@@ -280,7 +281,8 @@ def _install_transform_dispatch(g: dict[str, Any]) -> None:
         "has_updaters", "lock_matching_data", "lock_data", "lock_uniforms",
         "unlock_data", "set_animating_status",
         "_is_updating_suspended", "suspend_updating", "resume_updating", "update",
-        "interpolate", "get_family", "__getattribute__", "__getattr__",
+        "interpolate", "get_family", "has_points", "_style_data",
+        "pointlike_data_keys", "__getattribute__", "__getattr__",
     ))
     # submobjects is normally a per-instance _LiveSubmobjects, not a method.
     # Compare only its class descriptor; comparing its value to a class-level
@@ -297,6 +299,7 @@ def _install_transform_dispatch(g: dict[str, Any]) -> None:
     partial_hooks = (
         "copy", "get_family", "set_animating_status", "_is_updating_suspended",
         "suspend_updating", "resume_updating", "update", "pointwise_become_partial",
+        "has_points", "_style_data", "pointlike_data_keys",
         "__getattribute__", "__getattr__",
     )
     border_hooks = partial_hooks + (
@@ -327,6 +330,8 @@ def _install_transform_dispatch(g: dict[str, Any]) -> None:
     path_hooks = ("point_from_proportion", "_point_from_proportion", "has_points",
                   "get_num_points", "__getattribute__", "__getattr__")
     path_protocols = _protocols(g, g.get("VMobject", Mobject), path_hooks)
+    vector_fade_type = g.get("VFadeIn", ())
+    has_style_rows = hasattr(Mobject, "_style_data") and hasattr(Mobject, "has_points")
 
     def authored_family(root, object_protocols):
         # This is behavior admission, not interpolation's path-wise family
@@ -356,9 +361,71 @@ def _install_transform_dispatch(g: dict[str, Any]) -> None:
             stack.extend(children)
         return False
 
+    def changes_point_free_style(animation):
+        # Python owns a point-less member's mutable _data_defaults ndarray;
+        # Marionette's phantom record is a separate native constructor row.
+        # Use the existing Python interpolation when those observable styles
+        # change. Equal-style group motion still uses native Transform and
+        # pure-frame offload. Do not manufacture an endpoint at admission:
+        # synthesized targets belong to the animation's begin lifecycle.
+        if not has_style_rows:
+            return False
+        root = getattr(animation, "mobject", None)
+        if not isinstance(root, Mobject):
+            return False
+        source = root.get_family()
+        empty = [member for member in source if not member.has_points()]
+        # Native tags are plain strings in the shipping classes (or ordinary
+        # instance overrides). An authored descriptor is callback behavior,
+        # never something to evaluate as an admission query.
+        kind = getattr_static(animation, "_native_kind", None)
+        if kind is not None and type(kind) is not str:
+            return True
+        if empty:
+            if kind in {"fade_in", "fade_out", "v_fade_in", "v_fade_out", "v_fade_in_then_out"}:
+                return any(bool((row[name][:, 3] != 0).any())
+                           for member in empty for row in (member._style_data(),)
+                           for name in row.dtype.names
+                           if name.endswith("rgba") and row[name].shape[-1] == 4)
+            if kind in {"draw_border_then_fill", "write"}:
+                return any("fill_rgba" in row.dtype.names
+                           and bool((row["fill_rgba"][:, 3] != 0).any())
+                           for member in empty for row in (member._style_data(),))
+            if kind == "indicate":
+                return True
+            if (kind in {"grow_from_point", "grow_from_center", "grow_from_edge",
+                         "grow_arrow", "spin_in_from_nothing"}
+                    and getattr_static(animation, "point_color", None) is not None):
+                return True
+        target = getattr(animation, "target_mobject", None)
+        if isinstance(animation, Transform) and isinstance(target, Mobject):
+            destination = target.get_family()
+            if not any(not member.has_points() for member in (*source, *destination)):
+                return False
+            # Alignment may insert phantom members. Their future correspondence
+            # is not established yet, so keep that lifecycle on the host.
+            if len(source) != len(destination):
+                return True
+            for start, end in zip(source, destination):
+                if start.has_points() and end.has_points():
+                    continue
+                if start.has_points() != end.has_points():
+                    return True
+                a, b = start._style_data(), end._style_data()
+                if a.dtype != b.dtype:
+                    return True
+                geometric = set(start.pointlike_data_keys) | set(end.pointlike_data_keys)
+                if any(not g["_arrays_match"](a[name], b[name])
+                       for name in a.dtype.names if name not in geometric):
+                    return True
+            return False
+        return False
+
     def requires(animation):
         if isinstance(animation, Transform):
-            if _changed(animation, protocols):
+            if (_changed(animation, protocols) or any(
+                    _implementation(type(animation), name) is not None
+                    for name in ("mobject", "target_mobject"))):
                 return True
             # Inspect current endpoints on every lowering; families and
             # instance methods may change between plays of the same object.
@@ -393,6 +460,15 @@ def _install_transform_dispatch(g: dict[str, Any]) -> None:
                 return True
             if (authored_family(animation.mobject, path_object_protocols)
                     or _changed(animation.path, path_protocols)):
+                return True
+        elif isinstance(animation, vector_fade_type):
+            if (_changed(animation, protocols)
+                    or _implementation(type(animation), "mobject") is not None
+                    or authored_family(animation.mobject, border_protocols)):
+                return True
+        if (isinstance(animation, (Transform, *reveal_types))
+                or isinstance(animation, vector_fade_type)):
+            if changes_point_free_style(animation):
                 return True
         # Keep specialized native defaults and existing family capability
         # decisions. The guards above run BEFORE older classifiers which

@@ -1,5 +1,6 @@
 """Python protocol tests; fixture records are not native-render acceptance."""
 
+import ast
 import copy
 import importlib.util
 from pathlib import Path
@@ -42,6 +43,13 @@ def fixture():
 
         def has_points(self):
             return len(self.data) > 0
+
+        def _style_data(self):
+            if len(self.data):
+                return self.data
+            if not hasattr(self, "_data_defaults"):
+                self._data_defaults = np.ones(1, dtype=self.data.dtype)
+            return self._data_defaults
 
         def get_bounding_box(self):
             if len(self.data):
@@ -221,6 +229,51 @@ class TransformPathProtocolTests(unittest.TestCase):
         self.assertEqual(self.n._point_free_family_ids(self.source), set())
         empty._set_point_free_anchor((1, 2, 3))
         self.assertEqual(empty.point_free_anchor, (1, 2, 3))
+
+    def test_point_free_defaults_interpolate_without_fabricated_path_points(self):
+        source, target = self.source, self.target
+        for mob in (source, target):
+            mob.data = mob.data[:0].copy()
+        source._style_data()["rgba"] = [1., 0., 0., .25]
+        target._style_data()["rgba"] = [0., 0., 1., .75]
+        before = source.copy()
+        calls = []
+        def path(a, b, alpha):
+            calls.append(a.shape)
+            return (1 - alpha) * a + alpha * b
+        source.interpolate(before, target, .5, path)
+        np.testing.assert_array_equal(source._style_data()["rgba"], [[.5, 0., .5, .5]])
+        np.testing.assert_array_equal(before._style_data()["rgba"], [[1., 0., 0., .25]])
+        self.assertEqual(calls, [(3, 3)])  # Only the real point-free bounding box.
+        self.assertEqual(len(source.data), 0)
+        source.locked_data_keys.add("rgba")
+        source.interpolate(before, target, 1.)
+        np.testing.assert_array_equal(source._style_data()["rgba"], [[.5, 0., .5, .5]])
+
+    def test_production_matching_locks_compare_point_free_style_defaults(self):
+        bootstrap = SOURCE.parent.parent / "manimlib_bootstrap.py"
+        tree = ast.parse(bootstrap.read_text())
+        owner = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Mobject")
+        methods = [node for node in owner.body if isinstance(node, ast.FunctionDef)
+                   and node.name in ("lock_data", "lock_uniforms", "lock_matching_data")]
+        helpers = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+                   and node.name in ("_arrays_match", "_array_is_constant")]
+        scope = {"_np": np, "_listify": lambda value: value}
+        exec(compile(ast.Module(body=helpers + methods, type_ignores=[]), str(bootstrap), "exec"), scope)
+        for method in methods:
+            setattr(self.n.Mobject, method.name, scope[method.name])
+        source, target = self.source, self.target
+        for mob in (source, target):
+            mob.data = mob.data[:0].copy()
+        source._style_data()["rgba"] = [1., 0., 0., .25]
+        target._style_data()["rgba"] = [0., 0., 1., .75]
+        animation = self.n.Transform(source, target)
+        animation.begin()
+        self.assertNotIn("rgba", source.locked_data_keys)
+        animation.interpolate(.5)
+        np.testing.assert_array_equal(source._style_data()["rgba"], [[.5, 0., .5, .5]])
+        animation.finish()
+        np.testing.assert_array_equal(source._style_data()["rgba"], [[0., 0., 1., .75]])
 
     def test_analytic_midpoint_and_nonpoint_fields(self):
         self.target.data["rgba"] = 1

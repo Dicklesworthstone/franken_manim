@@ -135,16 +135,23 @@ def install(native, subsystems=True):
         # after the shipped straight_path, which is NumPy arithmetic.
         data = self.data
         start_data, end_data = mobject1.data, mobject2.data
+        point_free = len(data) == 0
+        pointlike = self.pointlike_data_keys
+        if point_free and len(start_data) == len(end_data) == 0:
+            # C-29: group/number roots retain real style in their phantom
+            # record. Drawing and transforms must restore that style too.
+            # Geometric placeholders are not points: the C-33 box below owns
+            # their position, and authored paths must not see a fabricated row.
+            data = self._style_data()
+            start_data, end_data = mobject1._style_data(), mobject2._style_data()
         data_keys = [
-            key for key in data.dtype.names if key not in locked_data
+            key for key in data.dtype.names
+            if key not in locked_data and (not point_free or key not in pointlike)
         ]
-        # Point-free family roots can still carry animated uniforms. They
-        # have no first record from which to broadcast a constant data field.
         if len(data) == 0:
             data_keys = []
         if data_keys:
             self.note_changed_data()
-        pointlike = self.pointlike_data_keys
         for key in data_keys:
             start = start_data[key]
             end = end_data[key]
@@ -178,7 +185,7 @@ def install(native, subsystems=True):
         # (mobject.py:1837) but leaves its refresh flag set, so whether it
         # moves depends on an earlier read; here it always moves. A box over
         # points follows the points, so only point-free families need this.
-        if len(data) == 0:
+        if point_free:
             pending, point_free = list(self.submobjects), True
             while pending and point_free:
                 member = pending.pop()

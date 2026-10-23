@@ -48,6 +48,21 @@ class BorderWriteTests(unittest.TestCase):
         np.testing.assert_array_equal(animation.mobject.data, before)
         self.assertIn(("joints",), animation.mobject.calls)
         self.assertFalse(animation.mobject.animating)
+    def test_write_restores_nested_point_less_root_styles_after_reverse_seek(self):
+        group = self.g["VGroup"](self.g["VGroup"](self.curve()))
+        group.fill_opacity, group.submobjects[0].fill_opacity = .5, .75
+        before = [mob._style_data().copy() for mob in group.get_family()]
+        animation = self.Write(group, lag_ratio=0., rate_func=self.g["linear"])
+        animation.begin()
+        for alpha, factor in ((.25, 0.), (.75, .5), (.25, 0.), (.875, .75)):
+            animation.interpolate(alpha)
+            for mob, original in zip(group.get_family(), before):
+                self.assertAlmostEqual(mob.fill_opacity, original["rgba"][0, 3] * factor)
+        animation.finish()
+        for mob, original in zip(group.get_family(), before):
+            np.testing.assert_array_equal(mob._style_data(), original)
+        self.assertFalse(group.has_points())
+        self.assertFalse(group.submobjects[0].has_points())
     def test_custom_outline_hook_is_evaluated_at_begin_not_constructor(self):
         seen = []
         base = self.Border

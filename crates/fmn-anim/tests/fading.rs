@@ -69,6 +69,43 @@ fn assert_close(actual: &[f32], expected: &[f32], tol: f32) {
 // ---------------------------------------------------------------- fades
 
 #[test]
+fn point_less_fades_animate_and_restore_group_style() {
+    let mut stage = Stage::new();
+    let root = vmob(&mut stage, &[]);
+    let child = line5(&mut stage);
+    stage.attach(root, child).unwrap();
+    {
+        let buffer = &mut stage.get_mut(root).unwrap().buffer;
+        buffer.write_color_lanes("fill_rgba", Some([0.0, 0.5, 0.5]), Some(0.5));
+        buffer.write_color_lanes("stroke_rgba", Some([1.0, 1.0, 1.0]), Some(0.75));
+    }
+    let opacity = |stage: &Stage| {
+        stage
+            .get(root)
+            .unwrap()
+            .buffer
+            .default_record("fill_rgba")
+            .unwrap()[3]
+    };
+    let mut appear = fade_in(&mut stage, root, [0.0; 3], 1.0).unwrap();
+    appear.state_mut().config.rate_func = RateFunc::linear();
+    appear.begin(&mut stage).unwrap();
+    assert_eq!(opacity(&stage), 0.0);
+    appear.interpolate(&mut stage, 0.5);
+    assert_eq!(opacity(&stage), 0.25);
+    appear.finish(&mut stage);
+    assert_eq!(opacity(&stage), 0.5);
+    let mut disappear = fade_out(&mut stage, root, [0.0; 3], 1.0).unwrap();
+    disappear.state_mut().config.rate_func = RateFunc::linear();
+    disappear.begin(&mut stage).unwrap();
+    disappear.interpolate(&mut stage, 0.5);
+    assert_eq!(opacity(&stage), 0.25);
+    disappear.finish(&mut stage);
+    assert_eq!(opacity(&stage), 0.5);
+    assert!(stage.get(root).unwrap().buffer.is_empty());
+}
+
+#[test]
 fn fade_in_starts_invisible_scaled_and_shifted() {
     let mut stage = Stage::new();
     let mob = line5(&mut stage);

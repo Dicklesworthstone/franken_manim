@@ -200,9 +200,7 @@ impl Stage {
 
     /// Reference `set_opacity`: write the alpha lane of every `*rgba` field
     /// across the whole family.
-    #[allow(clippy::cast_possible_truncation)]
     pub fn set_family_opacity(&mut self, mob: Mob, opacity: f64) {
-        let opacity = opacity as f32;
         for member in self.family(mob) {
             let Some(entry) = self.get_mut(member) else {
                 continue;
@@ -216,12 +214,7 @@ impl Stage {
                 .map(|f| f.name.clone())
                 .collect();
             for field in fields {
-                if let Some(mut column) = entry.buffer.read_column(&field) {
-                    for alpha in column.iter_mut().skip(3).step_by(4) {
-                        *alpha = opacity;
-                    }
-                    entry.buffer.write_range(&field, 0, &column);
-                }
+                entry.buffer.write_color_lanes(&field, None, Some(opacity));
             }
         }
     }

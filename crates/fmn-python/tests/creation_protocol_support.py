@@ -47,18 +47,22 @@ def environment():
             self.stroke_behind = False
         @property
         def fill_opacity(self):
-            return float(self.data["rgba"][0, 3]) if len(self.data) else self._empty_fill
+            return float(self._style_data()["rgba"][0, 3])
         @fill_opacity.setter
         def fill_opacity(self, value):
-            self._empty_fill = value
-            self.data["rgba"][:, 3] = value
+            self._style_data()["rgba"][:, 3] = value
         @property
         def stroke_width(self):
-            return float(self.data["stroke_width"][0, 0]) if len(self.data) else self._empty_width
+            return float(self._style_data()["stroke_width"][0, 0])
         @stroke_width.setter
         def stroke_width(self, value):
-            self._empty_width = value
-            self.data["stroke_width"][:] = value
+            self._style_data()["stroke_width"][:] = value
+        def _style_data(self):
+            if len(self.data):
+                return self.data
+            if not hasattr(self, "_data_defaults"):
+                self._data_defaults = np.ones(1, dtype=self.data.dtype)
+            return self._data_defaults
         def get_uniforms(self):
             return dict(self.uniforms)
         def set_uniform(self, **kwargs):

@@ -413,12 +413,7 @@ impl DrawBorderThenFill {
                 continue;
             };
             // set_fill(opacity=0), whole family.
-            if let Some(mut fill) = entry.buffer.read_column("fill_rgba") {
-                for alpha in fill.iter_mut().skip(3).step_by(4) {
-                    *alpha = 0.0;
-                }
-                entry.buffer.write_range("fill_rgba", 0, &fill);
-            }
+            entry.buffer.write_color_lanes("fill_rgba", None, Some(0.0));
             // set_stroke(color?, width, behind), members with points only.
             if entry.buffer.is_empty() {
                 continue;
@@ -460,11 +455,21 @@ pub(crate) fn match_style_from(stage: &mut Stage, mobject: Mob, source: Mob) {
     let fa = stage.family(mobject);
     let fb = stage.family(source);
     for (&dst, &src) in fa.iter().zip(fb.iter()) {
-        let columns: Vec<(String, Vec<f32>)> = match stage.get(src) {
-            Some(entry) => STYLE_FIELDS
-                .iter()
-                .filter_map(|&f| entry.buffer.read_column(f).map(|c| (f.to_owned(), c)))
-                .collect(),
+        let (defaults_only, columns): (bool, Vec<(String, Vec<f32>)>) = match stage.get(src) {
+            Some(entry) => (
+                entry.buffer.is_empty(),
+                STYLE_FIELDS
+                    .iter()
+                    .filter_map(|&field| {
+                        let column = if entry.buffer.is_empty() {
+                            entry.buffer.default_record(field)
+                        } else {
+                            entry.buffer.read_column(field)
+                        };
+                        column.map(|values| (field.to_owned(), values))
+                    })
+                    .collect(),
+            ),
             None => continue,
         };
         let (shading, flat, behind) = match stage.get(src) {
@@ -476,7 +481,11 @@ pub(crate) fn match_style_from(stage: &mut Stage, mobject: Mob, source: Mob) {
         };
         if let Some(entry) = stage.get_mut(dst) {
             for (field, column) in columns {
-                if entry.buffer.read_column(&field).map(|c| c.len()) == Some(column.len()) {
+                if defaults_only && entry.buffer.is_empty() {
+                    entry.buffer.write_default_record(&field, &column);
+                } else if !defaults_only
+                    && entry.buffer.read_column(&field).map(|c| c.len()) == Some(column.len())
+                {
                     entry.buffer.write_range(&field, 0, &column);
                 }
             }
@@ -570,6 +579,14 @@ impl Animation for DrawBorderThenFill {
             let tracker = stage.tracker(outline);
             if let Some(entry) = stage.get_mut(submob) {
                 entry.buffer.assign_from(&source);
+                // set_data only copies physical records. A reverse seek must
+                // also restore the outline style of a point-less root before
+                // returning to the drawing phase.
+                if source.is_empty()
+                    && let Some(row) = source.defaults_row()
+                {
+                    entry.buffer.restore_defaults_row(row);
+                }
                 if index == 0 {
                     // Even lerping identical numeric uniforms can round by one
                     // bit. Do not retain that fill-phase rounding in a reveal.

@@ -527,6 +527,102 @@ fn apply_pointwise_function_to_center_moves_to_mapped_center() {
 
 // ---------------------------------------------------- point-less box (C-33)
 
+#[test]
+fn point_less_transform_interpolates_defaults_without_locking_different_styles() {
+    let mut stage = Stage::new();
+    let source = vmob(&mut stage, &[], [0.0; 4]);
+    let target = vmob(&mut stage, &[], [0.0; 4]);
+    for (mob, fill, width) in [
+        (source, [1.0, 0.0, 0.0, 0.25], 2.0),
+        (target, [0.0, 0.0, 1.0, 0.75], 6.0),
+    ] {
+        let buffer = &mut stage.get_mut(mob).unwrap().buffer;
+        buffer.write_default_record("fill_rgba", &fill);
+        buffer.write_scalar_lanes("stroke_width", width);
+    }
+    let mut animation = Transform::new(source, target).with_config(AnimConfig {
+        rate_func: RateFunc::linear(),
+        ..AnimConfig::default()
+    });
+    animation.begin(&mut stage).unwrap();
+    assert!(!stage.get(source).unwrap().buffer.is_locked("fill_rgba"));
+    animation.interpolate(&mut stage, 0.5);
+    let buffer = &stage.get(source).unwrap().buffer;
+    assert!(buffer.is_empty());
+    assert_eq!(
+        buffer.default_record("fill_rgba").unwrap(),
+        [0.5, 0.0, 0.5, 0.5]
+    );
+    assert_eq!(buffer.default_record("stroke_width").unwrap(), [4.0]);
+    assert_eq!(
+        stage
+            .get(target)
+            .unwrap()
+            .buffer
+            .default_record("fill_rgba")
+            .unwrap(),
+        [0.0, 0.0, 1.0, 0.75]
+    );
+    animation.finish(&mut stage);
+    let buffer = &mut stage.get_mut(source).unwrap().buffer;
+    assert_eq!(
+        buffer.default_record("fill_rgba").unwrap(),
+        [0.0, 0.0, 1.0, 0.75]
+    );
+    // Later point creation must adopt the completed animation's style.
+    buffer.resize(3).unwrap();
+    assert_eq!(
+        buffer.read_column("fill_rgba").unwrap(),
+        [0.0, 0.0, 1.0, 0.75].repeat(3)
+    );
+    assert_eq!(buffer.read_column("stroke_width").unwrap(), [6.0; 3]);
+}
+
+#[test]
+fn point_less_interpolation_honors_explicit_locks_and_snapshot_isolation() {
+    let mut stage = Stage::new();
+    let source = vmob(&mut stage, &[], [0.0; 4]);
+    let target = vmob(&mut stage, &[], [0.0; 4]);
+    stage
+        .get_mut(source)
+        .unwrap()
+        .buffer
+        .write_default_record("fill_rgba", &[1.0, 0.0, 0.0, 0.25]);
+    stage
+        .get_mut(target)
+        .unwrap()
+        .buffer
+        .write_default_record("fill_rgba", &[0.0, 1.0, 0.0, 0.75]);
+    stage
+        .get_mut(source)
+        .unwrap()
+        .buffer
+        .write_scalar_lanes("stroke_width", 2.0);
+    stage
+        .get_mut(target)
+        .unwrap()
+        .buffer
+        .write_scalar_lanes("stroke_width", 8.0);
+    let live = stage.copy_family(source).unwrap();
+    stage
+        .get_mut(live)
+        .unwrap()
+        .buffer
+        .lock_data(["stroke_width"]);
+    let before = stage.get(live).unwrap().buffer.snapshot_clone();
+    fmn_anim::interpolate_fields(&mut stage, live, source, target, 0.5, PathFunc::Straight);
+    let buffer = &stage.get(live).unwrap().buffer;
+    assert_eq!(
+        buffer.default_record("fill_rgba").unwrap(),
+        [0.5, 0.5, 0.0, 0.5]
+    );
+    assert_eq!(buffer.default_record("stroke_width").unwrap(), [2.0]);
+    assert_eq!(
+        before.default_record("fill_rgba").unwrap(),
+        [1.0, 0.0, 0.0, 0.25]
+    );
+}
+
 /// C-33: a family without points has a degenerate box, its position.
 /// Interpolation puts that box where the path does, whatever was read
 /// before (the Reference's result depends on a stale refresh flag).

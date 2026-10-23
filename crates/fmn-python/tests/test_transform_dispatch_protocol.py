@@ -8,6 +8,8 @@ import ast
 from types import MethodType
 import unittest
 
+import numpy as np
+
 from test_composition_lifecycle_protocol import SOURCE, environment
 from fmn_python.playback import _install_transform_dispatch
 
@@ -189,6 +191,124 @@ class TransformDispatchTests(unittest.TestCase):
         self.assertEqual(mob.x, 11.)
         self.assertTrue(leaf.events)
         self.assertFalse(mob.animating)
+
+
+class PointFreeStyleDispatchTests(unittest.TestCase):
+    def setUp(self):
+        def setup(g):
+            Mobject = g["Mobject"]
+            original_init = Mobject.__init__
+            dtype = np.dtype([("point", "f4", (3,)), ("fill_rgba", "f4", (4,)),
+                              ("stroke_rgba", "f4", (4,)), ("stroke_width", "f4", (1,))])
+
+            def init(self, *children):
+                original_init(self, *children)
+                self.submobjects = self.children
+                self.point_count = 0
+                self.style_row = np.ones(1, dtype=dtype)
+
+            Mobject.__init__ = init
+            Mobject.has_points = lambda self: self.point_count != 0
+            Mobject._style_data = lambda self: self.style_row
+            Mobject.pointlike_data_keys = ("point",)
+            g["_arrays_match"] = np.array_equal
+
+            class VFadeIn(g["Animation"]):
+                _native_kind = "v_fade_in"
+
+            g["VFadeIn"] = VFadeIn
+
+        self.g = fixture(setup)
+        self.Mobject = self.g["Mobject"]
+
+    def animation(self, source=None, target=None, kind="transform"):
+        animation = self.g["Transform"](source or self.Mobject(), target or self.Mobject())
+        animation._native_kind = kind
+        return animation
+
+    def requires(self, animation):
+        return self.g["_requires_python_animation"](animation)
+
+    def test_equal_style_geometry_only_group_keeps_native_route(self):
+        source, target = self.Mobject(self.Mobject()), self.Mobject(self.Mobject())
+        source.children[0].point_count = target.children[0].point_count = 3
+        target.x = 4
+        # Phantom geometry is not interpolated as style or sent to a path.
+        target.style_row["point"] = 7
+        self.assertFalse(self.requires(self.animation(source, target)))
+
+    def test_root_and_nested_point_free_style_changes_select_callbacks(self):
+        for nested in (False, True):
+            for field, value in (("fill_rgba", [0, 0, 1, .75]),
+                                 ("stroke_rgba", [1, 0, 0, .5]), ("stroke_width", [7])):
+                with self.subTest(nested=nested, field=field):
+                    source, target = self.Mobject(), self.Mobject()
+                    target.style_row[field] = value
+                    if nested:
+                        source, target = self.Mobject(source), self.Mobject(target)
+                    self.assertTrue(self.requires(self.animation(source, target)))
+
+    def test_physical_record_style_changes_keep_native_route(self):
+        source, target = self.Mobject(), self.Mobject()
+        source.point_count = target.point_count = 3
+        target.style_row["fill_rgba"] = [0, 0, 1, .75]
+        self.assertFalse(self.requires(self.animation(source, target)))
+
+    def test_alignment_that_materializes_phantom_style_keeps_host_lifecycle(self):
+        source, target = self.Mobject(), self.Mobject()
+        target.point_count = 3
+        self.assertTrue(self.requires(self.animation(source, target)))
+        self.assertTrue(self.requires(self.animation(target, source)))
+
+    def test_authored_style_accessor_is_not_run_during_admission(self):
+        class Authored(self.Mobject):
+            def _style_data(self):
+                raise AssertionError("admission called authored style code")
+
+        self.assertTrue(self.requires(self.animation(Authored(), self.Mobject())))
+
+    def test_authored_native_tag_descriptor_is_not_run_during_admission(self):
+        class Authored(self.g["Transform"]):
+            @property
+            def _native_kind(self):
+                raise AssertionError("admission called authored native tag")
+
+        self.assertTrue(self.requires(Authored(self.Mobject(), self.Mobject())))
+
+    def test_vector_fade_mobject_descriptor_is_not_run_during_admission(self):
+        class Authored(self.g["VFadeIn"]):
+            @property
+            def mobject(self):
+                raise AssertionError("admission called authored fade endpoint")
+
+            @mobject.setter
+            def mobject(self, value):
+                self.__dict__["mobject"] = value
+
+        self.assertTrue(self.requires(Authored(self.Mobject())))
+
+    def test_transient_fade_and_indication_styles_use_callbacks_even_with_equal_targets(self):
+        for kind in ("fade_in", "fade_out", "v_fade_in", "v_fade_out",
+                     "v_fade_in_then_out", "draw_border_then_fill", "write", "indicate"):
+            with self.subTest(kind=kind):
+                self.assertTrue(self.requires(self.animation(kind=kind)))
+
+    def test_growth_without_point_color_keeps_native_geometry(self):
+        for kind in ("grow_from_point", "grow_from_center", "grow_from_edge",
+                     "grow_arrow", "spin_in_from_nothing"):
+            with self.subTest(kind=kind):
+                animation = self.animation(kind=kind)
+                animation.point_color = None
+                self.assertFalse(self.requires(animation))
+                animation.point_color = "#FF0000"
+                self.assertTrue(self.requires(animation))
+
+    def test_already_transparent_point_free_fade_keeps_native_route(self):
+        source, target = self.Mobject(), self.Mobject()
+        for member in (source, target):
+            member.style_row["fill_rgba"][:, 3] = 0
+            member.style_row["stroke_rgba"][:, 3] = 0
+        self.assertFalse(self.requires(self.animation(source, target, "fade_in")))
 
 
 def mobject_fixture():

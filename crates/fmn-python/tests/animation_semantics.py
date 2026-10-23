@@ -3,16 +3,20 @@
 import math
 
 import numpy as np
+import manimlib as _style_runtime
 
 from manimlib import (
     Animation,
     AnimationGroup,
     Circle,
     CyclicReplace,
+    DecimalNumber,
     DrawBorderThenFill,
+    FadeIn,
     FadeTransform,
     FadeTransformPieces,
     Group,
+    Integer,
     LaggedStart,
     LaggedStartMap,
     Mobject,
@@ -26,6 +30,8 @@ from manimlib import (
     TransformFromCopy,
     VMobject,
     VGroup,
+    Write,
+    linear,
 )
 
 
@@ -77,6 +83,73 @@ colored_outline = DrawBorderThenFill(
 ).get_outline()
 assert all(mob.get_stroke_color().upper() == "#0000FF"
            for mob in colored_outline.family_members_with_points())
+
+# C-29 / fm-v4lv: the stored style of a group or number root is observable
+# scene state even though it contributes no vertices of its own. Exercise
+# manual callbacks and Scene.play over real native-backed records.
+for drawing_type in (DrawBorderThenFill, Write):
+    group = VGroup(Integer(1), DecimalNumber(2.5), Square().shift((2, 0, 0)))
+    group.set_fill("#008080", .5).set_stroke("#FFFFFF", 1)
+    point_free = [member for member in group.get_family() if not member.has_points()]
+    assert len(point_free) >= 3
+    animation = drawing_type(group, rate_func=lambda t: t, lag_ratio=0)
+    animation.begin()
+    for alpha, opacity in ((.25, 0.), (.75, .25), (.25, 0.), (.875, .375)):
+        animation.interpolate(alpha)
+        assert all(abs(member.get_fill_opacity() - opacity) < 1e-6 for member in point_free)
+    animation.finish()
+    assert all(abs(member.get_fill_opacity() - .5) < 1e-6 for member in point_free)
+    assert all(member.get_stroke_width() == 1 for member in point_free)
+    drawing_scene = Scene()
+    drawing_scene.play(drawing_type(group, run_time=2 / 30, lag_ratio=0))
+    assert all(abs(member.get_fill_opacity() - .5) < 1e-6 for member in point_free)
+    drawing_scene.play(FadeIn(group, run_time=2 / 30, rate_func=lambda t: t))
+    assert all(abs(member.get_fill_opacity() - .5) < 1e-6 for member in point_free)
+
+style_source = VGroup(Square()).set_fill("#FF0000", .25)
+style_target = style_source.copy().set_fill("#0000FF", .75)
+style_transform = Transform(style_source, style_target, rate_func=lambda t: t)
+style_transform.begin()
+style_transform.interpolate(.5)
+assert abs(style_source.get_fill_opacity() - .5) < 1e-6
+assert np.allclose(style_source._style_data()["fill_rgba"][0], [.5, 0, .5, .5])
+style_transform.finish()
+assert abs(style_source.get_fill_opacity() - .75) < 1e-6
+assert not style_source.has_points()
+
+# Stock Scene.play used to update only the native phantom row, leaving the
+# Python group's separately owned style row at its old color and opacity.
+# A catalog rate deliberately keeps this test off the custom-rate fallback.
+class PointFreeStyleScene(Scene):
+    def update_mobjects(self, dt):
+        super().update_mobjects(dt)
+        probe = getattr(self, "style_probe", None)
+        if probe is not None and dt > 0:
+            self.style_samples.append(probe.get_fill_opacity())
+
+
+style_scene = PointFreeStyleScene()
+style_scene.style_samples = []
+style_scene.style_probe = VGroup(Square()).set_fill("#FF0000", .25)
+style_scene.add(style_scene.style_probe)
+style_destination = style_scene.style_probe.copy().set_fill("#0000FF", .75)
+style_play = Transform(style_scene.style_probe, style_destination,
+                       run_time=2 / 30, rate_func=linear)
+assert _style_runtime._requires_python_animation(style_play)
+style_scene.play(style_play)
+assert np.allclose(style_scene.style_samples, [.5, .75])
+assert np.allclose(style_scene.style_probe._style_data()["fill_rgba"][0], [0, 0, 1, .75])
+assert not style_scene.style_probe.has_points()
+
+# The conservative style rule must leave ordinary group geometry eligible for
+# native interpolation and pure-play worker dispatch.
+geometry_only = VGroup(Square()).set_fill("#008080", .5)
+geometry_target = geometry_only.copy().shift((1, 0, 0))
+geometry_play = Transform(geometry_only, geometry_target, run_time=2 / 30, rate_func=linear)
+assert not _style_runtime._requires_python_animation(geometry_play)
+Scene().play(geometry_play)
+assert np.allclose(geometry_only.get_center(), geometry_target.get_center())
+assert abs(geometry_only.get_fill_opacity() - .5) < 1e-6
 
 ghost_source = Square(side_length=2, fill_opacity=0.8, stroke_width=3)
 ghost_target = Square(side_length=1).stretch(3, 0).shift((4, 2, 0))

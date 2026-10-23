@@ -3026,9 +3026,15 @@ class Mobject(_BridgeMobject):
         for sm, sm1, sm2 in tuples:
             if not sm.data.dtype == sm1.data.dtype == sm2.data.dtype:
                 continue
+            start_data, end_data = sm1.data, sm2.data
+            if len(sm.data) == len(start_data) == len(end_data) == 0:
+                # Empty columns compare equal even when their stored styles
+                # differ. Lock against the same phantom rows interpolation
+                # uses, so a point-less root can actually change its style.
+                start_data, end_data = sm1._style_data(), sm2._style_data()
             sm.lock_data(
                 key for key in sm.data.dtype.names
-                if _arrays_match(sm1.data[key], sm2.data[key])
+                if _arrays_match(start_data[key], end_data[key])
             )
             sm.lock_uniforms(
                 key for key in self.uniforms
@@ -3039,8 +3045,8 @@ class Mobject(_BridgeMobject):
                 key for key in sm.data.dtype.names
                 if key not in sm.locked_data_keys
                 if all(
-                    _array_is_constant(mob.data[key])
-                    for mob in (sm, sm1, sm2)
+                    _array_is_constant(data[key])
+                    for data in (sm.data, start_data, end_data)
                 )
             )
         return self

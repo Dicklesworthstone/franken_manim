@@ -302,6 +302,53 @@ fn write_derives_reference_parameters() {
     assert_eq!(anim.state().config.name, "Write");
 }
 
+#[test]
+fn border_and_write_restore_point_less_family_styles_after_reverse_seeks() {
+    for use_write in [false, true] {
+        let mut stage = Stage::new();
+        let root = vmob(&mut stage, &[]);
+        let number = vmob(&mut stage, &[]);
+        let glyph = styled_vmob(&mut stage);
+        stage.attach(root, number).unwrap();
+        stage.attach(number, glyph).unwrap();
+        for (mob, opacity) in [(root, 0.5), (number, 0.75)] {
+            let buffer = &mut stage.get_mut(mob).unwrap().buffer;
+            buffer.write_color_lanes("fill_rgba", Some([0.0, 0.5, 0.5]), Some(opacity));
+            buffer.write_scalar_lanes("stroke_width", 5.0);
+        }
+        let before =
+            [root, number, glyph].map(|mob| stage.get(mob).unwrap().buffer.snapshot_clone());
+        let mut animation = if use_write {
+            write(&stage, root)
+        } else {
+            DrawBorderThenFill::new(root)
+        };
+        animation.state_mut().config.rate_func = RateFunc::linear();
+        animation.state_mut().config.lag_ratio = 0.0;
+        animation.begin(&mut stage).unwrap();
+        for (alpha, factor) in [(0.25, 0.0), (0.75, 0.5), (0.25, 0.0), (0.875, 0.75)] {
+            animation.interpolate(&mut stage, alpha);
+            for (mob, opacity) in [(root, 0.5), (number, 0.75)] {
+                let buffer = &stage.get(mob).unwrap().buffer;
+                assert!(buffer.is_empty());
+                assert_eq!(
+                    buffer.default_record("fill_rgba").unwrap()[3],
+                    opacity * factor
+                );
+            }
+            assert_eq!(column(&stage, glyph, "fill_rgba")[3], factor);
+        }
+        animation.finish(&mut stage);
+        for (mob, original) in [root, number, glyph].into_iter().zip(before) {
+            let buffer = &stage.get(mob).unwrap().buffer;
+            for field in ["fill_rgba", "stroke_rgba", "stroke_width"] {
+                assert_eq!(buffer.default_record(field), original.default_record(field));
+                assert_eq!(buffer.read_column(field), original.read_column(field));
+            }
+        }
+    }
+}
+
 // ------------------------------------------------- ShowIncreasingSubsets
 
 #[test]
