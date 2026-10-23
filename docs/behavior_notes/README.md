@@ -58,8 +58,9 @@ migration guidance users read:
 | BN-22 | Bounded surface construction and first-error callback execution | [BN-22-surface-construction-admission.md](BN-22-surface-construction-admission.md) | W7/W10 | Draft |
 | BN-23 | First-error execution for native-backed mathematical plots | [BN-23-graph-construction-admission.md](BN-23-graph-construction-admission.md) | W7/W10 | Draft |
 | BN-24 | Live affine axes invert their chart instead of projecting onto each axis | [BN-24-live-affine-coordinate-inversion.md](BN-24-live-affine-coordinate-inversion.md) | W7/W10 | Draft |
+| BN-25 | A camera at any resolution keeps square pixels | [BN-25-camera-output-aspect.md](BN-25-camera-output-aspect.md) | W5/W10 | Draft |
 
-BN-10 and BN-12 through BN-24 grew past §16.8's seed list, which is expected — the
+BN-10 and BN-12 through BN-25 grew past §16.8's seed list, which is expected — the
 seed names the differences the plan could foresee, and a workstream that finds
 another deliberate divergence writes it a note rather than filing it nowhere.
 ADR-0009 trues §16.8 up to this table and fixes the numbering rules above so

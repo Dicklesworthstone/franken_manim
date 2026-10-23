@@ -57,12 +57,13 @@
 //!
 //! # Reference quirks kept (and noted)
 //!
-//! * **`EnableDisableButton` constructs WHITE.** The Reference's
+//! * **`EnableDisableButton` constructs GREY_C.** The Reference's
 //!   `ValueTracker.__init__` stores the value directly and never
-//!   dispatches `set_value_anim`, so the box keeps its constructor fill
-//!   (the mobject-default colour at opacity 1) until the first
-//!   `set_value`/toggle. Kept verbatim — the first mutator call applies
-//!   the enable/disable colour.
+//!   dispatches `set_value_anim`, so the box keeps its `Rectangle`
+//!   constructor fill (the VMobject default fill, GREY_C, at opacity 1)
+//!   until the first `set_value`/toggle, whatever its value and colours.
+//!   Kept verbatim — the first mutator call applies the enable/disable
+//!   colour.
 //! * **`LinearNumberSlider` parks its handle at the axis midpoint at
 //!   construction**, whatever the value — the Reference's
 //!   `slider.move_to(slider_axis)` runs before the tracker exists and
@@ -91,8 +92,9 @@ use std::rc::Rc;
 use fmn_core::color::Srgb;
 use fmn_core::constants::{
     DEFAULT_MOBJECT_COLOR, DEFAULT_MOBJECT_TO_MOBJECT_BUFF, DEFAULT_STROKE_WIDTH,
-    DEFAULT_VMOBJECT_STROKE_COLOR, DOWN, FRAME_HEIGHT, FRAME_WIDTH, FRAME_X_RADIUS, FRAME_Y_RADIUS,
-    GREEN, GREY_A, GREY_C, LEFT, MED_SMALL_BUFF, ORIGIN, RED, RIGHT, SMALL_BUFF, UP, WHITE,
+    DEFAULT_VMOBJECT_FILL_COLOR, DEFAULT_VMOBJECT_STROKE_COLOR, DOWN, FRAME_HEIGHT, FRAME_WIDTH,
+    FRAME_X_RADIUS, FRAME_Y_RADIUS, GREEN, GREY_A, GREY_C, LEFT, MED_SMALL_BUFF, ORIGIN, RED,
+    RIGHT, SMALL_BUFF, UP, WHITE,
 };
 use fmn_core::types::Vec3;
 use fmn_geom::GeomError;
@@ -388,7 +390,7 @@ pub struct EnableDisableButton {
     enable_color: Srgb,
     disable_color: Srgb,
     /// Whether `set_value` has run at least once — see the module docs for
-    /// the Reference's white-at-construction quirk.
+    /// the Reference's GREY_C-at-construction quirk.
     colored: bool,
     rect: VMobject,
 }
@@ -485,8 +487,9 @@ impl EnableDisableButton {
 
     fn rebuild_rect(&mut self) {
         // The Reference constructs the box with fill_opacity=1 and the
-        // mobject-default colour; the enable/disable fill only appears
-        // once set_value_anim has run (ValueTracker.__init__ bypasses it).
+        // VMobject default fill (GREY_C); the enable/disable fill only
+        // appears once set_value_anim has run (ValueTracker.__init__
+        // bypasses it).
         let fill = if self.colored {
             if self.value {
                 self.enable_color
@@ -494,7 +497,7 @@ impl EnableDisableButton {
                 self.disable_color
             }
         } else {
-            DEFAULT_MOBJECT_COLOR
+            DEFAULT_VMOBJECT_FILL_COLOR
         };
         self.rect = Rectangle::new()
             .width(self.width)
@@ -2280,11 +2283,12 @@ mod tests {
     // ------------------------------------------------- EnableDisableButton
 
     #[test]
-    fn enable_disable_button_constructs_white_then_colors_on_set() {
+    fn enable_disable_button_constructs_grey_then_colors_on_set() {
         let mut button = EnableDisableButton::new(true);
         // The Reference quirk: ValueTracker.__init__ bypasses
-        // set_value_anim, so the box constructs with the default fill.
-        assert_eq!(button.rect().style().fill_color, WHITE);
+        // set_value_anim, so the box constructs with the VMobject default
+        // fill, GREY_C (#888888 on the pinned Reference).
+        assert_eq!(button.rect().style().fill_color, GREY_C);
         assert_eq!(button.rect().style().fill_opacity, 1.0);
 
         button.toggle_value();
@@ -2306,7 +2310,7 @@ mod tests {
         let mut button = EnableDisableButton::new(true)
             .enable_color(enable_color)
             .disable_color(disable_color);
-        assert_eq!(button.rect().style().fill_color, WHITE);
+        assert_eq!(button.rect().style().fill_color, GREY_C);
 
         button.set_value(true);
         assert_eq!(button.rect().style().fill_color, enable_color);

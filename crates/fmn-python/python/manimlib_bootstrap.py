@@ -607,6 +607,8 @@ def _install_live_state(mobject):
     mobject.locked_data_keys = set()
     mobject.const_data_keys = set()
     mobject.locked_uniform_keys = set()
+    # Reference mobject.py:111: a new mobject's data counts as changed.
+    mobject._data_has_changed = True
     # Reference __init__ (mobject.py:92-93) style seeds. Constructors in
     # the native-build family bypass Mobject.__init__ entirely, so the
     # seeds live here where every construction path passes; copy and
@@ -2757,6 +2759,10 @@ class Mobject(_BridgeMobject):
         return wrapper
 
     def refresh_shader_wrapper_id(self):
+        # Reference mobject.py:2042. Lumen keeps no moderngl shader wrappers;
+        # the data-changed notice to self and every ancestor remains.
+        for mob in (self, *self.get_ancestors()):
+            mob._data_has_changed = True
         return self
 
     def get_uniforms(self):
@@ -3138,6 +3144,9 @@ class Mobject(_BridgeMobject):
 
         return wrapper
 
+    # Reference mobject.py:652: the pickle leaves out parents, target and
+    # saved_state, so a restored copy points at none of the originals.
+    @stash_mobject_pointers
     def serialize(self):
         return pickle.dumps(self)
 
@@ -3446,9 +3455,9 @@ class EventType(_enum.Enum, metaclass=_EventTypeMeta):
     """The Reference's event-handler token set."""
 
     MouseMotionEvent = "mouse_motion_event"
-    MouseDragEvent = "mouse_drag_event"
     MousePressEvent = "mouse_press_event"
     MouseReleaseEvent = "mouse_release_event"
+    MouseDragEvent = "mouse_drag_event"
     MouseScrollEvent = "mouse_scroll_event"
     KeyPressEvent = "key_press_event"
     KeyReleaseEvent = "key_release_event"
@@ -3617,34 +3626,24 @@ class VMobject(Mobject):
         fill_border_width=0.0,
         **kwargs,
     ):
-        config = _pinned_vmobject_defaults()
-        self.fill_color = (
-            fill_color
-            if fill_color is not None
-            else color if color is not None else config.default_fill_color
+        _seed_vmobject_fields(
+            self,
+            color=color,
+            fill_color=fill_color,
+            fill_opacity=fill_opacity,
+            stroke_color=stroke_color,
+            stroke_opacity=stroke_opacity,
+            stroke_width=stroke_width,
+            stroke_behind=stroke_behind,
+            background_image_file=background_image_file,
+            long_lines=long_lines,
+            joint_type=joint_type,
+            flat_stroke=flat_stroke,
+            scale_stroke_with_zoom=scale_stroke_with_zoom,
+            use_simple_quadratic_approx=use_simple_quadratic_approx,
+            anti_alias_width=anti_alias_width,
+            fill_border_width=fill_border_width,
         )
-        self.fill_opacity = fill_opacity
-        self.stroke_color = (
-            stroke_color
-            if stroke_color is not None
-            else color if color is not None else config.default_stroke_color
-        )
-        self.stroke_opacity = stroke_opacity
-        self.stroke_width = stroke_width
-        self.stroke_behind = bool(stroke_behind)
-        self.background_image_file = background_image_file
-        self.long_lines = bool(long_lines)
-        self.joint_type = joint_type
-        self.flat_stroke = bool(flat_stroke)
-        self.scale_stroke_with_zoom = bool(scale_stroke_with_zoom)
-        self.use_simple_quadratic_approx = bool(use_simple_quadratic_approx)
-        self.anti_alias_width = float(anti_alias_width)
-        self.fill_border_width = fill_border_width
-        self.needs_new_joint_angles = True
-        self.needs_new_unit_normal = True
-        self.subpath_end_indices = None
-        self.outer_vert_indices = _np.zeros(0, dtype=int)
-        self.shader_program_type = None
 
         super().__init__(**kwargs)
         try:
@@ -4084,9 +4083,10 @@ class VMobject(Mobject):
 
     def reverse_points(self, recurse=True):
         recurse = bool(recurse)
-        if self._is_bound():
+        if self._is_bound() or not self.submobjects:
             # One bound Stage owns the complete native family and preserves
-            # the Reference's separate repair and base-row reversal scopes.
+            # the Reference's separate repair and base-row reversal scopes; a
+            # detached leaf's nursery is its whole family.
             self._reverse_points(recurse)
             return self
 
@@ -4102,6 +4102,15 @@ class VMobject(Mobject):
             mob.data["base_normal"][1::2] *= -1
         for mob in family:
             mob.data[:] = mob.data[::-1]
+        return self
+
+    def ensure_positive_orientation(self, recurse=True):
+        # Reference vectorized_mobject.py:957: every family member whose unit
+        # normal points into the screen is reversed, family and all, as
+        # reverse_points() does.
+        for mob in self.get_family(recurse):
+            if mob.get_num_points() >= 3 and mob._path_unit_normal()[2] < 0:
+                mob.reverse_points()
         return self
 
     def apply_function(self, function, make_smooth=False, **kwargs):
@@ -4408,9 +4417,62 @@ class VMobject(Mobject):
 # implementation (D4); no point math is re-derived here.
 
 
+def _seed_vmobject_fields(
+    mob,
+    color=None,
+    fill_color=None,
+    fill_opacity=0.0,
+    stroke_color=None,
+    stroke_opacity=1.0,
+    stroke_width=4.0,
+    stroke_behind=False,
+    background_image_file=None,
+    long_lines=False,
+    joint_type="auto",
+    flat_stroke=False,
+    scale_stroke_with_zoom=False,
+    use_simple_quadratic_approx=False,
+    anti_alias_width=1.5,
+    fill_border_width=0.0,
+):
+    # Reference VMobject.__init__ (vectorized_mobject.py:99-118). Native
+    # shells bypass that constructor, so they take its defaults here, as the
+    # Reference's SVG paths and glyphs do: their style arrives afterwards
+    # through set_style, never through these fields.
+    config = _pinned_vmobject_defaults()
+    mob.fill_color = (
+        fill_color
+        if fill_color is not None
+        else color if color is not None else config.default_fill_color
+    )
+    mob.fill_opacity = fill_opacity
+    mob.stroke_color = (
+        stroke_color
+        if stroke_color is not None
+        else color if color is not None else config.default_stroke_color
+    )
+    mob.stroke_opacity = stroke_opacity
+    mob.stroke_width = stroke_width
+    mob.stroke_behind = bool(stroke_behind)
+    mob.background_image_file = background_image_file
+    mob.long_lines = bool(long_lines)
+    mob.joint_type = joint_type
+    mob.flat_stroke = bool(flat_stroke)
+    mob.scale_stroke_with_zoom = bool(scale_stroke_with_zoom)
+    mob.use_simple_quadratic_approx = bool(use_simple_quadratic_approx)
+    mob.anti_alias_width = float(anti_alias_width)
+    mob.fill_border_width = fill_border_width
+    mob.needs_new_joint_angles = True
+    mob.needs_new_unit_normal = True
+    mob.subpath_end_indices = None
+    mob.outer_vert_indices = _np.zeros(0, dtype=int)
+    mob.shader_program_type = None
+
+
 def _native_shell_factory():
     shell = VMobject.__new__(VMobject)
     _install_live_state(shell)
+    _seed_vmobject_fields(shell)
     return shell
 
 
@@ -8407,13 +8469,24 @@ class VMobjectFromSVGPath(VMobject):
         if not isinstance(path_data, str):
             raise TypeError("VMobjectFromSVGPath path_obj.d() must return str")
         _install_live_state(self)
+        _seed_vmobject_fields(
+            self,
+            fill_color=style["fill_color"],
+            fill_opacity=style["fill_opacity"],
+            stroke_color=style["stroke_color"],
+            stroke_opacity=style["stroke_opacity"],
+            stroke_width=style["stroke_width"],
+            stroke_behind=style.get("stroke_behind") or False,
+            long_lines=long_lines,
+            joint_type=joint_type,
+            flat_stroke=style.get("flat_stroke") or False,
+            scale_stroke_with_zoom=scale_stroke_with_zoom,
+            use_simple_quadratic_approx=use_simple_quadratic_approx,
+            anti_alias_width=anti_alias_width,
+            fill_border_width=style["fill_border_width"],
+        )
         self.transform_cache = None
         self.path_obj = path_obj
-        self.long_lines = long_lines
-        self.joint_type = joint_type
-        self.scale_stroke_with_zoom = scale_stroke_with_zoom
-        self.use_simple_quadratic_approx = use_simple_quadratic_approx
-        self.anti_alias_width = anti_alias_width
         specs = self._build_svg_path(_native_shell_factory, path_data)
         _hang_native_children(self, specs)
         self.set_joint_type(joint_type)
@@ -8728,7 +8801,7 @@ class MarkupText(StringMobject):
     ):
         self.use_labelled_svg = bool(kwargs.pop("use_labelled_svg", False))
         should_center = kwargs.pop("should_center", True)
-        kwargs.pop("path_string_config", None)
+        self.path_string_config = dict(kwargs.pop("path_string_config", None) or {})
         self.base_color = kwargs.pop("base_color", "#FFFFFF")
         self.protect = kwargs.pop("protect", ())
         _refuse_unrouted(
@@ -11289,7 +11362,7 @@ class OldTexText(OldTex):
 _FUNCTOOLS_LRU_CACHE = _importlib.import_module("functools").lru_cache
 
 
-@_FUNCTOOLS_LRU_CACHE(maxsize=None)
+@_FUNCTOOLS_LRU_CACHE()
 def char_to_cahced_mob(char, **text_config):
     """The Reference's per-character template cache, verbatim including
     the Reference's own "cahced" spelling (numbers.py:22). LaTeX-command
@@ -12860,6 +12933,42 @@ def _native_surface_shell_factory():
     return shell
 
 
+# pywavefront's map-statement options (texture.py TextureOptionsParser) and the
+# number of values each consumes before the texture name.
+_MTL_TEXTURE_OPTION_ARITY = {
+    "-blendu": 1, "-blendv": 1, "-bm": 1, "-boost": 1, "-cc": 1, "-clamp": 1,
+    "-imfchan": 1, "-mm": 2, "-o": 3, "-s": 3, "-t": 3, "-texres": 1,
+}
+
+
+def _mtl_texture_name(spec):
+    tokens = spec.split()
+    index = 0
+    while index < len(tokens):
+        arity = _MTL_TEXTURE_OPTION_ARITY.get(tokens[index])
+        if arity is None:
+            return " ".join(tokens[index:])
+        index += 1 + arity
+    return None
+
+
+def _mtl_textures(path):
+    """{material: diffuse texture path or None} of one .mtl, in file order.
+    A missing file raises FileNotFoundError, as pywavefront's mtllib does."""
+    materials, current = {}, None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        if parts[0] == "newmtl" and len(parts) > 1:
+            current = parts[1]
+            materials[current] = None
+        elif parts[0] == "map_Kd" and current is not None:
+            name = _mtl_texture_name(line[line.find(" ") + 1:].strip())
+            materials[current] = None if name is None else str(path.parent / name)
+    return materials
+
+
 class ThreeDModel(Group):
     """Atlas's owned OBJ-subset reader under the Reference Group surface."""
 
@@ -12877,34 +12986,33 @@ class ThreeDModel(Group):
         self.height = float(height)
 
     def get_textures_from_mtl(self, obj_filepath, suppress_warnings=True):
-        """Reference ThreeDModel.get_textures_from_mtl over Atlas's owned
-        OBJ-subset reader: extract {material name: texture path} from the
-        sibling .mtl named by the file's mtllib line. The pywavefront
-        dependency is deliberately unshipped; this reads only the
-        newmtl/map_Kd pairs the docstring contract names. Materials with
-        no texture map to None, exactly as the pinned helper."""
+        """Reference ThreeDModel.get_textures_from_mtl (surface.py:460) over
+        Atlas's owned OBJ-subset reader, with the semantics of the
+        pywavefront scene the pinned helper reads (the dependency stays
+        unshipped):
+        - `mtllib` names the rest of its line, relative to the OBJ, and a
+          missing library raises FileNotFoundError;
+        - only `map_Kd` is a material's texture (`map_Ka` is its ambient
+          map), named by the rest of its line after its options;
+        - a face before any `usemtl` adds the material `default<N>`, N the
+          materials so far, with no texture; an unknown `usemtl` refuses.
+        Materials with no texture map to None, in definition order."""
         obj_path = _pathlib.Path(obj_filepath)
-        textures = {}
-        mtl_names = [
-            parts[1]
-            for line in obj_path.read_text().splitlines()
-            if (parts := line.split()) and parts[0] == "mtllib" and len(parts) > 1
-        ]
-        for mtl_name in mtl_names:
-            mtl_path = obj_path.parent / mtl_name
-            if not mtl_path.exists():
+        textures, bound = {}, False
+        for line in obj_path.read_text(encoding="utf-8").splitlines():
+            parts = line.split()
+            if not parts:
                 continue
-            current = None
-            for line in mtl_path.read_text().splitlines():
-                parts = line.split()
-                if not parts:
-                    continue
-                if parts[0] == "newmtl":
-                    current = parts[1] if len(parts) > 1 else None
-                    textures.setdefault(current, None)
-                elif parts[0] in ("map_Kd", "map_Ka") and current is not None:
-                    if len(parts) > 1:
-                        textures[current] = str(mtl_path.parent / parts[-1])
+            if parts[0] == "mtllib":
+                textures.update(_mtl_textures(obj_path.parent / " ".join(parts[1:])))
+            elif parts[0] in ("usemtl", "usemat"):
+                name = " ".join(parts[1:])
+                if name not in textures:
+                    raise ValueError(f"Unknown material: {name}")
+                bound = True
+            elif parts[0] == "f" and not bound:
+                textures[f"default{len(textures)}"] = None
+                bound = True
         return textures
 
     def copy(self, deep=False):
@@ -14108,14 +14216,8 @@ class EnableDisableButton(ControlMobject):
             enable_rgb,
             disable_rgb,
         )
-        custom_colors = (
-            enable_rgb != tuple(_color_to_rgb(_GREEN))
-            or disable_rgb != tuple(_color_to_rgb(_RED))
-        )
-        (box,) = self._native_enable_disable_parts(
-            value,
-            colored=custom_colors,
-        )
+        # No state colour before the first set_value, as in the Reference.
+        (box,) = self._native_enable_disable_parts(value, colored=False)
         super().__init__(value, box)
         self.box = box
 
@@ -15437,8 +15539,10 @@ class Camera:
         self.uniforms.update(
             view=tuple(frame.get_view_matrix().T.flatten()),
             frame_scale=frame.get_scale(),
+            # The Reference's FRAME_WIDTH is FRAME_HEIGHT times the configured
+            # aspect; Lumen projects with this camera's own pixel aspect.
             frame_rescale_factors=(
-                2.0 / (_FRAME_HEIGHT * _ASPECT_RATIO),
+                2.0 / (_FRAME_HEIGHT * self.get_aspect_ratio()),
                 2.0 / _FRAME_HEIGHT,
                 frame.get_scale() / frame.get_focal_distance(),
             ),
@@ -15543,6 +15647,10 @@ class Scene(_SceneCore):
             "Scene.assemble_render_groups batches moderngl shader wrappers; "
             "Lumen owns render grouping through the native Stage draw plan"
         )
+
+    def __str__(self):
+        # Reference scene.py:143; SceneFileWriter names outputs with it.
+        return self.__class__.__name__
 
     def __init__(self, *args, **kwargs):
         self.args = args
@@ -16390,6 +16498,12 @@ class Scene(_SceneCore):
                 "Scene.update_frame windowed capture requires a host window; "
                 "FrankenManim Studio owns interactive windows"
             )
+        # Reference scene.py:251: capture the scene through the camera; with
+        # no window, the in-memory frame is what get_pixel_array returns.
+        # Native output never runs this: its frames take the
+        # _fmn_frame_pending path, and progress_through_animations only
+        # reaches here while skipping (fm-fxov).
+        self.camera.capture(*self.mobjects)
 
     def emit_frame(self):
         if self.skip_animations:
@@ -21222,13 +21336,17 @@ class SceneFileWriter:
     def get_output_file_name(self):
         if self.file_name:
             return self.file_name
-        return type(self.scene).__name__
+        # The Reference also appends a -n range's start and end
+        # (scene_file_writer.py:103); OOT-RANGE-OUTPUT-NAMES.
+        return str(self.scene)
 
     def get_output_file_rootname(self):
         return str(_pathlib.Path(self.output_directory) / self.get_output_file_name())
 
     def init_partial_movie_directory(self):
-        return self.get_output_file_rootname()
+        # The portal's subdivided clips live in DIRECTORY/SCENE/clips, which
+        # the native Reel boundary creates on first publish (BN-15).
+        return str(_pathlib.Path(self.get_output_file_rootname()) / "clips")
 
     def get_image_file_path(self):
         return self.get_output_file_rootname() + ".png"
@@ -21244,13 +21362,11 @@ class SceneFileWriter:
         )
 
     def get_next_partial_movie_path(self):
+        # The clip the next play or wait publishes under subdivision (BN-15),
+        # numbered by num_plays as the Reference's NNNNN partial file is.
         plays = int(getattr(self.scene, "num_plays", 0))
-        directory = (
-            _pathlib.Path(self.output_directory)
-            / "partial_movie_files"
-            / self.get_output_file_name()
-        )
-        return str(directory / f"{plays:05}{self._movie_extension()}")
+        directory = _pathlib.Path(self.init_partial_movie_directory())
+        return str(directory / f"segment-{plays:06d}{self._movie_extension()}")
 
     def should_open_file(self):
         return bool(self.open_file_upon_completion)
@@ -21259,7 +21375,9 @@ class SceneFileWriter:
         return bool(self.write_to_movie) and not bool(self.quiet)
 
     def use_fast_encoding(self):
-        return self.pixel_format != "yuv444p"
+        # Reference scene_file_writer.py:241.
+        self.video_codec = "libx264rgb"
+        self.pixel_format = "rgb32"
 
     def init_output_directories(self):
         # Reference scene_file_writer.py:80 — conditional path resolution;

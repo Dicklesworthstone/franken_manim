@@ -171,15 +171,11 @@ def _typed_scalar_constructors(g):
                 rgb = [g["_color_to_rgb"](color) for color in (enable, disable)]
                 if not all(g["_np"].isfinite(color).all() for color in rgb):
                     raise ValueError("control colors must be finite")
-                style = dict(rect)
-                # Preserve the existing native white-at-construction default;
-                # genuine caller paints and custom state colors still win.
-                if style.get("fill_color") is None and style.get("color") is None:
-                    style["fill_color"] = g["WHITE"]
-                box = _shape(g, "Rectangle", style, "rect_kwargs")
-                if any(not g["_np"].array_equal(actual, g["_color_to_rgb"](default))
-                       for actual, default in zip(rgb, (g["GREEN"], g["RED"]))):
-                    box.set_fill(enable if p["value"] else disable)
+                # Reference interactive.py: the box is Rectangle(**rect_kwargs),
+                # so it keeps the VMobject default fill (GREY_C) or the caller's
+                # paint; ValueTracker.__init__ never runs set_value_anim, so no
+                # state colour appears before the first set_value (fm-fxov).
+                box = _shape(g, "Rectangle", dict(rect), "rect_kwargs")
                 self.rect_kwargs = rect
                 self.enable_color, self.disable_color = enable, disable
                 self.value_type, self.box = value_type, box

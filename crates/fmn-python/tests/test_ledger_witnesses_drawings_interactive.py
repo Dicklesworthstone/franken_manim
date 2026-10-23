@@ -277,6 +277,15 @@ class DrawingsInteractiveWitnesses(unittest.TestCase):
         self.assertIn((EventType.MousePressEvent, "on_mouse_press"), listeners(button))
         off = EnableDisableButton(value=False)
         self.assertFalse(off.get_value())
+        # interactive.py: the box is Rectangle(**rect_kwargs) and ValueTracker.__init__ never
+        # runs set_value_anim, so every new button keeps the VMobject default fill, GREY_C,
+        # whatever its value or colours (pinned Reference: #888888). The first set_value paints
+        # the state colour (fm-fxov).
+        from manimlib import BLUE
+        for fresh in (button, off, EnableDisableButton(enable_color=BLUE)):
+            self.assertEqual(fresh.box.get_fill_color(), "#888888")
+        off.set_value(True)
+        self.assertEqual(off.box.get_fill_color(), GREEN_HEX)
 
     def test_linear_number_slider_init(self):
         from manimlib import Circle, EventType, Line, RoundedRectangle
@@ -468,6 +477,9 @@ class DrawingsInteractiveWitnesses(unittest.TestCase):
         }
         members = vars(manimlib.EventType)["_member_map_"]
         self.assertEqual({name: member.value for name, member in members.items()}, reference)
+        # fm-fxov: definition order too (event_type.py:4-11), which list(EventType) and every
+        # dict built by iterating it expose.
+        self.assertEqual([member.name for member in EventType], list(reference))
         for name, value in reference.items():
             member = EventType(value)
             self.assertIs(member, members[name])

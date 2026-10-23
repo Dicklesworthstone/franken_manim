@@ -24,6 +24,20 @@ pub struct CameraRig {
     channels: [Mob; 12],
 }
 
+/// The camera a rig configuration describes. Width is the rig's zoom
+/// channel, so the frame keeps its width and the height follows the output
+/// aspect; `Camera::new` then keeps that already aspect-correct frame.
+fn zoom_camera(config: &CameraConfig) -> Result<Camera, SceneError> {
+    let mut config = config.clone();
+    let (width, height) = config.resolution;
+    if width != 0 && height != 0 {
+        config
+            .frame
+            .resize_to_aspect_ratio(f64::from(width) / f64::from(height), false)?;
+    }
+    Ok(Camera::new(config)?)
+}
+
 fn values(camera: &Camera) -> [f64; 12] {
     let frame = camera.frame();
     let center = frame.center();
@@ -59,7 +73,7 @@ impl CameraRig {
     /// camera is validated before any tracker is allocated. Resolution/aspect,
     /// background, samples and other capture policy stay outside the rig.
     pub fn new(scene: &mut Scene, config: &CameraConfig) -> Result<Self, SceneError> {
-        let camera = Camera::new(config.clone())?;
+        let camera = zoom_camera(config)?;
         let rig = allocate(scene.stage_mut(), values(&camera))?;
         scene.add(&[rig.root])?;
         Ok(rig)
@@ -80,7 +94,7 @@ impl CameraRig {
         scene: &mut Scene,
         target: &CameraConfig,
     ) -> Result<Transform, SceneError> {
-        let target_camera = Camera::new(target.clone())?;
+        let target_camera = zoom_camera(target)?;
         let current = self.sample(scene.stage(), target)?;
         let from = current.frame.orientation();
         let to = target_camera.frame().orientation();
@@ -183,7 +197,7 @@ impl CameraRig {
         }
         config.frame.set_field_of_view(values[8])?;
         config.light_source_position = [values[9], values[10], values[11]];
-        let camera = Camera::new(config.clone())?;
+        let camera = zoom_camera(&config)?;
         config.frame = camera.frame().clone();
         Ok(config)
     }

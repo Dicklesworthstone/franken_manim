@@ -334,14 +334,17 @@ class TrackerLifecycleTests(unittest.TestCase):
             self.assertEqual(slider.get_value(), 3.)
             np.testing.assert_array_equal(slider.slider.get_center(), m.ORIGIN)
 
-    def test_typed_toggle_keeps_native_white_default_and_custom_colors(self):
+    def test_typed_toggle_keeps_the_reference_construction_fill_and_custom_colors(self):
+        # The Reference's box is Rectangle(**rect_kwargs): the VMobject default fill, GREY_C,
+        # until the first set_value paints a state colour, whatever the value or colours
+        # (pinned Reference: #888888; fm-fxov).
         for value in (True, False):
             toggle = m.EnableDisableButton(value)
-            self.assertEqual(toggle.box.get_fill_color(), m.WHITE)
+            self.assertEqual(toggle.box.get_fill_color(), m.GREY_C)
             expected = m.Rectangle(width=.5, height=.5)
             np.testing.assert_array_equal(toggle.box.get_points(), expected.get_points())
             custom = m.EnableDisableButton(value, enable_color=m.BLUE, disable_color=m.YELLOW)
-            self.assertEqual(custom.box.get_fill_color(), m.BLUE if value else m.YELLOW)
+            self.assertEqual(custom.box.get_fill_color(), m.GREY_C)
             custom.set_value(not value)
             self.assertEqual(custom.box.get_fill_color(), m.YELLOW if value else m.BLUE)
 

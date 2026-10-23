@@ -134,6 +134,11 @@ mod tests {
             let t = f64::from(step);
             config.frame.set_center([t * 0.75, t * 0.1, 0.0]).unwrap();
             config.frame.set_width(8.0 - t * 0.5).unwrap();
+            // Zoom by width: the height follows the output aspect.
+            config
+                .frame
+                .resize_to_aspect_ratio(f64::from(WIDTH) / f64::from(HEIGHT), false)
+                .unwrap();
             config
                 .frame
                 .set_orientation([1.0, t * 0.05, t * 0.1, 0.0])

@@ -112,6 +112,13 @@ class AnimationWitnesses(unittest.TestCase):
         self.assertIs(type(mixed), Group)
         self.assertEqual(ids(mixed.submobjects), ids([a, inner]))
 
+        # composition.py:51 builds the group from remove_list_redundancies (iterables.py:17),
+        # which keeps each mobject's LAST occurrence: [a, b, a] groups as [b, a] (fm-fxov).
+        from manimlib import Indicate
+
+        repeated = AnimationGroup(FadeIn(a), FadeIn(b), Indicate(a)).get_all_mobjects()
+        self.assertEqual(ids(repeated.submobjects), ids([b, a]))
+
     # manimlib.animation.creation -------------------------------------------------------------
 
     def test_show_increasing_subsets_init(self):

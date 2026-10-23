@@ -250,6 +250,29 @@ class RuntimeConfigWitnesses(unittest.TestCase):
         self.assertEqual(manim_dir, os.path.dirname(package))
         self.assertTrue(os.path.isfile(os.path.join(manim_dir, "manimlib", "__init__.py")))
 
+    def test_scene_file_writer_names_and_fast_encoding(self):
+        from manimlib import Scene
+        from manimlib.scene.scene_file_writer import SceneFileWriter
+
+        # scene_file_writer.py:103: an explicit file_name wins, otherwise str(scene), the class
+        # name (scene.py:143). The Reference's -n suffix is OOT-RANGE-OUTPUT-NAMES. :241
+        # use_fast_encoding selects libx264rgb over rgb32 and returns None (fm-fxov).
+        class Lesson(Scene):
+            pass
+
+        temp = tempfile.TemporaryDirectory(prefix="fmn-fxov-writer-")
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        scene = Lesson()
+        self.assertEqual(str(scene), "Lesson")
+        writer = SceneFileWriter(scene, output_directory=root.as_posix())
+        self.assertEqual(writer.get_output_file_name(), "Lesson")
+        self.assertEqual(writer.get_movie_file_path(), (root / "Lesson.mp4").as_posix())
+        named = SceneFileWriter(scene, file_name="take", output_directory=root.as_posix())
+        self.assertEqual(named.get_output_file_name(), "take")
+        self.assertIsNone(writer.use_fast_encoding())
+        self.assertEqual((writer.video_codec, writer.pixel_format), ("libx264rgb", "rgb32"))
+
     def test_get_raster_image_dir(self):
         self._check_configured_getter("get_raster_image_dir", "raster_images")
 

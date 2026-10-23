@@ -2735,7 +2735,7 @@ fn perspective_stroke_reach_px(camera: &Camera, style: &Style, world: [Vec3; 3])
 
     let frame = camera.frame();
     let view = frame.view_matrix();
-    let factors = frame.frame_rescale_factors();
+    let factors = camera.frame_rescale_factors();
     let fixed = style.is_fixed_in_frame;
     let world_mix = 1.0 - fixed;
     let projection_row = |row: usize| -> Vec3 {
@@ -6427,9 +6427,9 @@ mod tests {
             crate::texture::TextureEncoding::Linear,
         )
         .expect("texture");
-        let scale = camera.frame().scale();
-        let half_width = fmn_core::constants::FRAME_WIDTH * scale / 2.0;
-        let half_height = fmn_core::constants::FRAME_HEIGHT * scale / 2.0;
+        // The quad covers the camera's own 4:3 frame.
+        let half_width = camera.frame().width() / 2.0;
+        let half_height = camera.frame().height() / 2.0;
         let normal = [0.0, 0.0, 1.0];
         let mesh = SurfaceMesh::from_uv_grid(
             vec![
@@ -6617,6 +6617,13 @@ mod tests {
         let sixteen = before.render(16).expect("frame");
         assert_eq!(one.as_bytes(), four.as_bytes());
         assert_eq!(one.as_bytes(), sixteen.as_bytes());
+        // Adjudicated 2026-10-23 (fm-fxov, BN-25): this 32x24 camera now
+        // shows its own 10.67 x 8 frame at 3 px per unit on both axes, so the
+        // 5 x 4 square at z = 0.5 (perspective 1.055x) draws about 16 x 13 px.
+        // Before, x was projected with the 16:9 factor and the square drew
+        // about 9 x 9.5 px, near square; that frame hashed e13a7041... The
+        // projection itself is proved
+        // by camera::tests::every_output_aspect_projects_its_own_frame_with_square_pixels.
         // Adjudicated 2026-07-28 (fm-diu): perspective strokes now minimize
         // `distance - half_width` per curve before choosing the winning color,
         // width and depth. The previous digest is restored if that law is
@@ -6625,7 +6632,7 @@ mod tests {
         // independently proves why nearest-curve-first is the wrong image.
         assert_eq!(
             sha256(one.as_bytes()).to_hex(),
-            "e13a704147fec87adc9c70bab4a3ef82725175a60790eda2d7d340b75ec0982f",
+            "14a81c64673f97493cbe08bcaf6b81f9ae5d46deb9f0fe19a7397e973a2e291c",
             "mixed vector/3D self-golden"
         );
 

@@ -1301,18 +1301,19 @@ def _install_composition_lifecycle(g):
         if id(animation) in visiting:
             raise ValueError("Animation composition contains a cycle")
         visiting.add(id(animation))
-        objects, seen = [], set()
+        objects = []
         try:
             for child in animation.animations:
                 if isinstance(child, AnimationGroup) and child.mobject is None:
                     ensure_root(child, visiting)
-                for obj in animated_mobjects(child):
-                    if id(obj) not in seen:
-                        seen.add(id(obj))
-                        objects.append(obj)
+                objects.extend(animated_mobjects(child))
         finally:
             visiting.remove(id(animation))
-        return objects
+        # Reference remove_list_redundancies (utils/iterables.py:17): a
+        # repeated mobject keeps the place of its LAST occurrence, which sets
+        # the group's member and draw order (fm-fxov).
+        last = {id(obj): obj for obj in reversed(objects)}
+        return list(reversed(last.values()))
 
     def ensure_root(animation, visiting=None):
         if animation.mobject is None:

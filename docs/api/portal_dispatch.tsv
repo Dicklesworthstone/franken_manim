@@ -687,7 +687,7 @@ Mobject.rotate	Mobject	fmn_python.point_editing	2	fmn_python.point_editing > boo
 Mobject.rotate_about_origin	Mobject	bootstrap	1	bootstrap
 Mobject.save_state	Mobject	bootstrap	1	bootstrap
 Mobject.scale	Mobject	bootstrap	1	bootstrap
-Mobject.serialize	Mobject	bootstrap	1	bootstrap
+Mobject.serialize	Mobject	bootstrap	2	bootstrap > bootstrap
 Mobject.set_animating_status	Mobject	bootstrap	1	bootstrap
 Mobject.set_clip_plane	Mobject	bootstrap	1	bootstrap
 Mobject.set_clip_planes	Mobject	bootstrap	1	bootstrap
@@ -1100,7 +1100,7 @@ VMobject.close_path	VMobject	bootstrap	1	bootstrap
 VMobject.consider_points_equal	VMobject	bootstrap	1	bootstrap
 VMobject.curve_and_prop_of_partial_point	VMobject	placeholder	1	placeholder
 VMobject.deactivate_depth_test	Mobject	bootstrap	2	bootstrap > bootstrap
-VMobject.ensure_positive_orientation	VMobject	placeholder	1	placeholder
+VMobject.ensure_positive_orientation	VMobject	bootstrap	1	bootstrap
 VMobject.fade	VMobject	bootstrap	1	bootstrap
 VMobject.get_anchors	VMobject	bootstrap	1	bootstrap
 VMobject.get_anchors_and_handles	VMobject	bootstrap	1	bootstrap

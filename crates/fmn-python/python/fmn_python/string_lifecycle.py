@@ -7,6 +7,7 @@ No SVG parser, second typesetter, or substitute interpolation is introduced.
 from __future__ import annotations
 
 import abc
+import inspect
 from .coordinate_lifecycle import _bind
 from .copying import FamilyRefs
 from .invocation import InvocationGuard
@@ -59,7 +60,7 @@ def initialize_string(g, obj, style):
         g["_init_native_vmobject"](obj, options)
 
 
-def _reclass_leaves(g, candidate, paths):
+def _reclass_leaves(g, candidate, paths, path_string_config):
     """Give each typeset leaf the Reference's class (fm-15k9).
 
     The Reference builds strings through SVGMobject: every glyph is a
@@ -68,11 +69,19 @@ def _reclass_leaves(g, candidate, paths):
     unchanged; only the leaf's Python class moves. A rule's contour runs
     from its bottom-right corner, so its start anchors are the Reference's
     vertices. Strings without kinds (Text, MarkupText) are all glyphs.
+    A glyph's VMobject fields are the constructor's, given the string's
+    path_string_config as the Reference's VMobjectFromSVGPath is (Text
+    passes use_simple_quadratic_approx=True).
     """
     kinds = getattr(candidate, "_string_sub_kinds", None) or ["glyph"] * len(paths)
     if len(kinds) != len(paths):
         raise ValueError("native string kinds do not match its span paths")
     glyph_class, rule_class = g["VMobjectFromSVGPath"], g["Rectangle"]
+    seed = g["_seed_vmobject_fields"]
+    fields = inspect.signature(seed).parameters
+    glyph_fields = {
+        key: value for key, value in path_string_config.items() if key in fields and key != "mob"
+    }
     for path, kind in zip(paths, kinds):
         leaf = candidate
         for index in path:
@@ -85,6 +94,8 @@ def _reclass_leaves(g, candidate, paths):
             leaf.__class__ = glyph_class
             leaf.transform_cache = None
             leaf.path_obj = None
+            if glyph_fields:
+                seed(leaf, **glyph_fields)
 
 
 def _publish(g, obj, candidate, specs):
@@ -97,7 +108,7 @@ def _publish(g, obj, candidate, specs):
     offset = len(retained)
     if any(not path or not 0 <= path[0] < len(children) for path in paths):
         raise ValueError("native string span paths do not identify glyph children")
-    _reclass_leaves(g, candidate, paths)
+    _reclass_leaves(g, candidate, paths, getattr(obj, "path_string_config", None) or {})
     # Rebase only the first component: TeX parts retain their nested structure.
     paths = [[path[0] + offset, *path[1:]] for path in paths]
     # Plain tuples keep shallow references under the public copy contract.

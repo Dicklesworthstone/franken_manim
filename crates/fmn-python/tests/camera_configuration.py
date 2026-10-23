@@ -85,7 +85,8 @@ class CameraConfigurationTests(unittest.TestCase):
         self.assertEqual(frame.get_shape(), (10., 6.))
         self.assertAlmostEqual(frame.get_field_of_view(), .7)
         self.assertIs(scene.camera.frame, frame)
-        self.assertEqual(frame.get_shape(), (10., 5.))
+        # The camera keeps the frame height and takes the 2:1 output aspect (BN-25).
+        self.assertEqual(frame.get_shape(), (12., 6.))
         np.testing.assert_array_equal(frame.get_center(), (2., -1., .5))
 
     def test_nested_constructor_config_merges_with_scene_defaults(self):
@@ -97,7 +98,7 @@ class CameraConfigurationTests(unittest.TestCase):
         override = {"frame_config": {"center_point": (3., 2., 0.)}, "fps": 24}
         scene = Configured(camera_config=override)
         self.assertEqual(scene.camera_config["frame_config"]["frame_shape"], (9., 5.))
-        self.assertEqual(scene.camera.get_frame_shape(), (9., 6.))
+        self.assertEqual(scene.camera.get_frame_shape(), (7.5, 5.))
         self.assertAlmostEqual(scene.frame.get_field_of_view(), .6)
         self.assertEqual(scene.frame._core.euler_axes(), "xyz")
         np.testing.assert_array_equal(scene.frame.get_center(), (3., 2., 0.))
@@ -141,10 +142,10 @@ class CameraConfigurationTests(unittest.TestCase):
         # The Reference's scene list starts with the frame (fm-6l2i).
         self.assertEqual(scene.mobjects, [frame])
 
-    def test_aspect_ratio_uses_actual_live_width_not_stale_recipe(self):
+    def test_aspect_ratio_uses_actual_live_height_not_stale_recipe(self):
         scene = m.Scene(camera_config={"resolution": (120, 60), "frame_config": {"frame_shape": (8., 8.)}})
-        scene.frame.set_width(5., stretch=True)
-        self.assertEqual(scene.camera.get_frame_shape(), (5., 2.5))
+        scene.frame.set_height(5., stretch=True)
+        self.assertEqual(scene.camera.get_frame_shape(), (10., 5.))
         scene.frame.set_height(7., stretch=True)
         self.assertIs(scene.camera, scene.camera)
         self.assertEqual(scene.frame.get_height(), 7., "repeated access must not reapply the initial correction")
@@ -154,7 +155,7 @@ class CameraConfigurationTests(unittest.TestCase):
         frame = m.CameraFrame(frame_shape=(6., 4.), center_point=(3., 0., 0.), fovy=.8)
         scene.frame = frame
         self.assertIs(scene.camera.frame, frame)
-        self.assertEqual(frame.get_shape(), (6., 3.))
+        self.assertEqual(frame.get_shape(), (8., 4.))
         self.assertAlmostEqual(frame.get_field_of_view(), .8)
 
     def test_invalid_frame_config_is_rejected(self):
@@ -208,7 +209,7 @@ class CameraConfigurationTests(unittest.TestCase):
             # Explicit independent pose construction, not the configuration path.
             if not configured and not wrong:
                 camera = scene.camera
-                scene.frame.set_width(5., stretch=True).set_height(5./(96/54), stretch=True)
+                scene.frame.set_height(3., stretch=True).set_width((96/54) * 3., stretch=True)
                 scene.frame.move_to((2., 1., 0.)).set_field_of_view(.8)
             with scene.render_session(path, format='png_sequence', resolution=(96, 54), fps=4, threads=threads):
                 square = m.Square(side_length=1.3, fill_color=m.RED, fill_opacity=1).move_to((2., 1., 0.))
@@ -235,13 +236,13 @@ class CameraConfigurationTests(unittest.TestCase):
                 if self.calls != 1:
                     raise RuntimeError("frame recipe evaluated twice")
                 return self.value
-        fovy, width = Once(.8), Once(5.)
+        fovy, height = Once(.8), Once(3.)
         scene = m.Scene(camera_config={"resolution": (96, 54), "samples": 1,
-            "frame_config": {"frame_shape": (width, 3.), "fovy": fovy}})
+            "frame_config": {"frame_shape": (5., height), "fovy": fovy}})
         frame = scene.frame
         self.assertIs(scene.camera.frame, frame)
-        self.assertEqual((fovy.calls, width.calls), (1, 1))
-        self.assertEqual(frame.get_width(), 5.)
+        self.assertEqual((fovy.calls, height.calls), (1, 1))
+        self.assertEqual(frame.get_height(), 3.)
         self.assertAlmostEqual(frame.get_field_of_view(), .8)
 
     def test_caller_mutating_consumed_recipe_cannot_poison_capture(self):
@@ -282,7 +283,7 @@ class CameraConfigurationTests(unittest.TestCase):
         replacement = m.CameraFrame(frame_shape=(6., 4.), center_point=(3., 0., 0.), fovy=.7)
         scene.frame = replacement
         self.assertIs(scene.camera.frame, replacement)
-        self.assertEqual(replacement.get_shape(), (6., 6. / (96/54)))
+        self.assertEqual(replacement.get_shape(), ((96/54) * 4., 4.))
         self.assertAlmostEqual(replacement.get_field_of_view(), .7)
 
 

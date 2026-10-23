@@ -58,8 +58,9 @@ Primitive option dictionaries accept the corresponding public shape's
 constructor/style options. A standalone control's dictionary is its complete
 primitive recipe; the color-bank adapter merges its partial overrides with
 the public slider defaults so compact channel geometry is retained. Scalar
-controls keep the existing midpoint-at-construction slider behavior and
-white-at-construction default toggle box. A later `set_value` applies the live
+controls keep the existing midpoint-at-construction slider behavior and a
+toggle box that keeps its `Rectangle` fill (the VMobject default, GREY_C)
+at construction, as the Reference's does. A later `set_value` applies the live
 state style or position. Finite, ordered ranges wholly outside the default
 slider interval are supported; invalid ranges, steps and degenerate axes
 refuse before tracker initialization.

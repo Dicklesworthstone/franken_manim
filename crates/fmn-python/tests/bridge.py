@@ -1484,14 +1484,15 @@ assert native_camera.get_pixel_shape() == (640, 320)
 assert native_camera.get_pixel_width() == 640
 assert native_camera.get_pixel_height() == 320
 assert native_camera.get_aspect_ratio() == 2.0
-assert np.allclose(native_camera.get_frame_shape(), (10.0, 5.0))
+# The frame keeps its height and takes the 2:1 pixel aspect (BN-25).
+assert np.allclose(native_camera.get_frame_shape(), (16.0, 8.0))
 assert np.allclose(native_camera.get_frame_center(), (1.0, 2.0, 0.0))
 assert native_camera.fps == 24
 assert native_camera.samples == 4
 assert native_camera.max_allowable_norm == 20.0
 assert np.allclose(native_camera.light_source.get_center(), (-3.0, 4.0, 5.0))
 native_camera.refresh_uniforms()
-assert native_camera.uniforms["pixel_size"] == 10.0 / 640.0
+assert native_camera.uniforms["pixel_size"] == 16.0 / 640.0
 
 failed_camera = camera_module.Camera.__new__(camera_module.Camera)
 try:
@@ -4587,8 +4588,10 @@ np.testing.assert_array_equal(native_check.get_all_points(), checked_points)
 np.testing.assert_array_equal(native_cross.get_all_points(), crossed_points)
 
 # EnableDisableButton is a one-box native control on the same real tracker
-# base. Construction preserves the Reference's default-white quirk; the first
-# state change routes through Atlas and colors the stable box proxy.
+# base. Construction preserves the Reference's quirk that the box keeps its
+# Rectangle fill (the VMobject default, GREY_C: #888888 on the pinned
+# Reference) until the first state change, which routes through Atlas and
+# colors the stable box proxy (fm-fxov).
 enabled_button = interactive.EnableDisableButton(True)
 disabled_button = interactive.EnableDisableButton(False)
 assert interactive.EnableDisableButton.__bases__ == (
@@ -4600,8 +4603,8 @@ assert bool(enabled_button.get_value()) is True
 assert bool(disabled_button.get_value()) is False
 assert list(enabled_button.submobjects) == [enabled_button.box]
 assert list(disabled_button.submobjects) == [disabled_button.box]
-assert enabled_button.box.get_fill_color() == manimlib.WHITE
-assert disabled_button.box.get_fill_color() == manimlib.WHITE
+assert enabled_button.box.get_fill_color() == manimlib.GREY_C
+assert disabled_button.box.get_fill_color() == manimlib.GREY_C
 
 enabled_box = enabled_button.box
 enabled_button.toggle_value()
@@ -4659,7 +4662,8 @@ custom_toggle = interactive.EnableDisableButton(
     disable_color=manimlib.YELLOW,
 )
 assert bool(custom_toggle.get_value()) is True
-assert custom_toggle.box.get_fill_color() == manimlib.BLUE
+# Custom colours too wait for the first set_value; the box keeps GREY_C (fm-fxov).
+assert custom_toggle.box.get_fill_color() == manimlib.GREY_C
 custom_toggle_box = custom_toggle.box
 custom_toggle.toggle_value()
 assert bool(custom_toggle.get_value()) is False
@@ -14764,12 +14768,17 @@ assert writer.get_output_file_rootname() == "/tmp/out/demo"
 assert writer.get_image_file_path() == "/tmp/out/demo.png"
 assert writer.get_movie_file_path() == "/tmp/out/demo.mp4"
 assert writer.get_insert_file_path(2) == "/tmp/out/demo_2.mp4"
+# Subdivided clips are DIRECTORY/SCENE/clips/segment-NNNNNN (BN-15); the
+# partial-movie helpers name that layout (fm-fxov).
+assert writer.init_partial_movie_directory() == "/tmp/out/demo/clips"
 assert writer.get_next_partial_movie_path() == (
-    "/tmp/out/partial_movie_files/demo/00000.mp4"
+    "/tmp/out/demo/clips/segment-000000.mp4"
 )
 assert writer.should_open_file() is True
 assert writer.has_progress_display() is True
-assert writer.use_fast_encoding() is True
+# Reference scene_file_writer.py:241: selects libx264rgb over rgb32, returns None.
+assert writer.use_fast_encoding() is None
+assert (writer.video_codec, writer.pixel_format) == ("libx264rgb", "rgb32")
 default_writer = writer_mod.SceneFileWriter(Scene())
 assert default_writer.get_output_file_name() == "Scene"
 assert default_writer.get_image_file_path() == "Scene.png"
@@ -19765,9 +19774,13 @@ data_bottom.note_changed_data()
 assert data_bottom._data_has_changed and data_top._data_has_changed
 data_side = Mobject()
 data_top.add(data_side)
+# A new mobject's data counts as changed (Reference mobject.py:111); clear it so
+# the notice's reach is what is measured.
+assert data_side._data_has_changed is True
+data_side._data_has_changed = False
 data_top.note_changed_data(recurse_up=False)
 assert data_top._data_has_changed
-assert not hasattr(data_side, "_data_has_changed")
+assert data_side._data_has_changed is False
 
 # The affects_data decorator marks after the wrapped call succeeds.
 @Mobject.affects_data
@@ -19777,6 +19790,7 @@ def _restyle(mob):
 
 
 decorated_target = Mobject()
+decorated_target._data_has_changed = False
 assert _restyle(decorated_target) == "styled"
 assert decorated_target.restyle_calls == 1
 assert decorated_target._data_has_changed
@@ -23428,9 +23442,9 @@ _check("movie path normalizes extension dot",
        _named.get_movie_file_path().endswith("custom_name.mov"))
 _check("insert path indexes per play",
        _named.get_insert_file_path(3).endswith("custom_name_3.mov"))
-_check("partial movie path nests per scene name",
+_check("partial movie path names the next subdivided clip (BN-15)",
        _named.get_next_partial_movie_path().endswith(
-           "partial_movie_files/custom_name/00000.mov"
+           "custom_name/clips/segment-000000.mov"
        ))
 _check("flag queries reflect construction",
        _named.should_open_file() is False
@@ -23443,12 +23457,10 @@ _loud = manimlib.SceneFileWriter(_writer_scene, write_to_movie=True)
 _check("progress display requires movie and silence",
        _quiet.has_progress_display() is False
        and _loud.has_progress_display() is True)
-_check("fast encoding keys off pixel format",
-       _fw.use_fast_encoding() is True
-       and manimlib.SceneFileWriter(
-           _writer_scene, pixel_format="yuv444p"
-       ).use_fast_encoding()
-       is False)
+_fast = manimlib.SceneFileWriter(_writer_scene, pixel_format="yuv444p")
+_check("fast encoding selects libx264rgb over rgb32 (scene_file_writer.py:241)",
+       _fast.use_fast_encoding() is None
+       and (_fast.video_codec, _fast.pixel_format) == ("libx264rgb", "rgb32"))
 _init_paths = manimlib.SceneFileWriter(
     _writer_scene, save_last_frame=True, write_to_movie=True
 )

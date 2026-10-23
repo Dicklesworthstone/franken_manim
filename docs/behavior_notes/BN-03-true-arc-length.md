@@ -72,6 +72,34 @@ compensated for the classic curved-tip tilt or rescaling should remove that
 compensation; custom `ArrowTip` subclasses keep their Python identity and
 style while the native placement algebra transforms their point run.
 
+## StreamLines honour `arc_len`, `n_samples_per_line` and `cutoff_norm`
+
+The Reference's `StreamLines.draw_lines` (`vector_field.py`) integrates each
+seed for `solution_time` (3) with `ode_solution_points` at `dt` (0.05) and
+smooths through all 60 solver samples (`t_eval = np.arange(0, 3, 0.05)`). It stores `arc_len`, `max_time_steps`,
+`n_samples_per_line` and `cutoff_norm` but never reads them (its comment:
+`TODO, account for arc length somehow?`). A line's drawn length is therefore
+however far the field carries it in 3 time units: long in a fast field,
+short in a slow one.
+
+**FrankenManim:** each line still integrates for `solution_time`, through
+fsci's adaptive RK45 with dense output. Then the four declared parameters do
+what their names say:
+- the line is cut at true arc length `arc_len` (default 3);
+- it is resampled to `n_samples_per_line` (default 10) evenly spaced samples
+  and smoothed through those;
+- it stops at the first sample whose field norm exceeds `cutoff_norm`;
+- at most `max_time_steps` dense samples are taken.
+
+In a field whose speed stays near 1 the lines look as they do in the
+Reference. In a fast field they are capped at 3 units rather than running
+off the frame. Each line has fewer, evenly spaced points (19 per line against
+the Reference's 119), which `AnimatedStreamLines` and `VShowPassingFlash`
+then sweep at constant speed.
+
+**Migration:** to draw longer lines in a fast field, raise `arc_len`. For
+more points per line, raise `n_samples_per_line`.
+
 ## Evidence
 
 - `crates/fmn-geom/src/arclength.rs`; `crates/fmn-geom/tests/arclength.rs`
@@ -82,6 +110,8 @@ style while the native placement algebra transforms their point run.
   cache tests).
 - Reference: `VMobject.get_arc_length` / `point_from_proportion` /
   `quick_point_from_proportion` at the pinned commit.
+- `crates/fmn-library/src/fields.rs` (`resample_even_arc`, the StreamLines
+  builder) and `crates/fmn-python/tests/live_streamlines.py`.
 - `crates/fmn-library/src/tip.rs` (true terminal tangents, reusable built-tip
   placement, true-length trimming, straight/curved/degenerate tests).
 - `crates/fmn-python/tests/bridge.py` (authored `TipableVMobject` MRO and full

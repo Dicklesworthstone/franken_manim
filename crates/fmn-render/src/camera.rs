@@ -5,7 +5,7 @@
 //!
 //! 1. map world space through the inverse camera orientation and frame scale;
 //! 2. mix that point with the original point by `is_fixed_in_frame`;
-//! 3. apply the fixed frame-rescale factors;
+//! 3. apply the frame-rescale factors of the output aspect;
 //! 4. set `w = 1 - z` and replace `z` by `-0.1 z`.
 //!
 //! Those constants are aesthetic and compositional API, so this module keeps
@@ -498,16 +498,6 @@ impl CameraFrame {
             self.center[2] + distance * to_camera[2],
         ]
     }
-
-    /// The fixed factors from the Reference's camera uniform refresh.
-    #[must_use]
-    pub fn frame_rescale_factors(&self) -> Vec3 {
-        [
-            2.0 / FRAME_WIDTH,
-            2.0 / FRAME_HEIGHT,
-            self.scale() / self.focal_distance(),
-        ]
-    }
 }
 
 /// Camera constructor state corresponding to the Reference's public fields.
@@ -574,7 +564,15 @@ impl Default for Camera {
 }
 
 impl Camera {
-    /// Construct a camera and resize its frame to the pixel aspect ratio.
+    /// Construct a camera whose frame has the pixel aspect ratio.
+    ///
+    /// A frame already at that aspect is kept exactly. Any other frame keeps
+    /// its height: the Reference builds its frame as `(FRAME_HEIGHT * aspect,
+    /// FRAME_HEIGHT)` from the configured resolution, and only the frame
+    /// height sets what it displays, so this is the frame it shows at that
+    /// resolution. A caller that zooms by width resizes the frame to the
+    /// aspect first, keeping its width. [`Camera::set_pixel_shape`] keeps the
+    /// width, as the Reference's `reset_pixel_shape` does.
     pub fn new(config: CameraConfig) -> Result<Self, CameraError> {
         let (width, height) = config.resolution;
         if width == 0 || height == 0 {
@@ -597,7 +595,10 @@ impl Camera {
             return Err(CameraError::NonFinite);
         }
         let mut frame = config.frame;
-        frame.resize_to_aspect_ratio(f64::from(width) / f64::from(height), false)?;
+        let aspect = f64::from(width) / f64::from(height);
+        if (frame.aspect_ratio() - aspect).abs() > 1e-12 * aspect {
+            frame.resize_to_aspect_ratio(aspect, true)?;
+        }
         Ok(Self {
             frame,
             resolution: config.resolution,
@@ -669,6 +670,23 @@ impl Camera {
     #[must_use]
     pub fn aspect_ratio(&self) -> f64 {
         f64::from(self.pixel_width()) / f64::from(self.pixel_height())
+    }
+
+    /// The factors from the Reference's camera uniform refresh.
+    ///
+    /// The Reference divides by `FRAME_WIDTH`, which its constants derive as
+    /// `FRAME_HEIGHT * width / height` of the configured resolution. Lumen
+    /// takes that aspect from this camera's pixel shape, so every output
+    /// aspect keeps square pixels. At a 16:9 output the x factor is
+    /// bit-identical to `2 / FRAME_WIDTH`. As in the Reference, the frame's
+    /// own width never enters the projection.
+    #[must_use]
+    pub fn frame_rescale_factors(&self) -> Vec3 {
+        [
+            2.0 / (FRAME_HEIGHT * self.aspect_ratio()),
+            2.0 / FRAME_HEIGHT,
+            self.frame.scale() / self.frame.focal_distance(),
+        ]
     }
 
     /// Frames per second.
@@ -767,7 +785,7 @@ impl Camera {
             view[1] + fixed * (point[1] - view[1]),
             view[2] + fixed * (point[2] - view[2]),
         ];
-        let factors = self.frame.frame_rescale_factors();
+        let factors = self.frame_rescale_factors();
         for (component, factor) in mixed.iter_mut().zip(factors) {
             *component *= factor;
         }
@@ -1497,7 +1515,7 @@ mod tests {
     }
 
     #[test]
-    fn camera_config_preserves_capture_fields_and_resizes_the_frame_aspect() {
+    fn camera_config_preserves_capture_fields_and_keeps_the_frame_height() {
         let background = Srgb::from_rgb8(12, 34, 56).to_linear(0.25);
         let camera = Camera::new(CameraConfig {
             resolution: (800, 600),
@@ -1516,9 +1534,90 @@ mod tests {
         assert_eq!(camera.samples(), 3);
         assert_eq!(camera.edge_sample_limit(), EdgeSampleLimit::TwoByTwo);
         assert_eq!(camera.light_source_position(), [1.0, 2.0, 3.0]);
-        assert!(close(camera.frame().width(), FRAME_WIDTH));
-        assert!(close(camera.frame().height(), FRAME_WIDTH * 3.0 / 4.0));
+        assert_eq!(camera.frame().height(), FRAME_HEIGHT);
+        assert!(close(camera.frame().width(), FRAME_HEIGHT * 4.0 / 3.0));
         assert!(close(camera.frame().aspect_ratio(), 4.0 / 3.0));
+    }
+
+    #[test]
+    fn sixteen_by_nine_outputs_keep_the_reference_frame_and_factors_bit_for_bit() {
+        for resolution in [(1920, 1080), (1280, 720), (3840, 2160), (320, 180)] {
+            let camera = Camera::new(CameraConfig {
+                resolution,
+                ..CameraConfig::default()
+            })
+            .expect("valid camera");
+            assert_eq!(camera.frame().shape(), [FRAME_WIDTH, FRAME_HEIGHT]);
+            assert_eq!(
+                camera.frame_rescale_factors().map(f64::to_bits)[..2],
+                [
+                    (2.0 / FRAME_WIDTH).to_bits(),
+                    (2.0 / FRAME_HEIGHT).to_bits()
+                ]
+            );
+        }
+        // A frame shape of another aspect keeps its height, the only
+        // dimension the Reference's display reads.
+        let mut frame = CameraFrame::default();
+        frame.set_shape([10.0, 6.0]).expect("finite shape");
+        let camera = Camera::new(CameraConfig {
+            frame,
+            ..CameraConfig::default()
+        })
+        .expect("valid camera");
+        assert_eq!(camera.frame().shape(), [1920.0 / 1080.0 * 6.0, 6.0]);
+        // A frame already at the pixel aspect is kept exactly, so a caller
+        // that zooms by width and derives the height keeps both bits.
+        let mut zoomed = CameraFrame::default();
+        zoomed.set_width(9.0).expect("finite width");
+        zoomed
+            .resize_to_aspect_ratio(96.0 / 64.0, false)
+            .expect("finite aspect");
+        let kept = zoomed.shape();
+        let camera = Camera::new(CameraConfig {
+            resolution: (96, 64),
+            frame: zoomed,
+            ..CameraConfig::default()
+        })
+        .expect("valid camera");
+        assert_eq!(camera.frame().shape(), kept);
+        assert_eq!(kept, [9.0, 6.0]);
+    }
+
+    #[test]
+    fn every_output_aspect_projects_its_own_frame_with_square_pixels() {
+        // fm-fxov: the x factor was 2 / FRAME_WIDTH at every aspect, so a
+        // 96x64 or 64x64 output squeezed x against its own frame.
+        for (resolution, frame_width) in [((96, 64), 12.0), ((64, 64), 8.0), ((64, 96), 16.0 / 3.0)]
+        {
+            let camera = Camera::new(CameraConfig {
+                resolution,
+                ..CameraConfig::default()
+            })
+            .expect("valid camera");
+            assert_eq!(camera.frame().height(), FRAME_HEIGHT);
+            assert!(close(camera.frame().width(), frame_width));
+            let pixels_per_unit = f64::from(resolution.1) / FRAME_HEIGHT;
+            let pixel = camera
+                .project([3.0, 2.0, 0.0], 0.0)
+                .pixel(resolution)
+                .expect("in front of the camera");
+            assert!(close(
+                pixel[0],
+                f64::from(resolution.0) / 2.0 + 3.0 * pixels_per_unit
+            ));
+            assert!(close(
+                pixel[1],
+                f64::from(resolution.1) / 2.0 - 2.0 * pixels_per_unit
+            ));
+            // The frame's corner lands on the output's corner.
+            let corner = camera
+                .project([frame_width / 2.0, FRAME_HEIGHT / 2.0, 0.0], 0.0)
+                .pixel(resolution)
+                .expect("in front of the camera");
+            assert!(close(corner[0], f64::from(resolution.0)));
+            assert!(close(corner[1], 0.0));
+        }
     }
 
     #[test]

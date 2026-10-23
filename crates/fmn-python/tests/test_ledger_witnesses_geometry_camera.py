@@ -87,6 +87,29 @@ class GeometryCameraWitnesses(unittest.TestCase):
         pixels = camera.get_pixel_array()
         check(45, 37)
 
+    def test_camera_frame_and_pixels_at_other_aspects(self):
+        from manimlib import RED, Camera, Scene, Square
+
+        # The Reference derives FRAME_WIDTH = FRAME_HEIGHT * width / height from the configured
+        # resolution (constants.py:13-21), so its frame keeps height 8 at any aspect and its
+        # pixels are square. FrankenManim gives every camera that frame from its own resolution
+        # (BN-25). fm-fxov: x used to be projected with the 16:9 factor whatever the aspect.
+        for resolution, frame_width in (((96, 64), 12.0), ((64, 64), 8.0)):
+            width, height = resolution
+            camera = Camera(resolution=resolution)
+            self.assertAlmostEqual(camera.get_frame_height(), 8.0, places=12)
+            self.assertAlmostEqual(camera.get_frame_width(), frame_width, places=12)
+            scene = Scene(camera_config=dict(resolution=resolution, background_color="#000000"))
+            square = Square(side_length=2, fill_color=RED, fill_opacity=1, stroke_width=0)
+            scene.add(square.move_to([3, 2, 0]))
+            scene.camera.capture(*scene.mobjects)
+            red = scene.camera.get_pixel_array()[:, :, 0] > 128
+            # 8 px per unit about the centre: x in [2, 4] and y in [1, 3].
+            cols = np.flatnonzero(red.any(axis=0))
+            rows = np.flatnonzero(red.any(axis=1))
+            self.assertEqual((cols.min(), cols.max()), (width // 2 + 16, width // 2 + 31))
+            self.assertEqual((rows.min(), rows.max()), (height // 2 - 24, height // 2 - 9))
+
     # manimlib.mobject.types.surface ----------------------------------------------------------
 
     def test_textured_surface_set_image_coords_by_uv_func(self):
@@ -137,6 +160,22 @@ class GeometryCameraWitnesses(unittest.TestCase):
         self.assertEqual(list(textures), ["painted", "plain"])
         self.assertEqual(model.get_textures_from_mtl(str(obj), suppress_warnings=False), expected)
 
+        # pywavefront's edge cases, each checked against pywavefront 1.3 (fm-fxov): map_Ka is the
+        # ambient map, not the texture; a face before any usemtl adds "default<N>"; map_Kd drops
+        # its options and keeps a spaced name; a missing library raises.
+        vertices = "v 0 0 0\nv 1 0 0\nv 0 1 0\n"
+        self._write("edge/a.mtl", "newmtl amb\nmap_Ka amb.png\n"
+                                  "newmtl opt\nmap_Kd -s 1 1 1 -o 0.5 0.5 0 my tex.png\n")
+        self._write("edge/b.mtl", "newmtl two\n")
+        edge = self._write("edge/model.obj", "mtllib a.mtl\nmtllib b.mtl\n" + vertices
+                                             + "f 1 2 3\nusemtl opt\nf 1 2 3\n")
+        self.assertEqual(model.get_textures_from_mtl(str(edge)),
+                         {"amb": None, "opt": str(self.root / "edge" / "my tex.png"),
+                          "two": None, "default3": None})
+        missing = self._write("missing/model.obj", "mtllib nothere.mtl\n" + vertices + "f 1 2 3\n")
+        with self.assertRaises(FileNotFoundError):
+            model.get_textures_from_mtl(str(missing))
+
     # manimlib.mobject.coordinate_systems -----------------------------------------------------
 
     def test_complex_plane_add_coordinate_labels(self):
@@ -180,6 +219,23 @@ class GeometryCameraWitnesses(unittest.TestCase):
             for slot, model in glyphs:
                 np.testing.assert_allclose(label[slot].get_points() - label[slot].get_center(),
                                            model.get_points() - model.get_center(), atol=1e-6)
+
+    def test_complex_plane_labels_take_their_own_unit(self):
+        from manimlib import ComplexPlane
+
+        # Appendix C-40 (BN-07): the Reference carries unit "i" over to every later real label
+        # ([2j, 3, 1] draws "2i", "3i", "i") and ignores skip_first in
+        # get_default_coordinate_values (23 values either way on the default plane) (fm-fxov).
+        plane = ComplexPlane()
+        plane.add_coordinate_labels([2j, 3, 1])
+        self.assertEqual([label.unit for label in plane.coordinate_labels], ["i", None, None])
+        self.assertEqual([len(label.submobjects) for label in plane.coordinate_labels], [2, 1, 1])
+        skipped = plane.get_default_coordinate_values()
+        kept = plane.get_default_coordinate_values(skip_first=False)
+        self.assertEqual(len(skipped), 23)
+        self.assertEqual(len(kept), 25)
+        self.assertEqual(kept[0], -8.0)
+        self.assertEqual(skipped[0], -7.0)
 
     def test_coordinate_system_bind_graph_to_func(self):
         from manimlib import Axes

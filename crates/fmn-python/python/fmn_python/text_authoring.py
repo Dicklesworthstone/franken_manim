@@ -180,7 +180,7 @@ def install_text_authoring(native):
         height = None if p["height"] is None else _number(p["height"], "Text height", positive=True)
         labelled = bool(style.pop("use_labelled_svg", False))
         centered = style.pop("should_center", True)
-        style.pop("path_string_config", None)
+        path_string_config = dict(style.pop("path_string_config", None) or {})
         base_color = style.pop("base_color", "#FFFFFF")
         protect = style.pop("protect", ())
         g["_preflight_vmobject_style_kwargs"](style)
@@ -193,6 +193,7 @@ def install_text_authoring(native):
         self.disable_ligatures, self.isolate = p["disable_ligatures"], p["isolate"]
         self.gradient = None if p["gradient"] is None else _stops(g, p["gradient"], "gradient")
         self.use_labelled_svg, self.base_color, self.protect = labelled, base_color, protect
+        self.path_string_config = path_string_config
         for name, value in maps.items():
             setattr(self, name, value)
         self._fmn_text_options = {}

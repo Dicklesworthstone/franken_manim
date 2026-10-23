@@ -151,9 +151,11 @@ fn checkbox_and_enable_toggle_keep_transformed_geometry_and_constructor_colors()
 
     let toggle = add_enable_disable_button(&mut scene, EnableDisableButton::new(false)).unwrap();
     let rect = toggle.components()[0];
+    // The Reference's box keeps its Rectangle fill (GREY_C) until the first
+    // set_value (fm-fxov).
     assert_eq!(
         scene.stage().get_fill_color(rect).unwrap().to_rgb8(),
-        WHITE.to_rgb8()
+        GREY_C.to_rgb8()
     );
     scene
         .stage_mut()

@@ -219,7 +219,10 @@ fn video_job(
     let wire = match pixel_format.to_ascii_lowercase().as_str() {
         "yuv420p" if transparent => WireFormat::Rgba8,
         "rgba" | "rgba8" => WireFormat::Rgba8,
-        "bgra" | "bgra8" => WireFormat::Bgra8,
+        // ffmpeg's rgb32 is native-endian ARGB words: BGRA bytes on the
+        // little-endian hosts the portal supports. The Reference's
+        // SceneFileWriter.use_fast_encoding selects it.
+        "bgra" | "bgra8" | "rgb32" => WireFormat::Bgra8,
         "nv12" | "yuv420p" => WireFormat::Nv12,
         "p010" | "p010le" | "yuv420p10le" => WireFormat::P010,
         _ => {

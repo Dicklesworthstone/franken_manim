@@ -1,4 +1,4 @@
-# BN-07 — Corrected mobject behavior (C-5, C-6, C-14, C-15, C-17, C-18, C-19, C-20, C-21, C-23, C-24, C-26, C-29, C-30, C-31, C-32, C-33, C-35, C-38)
+# BN-07 — Corrected mobject behavior (C-5, C-6, C-14, C-15, C-17, C-18, C-19, C-20, C-21, C-23, C-24, C-26, C-29, C-30, C-31, C-32, C-33, C-35, C-38, C-39, C-40)
 
 **Status:** Draft (W3, fm-yra; W10, fm-23ev, fm-5wq.4.39, fm-easc, fm-gm0v, and fm-pointless-box-interpolation-hccu). Consumed by Choreo (§9.1's
 `suspend_mobject_updating` interaction), fmn-python (whose `manimlib`
@@ -155,7 +155,13 @@ every 3b1b scene that uses them.
 **FrankenManim:** these classes construct as their evident intent: native
 typesetting (BN-05), with the Reference's part-splitting semantics
 (`tex_strings`, isolates and `tex_to_color_map` keys, one part per piece,
-and part lookup) kept exactly.
+and part lookup) kept exactly. `OldTex` is built on the modern `Tex`
+engine, so it subclasses `Tex` rather than `SingleStringTex`:
+`isinstance(OldTex("x"), SingleStringTex)` is false and
+`isinstance(OldTex("x"), Tex)` is true. At class level,
+`issubclass(OldTex, SingleStringTex)` is true in the Reference and false
+here. No Reference instance exists to compare, since none constructs
+(fm-fxov).
 
 **Migration:** none needed. Scenes that could not run under the pinned
 Reference now run.
@@ -353,7 +359,13 @@ inside a play leaves a `ThreeDAxes` tick group's root grey
 `bn07-c31-axes-ticks-match-style`).
 
 **FrankenManim:** a point-less member takes the matched style, as C-29
-carries it through `become()` and `restore()`.
+carries it through `become()` and `restore()`. Its plural style getters
+report that style too: `VMobject().get_fill_colors()` is `['#888888']` and
+`get_stroke_widths()` is `[4.0]`, where the Reference returns `[]` for
+every plural getter. The Reference's own singular getters already answer
+from `_data_defaults` (`get_fill_color()` is `'#888888'`), and C-29 and
+this ruling copy the style between point-less members through these
+getters (fm-fxov).
 
 Excluded from the structural diff by the `bn07-c31-point-less-match-style` row.
 
@@ -471,3 +483,44 @@ the pass still finishes the pass it began in. Locked by
 **Migration:** none needed for scenes that do not edit a family from inside
 its own update pass. A scene that relied on the skip, or on a just-added
 child updating in the same pass, sees the documented order instead.
+
+## C-39 — `ExponentialValueTracker(v)` holds `v`
+
+The Reference's `ExponentialValueTracker` stores the logarithm of its value:
+`set_value(v)` stores `log(v)` and `get_value()` returns `exp` of what is
+stored (`value_tracker.py:58-62`). Its constructor is ValueTracker's, which
+stores the argument itself (`value_tracker.py:22-28`). A new tracker
+therefore reports the exponential of the value it was given. Measured on
+the pinned Reference (2026-10-23, fm-fxov):
+`ExponentialValueTracker(2.0).get_value()` is 7.389 (e²), and
+`set_value(5.0)` then reads back 5.0. An animation from a new tracker starts
+from the wrong value: animating `ExponentialValueTracker(1.0)` to 100 passes
+16.49 at its midpoint, where the geometric midpoint is 10.
+
+**FrankenManim:** construction stores the value the way `set_value` does,
+so `ExponentialValueTracker(v).get_value()` is `v`. Animating it still
+interpolates the logarithm, which is the class's purpose: the example's
+midpoint is 10.
+
+**Migration:** a scene that wrote `ExponentialValueTracker(math.log(v))` to
+get `v` out should pass `v` instead.
+
+## C-40 — complex-plane labels take their own unit
+
+The Reference's `ComplexPlane.add_coordinate_labels` sets
+`kwargs["unit_tex"] = "i"` when it labels an imaginary number
+(`coordinate_systems.py:778`) and never resets it. Every real number after
+an imaginary one is then labelled as imaginary: on the pinned Reference
+(2026-10-23, fm-fxov), `add_coordinate_labels([2j, 3, 1])` draws "2i", "3i"
+and "i". Separately, `get_default_coordinate_values(skip_first)` ignores its
+argument and always drops the first tick (`coordinate_systems.py:753-760`),
+so `skip_first=False` gives the same 23 values as the default.
+
+**FrankenManim:** each label takes the unit of its own number, so the
+example draws "2i", "3" and "1". `get_default_coordinate_values(skip_first=False)`
+keeps the first tick of each axis (25 values on the default plane).
+`add_coordinate_labels` still ignores its own `skip_first`, as the
+Reference's does, so default labels are unchanged.
+
+**Migration:** none for the default labels or for numbers that are all
+real or all imaginary. A scene that wanted "3i" should pass `3j`.

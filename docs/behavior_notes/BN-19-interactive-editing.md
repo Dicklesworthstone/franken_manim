@@ -67,7 +67,9 @@ retained, with the following deliberate corrections:
   at a time. In a live worker that refusal follows the ordinary callback-failure
   freeze policy, so reload is required before further live execution.
 - Palette swatches remain pickable even though the palette is intentionally
-  not selectable. Opening/closing the palette does not add history; a color
+  not selectable. The Reference leaves `color_palette` out of
+  `unselectables` (`interactive_scene.py:119-126`), so its open palette can
+  itself be selected and dragged. Opening/closing the palette does not add history; a color
   edit's history does not resurrect the transient palette.
 
 The normal Studio generation/revision checks, bounded captures, worker timeout,

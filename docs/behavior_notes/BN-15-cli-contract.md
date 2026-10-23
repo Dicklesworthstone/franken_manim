@@ -76,6 +76,14 @@ portal command's exact output file or frames/clips directory, replace its
 stem. `--output` and `--file_name` reject batches so selected scenes cannot
 silently share a destination.
 
+A clip is `segment-NNNNNN.FORMAT`, numbered by play count, where the Reference
+writes partial movies as `DIRECTORY/SCENE/NNNNN.FORMAT`.
+`SceneFileWriter.init_partial_movie_directory()` and
+`get_next_partial_movie_path()` report the clip layout (fm-fxov). A `-n
+START[,END]` render keeps the scene's output name, where the Reference
+appends `_START[_END]` (OOT-RANGE-OUTPUT-NAMES): pass `--file_name` to keep
+a range's output apart from a full render.
+
 ### fmn-python outcome for every Reference option
 
 Every option of the generated table (`docs/api/cli_flags.md`, Reference flags)

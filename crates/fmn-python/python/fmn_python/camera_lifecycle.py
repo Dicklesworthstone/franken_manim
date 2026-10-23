@@ -163,9 +163,10 @@ def install_scene_camera_configuration(native):
             camera = g["Camera"](**config)
             # Retain edits made through scene.frame before capture was needed.
             # Apply Lumen's pixel-aspect policy to that actual frame, not to the
-            # temporary constructor frame which is about to be discarded.
+            # temporary constructor frame which is about to be discarded: the
+            # frame keeps its height, as a constructed camera's does (BN-25).
             camera.frame = self.frame
-            camera.resize_frame_shape()
+            camera.resize_frame_shape(fixed_dimension=True)
             self.__dict__["_camera"] = camera
         return camera
 

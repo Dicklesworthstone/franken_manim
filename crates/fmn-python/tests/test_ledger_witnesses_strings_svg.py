@@ -170,6 +170,56 @@ class StringsSvgWitnesses(unittest.TestCase):
         self.assertEqual(mob.get_fill_color(), "#00FF00")
         self.assertAlmostEqual(mob.get_fill_opacity(), 0.25, places=6)
 
+    def test_svg_paths_and_glyphs_carry_vmobject_construction_fields(self):
+        from manimlib import RED, Tex, Text
+        from manimlib.mobject.svg.svg_mobject import SVGMobject
+
+        # Reference svg_mobject.py:268/283 builds each path as VMobjectFromSVGPath(path,
+        # **path_string_config), whose VMobject.__init__ (vectorized_mobject.py:99-118) stores
+        # the constructor defaults; the SVG's style then arrives through set_style and leaves
+        # these fields alone, even with fill_color= on the SVGMobject (fm-fxov). Values read
+        # from the pinned Reference.
+        expected = dict(
+            fill_color="#888888", fill_opacity=0.0, stroke_color="#DDDDDD", stroke_opacity=1.0,
+            stroke_width=4.0, stroke_behind=False, background_image_file=None, long_lines=False,
+            joint_type="auto", flat_stroke=False, scale_stroke_with_zoom=False,
+            use_simple_quadratic_approx=False, anti_alias_width=1.5, fill_border_width=0.0,
+            needs_new_joint_angles=True, subpath_end_indices=None, shader_program_type=None,
+        )
+        svg = ('<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0 L4 0 L4 2 Z" '
+               'fill="#ff0000"/></svg>')
+        # Text's path_string_config is use_simple_quadratic_approx=True (text_mobject.py:407).
+        text_glyph = dict(expected, use_simple_quadratic_approx=True)
+        for mob, fields in ((SVGMobject(svg_string=svg)[0], expected),
+                            (SVGMobject(svg_string=svg, fill_color=RED, stroke_width=2)[0], expected),
+                            (Tex("x")[0], expected),
+                            (Text("a")[0], text_glyph),
+                            (Text("a", color=RED)[0], text_glyph)):
+            for name, value in fields.items():
+                self.assertEqual(getattr(mob, name), value, name)
+            self.assertEqual(mob.outer_vert_indices.shape, (0,))
+        # The style itself still comes from the source.
+        self.assertEqual(SVGMobject(svg_string=svg)[0].get_fill_color(), "#FF0000")
+
+    def test_ensure_positive_orientation(self):
+        from manimlib import Polygon, VGroup
+
+        # vectorized_mobject.py:957: every family member whose unit normal points into the screen
+        # is reversed (reverse_points), others untouched; returns self (fm-fxov).
+        clockwise = Polygon([0, 0, 0], [0, 1, 0], [1, 1, 0], [1, 0, 0])
+        counter = Polygon([0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0])
+        before = clockwise.get_points().copy()
+        self.assertLess(clockwise.get_unit_normal()[2], 0)
+        group = VGroup(clockwise, counter)
+        kept = counter.get_points().copy()
+        self.assertIs(group.ensure_positive_orientation(), group)
+        np.testing.assert_allclose(clockwise.get_points(), before[::-1])
+        np.testing.assert_allclose(counter.get_points(), kept)
+        self.assertGreater(clockwise.get_unit_normal()[2], 0)
+        lone = Polygon([0, 0, 0], [0, 1, 0], [1, 1, 0], [1, 0, 0])
+        VGroup(lone).ensure_positive_orientation(recurse=False)
+        self.assertLess(lone.get_unit_normal()[2], 0)
+
     def test_svg_mobject_handle_transform(self):
         from manimlib import VMobject
         from manimlib.mobject.svg.svg_mobject import SVGMobject
