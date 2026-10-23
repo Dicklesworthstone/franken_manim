@@ -39,7 +39,7 @@ use crate::StageError;
 use crate::bbox::{BoundingBox, BoxAccum};
 use crate::stage::{Mob, Stage};
 use crate::uniforms::Uniforms;
-use crate::{Placement, RecordBuffer};
+use crate::{Placement, RecordBuffer, RenderPrimitive};
 
 /// A positional target: another mobject (positioned by its critical point) or a
 /// literal point. Methods that accept "a mobject or a point" take
@@ -986,6 +986,33 @@ impl Stage {
     /// Scale about the box center (Reference default `about_edge=ORIGIN`).
     pub fn scale(&mut self, mob: Mob, factor: f64) -> &mut Self {
         self.scale_about(mob, factor, None, Some(ORIGIN))
+    }
+
+    /// Apply the Reference's `DotCloud.scale` radius side effect to this object.
+    ///
+    /// Native method animations call this after the point transform. The
+    /// Python portal dispatches `DotCloud.scale` itself, so the geometric
+    /// [`Stage::scale`] / [`Stage::scale_about`] operations stay point-only.
+    /// Only a dot-cloud root changes: scaling a Group moves its children's
+    /// centers without invoking each child's `DotCloud.scale` override.
+    ///
+    /// The radius uses the original factor, without the point transform's
+    /// minimum-scale clamp: growing from zero must start with zero radius.
+    /// Negative/non-finite results remain invalid data for render validation.
+    pub fn scale_dot_radii(&mut self, mob: Mob, factor: f64) -> &mut Self {
+        if let Some(entry) = self.get_mut(mob)
+            && entry.render_primitive() == RenderPrimitive::DotCloud
+            && let Some(mut radii) = entry.buffer.read_column("radius")
+        {
+            for radius in &mut radii {
+                #[allow(clippy::cast_possible_truncation)]
+                {
+                    *radius = (f64::from(*radius) * factor) as f32;
+                }
+            }
+            entry.buffer.write_range("radius", 0, &radii);
+        }
+        self
     }
 
     /// Scale about an explicit `about_point` or `about_edge` (the Reference's

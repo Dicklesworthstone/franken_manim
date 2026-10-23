@@ -938,7 +938,7 @@ fn apply(stage: &mut Stage, target: Mob, command: AnimateCommand) -> Result<(), 
             stage.shift(target, v);
         }
         AnimateCommand::Scale(f) => {
-            stage.scale(target, f);
+            stage.scale(target, f).scale_dot_radii(target, f);
         }
         AnimateCommand::Rotate(angle) => {
             stage.rotate(target, angle, OUT, None, None);
@@ -1015,7 +1015,9 @@ fn apply(stage: &mut Stage, target: Mob, command: AnimateCommand) -> Result<(), 
             stage.rotate(target, angle, axis, about_point, None);
         }
         AnimateCommand::ScaleAbout(factor, about_point, about_edge) => {
-            stage.scale_about(target, factor, about_point, about_edge);
+            stage
+                .scale_about(target, factor, about_point, about_edge)
+                .scale_dot_radii(target, factor);
         }
         AnimateCommand::Flip(axis) => {
             stage.rotate(target, TAU / 2.0, axis, None, None);

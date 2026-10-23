@@ -291,7 +291,7 @@ impl StartPrep {
             stage.set_family_opacity_zero(mob);
         }
         if let Some(k) = self.scale {
-            stage.scale(mob, k);
+            stage.scale(mob, k).scale_dot_radii(mob, k);
         }
         if let Some(v) = self.shift {
             stage.shift(mob, v);
@@ -348,7 +348,7 @@ impl TargetPrep {
     fn apply(&self, stage: &mut Stage, target: Mob) -> Result<(), AnimError> {
         match *self {
             Self::Indicate { scale, color } => {
-                stage.scale(target, scale);
+                stage.scale(target, scale).scale_dot_radii(target, scale);
                 set_family_rgb(stage, target, color);
             }
             Self::ReversePoints => stage.reverse_family_points(target)?,
@@ -357,11 +357,11 @@ impl TargetPrep {
                 // about the shifted center. Do not reorder the stage writes.
                 stage.set_family_opacity_zero(target);
                 stage.shift(target, shift);
-                stage.scale(target, scale);
+                stage.scale(target, scale).scale_dot_radii(target, scale);
             }
             Self::Color(rgb) => set_family_rgb(stage, target, rgb),
             Self::Scale(factor) => {
-                stage.scale(target, factor);
+                stage.scale(target, factor).scale_dot_radii(target, factor);
             }
             Self::Matrix(matrix) => {
                 // Use the existing world-space point-map operation, not a

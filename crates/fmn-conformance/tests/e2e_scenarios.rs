@@ -5676,6 +5676,99 @@ fn zero_radius_dot_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenari
         .with_counter("zero_radius_lifecycle_frames", 9))
 }
 
+/// Generic point transforms preserve DotCloud radius records, including when
+/// the deferred placement is baked for readback. Explicit world coordinates
+/// supply the independent expected scene at each lifecycle boundary.
+fn dot_cloud_affine_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    struct Dots {
+        explicit: bool,
+    }
+    impl fmn::SceneConstruct for Dots {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let dot = stage.add(
+                fmn_library::DotCloud::new([[-0.5, 0.25, 0.0], [0.5, -0.25, 0.0]])
+                    .with_radius(0.25)
+                    .colored(BLUE_C, 1.0),
+            )?;
+            stage.wait(0.125)?;
+            if self.explicit {
+                stage.set_points(dot, &[[-0.75, 0.375, 0.0], [0.75, -0.375, 0.0]])?;
+            } else {
+                stage.scale_about(dot, 1.5, Some([0.0; 3]), None);
+            }
+            stage.wait(0.125)?;
+            if self.explicit {
+                stage.set_points(dot, &[[-1.5, 0.375, 0.0], [1.5, -0.375, 0.0]])?;
+            } else {
+                stage.stretch_about(dot, 2.0, 0, Some([0.0; 3]), None);
+            }
+            stage.wait(0.125)?;
+            if self.explicit {
+                stage.set_points(dot, &[[-1.3125, 0.375, 0.0], [1.3125, -0.375, 0.0]])?;
+            } else {
+                stage.apply_affine(
+                    dot,
+                    fmn_mobject::Placement::new(
+                        [[1.0, 0.5, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                        [0.0; 3],
+                    ),
+                );
+            }
+            stage.wait(0.125)?;
+            stage.bake_placement(dot)?;
+            stage.wait(0.125)?;
+            Ok(())
+        }
+    }
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    let render = |path: &str, explicit: bool, threads| {
+        let mut options = fmn::RenderOptions::with_format(path, fmn::RenderFormat::PngSequence)
+            .map_err(|error| fail(format!("affine dot options: {error}")))?;
+        options.config.camera.resolution = (64, 40);
+        options.config.camera.fps = 8;
+        options.config.sizes.frame_height = 4.0;
+        options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+        options.typeset_cache = false;
+        let report = fmn::render_with_fs(&mut Dots { explicit }, options, fs.clone())
+            .map_err(|error| fail(format!("affine dot render: {error}")))?;
+        if report.artifact.frame_count != 5 {
+            return Err(fail("affine dot lifecycle must emit exactly five frames"));
+        }
+        (0..5)
+            .map(|index| {
+                fs.read(&PathBuf::from(format!("{path}/frame_{index:06}.png")))
+                    .map_err(|error| fail(format!("read affine dot PNG: {error}")))
+            })
+            .collect::<Result<Vec<_>, _>>()
+    };
+    let expected = render("/dot-explicit", true, 1)?;
+    if expected[..4].windows(2).any(|pair| pair[0] == pair[1]) || expected[3] != expected[4] {
+        return Err(fail(
+            "explicit dot fixture must visibly move and remain unchanged on readback",
+        ));
+    }
+    for threads in [1, 4, 16] {
+        let actual = render(&format!("/dot-affine-{threads}"), false, threads)?;
+        let equal = actual == expected;
+        ctx.event(
+            LogEvent::new("e2e.dot.affine_placement")
+                .field("threads", u64::from(threads))
+                .field("frames", actual.len() as u64)
+                .field("matches_explicit", truth(equal))
+                .field("baked_sha256", sha256(&actual[4]).to_hex()),
+        );
+        if !equal {
+            return Err(fail(
+                "retained dot placement differs from explicit centers and radii",
+            ));
+        }
+    }
+    Ok(RunOutcome::ok()
+        .with_artifact("dot-sheared.png", expected[3].clone())
+        .with_counter("dot_affine_lifecycle_frames", 15))
+}
+
 /// Retained camera captures stay immutable while later poses and overlay
 /// edits reuse the same renderer. A fresh serial renderer supplies each
 /// expected frame; replay then reverses capture order on 1, 4, and 16 threads.
@@ -9337,6 +9430,23 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.dot_cloud_affine_placement.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(dot_cloud_affine_lifecycle_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("dot_affine_lifecycle_frames", 15),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.dot.affine_placement",
+            vec![
+                FieldPred::u64_eq("frames", 5),
+                FieldPred::str_eq("matches_explicit", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.retained_camera_frames.v1",
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
@@ -12070,6 +12180,16 @@ fn zero_radius_dot_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.zero_radius_dot.v1")
         .expect("the zero-radius dot scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn dot_cloud_affine_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.dot_cloud_affine_placement.v1")
+        .expect("the affine dot scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

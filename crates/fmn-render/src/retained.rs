@@ -1147,33 +1147,12 @@ fn image_mesh(stage: &Stage, mob: Mob) -> Result<SurfaceMesh, RetainedFrameRende
     SurfaceMesh::new(vertices, (0..6).collect()).map_err(RetainedFrameRendererError::ThreeD)
 }
 
-fn uniform_scale(placement: Placement, mob: Mob) -> Result<f64, RetainedFrameRendererError> {
-    let axes = [
-        placement.apply_vector([1.0, 0.0, 0.0]),
-        placement.apply_vector([0.0, 1.0, 0.0]),
-        placement.apply_vector([0.0, 0.0, 1.0]),
-    ];
-    let lengths =
-        axes.map(|axis| (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt());
-    let scale = lengths[0];
-    let tolerance = scale.abs().max(1.0) * 1e-12;
-    let dot =
-        |left: Vec3, right: Vec3| left[0] * right[0] + left[1] * right[1] + left[2] * right[2];
-    if lengths
-        .iter()
-        .any(|length| (*length - scale).abs() > tolerance)
-        || dot(axes[0], axes[1]).abs() > tolerance
-        || dot(axes[0], axes[2]).abs() > tolerance
-        || dot(axes[1], axes[2]).abs() > tolerance
-    {
-        return Err(RetainedFrameRendererError::InvalidPrimitive {
-            mob,
-            reason: "dot cloud placement is not a uniform orthogonal scale",
-        });
-    }
-    Ok(scale)
-}
-
+/// Point transforms move the centers of camera-facing discs. Radius is an
+/// authoritative world-space record, not an axis of the retained placement:
+/// the Reference's DotCloud.scale explicitly updates it, whereas stretch,
+/// apply_matrix and a parent Group's point transforms leave it unchanged.
+/// Applying placement to the radius here would also make baking a point/data
+/// view change the rendered size, since only pointlike fields are baked.
 fn dot_draws(stage: &Stage, mob: Mob) -> Result<Vec<TrueDotDraw>, RetainedFrameRendererError> {
     let entry = stage
         .get(mob)
@@ -1182,7 +1161,6 @@ fn dot_draws(stage: &Stage, mob: Mob) -> Result<Vec<TrueDotDraw>, RetainedFrameR
             reason: "dot-cloud handle is stale",
         })?;
     let placement = entry.placement();
-    let scale = uniform_scale(placement, mob)?;
     let mut draws = Vec::new();
     draws.try_reserve_exact(entry.buffer.len()).map_err(|_| {
         RetainedFrameRendererError::InvalidPrimitive {
@@ -1211,7 +1189,7 @@ fn dot_draws(stage: &Stage, mob: Mob) -> Result<Vec<TrueDotDraw>, RetainedFrameR
             })?;
         let mut draw = TrueDotDraw::new(
             placement.apply_point(record_vec3(stage, mob, record, "point")?),
-            radius * scale,
+            radius,
             record_rgba(stage, mob, record)?,
         );
         draw.glow_factor = glow_factor;
@@ -2010,6 +1988,85 @@ mod tests {
                 empty.frame().as_bytes(),
                 "later radius edits must not change the frozen invisible frame"
             );
+        }
+    }
+
+    #[test]
+    fn dot_cloud_affine_placement_preserves_round_world_space_radii() {
+        let cases = [
+            (
+                "uniform point scale",
+                [[2.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 2.0]],
+                [4.0, 1.0, 1.0],
+            ),
+            (
+                "nonuniform scale",
+                [[2.0, 0.0, 0.0], [0.0, 0.5, 0.0], [0.0, 0.0, 1.0]],
+                [4.0, 0.25, 0.5],
+            ),
+            (
+                "shear",
+                [[1.0, 0.5, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                [2.25, 0.5, 0.5],
+            ),
+            (
+                "reflection",
+                [[-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                [-2.0, 0.5, 0.5],
+            ),
+            (
+                "collapsed axis",
+                [[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                [0.0, 0.5, 0.5],
+            ),
+            ("collapsed centers", [[0.0; 3]; 3], [0.0; 3]),
+        ];
+        let camera = camera();
+        let mut empty = RetainedFrameRenderer::new(config(1)).unwrap();
+        empty.render_with_camera(&Stage::new(), &camera).unwrap();
+        for (name, linear, center) in cases {
+            let mut expected = Stage::new();
+            let mut explicit = dot_cloud();
+            explicit
+                .buffer
+                .write(0, "point", &center.map(|value| value as f32));
+            let root = expected.add(explicit);
+            expected.add_to_scene(root).unwrap();
+            let mut reference = RetainedFrameRenderer::new(config(1)).unwrap();
+            reference.render_with_camera(&expected, &camera).unwrap();
+            assert_ne!(
+                reference.frame().as_bytes(),
+                empty.frame().as_bytes(),
+                "{name}"
+            );
+            for threads in [1, 4, 16] {
+                let mut stage = Stage::new();
+                let mob = stage.add(dot_cloud());
+                stage.add_to_scene(mob).unwrap();
+                stage
+                    .set_placement(mob, Placement::new(linear, [0.0; 3]))
+                    .unwrap();
+                let draws = dot_draws(&stage, mob).expect("finite affine dot placement");
+                assert_eq!(draws[0].center, center, "{name}");
+                assert_eq!(draws[0].radius, f64::from(0.45f32), "{name}");
+                let mut renderer = RetainedFrameRenderer::new(config(threads)).unwrap();
+                renderer.render_with_camera(&stage, &camera).unwrap();
+                assert_eq!(
+                    renderer.frame().as_bytes(),
+                    reference.frame().as_bytes(),
+                    "{name}, {threads} threads"
+                );
+                // A readback changes the representation to world-space f32
+                // points. These exact coordinates isolate radius authority
+                // from the unrelated f64-to-f32 coordinate roundoff.
+                stage.bake_placement(mob).unwrap();
+                renderer.render_with_camera(&stage, &camera).unwrap();
+                assert_eq!(
+                    renderer.frame().as_bytes(),
+                    reference.frame().as_bytes(),
+                    "{name}, baked, {threads} threads"
+                );
+            }
         }
     }
 

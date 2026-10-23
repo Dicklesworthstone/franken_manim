@@ -275,6 +275,80 @@ class PointCloudLifecycleTests(unittest.TestCase):
                     points=None, radius=.2, color=m.BLUE, opacity=.7), threads)
                 self.assertEqual(actual, expected)
 
+    def test_affine_maps_move_centers_and_only_dot_scale_changes_radii(self):
+        # Pinned Reference: pointlike maps (including Group.scale) preserve
+        # radius records; DotCloud.scale explicitly scales them unless opted
+        # out. No norm or average of an affine matrix determines dot radii.
+        points = [[-1., .5, 0.], [1., -.5, 0.]]
+        cases = (
+            ('stretch', lambda d: d.stretch(2., 0, about_point=m.ORIGIN),
+             [[-2., .5, 0.], [2., -.5, 0.]], .5),
+            ('group-stretch', lambda d: m.Group(d).stretch(2., 0, about_point=m.ORIGIN),
+             [[-2., .5, 0.], [2., -.5, 0.]], .5),
+            ('shear', lambda d: d.apply_matrix([[1., .5, 0.], [0., 1., 0.], [0., 0., 1.]], about_point=m.ORIGIN),
+             [[-.75, .5, 0.], [.75, -.5, 0.]], .5),
+            ('reflection', lambda d: d.apply_matrix([[-1., 0., 0.], [0., 1., 0.], [0., 0., 1.]], about_point=m.ORIGIN),
+             [[1., .5, 0.], [-1., -.5, 0.]], .5),
+            ('collapsed-axis', lambda d: d.stretch(0., 0, about_point=m.ORIGIN),
+             [[0., .5, 0.], [0., -.5, 0.]], .5),
+            ('group-scale', lambda d: m.Group(d).scale(2., about_point=m.ORIGIN),
+             [[-2., 1., 0.], [2., -1., 0.]], .5),
+            ('point-scale', lambda d: d.scale(2., scale_radii=False, about_point=m.ORIGIN),
+             [[-2., 1., 0.], [2., -1., 0.]], .5),
+            ('dot-scale', lambda d: d.scale(2., about_point=m.ORIGIN),
+             [[-2., 1., 0.], [2., -1., 0.]], 1.),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name, transform, expected_points, radius in cases:
+                expected = render(root / f'{name}-expected.y4m', kernel(
+                    expected_points, radius=radius, glow=2.))
+                for baked in (False, True):
+                    for threads in (1, 4, 16):
+                        with self.subTest(transform=name, baked=baked, threads=threads):
+                            dots = m.DotCloud(points, radius=.5, color=m.BLUE,
+                                              opacity=.7, glow_factor=2.)
+                            value = transform(dots)
+                            if baked:
+                                # Reading a live record view materializes the
+                                # retained placement. It must not change size.
+                                data = dots.data.copy()
+                                np.testing.assert_array_equal(data['point'], expected_points)
+                                np.testing.assert_array_equal(data['radius'], [[radius]] * 2)
+                            actual = render(root / f'{name}-{baked}-{threads}.y4m', value, threads)
+                            self.assertEqual(actual, expected)
+
+    def test_grow_and_animate_scale_match_explicit_radius_targets(self):
+        def sequence(path, explicit, threads):
+            scene = m.Scene()
+            dots = m.DotCloud([[0., 0., 0.]], radius=0. if explicit else .5,
+                              color=m.BLUE, opacity=.7, glow_factor=2.)
+            with render_session(scene, path, resolution=(64, 40), fps=8, threads=threads) as session:
+                scene.add(dots)
+                if explicit:
+                    target = kernel([[0., 0., 0.]], radius=.5, glow=2.)
+                    grow = m.Transform(dots, target)
+                else:
+                    grow = m.GrowFromCenter(dots)
+                scene.play(grow, run_time=.5, rate_func=lambda t: t)
+                scene.wait(.125)
+                if explicit:
+                    target = kernel([[0., 0., 0.]], radius=1., glow=2.)
+                    enlarge = m.Transform(dots, target)
+                else:
+                    enlarge = dots.animate.scale(2.)
+                scene.play(enlarge, run_time=.5, rate_func=lambda t: t)
+                scene.wait(.125)
+            self.assertEqual(session.result.frame_count, 10)
+            np.testing.assert_array_equal(dots.get_radii(), [[1.]])
+            return path.read_bytes()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            expected = sequence(root / 'explicit.y4m', True, 1)
+            for threads in (1, 4, 16):
+                self.assertEqual(sequence(root / f'animated-{threads}.y4m', False, threads), expected)
+
 
 def run_native_point_cloud_lifecycle():
     result = unittest.TextTestRunner(verbosity=2).run(
