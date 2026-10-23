@@ -5,7 +5,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 use crate::{BridgeMobject, install_native_tree, native_error, srgb_from_py};
-use fmn_library::svg::{SvgPaintOverrides, svg_mobject_with_paints};
+use fmn_library::svg::{SvgDocument, SvgPaintError, SvgPaintOverrides, svg_document_with_paints};
 
 #[pyfunction]
 fn _build_svg_paints<'py>(
@@ -33,10 +33,24 @@ fn _build_svg_paints<'py>(
             }
         }
     }
-    let prepared = slf
-        .py()
-        .detach(|| svg_mobject_with_paints(source.as_bytes(), overrides).map_err(native_error))?;
-    install_native_tree(slf, factory, prepared)
+    let (prepared, kinds) = slf.py().detach(|| {
+        let document = SvgDocument::parse(source.as_bytes())
+            .map_err(SvgPaintError::Document)
+            .map_err(native_error)?;
+        // One child per pointful shape, in document order: the element each
+        // came from decides the Reference class the portal gives it (fm-5rlu).
+        let kinds: Vec<&'static str> = document
+            .shapes
+            .iter()
+            .filter(|shape| shape.path.has_points())
+            .map(|shape| shape.kind.name())
+            .collect();
+        let prepared = svg_document_with_paints(&document, overrides).map_err(native_error)?;
+        Ok::<_, PyErr>((prepared, kinds))
+    })?;
+    let children = install_native_tree(slf, factory, prepared)?;
+    slf.as_any().setattr("_svg_child_kinds", kinds)?;
+    Ok(children)
 }
 
 pub(super) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {

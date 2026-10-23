@@ -22,7 +22,8 @@
 //! shim.
 
 use fmn_geom::{
-    FillRule, GeomError, LineCap, LineJoin, Paint, QuadPath, SvgShape, SvgStyle, emit_svg,
+    FillRule, GeomError, LineCap, LineJoin, Paint, QuadPath, SvgShape, SvgShapeKind, SvgStyle,
+    emit_svg,
 };
 use fmn_mobject::{Mob, Stage};
 
@@ -111,6 +112,7 @@ pub fn stage_svg_document_with_background(
                     stroke_dashoffset: 0.0,
                     opacity: 1.0,
                 },
+                kind: SvgShapeKind::Path,
             },
         );
     }
@@ -193,6 +195,7 @@ fn append_shape(
             stroke_dashoffset: 0.0,
             opacity: 1.0,
         },
+        kind: SvgShapeKind::Path,
     };
     if stage.uniforms(mob).is_some_and(|u| u.stroke_behind)
         && shape.style.fill.is_some()

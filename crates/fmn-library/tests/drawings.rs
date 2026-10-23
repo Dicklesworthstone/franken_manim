@@ -921,27 +921,28 @@ fn self_goldens_lock_each_asset_family_over_its_fixture() {
 
     // Re-locked when the SVG families took SVGMobject's flip, orientation
     // and centring (fm-hc78); svg_drawings_are_upright_centred_and_counter_clockwise
-    // states what moved.
+    // states what moved. Re-locked again when <rect> and <circle> import as the
+    // Reference's Rectangle (UR, UL, DL, DR) and Circle (its arc density) (fm-5rlu).
     let goldens: &[(&str, &str)] = &[
         (
             "lightbulb",
-            "fbffdf756f674d9d0faaf8825493888880fe33c04155df0d9e209c7e035b7e3a",
+            "653e17e134ed22a0018ec4e3d420f819130e42da0f3f379768e6fd745926f244",
         ),
         (
             "video_icon",
-            "15c50d6f312c69120442b7354f26267ff0b8085cae11f1f0a0b2b33cd6461f0b",
+            "6e3966a52d7a6dbf7dc87d06a9fdbfc88ef717dbf56437d43bb8db7fab881dc9",
         ),
         (
             "video_series",
-            "eea734acd57560322473a9dc068336acd04ffa475bb26bef7bb46393ca9c50fe",
+            "4fa465fa0e61464edf20bd78e598b788feb879192242a2c5d9335e2d7502e12b",
         ),
         (
             "old_speech_bubble",
-            "96300291203860bcb0480aee86b724bcea840986eadb18b0eda68bfe1a245ec6",
+            "12e0914f73fb47a3a27f30ebce6eb2fdcdcdf56c38130305840dae958a4c65ba",
         ),
         (
             "vectorized_earth",
-            "1872f76cfd457a9a0b7c713938e430802c25b6819b7869f11b5bf0ba8425e90b",
+            "d0678c622ff1885c8e65d4e0861ab9494e378ec013958cda4c8658bdb03c76dc",
         ),
     ];
     for (name, golden) in goldens {
