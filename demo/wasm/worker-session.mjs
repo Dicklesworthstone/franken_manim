@@ -74,6 +74,9 @@ class PictureConnection {
   #audioMode = 'eager';
   #pixels = null;
   #bufferFrame = 0;
+  #bufferWidth = 0;
+  #bufferHeight = 0;
+  #targetFrame = 0;
   #presenting = false;
   #id = 0;
   #epoch = 0;
@@ -101,6 +104,7 @@ class PictureConnection {
     return new Promise((resolve, reject) => {
       this.#resolve = resolve; this.#reject = reject;
       this.#audioMode = streamAudio ? 'windowed' : 'eager';
+      this.#targetFrame = restore?.frame ?? 0;
       // Never transfer unrelated bytes outside a caller's subarray.
       const owned = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes : bytes.slice();
       this.#source = recordingSource(owned);
@@ -113,7 +117,8 @@ class PictureConnection {
     const id = ++this.#id;
     try {
       integer(id, 'request identity', 1, Number.MAX_SAFE_INTEGER);
-      this.#active = {id, kind: fields.kind, frame: fields.frame, epoch: this.#epoch, audio};
+      this.#active = {id, kind: fields.kind, frame: fields.frame, epoch: this.#epoch, audio,
+        width: this.#width, height: this.#height};
       this.#timer = setTimeout(() => this.#fail(new Error('Picture worker request timed out; restart the picture worker to retry.')), this.#timeout);
       this.#worker.postMessage({protocol: WORKER_PROTOCOL, id, ...fields}, transfer);
     } catch (error) { this.#fail(error); }
@@ -135,8 +140,8 @@ class PictureConnection {
         this.#drain();
         return;
       }
-      if (value.width !== this.#width || value.height !== this.#height) throw new Error('Picture worker changed the viewport.');
-      pixels(value.pixels, this.#width, this.#height);
+      if (value.width !== active.width || value.height !== active.height) throw new Error('Picture worker changed the viewport.');
+      pixels(value.pixels, active.width, active.height);
       if (active.kind === 'load' || active.kind === 'restore') {
         const restoring = active.kind === 'restore';
         if (value.kind !== 'ready' || value.frame !== (restoring ? active.frame : 0) || value.audioReused !== restoring) {
@@ -152,6 +157,7 @@ class PictureConnection {
       }
       clearTimeout(this.#timer); this.#timer = null;
       this.#active = null; this.#pixels = value.pixels; this.#bufferFrame = value.frame;
+      this.#bufferWidth = value.width; this.#bufferHeight = value.height;
       if (active.kind === 'load' || active.kind === 'restore') {
         this.frame = value.frame;
         const resolve = this.#resolve; this.#resolve = null; this.#reject = null;
@@ -165,7 +171,8 @@ class PictureConnection {
   }
   present() {
     if (this.#closed) throw this.error || new Error('Picture worker is closed.');
-    if (!this.#pixels || this.#presenting || this.#bufferFrame !== this.frame) return;
+    if (!this.#pixels || this.#presenting || this.#bufferFrame !== this.frame ||
+        this.#bufferWidth !== this.#width || this.#bufferHeight !== this.#height) return;
     this.#presenting = true;
     try {
       this.#onFrame({index: this.frame, width: this.#width,
@@ -176,12 +183,25 @@ class PictureConnection {
   request(frame) {
     if (this.#closed) throw this.error || new Error('Picture worker is closed.');
     integer(frame, 'frame index', 0, this.metadata.frameCount - 1);
+    this.#targetFrame = frame;
     if (this.#active?.frame === frame && this.#active.epoch === this.#epoch) {
       this.#pending = null; return;
     }
-    if (this.#presenting && frame === this.frame) { this.#pending = null; return; }
+    if (this.#presenting && frame === this.frame &&
+        this.#bufferWidth === this.#width && this.#bufferHeight === this.#height) { this.#pending = null; return; }
     this.#pending = frame;
     this.#drain();
+  }
+  resize(width, height) {
+    viewport(width, height);
+    if (this.#closed) throw this.error || new Error('Picture worker is closed.');
+    if (width === this.#width && height === this.#height) return false;
+    this.#width = width; this.#height = height;
+    // Suppress old-sized replies, but retain their returned buffer for the
+    // next request. One pending frame also carries the latest viewport.
+    ++this.#epoch; this.#pending = this.#targetFrame;
+    this.#drain();
+    return true;
   }
   readAudio(start, count, signal) {
     return new Promise((resolve, reject) => {
@@ -218,14 +238,16 @@ class PictureConnection {
     }
     if (this.#pending === null) return;
     const frame = this.#pending; this.#pending = null;
-    if (frame === this.#bufferFrame && this.#pixels) {
+    const sameViewport = this.#bufferWidth === this.#width && this.#bufferHeight === this.#height;
+    if (frame === this.#bufferFrame && this.#pixels && sameViewport) {
       this.frame = frame; this.present();
       return;
     }
     const buffer = this.#pixels; this.#pixels = null;
-    this.#send({kind: 'render', frame, pixels: buffer}, [buffer]);
+    this.#send({kind: sameViewport ? 'render' : 'resize', frame, pixels: buffer,
+      ...(!sameViewport ? {width: this.#width, height: this.#height} : {})}, [buffer]);
   }
-  invalidate() { ++this.#epoch; this.#pending = null; }
+  invalidate() { ++this.#epoch; this.#pending = null; this.#targetFrame = this.frame; }
   #fail(error) {
     if (this.#closed) return;
     this.error = error;
@@ -373,6 +395,17 @@ export class WorkerTimelineSession {
       if (this.#candidate === renderer) this.#candidate = null;
       if (this.#restarting === generation) this.#restarting = null;
     }
+  }
+  resize(width, height) {
+    viewport(width, height);
+    if (this.#disposed) throw new Error('Worker timeline session is disposed.');
+    const changed = width !== this.#width || height !== this.#height;
+    this.#width = width; this.#height = height;
+    // Also follow a load/restart already in admission. Its response validates
+    // against its own request dimensions, not a newer requested viewport.
+    if (this.#current && !this.#current.renderer.error) this.#current.renderer.resize(width, height);
+    if (this.#candidate && !this.#candidate.error) this.#candidate.resize(width, height);
+    return changed;
   }
   present() { this.#current?.renderer.present(); }
   render(frame) {

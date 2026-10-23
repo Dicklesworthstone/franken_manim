@@ -93,9 +93,17 @@ export class PictureWorkerRuntime {
         }
         this.#post({protocol: WORKER_PROTOCOL, id: message.id, kind: 'audio',
           start: message.start, count: message.count, channels}, channels);
-      } else if (message.kind === 'render' && this.#player) {
+      } else if ((message.kind === 'render' || message.kind === 'resize') && this.#player) {
         const frame = integer(message.frame, 'requested frame', 0, this.#player.frame_count - 1);
-        const buffer = pixels(message.pixels, this.#width, this.#height);
+        let buffer = pixels(message.pixels, this.#width, this.#height);
+        if (message.kind === 'resize') {
+          const length = viewport(message.width, message.height);
+          // Allocation and protocol validation precede native mutation. The old
+          // buffer is transferred back, not retained as another picture cache.
+          if (buffer.byteLength !== length) buffer = new ArrayBuffer(length);
+          this.#player.set_viewport(message.width, message.height);
+          this.#width = message.width; this.#height = message.height;
+        }
         this.#player.render_into(frame, new Uint8Array(buffer));
         this.#player.seek_frame(frame);
         this.#post({protocol: WORKER_PROTOCOL, id: message.id, kind: 'frame',
