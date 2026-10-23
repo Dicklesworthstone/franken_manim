@@ -12,7 +12,8 @@ Each suite runs the way the gate runs it: the gate's loop suites through runpy, 
 name runs on an instance of the row's class, whichever override or installer wrapper runs: that
 is what calling the symbol means. The receiver is the first argument of method-like code (code
 defined inside a class or another function), or the bound instance of a native method. A class row counts when an instance of exactly that class is seen
-in any call. A function row counts when its code runs. A test that fails, or a script suite that
+in any call. A function row counts when its code runs, and so does a staticmethod member row,
+which has no receiver. A test that fails, or a script suite that
 raises, witnesses nothing. A call made outside any `test*` function belongs to the suite's
 top-level statement that made it (`<module>:L<line>`): bridge.py and the other script suites are
 sequences of top-level asserts and calls. Constants, attributes and leaked imports are read, not
@@ -150,13 +151,16 @@ class Probes:
             self.status[index] = "ok"
             if row["kind"] == "class" and isinstance(value, type):
                 self.classes[value].append(index)
-            elif isinstance(owner, type):
+            elif isinstance(owner, type) and not isinstance(value, staticmethod):
                 # A member is called through its name on an instance, whichever override
                 # (or installer wrapper) of that name then runs.
                 self.members[name].append((index, owner))
                 if getattr(function, "__code__", None) is None:
                     self.native_members.add(name)
             elif getattr(function, "__code__", None) is not None:
+                # A function, or a staticmethod member, which runs with no instance receiver
+                # (StringMobject.span_contains, the Mobject.affects_data decorator): calling
+                # it means running its code.
                 self.code[function.__code__].append(index)
             elif callable(function):
                 self.native[getattr(function, "__name__", name)].append(index)

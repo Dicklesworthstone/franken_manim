@@ -33,6 +33,11 @@ SYNTHETIC = textwrap.dedent('''
     class Disc(Shape):
         def width(self):
             return 3.0
+
+    class Span(Shape):
+        @staticmethod
+        def contains(outer, inner):
+            return outer[0] <= inner[0] and inner[1] <= outer[1]
 ''')
 
 
@@ -153,6 +158,29 @@ class Harness(unittest.TestCase):
             test_disc()
         self.assertEqual({rows[i]["symbol"] for i in recorder.hits["test_disc"]},
                          {"Shape.width", "Disc"})
+
+    def test_a_staticmethod_member_counts_when_its_code_runs(self):
+        # A staticmethod has no instance receiver (manimlib's StringMobject.span_contains, and
+        # the decorators the portal defines as staticmethods, such as Mobject.affects_data), so
+        # calling it means running its code, as for a module function. The class row still
+        # needs an instance of its exact class.
+        rows = [row("Span.contains", "method"), row("Span", "class")]
+        probes = pw.Probes(rows)
+        recorder = pw.Recorder(probes, __file__, render_rows=set())
+
+        def test_span(mod=self.mod):
+            mod.Span.contains((0, 3), (1, 2))
+        with recorder:
+            test_span()
+        self.assertEqual({rows[i]["symbol"] for i in recorder.hits["test_span"]},
+                         {"Span.contains"})
+        # Its trivial mutant stays a staticmethod, so a witness test sees None, not a TypeError.
+        original = pw.inspect.getattr_static(self.mod.Span, "contains")
+        pw.mutate(probes, 0, "trivial")
+        try:
+            self.assertIsNone(self.mod.Span.contains((0, 3), (1, 2)))
+        finally:
+            self.mod.Span.contains = original
 
     def test_an_installer_wrapper_with_star_args_still_names_its_receiver(self):
         rows = [row("Square.width", "method")]
