@@ -154,6 +154,66 @@ class ParallelClipRecoveryNativeTests(unittest.TestCase):
             self.assertTrue(image.startswith(b"\x89PNG\r\n\x1a\n"))
             self.assertEqual(hashlib.sha256(image).hexdigest(), row["result"]["still"]["digest"])
 
+    def test_native_two_level_recovery_skips_completed_pair_and_resumes_partial_scene(self):
+        self.source.write_text(SOURCE.replace('if (root / "fail").exists():',
+            'if type(self).__name__ == "Other" and (root / "fail").exists():'))
+        (self.root / "fail").touch()
+        checkpoint = self.root / "completed.json"
+        first = self.render(checkpoint=checkpoint, save_last_frame=True)
+        self.assertEqual([row.status for row in first.outcomes], ["succeeded", "failed"])
+        image = first.outcomes[0].result.still_destination
+        clip = first.outcomes[1].result.primary.segments[0].render.destination
+        self.assertTrue(image.read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertTrue(clip.read_bytes().startswith(b"GIF8"))
+        saved = [(path.read_bytes(), path.stat().st_mtime_ns) for path in (image, clip)]
+        (self.root / "fail").rename(self.root / "fixed")
+        second = self.render(checkpoint=checkpoint, save_last_frame=True, resume=True)
+        self.assertTrue(second.ok, second.as_dict())
+        self.assertEqual(second.reused, ("Lesson",))
+        self.assertEqual([(path.read_bytes(), path.stat().st_mtime_ns) for path in (image, clip)], saved)
+        for row, calls in zip(second.outcomes, (1, 2)):
+            self.assertEqual(len((self.root / (row.name + ".calls")).read_text().splitlines()), calls)
+            self.assertTrue(row.result.completed)
+            self.assertEqual(len(row.result.primary.segments), 3)
+            data = row.result.still_destination.read_bytes()
+            self.assertEqual(hashlib.sha256(data).hexdigest(), row.result.still.digest)
+        third = self.render(checkpoint=checkpoint, save_last_frame=True, resume=True)
+        self.assertEqual(third.reused, ("Lesson", "Other"))
+        self.assertEqual(len((self.root / "Lesson.calls").read_text().splitlines()), 1)
+        self.assertEqual(len((self.root / "Other.calls").read_text().splitlines()), 2)
+        image.write_bytes(b"altered completed image")
+        with self.assertRaises(ValueError):
+            self.render(checkpoint=checkpoint, save_last_frame=True, resume=True)
+        self.assertEqual(image.read_bytes(), b"altered completed image")
+        self.assertEqual(len((self.root / "Other.calls").read_text().splitlines()), 2)
+
+    def test_installed_cli_two_level_recovery_preserves_completed_scene_execution_count(self):
+        self.source.write_text(SOURCE.replace('if (root / "fail").exists():',
+            'if type(self).__name__ == "Other" and (root / "fail").exists():'))
+        (self.root / "fail").touch()
+        command = [sys.executable, "-m", "fmn_python", str(self.source), "Lesson", "Other",
+            "--workers", "2", "--subdivide", "--format", "gif", "--resolution", "64x48",
+            "--fps", "8", "--video_dir", str(self.output), "--checkpoint", str(self.root / "done.json"),
+            "--clip-checkpoint-dir", str(self.state), "--resume-key", "two-level-native-v1",
+            "--keep-going", "--robot"]
+        first = subprocess.run(command, cwd=self.root, capture_output=True, text=True, timeout=90)
+        self.assertEqual(first.returncode, 5, first.stderr + first.stdout)
+        self.assertEqual([row["status"] for row in json.loads(first.stdout)["batch"]["outcomes"]],
+                         ["succeeded", "failed"])
+        clip = self.output / "Other/clips/segment-000000.gif"
+        saved = clip.read_bytes(), clip.stat().st_mtime_ns
+        self.assertTrue(saved[0].startswith(b"GIF8"))
+        (self.root / "fail").rename(self.root / "fixed")
+        second = subprocess.run(command + ["--resume"], cwd=self.root,
+                                capture_output=True, text=True, timeout=90)
+        self.assertEqual(second.returncode, 0, second.stderr + second.stdout)
+        report = json.loads(second.stdout)["batch"]
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["reused"], ["Lesson"])
+        self.assertEqual((clip.read_bytes(), clip.stat().st_mtime_ns), saved)
+        self.assertEqual((self.root / "Lesson.calls").read_text().splitlines(), ["construct"])
+        self.assertEqual((self.root / "Other.calls").read_text().splitlines(), ["construct", "construct"])
+
 
 if __name__ == "__main__":
     unittest.main()

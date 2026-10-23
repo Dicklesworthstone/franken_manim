@@ -26,11 +26,11 @@ must also match; worker count and timeout may change. Reused scene names appear
 in the robot receipt. Sequential and parallel checkpoint plans are distinct.
 
 To recover INSIDE unfinished scenes, choose --clip-checkpoint-dir DIRECTORY
-instead of --checkpoint. It requires --workers and --subdivide, with the same
---resume-key INPUTS and explicit --resume on retries. Each job gets an existing
-per-clip journal; its saved clips are verified and its commands replay to rebuild
-state without rasterizing/encoding the saved prefix. Python side effects repeat,
-including for completed scenes, so the whole-scene reused list stays empty.
+alone or together with --checkpoint. It requires --workers and --subdivide,
+with the same --resume-key INPUTS and explicit --resume on retries. Each job gets
+an existing per-clip journal; saved clips are verified and commands replay to rebuild
+state without rasterizing/encoding the saved prefix. With the prefix mode alone,
+Python side effects repeat even for completed scenes; the reused list is empty.
 Named scene batches, --write_all and --jobs-file are supported. --save-last-frame
 adds an adjacent final PNG with a separate durable receipt. Completed final
 images are verified and reused; absent images are captured after scene replay.
@@ -38,6 +38,15 @@ Unrecorded existing images are refused, including after a publication-to-journal
 crash. Certification and FMTL do not combine with this mode. Keep the state
 directory outside every clip collection AND final image; missing journals never
 authorize existing outputs.
+Use BOTH --checkpoint FILE and --clip-checkpoint-dir DIRECTORY from the initial
+run for two-level recovery: verified completed scenes are skipped entirely;
+only unfinished scenes replay their saved prefix. The reused list names the
+whole-scene skips. CLI discovery still imports the source in a separate process;
+skipping a scene does not promise to suppress module-level side effects.
+Keep FILE and its lock outside DIRECTORY and all outputs. Both journal locations
+are bound into the plans: retain both, and do not add/remove a recovery mode on
+resume. A missing terminal batch receipt still requires scene replay, even if
+all child clips exist. Missing journals and unrecorded artifacts are not adopted.
 A shared --batch-timeout or per-job --job-timeout retains durably journaled clips.
 """
 
@@ -67,17 +76,18 @@ def take_checkpoint_options(arguments, value_flags):
     if not found:
         return remaining, {}
     modes = [flag for flag in ("--checkpoint", "--clip-checkpoint-dir") if flag in found]
-    if len(modes) != 1 or "--resume-key" not in found:
-        raise ValueError("batch recovery requires exactly one of --checkpoint PATH or "
-                         "--clip-checkpoint-dir DIRECTORY, and --resume-key INPUTS")
-    mode = modes[0]
-    path, key = found[mode], found["--resume-key"]
-    if not path or "\0" in path:
-        raise ValueError(mode + " must be a nonempty path without NUL")
+    if not modes or "--resume-key" not in found:
+        raise ValueError("batch recovery requires --checkpoint PATH, "
+                         "--clip-checkpoint-dir DIRECTORY, or both, and --resume-key INPUTS")
+    key = found["--resume-key"]
     if not key or len(key.encode("utf-8")) > 4096:
         raise ValueError("--resume-key must contain 1 to 4096 UTF-8 bytes")
-    # Source module code may chdir. Preserve the leaf so the journal owner can
-    # reject a symlink rather than resolving it into an overwrite target.
-    path = Path(path).absolute()
-    return remaining, {mode[2:].replace("-", "_"): path, "resume_key": key,
-                       "resume": bool(found.get("--resume"))}
+    result = {"resume_key": key, "resume": bool(found.get("--resume"))}
+    for mode in modes:
+        path = found[mode]
+        if not path or "\0" in path:
+            raise ValueError(mode + " must be a nonempty path without NUL")
+        # Source module code may chdir. Preserve the leaf so the journal owner
+        # can reject a symlink rather than resolving it into an overwrite target.
+        result[mode[2:].replace("-", "_")] = Path(path).absolute()
+    return remaining, result

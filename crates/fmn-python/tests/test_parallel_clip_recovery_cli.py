@@ -23,7 +23,7 @@ class ClipRecoveryOptionsTests(unittest.TestCase):
     def test_missing_duplicate_and_conflicting_recovery_options_refuse(self):
         for args in (["--clip-checkpoint-dir"], ["--clip-checkpoint-dir", "state"],
                      ["--resume-key", "v1"], ["--resume"],
-                     ["--clip-checkpoint-dir", "state", "--checkpoint", "batch.json", "--resume-key", "v1"],
+                     ["--clip-checkpoint-dir", "state", "--checkpoint", "batch.json"],
                      ["--clip-checkpoint-dir", "state", "--clip-checkpoint-dir", "more", "--resume-key", "v1"],
                      ["--clip-checkpoint-dir", "", "--resume-key", "v1"],
                      ["--clip-checkpoint-dir", "state", "--resume-key", ""]):
@@ -90,7 +90,7 @@ class ParallelClipCliTests(unittest.TestCase):
 
     def test_conflicting_modes_refuse_before_source_discovery(self):
         for extra, options in (((), {"subdivide": False}),
-                               (("--checkpoint", "other.json"), {}), (("-s",), {}),
+                               (("--checkpoint", ""), {}), (("-s",), {}),
                                ((), {"workers": False, "job_file": False, "names": ("Lesson", "Other")})):
             with self.subTest(extra=extra, options=options):
                 self.assertEqual(self.invoke(*extra, **options), 2)
