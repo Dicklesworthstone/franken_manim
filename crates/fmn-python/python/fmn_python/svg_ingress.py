@@ -27,6 +27,52 @@ def _dimension(value, name):
     return value
 
 
+# The class the Reference's SVGMobject builds for each element
+# (svg_mobject.py `mobjects_from_svg`); an ellipse is a stretched Circle.
+_SVG_CLASSES = {
+    "path": "VMobjectFromSVGPath", "rect": "Rectangle", "rounded_rect": "RoundedRectangle",
+    "circle": "Circle", "ellipse": "Circle", "line": "Line", "polyline": "Polyline",
+    "polygon": "Polygon",
+}
+
+
+def _reclass_children(g, receiver, specs):
+    """Give each SVG child the Reference's class for its element (fm-5rlu).
+
+    Native storage is unchanged; only the shell's Python class moves, with the
+    fields that class's constructor sets, read from the shape as built (still
+    in the document's user space, as the Reference's constructor arguments
+    are). This is the string path's ``_reclass_leaves``, for shapes.
+    """
+    kinds = vars(receiver).pop("_svg_child_kinds", None)
+    if kinds is None or len(kinds) != len(specs):
+        raise ValueError("native SVG kinds do not match its children")
+    for (shell, _), kind in zip(specs, kinds):
+        shell.__class__ = g[_SVG_CLASSES[kind]]
+        if kind == "path":
+            shell.transform_cache = None
+            shell.path_obj = None
+        elif kind in ("rect", "rounded_rect"):
+            shell.vertices = shell.get_start_anchors()
+            shell.width, shell.height = shell.get_width(), shell.get_height()
+            if kind == "rounded_rect":
+                # The first corner arc runs from the start to point 4.
+                points = shell.get_points()
+                chord = math.dist(points[0][:2], points[4][:2]) if len(points) > 4 else 0.0
+                shell.corner_radius = chord / math.sqrt(2.0)
+        elif kind in ("circle", "ellipse"):
+            shell.radius = shell.get_width() / 2.0
+            shell.arc_center = shell.get_center()
+            shell.start_angle, shell.angle, shell.n_components = 0.0, math.tau, None
+        elif kind == "line":
+            shell.path_arc, shell.buff = 0.0, 0.0
+        elif kind == "polygon":
+            shell.vertices = shell.get_start_anchors()
+        else:
+            shell.vertices = shell.get_anchors()
+    return specs
+
+
 def _authored_parts(g, receiver, values):
     """Freeze a whole factory result before adopting or transforming any part."""
     parts = list(islice(iter(values), _MAX_PARTS + 1))
@@ -157,7 +203,7 @@ def install_svg_ingress(native):
             source = vars(self)["svg_string"]
         else:
             source = self.file_name_to_svg_string(file_name)
-        return tag(builder(self, factory, source, {}))
+        return _reclass_children(g, self, tag(builder(self, factory, source, {})))
 
     old_init = Svg.__init__
     init_signature = inspect.signature(old_init)
@@ -223,7 +269,7 @@ def install_svg_ingress(native):
         # This API returns detached shapes; it must not replace the receiver's
         # nursery as the former native-builder call on self did.
         root = VM()
-        specs = tag(builder(root, g["_native_shell_factory"], source, {}))
+        specs = _reclass_children(g, root, tag(builder(root, g["_native_shell_factory"], source, {})))
         g["_hang_native_children"](root, specs)
         result = list(root.submobjects)
         root.remove(*result)

@@ -79,9 +79,6 @@ use crate::{FillRule, GeomError, QuadPath, cubic, scalar};
 /// space. See [`crate::cubic::DEFAULT_TOLERANCE_PX`].
 pub const DEFAULT_SVG_TOLERANCE: f64 = cubic::DEFAULT_TOLERANCE_PX;
 
-/// The κ for a quarter circle/ellipse cubic: `4/3 · tan(π/8)`.
-const QUARTER_ARC_KAPPA: f64 = 0.552_284_749_830_793_6;
-
 // ------------------------------------------------------------------ errors
 
 /// Why byte input could not become a [`crate::SvgDocument`]. Every variant is a
@@ -395,6 +392,48 @@ pub struct SvgShape {
     pub path: QuadPath,
     /// The resolved style record.
     pub style: SvgStyle,
+    /// The element the shape came from.
+    pub kind: SvgShapeKind,
+}
+
+/// The SVG element a shape came from, which decides the class the
+/// Reference's SVGMobject builds for it (svg_mobject.py `mobjects_from_svg`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SvgShapeKind {
+    /// `<path>`: a `VMobjectFromSVGPath`.
+    Path,
+    /// `<rect>` with square corners: a `Rectangle`.
+    Rect,
+    /// `<rect>` with positive `rx` and `ry`: a `RoundedRectangle`.
+    RoundedRect,
+    /// `<circle>`: a `Circle`.
+    Circle,
+    /// `<ellipse>`: a `Circle` stretched to its radii.
+    Ellipse,
+    /// `<line>`: a `Line`.
+    Line,
+    /// `<polyline>`: a `Polyline`.
+    Polyline,
+    /// `<polygon>`: a `Polygon`.
+    Polygon,
+}
+
+impl SvgShapeKind {
+    /// The element's name: `path`, `rect`, `rounded_rect`, `circle`,
+    /// `ellipse`, `line`, `polyline` or `polygon`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Path => "path",
+            Self::Rect => "rect",
+            Self::RoundedRect => "rounded_rect",
+            Self::Circle => "circle",
+            Self::Ellipse => "ellipse",
+            Self::Line => "line",
+            Self::Polyline => "polyline",
+            Self::Polygon => "polygon",
+        }
+    }
 }
 
 /// A parsed + resolved SVG document.
@@ -1992,106 +2031,83 @@ fn parse_path_data(
 
 // ------------------------------------------------------------ basic shapes
 
-/// One κ-cubic quarter arc of an axis-aligned ellipse, appended to `sink`.
-fn quarter_arc(
-    path: &mut QuadPath,
-    center: (f64, f64),
+/// A unit-circle arc of `angle` from `start_angle`, under the one arc-density
+/// rule (BN-09), mapped onto an axis-aligned ellipse of radii `rx`, `ry`
+/// about `(cx, cy)`.
+fn ellipse_arc(
+    cx: f64,
+    cy: f64,
     rx: f64,
     ry: f64,
-    from: (f64, f64),
-    to: (f64, f64),
-) -> Result<(), SvgError> {
-    // Unit direction vectors of the start/end radii.
-    let u = ((from.0 - center.0) / rx, (from.1 - center.1) / ry);
-    let v = ((to.0 - center.0) / rx, (to.1 - center.1) / ry);
-    let k = QUARTER_ARC_KAPPA;
-    // Handles: k·(tangent at each endpoint); tangent = radius rotated ±90°.
-    let cross = u.0 * v.1 - u.1 * v.0;
-    let sign = if cross >= 0.0 { 1.0 } else { -1.0 };
-    let h1 = (from.0 - sign * k * u.1 * rx, from.1 + sign * k * u.0 * ry);
-    let h2 = (to.0 + sign * k * v.1 * rx, to.1 - sign * k * v.0 * ry);
-    path.add_cubic_bezier_curve_to_with_tolerance(
-        [h1.0, h1.1, 0.0],
-        [h2.0, h2.1, 0.0],
-        [to.0, to.1, 0.0],
-        DEFAULT_SVG_TOLERANCE,
-    )
-    .map_err(geom)?;
-    Ok(())
+    start_angle: f64,
+    angle: f64,
+    n_components: Option<usize>,
+) -> Result<Vec<Vec3>, SvgError> {
+    let arc =
+        QuadPath::try_arc(start_angle, angle, 1.0, [0.0, 0.0, 0.0], n_components).map_err(geom)?;
+    Ok(arc
+        .points()
+        .iter()
+        .map(|p| [cx + rx * p[0], cy + ry * p[1], 0.0])
+        .collect())
 }
 
-/// A full ellipse as four quarter arcs, starting at (cx + rx, cy).
+/// A full ellipse as the Reference's SVGMobject builds it: `Circle(radius=rx)`
+/// stretched to `2 ry` and moved to the centre (svg_mobject.py
+/// `ellipse_to_mobject`), so it starts at `(cx + rx, cy)` and carries the
+/// Circle's arc density (fm-5rlu).
 fn ellipse_path(cx: f64, cy: f64, rx: f64, ry: f64) -> Result<QuadPath, SvgError> {
     let mut path = QuadPath::new();
-    path.start_new_path([cx + rx, cy, 0.0]);
-    let points = [
-        (cx + rx, cy),
-        (cx, cy + ry),
-        (cx - rx, cy),
-        (cx, cy - ry),
-        (cx + rx, cy),
-    ];
-    for w in points.windows(2) {
-        quarter_arc(&mut path, (cx, cy), rx, ry, w[0], w[1])?;
-    }
-    path.close_path(false).map_err(geom)?;
+    path.add_subpath(&ellipse_arc(
+        cx,
+        cy,
+        rx,
+        ry,
+        0.0,
+        std::f64::consts::TAU,
+        None,
+    )?)
+    .map_err(geom)?;
     Ok(path)
 }
 
-/// A rectangle, rounded when `rx`/`ry` are positive.
+/// A rectangle as the Reference's SVGMobject builds it (svg_mobject.py
+/// `rect_to_mobject`), in the document's user space before its y flip:
+/// `Rectangle`, the polygon UR, UL, DL, DR of the coordinates as given, or,
+/// when `rx` and `ry` are positive, `RoundedRectangle`, which starts on the
+/// right edge and turns each corner, UR first, with a two-component arc
+/// (`Polygon.round_corners`). Write traces the shape from the same vertex as
+/// the Reference (fm-5rlu).
 fn rect_path(x: f64, y: f64, w: f64, h: f64, rx: f64, ry: f64) -> Result<QuadPath, SvgError> {
     let mut path = QuadPath::new();
     if rx <= 0.0 || ry <= 0.0 {
-        path.start_new_path([x, y, 0.0]);
-        path.add_line_to([x + w, y, 0.0], false).map_err(geom)?;
-        path.add_line_to([x + w, y + h, 0.0], false).map_err(geom)?;
-        path.add_line_to([x, y + h, 0.0], false).map_err(geom)?;
+        path.start_new_path([x + w, y + h, 0.0]);
+        for corner in [[x, y + h, 0.0], [x, y, 0.0], [x + w, y, 0.0]] {
+            path.add_line_to(corner, false).map_err(geom)?;
+        }
         path.close_path(false).map_err(geom)?;
         return Ok(path);
     }
     let rx = rx.min(w / 2.0);
     let ry = ry.min(h / 2.0);
-    path.start_new_path([x + rx, y, 0.0]);
-    path.add_line_to([x + w - rx, y, 0.0], false)
-        .map_err(geom)?;
-    quarter_arc(
-        &mut path,
-        (x + w - rx, y + ry),
-        rx,
-        ry,
-        (x + w - rx, y),
-        (x + w, y + ry),
-    )?;
-    path.add_line_to([x + w, y + h - ry, 0.0], false)
-        .map_err(geom)?;
-    quarter_arc(
-        &mut path,
+    let quarter = std::f64::consts::FRAC_PI_2;
+    let corners = [
         (x + w - rx, y + h - ry),
-        rx,
-        ry,
-        (x + w, y + h - ry),
-        (x + w - rx, y + h),
-    )?;
-    path.add_line_to([x + rx, y + h, 0.0], false)
-        .map_err(geom)?;
-    quarter_arc(
-        &mut path,
         (x + rx, y + h - ry),
-        rx,
-        ry,
-        (x + rx, y + h),
-        (x, y + h - ry),
-    )?;
-    path.add_line_to([x, y + ry, 0.0], false).map_err(geom)?;
-    quarter_arc(
-        &mut path,
         (x + rx, y + ry),
-        rx,
-        ry,
-        (x, y + ry),
-        (x + rx, y),
-    )?;
-    path.close_path(false).map_err(geom)?;
+        (x + w - rx, y + ry),
+    ];
+    let mut arcs = Vec::with_capacity(corners.len());
+    for (index, (cx, cy)) in corners.into_iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let start = quarter * index as f64;
+        arcs.push(ellipse_arc(cx, cy, rx, ry, start, quarter, Some(2))?);
+    }
+    for (index, arc) in arcs.iter().enumerate() {
+        path.add_subpath(arc).map_err(geom)?;
+        let next = &arcs[(index + 1) % arcs.len()];
+        path.add_line_to(next[0], false).map_err(geom)?;
+    }
     Ok(path)
 }
 
@@ -2493,7 +2509,7 @@ impl<'a, 'tree> Interpreter<'a, 'tree> {
                 let d = attr(el, "d").ok_or_else(|| malformed(line, "path element without `d`"))?;
                 let path =
                     parse_path_data(d, line, &mut self.commands, self.limits.max_path_commands)?;
-                self.emit(path, affine, &style, line)?;
+                self.emit(path, SvgShapeKind::Path, affine, &style, line)?;
                 self.render_children(el, affine, &style, vp)?;
             }
             "rect" => {
@@ -2517,7 +2533,12 @@ impl<'a, 'tree> Interpreter<'a, 'tree> {
                         (None, Some(b)) => (b, b),
                         (a, b) => (a.unwrap_or(0.0), b.unwrap_or(0.0)),
                     };
-                    self.emit(rect_path(x, y, w, h, rx, ry)?, affine, &style, line)?;
+                    let kind = if rx > 0.0 && ry > 0.0 {
+                        SvgShapeKind::RoundedRect
+                    } else {
+                        SvgShapeKind::Rect
+                    };
+                    self.emit(rect_path(x, y, w, h, rx, ry)?, kind, affine, &style, line)?;
                 }
                 self.render_children(el, affine, &style, vp)?;
             }
@@ -2529,7 +2550,8 @@ impl<'a, 'tree> Interpreter<'a, 'tree> {
                         return Err(malformed(line, "circle radius must be non-negative"));
                     }
                     if r > 0.0 {
-                        self.emit(ellipse_path(cx, cy, r, r)?, affine, &style, line)?;
+                        let path = ellipse_path(cx, cy, r, r)?;
+                        self.emit(path, SvgShapeKind::Circle, affine, &style, line)?;
                     }
                 }
                 self.render_children(el, affine, &style, vp)?;
@@ -2545,7 +2567,8 @@ impl<'a, 'tree> Interpreter<'a, 'tree> {
                     return Err(malformed(line, "ellipse radii must be non-negative"));
                 }
                 if rx > 0.0 && ry > 0.0 {
-                    self.emit(ellipse_path(cx, cy, rx, ry)?, affine, &style, line)?;
+                    let path = ellipse_path(cx, cy, rx, ry)?;
+                    self.emit(path, SvgShapeKind::Ellipse, affine, &style, line)?;
                 }
                 self.render_children(el, affine, &style, vp)?;
             }
@@ -2557,7 +2580,7 @@ impl<'a, 'tree> Interpreter<'a, 'tree> {
                 let mut path = QuadPath::new();
                 path.start_new_path([x1, y1, 0.0]);
                 path.add_line_to([x2, y2, 0.0], false).map_err(geom)?;
-                self.emit(path, affine, &style, line)?;
+                self.emit(path, SvgShapeKind::Line, affine, &style, line)?;
                 self.render_children(el, affine, &style, vp)?;
             }
             "polyline" | "polygon" => {
@@ -2575,10 +2598,13 @@ impl<'a, 'tree> Interpreter<'a, 'tree> {
                         path.add_line_to([pair[0], pair[1], 0.0], false)
                             .map_err(geom)?;
                     }
-                    if name == "polygon" {
+                    let kind = if name == "polygon" {
                         path.close_path(false).map_err(geom)?;
-                    }
-                    self.emit(path, affine, &style, line)?;
+                        SvgShapeKind::Polygon
+                    } else {
+                        SvgShapeKind::Polyline
+                    };
+                    self.emit(path, kind, affine, &style, line)?;
                 }
                 self.render_children(el, affine, &style, vp)?;
             }
@@ -2642,6 +2668,7 @@ impl<'a, 'tree> Interpreter<'a, 'tree> {
     fn emit(
         &mut self,
         path: QuadPath,
+        kind: SvgShapeKind,
         affine: Affine,
         style: &Style,
         line: usize,
@@ -2695,6 +2722,7 @@ impl<'a, 'tree> Interpreter<'a, 'tree> {
                 stroke_dashoffset: style.dash_offset * scale,
                 opacity: style.opacity,
             },
+            kind,
         });
         Ok(())
     }

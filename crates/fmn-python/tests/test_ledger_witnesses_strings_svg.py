@@ -233,6 +233,51 @@ class StringsSvgWitnesses(unittest.TestCase):
             if mob.get_num_points() >= 3:
                 self.assertGreater(mob.get_unit_normal()[2], 0, type(mob).__name__)
 
+    # Measured on the pinned Reference (6199a00d): SVGMobject(svg_string=...) of one element in
+    # a viewBox="-1 -1 8 6" document; each child's class, point count, and its first three points
+    # as fractions of its own box (-1 left/bottom .. +1 right/top). Produced by
+    # `PYTHONPATH=scripts/manim_ref xvfb-run -a python svg_shapes_probe.py` (fm-5rlu).
+    _SVG_SHAPES = {
+        '<path d="M0 0 L4 0 L4 2 Z"/>':
+            ("VMobjectFromSVGPath", 7, [(-1.0, 1.0), (0.0, 0.0), (1.0, -1.0)]),
+        '<rect x="1" y="1" width="4" height="2"/>':
+            ("Rectangle", 9, [(1.0, -1.0), (1.0, 0.0), (1.0, 1.0)]),
+        '<rect x="1" y="1" width="4" height="2" rx="0.5" ry="0.5"/>':
+            ("RoundedRectangle", 25, [(1.0, -0.5), (1.0, 0.0), (1.0, 0.5)]),
+        '<circle cx="2" cy="2" r="1"/>':
+            ("Circle", 33, [(1.0, 0.0), (1.0, 0.2), (0.92, 0.38)]),
+        '<ellipse cx="2" cy="2" rx="2" ry="1"/>':
+            ("Circle", 33, [(1.0, 0.0), (1.0, 0.2), (0.92, 0.38)]),
+        '<polygon points="0,0 4,0 2,3"/>':
+            ("Polygon", 7, [(-1.0, 1.0), (-0.5, 0.0), (0.0, -1.0)]),
+        '<polyline points="0,0 4,0 2,3"/>':
+            ("Polyline", 5, [(0.0, -1.0), (0.5, 0.0), (1.0, 1.0)]),
+        '<line x1="0" y1="0" x2="4" y2="2" stroke="#ffffff"/>':
+            ("Line", 3, [(-1.0, 1.0), (0.0, 0.0), (1.0, -1.0)]),
+        '<rect x="1" y="1" width="4" height="2" transform="rotate(90)"/>':
+            ("Rectangle", 9, [(-1.0, -1.0), (0.0, -1.0), (1.0, -1.0)]),
+    }
+
+    def test_svg_shapes_keep_the_references_classes_and_start_vertices(self):
+        import numpy as np
+        from manimlib.mobject.svg.svg_mobject import SVGMobject
+
+        # svg_mobject.py mobjects_from_svg: each element is built as its Reference class, so
+        # Write and Transform start each shape where the Reference does (fm-5rlu).
+        for element, (cls, count, first) in self._SVG_SHAPES.items():
+            with self.subTest(element=element):
+                mob = SVGMobject(svg_string='<svg xmlns="http://www.w3.org/2000/svg" viewBox="-1 -1 8 6">'
+                                 + element + "</svg>")
+                child, = mob.family_members_with_points()
+                points = child.get_points()
+                lo, hi = points.min(0), points.max(0)
+                span = np.where(hi - lo > 1e-9, hi - lo, 1.0)
+                where = [tuple(round(float(v), 2) for v in ((p - lo) / span * 2 - 1)[:2])
+                         for p in points[:3]]
+                self.assertEqual((type(child).__name__, len(points)), (cls, count))
+                self.assertEqual(where, first)
+                self.assertGreater(child.get_unit_normal()[2], 0)
+
     def test_glyph_contours_trace_like_the_reference(self):
         import numpy as np
         from manimlib import Tex
