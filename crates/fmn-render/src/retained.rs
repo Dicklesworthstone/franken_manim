@@ -1972,6 +1972,47 @@ mod tests {
             .expect("same mixed frame at four threads");
         assert_eq!(one.frame().as_bytes(), four.frame().as_bytes());
     }
+
+    #[test]
+    fn zero_radius_live_edits_invalidate_projection_and_keep_frozen_frames() {
+        let camera = camera();
+        let mut empty = RetainedFrameRenderer::new(config(1)).unwrap();
+        empty.render_with_camera(&Stage::new(), &camera).unwrap();
+        for threads in [1, 4, 16] {
+            let mut stage = Stage::new();
+            let mob = stage.add(dot_cloud());
+            stage.add_to_scene(mob).unwrap();
+            let mut renderer = RetainedFrameRenderer::new(config(threads)).unwrap();
+            renderer.render_with_camera(&stage, &camera).unwrap();
+            let visible = renderer.frame().as_bytes().to_vec();
+            assert_ne!(visible, empty.frame().as_bytes());
+
+            stage
+                .get_mut(mob)
+                .unwrap()
+                .buffer
+                .write(0, "radius", &[0.0]);
+            let invisible = renderer.prepare_with_camera(&stage, &camera).unwrap();
+            assert_eq!(
+                invisible.render(threads).unwrap().as_bytes(),
+                empty.frame().as_bytes()
+            );
+
+            stage
+                .get_mut(mob)
+                .unwrap()
+                .buffer
+                .write(0, "radius", &[0.45]);
+            renderer.render_with_camera(&stage, &camera).unwrap();
+            assert_eq!(renderer.frame().as_bytes(), visible);
+            assert_eq!(
+                invisible.render(threads).unwrap().as_bytes(),
+                empty.frame().as_bytes(),
+                "later radius edits must not change the frozen invisible frame"
+            );
+        }
+    }
+
     #[test]
     fn camera_route_renders_image_pixels_and_interns_repeated_resources() {
         let camera = camera();

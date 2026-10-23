@@ -243,6 +243,40 @@ class PointCloudMaterialTests(unittest.TestCase):
                 actual = sequence(root / f'actual-{threads}.y4m', lambda d, v: d.uniforms.__setitem__('glow_factor', v), threads)
                 self.assertEqual(actual, expected)
 
+    def test_zero_radius_draws_nothing_and_can_grow_again(self):
+        def sequence(path, remove_at_zero, threads):
+            scene, dots = m.Scene(), cloud(glow=2.)
+            with render_session(scene, path, resolution=(64, 40), fps=8, threads=threads) as session:
+                scene.add(dots)
+                scene.wait(.125)
+                if remove_at_zero:
+                    scene.remove(dots)
+                else:
+                    dots.set_radius(0.)
+                scene.wait(.125)
+                if remove_at_zero:
+                    scene.add(dots)
+                else:
+                    dots.set_radius(.8)
+                scene.wait(.125)
+            self.assertEqual(session.result.frame_count, 3)
+            return path.read_bytes()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            expected = sequence(root / 'expected.y4m', True, 1)
+            for threads in (1, 4, 16):
+                actual = sequence(root / f'zero-{threads}.y4m', False, threads)
+                self.assertEqual(actual, expected)
+
+    def test_zero_radius_records_do_not_hide_visible_members(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            expected = render(root / 'expected.y4m', cloud(points=[[1., 0., 0.]]))
+            for threads in (1, 4, 16):
+                dots = cloud(points=[[-1., 0., 0.], [1., 0., 0.]])
+                dots.set_radii([0., .8])
+                self.assertEqual(render(root / f'mixed-{threads}.y4m', dots, threads), expected)
+
 
 def run_native_point_cloud_materials():
     result = unittest.TextTestRunner(verbosity=2).run(

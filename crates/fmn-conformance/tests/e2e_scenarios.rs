@@ -5589,6 +5589,93 @@ fn render_certified_camera_doc(stage: &Stage) -> Vec<u8> {
     encode_frame(renderer.frame()).expect("the camera frame encodes into its canonical document")
 }
 
+/// A dot can disappear at radius zero and grow again through the production
+/// scene/output pipeline. Removing and re-adding an independent dot supplies
+/// the expected PNG sequence; no frame hash is regenerated for this change.
+fn zero_radius_dot_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    struct Dots {
+        remove_at_zero: bool,
+    }
+    impl fmn::SceneConstruct for Dots {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let dot = stage.add(
+                fmn_library::DotCloud::new([[0.0; 3]])
+                    .with_radius(0.75)
+                    .with_glow_factor(2.0)
+                    .colored(BLUE_C, 1.0),
+            )?;
+            stage.wait(0.125)?;
+            if self.remove_at_zero {
+                stage.scene_mut().remove(&[dot]);
+            } else {
+                stage
+                    .get_mut(dot)
+                    .expect("live dot")
+                    .buffer
+                    .write(0, "radius", &[0.0]);
+            }
+            stage.wait(0.125)?;
+            if self.remove_at_zero {
+                stage.scene_mut().add(&[dot])?;
+            } else {
+                stage
+                    .get_mut(dot)
+                    .expect("live dot")
+                    .buffer
+                    .write(0, "radius", &[0.75]);
+            }
+            stage.wait(0.125)?;
+            Ok(())
+        }
+    }
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    let render = |path: &str, remove_at_zero: bool, threads| {
+        let mut options = fmn::RenderOptions::with_format(path, fmn::RenderFormat::PngSequence)
+            .map_err(|error| fail(format!("zero-radius dot options: {error}")))?;
+        options.config.camera.resolution = (64, 40);
+        options.config.camera.fps = 8;
+        options.config.sizes.frame_height = 4.0;
+        options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+        options.typeset_cache = false;
+        let report = fmn::render_with_fs(&mut Dots { remove_at_zero }, options, fs.clone())
+            .map_err(|error| fail(format!("zero-radius dot render: {error}")))?;
+        if report.artifact.frame_count != 3 {
+            return Err(fail("zero-radius lifecycle must emit exactly three frames"));
+        }
+        (0..3)
+            .map(|index| {
+                fs.read(&PathBuf::from(format!("{path}/frame_{index:06}.png")))
+                    .map_err(|error| fail(format!("read zero-radius lifecycle PNG: {error}")))
+            })
+            .collect::<Result<Vec<_>, _>>()
+    };
+    let expected = render("/dot-removed", true, 1)?;
+    if expected[0] == expected[1] || expected[0] != expected[2] {
+        return Err(fail(
+            "independent lifecycle must visibly disappear and return",
+        ));
+    }
+    for threads in [1, 4, 16] {
+        let actual = render(&format!("/dot-zero-{threads}"), false, threads)?;
+        let equal = actual == expected;
+        ctx.event(
+            LogEvent::new("e2e.dot.zero_radius")
+                .field("threads", u64::from(threads))
+                .field("frames", actual.len() as u64)
+                .field("matches_removed", truth(equal))
+                .field("invisible_sha256", sha256(&actual[1]).to_hex()),
+        );
+        if !equal {
+            return Err(fail("zero-radius lifecycle differs from removing the dot"));
+        }
+    }
+    Ok(RunOutcome::ok()
+        .with_artifact("dot-visible.png", expected[0].clone())
+        .with_artifact("dot-invisible.png", expected[1].clone())
+        .with_counter("zero_radius_lifecycle_frames", 9))
+}
+
 /// Retained camera captures stay immutable while later poses and overlay
 /// edits reuse the same renderer. A fresh serial renderer supplies each
 /// expected frame; replay then reverses capture order on 1, 4, and 16 threads.
@@ -9233,6 +9320,23 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.zero_radius_dot.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(zero_radius_dot_lifecycle_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("zero_radius_lifecycle_frames", 9),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.dot.zero_radius",
+            vec![
+                FieldPred::u64_eq("frames", 3),
+                FieldPred::str_eq("matches_removed", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.retained_camera_frames.v1",
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
@@ -11958,6 +12062,16 @@ fn phase2_and_phase3_e2e_scenarios_pass() {
         let report = Runner::from_env().run(scenario);
         assert!(report.is_pass(), "{}", report.summary());
     }
+}
+
+#[test]
+fn zero_radius_dot_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.zero_radius_dot.v1")
+        .expect("the zero-radius dot scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
 }
 
 /// The CLI builtin scenarios (fm-cli-camera-route-i1zc,

@@ -337,7 +337,7 @@ pub enum ThreeDError {
     },
     /// A vertex or draw parameter contained NaN or infinity.
     NonFinite,
-    /// Dot radius was not positive.
+    /// Dot radius was negative. A zero-radius dot has no coverage.
     InvalidRadius,
     /// Dot anti-alias width was negative.
     InvalidAntiAliasWidth,
@@ -400,7 +400,7 @@ impl std::fmt::Display for ThreeDError {
                 "could not reserve {requested} rows for 3D {resource} preparation"
             ),
             Self::NonFinite => f.write_str("3D draw data must be finite"),
-            Self::InvalidRadius => f.write_str("true-dot radius must be positive"),
+            Self::InvalidRadius => f.write_str("true-dot radius must be non-negative"),
             Self::InvalidAntiAliasWidth => {
                 f.write_str("true-dot anti-alias width must be non-negative")
             }
@@ -941,7 +941,7 @@ impl<'a> SurfaceDraw<'a> {
 pub struct TrueDotDraw {
     /// World-space center.
     pub center: Vec3,
-    /// World-space radius.
+    /// Non-negative world-space radius. Zero draws nothing.
     pub radius: f64,
     /// Linear-light straight color.
     pub color: LinearRgba,
@@ -2877,7 +2877,7 @@ fn compile_dot<'a>(
     {
         return Err(ThreeDError::NonFinite);
     }
-    if draw.radius <= 0.0 {
+    if draw.radius < 0.0 {
         return Err(ThreeDError::InvalidRadius);
     }
     if draw.anti_alias_width < 0.0 {
@@ -2910,16 +2910,22 @@ fn compile_dot<'a>(
         corner(1.0, 1.0),
     ];
     let mut triangles = Vec::new();
-    for indices in [[0, 1, 2], [2, 1, 3]] {
-        let triangle = indices.map(|index| corners[index]);
-        append_clipped_triangle(
-            camera,
-            &triangle,
-            draw.is_fixed_in_frame,
-            draw.clip_planes,
-            &mut triangles,
-            budget,
-        )?;
+    // A shrinking dot reaches radius zero during ordinary animation. Keep
+    // its draw slot (projection rebinding preserves draw order), but emit no
+    // triangles or depth writes. In particular, never divide its AA width by
+    // zero or send a degenerate billboard through clipping.
+    if draw.radius > 0.0 {
+        for indices in [[0, 1, 2], [2, 1, 3]] {
+            let triangle = indices.map(|index| corners[index]);
+            append_clipped_triangle(
+                camera,
+                &triangle,
+                draw.is_fixed_in_frame,
+                draw.clip_planes,
+                &mut triangles,
+                budget,
+            )?;
+        }
     }
     Ok(CompiledDraw {
         bounds: union_bounds(&triangles),
@@ -2932,7 +2938,11 @@ fn compile_dot<'a>(
                 glow_factor: draw.glow_factor,
                 shading: draw.shading,
                 to_camera,
-                scaled_aa_width: draw.anti_alias_width * camera.pixel_size() / draw.radius,
+                scaled_aa_width: if draw.radius > 0.0 {
+                    draw.anti_alias_width * camera.pixel_size() / draw.radius
+                } else {
+                    0.0
+                },
                 light_position: camera.light_source_position(),
                 camera_position: camera.location(),
             },
@@ -4711,12 +4721,22 @@ mod tests {
         );
 
         let camera = camera();
-        let invalid_radius = [ThreeDDraw::TrueDot(TrueDotDraw::new([0.0; 3], 0.0, white))];
+        let invalid_radius = [ThreeDDraw::TrueDot(TrueDotDraw::new([0.0; 3], -0.1, white))];
         assert_eq!(
             ThreeDJob::new(&camera, &invalid_radius, Tiling::default())
-                .expect_err("zero-radius dot must be rejected"),
+                .expect_err("negative-radius dot must be rejected"),
             ThreeDError::InvalidRadius
         );
+        for radius in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let draws = [ThreeDDraw::TrueDot(TrueDotDraw::new(
+                [0.0; 3], radius, white,
+            ))];
+            assert_eq!(
+                ThreeDJob::new(&camera, &draws, Tiling::default())
+                    .expect_err("non-finite dot radius must be rejected"),
+                ThreeDError::NonFinite
+            );
+        }
         let mut dot = TrueDotDraw::new([0.0; 3], 1.0, white);
         dot.anti_alias_width = -1.0;
         assert_eq!(
@@ -4724,6 +4744,66 @@ mod tests {
                 .expect_err("negative AA width must be rejected"),
             ThreeDError::InvalidAntiAliasWidth
         );
+    }
+
+    #[test]
+    fn zero_radius_dots_have_no_coverage_or_depth_and_keep_validation() {
+        let camera = camera();
+        let white = color("#FFFFFF", 1.0);
+        let mut visible = TrueDotDraw::new([0.0, 0.0, -0.5], 1.0, white);
+        visible.depth_test = true;
+        let expected = ThreeDJob::new(&camera, &[ThreeDDraw::TrueDot(visible)], Tiling::default())
+            .expect("visible dot")
+            .render(1)
+            .expect("visible frame");
+        let background = ThreeDJob::new(&camera, &[], Tiling::default())
+            .expect("empty scene")
+            .render(1)
+            .expect("background frame");
+        assert_ne!(expected.as_bytes(), background.as_bytes());
+        for radius in [0.0, -0.0] {
+            let mut zero = TrueDotDraw::glow([0.0, 0.0, 0.5], radius, white);
+            zero.depth_test = true;
+            zero.shading = [0.5, 0.1, 0.2];
+            let draws = [ThreeDDraw::TrueDot(zero)];
+            let job = ThreeDJob::new_with_limits(
+                &camera,
+                &draws,
+                Tiling::default(),
+                ThreeDPreparationLimits {
+                    max_raster_triangles: 0,
+                    ..ThreeDPreparationLimits::default()
+                },
+            )
+            .expect("zero-radius dot needs no triangles");
+            assert!(job.draws[0].bounds.is_none());
+            assert_eq!(job.scheduled_tile_draw_count(), 0);
+            for threads in [1, 4, 16] {
+                assert_eq!(
+                    job.render(threads).expect("invisible dot").as_bytes(),
+                    background.as_bytes()
+                );
+                let mixed = [ThreeDDraw::TrueDot(zero), ThreeDDraw::TrueDot(visible)];
+                let actual = ThreeDJob::new(&camera, &mixed, Tiling::default())
+                    .expect("mixed dots")
+                    .render(threads)
+                    .expect("visible dot behind zero-radius dot");
+                assert_eq!(actual.as_bytes(), expected.as_bytes());
+            }
+            zero.anti_alias_width = -1.0;
+            assert_eq!(
+                ThreeDJob::new(&camera, &[ThreeDDraw::TrueDot(zero)], Tiling::default())
+                    .expect_err("zero radius does not bypass AA validation"),
+                ThreeDError::InvalidAntiAliasWidth
+            );
+            zero.anti_alias_width = 2.0;
+            zero.center[0] = f64::NAN;
+            assert_eq!(
+                ThreeDJob::new(&camera, &[ThreeDDraw::TrueDot(zero)], Tiling::default())
+                    .expect_err("zero radius does not bypass finite validation"),
+                ThreeDError::NonFinite
+            );
+        }
     }
 
     #[test]
