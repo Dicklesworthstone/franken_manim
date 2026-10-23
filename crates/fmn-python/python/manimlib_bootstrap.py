@@ -19012,10 +19012,17 @@ class Transform(_NativeAnimation):
         return {"path_arc": self.path_arc, "path_arc_axis": self.path_arc_axis}
 
     def update_config(self, **kwargs) -> None:
+        # Reference transform.py:95: the kwargs become attributes (at the pin its call to the
+        # absent Animation.update_config raises; BN-12 §8), and a path_arc rebuilds path_func
+        # as path_along_arc(path_arc, the given axis or OUT), the arc native playback follows.
+        from manimlib.utils.paths import path_along_arc
+
         self.__dict__.update(kwargs)
         if "path_arc" in kwargs:
             self.path_arc = float(kwargs["path_arc"])
-        if "path_arc_axis" in kwargs:
+            self.path_arc_axis = _vec3(kwargs.get("path_arc_axis", _OUT))
+            self.path_func = path_along_arc(self.path_arc, self.path_arc_axis)
+        elif "path_arc_axis" in kwargs:
             self.path_arc_axis = _vec3(kwargs["path_arc_axis"])
 
     def _allows_deferred_target(self):
@@ -24481,15 +24488,15 @@ def _install_config_module():
         return None
 
     def load_yaml(file_path):
+        # Reference config.py: the parsed document, or {} for a missing or empty file;
+        # malformed YAML raises. The one native YAML reader parses FrankenManim's subset
+        # (maps of scalars, BN-15); anything outside it is a precise ValueError.
         try:
-            import yaml
-
-            if _pathlib.Path(file_path).exists():
-                with open(file_path, "r", encoding="utf-8") as f:
-                    return yaml.safe_load(f) or {}
-        except Exception:
-            pass
-        return {}
+            with open(file_path, "r", encoding="utf-8") as handle:
+                text = handle.read()
+        except FileNotFoundError:
+            return {}
+        return _FMN_ROOT._parse_yaml_subset(text) or {}
 
     def parse_cli():
         import argparse
