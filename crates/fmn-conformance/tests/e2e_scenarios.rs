@@ -3847,6 +3847,18 @@ fn python_studio_capture_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
         .with_artifact("studio_inspector.json", report.last_inspector))
 }
 
+fn python_studio_editing_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let checks = manimlib::run_portal_gauntlet_studio_editing()
+        .map_err(|error| fail(format!("Python Studio editing: {error}")))?;
+    ctx.event(
+        LogEvent::new("e2e.python.studio_editing")
+            .field("checks", checks)
+            .field("native_history", true)
+            .field("modifier_transitions", true),
+    );
+    Ok(RunOutcome::ok().with_counter("studio_editing_checks", checks))
+}
+
 fn python_portal_animation_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     python_portal_sequence_run(ctx, true)
 }
@@ -9594,6 +9606,23 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             ],
         )],
     ));
+    specs.push(spec(
+        "lifecycle.python_studio_editing.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_studio_editing_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_ge("studio_editing_checks", 21),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.studio_editing",
+            vec![
+                FieldPred::bool_eq("native_history", true),
+                FieldPred::bool_eq("modifier_transitions", true),
+            ],
+        )],
+    ));
     let mut portal_output_inventory = vec![
         "native_scene.py".to_owned(),
         "motion.gif".to_owned(),
@@ -11288,6 +11317,17 @@ fn python_studio_capture_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.python_studio_capture.v1")
         .expect("Python Studio capture is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+/// Native InteractiveScene gesture modifiers, key repeats and undo history.
+#[test]
+fn python_studio_editing_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.python_studio_editing.v1")
+        .expect("Python Studio editing is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

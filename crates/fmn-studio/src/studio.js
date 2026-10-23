@@ -412,6 +412,12 @@
     else void saveSession();
   });
   const keyNames = {ArrowLeft:"arrow_left", ArrowRight:"arrow_right", ArrowUp:"arrow_up", ArrowDown:"arrow_down", Escape:"escape", Enter:"enter", Tab:"tab", Backspace:"backspace"};
+  // Modifier bits describe a snapshot; InteractiveScene also needs the actual
+  // Shift transition to change the pivot of an already-held resize gesture.
+  // Preserve left/right identity through the existing native Other key code.
+  const sceneKey = event => event.key === "Shift"
+    ? (event.code === "ShiftRight" ? "other:65506" : "other:65505")
+    : keyNames[event.key] || ([...event.key].length === 1 ? event.key : null);
   // Physical ownership survives modifier/layout changes between down and up.
   // The native key itself remains the value admitted by the original press.
   const keyIdentity = (event, key) => typeof event.code === "string" && event.code && event.code !== "Unidentified" ? "code:" + event.code : "key:" + key;
@@ -482,7 +488,7 @@
   }
   $("preview").addEventListener("keydown", event => {
     if (!$("input-events").checked || !supportsInput()) return;
-    const key = keyNames[event.key] || ([...event.key].length === 1 ? event.key : null);
+    const key = sceneKey(event);
     if (!key) return;
     event.preventDefault();
     const identity = keyIdentity(event, key), prior = heldKeys.get(identity);
@@ -493,7 +499,7 @@
   });
   // Listen outside the canvas too: moving focus must not strand a held native key.
   window.addEventListener("keyup", event => {
-    const key = keyNames[event.key] || ([...event.key].length === 1 ? event.key : null);
+    const key = sceneKey(event);
     const identity = keyIdentity(event, key), owner = heldKeys.get(identity);
     if (!owner) return;
     event.preventDefault(); heldKeys.delete(identity);

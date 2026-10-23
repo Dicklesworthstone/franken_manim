@@ -288,6 +288,41 @@ test('layout changes during a held repeat do not strand a second native key', as
   assert.equal(f.errors.length, 0);
 });
 
+test('Shift transitions reach a held resize in order with distinct physical identities', async () => {
+  const f = fixture(), preview = f.$('preview');
+  preview.emit('keydown', {key:'t', code:'KeyT'});
+  preview.emit('keydown', {key:'Shift', code:'ShiftLeft', shiftKey:true});
+  preview.emit('pointermove', {clientX:60, shiftKey:true});
+  preview.emit('keydown', {key:'Shift', code:'ShiftRight', shiftKey:true});
+  f.window.emit('keyup', {key:'Shift', code:'ShiftLeft', shiftKey:true});
+  f.window.emit('keyup', {key:'Shift', code:'ShiftRight'});
+  f.window.emit('keyup', {key:'t', code:'KeyT'});
+  await f.settled();
+  assert.deepEqual(eventCalls(f).map(x => [x.type,x.key,x.modifiers]), [
+    ['key_press','t','0'], ['key_press','other:65505','1'], ['mouse_motion',undefined,'1'],
+    ['key_press','other:65506','1'], ['key_release','other:65505','1'],
+    ['key_release','other:65506','0'], ['key_release','t','0'],
+  ]);
+  assert.equal(f.queue.heldKeys.size, 0);
+  assert.equal(f.errors.length, 0);
+});
+
+test('focus loss releases a held Shift exactly once after a resize key', async () => {
+  const f = fixture(), preview = f.$('preview');
+  preview.emit('keydown', {key:'t', code:'KeyT'});
+  preview.emit('keydown', {key:'Shift', code:'ShiftLeft', shiftKey:true});
+  f.window.emit('blur');
+  f.window.emit('keyup', {key:'Shift', code:'ShiftLeft'});
+  f.window.emit('keyup', {key:'t', code:'KeyT'});
+  await f.settled();
+  assert.deepEqual(eventCalls(f).map(x => [x.type,x.key]), [
+    ['key_press','t'], ['key_press','other:65505'],
+    ['key_release','t'], ['key_release','other:65505'],
+  ]);
+  assert.equal(f.queue.heldKeys.size, 0);
+  assert.equal(f.errors.length, 0);
+});
+
 test('focus loss releases multiple physical keys using their admitted native values', async () => {
   const f = fixture();
   f.$('preview').emit('keydown', {key:'G', code:'KeyG', shiftKey:true});

@@ -113,7 +113,7 @@ def install_interactive_editing(native: Any) -> None:
         self.scale_ref_width, self.scale_ref_height = self.selection.get_width(), self.selection.get_height()
         self._fmn_edit_gesture = SimpleNamespace(
             kind="resize", members=selected(self), saved=bool(old and old.saved),
-            key=keys().resize, scales=np.ones(3), fixed=fixed,
+            key=keys().resize, scales=np.ones(3), fixed=fixed, about_corner=about_corner,
         )
         self.is_grabbing = False
 
@@ -275,17 +275,29 @@ def install_interactive_editing(native: Any) -> None:
         Scene.on_key_press(self, symbol, modifiers)
         if ctrl and char == "z":
             return
+        gesture = (current(self, "grab") if char in grabs else
+                   current(self, "resize") if char == k.resize else None)
+        repeated_gesture = gesture is not None and gesture.key == char
         if char in grabs and modifiers == 0:
-            gesture = self.__dict__.get("_fmn_edit_gesture")
-            if gesture is None or gesture.kind != "grab" or gesture.key != char:
+            if not repeated_gesture:
                 self.prepare_grab()
                 gesture = current(self, "grab")
                 if gesture is not None:
                     gesture.key = char
                     gesture.axis = None if char == k.grab else grabs.index(char) - 1
+                    gesture.saved = False
         elif char == k.resize and not ctrl:
-            gesture = current(self, "resize")
             if gesture is None and (modifiers & shift):
+                self.prepare_resizing(about_corner=True)
+                gesture = current(self, "resize")
+                if gesture is not None:
+                    gesture.saved = False
+        elif symbol == 0xffe1 and not ctrl and input_key_pressed(self, ord(k.resize)):
+            # Reference InteractiveScene.on_key_press: LShift can start the
+            # corner gesture after the resize key is already held. Browser
+            # repeats must not move an established pivot or reset its scales.
+            gesture = current(self, "resize")
+            if gesture is None or not gesture.about_corner:
                 self.prepare_resizing(about_corner=True)
         elif char == k.select and not ctrl:
             if not self.is_selecting:
@@ -338,7 +350,9 @@ def install_interactive_editing(native: Any) -> None:
                 self.remove(self.crosshair)
             else:
                 self.add(self.crosshair)
-        if (char in grabs or char == k.resize) and not ctrl:
+        if (char in grabs or char == k.resize) and not ctrl and not repeated_gesture:
+            # Pyglet emits one key press per hold; browsers may auto-repeat.
+            # One held gesture owns one prior snapshot, including after motion.
             self.save_state()
 
     def on_key_release(self, symbol, modifiers):
@@ -361,6 +375,13 @@ def install_interactive_editing(native: Any) -> None:
                 self.gather_new_selection()
         elif char == k.information:
             self.display_information(False)
+        elif symbol == 0xffe1 and input_key_pressed(self, ord(k.resize)):
+            # Reference on_key_release returns to a center pivot while t is
+            # still held. Rebase once at the current geometry, preserving the
+            # gesture's original undo boundary.
+            gesture = current(self, "resize")
+            if gesture is not None and gesture.about_corner:
+                self.prepare_resizing(about_corner=False)
 
     def get_state(self):
         # Host-owned notebooks and consoles can edit a Scene before run/setup.

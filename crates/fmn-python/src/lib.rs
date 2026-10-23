@@ -12612,7 +12612,10 @@ _fmn_sys.unraisablehook = _fmn_capture_unraisable
 
 /// Production captured-preview seam, available only to the Gauntlet.
 #[cfg(feature = "gauntlet")]
-pub use portal_studio::{PortalStudioGauntletReport, run_portal_gauntlet_studio_capture};
+pub use portal_studio::{
+    PortalStudioGauntletReport, run_portal_gauntlet_studio_capture,
+    run_portal_gauntlet_studio_editing,
+};
 
 /// Structured result from the feature-gated in-process Gauntlet portal row.
 #[cfg(feature = "gauntlet")]

@@ -16,10 +16,6 @@ import manimlib as m
 from fmn_python.interaction import dispatch_live_input
 from fmn_python.studio import Studio
 
-_helpers = runpy.run_path(str(Path(__file__).with_name("studio_preview.py")))
-Preview, rgba_png = _helpers["Preview"], _helpers["rgba_png"]
-
-
 class NativeEditingTests(unittest.TestCase):
     def setUp(self):
         self.s = m.InteractiveScene()
@@ -42,14 +38,22 @@ class NativeEditingTests(unittest.TestCase):
         symbol = ord(char) if isinstance(char, str) else char
         return dispatch_live_input(self.s, method, (symbol, modifiers), modifiers)
 
+    def centered_resize(self):
+        # Reference interactive_scene.py:499-503,559-560: Shift+t starts a
+        # corner resize; releasing LShift while t is held changes to the center.
+        self.key("t", 1)
+        self.key(0xffe1, release=True)
+
     def test_axis_grabs_repeat_release_and_native_undo_redo(self):
         self.motion([0, 0, 0])
         self.key("h")
-        self.assertEqual(len(self.s.undo_stack), 0, "cancelled gestures must not allocate history")
+        # Reference :545-546 saves the prior on the first grab/resize press.
+        self.assertEqual(len(self.s.undo_stack), 1)
         self.motion([2, 3, 4])
         np.testing.assert_allclose(self.box.get_center(), [2, 0, 0])
         self.key("h")  # Browser auto-repeat must not rebase the mouse offset.
         self.motion([3, 5, 9])
+        self.key("h", 1)  # A modifier change does not start another gesture.
         np.testing.assert_allclose(self.box.get_center(), [3, 0, 0])
         self.assertEqual(len(self.s.undo_stack), 1)
         self.key("h", release=True)
@@ -76,7 +80,7 @@ class NativeEditingTests(unittest.TestCase):
 
     def test_uniform_resize_is_cumulative_and_recovers_from_the_pivot(self):
         self.motion([1, 1, 0])
-        self.key("t")  # Previously only shift-t initialized the reference.
+        self.centered_resize()
         for point, size in (([2, 2, 0], 4), ([3, 3, 0], 6), ([1, 1, 0], 2)):
             self.motion(point)
             np.testing.assert_allclose([self.box.get_width(), self.box.get_height()], [size, size])
@@ -91,7 +95,7 @@ class NativeEditingTests(unittest.TestCase):
 
     def test_ctrl_stretch_reflection_and_return_to_uniform_are_finite(self):
         self.motion([1, 1, 0])
-        self.key("t")
+        self.centered_resize()
         self.motion([2, 0.5, 0], 2)
         np.testing.assert_allclose([self.box.get_width(), self.box.get_height()], [4, 1])
         original = self.box.get_points().copy()
@@ -113,12 +117,51 @@ class NativeEditingTests(unittest.TestCase):
         np.testing.assert_allclose([self.box.get_width(), self.box.get_height()], [4, 4])
         self.key("t", release=True)
 
+    def test_plain_resize_waits_for_shift_and_shift_alone_does_not_resize(self):
+        self.motion([1, 1, 0])
+        self.key(0xffe1, 1)
+        self.motion([2, 2, 0], 1)
+        np.testing.assert_allclose([self.box.get_width(), self.box.get_height()], [2, 2])
+        self.assertEqual(len(self.s.undo_stack), 0)
+        self.key(0xffe1, release=True)
+        self.key("t")
+        self.motion([3, 3, 0])
+        # Reference :499-503 and :572: plain t records the prior but has no pivot.
+        np.testing.assert_allclose([self.box.get_width(), self.box.get_height()], [2, 2])
+        self.assertEqual(len(self.s.undo_stack), 1)
+
+    def test_delayed_shift_and_repeats_keep_one_resize_history_and_fixed_pivot(self):
+        self.motion([1, 1, 0])
+        self.key("t")
+        self.key(0xffe1, 1)
+        pivot = self.box.get_corner(m.DL).copy()
+        self.motion([3, 3, 0], 1)
+        np.testing.assert_allclose([self.box.get_width(), self.box.get_height()], [4, 4])
+        self.key("t", 1)
+        self.key(0xffe1, 1)
+        self.motion([5, 5, 0], 1)
+        np.testing.assert_allclose([self.box.get_width(), self.box.get_height()], [6, 6])
+        np.testing.assert_allclose(self.box.get_corner(m.DL), pivot)
+        self.assertEqual(len(self.s.undo_stack), 1)
+        self.key(0xffe1, release=True)
+        center = self.box.get_center().copy()
+        self.motion([8, 8, 0])
+        np.testing.assert_allclose([self.box.get_width(), self.box.get_height()], [12, 12])
+        np.testing.assert_allclose(self.box.get_center(), center)
+        self.assertEqual(len(self.s.undo_stack), 1)
+        self.key("t", release=True)
+        self.key("z", 2)
+        np.testing.assert_allclose([self.box.get_width(), self.box.get_height()], [2, 2])
+        np.testing.assert_allclose(self.box.get_center(), [0, 0, 0])
+        self.key("z", 3)
+        np.testing.assert_allclose([self.box.get_width(), self.box.get_height()], [12, 12])
+
     def test_empty_degenerate_and_changed_selection_do_not_corrupt_geometry(self):
         self.s.clear_selection()
         self.key("g")
         self.key("t")
         self.motion([0, 0, 0], 2)
-        self.assertEqual(len(self.s.undo_stack), 0)
+        self.assertEqual(len(self.s.undo_stack), 1)  # Reference :545-546, even without selection.
         self.s.add_to_selection(self.box)
         self.key("t")  # mouse exactly at pivot: undefined radial reference
         self.motion([1, 1, 0])
@@ -138,7 +181,7 @@ class NativeEditingTests(unittest.TestCase):
         self.motion([0.5, 0, 0])
         self.assertEqual(len(seen), 1)
         np.testing.assert_allclose(self.box.get_center(), [0, 0, 0])
-        self.assertEqual(len(self.s.undo_stack), 0)
+        self.assertEqual(len(self.s.undo_stack), 1)  # The key press already saved its prior.
         self.box.clear_event_listners()
 
     def test_drag_owned_by_gesture_does_not_redispatch_motion_or_pan_camera(self):
@@ -161,16 +204,16 @@ class NativeEditingTests(unittest.TestCase):
         self.motion([1, 2, 3])
         np.testing.assert_allclose(self.box.get_center(), [0, 0, 0])
         self.assertFalse(self.s.is_grabbing)
-        self.assertEqual(len(self.s.undo_stack), 0)
+        self.assertEqual(len(self.s.undo_stack), 1)  # Reference :545-546, before removal.
 
     def test_resize_admission_refuses_extreme_scale_before_geometry_or_history_changes(self):
         self.motion([1, 1, 0])
-        self.key("t")
+        self.centered_resize()
         points = self.box.get_points().copy()
         with self.assertRaisesRegex(ValueError, "resize scale"):
             self.motion([1e10, 1e10, 0])
         np.testing.assert_array_equal(points, self.box.get_points())
-        self.assertEqual(len(self.s.undo_stack), 0)
+        self.assertEqual(len(self.s.undo_stack), 1)  # Refusal adds nothing to the key's prior.
 
     def test_fixed_frame_grab_and_resize_use_frame_not_world_coordinates(self):
         self.box.fix_in_frame()
@@ -182,7 +225,7 @@ class NativeEditingTests(unittest.TestCase):
         np.testing.assert_allclose(self.box.get_center(), [1, 0, 0], atol=1e-6)
         self.key("h", release=True)
         self.motion(to_world([2, 1, 0]))
-        self.key("t")
+        self.centered_resize()
         self.motion(to_world([3, 2, 0]))
         np.testing.assert_allclose([self.box.get_width(), self.box.get_height()], [4, 4], atol=1e-5)
 
@@ -278,7 +321,7 @@ class NativeEditingTests(unittest.TestCase):
         self.key("c")
         self.assertIn(self.s.color_palette, self.s.mobjects)
         self.assertNotIn(self.s.color_palette, self.s.get_selection_search_set())
-        self.assertEqual(len(self.s.undo_stack), 0)
+        self.assertEqual(len(self.s.undo_stack), 1)  # Reference :450-455 saves before the palette.
         swatch = next(s for s in self.s.color_palette if s.get_color() != original)
         expected = swatch.get_color()
         world = self.s.frame.from_fixed_frame_point(swatch.get_center())
@@ -302,6 +345,8 @@ class NativeEditingTests(unittest.TestCase):
 
 class WorkerEditingTests(unittest.TestCase):
     def test_unedited_interactive_scene_uses_real_modifiers_native_history_and_pixels(self):
+        helpers = runpy.run_path(str(Path(__file__).with_name("studio_preview.py")))
+        Preview, rgba_png = helpers["Preview"], helpers["rgba_png"]
         with tempfile.TemporaryDirectory(prefix="fmn edit scene ") as directory:
             root = Path(directory)
             path, facts = root / "edit.py", root / "facts.json"
@@ -336,9 +381,11 @@ class Edit(InteractiveScene):
                 event("mouse_motion", x=0, y=0, dx=0, dy=0, modifiers=0)
                 event("key_press", key="h", modifiers=0)
                 event("mouse_motion", x=1, y=-2, dx=1, dy=-2, modifiers=0)
+                event("key_press", key="h", modifiers=0)
                 event("key_release", key="h", modifiers=0)
                 state = json.loads(facts.read_text())
                 np.testing.assert_allclose(state["center"], [1, 0, 0])
+                self.assertEqual(state["undo"], 1, "browser repeat split the grab's undo boundary")
                 moved = api.frame()
                 self.assertNotEqual(initial, moved)
                 # Native geometry and separately decoded PNGs must agree.
@@ -348,6 +395,8 @@ class Edit(InteractiveScene):
                 self.assertGreater(np.nonzero(red)[1].mean(), width / 2 + 4)
                 event("mouse_motion", x=2, y=-1, dx=1, dy=1, modifiers=0)
                 event("key_press", key="t", modifiers=0)
+                event("key_press", key="other:65505", modifiers=1)
+                event("key_release", key="other:65505", modifiers=0)
                 event("mouse_motion", x=3, y=-0.5, dx=1, dy=0.5, modifiers=2)
                 event("key_release", key="t", modifiers=0)
                 state = json.loads(facts.read_text())
@@ -367,6 +416,7 @@ class Edit(InteractiveScene):
                 event("mouse_motion", x=3, y=-0.5, dx=0, dy=0, modifiers=0)
                 event("key_press", key="T", modifiers=1)
                 event("mouse_motion", x=7, y=-1.5, dx=4, dy=-1, modifiers=1)
+                event("key_press", key="T", modifiers=1)
                 event("key_release", key="T", modifiers=1)
                 state = json.loads(facts.read_text())
                 np.testing.assert_allclose([state["width"], state["height"]], [8, 2])

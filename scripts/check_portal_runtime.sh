@@ -171,6 +171,7 @@ FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/recording_sessions.py
 FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/stroke_profile_pixels.py
 FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/studio_clock.py
 FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/studio_input_identity.py
+FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/studio_editing.py
 FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/studio_live.py
 FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/studio_preview.py
 FMN_REQUIRE_FFMPEG=1 python3 crates/fmn-python/tests/subdivided_audio.py

@@ -750,8 +750,43 @@ assert static._finish_studio_capture().frame_count == 1
     })
 }
 
+/// Exercise the same native gesture and history acceptance suite as the wheel
+/// gate. The separate worker case stays in that gate because it launches an
+/// installed interpreter; this seam retains real native Scene/Mobject state.
+#[cfg(any(test, feature = "gauntlet"))]
+pub fn run_portal_gauntlet_studio_editing() -> Result<u64, String> {
+    crate::with_python_test_module("Studio native editing", |py, _module, globals| {
+        let source = std::ffi::CString::new(include_str!("../tests/studio_editing.py"))
+            .map_err(|error| error.to_string())?;
+        py.run(source.as_c_str(), Some(globals), Some(globals))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        py.run(
+            c"_suite = unittest.defaultTestLoader.loadTestsFromTestCase(NativeEditingTests)\n\
+              _result = unittest.TextTestRunner(verbosity=2).run(_suite)\n\
+              assert _result.wasSuccessful(), 'Studio native editing acceptance failed'\n\
+              _checks = _result.testsRun\n",
+            Some(globals),
+            Some(globals),
+        )
+        .inspect_err(|error| error.print(py))
+        .map_err(|error| error.to_string())?;
+        globals
+            .get_item("_checks")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "Studio editing produced no acceptance count".to_owned())?
+            .extract()
+            .map_err(|error| error.to_string())
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn portal_studio_editing_preserves_native_gesture_and_history_semantics() {
+        assert!(super::run_portal_gauntlet_studio_editing().unwrap() >= 21);
+    }
+
     #[test]
     fn portal_studio_capture_uses_stepped_scene_and_native_inspector() {
         let report = super::run_portal_gauntlet_studio_capture().unwrap();
