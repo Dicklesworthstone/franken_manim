@@ -1508,6 +1508,13 @@ impl Snapshot {
         let snapshot = Snapshot {
             stage_id,
             next_updater_id,
+            // The durable format does not carry the frame: a stage restoring
+            // this keeps its own, and a materialized arena starts at the
+            // default 16:9 frame (fm-8azr).
+            frame_shape: [
+                fmn_core::constants::FRAME_WIDTH,
+                fmn_core::constants::FRAME_HEIGHT,
+            ],
             slots,
             free: free.into(),
             roots: roots.into(),

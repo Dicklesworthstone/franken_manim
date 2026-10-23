@@ -154,7 +154,8 @@ def try_clip_recovery_cli(native, arguments):
     phase = "load"
     try:
         with (redirect_stdout(sys.stderr) if robot else nullcontext(),
-              SceneSource(source_path, native.Scene, entry_digest=digest, configuration=configuration) as loaded):
+              SceneSource(source_path, native.Scene, entry_digest=digest, configuration=configuration,
+                          frame_resolution=(width, height)) as loaded):
             if selected not in loaded.scenes:
                 raise ValueError(f"scene {selected!r} was not declared by {source}")
             phase = "render"

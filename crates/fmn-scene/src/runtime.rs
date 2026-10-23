@@ -35,6 +35,7 @@ use fmn_anim::{
     prepare_play_animation, prepare_play_frame, prepare_wait_frame, validate_play,
     wait_segment_with_capture,
 };
+use fmn_core::constants::{FRAME_HEIGHT, FRAME_WIDTH};
 use fmn_core::rng::{Pcg64Dxsm, RngRoot};
 use fmn_hash::SerialError;
 use fmn_mobject::{
@@ -78,6 +79,11 @@ pub struct RuntimeConfig {
     pub max_pending_events: usize,
     /// `wait(None)` duration.
     pub default_wait_time: f64,
+    /// The frame `(width, height)` the stage's `to_edge`, `to_corner` and
+    /// `shift_onto_screen` align against: the Reference's `FRAME_SHAPE`,
+    /// `sizes.frame_height` wide by the configured resolution's aspect
+    /// (fm-8azr). Defaults to the 16:9 frame.
+    pub frame_shape: [f64; 2],
 }
 
 impl Default for RuntimeConfig {
@@ -92,6 +98,7 @@ impl Default for RuntimeConfig {
             presenter_mode: false,
             max_pending_events: DEFAULT_MAX_PENDING_EVENTS,
             default_wait_time: DEFAULT_WAIT_TIME,
+            frame_shape: [FRAME_WIDTH, FRAME_HEIGHT],
         }
     }
 }
@@ -103,10 +110,24 @@ impl RuntimeConfig {
     /// this type and defaults off.
     #[must_use]
     pub fn from_config(config: &fmn_config::Config) -> Self {
+        let (width, height) = config.camera.resolution;
+        let frame_height = config.sizes.frame_height;
+        // The Reference's FRAME_WIDTH = FRAME_HEIGHT * ASPECT_RATIO
+        // (constants.py:17-20). An audio-only render has no picture (a zero
+        // resolution side) and keeps the default frame.
+        let frame_shape = if width > 0 && height > 0 {
+            [
+                frame_height * (f64::from(width) / f64::from(height)),
+                frame_height,
+            ]
+        } else {
+            Self::default().frame_shape
+        };
         Self {
             fps: config.camera.fps,
             preview_while_skipping: config.scene.preview_while_skipping,
             default_wait_time: config.scene.default_wait_time,
+            frame_shape,
             ..Self::default()
         }
     }
@@ -126,6 +147,15 @@ impl RuntimeConfig {
         if !self.default_wait_time.is_finite() || self.default_wait_time < 0.0 {
             return Err(SceneError::InvalidConfig(
                 "default_wait_time must be finite and non-negative",
+            ));
+        }
+        if !self
+            .frame_shape
+            .iter()
+            .all(|side| side.is_finite() && *side > 0.0)
+        {
+            return Err(SceneError::InvalidConfig(
+                "frame_shape must be finite and positive",
             ));
         }
         if let (Some(start), Some(end)) = (self.start_at_play, self.end_at_play)
@@ -797,11 +827,15 @@ impl Scene {
         let original_skipping = config.skip_animations;
         let skipping = original_skipping || config.start_at_play.is_some();
         let event_inbox = EventInbox::new(config.max_pending_events)?;
+        let mut stage = Stage::new();
+        stage
+            .set_frame_shape(config.frame_shape)
+            .map_err(|_| SceneError::InvalidConfig("frame_shape must be finite and positive"))?;
         Ok(Self {
             idle_owner: std::rc::Rc::new(()),
             idle_sequence: 0,
             config,
-            stage: Stage::new(),
+            stage,
             clock: RationalFrameClock::new(fps).map_err(AnimError::Clock)?,
             rng_root,
             scene_rng,

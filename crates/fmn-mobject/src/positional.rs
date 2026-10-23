@@ -31,7 +31,7 @@
 //! (`Semantic`, §6.1); parity against the Reference is checked at loose f32
 //! tolerance (§16.4).
 
-use fmn_core::constants::{DOWN, FRAME_X_RADIUS, FRAME_Y_RADIUS, IN, LEFT, ORIGIN, OUT, RIGHT, UP};
+use fmn_core::constants::{DOWN, IN, LEFT, ORIGIN, OUT, RIGHT, UP};
 use fmn_core::types::Vec3;
 use fmn_geom::{Mat3, QuadPath, space_ops};
 
@@ -1099,9 +1099,11 @@ impl Stage {
     }
 
     /// Align a side/corner to the frame border with `buff` (Reference
-    /// `align_on_border`, the engine of `to_edge`/`to_corner`).
+    /// `align_on_border`, the engine of `to_edge`/`to_corner`). The border
+    /// is the stage's [`Stage::frame_shape`].
     fn align_on_border(&mut self, mob: Mob, dir: Vec3, buff: f64) -> &mut Self {
-        let radius = [FRAME_X_RADIUS, FRAME_Y_RADIUS, 0.0];
+        let [width, height] = self.frame_shape();
+        let radius = [width / 2.0, height / 2.0, 0.0];
         let s = np_sign(dir);
         let target = hadamard(s, radius);
         let point_to_align = self.get_bounding_box_point(mob, dir);
@@ -1125,11 +1127,13 @@ impl Stage {
     /// `LEFT`, `RIGHT` in that order, an edge centre beyond the frame's
     /// half-extent less `buff` is pulled back with [`Stage::to_edge`].
     pub fn shift_onto_screen(&mut self, mob: Mob, buff: f64) -> &mut Self {
+        let [width, height] = self.frame_shape();
+        let (x_radius, y_radius) = (width / 2.0, height / 2.0);
         for (vect, radius) in [
-            (UP, FRAME_Y_RADIUS),
-            (DOWN, FRAME_Y_RADIUS),
-            (LEFT, FRAME_X_RADIUS),
-            (RIGHT, FRAME_X_RADIUS),
+            (UP, y_radius),
+            (DOWN, y_radius),
+            (LEFT, x_radius),
+            (RIGHT, x_radius),
         ] {
             let edge = self.get_bounding_box_point(mob, vect);
             if space_ops::dot(edge, vect) > radius - buff {

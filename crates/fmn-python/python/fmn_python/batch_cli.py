@@ -137,7 +137,8 @@ def try_batch_cli(native: Any, arguments: list[str]) -> int | None:
     phase = "load"
     try:
         with (redirect, recording_effects(bool(options.get("reproducible"))),
-              SceneSource(source_path, native.Scene, configuration=configuration) as loaded):
+              SceneSource(source_path, native.Scene, configuration=configuration,
+                          frame_resolution=(width, height)) as loaded):
             discovered = loaded.scenes
             if not discovered:
                 raise ValueError(f"no locally declared Scene classes found in {source}")

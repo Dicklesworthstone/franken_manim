@@ -273,7 +273,8 @@ def try_bundle_cli(native, arguments):
                                        **({"cancellation": cancellation} if cancellation is not None else {}),
                                        **({} if configuration is None else {"configuration": configuration}))
         else:
-            loading = SceneSource(source, native.Scene, configuration=configuration)
+            loading = SceneSource(source, native.Scene, configuration=configuration,
+                                  frame_resolution=(width, height))
         with redirect, loading as loaded:
             names = sorted(loaded.scenes)
             phase = "select"

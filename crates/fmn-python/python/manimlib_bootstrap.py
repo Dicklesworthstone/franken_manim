@@ -105,9 +105,41 @@ _BLUE_D = "#29ABCA"
 _GREEN_SCREEN = "#00FF00"
 _BLUE_E = "#1C758A"
 _DEFAULT_LIGHT_COLOR = "#BBBBBB"
-_ASPECT_RATIO = 16.0 / 9.0
+_MAX_CUSTOM_CONFIG_BYTES = 1024 * 1024
+
+
+def _cwd_custom_config():
+    # The Reference reads custom_config.yml from the working directory.
+    path = _pathlib.Path("custom_config.yml")
+    if not path.is_file():
+        return None
+    with open(path, "rb") as handle:
+        payload = handle.read(_MAX_CUSTOM_CONFIG_BYTES + 1)
+    if len(payload) > _MAX_CUSTOM_CONFIG_BYTES:
+        raise ValueError("custom_config.yml exceeds the 1 MiB configuration budget")
+    return payload.decode("utf-8")
+
+
+def _frame_metrics(resolution, frame_height):
+    # The Reference's constants.py:16-23 over one resolution: ASPECT_RATIO,
+    # FRAME_WIDTH = FRAME_HEIGHT * ASPECT_RATIO, and the two half-extents.
+    width, height = resolution
+    aspect_ratio = width / height
+    frame_width = frame_height * aspect_ratio
+    return aspect_ratio, frame_width, frame_width / 2.0, frame_height / 2.0
+
+
+# The Reference's DEFAULT_RESOLUTION (constants.py:13) is
+# manim_config.camera.resolution: default_config.yml under the cwd
+# custom_config.yml, read at import, so the frame constants and every default
+# argument built from them follow a portrait or square resolution. A CLI
+# resolution (-r, a quality flag, --config_file) rebinds them before the scene
+# source runs (_rebind_frame_resolution, fm-8azr).
+_DEFAULT_RESOLUTION = tuple(_FMN_ROOT._resolved_camera(_cwd_custom_config())["resolution"])
 _FRAME_HEIGHT = 8.0
-_FRAME_WIDTH = _FRAME_HEIGHT * _ASPECT_RATIO
+_ASPECT_RATIO, _FRAME_WIDTH, _FRAME_X_RADIUS, _FRAME_Y_RADIUS = _frame_metrics(
+    _DEFAULT_RESOLUTION, _FRAME_HEIGHT
+)
 
 # Function object -> catalog name, filled by _install_rate_functions;
 # Scene.play maps rate_func callables into the engine's named catalog.
@@ -238,8 +270,7 @@ def _axis_point_to_number(axis, x_min, x_max, point):
     return _interpolate(x_min, x_max, proportion)
 
 
-_FRAME_X_RADIUS, _FRAME_Y_RADIUS = _BridgeMobject._frame_radii()
-_FRAME_SHAPE = (2.0 * _FRAME_X_RADIUS, 2.0 * _FRAME_Y_RADIUS)
+_FRAME_SHAPE = (_FRAME_WIDTH, _FRAME_HEIGHT)
 _DEG = _math.tau / 360.0
 _RADIANS = 1.0
 
@@ -1426,11 +1457,11 @@ class Mobject(_BridgeMobject):
 
     def align_on_border(self, direction, buff=_DEFAULT_MOBJECT_TO_EDGE_BUFF):
         if self._is_bound():
-            self._to_edge(_vec3(direction), float(buff))
+            self._to_edge(_vec3(direction), float(buff), _FRAME_SHAPE)
             self._refresh_parent_boxes()
             return self
         direction = _np.array(_vec3(direction))
-        x_radius, y_radius = type(self)._frame_radii()
+        x_radius, y_radius = _FRAME_X_RADIUS, _FRAME_Y_RADIUS
         target_point = _np.sign(direction) * _np.array([x_radius, y_radius, 0.0])
         point_to_align = self.get_bounding_box_point(direction)
         shift_val = target_point - point_to_align - buff * direction
@@ -5160,7 +5191,9 @@ class Square(Rectangle):
 
 
 class ScreenRectangle(Rectangle):
-    def __init__(self, aspect_ratio=_ASPECT_RATIO, height=4, **kwargs):
+    # The Reference's literal 16:9 (frame.py:14), not the configured
+    # ASPECT_RATIO: FullScreenRectangle stays 16:9 in a portrait render.
+    def __init__(self, aspect_ratio=16.0 / 9.0, height=4, **kwargs):
         self.aspect_ratio = float(aspect_ratio)
         self.height = float(height)
         _init_native_vmobject(self, kwargs)
@@ -15188,7 +15221,9 @@ class CameraFrame(Mobject):
         return self
 
     def to_default_state(self):
+        # The Reference sets the configured FRAME_SHAPE (camera_frame.py:63).
         self._core.to_default_state()
+        self._core.set_shape(_FRAME_SHAPE)
         return self
 
     def get_euler_angles(self):
@@ -15333,11 +15368,11 @@ class Camera:
         window=None,
         background_image=None,
         frame_config=dict(),
-        resolution=(1920, 1080),
+        resolution=_DEFAULT_RESOLUTION,
         fps=30,
         background_color=_BLACK,
         background_opacity=1.0,
-        max_allowable_norm=14.222222222222221,
+        max_allowable_norm=_FRAME_WIDTH,
         image_mode="RGBA",
         n_channels=4,
         pixel_array_dtype=_np.uint8,
@@ -21854,8 +21889,11 @@ def _resolve_symbolic_constants(rows):
     pre-existing behavior.
     """
     numpy = _importlib.import_module("numpy")
+    # constants.py reads the configured resolution, not the pinned file's.
+    manim_config = _pinned_manim_config()
+    manim_config.camera.resolution = _DEFAULT_RESOLUTION
     env = {
-        "manim_config": _pinned_manim_config(),
+        "manim_config": manim_config,
         "np": numpy,
         "version": lambda _name: "1.7.2",
         # The Reference's generic TypeVar spellings (SubmobjectType) are
@@ -24346,21 +24384,6 @@ def _install_text_mobject_helpers():
 _install_text_mobject_helpers()
 
 
-_MAX_CUSTOM_CONFIG_BYTES = 1024 * 1024
-
-
-def _cwd_custom_config():
-    # The Reference reads custom_config.yml from the working directory.
-    path = _pathlib.Path("custom_config.yml")
-    if not path.is_file():
-        return None
-    with open(path, "rb") as handle:
-        payload = handle.read(_MAX_CUSTOM_CONFIG_BYTES + 1)
-    if len(payload) > _MAX_CUSTOM_CONFIG_BYTES:
-        raise ValueError("custom_config.yml exceeds the 1 MiB configuration budget")
-    return payload.decode("utf-8")
-
-
 def _portal_configuration_section(name):
     # fmn_python.scene_loading.SceneSource installs the CLI configuration on the
     # manimlib package, which shares this module's manim_config. Reading the
@@ -24378,13 +24401,115 @@ def _reference_camera_layer():
     # The Reference's first Scene camera layer, manim_config.camera: resolution,
     # fps and background from default_config.yml plus the cwd custom_config.yml,
     # through the same typed native resolution standalone fmn uses.
-    camera = _portal_configuration_section("camera") or _FMN_ROOT._resolved_camera(_cwd_custom_config())
+    section = _portal_configuration_section("camera")
+    camera = section or _FMN_ROOT._resolved_camera(_cwd_custom_config())
     return {
-        "resolution": tuple(camera["resolution"]),
+        # Without a CLI configuration, the resolution the frame constants are
+        # bound to: a bare -r reaches the camera too (fm-8azr).
+        "resolution": tuple(camera["resolution"]) if section else _DEFAULT_RESOLUTION,
         "fps": int(camera["fps"]),
         "background_color": camera["background_color"],
         "background_opacity": float(camera["background_opacity"]),
     }
+
+
+def _frame_dependent_defaults():
+    # Default arguments the Reference builds from the frame constants when its
+    # modules import (functions.py:91-92, special_tex.py:67,
+    # camera_frame.py:26, camera.py:32-38): (class, parameter, value).
+    return (
+        (ImplicitFunction, "x_range", (-_FRAME_X_RADIUS, _FRAME_X_RADIUS)),
+        (ImplicitFunction, "y_range", (-_FRAME_Y_RADIUS, _FRAME_Y_RADIUS)),
+        (Title, "underline_width", _FRAME_SHAPE[0] - 2),
+        (CameraFrame, "frame_shape", _FRAME_SHAPE),
+        (Camera, "resolution", _DEFAULT_RESOLUTION),
+        (Camera, "max_allowable_norm", _FRAME_WIDTH),
+    )
+
+
+def _rebind_default(cls, name, value):
+    # Rewrite one default in place on every function of cls.__init__'s
+    # wrapper chain that declares it, so introspection and calls agree.
+    function, found = cls.__init__, False
+    while function is not None:
+        code = getattr(function, "__code__", None)
+        if code is not None:
+            kwdefaults = function.__kwdefaults__ or {}
+            positional = code.co_varnames[:code.co_argcount]
+            defaults = function.__defaults__ or ()
+            first = len(positional) - len(defaults)
+            if name in kwdefaults:
+                function.__kwdefaults__ = {**kwdefaults, name: value}
+                found = True
+            elif name in positional[first:]:
+                index = positional.index(name) - first
+                function.__defaults__ = defaults[:index] + (value,) + defaults[index + 1:]
+                found = True
+        function = getattr(function, "__wrapped__", None)
+    if not found:
+        raise RuntimeError(f"{cls.__name__}.__init__ declares no default {name!r} to rebind")
+
+
+def _rebind_frame_resolution(resolution):
+    """Rebind the frame constants to ``resolution``; return the previous one.
+
+    The Reference parses the CLI before its constants import, so -r, a
+    quality flag or a --config_file camera resolution decide FRAME_WIDTH,
+    ASPECT_RATIO, FRAME_X_RADIUS and FRAME_SHAPE for the scene source
+    (constants.py:13-23). The portal parses the CLI after import, so
+    SceneSource calls this before any scene source runs, and again with the
+    returned value afterwards (fm-8azr). Every copy is rebound: the private
+    globals, each public constant wherever it was copied, and the defaults
+    that capture them.
+    """
+    global _DEFAULT_RESOLUTION, _ASPECT_RATIO, _FRAME_WIDTH, _FRAME_X_RADIUS, _FRAME_Y_RADIUS
+    global _FRAME_SHAPE
+    width, height = (int(side) for side in resolution)
+    if width <= 0 or height <= 0:
+        raise ValueError(f"frame resolution must be positive, got {resolution!r}")
+    previous = _DEFAULT_RESOLUTION
+    if (width, height) == previous:
+        return previous
+    rows = _apply_constant_overrides(_schema_rows())
+    before = _resolve_symbolic_constants(rows)
+    _DEFAULT_RESOLUTION = (width, height)
+    _ASPECT_RATIO, _FRAME_WIDTH, _FRAME_X_RADIUS, _FRAME_Y_RADIUS = _frame_metrics(
+        _DEFAULT_RESOLUTION, _FRAME_HEIGHT
+    )
+    _FRAME_SHAPE = (_FRAME_WIDTH, _FRAME_HEIGHT)
+    after = _resolve_symbolic_constants(rows)
+    holders = [module for name, module in list(_sys.modules.items())
+               if module is not None and (name == "manimlib" or name.startswith("manimlib."))]
+    holders.append(_FMN_ROOT)
+    for (_module_name, name), value in after.items():
+        old = before.get((_module_name, name), _MISSING_CONSTANT)
+        if _same_constant(old, value):
+            continue
+        for holder in holders:
+            current = vars(holder).get(name, _MISSING_CONSTANT)
+            if current is not _MISSING_CONSTANT and _same_constant(current, old):
+                setattr(holder, name, value)
+    for cls, name, value in _frame_dependent_defaults():
+        _rebind_default(cls, name, value)
+    return previous
+
+
+_MISSING_CONSTANT = object()
+
+
+def _same_constant(a, b):
+    # Equal value and type; arrays compare elementwise, anything that cannot
+    # say (an ambiguous or raising __eq__) counts as different.
+    if a is b:
+        return True
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, _np.ndarray):
+        return a.shape == b.shape and bool(_np.array_equal(a, b))
+    try:
+        return bool(a == b)
+    except (TypeError, ValueError):
+        return False
 
 
 def _user_cache_dir(name):

@@ -341,6 +341,7 @@ fn project(
     Ok(Snapshot {
         stage_id: snapshot.stage_id,
         next_updater_id: 1,
+        frame_shape: snapshot.frame_shape,
         slots,
         free: crate::stage::ArcVec::new(),
         roots: roots.into(),

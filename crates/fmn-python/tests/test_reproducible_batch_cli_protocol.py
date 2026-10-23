@@ -30,11 +30,12 @@ class BatchCliTests(unittest.TestCase):
         self.loaded = False
         self.load_count = 0
         self.loaded_sources = {"scene.py": self.source.read_bytes()}
-        self.configurations = []
+        self.configurations, self.frame_resolutions = [], []
         outer = self
         class Source:
-            def __init__(self, path, Scene, configuration=None):
+            def __init__(self, path, Scene, configuration=None, frame_resolution=None):
                 outer.configurations.append(configuration)
+                outer.frame_resolutions.append(frame_resolution)
                 self.scenes = outer.classes
             def __enter__(self):
                 outer.loaded = True
@@ -130,6 +131,8 @@ class BatchCliTests(unittest.TestCase):
         self.assertIn("authored import stdout", err)
         self.assertIn("Two: succeeded", err)
         self.assertNotIn("Two", self.parsed[0], "native parser receives one source, not extra selectors")
+        # The source loads with the render resolution's frame (fm-8azr).
+        self.assertEqual(self.frame_resolutions, [(48, 27)])
 
     def test_write_all_uses_sorted_names(self):
         code, receipt, _ = self.invoke(["--write_all"])

@@ -71,6 +71,67 @@ fn point() -> Mobject {
 }
 
 #[test]
+fn the_scene_stage_aligns_on_the_configured_frame() {
+    // The Reference derives FRAME_WIDTH from the configured resolution
+    // (constants.py:17-20): a portrait 1080x1920 render has the frame
+    // (4.5, 8), so to_edge(LEFT, buff=0) puts a left edge at -2.25 (fm-8azr).
+    let portrait = fmn_config::Config::resolve(
+        &[fmn_config::config::Layer {
+            name: "custom_config.yml",
+            text: "camera:\n  resolution: (1080, 1920)\n",
+        }],
+        None,
+    )
+    .expect("portrait config resolves")
+    .config;
+    let runtime = RuntimeConfig::from_config(&portrait);
+    assert_eq!(runtime.frame_shape, [4.5, 8.0]);
+    let mut scene = Scene::new(runtime, 0).expect("portrait scene");
+    assert_eq!(scene.stage().frame_shape(), [4.5, 8.0]);
+    let square = scene
+        .stage_mut()
+        .add(Mobject::from_points(&[[-0.5, -0.5, 0.0], [0.5, 0.5, 0.0]]));
+    scene
+        .stage_mut()
+        .to_edge(square, fmn_core::constants::LEFT, 0.0);
+    assert!((scene.stage().get_left(square)[0] + 2.25).abs() < 1e-12);
+
+    // The default config keeps the 16:9 frame bit for bit.
+    let default = fmn_config::Config::resolve(&[], None)
+        .expect("defaults")
+        .config;
+    assert_eq!(
+        RuntimeConfig::from_config(&default).frame_shape,
+        [
+            fmn_core::constants::FRAME_WIDTH,
+            fmn_core::constants::FRAME_HEIGHT
+        ]
+    );
+    assert_eq!(
+        RuntimeConfig::default().frame_shape,
+        RuntimeConfig::from_config(&default).frame_shape
+    );
+
+    // An audio-only render (a zero resolution side) keeps the default frame.
+    let mut audio_only = default.clone();
+    audio_only.camera.resolution = (0, 0);
+    assert_eq!(
+        RuntimeConfig::from_config(&audio_only).frame_shape,
+        RuntimeConfig::default().frame_shape
+    );
+
+    // A frame that is not finite and positive is a typed refusal.
+    let bad = RuntimeConfig {
+        frame_shape: [0.0, 8.0],
+        ..RuntimeConfig::default()
+    };
+    assert!(matches!(
+        Scene::new(bad, 0),
+        Err(SceneError::InvalidConfig(_))
+    ));
+}
+
+#[test]
 fn windowed_fps_override_and_config_refusals_are_semantic() {
     let scene = Scene::new(
         RuntimeConfig {

@@ -103,7 +103,9 @@ class CameraBundleConsole(unittest.TestCase):
                 self.assertEqual(report["bundle"]["sha256"], hashlib.sha256(data).hexdigest())
                 self.assertEqual(self.events.read_text().splitlines()[-4:],
                                  ["import", "setup", "construct", "tear_down"])
-                with SceneSource(str(self.source), m.Scene) as loaded:
+                # The console loads the source with the render resolution's
+                # frame constants (fm-8azr, BN-25); so does the reference.
+                with SceneSource(str(self.source), m.Scene, frame_resolution=resolution) as loaded:
                     reference = self.root / (name + "-reference.fmtl")
                     export_bundle(loaded.scenes["Orbit"], reference, camera=True,
                                   fps=fps, resolution=resolution)

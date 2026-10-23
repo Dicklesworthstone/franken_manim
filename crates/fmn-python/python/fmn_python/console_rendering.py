@@ -400,7 +400,8 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
                                        **({"cancellation": cancellation} if cancellation is not None else {}),
                                        **({} if configuration is None else {"configuration": configuration}))
         else:
-            loading = SceneSource(source_path, native.Scene, configuration=configuration)
+            loading = SceneSource(source_path, native.Scene, configuration=configuration,
+                                  frame_resolution=(width, height))
         with (redirect, recording_effects(bool(options.get("reproducible")) and not parallel), loading as loaded):
             scenes = loaded.scenes
             names = sorted(scenes)

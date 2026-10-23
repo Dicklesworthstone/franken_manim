@@ -376,6 +376,48 @@ fn shift_onto_screen_pulls_back_only_the_edges_beyond_the_inset_frame() {
     assert!((stage.get_bottom(low)[1] + (FRAME_Y_RADIUS - 0.25)).abs() < TOL);
 }
 
+#[test]
+fn border_alignment_follows_the_stage_frame_shape() {
+    // A portrait 1080x1920 render has the Reference frame (4.5, 8): to_edge,
+    // to_corner and shift_onto_screen align on it, not on the 16:9 default
+    // (fm-8azr; measured on the pinned Reference: Square().to_edge(LEFT,
+    // buff=0) has its left edge at -2.25).
+    use fmn_core::constants::{FRAME_HEIGHT, FRAME_WIDTH};
+    let square = |x: f64| Mobject::from_points(&[[x - 0.5, -0.5, 0.0], [x + 0.5, 0.5, 0.0]]);
+    let mut stage = Stage::new();
+    assert_eq!(stage.frame_shape(), [FRAME_WIDTH, FRAME_HEIGHT]);
+    stage.set_frame_shape([4.5, 8.0]).unwrap();
+    let left = stage.add(square(0.0));
+    stage.to_edge(left, LEFT, 0.0);
+    assert!((stage.get_left(left)[0] + 2.25).abs() < TOL);
+    let corner = stage.add(square(0.0));
+    stage.to_corner(corner, UR, 0.5);
+    assert!((stage.get_right(corner)[0] - 1.75).abs() < TOL);
+    assert!((stage.get_top(corner)[1] - 3.5).abs() < TOL);
+    let off = stage.add(square(3.0));
+    stage.shift_onto_screen(off, 0.0);
+    assert!((stage.get_right(off)[0] - 2.25).abs() < TOL);
+    // Render workers' arenas keep the frame of the stage they came from.
+    assert_eq!(stage.snapshot().materialize().frame_shape(), [4.5, 8.0]);
+    assert_eq!(
+        stage.freeze_render_state().materialize().frame_shape(),
+        [4.5, 8.0]
+    );
+    // A frame that is not finite and positive is refused and changes nothing.
+    for bad in [
+        [0.0, 8.0],
+        [4.5, -1.0],
+        [f64::NAN, 8.0],
+        [f64::INFINITY, 8.0],
+    ] {
+        assert_eq!(
+            stage.set_frame_shape(bad),
+            Err(fmn_mobject::StageError::InvalidFrameShape)
+        );
+    }
+    assert_eq!(stage.frame_shape(), [4.5, 8.0]);
+}
+
 fn layout_box(min: Vec3, max: Vec3) -> Mobject {
     Mobject::from_points(&[min, max])
 }

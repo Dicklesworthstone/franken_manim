@@ -27,6 +27,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use fmn_core::constants::{FRAME_HEIGHT, FRAME_WIDTH};
+
 use crate::StageError;
 use crate::bbox::BboxCache;
 use crate::mobject::{ImageResource, Mobject, RenderPrimitive};
@@ -899,6 +901,9 @@ struct Slot {
 pub struct Snapshot {
     pub(crate) stage_id: u64,
     pub(crate) next_updater_id: u64,
+    // The frame of the stage it was taken from: only `materialize` reads it;
+    // `restore` keeps the restoring stage's frame.
+    pub(crate) frame_shape: [f64; 2],
     pub(crate) slots: Vec<(u32, Option<SnapshotEntry>)>,
     pub(crate) free: ArcVec<u32>,
     pub(crate) roots: ArcVec<Mob>,
@@ -926,6 +931,7 @@ impl Snapshot {
             topology_epoch: fresh_epoch(),
             updater_failure: None,
             updater_callbacks: Rc::new(()),
+            frame_shape: self.frame_shape,
         };
         stage.restore(self);
         stage
@@ -1016,6 +1022,10 @@ pub struct Stage {
     // automatic Rc destruction also restores the guard when a callback panics.
     updater_failure: Option<UpdaterFailure>,
     updater_callbacks: Rc<()>,
+    // The frame `to_edge`, `to_corner` and `shift_onto_screen` align against
+    // (the Reference's FRAME_SHAPE, derived from the configured resolution).
+    // Configuration, not scene content: snapshots neither save nor restore it.
+    frame_shape: [f64; 2],
 }
 
 impl Default for Stage {
@@ -1037,7 +1047,29 @@ impl Stage {
             topology_epoch: fresh_epoch(),
             updater_failure: None,
             updater_callbacks: Rc::new(()),
+            frame_shape: [FRAME_WIDTH, FRAME_HEIGHT],
         }
+    }
+
+    /// The frame `(width, height)` the border-alignment surface is defined
+    /// against: the Reference's `FRAME_SHAPE`. It starts at the 16:9 default
+    /// frame; the scene runtime sets the configured one (fm-8azr, BN-25).
+    #[must_use]
+    pub fn frame_shape(&self) -> [f64; 2] {
+        self.frame_shape
+    }
+
+    /// Set the frame `(width, height)` that [`Stage::frame_shape`] reports.
+    ///
+    /// # Errors
+    /// [`StageError::InvalidFrameShape`] unless both sides are finite and
+    /// positive; the frame is left unchanged.
+    pub fn set_frame_shape(&mut self, shape: [f64; 2]) -> Result<(), StageError> {
+        if !shape.iter().all(|side| side.is_finite() && *side > 0.0) {
+            return Err(StageError::InvalidFrameShape);
+        }
+        self.frame_shape = shape;
+        Ok(())
     }
 
     /// Changes whenever the draw list or any parent/child edge changes:
@@ -2998,6 +3030,7 @@ impl Stage {
         Snapshot {
             stage_id: self.id,
             next_updater_id: self.next_updater_id,
+            frame_shape: self.frame_shape,
             slots: self
                 .slots
                 .iter()

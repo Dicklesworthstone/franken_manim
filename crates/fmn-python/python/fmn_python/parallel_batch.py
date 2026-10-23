@@ -67,7 +67,9 @@ def _render_source_job(job):
         # orchestration subprocesses as though they were authored scene effects.
         with (recording(reproducible),
               SceneSource(source, native.Scene, entry_digest=job["source_digest"],
-                          configuration=options.get("_configuration")) as loaded):
+                          configuration=options.get("_configuration"),
+                          frame_resolution=(None if options.get("resolution") is None
+                                            else tuple(options["resolution"]))) as loaded):
             # SceneSource owns exact compilation bytes. Check those, not a
             # second disk read that could miss an edit during source loading.
             compiled = loaded._source_bytes.get(source)

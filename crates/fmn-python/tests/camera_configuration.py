@@ -76,6 +76,88 @@ class CameraConfigurationTests(unittest.TestCase):
         self.assertEqual(child.returncode, 0, child.stderr)
         self.assertEqual(child.stdout.split(), ["#000000", "24", "(1920,", "1080)"])
 
+    # Measured on the pinned Reference under custom_config.yml camera
+    # resolution (1080, 1920) (fm-8azr): constants.py derives every frame
+    # constant from the configured resolution. LEFT_SIDE is the portal's C-16
+    # unit direction (BN-07); FullScreenRectangle keeps ScreenRectangle's
+    # literal 16:9 aspect (frame.py:14), as in the Reference.
+    _PORTRAIT_FACTS = {
+        "FRAME_WIDTH": 4.5, "constants.FRAME_WIDTH": 4.5, "ASPECT_RATIO": 0.5625,
+        "FRAME_X_RADIUS": 2.25, "FRAME_SHAPE": (4.5, 8.0), "DEFAULT_RESOLUTION": (1080, 1920),
+        "LEFT_SIDE": (-1.0, 0.0, 0.0), "detached_to_edge_left": -2.25,
+        "title_underline_default": 2.5, "full_screen_rectangle_width": 14.2222,
+        "screen_rectangle_width": 7.1111, "implicit_x_range": (-2.25, 2.25),
+        "bound_to_edge_left": -2.25, "scene_frame_shape": (4.5, 8.0),
+        "frame_default_state_shape": (4.5, 8.0), "off_screen_at_x3": True,
+    }
+    _FRAME_PROBE = (
+        "import inspect, manimlib as m\n"
+        "from manimlib.constants import FRAME_WIDTH as constants_frame_width\n"
+        "r = lambda v: round(float(v), 4)\n"
+        "facts = {'FRAME_WIDTH': r(m.FRAME_WIDTH), 'constants.FRAME_WIDTH': r(constants_frame_width),\n"
+        "  'ASPECT_RATIO': r(m.ASPECT_RATIO), 'FRAME_X_RADIUS': r(m.FRAME_X_RADIUS),\n"
+        "  'FRAME_SHAPE': tuple(r(v) for v in m.FRAME_SHAPE),\n"
+        "  'DEFAULT_RESOLUTION': tuple(int(v) for v in m.DEFAULT_RESOLUTION),\n"
+        "  'LEFT_SIDE': tuple(r(v) for v in m.LEFT_SIDE),\n"
+        "  'detached_to_edge_left': r(m.Square(side_length=1).to_edge(m.LEFT, buff=0).get_left()[0]),\n"
+        "  'title_underline_default': r(inspect.signature(m.Title).parameters['underline_width'].default),\n"
+        "  'full_screen_rectangle_width': r(m.FullScreenRectangle().get_width()),\n"
+        "  'screen_rectangle_width': r(m.ScreenRectangle().get_width()),\n"
+        "  'implicit_x_range': tuple(r(v) for v in\n"
+        "      inspect.signature(m.ImplicitFunction).parameters['x_range'].default)}\n"
+        "scene = m.Scene(); square = m.Square(side_length=1); scene.add(square)\n"
+        "square.to_edge(m.LEFT, buff=0)\n"
+        "facts['bound_to_edge_left'] = r(square.get_left()[0])\n"
+        "facts['scene_frame_shape'] = tuple(r(v) for v in scene.frame.get_shape())\n"
+        "scene.frame.set_width(3).to_default_state()\n"
+        "facts['frame_default_state_shape'] = tuple(r(v) for v in scene.frame.get_shape())\n"
+        "facts['off_screen_at_x3'] = bool(m.Square(side_length=1).move_to(3 * m.RIGHT).is_off_screen())\n"
+        "print(repr(facts))\n"
+    )
+
+    def test_frame_constants_follow_a_portrait_custom_config(self):
+        # Read at import from the cwd custom_config.yml, so the probe runs in
+        # a child with that working directory (fm-8azr).
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "custom_config.yml").write_text(
+                "camera:\n  resolution: (1080, 1920)\n"
+                f"directories:\n  cache: {Path(directory, 'cache')}\n")
+            child = subprocess.run([sys.executable, "-c", self._FRAME_PROBE], cwd=directory,
+                                   capture_output=True, text=True, timeout=300)
+        self.assertEqual(child.returncode, 0, child.stderr)
+        import ast
+        facts = ast.literal_eval(child.stdout.strip().splitlines()[-1])
+        self.assertEqual(facts, self._PORTRAIT_FACTS)
+
+    def test_a_render_resolution_rebinds_the_frame_for_its_source_and_restores_it(self):
+        # A CLI -r reaches the constants through SceneSource, before the scene
+        # source runs and only while it is open (fm-8azr).
+        import inspect
+        from fmn_python.scene_loading import SceneSource
+        constants = sys.modules["manimlib.constants"]
+        self.assertEqual((m.FRAME_WIDTH, m.DEFAULT_RESOLUTION), (16 * 8 / 9, (1920, 1080)))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "portrait_scene.py")
+            path.write_text("from manimlib import *\nWIDTH_AT_IMPORT = FRAME_WIDTH\n"
+                            "class Portrait(Scene): pass\n")
+            with SceneSource(path, m.Scene, frame_resolution=(1080, 1920)) as source:
+                self.assertEqual(source.module.WIDTH_AT_IMPORT, 4.5)
+                self.assertEqual((m.FRAME_WIDTH, constants.FRAME_WIDTH, m.FRAME_X_RADIUS),
+                                 (4.5, 4.5, 2.25))
+                self.assertEqual((m.ASPECT_RATIO, m.DEFAULT_RESOLUTION), (0.5625, (1080, 1920)))
+                self.assertEqual(inspect.signature(m.Title).parameters["underline_width"].default, 2.5)
+                scene = source.scenes["Portrait"]()
+                self.assertEqual(scene.frame.get_shape(), (4.5, 8.0))
+                square = m.Square(side_length=1)
+                scene.add(square)
+                square.to_edge(m.LEFT, buff=0)
+                self.assertAlmostEqual(square.get_left()[0], -2.25)
+        self.assertEqual((m.FRAME_WIDTH, constants.FRAME_WIDTH), (16 * 8 / 9, 16 * 8 / 9))
+        self.assertEqual((m.ASPECT_RATIO, m.DEFAULT_RESOLUTION), (16 / 9, (1920, 1080)))
+        self.assertEqual(inspect.signature(m.Title).parameters["underline_width"].default,
+                         16 * 8 / 9 - 2)
+        self.assertEqual(m.Scene().frame.get_shape(), (16 * 8 / 9, 8.0))
+
     def test_scene_frame_uses_configured_pose_and_field_of_view(self):
         scene = m.Scene(camera_config={"frame_config": {
             "frame_shape": (10., 6.), "center_point": (2., -1., .5), "fovy": .7,

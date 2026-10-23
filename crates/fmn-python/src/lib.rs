@@ -2902,12 +2902,21 @@ impl BridgeMobject {
 
     /// `Stage::to_edge` (`align_on_border`): the single-target engine path
     /// used when the proxy is bound; the bootstrap's detached branch
-    /// decomposes over the frame radii instead.
-    fn _to_edge(slf: &Bound<'_, Self>, direction: [f64; 3], buff: f64) -> PyResult<()> {
+    /// decomposes over the frame radii instead. `frame_shape` is the
+    /// configured `FRAME_SHAPE` the border is defined against (fm-8azr).
+    fn _to_edge(
+        slf: &Bound<'_, Self>,
+        direction: [f64; 3],
+        buff: f64,
+        frame_shape: [f64; 2],
+    ) -> PyResult<()> {
         crossing::record(CrossingClass::FieldWrite);
         with_stage(slf, |stage, mob| {
+            stage.set_frame_shape(frame_shape)?;
             stage.to_edge(mob, direction, buff);
-        })
+            Ok(())
+        })?
+        .map_err(stage_error)
     }
 
     /// `Stage::refresh_bounding_box` without the upward walk: return this
@@ -2927,16 +2936,6 @@ impl BridgeMobject {
     fn _set_point_free_anchor(slf: &Bound<'_, Self>, point: [f64; 3]) -> PyResult<bool> {
         crossing::record(CrossingClass::FieldWrite);
         with_stage(slf, |stage, mob| stage.set_point_free_anchor(mob, point))?.map_err(stage_error)
-    }
-
-    /// The frame half-extents `(FRAME_X_RADIUS, FRAME_Y_RADIUS)` the border
-    /// alignment surface is defined against.
-    #[staticmethod]
-    fn _frame_radii() -> (f64, f64) {
-        (
-            fmn_core::constants::FRAME_X_RADIUS,
-            fmn_core::constants::FRAME_Y_RADIUS,
-        )
     }
 
     /// fmn-core's one color model (D4): parse `#RRGGBB`/`#RGB` into sRGB

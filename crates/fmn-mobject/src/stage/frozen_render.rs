@@ -28,6 +28,7 @@ use std::sync::Arc;
 pub struct FrozenRenderState {
     stage_id: u64,
     next_updater_id: u64,
+    frame_shape: [f64; 2],
     slots: Vec<(u32, Option<FrozenRenderEntry>)>,
     free: ArcVec<u32>,
     roots: ArcVec<Mob>,
@@ -226,6 +227,7 @@ impl FrozenRenderState {
             topology_epoch: fresh_epoch(),
             updater_failure: None,
             updater_callbacks: std::rc::Rc::new(()),
+            frame_shape: self.frame_shape,
         }
     }
 }
@@ -240,6 +242,7 @@ impl Stage {
     pub fn freeze_render_state(&self) -> FrozenRenderState {
         FrozenRenderState {
             stage_id: self.id,
+            frame_shape: self.frame_shape,
             next_updater_id: self.next_updater_id,
             slots: self
                 .slots
@@ -275,6 +278,7 @@ impl Snapshot {
         );
         FrozenRenderState {
             stage_id: self.stage_id,
+            frame_shape: self.frame_shape,
             next_updater_id: self.next_updater_id,
             slots: self
                 .slots
@@ -308,6 +312,7 @@ impl Snapshot {
         );
         FrozenRenderState {
             stage_id: self.stage_id,
+            frame_shape: self.frame_shape,
             next_updater_id: self.next_updater_id,
             slots: self
                 .slots

@@ -65,7 +65,7 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
         case = self
 
         class Source:
-            def __init__(self, path, scene_type, *, configuration=None):
+            def __init__(self, path, scene_type, *, configuration=None, frame_resolution=None):
                 self._source_bytes = {path: path.read_bytes()}
                 self.sources = {path.name: path.read_bytes()}
                 self.scenes = {"Second": type("Second", (), {}), "First": type("First", (), {})}

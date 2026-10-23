@@ -116,6 +116,9 @@ pub enum StageError {
     /// identical points, so the caller has to decide (`Line` rebuilds its
     /// path from the new ends instead).
     DegenerateEndpoints,
+    /// [`Stage::set_frame_shape`] with a side that is not finite and
+    /// positive. The frame is unchanged.
+    InvalidFrameShape,
     /// A record sizing proof refused the operation (fm-vek.2) — the
     /// target record count and schema stride cannot be addressed. The
     /// buffer is untouched.
@@ -165,6 +168,9 @@ impl std::fmt::Display for StageError {
             }
             Self::DegenerateEndpoints => {
                 write!(f, "cannot position endpoints of a closed or empty path")
+            }
+            Self::InvalidFrameShape => {
+                write!(f, "frame width and height must be finite and positive")
             }
             Self::Record(err) => {
                 write!(f, "record sizing refused: {err}")

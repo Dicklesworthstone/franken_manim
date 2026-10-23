@@ -1,9 +1,11 @@
 # BN-25 — A camera at any resolution keeps square pixels
 
-**Status:** Draft (W5/W10, fm-fxov). Consumed by Lumen's camera
-(`crates/fmn-render/src/camera.rs`), the fmn-python `Camera`, and the Parity
-Ledger rows for `Camera.__init__`, `Camera.refresh_uniforms` and
-`CameraFrame`.
+**Status:** Draft (W5/W10, fm-fxov, fm-8azr). Consumed by Lumen's camera
+(`crates/fmn-render/src/camera.rs`), the Stage's border alignment
+(`crates/fmn-mobject/src/positional.rs`), the fmn-python `Camera` and frame
+constants, and the Parity Ledger rows for `Camera.__init__`,
+`Camera.refresh_uniforms`, `CameraFrame` and the `manimlib.constants` frame
+constants.
 
 ## What the Reference does
 
@@ -65,10 +67,7 @@ image matched neither the frame nor the Reference:
   aspect. The frame height sets the region shown. To keep the full
   `FRAME_WIDTH` across a narrower output, scale the frame:
   `camera.frame.set_height(FRAME_WIDTH * pixel_height / pixel_width)`.
-- Not covered here: the module constants `FRAME_WIDTH`, `FRAME_X_RADIUS`
-  and `ASPECT_RATIO` stay at their 16:9 values whatever the configured
-  resolution, so `to_edge(LEFT)` on a portrait render still uses the 16:9
-  frame edge (fm-8azr).
+- The module constants follow the configured resolution too; see below.
 
 Witnesses:
 - `crates/fmn-render/src/camera.rs`:
@@ -76,3 +75,52 @@ Witnesses:
   `sixteen_by_nine_outputs_keep_the_reference_frame_and_factors_bit_for_bit`.
 - `crates/fmn-python/tests/test_ledger_witnesses_geometry_camera.py`:
   `test_camera_frame_and_pixels_at_other_aspects`.
+
+## The frame constants follow the configured resolution (fm-8azr)
+
+As in the Reference, `DEFAULT_RESOLUTION`, `ASPECT_RATIO`, `FRAME_WIDTH`,
+`FRAME_X_RADIUS` and `FRAME_SHAPE` come from the configured resolution.
+`to_edge`, `to_corner`, `shift_onto_screen`, `is_off_screen`, the default
+camera frame and `CameraFrame.to_default_state` therefore use the frame that
+is actually rendered. A portrait 1080 × 1920 render has the frame 4.5 × 8, and
+`Square().to_edge(LEFT, buff=0)` sits at x = -2.25. These values were measured
+on the pinned Reference.
+
+- **The portal.** The bootstrap reads the cwd `custom_config.yml` at import,
+  as `manim_config` does. The Reference parses the CLI before its constants
+  import; the portal parses it after. So `SceneSource` rebinds the constants
+  to the render resolution (`-r`, a quality flag or a `--config_file` camera)
+  before the scene source runs, and restores them when it closes. The rebind
+  reaches every copy of a constant and the defaults built from them at
+  import: ImplicitFunction's ranges, Title's underline width, CameraFrame's
+  shape and Camera's resolution and `max_allowable_norm`.
+- **Native `fmn`.** The Stage carries the frame shape (`Stage::frame_shape`).
+  `RuntimeConfig::from_config` derives it from `camera.resolution` and
+  `sizes.frame_height`, and `Scene::new` hands it to its stage. Snapshots and
+  render-worker arenas keep the frame of the stage they came from. A decoded
+  durable snapshot does not carry one, and starts at the default 16:9 frame.
+- **Unchanged, as in the Reference.**
+  - `ScreenRectangle` keeps its literal 16:9 default aspect (frame.py:14), so
+    `FullScreenRectangle` stays 14.22 wide in a portrait render.
+  - The portal's `LEFT_SIDE`/`RIGHT_SIDE`/`TOP`/`BOTTOM` remain BN-07's unit
+    directions (C-16).
+- **Not covered.** `ControlPanel` keeps its 16:9 width and corner placement in
+  a portrait render. Its wrapper binds defaults from a signature captured at
+  install time, and the native panel places itself with the compile-time
+  radius.
+- **Resolutions that are not exactly 16:9 move.** `-l` is 854 × 480, a
+  frame 14.233 wide, not 14.222. Edge-aligned content now sits on the edge
+  the camera shows, as in the Reference. Exact 16:9 resolutions are
+  bit-identical.
+
+Witnesses:
+- `crates/fmn-mobject/tests/positional.rs`:
+  `border_alignment_follows_the_stage_frame_shape`.
+- `crates/fmn-scene/tests/runtime.rs`:
+  `the_scene_stage_aligns_on_the_configured_frame`.
+- `crates/fmn-python/tests/camera_configuration.py`:
+  `test_frame_constants_follow_a_portrait_custom_config` (the Reference's
+  values) and
+  `test_a_render_resolution_rebinds_the_frame_for_its_source_and_restores_it`.
+- `crates/fmn-python/tests/test_ledger_witnesses_runtime_config.py`:
+  `test_main_portrait_resolution_moves_the_frame_edges` (pixels at `-r 36x64`).

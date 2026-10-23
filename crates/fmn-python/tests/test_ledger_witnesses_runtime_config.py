@@ -151,6 +151,42 @@ class RuntimeConfigWitnesses(unittest.TestCase):
         self.assertFalse((out / "Other.png").exists(), "an unselected scene was run")
         self.assertEqual(sorted(p.name for p in out.iterdir()), ["Tiny.png"])
 
+    def test_main_portrait_resolution_moves_the_frame_edges(self):
+        # The Reference's constants follow -r (constants.py:13-23): at 36x64
+        # the frame is 4.5 x 8 units at 8 px per unit, so a unit square sent
+        # to_edge(LEFT, buff=0) fills pixel columns 0..7, rows 28..35 (fm-8azr).
+        # With the 16:9 constants it lands at x = -7.11, off the frame.
+        from manimlib.__main__ import main
+
+        work = Path(self._tempdir("fm8azr-portrait-"))
+        source = work / "portrait.py"
+        source.write_text(textwrap.dedent("""\
+            from manimlib import *
+
+            class Edge(Scene):
+                def construct(self):
+                    square = Square(side_length=1, fill_color=RED, fill_opacity=1, stroke_width=0)
+                    self.add(square.to_edge(LEFT, buff=0))
+        """))
+        (work / "custom_config.yml").write_text("directories:\n  cache: %s\n" % (work / "cache"))
+        previous = os.getcwd()
+        os.chdir(work)
+        self.addCleanup(os.chdir, previous)
+        out = work / "out"
+        self._with_argv(["manimgl", str(source), "Edge", "-w", "-s",
+                         "--video_dir", str(out), "-r", "36x64"])
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            code = main()
+        self.assertIn(code, (None, 0))
+        rgb = _read_png(out / "Edge.png")[..., :3].astype(int)
+        self.assertEqual(rgb.shape[:2], (64, 36))
+        filled = np.all(np.abs(rgb - np.array(_RED)) <= 3, axis=-1)
+        ys, xs = np.nonzero(filled)
+        self.assertEqual((ys.min(), ys.max(), xs.min(), xs.max()), (28, 35, 0, 7))
+        self.assertEqual(int(filled.sum()), 64)
+        from manimlib import FRAME_WIDTH
+        self.assertEqual(FRAME_WIDTH, 16 * 8 / 9, "the render's frame stays with its source")
+
     def test_run_scenes(self):
         # Reference __main__.run_scenes: run every scene the run config selects;
         # with -a (write_all) that is every scene in the file.

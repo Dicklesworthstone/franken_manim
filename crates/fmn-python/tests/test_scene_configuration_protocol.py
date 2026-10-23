@@ -68,6 +68,8 @@ def native_boundary():
         "file_writer": {"video_crf": None},
     }
     native._resolved_camera = lambda _: dict(native.manim_config["camera"])
+    # The resolution the engine bound its frame constants to (fm-8azr).
+    native._DEFAULT_RESOLUTION = native.manim_config["camera"]["resolution"]
     native._cwd_custom_config = lambda: None
     native._itertools = itertools
     native._pathlib = __import__("pathlib")

@@ -42,6 +42,17 @@ _CONFIG_BOUND_AT_IMPORT = frozenset({
 })
 
 
+def _frame_rebinder():
+    """The engine's frame-constant rebinding hook (fm-8azr), or None.
+
+    The installed portal always defines it. Protocol fixtures that stand in
+    for the engine model only the configuration seam and have no frame.
+    """
+    package = importlib.import_module("manimlib")
+    engine = vars(package).get("_native", package)
+    return getattr(engine, "_rebind_frame_resolution", None)
+
+
 def resolve_render_configuration(native, options, width, height, fps):
     """Freeze file layers before source effects; workers receive values, not paths."""
     explicit, color = options.get("config_file"), options.get("color")
@@ -240,6 +251,7 @@ class SceneSource:
         source_inputs: Mapping[str | Path, str] | None = None,
         entry_digest: str | None = None,
         configuration: dict | None = None,
+        frame_resolution: tuple[int, int] | None = None,
     ) -> None:
         self.path = Path(source).resolve()
         if self.path.suffix.lower() not in (".py", ".pyw"):
@@ -253,6 +265,19 @@ class SceneSource:
                                json.loads(json.dumps(configuration, allow_nan=False)))
         self._configuration_native = None
         self._configuration_snapshots = []
+        # The render resolution the frame constants follow while the source
+        # loads and runs (FRAME_WIDTH, ASPECT_RATIO, ...; fm-8azr). Without
+        # one, a configuration's camera resolution decides.
+        if frame_resolution is None and self._configuration is not None:
+            frame_resolution = self._configuration["values"]["camera"]["resolution"]
+        if frame_resolution is not None:
+            width, height = frame_resolution
+            if not all(isinstance(side, int) and not isinstance(side, bool) and side > 0
+                       for side in (width, height)):
+                raise ValueError("frame_resolution must be two positive integers")
+            frame_resolution = (width, height)
+        self._frame_resolution = frame_resolution
+        self._previous_frame_resolution = None
         # Unlike source_inputs, this pins only the entry point: ordinary local
         # and lazy helper imports remain allowed. Check the exact compilation
         # bytes BEFORE authored module code executes, not a later disk read.
@@ -543,6 +568,10 @@ class SceneSource:
         return False
 
     def _install_configuration(self):
+        if self._frame_resolution is not None:
+            rebind = _frame_rebinder()
+            if rebind is not None:
+                self._previous_frame_resolution = rebind(self._frame_resolution)
         if self._configuration is None:
             return
         native = importlib.import_module("manimlib")
@@ -577,6 +606,9 @@ class SceneSource:
         ) if key in values})
 
     def _restore_configuration(self):
+        if self._previous_frame_resolution is not None:
+            _frame_rebinder()(self._previous_frame_resolution)
+            self._previous_frame_resolution = None
         for mapping, original in reversed(self._configuration_snapshots):
             mapping.clear()
             mapping.update(original)
