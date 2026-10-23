@@ -117,7 +117,7 @@ export function mountTimelinePlayer({document = globalThis.document, window = gl
   }
   try {
     if (!ctx) throw new Error('A Canvas 2D context is required.');
-    session = createSession({width: canvas.width, height: canvas.height,
+    session = createSession({streamAudio: true, width: canvas.width, height: canvas.height,
       prepareAudio: player => prepareSoundtrack(player, createContext), onFrame: draw,
       onError: error => { stop(); message(`Playback stopped: ${error}. Restart the picture worker to retry.`, true); }});
     on(scrub, 'input', () => seek(Number(scrub.value)));

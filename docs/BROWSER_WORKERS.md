@@ -9,7 +9,9 @@ and resource checks remain authoritative. No JavaScript FMTL decoder is added.
 
 Decode and every raster, including frame zero, run outside the UI thread. The
 main thread owns controls, canvas presentation and the existing Web Audio clock.
-This keeps a slow picture from blocking audio-window refill or a Pause click.
+This keeps a slow picture from blocking a Pause click or the browser UI.
+A worker-owned PCM request waits for an already executing raster; if the audio
+lookahead runs out, the clock stops at the first unheard sample until refill.
 It does not make the renderer faster or claim that every preview picture is shown.
 
 ## Ownership and bounds
@@ -35,16 +37,38 @@ The input and decoded-PCM limits are each 256 MiB. Each viewport dimension is in
 1..4096. Metadata allows 4096 labels, each at most 4096 code units, with a combined
 1 MiB UTF-8 label budget. Exceeding these limits is a named refusal, not truncation.
 
-Sound is extracted once in the picture worker and copied in native bridge windows
-of at most 65,536 sample frames into transferable Float32 channel buffers. The
-worker frees its extracted native PCM and transfers those buffers without a
-structured-clone copy. The main thread adapts that ownership to the existing
-`prepareSoundtrack` scheduler. Small audio uses its eager path; larger audio
-retains one transferred PCM owner and three bounded device windows. There is no
-second native player or retained picture arena on the UI thread. Conversion can
-transiently hold native PCM and transferred PCM together, and the Wasm allocator
-may retain freed capacity. The old movie and replacement candidate also overlap;
-none of these limits is a process-RSS guarantee.
+The shipping page enables `streamAudio: true`. The picture worker extracts and
+retains its native soundtrack once. It transfers no full-length channel arrays.
+Instead, the existing audio scheduler requests random-access PCM windows through
+`read_window(start, count, signal)`. Each request and response is independently
+range-checked, correlated, and limited to 65,536 frames per channel (512 KiB for
+stereo float32). One live audio request may wait alongside the single latest
+preview index; audio receives the next worker slot before pending previews. An
+already running raster is not preempted or duplicated.
+
+The same Web Audio scheduler handles synchronous native PCM and asynchronous
+worker windows. It retains at most three bounded device buffers and one pending
+transfer, not a second recording-sized PCM array. Initial admission awaits one
+verified window without starting sound. Refill callbacks only prepare a window;
+`frameAt()` owns subsequent scheduling. Delayed reads freeze at the first
+unqueued sample and resume from that phase, preserving fractional seeks, device
+resampling halos, audio tails, and the silent picture suffix. Pause, seek and
+disposal cancel pending reads and invalidate late completions. A transfer or
+device failure stops playback rather than retrying indefinitely.
+
+`prepareSoundtrack` returns a promise for asynchronous PCM sources; ordinary
+native sources retain their synchronous API. `WorkerTimelineSession` awaits
+both kinds of adapters transactionally. The API defaults to `streamAudio: false`
+for existing custom adapters: that legacy route still transfers full channel
+arrays and uses eager/retained playback according to their size. Set the option
+explicitly to use bounded transport, as in the example below. An old worker that
+does not acknowledge windowed mode is refused, never silently used eagerly.
+
+The 256 MiB decoded-PCM admission limit is unchanged. Native decoding still
+retains the full soundtrack for random access, and Wasm may retain allocator
+capacity. The old and replacement workers overlap during transactional load or
+restart. Device buffers, transferred windows, the input envelope, canvas storage
+and browser-internal allocations are additional; this is not a process-RSS cap.
 
 A failed current-worker request pauses its associated audio and reports the
 failure. A wrong response identity, frame, viewport or buffer shape is refused
@@ -77,6 +101,7 @@ import {prepareSoundtrack} from './audio-playback.mjs';
 const session = new WorkerTimelineSession({
   width: 640,
   height: 360,
+  streamAudio: true,
   prepareAudio: player => prepareSoundtrack(player, () => new AudioContext()),
   onFrame: ({rgba, width, height}) => context.putImageData(new ImageData(
     new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.byteLength),
@@ -131,9 +156,10 @@ main-thread native oracle explicitly.
 `await session.restart()` starts one replacement worker, rereads the current
 source through its original reader, and reconstructs the paused picture before
 publishing the replacement. Narration stays paused at its exact fractional
-position. The existing audio owner is reused: the replacement decodes and frees
-its native soundtrack without copying or transferring another set of channel
-buffers. No new audio device is created and restart never starts playback.
+position. The existing audio owner and device are reused. In windowed mode,
+the validated replacement retains its decoded PCM and the stable source adapter
+is rebound only when replacement succeeds. No full channel arrays are copied.
+In legacy eager mode the replacement frees its decoded soundtrack as before. No new audio device is created and restart never starts playback.
 For silent recordings, the default restore position is the last delivered
 picture; `restart(frame)` may name an explicit recorded frame.
 
@@ -176,3 +202,22 @@ Chromium page check additionally clicks the real controls after a worker protoco
 failure, verifies the same paused audio owner and device, cancels recovery, and
 checks changed-source refusal and retry. These checks retain the native-decoder
 fixture boundary described above; they do not establish native Wasm acceptance.
+
+## Bounded audio validation
+
+`node --test demo/wasm/worker-audio.test.mjs demo/wasm/async-audio.test.mjs`
+exercises window budgets, exact sample order across delayed refills, cancelled
+requests, hostile responses, fractional positions, async admission and worker
+restarts using explicit native/device fixtures and real buffer transfers.
+
+`python scripts/check_streamed_audio_browser.py` compares the asynchronous
+scheduler's real Chromium `OfflineAudioContext` output against a full-buffer
+reference at nine source/device-rate and seek combinations, with the existing
+1e-5 absolute tolerance unchanged. It also exercises a real worker and real Web
+Audio over a long synthetic PCM source, including recovery without a new device.
+By default this uses an ephemeral loopback server and ordinary module workers.
+`--in-memory` runs when browser policy refuses loopback navigation; it imports
+Blob modules through a classic-worker bootstrap and explicitly reports
+`normalModuleWorkers: false`. That mode does not prove hosted module-worker
+startup. Both modes use a named native-decoder fixture, not generated Wasm,
+physical audio hardware, cross-browser evidence or a native acceptance gate.

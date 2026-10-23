@@ -43,11 +43,16 @@ export function prepareSoundtrack(player, createContext, maxBytes = MAX_AUDIO_BY
     if (frames * channels * 4 > maxBytes) throw new RangeError('soundtrack exceeds browser audio byte budget');
     context = createContext();
     if (!context || context.state === 'closed') throw new Error('Web Audio context is unavailable');
-    if (frames * channels * 4 > MAX_EAGER_AUDIO_BYTES) {
+    const asynchronous = typeof pcm.read_window === 'function';
+    if (frames && (asynchronous || frames * channels * 4 > MAX_EAGER_AUDIO_BYTES)) {
       const playback = new WindowedSoundtrackPlayback(context, pcm, player.fps, player.frame_count, {
         sampleRate: rate, channels, sampleFrames: frames,
       });
       retained = true;
+      if (asynchronous) return playback.prepare().catch(error => {
+        playback.dispose();
+        throw error;
+      });
       return playback;
     }
     // AudioBuffer rejects unsupported rates; never silently reinterpret PCM.
@@ -199,12 +204,16 @@ export class SoundtrackPlayback {
 
 
 // The immutable Wasm track stays alive for random seeks. Only three bounded
-// windows can be owned by Web Audio. frameAt() refills them; no detached timers
-// or background callbacks can restart playback after a pause or replacement.
+// windows can be owned by Web Audio. frameAt() alone refills the device queue.
+// Async sources retain at most one pending transfer; completion can only prime
+// a window, never start sound after pause, seek, replacement or disposal.
 class WindowedSoundtrackPlayback {
   #context;
   #pcm;
   #primed;
+  #asynchronous;
+  #pending = null;
+  #readError = null;
   #fps;
   #count;
   #windowFrames;
@@ -233,6 +242,7 @@ class WindowedSoundtrackPlayback {
     this.audio = Object.freeze({ sampleRate, channels, sampleFrames });
     this.#context = context;
     this.#pcm = pcm;
+    this.#asynchronous = typeof pcm.read_window === 'function';
     this.#deviceRate = integer(context.sampleRate ?? sampleRate, 'audio device sample rate', 1);
     let a = sampleRate, b = this.#deviceRate;
     while (b) [a, b] = [b, a % b];
@@ -247,7 +257,7 @@ class WindowedSoundtrackPlayback {
     this.#duration = Math.max(frameCount / fps, sampleFrames / sampleRate);
     // Admission and the first native copy precede session replacement. A bad
     // device rate/allocation/bridge never destroys the previous movie.
-    this.#primed = this.#copy(0);
+    this.#primed = this.#asynchronous ? null : this.#copy(0);
   }
   get playing() { return this.#playing; }
   get starting() { return this.#starting; }
@@ -259,13 +269,50 @@ class WindowedSoundtrackPlayback {
     if (this.#disposed) throw new Error('audio playback is disposed');
     if (this.#context.state === 'closed') throw new Error('audio context is closed');
   }
-  #copy(start) {
+  async prepare() {
+    await this.#request(0);
+    this.#check();
+    if (this.#readError) throw this.#readError;
+    if (!this.#primed) throw new Error('audio preparation was cancelled');
+    return this;
+  }
+  #request(start) {
+    if (this.#pending) return this.#pending.promise;
+    const generation = this.#generation;
+    const pending = {controller: new AbortController(), promise: null};
+    this.#pending = pending;
+    const readStart = Math.max(0, start - AUDIO_HALO_FRAMES);
+    const readEnd = Math.min(this.audio.sampleFrames, start + this.#windowFrames + AUDIO_HALO_FRAMES);
+    const valid = () => !this.#disposed && this.#generation === generation && this.#pending === pending;
+    pending.promise = Promise.resolve().then(() => {
+      if (!valid()) return null;
+      return this.#pcm.read_window(readStart, readEnd - readStart, pending.controller.signal);
+    }).then(channels => {
+      if (!valid()) return;
+      const window = this.#copy(start, channels);
+      if (valid()) this.#primed = window;
+    }).catch(error => { if (valid()) this.#readError = error; })
+      .finally(() => { if (this.#pending === pending) this.#pending = null; });
+    return pending.promise;
+  }
+  #cancelRead() {
+    const pending = this.#pending; this.#pending = null;
+    pending?.controller.abort();
+    this.#readError = null;
+    if (this.#asynchronous) this.#primed = null;
+  }
+  #copy(start, channels = null) {
     const end = Math.min(start + this.#windowFrames, this.audio.sampleFrames);
     const readStart = Math.max(0, start - AUDIO_HALO_FRAMES);
     const readEnd = Math.min(this.audio.sampleFrames, end + AUDIO_HALO_FRAMES);
+    if (this.#asynchronous && (!Array.isArray(channels) || channels.length !== this.audio.channels ||
+        channels.some(channel => !(channel instanceof Float32Array) || channel.length !== readEnd - readStart))) {
+      throw new Error('invalid asynchronous PCM window');
+    }
     const buffer = this.#context.createBuffer(this.audio.channels, readEnd - readStart, this.audio.sampleRate);
     for (let channel = 0; channel < this.audio.channels; ++channel) {
-      this.#pcm.copy_channel_into(channel, readStart, buffer.getChannelData(channel));
+      if (this.#asynchronous) buffer.getChannelData(channel).set(channels[channel]);
+      else this.#pcm.copy_channel_into(channel, readStart, buffer.getChannelData(channel));
     }
     return { start, end, readStart, buffer };
   }
@@ -295,13 +342,15 @@ class WindowedSoundtrackPlayback {
     for (const slot of this.#slots) this.#release(slot, true);
   }
   #fill(reset = false) {
+    if (this.#readError) { const error = this.#readError; this.#readError = null; throw error; }
     const generation = this.#generation;
     const before = time(this.#context.currentTime);
     for (const slot of this.#slots) if (slot.endTime <= before) this.#release(slot, false);
-    if (this.#queuedFrame !== 0) this.#primed = null;
+    if (this.#primed && this.#primed.start !== this.#queuedFrame) this.#primed = null;
     const prepared = [];
     let cursor = this.#queuedFrame;
     while (this.#slots.size + prepared.length < MAX_AUDIO_WINDOWS && cursor < this.audio.sampleFrames) {
+      if (this.#asynchronous && !this.#primed) { this.#request(cursor); break; }
       const window = this.#primed ?? this.#copy(cursor);
       this.#primed = null;
       if (generation !== this.#generation || this.#disposed) return;
@@ -360,12 +409,19 @@ class WindowedSoundtrackPlayback {
       if (this.#context.state !== 'running') throw new Error('audio context did not resume; press Play to retry');
       if (this.#position >= this.#duration) { this.#position = 0; this.#frame = 0; }
       this.#queuedFrame = Math.min(this.audio.sampleFrames, Math.floor(this.#position * this.audio.sampleRate));
+      if (this.#primed && this.#primed.start !== this.#queuedFrame) this.#primed = null;
+      if (this.#asynchronous && !this.#primed && this.#queuedFrame < this.audio.sampleFrames) {
+        await this.#request(this.#queuedFrame);
+        if (this.#disposed || generation !== this.#generation) return false;
+        if (this.#context.state !== 'running') throw new Error('audio device suspended during buffering; press Play to retry');
+      }
       this.#fill(true);
       if (this.#disposed || generation !== this.#generation) return false;
       this.#playing = true;
       return true;
     } catch (error) {
       if (this.#disposed || generation !== this.#generation) return false;
+      this.#cancelRead();
       this.#stop();
       throw error;
     } finally {
@@ -375,6 +431,7 @@ class WindowedSoundtrackPlayback {
   pause() {
     ++this.#generation;
     this.#starting = false;
+    this.#cancelRead();
     try { this.#sample(); } finally {
       this.#playing = false;
       this.#stop();
@@ -409,6 +466,7 @@ class WindowedSoundtrackPlayback {
     ++this.#generation;
     this.#starting = false;
     this.#playing = false;
+    this.#cancelRead();
     const pcm = this.#pcm;
     this.#pcm = null;
     this.#primed = null;
