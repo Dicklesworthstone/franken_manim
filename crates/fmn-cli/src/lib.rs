@@ -11118,6 +11118,8 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
     #[test]
     fn doctor_distinguishes_compiled_hardware_from_a_working_encoder() {
+        use std::os::unix::fs::DirBuilderExt;
+
         use fmn_platform::process::{
             ProcessCancellation, ProcessError, ProcessMechanism, ProcessOutcome, ProcessRunner,
             ProcessSpec, ProcessStdinLimits, ProcessTermination, RunningProcess,
@@ -11159,7 +11161,10 @@ mod tests {
             std::process::id(),
             SEQUENCE.fetch_add(1, Ordering::Relaxed),
         ));
-        std::fs::create_dir(&root).unwrap();
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
         let source = root.join("ffmpeg");
         write_native_ffmpeg_fixture(&source);
         let locator = fmn_platform::process::StdFfmpegLocator::from_search_path(None);

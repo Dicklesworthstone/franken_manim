@@ -404,7 +404,15 @@ fn native_video_replays_stored_sound_after_all_source_assets_are_gone() {
         .as_nanos();
     let root =
         std::env::temp_dir().join(format!("fmn-bundle-audio-{}-{stamp}", std::process::id()));
-    std::fs::create_dir_all(&root).unwrap();
+    let directory = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    let directory = {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut directory = directory;
+        directory.mode(0o700);
+        directory
+    };
+    directory.create(&root).unwrap();
     let root = root.canonicalize().unwrap();
     let capability = FfmpegCapability {
         runner: Arc::new(StdProcessRunner),
