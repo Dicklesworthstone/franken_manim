@@ -28,6 +28,15 @@ Witness kinds per symbol, each with its own denominator:
 - rendered: a passing test that also captured a frame (one of RENDER_SYMBOLS) invoked it;
 - corpus: the pinned videos tree names it (`.name` for a member, `Name(` otherwise).
 
+The harness imports the installed portal before each suite, to resolve the ledger. Fake-based
+protocol suites can depend on the real portal never having initialized in their process,
+which `unittest discover` happens to guarantee because its native tests skip. Suites can
+also depend on discover's import order. So a suite that fails traced is checked the way the
+gate runs it, untraced and without the portal import. A script or loop suite is rerun alone.
+The discovery suites are checked against one plain `unittest discover` of the whole
+directory, per module. Only failures that reproduce there are the suite's. The rest are
+reported as harness-only, and those tests witness nothing (fm-6l60).
+
 Mutation controls: `check --mutants N` replaces the implementation of N deterministically sampled
 witnessed members (Python implementations; a native one cannot be patched) with a trivial body
 (returns None), and of N members whose name says they return positions with a plausible-but-wrong
@@ -39,7 +48,7 @@ that returned no float array) is reported as inapplicable, not as a survivor.
 
     portal_witnesses.py build [--jobs N]              write docs/api/portal_witnesses.tsv
     portal_witnesses.py check [--jobs N] [--mutants N]
-    portal_witnesses.py trace SUITE [--mode runpy|main] [--mutate ROW:KIND]   internal
+    portal_witnesses.py trace SUITE [--mode runpy|main|discover] [--mutate ROW:KIND] [--plain]   internal
 
 `check` exits 1 when a suite fails, a symbol the committed registry records as witnessed has lost every
 semantic witness, when a same/improved row has only refusal witnesses, when a ledger symbol resolves to a placeholder or does not resolve, when a suite
@@ -451,12 +460,24 @@ def mutate(probes: Probes, row: int, kind: str) -> None:
     setattr(owner, name, replacement)
 
 
-def trace_suite(name: str, mode: str, mutation: str | None) -> list[dict]:
+class _PlainRecorder:
+    """No profiler and no ledger import: the suite runs as the gate runs it (fm-6l60)."""
+
+    def __init__(self):
+        self.current = None
+        self.hits, self.renders = {}, set()
+
+
+def trace_suite(name: str, mode: str, mutation: str | None, plain: bool = False) -> list[dict]:
     """Run one suite under the profiler the way the gate runs it (`mode`: `runpy` or `main`).
-    One record per test identity, then a summary record."""
-    rows = ledger_rows(LEDGER.read_text(encoding="utf-8"))
-    probes = Probes(rows)
-    render_rows = {i for i, r in enumerate(rows) if r["symbol"] in RENDER_SYMBOLS}
+    One record per test identity, then a summary record. `plain` runs it untraced, without
+    importing the portal first, and returns only the summary."""
+    if plain:
+        rows, probes, render_rows = [], None, set()
+    else:
+        rows = ledger_rows(LEDGER.read_text(encoding="utf-8"))
+        probes = Probes(rows)
+        render_rows = {i for i, r in enumerate(rows) if r["symbol"] in RENDER_SYMBOLS}
     if mutation:
         row, kind = mutation.split(":")
         try:
@@ -465,7 +486,7 @@ def trace_suite(name: str, mode: str, mutation: str | None) -> list[dict]:
             return [{"suite": name, "summary": True, "cases": 0, "failed": [],
                      "error": None, "unmutable": f"{type(error).__name__}: {error}"}]
     suite = TESTS / f"{name}.py"
-    recorder = Recorder(probes, str(suite), render_rows)
+    recorder = _PlainRecorder() if plain else Recorder(probes, str(suite), render_rows)
     version = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]["version"]
     error = None
     # Standard unittest runners report original per-test outcomes through _Result.
@@ -487,7 +508,7 @@ def trace_suite(name: str, mode: str, mutation: str | None) -> list[dict]:
     sys.path.insert(0, str(TESTS))
     try:
         # A mutant run needs only pass/fail, so it runs untraced.
-        with recorder if mutation is None else contextlib.nullcontext():
+        with recorder if mutation is None and not plain else contextlib.nullcontext():
             if mode == "discover":
                 module = importlib.import_module(name)
                 namespace = vars(module)
@@ -609,9 +630,121 @@ def run_suites(suites: list[tuple[str, str]], jobs: int, mutation: str | None = 
         if not any(r.get("summary") for r in records):
             records.append({"suite": name, "summary": True, "cases": 0, "failed": [],
                             "error": f"exit {done.returncode}: {done.stderr.strip()[-200:]}"})
+        summary = records[-1] if records[-1].get("summary") else None
+        if (mutation is None and mode != "discover" and summary is not None
+                and (summary["failed"] or summary["error"])):
+            records[-1] = reconcile(summary, plain_summary(name, mode))
         return records
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
-        return [record for records in pool.map(one, suites) for record in records]
+        records = [record for records in pool.map(one, suites) for record in records]
+    discovered = {name for name, mode in suites if mode == "discover"}
+    if mutation is None and failing_discovered(records, discovered):
+        records = reconcile_discovered(records, discovered, plain_discover())
+    return records
+
+
+def failing_discovered(records: list[dict], discovered: set[str]) -> list[dict]:
+    return [r for r in records if r.get("summary") and r["suite"] in discovered
+            and (r["failed"] or r["error"])]
+
+
+def reconcile_discovered(records: list[dict], discovered: set[str],
+                         verdict: dict[str, dict]) -> list[dict]:
+    """Each failing discovery suite's summary, reconciled with the plain discover verdict for
+    its module (a module absent from the verdict had no failures there)."""
+    failing_ids = {id(record) for record in failing_discovered(records, discovered)}
+    return [reconcile(record, verdict.get(record["suite"], {"failed": [], "error": None}))
+            if id(record) in failing_ids else record for record in records]
+
+
+def plain_summary(name: str, mode: str) -> dict:
+    """The suite's summary run untraced and without the portal pre-imported (fm-6l60)."""
+    command = [sys.executable, __file__, "trace", name, "--mode", mode, "--plain"]
+    try:
+        done = subprocess.run(command, capture_output=True, text=True, timeout=SUITE_TIMEOUT_S,
+                              cwd=ROOT, check=False)
+    except subprocess.TimeoutExpired:
+        return {"suite": name, "summary": True, "cases": 0, "failed": [],
+                "error": f"timeout after {SUITE_TIMEOUT_S} s"}
+    for line in reversed(done.stdout.splitlines()):
+        if line.startswith('{"suite"'):
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if record.get("summary"):
+                return record
+    return {"suite": name, "summary": True, "cases": 0, "failed": [],
+            "error": f"exit {done.returncode}: {done.stderr.strip()[-200:]}"}
+
+
+def plain_discover() -> dict[str, dict]:
+    """The gate's own `unittest discover` of the tests directory, untraced and without the
+    portal pre-imported: per module, the failed test identities, or the import error."""
+    command = [sys.executable, __file__, "discover-plain"]
+    try:
+        done = subprocess.run(command, capture_output=True, text=True, cwd=ROOT, check=False,
+                              timeout=SUITE_TIMEOUT_S * 4)
+    except subprocess.TimeoutExpired:
+        return {}
+    for line in reversed(done.stdout.splitlines()):
+        if line.startswith('{"discover"'):
+            try:
+                return json.loads(line)["discover"]
+            except (json.JSONDecodeError, KeyError):
+                break
+    return {}
+
+
+def discover_plain() -> dict[str, dict]:
+    """Run `python -m unittest discover -s TESTS -p 'test_*.py'` in this process (a fresh one)
+    and record per module what failed, by the identities trace_suite uses."""
+    class Collect(unittest.TextTestResult):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.by_module = collections.defaultdict(lambda: {"failed": set(), "error": None})
+
+        def _note(self, test):
+            if isinstance(test, unittest.case._SubTest):
+                test = test.test_case
+            module = type(test).__module__
+            if module == "unittest.loader":  # a module that failed to import
+                self.by_module[test._testMethodName]["error"] = "import failed"
+                return
+            self.by_module[module]["failed"].add(_Result._identity(test))
+
+        def addFailure(self, test, err):
+            super().addFailure(test, err)
+            self._note(test)
+
+        def addError(self, test, err):
+            super().addError(test, err)
+            self._note(test)
+
+        def addSubTest(self, test, subtest, err):
+            super().addSubTest(test, subtest, err)
+            if err is not None:
+                self._note(test)
+
+    sys.path.insert(0, str(TESTS))
+    tests = unittest.defaultTestLoader.discover(str(TESTS), pattern="test_*.py")
+    with open(os.devnull, "w", encoding="utf-8") as sink:
+        result = unittest.TextTestRunner(stream=sink, resultclass=Collect).run(tests)
+    return {module: {"failed": sorted(entry["failed"]), "error": entry["error"]}
+            for module, entry in result.by_module.items()}
+
+
+def reconcile(traced: dict, plain: dict) -> dict:
+    """A traced summary corrected by the gate-faithful plain rerun: the suite's failures and
+    error are the plain run's; what failed only traced is kept as harness_only. The traced
+    values stay as traced_failed and traced_error, the baseline mutants compare against."""
+    summary = dict(traced)
+    summary["traced_failed"], summary["traced_error"] = traced["failed"], traced["error"]
+    summary["failed"], summary["error"] = sorted(plain["failed"]), plain["error"]
+    summary["harness_only"] = sorted(set(traced["failed"]) - set(plain["failed"]))
+    if traced["error"] and not plain["error"]:
+        summary["harness_error"] = traced["error"]
+    return summary
 
 
 def corpus_counts(rows: list[dict]) -> dict[int, int]:
@@ -769,6 +902,8 @@ def main(argv=None) -> int:
     trace.add_argument("suite")
     trace.add_argument("--mode", choices=("runpy", "main", "discover"), default="runpy")
     trace.add_argument("--mutate")
+    trace.add_argument("--plain", action="store_true")
+    sub.add_parser("discover-plain")
     for name in ("build", "check"):
         command = sub.add_parser(name)
         command.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 2) // 4))
@@ -777,7 +912,14 @@ def main(argv=None) -> int:
             command.add_argument("--mutants", type=int, default=0)
     args = parser.parse_args(argv)
 
+    if args.command == "discover-plain":
+        print(json.dumps({"discover": discover_plain()}))
+        return 0
+
     if args.command == "trace":
+        if args.plain:
+            print(json.dumps(trace_suite(args.suite, args.mode, None, plain=True)[-1]))
+            return 0
         for record in trace_suite(args.suite, args.mode, args.mutate):
             print(json.dumps(record))
         return 0
@@ -796,6 +938,10 @@ def main(argv=None) -> int:
         if record.get("summary") and (record["error"] or record["failed"]):
             print(json.dumps({"schema": SCHEMA, "suite": record["suite"], "cases": record["cases"],
                               "failed": record["failed"][:5], "error": record["error"]}))
+        if record.get("summary") and (record.get("harness_only") or record.get("harness_error")):
+            print(json.dumps({"schema": SCHEMA, "suite": record["suite"],
+                              "harness_only": record.get("harness_only", [])[:5],
+                              "harness_error": record.get("harness_error")}))
     if args.command == "build":
         REGISTRY.write_text(write_registry(table, records), encoding="utf-8")
         return 0
@@ -834,8 +980,13 @@ def main(argv=None) -> int:
                 print(json.dumps({"schema": SCHEMA, "mutant": name, "kind": kind,
                                   "inapplicable": True}))
                 continue
-            died = any(set(r["failed"]) - set(baseline[r["suite"]]["failed"])
-                       or (r["error"] and not baseline[r["suite"]]["error"]) for r in mutant)
+            # A mutant run is traced-environment (the portal is imported to patch it), so it is
+            # compared against the traced baseline, harness-only failures included.
+            died = any(set(r["failed"]) - set(baseline[r["suite"]].get("traced_failed",
+                                                                       baseline[r["suite"]]["failed"]))
+                       or (r["error"] and not baseline[r["suite"]].get("traced_error",
+                                                                      baseline[r["suite"]]["error"]))
+                       for r in mutant)
             tried += 1
             killed += died
             print(json.dumps({"schema": SCHEMA, "mutant": name, "kind": kind,

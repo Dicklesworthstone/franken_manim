@@ -129,7 +129,7 @@ class Harness(unittest.TestCase):
             body()
         return rows, probes, recorder
 
-    def trace_runner_fixture(self, name, entry, mode="main"):
+    def trace_runner_fixture(self, name, entry, mode="main", plain=False):
         root = pathlib.Path(self.tmp.name)
         (root / "Cargo.toml").write_text('[workspace.package]\nversion = "0.5.0"\n')
         ledger = root / "runner_ledger.tsv"
@@ -156,7 +156,7 @@ class Harness(unittest.TestCase):
               mock.patch.object(pw, "ledger_rows", return_value=self.rows()[:3]),
               mock.patch.object(self.mod, "runner_calls", [], create=True)):
             try:
-                records = pw.trace_suite(name, mode, None)
+                records = pw.trace_suite(name, mode, None, plain=plain)
                 calls = list(self.mod.runner_calls)
                 restored = (unittest.main is original_main,
                             unittest.TextTestRunner.run is original_runner,
@@ -168,6 +168,62 @@ class Harness(unittest.TestCase):
                 unittest.TextTestRunner._makeResult = original_factory
                 sys.modules.pop(name, None)
         return records, calls, restored
+
+    def test_a_failure_only_under_the_harness_is_rerun_plain_and_kept_apart(self):
+        # fm-6l60: protocol suites can depend on the real portal never having initialized,
+        # which the harness's ledger import breaks. Planted here as a test that fails while a
+        # profiler is attached and passes untraced, the way the gate runs it.
+        entry = textwrap.dedent('''
+            import sys as _sys
+
+            class HarnessSensitive(unittest.TestCase):
+                def test_no_profiler(self):
+                    self.assertIsNone(_sys.monitoring.get_tool(_sys.monitoring.PROFILER_ID))
+        ''')
+        traced, _, _ = self.trace_runner_fixture("harness_sensitive", entry, "discover")
+        plain, _, _ = self.trace_runner_fixture("harness_sensitive", entry, "discover", plain=True)
+        self.assertEqual(traced[-1]["failed"], ["HarnessSensitive.test_no_profiler"])
+        self.assertEqual(plain[-1]["failed"], [])
+        self.assertEqual([r for r in plain if not r.get("summary")], [])  # plain records no witness
+        summary = pw.reconcile(traced[-1], plain[-1])
+        self.assertEqual((summary["failed"], summary["harness_only"], summary["traced_failed"]),
+                         ([], ["HarnessSensitive.test_no_profiler"],
+                          ["HarnessSensitive.test_no_profiler"]))
+        self.assertEqual(pw.registry_problems([], [summary], {}), [])
+
+    def test_discovery_suites_take_the_plain_discover_verdict(self):
+        # A discovery suite's gate verdict is the whole-directory `unittest discover`, whose
+        # import order some suites depend on: only its failures for that module count.
+        traced = [
+            {"suite": "test_alone", "summary": True, "unittest": True, "cases": 2,
+             "failed": ["A.order_dependent", "A.broken"], "error": None},
+            {"suite": "test_clean", "summary": True, "unittest": True, "cases": 1,
+             "failed": [], "error": None},
+            {"suite": "loop_suite", "summary": True, "unittest": False, "cases": 1,
+             "failed": [], "error": "ValueError: x"},
+        ]
+        verdict = {"test_alone": {"failed": ["A.broken"], "error": None}}
+        merged = pw.reconcile_discovered(traced, {"test_alone", "test_clean"}, verdict)
+        self.assertEqual((merged[0]["failed"], merged[0]["harness_only"]),
+                         (["A.broken"], ["A.order_dependent"]))
+        self.assertIs(merged[1], traced[1])
+        self.assertIs(merged[2], traced[2])  # loop suites are rerun alone, not here
+        self.assertEqual(pw.registry_problems([], merged, {}), [
+            "test_alone: 1 test identities failed", "loop_suite: suite failed: ValueError: x"])
+
+    def test_reconcile_keeps_the_gates_failures(self):
+        traced = {"suite": "s", "summary": True, "unittest": True, "cases": 3,
+                  "failed": ["C.a", "C.b"], "error": None}
+        both = pw.reconcile(traced, {"failed": ["C.b"], "error": None})
+        self.assertEqual((both["failed"], both["harness_only"]), (["C.b"], ["C.a"]))
+        self.assertEqual(pw.registry_problems([], [both], {}), ["s: 1 test identities failed"])
+        raised = dict(traced, failed=[], error="RuntimeIdentityError: wheel")
+        clean = pw.reconcile(raised, {"failed": [], "error": None})
+        self.assertEqual((clean["error"], clean["harness_error"]),
+                         (None, "RuntimeIdentityError: wheel"))
+        self.assertEqual(pw.registry_problems([], [clean], {}), [])
+        still = pw.reconcile(raised, {"failed": [], "error": "ValueError: real"})
+        self.assertEqual(pw.registry_problems([], [still], {}), ["s: suite failed: ValueError: real"])
 
     def test_explicit_text_runner_executes_once_while_its_pickle_module_is_live(self):
         records, calls, restored = self.trace_runner_fixture("text_runner", textwrap.dedent('''
