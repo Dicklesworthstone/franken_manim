@@ -41,7 +41,7 @@ Succession.interpolate	AnimationGroup	semantics	1	semantics
 Succession.update_mobjects	AnimationGroup	semantics	1	semantics
 AddTextWordByWord.__init__	AddTextWordByWord	fmn_python.text_reveal	2	fmn_python.text_reveal > bootstrap
 AddTextWordByWord.clean_up_from_scene	Animation	semantics	1	semantics
-DrawBorderThenFill.__init__	DrawBorderThenFill	bootstrap	1	bootstrap
+DrawBorderThenFill.__init__	DrawBorderThenFill	semantics	2	semantics > bootstrap
 DrawBorderThenFill.begin	DrawBorderThenFill	semantics	1	semantics
 DrawBorderThenFill.finish	DrawBorderThenFill	semantics	1	semantics
 DrawBorderThenFill.get_all_mobjects	DrawBorderThenFill	semantics	1	semantics
