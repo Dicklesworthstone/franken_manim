@@ -165,6 +165,70 @@ fn typeset_produces_placed_output_through_the_pin() {
 }
 
 #[test]
+fn cm_multiple_integrals_and_tall_radicals_cross_the_pin() {
+    use fmd_math::faces::FACE_MATH_EXTENSION;
+    let engine = fmd_math::Engine::bundled().unwrap();
+    // Independent article+amsmath showbox widths at 10pt, retained in the
+    // qualification evidence. A row remains one source-selectable part.
+    for (source, count, style, width) in [
+        (r"\iint", 2, Style::Display, 1.666_678),
+        (r"\iiint", 3, Style::Display, 2.333_354),
+        (r"\iint", 2, Style::Text, 1.166_672),
+        (r"\iiint", 3, Style::Text, 1.666_676),
+    ] {
+        let layout = engine.typeset(source, style).unwrap();
+        let single = engine.typeset(r"\int", style).unwrap();
+        let contours = fmd_math::paths::resolve_paths(&engine, &single).unwrap();
+        assert!(!contours.is_empty());
+        assert_eq!(layout.paths.len(), 1, "{source}");
+        let row = &layout.paths[0];
+        assert_eq!(row.contours.len(), count * contours.len(), "{source}");
+        assert_eq!(&source[row.span.start..row.span.end], source);
+        assert!(layout.glyphs.iter().all(|g| g.ch != '∫'));
+        assert!((layout.width - width).abs() < 2e-5, "{source}: {layout:?}");
+        assert!(fmd_math::paths::spans_cover(&layout, source.len()));
+    }
+    let limits = engine
+        .typeset(r"\iint\limits^{A+B+C}_{a+b+c}", Style::Display)
+        .unwrap();
+    for (actual, tex) in [
+        (limits.width, 2.590_085),
+        (limits.height, 2.139_455),
+        (limits.depth, 1.697_234),
+    ] {
+        assert!((actual - tex).abs() < 2e-5, "{limits:?}");
+    }
+    let source = r"\sqrt{\dfrac{\dfrac{a}{b}}{\dfrac{c}{d}}}";
+    let layout = engine.typeset(source, Style::Display).unwrap();
+    assert!(
+        layout.paths.is_empty(),
+        "CM radical uses native extension pieces"
+    );
+    let pieces: Vec<_> = layout.glyphs.iter().filter(|g| g.ch == '√').collect();
+    assert_eq!(pieces.len(), 5, "top, three repeaters, bottom");
+    assert!(pieces.iter().all(|g| g.face == FACE_MATH_EXTENSION));
+    assert!(
+        (layout.width - 2.064146).abs() < 1e-4,
+        "independent 10pt TeX box"
+    );
+}
+
+#[test]
+fn cm_native_vector_accent_keeps_the_optical_math_italic_face() {
+    use fmd_math::faces::{FACE_MATH_ITALIC, FACE_MATH_ITALIC_7};
+    let engine = fmd_math::Engine::bundled().unwrap();
+    for (style, face, size) in [
+        (Style::Text, FACE_MATH_ITALIC, 1.0),
+        (Style::Script, FACE_MATH_ITALIC_7, 0.7),
+    ] {
+        let layout = engine.typeset(r"\vec{v}", style).unwrap();
+        let accent = layout.glyphs.iter().find(|g| g.ch == '\u{20D7}').unwrap();
+        assert_eq!(accent.face, face);
+        assert_eq!(accent.size, size);
+    }
+}
+
+#[test]
 fn typeset_text_handles_the_textext_contract() {
     let engine = fmd_math::Engine::bundled().unwrap();
     let layout = engine
