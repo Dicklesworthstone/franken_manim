@@ -250,6 +250,10 @@ impl RetainedFrameRenderer {
 
     /// Synchronize one immutable stage and rasterize its retained raw frame.
     ///
+    /// When the synchronized plan, camera revision and frame policy are those
+    /// of the preceding successful planar render, the retained frame already
+    /// holds the result and is published without rasterizing again.
+    ///
     /// `camera_revision` is independent of frame sequence. A fixed 2D camera
     /// therefore passes zero on every call and preserves cache hits.
     pub fn render(
@@ -278,6 +282,20 @@ impl RetainedFrameRenderer {
         self.camera_projection = None;
         self.plan.sync(stage, camera_revision)?;
         let pixels = (self.plan.identity(), camera_revision, self.config.frame);
+        if previous_pixels == Some(pixels) {
+            // `frame` still holds the successful raster of this exact plan
+            // identity, camera revision and frame policy: nothing else writes
+            // it, and the camera route, background changes and failures all
+            // retire `planar_pixels`. Rasterizing again would only rebuild the
+            // same pixels tile by tile (a static `wait()` paid that walk on
+            // every frame), so publish the retained frame as the camera route
+            // already does for identical captures. The tile cache and its
+            // serial are untouched, so the next changed frame still resumes
+            // from them.
+            self.last_frame_reused = true;
+            self.planar_pixels = Some(pixels);
+            return Ok(self.reused_frame_stats());
+        }
         self.mono
             .rebuild_in_place(&self.plan, self.config.frame.map)?;
         if !self.binning.matches_plan(&self.plan)
@@ -312,6 +330,26 @@ impl RetainedFrameRenderer {
         self.last_frame_reused = previous_pixels == Some(pixels);
         self.planar_pixels = Some(pixels);
         Ok(stats)
+    }
+
+    /// Work evidence for a planar frame published from the retained raster.
+    ///
+    /// The tile cache still holds the counts of the raster that produced
+    /// these pixels, which had the same plan identity and therefore the same
+    /// binning. Every tile with commands is reused and none was rasterized
+    /// (the [`crate::CacheStats`] contract for a frame that changed nothing),
+    /// so no coverage or sampling work is reported.
+    fn reused_frame_stats(&self) -> CachedRenderStats {
+        let rasterized = self.cache.stats();
+        CachedRenderStats {
+            cache: crate::CacheStats {
+                hits: rasterized.hits + rasterized.misses + rasterized.poisoned,
+                misses: 0,
+                poisoned: 0,
+                empty: rasterized.empty,
+            },
+            raster: crate::AaStats::default(),
+        }
     }
 
     /// Synchronize vector records, retain camera-bound surface/dot commands,
@@ -2244,6 +2282,67 @@ mod tests {
         assert!(!renderer.last_frame_reused());
         renderer.render(&stage, 0).unwrap();
         assert!(renderer.last_frame_reused());
+    }
+
+    #[test]
+    fn unchanged_planar_frames_publish_the_retained_raster_without_rasterizing() {
+        for threads in [1, 4, 16] {
+            let mut stage = Stage::new();
+            let mob = stage.add(vector());
+            stage.add_to_scene(mob).unwrap();
+            let mut renderer = RetainedFrameRenderer::new(config(threads)).unwrap();
+            let first = renderer.render(&stage, 0).unwrap();
+            assert!(!renderer.last_frame_reused());
+            let bits = renderer.frame().as_bytes().to_vec();
+            let serial = renderer.cache().serial();
+            let drawn = first.cache.hits + first.cache.misses + first.cache.poisoned;
+            assert!(drawn > 0, "the vector covers no tile");
+
+            // A static wait: each identical capture is the retained raster.
+            // Rendering a tile advances the cache serial; these frames don't.
+            for _ in 0..3 {
+                let stats = renderer.render(&stage, 0).unwrap();
+                assert!(renderer.last_frame_reused());
+                assert_eq!(renderer.cache().serial(), serial, "rasterized again");
+                assert_eq!(
+                    stats.cache,
+                    crate::CacheStats {
+                        hits: drawn,
+                        misses: 0,
+                        poisoned: 0,
+                        empty: first.cache.empty,
+                    }
+                );
+                assert_eq!(stats.raster, crate::AaStats::default());
+                assert_eq!(renderer.frame().as_bytes(), bits);
+            }
+
+            // The skipped frames leave the tile cache resumable: the next
+            // change rasterizes again and matches a cold render, and so do a
+            // new camera revision and a return to the static state.
+            let cold_bits = |stage: &Stage, revision: u64| {
+                let mut cold = RetainedFrameRenderer::new(config(threads)).unwrap();
+                cold.render(stage, revision).unwrap();
+                cold.frame().as_bytes().to_vec()
+            };
+            stage.shift(mob, [0.75, 0.0, 0.0]);
+            let moved = renderer.render(&stage, 0).unwrap();
+            assert!(!renderer.last_frame_reused());
+            assert!(moved.cache.misses > 0);
+            assert_ne!(renderer.cache().serial(), serial);
+            assert_eq!(renderer.frame().as_bytes(), cold_bits(&stage, 0));
+            renderer.render(&stage, 1).unwrap();
+            assert!(!renderer.last_frame_reused());
+            assert_eq!(renderer.frame().as_bytes(), cold_bits(&stage, 1));
+            stage.shift(mob, [-0.75, 0.0, 0.0]);
+            renderer.render(&stage, 1).unwrap();
+            assert!(!renderer.last_frame_reused());
+            let returned = cold_bits(&stage, 1);
+            assert_eq!(renderer.frame().as_bytes(), returned);
+            renderer.render(&stage, 1).unwrap();
+            assert!(renderer.last_frame_reused());
+            assert_eq!(renderer.frame().as_bytes(), returned);
+        }
     }
 
     #[test]
