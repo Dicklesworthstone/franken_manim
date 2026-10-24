@@ -22,7 +22,9 @@ called, so only the import kind applies to them.
 Witness kinds per symbol, each with its own denominator:
 - import: the symbol resolves in the installed portal, and not to a schema placeholder;
 - semantic: a passing test invoked it and the call returned normally;
-- refusal_only: a passing test invoked it, but every such call raised;
+- refusal_only: a passing test invoked it, but every such call raised. An abstract class
+  (inspect.isabstract) is exempt from the check below: refusing to construct is what the
+  Reference's abstract class does too, so its refusal is the semantics, not an overclaim;
 - rendered: a passing test that also captured a frame (one of RENDER_SYMBOLS) invoked it;
 - corpus: the pinned videos tree names it (`.name` for a member, `Name(` otherwise).
 
@@ -645,6 +647,7 @@ def registry(rows: list[dict], probes: Probes, records: list[dict]) -> list[dict
     for index, row in enumerate(rows):
         if row["status"] not in WITNESSED_STATUSES:
             continue
+        value = probes.implementation.get(index, (None, None, None))[2]
         out.append({
             "module": row["module"], "symbol": row["symbol"], "kind": row["kind"],
             "status": row["status"], "import": probes.status.get(index, "error"),
@@ -652,6 +655,8 @@ def registry(rows: list[dict], probes: Probes, records: list[dict]) -> list[dict
             "refusal_only": len(refusals[index]),
             "corpus": corpus.get(index, "-"),
             "example": min(semantic[index]) if semantic[index] else "-",
+            # Not a registry column: check's refusal-only rule exempts abstract classes.
+            "abstract": isinstance(value, type) and inspect.isabstract(value),
         })
     return out
 
@@ -732,7 +737,7 @@ def registry_problems(table: list[dict], records: list[dict],
         if row["import"] != "ok":
             problems.append(f"{row['module']}.{row['symbol']}: {row['status']} in the ledger, but "
                             f"it resolves to {row['import']}")
-        if row["semantic"] == 0 and row["refusal_only"] > 0:
+        if row["semantic"] == 0 and row["refusal_only"] > 0 and not row.get("abstract"):
             problems.append(f"{row['module']}.{row['symbol']}: {row['status']} in the ledger, but "
                             f"its {row['refusal_only']} passing witnesses only exercise refusals")
     now = {(r["module"], r["symbol"]): r for r in table}

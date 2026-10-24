@@ -204,6 +204,97 @@ class DrawingsInteractiveWitnesses(unittest.TestCase):
         self.assertIs(bubble.submobjects[0], body)
         self.assertIs(bubble.content, content)  # the attribute is kept, only the child is removed
 
+    # ----------------------------------------------- asset-backed drawings (ADR-0020)
+    # Lightbulb, VideoIcon, VideoSeries, VectorizedEarth and the SVG-body bubbles load the
+    # Reference's asset files. Those are CC BY-NC-SA, so none ships. These classes build from
+    # the user's own file, found the way the Reference finds it: the vector_images directory,
+    # the working directory, or file_name=PATH. The expected values were measured on the
+    # pinned Reference over this same synthetic SVG, an original drawing and not a
+    # Reference asset (fm-u9g2). Point counts are not compared: Chisel's cubic-to-quadratic
+    # conversion is adaptive (Behavior Note).
+    _ASSET_SVG = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 60">'
+        '<path d="M20 2 C 32 2 38 12 38 22 C 38 32 28 36 28 46 L 12 46 C 12 36 2 32 2 22 '
+        'C 2 12 8 2 20 2 Z"/><rect x="12" y="48" width="16" height="8"/></svg>')
+    _ASSET_FILES = ("lightbulb.svg", "video_icon.svg", "earth.svg", "Bubbles_speech.svg",
+                    "Bubbles_thought.svg")
+
+    def _vector_images(self, files=_ASSET_FILES):
+        import pathlib
+        import tempfile
+        from unittest import mock
+
+        from manimlib.utils import directories
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        for name in files:
+            pathlib.Path(tmp.name, name).write_text(self._ASSET_SVG)
+        patcher = mock.patch.object(directories, "get_vector_image_dir", return_value=tmp.name)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return tmp.name
+
+    @staticmethod
+    def _facts(mob):
+        return (len(mob.family_members_with_points()),
+                np.round([mob.get_width(), mob.get_height()], 4).tolist(),
+                np.round(mob.get_center(), 4).tolist())
+
+    @staticmethod
+    def _styles(mob):
+        return [(str(m.get_stroke_color()).upper(), round(float(m.get_stroke_width()), 3),
+                 round(float(m.get_fill_opacity()), 3)) for m in mob.family_members_with_points()]
+
+    def test_asset_backed_drawings_build_from_the_users_svg(self):
+        import os
+
+        assets = self._vector_images()
+        from manimlib import Lightbulb, VectorizedEarth, VideoIcon, VideoSeries
+
+        bulb = Lightbulb()
+        self.assertEqual(self._facts(bulb), (2, [0.6667, 1.0], [0.0, 0.0, 0.0]))
+        self.assertEqual(self._styles(bulb), [("#FFFF00", 3.0, 0.0)] * 2)
+        icon = VideoIcon()
+        self.assertEqual(self._facts(icon), (2, [1.2, 1.8], [0.0, 0.0, 0.0]))
+        self.assertEqual(self._styles(icon), [("#C7E9F1", 0.0, 1.0)] * 2)
+        earth = VectorizedEarth()
+        self.assertEqual(self._facts(earth), (3, [1.3333, 2.0], [0.0, 0.0, 0.0]))
+        self.assertEqual(self._styles(earth)[0], (GREEN_HEX, 3.0, 1.0))  # the ocean Circle, behind
+        series = VideoSeries(num_videos=3)
+        self.assertEqual(self._facts(series), (6, [13.7222, 6.0244], [0.0, 0.0, 0.0]))
+        self.assertEqual([str(video.get_fill_color()).upper() for video in series],
+                         ["#9CDCEB", "#72C5DB", "#29ABCA"])
+        # file_name=PATH reaches the same file with the search directory empty.
+        self._vector_images(())
+        explicit = Lightbulb(file_name=os.path.join(assets, "lightbulb.svg"))
+        self.assertEqual(self._facts(explicit), self._facts(bulb))
+
+    def test_svg_body_bubbles_build_from_the_users_svg(self):
+        self._vector_images()
+        from manimlib import Bubble, OldSpeechBubble, OldThoughtBubble, RIGHT, Square
+
+        for cls in (Bubble, OldSpeechBubble, OldThoughtBubble):
+            with self.subTest(bubble=cls.__name__):
+                bubble = cls(Square())
+                self.assertEqual(self._facts(bubble), (3, [3.0, 4.05], [0.0, -0.5063, 0.0]))
+                self.assertEqual(self._styles(bubble.body), [(WHITE_HEX, 3.0, 0.8)] * 2)
+                flipped = cls(Square(), direction=RIGHT).body
+                self.assertEqual(self._facts(flipped), (2, [3.0, 4.05], [0.0, -0.5063, 0.0]))
+
+    def test_asset_backed_drawings_without_the_file_refuse_by_name(self):
+        self._vector_images(())
+        import manimlib
+
+        for name, asset in (("Lightbulb", "lightbulb"), ("VideoIcon", "video_icon"),
+                            ("VectorizedEarth", "earth"), ("VideoSeries", "video_icon"),
+                            ("Bubble", "Bubbles_speech.svg")):
+            with self.subTest(drawing=name):
+                with self.assertRaises(NotImplementedError) as caught:
+                    getattr(manimlib, name)()
+                self.assertIn(repr(asset), str(caught.exception))
+                self.assertIn("ADR-0020", str(caught.exception))
+
     # ------------------------------------------------------------------ interactive
     def test_control_mobject_init(self):
         from manimlib import Circle, Square

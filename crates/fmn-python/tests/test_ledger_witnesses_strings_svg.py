@@ -304,6 +304,31 @@ class StringsSvgWitnesses(unittest.TestCase):
         self.assertEqual((outer[0] > 0, outer[1]), (True, [1.0, 0.0]))
         self.assertEqual((counter[0] < 0, counter[1]), (True, [0.0, -1.0]))
 
+    def test_svg_mobject_finds_named_files_like_the_reference(self):
+        import pathlib
+        import tempfile
+        from unittest import mock
+
+        from manimlib.mobject.svg.svg_mobject import SVGMobject
+        from manimlib.utils import directories
+
+        # svg_mobject.py:158 reads get_full_vector_image_path(file_name): an existing path, else
+        # the vector_images directory with .svg, .xdv or no extension; a miss is find_file's
+        # IOError "<name> not Found" (fm-u9g2; before, the portal read the bare name).
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        pathlib.Path(tmp.name, "shape.svg").write_text(
+            '<svg xmlns="http://www.w3.org/2000/svg"><rect width="4" height="2"/></svg>')
+        with mock.patch.object(directories, "get_vector_image_dir", return_value=tmp.name):
+            named = SVGMobject("shape")
+            self.assertEqual(len(named.family_members_with_points()), 1)
+            self.assertAlmostEqual(named.get_width() / named.get_height(), 2.0, places=6)
+            explicit = SVGMobject(str(pathlib.Path(tmp.name, "shape.svg")))
+            np.testing.assert_allclose(explicit.get_points(), named.get_points(), atol=1e-9)
+            with self.assertRaises(OSError) as caught:
+                SVGMobject("absent")
+            self.assertEqual(str(caught.exception), "absent not Found")
+
     def test_svg_mobject_handle_transform(self):
         from manimlib import VMobject
         from manimlib.mobject.svg.svg_mobject import SVGMobject

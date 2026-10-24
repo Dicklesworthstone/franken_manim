@@ -8302,9 +8302,12 @@ class SVGMobject(VMobject):
         return result
 
     def file_name_to_svg_string(self, file_name):
-        # Governed native reader: same byte budget and error surface as
-        # the constructor's own file path.
-        return self._read_svg_file(str(file_name))
+        # Reference svg_mobject.py:158: find the file as get_full_vector_image_path
+        # does (an existing path, else the vector_images directory with .svg, .xdv
+        # or no extension), then read it through the governed native reader, with
+        # its byte budget and error surface (fm-u9g2).
+        images = _sys.modules["manimlib.utils.images"]
+        return self._read_svg_file(str(images.get_full_vector_image_path(str(file_name))))
 
     def generate_config_style_dict(self):
         # Reference svg_mobject.py:193 verbatim over svg_default.
@@ -10412,9 +10415,24 @@ class Dartboard(VGroup):
         self.set_width(2.0 * self.radius)
 
 
+def _drawing_asset(owner, file_name):
+    """ADR-0020: the Reference's drawings SVGs are CC BY-NC-SA, so the wheel ships none. Find
+    the user's own copy as the Reference does (find_file over the vector_images directory and
+    the working directory), or refuse by name with the policy and the remedy."""
+    try:
+        return _sys.modules["manimlib.utils.images"].get_full_vector_image_path(file_name)
+    except OSError:
+        raise NotImplementedError(
+            f"{owner} needs the SVG asset {file_name!r}, which FrankenManim does not bundle: "
+            "the Reference's drawings assets are CC BY-NC-SA (ADR-0020). Put your own copy in "
+            "the vector_images directory (custom_config.yml directories.vector_images) or pass "
+            "file_name=PATH."
+        ) from None
+
+
 class Bubble(VGroup):
-    """Speech/thought bubble family root. SVG-file bodies stay a named gap;
-    SpeechBubble supplies a native Union body."""
+    """Speech/thought bubble family root. The default body is the user's own SVG asset
+    (ADR-0020); SpeechBubble supplies a native Union body."""
 
     file_name = "Bubbles_speech.svg"
     bubble_center_adjustment_factor = 0.125
@@ -10452,12 +10470,19 @@ class Bubble(VGroup):
             self.pin_to(pin_point)
 
     def get_body(self, content, direction, buff):
-        del content, direction, buff
-        raise NotImplementedError(
-            "Bubble.get_body requires bundled SVG "
-            + repr(self.file_name)
-            + "; SpeechBubble supplies a native body"
-        )
+        # Reference drawings.py Bubble.get_body, over the user's asset.
+        _drawing_asset(type(self).__name__ + ".get_body", self.file_name)
+        body = SVGMobject(self.file_name)
+        if direction[0] > 0:
+            body.flip()
+        width = content.get_width()
+        height = content.get_height()
+        target_width = width + min(buff, height)
+        target_height = 1.35 * (height + buff)
+        body.set_shape(target_width, target_height)
+        body.move_to(content)
+        body.shift(self.bubble_center_adjustment_factor * body.get_height() * _DOWN)
+        return body
 
     def get_tip(self):
         return self.get_corner(_DOWN + self.direction)
@@ -10868,13 +10893,13 @@ class Piano3D(VGroup):
 
 
 class OldSpeechBubble(Bubble):
-    """SVG-file speech bubble; construction is the named drawings-shelf gap."""
+    """SVG-file speech bubble over the user's own Bubbles_speech.svg (ADR-0020)."""
 
     file_name = "Bubbles_speech.svg"
 
 
 class OldThoughtBubble(Bubble):
-    """SVG-file thought bubble; construction is the named drawings-shelf gap."""
+    """SVG-file thought bubble over the user's own Bubbles_thought.svg (ADR-0020)."""
 
     file_name = "Bubbles_thought.svg"
 
@@ -10889,7 +10914,7 @@ class OldThoughtBubble(Bubble):
 
 
 class Lightbulb(SVGMobject):
-    """Bundled lightbulb SVG; the drawings SVG shelf is fm-3kr."""
+    """Reference drawings.py Lightbulb over the user's own lightbulb SVG (ADR-0020)."""
 
     file_name = "lightbulb"
 
@@ -10901,38 +10926,49 @@ class Lightbulb(SVGMobject):
         fill_opacity=0.0,
         **kwargs,
     ):
-        raise NotImplementedError(
-            "Lightbulb requires bundled SVG 'lightbulb'; "
-            "the drawings SVG shelf is fm-3kr"
+        _drawing_asset("Lightbulb", kwargs.get("file_name") or self.file_name)
+        super().__init__(
+            height=height,
+            color=color,
+            stroke_width=stroke_width,
+            fill_opacity=fill_opacity,
+            **kwargs,
         )
+        self.insert_n_curves(25)
 
 
 class VideoIcon(SVGMobject):
-    """Bundled video-icon SVG; the drawings SVG shelf is fm-3kr."""
+    """Reference drawings.py VideoIcon over the user's own video_icon SVG (ADR-0020)."""
 
     file_name = "video_icon"
 
     def __init__(self, width=1.2, color=_BLUE_A, **kwargs):
-        raise NotImplementedError(
-            "VideoIcon requires bundled SVG 'video_icon'; "
-            "the drawings SVG shelf is fm-3kr"
-        )
+        _drawing_asset("VideoIcon", kwargs.get("file_name") or self.file_name)
+        super().__init__(color=color, **kwargs)
+        self.set_width(width)
 
 
 class VectorizedEarth(SVGMobject):
-    """Bundled earth SVG; the drawings SVG shelf is fm-3kr."""
+    """Reference drawings.py VectorizedEarth over the user's own earth SVG (ADR-0020)."""
 
     file_name = "earth"
 
     def __init__(self, height=2.0, **kwargs):
-        raise NotImplementedError(
-            "VectorizedEarth requires bundled SVG 'earth'; "
-            "the drawings SVG shelf is fm-3kr"
+        _drawing_asset("VectorizedEarth", kwargs.get("file_name") or self.file_name)
+        super().__init__(height=height, **kwargs)
+        self.insert_n_curves(20)
+        circle = Circle(
+            stroke_width=3,
+            stroke_color=_GREEN,
+            fill_opacity=1,
+            fill_color=_BLUE,  # BLUE_C
         )
+        circle.replace(self)
+        self.add_to_back(circle)
 
 
 class VideoSeries(VGroup):
-    """A row of VideoIcons; construction waits on the bundled video_icon SVG."""
+    """A row of VideoIcons over the user's own video_icon SVG (ADR-0020)."""
 
     def __init__(
         self,
