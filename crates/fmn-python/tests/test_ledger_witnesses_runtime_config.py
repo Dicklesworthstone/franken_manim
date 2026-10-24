@@ -346,6 +346,19 @@ class RuntimeConfigWitnesses(unittest.TestCase):
         self.assertIsNone(writer.use_fast_encoding())
         self.assertEqual((writer.video_codec, writer.pixel_format), ("libx264rgb", "rgb32"))
 
+    def test_scene_file_writer_finish_without_outputs_is_silent(self):
+        from manimlib import Scene
+        from manimlib.scene.scene_file_writer import SceneFileWriter
+
+        # scene_file_writer.py finish: with no movie and no final frame to write, it writes
+        # and opens nothing and returns None (measured on 6199a00d, fm-u9g2).
+        temp = tempfile.TemporaryDirectory(prefix="fmn-u9g2-writer-")
+        self.addCleanup(temp.cleanup)
+        writer = SceneFileWriter(Scene(), write_to_movie=False, save_last_frame=False,
+                                 output_directory=temp.name)
+        self.assertIsNone(writer.finish())
+        self.assertEqual(list(Path(temp.name).iterdir()), [])
+
     def test_get_raster_image_dir(self):
         self._check_configured_getter("get_raster_image_dir", "raster_images")
 

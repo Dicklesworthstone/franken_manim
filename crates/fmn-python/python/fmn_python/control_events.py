@@ -344,7 +344,7 @@ def _typed_textbox_constructor(g):
 def _install_transitions(g, *, typed_checkbox=False):
     Checkbox = g.get("Checkbox")
     if Checkbox is not None:
-        def place_factory(original):
+        def place_factory(name, original):
             @wraps(original)
             def mark(self):
                 result = original(self)
@@ -360,6 +360,9 @@ def _install_transitions(g, *, typed_checkbox=False):
                     else:
                         result.unfix_from_frame()
                 return result
+            # One code object per member, named for it: tracebacks and the witness registry
+            # (which matches members by code) can then tell get_checkmark from get_cross.
+            mark.__code__ = mark.__code__.replace(co_name=name, co_qualname="Checkbox." + name)
             return mark
         if typed_checkbox:
             # Same two-Line compositions as the Reference interactive.py,
@@ -384,7 +387,7 @@ def _install_transitions(g, *, typed_checkbox=False):
             factories = tuple((name, getattr(Checkbox, name))
                               for name in ("get_checkmark", "get_cross"))
         for name, factory in factories:
-            _method(Checkbox, name, place_factory(factory))
+            _method(Checkbox, name, place_factory(name, factory))
 
     Toggle = g.get("EnableDisableButton")
     if Toggle is not None:

@@ -268,6 +268,29 @@ class MobjectSceneWitnesses(unittest.TestCase):
         self.assertAlmostEqual(narrow.get_height(), 4.0, places=6)
         np.testing.assert_allclose(narrow.get_left(), left, atol=1e-6)
 
+    def test_add_cubic_bezier_curve_to(self):
+        from manimlib import VMobject
+
+        # vectorized_mobject.py add_cubic_bezier_curve_to: extends the open path from its last
+        # point and returns self; with no points it refuses. Improved (fm-u9g2): the portal
+        # also takes plain sequences, where the Reference's array arithmetic raises TypeError,
+        # and approximates the cubic within Chisel's tolerance rather than with two fixed halves.
+        path = VMobject().start_new_path(np.array([0.0, 0.0, 0.0]))
+        self.assertIs(path.add_cubic_bezier_curve_to(
+            np.array([1.0, 0.0, 0.0]), np.array([1.0, 1.0, 0.0]), np.array([0.0, 1.0, 0.0])), path)
+        points = path.get_points()
+        np.testing.assert_allclose(points[0], [0.0, 0.0, 0.0], atol=1e-6)
+        np.testing.assert_allclose(points[-1], [0.0, 1.0, 0.0], atol=1e-6)
+        self.assertGreaterEqual(path.get_num_curves(), 2)
+        self.assertTrue(np.all(np.isfinite(points)))
+        # The curve's midpoint is the cubic's, B(0.5) = (0.75, 0.5).
+        np.testing.assert_allclose(path.point_from_proportion(0.5)[:2], [0.75, 0.5], atol=0.05)
+        tuples = VMobject().start_new_path((0.0, 0.0, 0.0))
+        tuples.add_cubic_bezier_curve_to((1.0, 0.0, 0.0), (1.0, 1.0, 0.0), (0.0, 1.0, 0.0))
+        np.testing.assert_allclose(tuples.get_points(), points, atol=1e-6)
+        with self.assertRaises(ValueError):
+            VMobject().add_cubic_bezier_curve_to((1, 0, 0), (1, 1, 0), (0, 1, 0))
+
     # Reference vectorized_mobject.py:363: one upper-case long hex per point of stroke_rgba.
     def test_get_stroke_colors(self):
         from manimlib import BLUE, LEFT, RED, RIGHT, Line, Square

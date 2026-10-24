@@ -77,6 +77,17 @@ SYNTHETIC = textwrap.dedent('''
             raise ValueError("negative side")
         return side * side
 
+    import abc
+
+    class Template(abc.ABC):
+        @abc.abstractmethod
+        def width(self):
+            ...
+
+    class Sealed:
+        def __init__(self):
+            raise NotImplementedError("sealed")
+
     def delayed_area(side):
         yield side
         if side < 0:
@@ -483,6 +494,34 @@ class Harness(unittest.TestCase):
                 "its 1 passing witnesses only exercise refusals"])
             failed = [dict(records[0], passed=False)]
             self.assertEqual(pw.registry(rows, probes, failed)[0]["refusal_only"], 0)
+
+    def test_an_abstract_class_refusal_is_its_semantics_but_a_concrete_one_is_not(self):
+        # An abstract class refuses construction in the Reference too (CoordinateSystem,
+        # ShowPartial, StringMobject), so that refusal is no overclaim. A concrete class
+        # whose constructor refuses still fails the check.
+        rows = [row("Template", "class"), row("Sealed", "class")]
+        probes = pw.Probes(rows)
+        recorder = pw.Recorder(probes, __file__, render_rows=set())
+
+        def test_refusals(mod=self.mod):
+            for cls in (mod.Template, mod.Sealed):
+                try:
+                    cls()
+                except (TypeError, NotImplementedError):
+                    pass
+
+        with recorder:
+            test_refusals()
+        records = [{"suite": "planted", "test": "test_refusals", "passed": True,
+                    "rows": sorted(recorder.successes["test_refusals"]),
+                    "refusals": sorted(recorder.refusals["test_refusals"]),
+                    "renders": False}]
+        table = pw.registry(rows, probes, records)
+        self.assertEqual([(r["symbol"], r["semantic"], r["refusal_only"], r["abstract"])
+                          for r in table], [("Template", 0, 1, True), ("Sealed", 0, 1, False)])
+        self.assertEqual(pw.registry_problems(table, records, {}), [
+            "fmn_witness_synthetic.Sealed: same in the ledger, but "
+            "its 1 passing witnesses only exercise refusals"])
 
     def test_success_and_refusal_in_one_test_still_earn_a_successful_witness(self):
         rows = [row("maybe_area", "function")]
