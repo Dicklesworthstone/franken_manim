@@ -1,5 +1,6 @@
 """Malformed transport checks; these do not stand in for native pixel tests."""
 from copy import deepcopy
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -135,11 +136,38 @@ class ParallelOutputReceiptTests(unittest.TestCase):
                             {"subdivide": True, "format": "png"},
                             {"subdivide": True, "format": "gif", "max_segments": 0},
                             {"subdivide": True, "format": "gif", "resolution": (100000, 100000)},
-                            {"subdivide": True, "format": "gif", "checkpoint": self.root / "p.json",
-                             "resume_key": "x"}, {"save_last_frame": True, "format": "svg"}):
+                            {"save_last_frame": True, "format": "svg"}):
                 with self.subTest(options=options), self.assertRaises((TypeError, ValueError)):
                     render_source_scenes(source, self.root / "out", ["First"], **options)
             workers.assert_not_called()
+        self.assertFalse((self.root / "out").exists())
+
+    def test_subdivided_collection_recovery_is_admitted_without_running_the_source(self):
+        # 305adc54: a completion journal recovers whole subdivided collections. Admission
+        # plans one worker job; the parent alone writes the journal and the source never runs.
+        source = self.root / "scene.py"
+        source.write_text("raise AssertionError('must not run')\n")
+        native = types.SimpleNamespace(
+            _CameraCapture=types.SimpleNamespace(prepare_png=lambda: None),
+            _portal_prepare_recording_scene=lambda: None,
+            _portal_begin_audio_clip=lambda: None,
+        )
+
+        class Admitted(Exception):
+            pass
+
+        journal = self.root / "p.json"
+        with (patch("fmn_python.parallel_batch.run_process_jobs", side_effect=Admitted) as workers,
+              patch.dict(sys.modules, {"manimlib": native}), self.assertRaises(Admitted)):
+            render_source_scenes(source, self.root / "out", ["First"], subdivide=True, format="gif",
+                                 checkpoint=journal, resume_key="x")
+        (job,) = workers.call_args.args[0]
+        self.assertEqual(job["name"], "First")
+        self.assertIs(job["options"]["subdivide"], True)
+        self.assertEqual(job["options"]["format"], "gif")
+        self.assertNotIn(str(journal), repr(job))
+        outcomes = json.loads(journal.read_text(encoding="utf-8"))["outcomes"]  # ubs:ignore -- a malformed journal must fail this test
+        self.assertEqual([(row["name"], row["status"]) for row in outcomes], [("First", "not_run")])
         self.assertFalse((self.root / "out").exists())
 
 

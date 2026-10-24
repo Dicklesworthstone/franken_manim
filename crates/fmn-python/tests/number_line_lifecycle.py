@@ -183,9 +183,21 @@ class NumberLineLifecycleTests(unittest.TestCase):
         self.assertEqual(first,render(root/'expected',False,1))
         self.assertEqual(len(first),2);self.assertNotEqual(first[0],first[1])
 
+    def _play_reading_roots(self, start, animation):
+        # Read the roots every frame, as the CLI's public-update check does mid-play.
+        scene = m.Scene()
+        observer = m.Mobject()
+        observer.add_updater(lambda mob, dt: list(scene.mobjects), call=False)
+        scene.add(start, observer)
+        scene.play(animation, run_time=1 / 15)
+        scene.remove(observer)
+        mobjects = list(scene.mobjects)
+        return mobjects, [member for root in mobjects for member in root.get_family()]
+
     def test_numbered_lines_of_different_counts_transform_with_the_reference_structure(self):
-        # fm-yynk: the engine pads a padded number's glyphs from a sibling pad, so one batch can
-        # hold a pair whose source is an earlier pair's still-uninstalled pad. Roots and
+        # fm-yynk's crash forms. Since 0caf2269 a Transform whose alignment inserts members into
+        # a family with point-free members runs the host lifecycle, so these no longer reach the
+        # engine's padding; the native case below keeps that path covered. Roots and
         # DecimalNumber/NumberLine counts measured on the pinned Reference (6199a00d).
         def numbered(end, width, axes):
             if axes:
@@ -195,8 +207,6 @@ class NumberLineLifecycleTests(unittest.TestCase):
                 obj = m.NumberLine((0, end), width=width)
                 obj.add_numbers(font_size=24, excluding=[0])
             return obj
-        native = vars(sys.modules["manimlib.manimlib"])
-        adopt = native["_adopt_padding_ghosts"]
         cases = (
             ("Transform", m.Transform, False, ["CameraFrame", "NumberLine"], 11, 1),
             ("TransformFromCopy", m.TransformFromCopy, False, ["CameraFrame", "NumberLine", "NumberLine"], 17, 2),
@@ -204,6 +214,38 @@ class NumberLineLifecycleTests(unittest.TestCase):
         )
         for name, animation, axes, roots, decimals, lines in cases:
             with self.subTest(case=name):
+                small, wide = numbered(6, 5, axes), numbered(11, 10, axes)
+                mobjects, family = self._play_reading_roots(small, animation(small, wide))
+                self.assertEqual([type(root).__name__ for root in mobjects], roots)
+                self.assertEqual(sum(type(member).__name__ == "DecimalNumber" for member in family), decimals)
+                self.assertEqual(sum(type(member).__name__ == "NumberLine" for member in family), lines)
+
+    def test_native_pads_sourced_from_other_pads_keep_the_reference_structure(self):
+        # fm-yynk: padding a nested family pads a pad's children from that pad's own (padded)
+        # children, so one _adopt_padding_ghosts batch holds a pair whose source is an earlier
+        # pair's still-uninstalled pad. Every member has points, so the play stays native.
+        # Without the fix each case raises "'Dot' object has no attribute 'submobjects'".
+        # Roots and counts measured on the pinned Reference (6199a00d) with this construction.
+        def nest(children, dots, shift=0):
+            root = m.Square(side_length=4).shift(shift * m.RIGHT)
+            for i in range(children):
+                circle = m.Circle(radius=0.5).shift((i - 1 + shift) * m.RIGHT)
+                for j in range(dots):
+                    circle.add(m.Dot(circle.get_center() + 0.2 * j * m.UP))
+                root.add(circle)
+            return root
+        native = vars(sys.modules["manimlib.manimlib"])
+        adopt = native["_adopt_padding_ghosts"]
+        cases = (
+            ("Transform", m.Transform, ["CameraFrame", "Square"], (1, 3, 6)),
+            ("TransformFromCopy", m.TransformFromCopy, ["CameraFrame", "Square", "Square"], (2, 4, 7)),
+            ("ReplacementTransform", m.ReplacementTransform, ["CameraFrame", "Square"], (1, 3, 6)),
+        )
+        for name, animation, roots, counts in cases:
+            with self.subTest(case=name):
+                small, wide = nest(1, 1), nest(3, 2, 1)
+                play = animation(small, wide)
+                self.assertFalse(native["_requires_python_animation"](play), "left the native route")
                 chained = []
                 def recording(pairs, adopt=adopt):
                     pads = {id(new) for _, new in pairs}
@@ -211,22 +253,13 @@ class NumberLineLifecycleTests(unittest.TestCase):
                     return adopt(pairs)
                 native["_adopt_padding_ghosts"] = recording
                 try:
-                    scene = m.Scene()
-                    small, wide = numbered(6, 5, axes), numbered(11, 10, axes)
-                    # Read the roots every frame, as the CLI's public-update check does mid-play.
-                    observer = m.Mobject()
-                    observer.add_updater(lambda mob, dt: list(scene.mobjects), call=False)
-                    scene.add(small, observer)
-                    scene.play(animation(small, wide), run_time=1 / 15)
-                    scene.remove(observer)
-                    mobjects = list(scene.mobjects)
+                    mobjects, family = self._play_reading_roots(small, play)
                 finally:
                     native["_adopt_padding_ghosts"] = adopt
                 self.assertTrue(any(chained), "no batch held a pad sourced from another pad")
-                family = [member for root in mobjects for member in root.get_family()]
                 self.assertEqual([type(root).__name__ for root in mobjects], roots)
-                self.assertEqual(sum(type(member).__name__ == "DecimalNumber" for member in family), decimals)
-                self.assertEqual(sum(type(member).__name__ == "NumberLine" for member in family), lines)
+                self.assertEqual(tuple(sum(type(member).__name__ == kind for member in family)
+                                       for kind in ("Square", "Circle", "Dot")), counts)
 
 
 if __name__=='__main__':unittest.main()

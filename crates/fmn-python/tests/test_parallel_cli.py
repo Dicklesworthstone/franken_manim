@@ -146,7 +146,7 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
         tree = ast.parse((PYTHON / "fmn_python/console_rendering.py").read_text())
         tree.body = [node for node in tree.body if isinstance(node, ast.FunctionDef)
                      and node.name in {"_tokens", "_message", "try_render_cli"}]
-        exec(compile(tree, "console_rendering.py", "exec"), self.g)
+        exec(compile(tree, "console_rendering.py", "exec"), self.g)  # ubs:ignore -- three functions parsed from this repository's console_rendering.py; no external input
         self.parallel = types.ModuleType("fmn_python.parallel_batch")
         self.parallel.render_source_scenes = render("parallel")
         discovery = types.ModuleType("fmn_python.parallel_discovery")
@@ -275,7 +275,9 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
         self.assertEqual(options["scene_names"], ["Second", "First"])
         self.assertFalse(self.loads)
 
-    def test_parallel_pair_recovery_is_supported_but_clip_recovery_refuses_before_discovery(self):
+    def test_parallel_pair_and_subdivided_collection_recovery_are_admitted(self):
+        # 305adc54: --workers --subdivide --checkpoint is the shipping whole-collection recovery,
+        # final PNGs included. Only the sequential form still refuses, before discovery.
         flags = ("--write_all", "--workers=2", "--format", "gif", "--save-last-frame",
                  "--checkpoint", str(self.root / "pair.json"), "--resume-key", "inputs", "--resume")
         self.assertEqual(self.run_cli(*flags), 0)
@@ -283,7 +285,14 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
         self.assertIs(self.calls[0][2]["resume"], True)
         self.calls.clear()
         self.discovery_calls.clear()
-        self.assertEqual(self.run_cli(*flags, "--subdivide"), 2)
+        self.assertEqual(self.run_cli(*flags, "--subdivide"), 0)
+        job = self.calls[0][2]
+        self.assertEqual((job["subdivide"], job["save_last_frame"], job["resume"]), (True, True, True))
+        self.assertEqual(Path(job["checkpoint"]), self.root / "pair.json")
+        self.calls.clear()
+        self.discovery_calls.clear()
+        sequential = [flag for flag in flags if flag != "--workers=2"]
+        self.assertEqual(self.run_cli(*sequential, "--subdivide"), 2)
         self.assertFalse(self.calls)
         self.assertFalse(self.discovery_calls)
 
