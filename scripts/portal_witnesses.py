@@ -34,8 +34,9 @@ which `unittest discover` happens to guarantee because its native tests skip. Su
 also depend on discover's import order. So a suite that fails traced is checked the way the
 gate runs it, untraced and without the portal import. A script or loop suite is rerun alone.
 The discovery suites are checked against one plain `unittest discover` of the whole
-directory, per module. Only failures that reproduce there are the suite's. The rest are
-reported as harness-only, and those tests witness nothing (fm-6l60).
+directory, per module. A traced failure is harness-only only when that identity explicitly
+passes there. Missing, skipped or incomplete reruns cannot clear failures, and plain runs
+never grant witnesses (fm-6l60).
 
 Mutation controls: `check --mutants N` replaces the implementation of N deterministically sampled
 witnessed members (Python implementations; a native one cannot be patched) with a trivial body
@@ -554,7 +555,7 @@ def trace_suite(name: str, mode: str, mutation: str | None, plain: bool = False)
     # statements that invoked a ledger symbol.
     cases = len(passed | failed) if unittest_suite else len(recorder.hits)
     records.append({"suite": name, "summary": True, "unittest": unittest_suite, "cases": cases,
-                    "failed": sorted(failed), "error": error,
+                    "complete": True, "passed_tests": sorted(passed), "failed": sorted(failed), "error": error,
                     "mutant_applied": MUTANT_CALLS["applied"]})
     return records
 
@@ -649,11 +650,15 @@ def failing_discovered(records: list[dict], discovered: set[str]) -> list[dict]:
 
 
 def reconcile_discovered(records: list[dict], discovered: set[str],
-                         verdict: dict[str, dict]) -> list[dict]:
-    """Each failing discovery suite's summary, reconciled with the plain discover verdict for
-    its module (a module absent from the verdict had no failures there)."""
+                         verdict: dict) -> list[dict]:
+    """Reconcile only modules actually observed by a completed plain discovery run."""
     failing_ids = {id(record) for record in failing_discovered(records, discovered)}
-    return [reconcile(record, verdict.get(record["suite"], {"failed": [], "error": None}))
+    modules = verdict.get("discover", {}) if verdict.get("complete") is True else {}
+    if not isinstance(modules, dict):
+        modules = {}
+    missing = {"complete": False, "error": verdict.get("error")
+               or "plain discovery did not verify this module"}
+    return [reconcile(record, modules.get(record["suite"], missing))
             if id(record) in failing_ids else record for record in records]
 
 
@@ -666,19 +671,22 @@ def plain_summary(name: str, mode: str) -> dict:
     except subprocess.TimeoutExpired:
         return {"suite": name, "summary": True, "cases": 0, "failed": [],
                 "error": f"timeout after {SUITE_TIMEOUT_S} s"}
+    if done.returncode:
+        return {"complete": False, "error": f"plain exit {done.returncode}: {done.stderr.strip()[-200:]}"}
     for line in reversed(done.stdout.splitlines()):
         if line.startswith('{"suite"'):
             try:
                 record = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if record.get("summary"):
+            if (isinstance(record, dict) and record.get("summary") is True
+                    and record.get("suite") == name and record.get("complete") is True):
                 return record
     return {"suite": name, "summary": True, "cases": 0, "failed": [],
             "error": f"exit {done.returncode}: {done.stderr.strip()[-200:]}"}
 
 
-def plain_discover() -> dict[str, dict]:
+def plain_discover() -> dict:
     """The gate's own `unittest discover` of the tests directory, untraced and without the
     portal pre-imported: per module, the failed test identities, or the import error."""
     command = [sys.executable, __file__, "discover-plain"]
@@ -686,23 +694,43 @@ def plain_discover() -> dict[str, dict]:
         done = subprocess.run(command, capture_output=True, text=True, cwd=ROOT, check=False,
                               timeout=SUITE_TIMEOUT_S * 4)
     except subprocess.TimeoutExpired:
-        return {}
+        return {"complete": False, "error": f"plain discovery timeout after {SUITE_TIMEOUT_S * 4} s"}
+    if done.returncode:
+        return {"complete": False, "error": f"plain discovery exit {done.returncode}"}
     for line in reversed(done.stdout.splitlines()):
         if line.startswith('{"discover"'):
             try:
-                return json.loads(line)["discover"]
-            except (json.JSONDecodeError, KeyError):
+                record = json.loads(line)
+                if (record.get("complete") is True and record.get("error") is None
+                        and isinstance(record.get("discover"), dict)):
+                    return record
+            except (json.JSONDecodeError, AttributeError):
                 break
-    return {}
+    return {"complete": False, "error": "plain discovery missing completion record"}
 
 
-def discover_plain() -> dict[str, dict]:
+def discover_plain() -> dict:
     """Run `python -m unittest discover -s TESTS -p 'test_*.py'` in this process (a fresh one)
     and record per module what failed, by the identities trace_suite uses."""
     class Collect(unittest.TextTestResult):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
-            self.by_module = collections.defaultdict(lambda: {"failed": set(), "error": None})
+            self.by_module = collections.defaultdict(
+                lambda: {"passed": set(), "failed": set(), "error": None})
+
+        def _entry(self, test):
+            module = type(test).__module__
+            if module == "unittest.loader":
+                module = test._testMethodName
+            return self.by_module[module]
+
+        def startTest(self, test):
+            super().startTest(test)
+            self._entry(test)  # A skipped-only module is observed but has zero passing cases.
+
+        def addSuccess(self, test):
+            super().addSuccess(test)
+            self._entry(test)["passed"].add(_Result._identity(test))
 
         def _note(self, test):
             if isinstance(test, unittest.case._SubTest):
@@ -721,6 +749,10 @@ def discover_plain() -> dict[str, dict]:
             super().addError(test, err)
             self._note(test)
 
+        def addUnexpectedSuccess(self, test):
+            super().addUnexpectedSuccess(test)
+            self._note(test)
+
         def addSubTest(self, test, subtest, err):
             super().addSubTest(test, subtest, err)
             if err is not None:
@@ -730,19 +762,36 @@ def discover_plain() -> dict[str, dict]:
     tests = unittest.defaultTestLoader.discover(str(TESTS), pattern="test_*.py")
     with open(os.devnull, "w", encoding="utf-8") as sink:
         result = unittest.TextTestRunner(stream=sink, resultclass=Collect).run(tests)
-    return {module: {"failed": sorted(entry["failed"]), "error": entry["error"]}
-            for module, entry in result.by_module.items()}
+    return {"discover": {
+        module: {"complete": True, "cases": len(entry["passed"] | entry["failed"]),
+                 "passed_tests": sorted(entry["passed"]), "failed": sorted(entry["failed"]),
+                 "error": entry["error"]}
+        for module, entry in result.by_module.items()}, "complete": True}
 
 
 def reconcile(traced: dict, plain: dict) -> dict:
-    """A traced summary corrected by the gate-faithful plain rerun: the suite's failures and
-    error are the plain run's; what failed only traced is kept as harness_only. The traced
-    values stay as traced_failed and traced_error, the baseline mutants compare against."""
+    """Clear only positively verified harness failures, retaining the original mutant baseline."""
     summary = dict(traced)
     summary["traced_failed"], summary["traced_error"] = traced["failed"], traced["error"]
-    summary["failed"], summary["error"] = sorted(plain["failed"]), plain["error"]
-    summary["harness_only"] = sorted(set(traced["failed"]) - set(plain["failed"]))
-    if traced["error"] and not plain["error"]:
+    if not isinstance(plain, dict):
+        plain = {}
+    passed, failed = plain.get("passed_tests"), plain.get("failed")
+    valid = (plain.get("complete") is True and isinstance(passed, list) and isinstance(failed, list)
+             and all(isinstance(identity, str) for identity in passed + failed)
+             and not set(passed) & set(failed) and type(plain.get("cases")) is int
+             and plain["cases"] == len(set(passed) | set(failed))
+             and "error" in plain and (plain["error"] is None or isinstance(plain["error"], str)))
+    if not valid:
+        summary["error"] = plain.get("error") or "plain verification incomplete or malformed"
+        return summary
+    summary["failed"] = sorted(set(failed) | (set(traced["failed"]) - set(passed)))
+    summary["harness_only"] = sorted(set(traced["failed"]) & set(passed))
+    # An empty or skipped-only unittest run cannot disprove a suite-level failure. A script
+    # has no unittest identities; its successful normal completion is its plain verdict.
+    verified = plain["cases"] > 0 or (traced.get("unittest") is False
+                                      and plain.get("unittest") is False)
+    summary["error"] = plain["error"] or (None if verified else traced["error"])
+    if traced["error"] and not summary["error"]:
         summary["harness_error"] = traced["error"]
     return summary
 
@@ -913,7 +962,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "discover-plain":
-        print(json.dumps({"discover": discover_plain()}))
+        print(json.dumps(discover_plain()))
         return 0
 
     if args.command == "trace":

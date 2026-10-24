@@ -1,7 +1,9 @@
 """Unit tests for scripts/portal_witnesses.py (fm-5wq.12), on synthetic modules."""
 import pathlib
 import gc
+import json
 import runpy
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -202,7 +204,9 @@ class Harness(unittest.TestCase):
             {"suite": "loop_suite", "summary": True, "unittest": False, "cases": 1,
              "failed": [], "error": "ValueError: x"},
         ]
-        verdict = {"test_alone": {"failed": ["A.broken"], "error": None}}
+        verdict = {"complete": True, "discover": {"test_alone": {
+            "complete": True, "cases": 2, "passed_tests": ["A.order_dependent"],
+            "failed": ["A.broken"], "error": None}}}
         merged = pw.reconcile_discovered(traced, {"test_alone", "test_clean"}, verdict)
         self.assertEqual((merged[0]["failed"], merged[0]["harness_only"]),
                          (["A.broken"], ["A.order_dependent"]))
@@ -214,16 +218,124 @@ class Harness(unittest.TestCase):
     def test_reconcile_keeps_the_gates_failures(self):
         traced = {"suite": "s", "summary": True, "unittest": True, "cases": 3,
                   "failed": ["C.a", "C.b"], "error": None}
-        both = pw.reconcile(traced, {"failed": ["C.b"], "error": None})
+        plain = {"complete": True, "cases": 2, "passed_tests": ["C.a"], "failed": ["C.b"],
+                 "error": None}
+        both = pw.reconcile(traced, plain)
         self.assertEqual((both["failed"], both["harness_only"]), (["C.b"], ["C.a"]))
         self.assertEqual(pw.registry_problems([], [both], {}), ["s: 1 test identities failed"])
         raised = dict(traced, failed=[], error="RuntimeIdentityError: wheel")
-        clean = pw.reconcile(raised, {"failed": [], "error": None})
+        clean = pw.reconcile(raised, dict(plain, cases=1, failed=[]))
         self.assertEqual((clean["error"], clean["harness_error"]),
                          (None, "RuntimeIdentityError: wheel"))
         self.assertEqual(pw.registry_problems([], [clean], {}), [])
-        still = pw.reconcile(raised, {"failed": [], "error": "ValueError: real"})
+        still = pw.reconcile(raised, dict(plain, cases=1, failed=[], error="ValueError: real"))
         self.assertEqual(pw.registry_problems([], [still], {}), ["s: suite failed: ValueError: real"])
+
+    def test_missing_discovery_module_cannot_clear_a_traced_failure(self):
+        traced = {"suite": "test_missing", "summary": True, "unittest": True, "cases": 1,
+                  "failed": ["C.real_failure"], "error": None}
+        merged = pw.reconcile_discovered([traced], {"test_missing"}, {})[0]
+        self.assertEqual(merged["failed"], traced["failed"])
+        self.assertTrue(pw.registry_problems([], [merged], {}))
+
+    def test_only_explicit_plain_success_can_clear_a_failed_identity(self):
+        traced = {"suite": "s", "summary": True, "unittest": True, "cases": 2,
+                  "failed": ["C.passed", "C.skipped_or_missing"], "error": None}
+        plain = {"complete": True, "cases": 1, "passed_tests": ["C.passed"],
+                 "failed": [], "error": None}
+        merged = pw.reconcile(traced, plain)
+        self.assertEqual(merged["failed"], ["C.skipped_or_missing"])
+        self.assertEqual(merged["harness_only"], ["C.passed"])
+        for bad in ({"complete": True, "cases": 0, "passed_tests": [], "failed": [], "error": None},
+                    {"complete": False, "cases": 1, "passed_tests": traced["failed"],
+                     "failed": [], "error": None}):
+            with self.subTest(plain=bad):
+                self.assertEqual(pw.reconcile(traced, bad)["failed"], traced["failed"])
+
+    def test_plain_subprocess_failure_cannot_erase_traced_red(self):
+        traced = {"suite": "s", "summary": True, "unittest": True, "cases": 1,
+                  "failed": ["C.real_failure"], "error": None}
+        good = {"suite": "s", "summary": True, "complete": True, "cases": 1,
+                "passed_tests": ["C.real_failure"], "failed": [], "error": None}
+        outputs = [(0, ""), (0, '{"discover":bad'), (7, json.dumps({"discover": {"s": good}})),
+                   (0, json.dumps({"discover": {"s": good}}))]
+        for code, output in outputs:
+            with self.subTest(code=code, output=output), mock.patch.object(
+                    pw.subprocess, "run", return_value=subprocess.CompletedProcess([], code, output, "")):
+                verdict = pw.plain_discover()
+                merged = pw.reconcile_discovered([traced], {"s"}, verdict)[0]
+                self.assertEqual(merged["failed"], traced["failed"])
+        with mock.patch.object(pw.subprocess, "run", side_effect=subprocess.TimeoutExpired([], 1)):
+            merged = pw.reconcile_discovered([traced], {"s"}, pw.plain_discover())[0]
+            self.assertEqual(merged["failed"], traced["failed"])
+        for code, output in ((0, ""), (7, json.dumps(good))):
+            with self.subTest(code=code), mock.patch.object(
+                    pw.subprocess, "run", return_value=subprocess.CompletedProcess([], code, output, "")):
+                self.assertEqual(pw.reconcile(traced, pw.plain_summary("s", "main"))["failed"],
+                                 traced["failed"])
+
+    def test_completed_plain_subprocess_reports_can_clear_only_observed_passes(self):
+        traced = {"suite": "s", "summary": True, "unittest": True, "cases": 1,
+                  "failed": ["C.a"], "error": None}
+        good = {"suite": "s", "summary": True, "complete": True, "cases": 1,
+                "passed_tests": ["C.a"], "failed": [], "error": None}
+        for report in (good, {"discover": {"s": good}, "complete": True}):
+            with self.subTest(report=report), mock.patch.object(
+                    pw.subprocess, "run", return_value=subprocess.CompletedProcess(
+                        [], 0, json.dumps(report) + "\n", "")):
+                if "discover" in report:
+                    merged = pw.reconcile_discovered([traced], {"s"}, pw.plain_discover())[0]
+                else:
+                    merged = pw.reconcile(traced, pw.plain_summary("s", "main"))
+                self.assertEqual(merged["failed"], [])
+                self.assertEqual(merged["harness_only"], ["C.a"])
+                self.assertEqual(merged["traced_failed"], ["C.a"])
+
+    def test_plain_discovery_records_real_success_skip_subtest_and_import_outcomes(self):
+        root = pathlib.Path(self.tmp.name) / "discovery_outcomes"
+        root.mkdir()
+        (root / "test_plain_outcomes.py").write_text(textwrap.dedent('''
+            import unittest
+            class Outcomes(unittest.TestCase):
+                def test_pass(self): pass
+                def test_fail(self): self.fail("real")
+                @unittest.skip("unavailable")
+                def test_skip(self): pass
+                @unittest.expectedFailure
+                def test_unexpected_success(self): pass
+                def test_subtest(self):
+                    with self.subTest(part=1): self.fail("subtest")
+        '''))
+        (root / "test_plain_import_error.py").write_text('raise RuntimeError("import failed")\n')
+        original_path = list(sys.path)
+        try:
+            with (mock.patch.object(pw, "TESTS", root),
+                  mock.patch.object(unittest.defaultTestLoader, "_top_level_dir", None)):
+                report = pw.discover_plain()
+        finally:
+            sys.path[:] = original_path
+            sys.modules.pop("test_plain_outcomes", None)
+        self.assertIs(report["complete"], True)
+        verdict = report["discover"]["test_plain_outcomes"]
+        self.assertEqual(verdict["cases"], 4)
+        self.assertEqual(verdict["passed_tests"], ["Outcomes.test_pass"])
+        self.assertEqual(verdict["failed"], ["Outcomes.test_fail", "Outcomes.test_subtest",
+                                           "Outcomes.test_unexpected_success"])
+        self.assertEqual(report["discover"]["test_plain_import_error"]["error"], "import failed")
+        traced = {"suite": "test_plain_outcomes", "summary": True, "unittest": True,
+                  "cases": 2, "failed": ["Outcomes.test_pass", "Outcomes.test_skip"], "error": None}
+        merged = pw.reconcile_discovered([traced], {traced["suite"]}, report)[0]
+        self.assertIn("Outcomes.test_skip", merged["failed"])
+        self.assertEqual(merged["harness_only"], ["Outcomes.test_pass"])
+
+    def test_empty_plain_run_cannot_clear_an_import_error(self):
+        traced = {"suite": "s", "summary": True, "unittest": True, "cases": 0,
+                  "failed": [], "error": "RuntimeError: import"}
+        empty = {"complete": True, "cases": 0, "passed_tests": [], "failed": [], "error": None}
+        self.assertEqual(pw.reconcile(traced, empty)["error"], traced["error"])
+        script = dict(traced, unittest=False)
+        complete_script = dict(empty, unittest=False)
+        self.assertIsNone(pw.reconcile(script, complete_script)["error"])
 
     def test_explicit_text_runner_executes_once_while_its_pickle_module_is_live(self):
         records, calls, restored = self.trace_runner_fixture("text_runner", textwrap.dedent('''
