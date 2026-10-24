@@ -248,17 +248,33 @@ standalone Rust subcommand tree (`fmn render|batch|doctor|studio`), its console
 front door exposes a bounded set of portal-specific extension flags governed by
 this Behavior Note and enforced by `crates/fmn-conformance/tests/api_schema.rs`:
 
-- **Process-isolated parallel scene batches (`--workers`, `--job-timeout`).**
+- **Process-isolated parallel scene batches (`--workers`, `--job-timeout`, `--batch-timeout`).**
   `--workers 1..64` spawns one fresh CPython worker subprocess per selected
   scene (paired with `--write_all` or multiple scene names), corresponding to
   standalone `fmn batch --max-scenes`. `--job-timeout SECONDS` bounds each
   worker's wall-clock lifetime (corresponding to `fmn batch --budget-ms`).
+  `--batch-timeout SECONDS` (requires `--workers`; composes with
+  `--job-timeout`) is one shared wall-clock budget for the whole invocation:
+  discovery, planning and every scene worker. On expiry the invocation stops
+  admitting jobs, reaps active workers, keeps published outputs, journals
+  partial progress, and exits 6 with `batch-deadline-exceeded`. That is not
+  the user-interrupt 130, and unlike per-job timeouts it is not softened by
+  `--keep-going`. The budget is stored neither in checkpoints nor in certified
+  scene identities.
   Without `--threads`, each worker defaults to `--threads 1` so total CPU
   oversubscription stays bounded.
 - **Durable batch checkpointing and recovery (`--checkpoint`, `--resume-key`, `--resume`).**
   `--checkpoint PATH` and `--resume-key INPUTS` record per-scene artifact digests
   and provenance; adding `--resume` verifies existing completed artifacts and
   skips re-executing their scenes (see [parallel batch recovery](../PARALLEL_BATCH_RECOVERY.md)).
+  `--clip-checkpoint-dir DIRECTORY` (requires `--workers`, `--subdivide` and
+  `--resume-key`) recovers inside unfinished scenes. Each job keeps a per-clip
+  journal there. A `--resume` retry verifies the saved clips and replays
+  commands to rebuild state, without rasterizing or encoding the saved prefix.
+  Python side effects therefore repeat. Together with `--checkpoint` it gives
+  two-level recovery: verified completed scenes are skipped whole, and only
+  unfinished scenes replay their prefix. Neither certification nor FMTL
+  combines with it, and missing journals never authorize existing outputs.
 - **Ordered batch continuation (`--keep-going`).** Continues a multi-scene
   portal batch after ordinary scene failures (the inverse of standalone
   `fmn batch --fail-fast`).

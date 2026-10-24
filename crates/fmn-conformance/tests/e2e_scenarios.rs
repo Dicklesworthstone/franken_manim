@@ -5848,6 +5848,12 @@ fn zero_radius_dot_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenari
         options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
         options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
         options.typeset_cache = false;
+        // DotCloud content renders only on the camera route (RenderOptions::camera).
+        options.camera = Some(
+            options
+                .camera_config()
+                .map_err(|error| fail(format!("zero-radius dot camera: {error}")))?,
+        );
         let report = fmn::render_with_fs(&mut Dots { remove_at_zero }, options, fs.clone())
             .map_err(|error| fail(format!("zero-radius dot render: {error}")))?;
         if report.artifact.frame_count != 3 {
@@ -5940,6 +5946,12 @@ fn dot_cloud_affine_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenar
         options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
         options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
         options.typeset_cache = false;
+        // DotCloud content renders only on the camera route (RenderOptions::camera).
+        options.camera = Some(
+            options
+                .camera_config()
+                .map_err(|error| fail(format!("affine dot camera: {error}")))?,
+        );
         let report = fmn::render_with_fs(&mut Dots { explicit }, options, fs.clone())
             .map_err(|error| fail(format!("affine dot render: {error}")))?;
         if report.artifact.frame_count != 5 {
