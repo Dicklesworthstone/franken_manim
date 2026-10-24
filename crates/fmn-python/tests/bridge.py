@@ -21052,7 +21052,7 @@ assert np.allclose(space_utils.rotate_vector_2d([1.0, 0.0], np.pi / 2), [0.0, 1.
 import functools as _bridge_functools
 import operator as _bridge_operator
 _star_namespace = {}
-exec("from manimlib import *", _star_namespace)
+exec("from manimlib import *", _star_namespace)  # ubs:ignore -- fixed wildcard-import conformance statement; no external input reaches exec.
 assert space_utils.op is _bridge_operator and _star_namespace["op"] is _bridge_operator
 assert space_utils.reduce is _bridge_functools.reduce
 assert _star_namespace["reduce"] is _bridge_functools.reduce
