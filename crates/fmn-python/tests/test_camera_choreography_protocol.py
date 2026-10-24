@@ -267,6 +267,7 @@ def environment():
     tree = ast.parse(BOOTSTRAP.read_text())
     definitions = [node for node in tree.body if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name in NAMES]
     assert {node.name for node in definitions} == NAMES
+    # ubs:ignore -- executes this repository's own bootstrap definitions, parsed from the source tree.
     exec(compile(ast.Module(body=definitions, type_ignores=[]), str(BOOTSTRAP), "exec"), g)
     module = SimpleNamespace(**g)
     semantics.install(module)

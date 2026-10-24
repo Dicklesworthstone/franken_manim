@@ -60,6 +60,7 @@ class AnimationWitnesses(unittest.TestCase):
                 function = getattr(rate_functions, name)
                 self.assertEqual((function.__name__, function.__qualname__, function.__module__),
                                  (name, name, "manimlib.utils.rate_functions"))
+                # ubs:ignore -- round-trips our own rate function (pickle by reference); no external data.
                 self.assertIs(pickle.loads(pickle.dumps(function)), function)
         self.assertIs(FadeIn(Square()).rate_func, rate_functions.smooth)
         self.assertIs(Write(Square()).rate_func, rate_functions.linear)
@@ -67,7 +68,7 @@ class AnimationWitnesses(unittest.TestCase):
         loaded = subprocess.run(
             [sys.executable, "-c", "import pickle, sys; f = pickle.loads(sys.stdin.buffer.read());"
              " print(f.__module__, f.__name__, f(0.25))"],
-            input=pickle.dumps(rate_functions.rush_into), capture_output=True, check=True)
+            input=pickle.dumps(rate_functions.rush_into), capture_output=True, check=True, timeout=120)
         self.assertEqual(loaded.stdout.decode().split()[:2],
                          ["manimlib.utils.rate_functions", "rush_into"])
         self.assertAlmostEqual(float(loaded.stdout.split()[2]), rate_functions.rush_into(0.25))

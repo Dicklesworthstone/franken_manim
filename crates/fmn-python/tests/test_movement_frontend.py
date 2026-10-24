@@ -20,6 +20,7 @@ def frontend():
     # play() records the roots it played (fm-v1aq); both run as production code.
     methods = [node for node in scene.body if isinstance(node, ast.FunctionDef)
                and node.name in {"play", "_record_played_roots"}]
+    # ubs:ignore -- executes this repository's own bootstrap definitions, parsed from the source tree.
     exec(compile(ast.Module(methods, []), str(path), "exec"), g)
     native.Scene.play, native.Scene._record_played_roots = g["play"], g["_record_played_roots"]
     native.Scene.mobjects = property(lambda scene: scene.roots)
