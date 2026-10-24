@@ -38,7 +38,9 @@ fn coupled_six_dimensional_oscillators_keep_every_component() {
         |state| {
             Ok::<_, ()>(
                 state
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .flat_map(|pair| [pair[1], -pair[0]])
                     .collect(),
             )
@@ -52,7 +54,7 @@ fn coupled_six_dimensional_oscillators_keep_every_component() {
     .unwrap();
     for (time, state) in solution.times.iter().zip(&solution.states) {
         assert_eq!(state.len(), initial.len());
-        for (pair, radius) in state.chunks_exact(2).zip([1.0, 2.0, 3.0]) {
+        for (pair, radius) in state.as_chunks::<2>().0.iter().zip([1.0, 2.0, 3.0]) {
             assert!((pair[0] - radius * fmn_dmath::cos(*time)).abs() < 2e-3);
             assert!((pair[1] + radius * fmn_dmath::sin(*time)).abs() < 2e-3);
         }
