@@ -42,8 +42,11 @@ def _reclass_children(g, receiver, specs):
     Native storage is unchanged; only the shell's Python class moves, with the
     fields that class's constructor sets, read from the shape as built (still
     in the document's user space, as the Reference's constructor arguments
-    are). This is the string path's ``_reclass_leaves``, for shapes.
+    are). This is the string path's ``_reclass_leaves``, for shapes. Point
+    fields are detached float64 copies, as the Reference's arguments are: a
+    retained record view would pin the shell's later writes to its f32 mirror.
     """
+    np = g["_np"]
     kinds = vars(receiver).pop("_svg_child_kinds", None)
     if kinds is None or len(kinds) != len(specs):
         raise ValueError("native SVG kinds do not match its children")
@@ -53,7 +56,7 @@ def _reclass_children(g, receiver, specs):
             shell.transform_cache = None
             shell.path_obj = None
         elif kind in ("rect", "rounded_rect"):
-            shell.vertices = shell.get_start_anchors()
+            shell.vertices = np.array(shell.get_start_anchors(), dtype=float)
             shell.width, shell.height = shell.get_width(), shell.get_height()
             if kind == "rounded_rect":
                 # The first corner arc runs from the start to point 4.
@@ -62,14 +65,14 @@ def _reclass_children(g, receiver, specs):
                 shell.corner_radius = chord / math.sqrt(2.0)
         elif kind in ("circle", "ellipse"):
             shell.radius = shell.get_width() / 2.0
-            shell.arc_center = shell.get_center()
+            shell.arc_center = np.array(shell.get_center(), dtype=float)
             shell.start_angle, shell.angle, shell.n_components = 0.0, math.tau, None
         elif kind == "line":
             shell.path_arc, shell.buff = 0.0, 0.0
         elif kind == "polygon":
-            shell.vertices = shell.get_start_anchors()
+            shell.vertices = np.array(shell.get_start_anchors(), dtype=float)
         else:
-            shell.vertices = shell.get_anchors()
+            shell.vertices = np.array(shell.get_anchors(), dtype=float)
     return specs
 
 

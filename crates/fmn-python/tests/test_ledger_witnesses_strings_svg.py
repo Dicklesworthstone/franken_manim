@@ -277,6 +277,12 @@ class StringsSvgWitnesses(unittest.TestCase):
                 self.assertEqual((type(child).__name__, len(points)), (cls, count))
                 self.assertEqual(where, first)
                 self.assertGreater(child.get_unit_normal()[2], 0)
+                # The class fields are detached float64 arrays, like the Reference's arguments;
+                # a retained f32 record view would round the shell's later transforms.
+                for field in ("vertices", "arc_center"):
+                    if field in vars(child):
+                        value = vars(child)[field]
+                        self.assertEqual((value.dtype, value.flags.owndata), (np.float64, True))
 
     def test_glyph_contours_trace_like_the_reference(self):
         import numpy as np
