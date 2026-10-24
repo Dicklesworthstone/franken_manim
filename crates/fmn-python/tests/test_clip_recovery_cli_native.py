@@ -14,9 +14,6 @@ import wave
 
 from test_clip_checkpoint_native import _native_available
 
-PYTHON = Path(__file__).resolve().parents[1] / "python"
-
-
 @unittest.skipUnless(_native_available(), "requires the built FrankenManim native extension")
 class ClipRecoveryCliTests(unittest.TestCase):
     def setUp(self):
@@ -46,7 +43,9 @@ class Motion(Scene):
                      "--resume-key", "inputs-v1", "--robot"]
 
     def cli(self, *extra, args=None):
-        env = dict(os.environ, PYTHONPATH=str(PYTHON))
+        # Keep the installed provider visible to the same interpreter. The
+        # checkout's Python wrappers have no extension in a clean wheel venv.
+        env = os.environ.copy()
         result = subprocess.run([sys.executable, "-m", "fmn_python", *(self.base if args is None else args), *extra],
                                 cwd=self.root, env=env, capture_output=True, text=True, timeout=25)
         lines = result.stdout.splitlines()
