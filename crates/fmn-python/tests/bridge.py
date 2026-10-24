@@ -7715,10 +7715,29 @@ assert np.allclose(grow_point_start.get_points(), 2.0 * manimlib.LEFT)
 assert grow_point_start.get_color() == manimlib.RED
 assert np.isclose(grow_point_source.get_width(), 2.0)
 
-# Use a straight path for exact intermediate-center observations.  Moving the
-# source after animation construction proves the fixed anchor and play-time
-# target are distinct lifecycle moments.
-grow_point.path_arc = 0.0
+# Transform constructs its path callable once. Check the curved path against
+# the circular-arc sagitta, then construct the straight-path witness explicitly;
+# assigning path_arc alone would leave the already-created curved callable.
+grow_path_start = np.array([2.0 * manimlib.LEFT])
+grow_path_end = np.array([2.0 * manimlib.RIGHT])
+grow_curved_midpoint = grow_point.path_func(grow_path_start, grow_path_end, 0.5)
+assert np.allclose(
+    grow_curved_midpoint,
+    [[0.0, -2.0 * math.tan(math.pi / 24.0), 0.0]],
+), grow_curved_midpoint
+assert not np.allclose(grow_curved_midpoint, [manimlib.ORIGIN])
+grow_point = growing.GrowFromPoint(
+    grow_point_source,
+    2.0 * manimlib.LEFT,
+    point_color=manimlib.RED,
+    path_arc=0.0,
+)
+assert np.allclose(
+    grow_point.path_func(grow_path_start, grow_path_end, 0.5),
+    [manimlib.ORIGIN],
+)
+# Moving the source after construction distinguishes the fixed anchor from
+# the play-time target. The updater and frame-order observations below stay exact.
 grow_point_source.shift(2.0 * manimlib.RIGHT)
 grow_point_identity = id(grow_point_source)
 grow_point_all_samples = []
