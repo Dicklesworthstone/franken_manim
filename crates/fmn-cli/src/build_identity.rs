@@ -17,12 +17,21 @@
 // of dependencies beyond std and fmn-hash.
 
 /// Repository paths whose content is compiled into, or embedded in, the
-/// binaries. Edits elsewhere (docs, beads, scratch) never dirty a build.
+/// binaries. Other documentation, Beads and scratch never dirty a build.
 const COMPILED_INPUTS: &[&str] = &[
     "crates",
     "Cargo.toml",
     "Cargo.lock",
     "SUITE.lock",
+    "README.md",
+    "API_SCHEMA.tsv",
+    "API_OVERLAY.tsv",
+    "demo/wasm/bundle.fmtl",
+    "docs/api/cli_flags.md",
+    "docs/api/portal_dispatch.tsv",
+    "docs/behavior_notes/BN-15-cli-contract.md",
+    "docs/performance/PERF_GATES.tsv",
+    "scripts/portal_dispatch_table.py",
     "rust-toolchain.toml",
     ".cargo",
 ];
@@ -359,6 +368,43 @@ mod tests {
         repo.write("docs/notes.md", "edited notes\n");
         repo.write("docs/new.md", "untracked docs\n");
         assert_eq!(repo.identity(), clean);
+    }
+
+    #[test]
+    fn embedded_contract_and_fixture_bytes_are_compiled_inputs() {
+        for path in [
+            "README.md",
+            "API_SCHEMA.tsv",
+            "API_OVERLAY.tsv",
+            "demo/wasm/bundle.fmtl",
+            "docs/api/cli_flags.md",
+            "docs/api/portal_dispatch.tsv",
+            "docs/behavior_notes/BN-15-cli-contract.md",
+            "docs/performance/PERF_GATES.tsv",
+            "scripts/portal_dispatch_table.py",
+        ] {
+            let repo = Repo::new("embedded-inputs");
+            let parent = repo.0.join(path).parent().unwrap().to_owned();
+            std::fs::create_dir_all(parent).unwrap();
+            repo.write(path, "first embedded contract\n");
+            repo.git(&["add", "--", path]);
+            repo.git(&["commit", "-q", "-m", "embedded baseline"]);
+            let clean = repo.identity();
+            repo.write(path, "second embedded contract\n");
+            let dirty = repo.identity();
+            assert!(
+                dirty.starts_with(&format!("{clean}+dirty:")),
+                "{path}: {dirty}"
+            );
+            repo.write(path, "third embedded contract\n");
+            let changed = repo.identity();
+            assert_ne!(
+                changed, dirty,
+                "{path}: changed embedded bytes must be named"
+            );
+            repo.git(&["add", "--", path]);
+            assert_eq!(repo.identity(), changed, "{path}: staging is not an input");
+        }
     }
 
     #[test]
