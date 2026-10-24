@@ -8662,6 +8662,78 @@ fn parity_tex_span_map_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
     Ok(RunOutcome::ok().with_counter("parity_t2c_source_identity", 1))
 }
 
+/// fm-zxxy: native CM recipes survive Tex construction, source-based colour
+/// selection, Stage adoption and a real certified raster frame.
+fn parity_tex_cm_recipes_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let engine = &scene_goldens::corpus().tex;
+    let radical = r"\sqrt{\dfrac{\dfrac{a}{b}}{\dfrac{c}{d}}}";
+    let mut members = Vec::new();
+    for (source, selection, integral, count) in [
+        (r"\iint_D f\,dA", r"\iint", true, 1),
+        (r"\iiint_V f\,dV", r"\iiint", true, 1),
+        (radical, radical, false, 5),
+    ] {
+        let built = fmn_library::Tex::new(source)
+            .t2c(&[(selection, RED_C)])
+            .build(engine)
+            .map_err(|error| fail(format!("CM recipe {source:?}: {error}")))?;
+        let occurrences = built.occurrences(selection);
+        if occurrences.len() != 1 {
+            return Err(fail(format!(
+                "{selection:?} lost its single source occurrence"
+            )));
+        }
+        let ordinals = &occurrences[0];
+        let signs = built
+            .typeset
+            .subs
+            .iter()
+            .enumerate()
+            .filter(|(_, sub)| {
+                if integral {
+                    matches!(sub.prim, Prim::Path(_))
+                } else {
+                    matches!(sub.prim, Prim::Glyph(i) if built.typeset.layout.glyphs[i].ch == '√')
+                }
+            })
+            .collect::<Vec<_>>();
+        if signs.len() != count || !signs.iter().all(|(i, _)| ordinals.contains(i)) {
+            return Err(fail(format!(
+                "{source:?}: expected {count} source-selected CM pieces, got {}",
+                signs.len()
+            )));
+        }
+        if integral && ordinals.len() != 1 {
+            return Err(fail(format!(
+                "{selection:?}: an integral command must be one source part"
+            )));
+        }
+        if !ordinals
+            .iter()
+            .all(|&i| built.vmob.children()[i].style().fill_color == RED_C)
+        {
+            return Err(fail(format!(
+                "{selection:?}: colour did not reach every selected primitive"
+            )));
+        }
+        members.push(built.vmob);
+    }
+    let mut stage = Stage::new();
+    stage.add(VMobject::arranged(members, RIGHT, 0.4, [0.0; 3]).moved_to([0.0; 3]));
+    let rendered = render_certified_doc(&stage);
+    if rendered == render_certified_doc(&Stage::new()) {
+        return Err(fail("CM recipes produced a blank certified frame"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.parity.tex_cm_recipes")
+            .field("formulas", 3_u64)
+            .field("integral_source_parts", 2_u64)
+            .field("radical_pieces", 5_u64)
+            .field("visible", "true"),
+    );
+    Ok(RunOutcome::ok().with_counter("tex_cm_recipe_formulas", 3))
+}
+
 /// fm-tex-metrics-glyphs-ru72: the ten formulas the bead first measured,
 /// set as one strip and rendered certified. Each formula's width holds the
 /// pinned Reference's (`fixtures/tex_reference_widths.v1.tsv`) within its
@@ -11604,6 +11676,24 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "parity.tex_cm_recipes.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(parity_tex_cm_recipes_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tex_cm_recipe_formulas", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.parity.tex_cm_recipes",
+            vec![
+                FieldPred::u64_eq("formulas", 3),
+                FieldPred::u64_eq("integral_source_parts", 2),
+                FieldPred::u64_eq("radical_pieces", 5),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "parity.markdown_inline_math.v1",
         ScenarioClass::ParityDrill,
         Surface::RustApi,
@@ -12637,6 +12727,7 @@ const PARITY_RULING_DRILL_IDS: &[&str] = &[
     "parity.frame_markers_to_edge.v1",
     "parity.move_along_path_true_arclength.v1",
     "parity.tex_span_map_t2c.v1",
+    "parity.tex_cm_recipes.v1",
 ];
 
 /// Catalog invariants: unique path-safe names, class coverage, a drill
