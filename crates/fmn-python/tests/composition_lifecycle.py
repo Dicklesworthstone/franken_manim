@@ -26,6 +26,45 @@ class RecordingGroup(AnimationGroup):
 
 
 class CompositionLifecycleAcceptance(unittest.TestCase):
+    def test_member_preparation_keeps_iterables_builders_and_native_identity(self):
+        for container in (list, tuple, iter):
+            with self.subTest(container=container.__name__):
+                first, second = Square(), Circle()
+                transform = Transform(first, first.copy().shift(RIGHT))
+                builder = second.animate.shift(UP)
+                build = builder.build
+                calls = []
+
+                def counted_build():
+                    calls.append(True)
+                    return build()
+
+                builder.build = counted_build
+                group = AnimationGroup(container([transform, builder]), run_time=2 / 30)
+                self.assertIs(group.animations[0], transform)
+                self.assertEqual(calls, [True])
+                Scene().play(group)
+                self.assertEqual(calls, [True], "playing a prepared member rebuilt it")
+                np.testing.assert_allclose(first.get_center(), RIGHT, atol=1e-6)
+                np.testing.assert_allclose(second.get_center(), UP, atol=1e-6)
+
+    def test_invalid_members_fail_before_authored_timing_or_group_construction(self):
+        calls = []
+
+        class ObservedGroup(AnimationGroup):
+            def build_animations_with_timings(self, lag_ratio):
+                calls.append("timing")
+                super().build_animations_with_timings(lag_ratio)
+
+        for container in (list, tuple, iter):
+            with self.subTest(container=container.__name__):
+                with self.assertRaisesRegex(
+                    TypeError, r"^Object 42 cannot be converted to an animation$"
+                ):
+                    ObservedGroup(container([FadeIn(Square()), 42]),
+                                  group_type=lambda *members: calls.append("group"))
+        self.assertEqual(calls, [])
+
     def test_native_motion_runs_inside_authored_group(self):
         source = Square()
         target = source.copy().shift((2, 0, 0))
@@ -223,5 +262,5 @@ class CompositionLifecycleAcceptance(unittest.TestCase):
 
 suite = unittest.defaultTestLoader.loadTestsFromTestCase(CompositionLifecycleAcceptance)
 result = unittest.TextTestRunner(verbosity=2).run(suite)
-if result.testsRun != 12 or not result.wasSuccessful():
+if result.testsRun != 14 or not result.wasSuccessful():
     raise AssertionError("Native composition lifecycle acceptance failed")

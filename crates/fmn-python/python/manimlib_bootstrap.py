@@ -20423,10 +20423,7 @@ class AnimationGroup(_NativeAnimation):
             lag_ratio=type(self)._default_lag_ratio if lag_ratio is None else lag_ratio,
             **kwargs,
         )
-        self.animations = [
-            prepare_animation(animation) if isinstance(animation, _AnimationBuilder) else animation
-            for animation in animations
-        ]
+        self.animations = [prepare_animation(animation) for animation in animations]
         self.build_animations_with_timings(self.lag_ratio)
         self.calculate_max_end_time()
 
