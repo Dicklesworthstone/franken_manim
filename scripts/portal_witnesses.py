@@ -7,12 +7,12 @@ symbol. It runs the installed-wheel gate's suites (the ones scripts/check_portal
 each in its own interpreter under sys.monitoring, against the installed wheel, and records which
 ledger symbols every passing test invokes.
 
-Each suite runs the way the gate runs it: the gate's loop suites through runpy, the rest as
-`python3 suite.py` (`__main__`). A member row (method or property) counts when a member of that
+Each suite runs the way the gate runs it: the loop through runpy, direct scripts as
+`__main__`, and discovery suites imported by their module name. A member row counts when a member of that
 name runs on an instance of the row's class, whichever override or installer wrapper runs: that
 is what calling the symbol means. The receiver is the first argument of method-like code (code
-defined inside a class or another function), or the bound instance of a native method. A class row counts when an instance of exactly that class is seen
-in any call. A function row counts when its code runs, and so does a staticmethod member row,
+defined inside a class or another function), or the bound instance of a native method. A class row counts when construction of exactly that class returns normally.
+A function row counts when its code returns normally, and so does a staticmethod member row,
 which has no receiver. A test that fails, or a script suite that
 raises, witnesses nothing. A call made outside any `test*` function belongs to the suite's
 top-level statement that made it (`<module>:L<line>`): bridge.py and the other script suites are
@@ -21,7 +21,8 @@ called, so only the import kind applies to them.
 
 Witness kinds per symbol, each with its own denominator:
 - import: the symbol resolves in the installed portal, and not to a schema placeholder;
-- semantic: a passing test invoked it;
+- semantic: a passing test invoked it and the call returned normally;
+- refusal_only: a passing test invoked it, but every such call raised;
 - rendered: a passing test that also captured a frame (one of RENDER_SYMBOLS) invoked it;
 - corpus: the pinned videos tree names it (`.name` for a member, `Name(` otherwise).
 
@@ -38,8 +39,8 @@ that returned no float array) is reported as inapplicable, not as a survivor.
     portal_witnesses.py check [--jobs N] [--mutants N]
     portal_witnesses.py trace SUITE [--mode runpy|main] [--mutate ROW:KIND]   internal
 
-`check` exits 1 when a symbol the committed registry records as witnessed has lost every
-semantic witness, when a ledger symbol resolves to a placeholder or does not resolve, when a suite
+`check` exits 1 when a suite fails, a symbol the committed registry records as witnessed has lost every
+semantic witness, when a same/improved row has only refusal witnesses, when a ledger symbol resolves to a placeholder or does not resolve, when a suite
 that defines unittest cases executes none of them, or when an applied sampled mutant (trivial or
 shifted) survives every witness test it reran.
 """
@@ -71,10 +72,10 @@ GATE = ROOT / "scripts" / "check_portal_runtime.sh"
 TESTS = ROOT / "crates" / "fmn-python" / "tests"
 VIDEOS = pathlib.Path(os.environ.get("FMN_VIDEOS_REF", ROOT / "scripts" / "videos_ref"))
 SCHEMA = "fmn.portal-witnesses"
-VERSION = 1
+VERSION = 2
 WITNESSED_STATUSES = ("same", "improved")
-COLUMNS = ("module", "symbol", "kind", "status", "import", "semantic", "rendered", "corpus",
-           "example")
+COLUMNS = ("module", "symbol", "kind", "status", "import", "semantic", "refusal_only",
+           "rendered", "corpus", "example")
 # A test that calls one of these produced a frame, so what it invoked is rendered state.
 RENDER_SYMBOLS = frozenset({"Scene.get_image", "Camera.get_image", "Camera.get_raw_fbo_data",
                             "Camera.capture", "Scene.update_frame", "Scene.emit_frame"})
@@ -101,22 +102,21 @@ def ledger_rows(text: str) -> list[dict]:
 
 
 def gate_suites(script: str, tests: pathlib.Path = TESTS) -> list[tuple[str, str]]:
-    """The suites check_portal_runtime.sh runs, in its order, with how it runs each: `runpy`
-    (the loop: runpy.run_path, `__name__` "<run_path>") or `main` (`python3 suite.py`, and the
-    `unittest discover` of every test_*.py)."""
+    """Gate suites with their execution mode: `runpy` for the loop, `main` for direct
+    scripts, and `discover` for normally imported unittest discovery modules."""
     loop = re.search(r"^for suite in (.+?); do$", script, re.M)
     if loop is None:
         raise ValueError("check_portal_runtime.sh has no suite loop")
     suites = [(name, "runpy") for name in loop.group(1).split()]
     # A direct run may carry environment assignments (`FMN_REQUIRE_FFMPEG=1 python3 ...`).
-    direct = re.findall(r"^(?:[A-Z_][A-Z0-9_]*=\S* )*python3 crates/fmn-python/tests/(\w+)\.py",
-                        script, re.M)
+    direct = [(name, "main") for name in re.findall(
+        r"^(?:[A-Z_][A-Z0-9_]*=\S* )*python3 crates/fmn-python/tests/(\w+)\.py", script, re.M)]
     if re.search(r"unittest discover -s crates/fmn-python/tests -p 'test_\*\.py'", script):
-        direct += sorted(path.stem for path in tests.glob("test_*.py"))
+        direct += [(path.stem, "discover") for path in sorted(tests.glob("test_*.py"))]
     seen = {name for name, _ in suites}
-    for name in direct:
+    for name, mode in direct:
         if name not in seen:
-            suites.append((name, "main"))
+            suites.append((name, mode))
             seen.add(name)
     return suites
 
@@ -177,15 +177,15 @@ class Probes:
                         if len(names) == 1}
 
     def matches(self, name: str, cls: type) -> tuple[int, ...]:
-        """The rows a call of member `name` on an instance of `cls` witnesses: the member rows of
-        every class it is an instance of, and the class rows of exactly `cls`. Memoized: the
-        tracer asks for the same pairs millions of times."""
+        """Member rows answered by this receiver, memoized without owning its class.
+        Class rows instead require a completed construction: a helper returning normally
+        inside an ultimately refusing constructor cannot witness that constructor."""
         memo = self._matches[name]
         entry = memo.get(id(cls))
         if entry is not None and entry[0]() is cls:
             return entry[1]
         found = tuple(row for row, owner in self.members.get(name, ())
-                      if issubclass(cls, owner)) + tuple(self.classes.get(cls, ()))
+                      if issubclass(cls, owner))
         try:
             memo[id(cls)] = (weakref.ref(cls), found)
         except TypeError:  # a type that refuses weak references is not memoized
@@ -237,8 +237,15 @@ class Recorder:
         self.current = None                           # the running unittest test, if any
         self.stack = []                               # running test* frames of the suite file
         self.hits = collections.defaultdict(set)      # identity -> rows
+        self.successes = collections.defaultdict(set)  # calls that returned normally
+        self.refusals = collections.defaultdict(set)    # calls that unwound with an exception
         self.renders = set()                          # identities that captured a frame
-        self.seen = set()                             # (identity, member, id(class)) recorded
+        # Store frame identities, never frames/receivers: the suites test collection of
+        # authored classes and objects. A new PY_START replaces any abandoned generator's
+        # entry if its frame identity is recycled; only PY_RETURN earns success.
+        self.python_calls = {}
+        self.native_calls = {}
+        self.local_codes = set()
         self.module_line = None
         self.module_identity = "<module>"
 
@@ -247,17 +254,28 @@ class Recorder:
         MONITOR.restart_events()  # what an earlier session disabled may matter to this one
         MONITOR.register_callback(TOOL, MONITOR.events.PY_START, self._start)
         MONITOR.register_callback(TOOL, MONITOR.events.PY_RETURN, self._return)
+        MONITOR.register_callback(TOOL, MONITOR.events.PY_UNWIND, self._unwind)
         MONITOR.register_callback(TOOL, MONITOR.events.CALL, self._call)
+        MONITOR.register_callback(TOOL, MONITOR.events.C_RETURN, self._native_return)
+        MONITOR.register_callback(TOOL, MONITOR.events.C_RAISE, self._native_raise)
         MONITOR.register_callback(TOOL, MONITOR.events.LINE, self._line)
-        MONITOR.set_events(TOOL, MONITOR.events.PY_START | MONITOR.events.CALL)
+        MONITOR.set_events(TOOL, MONITOR.events.PY_START | MONITOR.events.PY_UNWIND
+                           | MONITOR.events.CALL | MONITOR.events.C_RETURN | MONITOR.events.C_RAISE)
         return self
 
     def __exit__(self, *exc):
         MONITOR.set_events(TOOL, 0)
+        for code in self.local_codes:
+            MONITOR.set_local_events(TOOL, code, 0)
         for event in (MONITOR.events.PY_START, MONITOR.events.PY_RETURN, MONITOR.events.CALL,
+                      MONITOR.events.PY_UNWIND, MONITOR.events.C_RETURN, MONITOR.events.C_RAISE,
                       MONITOR.events.LINE):
             MONITOR.register_callback(TOOL, event, None)
         MONITOR.free_tool_id(TOOL)
+        self.python_calls.clear()
+        self.native_calls.clear()
+        self.local_codes.clear()
+        self.stack.clear()
         return False
 
     def _key(self):
@@ -279,18 +297,25 @@ class Recorder:
             return
         key = self._key()
         self.hits[key].update(rows)
-        if not self.render_rows.isdisjoint(rows):
+
+    def _outcome(self, call, success):
+        if call is None:
+            return
+        key, rows = call
+        (self.successes if success else self.refusals)[key].update(rows)
+        if success and not self.render_rows.isdisjoint(rows):
             self.renders.add(key)
 
-    def _instance(self, instance, name: str) -> None:
-        """A call of member `name` on `instance`: its member rows, and its exact class's rows.
-        A repeat of the same member on the same class under the same identity adds nothing."""
-        cls = type(instance)
-        seen = (self._key(), name, id(cls))
-        if seen in self.seen:
-            return
-        self.seen.add(seen)
-        self._hit_all(self.probes.matches(name, cls))
+    def _python_outcome(self, frame, code, success):
+        call = self.python_calls.pop(id(frame), None)
+        # An abandoned generator owns no retained frame here. Its numeric identity
+        # can later belong to another code object; that return earns it no witness.
+        if call is not None and call[0] is code:
+            self._outcome(call[1:], success)
+
+    def _local(self, code, events):
+        self.local_codes.add(code)
+        MONITOR.set_local_events(TOOL, code, events)
 
     def _start(self, code, offset):
         rows = self.probes.code.get(code)
@@ -305,50 +330,71 @@ class Recorder:
         if module:
             # LINE events on the module code alone give the running top-level statement.
             # Reading the frame's f_lineno instead scans bridge.py's whole line table per hit.
-            MONITOR.set_local_events(TOOL, code, MONITOR.events.LINE)
+            self._local(code, MONITOR.events.LINE)
             return None
         frame = sys._getframe(1)
         if test:
             self.stack.append((frame, frame_identity(frame)))
-            MONITOR.set_local_events(TOOL, code, MONITOR.events.PY_RETURN)
+            self._local(code, MONITOR.events.PY_RETURN)
             return None
-        self._hit_all(rows)
+        found = set(rows or ())
         if names:
             instance = first_argument(frame)
             if instance is not None:
                 for name in names:
-                    self._instance(instance, name)
+                    found.update(self.probes.matches(name, type(instance)))
+        if found:
+            self._hit_all(found)
+            self.python_calls[id(frame)] = (code, self._key(), tuple(found))
+            self._local(code, MONITOR.events.PY_RETURN)
         return None
 
     def _line(self, code, line):
         self.module_line = line
 
     def _return(self, code, offset, value):
-        if self.stack and self.stack[-1][0] is sys._getframe(1):
+        frame = sys._getframe(1)
+        self._python_outcome(frame, code, True)
+        if self.stack and self.stack[-1][0] is frame:
+            self.stack.pop()
+
+    def _unwind(self, code, offset, exception):
+        frame = sys._getframe(1)
+        self._python_outcome(frame, code, False)
+        if self.stack and self.stack[-1][0] is frame:
             self.stack.pop()
 
     def _call(self, code, offset, function, arg0):
-        """Calls PY_START cannot see: constructions of probed classes (a native __init__ has no
-        Python frame) and native members. Any other call site is disabled after its first call;
-        a Python member is seen at its PY_START."""
+        """Track constructions and native calls until their C_RETURN/C_RAISE outcome.
+        Python functions instead complete at PY_RETURN/PY_UNWIND. Keep indirect call
+        sites enabled: the next target at the same offset can be a different provider."""
+        rows = ()
         if isinstance(function, type):
             rows = self.probes.classes.get(function)
             if not rows:
-                return MONITOR.DISABLE
-            self._hit_all(rows)
+                return None
+        elif isinstance(function, NATIVE_CALLABLES):
+            name = getattr(function, "__name__", None)
+            rows = self.probes.native.get(name, ())
+            if name in self.probes.native_members:
+                instance = getattr(function, "__self__", None)
+                if instance is None or isinstance(instance, types.ModuleType):
+                    instance = arg0
+                if instance is not MONITOR.MISSING:
+                    rows = (*rows, *self.probes.matches(name, type(instance)))
+        if not rows:
+            # An indirect call site may next call a probed class/native method.
+            # Disabling it after one unrelated target silently loses those outcomes.
             return None
-        name = getattr(function, "__name__", None)
-        if name in self.probes.native_members and isinstance(function, NATIVE_CALLABLES):
-            instance = getattr(function, "__self__", None)
-            if instance is None or isinstance(instance, types.ModuleType):
-                instance = arg0
-            if instance is not MONITOR.MISSING:
-                self._instance(instance, name)
-            return None
-        if name in self.probes.native and isinstance(function, NATIVE_CALLABLES):
-            self._hit_all(self.probes.native[name])
-            return None
-        return MONITOR.DISABLE
+        self._hit_all(rows)
+        self.native_calls[(id(sys._getframe(1)), offset)] = (self._key(), tuple(rows))
+        return None
+
+    def _native_return(self, code, offset, function, arg0):
+        self._outcome(self.native_calls.pop((id(sys._getframe(1)), offset), None), True)
+
+    def _native_raise(self, code, offset, function, arg0):
+        self._outcome(self.native_calls.pop((id(sys._getframe(1)), offset), None), False)
 
 
 def first_argument(frame):
@@ -420,69 +466,90 @@ def trace_suite(name: str, mode: str, mutation: str | None) -> list[dict]:
     recorder = Recorder(probes, str(suite), render_rows)
     version = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]["version"]
     error = None
-    # unittest.main runs the calling module's own cases into _Result, for per-test pass/fail.
-    result = _Result(recorder)
-    defined = []  # the TestCase classes the suite defines
+    # Standard unittest runners report original per-test outcomes through _Result.
+    results = []
+    namespace = {}
 
-    def run_cases(namespace):
-        cases = unittest.TestSuite()
-        for value in list(namespace.values()):
-            if (isinstance(value, type) and issubclass(value, unittest.TestCase)
-                    and value.__module__ == namespace.get("__name__")):
-                defined.append(value)
-                cases.addTests(unittest.TestLoader().loadTestsFromTestCase(value))
-        cases.run(result)
+    def make_result(runner):
+        result = _Result(recorder, runner.stream, runner.descriptions, runner.verbosity)
+        results.append(result)
+        return result
 
-    unittest.main = lambda *args, **kwargs: run_cases(sys._getframe(1).f_globals)
+    original_factory = unittest.TextTestRunner._makeResult
+    original_argv, original_path = sys.argv, list(sys.path)
+    # Observe the standard runner's original execution, preserving its loader,
+    # flags, output and __main__ lifetime. Replaying cases after runpy returns
+    # both doubles side effects and breaks pickle's class lookup.
+    unittest.TextTestRunner._makeResult = make_result
     sys.argv = [str(suite)]
     sys.path.insert(0, str(TESTS))
     try:
         # A mutant run needs only pass/fail, so it runs untraced.
         with recorder if mutation is None else contextlib.nullcontext():
-            if mode == "main":
+            if mode == "discover":
+                module = importlib.import_module(name)
+                namespace = vars(module)
+                unittest.TextTestRunner().run(unittest.defaultTestLoader.loadTestsFromModule(module))
+            elif mode == "main":
                 # `python3 suite.py`: classes pickle and multiprocessing children re-import it.
                 namespace = runpy.run_path(str(suite), run_name="__main__")
-                if not defined:
-                    # No unittest.main call: the gate's `unittest discover` runs its cases.
-                    run_cases(namespace)
             else:
-                runpy.run_path(str(suite), init_globals={"_expected_package_version": version})
+                namespace = runpy.run_path(str(suite), init_globals={"_expected_package_version": version})
     except SystemExit as caught:
-        if caught.code not in (None, 0):
+        # unittest.main's normal failure exit does not erase other passing
+        # identities. The failed cases still make the registry check fail.
+        failure_exit = caught.code == 1 and any(not result.wasSuccessful() for result in results)
+        if caught.code not in (None, 0) and not failure_exit:
             error = f"SystemExit: {caught.code}"
     except BaseException as caught:  # noqa: BLE001 — a raising script suite witnesses nothing
         error = f"{type(caught).__name__}: {str(caught)[:200]}"
-    unittest_suite = bool(defined)
+    finally:
+        unittest.TextTestRunner._makeResult = original_factory
+        sys.argv = original_argv
+        sys.path[:] = original_path
+    defined = any(isinstance(value, type) and issubclass(value, unittest.TestCase)
+                  and value.__module__ == namespace.get("__name__")
+                  for value in list(namespace.values()))
+    unittest_suite = defined or bool(results)
+    passed = set().union(*(result.passed for result in results))
+    failed = set().union(*(result.failed for result in results))
     records = []
     for key, hit in recorder.hits.items():
         identity = recorder.spell(key)
         if unittest_suite:
             # A unittest suite's witnesses are its passing tests; import-time work is not one.
-            ok = error is None and identity in result.passed
+            ok = error is None and identity in passed and identity not in failed
         else:
             ok = error is None
         records.append({"suite": name, "test": identity, "passed": ok,
-                        "renders": key in recorder.renders, "rows": sorted(hit)})
+                        "renders": key in recorder.renders,
+                        "rows": sorted(recorder.successes[key]),
+                        "refusals": sorted(recorder.refusals[key] - recorder.successes[key]),
+                        "trace_version": VERSION})
     records.sort(key=lambda record: record["test"])
     # A unittest suite's cases are its tests run (skips excluded); a script suite's, the
     # statements that invoked a ledger symbol.
-    cases = len(result.passed | result.failed) if unittest_suite else len(recorder.hits)
+    cases = len(passed | failed) if unittest_suite else len(recorder.hits)
     records.append({"suite": name, "summary": True, "unittest": unittest_suite, "cases": cases,
-                    "failed": sorted(result.failed), "error": error,
+                    "failed": sorted(failed), "error": error,
                     "mutant_applied": MUTANT_CALLS["applied"]})
     return records
 
 
-class _Result(unittest.TestResult):
+class _Result(unittest.TextTestResult):
     """Pass/fail per test identity (Class.method), and the running test for the recorder."""
 
-    def __init__(self, recorder: Recorder):
-        super().__init__()
+    def __init__(self, recorder: Recorder, stream=None, descriptions=True, verbosity=0):
+        if stream is None:
+            stream = unittest.TextTestRunner(verbosity=0).stream
+        super().__init__(stream, descriptions, verbosity)
         self.recorder = recorder
         self.passed, self.failed = set(), set()
 
     @staticmethod
     def _identity(test) -> str:
+        if isinstance(test, unittest.FunctionTestCase):
+            return test.id()
         return f"{type(test).__name__}.{test._testMethodName}"
 
     def startTest(self, test):
@@ -494,16 +561,28 @@ class _Result(unittest.TestResult):
         self.recorder.current = None
 
     def addSuccess(self, test):
+        super().addSuccess(test)
         self.passed.add(self._identity(test))
 
     def addFailure(self, test, err):
+        super().addFailure(test, err)
         self.failed.add(self._identity(test))
 
     def addError(self, test, err):
+        super().addError(test, err)
         self.failed.add(self._identity(test))
 
     def addSkip(self, test, reason):
-        pass
+        super().addSkip(test, reason)
+
+    def addSubTest(self, test, subtest, err):
+        super().addSubTest(test, subtest, err)
+        if err is not None:
+            self.failed.add(self._identity(test))
+
+    def addUnexpectedSuccess(self, test):
+        super().addUnexpectedSuccess(test)
+        self.failed.add(self._identity(test))
 
 
 def run_suites(suites: list[tuple[str, str]], jobs: int, mutation: str | None = None) -> list[dict]:
@@ -550,10 +629,13 @@ def corpus_counts(rows: list[dict]) -> dict[int, int]:
 
 def registry(rows: list[dict], probes: Probes, records: list[dict]) -> list[dict]:
     semantic, rendered = collections.defaultdict(set), collections.defaultdict(set)
+    refusals = collections.defaultdict(set)
     for record in records:
         if record.get("summary") or not record["passed"]:
             continue
         identity = f"{record['suite']}::{record['test']}"
+        for row in set(record.get("refusals", ())) - set(record["rows"]):
+            refusals[row].add(identity)
         for row in record["rows"]:
             semantic[row].add(identity)
             if record["renders"]:
@@ -567,6 +649,7 @@ def registry(rows: list[dict], probes: Probes, records: list[dict]) -> list[dict
             "module": row["module"], "symbol": row["symbol"], "kind": row["kind"],
             "status": row["status"], "import": probes.status.get(index, "error"),
             "semantic": len(semantic[index]), "rendered": len(rendered[index]),
+            "refusal_only": len(refusals[index]),
             "corpus": corpus.get(index, "-"),
             "example": min(semantic[index]) if semantic[index] else "-",
         })
@@ -581,6 +664,7 @@ def summary_lines(table: list[dict], records: list[dict]) -> list[str]:
         "import_ok": sum(r["import"] == "ok" for r in table),
         "placeholder": sum(r["import"] == "placeholder" for r in table),
         "semantic": sum(r["semantic"] > 0 for r in table),
+        "refusal_only": sum(r["semantic"] == 0 and r["refusal_only"] > 0 for r in table),
         "rendered": sum(r["rendered"] > 0 for r in table),
         "corpus": sum(isinstance(r["corpus"], int) and r["corpus"] > 0 for r in table),
         "suites": len(suites),
@@ -600,10 +684,29 @@ def write_registry(table: list[dict], records: list[dict]) -> str:
 
 def read_registry(text: str) -> dict[tuple[str, str], dict]:
     rows = {}
+    columns = None
+    version = None
+    # v1 recorded call entry, without an outcome. Keep its original column meanings
+    # when checking the prior baseline; never shift its rendered count into refusal_only.
+    prior_columns = tuple(c for c in COLUMNS if c != "refusal_only")
     for line in text.splitlines():
-        if not line or line.startswith("#") or line.startswith("module\t"):
+        match = re.match(r"# fmn\.portal-witnesses v(\d+):", line)
+        if match:
+            version = int(match.group(1))
+            if version not in (1, VERSION):
+                raise ValueError("unsupported portal witness registry version")
+        if line.startswith("module\t"):
+            columns = tuple(line.split("\t"))
+            expected = prior_columns if version == 1 else COLUMNS
+            if version is None or columns != expected:
+                raise ValueError("unsupported portal witness registry columns")
             continue
-        row = dict(zip(COLUMNS, line.split("\t")))
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split("\t")
+        if columns is None or len(fields) != len(columns):
+            raise ValueError("malformed portal witness registry row")
+        row = dict(zip(columns, fields))
         rows[(row["module"], row["symbol"])] = row
     return rows
 
@@ -612,10 +715,16 @@ def registry_problems(table: list[dict], records: list[dict],
                       committed: dict[tuple[str, str], dict]) -> list[str]:
     """What `check` fails on, before the mutants: a suite that defines tests and executes none
     (every one skipped, say), a same/improved symbol that resolves to a placeholder or does not
-    resolve, and a symbol the committed registry records as witnessed that no passing test
-    invokes now. A script suite that never runs is refused by the gate's own runner."""
+    resolve, a same/improved row with only refusal witnesses, and a symbol the committed
+    registry records as witnessed that no passing test completes now. A script suite that
+    never runs is refused by the gate's own runner."""
     problems = []
     for record in records:
+        if record.get("summary"):
+            if record.get("error"):
+                problems.append(f"{record['suite']}: suite failed: {record['error']}")
+            elif record.get("failed"):
+                problems.append(f"{record['suite']}: {len(record['failed'])} test identities failed")
         if (record.get("summary") and record.get("unittest") and record["cases"] == 0
                 and not record["error"]):
             problems.append(f"{record['suite']}: defines tests but executed none")
@@ -623,6 +732,9 @@ def registry_problems(table: list[dict], records: list[dict],
         if row["import"] != "ok":
             problems.append(f"{row['module']}.{row['symbol']}: {row['status']} in the ledger, but "
                             f"it resolves to {row['import']}")
+        if row["semantic"] == 0 and row["refusal_only"] > 0:
+            problems.append(f"{row['module']}.{row['symbol']}: {row['status']} in the ledger, but "
+                            f"its {row['refusal_only']} passing witnesses only exercise refusals")
     now = {(r["module"], r["symbol"]): r for r in table}
     for key, row in committed.items():
         if int(row["semantic"]) > 0 and now.get(key, {}).get("semantic", 0) == 0:
@@ -650,7 +762,7 @@ def main(argv=None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     trace = sub.add_parser("trace")
     trace.add_argument("suite")
-    trace.add_argument("--mode", choices=("runpy", "main"), default="runpy")
+    trace.add_argument("--mode", choices=("runpy", "main", "discover"), default="runpy")
     trace.add_argument("--mutate")
     for name in ("build", "check"):
         command = sub.add_parser(name)

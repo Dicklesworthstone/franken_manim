@@ -1,10 +1,13 @@
 """Unit tests for scripts/portal_witnesses.py (fm-5wq.12), on synthetic modules."""
 import pathlib
+import gc
 import runpy
 import sys
 import tempfile
 import textwrap
 import unittest
+import weakref
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import portal_witnesses as pw  # noqa: E402
@@ -68,6 +71,16 @@ SYNTHETIC = textwrap.dedent('''
     @functools.lru_cache(maxsize=None)
     def cached_area(side):
         return side * side
+
+    def maybe_area(side):
+        if side < 0:
+            raise ValueError("negative side")
+        return side * side
+
+    def delayed_area(side):
+        yield side
+        if side < 0:
+            raise ValueError("negative side")
 ''')
 
 
@@ -104,6 +117,148 @@ class Harness(unittest.TestCase):
         with recorder:
             body()
         return rows, probes, recorder
+
+    def trace_runner_fixture(self, name, entry, mode="main"):
+        root = pathlib.Path(self.tmp.name)
+        (root / "Cargo.toml").write_text('[workspace.package]\nversion = "0.5.0"\n')
+        ledger = root / "runner_ledger.tsv"
+        ledger.write_text("runner fixture: rows supplied below\n")
+        source = textwrap.dedent('''
+            import pickle
+            import unittest
+            import fmn_witness_synthetic as witness
+
+            class Sample:
+                value = 7
+
+            class RunnerCase(unittest.TestCase):
+                def test_pickle(self):
+                    witness.runner_calls.append("pickle")
+                    self.assertEqual(witness.Square().width(), 2)
+                    self.assertEqual(pickle.loads(pickle.dumps(Sample())).value, 7)
+        ''') + entry
+        (root / (name + ".py")).write_text(source)
+        original_main, original_runner = unittest.main, unittest.TextTestRunner.run
+        original_factory = unittest.TextTestRunner._makeResult
+        with (mock.patch.object(pw, "ROOT", root), mock.patch.object(pw, "LEDGER", ledger),
+              mock.patch.object(pw, "TESTS", root),
+              mock.patch.object(pw, "ledger_rows", return_value=self.rows()[:3]),
+              mock.patch.object(self.mod, "runner_calls", [], create=True)):
+            try:
+                records = pw.trace_suite(name, mode, None)
+                calls = list(self.mod.runner_calls)
+                restored = (unittest.main is original_main,
+                            unittest.TextTestRunner.run is original_runner,
+                            unittest.TextTestRunner._makeResult is original_factory)
+            finally:
+                # The pre-fix implementation leaks its patched unittest.main.
+                # Keep this planted red control from contaminating other tests.
+                unittest.main, unittest.TextTestRunner.run = original_main, original_runner
+                unittest.TextTestRunner._makeResult = original_factory
+                sys.modules.pop(name, None)
+        return records, calls, restored
+
+    def test_explicit_text_runner_executes_once_while_its_pickle_module_is_live(self):
+        records, calls, restored = self.trace_runner_fixture("text_runner", textwrap.dedent('''
+            if __name__ == "__main__":
+                unittest.TextTestRunner(verbosity=0).run(
+                    unittest.defaultTestLoader.loadTestsFromTestCase(RunnerCase))
+        '''))
+        self.assertEqual(calls, ["pickle"])
+        self.assertEqual(restored, (True, True, True))
+        self.assertEqual((records[-1]["cases"], records[-1]["failed"], records[-1]["error"]),
+                         (1, [], None))
+        witnessed = [record for record in records if not record.get("summary")
+                     and record["passed"]]
+        self.assertEqual([record["test"] for record in witnessed], ["RunnerCase.test_pickle"])
+        self.assertEqual(set(witnessed[0]["rows"]), {0, 2})
+
+    def test_unittest_main_executes_once_and_restores_its_process_hooks(self):
+        records, calls, restored = self.trace_runner_fixture("main_runner", textwrap.dedent('''
+            if __name__ == "__main__":
+                unittest.main()
+        '''))
+        self.assertEqual(calls, ["pickle"])
+        self.assertEqual(restored, (True, True, True))
+        self.assertEqual((records[-1]["cases"], records[-1]["failed"], records[-1]["error"]),
+                         (1, [], None))
+
+    def test_discovery_imports_its_pickle_module_and_executes_cases_once(self):
+        records, calls, restored = self.trace_runner_fixture("discovered_runner", "", "discover")
+        self.assertEqual(calls, ["pickle"])
+        self.assertEqual(restored, (True, True, True))
+        self.assertEqual((records[-1]["cases"], records[-1]["failed"], records[-1]["error"]),
+                         (1, [], None))
+
+    def test_a_direct_script_does_not_invent_a_missing_unittest_runner(self):
+        records, calls, _ = self.trace_runner_fixture("no_runner", "")
+        self.assertEqual(calls, [])
+        self.assertEqual((records[-1]["unittest"], records[-1]["cases"]), (True, 0))
+        self.assertIn("no_runner: defines tests but executed none",
+                      pw.registry_problems([], records, {}))
+
+    def test_main_failure_keeps_other_passing_identities_but_refuses_the_suite(self):
+        records, calls, _ = self.trace_runner_fixture("failed_main", textwrap.dedent('''
+            def failure(self):
+                witness.runner_calls.append("failure")
+                self.assertEqual(witness.Square().width(), -1)
+            RunnerCase.test_bad = failure
+            if __name__ == "__main__":
+                unittest.main()
+        '''))
+        self.assertEqual(calls, ["failure", "pickle"])
+        self.assertEqual((records[-1]["cases"], records[-1]["failed"], records[-1]["error"]),
+                         (2, ["RunnerCase.test_bad"], None))
+        passed = [record["test"] for record in records if record.get("passed")]
+        self.assertEqual(passed, ["RunnerCase.test_pickle"])
+        self.assertEqual(pw.registry_problems([], records, {}),
+                         ["failed_main: 1 test identities failed"])
+
+    def test_function_test_cases_keep_their_individual_identities(self):
+        records, calls, _ = self.trace_runner_fixture("function_runner", textwrap.dedent('''
+            def test_first():
+                witness.runner_calls.append("first")
+                assert witness.Square().width() == 2
+            def test_second():
+                witness.runner_calls.append("second")
+                assert witness.Circle().width() == 2
+            unittest.TextTestRunner(verbosity=0).run(unittest.TestSuite([
+                unittest.FunctionTestCase(test_first), unittest.FunctionTestCase(test_second)]))
+        '''))
+        self.assertEqual(calls, ["first", "second"])
+        self.assertEqual((records[-1]["cases"], records[-1]["failed"]), (2, []))
+        passed = {record["test"]: set(record["rows"]) for record in records
+                  if record.get("passed")}
+        self.assertEqual(passed, {"test_first": {0, 2}, "test_second": {1}})
+
+    def test_result_records_failures_subtest_failures_and_unexpected_successes(self):
+        class Bad(unittest.TestCase):
+            def test_failure(self):
+                self.fail("planted failure")
+
+            def test_subtest(self):
+                with self.subTest("planted subtest"):
+                    self.fail("planted subtest failure")
+
+            @unittest.expectedFailure
+            def test_unexpected_success(self):
+                pass
+
+        for name in ("test_failure", "test_subtest", "test_unexpected_success"):
+            with self.subTest(name=name):
+                recorder = pw.Recorder(pw.Probes([]), __file__, set())
+                result = pw._Result(recorder)
+                Bad(name).run(result)
+                self.assertFalse(result.wasSuccessful())
+                self.assertEqual(result.failed, {f"Bad.{name}"})
+
+    def test_a_failing_or_raising_suite_cannot_pass_the_registry_check(self):
+        records = [{"suite": "failed", "summary": True, "unittest": True, "cases": 2,
+                    "failed": ["Case.test_bad"], "error": None},
+                   {"suite": "raised", "summary": True, "unittest": False, "cases": 1,
+                    "failed": [], "error": "RuntimeError: planted"}]
+        self.assertEqual(pw.registry_problems([], records, {}), [
+            "failed: 1 test identities failed", "raised: suite failed: RuntimeError: planted"])
 
     def test_a_method_counts_for_the_rows_whose_class_the_instance_is(self):
         # Defaults, not closures: a closure over self would make the frame a TestCase's.
@@ -247,6 +402,153 @@ class Harness(unittest.TestCase):
         self.assertEqual({rows[i]["symbol"] for i in recorder.hits["test_cached"]},
                          {"cached_area"})
 
+    def test_a_refusing_constructor_is_not_a_successful_class_witness(self):
+        class Refusing:
+            def __init__(self):
+                self.helper()
+                raise NotImplementedError("private asset")
+
+            def helper(self):
+                return None
+
+        self.mod.Refusing = Refusing
+        rows = [row("Refusing", "class"), row("Refusing.helper", "method")]
+        recorder = pw.Recorder(pw.Probes(rows), __file__, render_rows=set())
+        with recorder:
+            with self.assertRaises(NotImplementedError):
+                self.mod.Refusing()
+        self.assertEqual(recorder.successes["<module>"], {1})
+        self.assertEqual(recorder.refusals["<module>"], {0})
+
+    def test_only_normal_completion_witnesses_a_python_or_native_call(self):
+        self.mod.native_index = list.index
+
+        def checked(value):
+            if value < 0:
+                raise ValueError("negative")
+            try:
+                raise LookupError("internally handled")
+            except LookupError:
+                return None
+
+        self.mod.checked = checked
+        rows = [row("checked", "function"), row("native_index", "function")]
+        recorder = pw.Recorder(pw.Probes(rows), __file__, render_rows={1})
+
+        def test_refusals(mod=self.mod):
+            for function, args in ((mod.checked, (-1,)), (mod.native_index, ([], 3))):
+                try:
+                    function(*args)
+                except ValueError:
+                    pass
+
+        def test_success(mod=self.mod):
+            assert mod.checked(1) is None
+            assert mod.native_index([3], 3) == 0
+
+        with recorder:
+            test_refusals()
+            test_success()
+        self.assertEqual(recorder.successes["test_refusals"], set())
+        self.assertEqual(recorder.refusals["test_refusals"], {0, 1})
+        self.assertEqual(recorder.successes["test_success"], {0, 1})
+        self.assertEqual(recorder.refusals["test_success"], set())
+        self.assertEqual(recorder.renders, {"test_success"})
+
+    def test_refusal_only_same_or_improved_row_fails_without_a_committed_baseline(self):
+        for status in ("same", "improved"):
+            rows = [row("maybe_area", "function", status=status)]
+            probes = pw.Probes(rows)
+            recorder = pw.Recorder(probes, __file__, render_rows={0})
+
+            def test_refusal(mod=self.mod):
+                for _ in range(3):
+                    try:
+                        mod.maybe_area(-1)
+                    except ValueError:
+                        pass
+
+            with recorder:
+                test_refusal()
+            records = [{"suite": "planted", "test": "test_refusal", "passed": True,
+                        "rows": sorted(recorder.successes["test_refusal"]),
+                        "refusals": sorted(recorder.refusals["test_refusal"]),
+                        "renders": "test_refusal" in recorder.renders}]
+            table = pw.registry(rows, probes, records)
+            self.assertEqual(table[0]["semantic"], 0)
+            self.assertEqual(table[0]["rendered"], 0)
+            self.assertEqual(table[0]["refusal_only"], 1)
+            self.assertEqual(pw.registry_problems(table, records, {}), [
+                f"fmn_witness_synthetic.maybe_area: {status} in the ledger, but "
+                "its 1 passing witnesses only exercise refusals"])
+            failed = [dict(records[0], passed=False)]
+            self.assertEqual(pw.registry(rows, probes, failed)[0]["refusal_only"], 0)
+
+    def test_success_and_refusal_in_one_test_still_earn_a_successful_witness(self):
+        rows = [row("maybe_area", "function")]
+        probes = pw.Probes(rows)
+        recorder = pw.Recorder(probes, __file__, render_rows=set())
+
+        def test_mixed(mod=self.mod):
+            try:
+                mod.maybe_area(-1)
+            except ValueError:
+                pass
+            assert mod.maybe_area(2) == 4
+
+        with recorder:
+            test_mixed()
+        self.assertEqual(recorder.successes["test_mixed"], {0})
+        self.assertEqual(recorder.refusals["test_mixed"], {0})
+        records = [{"suite": "mixed", "test": "test_mixed", "passed": True,
+                    "rows": [0], "refusals": [0], "renders": False}]
+        table = pw.registry(rows, probes, records)
+        self.assertEqual((table[0]["semantic"], table[0]["refusal_only"]), (1, 0))
+        self.assertEqual(pw.registry_problems(table, records, {}), [])
+
+    def test_v1_registry_columns_keep_their_original_meanings(self):
+        prior = ("# fmn.portal-witnesses v1: generated baseline\n"
+                 "module\tsymbol\tkind\tstatus\timport\tsemantic\trendered\tcorpus\texample\n"
+                 "fmn_witness_synthetic\tmaybe_area\tfunction\tsame\tok\t2\t3\t4\ts::t\n")
+        record = pw.read_registry(prior)[("fmn_witness_synthetic", "maybe_area")]
+        self.assertEqual((record["semantic"], record["rendered"], record["corpus"]),
+                         ("2", "3", "4"))
+        self.assertNotIn("refusal_only", record)
+        with self.assertRaises(ValueError):
+            pw.read_registry(prior.replace("\ts::t", ""))
+        with self.assertRaises(ValueError):
+            pw.read_registry(prior.replace("v1:", "v999:"))
+
+    def test_generator_yield_is_not_completion_and_abandonment_keeps_no_frame_alive(self):
+        rows = [row("delayed_area", "function")]
+        recorder = pw.Recorder(pw.Probes(rows), __file__, render_rows=set())
+
+        def test_abandoned(mod=self.mod):
+            generator = mod.delayed_area(-1)
+            observer = weakref.ref(generator)
+            assert next(generator) == -1
+            del generator
+            gc.collect()
+            assert observer() is None, "the tracer retained an abandoned generator"
+
+        def test_refused_generator(mod=self.mod):
+            try:
+                list(mod.delayed_area(-1))
+            except ValueError:
+                pass
+
+        def test_completed_generator(mod=self.mod):
+            assert list(mod.delayed_area(2)) == [2]
+
+        with recorder:
+            test_abandoned()
+            test_refused_generator()
+            test_completed_generator()
+        self.assertEqual(recorder.successes["test_abandoned"], set())
+        self.assertEqual(recorder.successes["test_refused_generator"], set())
+        self.assertEqual(recorder.refusals["test_refused_generator"], {0})
+        self.assertEqual(recorder.successes["test_completed_generator"], {0})
+
     def test_an_installer_wrapper_with_star_args_still_names_its_receiver(self):
         rows = [row("Square.width", "method")]
         recorder = pw.Recorder(pw.Probes(rows), __file__, render_rows=set())
@@ -300,6 +602,13 @@ class Harness(unittest.TestCase):
                          [("alpha", "runpy"), ("beta", "runpy"), ("gamma", "main"), ("delta", "main")])
         with self.assertRaises(ValueError):
             pw.gate_suites("python3 crates/fmn-python/tests/gamma.py\n")
+        tests = pathlib.Path(self.tmp.name)
+        (tests / "test_first.py").write_text("")
+        (tests / "test_last.py").write_text("")
+        direct = "python3 crates/fmn-python/tests/test_first.py\n"
+        discover = "python3 -m unittest discover -s crates/fmn-python/tests -p 'test_*.py'\n"
+        self.assertEqual(pw.gate_suites(script + direct + discover, tests)[-2:],
+                         [("test_first", "main"), ("test_last", "discover")])
 
     def test_each_registry_failure_class_fails_the_check(self):
         # Negative controls for check's non-mutant failure classes, one planted defect each.
