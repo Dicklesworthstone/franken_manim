@@ -40,7 +40,10 @@ fn duplicate_output_paths_refuse_in_every_order_even_with_matching_digests() {
                 assert_eq!(value.semantic_digest(), Err(error.clone()));
                 assert_eq!(value.compare(&original), Err(error.clone()));
                 assert_eq!(original.compare(&value), Err(error.clone()));
-                assert_eq!(ProvenanceManifest::from_bytes(&unchecked_bytes(&value)), Err(error));
+                assert_eq!(
+                    ProvenanceManifest::from_bytes(&unchecked_bytes(&value)),
+                    Err(error)
+                );
             }
         }
     }
@@ -68,8 +71,15 @@ fn encoded_only_certified_documents_are_valid_but_cannot_prove_bit_agreement() {
     value.outputs[0].certified = false;
     let decoded = ProvenanceManifest::from_bytes(&value.to_bytes().unwrap()).unwrap();
     assert_eq!(value, decoded);
-    assert_eq!(value.compare(&decoded), Err(ManifestError::NoCertifiedOutputs));
-    assert!(ManifestError::NoCertifiedOutputs.to_string().contains("no certified output"));
+    assert_eq!(
+        value.compare(&decoded),
+        Err(ManifestError::NoCertifiedOutputs)
+    );
+    assert!(
+        ManifestError::NoCertifiedOutputs
+            .to_string()
+            .contains("no certified output")
+    );
     // Standard provenance remains useful, but never claims certified agreement.
     let mut standard = value.clone();
     standard.mode = ManifestMode::Standard;
@@ -118,14 +128,19 @@ fn standard_to_certified_mutation_rechecks_build_identification() {
     let mut changed = original.clone();
     changed.mode = ManifestMode::Standard;
     changed.identity.build_id = "unidentified:fixture".to_owned();
-    let build = changed.items.iter_mut().find(|item| {
-        item.item_id == 2 && item.virtual_path.as_deref() == Some("franken_manim.build")
-    }).unwrap();
+    let build = changed
+        .items
+        .iter_mut()
+        .find(|item| {
+            item.item_id == 2 && item.virtual_path.as_deref() == Some("franken_manim.build")
+        })
+        .unwrap();
     build.digest = sha256(changed.identity.build_id.as_bytes());
     let mut changed = rebuild(&changed).unwrap();
     assert!(changed.validate().is_ok());
     changed.mode = ManifestMode::Certified;
-    let error = ManifestError::Invalid("a certified manifest requires an identified build (ADR-0025)");
+    let error =
+        ManifestError::Invalid("a certified manifest requires an identified build (ADR-0025)");
     assert_eq!(changed.validate(), Err(error.clone()));
     assert_eq!(changed.to_bytes(), Err(error.clone()));
     assert_eq!(changed.compare(&original), Err(error));
@@ -140,7 +155,9 @@ fn a_checksummed_noncanonical_item_order_is_not_repaired_on_decode() {
     assert!(rebuild(&value).is_ok());
     assert_eq!(
         ProvenanceManifest::from_bytes(&unchecked_bytes(&value)),
-        Err(ManifestError::Invalid("closure items are not in canonical order")),
+        Err(ManifestError::Invalid(
+            "closure items are not in canonical order"
+        )),
     );
 }
 
@@ -193,7 +210,11 @@ fn output_count_is_bounded_before_comparison_indexing() {
     let original = manifest();
     let mut changed = original.clone();
     changed.outputs = vec![changed.outputs[0].clone(); 4097];
-    let error = ManifestError::CountLimit { field: "output", count: 4097, max: 4096 };
+    let error = ManifestError::CountLimit {
+        field: "output",
+        count: 4097,
+        max: 4096,
+    };
     assert_eq!(changed.validate(), Err(error.clone()));
     assert_eq!(changed.compare(&original), Err(error.clone()));
     assert_eq!(original.compare(&changed), Err(error));

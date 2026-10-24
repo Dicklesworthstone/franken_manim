@@ -14,13 +14,18 @@ exclude_patterns = [
     ".rch_target*/",
     "/.rch-tmp/",
     "/.rch-results/",
+    # Expected golden-mismatch diagnostics are outputs of injected red drills,
+    # not source inputs. Keep every committed golden under e2e.certified/.
+    "/crates/fmn-conformance/goldens/e2e.certified.actual/",
     ".rch_cargo_home*/",
     "*.rlib",
     "*.rmeta",
     "node_modules/",
     ".beads/*.db",
     ".beads/*.db-*",
-    ".beads/*.db.*",
+    # The tracked beads.db.fsqlite-migration-state is a release-scan input.
+    # Exclude disposable migration database copies without dropping that file.
+    ".beads/*.db.schema-migration-*",
     ".beads/*.backup_*",
     ".beads/*.corrupt_*",
     ".beads/*.orphan_*",

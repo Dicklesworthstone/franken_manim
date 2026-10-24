@@ -600,7 +600,9 @@ impl fmt::Display for ManifestError {
                 write!(f, "FMNP could not reserve storage for {field}")
             }
             Self::DigestMismatch => f.write_str("FMNP closure digest does not match its item list"),
-            Self::NoCertifiedOutputs => f.write_str("FMNP has no certified output artifacts to compare"),
+            Self::NoCertifiedOutputs => {
+                f.write_str("FMNP has no certified output artifacts to compare")
+            }
         }
     }
 }
@@ -644,7 +646,9 @@ fn validate_items(items: &[ClosureItem]) -> Result<(), ManifestError> {
             return Err(ManifestError::Invalid("closure item detail is empty"));
         }
         if item.virtual_path.as_deref() == Some("") {
-            return Err(ManifestError::Invalid("closure item has an empty virtual path"));
+            return Err(ManifestError::Invalid(
+                "closure item has an empty virtual path",
+            ));
         }
         let identity = (item.item_id, item.virtual_path.as_deref());
         if let Some(previous) = previous {
@@ -706,7 +710,11 @@ fn output_index(
     sorted
         .try_reserve_exact(outputs.len())
         .map_err(|_| ManifestError::AllocationFailed("output index"))?;
-    sorted.extend(outputs.iter().filter(|output| !certified_only || output.certified));
+    sorted.extend(
+        outputs
+            .iter()
+            .filter(|output| !certified_only || output.certified),
+    );
     sorted.sort_unstable_by(|a, b| a.virtual_path.cmp(&b.virtual_path));
     Ok(sorted)
 }

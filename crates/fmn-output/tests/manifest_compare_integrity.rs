@@ -68,14 +68,23 @@ fn record(output: &Output, code: i32, verdict: &str) -> String {
     let text = String::from_utf8(output.stdout.clone()).unwrap();
     assert_eq!(text.lines().count(), 1, "one terminal robot record");
     assert!(text.contains("\"schema\":\"fmn.manifest-compare\",\"version\":1"));
-    assert!(text.contains(&format!("\"verdict\":\"{verdict}\"")), "{text}");
+    assert!(
+        text.contains(&format!("\"verdict\":\"{verdict}\"")),
+        "{text}"
+    );
     text
 }
 
 fn malformed(output: &Output, message: &str) {
     assert_eq!(output.status.code(), Some(64), "{output:?}");
-    assert!(output.stdout.is_empty(), "invalid input must not emit a comparison verdict");
-    assert!(String::from_utf8_lossy(&output.stderr).contains(message), "{output:?}");
+    assert!(
+        output.stdout.is_empty(),
+        "invalid input must not emit a comparison verdict"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(message),
+        "{output:?}"
+    );
 }
 
 #[test]
@@ -141,7 +150,11 @@ fn standard_mode_and_changed_inputs_remain_noncomparable() {
         changed.journal_ref,
     )
     .unwrap();
-    let text = record(&compare_bytes(&a, &changed.to_bytes().unwrap()), 2, "not-comparable");
+    let text = record(
+        &compare_bytes(&a, &changed.to_bytes().unwrap()),
+        2,
+        "not-comparable",
+    );
     assert!(text.contains("\"semantic_equal\":false"));
 }
 
@@ -158,8 +171,14 @@ fn checksummed_duplicate_outputs_cannot_hide_different_artifacts_from_the_cli() 
             duplicate.outputs.reverse();
         }
         let forged = unchecked_bytes(&duplicate);
-        malformed(&compare_bytes(&valid, &forged), "duplicate manifest output path");
-        malformed(&compare_bytes(&forged, &valid), "duplicate manifest output path");
+        malformed(
+            &compare_bytes(&valid, &forged),
+            "duplicate manifest output path",
+        );
+        malformed(
+            &compare_bytes(&forged, &valid),
+            "duplicate manifest output path",
+        );
     }
 }
 
@@ -187,7 +206,10 @@ fn missing_nonregular_and_oversized_inputs_refuse_at_the_real_read_boundary() {
     let valid = directory.put("valid.fmnp", &manifest().to_bytes().unwrap());
     let missing = directory.0.join("missing.fmnp");
     malformed(&compare_paths(&valid, &missing), "missing.fmnp");
-    malformed(&compare_paths(&directory.0, &valid), "fmn-manifest-compare:");
+    malformed(
+        &compare_paths(&directory.0, &valid),
+        "fmn-manifest-compare:",
+    );
     let large = directory.0.join("oversized.fmnp");
     let file = std::fs::OpenOptions::new()
         .write(true)
