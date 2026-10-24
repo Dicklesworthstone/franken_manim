@@ -456,6 +456,7 @@ pub struct RenderPlan {
     scratch_live_styles: Vec<bool>,
     stats: SyncStats,
     epoch: RenderPlanEpoch,
+    geometry_rows: GeometryRowDigests,
     geometry_key: GeometryIdentity,
     plan_key: PlanIdentity,
 }
@@ -506,6 +507,7 @@ impl Default for RenderPlan {
             scratch_live_styles: Vec::new(),
             stats: SyncStats::default(),
             epoch: RenderPlanEpoch::default(),
+            geometry_rows: GeometryRowDigests::default(),
             geometry_key: GeometryIdentity::default(),
             plan_key: PlanIdentity::default(),
         };
@@ -522,7 +524,50 @@ impl Default for RenderPlan {
 /// sequence, giving the same collision resistance as the content-addressed
 /// cache without making large scenes fail merely because an integrity check was
 /// requested.
+#[derive(Clone)]
 struct IdentityHasher(Sha256);
+
+/// Running digests of the append-only geometry tables.
+///
+/// Within one plan the segment and shape rows only grow: `sync` appends them
+/// and compaction replaces the whole plan, these digests included. Absorbing
+/// only the rows appended since the last identity keeps each geometry identity
+/// proportional to the new rows. Rehashing every row of the epoch, unreachable
+/// history included, made each frame that compiles a shape (a moving glyph)
+/// cost time proportional to everything compiled so far.
+///
+/// Every row encoding is self-delimiting (fixed-size, tagged or
+/// length-prefixed), so a digest over the concatenated rows plus the row count
+/// is as collision resistant as the single pass it replaces.
+#[derive(Clone)]
+struct GeometryRowDigests {
+    /// Segment rows already absorbed into `segment_hash`.
+    segments: usize,
+    segment_hash: IdentityHasher,
+    /// Shape rows already absorbed into `shape_hash`.
+    shapes: usize,
+    shape_hash: IdentityHasher,
+}
+
+impl Default for GeometryRowDigests {
+    fn default() -> Self {
+        Self {
+            segments: 0,
+            segment_hash: IdentityHasher::new(b"fmn-render/geometry-identity/segments/v2"),
+            shapes: 0,
+            shape_hash: IdentityHasher::new(b"fmn-render/geometry-identity/shapes/v2"),
+        }
+    }
+}
+
+impl std::fmt::Debug for GeometryRowDigests {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GeometryRowDigests")
+            .field("segments", &self.segments)
+            .field("shapes", &self.shapes)
+            .finish_non_exhaustive()
+    }
+}
 
 impl IdentityHasher {
     fn new(domain: &[u8]) -> Self {
@@ -1247,11 +1292,19 @@ impl RenderPlan {
         self.plan_key = plan;
     }
 
-    fn compute_geometry_identity(&self) -> GeometryIdentity {
-        let mut hash = IdentityHasher::new(b"fmn-render/geometry-identity/v1");
+    /// Absorb the geometry rows appended since the last call, then derive
+    /// the identity from both running digests and the table lengths.
+    fn compute_geometry_identity(&mut self) -> GeometryIdentity {
+        let shapes = self.shapes.shapes();
+        let rows = &mut self.geometry_rows;
+        if rows.segments > self.segments.len() || rows.shapes > shapes.len() {
+            // A live plan never loses rows, so a shorter table is a different
+            // one: digest it from its first row.
+            *rows = GeometryRowDigests::default();
+        }
 
-        hash.u64(self.segments.len() as u64);
-        for segment in self.segments.iter() {
+        for segment in &self.segments[rows.segments..] {
+            let hash = &mut rows.segment_hash;
             for point in [segment.p0, segment.p1, segment.p2] {
                 for component in point {
                     hash.f64(component);
@@ -1260,10 +1313,10 @@ impl RenderPlan {
             hash.f64(segment.s0);
             hash.f64(segment.s1);
         }
+        rows.segments = self.segments.len();
 
-        let shapes = self.shapes.shapes();
-        hash.u64(shapes.len() as u64);
-        for shape in shapes {
+        for shape in &shapes[rows.shapes..] {
+            let hash = &mut rows.shape_hash;
             hash.digest(shape.digest);
             hash.u32(shape.first_segment);
             hash.u32(shape.segment_count);
@@ -1272,7 +1325,7 @@ impl RenderPlan {
                     hash.f64(component);
                 }
             }
-            hash_hint(&mut hash, shape.hint);
+            hash_hint(hash, shape.hint);
             hash.u64(shape.arc_length.curve_lengths().len() as u64);
             for &length in shape.arc_length.curve_lengths() {
                 hash.f64(length);
@@ -1282,8 +1335,23 @@ impl RenderPlan {
                 hash.u32(start);
             }
         }
+        rows.shapes = shapes.len();
 
+        let mut hash = IdentityHasher::new(b"fmn-render/geometry-identity/v2");
+        hash.u64(count_u64(rows.segments));
+        hash.digest(rows.segment_hash.clone().finish());
+        hash.u64(count_u64(rows.shapes));
+        hash.digest(rows.shape_hash.clone().finish());
         GeometryIdentity(hash.finish())
+    }
+
+    /// The geometry identity digested from every row again, ignoring the
+    /// running digests: the oracle for their incremental bookkeeping.
+    #[cfg(test)]
+    fn geometry_identity_from_scratch(&self) -> GeometryIdentity {
+        let mut fresh = self.clone();
+        fresh.geometry_rows = GeometryRowDigests::default();
+        fresh.compute_geometry_identity()
     }
 
     fn compute_identity(&self, geometry: GeometryIdentity) -> PlanIdentity {
@@ -2401,6 +2469,90 @@ mod tests {
         );
         assert_eq!(rotated.shapes_compiled, 0);
         assert_eq!(plan.geometry_identity(), geometry);
+    }
+
+    #[test]
+    fn incremental_geometry_identity_matches_a_full_digest_through_growth_forks_and_compaction() {
+        fn checked(plan: &RenderPlan) -> GeometryIdentity {
+            assert_eq!(
+                plan.geometry_identity(),
+                plan.geometry_identity_from_scratch()
+            );
+            plan.geometry_identity()
+        }
+        fn move_point(stage: &mut Stage, mob: Mob, x: f32) {
+            stage
+                .get_mut(mob)
+                .expect("live")
+                .buffer
+                .write(2, "point", &[x, 0.5, 0.0]);
+        }
+
+        let (mut stage, mobs) = staged(3);
+        let mut plan = RenderPlan::new();
+        checked(&plan);
+        sync_valid(&mut plan, &stage, 0);
+        let mut seen = vec![checked(&plan)];
+        sync_valid(&mut plan, &stage, 0);
+        assert_eq!(
+            checked(&plan),
+            seen[0],
+            "a static sync changed the geometry"
+        );
+
+        // Every moved point appends an outline and a new identity; the
+        // running digests absorb only those rows.
+        for step in 1..=6_u8 {
+            move_point(
+                &mut stage,
+                mobs[usize::from(step) % 3],
+                2.0 + f32::from(step) / 4.0,
+            );
+            assert!(sync_valid(&mut plan, &stage, 0).shapes_compiled > 0);
+            let identity = checked(&plan);
+            assert!(!seen.contains(&identity), "step {step} reused an identity");
+            seen.push(identity);
+        }
+
+        // An independently compiled plan with the same history agrees.
+        let (mut replay_stage, replay_mobs) = staged(3);
+        let mut replay = RenderPlan::new();
+        sync_valid(&mut replay, &replay_stage, 0);
+        for step in 1..=6_u8 {
+            let mob = replay_mobs[usize::from(step) % 3];
+            move_point(&mut replay_stage, mob, 2.0 + f32::from(step) / 4.0);
+            sync_valid(&mut replay, &replay_stage, 0);
+        }
+        assert_eq!(checked(&replay), checked(&plan));
+
+        // Forks share the absorbed prefix and then diverge independently.
+        let mut fork = plan.clone();
+        assert_eq!(checked(&fork), checked(&plan));
+        let mut fork_stage = Stage::new();
+        for (index, &x) in [7.0_f32, 8.0, 9.0].iter().enumerate() {
+            let mob = fork_stage.add(tri_at(index as f64 * 10.0, 0.0));
+            fork_stage.add_to_scene(mob).expect("live");
+            move_point(&mut fork_stage, mob, x);
+        }
+        sync_valid(&mut fork, &fork_stage, 0);
+        move_point(&mut stage, mobs[0], 5.0);
+        sync_valid(&mut plan, &stage, 0);
+        assert_ne!(checked(&fork), checked(&plan));
+
+        // Compaction replaces the tables and the digests together: the
+        // compacted plan is the one a fresh plan compiles for the live state.
+        move_point(&mut stage, mobs[1], 6.0);
+        let stats = plan
+            .sync_with_limits(&stage, 0, compacting_limits())
+            .expect("the live state fits after compaction");
+        assert!(stats.compaction.is_some(), "the history was not compacted");
+        let mut fresh = RenderPlan::new();
+        sync_valid(&mut fresh, &stage, 0);
+        assert_eq!(checked(&plan), checked(&fresh));
+        move_point(&mut stage, mobs[2], 7.0);
+        sync_valid(&mut plan, &stage, 0);
+        sync_valid(&mut fresh, &stage, 0);
+        assert_eq!(checked(&plan), checked(&fresh));
     }
 
     #[test]

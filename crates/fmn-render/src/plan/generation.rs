@@ -23,6 +23,8 @@ impl Clone for RenderPlan {
             scratch_live_styles: Vec::new(),
             stats: self.stats,
             epoch: self.epoch,
+            // The clone shares every absorbed row, and its tables only grow.
+            geometry_rows: self.geometry_rows.clone(),
             geometry_key: self.geometry_key,
             plan_key: self.plan_key,
         }
