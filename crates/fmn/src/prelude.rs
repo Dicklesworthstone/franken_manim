@@ -1,8 +1,8 @@
 //! Curated imports for writing native Rust scenes.
 //!
-//! This is intentionally smaller than every public symbol in the subsystem
-//! crates. Less-common surfaces remain discoverable under `fmn::animation`,
-//! `fmn::library`, `fmn::scene`, and the other named modules.
+//! Scene-facing animations and mobject constructors are available here;
+//! subsystem internals remain under `fmn::animation`, `fmn::library`,
+//! `fmn::scene`, and the other named modules.
 
 pub use crate::controls::{
     ButtonBinding, ScalarControlBinding, add_button, add_checkbox, add_enable_disable_button,
@@ -21,27 +21,57 @@ pub use crate::{
     render_svg_with_fs, render_with_fs, run_scene, run_scene_with_typesetting,
 };
 pub use fmn_anim::{
-    AnimConfig, AnimError, Animation, AnimationGroup, ApplyMethod, FramePacket, IntoAnimation,
-    IntoAnimations, MoveAlongPath, RateFunc, Rotating, ShowPartial, Succession, Transform, fade_in,
-    fade_out, prepare_animation, prepare_animations, rotate, show_creation, write,
+    AnimConfig, AnimError, Animation, AnimationGroup, ApplyMethod, DrawBorderThenFill,
+    FadeTransform, FramePacket, Homotopy, IntoAnimation, IntoAnimations,
+    MaintainPositionRelativeTo, MatchingPartsConfig, MoveAlongPath, PathFunc, PhaseFlow, RateFunc,
+    RationalFrameClock, RationalTime, Rotating, ShowIncreasingSubsets, ShowPartial, StartPrep,
+    Succession, Timeline, Transform, TransformMatchingParts, TransformMatchingShapes,
+    UpdateFromFunc, VFade, VShowPassingFlash, WiggleOutThenIn, add_text_letter_by_letter,
+    add_text_word_by_word, animation_on_surrounding_rectangle, apply_complex_function,
+    apply_function, apply_matrix, apply_matrix_2d, apply_pointwise_function,
+    apply_pointwise_function_to_center, apply_wave, broadcast, circle_indicate, clock_passes_time,
+    complex_homotopy, cyclic_replace, fade_in, fade_in_from_point, fade_out, fade_out_to_point,
+    fade_to_color, fade_transform, fade_transform_pieces, flash, flash_around, flashy_fade_in,
+    focus_on, grow_arrow, grow_from_center, grow_from_edge, grow_from_point, indicate,
+    lagged_start, lagged_start_map, move_to_target, prepare_animation, prepare_animations,
+    replacement_transform, restore, rotate, rotate_default, scale_in_place, show_creation,
+    show_creation_then_destruction, show_creation_then_destruction_around,
+    show_creation_then_fade_around, show_creation_then_fade_out, show_increasing_subsets,
+    show_passing_flash, show_passing_flash_around, show_submobjects_one_by_one,
+    show_surface_creation, shrink_to_center, smoothed_homotopy, swap, transform_from_copy,
+    transform_matching_keys, transform_matching_parts, turn_inside_out, uncreate, uncreate_surface,
+    v_fade_in, v_fade_in_then_out, v_fade_out, write,
 };
 pub use fmn_config::Config;
+pub use fmn_config::config::{DeterminismMode, Engine, ThreadPolicy};
 pub use fmn_core::color::Srgb;
 pub use fmn_core::constants::*;
 pub use fmn_core::rng::{Pcg64Dxsm, RngRoot};
 pub use fmn_core::types::{Record, Semantic, Vec3};
 pub use fmn_library::{
-    Annulus, Arc, ArcBetweenPoints, Arrow, Axes, BarChart, Brace, BraceLabel, Button, Checkbox,
-    Circle, Code, CodeTheme, ComplexPlane, CoordinateFrame, CoordinateFrameError, CoordinateSystem,
-    Cube, Cylinder, DashedLine, DecimalNumber, Dot, Ellipse, EnableDisableButton, FunctionGraph,
-    GraphLayout, ImageMobject, Integer, Line, LinearNumberSlider, LiveCoordinateSystem, Markdown,
-    MarkdownMobject, MarkupText, NetworkGraph, NumberLine, NumberPlane, ParametricCurve, Polygon,
-    Rectangle, RegularPolygon, SampleSpace, Sphere, Square, StreamLines, Style,
-    SurroundingRectangle, TableMobject, Tex, TexBindingError, TexMobject, TexNumberBinding,
-    TexSpanBinding, TexText, Text, TextMobject, ThreeDAxes, ThreeDModel, VMobject, VStyle,
-    VectorField, curved_arrow, curved_double_arrow, curves_as_submobjects, dashed_vmobject, group,
-    polyline, rounded_rectangle, sector, small_dot, svg_mobject, tangent_line, triangle, v_group,
-    v_highlight, vector, vectorized_point,
+    AnimatedBoundary, AnimatedStreamLines, AnnularSector, Annulus, Arc, ArcBetweenPoints, Arrow,
+    ArrowTip, Axes, AxisConfig, BarChart, Brace, BraceLabel, BulletedList, BulletedListMobject,
+    Button, Checkbox, Circle, Code, CodeTheme, ColorSliders, ComplexPlane, Cone, ControlMob,
+    ControlMobject, ControlPanel, ControlPanelMobject, CoordinateFrame, CoordinateFrameError,
+    CoordinateSystem, Cube, CubicBezier, Cylinder, DashedLine, DecimalMatrix, DecimalNumber,
+    Disk3D, Dodecahedron, Dot, DotCloud, Elbow, Ellipse, EnableDisableButton, FunctionGraph,
+    GraphLayout, ImageMobject, ImplicitFunction, Integer, IntegerMatrix, LayerKind, LayerSpec,
+    Line, Line3D, LineAlign, LinearNumberSlider, LiveCoordinateSystem, Markdown, MarkdownMobject,
+    MarkupText, Matrix, MatrixMobject, MobjectMatrix, MotionMobject, NetworkGraph,
+    NeuralNetworkConfig, NeuralNetworkMobject, NumberLine, NumberPlane, OldTex, OldTexMobject,
+    PMobject, ParametricCurve, ParametricSurface, Polygon, Prism, Prismify, Rectangle,
+    RegularPolygon, RiemannConfig, SGroup, SampleSpace, SamplingBudget, ScalarControl, Slider,
+    Sphere, Square, Square3D, StreamLines, StreamLinesMobject, StrokeArrow, StrokeProfile, Style,
+    Surface, SurfaceMesh, SurfaceSpec, SurroundingRectangle, TableMobject, Tex, TexBindingError,
+    TexMatrix, TexMobject, TexNumberBinding, TexSpanBinding, TexText, Text, TextMatchingConfig,
+    TextMobject, Textbox, TexturedSurface, ThreeDAxes, ThreeDModel, TimeVaryingVectorField, Title,
+    TitleMobject, Torus, TracedPath, TracingTail, TransformMatchingStrings, TransformMatchingTex,
+    UnitInterval, VCube, VGroup3D, VMobject, VPrism, VStyle, VectorField, VectorFieldMobject,
+    VectorFieldStyle, background_rectangle, checkmark, cross, curved_arrow, curved_double_arrow,
+    curves_as_submobjects, dashed_vmobject, exmark, glow_dot, glow_dots, group, line_brace,
+    p_group, polyline, rounded_rectangle, sector, small_dot, svg_document_mobject, svg_mobject,
+    tangent_line, triangle, true_dot, underline, v_group, v_highlight, vector, vectorized_point,
+    vmobject_from_svg_path,
 };
 pub use fmn_mobject::{
     AnimBuilder, AnimateArgs, AnimateError, Mob, Mobject, PosTarget, StageError, UpdaterError,
