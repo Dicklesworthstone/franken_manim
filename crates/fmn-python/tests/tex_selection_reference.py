@@ -70,8 +70,9 @@ OWNED = {}
 # formula -> bead: an open bead owns every mismatching row of the formula, because its layout is
 # off as a whole (the correspondence cannot pair its glyphs). Stale once none mismatch.
 OWNED_FORMULAS = {
-    # fmd-math sets \iint from a fallback face: the box is 0.82 of TeX's and every glyph after it
-    # moves (ink oracle: IoU 0.09).
+    # The native CM row follows amsmath; the pinned Reference's wasysym
+    # redefinition is narrower. At439a910 this formula remains19.1% wider,
+    # so positional correspondence still loses its parts. Keep the open owner.
     r"\iint_D f\,dA": "fm-zxxy",
 }
 # An environment's name first: alternation takes the first alternative that matches.

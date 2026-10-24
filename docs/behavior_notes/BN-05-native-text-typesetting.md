@@ -154,7 +154,14 @@ selection (Appendix C-36): `Tex(r"e^{i\pi} + 1 = 0")["i"]` selects the i and
 the `+` there and the i here. 36 differ because the Reference's labelling braces
 make LaTeX refuse the formula (C-37): `t2c={"(": RED}` on
 `\left( \frac{a}{b} \right)` raises there and colours the parenthesis here. 22
-rows of `\iint_D f\,dA` are fm-zxxy's (the glyph-count gap). The check runs in
+rows of `\iint_D f\,dA` remain fm-zxxy's. The native CM row at `439a910`
+is one selectable part, but follows amsmath's repeated-integral metrics;
+the pinned Reference loads wasysym, which redefines the integral. Live TeX
+measures the complete display formula at 41.4865 pt with amsmath and
+34.78821 pt with wasysym. The native public box remains 19.1% wider than
+the Reference. This is an unresolved Reference comparison, not an accepted
+exception or a closed acceptance criterion; its existing owned rows and
+the box and ink floors remain in force. The check runs in
 the e2e catalog as `parity.tex_selection_reference.v1` and in the
 installed-wheel gate.
 
