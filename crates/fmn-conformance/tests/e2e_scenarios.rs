@@ -5287,9 +5287,14 @@ fn cli_builtin_frames(
     let dir_text = dir
         .to_str()
         .ok_or_else(|| fail("CLI scenario output path is not UTF-8"))?;
+    // Embedded Python configuration tests temporarily change the process cwd.
+    // Bind the locked corpus's background explicitly, like its size and clock,
+    // so an unrelated custom_config.yml cannot change this fixture's inputs.
     let output = fmn_cli::run([
         "--robot",
         "--reproducible",
+        "--background",
+        "#333333",
         "--format",
         "png_sequence",
         "--resolution",
@@ -8719,7 +8724,10 @@ fn parity_tex_cm_recipes_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
         members.push(built.vmob);
     }
     let mut stage = Stage::new();
-    stage.add(VMobject::arranged(members, RIGHT, 0.4, [0.0; 3]).moved_to([0.0; 3]));
+    let group = stage.add(VMobject::arranged(members, RIGHT, 0.4, [0.0; 3]).moved_to([0.0; 3]));
+    stage
+        .add_to_scene(group)
+        .map_err(|error| fail(format!("show CM recipes: {error}")))?;
     let rendered = render_certified_doc(&stage);
     if rendered == render_certified_doc(&Stage::new()) {
         return Err(fail("CM recipes produced a blank certified frame"));
