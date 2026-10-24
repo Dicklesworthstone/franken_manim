@@ -292,6 +292,11 @@ impl RetainedFrameRenderer {
             // already does for identical captures. The tile cache and its
             // serial are untouched, so the next changed frame still resumes
             // from them.
+            // No FrameJob is constructed on this path, so start its empty
+            // arena frame here. Otherwise the per-frame ledger still reports
+            // the preceding raster's allocations. Keep every backing buffer
+            // and worker slot for the next frame that actually needs them.
+            self.arena.begin_frame();
             self.last_frame_reused = true;
             self.planar_pixels = Some(pixels);
             return Ok(self.reused_frame_stats());
@@ -2293,6 +2298,8 @@ mod tests {
             let mut renderer = RetainedFrameRenderer::new(config(threads)).unwrap();
             let first = renderer.render(&stage, 0).unwrap();
             assert!(!renderer.last_frame_reused());
+            let warm_allocations = renderer.allocation_stats();
+            assert!(warm_allocations.heap_allocs_this_frame > 0);
             let bits = renderer.frame().as_bytes().to_vec();
             let serial = renderer.cache().serial();
             let drawn = first.cache.hits + first.cache.misses + first.cache.poisoned;
@@ -2315,6 +2322,14 @@ mod tests {
                 );
                 assert_eq!(stats.raster, crate::AaStats::default());
                 assert_eq!(renderer.frame().as_bytes(), bits);
+                assert_eq!(
+                    renderer.allocation_stats(),
+                    AllocStats {
+                        heap_allocs_this_frame: 0,
+                        ..warm_allocations
+                    },
+                    "a reused frame must start a new ledger without discarding its buffers"
+                );
             }
 
             // The skipped frames leave the tile cache resumable: the next
@@ -2342,6 +2357,29 @@ mod tests {
             renderer.render(&stage, 1).unwrap();
             assert!(renderer.last_frame_reused());
             assert_eq!(renderer.frame().as_bytes(), returned);
+
+            // A reused frame must not disable accounting for later work.
+            // Grow the draw working set beyond its one-object warm-up, then
+            // require real pool growth and cold-render equality before reuse.
+            for _ in 0..64 {
+                let extra = stage.add(vector());
+                stage.add_to_scene(extra).unwrap();
+            }
+            renderer.render(&stage, 1).unwrap();
+            let growth = renderer.allocation_stats();
+            assert!(growth.heap_allocs_this_frame > 0);
+            assert!(growth.arena_buffer_bytes > warm_allocations.arena_buffer_bytes);
+            assert!(!renderer.last_frame_reused());
+            assert_eq!(renderer.frame().as_bytes(), cold_bits(&stage, 1));
+            renderer.render(&stage, 1).unwrap();
+            assert!(renderer.last_frame_reused());
+            assert_eq!(
+                renderer.allocation_stats(),
+                AllocStats {
+                    heap_allocs_this_frame: 0,
+                    ..growth
+                }
+            );
         }
     }
 
