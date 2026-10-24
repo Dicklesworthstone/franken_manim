@@ -112,13 +112,18 @@ class MovementFrontendTests(unittest.TestCase):
         class Native(self.n._NativeAnimation):
             _native_kind="fixture_native"
         sibling=Native(point(self.n),run_time=2.)
+        # The default is public from construction (fm-v3oj); the native lowering carries the
+        # play override in its payload and leaves the sibling's own attribute alone.
+        sibling_default=sibling.rate_func
         rate=lambda t:t*t
         animation=self.n.MoveAlongPath(self.mob,self.path)
         self.scene.play(animation,sibling,rate_func=rate)
         self.assertEqual(self.scene.specs[0][0],"python_callback")
         self.assertEqual(self.scene.specs[1][0],"fixture_native")
-        self.assertIsNone(sibling.rate_func)
-        self.assertIsNone(self.scene.specs[1][4])
+        self.assertIs(sibling.rate_func,sibling_default)
+        # The spec names that public default; the play payload below still governs (an installed
+        # wheel ends a there_and_back play back at its start, as the Reference does).
+        self.assertEqual(self.scene.specs[1][4],"smooth")
         self.assertEqual(self.scene.rate_payload,[(i/30)**2 for i in range(31)])
         self.assertIs(animation.rate_func,rate)
         self.assertFalse(hasattr(animation,"_movement_force_callback"))

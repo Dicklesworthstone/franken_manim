@@ -1459,7 +1459,10 @@ def _install_composition_lifecycle(g):
         self._composition_driver = None
 
     def get_all_mobjects(self):
-        return ensure_root(self)
+        # composition.py returns self.group, which an author may reassign after
+        # construction; the root the constructor built is only its default.
+        group = getattr(self, "group", None)
+        return group if isinstance(group, Mobject) else ensure_root(self)
 
     methods = {
         "__init__": group_init,

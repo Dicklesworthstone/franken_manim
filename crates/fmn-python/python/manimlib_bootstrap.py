@@ -160,9 +160,6 @@ def _there_and_back_rate(t):
     return _smooth_rate(new_t)
 
 
-_there_and_back_rate.__name__ = "there_and_back"
-_there_and_back_rate.__qualname__ = "there_and_back"
-
 # The Reference leaks its OpenGL/window implementation modules into ordinary
 # Python namespaces.  Those names remain part of the compatibility surface,
 # but importing their host packages would initialize a second renderer (and
@@ -22810,6 +22807,10 @@ def _install_rate_functions():
         # crossing during the segment.
         if name in native_catalog:
             _RATE_FUNC_NAMES[function] = name
+        # The Reference's identity: `smooth.__name__ == "smooth"`, and pickle
+        # finds each function at manimlib.utils.rate_functions.<name> (fm-v3oj).
+        function.__name__ = function.__qualname__ = name
+        function.__module__ = module.__name__
         setattr(module, name, function)
         if not hasattr(_FMN_MODULE, name):
             setattr(_FMN_MODULE, name, function)

@@ -41,6 +41,37 @@ class AnimationWitnesses(unittest.TestCase):
                     self.assertNear(animation.path_func(np.zeros((1, 3)), np.ones((1, 3)), .25),
                                     [[.25, .25, .25]])
 
+    def test_rate_functions_keep_the_reference_names_and_pickle(self):
+        import pickle
+        import subprocess
+        import sys
+
+        from manimlib import FadeIn, Square, Write
+        from manimlib.utils import rate_functions
+
+        # fm-v3oj: manimlib/utils/rate_functions.py defines each at module scope, so
+        # `smooth.__name__ == "smooth"` and pickle stores it by reference.
+        names = ("linear", "smooth", "rush_into", "rush_from", "slow_into", "double_smooth",
+                 "there_and_back", "there_and_back_with_pause", "running_start", "overshoot",
+                 "not_quite_there", "wiggle", "squish_rate_func", "lingering",
+                 "exponential_decay")
+        for name in names:
+            with self.subTest(name=name):
+                function = getattr(rate_functions, name)
+                self.assertEqual((function.__name__, function.__qualname__, function.__module__),
+                                 (name, name, "manimlib.utils.rate_functions"))
+                self.assertIs(pickle.loads(pickle.dumps(function)), function)
+        self.assertIs(FadeIn(Square()).rate_func, rate_functions.smooth)
+        self.assertIs(Write(Square()).rate_func, rate_functions.linear)
+        # A fresh interpreter resolves the pickled reference too.
+        loaded = subprocess.run(
+            [sys.executable, "-c", "import pickle, sys; f = pickle.loads(sys.stdin.buffer.read());"
+             " print(f.__module__, f.__name__, f(0.25))"],
+            input=pickle.dumps(rate_functions.rush_into), capture_output=True, check=True)
+        self.assertEqual(loaded.stdout.decode().split()[:2],
+                         ["manimlib.utils.rate_functions", "rush_into"])
+        self.assertAlmostEqual(float(loaded.stdout.split()[2]), rate_functions.rush_into(0.25))
+
     def test_transform_get_all_mobjects_returns_list(self):
         from manimlib import Square, Transform
 
@@ -152,6 +183,37 @@ class AnimationWitnesses(unittest.TestCase):
                 self.assertIs(animation.group, animation.mobject)
                 self.assertIn(id(animation.rectangle), ids(animation.mobject.get_family()))
                 self.assertEqual(animation.mobject.get_points().shape, (0, 3))
+
+    def test_surrounding_rectangle_follows_its_moving_mobject(self):
+        import tempfile
+
+        from manimlib import Mobject, RIGHT, Scene, ShowCreationThenFadeAround, Square, linear
+
+        # indication.py AnimationOnSurroundingRectangle: rect.add_updater(lambda r:
+        # r.move_to(mobject)), and the rectangle is the group root from construction, so its
+        # updater runs on the animation's helper copies too (fm-v3oj). Measured on the pinned
+        # Reference (6199a00d) at 10 fps, sampled by a scene updater: the rectangle trails the
+        # shifting square by one frame. A native route that dropped the updater left it at 0.
+        rows = []
+
+        class Follow(Scene):
+            def construct(self):
+                square = Square()
+                self.add(square)
+                effect = ShowCreationThenFadeAround(square, rate_func=linear)
+                recorder = Mobject()
+                recorder.add_updater(lambda mob, dt: rows.append(
+                    (effect.mobject[0].get_center()[0], square.get_center()[0])))
+                self.add(recorder)
+                self.play(effect, square.animate.shift(2 * RIGHT), run_time=0.5)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            Follow().render(tmp + "/follow", format="png_sequence", resolution=(160, 90),
+                            fps=10, threads=1)
+        self.assertEqual([round(float(r), 3) for r, _ in rows],
+                         [0.0, 0.0, 0.116, 0.635, 1.365, 1.884, 1.884])
+        self.assertEqual([round(float(s), 3) for _, s in rows],
+                         [0.0, 0.116, 0.635, 1.365, 1.884, 2.0, 2.0])
 
     def test_animation_group_get_all_mobjects(self):
         # composition.py:61: get_all_mobjects returns self.group, a single Mobject: VGroup of

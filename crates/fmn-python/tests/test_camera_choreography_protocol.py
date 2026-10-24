@@ -252,11 +252,16 @@ def environment():
             for updater in self.frame.updaters[:]:
                 self.frame._dispatch_updater(updater, 0.)
             return self.samples
+    def straight_path(a, b, t):
+        return (1-t)*a+t*b
+    # The shipped straight_path's native-route marker (manimlib_bootstrap). Transform resolves
+    # its path at construction (fm-v3oj), so an unmarked stand-in reads as an authored path.
+    straight_path._fmn_path_arc = 0.0
     g = dict(locals())
     g.update(_NativeAnimation=NativeAnimation, _AnimationBuilder=Builder, _SceneCore=Scene, _np=np, _copy=copy,
              _OUT=np.array([0., 0., 1.]), _refuse_unrouted=refuse, _smooth_rate=smooth,
              _linear_rate=linear, _interpolate=lambda a, b, t: (1-t)*a+t*b,
-             straight_path=lambda a, b, t: (1-t)*a+t*b, _collections_abc=collections.abc,
+             _collections_abc=collections.abc,
              _RATE_FUNC_NAMES={linear: "linear", smooth: "smooth"}, _TexError=ValueError,
              _FMN_ROOT=SimpleNamespace(_composition_intervals=intervals))
     tree = ast.parse(BOOTSTRAP.read_text())
@@ -353,7 +358,10 @@ class CameraChoreographyTests(unittest.TestCase):
             if t not in (0., 1.):
                 observed.append(float(obj.get_center()[0]))
             return (1-t)*a+t*b
-        self.scene.play(self.camera_move(4, run_time=1, path_func=path), self.Transform(obj, obj.copy().shift((4, 0, 0)), run_time=1))
+        # Linear, as the sibling test above: a Transform's default rate is the Reference's smooth
+        # from construction (fm-v3oj), and these samples are linear positions.
+        self.scene.play(self.camera_move(4, run_time=1, path_func=path),
+                        self.Transform(obj, obj.copy().shift((4, 0, 0)), run_time=1, rate_func=self.g["linear"]))
         self.assertEqual(observed, [0., 1., 2.])
     def test_multiple_camera_animations_keep_argument_order(self):
         self.scene.play(self.camera_move(8, run_time=1), self.camera_move(4, run_time=1))
