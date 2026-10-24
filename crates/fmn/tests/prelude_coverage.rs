@@ -73,7 +73,7 @@ impl SceneConstruct for Family {
                 assert_eq!(stage.get_center(circle), LEFT);
             }
             Self::Grow => {
-                let grow = grow_from_point(stage, square, LEFT, Some(RED))?;
+                let grow = grow_from_point(stage, square, LEFT, Some([1.0, 0.0, 0.0]))?;
                 stage.play(grow.with_config(timing()))?;
                 assert_eq!(stage.get_center(square), ORIGIN);
             }
@@ -105,7 +105,7 @@ fn prelude_families_render_real_frames_and_keep_thread_independent_pixels() {
         Family::Fade,
     ] {
         let mut baseline = None;
-        for threads in [1, 4] {
+        for threads in [1, 4, 16] {
             let fs = Arc::new(VirtualFs::new());
             let mut options = RenderOptions::new("/prelude").unwrap();
             options.format = RenderFormat::PngSequence;
