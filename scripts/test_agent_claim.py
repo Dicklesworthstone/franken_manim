@@ -47,7 +47,7 @@ def dependency(owner: str, target: str, kind: str = "blocks") -> dict:
 class Fixture:
     def __init__(self, rows: list[dict], *, worktree: bool = False):
         self.directory = tempfile.TemporaryDirectory()
-        self.root = Path(self.directory.name) / "repo"
+        self.root = Path(self.directory.name).resolve() / "repo"
         self.root.mkdir()
         (self.root / ".beads").mkdir()
         if worktree:
@@ -142,6 +142,8 @@ class FakeRunner:
         raise AssertionError(f"unexpected command: {argv}")
 
     def __call__(self, argv: tuple[str, ...], cwd: Path) -> agent_claim.CommandResult:
+        if cwd != self.fixture.root:
+            raise AssertionError(f"claim command ran in another repository: {cwd}")
         self.calls.append((argv, cwd))
         command = self.command(argv)
         if command == "update":
@@ -198,6 +200,23 @@ class AgentClaimTests(unittest.TestCase):
         fixture = Fixture(rows, worktree=worktree)
         self.addCleanup(fixture.cleanup)
         return fixture
+
+    def test_symlinked_repository_uses_its_canonical_command_directory(self) -> None:
+        fixture = self.fixture([record("fm-next")])
+        alias = fixture.root.parent / "repo-alias"
+        alias.symlink_to(fixture.root, target_is_directory=True)
+        runner = FakeRunner(fixture)
+        receipt = agent_claim.execute_claim(
+            alias,
+            fixture.token(),
+            "agent@example.com",
+            runner=runner,
+        )
+        self.assertTrue(receipt["claimed"])
+        self.assertEqual([cwd for _, cwd in runner.calls], [fixture.root, fixture.root])
+        other = self.fixture([record("fm-other")])
+        with self.assertRaisesRegex(AssertionError, "another repository"):
+            runner(("br", "update"), other.root)
 
     def test_dry_run_pins_atomic_claim_argv_and_versioned_policy(self) -> None:
         fixture = self.fixture([record("fm-next")])
