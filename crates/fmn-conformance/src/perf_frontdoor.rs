@@ -1745,7 +1745,14 @@ mod tests {
             // vanishing: four of 163 members, each with no records, change
             // only phantom stroke/fill colour or opacity. Same size and
             // engine, and all 30 certified frames byte-identical (fm-f4x6).
-            "0088fcb07c68b8330ece9f527fa3d549b9668713aa45acda1da76f6cb04f18b5"
+            // Then twice more (fm-d0jn), each frame byte-identical, from
+            // bundles dumped at the bracketing commits:
+            // - 0caf2269 (fm-v4lv) fades point-free roots' styles. The title
+            //   root (no records) carries its fading alpha in frames 0-13.
+            // - 47d2d8e0 (fm-hc78) orients glyphs counter-clockwise. Each of
+            //   the title's 37 glyphs is reverse_each_subpath of its old
+            //   points, with joint_angle following.
+            "86d45d332ef71780e8c24cfcc0a757e137e36437d93e55601f503db331ec9f10"
         );
         let opening = TimelineBundle::from_bytes(&opening_a).expect("decode opening fixture");
         assert_eq!(opening.fps(), 30);
