@@ -74,6 +74,11 @@ class TrackerRateIntegrationTests(unittest.TestCase):
         scene.lower_only = True
         scene.play(animation)
         self.assertEqual(scene.executions[0][0][0][0], "transform")
+        # An authored point-field override must still demote the same
+        # catalog animation; a stock fixture must not supply that override.
+        animation.mobject.pointlike_data_keys = ["point", "authored_point"]
+        scene.play(animation)
+        self.assertEqual(scene.executions[1][0][0][0], "python_callback")
 
 
 if __name__ == "__main__":

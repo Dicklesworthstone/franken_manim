@@ -23,15 +23,22 @@ def environment(install=True):
     native = ModuleType("manimlib.tracker_fixture")
     g = vars(native)
     class Mobject:
+        # Match the shipped Mobject class protocol. An instance override is
+        # authored behavior and correctly selects callbacks on CPython 3.13.
+        pointlike_data_keys = ["point"]
         def __init__(self):
             self.data = np.zeros(0, dtype=[("point", "f4", (3,)), ("rgba", "f4", (4,))])
+            # Real point-free roots retain one style record outside `.data`.
+            self.style_record = np.zeros(1, dtype=self.data.dtype)
             self.uniforms = {"opacity": 1.0}
             self.locked_data_keys, self.locked_uniform_keys, self.const_data_keys = set(), set(), set()
-            self.pointlike_data_keys, self.dirty = ("point",), 0
+            self.dirty = 0
             self.setter_calls = []
             self.submobjects, self.anchor = [], (0.0, 0.0, 0.0)
         def init_uniforms(self):
             pass
+        def _style_data(self):
+            return self.data if len(self.data) else self.style_record
         # live_rates routes an updater-carrying family through callbacks (fm-k00v).
         def get_family(self):
             return [self, *(member for child in self.submobjects for member in child.get_family())]
@@ -73,7 +80,7 @@ def environment(install=True):
     names = {"ValueTracker", "ExponentialValueTracker", "ComplexValueTracker"}
     nodes = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name in names]
     assert {node.name for node in nodes} == names
-    exec(compile(ast.Module(nodes, []), str(bootstrap), "exec"), g)
+    exec(compile(ast.Module(nodes, []), str(bootstrap), "exec"), g)  # ubs:ignore -- test-only named classes parsed from the fixed repository bootstrap path; no external input.
     source = ROOT / "python/manimlib/_animation_semantics.py"
     installer = next(node for node in ast.parse(source.read_text()).body if isinstance(node, ast.FunctionDef) and node.name == "install")
     names = {"interpolate_uniform", "mobject_interpolate"}
@@ -83,7 +90,7 @@ def environment(install=True):
     captures = [node for node in installer.body if isinstance(node, ast.Assign) and any(
         isinstance(target, ast.Name) and target.id == "shipped_straight_path" for target in node.targets)]
     assert len(captures) == 1
-    exec(compile(ast.Module(captures + nodes, []), str(source), "exec"), g)
+    exec(compile(ast.Module(captures + nodes, []), str(source), "exec"), g)  # ubs:ignore -- test-only named functions/capture parsed from the fixed repository semantics path; no external input.
     Mobject.interpolate = g["mobject_interpolate"]
     if install:
         trackers.install_tracker_interpolation(native)

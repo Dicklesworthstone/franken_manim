@@ -206,11 +206,26 @@ class ExactRateDispatch(unittest.TestCase):
         # Negative control: adding live easing must not turn stock animations
         # into Python work merely because a callback implementation exists.
         for factory in (m.VFadeIn, m.VFadeOut, m.VFadeInThenOut,
-                        m.ShowCreationThenFadeOut, m.ShowCreationThenFadeAround,
-                        m.ShowCreationThenDestructionAround):
+                        m.ShowCreationThenFadeOut):
             with self.subTest(factory=factory.__name__):
                 animation = factory(m.Square(), rate_func=m.linear)
                 self.assertFalse(m._native._requires_python_animation(animation))
+
+    def test_surrounding_rectangle_tracking_keeps_its_callback(self):
+        # Pinned Reference indication.py:316 installs a rectangle updater.
+        # A catalog rate does not make that host callback safe to discard.
+        # Remove only that updater for the native-route negative control;
+        # then authored easing must select callbacks even without an updater.
+        for factory in (m.ShowCreationThenFadeAround,
+                        m.ShowCreationThenDestructionAround):
+            with self.subTest(factory=factory.__name__):
+                animation = factory(m.Square(), rate_func=m.linear)
+                self.assertTrue(animation.rectangle.get_updaters())
+                self.assertTrue(m._native._requires_python_animation(animation))
+                animation.rectangle.clear_updaters()
+                self.assertFalse(m._native._requires_python_animation(animation))
+                animation.rate_func = lambda alpha: alpha * alpha
+                self.assertTrue(m._native._requires_python_animation(animation))
 
     def test_authored_rate_failure_preserves_exception_and_releases_state(self):
         for factory in (m.VFadeIn, m.ShowCreationThenFadeOut):
