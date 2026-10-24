@@ -23,7 +23,9 @@ exclude_patterns = [
     "node_modules/",
     ".beads/*.db",
     ".beads/*.db-*",
-    ".beads/*.db.*",
+    # The tracked beads.db.fsqlite-migration-state is a release-scan input.
+    # Exclude disposable migration database copies without dropping that file.
+    ".beads/*.db.schema-migration-*",
     ".beads/*.backup_*",
     ".beads/*.corrupt_*",
     ".beads/*.orphan_*",
