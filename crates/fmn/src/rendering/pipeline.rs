@@ -890,6 +890,22 @@ impl NativeFramePipeline {
         result
     }
 
+    /// Seal capture input while already-admitted frames continue draining.
+    ///
+    /// This does not join workers or finalize the output generation. A caller
+    /// can use another planned render team while this prefix drains, then
+    /// call [`Self::finish`] to recover the complete result and release it.
+    ///
+    /// # Errors
+    /// Refuses an already-finished pipeline. Stage failures remain for `finish`.
+    pub fn close_input(&mut self) -> Result<(), RenderError> {
+        self.stream
+            .as_mut()
+            .ok_or(RenderError::Pipeline(FrameStreamError::Closed))?
+            .close_input();
+        Ok(())
+    }
+
     /// Drain and join all frame stages. This does NOT publish the artifact.
     ///
     /// # Errors

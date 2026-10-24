@@ -58,7 +58,8 @@ def render_play(root, label, scene_type, fps, threads, depth, moved):
 
 def independent_plays_match_serial(root):
     total_pure = total_frames = 0
-    cases = ((15, 1, False, False), (24, 4, True, False), (60, 16, True, True))
+    cases = ((15, 1, False, False), (24, 4, True, False), (60, 16, True, True),
+             (24, 64, False, False))
     for index, (fps, threads, depth, moved) in enumerate(cases):
         serial, expected, expected_bytes, pure_count = render_play(
             root, f"serial-{index}", SerialScene, fps, threads, depth, moved)
@@ -88,6 +89,38 @@ def independent_plays_match_serial(root):
         total_pure += stats["pure_play_frames"]
         total_frames += actual.frame_count
     return total_pure, total_frames
+
+
+def retained_tail_survives_waits_and_rejects_edits(root):
+    for samples in (1, 2):
+        results = []
+        for scene_type, label in ((SerialScene, "serial"), (m.Scene, "native")):
+            scene = scene_type()
+            scene.observations = []
+            destination = root / f"tail-{samples}-{label}"
+            with scene.render_session(destination, format="png_sequence",
+                                      resolution=(96, 54), fps=8, threads=4):
+                square = m.Square(fill_color=m.BLUE, fill_opacity=1)
+                scene.add(square)
+                scene.play(m.Transform(square, square.copy().shift(m.RIGHT)),
+                           run_time=samples / 8, rate_func=m.linear)
+                scene.wait(2 / 8)
+                for edit in (lambda: square.set_color(m.RED),
+                             lambda: square.shift(m.UP),
+                             lambda: scene.frame.shift(.25 * m.UP)):
+                    edit()
+                    scene.wait(1 / 8)
+            stats = scene._render_performance
+            assert stats["conversion_reuses"] == 2, stats
+            assert stats["converted_frames"] == samples + 3, stats
+            assert stats["raw_frame_reuses"] == 2, stats
+            pixels = frame_bytes(destination)
+            assert len(pixels) == samples + 5
+            assert pixels[samples - 1] == pixels[samples] == pixels[samples + 1]
+            assert all(pixels[index] != pixels[index - 1]
+                       for index in range(samples + 2, samples + 5))
+            results.append(pixels)
+        assert results[0] == results[1], "tail handoff changed pixels or ignored edits"
 
 
 def authored_light_callbacks_match_serial(root):
@@ -226,6 +259,7 @@ def run_native_pure_offload_acceptance(directory):
     authored_light_callbacks_match_serial(root)
     fallbacks = implicit_sources_views_and_empty_callbacks_stay_serial(root)
     zero_duration_and_failure_do_not_publish_extra_frames(root)
+    retained_tail_survives_waits_and_rejects_edits(root)
     return pure + 6, frames + 6, fallbacks + 2
 
 

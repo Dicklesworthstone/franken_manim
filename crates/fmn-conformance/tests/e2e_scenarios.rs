@@ -2057,7 +2057,7 @@ fn native_shape_matching_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
         .with_counter("native_shape_matching_thread_counts", checked))
 }
 
-/// Native scene cues reach canonical WAV bytes at every requested worker count.
+/// Prelude-only animation families converge to independently authored geometry.
 fn prelude_families_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     use fmn::prelude::*;
     use fmn_platform::fs::{FileSystem, VirtualFs};
@@ -2127,14 +2127,10 @@ fn prelude_families_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         .read(std::path::Path::new("/expected.png"))
         .map_err(|e| fail(e.to_string()))?;
     let mut checked = 0;
-    for threads in [1, 4] {
+    for threads in [1, 4, 16] {
         let path = format!("/actual-{threads}.png");
-        let report = render_with_fs(
-            &mut PreludeScene,
-            options(&path, threads)?,
-            fs.clone(),
-        )
-        .map_err(|e| fail(e.to_string()))?;
+        let report = render_with_fs(&mut PreludeScene, options(&path, threads)?, fs.clone())
+            .map_err(|e| fail(e.to_string()))?;
         let actual = fs
             .read(std::path::Path::new(&path))
             .map_err(|e| fail(e.to_string()))?;
@@ -2156,6 +2152,7 @@ fn prelude_families_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         .with_counter("prelude_thread_counts", checked))
 }
 
+/// Native scene cues reach canonical WAV bytes at every requested worker count.
 fn native_soundtrack_wav_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     struct Cues;
     impl fmn::SceneConstruct for Cues {
@@ -4439,10 +4436,12 @@ fn python_portal_native_offload_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scen
     let (pure_frames, compared_frames, fallback_cases) =
         manimlib::run_portal_gauntlet_native_offload(&root)
             .map_err(|error| fail(format!("run Python portal native offload: {error}")))?;
-    if (pure_frames, compared_frames, fallback_cases) != (45, 51, 5) {
+    // Four paired scene cases contribute 7 + 10 + 22 + 10 pure samples and
+    // eight wait samples. The separate moving-light pair adds six to both.
+    if (pure_frames, compared_frames, fallback_cases) != (55, 63, 5) {
         return Err(fail(format!(
             "portal native offload: pure={pure_frames}, compared={compared_frames}, \
-             fallbacks={fallback_cases}; expected 45, 51, 5"
+             fallbacks={fallback_cases}; expected 55, 63, 5"
         )));
     }
     ctx.event(
@@ -9332,8 +9331,10 @@ fn tile_binned_stroke_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenari
     let initial = stage.snapshot();
     let expected = cold(&stage)?;
     let visible_pixels = expected
-        .chunks_exact(8)
-        .zip(blank.chunks_exact(8))
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .zip(blank.as_chunks::<8>().0.iter())
         .filter(|(actual, background)| actual != background)
         .count();
     if visible_pixels < 100 {
@@ -9620,13 +9621,13 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         vec![
             Assertion::ExitCode(0),
             counter_eq("prelude_families", 4),
-            counter_eq("prelude_thread_counts", 2),
+            counter_eq("prelude_thread_counts", 3),
         ],
         vec![LogExpect::span_present(
             "e2e.render_matrix.prelude_families",
             vec![
                 FieldPred::u64_eq("families", 4),
-                FieldPred::u64_eq("thread_counts", 2),
+                FieldPred::u64_eq("thread_counts", 3),
             ],
         )],
     ));
@@ -10881,15 +10882,15 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         Invocation::new(python_portal_native_offload_run),
         vec![
             Assertion::ExitCode(0),
-            counter_eq("python_offload_pure_frames", 45),
-            counter_eq("python_offload_compared_frames", 51),
+            counter_eq("python_offload_pure_frames", 55),
+            counter_eq("python_offload_compared_frames", 63),
             counter_eq("python_offload_fallback_cases", 5),
         ],
         vec![LogExpect::span_present(
             "e2e.python.native_offload",
             vec![
-                FieldPred::u64_eq("pure_frames", 45),
-                FieldPred::u64_eq("compared_frames", 51),
+                FieldPred::u64_eq("pure_frames", 55),
+                FieldPred::u64_eq("compared_frames", 63),
                 FieldPred::u64_eq("fallback_cases", 5),
                 FieldPred::str_eq("serial_pixels_identical", "true"),
                 FieldPred::str_eq("authored_observers_preserved", "true"),
@@ -12301,6 +12302,16 @@ fn python_native_outputs_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.python_portal_native_outputs.v1")
         .expect("Python native output scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn prelude_families_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.prelude_families.v1")
+        .expect("native prelude family scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

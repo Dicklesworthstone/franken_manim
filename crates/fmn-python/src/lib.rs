@@ -810,8 +810,8 @@ impl PortalFrameSession {
                 timeline: OutputTimeline::new(single_frame),
                 planar_baseline,
                 planar_map_matches,
-                // Stateful captures retain the first renderer. Eligible pure
-                // plays use every planned team through NativeFramePipeline.
+                // Team zero retains the session renderer. Eligible pure plays
+                // use the other planned teams through NativeFramePipeline.
                 routes: PortalRoutes {
                     teams_used: 1,
                     teams_planned: plan.render_teams.len() as u64,
@@ -837,8 +837,34 @@ impl PortalFrameSession {
         &mut self,
         packet: fmn_scene::studio_bridge::FramePacket,
     ) -> Result<(), fmn_scene::IntegrationError> {
+        let reservation = self.reserve_output()?;
         let preparation_start = Instant::now();
         let stage = packet.materialize_stage();
+        self.capture_stage(&stage, preparation_start, reservation)
+    }
+
+    fn reserve_output(
+        &mut self,
+    ) -> Result<fmn_output::FrameReservation, fmn_scene::IntegrationError> {
+        let start = Instant::now();
+        let reservation = self
+            .emitter
+            .as_ref()
+            .ok_or_else(|| {
+                fmn_scene::IntegrationError::new("reel", "render generation is already closed")
+            })?
+            .reserve(self.next_sequence)
+            .map_err(|error| fmn_scene::IntegrationError::new("reel", error.to_string()))?;
+        self.routes.performance.output_submit_ns += portal_elapsed_ns(start);
+        Ok(reservation)
+    }
+
+    fn capture_stage(
+        &mut self,
+        stage: &fmn_mobject::Stage,
+        preparation_start: Instant,
+        mut reservation: fmn_output::FrameReservation,
+    ) -> Result<(), fmn_scene::IntegrationError> {
         if let Some(light) = self.light_mob {
             if stage.get(light).is_none() {
                 return Err(fmn_scene::IntegrationError::new(
@@ -869,13 +895,13 @@ impl PortalFrameSession {
         {
             Some("camera frame differs from the default frame")
         } else {
-            planar_stage_refusal(&stage)
+            planar_stage_refusal(stage)
         };
         self.routes.performance.capture_prepare_ns += portal_elapsed_ns(preparation_start);
         let render_start = Instant::now();
         if let Some(reason) = refusal {
             self.renderer
-                .render_with_camera(&stage, &self.camera)
+                .render_with_camera(stage, &self.camera)
                 .map_err(|error| fmn_scene::IntegrationError::new("lumen", error.to_string()))?;
             self.routes.camera += 1;
             self.routes.first_camera_reason.get_or_insert(reason);
@@ -883,7 +909,7 @@ impl PortalFrameSession {
             self.renderer.set_background(self.camera.background());
             let stats = self
                 .renderer
-                .render(&stage, 0)
+                .render(stage, 0)
                 .map_err(|error| fmn_scene::IntegrationError::new("lumen", error.to_string()))?;
             self.routes.performance.tile_cache_hits += stats.cache.hits as u64;
             self.routes.performance.tile_cache_misses += stats.cache.misses as u64;
@@ -894,16 +920,6 @@ impl PortalFrameSession {
         self.routes.performance.native_render_ns += portal_elapsed_ns(render_start);
         let unchanged = self.renderer.last_frame_reused();
         self.routes.performance.raw_frame_reuses += u64::from(unchanged);
-        let reserve_start = Instant::now();
-        let mut reservation = self
-            .emitter
-            .as_ref()
-            .ok_or_else(|| {
-                fmn_scene::IntegrationError::new("reel", "render generation is already closed")
-            })?
-            .reserve(self.next_sequence)
-            .map_err(|error| fmn_scene::IntegrationError::new("reel", error.to_string()))?;
-        self.routes.performance.output_submit_ns += portal_elapsed_ns(reserve_start);
         let conversion_start = Instant::now();
         let reused = self
             .conversion
@@ -969,33 +985,49 @@ impl PortalFrameSession {
         );
         let segment = segment.clone();
         let first_sequence = self.next_sequence;
+        let had_camera_reason = self.routes.first_camera_reason.is_some();
         let started = Instant::now();
-        // No Scene borrow, Python handle or callback enters the detached
-        // closure. The same bounded pipeline joins before begin/finish-owned
-        // authored state can be observed or mutated again.
+        // No Scene borrow, Python handle or authored callback enters the
+        // detached closure. Every bounded worker joins before begin/finish-
+        // owned authored state can be observed or mutated again.
         let completed = Python::attach(|py| {
-            py.detach(move || {
-                portal_offload::render(plan, config, output, segment, camera, first_sequence)
+            py.detach(|| {
+                portal_offload::render(
+                    plan,
+                    config,
+                    output,
+                    segment,
+                    camera,
+                    first_sequence,
+                    |job, sequence| {
+                        self.next_sequence = sequence;
+                        // The shared output ring bounds prefix plus owner work.
+                        // Acquire it before materializing the final frame;
+                        // the prefix has joined before this owner reservation.
+                        let reservation = self.reserve_output()?;
+                        let preparation_start = Instant::now();
+                        let stage = job.materialize();
+                        self.capture_stage(&stage, preparation_start, reservation)
+                    },
+                )
             })
         })?;
         self.routes.performance.native_offload_ns += portal_elapsed_ns(started);
         self.next_sequence = completed.next_sequence;
         self.routes.planar += completed.routes.planar;
         self.routes.camera += completed.routes.camera;
-        if self.routes.first_camera_reason.is_none() {
+        // The owner may finish its last sample before a prefix worker. The
+        // first camera reason must still describe output order, not completion.
+        if !had_camera_reason && completed.routes.first_camera_reason.is_some() {
             self.routes.first_camera_reason = completed.routes.first_camera_reason;
         }
-        self.routes.teams_used = self.routes.teams_used.max(
-            completed
-                .pipeline
-                .render_team_frames
-                .iter()
-                .filter(|frames| **frames != 0)
-                .count() as u64,
-        );
+        if let Some(pipeline) = completed.pipeline {
+            self.routes.performance.pure_play_frames += pipeline.emitted;
+            self.routes.performance.converted_frames += pipeline.converted;
+        }
+        self.routes.teams_used = self.routes.teams_used.max(completed.teams_used);
         self.routes.performance.pure_play_segments += 1;
-        self.routes.performance.pure_play_frames += completed.pipeline.emitted;
-        self.routes.performance.converted_frames += completed.pipeline.converted;
+        self.routes.performance.pure_play_frames += completed.owner_frames;
         Ok(completed.alphas)
     }
 
@@ -13923,6 +13955,10 @@ mod tests {
                 (
                     "fading_family.py",
                     include_str!("../tests/fading_family.py"),
+                ),
+                (
+                    "composition_lifecycle.py",
+                    include_str!("../tests/composition_lifecycle.py"),
                 ),
             ] {
                 globals.set_item("__file__", name).expect("suite filename");

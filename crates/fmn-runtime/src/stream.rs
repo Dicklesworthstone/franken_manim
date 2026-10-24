@@ -187,6 +187,15 @@ impl<F: Send + 'static, E: Send + 'static> FrameStream<F, E> {
         self.cancellation.clone()
     }
 
+    /// Seal input without cancelling or waiting for the earlier frames.
+    ///
+    /// Workers continue draining in order. No further permit can be reserved;
+    /// call [`Self::finish`] to join and recover the terminal result. This is
+    /// idempotent and does not publish or finalize the caller's output sink.
+    pub fn close_input(&mut self) {
+        self.requests.take();
+    }
+
     /// Close input, drain earlier frames in order, and join every worker.
     ///
     /// This only completes the pipeline; the caller still owns any sink's
@@ -195,7 +204,7 @@ impl<F: Send + 'static, E: Send + 'static> FrameStream<F, E> {
     /// # Errors
     /// Preserves the pipeline's first failure and final resource counters.
     pub fn finish(mut self) -> Result<PipelineStats, FrameStreamError<E>> {
-        self.requests.take();
+        self.close_input();
         self.join()
     }
 
@@ -455,6 +464,69 @@ mod tests {
     fn empty_finish_and_idle_cancellation_do_not_hang() {
         assert_eq!(stream(1, None, false).finish().unwrap().emitted, 0);
         assert!(stream(1, None, false).cancel().is_err());
+    }
+
+    #[test]
+    fn sealed_input_drains_before_join_and_refuses_new_admission() {
+        for slots in [1, 2, 4] {
+            let alive = Arc::new(AtomicUsize::new(0));
+            let (sent, received) = mpsc::sync_channel(1);
+            let mut stream = FrameStream::new(
+                plan(slots),
+                Stages {
+                    fail: None,
+                    panic: false,
+                },
+                move |sequence, frame: Tracked| {
+                    sent.send((sequence, frame.value)).unwrap();
+                    Ok(())
+                },
+            )
+            .unwrap();
+            let cancellation = stream.cancellation_token();
+            assert!(
+                stream
+                    .reserve()
+                    .unwrap()
+                    .submit(0, tracked(3, &alive))
+                    .is_ok()
+            );
+            stream.close_input();
+            stream.close_input();
+            assert!(matches!(stream.reserve(), Err(FrameStreamError::Closed)));
+            assert_eq!(
+                received.recv_timeout(Duration::from_secs(5)).unwrap(),
+                (0, 3)
+            );
+            assert!(
+                !cancellation.is_cancelled(),
+                "sealing must drain, not cancel"
+            );
+            let stats = stream.finish().unwrap();
+            assert_eq!(stats.emitted, 1);
+            assert_eq!(stats.outstanding_slots, 0);
+            assert_eq!(alive.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[test]
+    fn sealed_input_keeps_the_stage_failure_and_releases_its_frame() {
+        let alive = Arc::new(AtomicUsize::new(0));
+        let mut stream = stream(1, Some(0), false);
+        assert!(
+            stream
+                .reserve()
+                .unwrap()
+                .submit(0, tracked(0, &alive))
+                .is_ok()
+        );
+        stream.close_input();
+        let Err(FrameStreamError::Pipeline(failure)) = stream.finish() else {
+            panic!("sealing hid the stage failure");
+        };
+        assert!(matches!(failure.error, PipelineError::Stage { .. }));
+        assert_eq!(failure.stats.outstanding_slots, 0);
+        assert_eq!(alive.load(Ordering::SeqCst), 0);
     }
 
     #[test]
