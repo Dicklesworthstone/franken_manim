@@ -12,9 +12,9 @@ import unittest
 from unittest.mock import patch
 import wave
 
-from test_clip_checkpoint_native import _native_available
+from test_parallel_batch_native import native_wheel_available
 
-@unittest.skipUnless(_native_available(), "requires the built FrankenManim native extension")
+@unittest.skipUnless(native_wheel_available(), "requires the built FrankenManim native extension")
 class ClipRecoveryCliTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="fmn-clip-cli-")
@@ -172,7 +172,7 @@ class Motion(Scene):
         self.assertIn("--clip-checkpoint", report["help"])
 
 
-@unittest.skipUnless(_native_available(), "requires the built FrankenManim native extension")
+@unittest.skipUnless(native_wheel_available(), "requires the built FrankenManim native extension")
 class ClipRecoveryNativeEdges(unittest.TestCase):
     def test_constructor_paths_are_frozen_at_the_call_site(self):
         from fmn_python import render_subdivided_scene

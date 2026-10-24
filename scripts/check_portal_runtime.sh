@@ -236,6 +236,10 @@ FMN_TEST_NATIVE=1 python3 crates/fmn-python/tests/test_ledger_witnesses_strings_
 FMN_TEST_NATIVE=1 python3 crates/fmn-python/tests/test_ledger_witnesses_runtime_config.py
 FMN_TEST_NATIVE=1 python3 crates/fmn-python/tests/test_ledger_witnesses_geometry_camera.py
 FMN_TEST_NATIVE=1 python3 crates/fmn-python/tests/test_native_pure_offload.py
+FMN_TEST_NATIVE=1 python3 crates/fmn-python/tests/test_clip_recovery_cli_native.py
+
+# fm-fdmd: run this fixture suite without discover's prior module imports.
+python3 crates/fmn-python/tests/test_two_level_batch_cli.py
 
 # Every protocol suite, not only the ones named above, so a fake Scene or
 # lifted namespace that falls behind production code fails here (fm-fmgv:
