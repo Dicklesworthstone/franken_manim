@@ -2058,6 +2058,104 @@ fn native_shape_matching_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
 }
 
 /// Native scene cues reach canonical WAV bytes at every requested worker count.
+fn prelude_families_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::prelude::*;
+    use fmn_platform::fs::{FileSystem, VirtualFs};
+
+    struct PreludeScene;
+    impl SceneConstruct for PreludeScene {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            let timing = AnimConfig {
+                run_time: 0.25,
+                rate_func: RateFunc::linear(),
+                ..AnimConfig::default()
+            };
+            let square = stage.add(Square::new().side_length(1.0).color(BLUE))?;
+            stage.set_fill(square, Some(BLUE), Some(1.0), None, true);
+            stage.shift(square, LEFT);
+            let other = stage.add(Square::new().side_length(1.0).color(RED))?;
+            stage.shift(other, RIGHT);
+            let members = cyclic_replace(stage, &[square, other], 0.0)?
+                .into_iter()
+                .map(|animation| {
+                    Box::new(animation.with_config(timing.clone())) as Box<dyn Animation>
+                })
+                .collect();
+            stage.play_prepared(members)?;
+            let shifted = apply_function(stage, square, |arena, target| {
+                arena.shift(target, UP);
+            })?;
+            stage.play(shifted.with_config(timing.clone()))?;
+            let dot = stage.add(Dot::new().radius(1.0).color(YELLOW))?;
+            let target = stage.add(Dot::new().radius(0.0).color(YELLOW))?;
+            stage.play(focus_on(dot, target, true).with_config(timing.clone()))?;
+            let fade = fade_out(stage, other, ORIGIN, 1.0)?.with_config(timing);
+            let sequence = show_creation_then_fade_out(
+                stage,
+                vec![Box::new(show_creation(other)), Box::new(fade)],
+                1.0,
+                true,
+            )?
+            .with_run_time(0.5);
+            stage.play(sequence)?;
+            assert_eq!(stage.get_center(square), [1.0, 1.0, 0.0]);
+            Ok(())
+        }
+    }
+    struct Expected;
+    impl SceneConstruct for Expected {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            let square = stage.add(Square::new().side_length(1.0).color(BLUE))?;
+            stage.set_fill(square, Some(BLUE), Some(1.0), None, true);
+            stage.shift(square, [1.0, 1.0, 0.0]);
+            Ok(())
+        }
+    }
+    let options = |path: &str, threads| -> Result<RenderOptions, ScenarioError> {
+        let mut options = RenderOptions::new(path).map_err(|e| fail(e.to_string()))?;
+        options.format = RenderFormat::Png;
+        options.config.camera.resolution = (64, 48);
+        options.config.camera.fps = 8;
+        options.config.determinism.mode = DeterminismMode::Certified;
+        options.config.render.threads = ThreadPolicy::Fixed(threads);
+        Ok(options)
+    };
+    let fs = std::sync::Arc::new(VirtualFs::new());
+    render_with_fs(&mut Expected, options("/expected.png", 1)?, fs.clone())
+        .map_err(|e| fail(e.to_string()))?;
+    let expected = fs
+        .read(std::path::Path::new("/expected.png"))
+        .map_err(|e| fail(e.to_string()))?;
+    let mut checked = 0;
+    for threads in [1, 4] {
+        let path = format!("/actual-{threads}.png");
+        let report = render_with_fs(
+            &mut PreludeScene,
+            options(&path, threads)?,
+            fs.clone(),
+        )
+        .map_err(|e| fail(e.to_string()))?;
+        let actual = fs
+            .read(std::path::Path::new(&path))
+            .map_err(|e| fail(e.to_string()))?;
+        if actual != expected || report.scene.play_count != 4 || report.artifact.frame_count != 1 {
+            return Err(fail(
+                "prelude families disagree with independently placed final geometry",
+            ));
+        }
+        checked += 1;
+    }
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.prelude_families")
+            .field("families", 4_u64)
+            .field("thread_counts", checked),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("prelude.png", expected)
+        .with_counter("prelude_families", 4)
+        .with_counter("prelude_thread_counts", checked))
+}
+
 fn native_soundtrack_wav_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     struct Cues;
     impl fmn::SceneConstruct for Cues {
@@ -9511,6 +9609,24 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 FieldPred::u64_eq("thread_counts", 3),
                 FieldPred::u64_eq("nominal_ticks", 6),
                 FieldPred::u64_eq("published_frames", 3),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.prelude_families.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(prelude_families_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("prelude_families", 4),
+            counter_eq("prelude_thread_counts", 2),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.prelude_families",
+            vec![
+                FieldPred::u64_eq("families", 4),
+                FieldPred::u64_eq("thread_counts", 2),
             ],
         )],
     ));
