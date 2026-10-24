@@ -1,6 +1,31 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-run, 2026-10-23, against `Cargo.lock` `7e931713` and `SUITE.lock`
+**Status:** re-run, 2026-10-24, against `Cargo.lock` `2ff0686f` and `SUITE.lock`
+`ebfd3073`, for the franken_markdown repin from `2f1e00c0` to `439a910c`
+(fm-zxxy: native CM integral rows, vector accents and radical extensibles).
+The lock delta changes only the three franken_markdown Git revisions; no
+package, version, checksum or WASM manifest changes. The auxiliary lock is
+byte-identical.
+
+- **VERIFIED (mechanical):** two strict RCH metadata jobs derive identical
+  134-line normal-edge wasm32 trees before and after, with no fmd,
+  franken_markdown, PyO3 or fmn-python package. After replacing workspace
+  paths only, the tree SHA-256 is
+  `ae6a50f567eaadcefc0e6a09e693ca46423124f8cda7c60127cd0bb1e923b6a5`.
+- **VERIFIED (build):** a fresh pinned-nightly `cargo build --locked -p
+  fmn-wasm --target wasm32-unknown-unknown` passes through strict RCH at
+  `cf31e50a`. A separate fresh locked release build of `wasm-smoke` passes
+  at `f4038c9a`; both use the lock identities recorded below.
+- **VERIFIED (execution):** that smoke artifact, SHA-256
+  `4798f438e02b40e100d73224707763e28e0e870c1530de5c307df5f96704512b`,
+  passes under Node 22.22.1 on ts1 and Node 26.8.1 on macOS, with unchanged
+  digest `1f248a71347b82aa`, semantic masks `111111` / `101000`, real host
+  clocks, process-capability refusal and the one-CPU topology shim.
+- The package/browser gate is not re-run: its source and complete dependency
+  graph are unchanged by this pin. The historical package-size failure
+  (fm-8j70) remains open. This is no fresh package, browser or size-budget pass.
+
+Earlier re-run, 2026-10-23, against `Cargo.lock` `7e931713` and `SUITE.lock`
 `762141b7`, for 5bb2621c (fm-5wq.51: pure Python plays on native teams). The only
 lock change is one new edge, `fmn-python` -> the workspace `fmn` facade. No
 package, version, source or checksum moved, and `fmn-python` is not in the wasm
@@ -419,8 +444,8 @@ The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
-- `SUITE.lock` SHA-256: `762141b744b77ba3a7a5df975f4ef77432b3ce0e54ee8e6376e42446211fb271`
-- `Cargo.lock` SHA-256: `7e9317133e6ede599c4651c8a57d369f68b25d7aed7a96c6e2d54724407a137a`
+- `SUITE.lock` SHA-256: `ebfd30732445d1590c88d8aab69b46906464e6535dc6d48f228d9a50b20f800e`
+- `Cargo.lock` SHA-256: `2ff0686f32c5c03a1b2780c63a96d8f9111b0622b294d443ac52b59a1c09f0e7`
 - Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `b1fac18569682e3d2888881883f8b37e4abfb10884ed34a6f2e1eb7a4da942b5`
 
 The 0.5.0 release bump re-bound both lock identities above. That bump changed

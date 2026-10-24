@@ -5293,7 +5293,7 @@ fn cli_builtin_frames(
     let output = fmn_cli::run([
         "--robot",
         "--reproducible",
-        "--background",
+        "--color",
         "#333333",
         "--format",
         "png_sequence",
@@ -5308,6 +5308,12 @@ fn cli_builtin_frames(
         fmn_cli::BUILTIN_SCENE_SOURCE,
         name,
     ]);
+    if output.code != 0 {
+        return Err(fail(format!(
+            "CLI builtin {name}: code={} stdout={:?} stderr={:?}",
+            output.code, output.stdout, output.stderr
+        )));
+    }
     let sequence = dir.join(name);
     let mut paths: Vec<_> = std::fs::read_dir(&sequence)
         .map_err(|error| fail(format!("list {}: {error}", sequence.display())))?
