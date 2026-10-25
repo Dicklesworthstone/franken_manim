@@ -8748,6 +8748,66 @@ fn parity_tex_cm_recipes_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
     Ok(RunOutcome::ok().with_counter("tex_cm_recipe_formulas", 3))
 }
 
+/// fm-w1c0 proposal: family reversal preserves a filled contour, with an
+/// independently constructed raw-reversal negative drawn by the real renderer.
+fn lifecycle_family_reversal_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_core::constants::WHITE;
+    use fmn_geom::QuadPath;
+    use fmn_library::style::Style;
+
+    let points = vec![
+        [-1.0, -1.0, 0.0],
+        [-1.0, 0.0, 0.0],
+        [-1.0, 1.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, -1.0, 0.0],
+        [0.0, -1.0, 0.0],
+        [-1.0, -1.0, 0.0],
+    ];
+    let path = QuadPath::from_points(points.clone()).map_err(|e| fail(e.to_string()))?;
+    let style = Style::default().fill(WHITE, 1.0).stroke(WHITE, 0.0, 0.0);
+    let mut stage = Stage::new();
+    let mob = stage.add(VMobject::from_path(&path).with_style(style));
+    stage.add_to_scene(mob).map_err(|e| fail(e.to_string()))?;
+    let before = render_certified_doc(&stage);
+    if before == render_certified_doc(&Stage::new()) {
+        return Err(fail("the reversal fixture must draw visible ink"));
+    }
+    stage
+        .reverse_family_points(mob)
+        .map_err(|e| fail(e.to_string()))?;
+    let points_after = stage
+        .get_object_points(mob)
+        .ok_or_else(|| fail("lost points"))?;
+    let reversed_path = QuadPath::from_points(points_after).map_err(|e| fail(e.to_string()))?;
+    let contours = reversed_path.subpaths().len();
+    let pixels_equal = before == render_certified_doc(&stage);
+    if contours != 1 || !pixels_equal {
+        return Err(fail(format!(
+            "reversal contours={contours}, pixels_equal={pixels_equal}"
+        )));
+    }
+
+    let mut raw = points;
+    raw.reverse();
+    let raw_path = QuadPath::from_points(raw).map_err(|e| fail(e.to_string()))?;
+    let mut broken = Stage::new();
+    let bad = broken.add(VMobject::from_path(&raw_path).with_style(style));
+    broken.add_to_scene(bad).map_err(|e| fail(e.to_string()))?;
+    if render_certified_doc(&broken) == before {
+        return Err(fail("the real frame oracle missed the raw-reversal defect"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.family_reversal")
+            .field("contours", 1_u64)
+            .field("pixels_equal", 1_u64)
+            .field("planted_pixels_differ", 1_u64),
+    );
+    Ok(RunOutcome::ok().with_counter("family_reversal_pixels_equal", 1))
+}
+
 /// fm-tex-metrics-glyphs-ru72: the ten formulas the bead first measured,
 /// set as one strip and rendered certified. Each formula's width holds the
 /// pinned Reference's (`fixtures/tex_reference_widths.v1.tsv`) within its
@@ -11708,6 +11768,24 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.family_reversal_end_handle.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(lifecycle_family_reversal_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("family_reversal_pixels_equal", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.lifecycle.family_reversal",
+            vec![
+                FieldPred::u64_eq("contours", 1),
+                FieldPred::u64_eq("pixels_equal", 1),
+                FieldPred::u64_eq("planted_pixels_differ", 1),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "parity.markdown_inline_math.v1",
         ScenarioClass::ParityDrill,
         Surface::RustApi,
@@ -12274,6 +12352,16 @@ fn python_studio_editing_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.python_studio_editing.v1")
         .expect("Python Studio editing is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn family_reversal_contour_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.family_reversal_end_handle.v1")
+        .expect("family reversal is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

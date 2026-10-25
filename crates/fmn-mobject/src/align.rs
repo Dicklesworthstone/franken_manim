@@ -632,7 +632,8 @@ impl Stage {
     }
 
     /// Reference `VMobject.reverse_points(recurse)` over
-    /// `Mobject.reverse_points`: re-mark subpath-break handles and invert odd
+    /// `Mobject.reverse_points`: normalize straight end handles through the
+    /// geometry primitive, re-mark subpath-break handles and invert odd
     /// `base_normal` rows for the selected VMobject family, then reverse
     /// **every** record row in the complete family wholesale. Colors, widths,
     /// and angles travel with their points exactly as `data[::-1]` does.
@@ -667,22 +668,34 @@ impl Stage {
                 continue;
             }
             if is_vmobject_schema(self, member)? {
-                let mut points = self
+                let points = self
                     .get_object_points(member)
                     .ok_or(StageError::StaleHandle)?;
-                let path = QuadPath::from_points(points.clone()).map_err(StageError::Geometry)?;
-                let end_indices = path.subpath_end_indices();
-                for &e in &end_indices[..end_indices.len().saturating_sub(1)] {
-                    if e + 2 < points.len() {
-                        points[e + 1] = points[e + 2];
-                    }
-                }
-                let entry = self.get_mut(member).ok_or(StageError::StaleHandle)?;
+                let mut path = QuadPath::from_points(points).map_err(StageError::Geometry)?;
+                path.reverse_points();
                 #[allow(clippy::cast_possible_truncation)]
-                let flat: Vec<f32> = points
+                let mut flat: Vec<f32> = path
+                    .points()
                     .iter()
                     .flat_map(|p| p.iter().map(|v| *v as f32))
                     .collect();
+                for (i, curve) in path.points().windows(3).step_by(2).enumerate() {
+                    let offset = 6 * i;
+                    // Original record coordinates are already f32. Only a
+                    // newly computed straight midpoint can round onto this
+                    // start anchor; intentional break handles are equal in
+                    // the f64 path too. Use the representable end instead.
+                    if curve[0] != curve[1]
+                        && flat[offset..offset + 3] == flat[offset + 3..offset + 6]
+                    {
+                        let end = [flat[offset + 6], flat[offset + 7], flat[offset + 8]];
+                        flat[offset + 3..offset + 6].copy_from_slice(&end);
+                    }
+                }
+                // The complete-family pass below still reverses every
+                // record field together. Store its point-column preimage.
+                flat.as_chunks_mut::<3>().0.reverse();
+                let entry = self.get_mut(member).ok_or(StageError::StaleHandle)?;
                 entry.buffer.write_range("point", 0, &flat);
                 if let Some(mut normals) = entry.buffer.read_column("base_normal") {
                     for row in normals.as_chunks_mut::<3>().0.iter_mut().skip(1).step_by(2) {

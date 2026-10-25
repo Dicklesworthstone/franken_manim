@@ -100,6 +100,28 @@ then sweep at constant speed.
 **Migration:** to draw longer lines in a fast field, raise `arc_len`. For
 more points per line, raise `n_samples_per_line`.
 
+## Straight segments remain whole under point reversal
+
+A quadratic whose control point equals its end anchor is a valid straight
+segment. Reversing its rows naively puts that handle on its start anchor,
+which the shared-anchor format reserves for a subpath break. The resulting
+open runs can acquire extra closing chords when filled.
+
+FrankenManim normalizes that straight handle before reversal. Stage family
+reversal uses the same geometry primitive, then preserves the complete
+record-row reversal for widths, colours and other fields. When float32
+record storage cannot represent a midpoint without turning it into a break,
+the handle uses the representable end anchor of the reversed straight
+segment. Intentional subpath breaks remain intact. The existing
+`recurse=false` pre-repair scope is unchanged.
+
+The segment's geometry and true arc length are unchanged; its raw control
+point may differ. Code inspecting control arrays should accept the
+equivalent straight representation rather than require a split contour.
+The Stage contour/record tests and
+`lifecycle.family_reversal_end_handle.v1` cover this case, including a real
+rendered raw-reversal negative.
+
 ## Evidence
 
 - `crates/fmn-geom/src/arclength.rs`; `crates/fmn-geom/tests/arclength.rs`
