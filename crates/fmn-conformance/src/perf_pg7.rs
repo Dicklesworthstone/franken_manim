@@ -1760,14 +1760,15 @@ mod tests {
         // names its single engine, and the text is the marked-up, wrapped
         // paragraph. The formula pair moves with the TeX engine's fingerprint,
         // which names the franken_markdown pin, and with q^7+z's result digest.
-        // The 439a910 pin moves the formula definitions' engine identity
-        // (fm-zxxy). Their q^7+z result and the complete text definition
-        // remain unchanged; no workload, timing budget or result golden moves.
+        // The 439a910 pin and the fingerprint's new \iint and tall-radical
+        // probe move the formula definitions' engine identity (fm-zxxy).
+        // Their q^7+z result and the complete text definition remain
+        // unchanged; no workload, timing budget or result golden moves.
         assert_eq!(
             [cold.digest(), cached.digest(), text.digest()].map(|digest| digest.to_string()),
             [
-                "67de781ad44b194d206c068b9d857e1d60d41f4fc60c4bd903f5ad3b8b16f044",
-                "4d3bc7f3882f1ffc4f10053de23b8cb1aab9f5b00511078de6986ab4cb4a0110",
+                "ab07d8ec78022b40fa5023e4d92ff2d4587916fb5b0e7669c7c14ed4a3e0e1c4",
+                "93cd0bd94dee585b0c141b61e9ec01a85f600cf48e1dc48e72c8d6279edba526",
                 "0fa22e64fe9e1901eea58a596899ec843bc0d6db46f1cd91607925a50fea3e6f",
             ]
         );
