@@ -8979,7 +8979,9 @@ fn parity_tex_ams_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         if report.artifact.frame_count != 1
             || !image
                 .rgba
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .any(|pixel| pixel[..3].iter().any(|&v| v > 0))
             || expected.as_ref().is_some_and(|bytes| bytes != &png)
         {
