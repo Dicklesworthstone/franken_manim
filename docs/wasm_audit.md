@@ -1,6 +1,39 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-run, 2026-10-25, at source
+**Status:** foundation re-run, 2026-10-25, at source
+`f8eb01f3db11b4cc2dc217416b2f89aee322bb41`, with the native AMS and structured
+macro-overlay provider `c81208f19a81103daf41aa1d8e4a6153c22f7b71`.
+The current lock identities are recorded below. This is a native typesetting
+pin change: the three provider Git sources move, with no package/version,
+checksum, feature or dependency-edge change. No fmd, franken_markdown,
+fmn-python or PyO3 package enters the browser execution graph.
+
+- **VERIFIED (mechanical):** actual locked before/after normal-edge wasm32
+  trees have the same134 rows after replacing workspace paths only, SHA-256
+  `d580244094a527237784d5bdd5ac2b82ecb2c8661659f6d1040c4c2649c47177`.
+  The browser Rust/JS sources are unchanged by this native increment.
+- **VERIFIED (build):** fresh locked release builds of `fmn-wasm` and the
+  separate `wasm-smoke` probe pass through strict RCH on ts1, bound to clean
+  source f8eb01f3 by their clean-overlay receipts. No local Rust build ran.
+- **VERIFIED (execution):** the returned raw smoke helper is536078bytes,
+  SHA-256`cb086493fec936bfaebd0c06980240cd337474c42ea86842e4432c88d9bda6dc`,
+  matching the worker bytes. It passes Node22.22.1 on Linux and26.8.1 on
+  macOS: digest`1f248a71347b82aa`, semantic masks111111/101000, real host
+  clocks, named process-capability refusal and the one-CPU topology shim.
+- **Distribution boundary:** the native font manifest has26 faces; all20
+  earlier face records and all five raw license notices remain unchanged.
+  Its six additional font records do not put those fonts in the Wasm graph.
+- **Package/browser BLOCKED at preflight:** the actual package script exits1
+  because `webpack` is unavailable, before compilation, package construction
+  or Chromium. The available wasm-pack0.13.1, wasm-bindgen0.2.128 and
+  Binaryen125 also differ from its governed0.15.0/0.2.127/117 tool pins.
+  This is a host-tooling limitation, not a fresh product-size result. The
+  historical555759-versus514521-byte package breach (fm-8j70) remains open;
+  the536078-byte smoke helper is a separate artifact. No current npm,
+  serial/shared-memory package, browser, size-budget or certification pass
+  is inferred from these foundation checks.
+
+Earlier re-run, 2026-10-25, at source
 `dd56137d8bea843f906b6934c1ba067e4bba9f17`, against `Cargo.lock` `94652d0c`,
 `SUITE.lock` `ebfd3073`, and auxiliary lock `93a7c2dc`. The lock security
 delta updates only `ctutils` from0.4.2 to0.4.4 for RUSTSEC-2026-0385. The
@@ -474,8 +507,8 @@ The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
-- `SUITE.lock` SHA-256: `ebfd30732445d1590c88d8aab69b46906464e6535dc6d48f228d9a50b20f800e`
-- `Cargo.lock` SHA-256: `94652d0c9e855422b3c8d36cea583332c2247d7c6981e92c25b01dba92cced59`
+- `SUITE.lock` SHA-256: `85ead8b6baf1a5080aae4584dc9d18c4ababf87c8f2b614fa1c4aa5eaf235f05`
+- `Cargo.lock` SHA-256: `59ba59843715107c5fa91784ad5d54b573a290fa3d27e2b323c22bc9cb01ddca`
 - Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `93a7c2dc6acf3dfef88a4a490efbfda7970bd963b4740aa7f879a08fff395061`
 
 The 0.5.0 release bump re-bound both lock identities above. That bump changed
@@ -533,20 +566,20 @@ and verifies that process access fails closed. The 2026-09-08 run under Node
 
 ## Product surfaces
 
-| surface | verdict | current boundary |
+| surface | historical package verdict | tested boundary at the historical receipt |
 |---|---|---|
 | Tier 1: `FmnScene` fixed-scene renderer | **VERIFIED (execution)** | The packaged ESM/TypeScript surface enumerates `circle_shift`, `parametric_wave`, and `orbit_duet`, renders RGBA8 into caller-reused buffers, and precisely refuses a wrong destination length. wasm-bindgen copies the mutable JS view into Wasm memory; this is buffer reuse, not a zero-copy claim. |
 | Tier 2: `FmnPlayer` FMTL/1 player | **VERIFIED (execution)** | The packaged player parses the governed timeline bundle, refuses engine-major mismatches, exposes labels/seek state, and renders RGBA8 through the same semantic Lumen path. |
-| npm bundler artifact | **VERIFIED (execution)** | `scripts/check_wasm_package.sh` builds the self-contained package, checks its exact file/license inventory and recorded size budgets, runs `npm pack` plus `npm publish --dry-run`, installs the tarball into a fresh consumer, bundles it with webpack 5.109.2, and exercises both tiers through Canvas write/readback in headless Chrome. The current diagnostic receipt and its limits are recorded below. |
+| npm bundler artifact | **VERIFIED (historical execution)** | `scripts/check_wasm_package.sh` builds the self-contained package, checks its exact file/license inventory and recorded size budgets, runs `npm pack` plus `npm publish --dry-run`, installs the tarball into a fresh consumer, bundles it with webpack 5.109.2, and exercises both tiers through Canvas write/readback in headless Chrome. The historical receipt and its limits are recorded below; current preflight is blocked as recorded above. |
 | threads artifact | **VERIFIED (execution)** | The separate `fmn-wasm/threads` export is built with atomics and imported shared memory. Its coordinator compiles the module once, verifies the instantiated buffer is a `SharedArrayBuffer`, passes the same module and memory to two module workers, and renders independent whole frames concurrently. The Chromium gate byte-compares serial and threaded results, checks repeatability, and proves a document without COOP/COEP receives `FMN_WASM_CROSS_ORIGIN_ISOLATION_REQUIRED` before worker startup. This is frame-batch parallelism, not intra-frame parallelism. |
 
-The browser/package evidence proves compilation, packaging, deterministic
+That historical browser/package evidence proves compilation, packaging, deterministic
 same-build execution, and the tested failure paths. It does **not** prove
 browser performance, cross-browser behavior, the certified platform matrix,
 cross-platform bit identity, registry publication, or service-worker/CDN
 deployment. WASM remains standard-mode only.
 
-### Current package receipt
+### Historical full package receipt (2026-09-17)
 
 The release-grade run exited 0 in 111.9 seconds on a clean clone of commit
 `efdf8e4041bbbe9f2a63b4b91f30b59286861b89` (`source_dirty=false`); retained
