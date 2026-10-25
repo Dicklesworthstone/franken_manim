@@ -1,6 +1,32 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-run, 2026-10-24, against `Cargo.lock` `2ff0686f` and `SUITE.lock`
+**Status:** re-run, 2026-10-25, against `Cargo.lock` `94652d0c`, `SUITE.lock`
+`ebfd3073`, and auxiliary lock `93a7c2dc`. The root and auxiliary locks
+update only `ctutils` from0.4.2 to0.4.4 for RUSTSEC-2026-0385. The reviewed
+archive checksum, unchanged dependency/features/licenses, absent build script
+and `forbid(unsafe_code)` posture are recorded in the governed allowlist.
+No source, manifest, feature or package in the normal wasm32 graph changes.
+
+- **VERIFIED (mechanical):** actual before/after normal-edge trees have134
+  identical rows after replacing workspace paths only, SHA-256
+  `1face7d9ec9ca0ffba2e3f5bd826c2de43f5c0afcc804e02e2a1992db958e95c`.
+  `ctutils` is absent from that execution graph. The peer integration9a2afe09
+  retains the candidate's tree byte for byte: its additional math fingerprint,
+  conformance tests and fuzz/accelerator locks are outside this graph.
+- **VERIFIED (build):** pinned-nightly wasm32 target and separate locked
+  release-smoke builds pass through strict RCH atfb1a9b45. Those builds qualify
+  that source and the lock identities below; this is not a fresh native or
+  full-workspace pass at the later integration.
+- **VERIFIED (execution):** the actual returned smoke artifact, SHA-256
+  `94d035807751db3c46d712feaf82d35eae25c4c58c08a66f9e8405f0c27e1417`,
+  passes Node22.22.1 on ts1 and Node26.8.1 on macOS with digest
+  `1f248a71347b82aa`, semantic masks111111/101000, real host clocks, named
+  process-capability refusal and the one-CPU topology shim.
+- The package/browser gate is not rerun: its code and complete execution
+  graph are unchanged. The historical package-size failurefm-8j70 remains
+  open. No fresh package, browser or size-budget pass is claimed.
+
+Earlier re-run, 2026-10-24, against `Cargo.lock` `2ff0686f` and `SUITE.lock`
 `ebfd3073`, for the franken_markdown repin from `2f1e00c0` to `439a910c`
 (fm-zxxy: native CM integral rows, vector accents and radical extensibles).
 The lock delta changes only the three franken_markdown Git revisions; no
@@ -445,8 +471,8 @@ either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
 - `SUITE.lock` SHA-256: `ebfd30732445d1590c88d8aab69b46906464e6535dc6d48f228d9a50b20f800e`
-- `Cargo.lock` SHA-256: `2ff0686f32c5c03a1b2780c63a96d8f9111b0622b294d443ac52b59a1c09f0e7`
-- Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `b1fac18569682e3d2888881883f8b37e4abfb10884ed34a6f2e1eb7a4da942b5`
+- `Cargo.lock` SHA-256: `94652d0c9e855422b3c8d36cea583332c2247d7c6981e92c25b01dba92cced59`
+- Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `93a7c2dc6acf3dfef88a4a490efbfda7970bd963b4740aa7f879a08fff395061`
 
 The 0.5.0 release bump re-bound both lock identities above. That bump changed
 only the lockstep workspace package versions (0.4.0 -> 0.5.0, path packages
