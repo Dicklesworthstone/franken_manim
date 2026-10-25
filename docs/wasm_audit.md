@@ -1,30 +1,34 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-run, 2026-10-25, against `Cargo.lock` `94652d0c`, `SUITE.lock`
-`ebfd3073`, and auxiliary lock `93a7c2dc`. The root and auxiliary locks
-update only `ctutils` from0.4.2 to0.4.4 for RUSTSEC-2026-0385. The reviewed
-archive checksum, unchanged dependency/features/licenses, absent build script
-and `forbid(unsafe_code)` posture are recorded in the governed allowlist.
-No source, manifest, feature or package in the normal wasm32 graph changes.
+**Status:** re-run, 2026-10-25, at source
+`dd56137d8bea843f906b6934c1ba067e4bba9f17`, against `Cargo.lock` `94652d0c`,
+`SUITE.lock` `ebfd3073`, and auxiliary lock `93a7c2dc`. The lock security
+delta updates only `ctutils` from0.4.2 to0.4.4 for RUSTSEC-2026-0385. The
+reviewed archive checksum, unchanged dependency/features/licenses, absent
+build script and `forbid(unsafe_code)` posture are in the governed allowlist.
+This integration also changes geometry and Stage family reversal; unchanged
+package membership alone does not qualify that code.
 
 - **VERIFIED (mechanical):** actual before/after normal-edge trees have134
   identical rows after replacing workspace paths only, SHA-256
   `1face7d9ec9ca0ffba2e3f5bd826c2de43f5c0afcc804e02e2a1992db958e95c`.
-  `ctutils` is absent from that execution graph. The peer integration9a2afe09
-  retains the candidate's tree byte for byte: its additional math fingerprint,
-  conformance tests and fuzz/accelerator locks are outside this graph.
+  `ctutils` is absent from that execution graph. DD retains that package tree;
+  the geometry/object implementation changes are covered by fresh builds.
 - **VERIFIED (build):** pinned-nightly wasm32 target and separate locked
-  release-smoke builds pass through strict RCH atfb1a9b45. Those builds qualify
-  that source and the lock identities below; this is not a fresh native or
-  full-workspace pass at the later integration.
+  release-smoke builds pass through strict RCH at DD, with successful terminal
+  acknowledgements and source-bound clean-overlay receipts. Earlier trj
+  delivery failures and a ts1 queue timeout remain recorded failed attempts.
 - **VERIFIED (execution):** the actual returned smoke artifact, SHA-256
-  `94d035807751db3c46d712feaf82d35eae25c4c58c08a66f9e8405f0c27e1417`,
-  passes Node22.22.1 on ts1 and Node26.8.1 on macOS with digest
+  `0f4e2b8d81787729240bcdb84847bc15288ed1ba4047a913c21176a03d9ef87e`
+  (536101bytes), matches the worker bytes. Frozen copies pass Node22.22.1 on
+  ts1, Node26.0.0 on trj and Node26.8.1 on macOS with digest
   `1f248a71347b82aa`, semantic masks111111/101000, real host clocks, named
   process-capability refusal and the one-CPU topology shim.
-- The package/browser gate is not rerun: its code and complete execution
-  graph are unchanged. The historical package-size failurefm-8j70 remains
-  open. No fresh package, browser or size-budget pass is claimed.
+- The package/browser gate is **UNRUN at DD**. The historical package-size
+  failurefm-8j70 remains open. These Node probes exercise the foundation;
+  they do not execute the new family-reversal scenario in a browser or qualify
+  the package size. Native full-workspace and installed-wheel qualification
+  are separate gates.
 
 Earlier re-run, 2026-10-24, against `Cargo.lock` `2ff0686f` and `SUITE.lock`
 `ebfd3073`, for the franken_markdown repin from `2f1e00c0` to `439a910c`
