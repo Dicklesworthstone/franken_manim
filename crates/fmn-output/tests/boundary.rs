@@ -1225,17 +1225,29 @@ mod private_boundary {
         ] {
             let (dir, _gate) = scratch(label);
             let (tool_path, mut runner) = scripted_tool(&dir);
-            runner.script(probe_bound_tool(&dir, 1), outcome);
+            runner.script(probe_bound_tool(&dir, 1), outcome.clone());
             runner.script(
                 probe_bound_tool(&dir, 2),
                 pixel_format_outcome("libx264", "nv12 yuv420p10le"),
             );
             let tool = resolve_tool(&tool_path, &runner, &dir).unwrap();
             let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
-            assert!(matches!(
-                caps.probe_pixel_formats(&tool, &runner, "libx264"),
-                Err(BoundaryError::ProbeFailed(_))
-            ));
+            let error = caps
+                .probe_pixel_formats(&tool, &runner, "libx264")
+                .expect_err("failed or malformed help must refuse discovery");
+            match error {
+                BoundaryError::ProbeFailed(_) if outcome.success() => {}
+                BoundaryError::ProbeProcessFailed(failure) if !outcome.success() => {
+                    assert_eq!(failure.outcome, outcome);
+                    assert_eq!(failure.source_path, tool.path());
+                    assert_eq!(failure.executable_sha256, tool.sha256_hex());
+                    assert_eq!(failure.version, tool.version());
+                    assert_eq!(failure.spec.argv, ["-hide_banner", "-h", "encoder=libx264"]);
+                    assert_eq!(failure.spec.timeout, std::time::Duration::from_secs(2));
+                    assert_eq!(failure.spec.max_output_bytes, 64 * 1024);
+                }
+                error => panic!("{label} returned the wrong refusal: {error:?}"),
+            }
             let accepted = caps.probe_pixel_formats(&tool, &runner, "libx264").unwrap();
             assert_eq!(accepted.formats, ["nv12", "yuv420p10le"]);
             assert_eq!(runner.runs().len(), 3, "failed discovery was retried");
