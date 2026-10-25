@@ -47,15 +47,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// (2f1e00c, fm-u5sb): \underbrace, \overbrace and \left[ x \right] match.
 /// 102 since `\vec` is cmmi's own accent (439a910, fm-zxxy): \vec{v} goes
 /// from IoU 0.86 to 0.986.
+/// 104 with authored AMS symbols and blackboard capitals (9b457a38, fm-0byq).
 /// Improve the floors when the ink improves; never loosen one to land a change.
 const PUBLIC_FLOORS: InkFloors = InkFloors {
-    matches: 102,
+    matches: 104,
     median_hausdorff_px: 1.0,
-    p95_hausdorff_px: 5.1,
-    median_sliced_w1_px: 0.060,
-    p95_sliced_w1_px: 2.954,
-    median_iou: 0.990,
-    p05_iou: 0.355,
+    p95_hausdorff_px: 4.124,
+    median_sliced_w1_px: 0.057,
+    p95_sliced_w1_px: 2.461,
+    median_iou: 0.9906,
+    p05_iou: 0.3991,
 };
 
 /// The private corpus set's floors (the TeX box oracle's sample and the 60
@@ -74,14 +75,17 @@ const PUBLIC_FLOORS: InkFloors = InkFloors {
 /// into open runs, moving six rows and the p95 sliced W1 to 6.0091 px. The
 /// fix moves those six rows back, the \mathcal row matches again, and the
 /// p95 is 5.9700 px.
+/// 505 with AMS optical cuts and the default pack's native short minus
+/// (9b457a38, fm-0byq); all 643 captures remain, including the original
+/// 26-row non-CM cohort, whose 4 matches still miss its 65% acceptance bar.
 const CORPUS_FLOORS: InkFloors = InkFloors {
-    matches: 501,
+    matches: 505,
     median_hausdorff_px: 1.0,
-    p95_hausdorff_px: 10.0,
-    median_sliced_w1_px: 0.072,
-    p95_sliced_w1_px: 5.971,
-    median_iou: 0.988,
-    p05_iou: 0.144,
+    p95_hausdorff_px: 8.001,
+    median_sliced_w1_px: 0.0702,
+    p95_sliced_w1_px: 4.441,
+    median_iou: 0.9889,
+    p05_iou: 0.1645,
 };
 
 /// cmr10's stem (`stem# = 25/36 pt`) in scene units at font size 48: an em
@@ -492,7 +496,8 @@ fn font_classes(row: &InkRow) -> Vec<String> {
 
 /// With `FMN_TEX_INK_GALLERY` set to a directory (outside the repository:
 /// corpus formulas are CC BY-NC-SA, plan §15.3), write the side-by-side crops
-/// of the 50 lowest-IoU rows as `<set>/NN-<label>.png`.
+/// of the 50 lowest-IoU rows and every originally captured fallback row as
+/// `<set>/NN-<label>.png`. Improved font rows must remain visible for review.
 fn write_gallery(
     set: &str,
     rows: &[InkRow],
@@ -509,7 +514,10 @@ fn write_gallery(
     let iou = |i: usize| results[i].as_ref().map_or(0.0, |m| m.iou);
     order.sort_by(|&x, &y| iou(x).total_cmp(&iou(y)).then(x.cmp(&y)));
     let engine = TexEngine::new("fmd-math/pack/default", None).expect("engine");
-    for (rank, &i) in order.iter().take(50).enumerate() {
+    for (rank, &i) in order.iter().enumerate() {
+        if rank >= 50 && rows[i].class != "fallback" {
+            continue;
+        }
         let Ok(members) = native(&engine, rows[i].kind, &sources[i]) else {
             continue;
         };

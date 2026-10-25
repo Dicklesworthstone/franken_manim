@@ -432,9 +432,10 @@ pub struct Pending {
     pub tracked: String,
 }
 
-/// The corpus's glyphs from faces outside Computer Modern (fm-tex-metrics-glyphs-ru72): fmd-math's
-/// fallback faces, the Noto math subset and the sans, stand in where no bundled CM face has the
-/// character. The counts are occurrence-weighted by the strings that lay out with such a glyph.
+/// The corpus's glyphs using the Noto math or Plex Sans faces
+/// (fm-tex-metrics-glyphs-ru72), including explicitly requested sans styling.
+/// Bundled AMS faces are not counted. This face-usage metric does not measure
+/// ink fidelity; counts are weighted by each string's corpus occurrences.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FallbackSummary {
     /// Distinct strings with at least one fallback glyph.
@@ -487,7 +488,7 @@ impl FallbackSummary {
             .filter(|ch| !gaps.iter().any(|(gap, _)| gap == *ch))
             .map(|ch| {
                 format!(
-                    "{ch} (U+{:04X}) falls back outside Computer Modern",
+                    "{ch} (U+{:04X}) uses Noto math or Plex Sans",
                     u32::from(*ch)
                 )
             })
@@ -515,7 +516,7 @@ pub const STANDARD_RELATIONS: &[char] = &[
     '⊃', '⊆', '⊇', '∈', '∉', '∋', '⊥', '∣', '∥', '→', '←', '↔', '⇒', '⇐', '⇔', '↦', '↑', '↓',
 ];
 
-/// The characters of `layout` drawn from a fallback face.
+/// The characters of `layout` drawn from Noto math or Plex Sans.
 #[must_use]
 pub fn fallback_chars(layout: &fmd_math::Layout) -> BTreeSet<char> {
     layout
@@ -533,8 +534,8 @@ pub fn fallback_chars(layout: &fmd_math::Layout) -> BTreeSet<char> {
 #[must_use]
 pub fn fallback_dashboard_line(f: &FallbackSummary) -> String {
     format!(
-        "{} strings ({} occurrences) lay out with at least one glyph from a face outside Computer \
-         Modern. Standard relations among those glyphs: {}.",
+        "{} strings ({} occurrences) lay out with at least one glyph from Noto math or Plex Sans. \
+         Standard relations among those glyphs: {}.",
         f.unique,
         f.occurrences,
         f.standard_relations().len()
@@ -592,7 +593,7 @@ pub fn render_dashboard(
     );
     let _ = writeln!(
         out,
-        "| **Glyph fallback (a glyph outside Computer Modern)** | {:.3} % | {:.3} % |",
+        "| **Noto math or Plex Sans face usage** | {:.3} % | {:.3} % |",
         share(fallback.occurrences, baseline.occurrence_total),
         share(fallback.unique, baseline.unique_total)
     );
@@ -604,7 +605,7 @@ pub fn render_dashboard(
          unsampled strings count as unverified.",
         oracle_dashboard_line(oracle)
     );
-    let _ = writeln!(out, "\n## Glyph fallback\n");
+    let _ = writeln!(out, "\n## Noto math or Plex Sans face usage\n");
     let gaps = STANDARD_RELATION_GAPS
         .iter()
         .map(|(ch, bead)| format!("{ch} ({bead})"))
@@ -617,7 +618,8 @@ pub fn render_dashboard(
     };
     let _ = writeln!(
         out,
-        "{} Fewer is better. {relations}\n",
+        "{} This includes explicitly requested sans styling and excludes bundled AMS faces. \
+         It does not measure ink fidelity. {relations}\n",
         fallback_dashboard_line(fallback)
     );
     let _ = writeln!(out, "| Character | Code point | Occurrences |");
@@ -1358,13 +1360,13 @@ mod tests {
         fallback.add(&BTreeSet::from(['≅']), 1);
         assert_eq!(
             fallback.relation_violations_with(&planted),
-            ["≤ (U+2264) falls back outside Computer Modern"]
+            ["≤ (U+2264) uses Noto math or Plex Sans"]
         );
         assert_eq!(
             fallback.relation_violations(),
             [
-                "≅ (U+2245) falls back outside Computer Modern",
-                "≤ (U+2264) falls back outside Computer Modern"
+                "≅ (U+2245) uses Noto math or Plex Sans",
+                "≤ (U+2264) uses Noto math or Plex Sans"
             ]
         );
     }

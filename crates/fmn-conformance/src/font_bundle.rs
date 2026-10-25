@@ -128,7 +128,7 @@ pub const FACE_POLICY: &[FacePolicy] = &[
     },
     // The AMS Type 1 CM math faces, converted and renamed upstream
     // (ADR-0028); one OFL text with the AMS copyright and its Reserved
-    // Font Names covers all nine.
+    // Font Names covers the CM and AMS-A/B faces.
     FacePolicy {
         name: "cm-math-italic-10",
         license_slug: "cm-math",
@@ -178,6 +178,36 @@ pub const FACE_POLICY: &[FacePolicy] = &[
         name: "cm-roman-5",
         license_slug: "cm-math",
         family: "FMD CM Roman",
+    },
+    FacePolicy {
+        name: "ams-a-10",
+        license_slug: "cm-math",
+        family: "FMD AMS A Symbols",
+    },
+    FacePolicy {
+        name: "ams-a-7",
+        license_slug: "cm-math",
+        family: "FMD AMS A Symbols",
+    },
+    FacePolicy {
+        name: "ams-a-5",
+        license_slug: "cm-math",
+        family: "FMD AMS A Symbols",
+    },
+    FacePolicy {
+        name: "ams-b-10",
+        license_slug: "cm-math",
+        family: "FMD AMS B Symbols",
+    },
+    FacePolicy {
+        name: "ams-b-7",
+        license_slug: "cm-math",
+        family: "FMD AMS B Symbols",
+    },
+    FacePolicy {
+        name: "ams-b-5",
+        license_slug: "cm-math",
+        family: "FMD AMS B Symbols",
     },
 ];
 

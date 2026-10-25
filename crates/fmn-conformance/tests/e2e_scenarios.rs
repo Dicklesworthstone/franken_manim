@@ -8905,6 +8905,102 @@ fn lifecycle_family_reversal_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenari
     Ok(RunOutcome::ok().with_counter("family_reversal_pixels_equal", 1))
 }
 
+/// fm-0byq: authored AMS glyphs survive native Tex construction, source
+/// colouring and the shipping PNG renderer at every certified worker count.
+fn parity_tex_ams_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::prelude::{DeterminismMode, ThreadPolicy};
+    use fmn_platform::fs::{FileSystem, VirtualFs};
+
+    struct Strip(VMobject);
+    impl fmn::SceneConstruct for Strip {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            stage.add(self.0.clone())?;
+            Ok(())
+        }
+    }
+    let engine = &scene_goldens::corpus().tex;
+    // Stable face slots and authored codes come from the font encodings
+    // and Reference DVI traces, rather than being inferred from layout.
+    let cases = [
+        (r"\checkmark", '✓', 17, 0x58),
+        (r"\minus", '−', 17, 0x39),
+        (r"\circlearrowright", '↻', 17, 0x08),
+        (r"\circlearrowleft", '↺', 17, 0x09),
+        (r"\hbar", 'ℏ', 20, 0x7E),
+        (r"\nmid", '∤', 20, 0x2D),
+        (r"\mathbb{R}", 'ℝ', 20, 0x52),
+    ];
+    let faces =
+        fmd_math::faces::FaceSet::bundled().map_err(|error| fail(format!("AMS faces: {error}")))?;
+    let mut members = Vec::new();
+    for (source, semantic, face, code) in cases {
+        let built = fmn_library::Tex::new(source)
+            .t2c(&[(source, RED_C)])
+            .build(engine)
+            .map_err(|error| fail(format!("{source}: native Tex: {error}")))?;
+        let glyphs = &built.typeset.layout.glyphs;
+        let wanted = fmd_math::FaceId(face);
+        if glyphs.len() != 1
+            || glyphs[0].face != wanted
+            || glyphs[0].ch != semantic
+            || Some(glyphs[0].gid) != faces.tex_glyph(wanted, code)
+            || built.vmob.children().is_empty()
+            || !built
+                .vmob
+                .children()
+                .iter()
+                .all(|child| child.style().fill_color == RED_C)
+        {
+            return Err(fail(format!(
+                "{source}: lost authored AMS identity or source colour"
+            )));
+        }
+        members.push(built.vmob);
+    }
+    let strip = VMobject::arranged(members, RIGHT, 0.4, [0.0; 3]).moved_to([0.0; 3]);
+    let fs = Arc::new(VirtualFs::new());
+    let mut expected = None;
+    for threads in [1, 4, 16] {
+        let path = format!("/ams-{threads}.png");
+        let mut options = fmn::RenderOptions::with_format(&path, fmn::RenderFormat::Png)
+            .map_err(|error| fail(error.to_string()))?;
+        options.config.camera.resolution = (480, 270);
+        options.config.camera.background_color = "#000000".to_owned();
+        options.config.camera.background_opacity = 1.0;
+        options.config.determinism.mode = DeterminismMode::Certified;
+        options.config.render.threads = ThreadPolicy::Fixed(threads);
+        let report = fmn::render_with_fs(&mut Strip(strip.clone()), options, fs.clone())
+            .map_err(|error| fail(format!("AMS PNG: {error}")))?;
+        let png = fs
+            .read(std::path::Path::new(&path))
+            .map_err(|error| fail(error.to_string()))?;
+        let image = fmn_codec::decode_png(&png, &fmn_codec::PngLimits::default())
+            .map_err(|error| fail(error.to_string()))?;
+        if report.artifact.frame_count != 1
+            || !image
+                .rgba
+                .chunks_exact(4)
+                .any(|pixel| pixel[..3].iter().any(|&v| v > 0))
+            || expected.as_ref().is_some_and(|bytes| bytes != &png)
+        {
+            return Err(fail("AMS strip is blank or differs by worker count"));
+        }
+        expected = Some(png);
+    }
+    ctx.event(
+        LogEvent::new("e2e.parity.tex_ams")
+            .field("formulas", 7_u64)
+            .field("thread_counts", 3_u64),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("tex_ams_formulas", 7)
+        .with_counter("tex_ams_thread_counts", 3)
+        .with_artifact(
+            "ams-strip.png",
+            expected.ok_or_else(|| fail("no AMS frame"))?,
+        ))
+}
+
 /// fm-tex-metrics-glyphs-ru72: the ten formulas the bead first measured,
 /// set as one strip and rendered certified. Each formula's width holds the
 /// pinned Reference's (`fixtures/tex_reference_widths.v1.tsv`) within its
@@ -11865,6 +11961,24 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "parity.tex_ams.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(parity_tex_ams_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tex_ams_formulas", 7),
+            counter_eq("tex_ams_thread_counts", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.parity.tex_ams",
+            vec![
+                FieldPred::u64_eq("formulas", 7),
+                FieldPred::u64_eq("thread_counts", 3),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "parity.tex_cm_recipes.v1",
         ScenarioClass::ParityDrill,
         Surface::RustApi,
@@ -12488,6 +12602,16 @@ fn encoder_help_process_evidence_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "failure_path.encoder_help_process_evidence.v1")
         .expect("encoder help process evidence is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn tex_ams_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "parity.tex_ams.v1")
+        .expect("AMS native rendering is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

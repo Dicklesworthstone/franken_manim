@@ -119,3 +119,34 @@ keeps CM Unicode, which stands in for the Reference's T1 ecrm text face
 `latex_to_svg("0")` does, so it did not move.
 
 The bundle grows by one face of 23 KiB.
+
+## Amendment (2026-10-25): AMS-A and AMS-B symbol cuts
+
+fm-0byq applies the same source, OFL, offline conversion and renamed-derivative
+recipe to `msam10/7/5` and `msbm10/7/5`. The six faces add 178,100 bytes;
+the earlier ten converted CM faces and their provenance entries reproduce
+byte-for-byte. The original AMS OFL notice also accompanies the numeric AMS
+TFM transcription in the `fmd-math` package. No font tooling or new dependency
+enters the runtime/build closure.
+
+The emitted glyphs in the original 26 non-CM DVI rows confirm 16 AMS-bearing
+rows. Named commands select their authored family/code while preserving
+semantic Unicode and source spans: checkmark, circle arrows and short minus
+from AMS-A; hbar and not-divides from AMS-B. Blackboard capitals prefer AMS-B.
+Scripts use the 7/5 pt optical cuts. Ordinary subtraction keeps cmsy's minus:
+the preamble's shorter `\minus` is an explicit command route, never a global
+Unicode-minus remap. The default macro pack binds that native primitive while
+preserving its existing name reservation and source-local renewal rules.
+Canonical macro identities use v2 tagged, length-framed records so native
+bindings and arbitrary valid substitution bodies remain distinguishable.
+Custom rosters without AMS retain Unicode fallback;
+a present face missing its authored code reports the semantic character and
+original span precisely.
+
+The single changed upstream alphabet golden is adjudicated against the
+original `msbm10.pfb` R: its serif/double-stroke design replaces Noto's sans
+R, and its TFM advance shifts the unchanged following glyphs. The other 19
+layout goldens remain locked. The visual comparison, source hashes and
+single-glyph adjudication are retained with fm-0byq's evidence. This is not
+an owner C-41 ruling, a DS/WASY decision, native ink/Gallery acceptance or
+platform/performance certification. Those original obligations remain.

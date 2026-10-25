@@ -1764,11 +1764,14 @@ mod tests {
         // probe move the formula definitions' engine identity (fm-zxxy).
         // Their q^7+z result and the complete text definition remain
         // unchanged; no workload, timing budget or result golden moves.
+        // The 9b457a38 provider, six AMS faces and v2 macro identities change
+        // only the formula definitions' declared engine/inputs (fm-0byq).
+        // Both result goldens and the complete text definition stay fixed.
         assert_eq!(
             [cold.digest(), cached.digest(), text.digest()].map(|digest| digest.to_string()),
             [
-                "ab07d8ec78022b40fa5023e4d92ff2d4587916fb5b0e7669c7c14ed4a3e0e1c4",
-                "93cd0bd94dee585b0c141b61e9ec01a85f600cf48e1dc48e72c8d6279edba526",
+                "ab6807508b3f7de166f54bf6441ffed9734c57e1f714e4ab13f4697c7c580f26",
+                "0fb972268394a196a20b6eb5b38316152a5904c30c1a43317ca39460ed95f836",
                 "0fa22e64fe9e1901eea58a596899ec843bc0d6db46f1cd91607925a50fea3e6f",
             ]
         );
