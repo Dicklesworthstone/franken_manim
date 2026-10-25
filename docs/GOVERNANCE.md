@@ -116,7 +116,16 @@ The canonical autonomous mutation uses Beads' storage-level compare-and-set:
 br update ISSUE --claim --actor ASSIGNEE --json
 ```
 
-The executor then runs `br sync --flush-only`, validates the exported represented-field delta, and emits schema `fmn.agent.claim` version 6 only after all proofs succeed.
+The executor then runs `br sync --flush-only`, validates the exported represented-field delta, and emits schema `fmn.agent.claim` version 7 only after all proofs succeed.
+
+Version 7 retains the exact reviewed fsqlite-core0.4.10 warning about a missing
+caller-owned runtime blocking pool under `atomic_claim.stderr_diagnostics`.
+The native implementation returns success without starting optional WAL-FEC
+repair work; primary WAL durability remains unchanged. Only that exact message,
+module and WARN level, with a valid UTC log timestamp, are admitted. Unknown or
+mixed stderr still fails. The native exit, strict JSON response, explicit export,
+exact graph delta, timestamp and resource bounds remain mandatory. This change
+does not enable WAL-FEC or suppress its diagnostic.
 
 Exit `5` does not prove native tracker state is unchanged. Inspect:
 

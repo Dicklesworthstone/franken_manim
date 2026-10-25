@@ -14,6 +14,12 @@ import agent_claim
 import agent_claim_guard
 import agent_next
 
+WAL_FEC_WARNING = (
+    b"2026-10-25T05:31:46.776806Z  WARN fsqlite_core::connection: "
+    b"WAL-FEC requires a caller-owned runtime blocking pool; "
+    b"primary WAL durability is unchanged\n"
+)
+
 
 def record(
     issue_id: str,
@@ -234,7 +240,7 @@ class AgentClaimTests(unittest.TestCase):
         )
         self.assertEqual(runner.calls, [])
         self.assertEqual(receipt["schema"], "fmn.agent.claim")
-        self.assertEqual(receipt["version"], 6)
+        self.assertEqual(receipt["version"], 7)
         self.assertEqual(receipt["mode"], "dry-run")
         self.assertFalse(receipt["claimed"])
         self.assertEqual(
@@ -294,6 +300,7 @@ class AgentClaimTests(unittest.TestCase):
                 "assignee": "agent@example.com",
                 "updated_at": "2026-09-01T00:00:01Z",
                 "warning_count": 0,
+                "stderr_diagnostics": [],
             },
         )
         self.assertEqual(receipt["claim_delta"]["changed_issue_ids"], ["fm-next"])
@@ -319,6 +326,75 @@ class AgentClaimTests(unittest.TestCase):
         )
         self.assertEqual(receipt["atomic_claim"]["shape"], "updated-envelope")
         self.assertEqual(receipt["atomic_claim"]["warning_count"], 1)
+
+    def test_known_wal_fec_advisory_is_preserved_in_verified_receipt(self) -> None:
+        for stderr in [WAL_FEC_WARNING, WAL_FEC_WARNING * 2]:
+            with self.subTest(stderr=stderr):
+                fixture = self.fixture([record("fm-next")])
+                runner = FakeRunner(fixture, update_stderr=stderr)
+                receipt = agent_claim.execute_claim(
+                    fixture.root, fixture.token(), "agent@example.com", runner=runner
+                )
+                self.assertEqual(receipt["version"], 7)
+                self.assertTrue(receipt["claimed"])
+                self.assertEqual(
+                    receipt["atomic_claim"]["stderr_diagnostics"],
+                    [{
+                        "code": "fsqlite.wal_fec.blocking_pool_unavailable",
+                        "stderr": stderr.decode(),
+                    }],
+                )
+                self.assertEqual(receipt["claim_delta"]["changed_issue_ids"], ["fm-next"])
+                self.assertEqual([runner.command(c[0]) for c in runner.calls], ["update", "sync"])
+
+    def test_wal_fec_advisory_never_admits_other_stderr(self) -> None:
+        cases = {
+            "unknown": b"warning\n",
+            "wrong level": WAL_FEC_WARNING.replace(b" WARN ", b" ERROR "),
+            "wrong module": WAL_FEC_WARNING.replace(b"fsqlite_core::connection", b"other"),
+            "changed message": WAL_FEC_WARNING.replace(b"unchanged", b"uncertain"),
+            "bad date": WAL_FEC_WARNING.replace(b"2026-10-25", b"2026-99-25"),
+            "missing timestamp": WAL_FEC_WARNING.partition(b"  WARN ")[2],
+            "suffix": WAL_FEC_WARNING.rstrip() + b" extra\n",
+            "unknown before": b"unreviewed diagnostic\n" + WAL_FEC_WARNING,
+            "unknown after": WAL_FEC_WARNING + b"unreviewed diagnostic\n",
+            "invalid UTF-8": WAL_FEC_WARNING + b"\xff",
+            "ANSI decoration": b"\x1b[33m" + WAL_FEC_WARNING + b"\x1b[0m",
+        }
+        for name, stderr in cases.items():
+            with self.subTest(name=name):
+                fixture = self.fixture([record("fm-next")])
+                runner = FakeRunner(fixture, update_stderr=stderr)
+                with self.assertRaises(agent_claim.ClaimError) as raised:
+                    agent_claim.execute_claim(
+                        fixture.root, fixture.token(), "agent@example.com", runner=runner
+                    )
+                self.assertEqual(raised.exception.exit_code, 5)
+                self.assertEqual([runner.command(c[0]) for c in runner.calls], ["update"])
+
+    def test_known_wal_fec_advisory_cannot_replace_native_and_export_proofs(self) -> None:
+        cases = {
+            "native failure": {"update_code": 9},
+            "missing JSON": {"update_stdout": b""},
+            "truncated JSON": {"update_stdout": b"[{"},
+            "contradictory JSON": {"update_stdout": b'[{"id":"fm-other"}]'},
+            "flush failure": {"sync_code": 7},
+            "wrong export timestamp": {"response_updated_at": "2026-09-01T00:00:02Z"},
+            "unrelated mutation": {
+                "after_sync": lambda f, _: f.write([
+                    {**row, "title": "unexpected change"} for row in f.rows()
+                ]),
+            },
+        }
+        for name, options in cases.items():
+            with self.subTest(name=name):
+                fixture = self.fixture([record("fm-next")])
+                runner = FakeRunner(fixture, update_stderr=WAL_FEC_WARNING, **options)
+                with self.assertRaises(agent_claim.ClaimError) as raised:
+                    agent_claim.execute_claim(
+                        fixture.root, fixture.token(), "agent@example.com", runner=runner
+                    )
+                self.assertEqual(raised.exception.exit_code, 5)
 
     def test_atomic_json_response_is_strict_and_semantically_bound(self) -> None:
         fixture = self.fixture([record("fm-next")])

@@ -19,6 +19,7 @@ import contextlib
 import json
 import math
 import os
+import re
 import signal
 import stat
 import subprocess
@@ -34,7 +35,7 @@ import agent_claim_guard
 import agent_next
 
 SCHEMA = "fmn.agent.claim"
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 ATOMIC_CLAIM_MODE = "beads.update.claim/v1"
 MAX_OUTPUT_BYTES = 1024 * 1024
 MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024
@@ -55,6 +56,15 @@ COMMAND_TERMINATION_WAIT_SECONDS = 5.0
 COMMAND_READER_JOIN_SECONDS = 5.0
 COMMAND_WAIT_POLL_SECONDS = 0.05
 LOCK_FILE_NAME = "fmn-agent-claim.lock"
+WAL_FEC_BLOCKING_POOL_MESSAGE = (
+    "WAL-FEC requires a caller-owned runtime blocking pool; "
+    "primary WAL durability is unchanged"
+)
+WAL_FEC_BLOCKING_POOL_LOG = re.compile(
+    r"(?P<timestamp>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:"
+    r"[0-9]{2}(?:\.[0-9]{1,9})?Z)  WARN fsqlite_core::connection: "
+    + re.escape(WAL_FEC_BLOCKING_POOL_MESSAGE)
+)
 
 
 class ClaimError(ValueError):
@@ -381,7 +391,7 @@ def _windows_taskkill(process_id: int) -> None:
         return
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
-        subprocess.run(
+        subprocess.run(  # ubs:ignore — operator SystemRoot has the same trust as --br; fixed taskkill.exe, child PID and argv, no shell or issue text.
             (str(taskkill), "/PID", str(process_id), "/T", "/F"),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
@@ -703,16 +713,43 @@ def _strict_command_json(payload: bytes, label: str) -> Any:
     return document
 
 
+def _claim_stderr_diagnostics(payload: bytes) -> list[dict[str, str]]:
+    if not payload.strip():
+        return []
+    detail = _decode_process_output(payload)
+
+    def unexpected() -> ClaimError:
+        return ClaimError(
+            f"br update --claim emitted unexpected stderr on success: {detail[:4096]}", 5
+        )
+
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise unexpected() from exc
+    lines = text.removesuffix("\n").split("\n")
+    for line in lines:
+        matched = WAL_FEC_BLOCKING_POOL_LOG.fullmatch(line)
+        if matched is None:
+            raise unexpected()
+        try:
+            agent_brief.parse_timestamp(
+                matched["timestamp"], field="WAL-FEC log timestamp", issue_id="diagnostic"
+            )
+        except agent_brief.BriefError as exc:
+            raise unexpected() from exc
+    # fsqlite-core 0.4.10 returns Ok here without starting optional repair work;
+    # it does not weaken primary WAL durability. Preserve the exact diagnostic,
+    # while requiring all native JSON and exported-graph proofs below.
+    return [{"code": "fsqlite.wal_fec.blocking_pool_unavailable", "stderr": text}]
+
+
 def _verify_atomic_claim_response(
     result: CommandResult,
     issue: agent_brief.Issue,
     assignee: str,
 ) -> dict[str, object]:
-    if result.stderr.strip():
-        detail = _decode_process_output(result.stderr)
-        raise ClaimError(
-            f"br update --claim emitted unexpected stderr on success: {detail[:4096]}", 5
-        )
+    diagnostics = _claim_stderr_diagnostics(result.stderr)
     document = _strict_command_json(result.stdout, "br update --claim")
     if isinstance(document, list):
         rows = document
@@ -771,6 +808,7 @@ def _verify_atomic_claim_response(
         "assignee": assignee,
         "updated_at": updated_at.isoformat().replace("+00:00", "Z"),
         "warning_count": len(warnings),
+        "stderr_diagnostics": diagnostics,
     }
 
 
