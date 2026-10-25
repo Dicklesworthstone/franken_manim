@@ -857,6 +857,76 @@ mod tests {
     }
 
     #[test]
+    fn family_reversal_preserves_end_handle_contours_and_record_rows() {
+        let points = [
+            -1.0, -1.0, 0.0, -1.0, 0.0, 0.0, -1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0,
+            0.0, 0.0, 1.0, -1.0, 0.0, 0.0, -1.0, 0.0, -1.0, -1.0, 0.0,
+        ];
+        let make = || {
+            let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), 9).expect("rectangle");
+            buffer.write_range("point", 0, &points);
+            buffer.write_range(
+                "stroke_width",
+                0,
+                &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
+            );
+            Mobject::from_buffer(buffer)
+        };
+        let mut stage = Stage::new();
+        let root = stage.add(make());
+        let child = stage.add(make());
+        stage.attach(root, child).expect("family");
+        stage.reverse_family_points(root).expect("reverse family");
+        for mob in [root, child] {
+            let points = stage.get_object_points(mob).expect("points");
+            let path = QuadPath::from_points(points.clone()).expect("path");
+            assert_eq!(
+                path.subpaths().len(),
+                1,
+                "the rectangle remains one contour"
+            );
+            assert_eq!(points.first(), points.last(), "the contour stays closed");
+            assert_eq!(
+                points[5],
+                [0.0, 1.0, 0.0],
+                "the straight handle is normalized"
+            );
+            assert_eq!(
+                stage
+                    .get(mob)
+                    .expect("member")
+                    .buffer
+                    .read_column("stroke_width"),
+                Some(vec![9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0]),
+                "non-point rows reverse with their original records"
+            );
+        }
+    }
+
+    #[test]
+    fn family_reversal_keeps_rounded_float32_line_handles_unambiguous() {
+        let low = f32::from_bits(0x4e80_0001);
+        let high = f32::from_bits(0x4e80_0002);
+        let points = [
+            low, -1.0, 0.0, low, 0.0, 0.0, low, 1.0, 0.0, high, 1.0, 0.0, high, 1.0, 0.0, high,
+            0.0, 0.0, high, -1.0, 0.0, low, -1.0, 0.0, low, -1.0, 0.0,
+        ];
+        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), 9).expect("rectangle");
+        buffer.write_range("point", 0, &points);
+        let mut stage = Stage::new();
+        let mob = stage.add(Mobject::from_buffer(buffer));
+        stage.reverse_family_points(mob).expect("reverse");
+        let path =
+            QuadPath::from_points(stage.get_object_points(mob).expect("points")).expect("path");
+        assert_eq!(
+            path.subpaths().len(),
+            1,
+            "storage rounding cannot create a break"
+        );
+        assert_eq!(path.points().first(), path.points().last());
+    }
+
+    #[test]
     fn aligned_submobject_budget_accepts_the_exact_boundary() {
         assert_eq!(MAX_ALIGNED_SUBMOBJECTS, 65_536);
         assert_eq!(
