@@ -30,8 +30,11 @@ const WITHIN_5_PERCENT_FLOOR: usize = 106;
 /// The same at ±10%: 57, then 60, then 65, then 67, then 70, then 73, then 75,
 /// then 77, then 80, then 84 with big operators' cmex10 widths (80cbadc),
 /// then 108 in the CM math faces (23c4d0c), still 108 with the TFM metrics
-/// (216c7c3): the three beyond are \iint_D (no cmex double integral) and the
-/// Reference's tipa-broken x\;y and x\!y (Appendix C-27).
+/// (216c7c3), and still 108 with amsmath's \iint row (439a910, fm-zxxy): the
+/// three beyond are \iint_D, +19% wide (+49% with the old fallback glyph)
+/// because the Reference's wasysym preamble sets a smaller single character
+/// with its D below (unresolved, fm-zxxy), and the Reference's tipa-broken
+/// x\;y and x\!y (Appendix C-27).
 const WITHIN_10_PERCENT_FLOOR: usize = 108;
 
 struct Row {

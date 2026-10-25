@@ -45,9 +45,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// drops at the script size (4db6f43, fm-4ptw): a display integral's upper
 /// limit is in place. 101 since TeX's own small delimiters and brace pieces
 /// (2f1e00c, fm-u5sb): \underbrace, \overbrace and \left[ x \right] match.
+/// 102 since `\vec` is cmmi's own accent (439a910, fm-zxxy): \vec{v} goes
+/// from IoU 0.86 to 0.986.
 /// Improve the floors when the ink improves; never loosen one to land a change.
 const PUBLIC_FLOORS: InkFloors = InkFloors {
-    matches: 101,
+    matches: 102,
     median_hausdorff_px: 1.0,
     p95_hausdorff_px: 5.1,
     median_sliced_w1_px: 0.060,
@@ -64,15 +66,19 @@ const PUBLIC_FLOORS: InkFloors = InkFloors {
 /// e^{-x^2} matches. 489 since `\cong` is cmsy's ∼ over cmr's = (83d363c,
 /// fm-shqq): its one corpus row went from IoU 0.190 to 0.984, and the p95
 /// Hausdorff fell from 11 to 10.05 px. 493 with TeX's small delimiters and
-/// brace pieces (2f1e00c, fm-u5sb).
+/// brace pieces (2f1e00c, fm-u5sb). 500 with cmmi's `\vec`, cmex's tall
+/// radical and amsmath's `\iint` (439a910, fm-zxxy): 14 rows change, every
+/// one's IoU rises, 8 of them now match, and p05 IoU rises 0.1431 -> 0.1443.
+/// The p95 sliced W1 ceiling (5.971) is exceeded since 47d2d8e0, at the
+/// 2f1e00c pin (6.0091, unchanged by 439a910; fm-7lzd).
 const CORPUS_FLOORS: InkFloors = InkFloors {
-    matches: 493,
+    matches: 500,
     median_hausdorff_px: 1.0,
     p95_hausdorff_px: 10.0,
     median_sliced_w1_px: 0.072,
     p95_sliced_w1_px: 5.971,
     median_iou: 0.988,
-    p05_iou: 0.143,
+    p05_iou: 0.144,
 };
 
 /// cmr10's stem (`stem# = 25/36 pt`) in scene units at font size 48: an em

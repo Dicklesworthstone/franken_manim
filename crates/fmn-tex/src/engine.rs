@@ -960,6 +960,7 @@ fn fingerprint_with_identity(
         r"\begin{pmatrix} a & \cdots & b \\ \vdots & \ddots & \vdots \\ c & \cdots & d \end{pmatrix}",
         r"\begin{cases} x & x > 0 \\ -x & x \le 0 \end{cases}",
         r"\widehat{x+y} + \overbrace{a+b}",
+        r"\iint_D f + \sqrt{\begin{matrix} a \\ b \\ c \\ d \\ e \end{matrix}}",
         r"\mathbb{R} \mathrm{d} \mathbf{v}",
         r"1 + \cdots + n, \ldots \equiv k \pmod{p}",
         r"x + 1 &= y \\ &\approx 2 \\ z",
