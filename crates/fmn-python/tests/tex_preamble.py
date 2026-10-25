@@ -73,11 +73,28 @@ class TexPreambleTests(unittest.TestCase):
         plain = m.Tex("x")
         for template in ("", "default", "basic", "empty"):
             self.assertGeometryEqual(m.Tex("x", template=template), plain)
-        self.assertGeometryEqual(m.Tex(r"x\minus y", template="default"), m.Tex("x-y"))
+        short = m.Tex(r"\minus", template="default")
+        binary = m.Tex("-")
+        # Original AMS Type1 outlines: msam10's axisshort (code 0x39)
+        # inks x=83..417; cmsy10's minus (code 0x00) inks x=83..694.
+        # Both ink y=230..270. This checks the authored short glyph rather
+        # than accepting the old default-pack substitution to a hyphen.
+        expected_width_ratio = 334 / 611
+        self.assertAlmostEqual(short.get_width() / binary.get_width(),
+                               expected_width_ratio, delta=1e-6)
+        self.assertAlmostEqual(short.get_height(), binary.get_height(), delta=1e-6)
+        native_expression = m.Tex(r"x\minus y", template="default")
+        old_hyphen = r"\renewcommand{\minus}{-}"
+        planted = m.Tex(r"\minus", additional_preamble=old_hyphen)
+        self.assertGeometryEqual(planted, binary)
+        self.assertGeometryEqual(m.Tex(r"x\minus y", additional_preamble=old_hyphen),
+                                 m.Tex("x-y"))
+        self.assertNotAlmostEqual(planted.get_width() / binary.get_width(),
+                                  expected_width_ratio, delta=1e-6)
         for template in ("basic", "empty"):
             # The symbol vocabulary also includes minus. Pack identity is
             # observable through macro shadowing, not by denying that symbol.
-            self.assertGeometryEqual(m.Tex(r"x\minus y", template=template), m.Tex("x-y"))
+            self.assertGeometryEqual(m.Tex(r"x\minus y", template=template), native_expression)
             self.assertGeometryEqual(m.Tex(r"\minus", template=template,
                 additional_preamble=r"\newcommand{\minus}{+}"), m.Tex("+"))
             with self.assertRaisesRegex(ValueError, "not defined"):
@@ -99,7 +116,12 @@ class TexPreambleTests(unittest.TestCase):
     def test_copy_deepcopy_and_pickle_preserve_configuration_and_selection(self):
         mob = m.Tex(r"\sq{x}+1", additional_preamble=PREAMBLE, template="empty", isolate=["x"])
         before = mob.get_all_points().copy()
-        for clone in (mob.copy(), copy.deepcopy(mob), pickle.loads(pickle.dumps(mob))):
+        clones = (
+            mob.copy(),
+            copy.deepcopy(mob),
+            pickle.loads(pickle.dumps(mob)),  # ubs:ignore -- only this local test object's own dump
+        )
+        for clone in clones:
             self.assertEqual(clone.get_tex(), mob.get_tex())
             self.assertEqual(clone.template, "empty")
             self.assertEqual(clone.additional_preamble, PREAMBLE)

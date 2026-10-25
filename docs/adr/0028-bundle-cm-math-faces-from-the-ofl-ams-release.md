@@ -139,6 +139,12 @@ Unicode-minus remap. The default macro pack binds that native primitive while
 preserving its existing name reservation and source-local renewal rules.
 Canonical macro identities use v2 tagged, length-framed records so native
 bindings and arbitrary valid substitution bodies remain distinguishable.
+Caller definitions are overlaid through the producer's structured API; cache
+identity bytes are not decoded as a transport format. The Python pack oracle
+uses the original Type1 ink widths (334 font units for msam10 code 0x39,
+611 for cmsy10 code 0x00, both 40 units high). It rejects the old hyphen
+substitution that its former ordinary-minus equality accepted, while retaining
+the pack's name reservation and newcommand/renewcommand checks.
 Custom rosters without AMS retain Unicode fallback;
 a present face missing its authored code reports the semantic character and
 original span precisely.

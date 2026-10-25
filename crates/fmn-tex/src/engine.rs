@@ -217,7 +217,7 @@ impl TexEngine {
         })?;
         if let Some(extra) = extra {
             // Caller definitions layer over the pack, last wins.
-            macros = merged(&macros, extra);
+            macros.overlay_definitions(extra);
         }
         let fingerprint = fingerprint(&math, &macros);
         Ok(Self {
@@ -894,39 +894,6 @@ fn preflight_worker<Job: Fn(usize) -> PreflightOutcome + Sync>(
         let mut slot = slot.lock().unwrap_or_else(PoisonError::into_inner);
         *slot = Some(outcome);
     }
-}
-
-/// Layer `extra` over `base` (last wins), through canonical bytes: the
-/// merged set is rebuilt definition-by-definition so validation and
-/// canonical identity stay uniform.
-fn merged(base: &MacroSet, extra: &MacroSet) -> MacroSet {
-    // MacroSet has no direct iterator over bodies; canonical_bytes is the
-    // exchange format. Parse it back: `name US params US body RS` records
-    // after the version tag.
-    let mut out = base.clone();
-    let bytes = extra.canonical_bytes();
-    let Some(tag_end) = bytes.iter().position(|&b| b == 0x1e) else {
-        return out;
-    };
-    let mut rest = &bytes[tag_end + 1..];
-    while let Some(rec_end) = rest.iter().position(|&b| b == 0x1e) {
-        let rec = &rest[..rec_end];
-        rest = &rest[rec_end + 1..];
-        let mut fields = rec.split(|&b| b == 0x1f);
-        let (Some(name), Some(params), Some(body)) = (fields.next(), fields.next(), fields.next())
-        else {
-            continue;
-        };
-        if let (Ok(name), Some(&p), Ok(body)) = (
-            core::str::from_utf8(name),
-            params.first(),
-            core::str::from_utf8(body),
-        ) {
-            // Definitions already validated on the way into `extra`.
-            let _ = out.define(name, p.saturating_sub(b'0'), body);
-        }
-    }
-    out
 }
 
 /// The engine fingerprint: canonical layout bytes of a fixed probe set
