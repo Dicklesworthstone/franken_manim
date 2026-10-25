@@ -1196,7 +1196,7 @@ impl QuadPath {
 
     /// `reverse_points`: reverse the trace direction, repositioning break
     /// markers so subpath decomposition survives, as the Reference does,
-    /// after [`QuadPath::straighten_end_handles`].
+    /// after normalizing straight-segment end handles.
     pub fn reverse_points(&mut self) -> &mut Self {
         if !self.has_points() {
             return self;
@@ -1213,8 +1213,8 @@ impl QuadPath {
     /// Reverse every subpath in place, keeping their order: inside each one
     /// anchors and handles swap roles, a closed subpath keeps its start
     /// point, and the break handle after it moves onto its new end anchor
-    /// (the shared-anchor break layout). Runs
-    /// [`QuadPath::straighten_end_handles`] first.
+    /// (the shared-anchor break layout). Straight-segment end handles are
+    /// normalized before reversal.
     pub fn reverse_each_subpath(&mut self) -> &mut Self {
         if !self.has_points() {
             return self;
