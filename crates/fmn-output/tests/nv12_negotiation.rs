@@ -27,6 +27,90 @@ fn formats(argv: &[String]) -> Vec<&str> {
         .collect()
 }
 
+#[cfg(unix)]
+fn probe_formats_retaining_failure(
+    caps: &fmn_output::EncoderCapabilities,
+    tool: &fmn_output::FfmpegTool,
+    runner: &dyn fmn_platform::process::ProcessRunner,
+    encoder: &str,
+    root: &Path,
+) -> Result<fmn_output::EncoderPixelFormats, fmn_output::BoundaryError> {
+    use std::io::Write as _;
+
+    let result = caps.probe_pixel_formats(tool, runner, encoder);
+    if let Err(fmn_output::BoundaryError::ProbeProcessFailed(failure)) = &result {
+        for (suffix, bytes) in [
+            ("stdout", failure.outcome.stdout.clone()),
+            ("stderr", failure.outcome.stderr.clone()),
+            (
+                "txt",
+                format!(
+                    "source={:?}\nsha256={}\nversion={:?}\nspec={:?}\ntermination={:?}\n",
+                    failure.source_path,
+                    failure.executable_sha256,
+                    failure.version,
+                    failure.spec,
+                    failure.outcome.termination,
+                )
+                .into_bytes(),
+            ),
+        ] {
+            let path = root.join(format!("{encoder}-help.{suffix}"));
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .unwrap_or_else(|error| panic!("preserve {path:?}: {error}; probe: {failure}"));
+            file.write_all(&bytes).unwrap();
+        }
+        eprintln!("encoder help failure evidence retained in {root:?}");
+    }
+    result
+}
+
+#[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+#[test]
+fn native_failed_help_preserves_raw_streams_and_invocation() {
+    use fmn_platform::process::{FfmpegLocator, StdFfmpegLocator, StdProcessRunner};
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir()
+        .canonicalize()
+        .unwrap()
+        .join(format!("fmn-help-evidence-{}-{unique}", std::process::id()));
+    std::fs::create_dir(&root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(root.join(".fmn-native-ffmpeg-mode"), "help-exit").unwrap();
+    let executable = StdFfmpegLocator::default()
+        .locate_ffmpeg(Path::new(env!("CARGO_BIN_EXE_fmn-ffmpeg-test-fixture")))
+        .unwrap();
+    let runner = StdProcessRunner;
+    let tool = fmn_output::FfmpegTool::resolve(executable, &runner, &root).unwrap();
+    let caps = fmn_output::EncoderCapabilities::probe(&tool, &runner).unwrap();
+    let result = probe_formats_retaining_failure(&caps, &tool, &runner, "h264_nvenc", &root);
+    assert!(matches!(
+        result,
+        Err(fmn_output::BoundaryError::ProbeProcessFailed(_))
+    ));
+    assert_eq!(
+        std::fs::read(root.join("h264_nvenc-help.stdout")).unwrap(),
+        b"partial help\0"
+    );
+    assert_eq!(
+        std::fs::read(root.join("h264_nvenc-help.stderr")).unwrap(),
+        b"driver diagnostic\xff\n"
+    );
+    let metadata = std::fs::read_to_string(root.join("h264_nvenc-help.txt")).unwrap();
+    assert!(metadata.contains(tool.sha256_hex()));
+    assert!(metadata.contains("encoder=h264_nvenc"));
+    assert!(metadata.contains("Exited(Some(23))"));
+    assert!(metadata.contains("max_output_bytes: 65536"));
+}
+
 #[test]
 fn native_nv12_encoders_are_not_forced_through_planar_chroma() {
     // The unrecognized name is intentional: this must work for future
@@ -188,18 +272,18 @@ Encoder h264_nvenc [NVIDIA NVENC H.264 encoder]:
         let program = tool.path().to_path_buf();
         let caps = EncoderCapabilities::probe(&tool, runner.as_ref()).unwrap();
         if caps.offers("libx264") {
-            let fmts = caps
-                .probe_pixel_formats(&tool, runner.as_ref(), "libx264")
-                .unwrap();
+            let fmts =
+                probe_formats_retaining_failure(&caps, &tool, runner.as_ref(), "libx264", &root)
+                    .unwrap();
             assert!(
                 fmts.formats.iter().any(|fmt| fmt == "nv12")
                     && fmts.formats.iter().any(|fmt| fmt == "yuv420p")
             );
         }
         if caps.offers("h264_nvenc") {
-            let fmts = caps
-                .probe_pixel_formats(&tool, runner.as_ref(), "h264_nvenc")
-                .unwrap();
+            let fmts =
+                probe_formats_retaining_failure(&caps, &tool, runner.as_ref(), "h264_nvenc", &root)
+                    .unwrap();
             assert!(
                 fmts.formats.iter().any(|fmt| fmt == "nv12")
                     && fmts.formats.iter().any(|fmt| fmt == "p010le")

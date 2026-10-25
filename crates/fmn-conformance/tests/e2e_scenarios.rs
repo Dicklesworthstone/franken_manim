@@ -1329,6 +1329,92 @@ fn failure_cli_ffmpeg_limits_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenari
         .with_counter("cli_ffmpeg_admitted_input", input))
 }
 
+/// Actual supervised native children establish propagation of three terminal
+/// reasons. These planted failures do not diagnose a real FFmpeg/driver failure.
+#[cfg(unix)]
+fn failure_encoder_help_evidence_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_output::{BoundaryError, EncoderCapabilities, FfmpegTool};
+    use fmn_platform::process::{
+        FfmpegLocator, ProcessTermination, StdFfmpegLocator, StdProcessRunner,
+    };
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = scenario_dir("encoder_help_evidence")?
+        .canonicalize()
+        .map_err(|error| fail(error.to_string()))?;
+    let runner = StdProcessRunner;
+    let mut outcome = RunOutcome::ok();
+    for (mode, expected) in [
+        ("help-exit", ProcessTermination::Exited(Some(23))),
+        ("help-timeout", ProcessTermination::TimedOut),
+        (
+            "help-output-overflow",
+            ProcessTermination::OutputLimitExceeded,
+        ),
+    ] {
+        let dir = root.join(mode);
+        std::fs::create_dir(&dir).map_err(|error| fail(error.to_string()))?;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| fail(error.to_string()))?;
+        std::fs::write(dir.join(".fmn-native-ffmpeg-mode"), mode)
+            .map_err(|error| fail(error.to_string()))?;
+        let executable = StdFfmpegLocator::default()
+            .locate_ffmpeg(Path::new(env!(
+                "CARGO_BIN_FILE_FMN_OUTPUT_fmn-ffmpeg-test-fixture"
+            )))
+            .map_err(|error| fail(error.to_string()))?;
+        let tool = FfmpegTool::resolve(executable, &runner, &dir)
+            .map_err(|error| fail(error.to_string()))?;
+        let caps =
+            EncoderCapabilities::probe(&tool, &runner).map_err(|error| fail(error.to_string()))?;
+        let error = caps
+            .probe_pixel_formats(&tool, &runner, "h264_nvenc")
+            .expect_err("the native fixture must fail its help query");
+        let message = error.to_string();
+        let BoundaryError::ProbeProcessFailed(failure) = error else {
+            return Err(fail(format!("{mode}: lost process evidence: {message}")));
+        };
+        if failure.outcome.termination != expected
+            || failure.spec.timeout != std::time::Duration::from_secs(2)
+            || failure.spec.max_output_bytes != 65_536
+            || failure.spec.argv != ["-hide_banner", "-h", "encoder=h264_nvenc"]
+            || failure.source_path != tool.path()
+            || failure.executable_sha256 != tool.sha256_hex()
+            || failure.version != tool.version()
+            || !message.contains(&format!("{expected:?}"))
+        {
+            return Err(fail(format!(
+                "{mode}: incorrect process evidence: {failure:?}"
+            )));
+        }
+        let streams_match = match expected {
+            ProcessTermination::Exited(_) => {
+                failure.outcome.stdout == b"partial help\0"
+                    && failure.outcome.stderr == b"driver diagnostic\xff\n"
+            }
+            ProcessTermination::TimedOut => failure.outcome.stderr == b"help is blocked\n",
+            ProcessTermination::OutputLimitExceeded => failure.outcome.stderr == vec![b'x'; 65_536],
+            ProcessTermination::Cancelled => false,
+        };
+        if !streams_match {
+            return Err(fail(format!(
+                "{mode}: bounded streams changed: {failure:?}"
+            )));
+        }
+        ctx.event(
+            LogEvent::new("e2e.failure.encoder_help")
+                .field("mode", mode)
+                .field("termination", format!("{expected:?}"))
+                .field("timeout_ms", 2_000_u64)
+                .field("log_cap", 65_536_u64),
+        );
+        outcome = outcome
+            .with_artifact(&format!("{mode}.stdout"), failure.outcome.stdout)
+            .with_artifact(&format!("{mode}.stderr"), failure.outcome.stderr);
+    }
+    Ok(outcome.with_counter("encoder_help_terminal_modes", 3))
+}
+
 /// Native equation and reordered-string transitions cross the public facade,
 /// materialize on a worker, and retain both nominal sampling and owner cleanup.
 fn native_matching_workers_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -11333,6 +11419,24 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             ],
         )],
     ));
+    #[cfg(unix)]
+    specs.push(spec(
+        "failure_path.encoder_help_process_evidence.v1",
+        ScenarioClass::FailurePath,
+        Surface::RustApi,
+        Invocation::new(failure_encoder_help_evidence_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("encoder_help_terminal_modes", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.failure.encoder_help",
+            vec![
+                FieldPred::u64_eq("timeout_ms", 2_000),
+                FieldPred::u64_eq("log_cap", 65_536),
+            ],
+        )],
+    ));
     specs.push(spec(
         "failure_path.facade_video_requires_ffmpeg_capability.v1",
         ScenarioClass::FailurePath,
@@ -12362,6 +12466,17 @@ fn family_reversal_contour_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.family_reversal_end_handle.v1")
         .expect("family reversal is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[cfg(unix)]
+#[test]
+fn encoder_help_process_evidence_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "failure_path.encoder_help_process_evidence.v1")
+        .expect("encoder help process evidence is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

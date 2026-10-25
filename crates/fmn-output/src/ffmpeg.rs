@@ -94,6 +94,55 @@ pub const HARDWARE_ENCODERS: [&str; 6] = [
     "av1_nvenc",
 ];
 
+/// Evidence from an unsuccessful, supervised FFmpeg probe.
+///
+/// The specification carries the actual argv, private executable path,
+/// environment and unchanged time/output limits. The outcome retains both
+/// captured streams at those limits; formatting shows only an escaped excerpt.
+#[derive(Debug, Clone)]
+pub struct ProbeFailure {
+    /// Configured executable's canonical source path.
+    pub source_path: PathBuf,
+    /// SHA-256 verified for the source and private executable copy.
+    pub executable_sha256: String,
+    /// Version banner observed when this tool was resolved.
+    pub version: String,
+    /// Exact specification handed to the process capability.
+    pub spec: ProcessSpec,
+    /// Authoritative termination and full bounded stdout/stderr.
+    pub outcome: ProcessOutcome,
+}
+
+impl std::fmt::Display for ProbeFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "ffmpeg probe {:?} failed: {:?}; source {:?}; SHA-256 {}; \
+             timeout {} ms; log limit {} bytes/stream; stdout {} bytes; stderr {} bytes",
+            self.spec.argv,
+            self.outcome.termination,
+            self.source_path,
+            self.executable_sha256,
+            self.spec.timeout.as_millis(),
+            self.spec.max_output_bytes,
+            self.outcome.stdout.len(),
+            self.outcome.stderr.len(),
+        )?;
+        if !self.outcome.stderr.is_empty() {
+            write!(f, "; stderr excerpt: ")?;
+            for byte in self.outcome.stderr.iter().take(512) {
+                for escaped in std::ascii::escape_default(*byte) {
+                    write!(f, "{}", char::from(escaped))?;
+                }
+            }
+            if self.outcome.stderr.len() > 512 {
+                write!(f, " [excerpt truncated; bounded stream retained]")?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Typed refusals of the boundary.
 #[derive(Debug)]
 pub enum BoundaryError {
@@ -136,6 +185,8 @@ pub enum BoundaryError {
     /// A probe (`-version`, `-encoders`, encoder help) ran but its output was not
     /// usable.
     ProbeFailed(&'static str),
+    /// A supervised probe failed; retain its identity, specification and outcome.
+    ProbeProcessFailed(Box<ProbeFailure>),
     /// A named encoder the installed ffmpeg does not offer.
     UnknownEncoder {
         /// The encoder that was requested.
@@ -245,6 +296,7 @@ impl std::fmt::Display for BoundaryError {
             ),
             Self::Mechanism(e) => write!(f, "process mechanism: {e}"),
             Self::ProbeFailed(what) => write!(f, "ffmpeg probe failed: {what}"),
+            Self::ProbeProcessFailed(failure) => std::fmt::Display::fmt(failure, f),
             Self::UnknownEncoder {
                 requested,
                 hardware_available,

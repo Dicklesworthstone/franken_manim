@@ -198,14 +198,20 @@ impl FfmpegTool {
                     .and_then(|process| process.finish())
                     .map_err(BoundaryError::from);
                 watch.finish()?;
-                result
+                let outcome = result?;
+                if outcome.success() {
+                    Ok(outcome)
+                } else {
+                    Err(BoundaryError::ProbeProcessFailed(Box::new(ProbeFailure {
+                        source_path: self.path.clone(),
+                        executable_sha256: self.sha256_hex.clone(),
+                        version: self.version.clone(),
+                        spec,
+                        outcome,
+                    })))
+                }
             },
         )?;
-        if !outcome.success() {
-            return Err(BoundaryError::ProbeFailed(
-                "encoder pixel-format help failed or exceeded its time/output limits",
-            ));
-        }
         let listing = std::str::from_utf8(&outcome.stdout).map_err(|_| {
             BoundaryError::ProbeFailed("encoder pixel-format help is not valid UTF-8")
         })?;
@@ -412,6 +418,167 @@ fn classify_probe(encoder: &str, outcome: &ProcessOutcome) -> EncoderProbe {
 mod tests {
     use super::*;
     use crate::negotiate::{ColorDescription, EncoderChoice};
+
+    #[cfg(unix)]
+    struct HelpOutcomeRunner {
+        outcome: ProcessOutcome,
+        specs: std::sync::Mutex<Vec<ProcessSpec>>,
+    }
+
+    #[cfg(unix)]
+    impl ProcessRunner for HelpOutcomeRunner {
+        fn mechanism(&self) -> ProcessMechanism {
+            ProcessMechanism::Scripted
+        }
+
+        fn start(
+            &self,
+            spec: &ProcessSpec,
+            cancellation: ProcessCancellation,
+            limits: ProcessStdinLimits,
+        ) -> Result<Box<dyn RunningProcess>, ProcessError> {
+            self.specs.lock().unwrap().push(spec.clone());
+            let mut runner = fmn_platform::process::ScriptedRunner::new();
+            runner.script(spec.program.clone(), self.outcome.clone());
+            runner.start(spec, cancellation, limits)
+        }
+    }
+
+    #[cfg(unix)]
+    fn help_probe_tool() -> FfmpegTool {
+        use fmn_platform::process::{FfmpegLocator as _, StdFfmpegLocator};
+
+        let source_path = std::env::current_exe().unwrap();
+        let executable = StdFfmpegLocator::default()
+            .locate_ffmpeg(&source_path)
+            .unwrap();
+        let path = executable.canonical_path().to_path_buf();
+        let (mut source, native_image) = executable.open_current().unwrap();
+        let sha256_hex = sha256_open_file(&mut source, &path, native_image.file_bytes).unwrap();
+        FfmpegTool {
+            executable,
+            path,
+            sha256_hex,
+            native_image,
+            version: "ffmpeg version controlled-outcome".to_owned(),
+            session: ToolSession::create(&std::env::temp_dir().canonicalize().unwrap()).unwrap(),
+            encoder_probes: Arc::default(),
+            encoder_formats: Arc::default(),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_help_retains_the_actual_terminal_reason_and_unchanged_limits() {
+        let tool = help_probe_tool();
+        let mut missing = Vec::new();
+        for termination in [
+            ProcessTermination::Exited(Some(23)),
+            ProcessTermination::Exited(None),
+            ProcessTermination::TimedOut,
+            ProcessTermination::OutputLimitExceeded,
+            ProcessTermination::Cancelled,
+        ] {
+            let runner = HelpOutcomeRunner {
+                outcome: ProcessOutcome {
+                    termination,
+                    stdout: b"partial help\0".to_vec(),
+                    stderr: b"driver diagnostic\xff\n".to_vec(),
+                },
+                specs: std::sync::Mutex::default(),
+            };
+            let error = tool
+                .probe_encoder_pixel_formats(&runner, "h264_nvenc")
+                .unwrap_err();
+            let detail = error.to_string();
+            if !detail.contains(&format!("{termination:?}"))
+                || !detail.contains(tool.sha256_hex())
+                || !detail.contains("2000")
+                || !detail.contains("65536")
+            {
+                missing.push(format!("{termination:?}: {detail}"));
+            }
+            let BoundaryError::ProbeProcessFailed(failure) = &error else {
+                panic!("expected the actual failed process outcome: {error:?}");
+            };
+            assert_eq!(failure.outcome, runner.outcome);
+            assert_eq!(failure.source_path, tool.path);
+            assert_eq!(failure.executable_sha256, tool.sha256_hex);
+            assert_eq!(failure.version, tool.version);
+            let specs = runner.specs.lock().unwrap();
+            assert_eq!(specs.len(), 1, "failed discovery must never be cached");
+            assert_eq!(specs[0].timeout, Duration::from_secs(2));
+            assert_eq!(specs[0].max_output_bytes, 64 * 1024);
+            assert_eq!(failure.spec.argv, specs[0].argv);
+            assert_eq!(failure.spec.program, specs[0].program);
+            assert_eq!(failure.spec.env, specs[0].env);
+            assert_eq!(failure.spec.timeout, specs[0].timeout);
+            assert_eq!(failure.spec.max_output_bytes, specs[0].max_output_bytes);
+            assert_eq!(
+                specs[0].argv,
+                vec![
+                    "-hide_banner".to_owned(),
+                    "-h".to_owned(),
+                    "encoder=h264_nvenc".to_owned(),
+                ]
+            );
+        }
+        assert!(missing.is_empty(), "lost probe evidence: {missing:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn help_failure_display_is_escaped_and_bounded_without_losing_raw_streams() {
+        let tool = help_probe_tool();
+        let mut stderr = vec![0xff; 64 * 1024];
+        stderr[..7].copy_from_slice(b"\x1b[31m\r\n");
+        let runner = HelpOutcomeRunner {
+            outcome: ProcessOutcome {
+                termination: ProcessTermination::OutputLimitExceeded,
+                stdout: vec![b'x'; 64 * 1024],
+                stderr,
+            },
+            specs: std::sync::Mutex::default(),
+        };
+        let error = tool
+            .probe_encoder_pixel_formats(&runner, "h264_nvenc")
+            .unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("OutputLimitExceeded"));
+        assert!(text.contains("\\x1b[31m\\r\\n"));
+        assert!(text.contains("excerpt truncated"));
+        assert!(text.len() < 4096);
+        assert!(!text.chars().any(char::is_control));
+        let BoundaryError::ProbeProcessFailed(failure) = error else {
+            panic!("expected structured failed probe");
+        };
+        assert_eq!(failure.outcome, runner.outcome);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn successful_help_still_parses_and_caches_only_the_verified_formats() {
+        let tool = help_probe_tool();
+        let runner = HelpOutcomeRunner {
+            outcome: ProcessOutcome {
+                termination: ProcessTermination::Exited(Some(0)),
+                stdout: b"Encoder h264_nvenc [NVENC]:\n    Supported pixel formats: p010le nv12\n"
+                    .to_vec(),
+                stderr: Vec::new(),
+            },
+            specs: std::sync::Mutex::default(),
+        };
+        let formats = tool
+            .probe_encoder_pixel_formats(&runner, "h264_nvenc")
+            .unwrap();
+        assert_eq!(formats.formats, advertised("nv12 p010le"));
+        assert_eq!(
+            tool.probe_encoder_pixel_formats(&runner, "h264_nvenc")
+                .unwrap(),
+            formats
+        );
+        assert_eq!(runner.specs.lock().unwrap().len(), 1);
+    }
 
     fn format_job(wire: WireFormat) -> VideoJob {
         VideoJob {

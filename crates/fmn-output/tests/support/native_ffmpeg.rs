@@ -48,7 +48,31 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
         );
         return Ok(0);
     }
+    let private_dir = std::env::var_os("TMPDIR")
+        .map(PathBuf::from)
+        .ok_or("ffmpeg fixture invocation has no TMPDIR")?;
+    if !private_dir.is_absolute() {
+        return Err("ffmpeg fixture TMPDIR is not absolute".into());
+    }
+    let mode = fixture_mode(&private_dir)?;
     if argv.len() == 3 && argv[0] == "-hide_banner" && argv[1] == "-h" {
+        match mode.as_ref().map(|(mode, _)| mode.as_str()) {
+            Some("help-exit") => {
+                std::io::stdout().write_all(b"partial help\0")?;
+                std::io::stderr().write_all(b"driver diagnostic\xff\n")?;
+                return Ok(23);
+            }
+            Some("help-timeout") => {
+                std::io::stderr().write_all(b"help is blocked\n")?;
+                std::thread::sleep(Duration::from_secs(5));
+                return Ok(0);
+            }
+            Some("help-output-overflow") => {
+                std::io::stderr().write_all(&[b'x'; 65_537])?;
+                return Ok(0);
+            }
+            _ => {}
+        }
         let encoder = argv[2]
             .to_str()
             .and_then(|help| help.strip_prefix("encoder="))
@@ -62,13 +86,6 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
         return Ok(0);
     }
 
-    let private_dir = std::env::var_os("TMPDIR")
-        .map(PathBuf::from)
-        .ok_or("ffmpeg fixture invocation has no TMPDIR")?;
-    if !private_dir.is_absolute() {
-        return Err("ffmpeg fixture TMPDIR is not absolute".into());
-    }
-    let mode = fixture_mode(&private_dir)?;
     if argv
         .windows(2)
         .any(|pair| pair[0] == "-f" && pair[1] == "null")
