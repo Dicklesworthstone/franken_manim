@@ -1338,9 +1338,20 @@ fn failure_encoder_help_evidence_run(ctx: &mut RunCtx) -> Result<RunOutcome, Sce
         FfmpegLocator, ProcessTermination, StdFfmpegLocator, StdProcessRunner,
     };
     use std::os::unix::fs::PermissionsExt as _;
+    use std::path::Path;
 
-    let root = scenario_dir("encoder_help_evidence")?
+    // Cargo's target tmpdir may have shared writable ancestors; private tool
+    // sessions must instead live beneath Unix's canonical sticky temp root.
+    let root = Path::new("/tmp")
         .canonicalize()
+        .map_err(|error| fail(error.to_string()))?
+        .join(format!(
+            "fmn-e2e-encoder-help.{}.{}",
+            std::process::id(),
+            RUN_SUFFIX.fetch_add(1, Ordering::Relaxed),
+        ));
+    std::fs::create_dir(&root).map_err(|error| fail(error.to_string()))?;
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
         .map_err(|error| fail(error.to_string()))?;
     let runner = StdProcessRunner;
     let mut outcome = RunOutcome::ok();

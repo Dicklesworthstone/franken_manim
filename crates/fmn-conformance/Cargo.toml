@@ -47,7 +47,7 @@ fnp-io.workspace = true
 [dev-dependencies]
 # Native, supervised failure controls for the encoder-help boundary (fm-173q).
 # The executable is a test fixture, never an FFmpeg capability observation.
-fmn-output = { workspace = true, features = ["ffmpeg-test-fixture"], artifact = "bin:fmn-ffmpeg-test-fixture", lib = true }
+fmn-output = { path = "../fmn-output", features = ["ffmpeg-test-fixture"], artifact = "bin:fmn-ffmpeg-test-fixture", lib = true }
 # W10 drives both the library surface and Cargo's exact shipping CLI artifact.
 # This remains dev-only; the shipped edge set and crate DAG are unaffected.
 fmn-cli = { path = "../fmn-cli", features = ["batch"], artifact = "bin:fmn", lib = true }
