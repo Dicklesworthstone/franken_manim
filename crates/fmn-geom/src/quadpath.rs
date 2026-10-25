@@ -1195,12 +1195,13 @@ impl QuadPath {
     }
 
     /// `reverse_points`: reverse the trace direction, repositioning break
-    /// markers so subpath decomposition survives, exactly as the Reference
-    /// does.
+    /// markers so subpath decomposition survives, as the Reference does,
+    /// after [`QuadPath::straighten_end_handles`].
     pub fn reverse_points(&mut self) -> &mut Self {
         if !self.has_points() {
             return self;
         }
+        self.straighten_end_handles();
         let ends = self.subpath_end_indices();
         for &end in &ends[..ends.len().saturating_sub(1)] {
             self.points[end + 1] = self.points[end + 2];
@@ -1212,11 +1213,13 @@ impl QuadPath {
     /// Reverse every subpath in place, keeping their order: inside each one
     /// anchors and handles swap roles, a closed subpath keeps its start
     /// point, and the break handle after it moves onto its new end anchor
-    /// (the shared-anchor break layout).
+    /// (the shared-anchor break layout). Runs
+    /// [`QuadPath::straighten_end_handles`] first.
     pub fn reverse_each_subpath(&mut self) -> &mut Self {
         if !self.has_points() {
             return self;
         }
+        self.straighten_end_handles();
         let mut start = 0;
         for end in self.subpath_end_indices() {
             self.points[start..=end].reverse();
@@ -1226,6 +1229,26 @@ impl QuadPath {
             start = end + 2;
         }
         self
+    }
+
+    /// Before a reversal: move every handle that sits exactly on its curve's
+    /// end anchor, away from its start, to the chord's midpoint. The curve
+    /// is the same straight segment. Reversed as it was, its handle would
+    /// sit on its start anchor, which [`QuadPath::subpath_end_indices`]
+    /// reads as a break: the contour would split into two open runs, each
+    /// filled as if closed by a chord. Computer Modern's converted faces
+    /// carry such segments in 32 glyphs, the script y among them (fm-7lzd).
+    fn straighten_end_handles(&mut self) {
+        for i in 0..self.num_curves() {
+            let (a0, h, a1) = (
+                self.points[2 * i],
+                self.points[2 * i + 1],
+                self.points[2 * i + 2],
+            );
+            if h == a1 && (0..3).any(|k| (h[k] - a0[k]).abs() > SUBPATH_END_ATOL) {
+                self.points[2 * i + 1] = space_ops::midpoint(a0, a1);
+            }
+        }
     }
 
     /// `ensure_positive_orientation` for one path: reverse it, every subpath
@@ -1615,5 +1638,47 @@ mod tests {
         let settled = glyph.points().to_vec();
         assert!(!glyph.ensure_positive_contour_orientation());
         assert_eq!(glyph.points(), settled.as_slice());
+    }
+
+    #[test]
+    fn reversal_keeps_a_contour_whose_handle_sits_on_its_end_anchor_whole() {
+        // A clockwise triangle whose last side is a quadratic with its
+        // control point on its end anchor, as 32 converted Computer Modern
+        // glyphs carry (the script y among them).
+        let mut glyph = QuadPath::new();
+        glyph.start_new_path([0.0, 0.0, 0.0]);
+        glyph.add_line_to([0.0, 2.0, 0.0], true).unwrap();
+        glyph.add_line_to([2.0, 2.0, 0.0], true).unwrap();
+        glyph
+            .add_quadratic_bezier_curve_to([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], true)
+            .unwrap();
+        assert_eq!(glyph.subpath_end_indices().len(), 1);
+        // The negative: the raw reversal reads the side as a break.
+        let mut raw = glyph.points().to_vec();
+        raw.reverse();
+        let mut naive = QuadPath::new();
+        naive.set_points(raw).unwrap();
+        assert_eq!(
+            naive.subpath_end_indices().len(),
+            2,
+            "the raw reversal splits it"
+        );
+        for reverse in [QuadPath::reverse_points, QuadPath::reverse_each_subpath] {
+            let mut path = glyph.clone();
+            reverse(&mut path);
+            let subpaths = path.subpaths();
+            assert_eq!(subpaths.len(), 1, "one contour, still whole");
+            let run = subpaths[0];
+            assert_eq!(run[0], run[run.len() - 1], "and closed");
+            assert!(signed_area(run) > 0.0, "counter-clockwise");
+            // The side is the same straight segment, its handle at its midpoint.
+            assert_eq!(
+                &run[..3],
+                &[[0.0, 0.0, 0.0], [1.0, 1.0, 0.0], [2.0, 2.0, 0.0]]
+            );
+        }
+        let mut oriented = glyph.clone();
+        assert!(oriented.ensure_positive_contour_orientation());
+        assert_eq!(oriented.subpaths().len(), 1);
     }
 }

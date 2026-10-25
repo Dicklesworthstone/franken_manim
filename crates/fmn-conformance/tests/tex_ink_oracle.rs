@@ -69,10 +69,13 @@ const PUBLIC_FLOORS: InkFloors = InkFloors {
 /// brace pieces (2f1e00c, fm-u5sb). 500 with cmmi's `\vec`, cmex's tall
 /// radical and amsmath's `\iint` (439a910, fm-zxxy): 14 rows change, every
 /// one's IoU rises, 8 of them now match, and p05 IoU rises 0.1431 -> 0.1443.
-/// The p95 sliced W1 ceiling (5.971) is exceeded since 47d2d8e0, at the
-/// 2f1e00c pin (6.0091, unchanged by 439a910; fm-7lzd).
+/// 501 since a reversal keeps a contour whole when a handle sits on its end
+/// anchor (fm-7lzd): fm-hc78's orientation (47d2d8e0) had split 32 CM glyphs
+/// into open runs, moving six rows and the p95 sliced W1 to 6.0091 px. The
+/// fix moves those six rows back, the \mathcal row matches again, and the
+/// p95 is 5.9700 px.
 const CORPUS_FLOORS: InkFloors = InkFloors {
-    matches: 500,
+    matches: 501,
     median_hausdorff_px: 1.0,
     p95_hausdorff_px: 10.0,
     median_sliced_w1_px: 0.072,

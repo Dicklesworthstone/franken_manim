@@ -2105,6 +2105,39 @@ mod tests {
         );
     }
 
+    /// Every glyph contour stays one closed subpath through fm-hc78's
+    /// orientation. The converted CM faces carry quadratics whose control
+    /// point is their end anchor (the script y, calligraphic F, cmr's tilde,
+    /// cmmi's star, a script ν and Γ), and a plain reversal turned each into
+    /// a break mid-contour, filled as two runs closed by chords (fm-7lzd).
+    #[test]
+    fn oriented_glyph_contours_stay_closed() {
+        let engine = engine();
+        let sources = [
+            r"x^y",
+            r"\mathcal{F}",
+            r"\tilde{x}",
+            r"\star",
+            r"e^{\nu}",
+            r"\Gamma^{\Gamma}",
+        ];
+        for source in sources {
+            let m = Tex::new(source).build(&engine).expect("builds");
+            for (part, glyph) in m.vmob.children().iter().enumerate() {
+                let mut path = QuadPath::new();
+                path.set_points(glyph.points().to_vec())
+                    .expect("a quad path");
+                for run in path.subpaths() {
+                    assert_eq!(
+                        run[0],
+                        run[run.len() - 1],
+                        "{source} part {part}: an open subpath"
+                    );
+                }
+            }
+        }
+    }
+
     /// The Reference's TexText default is `alignment="\centering"`: each
     /// `\\`-split line centers on the widest. `line_align(Left)` keeps
     /// fmd-math's flush-left block.
