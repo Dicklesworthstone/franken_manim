@@ -1772,12 +1772,13 @@ mod tests {
         // and so does 2d820c52 (Euler Fraktur's three faces join the roster),
         // and 37632d2d (fm-0byq: fractions as Ords, amssymb on the AMS faces;
         // the identity names the provider revision, so a test-only provider
-        // commit moves it too).
+        // commit moves it too), 4b705d14 (fm-eo8l: amsmath's \mod), and
+        // 1ffcadc9 (fm-ew7o: \dddot as amsmath's operator over a period row).
         assert_eq!(
             [cold.digest(), cached.digest(), text.digest()].map(|digest| digest.to_string()),
             [
-                "0f4455bb4f650877ec4e36cdb5f9bee7f615bdcbd2c7f6e78c84f3e368a34a52",
-                "bddad0eef1f9f47a27e5c3910407058886c151f26ab147ee630739fa020c4c76",
+                "a1c0f560a72118e8f267447cf47f0aa01f6c586b070b9e9654ede677d1d963f5",
+                "74aa24d92311097ccb7cd6ebe2c0288a6f288bae6423442b0da4355a60d6ae23",
                 "0fa22e64fe9e1901eea58a596899ec843bc0d6db46f1cd91607925a50fea3e6f",
             ]
         );
