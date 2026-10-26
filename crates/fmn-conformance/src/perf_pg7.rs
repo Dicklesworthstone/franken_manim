@@ -1768,12 +1768,13 @@ mod tests {
         // change the formula definitions' declared engine/inputs (fm-0byq).
         // Both result goldens and the complete text definition stay fixed.
         // The e6da6ee1 pin (fm-tex-constructs-t2-1wfq: \TeX, \LaTeX and
-        // \mathchoice) moves the formula definitions' engine identity again.
+        // \mathchoice) moves the formula definitions' engine identity again,
+        // and so does 2d820c52 (Euler Fraktur's three faces join the roster).
         assert_eq!(
             [cold.digest(), cached.digest(), text.digest()].map(|digest| digest.to_string()),
             [
-                "5dbc038d22d497b1dd5b1bdb2992d3e1556f85cfc53de21a48204f8bd7d3279d",
-                "b9f1c90eb3e330cd82b4816bfed76062d48ab9a3a6dca82543eca27385b24b55",
+                "9bc61c1e35f8018850fd27a28ce36ef22c2d29633921dc997a8c37927f10c7a8",
+                "b0515fa29340c30261567da72673d2c364816dccbf6313ee5daa2710fdcc350d",
                 "0fa22e64fe9e1901eea58a596899ec843bc0d6db46f1cd91607925a50fea3e6f",
             ]
         );

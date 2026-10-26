@@ -5145,25 +5145,43 @@ fn tex_color_final_png_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
 const TEX_CONSTRUCTS_T2_MATH: &str = r"\boxed{a \leqslant b} \not\subset \lvert z \rvert \quad \cfrac{1}{1+\cfrac{1}{x}} \therefore \square \mathscr{L}";
 const TEX_CONSTRUCTS_T2_TEXT: &str = r"\textit{italic} \texttt{mono}\hspace{1em}\textsf{sans}";
 
+/// The sheet `render_matrix.tex_cancel_frak.v1` renders: `\mathfrak` and
+/// the cancel package's strokes in mathematics, and `\cancel` in a TexText
+/// line (fm-tex-constructs-t2-1wfq).
+const TEX_CANCEL_FRAK_MATH: &str = r"\mathfrak{su}(2) \oplus \mathfrak{R} \quad \frac{\cancel{2}x}{\cancel{2}y} \; \bcancel{a} \; \xcancel{b+c}";
+const TEX_CANCEL_FRAK_TEXT: &str = r"\cancel{struck} text";
+
 /// The certified final PNG of the constructs sheet, its two mobjects' part
 /// counts and its opaque white pixel count.
 fn tex_constructs_t2_render() -> Result<(Vec<u8>, [u64; 2], u64), ScenarioError> {
+    tex_sheet_render(TEX_CONSTRUCTS_T2_MATH, TEX_CONSTRUCTS_T2_TEXT)
+}
+
+/// The certified final PNG of a constructs sheet: a `Tex` line above a
+/// `TexText` line at 40 pt in a 640x360 frame. Also its two mobjects' part
+/// counts and its opaque white pixel count.
+fn tex_sheet_render(
+    math: &'static str,
+    text: &'static str,
+) -> Result<(Vec<u8>, [u64; 2], u64), ScenarioError> {
     struct Sheet {
+        math: &'static str,
+        text: &'static str,
         parts: [u64; 2],
     }
     impl fmn::SceneConstruct for Sheet {
         fn tex_preflight(&self) -> Vec<fmn::tex::TypesetRequest<'_>> {
             vec![
-                fmn::tex::TypesetRequest::math(TEX_CONSTRUCTS_T2_MATH),
-                fmn::tex::TypesetRequest::text(TEX_CONSTRUCTS_T2_TEXT),
+                fmn::tex::TypesetRequest::math(self.math),
+                fmn::tex::TypesetRequest::text(self.text),
             ]
         }
 
         fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
-            let math = fmn::prelude::Tex::new(TEX_CONSTRUCTS_T2_MATH)
+            let math = fmn::prelude::Tex::new(self.math)
                 .font_size(40.0)
                 .build(stage.tex_engine()?)?;
-            let text = fmn::prelude::TexText::new(TEX_CONSTRUCTS_T2_TEXT)
+            let text = fmn::prelude::TexText::new(self.text)
                 .font_size(40.0)
                 .build(stage.tex_engine()?)?;
             self.parts = [math.vmob.children().len(), text.vmob.children().len()]
@@ -5181,7 +5199,11 @@ fn tex_constructs_t2_render() -> Result<(Vec<u8>, [u64; 2], u64), ScenarioError>
         .map_err(|error| fail(format!("constructs sheet options: {error}")))?;
     options.config.camera.resolution = (640, 360);
     options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
-    let mut sheet = Sheet { parts: [0; 2] };
+    let mut sheet = Sheet {
+        math,
+        text,
+        parts: [0; 2],
+    };
     fmn::render_with_fs(&mut sheet, options, fs.clone())
         .map_err(|error| fail(format!("render the constructs sheet: {error}")))?;
     let png = fs
@@ -5214,6 +5236,23 @@ fn tex_constructs_t2_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> 
     Ok(RunOutcome::ok()
         .with_counter("tex_constructs_t2_mobjects", 2)
         .with_artifact("render_matrix.tex_constructs_t2.v1", png))
+}
+
+/// fm-tex-constructs-t2-1wfq: `\mathfrak` (Euler Fraktur) and `\cancel`,
+/// `\bcancel` and `\xcancel`, in a fraction and in TexText, build and reach
+/// the certified final PNG, which is bit-locked.
+fn tex_cancel_frak_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let (png, [math_parts, text_parts], white_px) =
+        tex_sheet_render(TEX_CANCEL_FRAK_MATH, TEX_CANCEL_FRAK_TEXT)?;
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.tex_cancel_frak")
+            .field("math_parts", math_parts)
+            .field("text_parts", text_parts)
+            .field("white_px", white_px),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("tex_cancel_frak_mobjects", 2)
+        .with_artifact("render_matrix.tex_cancel_frak.v1", png))
 }
 
 /// fm-cache-eviction-wired-1w05: exercise the real render-completion hook
@@ -10100,6 +10139,31 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.tex_cancel_frak.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(tex_cancel_frak_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tex_cancel_frak_mobjects", 2),
+            Assertion::GoldenLock {
+                suite: E2E_SUITE,
+                scope: Scope::Certified,
+            },
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.tex_cancel_frak",
+            vec![
+                // 20 math parts: s, u, (, 2, ), ⊕ and ℜ, the fraction's four
+                // glyphs, bar and two strokes, then a, b, +, c and their two
+                // strokes. 11 text parts: the stroke and ten glyphs.
+                FieldPred::u64_eq("math_parts", 20),
+                FieldPred::u64_eq("text_parts", 11),
+                FieldPred::u64_ge("white_px", 50),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.native_shape_matching.v1",
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
@@ -12475,6 +12539,16 @@ fn semantic_oracles_portal_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioE
 // ---------------------------------------------------------------------------
 
 #[test]
+fn tex_cancel_frak_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.tex_cancel_frak.v1")
+        .expect("the Fraktur and cancel scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
 fn tex_constructs_t2_scenario_passes() {
     let scenario = catalog()
         .into_iter()
@@ -13577,6 +13651,24 @@ fn rebless_e2e_tex_constructs_t2_panel() {
     write_single_frame_rebless_panel(
         &png,
         std::env::var_os("FMN_REBLESS_E2E_TEX_CONSTRUCTS_T2_BEFORE"),
+    );
+}
+
+/// Re-bless evidence for the e2e lock's `render_matrix.tex_cancel_frak.v1`
+/// entry, as for `tex_constructs_t2`: opt-in with
+/// `FMN_REBLESS_E2E_TEX_CANCEL_FRAK=1` after the bless, with
+/// `FMN_REBLESS_E2E_TEX_CANCEL_FRAK_BEFORE` naming the old panel when the
+/// entry changes.
+#[test]
+fn rebless_e2e_tex_cancel_frak_panel() {
+    if std::env::var("FMN_REBLESS_E2E_TEX_CANCEL_FRAK").as_deref() != Ok("1") {
+        return;
+    }
+    let (png, _, _) = tex_sheet_render(TEX_CANCEL_FRAK_MATH, TEX_CANCEL_FRAK_TEXT)
+        .expect("the Fraktur and cancel sheet renders");
+    write_single_frame_rebless_panel(
+        &png,
+        std::env::var_os("FMN_REBLESS_E2E_TEX_CANCEL_FRAK_BEFORE"),
     );
 }
 

@@ -156,3 +156,23 @@ layout goldens remain locked. The visual comparison, source hashes and
 single-glyph adjudication are retained with fm-0byq's evidence. This is not
 an owner C-41 ruling, a DS/WASY decision, native ink/Gallery acceptance or
 platform/performance certification. Those original obligations remain.
+
+## Amendment (2026-10-26): Euler Fraktur
+
+fm-tex-constructs-t2-1wfq applies the same recipe to `eufm10/7/5`, the faces
+amssymb's `\mathfrak` sets through eufrak (ueuf.fd picks eufm7 and eufm5 at
+the script sizes):
+- the same AMS OFL release (AMSFonts' `euler/`), whose OFL text already
+  names eufm10, eufm7 and eufm5 as Reserved Font Names;
+- `convert-cm-math.py` with fonttools 4.65.0, renamed "FMD Euler Fraktur
+  10/7/5" (franken_markdown 662c3f97); the 16 earlier faces reproduce byte
+  for byte;
+- the TFM metrics transcribed by `extract-cm-tfm.py` beside the others.
+
+The three faces add 58,904 bytes; the manifest lists 29 faces. Letters map
+at Unicode's Mathematical Fraktur codepoints, the five Letterlike capitals
+included. Digits map at ASCII inside this face only. No glyph moves anywhere
+else: no other face maps those codepoints first. The bundled Noto subset
+carries only the five Letterlike capitals, so it could not serve
+`\mathfrak`. Twelve `\mathfrak` boxes match TeX's `\showbox` within 1e-4
+em. No font tooling or dependency enters the runtime or build closure.

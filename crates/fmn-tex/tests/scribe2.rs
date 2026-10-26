@@ -101,6 +101,13 @@ fn constructs_outside_the_corpus_lock_their_shapes_and_spans() {
             1,
         ),
         (Mode::Text, r"\texttt{code} x", 5, 0, 0, r"\texttt{code}", 4),
+        (math, r"\mathfrak{su}(2)", 5, 0, 0, r"\mathfrak{su}", 2),
+        // One drawn stroke over the body; the whole construct selects both.
+        (math, r"\cancel{x+y}", 3, 0, 1, r"\cancel{x+y}", 4),
+        (math, r"\bcancel{x}^2", 2, 0, 1, "2", 1),
+        (math, r"\xcancel{a}", 1, 0, 1, r"\xcancel{a}", 2),
+        (Mode::Text, r"\cancel{word} x", 5, 0, 1, "word", 4),
+        (math, r"a&=b & c&=d", 6, 0, 0, "c", 1),
     ] {
         let t = e
             .typeset(mode, src)

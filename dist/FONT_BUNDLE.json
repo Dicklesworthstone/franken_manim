@@ -4,7 +4,7 @@
   "hash_convention": "sha256 (fmn-hash, FIPS 180-4; lowercase hex via Digest::to_hex) over the exact bundled TTF bytes of fmd-font's ALL_FACES at the SUITE.lock pin — the same identity the §16.7 input closure and the typeset cache fingerprint key against",
   "suite_lock": {
     "repo": "franken_markdown",
-    "rev": "e6da6ee1a73e636df49484fec27a6daea495732e"
+    "rev": "2d820c52b718bd11f9ff8e6cdd1ca0b7938a06a8"
   },
   "faces": [
     {
@@ -214,6 +214,30 @@
       "byte_len": 34056,
       "sha256": "9531e289856ba296fce6a419808167f53f570abf7db83356c4f0165080123d16",
       "license": "licenses/fonts/cm-math-OFL.txt"
+    },
+    {
+      "name": "euler-fraktur-10",
+      "family": "FMD Euler Fraktur",
+      "version": "Version 1.000",
+      "byte_len": 19480,
+      "sha256": "eb89942b4128ecacfd47d0577a9604ace32da94b6abdddc07eb706b67556c859",
+      "license": "licenses/fonts/cm-math-OFL.txt"
+    },
+    {
+      "name": "euler-fraktur-7",
+      "family": "FMD Euler Fraktur",
+      "version": "Version 1.000",
+      "byte_len": 19604,
+      "sha256": "87864c1a73275448d8e5828081896c1a6622c08d354312f3178b38b09a2e3fb4",
+      "license": "licenses/fonts/cm-math-OFL.txt"
+    },
+    {
+      "name": "euler-fraktur-5",
+      "family": "FMD Euler Fraktur",
+      "version": "Version 1.000",
+      "byte_len": 19820,
+      "sha256": "45bc3569bbbce3d8113f14da9af0906b8db4403d0418ea75a896c517cba206bd",
+      "license": "licenses/fonts/cm-math-OFL.txt"
     }
   ],
   "licenses": [
@@ -241,7 +265,7 @@
     {
       "path": "licenses/fonts/cm-math-OFL.txt",
       "license_id": "OFL-1.1",
-      "covers": ["cm-math-italic-10", "cm-math-italic-7", "cm-math-italic-5", "cm-math-symbols-10", "cm-math-symbols-7", "cm-math-symbols-5", "cm-math-extension-10", "cm-roman-10", "cm-roman-7", "cm-roman-5", "ams-a-10", "ams-a-7", "ams-a-5", "ams-b-10", "ams-b-7", "ams-b-5"],
+      "covers": ["cm-math-italic-10", "cm-math-italic-7", "cm-math-italic-5", "cm-math-symbols-10", "cm-math-symbols-7", "cm-math-symbols-5", "cm-math-extension-10", "cm-roman-10", "cm-roman-7", "cm-roman-5", "ams-a-10", "ams-a-7", "ams-a-5", "ams-b-10", "ams-b-7", "ams-b-5", "euler-fraktur-10", "euler-fraktur-7", "euler-fraktur-5"],
       "byte_len": 12520,
       "sha256": "aa783fdd47e92743bafe79277ac4067d20339344dc5b64a09c2d0f869b2999dc"
     },

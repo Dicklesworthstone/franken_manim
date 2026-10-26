@@ -135,13 +135,26 @@ from the Reference in the ways below.
 - `\TeX` and `\LaTeX` are the kernel's constructions in cmr10 and cmr7, and `\mathchoice`
   sets the branch for the style in force. The logos follow Computer Modern's metrics; the
   Reference's T1 ecrm differs from them by up to 6e-4 em.
+- `\mathfrak` is the Reference's own Euler Fraktur (eufm10/7/5, ADR-0028's recipe), with
+  its TFM boxes.
+- A script after `\mathchoice` or `\cancel` sits on an empty base, as in TeX: `\cancel` is
+  a `\mathpalette`, so `\cancel{x}^2` raises the 2 at the plain superscript height, not
+  above the struck box.
+- Display `align*` (every `Tex` string's surface, and `TexText`'s `align*`) spreads its
+  column pairs across the page's 345 pt `\linewidth`, as amsmath does. Every gap, the
+  margins included, gets the same share, at least 10 pt. `aligned` keeps 10 pt between its
+  pairs. Earlier pins set every pair 10 pt apart.
+- **`\cancel`, `\bcancel` and `\xcancel` go beyond the Reference.** Its template does not
+  load the cancel package, so there these strings are a LaTeX error. Here they are drawn
+  as cancel.sty draws them: line-font slopes, LaTeX's `\@sline` tiling and a 0.4 pt
+  round pen, with matching boxes. One deliberate difference: a stroke shorter than one
+  line-font character, which LaTeX omits with a warning, is drawn.
 - **Refused by name until they land**, with an error naming franken_manim
-  fm-tex-constructs-t2-1wfq:
-  - `\mathfrak`: no bundled face carries Fraktur;
-  - `\tag` and `\sideset`;
-  - `\cancel`, which the Reference's template does not load either;
-  - the numbered `equation` and `gather`, and `multline`: their numbers and flush lines sit
-    against `\linewidth`, which a formula's box does not have.
+  fm-tex-numbered-displays-bxl9:
+  - `\tag`, `\sideset` and `\cancelto`;
+  - the numbered `equation`, `gather` and `align`, and `multline`: their numbers and flush
+    lines sit against `\linewidth`. Numbered `align` used to be set without its numbers;
+    it now refuses with the others.
 
 ## Source selection and matching through the Python portal
 
