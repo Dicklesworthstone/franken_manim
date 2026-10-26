@@ -110,6 +110,12 @@ from the Reference in the ways below.
   the AMS msam/msbm shapes the Reference draws.
   - fmd-math now bundles those faces (fm-0byq). `\hslash` and `\nshortmid` already take
     their authored AMS-B glyphs; moving the rest onto the AMS faces is fm-0byq's open work.
+  - The Reference's template loads wasysym after amssymb. There `\lhd`, `\rhd`, `\unlhd`,
+    `\unrhd`, `\mho`, `\sqsubset`, `\sqsupset`, `\Box` and `\leadsto` are wasy10's
+    characters, in the same classes (TeX's `\meaning` under the template's preamble).
+    fmd-math has no wasy10 face, the gap behind C-41's `\iint`, so it sets them from Noto
+    Sans Math. Under the template's full preamble, every other construct here keeps the box
+    TeX gives it under amsmath and amssymb alone.
   - `\thickapprox` and `\thicksim` are cmsy's thinner ≈ and ∼.
   - 32 names whose glyph no bundled face carries remain an untiered error, among them
     `\lneq`, `\subseteqq`, `\smallfrown` and `\lessapprox`. So do `\Lsh`, `\Rsh`,
