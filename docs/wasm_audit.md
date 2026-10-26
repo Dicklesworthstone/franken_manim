@@ -1,8 +1,8 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-run, 2026-10-26, against `Cargo.lock` `345959f6` and `SUITE.lock` `bd820d71`,
-for the franken_markdown repin from `4b705d14` to `1ffcadc9` (fm-ew7o: `\dddot` as amsmath's
-operator under a row of text periods; franken_markdown's PDF baseline-grid, compression and
+**Status:** re-run, 2026-10-26, against `Cargo.lock` `e6b4be94` and `SUITE.lock` `f6c4b865`,
+for the franken_markdown repin from `4b705d14` to `8667819a` (fm-ew7o: `\dddot` as amsmath's
+operator under a row of text periods, and amsgen's `\ex@` without `powf`; franken_markdown's PDF baseline-grid, compression and
 pagination commits ride along with no dependency change). The lock delta changes only the
 franken_markdown Git revisions; no package, version, checksum or WASM manifest changes.
 
@@ -590,8 +590,8 @@ The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
-- `SUITE.lock` SHA-256: `bd820d714935d7d2d8ee4ecd86f2bb90ec3121b2ab17b8e880eb2c7e34f28e93`
-- `Cargo.lock` SHA-256: `345959f6dd0b107d12715db2b355d3811b07c54af5cf5a3dd65acf7a9a588211`
+- `SUITE.lock` SHA-256: `f6c4b865b08a3ac2553bf4e28ee6b2a336d03cd1d766bb5b25e06eeb33309a76`
+- `Cargo.lock` SHA-256: `e6b4be948d9f03aad590c896291e6a83839b6422e39b897532e2b45a2cefd2a3`
 - Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `93a7c2dc6acf3dfef88a4a490efbfda7970bd963b4740aa7f879a08fff395061`
 
 The 0.5.0 release bump re-bound both lock identities above. That bump changed

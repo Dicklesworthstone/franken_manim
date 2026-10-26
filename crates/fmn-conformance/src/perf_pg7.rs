@@ -1773,12 +1773,13 @@ mod tests {
         // and 37632d2d (fm-0byq: fractions as Ords, amssymb on the AMS faces;
         // the identity names the provider revision, so a test-only provider
         // commit moves it too), 4b705d14 (fm-eo8l: amsmath's \mod), and
-        // 1ffcadc9 (fm-ew7o: \dddot as amsmath's operator over a period row).
+        // 1ffcadc9 and 8667819a (fm-ew7o: \dddot as amsmath's operator over a
+        // period row; \ex@ without powf).
         assert_eq!(
             [cold.digest(), cached.digest(), text.digest()].map(|digest| digest.to_string()),
             [
-                "a1c0f560a72118e8f267447cf47f0aa01f6c586b070b9e9654ede677d1d963f5",
-                "74aa24d92311097ccb7cd6ebe2c0288a6f288bae6423442b0da4355a60d6ae23",
+                "8ea6178e36ca2f454656c91e94f51b0701b50a049570af24720eb330a14c97e9",
+                "538f24ab76cbe68f25f5410d17165768a29bf370a51dd1d2a1ae1220192b881f",
                 "0fa22e64fe9e1901eea58a596899ec843bc0d6db46f1cd91607925a50fea3e6f",
             ]
         );
