@@ -9,7 +9,8 @@ packages and \\minus), and the document class is 10 pt, so 1 em = 10 pt.
 Each string is stripped, as the Reference strips it. A single line is braced
 as amsmath braces an align* cell; multi-line strings (`\\\\` or `&`) are
 boxed as a top-aligned `aligned`, the inner form of the Reference's align*
-wrapper, without its invisible row struts and trailing column glue. No SVG
+wrapper, without its invisible row struts and trailing column glue. amsmath's
+\\if@display is set, as align*'s \\everydisplay sets it. No SVG
 conversion or Reference SVG cache is involved, so the Reference's cache race
 (Appendix C-22, fm-0v8k) cannot reach these boxes.
 
@@ -108,9 +109,14 @@ def measure_one(text: str, preamble: str) -> tuple[float, float, float] | None:
         if multiline
         else ""
     )
+    # align* is display math: its \everydisplay sets amsmath's \if@display,
+    # and the inline math of each cell keeps it. The box below is inline
+    # math, so set it here, or \mod and \pod take their inline kerns (12 mu
+    # and 8 mu for 18 mu), which the Reference never sets (fm-eo8l).
     document = (
         "\\documentclass{article}\n" + preamble + "\n" + unpad
         + "\\newsavebox\\fmnbox\n\\begin{document}\n"
+        "\\makeatletter\\@displaytrue\\makeatother\n"
         "\\sbox\\fmnbox{$\\displaystyle\n" + body + "\n$}\n"
         "\\typeout{FMNBOX \\the\\wd\\fmnbox\\space\\the\\ht\\fmnbox\\space\\the\\dp\\fmnbox}\n"
         "\\end{document}\n"
@@ -152,7 +158,8 @@ def main() -> int:
         "# Strings are private fixtures (plan §15.3): each row names its corpus string by",
         "# sha256(mode + NUL + string). Width, height and depth are TeX's \\wd, \\ht and \\dp",
         "# of the stripped string boxed in display style, in ems at 10 pt: braced like an align*",
-        "# cell, or for multi-line strings as `aligned`[t] without its invisible struts and glue.",
+        "# cell, or for multi-line strings as `aligned`[t] without its invisible struts and glue,",
+        "# with amsmath's \\if@display set as align* sets it.",
         "# Preamble: the pinned Reference's default template (3b1b/manim 6199a00d); TeX Live",
         "# 2025 on the dev host.",
         f"# Sample: up to {PER_CLASS} strings per construct class by",
