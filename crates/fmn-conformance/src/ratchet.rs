@@ -1136,6 +1136,265 @@ fn skip_value(s: &str, start: usize) -> Option<usize> {
     }
 }
 
+// ── The second ranking corpus (fm-tex-constructs-t2-1wfq) ───────────────
+
+/// ManimCommunity/manim's TeX strings: its library, example scenes and
+/// documentation examples, harvested by `scripts/harvest_tex_corpus.py
+/// --second` (commit and counts in `fixtures/second_corpus/PROVENANCE.json`).
+/// G0-4's corpus is 3b1b's own videos; this one is the TeX that scenes
+/// outside them write. It is MIT-licensed (the notices are in
+/// `fixtures/second_corpus/LICENSE.manimce`), so the strings are committed
+/// and every checkout measures them.
+pub const SECOND_CORPUS: &str = include_str!("../fixtures/second_corpus/manimce.v1.jsonl");
+
+/// Where the second corpus's numbers are committed.
+pub const SECOND_CORPUS_BASELINE: &str = "docs/ratchet/second_corpus.tsv";
+
+/// One corpus's parse and typeset counts, and what blocks the rest.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CorpusCounts {
+    /// Distinct (mode, string) pairs.
+    pub unique_total: u64,
+    /// Occurrence-weighted total.
+    pub occurrence_total: u64,
+    /// Distinct strings that parse.
+    pub parse_unique: u64,
+    /// Occurrences that parse.
+    pub parse_occurrences: u64,
+    /// Distinct strings that parse and typeset without an error.
+    pub layout_unique: u64,
+    /// Occurrences that parse and typeset without an error.
+    pub layout_occurrences: u64,
+    /// The occurrences each blocking construct costs, parse and layout
+    /// together (not committed; the dashboard lists them).
+    pub blocked: BTreeMap<String, u64>,
+}
+
+/// Count how much of a corpus (JSONL records with `mode`, `text`, `count`)
+/// parses and typesets, in display style for mathematics.
+///
+/// # Errors
+/// A record that is not a corpus entry.
+pub fn measure_corpus(data: &str, engine: &fmd_math::Engine) -> Result<CorpusCounts, String> {
+    let mut counts = CorpusCounts::default();
+    for (index, line) in data.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let entry = parse_corpus_entry(line)
+            .ok_or_else(|| format!("corpus line {}: not a corpus entry", index + 1))?;
+        counts.unique_total += 1;
+        counts.occurrence_total += entry.count;
+        let parsed = if entry.mode == "text" {
+            fmd_math::parse_text(&entry.text).map(|_| ())
+        } else {
+            fmd_math::parse(&entry.text).map(|_| ())
+        };
+        let blocked = |error: &fmd_math::MathError| match error {
+            fmd_math::MathError::UnmappedChar { ch, .. } => format!("char:U+{:04X}", *ch as u32),
+            other => other
+                .unsupported_construct()
+                .unwrap_or("(structural)")
+                .to_owned(),
+        };
+        if let Err(error) = parsed {
+            *counts.blocked.entry(blocked(&error)).or_insert(0) += entry.count;
+            continue;
+        }
+        counts.parse_unique += 1;
+        counts.parse_occurrences += entry.count;
+        let laid = if entry.mode == "text" {
+            engine.typeset_text(&entry.text)
+        } else {
+            engine.typeset(&entry.text, fmd_math::Style::Display)
+        };
+        match laid {
+            Ok(_) => {
+                counts.layout_unique += 1;
+                counts.layout_occurrences += entry.count;
+            }
+            Err(error) => *counts.blocked.entry(blocked(&error)).or_insert(0) += entry.count,
+        }
+    }
+    Ok(counts)
+}
+
+impl CorpusCounts {
+    const KEYS: [&'static str; 6] = [
+        "unique_total",
+        "occurrence_total",
+        "parse_unique",
+        "parse_occurrences",
+        "layout_unique",
+        "layout_occurrences",
+    ];
+
+    fn values(&self) -> [u64; 6] {
+        [
+            self.unique_total,
+            self.occurrence_total,
+            self.parse_unique,
+            self.parse_occurrences,
+            self.layout_unique,
+            self.layout_occurrences,
+        ]
+    }
+
+    /// The committed TSV: the counts, one `key<TAB>value` per line.
+    #[must_use]
+    pub fn to_tsv(&self) -> String {
+        let mut out = String::from(
+            "# The second corpus's ratchet (fm-tex-constructs-t2-1wfq): counts may\n\
+             # only rise. Regenerate with RATCHET_UPDATE=1.\n",
+        );
+        for (key, value) in Self::KEYS.iter().zip(self.values()) {
+            let _ = writeln!(out, "{key}\t{value}");
+        }
+        out
+    }
+
+    /// Read [`Self::to_tsv`]'s output back (without `blocked`).
+    ///
+    /// # Errors
+    /// A missing, repeated, unknown or non-numeric key.
+    pub fn parse_tsv(text: &str) -> Result<Self, String> {
+        let mut values: [Option<u64>; 6] = [None; 6];
+        for line in text
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+        {
+            let (key, value) = line
+                .split_once('\t')
+                .ok_or_else(|| format!("second corpus baseline: bad line `{line}`"))?;
+            let slot = Self::KEYS
+                .iter()
+                .position(|k| *k == key)
+                .ok_or_else(|| format!("second corpus baseline: unknown key `{key}`"))?;
+            if values[slot].is_some() {
+                return Err(format!("second corpus baseline: `{key}` repeated"));
+            }
+            values[slot] = Some(
+                value
+                    .parse()
+                    .map_err(|_| format!("second corpus baseline: `{key}` is not a count"))?,
+            );
+        }
+        let get = |i: usize| {
+            values[i].ok_or_else(|| format!("second corpus baseline: `{}` missing", Self::KEYS[i]))
+        };
+        Ok(Self {
+            unique_total: get(0)?,
+            occurrence_total: get(1)?,
+            parse_unique: get(2)?,
+            parse_occurrences: get(3)?,
+            layout_unique: get(4)?,
+            layout_occurrences: get(5)?,
+            blocked: BTreeMap::new(),
+        })
+    }
+
+    /// What regressed against a committed baseline. The corpus is a fixed
+    /// fixture, so its totals must match too.
+    #[must_use]
+    pub fn violations(&self, committed: &Self) -> Vec<String> {
+        let mut out = Vec::new();
+        for ((key, now), before) in Self::KEYS.iter().zip(self.values()).zip(committed.values()) {
+            let total = key.ends_with("_total");
+            if (total && now != before) || (!total && now < before) {
+                out.push(format!("second corpus {key}: {before} -> {now}"));
+            }
+        }
+        out
+    }
+
+    /// The counts without `blocked`, as committed.
+    #[must_use]
+    pub fn committed_form(&self) -> Self {
+        Self {
+            blocked: BTreeMap::new(),
+            ..self.clone()
+        }
+    }
+
+    /// The dashboard's section for the second corpus, beside the 3b1b
+    /// headline.
+    #[must_use]
+    pub fn dashboard_section(&self) -> String {
+        let share = |part: u64, whole: u64| {
+            if whole == 0 {
+                0.0
+            } else {
+                100.0 * part as f64 / whole as f64
+            }
+        };
+        let mut out = String::new();
+        let _ = writeln!(out, "## A second corpus: ManimCommunity/manim\n");
+        let _ = writeln!(
+            out,
+            "The corpus above is 3b1b's own videos. This one is the TeX of ManimCommunity/manim's \
+             library, example scenes and documentation examples: `{}` distinct strings, `{}` \
+             occurrences (MIT; commit and counts in \
+             `crates/fmn-conformance/fixtures/second_corpus/PROVENANCE.json`). It is public, \
+             every checkout measures it, and its numbers may only rise.\n",
+            self.unique_total, self.occurrence_total
+        );
+        let _ = writeln!(out, "| Plane | Occurrence-weighted | Unique-string |");
+        let _ = writeln!(out, "|---|---|---|");
+        let _ = writeln!(
+            out,
+            "| **Parse** | {:.3} % | {:.3} % |",
+            share(self.parse_occurrences, self.occurrence_total),
+            share(self.parse_unique, self.unique_total)
+        );
+        let _ = writeln!(
+            out,
+            "| **Parse + typeset returned Ok** | {:.3} % | {:.3} % |",
+            share(self.layout_occurrences, self.occurrence_total),
+            share(self.layout_unique, self.unique_total)
+        );
+        let mut blocked: Vec<(&String, &u64)> = self.blocked.iter().collect();
+        blocked.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        let list = blocked
+            .iter()
+            .map(|(construct, occurrences)| format!("`{construct}` ({occurrences})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = writeln!(
+            out,
+            "\nBlocked, by occurrences: {}.\n",
+            if list.is_empty() {
+                "nothing".to_owned()
+            } else {
+                list
+            }
+        );
+        out
+    }
+}
+
+/// `dashboard` with `section` (a [`CorpusCounts::dashboard_section`]) in
+/// place of any earlier second-corpus section, just before the glyph
+/// fallback section.
+#[must_use]
+pub fn with_second_corpus_section(dashboard: &str, section: &str) -> String {
+    const HEAD: &str = "## A second corpus: ManimCommunity/manim";
+    const NEXT: &str = "## Glyph fallback";
+    let mut text = dashboard.to_owned();
+    if let Some(start) = text.find(HEAD) {
+        let end = text[start..]
+            .find(NEXT)
+            .map_or(text.len(), |offset| start + offset);
+        text.replace_range(start..end, "");
+    }
+    match text.find(NEXT) {
+        Some(at) => {
+            text.insert_str(at, section);
+            text
+        }
+        None => format!("{text}\n{section}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1404,5 +1663,69 @@ mod tests {
         );
         assert!(lines[5].ends_with("\"decision\":\"pass\"}"));
         assert!(parse_oracle_fixture("aa\t1.0\t0.5\n").is_err());
+    }
+
+    #[test]
+    fn the_second_corpus_ratchet_refuses_regressions_and_a_moved_denominator() {
+        let committed = CorpusCounts {
+            unique_total: 10,
+            occurrence_total: 20,
+            parse_unique: 9,
+            parse_occurrences: 18,
+            layout_unique: 8,
+            layout_occurrences: 16,
+            blocked: BTreeMap::new(),
+        };
+        let parsed = CorpusCounts::parse_tsv(&committed.to_tsv()).unwrap();
+        assert_eq!(parsed, committed, "the TSV round-trips");
+        assert!(committed.violations(&committed).is_empty());
+        let advanced = CorpusCounts {
+            layout_unique: 9,
+            layout_occurrences: 18,
+            ..committed.clone()
+        };
+        assert!(advanced.violations(&committed).is_empty(), "rising is fine");
+        let regressed = CorpusCounts {
+            layout_occurrences: 15,
+            ..committed.clone()
+        };
+        assert_eq!(regressed.violations(&committed).len(), 1);
+        let moved = CorpusCounts {
+            occurrence_total: 21,
+            ..committed.clone()
+        };
+        assert_eq!(
+            moved.violations(&committed).len(),
+            1,
+            "the fixture is fixed"
+        );
+        assert!(CorpusCounts::parse_tsv("unique_total\t1\n").is_err());
+        assert!(
+            CorpusCounts::parse_tsv(&format!("{}unique_total\t1\n", committed.to_tsv())).is_err()
+        );
+    }
+
+    #[test]
+    fn the_second_corpus_section_replaces_itself_before_the_glyph_fallback() {
+        let page = "# Ratchet\n\n| table |\n\n## Glyph fallback\n\nrest\n";
+        let first = CorpusCounts {
+            unique_total: 2,
+            occurrence_total: 3,
+            ..CorpusCounts::default()
+        };
+        let once = with_second_corpus_section(page, &first.dashboard_section());
+        assert!(once.find("## A second corpus").unwrap() < once.find("## Glyph fallback").unwrap());
+        let again = with_second_corpus_section(&once, &first.dashboard_section());
+        assert_eq!(again, once, "idempotent");
+        let later = CorpusCounts {
+            parse_unique: 2,
+            parse_occurrences: 3,
+            layout_unique: 2,
+            layout_occurrences: 3,
+            ..first
+        };
+        let updated = with_second_corpus_section(&once, &later.dashboard_section());
+        assert_eq!(updated.matches("## A second corpus").count(), 1);
+        assert!(updated.contains("| **Parse** | 100.000 % | 100.000 % |"));
     }
 }

@@ -421,6 +421,35 @@ fn git_dependencies_ride_their_suite_lock_pins() {
         }
         assert!(found, "{pkg} not found in Cargo.lock with a source line");
     }
+    // The fuzz crate and the accelerator spike keep their own lock files,
+    // outside the workspace, and consume franken_markdown too: the same pin
+    // binds them. Two repins left them behind (fm-zxxy, fm-0byq), so the
+    // fuzz targets ran the old fmd-math.
+    let pin = pin_for("franken_markdown");
+    for aux in ["fuzz/Cargo.lock", "spikes/g0-8-accelerator/Cargo.lock"] {
+        let lock = repo_file(aux);
+        let sources: Vec<&str> = lock
+            .lines()
+            .filter_map(|l| {
+                l.trim().strip_prefix(
+                    "source = \"git+https://github.com/Dicklesworthstone/franken_markdown",
+                )
+            })
+            .collect();
+        assert!(!sources.is_empty(), "{aux}: no franken_markdown package");
+        for source in sources {
+            let resolved = source
+                .split('#')
+                .nth(1)
+                .map(|s| s.trim_end_matches('"'))
+                .unwrap_or("");
+            assert_eq!(
+                resolved, pin,
+                "{aux}: franken_markdown resolves {resolved} but SUITE.lock pins it at {pin} — \
+                 bump the auxiliary lock with the repin"
+            );
+        }
+    }
 }
 
 #[test]

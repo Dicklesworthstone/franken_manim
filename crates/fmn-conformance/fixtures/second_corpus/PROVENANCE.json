@@ -1,0 +1,34 @@
+{
+  "source": "https://github.com/ManimCommunity/manim",
+  "commit": "17da10e9d1d39358b39efdf617d7d187ec57e1b7",
+  "licence": "MIT (LICENSE.manimce: both notices)",
+  "rules_version": "1",
+  "math_calls": [
+    "MathTex",
+    "SingleStringMathTex"
+  ],
+  "text_calls": [
+    "BulletedList",
+    "Tex",
+    "Title"
+  ],
+  "scanned": [
+    "manim/ (code and docstring examples)",
+    "example_scenes/",
+    "docs/ (rst examples)"
+  ],
+  "excluded": [
+    "tests/"
+  ],
+  "files_and_blocks_scanned": 707,
+  "blocks_failed_to_parse": 2,
+  "call_sites": {
+    "BulletedList": 1,
+    "MathTex": 67,
+    "Tex": 68,
+    "Title": 5
+  },
+  "dynamic_args_excluded": 27,
+  "distinct_strings": 113,
+  "total_occurrences": 142
+}

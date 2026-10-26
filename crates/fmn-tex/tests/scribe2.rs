@@ -71,6 +71,55 @@ fn submobject_counts_are_locked_for_corpus_shapes() {
     }
 }
 
+/// fm-tex-constructs-t2-1wfq: the common constructs outside the 3b1b corpus
+/// build their families, and each one's source selects its own ink.
+#[test]
+fn constructs_outside_the_corpus_lock_their_shapes_and_spans() {
+    let e = engine();
+    let math = Mode::Math(Style::Display);
+    // (mode, source, glyphs, rules, paths, needle, primitives it selects)
+    for (mode, src, glyphs, rules, paths, needle, selected) in [
+        // The slash and the relation: `\not` selects only the slash.
+        (math, r"a \not= b", 4, 0, 0, r"\not", 1),
+        (math, r"\lvert x \rvert", 3, 0, 0, "x", 1),
+        (math, r"a\hspace{1cm}b", 2, 0, 0, "b", 1),
+        // Four frame rules around the body; the whole construct selects all five.
+        (math, r"\boxed{x}", 1, 4, 0, r"\boxed{x}", 5),
+        (math, r"\cfrac{1}{x}", 2, 1, 0, "x", 1),
+        (math, r"\genfrac{(}{)}{0pt}{}{n}{k}", 4, 0, 0, "k", 1),
+        (math, r"\textit{word}", 4, 0, 0, r"\textit{word}", 4),
+        (math, r"a \leqslant b", 3, 0, 0, r"\leqslant", 1),
+        (math, r"\therefore\ \square", 2, 0, 0, r"\square", 1),
+        (math, r"\mathscr{L}", 1, 0, 0, r"\mathscr{L}", 1),
+        (
+            math,
+            r"\begin{gather*} a \\ b \end{gather*}",
+            2,
+            0,
+            0,
+            "b",
+            1,
+        ),
+        (Mode::Text, r"\texttt{code} x", 5, 0, 0, r"\texttt{code}", 4),
+    ] {
+        let t = e
+            .typeset(mode, src)
+            .unwrap_or_else(|err| panic!("{src}: {err}"));
+        assert_eq!(
+            (
+                t.layout.glyphs.len(),
+                t.layout.rules.len(),
+                t.layout.paths.len()
+            ),
+            (glyphs, rules, paths),
+            "family shape of {src:?}"
+        );
+        assert_eq!(t.subs.len(), glyphs + rules + paths, "{src:?}");
+        let hits: usize = t.occurrences(needle).iter().map(Vec::len).sum();
+        assert_eq!(hits, selected, "{src:?} selecting {needle:?}");
+    }
+}
+
 #[test]
 fn spans_select_submobjects_by_source_identity() {
     let e = engine();

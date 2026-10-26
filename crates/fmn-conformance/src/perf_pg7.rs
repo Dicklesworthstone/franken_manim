@@ -1767,11 +1767,13 @@ mod tests {
         // The c81208f1 provider, AMS faces and structured macro overlays
         // change the formula definitions' declared engine/inputs (fm-0byq).
         // Both result goldens and the complete text definition stay fixed.
+        // The e6da6ee1 pin (fm-tex-constructs-t2-1wfq: \TeX, \LaTeX and
+        // \mathchoice) moves the formula definitions' engine identity again.
         assert_eq!(
             [cold.digest(), cached.digest(), text.digest()].map(|digest| digest.to_string()),
             [
-                "d3b7265b84c88b0b1a5af570c245ff6a00d98e6bc2ee3f5a1d20688b2e8178d9",
-                "6f308af6d28d08d0b476cf4555687d659789e067b9836dda3b7315456f5a0abb",
+                "5dbc038d22d497b1dd5b1bdb2992d3e1556f85cfc53de21a48204f8bd7d3279d",
+                "b9f1c90eb3e330cd82b4816bfed76062d48ab9a3a6dca82543eca27385b24b55",
                 "0fa22e64fe9e1901eea58a596899ec843bc0d6db46f1cd91607925a50fea3e6f",
             ]
         );

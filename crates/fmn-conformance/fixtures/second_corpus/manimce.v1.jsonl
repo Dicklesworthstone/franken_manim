@@ -1,0 +1,113 @@
+{"count": 1, "mode": "math", "sources": ["manimce/manim/mobject/matrix.py:627"], "text": "("}
+{"count": 1, "mode": "math", "sources": ["manimce/manim/mobject/matrix.py:627"], "text": ")"}
+{"count": 4, "mode": "math", "sources": ["manimce/docs/source/examples.rst#block10:5", "manimce/manim/animation/transform_matching_parts.py#block0:6", "manimce/manim/animation/transform_matching_parts.py#block0:7", "manimce/manim/utils/debug.py#block0:7"], "text": "+"}
+{"count": 1, "mode": "math", "sources": ["manimce/manim/animation/transform_matching_parts.py#block0:8"], "text": "-"}
+{"count": 1, "mode": "math", "sources": ["manimce/manim/mobject/graphing/coordinate_systems.py#block0:9"], "text": "-3-2i"}
+{"count": 1, "mode": "math", "sources": ["manimce/docs/source/examples.rst#block26:28"], "text": "2 \\pi"}
+{"count": 1, "mode": "math", "sources": ["manimce/manim/mobject/graphing/coordinate_systems.py#block0:8"], "text": "2+i"}
+{"count": 1, "mode": "math", "sources": ["manimce/docs/source/examples.rst#block26:29"], "text": "3 \\pi"}
+{"count": 1, "mode": "math", "sources": ["manimce/docs/source/examples.rst#block26:29"], "text": "4 \\pi"}
+{"count": 5, "mode": "math", "sources": ["manimce/manim/animation/transform_matching_parts.py#block0:6", "manimce/manim/animation/transform_matching_parts.py#block0:7", "manimce/manim/animation/transform_matching_parts.py#block0:8", "manimce/manim/mobject/matrix.py:640", "manimce/manim/mobject/text/numbers.py:457"], "text": "="}
+{"count": 1, "mode": "math", "sources": ["manimce/manim/mobject/geometry/arc.py#block0:7"], "text": "\\alpha"}
+{"count": 1, "mode": "math", "sources": ["manimce/docs/source/guides/using_text.rst#block23:4"], "text": "\\binom{2n}{n+2}"}
+{"count": 1, "mode": "math", "sources": ["manimce/manim/mobject/text/tex_mobject.py:696"], "text": "\\cdot"}
+{"count": 1, "mode": "math", "sources": ["manimce/manim/mobject/table.py#block0:13"], "text": "\\cos"}
+{"count": 1, "mode": "math", "sources": ["manimce/manim/mobject/table.py#block0:8"], "text": "\\frac{ \\sqrt{0} }{2}"}
+{"count": 1, "mode": "math", "sources": ["manimce/manim/mobject/table.py#block0:9"], "text": "\\frac{ \\sqrt{1} }{2}"}
+{"count": 1, "mode": "math", "sources": ["manimce/manim/mobject/table.py#block0:10"], "text": "\\frac{ \\sqrt{2} }{2}"}
+{"count": 1, "mode": "math", "sources": ["manimce/manim/mobject/table.py#block0:11"], "text": "\\frac{ \\sqrt{3} }{2}"}
+{"count": 1, "mode": "math", "sources": ["manimce/manim/mobject/table.py#block0:12"], "text": "\\frac{ \\sqrt{4} }{2}"}
+{"count": 1, "mode": "math", "sources": ["manimce/manim/mobject/graphing/coordinate_systems.py#block0:8"], "text": "\\frac{\\pi}{2}"}
+{"count": 2, "mode": "math", "sources": ["manimce/docs/source/examples.rst#block10:5", "manimce/manim/utils/debug.py#block0:5"], "text": "\\frac{d}{dx}f(x)g(x)="}
+{"count": 1, "mode": "math", "sources": ["manimce/docs/source/contributing/docs/examples.rst#block0:4"], "text": "\\int_a^b f'(x) dx = f(b) - f(a)"}
+{"count": 1, "mode": "math", "sources": ["manimce/manim/mobject/text/tex_mobject.py#block0:4"], "text": "\\int_a^b f'(x) dx = f(b)- f(a)"}
+{"count": 1, "mode": "math", "sources": ["manimce/docs/source/examples.rst#block0:9"], "text": "\\mathbb{M}"}
+{"count": 1, "mode": "math", "sources": ["manimce/manim/cli/checkhealth/commands.py:73"], "text": "\\oint_{\\gamma} f(z)~dz = 0"}
+{"count": 4, "mode": "math", "sources": ["manimce/docs/source/examples.rst#block26:28", "manimce/example_scenes/basic.py:143", "manimce/manim/mobject/matrix.py#block0:15", "manimce/manim/mobject/matrix.py#block0:6"], "text": "\\pi"}
+{"count": 1, "mode": "math", "sources": ["manimce/manim/mobject/table.py#block0:13"], "text": "\\sin"}
+{"count": 1, "mode": "math", "sources": ["manimce/example_scenes/basic.py:103"], "text": "\\sum_{k=1}^\\infty {1 \\over k^2} = {\\pi^2 \\over 6}"}
+{"count": 2, "mode": "math", "sources": ["manimce/docs/source/examples.rst#block25:5", "manimce/example_scenes/basic.py:21"], "text": "\\sum_{n=1}^\\infty \\frac{1}{n^2} = \\frac{\\pi^2}{6}"}
+{"count": 1, "mode": "math", "sources": ["manimce/docs/source/examples.rst#block7:14"], "text": "\\theta"}
+{"count": 2, "mode": "math", "sources": ["manimce/example_scenes/customtex.py:14", "manimce/example_scenes/customtex.py:39"], "text": "\\vv{vb}"}
+{"count": 1, "mode": "math", "sources": ["manimce/docs/source/guides/using_text.rst#block17:4"], "text": "\\xrightarrow{x^6y^8}"}
+{"count": 2, "mode": "math", "sources": ["manimce/manim/animation/transform_matching_parts.py#block0:4", "manimce/manim/mobject/geometry/arc.py#block0:7"], "text": "a"}
+{"count": 2, "mode": "math", "sources": ["manimce/manim/mobject/text/tex_mobject.py:284", "manimce/manim/mobject/text/tex_mobject.py:64"], "text": "align*"}
+{"count": 1, "mode": "math", "sources": ["manimce/manim/animation/transform_matching_parts.py#block0:4"], "text": "b"}
+{"count": 1, "mode": "math", "sources": ["manimce/manim/animation/transform_matching_parts.py#block0:4"], "text": "c"}
+{"count": 1, "mode": "math", "sources": ["manimce/manim/mobject/text/tex_mobject.py:635"], "text": "center"}
+{"count": 1, "mode": "math", "sources": ["manimce/docs/source/guides/using_text.rst#block22:5"], "text": "e^{x} = x^0 + x^1 + \\frac{1}{2} x^2 + \\frac{1}{6} x^3 + \\cdots + \\frac{1}{n!} x^n + \\cdots"}
+{"count": 1, "mode": "math", "sources": ["manimce/manim/mobject/table.py#block0:15"], "text": "f(x)"}
+{"count": 1, "mode": "math", "sources": ["manimce/docs/source/guides/using_text.rst#block26:4"], "text": "f(x) &= 3 + 2 + 1\\\\ &= 5 + 1 \\\\ &= 6"}
+{"count": 1, "mode": "math", "sources": ["manimce/manim/mobject/table.py#block0:8"], "text": "f(x)=e^{x}"}
+{"count": 2, "mode": "math", "sources": ["manimce/docs/source/examples.rst#block10:5", "manimce/manim/utils/debug.py#block0:6"], "text": "f(x)\\frac{d}{dx}g(x)"}
+{"count": 2, "mode": "math", "sources": ["manimce/docs/source/examples.rst#block10:6", "manimce/manim/utils/debug.py#block0:8"], "text": "g(x)\\frac{d}{dx}f(x)"}
+{"count": 3, "mode": "math", "sources": ["manimce/manim/mobject/table.py#block0:15", "manimce/manim/mobject/table.py#block0:8", "manimce/manim/mobject/value_tracker.py#block0:6"], "text": "x"}
+{"count": 1, "mode": "math", "sources": ["manimce/manim/mobject/mobject.py#block0:7"], "text": "x^3"}
+{"count": 2, "mode": "math", "sources": ["manimce/manim/animation/transform_matching_parts.py#block0:7", "manimce/manim/animation/transform_matching_parts.py#block0:8"], "text": "{{a}}^2"}
+{"count": 2, "mode": "math", "sources": ["manimce/manim/animation/transform_matching_parts.py#block0:7", "manimce/manim/animation/transform_matching_parts.py#block0:8"], "text": "{{b}}^2"}
+{"count": 2, "mode": "math", "sources": ["manimce/manim/animation/transform_matching_parts.py#block0:7", "manimce/manim/animation/transform_matching_parts.py#block0:8"], "text": "{{c}}^2"}
+{"count": 1, "mode": "math", "sources": ["manimce/manim/animation/transform_matching_parts.py#block0:6"], "text": "{{x}}^2"}
+{"count": 1, "mode": "math", "sources": ["manimce/manim/animation/transform_matching_parts.py#block0:6"], "text": "{{y}}^2"}
+{"count": 1, "mode": "math", "sources": ["manimce/manim/animation/transform_matching_parts.py#block0:6"], "text": "{{z}}^2"}
+{"count": 1, "mode": "text", "sources": ["manimce/docs/source/examples.rst#block17:14"], "text": "$\\Delta Q$"}
+{"count": 1, "mode": "text", "sources": ["manimce/docs/source/guides/using_text.rst#block21:4"], "text": "$\\bigstar$"}
+{"count": 1, "mode": "text", "sources": ["manimce/docs/source/guides/using_text.rst#block20:7"], "text": "$\\mathscr{H} \\rightarrow \\mathbb{H}$"}
+{"count": 1, "mode": "text", "sources": ["manimce/docs/source/guides/using_text.rst#block18:4"], "text": "$\\mathtt{H} \\looparrowright$ \\LaTeX"}
+{"count": 1, "mode": "text", "sources": ["manimce/docs/source/guides/using_text.rst#block17:5"], "text": "$\\xrightarrow{x^6y^8}$"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/mobject/graphing/coordinate_systems.py#block0:6"], "text": "$x$-values"}
+{"count": 1, "mode": "text", "sources": ["manimce/docs/source/guides/using_text.rst#block24:5"], "text": "$x^2 + y^2 = z^2$"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/mobject/graphing/coordinate_systems.py#block0:5"], "text": "$y$-label"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/mobject/graphing/coordinate_systems.py#block0:6"], "text": "$y$-values"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/mobject/graphing/coordinate_systems.py#block0:5"], "text": "$z$-label"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/mobject/geometry/arc.py#block0:8"], "text": "(0,2)"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/mobject/graphing/coordinate_systems.py#block0:33"], "text": "(1,1)"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/mobject/geometry/arc.py#block0:6"], "text": "(2,0)"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/mobject/geometry/arc.py#block0:6"], "text": "42"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/mobject/geometry/shape_matchers.py#block0:4"], "text": "A Quote from Newton"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/animation/creation.py#block0:4"], "text": "Alice and Bob"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/animation/indication.py#block0:4"], "text": "Circum-\\\\scribe"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/utils/rate_functions.py#block1:12"], "text": "Ease In"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/utils/rate_functions.py#block1:14"], "text": "Ease In Out"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/utils/rate_functions.py#block1:13"], "text": "Ease out"}
+{"count": 2, "mode": "text", "sources": ["manimce/manim/animation/fading.py#block0:4", "manimce/manim/animation/fading.py#block0:5"], "text": "Fade"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/animation/indication.py#block0:5"], "text": "Flash the dot below:"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/mobject/vector_field.py#block1:11"], "text": "Flowing Area"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/animation/indication.py#block0:5"], "text": "Focusing on the dot below:"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/mobject/graphing/coordinate_systems.py#block0:36"], "text": "Graphs of $y=x^{ {1}\\over{n} }$ and $y=x^n (n=1,2,3,...,20)$"}
+{"count": 1, "mode": "text", "sources": ["manimce/docs/source/guides/using_text.rst#block21:4"], "text": "Hello"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/mobject/geometry/shape_matchers.py#block0:12"], "text": "Hello World"}
+{"count": 1, "mode": "text", "sources": ["manimce/docs/source/guides/using_text.rst#block19:4"], "text": "Hello \\LaTeX"}
+{"count": 1, "mode": "text", "sources": ["manimce/docs/source/guides/using_text.rst#block25:4"], "text": "Hello 你好 \\LaTeX"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/mobject/mobject.py#block0:4"], "text": "I am at the top!"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/mobject/mobject.py#block0:6"], "text": "I am moving to the side!"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/animation/fading.py#block0:4"], "text": "In"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/animation/indication.py#block0:4"], "text": "Indicate"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/mobject/text/tex_mobject.py#block0:4"], "text": "Item 1"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/mobject/text/tex_mobject.py#block0:4"], "text": "Item 2"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/mobject/text/tex_mobject.py#block0:4"], "text": "Item 3"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/mobject/text/text_mobject.py#block9:13"], "text": "Justified"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/animation/composition.py#block0:4"], "text": "LaggedStartMap"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/mobject/geometry/shape_matchers.py#block0:4"], "text": "Manim"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/mobject/text/text_mobject.py#block9:14"], "text": "Not Justified"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/animation/fading.py#block0:5"], "text": "Out"}
+{"count": 2, "mode": "text", "sources": ["manimce/example_scenes/advanced_tex_fonts.py:136", "manimce/example_scenes/advanced_tex_fonts.py:37"], "text": "See more font templates at \\\\ http://jf.burnol.free.fr/showcase.html"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/mobject/types/vectorized_mobject.py#block0:32"], "text": "Some other text"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/mobject/types/vectorized_mobject.py#block0:15"], "text": "Some text"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/mobject/vector_field.py#block1:11"], "text": "Spawning Area"}
+{"count": 1, "mode": "text", "sources": ["manimce/docs/source/examples.rst#block17:14"], "text": "T[$^\\circ C$]"}
+{"count": 1, "mode": "text", "sources": ["manimce/example_scenes/advanced_tex_fonts.py:30"], "text": "Tex Font Example"}
+{"count": 1, "mode": "text", "sources": ["manimce/example_scenes/advanced_tex_fonts.py:125"], "text": "Tex Font Template Example"}
+{"count": 2, "mode": "text", "sources": ["manimce/docs/source/examples.rst#block25:34", "manimce/example_scenes/basic.py:50"], "text": "That was a non-linear function \\\\ applied to the grid"}
+{"count": 2, "mode": "text", "sources": ["manimce/docs/source/examples.rst#block25:13", "manimce/example_scenes/basic.py:29"], "text": "That was a transform"}
+{"count": 2, "mode": "text", "sources": ["manimce/docs/source/examples.rst#block25:22", "manimce/example_scenes/basic.py:38"], "text": "This is a grid"}
+{"count": 1, "mode": "text", "sources": ["manimce/example_scenes/basic.py:101"], "text": "This is a some text"}
+{"count": 2, "mode": "text", "sources": ["manimce/docs/source/examples.rst#block25:4", "manimce/example_scenes/basic.py:20"], "text": "This is some \\LaTeX"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/mobject/mobject.py#block0:6"], "text": "To the corner!"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/animation/indication.py#block0:4"], "text": "WaveWaveWaveWaveWave"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/animation/indication.py#block0:4"], "text": "Wiggle"}
+{"count": 2, "mode": "text", "sources": ["manimce/docs/source/guides/using_text.rst#block16:4", "manimce/docs/source/guides/using_text.rst#block21:4"], "text": "\\LaTeX"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/mobject/matrix.py:633"], "text": "det"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/mobject/graphing/coordinate_systems.py#block0:10"], "text": "dx = 1.0"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/mobject/graphing/coordinate_systems.py#block0:6"], "text": "x-axis"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/mobject/graphing/coordinate_systems.py#block0:8"], "text": "x-value"}
+{"count": 1, "mode": "text", "sources": ["manimce/manim/mobject/mobject.py#block0:6"], "text": "zIndex = 1"}

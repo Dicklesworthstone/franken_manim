@@ -99,6 +99,44 @@ ligature is one submobject), so scene code indexes identically.
   `x\;=y` loses the relation spacing around `=`, and `a\!\!b` does not
   compile. A formula that asks for a space gets it.
 
+## TeX constructs beyond the 3b1b corpus
+
+fmd-math's first vocabulary was ranked by 3b1b's own videos. These constructs from the
+Reference's default preamble (amsmath, amssymb, mathrsfs) are set natively too. They differ
+from the Reference in the ways below.
+
+- **Most of amssymb's symbols still use Noto Sans Math's glyphs.** `\leqslant`, `\therefore`,
+  `\square`, `\nleq`, `\twoheadrightarrow` and 161 more take amssymb's spacing class, but not
+  the AMS msam/msbm shapes the Reference draws.
+  - fmd-math now bundles those faces (fm-0byq). `\hslash` and `\nshortmid` already take
+    their authored AMS-B glyphs; moving the rest onto the AMS faces is fm-0byq's open work.
+  - `\thickapprox` and `\thicksim` are cmsy's thinner ≈ and ∼.
+  - 32 names whose glyph no bundled face carries remain an untiered error, among them
+    `\lneq`, `\subseteqq`, `\smallfrown` and `\lessapprox`. So do `\Lsh`, `\Rsh`,
+    `\curvearrowleft`, `\curvearrowright`, `\leftrightarrows`, `\rightleftarrows`,
+    `\lozenge`, `\digamma` and `\eth`.
+- **`\mathscr` is Noto Sans Math's script.** The Reference uses mathrsfs's rsfs10. It stays
+  distinct from `\mathcal`, which is cmsy's calligraphic in both. Lowercase `\mathscr`
+  letters typeset here; rsfs10 has none.
+- **Text font switches set one face each.** `\textit`, `\textrm`, `\textup`, `\textnormal`,
+  `\texttt` and `\textsf` work in `Tex` and `TexText`.
+  - Nested switches do not compose: `\textbf{\textit{x}}` is italic, not bold italic.
+  - `\textsf` is IBM Plex Sans, not cmss.
+- **`\hspace` reads `em` and `ex` from cmr10.** The Reference's text font is T1's ecrm, whose
+  quad (9.99755 pt) is 0.025% narrower. Fixed lengths (`1cm`, `6pt`) are exact.
+- `\not`, `\lvert`/`\rvert`, `\boxed`, `\cfrac` and `\genfrac` match TeX's boxes.
+- `gather*`, `gathered` and `equation*` set display-style rows, centred.
+- `\TeX` and `\LaTeX` are the kernel's constructions in cmr10 and cmr7, and `\mathchoice`
+  sets the branch for the style in force. The logos follow Computer Modern's metrics; the
+  Reference's T1 ecrm differs from them by up to 6e-4 em.
+- **Refused by name until they land**, with an error naming franken_manim
+  fm-tex-constructs-t2-1wfq:
+  - `\mathfrak`: no bundled face carries Fraktur;
+  - `\tag` and `\sideset`;
+  - `\cancel`, which the Reference's template does not load either;
+  - the numbered `equation` and `gather`, and `multline`: their numbers and flush lines sit
+    against `\linewidth`, which a formula's box does not have.
+
 ## Source selection and matching through the Python portal
 
 String selectors now use the native source spans throughout the portal.

@@ -5,7 +5,7 @@ real 3b1b formula corpus typesets natively. The denominator is **frozen**
 (G0-4: `9269` distinct strings, `17711` occurrences, corpus hash
 `a8325e49e0ce78fcc735533952740e9adeaaa5cb10f9c13d73aaa3ba4bf883fc`, rules_version 1); the numbers may only rise.
 
-**Computed against franken_markdown `c81208f19a81`.**
+**Computed against franken_markdown `e6da6ee1a73e`.**
 
 | Plane | Occurrence-weighted | Unique-string |
 |---|---|---|
@@ -79,6 +79,7 @@ real 3b1b formula corpus typesets natively. The denominator is **frozen**
 | `439a910ce7c1` | 99.994 | 99.989 | 99.994 | 99.989 |
 | `9b457a3895d7` | 99.994 | 99.989 | 99.994 | 99.989 |
 | `c81208f19a81` | 99.994 | 99.989 | 99.994 | 99.989 |
+| `e6da6ee1a73e` | 99.994 | 99.989 | 99.994 | 99.989 |
 
 ## How this is enforced
 
@@ -107,3 +108,15 @@ The corpus strings are 3b1b-authored course material and stay in the
 private fixture; this dashboard publishes **numbers, construct names,
 and hashes only**. Anyone with the pinned trees can reproduce the
 denominator byte-for-byte via `scripts/harvest_tex_corpus.py`.
+
+## A second corpus: ManimCommunity/manim
+
+The corpus above is 3b1b's own videos. This one is the TeX of ManimCommunity/manim's library, example scenes and documentation examples: `113` distinct strings, `142` occurrences (MIT; commit and counts in `crates/fmn-conformance/fixtures/second_corpus/PROVENANCE.json`). It is public, every checkout measures it, and its numbers may only rise.
+
+| Plane | Occurrence-weighted | Unique-string |
+|---|---|---|
+| **Parse** | 98.592 % | 99.115 % |
+| **Parse + typeset returned Ok** | 97.887 % | 98.230 % |
+
+Blocked, by occurrences: `\vv` (2), `char:U+4F60` (1).
+

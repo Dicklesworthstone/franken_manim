@@ -170,7 +170,9 @@ def call_name(node: ast.Call) -> str | None:
 
 
 class Harvest:
-    def __init__(self) -> None:
+    def __init__(self, math_calls: set[str] = MATH_CALLS, text_calls: set[str] = TEXT_CALLS) -> None:
+        self.math_calls = math_calls
+        self.all_calls = math_calls | text_calls
         # (mode, text) -> count
         self.corpus: Counter[tuple[str, str]] = Counter()
         # (mode, text) -> sorted set of "tree:relpath:line"
@@ -195,13 +197,46 @@ class Harvest:
                 self.files_failed.append(rel)
                 continue
             self.files_scanned += 1
+            self._take_module(mod, rel)
+
+    def _take_module(self, mod: ast.Module, rel: str) -> None:
+        for node in ast.walk(mod):
+            if isinstance(node, ast.Call):
+                name = call_name(node)
+                if name in self.all_calls:
+                    self._take_call(node, name, rel)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                self._take_tex_defaults(node, rel)
+
+    def scan_examples(self, root: Path, tree_label: str) -> None:
+        """The example scenes documentation carries as reStructuredText code
+        blocks: ``.. manim::`` and ``.. code-block:: python`` bodies in
+        ``*.rst`` files and in the docstrings of ``*.py`` files."""
+        texts: list[tuple[str, str]] = []
+        for path in sorted(root.rglob("*.rst")):
+            rel = f"{tree_label}/{path.relative_to(root)}"
+            texts.append((rel, path.read_text(encoding="utf-8", errors="replace")))
+        for path in sorted(root.rglob("*.py")):
+            rel = f"{tree_label}/{path.relative_to(root)}"
+            try:
+                mod = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+            except SyntaxError:
+                continue
             for node in ast.walk(mod):
-                if isinstance(node, ast.Call):
-                    name = call_name(node)
-                    if name in ALL_CALLS:
-                        self._take_call(node, name, rel)
-                elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    self._take_tex_defaults(node, rel)
+                if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                     ast.AsyncFunctionDef)):
+                    doc = ast.get_docstring(node)
+                    if doc:
+                        texts.append((rel, doc))
+        for rel, text in texts:
+            for index, block in enumerate(rst_code_blocks(text)):
+                try:
+                    mod = ast.parse(block)
+                except SyntaxError:
+                    self.files_failed.append(f"{rel}#block{index}")
+                    continue
+                self.files_scanned += 1
+                self._take_module(mod, f"{rel}#block{index}")
 
     def _take_tex_defaults(self, fn: ast.FunctionDef, rel: str) -> None:
         """Preset strings: str defaults of parameters named *tex*."""
@@ -226,7 +261,7 @@ class Harvest:
 
     def _take_call(self, node: ast.Call, name: str, rel: str) -> None:
         self.call_sites[name] += 1
-        mode = "math" if name in MATH_CALLS else "text"
+        mode = "math" if name in self.math_calls else "text"
         for arg in node.args:
             if isinstance(arg, ast.Starred):
                 self.dynamic_args[name] += 1
@@ -242,6 +277,105 @@ class Harvest:
                         sub.value, str
                     ):
                         self.fragments[(mode, sub.value)] += 1
+
+
+def rst_code_blocks(text: str) -> list[str]:
+    """The bodies of ``.. manim::`` and ``.. code-block:: python``
+    directives: the lines indented past the directive, its ``:option:``
+    lines dropped, dedented."""
+    lines = text.splitlines()
+    blocks: list[str] = []
+    i = 0
+    directive = re.compile(r"^(\s*)\.\. (manim|code-block|code):: ?(\S*)")
+    while i < len(lines):
+        m = directive.match(lines[i])
+        if not m or (m.group(2) != "manim" and m.group(3) not in ("python", "py")):
+            i += 1
+            continue
+        indent = len(m.group(1))
+        body: list[str] = []
+        i += 1
+        while i < len(lines) and (not lines[i].strip() or
+                                  len(lines[i]) - len(lines[i].lstrip()) > indent):
+            if not lines[i].strip().startswith(":") or body:
+                body.append(lines[i])
+            i += 1
+        code = [line for line in body]
+        while code and not code[-1].strip():
+            code.pop()
+        width = min((len(l) - len(l.lstrip()) for l in code if l.strip()), default=0)
+        blocks.append("\n".join(l[width:] for l in code))
+    return blocks
+
+
+# ---------------------------------------------------------------------------
+# The second ranking corpus (fm-tex-constructs-t2-1wfq): the TeX strings of a
+# broad, permissively licensed body of manim scenes, ranked beside G0-4's
+# 3b1b corpus. ManimCommunity/manim (MIT): its library, its example scenes and
+# its documentation's examples (rst files and docstrings), not its tests,
+# whose deliberately broken TeX exercises error paths. In ManimCE, ``Tex`` is
+# text mode (manimgl's ``TexText``) and ``MathTex`` is math. MIT permits
+# publishing the strings, so the corpus is a committed fixture with the
+# licence notices beside it, and the ratchet always measures it.
+# ---------------------------------------------------------------------------
+
+CE_MATH_CALLS = {"MathTex", "SingleStringMathTex"}
+CE_TEXT_CALLS = {"Tex", "Title", "BulletedList"}
+SECOND_DIR = REPO / "crates" / "fmn-conformance" / "fixtures" / "second_corpus"
+
+
+def second_corpus(root: Path) -> int:
+    commit = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True, timeout=30,
+    ).stdout.strip()
+    h = Harvest(CE_MATH_CALLS, CE_TEXT_CALLS)
+    h.scan_tree(root / "manim", "manimce/manim")
+    if (root / "example_scenes").is_dir():
+        h.scan_tree(root / "example_scenes", "manimce/example_scenes")
+    h.scan_examples(root / "docs", "manimce/docs")
+    h.scan_examples(root / "manim", "manimce/manim")
+    SECOND_DIR.mkdir(parents=True, exist_ok=True)
+    records = [
+        {
+            "mode": mode,
+            "count": count,
+            "text": text,
+            "sources": sorted(h.sources[(mode, text)]),
+        }
+        for (mode, text), count in sorted(h.corpus.items())
+    ]
+    (SECOND_DIR / "manimce.v1.jsonl").write_text(
+        "".join(json.dumps(r, ensure_ascii=False, sort_keys=True) + "\n" for r in records),
+        encoding="utf-8",
+    )
+    licence = "".join(
+        f"==> {name} <==\n" + (root / name).read_text(encoding="utf-8") + "\n"
+        for name in ("LICENSE", "LICENSE.community")
+    )
+    (SECOND_DIR / "LICENSE.manimce").write_text(licence, encoding="utf-8")
+    provenance = {
+        "source": "https://github.com/ManimCommunity/manim",
+        "commit": commit,
+        "licence": "MIT (LICENSE.manimce: both notices)",
+        "rules_version": RULES_VERSION,
+        "math_calls": sorted(CE_MATH_CALLS),
+        "text_calls": sorted(CE_TEXT_CALLS),
+        "scanned": ["manim/ (code and docstring examples)", "example_scenes/",
+                    "docs/ (rst examples)"],
+        "excluded": ["tests/"],
+        "files_and_blocks_scanned": h.files_scanned,
+        "blocks_failed_to_parse": len(h.files_failed),
+        "call_sites": {k: h.call_sites[k] for k in sorted(h.call_sites)},
+        "dynamic_args_excluded": sum(h.dynamic_args.values()),
+        "distinct_strings": len(h.corpus),
+        "total_occurrences": sum(h.corpus.values()),
+    }
+    (SECOND_DIR / "PROVENANCE.json").write_text(
+        json.dumps(provenance, indent=2) + "\n", encoding="utf-8"
+    )
+    print(json.dumps(provenance, indent=2))
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -380,6 +514,8 @@ def kind_of(construct: str) -> str:
 
 
 def main() -> int:
+    if sys.argv[1:2] == ["--second"] and len(sys.argv) == 3:
+        return second_corpus(Path(sys.argv[2]))
     for root, label in ((VIDEOS_REF, "videos_ref"), (MANIM_REF, "manim_ref")):
         if not root.is_dir():
             print(f"error: {root} missing — clone per SUITE.lock [reference]",
