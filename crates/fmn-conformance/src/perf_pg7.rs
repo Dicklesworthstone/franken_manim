@@ -1769,12 +1769,15 @@ mod tests {
         // Both result goldens and the complete text definition stay fixed.
         // The e6da6ee1 pin (fm-tex-constructs-t2-1wfq: \TeX, \LaTeX and
         // \mathchoice) moves the formula definitions' engine identity again,
-        // and so does 2d820c52 (Euler Fraktur's three faces join the roster).
+        // and so does 2d820c52 (Euler Fraktur's three faces join the roster),
+        // and 37632d2d (fm-0byq: fractions as Ords, amssymb on the AMS faces;
+        // the identity names the provider revision, so a test-only provider
+        // commit moves it too).
         assert_eq!(
             [cold.digest(), cached.digest(), text.digest()].map(|digest| digest.to_string()),
             [
-                "9bc61c1e35f8018850fd27a28ce36ef22c2d29633921dc997a8c37927f10c7a8",
-                "b0515fa29340c30261567da72673d2c364816dccbf6313ee5daa2710fdcc350d",
+                "0f4455bb4f650877ec4e36cdb5f9bee7f615bdcbd2c7f6e78c84f3e368a34a52",
+                "bddad0eef1f9f47a27e5c3910407058886c151f26ab147ee630739fa020c4c76",
                 "0fa22e64fe9e1901eea58a596899ec843bc0d6db46f1cd91607925a50fea3e6f",
             ]
         );

@@ -105,22 +105,18 @@ fmd-math's first vocabulary was ranked by 3b1b's own videos. These constructs fr
 Reference's default preamble (amsmath, amssymb, mathrsfs) are set natively too. They differ
 from the Reference in the ways below.
 
-- **Most of amssymb's symbols still use Noto Sans Math's glyphs.** `\leqslant`, `\therefore`,
-  `\square`, `\nleq`, `\twoheadrightarrow` and 161 more take amssymb's spacing class, but not
-  the AMS msam/msbm shapes the Reference draws.
-  - fmd-math now bundles those faces (fm-0byq). `\hslash` and `\nshortmid` already take
-    their authored AMS-B glyphs; moving the rest onto the AMS faces is fm-0byq's open work.
+- **amssymb's symbols are the AMS msam/msbm glyphs the Reference draws.** Every amssymb name
+  fmd-math knows (`\leqslant`, `\therefore`, `\square`, `\nleq`, `\lneq`, `\Lsh`,
+  `\curvearrowleft` …) takes the family and code amssymb.sty declares, its spacing class and
+  the TFM box (fm-0byq).
   - The Reference's template loads wasysym after amssymb. There `\lhd`, `\rhd`, `\unlhd`,
     `\unrhd`, `\mho`, `\sqsubset`, `\sqsupset`, `\Box` and `\leadsto` are wasy10's
     characters, in the same classes (TeX's `\meaning` under the template's preamble).
-    fmd-math has no wasy10 face, the gap behind C-41's `\iint`, so it sets them from Noto
-    Sans Math. Under the template's full preamble, every other construct here keeps the box
-    TeX gives it under amsmath and amssymb alone.
-  - `\thickapprox` and `\thicksim` are cmsy's thinner ≈ and ∼.
-  - 32 names whose glyph no bundled face carries remain an untiered error, among them
-    `\lneq`, `\subseteqq`, `\smallfrown` and `\lessapprox`. So do `\Lsh`, `\Rsh`,
-    `\curvearrowleft`, `\curvearrowright`, `\leftrightarrows`, `\rightleftarrows`,
-    `\lozenge`, `\digamma` and `\eth`.
+    fmd-math has no wasy10 face, the gap behind C-41's `\iint`, so it sets amssymb's msam and
+    msbm forms of them. Under the template's full preamble, every other construct here keeps
+    the box TeX gives it under amsmath and amssymb alone.
+  - `\nleqslant`, `\ngeqslant`, `\nleqq`, `\ngeqq`, `\nsubseteqq` and `\nsupseteqq` have no
+    single Unicode character to carry their meaning, and remain an untiered error.
 - **`\mathscr` is Noto Sans Math's script.** The Reference uses mathrsfs's rsfs10. It stays
   distinct from `\mathcal`, which is cmsy's calligraphic in both. Lowercase `\mathscr`
   letters typeset here; rsfs10 has none.

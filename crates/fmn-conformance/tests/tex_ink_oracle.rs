@@ -78,14 +78,18 @@ const PUBLIC_FLOORS: InkFloors = InkFloors {
 /// 505 with AMS optical cuts and the default pack's native short minus
 /// (9b457a38, fm-0byq); all 643 captures remain, including the original
 /// 26-row non-CM cohort, whose 4 matches still miss its 65% acceptance bar.
+/// 515 since LaTeX's fractions are Ord atoms and amssymb sets its authored
+/// AMS glyphs (683e4ccc, fm-0byq): \frac no longer takes thin spaces against
+/// an Ord. The non-CM cohort rises to 9 of 26, and the p95 Hausdorff falls
+/// 8.0 -> 7.071 px and the p95 sliced W1 4.4397 -> 4.0399 px.
 const CORPUS_FLOORS: InkFloors = InkFloors {
-    matches: 505,
+    matches: 515,
     median_hausdorff_px: 1.0,
-    p95_hausdorff_px: 8.001,
-    median_sliced_w1_px: 0.0702,
-    p95_sliced_w1_px: 4.441,
-    median_iou: 0.9889,
-    p05_iou: 0.1645,
+    p95_hausdorff_px: 7.072,
+    median_sliced_w1_px: 0.0694,
+    p95_sliced_w1_px: 4.041,
+    median_iou: 0.9892,
+    p05_iou: 0.1698,
 };
 
 /// cmr10's stem (`stem# = 25/36 pt`) in scene units at font size 48: an em
