@@ -602,7 +602,8 @@ pub fn render_dashboard(
         "\n\"Typeset returned Ok\" means fmd-math produced a layout without an \
          error. It does not show that the layout is right. {} The oracle row \
          counts only those verified strings against the whole corpus; \
-         unsampled strings count as unverified.",
+         text-mode strings, which this math oracle does not measure, and math \
+         fragments TeX cannot typeset alone count as unverified.",
         oracle_dashboard_line(oracle)
     );
     let _ = writeln!(out, "\n## Noto math or Plex Sans face usage\n");
@@ -697,6 +698,12 @@ pub fn render_dashboard(
 /// sample, captured by `scripts/capture_tex_corpus_boxes.py`. Rows name
 /// their strings by digest only (§15.3).
 pub const ORACLE_FIXTURE: &str = include_str!("../fixtures/tex_corpus_boxes.v1.tsv");
+
+/// The census: real TeX's boxes for every math-mode corpus string TeX can
+/// typeset alone, from the same capture run (fm-box-oracle-full-corpus-r11-lykz).
+/// The sample above is a subset of it, row for row. The dashboard's oracle
+/// plane is computed over the census.
+pub const CENSUS_FIXTURE: &str = include_str!("../fixtures/tex_corpus_boxes_census.v1.tsv");
 
 /// One fixture row: real TeX's box for one sampled corpus string, in ems.
 #[derive(Clone, Debug, PartialEq)]
@@ -833,10 +840,10 @@ pub fn summarize_oracle(rows: &[OracleRow], errors: &[f64]) -> OracleSummary {
 #[must_use]
 pub fn oracle_dashboard_line(s: &OracleSummary) -> String {
     format!(
-        "The corpus TeX box oracle (fm-tex-layout-oracle-bkbc) lays out {} \
-         strings, sampled by construct class and occurrence ({} occurrences), \
-         and compares each box with real TeX's: {} are within 5% and {} within \
-         10%, covering {} occurrences within 5%.",
+        "The corpus TeX box oracle (fm-tex-layout-oracle-bkbc) lays out every \
+         math-mode corpus string TeX can typeset alone ({} strings, {} \
+         occurrences) and compares each box with real TeX's: {} are within 5% \
+         and {} within 10%, covering {} occurrences within 5%.",
         s.rows, s.occurrences, s.within_5, s.within_10, s.occurrences_within_5
     )
 }

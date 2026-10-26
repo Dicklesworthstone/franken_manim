@@ -16,7 +16,7 @@
 //! dashboard in one stroke).
 
 use fmn_conformance::ratchet::{
-    Baseline, CorpusCounts, FallbackSummary, ORACLE_FIXTURE, OracleSummary, Pending, SECOND_CORPUS,
+    Baseline, CENSUS_FIXTURE, CorpusCounts, FallbackSummary, OracleSummary, Pending, SECOND_CORPUS,
     SECOND_CORPUS_BASELINE, corpus_digest, fallback_chars, fallback_dashboard_line, measure_corpus,
     oracle_error, parse_corpus_entry, parse_oracle_fixture, parse_trend_tsv, ratchet_violations,
     render_dashboard, run_layout_oracle, summarize_oracle, with_second_corpus_section,
@@ -342,15 +342,15 @@ fn recompute_and_enforce_the_ratchet() -> Result<(), String> {
     );
     let advanced = current != committed;
     if std::env::var("RATCHET_UPDATE").is_ok() {
-        // The dashboard publishes the TeX box oracle's counts beside the
-        // coverage (tests/tex_corpus_boxes.rs checks they stay current).
+        // The dashboard publishes the TeX box oracle's census counts beside
+        // the coverage (tests/tex_corpus_boxes.rs checks they stay current).
         let texts: HashMap<String, String> = data
             .lines()
             .filter_map(parse_corpus_entry)
             .filter(|entry| entry.mode == "math")
             .map(|entry| (corpus_digest("math", &entry.text), entry.text))
             .collect();
-        let rows = parse_oracle_fixture(ORACLE_FIXTURE)?;
+        let rows = parse_oracle_fixture(CENSUS_FIXTURE)?;
         let laid = run_layout_oracle(&rows, &texts)?;
         let errors: Vec<f64> = rows
             .iter()

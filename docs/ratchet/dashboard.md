@@ -11,10 +11,10 @@ real 3b1b formula corpus typesets natively. The denominator is **frozen**
 |---|---|---|
 | **Parse** | 99.994 % | 99.989 % |
 | **Parse + typeset returned Ok** | 99.994 % | 99.989 % |
-| **Layout within 5% of real TeX (oracle)** | 38.343 % | 6.031 % |
+| **Layout within 5% of real TeX (oracle)** | 62.712 % | 44.579 % |
 | **Noto math or Plex Sans face usage** | 0.136 % | 0.097 % |
 
-"Typeset returned Ok" means fmd-math produced a layout without an error. It does not show that the layout is right. The corpus TeX box oracle (fm-tex-layout-oracle-bkbc) lays out 585 strings, sampled by construct class and occurrence (6847 occurrences), and compares each box with real TeX's: 559 are within 5% and 574 within 10%, covering 6791 occurrences within 5%. The oracle row counts only those verified strings against the whole corpus; unsampled strings count as unverified.
+"Typeset returned Ok" means fmd-math produced a layout without an error. It does not show that the layout is right. The corpus TeX box oracle (fm-tex-layout-oracle-bkbc) lays out every math-mode corpus string TeX can typeset alone (4175 strings, 11183 occurrences) and compares each box with real TeX's: 4132 are within 5% and 4157 within 10%, covering 11107 occurrences within 5%. The oracle row counts only those verified strings against the whole corpus; text-mode strings, which this math oracle does not measure, and math fragments TeX cannot typeset alone count as unverified.
 
 ## Noto math or Plex Sans face usage
 

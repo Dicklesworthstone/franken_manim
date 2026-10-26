@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Capture real TeX's box dimensions for a stratified corpus sample
-(fm-tex-layout-oracle-bkbc).
+"""Capture real TeX's box dimensions for every math-mode corpus string (the census,
+fm-box-oracle-full-corpus-r11-lykz) and its stratified sample (fm-tex-layout-oracle-bkbc).
 
 TeX itself reports each formula's box: width, height and depth, from \\wd,
 \\ht and \\dp of a saved box, in display style. The preamble is the pinned
@@ -15,19 +15,20 @@ conversion or Reference SVG cache is involved, so the Reference's cache race
 (Appendix C-22, fm-0v8k) cannot reach these boxes.
 
 The corpus is a private fixture (plan §15.3): its strings never ship. The
-committed fixture `crates/fmn-conformance/fixtures/tex_corpus_boxes.v1.tsv`
-carries only each string's public digest sha256(mode + NUL + string), the
+committed fixtures `crates/fmn-conformance/fixtures/tex_corpus_boxes_census.v1.tsv`
+(every math string) and `tex_corpus_boxes.v1.tsv` (the sample) carry only each string's public digest sha256(mode + NUL + string), the
 box in ems, its occurrence count and its construct classes. The oracle test
 (`crates/fmn-conformance/tests/tex_corpus_boxes.rs`) finds the strings again
 through the private corpus where it is present.
 
-Sample: corpus math strings, up to PER_CLASS per construct class (by
-occurrence, digest tie-break), then the most frequent remaining strings until
-TARGET candidates. Strings TeX cannot typeset alone (fragments of
+Census: every math-mode corpus string. Sample, a subset of the same
+measurements: up to PER_CLASS per construct class (by occurrence, digest
+tie-break), then the most frequent remaining strings until TARGET candidates.
+The sample stays the ink capture's input and the quick-run set. Strings TeX cannot typeset alone (fragments of
 multi-argument Tex calls) are left out and counted.
 
 Usage:
-  capture_tex_corpus_boxes.py --corpus corpus/tex_corpus.jsonl [--jobs 8]
+  capture_tex_corpus_boxes.py --corpus corpus/tex_corpus.jsonl [--jobs 8] [--sample-only]
   (needs `latex` from the TeX installation the Reference uses)
 """
 from __future__ import annotations
@@ -43,16 +44,21 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "crates" / "fmn-conformance" / "fixtures" / "tex_corpus_boxes.v1.tsv"
+CENSUS = ROOT / "crates" / "fmn-conformance" / "fixtures" / "tex_corpus_boxes_census.v1.tsv"
 TEMPLATES = ROOT / "scripts" / "manim_ref" / "manimlib" / "tex_templates.yml"
 PER_CLASS = 4
 TARGET = 640
 BOX = re.compile(r"FMNBOX ([0-9.]+)pt ([0-9.]+)pt ([0-9.]+)pt")
 
 
-def sample(corpus: pathlib.Path) -> list[dict]:
+def ranked_math(corpus: pathlib.Path) -> list[dict]:
+    """Every math-mode corpus string, most frequent first (digest tie-break)."""
     records = [json.loads(line) for line in corpus.open(encoding="utf-8")]
     math = [r for r in records if r["mode"] == "math" and r["text"].strip()]
-    ranked = sorted(math, key=lambda r: (-r["count"], r["sha256"]))
+    return sorted(math, key=lambda r: (-r["count"], r["sha256"]))
+
+
+def sample(ranked: list[dict]) -> list[dict]:
     classes: dict[str, list[dict]] = {}
     for r in ranked:
         for c in r["constructs"] or ["(plain)"]:
@@ -139,13 +145,49 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--corpus", type=pathlib.Path, required=True)
     parser.add_argument("--jobs", type=int, default=8)
+    parser.add_argument(
+        "--sample-only",
+        action="store_true",
+        help="measure and write only the stratified sample (a quick run), not the census",
+    )
     args = parser.parse_args()
-    items = sample(args.corpus)
+    ranked = ranked_math(args.corpus)
+    chosen = sample(ranked)
+    # The census measures every math string; the sample is a subset of the same measurements.
+    items = chosen if args.sample_only else ranked
     preamble = reference_preamble()
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
         boxes = list(pool.map(lambda item: measure_one(item["text"], preamble), items))
+    measured = {item["sha256"]: box for item, box in zip(items, boxes)}
+    write_fixture(
+        FIXTURE,
+        "# Real TeX boxes for a stratified corpus sample (fm-tex-layout-oracle-bkbc).",
+        [
+            f"# Sample: up to {PER_CLASS} strings per construct class by",
+            f"# occurrence, then the most frequent remaining strings, {len(chosen)} candidates;",
+        ],
+        chosen,
+        measured,
+    )
+    if not args.sample_only:
+        write_fixture(
+            CENSUS,
+            "# Real TeX boxes for every math-mode corpus string (fm-box-oracle-full-corpus-r11-lykz).",
+            [
+                "# Census: every math-mode string of the frozen G0-4 corpus, most frequent first,",
+                f"# {len(ranked)} candidates; tex_corpus_boxes.v1.tsv is its stratified sample;",
+            ],
+            ranked,
+            measured,
+        )
+    return 0
+
+
+def write_fixture(path: pathlib.Path, title: str, scope: list[str], items: list[dict],
+                  measured: dict[str, tuple[float, float, float] | None]) -> None:
     rows, failed = [], 0
-    for item, box in zip(items, boxes):
+    for item in items:
+        box = measured[item["sha256"]]
         if box is None or box[0] <= 0.0 or box[1] + box[2] <= 0.0:
             failed += 1
             continue
@@ -154,7 +196,7 @@ def main() -> int:
         width, height, depth = box
         rows.append(f"{item['sha256']}\t{width:.5f}\t{height:.5f}\t{depth:.5f}\t{item['count']}\t{classes}")
     header = [
-        "# Real TeX boxes for a stratified corpus sample (fm-tex-layout-oracle-bkbc).",
+        title,
         "# Strings are private fixtures (plan §15.3): each row names its corpus string by",
         "# sha256(mode + NUL + string). Width, height and depth are TeX's \\wd, \\ht and \\dp",
         "# of the stripped string boxed in display style, in ems at 10 pt: braced like an align*",
@@ -162,15 +204,13 @@ def main() -> int:
         "# with amsmath's \\if@display set as align* sets it.",
         "# Preamble: the pinned Reference's default template (3b1b/manim 6199a00d); TeX Live",
         "# 2025 on the dev host.",
-        f"# Sample: up to {PER_CLASS} strings per construct class by",
-        f"# occurrence, then the most frequent remaining strings, {len(items)} candidates;",
+        *scope,
         f"# {failed} TeX could not typeset alone (fragments of multi-argument Tex calls) are",
         "# omitted. Regenerate only with scripts/capture_tex_corpus_boxes.py; never edit by hand.",
         "# sha256\twidth\theight\tdepth\tcount\tclasses (|-separated construct names)",
     ]
-    FIXTURE.write_text("\n".join(header + rows) + "\n", encoding="utf-8")
-    print(f"{len(rows)} rows, {failed} omitted -> {FIXTURE.relative_to(ROOT)}")
-    return 0
+    path.write_text("\n".join(header + rows) + "\n", encoding="utf-8")
+    print(f"{len(rows)} rows, {failed} omitted -> {path.relative_to(ROOT)}")
 
 
 if __name__ == "__main__":
