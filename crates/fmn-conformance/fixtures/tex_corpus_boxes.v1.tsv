@@ -2,7 +2,8 @@
 # Strings are private fixtures (plan §15.3): each row names its corpus string by
 # sha256(mode + NUL + string). Width, height and depth are TeX's \wd, \ht and \dp
 # of the stripped string boxed in display style, in ems at 10 pt: braced like an align*
-# cell, or for multi-line strings as `aligned`[t] without its invisible struts and glue.
+# cell, or for multi-line strings as `aligned`[t] without its invisible struts and glue,
+# with amsmath's \if@display set as align* sets it.
 # Preamble: the pinned Reference's default template (3b1b/manim 6199a00d); TeX Live
 # 2025 on the dev host.
 # Sample: up to 4 strings per construct class by
@@ -503,7 +504,7 @@ f3b322c76274f985aeb1d1a73dbe32b7883f2361b8e7a3168dccecb3e8e2c5a9	4.28544	0.68872
 5cb50c0d03f14ed4d63282d4c099ee915093571e912d1f8c16a30c1d760d96c4	1.92327	0.75000	0.25000	1	\wp
 5cc85e4947c397a040a55da241390ebae2e2c6eb5b7f3f329c821c496adb91b1	5.74618	0.89900	1.75000	1	\\|\lambda|\tilde|script:sub|script:sup
 5d65ec7c16e5e39b06ac54bc04f5852bec5f8a8d0cf75adddf5967103a6e3108	5.83111	0.53910	0.15000	1	\ldots|script:sub
-5fb3fd477627f1d05c5bdb49e9205360b0f5e18dc774230fee63019750e3cc8d	5.75310	0.69444	0.19444	1	\equiv|\mod
+5fb3fd477627f1d05c5bdb49e9205360b0f5e18dc774230fee63019750e3cc8d	6.08642	0.69444	0.19444	1	\equiv|\mod
 6028b4d10c20c37bf3003742c02e69a811d6f65e87ee60f61578cfcb5d4a05b6	12.81985	1.75001	1.25001	1	\\|\frac|\text|alignment-tab|env:cases
 60c3ada85b994c8b8a1dbdff264a66520a89406099e6e472549f1a54c05487af	5.26734	0.68611	0.19444	1	\cdot|\mathbf|\nabla|\pi|\rho
 619c8b052b9742d9a76027b41c5fa6ee0a9f1e5ca534ded0daefb16a95b78960	12.16435	1.05559	0.35001	1	\big|\cdot|\overrightarrow|\text|\textbf|\vec
@@ -526,7 +527,7 @@ f3b322c76274f985aeb1d1a73dbe32b7883f2361b8e7a3168dccecb3e8e2c5a9	4.28544	0.68872
 7c589b9f42035891de3b2225a40b5c24986acdd2c6d5f06ae61cd3a148379998	1.00000	0.36688	0.00000	1	\Leftarrow
 7ce34b87e420c1176dd5e2b3a60365ce404a174759df4e5baf1c991577a2bdd1	5.27927	1.05559	0.00000	1	\overrightarrow|\text
 7ce9c53496e1bb75984e8e5a2b0618ea4ed0388282067e226335fb23c40f658b	6.74000	1.35984	0.93595	1	\Delta|\Lambda|\det|\frac|script:sub
-7fa762e94f668d3553d5daa611fbbf4938a80fbe39a871a7dfb8782695639d9f	5.79467	0.69444	0.08333	1	\mod|\times
+7fa762e94f668d3553d5daa611fbbf4938a80fbe39a871a7dfb8782695639d9f	6.12799	0.69444	0.08333	1	\mod|\times
 81ac0b3f1d19b31b060a74fe78a0fb5fdea57ee41dbc34f7a5c79dacf4bdf969	7.35325	0.86400	0.25000	1	\dddot|\dot|script:sup
 820e5c44a32028ec16783c852c69ee6597118412ddd1c7ede7e05556ad58f0a2	1.60023	0.69444	0.00000	1	\hat|\imath|\to
 82a0386b34e6ccbff4e3f9068a59e96c0d2657ffcb6a006e6e72c5c726d52314	3.19417	0.75000	0.25000	1	\ddddot
@@ -538,7 +539,7 @@ f3b322c76274f985aeb1d1a73dbe32b7883f2361b8e7a3168dccecb3e8e2c5a9	4.28544	0.68872
 8dd791858eaf723ff932e86982cc937dde729d804242b14bb4d2d58d22281c5f	6.98490	0.68872	0.19440	1	\leftrightarrow|\text
 8eabef738383f7cb30fe7e0230e8f07f73ddf569657094a0aba211735a8c02d7	11.44744	1.49051	0.76928	1	\frac|\ldots|script:sub|script:sup
 8f616b9d4c2c9e55e1c8f21b63c69eb53bda680aed9862681645a9893e4cc9b3	19.99615	1.32095	0.68595	1	\big|\frac|\in|\ldots|\mathbb|\mathbf|\quad|\text|\{|\}|script:sub
-9090381a63e2b83e420434aca8b13b57801cda204f739ad458f428df92bb637c	10.51657	1.82834	1.26778	1	\equiv|\mod|\sum|script:sub|script:sup
+9090381a63e2b83e420434aca8b13b57801cda204f739ad458f428df92bb637c	10.84989	1.82834	1.26778	1	\equiv|\mod|\sum|script:sub|script:sup
 9411d7ea77247f6f6889aa2a04ba7e2dbb8dec82de3680b46b2e7b359644aad3	1.27758	0.97400	0.28611	1	\downarrow|\textbf|\vec|script:sub
 94c77fd4f791d1aacece1effb7628871548701dbe010c10b32220c6f8ad04545	1.66667	0.75000	0.25000	1	\!|\nearrow|\rangle
 991e0529a8a920220eec86aad4f7992b0a80bfbe0491bd23b1eb3e3a9970a820	11.33159	0.86400	0.25000	1	\le|\max|script:sub|script:sup
@@ -565,7 +566,7 @@ bfb627c36dee09d3b1984859cc31f4779a3083b239eeb3919107f320f23e8c16	13.99977	2.1091
 c299f375d1304a24965706e62251089b9161cd01160f191402003aecffeeeaf1	0.77778	0.36688	0.00000	1	\displaystyle
 c2fe96adf0d3fc186272f731ddf798ad754060039a28dc7ed0b38bf5c6003cbf	12.89581	1.08334	1.32834	1	\cdot|\displaystyle|\hat|\iiint|\mathbf|\mathrm|\nabla|\oiint|script:sub
 c36322f31d63c885450bc0a1714cdf5689b6678fe323194d6623be5e7e3eff2b	11.35398	1.16410	0.15000	1	\cdots|\partial|\xrightarrow|script:sub
-c3677a9825b13a199bb16059dbca983828e7a845a7b3fac30e8e747fec0e845c	5.75310	0.69444	0.19444	1	\equiv|\mod
+c3677a9825b13a199bb16059dbca983828e7a845a7b3fac30e8e747fec0e845c	6.08642	0.69444	0.19444	1	\equiv|\mod
 c39b241fcaef23c1dfe3a3c6e42f5148d962d25f2af5b97cb54e18dbb0a47e7f	7.21970	0.88332	0.08333	1	\overline
 c6358cf04fc10428d7248274eabcb95a76d8e5d2b52de4b9b3f85f85c1cb66e3	1.41667	0.69444	0.00000	1	\;
 c64b6eac0480f8c677d0c31aa4a550570c28fc6d6c3bcf29101723191c318487	3.81396	1.15001	0.68595	1	\frac|\lceil|\left|\pi|\rceil|\right|\sqrt

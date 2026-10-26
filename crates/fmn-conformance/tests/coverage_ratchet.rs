@@ -16,10 +16,10 @@
 //! dashboard in one stroke).
 
 use fmn_conformance::ratchet::{
-    Baseline, FallbackSummary, ORACLE_FIXTURE, OracleSummary, Pending, corpus_digest,
-    fallback_chars, fallback_dashboard_line, oracle_error, parse_corpus_entry,
-    parse_oracle_fixture, parse_trend_tsv, ratchet_violations, render_dashboard, run_layout_oracle,
-    summarize_oracle,
+    Baseline, CorpusCounts, FallbackSummary, ORACLE_FIXTURE, OracleSummary, Pending, SECOND_CORPUS,
+    SECOND_CORPUS_BASELINE, corpus_digest, fallback_chars, fallback_dashboard_line, measure_corpus,
+    oracle_error, parse_corpus_entry, parse_oracle_fixture, parse_trend_tsv, ratchet_violations,
+    render_dashboard, run_layout_oracle, summarize_oracle, with_second_corpus_section,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
@@ -455,8 +455,71 @@ fn bless(
         &to_pending(layout_pending),
         &trend,
     );
+    let engine = fmd_math::Engine::bundled().map_err(|error| format!("bundled faces: {error}"))?;
+    let second = measure_corpus(SECOND_CORPUS, &engine)?;
+    let dashboard = with_second_corpus_section(&dashboard, &second.dashboard_section());
+    let _guard = DASHBOARD_WRITE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     std::fs::write(dir.join("dashboard.md"), dashboard)
         .map_err(|error| format!("dashboard: {error}"))?;
+    Ok(())
+}
+
+/// Both blesses write `dashboard.md`; they take turns, and each rewrites the
+/// whole page or only its own section, so the result does not depend on
+/// their order.
+static DASHBOARD_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// fm-tex-constructs-t2-1wfq: the second corpus (ManimCommunity/manim, MIT,
+/// committed) is measured on every checkout. Its counts may only rise, an
+/// advance is blessed with `RATCHET_UPDATE=1`, and the dashboard publishes
+/// them beside the 3b1b corpus's.
+#[test]
+fn the_second_corpus_never_regresses_and_is_published() -> Result<(), String> {
+    let engine = fmd_math::Engine::bundled().map_err(|error| format!("bundled faces: {error}"))?;
+    let current = measure_corpus(SECOND_CORPUS, &engine)?;
+    if std::env::var("RATCHET_UPDATE").is_ok() {
+        std::fs::write(repo_path(SECOND_CORPUS_BASELINE), current.to_tsv())
+            .map_err(|error| format!("second corpus baseline: {error}"))?;
+        let _guard = DASHBOARD_WRITE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dashboard = repo_file("docs/ratchet/dashboard.md", MAX_DASHBOARD_BYTES)?;
+        std::fs::write(
+            repo_path("docs/ratchet/dashboard.md"),
+            with_second_corpus_section(&dashboard, &current.dashboard_section()),
+        )
+        .map_err(|error| format!("dashboard: {error}"))?;
+        eprintln!(
+            "second corpus blessed: {}/{} occurrences typeset",
+            current.layout_occurrences, current.occurrence_total
+        );
+        return Ok(());
+    }
+    let committed =
+        CorpusCounts::parse_tsv(&repo_file(SECOND_CORPUS_BASELINE, MAX_BASELINE_BYTES)?)?;
+    let violations = current.violations(&committed);
+    assert!(
+        violations.is_empty(),
+        "THE SECOND CORPUS RATCHET: coverage regressed:\n{}",
+        violations.join("\n")
+    );
+    if current.committed_form() != committed {
+        return Err(format!(
+            "the second corpus advanced ({} -> {} occurrences typeset): bless with \
+             RATCHET_UPDATE=1 so the baseline and dashboard move in the same commit",
+            committed.layout_occurrences, current.layout_occurrences
+        ));
+    }
+    let dashboard = repo_file("docs/ratchet/dashboard.md", MAX_DASHBOARD_BYTES)?;
+    if !dashboard.contains(&current.dashboard_section()) {
+        return Err(
+            "docs/ratchet/dashboard.md does not publish the second corpus's current counts; \
+             re-bless with RATCHET_UPDATE=1"
+                .to_owned(),
+        );
+    }
     Ok(())
 }
 

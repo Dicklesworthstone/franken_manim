@@ -209,6 +209,21 @@ pub const FACE_POLICY: &[FacePolicy] = &[
         license_slug: "cm-math",
         family: "FMD AMS B Symbols",
     },
+    FacePolicy {
+        name: "euler-fraktur-10",
+        license_slug: "cm-math",
+        family: "FMD Euler Fraktur",
+    },
+    FacePolicy {
+        name: "euler-fraktur-7",
+        license_slug: "cm-math",
+        family: "FMD Euler Fraktur",
+    },
+    FacePolicy {
+        name: "euler-fraktur-5",
+        license_slug: "cm-math",
+        family: "FMD Euler Fraktur",
+    },
 ];
 
 /// Every license-set slug that must ship an OFL text, in canonical order.

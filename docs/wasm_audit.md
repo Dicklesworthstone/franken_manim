@@ -1,6 +1,89 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** foundation re-run, 2026-10-25, at source
+**Status:** re-run, 2026-10-26, against `Cargo.lock` `345959f6` and `SUITE.lock` `bd820d71`,
+for the franken_markdown repin from `4b705d14` to `1ffcadc9` (fm-ew7o: `\dddot` as amsmath's
+operator under a row of text periods; franken_markdown's PDF baseline-grid, compression and
+pagination commits ride along with no dependency change). The lock delta changes only the
+franken_markdown Git revisions; no package, version, checksum or WASM manifest changes.
+
+- **VERIFIED (mechanical):** `cargo tree -p fmn-wasm --target wasm32-unknown-unknown -e
+  normal --prefix none --locked` through RCH gives 134 lines, byte-identical to the tree at
+  `4b705d14` once each workspace path is replaced by one placeholder. It has no fmd,
+  franken_markdown, PyO3 or fmn-python package.
+- **VERIFIED (build):** `cargo build --locked -p fmn-wasm --target wasm32-unknown-unknown`
+  passes through RCH at this tree.
+- The font manifest is unchanged at 29 faces: this pin changes layout code only.
+- Not re-run: the wasm-smoke Node execution and the package/browser gate. Their source and
+  complete dependency graph are unchanged by this pin. This is no fresh smoke, package,
+  browser or size-budget pass.
+
+Earlier re-run, 2026-10-26, for the franken_markdown repin from `37632d2d` to `4b705d14`:
+`Cargo.lock` `16ccf642` and `SUITE.lock` `a2daacdf` (fm-eo8l: amsmath's `\mod` and `\pmod`
+kerns follow `\if@display`). The lock delta changes only the franken_markdown Git revisions;
+no package, version, checksum or WASM manifest changes.
+
+- **VERIFIED (mechanical):** `cargo tree -p fmn-wasm --target wasm32-unknown-unknown -e
+  normal --prefix none --locked` through RCH gives 134 lines, byte-identical to the tree at
+  `37632d2d` once each workspace path is replaced by one placeholder. It has no fmd,
+  franken_markdown, PyO3 or fmn-python package.
+- **VERIFIED (build):** `cargo build --locked -p fmn-wasm --target wasm32-unknown-unknown`
+  passes through RCH at this tree.
+- The font manifest is unchanged at 29 faces: this pin changes layout code only.
+- Not re-run: the wasm-smoke Node execution and the package/browser gate. Their source and
+  complete dependency graph are unchanged by this pin. This is no fresh smoke, package,
+  browser or size-budget pass.
+
+Earlier re-run, 2026-10-26, for the franken_markdown repin from `2d820c52` to `37632d2d`:
+`Cargo.lock` `d251f51d` and `SUITE.lock` `37286bbc` (fm-0byq: LaTeX's fractions as Ord atoms,
+and amssymb's names on their authored AMS glyphs). The lock delta changes only the
+franken_markdown Git revisions; no package, version, checksum or WASM manifest changes.
+
+- **VERIFIED (mechanical):** `cargo tree -p fmn-wasm --target wasm32-unknown-unknown -e
+  normal --prefix none --locked` through RCH gives 134 lines, byte-identical to the tree at
+  `e6da6ee1` and `2d820c52` once each workspace path is replaced by one placeholder. It has no
+  fmd, franken_markdown, PyO3 or fmn-python package.
+- **VERIFIED (build):** `cargo build --locked -p fmn-wasm --target wasm32-unknown-unknown`
+  passes through RCH at this tree.
+- The font manifest is unchanged at 29 faces: this pin changes layout code only.
+- Not re-run: the wasm-smoke Node execution and the package/browser gate. Their source and
+  complete dependency graph are unchanged by this pin. This is no fresh smoke, package,
+  browser or size-budget pass.
+
+Earlier re-run, 2026-10-26, for the franken_markdown repin from `e6da6ee1` to `2d820c52`:
+`Cargo.lock` `2ee6d41d` and `SUITE.lock` `b0cec729` (fm-tex-constructs-t2-1wfq:
+`\mathfrak` from Euler Fraktur, the cancel package's strokes, display `align*`'s spread
+pairs). The lock delta changes only the franken_markdown Git revisions; no package,
+version, checksum or WASM manifest changes.
+
+- **VERIFIED (mechanical):** `cargo tree -p fmn-wasm --target wasm32-unknown-unknown -e
+  normal --prefix none --locked` through RCH gives 134 lines, byte-identical to the same
+  command at `e6da6ee1` once each workspace path is replaced by one placeholder (SHA-256
+  prefix `2b47e553b5b86be8`). It has no fmd, franken_markdown, PyO3 or fmn-python package.
+- **VERIFIED (build):** `cargo build --locked -p fmn-wasm --target wasm32-unknown-unknown`
+  passes through RCH at this tree.
+- **Distribution boundary:** the native font manifest now has 29 faces. The three Euler
+  Fraktur faces (58,904 bytes) are native-only; no font enters the Wasm graph, so the
+  package size budget (fm-8j70) is untouched by them.
+- Not re-run: the wasm-smoke Node execution and the package/browser gate. Their source and
+  complete dependency graph are unchanged by this pin. This is no fresh smoke, package,
+  browser or size-budget pass.
+
+Earlier re-run, 2026-10-25, against `Cargo.lock` `01520fc6` and `SUITE.lock` `4e769b6b`,
+for the franken_markdown repin from `c81208f1` to `e6da6ee1` (fm-tex-constructs-t2-1wfq:
+the `\TeX` and `\LaTeX` logos and `\mathchoice`). The lock delta changes only the
+franken_markdown Git revisions; no package, version, checksum or WASM manifest changes.
+
+- **VERIFIED (mechanical):** a strict RCH metadata job derives a 134-line normal-edge
+  wasm32 tree identical to the one derived at `439a910c` (the same SHA-256 once the
+  workspace path is replaced by one placeholder), with no fmd, franken_markdown, PyO3 or
+  fmn-python package.
+- **VERIFIED (build):** a pinned-nightly `cargo build --locked -p fmn-wasm --target
+  wasm32-unknown-unknown` passes through RCH at this tree.
+- Not re-run: the wasm-smoke Node execution and the package/browser gate. Their source and
+  complete dependency graph are unchanged by this pin, which is no fresh smoke, package,
+  browser or size-budget pass.
+
+Earlier re-run: foundation re-run, 2026-10-25, at source
 `f8eb01f3db11b4cc2dc217416b2f89aee322bb41`, with the native AMS and structured
 macro-overlay provider `c81208f19a81103daf41aa1d8e4a6153c22f7b71`.
 The current lock identities are recorded below. This is a native typesetting
@@ -507,8 +590,8 @@ The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
-- `SUITE.lock` SHA-256: `85ead8b6baf1a5080aae4584dc9d18c4ababf87c8f2b614fa1c4aa5eaf235f05`
-- `Cargo.lock` SHA-256: `59ba59843715107c5fa91784ad5d54b573a290fa3d27e2b323c22bc9cb01ddca`
+- `SUITE.lock` SHA-256: `bd820d714935d7d2d8ee4ecd86f2bb90ec3121b2ab17b8e880eb2c7e34f28e93`
+- `Cargo.lock` SHA-256: `345959f6dd0b107d12715db2b355d3811b07c54af5cf5a3dd65acf7a9a588211`
 - Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `93a7c2dc6acf3dfef88a4a490efbfda7970bd963b4740aa7f879a08fff395061`
 
 The 0.5.0 release bump re-bound both lock identities above. That bump changed

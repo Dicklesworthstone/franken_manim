@@ -1767,11 +1767,18 @@ mod tests {
         // The c81208f1 provider, AMS faces and structured macro overlays
         // change the formula definitions' declared engine/inputs (fm-0byq).
         // Both result goldens and the complete text definition stay fixed.
+        // The e6da6ee1 pin (fm-tex-constructs-t2-1wfq: \TeX, \LaTeX and
+        // \mathchoice) moves the formula definitions' engine identity again,
+        // and so does 2d820c52 (Euler Fraktur's three faces join the roster),
+        // and 37632d2d (fm-0byq: fractions as Ords, amssymb on the AMS faces;
+        // the identity names the provider revision, so a test-only provider
+        // commit moves it too), 4b705d14 (fm-eo8l: amsmath's \mod), and
+        // 1ffcadc9 (fm-ew7o: \dddot as amsmath's operator over a period row).
         assert_eq!(
             [cold.digest(), cached.digest(), text.digest()].map(|digest| digest.to_string()),
             [
-                "d3b7265b84c88b0b1a5af570c245ff6a00d98e6bc2ee3f5a1d20688b2e8178d9",
-                "6f308af6d28d08d0b476cf4555687d659789e067b9836dda3b7315456f5a0abb",
+                "a1c0f560a72118e8f267447cf47f0aa01f6c586b070b9e9654ede677d1d963f5",
+                "74aa24d92311097ccb7cd6ebe2c0288a6f288bae6423442b0da4355a60d6ae23",
                 "0fa22e64fe9e1901eea58a596899ec843bc0d6db46f1cd91607925a50fea3e6f",
             ]
         );

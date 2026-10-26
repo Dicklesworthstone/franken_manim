@@ -78,14 +78,26 @@ const PUBLIC_FLOORS: InkFloors = InkFloors {
 /// 505 with AMS optical cuts and the default pack's native short minus
 /// (9b457a38, fm-0byq); all 643 captures remain, including the original
 /// 26-row non-CM cohort, whose 4 matches still miss its 65% acceptance bar.
+/// 515 since LaTeX's fractions are Ord atoms and amssymb sets its authored
+/// AMS glyphs (683e4ccc, fm-0byq): \frac no longer takes thin spaces against
+/// an Ord. The non-CM cohort rises to 9 of 26, and the p95 Hausdorff falls
+/// 8.0 -> 7.071 px and the p95 sliced W1 4.4397 -> 4.0399 px.
+/// 518 with amsmath's `\mod` as its display kern (4b705d14, fm-eo8l): the
+/// five `\mod` rows' IoU rises from 0.09-0.64 to 0.92-0.99 and three match.
+/// The p95 Hausdorff falls to 6.083 px, the p95 sliced W1 to 3.3195 px, and
+/// the p05 IoU rises to 0.2368.
+/// 521 with amsmath's `\dddot` as an operator under a row of text periods
+/// (1ffcadc9, fm-ew7o): its three rows' IoU rises from 0.07-0.12 to
+/// 0.98-0.99 and all three match. The p95 Hausdorff falls to 6.000 px, the
+/// p95 sliced W1 to 2.9750 px, and the p05 IoU rises to 0.2815.
 const CORPUS_FLOORS: InkFloors = InkFloors {
-    matches: 505,
+    matches: 521,
     median_hausdorff_px: 1.0,
-    p95_hausdorff_px: 8.001,
-    median_sliced_w1_px: 0.0702,
-    p95_sliced_w1_px: 4.441,
-    median_iou: 0.9889,
-    p05_iou: 0.1645,
+    p95_hausdorff_px: 6.001,
+    median_sliced_w1_px: 0.0694,
+    p95_sliced_w1_px: 2.976,
+    median_iou: 0.9893,
+    p05_iou: 0.2814,
 };
 
 /// cmr10's stem (`stem# = 25/36 pt`) in scene units at font size 48: an em

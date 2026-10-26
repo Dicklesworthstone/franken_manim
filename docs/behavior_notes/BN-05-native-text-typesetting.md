@@ -99,6 +99,59 @@ ligature is one submobject), so scene code indexes identically.
   `x\;=y` loses the relation spacing around `=`, and `a\!\!b` does not
   compile. A formula that asks for a space gets it.
 
+## TeX constructs beyond the 3b1b corpus
+
+fmd-math's first vocabulary was ranked by 3b1b's own videos. These constructs from the
+Reference's default preamble (amsmath, amssymb, mathrsfs) are set natively too. They differ
+from the Reference in the ways below.
+
+- **amssymb's symbols are the AMS msam/msbm glyphs the Reference draws.** Every amssymb name
+  fmd-math knows (`\leqslant`, `\therefore`, `\square`, `\nleq`, `\lneq`, `\Lsh`,
+  `\curvearrowleft` …) takes the family and code amssymb.sty declares, its spacing class and
+  the TFM box (fm-0byq).
+  - The Reference's template loads wasysym after amssymb. There `\lhd`, `\rhd`, `\unlhd`,
+    `\unrhd`, `\mho`, `\sqsubset`, `\sqsupset`, `\Box` and `\leadsto` are wasy10's
+    characters, in the same classes (TeX's `\meaning` under the template's preamble).
+    fmd-math has no wasy10 face, the gap behind C-41's `\iint`, so it sets amssymb's msam and
+    msbm forms of them. Under the template's full preamble, every other construct here keeps
+    the box TeX gives it under amsmath and amssymb alone.
+  - `\nleqslant`, `\ngeqslant`, `\nleqq`, `\ngeqq`, `\nsubseteqq` and `\nsupseteqq` have no
+    single Unicode character to carry their meaning, and remain an untiered error.
+- **`\mathscr` is Noto Sans Math's script.** The Reference uses mathrsfs's rsfs10. It stays
+  distinct from `\mathcal`, which is cmsy's calligraphic in both. Lowercase `\mathscr`
+  letters typeset here; rsfs10 has none.
+- **Text font switches set one face each.** `\textit`, `\textrm`, `\textup`, `\textnormal`,
+  `\texttt` and `\textsf` work in `Tex` and `TexText`.
+  - Nested switches do not compose: `\textbf{\textit{x}}` is italic, not bold italic.
+  - `\textsf` is IBM Plex Sans, not cmss.
+- **`\hspace` reads `em` and `ex` from cmr10.** The Reference's text font is T1's ecrm, whose
+  quad (9.99755 pt) is 0.025% narrower. Fixed lengths (`1cm`, `6pt`) are exact.
+- `\not`, `\lvert`/`\rvert`, `\boxed`, `\cfrac` and `\genfrac` match TeX's boxes.
+- `gather*`, `gathered` and `equation*` set display-style rows, centred.
+- `\TeX` and `\LaTeX` are the kernel's constructions in cmr10 and cmr7, and `\mathchoice`
+  sets the branch for the style in force. The logos follow Computer Modern's metrics; the
+  Reference's T1 ecrm differs from them by up to 6e-4 em.
+- `\mathfrak` is the Reference's own Euler Fraktur (eufm10/7/5, ADR-0028's recipe), with
+  its TFM boxes.
+- A script after `\mathchoice` or `\cancel` sits on an empty base, as in TeX: `\cancel` is
+  a `\mathpalette`, so `\cancel{x}^2` raises the 2 at the plain superscript height, not
+  above the struck box.
+- Display `align*` (every `Tex` string's surface, and `TexText`'s `align*`) spreads its
+  column pairs across the page's 345 pt `\linewidth`, as amsmath does. Every gap, the
+  margins included, gets the same share, at least 10 pt. `aligned` keeps 10 pt between its
+  pairs. Earlier pins set every pair 10 pt apart.
+- **`\cancel`, `\bcancel` and `\xcancel` go beyond the Reference.** Its template does not
+  load the cancel package, so there these strings are a LaTeX error. Here they are drawn
+  as cancel.sty draws them: line-font slopes, LaTeX's `\@sline` tiling and a 0.4 pt
+  round pen, with matching boxes. One deliberate difference: a stroke shorter than one
+  line-font character, which LaTeX omits with a warning, is drawn.
+- **Refused by name until they land**, with an error naming franken_manim
+  fm-tex-numbered-displays-bxl9:
+  - `\tag`, `\sideset` and `\cancelto`;
+  - the numbered `equation`, `gather` and `align`, and `multline`: their numbers and flush
+    lines sit against `\linewidth`. Numbered `align` used to be set without its numbers;
+    it now refuses with the others.
+
 ## Source selection and matching through the Python portal
 
 String selectors now use the native source spans throughout the portal.

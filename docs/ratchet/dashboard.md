@@ -5,26 +5,25 @@ real 3b1b formula corpus typesets natively. The denominator is **frozen**
 (G0-4: `9269` distinct strings, `17711` occurrences, corpus hash
 `a8325e49e0ce78fcc735533952740e9adeaaa5cb10f9c13d73aaa3ba4bf883fc`, rules_version 1); the numbers may only rise.
 
-**Computed against franken_markdown `c81208f19a81`.**
+**Computed against franken_markdown `1ffcadc92e9f`.**
 
 | Plane | Occurrence-weighted | Unique-string |
 |---|---|---|
 | **Parse** | 99.994 % | 99.989 % |
 | **Parse + typeset returned Ok** | 99.994 % | 99.989 % |
-| **Layout within 5% of real TeX (oracle)** | 38.304 % | 5.955 % |
-| **Noto math or Plex Sans face usage** | 0.152 % | 0.129 % |
+| **Layout within 5% of real TeX (oracle)** | 38.343 % | 6.031 % |
+| **Noto math or Plex Sans face usage** | 0.136 % | 0.097 % |
 
-"Typeset returned Ok" means fmd-math produced a layout without an error. It does not show that the layout is right. The corpus TeX box oracle (fm-tex-layout-oracle-bkbc) lays out 585 strings, sampled by construct class and occurrence (6847 occurrences), and compares each box with real TeX's: 552 are within 5% and 570 within 10%, covering 6784 occurrences within 5%. The oracle row counts only those verified strings against the whole corpus; unsampled strings count as unverified.
+"Typeset returned Ok" means fmd-math produced a layout without an error. It does not show that the layout is right. The corpus TeX box oracle (fm-tex-layout-oracle-bkbc) lays out 585 strings, sampled by construct class and occurrence (6847 occurrences), and compares each box with real TeX's: 559 are within 5% and 574 within 10%, covering 6791 occurrences within 5%. The oracle row counts only those verified strings against the whole corpus; unsampled strings count as unverified.
 
 ## Noto math or Plex Sans face usage
 
-12 strings (27 occurrences) lay out with at least one glyph from Noto math or Plex Sans. Standard relations among those glyphs: 0. This includes explicitly requested sans styling and excludes bundled AMS faces. It does not measure ink fidelity. The standard relation set never falls back.
+9 strings (24 occurrences) lay out with at least one glyph from Noto math or Plex Sans. Standard relations among those glyphs: 0. This includes explicitly requested sans styling and excludes bundled AMS faces. It does not measure ink fidelity. The standard relation set never falls back.
 
 | Character | Code point | Occurrences |
 |---|---|---|
 | ⟶ | U+27F6 | 13 |
 | ⟹ | U+27F9 | 6 |
-| ̇ | U+0307 | 3 |
 | ⟵ | U+27F5 | 2 |
 | ⟷ | U+27F7 | 2 |
 | ∯ | U+222F | 1 |
@@ -79,6 +78,12 @@ real 3b1b formula corpus typesets natively. The denominator is **frozen**
 | `439a910ce7c1` | 99.994 | 99.989 | 99.994 | 99.989 |
 | `9b457a3895d7` | 99.994 | 99.989 | 99.994 | 99.989 |
 | `c81208f19a81` | 99.994 | 99.989 | 99.994 | 99.989 |
+| `e6da6ee1a73e` | 99.994 | 99.989 | 99.994 | 99.989 |
+| `2d820c52b718` | 99.994 | 99.989 | 99.994 | 99.989 |
+| `683e4cccb66b` | 99.994 | 99.989 | 99.994 | 99.989 |
+| `37632d2dc0ab` | 99.994 | 99.989 | 99.994 | 99.989 |
+| `4b705d147c10` | 99.994 | 99.989 | 99.994 | 99.989 |
+| `1ffcadc92e9f` | 99.994 | 99.989 | 99.994 | 99.989 |
 
 ## How this is enforced
 
@@ -107,3 +112,15 @@ The corpus strings are 3b1b-authored course material and stay in the
 private fixture; this dashboard publishes **numbers, construct names,
 and hashes only**. Anyone with the pinned trees can reproduce the
 denominator byte-for-byte via `scripts/harvest_tex_corpus.py`.
+
+## A second corpus: ManimCommunity/manim
+
+The corpus above is 3b1b's own videos. This one is the TeX of ManimCommunity/manim's library, example scenes and documentation examples: `113` distinct strings, `142` occurrences (MIT; commit and counts in `crates/fmn-conformance/fixtures/second_corpus/PROVENANCE.json`). It is public, every checkout measures it, and its numbers may only rise.
+
+| Plane | Occurrence-weighted | Unique-string |
+|---|---|---|
+| **Parse** | 98.592 % | 99.115 % |
+| **Parse + typeset returned Ok** | 97.887 % | 98.230 % |
+
+Blocked, by occurrences: `\vv` (2), `char:U+4F60` (1).
+

@@ -5139,6 +5139,122 @@ fn tex_color_final_png_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
         .with_artifact("render_matrix.tex_color.v1", png))
 }
 
+/// The sheet `render_matrix.tex_constructs_t2.v1` renders: common
+/// constructs outside the 3b1b corpus (fm-tex-constructs-t2-1wfq), in
+/// mathematics and in a TexText line.
+const TEX_CONSTRUCTS_T2_MATH: &str = r"\boxed{a \leqslant b} \not\subset \lvert z \rvert \quad \cfrac{1}{1+\cfrac{1}{x}} \therefore \square \mathscr{L}";
+const TEX_CONSTRUCTS_T2_TEXT: &str = r"\textit{italic} \texttt{mono}\hspace{1em}\textsf{sans}";
+
+/// The sheet `render_matrix.tex_cancel_frak.v1` renders: `\mathfrak` and
+/// the cancel package's strokes in mathematics, and `\cancel` in a TexText
+/// line (fm-tex-constructs-t2-1wfq).
+const TEX_CANCEL_FRAK_MATH: &str = r"\mathfrak{su}(2) \oplus \mathfrak{R} \quad \frac{\cancel{2}x}{\cancel{2}y} \; \bcancel{a} \; \xcancel{b+c}";
+const TEX_CANCEL_FRAK_TEXT: &str = r"\cancel{struck} text";
+
+/// The certified final PNG of the constructs sheet, its two mobjects' part
+/// counts and its opaque white pixel count.
+fn tex_constructs_t2_render() -> Result<(Vec<u8>, [u64; 2], u64), ScenarioError> {
+    tex_sheet_render(TEX_CONSTRUCTS_T2_MATH, TEX_CONSTRUCTS_T2_TEXT)
+}
+
+/// The certified final PNG of a constructs sheet: a `Tex` line above a
+/// `TexText` line at 40 pt in a 640x360 frame. Also its two mobjects' part
+/// counts and its opaque white pixel count.
+fn tex_sheet_render(
+    math: &'static str,
+    text: &'static str,
+) -> Result<(Vec<u8>, [u64; 2], u64), ScenarioError> {
+    struct Sheet {
+        math: &'static str,
+        text: &'static str,
+        parts: [u64; 2],
+    }
+    impl fmn::SceneConstruct for Sheet {
+        fn tex_preflight(&self) -> Vec<fmn::tex::TypesetRequest<'_>> {
+            vec![
+                fmn::tex::TypesetRequest::math(self.math),
+                fmn::tex::TypesetRequest::text(self.text),
+            ]
+        }
+
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let math = fmn::prelude::Tex::new(self.math)
+                .font_size(40.0)
+                .build(stage.tex_engine()?)?;
+            let text = fmn::prelude::TexText::new(self.text)
+                .font_size(40.0)
+                .build(stage.tex_engine()?)?;
+            self.parts = [math.vmob.children().len(), text.vmob.children().len()]
+                .map(|n| u64::try_from(n).unwrap_or(u64::MAX));
+            let math = stage.add(math)?;
+            let text = stage.add(text)?;
+            stage.shift(math, [0.0, 0.9, 0.0]);
+            stage.shift(text, [0.0, -1.3, 0.0]);
+            Ok(())
+        }
+    }
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    let path = "/tex-constructs-t2.png";
+    let mut options = fmn::RenderOptions::with_format(path, fmn::RenderFormat::Png)
+        .map_err(|error| fail(format!("constructs sheet options: {error}")))?;
+    options.config.camera.resolution = (640, 360);
+    options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+    let mut sheet = Sheet {
+        math,
+        text,
+        parts: [0; 2],
+    };
+    fmn::render_with_fs(&mut sheet, options, fs.clone())
+        .map_err(|error| fail(format!("render the constructs sheet: {error}")))?;
+    let png = fs
+        .read(std::path::Path::new(path))
+        .map_err(|error| fail(format!("read {path}: {error}")))?;
+    let image = fmn_codec::decode_png(&png, &fmn_codec::PngLimits::default())
+        .map_err(|error| fail(format!("decode {path}: {error}")))?;
+    let white = image
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|px| px[3] == 255 && px[..3].iter().all(|&c| c >= 252))
+        .count();
+    Ok((png, sheet.parts, u64::try_from(white).unwrap_or(u64::MAX)))
+}
+
+/// fm-tex-constructs-t2-1wfq: `\boxed`, `\leqslant`, `\not`, `\lvert`,
+/// `\cfrac`, `\therefore`, `\square`, `\mathscr`, `\textit`, `\texttt`,
+/// `\hspace` and `\textsf` build and reach the certified final PNG, which is
+/// bit-locked.
+fn tex_constructs_t2_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let (png, [math_parts, text_parts], white_px) = tex_constructs_t2_render()?;
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.tex_constructs_t2")
+            .field("math_parts", math_parts)
+            .field("text_parts", text_parts)
+            .field("white_px", white_px),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("tex_constructs_t2_mobjects", 2)
+        .with_artifact("render_matrix.tex_constructs_t2.v1", png))
+}
+
+/// fm-tex-constructs-t2-1wfq: `\mathfrak` (Euler Fraktur) and `\cancel`,
+/// `\bcancel` and `\xcancel`, in a fraction and in TexText, build and reach
+/// the certified final PNG, which is bit-locked.
+fn tex_cancel_frak_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let (png, [math_parts, text_parts], white_px) =
+        tex_sheet_render(TEX_CANCEL_FRAK_MATH, TEX_CANCEL_FRAK_TEXT)?;
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.tex_cancel_frak")
+            .field("math_parts", math_parts)
+            .field("text_parts", text_parts)
+            .field("white_px", white_px),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("tex_cancel_frak_mobjects", 2)
+        .with_artifact("render_matrix.tex_cancel_frak.v1", png))
+}
+
 /// fm-cache-eviction-wired-1w05: exercise the real render-completion hook
 /// with no disk retention, ordinary retention, and memory-only typesetting.
 /// All three render teams must publish exactly the same certified PNG.
@@ -9997,6 +10113,57 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.tex_constructs_t2.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(tex_constructs_t2_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tex_constructs_t2_mobjects", 2),
+            Assertion::GoldenLock {
+                suite: E2E_SUITE,
+                scope: Scope::Certified,
+            },
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.tex_constructs_t2",
+            vec![
+                // 22 math parts (the boxed frame alone is four rules) and 14
+                // text glyphs. At 40 pt, most ink is antialiased, so only a
+                // hundred pixels are full white: enough to refuse a blank
+                // frame, which the lock's digest pins exactly anyway.
+                FieldPred::u64_eq("math_parts", 22),
+                FieldPred::u64_eq("text_parts", 14),
+                FieldPred::u64_ge("white_px", 50),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.tex_cancel_frak.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(tex_cancel_frak_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tex_cancel_frak_mobjects", 2),
+            Assertion::GoldenLock {
+                suite: E2E_SUITE,
+                scope: Scope::Certified,
+            },
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.tex_cancel_frak",
+            vec![
+                // 20 math parts: s, u, (, 2, ), ⊕ and ℜ, the fraction's four
+                // glyphs, bar and two strokes, then a, b, +, c and their two
+                // strokes. 11 text parts: the stroke and ten glyphs.
+                FieldPred::u64_eq("math_parts", 20),
+                FieldPred::u64_eq("text_parts", 11),
+                FieldPred::u64_ge("white_px", 50),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.native_shape_matching.v1",
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
@@ -12372,6 +12539,26 @@ fn semantic_oracles_portal_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioE
 // ---------------------------------------------------------------------------
 
 #[test]
+fn tex_cancel_frak_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.tex_cancel_frak.v1")
+        .expect("the Fraktur and cancel scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn tex_constructs_t2_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.tex_constructs_t2.v1")
+        .expect("the outside-corpus TeX constructs scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
 fn live_coordinate_surface_scenario_passes() {
     let scenario = catalog()
         .into_iter()
@@ -13443,14 +13630,57 @@ fn rebless_e2e_cli_builtins_panel() {
 /// panels are before | 4 px divider | after).
 #[test]
 fn rebless_e2e_tex_color_panel() {
-    use fmn_conformance::golden::{REBLESS_ARTEFACT_DIR, rebless_artefact_name, side_by_side_png};
     if std::env::var("FMN_REBLESS_E2E_TEX_COLOR").as_deref() != Ok("1") {
         return;
     }
     let ((png, _), _) = tex_color_renders().expect("the coloured formula renders");
-    let image = fmn_codec::decode_png(&png, &fmn_codec::PngLimits::default())
+    write_single_frame_rebless_panel(&png, std::env::var_os("FMN_REBLESS_E2E_TEX_COLOR_BEFORE"));
+}
+
+/// Re-bless evidence for the e2e lock's `render_matrix.tex_constructs_t2.v1`
+/// entry (GOVERNANCE.md §4), as for `tex_color`: opt-in with
+/// `FMN_REBLESS_E2E_TEX_CONSTRUCTS_T2=1` after the bless, with
+/// `FMN_REBLESS_E2E_TEX_CONSTRUCTS_T2_BEFORE` naming the old panel when the
+/// entry changes.
+#[test]
+fn rebless_e2e_tex_constructs_t2_panel() {
+    if std::env::var("FMN_REBLESS_E2E_TEX_CONSTRUCTS_T2").as_deref() != Ok("1") {
+        return;
+    }
+    let (png, _, _) = tex_constructs_t2_render().expect("the constructs sheet renders");
+    write_single_frame_rebless_panel(
+        &png,
+        std::env::var_os("FMN_REBLESS_E2E_TEX_CONSTRUCTS_T2_BEFORE"),
+    );
+}
+
+/// Re-bless evidence for the e2e lock's `render_matrix.tex_cancel_frak.v1`
+/// entry, as for `tex_constructs_t2`: opt-in with
+/// `FMN_REBLESS_E2E_TEX_CANCEL_FRAK=1` after the bless, with
+/// `FMN_REBLESS_E2E_TEX_CANCEL_FRAK_BEFORE` naming the old panel when the
+/// entry changes.
+#[test]
+fn rebless_e2e_tex_cancel_frak_panel() {
+    if std::env::var("FMN_REBLESS_E2E_TEX_CANCEL_FRAK").as_deref() != Ok("1") {
+        return;
+    }
+    let (png, _, _) = tex_sheet_render(TEX_CANCEL_FRAK_MATH, TEX_CANCEL_FRAK_TEXT)
+        .expect("the Fraktur and cancel sheet renders");
+    write_single_frame_rebless_panel(
+        &png,
+        std::env::var_os("FMN_REBLESS_E2E_TEX_CANCEL_FRAK_BEFORE"),
+    );
+}
+
+/// Write a one-frame lock entry's re-bless panel, before | 4 px divider |
+/// after, as the e2e lock's artefact. A new entry (`before` unset) puts its
+/// frame on both sides; a changed one takes the left half of the panel that
+/// carried its old frame.
+fn write_single_frame_rebless_panel(png: &[u8], before: Option<std::ffi::OsString>) {
+    use fmn_conformance::golden::{REBLESS_ARTEFACT_DIR, rebless_artefact_name, side_by_side_png};
+    let image = fmn_codec::decode_png(png, &fmn_codec::PngLimits::default())
         .expect("the locked frame decodes");
-    let before = match std::env::var_os("FMN_REBLESS_E2E_TEX_COLOR_BEFORE") {
+    let before = match before {
         None => image.rgba.clone(),
         Some(path) => {
             let old = fmn_codec::decode_png(

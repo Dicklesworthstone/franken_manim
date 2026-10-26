@@ -41,12 +41,16 @@ use std::path::PathBuf;
 /// faces (23c4d0c, ADR-0028), 540 laid out from TeX's TFM metrics with clean
 /// boxes that keep a lone character's italic correction (216c7c3), 543 with
 /// rule 18a's drops read at the script size (4db6f43, fm-4ptw), 552 with
-/// authored AMS symbols and the native default-pack minus (9b457a38, fm-0byq).
+/// authored AMS symbols and the native default-pack minus (9b457a38, fm-0byq),
+/// 556 with amsmath's \mod kern (4b705d14, fm-eo8l), captured with
+/// \if@display set as the Reference's align* sets it, 559 with amsmath's
+/// \dddot as an operator under a period row (1ffcadc9, fm-ew7o).
 /// Raise it when layout improves; never lower it to land a change.
-const WITHIN_5_PERCENT_FLOOR: usize = 552;
+const WITHIN_5_PERCENT_FLOOR: usize = 559;
 /// The same at 10%: 315, 316, 330, 365, 367, 385, 421, 423, 437, 444, 543,
-/// 564, 565, then 570 with the AMS/default-pack correction (9b457a38).
-const WITHIN_10_PERCENT_FLOOR: usize = 570;
+/// 564, 565, 570 with the AMS/default-pack correction (9b457a38), 573 with
+/// amsmath's \mod (4b705d14), then 574 with its \dddot (1ffcadc9).
+const WITHIN_10_PERCENT_FLOOR: usize = 574;
 
 fn rows() -> Vec<OracleRow> {
     parse_oracle_fixture(ORACLE_FIXTURE).expect("the oracle fixture parses")
