@@ -549,6 +549,7 @@ pub fn fallback_dashboard_line(f: &FallbackSummary) -> String {
 pub fn render_dashboard(
     baseline: &Baseline,
     oracle: &OracleSummary,
+    text_oracle: &OracleSummary,
     fallback: &FallbackSummary,
     parse_pending: &[Pending],
     layout_pending: &[Pending],
@@ -562,8 +563,9 @@ pub fn render_dashboard(
             100.0 * part as f64 / whole as f64
         }
     };
-    let oracle_occ = share(oracle.occurrences_within_5, baseline.occurrence_total);
-    let oracle_uniq = share(oracle.within_5 as u64, baseline.unique_total);
+    let both = oracle.plus(*text_oracle);
+    let oracle_occ = share(both.occurrences_within_5, baseline.occurrence_total);
+    let oracle_uniq = share(both.within_5 as u64, baseline.unique_total);
     let mut out = String::new();
     let _ = writeln!(out, "# The fmd-math coverage ratchet\n");
     let _ = writeln!(
@@ -600,11 +602,12 @@ pub fn render_dashboard(
     let _ = writeln!(
         out,
         "\n\"Typeset returned Ok\" means fmd-math produced a layout without an \
-         error. It does not show that the layout is right. {} The oracle row \
+         error. It does not show that the layout is right. {} {} The oracle row \
          counts only those verified strings against the whole corpus; \
-         text-mode strings, which this math oracle does not measure, and math \
+         multi-line text, text the Reference breaks across lines, and \
          fragments TeX cannot typeset alone count as unverified.",
-        oracle_dashboard_line(oracle)
+        oracle_dashboard_line(oracle),
+        text_oracle_dashboard_line(text_oracle)
     );
     let _ = writeln!(out, "\n## Noto math or Plex Sans face usage\n");
     let gaps = STANDARD_RELATION_GAPS
@@ -705,6 +708,11 @@ pub const ORACLE_FIXTURE: &str = include_str!("../fixtures/tex_corpus_boxes.v1.t
 /// plane is computed over the census.
 pub const CENSUS_FIXTURE: &str = include_str!("../fixtures/tex_corpus_boxes_census.v1.tsv");
 
+/// The text-mode census: real TeX's box for every text-mode corpus string the
+/// Reference sets on one line (fm-texttext-box-oracle-r11-hkdv), from the same
+/// capture script. The dashboard's oracle plane counts both censuses.
+pub const TEXT_CENSUS_FIXTURE: &str = include_str!("../fixtures/tex_text_boxes_census.v1.tsv");
+
 /// One fixture row: real TeX's box for one sampled corpus string, in ems.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OracleRow {
@@ -767,6 +775,27 @@ pub fn run_layout_oracle(
     rows: &[OracleRow],
     texts: &std::collections::HashMap<String, String>,
 ) -> Result<Vec<OracleBox>, String> {
+    run_oracle(rows, texts, false)
+}
+
+/// [`run_layout_oracle`] for the text-mode census: each string through
+/// fmd-math's TexText contract (text mainland and math islands), under the
+/// default pack.
+///
+/// # Errors
+/// As [`run_layout_oracle`].
+pub fn run_text_layout_oracle(
+    rows: &[OracleRow],
+    texts: &std::collections::HashMap<String, String>,
+) -> Result<Vec<OracleBox>, String> {
+    run_oracle(rows, texts, true)
+}
+
+fn run_oracle(
+    rows: &[OracleRow],
+    texts: &std::collections::HashMap<String, String>,
+    text_mode: bool,
+) -> Result<Vec<OracleBox>, String> {
     let engine = fmd_math::Engine::bundled().map_err(|error| format!("bundled faces: {error}"))?;
     let pack = fmd_math::MacroSet::pack("fmd-math/pack/default")
         .ok_or_else(|| "the default macro pack is missing".to_owned())?;
@@ -775,8 +804,12 @@ pub fn run_layout_oracle(
             let text = texts
                 .get(&row.digest)
                 .ok_or_else(|| format!("fixture row {} is not in the corpus", row.digest))?;
-            Ok(engine
-                .typeset_with_macros(text, fmd_math::Style::Display, &pack)
+            let layout = if text_mode {
+                engine.typeset_text_with_macros(text.trim(), &pack)
+            } else {
+                engine.typeset_with_macros(text, fmd_math::Style::Display, &pack)
+            };
+            Ok(layout
                 .ok()
                 .map(|layout| (layout.width, layout.height, layout.depth)))
         })
@@ -832,6 +865,35 @@ pub fn summarize_oracle(rows: &[OracleRow], errors: &[f64]) -> OracleSummary {
         }
     }
     s
+}
+
+impl OracleSummary {
+    /// Two censuses' counts together: the dashboard's oracle plane counts
+    /// the math-mode and the text-mode census.
+    #[must_use]
+    pub fn plus(self, other: Self) -> Self {
+        Self {
+            rows: self.rows + other.rows,
+            within_5: self.within_5 + other.within_5,
+            within_10: self.within_10 + other.within_10,
+            refused: self.refused + other.refused,
+            occurrences: self.occurrences + other.occurrences,
+            occurrences_within_5: self.occurrences_within_5 + other.occurrences_within_5,
+        }
+    }
+}
+
+/// The dashboard's sentence about the text-mode census, which
+/// `tests/tex_corpus_boxes.rs` requires verbatim.
+#[must_use]
+pub fn text_oracle_dashboard_line(s: &OracleSummary) -> String {
+    format!(
+        "The text-mode census (fm-texttext-box-oracle-r11-hkdv) lays out every \
+         text-mode corpus string the Reference sets on one line ({} strings, {} \
+         occurrences) and compares each box with real TeX's: {} are within 5% \
+         and {} within 10%, covering {} occurrences within 5%.",
+        s.rows, s.occurrences, s.within_5, s.within_10, s.occurrences_within_5
+    )
 }
 
 /// The sentence the dashboard publishes about the oracle. The oracle test
@@ -1584,6 +1646,14 @@ mod tests {
             occurrences: 400,
             occurrences_within_5: 250,
         };
+        let text_oracle = OracleSummary {
+            rows: 10,
+            within_5: 4,
+            within_10: 6,
+            refused: 1,
+            occurrences: 200,
+            occurrences_within_5: 100,
+        };
         let mut fallback = FallbackSummary::default();
         fallback.add(&BTreeSet::from(['ℝ', '✓']), 50);
         fallback.add(&BTreeSet::from(['ℝ']), 30);
@@ -1591,6 +1661,7 @@ mod tests {
         let d = render_dashboard(
             &base(),
             &oracle,
+            &text_oracle,
             &fallback,
             &[Pending {
                 construct: "\\substack".to_owned(),
@@ -1603,10 +1674,11 @@ mod tests {
         assert!(d.contains("95.000 %"));
         assert!(d.contains("\\substack"));
         assert!(d.contains("escalation path"));
-        // 250 of the corpus's 1000 occurrences and 8 of its 100 strings are
-        // verified within 5%.
-        assert!(d.contains("| 25.000 % | 8.000 % |"));
+        // Both censuses together: 250 + 100 of the corpus's 1000 occurrences
+        // and 8 + 4 of its 100 strings are verified within 5%.
+        assert!(d.contains("| 35.000 % | 12.000 % |"));
         assert!(d.contains(&oracle_dashboard_line(&oracle)));
+        assert!(d.contains(&text_oracle_dashboard_line(&text_oracle)));
         // 80 of 1000 occurrences, 2 of 100 strings; ℝ ranks first.
         assert!(d.contains("| 8.000 % | 2.000 % |"));
         assert!(d.contains("| ℝ | U+211D | 80 |\n| ✓ | U+2713 | 50 |"));

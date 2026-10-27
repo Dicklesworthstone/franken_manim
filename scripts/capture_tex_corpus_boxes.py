@@ -45,6 +45,9 @@ import tempfile
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "crates" / "fmn-conformance" / "fixtures" / "tex_corpus_boxes.v1.tsv"
 CENSUS = ROOT / "crates" / "fmn-conformance" / "fixtures" / "tex_corpus_boxes_census.v1.tsv"
+TEXT_CENSUS = ROOT / "crates" / "fmn-conformance" / "fixtures" / "tex_text_boxes_census.v1.tsv"
+# The Reference's standalone[preview] page: \linewidth and \parindent under its template.
+LINE_WIDTH_EM = 34.5
 TEMPLATES = ROOT / "scripts" / "manim_ref" / "manimlib" / "tex_templates.yml"
 PER_CLASS = 4
 TARGET = 640
@@ -141,6 +144,86 @@ def measure_one(text: str, preamble: str) -> tuple[float, float, float] | None:
     return tuple(float(v) / 10.0 for v in match.groups())  # pt -> em at 10 pt
 
 
+def ranked_text(corpus: pathlib.Path) -> list[dict]:
+    """Every text-mode corpus string, most frequent first (digest tie-break)."""
+    records = [json.loads(line) for line in corpus.open(encoding="utf-8")]
+    text = [r for r in records if r["mode"] == "text" and r["text"].strip()]
+    return sorted(text, key=lambda r: (-r["count"], r["sha256"]))
+
+
+MULTILINE = re.compile(r"\\\\|\\par\b|\n\s*\n")
+
+
+def measure_text(text: str, preamble: str) -> tuple[float, float, float] | str:
+    """A TexText string's box in the Reference's document, or why it has none.
+
+    The Reference sets TexText as `\\centering` paragraph text in a
+    `standalone[preview]` page (\\linewidth 345 pt, \\parindent 0), after
+    stripping the joined string. A string that stays on one line is its
+    natural `\\sbox`: the paragraph's single line, at natural interword glue.
+    The paragraph's end drops its last glue (the newline after the string,
+    or a final control space), so the box ends with `\\unskip`.
+    `multi-line` strings break lines themselves; a `wraps` string is wider
+    than the line and breaks there; `fragment` strings TeX cannot typeset alone.
+    """
+    text = text.strip()
+    if MULTILINE.search(text):
+        return "multi-line"
+    document = (
+        "\\documentclass[preview]{standalone}\n" + preamble + "\n"
+        "\\newsavebox\\fmnbox\n\\begin{document}\n"
+        "\\sbox\\fmnbox{" + text + "\n\\unskip}\n"
+        "\\typeout{FMNBOX \\the\\wd\\fmnbox\\space\\the\\ht\\fmnbox\\space\\the\\dp\\fmnbox}\n"
+        "\\end{document}\n"
+    )
+    with tempfile.TemporaryDirectory(prefix="tex-corpus-text-box-") as work:
+        (pathlib.Path(work) / "f.tex").write_text(document, encoding="utf-8")
+        try:
+            run = subprocess.run(["latex", "-interaction=batchmode", "-halt-on-error", "f.tex"],
+                                 cwd=work, capture_output=True, timeout=60, check=False)
+        except subprocess.TimeoutExpired:
+            return "fragment"
+        log = (pathlib.Path(work) / "f.log").read_text(encoding="latin-1", errors="replace")
+    match = BOX.search(log)
+    if run.returncode != 0 or match is None:
+        return "fragment"
+    width, height, depth = (float(v) / 10.0 for v in match.groups())  # pt -> em at 10 pt
+    if width > LINE_WIDTH_EM:
+        return "wraps"
+    return (width, height, depth)
+
+
+def write_text_census(items: list[dict], measured: dict) -> None:
+    rows = []
+    omitted = {"multi-line": 0, "wraps": 0, "fragment": 0}
+    for item in items:
+        box = measured[item["sha256"]]
+        if isinstance(box, str) or box[0] <= 0.0 or box[1] + box[2] <= 0.0:
+            omitted[box if isinstance(box, str) else "fragment"] += 1
+            continue
+        classes = "|".join(sorted(item["constructs"])) or "(plain)"
+        width, height, depth = box
+        rows.append(f"{item['sha256']}\t{width:.5f}\t{height:.5f}\t{depth:.5f}\t{item['count']}\t{classes}")
+    header = [
+        "# Real TeX boxes for every one-line text-mode corpus string (fm-texttext-box-oracle-r11-hkdv).",
+        "# Strings are private fixtures (plan §15.3): each row names its corpus string by",
+        "# sha256(mode + NUL + string). Width, height and depth are TeX's \\wd, \\ht and \\dp of the",
+        "# stripped string's \\sbox, in ems at 10 pt, in the Reference's standalone[preview] document",
+        "# (\\linewidth 345 pt, \\parindent 0) with its default template's preamble: the one line",
+        "# its \\centering paragraph sets, at natural interword glue, without the final glue the",
+        "# paragraph's end drops.",
+        "# Preamble: the pinned Reference's default template (3b1b/manim 6199a00d); TeX Live",
+        "# 2025 on the dev host.",
+        f"# Census: every text-mode string of the frozen G0-4 corpus, {len(items)} candidates.",
+        f"# Omitted: {omitted['multi-line']} multi-line (\\\\, \\par or a blank line), {omitted['wraps']}",
+        f"# wider than the line (the Reference breaks them), {omitted['fragment']} TeX could not typeset alone.",
+        "# Regenerate only with scripts/capture_tex_corpus_boxes.py; never edit by hand.",
+        "# sha256\twidth\theight\tdepth\tcount\tclasses (|-separated construct names)",
+    ]
+    TEXT_CENSUS.write_text("\n".join(header + rows) + "\n", encoding="utf-8")
+    print(f"{len(rows)} rows, omitted {omitted} -> {TEXT_CENSUS.relative_to(ROOT)}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--corpus", type=pathlib.Path, required=True)
@@ -150,12 +233,29 @@ def main() -> int:
         action="store_true",
         help="measure and write only the stratified sample (a quick run), not the census",
     )
+    parser.add_argument(
+        "--text",
+        action="store_true",
+        help="also measure the text-mode census (tex_text_boxes_census.v1.tsv)",
+    )
+    parser.add_argument(
+        "--text-only",
+        action="store_true",
+        help="measure and write only the text-mode census",
+    )
     args = parser.parse_args()
+    preamble = reference_preamble()
+    if args.text or args.text_only:
+        items = ranked_text(args.corpus)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            boxes = list(pool.map(lambda item: measure_text(item["text"], preamble), items))
+        write_text_census(items, {item["sha256"]: box for item, box in zip(items, boxes)})
+        if args.text_only:
+            return 0
     ranked = ranked_math(args.corpus)
     chosen = sample(ranked)
     # The census measures every math string; the sample is a subset of the same measurements.
     items = chosen if args.sample_only else ranked
-    preamble = reference_preamble()
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
         boxes = list(pool.map(lambda item: measure_one(item["text"], preamble), items))
     measured = {item["sha256"]: box for item, box in zip(items, boxes)}

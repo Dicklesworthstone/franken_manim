@@ -17,9 +17,10 @@
 
 use fmn_conformance::ratchet::{
     Baseline, CENSUS_FIXTURE, CorpusCounts, FallbackSummary, OracleSummary, Pending, SECOND_CORPUS,
-    SECOND_CORPUS_BASELINE, corpus_digest, fallback_chars, fallback_dashboard_line, measure_corpus,
-    oracle_error, parse_corpus_entry, parse_oracle_fixture, parse_trend_tsv, ratchet_violations,
-    render_dashboard, run_layout_oracle, summarize_oracle, with_second_corpus_section,
+    SECOND_CORPUS_BASELINE, TEXT_CENSUS_FIXTURE, corpus_digest, fallback_chars,
+    fallback_dashboard_line, measure_corpus, oracle_error, parse_corpus_entry,
+    parse_oracle_fixture, parse_trend_tsv, ratchet_violations, render_dashboard, run_layout_oracle,
+    run_text_layout_oracle, summarize_oracle, with_second_corpus_section,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
@@ -342,25 +343,36 @@ fn recompute_and_enforce_the_ratchet() -> Result<(), String> {
     );
     let advanced = current != committed;
     if std::env::var("RATCHET_UPDATE").is_ok() {
-        // The dashboard publishes the TeX box oracle's census counts beside
-        // the coverage (tests/tex_corpus_boxes.rs checks they stay current).
-        let texts: HashMap<String, String> = data
-            .lines()
-            .filter_map(parse_corpus_entry)
-            .filter(|entry| entry.mode == "math")
-            .map(|entry| (corpus_digest("math", &entry.text), entry.text))
-            .collect();
-        let rows = parse_oracle_fixture(CENSUS_FIXTURE)?;
-        let laid = run_layout_oracle(&rows, &texts)?;
-        let errors: Vec<f64> = rows
-            .iter()
-            .zip(&laid)
-            .map(|(row, &laid)| oracle_error(row, laid))
-            .collect();
-        let oracle = summarize_oracle(&rows, &errors);
+        // The dashboard publishes the TeX box oracle's census counts, math
+        // and text, beside the coverage (tests/tex_corpus_boxes.rs checks
+        // they stay current).
+        let texts = |mode: &str| -> HashMap<String, String> {
+            data.lines()
+                .filter_map(parse_corpus_entry)
+                .filter(|entry| entry.mode == mode)
+                .map(|entry| (corpus_digest(mode, &entry.text), entry.text))
+                .collect()
+        };
+        let summary = |fixture: &str, text_mode: bool| -> Result<OracleSummary, String> {
+            let rows = parse_oracle_fixture(fixture)?;
+            let laid = if text_mode {
+                run_text_layout_oracle(&rows, &texts("text"))?
+            } else {
+                run_layout_oracle(&rows, &texts("math"))?
+            };
+            let errors: Vec<f64> = rows
+                .iter()
+                .zip(&laid)
+                .map(|(row, &laid)| oracle_error(row, laid))
+                .collect();
+            Ok(summarize_oracle(&rows, &errors))
+        };
+        let oracle = summary(CENSUS_FIXTURE, false)?;
+        let text_oracle = summary(TEXT_CENSUS_FIXTURE, true)?;
         bless(
             &current,
             &oracle,
+            &text_oracle,
             &fallback,
             &parse_pending,
             &layout_pending,
@@ -389,6 +401,7 @@ fn recompute_and_enforce_the_ratchet() -> Result<(), String> {
 fn bless(
     current: &Baseline,
     oracle: &OracleSummary,
+    text_oracle: &OracleSummary,
     fallback: &FallbackSummary,
     parse_pending: &BTreeMap<String, u64>,
     layout_pending: &BTreeMap<String, u64>,
@@ -450,6 +463,7 @@ fn bless(
     let dashboard = render_dashboard(
         current,
         oracle,
+        text_oracle,
         fallback,
         &to_pending(parse_pending),
         &to_pending(layout_pending),

@@ -5,6 +5,9 @@
 //! preamble) for every math-mode string of the private TeX corpus that TeX can
 //! typeset alone (fm-box-oracle-full-corpus-r11-lykz).
 //! `fixtures/tex_corpus_boxes.v1.tsv` is its stratified sample, row for row.
+//! `fixtures/tex_text_boxes_census.v1.tsv` holds TeX's box for every
+//! text-mode string the Reference sets on one line, laid out natively through
+//! the TexText contract (fm-texttext-box-oracle-r11-hkdv).
 //! Each string is named only by its public digest (plan §15.3); one run of
 //! `scripts/capture_tex_corpus_boxes.py` captures both. The evaluation lives in
 //! `fmn_conformance::ratchet`, which the coverage ratchet's dashboard shares.
@@ -22,8 +25,9 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::print_stderr)]
 
 use fmn_conformance::ratchet::{
-    CENSUS_FIXTURE, ORACLE_FIXTURE, OracleRow, corpus_digest, oracle_dashboard_line, oracle_error,
-    oracle_ndjson, parse_corpus_entry, parse_oracle_fixture, run_layout_oracle, summarize_oracle,
+    CENSUS_FIXTURE, ORACLE_FIXTURE, OracleRow, TEXT_CENSUS_FIXTURE, corpus_digest,
+    oracle_dashboard_line, oracle_error, oracle_ndjson, parse_corpus_entry, parse_oracle_fixture,
+    run_layout_oracle, run_text_layout_oracle, summarize_oracle, text_oracle_dashboard_line,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -73,6 +77,18 @@ const CENSUS_WITHIN_5_PERCENT_FLOOR: usize = 4146;
 /// The same at 10%: 4157 at 8667819a, 4161 at d99fee96, 4166 at cc470d1a.
 const CENSUS_WITHIN_10_PERCENT_FLOOR: usize = 4166;
 
+/// Text-mode census strings within 5% of TeX's box, of the 3747 text-mode
+/// corpus strings the Reference sets on one line
+/// (fm-texttext-box-oracle-r11-hkdv): 3733 when first measured (franken_markdown
+/// cc470d1a), covering 4666 of their 4689 occurrences. Of the 14 misses, six
+/// are C-27's tipa `\;` and `\!` (deliberately not replicated), two are the
+/// EC text fonts' kerning (fm-q364), and two are text-mode `\dots`
+/// (`\textellipsis`). Raise it when layout improves; never lower it to land
+/// a change.
+const TEXT_CENSUS_WITHIN_5_PERCENT_FLOOR: usize = 3733;
+/// The same at 10%: 3743 at cc470d1a.
+const TEXT_CENSUS_WITHIN_10_PERCENT_FLOOR: usize = 3743;
+
 fn rows() -> Vec<OracleRow> {
     parse_oracle_fixture(ORACLE_FIXTURE).expect("the oracle fixture parses")
 }
@@ -81,10 +97,15 @@ fn census_rows() -> Vec<OracleRow> {
     parse_oracle_fixture(CENSUS_FIXTURE).expect("the census fixture parses")
 }
 
+fn text_census_rows() -> Vec<OracleRow> {
+    parse_oracle_fixture(TEXT_CENSUS_FIXTURE).expect("the text census fixture parses")
+}
+
 #[test]
 fn fixture_names_corpus_strings_only_by_digest() {
     let rows = rows();
     let census = census_rows();
+    let text_census = text_census_rows();
     assert!(
         rows.len() >= 500,
         "the sample thinned out: {} rows",
@@ -95,9 +116,86 @@ fn fixture_names_corpus_strings_only_by_digest() {
         "the census thinned out: {} rows",
         census.len()
     );
-    for fixture in [&rows, &census] {
+    assert!(
+        text_census.len() >= 3500,
+        "the text census thinned out: {} rows",
+        text_census.len()
+    );
+    for fixture in [&rows, &census, &text_census] {
         assert_rows_are_digest_only(fixture);
     }
+}
+
+/// The text-mode census against fmd-math's TexText layout under the default
+/// pack, with the private corpus where it is present (as the math census).
+#[test]
+fn corpus_text_boxes_track_tex_and_never_regress() {
+    let path = std::env::var("FMN_TEX_CORPUS").map_or_else(
+        |_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../corpus/tex_corpus.jsonl"),
+        PathBuf::from,
+    );
+    let Ok(corpus) = std::fs::read_to_string(&path) else {
+        fmn_core::test_inputs::skip_or_fail(
+            "fmn-conformance::corpus_text_boxes_track_tex_and_never_regress",
+            &format!("TeX corpus at {}", path.display()),
+        );
+        return;
+    };
+    let texts: HashMap<String, String> = corpus
+        .lines()
+        .filter_map(parse_corpus_entry)
+        .filter(|entry| entry.mode == "text")
+        .map(|entry| (corpus_digest("text", &entry.text), entry.text))
+        .collect();
+    let census = text_census_rows();
+    let laid =
+        run_text_layout_oracle(&census, &texts).expect("every text census string is in the corpus");
+    let errors: Vec<f64> = census
+        .iter()
+        .zip(&laid)
+        .map(|(row, &laid)| oracle_error(row, laid))
+        .collect();
+    eprint!(
+        "{}",
+        oracle_ndjson(
+            &census,
+            &laid,
+            &errors,
+            (
+                TEXT_CENSUS_WITHIN_5_PERCENT_FLOOR,
+                TEXT_CENSUS_WITHIN_10_PERCENT_FLOOR
+            )
+        )
+    );
+    let summary = summarize_oracle(&census, &errors);
+    eprintln!(
+        "{{\"schema\":\"fmn.tex-corpus-boxes.v1\",\"kind\":\"text_summary\",\"rows\":{},\"within_5\":{},\"within_10\":{},\"refused\":{},\"occurrences\":{},\"occurrences_within_5\":{}}}",
+        summary.rows,
+        summary.within_5,
+        summary.within_10,
+        summary.refused,
+        summary.occurrences,
+        summary.occurrences_within_5
+    );
+    assert!(
+        summary.within_5 >= TEXT_CENSUS_WITHIN_5_PERCENT_FLOOR,
+        "{} text strings within 5% of TeX, below the floor {TEXT_CENSUS_WITHIN_5_PERCENT_FLOOR}",
+        summary.within_5
+    );
+    assert!(
+        summary.within_10 >= TEXT_CENSUS_WITHIN_10_PERCENT_FLOOR,
+        "{} text strings within 10% of TeX, below the floor {TEXT_CENSUS_WITHIN_10_PERCENT_FLOOR}",
+        summary.within_10
+    );
+    let dashboard = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/ratchet/dashboard.md"),
+    )
+    .expect("the ratchet dashboard");
+    assert!(
+        dashboard.contains(&text_oracle_dashboard_line(&summary)),
+        "docs/ratchet/dashboard.md does not publish the text census ({summary:?}); re-bless it \
+         with RATCHET_UPDATE=1 cargo test -p fmn-conformance --test coverage_ratchet"
+    );
 }
 
 /// One capture run writes both fixtures, so every sample row must be its
