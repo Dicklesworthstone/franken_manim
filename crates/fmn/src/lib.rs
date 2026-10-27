@@ -53,10 +53,10 @@ use fmn_anim::{
 use fmn_config::ConfigError;
 use fmn_geom::{GeomError, SpaceOpsError};
 use fmn_library::{
-    CoordsError, DashError, DataMobjectError, FieldError, GraphError, ImageError, MatrixError,
-    MeshError, NetworkGraphError, NeuralNetworkError, ObjError, ProbabilityError, SamplingError,
-    SliderError, SpanCollectorError, TexBindingError, TexMobjectError, TextMatchingError,
-    TextMobjectError,
+    CoordsError, DashError, DataMobjectError, FieldError, GraphAnimationError, GraphError,
+    ImageError, MatrixError, MeshError, NetworkGraphError, NeuralNetworkError, ObjError,
+    ProbabilityError, SamplingError, SliderError, SpanCollectorError, TexBindingError,
+    TexMobjectError, TextMatchingError, TextMobjectError,
 };
 use fmn_mobject::{AnimateError, Mob, Mobject, Stage as MobjectStage, StageError};
 use fmn_platform::fetch::FetchError;
@@ -1140,6 +1140,8 @@ pub enum LibraryError {
     TexBinding(TexBindingError),
     /// `NetworkGraph`.
     NetworkGraph(NetworkGraphError),
+    /// Live graph layout transitions, traversal and weighted flow animations.
+    GraphAnimation(GraphAnimationError),
     /// `NeuralNetworkMobject`.
     NeuralNetwork(NeuralNetworkError),
     /// `Slider` and the control widgets.
@@ -1192,6 +1194,7 @@ impl LibraryError {
             Self::TextMatching(error) => error,
             Self::TexBinding(error) => error,
             Self::NetworkGraph(error) => error,
+            Self::GraphAnimation(error) => error,
             Self::NeuralNetwork(error) => error,
             Self::Slider(error) => error,
             Self::Drawings(error) => error,
@@ -1243,6 +1246,7 @@ library_error_from!(fmn_library::boolean_ops::BooleanMobjectError, Boolean);
 library_error_from!(TextMatchingError, TextMatching);
 library_error_from!(TexBindingError, TexBinding);
 library_error_from!(NetworkGraphError, NetworkGraph);
+library_error_from!(GraphAnimationError, GraphAnimation);
 library_error_from!(NeuralNetworkError, NeuralNetwork);
 library_error_from!(SliderError, Slider);
 library_error_from!(fmn_library::drawings::DrawingsAssetError, Drawings);

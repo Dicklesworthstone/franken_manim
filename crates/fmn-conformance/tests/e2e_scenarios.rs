@@ -7748,6 +7748,136 @@ fn network_graph_layout_determinism_run(ctx: &mut RunCtx) -> Result<RunOutcome, 
         .with_counter("spring_seeds_diverge", seeds_diverge))
 }
 
+/// Graph authoring through the public native facade, including layout motion,
+/// ordered traversal and weighted directed flow, at three worker counts.
+fn graph_animations_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::prelude::{
+        AnimConfig, FlowAlongEdges, GraphFlowConfig, GraphLayout, GraphTraversal,
+        GraphTraversalConfig, LayoutTransition, NetworkGraph, TraverseGraph,
+    };
+
+    struct GraphScene;
+    impl fmn::SceneConstruct for GraphScene {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let graph = NetworkGraph::from_edge_list(
+                &["a", "b", "c", "d"],
+                &[("a", "b"), ("a", "c"), ("b", "d"), ("c", "d")],
+            )
+            .laid_out(&GraphLayout::Circular)?;
+            let raw = stage.scene_mut().stage_mut();
+            let binding = graph.add_to(raw)?;
+            raw.add_to_scene(binding.mobject())?;
+            let layout = LayoutTransition::new(
+                raw,
+                &binding,
+                &GraphLayout::Shell {
+                    shells: vec![vec!["a".into(), "b".into(), "c".into()], vec!["d".into()]],
+                },
+            )?
+            .with_config(AnimConfig {
+                run_time: 0.5,
+                rate_func: RateFunc::linear(),
+                ..AnimConfig::default()
+            });
+            stage.play_prepared(vec![Box::new(layout)])?;
+            let traversal = TraverseGraph::with_config(
+                stage.scene_mut().stage_mut(),
+                &binding,
+                "a",
+                GraphTraversal::BreadthFirst,
+                GraphTraversalConfig {
+                    run_time: 1.0,
+                    color: YELLOW,
+                },
+            )?;
+            assert_eq!(traversal.order(), ["a", "b", "c", "d"]);
+            stage.play_prepared(vec![Box::new(traversal)])?;
+            let flow = FlowAlongEdges::with_config(
+                stage.scene_mut().stage_mut(),
+                &binding,
+                &[("b", "a", 1.0), ("a", "c", 3.0)],
+                GraphFlowConfig {
+                    run_time: 1.0,
+                    color: RED_C,
+                    ..GraphFlowConfig::default()
+                },
+            )?;
+            stage.play_prepared(vec![Box::new(flow)])?;
+            stage.wait(0.25)?;
+            Ok(())
+        }
+    }
+
+    let mut baseline: Option<Vec<Vec<u8>>> = None;
+    let mut rendered_frames = 0;
+    for (window, threads) in [(1, 1), (2, 4), (4, 16)] {
+        let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+        let mut options = fmn::RenderOptions::new("/graph-animations")
+            .map_err(|error| fail(format!("graph render options: {error}")))?;
+        options.config.camera.resolution = (96, 64);
+        options.config.camera.fps = 8;
+        options.config.sizes.frame_height = 3.0;
+        options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+        options.frames_in_flight = window;
+        let report = fmn::render_with_fs(&mut GraphScene, options, fs.clone())
+            .map_err(|error| fail(format!("graph animation render: {error}")))?;
+        let pipeline = report
+            .frame_pipeline
+            .as_ref()
+            .ok_or_else(|| fail("graph animation render omitted the frame pipeline"))?;
+        if report.artifact.frame_count != 22
+            || pipeline.submitted != 22
+            || pipeline.emitted != 22
+            || pipeline.outstanding_slots != 0
+            || pipeline.max_in_flight > report.execution_plan.frames_in_flight
+        {
+            return Err(fail(
+                "graph animations lost bounded ordered frame publication",
+            ));
+        }
+        let mut frames = Vec::new();
+        for index in 0..22 {
+            let path = PathBuf::from("/graph-animations").join(format!("frame_{index:06}.png"));
+            frames.push(
+                fs.read(&path)
+                    .map_err(|error| fail(format!("graph PNG: {error}")))?,
+            );
+        }
+        if frames[0] == frames[3] || frames[4] == frames[11] || frames[12] == frames[19] {
+            return Err(fail(
+                "layout, traversal or directed flow did not change rendered pixels",
+            ));
+        }
+        if frames[11] != frames[19] || frames[19] != frames[20] || frames[20] != frames[21] {
+            return Err(fail(
+                "flow changed its underlying graph or leaked a visible pulse",
+            ));
+        }
+        if let Some(expected) = &baseline {
+            if expected != &frames {
+                return Err(fail(format!(
+                    "graph PNG bytes changed at {threads} threads"
+                )));
+            }
+        } else {
+            baseline = Some(frames);
+        }
+        rendered_frames += report.artifact.frame_count;
+    }
+    let frames = baseline.ok_or_else(|| fail("no graph frames rendered"))?;
+    ctx.event(
+        LogEvent::new("e2e.network_graph.animations")
+            .field("thread_counts", 3_u64)
+            .field("rendered_frames", rendered_frames),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("graph-layout.png", frames[3].clone())
+        .with_artifact("graph-flow.png", frames[12].clone())
+        .with_counter("graph_animation_thread_counts", 3)
+        .with_counter("graph_animation_frames", rendered_frames))
+}
+
 /// NeuralNetworkMobject end-to-end drill (fm-74z): introspects an MLP with
 /// explicit weights and biases, executes forward pass activation, attaches
 /// live training updaters on stage, and proves segment purity classification
@@ -12384,6 +12514,27 @@ pub fn catalog() -> Vec<ScenarioSpec> {
     );
     specs.push(
         spec(
+            "lifecycle.graph_animations.v1",
+            ScenarioClass::LifecycleDrill,
+            Surface::RustApi,
+            Invocation::new(graph_animations_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("graph_animation_thread_counts", 3),
+                counter_eq("graph_animation_frames", 66),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.network_graph.animations",
+                vec![
+                    FieldPred::u64_eq("thread_counts", 3),
+                    FieldPred::u64_eq("rendered_frames", 66),
+                ],
+            )],
+        )
+        .tier(Tier::Fast),
+    );
+    specs.push(
+        spec(
             "neural_network.live_training_and_purity.v1",
             ScenarioClass::LifecycleDrill,
             Surface::RustApi,
@@ -13249,6 +13400,16 @@ fn cli_doctor_capabilities_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.cli_doctor_capabilities.v1")
         .expect("doctor capability scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn graph_animations_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.graph_animations.v1")
+        .expect("native graph animation lifecycle is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

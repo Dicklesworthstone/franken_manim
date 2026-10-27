@@ -164,6 +164,10 @@ pub use network_graph::{
     DEFAULT_SPRING_IDEAL_EDGE, DEFAULT_SPRING_ITERATIONS, GraphLayout, NetworkGraph,
     NetworkGraphError,
 };
+pub use network_graph::{
+    FlowAlongEdges, GraphAnimationError, GraphFlowConfig, GraphTraversal, GraphTraversalConfig,
+    LayoutTransition, NetworkGraphMobject, TraverseGraph,
+};
 pub use neural_network::{
     DEFAULT_LAYER_SPACING, DEFAULT_MAX_DISPLAYED_NEURONS, DEFAULT_NEURON_RADIUS,
     DEFAULT_NEURON_SPACING, DEFAULT_SYNAPSE_STROKE_WIDTH, LayerKind, LayerSpec,

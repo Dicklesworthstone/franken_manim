@@ -54,6 +54,13 @@ use crate::line::Line;
 use crate::style::Style;
 use crate::vmobject::{VMobject, v_group};
 
+#[path = "network_graph_animation.rs"]
+mod animation;
+pub use animation::{
+    FlowAlongEdges, GraphAnimationError, GraphFlowConfig, GraphTraversal, GraphTraversalConfig,
+    LayoutTransition, NetworkGraphMobject, TraverseGraph,
+};
+
 /// Edge styling: the neutral grey, slightly heavier than a gridline.
 const EDGE_STROKE_WIDTH: f64 = 2.5;
 /// Vertex styling radius: a shade above [`crate::arc::Dot`]'s default so
