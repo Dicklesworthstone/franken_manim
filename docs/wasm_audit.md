@@ -1,6 +1,21 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-run, 2026-10-26, against `Cargo.lock` `ba9ed445` and `SUITE.lock` `a87e525e`,
+**Status:** re-run, 2026-10-27, against `Cargo.lock` `716d4655` and `SUITE.lock` `41856fe9`,
+for the franken_markdown repin from `cc470d1a` to `450111a4` (fm-texttext-line-breaking-r11-bfdx:
+TexText paragraphs break at the 345 pt line, a blank line ends a paragraph, alignment blocks
+keep their first baseline). The lock delta changes only the franken_markdown Git revisions; no
+package, version, checksum or WASM manifest changes.
+
+- **VERIFIED (mechanical):** `cargo tree -p fmn-wasm --target wasm32-unknown-unknown -e
+  normal --prefix none --locked` through RCH gives 134 lines, byte-identical to the tree at
+  `cc470d1a` once each workspace path is replaced by one placeholder, with no fmd,
+  franken_markdown, PyO3 or fmn-python package.
+- **VERIFIED (build):** `cargo build --locked -p fmn-wasm --target wasm32-unknown-unknown`
+  passes through RCH at this tree.
+- Not re-run: the wasm-smoke Node execution and the package/browser gate. fmn-wasm's tree does
+  not reach franken_markdown. This is no fresh smoke, package, browser or size-budget pass.
+
+Earlier re-run, 2026-10-26, against `Cargo.lock` `ba9ed445` and `SUITE.lock` `a87e525e`,
 for one dev-only lock change (fm-counting-allocator-harness-r4-ndz8): `stats_alloc 0.1.10`
 enters as an ADR-0003 class=dev package of fmn-conformance's test binaries. No shipped package,
 version, checksum or WASM manifest changes.

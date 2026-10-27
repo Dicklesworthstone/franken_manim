@@ -95,13 +95,19 @@ const TEXT_CENSUS_WITHIN_5_PERCENT_FLOOR: usize = 3733;
 /// The same at 10%: 3743 at cc470d1a.
 const TEXT_CENSUS_WITHIN_10_PERCENT_FLOOR: usize = 3743;
 
-/// Paragraph census strings within 5% of TeX (widest line and total
-/// height), of the text-mode corpus strings that are multi-line or wider
-/// than the Reference's 345 pt line (fm-texttext-line-breaking-r11-bfdx).
-/// PARAGRAPH_FLOOR_HISTORY_5
-const PARAGRAPH_CENSUS_WITHIN_5_PERCENT_FLOOR: usize = 0; // MEASURING: set to the measured count before any commit
-/// The same at 10%: PARAGRAPH_FLOOR_HISTORY_10
-const PARAGRAPH_CENSUS_WITHIN_10_PERCENT_FLOOR: usize = 0; // MEASURING: set to the measured count before any commit
+/// Paragraph census strings within 5% of TeX (the widest line, the first
+/// line's height and the depth to the last line), of the 925 text-mode corpus
+/// strings that are multi-line or wider than the Reference's 345 pt line and
+/// that TeX typesets alone (fm-texttext-line-breaking-r11-bfdx): 915 when
+/// first measured (franken_markdown 450111a4), covering 946 of their 956
+/// occurrences. Of the 10 misses, eight set display mathematics (`$$…$$`,
+/// `align*`) inside the paragraph, which TeX sets between display skips and
+/// fmd-math sets inline; one is `\Large`'s optical size and one the EC fonts'
+/// kerning (fm-q364). Raise it when layout improves; never lower it to land
+/// a change.
+const PARAGRAPH_CENSUS_WITHIN_5_PERCENT_FLOOR: usize = 915;
+/// The same at 10%: 916 at 450111a4.
+const PARAGRAPH_CENSUS_WITHIN_10_PERCENT_FLOOR: usize = 916;
 
 fn rows() -> Vec<OracleRow> {
     parse_oracle_fixture(ORACLE_FIXTURE).expect("the oracle fixture parses")

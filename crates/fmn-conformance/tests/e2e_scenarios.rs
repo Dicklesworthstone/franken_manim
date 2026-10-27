@@ -5266,8 +5266,9 @@ const TEXTEXT_PARAGRAPH: &str = "Every paragraph that is wider than its line bre
 /// on one axis. Under the basic pack, which has no line width, the same
 /// paragraph is one line with the same glyphs.
 fn textext_paragraph_lines_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
-    /// Each glyph's ink box, `(min, max)`, in emission order.
-    let glyphs = |pack: &str| -> Result<Vec<(Vec3, Vec3)>, ScenarioError> {
+    // Each glyph's ink box, `(min, max)`, in emission order.
+    type Ink = (fmn_core::types::Vec3, fmn_core::types::Vec3);
+    let glyphs = |pack: &'static str| -> Result<Vec<Ink>, ScenarioError> {
         let engine = fmn_library::TexEngine::new(pack, None)
             .map_err(|error| fail(format!("the {pack} engine: {error}")))?;
         let text = fmn_library::TexText::new(TEXTEXT_PARAGRAPH)
@@ -5309,7 +5310,7 @@ fn textext_paragraph_lines_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioE
             .iter()
             .map(|(min, _)| min[1])
             .fold(f64::MAX, f64::min);
-    let mut lines: Vec<Vec<(Vec3, Vec3)>> = Vec::new();
+    let mut lines: Vec<Vec<Ink>> = Vec::new();
     for glyph in &broken {
         let centre = (glyph.0[1] + glyph.1[1]) / 2.0;
         match lines.last_mut() {

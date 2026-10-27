@@ -1776,13 +1776,14 @@ mod tests {
         // 1ffcadc9 and 8667819a (fm-ew7o: \dddot as amsmath's operator over a
         // period row; \ex@ without powf), d99fee96 (the long arrows from CM
         // pieces, \binrel@'s class for \overset, amsmath's dots look-ahead),
-        // and cc470d1a (physics' function arguments in the default pack,
-        // whose macro identity gains the physics flag).
+        // cc470d1a (physics' function arguments in the default pack, whose
+        // macro identity gains the physics flag), and 450111a4 (TexText line
+        // breaking, whose macro identity gains the pack's line width).
         assert_eq!(
             [cold.digest(), cached.digest(), text.digest()].map(|digest| digest.to_string()),
             [
-                "33cd3585b642ed932c8cf41296c8949cbb152856732752c2401b6183082aa880",
-                "897ada886575ee93dbf42019a1042d3452b90a69e3fde7cc90513a2fc456f7c3",
+                "4ce8d2aeba886ebc2dbc7a7926b8829d076489242cc72ccdfcfb1f7def281e64",
+                "f79717625cd9c78d592a54ed4a0d1c193cf2c50c3f0d99bae56c70665ade87bb",
                 "0fa22e64fe9e1901eea58a596899ec843bc0d6db46f1cd91607925a50fea3e6f",
             ]
         );
