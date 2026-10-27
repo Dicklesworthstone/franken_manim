@@ -1178,11 +1178,12 @@ mod tests {
             // sub-micro shifts, at franken_markdown abbb957, then tex_overbrace
             // with cmex's brace pieces at franken_markdown 2f1e00c, then the
             // sixteen text and TeX scenes with every glyph contour turned
-            // counter-clockwise in place, fm-hc78)
+            // counter-clockwise in place, fm-hc78, then tex_overbrace with
+            // cmr10's interword space at franken_markdown 450111a4)
             // and the journaled map orientation.
             assert_eq!(
                 definition.digest().to_string(),
-                "603266670eff352dde113562915561b5f1d65693e97311d8655d6406c1dc7793"
+                "8ec942e57f908a68ac3aca6aad878743c2bb179aadf5d0cf34c6a3e54c54fdd7"
             );
         }
     }
