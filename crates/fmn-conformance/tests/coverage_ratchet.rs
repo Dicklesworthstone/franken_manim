@@ -16,11 +16,11 @@
 //! dashboard in one stroke).
 
 use fmn_conformance::ratchet::{
-    Baseline, CENSUS_FIXTURE, CorpusCounts, FallbackSummary, OracleRow, OracleSummary,
-    PARAGRAPH_CENSUS_FIXTURE, Pending, SECOND_CORPUS, SECOND_CORPUS_BASELINE, TEXT_CENSUS_FIXTURE,
-    corpus_digest, fallback_chars, fallback_dashboard_line, measure_corpus, oracle_error,
-    parse_corpus_entry, parse_oracle_fixture, parse_paragraph_fixture, parse_trend_tsv,
-    ratchet_violations, render_dashboard, run_layout_oracle, run_paragraph_oracle,
+    Baseline, CENSUS_FIXTURE, CorpusCounts, FallbackSummary, OracleCensuses, OracleRow,
+    OracleSummary, PARAGRAPH_CENSUS_FIXTURE, Pending, SECOND_CORPUS, SECOND_CORPUS_BASELINE,
+    TEXT_CENSUS_FIXTURE, corpus_digest, fallback_chars, fallback_dashboard_line, measure_corpus,
+    oracle_error, parse_corpus_entry, parse_oracle_fixture, parse_paragraph_fixture,
+    parse_trend_tsv, ratchet_violations, render_dashboard, run_layout_oracle, run_paragraph_oracle,
     run_text_layout_oracle, summarize_oracle, with_second_corpus_section,
 };
 use std::collections::{BTreeMap, HashMap};
@@ -380,12 +380,14 @@ fn recompute_and_enforce_the_ratchet() -> Result<(), String> {
             .zip(&paragraph_laid)
             .map(|(row, &laid)| oracle_error(row, laid))
             .collect();
-        let paragraph_oracle = summarize_oracle(&paragraph_rows, &paragraph_errors);
+        let censuses = OracleCensuses {
+            math: oracle,
+            text: text_oracle,
+            paragraph: summarize_oracle(&paragraph_rows, &paragraph_errors),
+        };
         bless(
             &current,
-            &oracle,
-            &text_oracle,
-            &paragraph_oracle,
+            &censuses,
             &fallback,
             &parse_pending,
             &layout_pending,
@@ -413,9 +415,7 @@ fn recompute_and_enforce_the_ratchet() -> Result<(), String> {
 
 fn bless(
     current: &Baseline,
-    oracle: &OracleSummary,
-    text_oracle: &OracleSummary,
-    paragraph_oracle: &OracleSummary,
+    censuses: &OracleCensuses,
     fallback: &FallbackSummary,
     parse_pending: &BTreeMap<String, u64>,
     layout_pending: &BTreeMap<String, u64>,
@@ -476,9 +476,7 @@ fn bless(
     };
     let dashboard = render_dashboard(
         current,
-        oracle,
-        text_oracle,
-        paragraph_oracle,
+        censuses,
         fallback,
         &to_pending(parse_pending),
         &to_pending(layout_pending),

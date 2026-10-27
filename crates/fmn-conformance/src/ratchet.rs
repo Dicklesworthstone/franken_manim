@@ -542,15 +542,25 @@ pub fn fallback_dashboard_line(f: &FallbackSummary) -> String {
     )
 }
 
+/// The TeX box oracle's censuses, whose counts the dashboard's oracle plane
+/// publishes together.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OracleCensuses {
+    /// Every math-mode string TeX typesets alone.
+    pub math: OracleSummary,
+    /// Every text-mode string the Reference sets on one line.
+    pub text: OracleSummary,
+    /// Every other text-mode string, as the Reference's paragraph.
+    pub paragraph: OracleSummary,
+}
+
 /// Render the public dashboard (numbers, construct names, hashes — never
 /// the corpus strings; §15.3) plus the trend log and the R1 escalation
 /// path.
 #[must_use]
 pub fn render_dashboard(
     baseline: &Baseline,
-    oracle: &OracleSummary,
-    text_oracle: &OracleSummary,
-    paragraph_oracle: &OracleSummary,
+    censuses: &OracleCensuses,
     fallback: &FallbackSummary,
     parse_pending: &[Pending],
     layout_pending: &[Pending],
@@ -564,6 +574,11 @@ pub fn render_dashboard(
             100.0 * part as f64 / whole as f64
         }
     };
+    let OracleCensuses {
+        math: oracle,
+        text: text_oracle,
+        paragraph: paragraph_oracle,
+    } = censuses;
     let all = oracle.plus(*text_oracle).plus(*paragraph_oracle);
     let oracle_occ = share(all.occurrences_within_5, baseline.occurrence_total);
     let oracle_uniq = share(all.within_5 as u64, baseline.unique_total);
@@ -1752,9 +1767,11 @@ mod tests {
         fallback.add(&BTreeSet::new(), 900);
         let d = render_dashboard(
             &base(),
-            &oracle,
-            &text_oracle,
-            &paragraph_oracle,
+            &OracleCensuses {
+                math: oracle,
+                text: text_oracle,
+                paragraph: paragraph_oracle,
+            },
             &fallback,
             &[Pending {
                 construct: "\\substack".to_owned(),
