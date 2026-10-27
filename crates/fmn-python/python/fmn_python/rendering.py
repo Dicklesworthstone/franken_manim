@@ -131,6 +131,7 @@ class RenderResult:
     certified: bool = False
     animation_range: tuple[int, int | None] | None = None
     audio_inputs: tuple[dict[str, Any], ...] = ()
+    image_inputs: tuple[dict[str, Any], ...] = ()
     manifest: Path | None = None
     closure_digest: str | None = None
     ffmpeg_limits: dict[str, Any] | None = None
@@ -148,6 +149,7 @@ class RenderResult:
             "certified": self.certified,
             "ffmpeg_invocations": copy.deepcopy(list(self.ffmpeg_invocations)),
             "audio_inputs": copy.deepcopy(list(self.audio_inputs)),
+            "image_inputs": copy.deepcopy(list(self.image_inputs)),
         }
         if self.animation_range is not None:
             result["animation_range"] = list(self.animation_range)
@@ -392,9 +394,10 @@ class RenderSession:
             self._state = "published"
             path, count, size, digest, engine, threads = receipt
             published_path = path
-            invocations, audio_inputs, ffmpeg_limits = (), (), None
+            invocations = tuple(copy.deepcopy(getattr(self.scene, "_render_invocations", ())))
+            image_inputs = tuple(copy.deepcopy(getattr(self.scene, "_render_image_inputs", ())))
+            audio_inputs, ffmpeg_limits = (), None
             if self.format in _VIDEO_FORMATS or self.format == "wav":
-                invocations = tuple(copy.deepcopy(self.scene._render_invocations))
                 audio_inputs = tuple(copy.deepcopy(self.scene._render_audio_inputs))
                 ffmpeg_limits = copy.deepcopy(getattr(self.scene, "_render_ffmpeg_limits", None))
             manifest_path, closure_digest = None, None
@@ -404,7 +407,8 @@ class RenderSession:
                     Path(self.destination), self.format, self.resolution,
                     self.fps, self.threads, self.seed,
                     {"path": str(path), "digest": digest,
-                     "routes": tuple(getattr(self.scene, "_render_routes", (0, 0, None)))},
+                     "routes": tuple(getattr(self.scene, "_render_routes", (0, 0, None))),
+                     "image_inputs": image_inputs},
                     sources, self.runtime_identities, _cue_assets(cues),
                 )
                 manifest_path = Path(manifest_file_str)
@@ -416,7 +420,7 @@ class RenderSession:
                 seed=self.seed, animation_range=self.animation_range,
                 certified=self.reproducible, manifest=manifest_path,
                 closure_digest=closure_digest, ffmpeg_invocations=invocations,
-                audio_inputs=audio_inputs, ffmpeg_limits=ffmpeg_limits,
+                audio_inputs=audio_inputs, image_inputs=image_inputs, ffmpeg_limits=ffmpeg_limits,
                 performance=(copy.deepcopy(getattr(self.scene, "_render_performance", None))
                              if self.format not in {"wav", "svg"} else None),
             )

@@ -57,6 +57,12 @@ _roots: tuple[str, ...] = ()
 _installed = False
 
 
+def certification_active() -> bool:
+    """Native media boundaries must also honor active certified captures."""
+    with _lock:
+        return bool(_active)
+
+
 def _library_roots() -> tuple[str, ...]:
     return tuple(str(root) + os.sep for root in library_roots())
 

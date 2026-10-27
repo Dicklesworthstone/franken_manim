@@ -244,8 +244,8 @@ pub(crate) fn decoded_image(
     })
 }
 
-/// Lazy, reusable decoder. `None` means native-only; PNG/JPEG never inspect
-/// PATH, resolve an executable or invoke a process, even when one is configured.
+/// Lazy, reusable decoder. `None` means native-only; PNG/JPEG never resolve
+/// an executable or invoke a process, even when one is configured.
 pub struct ImageDecoder {
     limits: ImageDecodeLimits,
     job_limits: JobLimits,

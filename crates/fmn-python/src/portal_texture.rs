@@ -9,7 +9,7 @@ mod surface;
 pub use surface::run_portal_gauntlet_surface_lifecycle;
 
 #[path = "portal_raster.rs"]
-mod raster;
+pub(crate) mod raster;
 
 #[path = "portal_obj.rs"]
 mod obj;
@@ -20,7 +20,7 @@ fn image(payload: &Bound<'_, PyAny>) -> PyResult<fmn_mobject::ImageResource> {
     }
     let bytes = payload.cast::<PyBytes>()?;
     // Both file-backed and in-memory callers use the same bounded decoder.
-    Ok(raster::RasterImage::decode(payload.py(), bytes)?.resource)
+    Ok(raster::RasterImage::decode(payload.py(), bytes, None, None)?.resource)
 }
 
 fn detached(target: &Bound<'_, BridgeMobject>) -> PyResult<()> {

@@ -203,6 +203,14 @@ impl FrozenRenderEntry {
 }
 
 impl FrozenRenderState {
+    /// Immutable images retained by this handoff, including prepared animation
+    /// endpoints. Hosts can validate input capabilities before worker dispatch.
+    pub fn image_resources(&self) -> impl Iterator<Item = &ImageResource> {
+        self.slots
+            .iter()
+            .filter_map(|(_, entry)| entry.as_ref()?.image.as_ref())
+    }
+
     /// Consume the handoff into a worker-local arena in the same handle domain.
     ///
     /// No callback runs here, and no updater callable or native updater state
@@ -233,6 +241,14 @@ impl FrozenRenderState {
 }
 
 impl Stage {
+    /// Immutable images retained by this arena, including saved states and
+    /// animation endpoints that may become visible during the next capture.
+    pub fn image_resources(&self) -> impl Iterator<Item = &ImageResource> {
+        self.slots
+            .iter()
+            .filter_map(|slot| slot.entry.as_ref()?.image.as_ref())
+    }
+
     /// Freeze already-observed rendering data without cloning any callbacks.
     ///
     /// Must be called on the scene owner after its updater/capture boundary.

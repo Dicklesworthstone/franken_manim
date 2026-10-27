@@ -34,12 +34,12 @@ def install_raster_animation(native):
     class RasterTransition(Animation):
         """Crossfade one native image or material, without changing its geometry.
 
-        Image inputs use the ordinary array/PNG/JPEG/path boundary and are
+        Image inputs use the ordinary array/encoded-image/path boundary and are
         frozen at construction. The starting material is captured at begin(),
         including for just-in-time Succession members. Color interpolation is
         premultiplied linear light; final endpoints keep their original bytes.
         """
-        def __init__(self, mobject, image, dark_image=None, **kwargs):
+        def __init__(self, mobject, image, dark_image=None, *, ffmpeg_bin=None, **kwargs):
             if not isinstance(mobject, (Image, Textured)):
                 raise TypeError("RasterTransition requires an ImageMobject or textured surface/mesh")
             if isinstance(mobject, Image) and dark_image is not None:
@@ -49,8 +49,8 @@ def install_raster_animation(native):
             self._raster_options = dict(kwargs)
             self._raster_plan = None
             with _editing(mobject):
-                self._raster_end, path = _source(g, image)
-                dark, dark_path = (None, None) if dark_image is None else _source(g, dark_image)
+                self._raster_end, path = _source(g, image, ffmpeg_bin)
+                dark, dark_path = (None, None) if dark_image is None else _source(g, dark_image, ffmpeg_bin)
                 if path is not None and dark_path is not None:
                     if g["_pathlib"].Path(path).resolve() == g["_pathlib"].Path(dark_path).resolve():
                         dark = None
@@ -126,16 +126,16 @@ def install_raster_animation(native):
     RasterTransition.finish, RasterTransition.abort = release_finish, release_abort
     g["_RasterAnimation"] = RasterTransition
 
-    def image_override(self, image):
-        return RasterTransition(self, image)
+    def image_override(self, image, *, ffmpeg_bin=None):
+        return RasterTransition(self, image, ffmpeg_bin=ffmpeg_bin)
 
     def pixels_override(self, pixels):
         with _editing(self):
             value = g["_RasterImage"](*_pixels(g["_np"], pixels))
         return RasterTransition(self, value)
 
-    def textures_override(self, image, dark_image=None):
-        return RasterTransition(self, image, dark_image)
+    def textures_override(self, image, dark_image=None, *, ffmpeg_bin=None):
+        return RasterTransition(self, image, dark_image, ffmpeg_bin=ffmpeg_bin)
 
     def texture_pixels_override(self, pixels, dark_pixels=None):
         with _editing(self):

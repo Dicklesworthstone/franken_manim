@@ -1,7 +1,7 @@
 """Textured surfaces and meshes on native durable image resources.
 
 The portal resolves local image paths and preserves Python object metadata.
-Atlas owns mesh normals, fmn-codec owns decoding, and Lumen owns perspective
+Atlas owns mesh normals, Reel owns governed decoding, and Lumen owns perspective
 sampling, alpha, lighting and depth. Both sides of a light/dark pair are
 immutable native resources carried by copies, snapshots and replay.
 """
@@ -89,13 +89,14 @@ def install_surface_textures(native: Any) -> None:
         with _editing(self):
             if not isinstance(uv_surface, Surface):
                 raise TypeError("TexturedSurface uv_surface must be a Surface")
+            ffmpeg_bin = kwargs.pop("ffmpeg_bin", None)
             values = options(kwargs)
-            payload, path = _source(g, image_file)
+            payload, path = _source(g, image_file, ffmpeg_bin)
             if path is not None:
                 path = str(g["_pathlib"].Path(path).resolve())
             dark, dark_payload = path, None
             if dark_image_file is not None:
-                dark_payload, dark = _source(g, dark_image_file)
+                dark_payload, dark = _source(g, dark_image_file, ffmpeg_bin)
                 if dark is not None:
                     dark = str(g["_pathlib"].Path(dark).resolve())
                 if path is not None and path == dark:
@@ -119,6 +120,7 @@ def install_surface_textures(native: Any) -> None:
         if self._is_bound():
             raise RuntimeError("a texture constructor requires a detached target")
         with _editing(self):
+            ffmpeg_bin = kwargs.pop("ffmpeg_bin", None)
             values = options(kwargs)
             # Accept the Reference's geometry protocol without importing trimesh.
             # The native mesh builder validates indices and constructs C-4 normals.
@@ -135,7 +137,7 @@ def install_surface_textures(native: Any) -> None:
                 raise ValueError("textured geometry requires one UV pair per vertex")
             if faces.dtype.kind not in "iu":
                 raise TypeError("textured geometry triangle indices must be integers")
-            payload, path = _source(g, texture_file)
+            payload, path = _source(g, texture_file, ffmpeg_bin)
             if path is not None:
                 path = str(g["_pathlib"].Path(path).resolve())
             g["_install_live_state"](self)

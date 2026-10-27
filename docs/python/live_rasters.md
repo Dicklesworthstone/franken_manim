@@ -47,6 +47,63 @@ rasters; encoded data is bounded to 64 MiB, and decode dimensions are checked
 before decompression/allocation. Bytes-like values are encoded images, not raw
 unshaped pixel arrays.
 
+### Other encoded image formats
+
+GIF, BMP, WebP and TIFF inputs use the optional, governed ffmpeg decoder when
+you supply its executable explicitly. The bytes select a recognized image
+container; a filename extension never selects a decoder. An animated image
+contributes its first frame.
+
+```python
+image = ImageMobject("diagram.webp", ffmpeg_bin="/usr/bin/ffmpeg")
+image.set_image("replacement.tiff", ffmpeg_bin="/usr/bin/ffmpeg")
+from_memory = ImageMobject.from_bytes(gif_bytes, ffmpeg_bin="/usr/bin/ffmpeg")
+
+scene.play(image.animate.set_image("next.bmp", ffmpeg_bin="/usr/bin/ffmpeg"))
+```
+
+The same keyword is accepted by `TexturedSurface`, `TexturedGeometry`,
+`set_textures` and `RasterTransition`. PNG/JPEG always use native decoding,
+including when the supplied executable is missing. A corrupt native image
+does not fall through to ffmpeg. Unsupported byte signatures and missing
+capabilities raise before the current image material is replaced.
+
+External decoding uses the native argv-only media boundary, with bounded input,
+output, pixels, time and process resources. No URL, playlist or implicit network
+lookup is accepted. The decoded output retains its dimensions and top-row-first
+RGBA orientation; it is not resized to fit an output budget.
+
+### Input receipts and reproducible rendering
+
+`RenderResult.image_inputs` records each consumed image input's container,
+dimensions, source SHA-256, normalized pixel SHA-256, raw RGBA SHA-256, source
+path when applicable, decoder identity and optional executable SHA-256. An
+image's ffmpeg invocation is also included in `RenderResult.ffmpeg_invocations`,
+including for PNG and PNG-sequence outputs. Copies share one decode receipt;
+separately executed decodes retain their separate invocation receipts.
+
+Receipts follow native immutable pixel storage through copies, deep copies,
+frame snapshots and intermediate raster transitions. Scene checkpoints also
+retain their receipts when their canonical bytes reconstruct pixel resources
+on undo or restore. Checkpoint receipt metadata is bounded to 4096 checkpoint
+digests and 65,536 source associations per live scene; it retains no pixel
+buffers. Byte-identical checkpoints retain the union of their observed input
+origins. Receipt history uses metadata-only job identities, so replacing live
+pixels does not keep the retired pixel allocations alive. Explicit RGBA inputs
+with equal dimensions, transfer encoding and pixels share one content receipt.
+
+Certified rendering accepts native PNG/JPEG and explicit RGBA inputs. It
+refuses an externally decoded live image before frame publication, even when
+the image was constructed before the render or restored from a checkpoint.
+During a certified generation, external image decoding refuses before looking
+up the executable. Source and normalized image hashes enter the certified
+input closure, including for bytes prepared before the generation.
+
+Standalone durable serialization, including a mobject pickle, stores baked
+pixels. Those reconstructed resources are reported as `embedded-rgba8`, with
+their actual pixel hashes and no original codec or executable claim. Supplying
+`get_pixel_array()` as a new input is the same explicit baking boundary.
+
 ## Light/dark materials and indexed meshes
 
 ```python

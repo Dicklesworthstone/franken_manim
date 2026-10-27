@@ -170,6 +170,7 @@ struct RasterTransition {
     end: ImageResource,
     light: Option<Plane>,
     dark: Option<Plane>,
+    constant: Option<ImageResource>,
 }
 
 #[pymethods]
@@ -208,11 +209,15 @@ impl RasterTransition {
             ));
         }
         if decoded_texels(&start, &end)? == 0 {
+            let constant = target
+                .py()
+                .detach(|| super::constant_material(&start, &end))?;
             return Ok(Self {
                 start,
                 end,
                 light: None,
                 dark: None,
+                constant: Some(constant),
             });
         }
         let light_shape = shape(&start, &end)?;
@@ -250,6 +255,7 @@ impl RasterTransition {
                     size: light_shape,
                 }),
                 dark,
+                constant: None,
             })
         })
     }
@@ -280,7 +286,11 @@ impl RasterTransition {
         left: &Bound<'_, BridgeMobject>,
         right: &Bound<'_, BridgeMobject>,
     ) -> PyResult<bool> {
-        Ok(endpoints(left, right)?.is_some_and(|(a, b)| a == self.start && b == self.end))
+        let Some((a, b)) = endpoints(left, right)? else {
+            return Ok(false);
+        };
+        Ok(super::same_resource_inputs(&a, &self.start)?
+            && super::same_resource_inputs(&b, &self.end)?)
     }
 
     #[getter]
@@ -327,7 +337,7 @@ impl RasterTransition {
         }
         let Some(light) = &self.light else {
             return Ok(RasterImage {
-                resource: self.start.clone(),
+                resource: self.constant.as_ref().unwrap_or(&self.start).clone(),
             });
         };
         py.detach(|| {
@@ -337,6 +347,7 @@ impl RasterTransition {
                     .with_dark_image(dark.sample(alpha, self.start.sampler())?)
                     .map_err(native_error)?;
             }
+            super::inherit_inputs(&resource, &[&self.start, &self.end])?;
             Ok(RasterImage { resource })
         })
     }

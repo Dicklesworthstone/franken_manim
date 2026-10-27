@@ -133,6 +133,52 @@ fn dark_only_replacement_changes_revision_and_snapshot_identity() {
 }
 
 #[test]
+fn equal_pixels_adopt_new_ownership_without_invalidating_render_identity() {
+    let make = || {
+        image([255, 0, 0])
+            .with_dark_image(image([0, 0, 255]))
+            .unwrap()
+    };
+    let original = make();
+    let incoming = make();
+    let mut stage = Stage::new();
+    let mob = stage.add(Mobject::new().with_image_resource(original.clone()));
+    let before = stage.snapshot();
+    let bytes = stage.snapshot_bytes().unwrap();
+    let revision = stage.get(mob).unwrap().image_revision();
+    assert!(!std::sync::Arc::ptr_eq(
+        &original.shared_pixels(),
+        &incoming.shared_pixels()
+    ));
+    assert!(
+        !stage
+            .set_image_resource(mob, Some(incoming.clone()))
+            .unwrap()
+    );
+    let current = stage.get(mob).unwrap().image_resource().unwrap();
+    assert!(std::sync::Arc::ptr_eq(
+        &current.shared_pixels(),
+        &incoming.shared_pixels()
+    ));
+    assert!(std::sync::Arc::ptr_eq(
+        &current.dark_image().unwrap().shared_pixels(),
+        &incoming.dark_image().unwrap().shared_pixels(),
+    ));
+    assert_eq!(stage.get(mob).unwrap().image_revision(), revision);
+    assert_eq!(stage.snapshot_bytes().unwrap(), bytes);
+    stage.restore(&before);
+    assert!(std::sync::Arc::ptr_eq(
+        &stage
+            .get(mob)
+            .unwrap()
+            .image_resource()
+            .unwrap()
+            .shared_pixels(),
+        &original.shared_pixels(),
+    ));
+}
+
+#[test]
 fn dark_digest_corruption_is_refused_even_with_a_valid_outer_checksum() {
     let dark = image([19, 37, 91]);
     let digest = dark.content_digest();

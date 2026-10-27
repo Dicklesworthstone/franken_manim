@@ -297,6 +297,12 @@ impl std::fmt::Debug for PureSegment {
 }
 
 impl PureSegment {
+    /// Images retained by the prepared begin state, before any offloaded frame
+    /// can publish. Input-capability checks must run on this complete set.
+    pub fn image_resources(&self) -> impl Iterator<Item = &fmn_mobject::ImageResource> {
+        self.data.begin.image_resources()
+    }
+
     /// Admit and freeze the already-begun native animations without retaining
     /// an Rc, updater, view or arbitrary callable in the worker representation.
     ///

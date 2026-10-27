@@ -107,6 +107,7 @@ impl SvgSession {
                 digest: report.digest,
                 invocations: Vec::new(),
                 audio_inputs: Vec::new(),
+                image_inputs: Vec::new(),
                 routes: crate::PortalRoutes::default(),
             },
             "native-svg".to_owned(),

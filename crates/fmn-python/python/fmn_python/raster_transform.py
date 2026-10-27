@@ -148,7 +148,8 @@ def install_raster_transform(native):
                 raise ValueError('Transform material family exceeds its 256 MiB decoded endpoint budget')
             if old is not None and old.matches(start, end):
                 retained[key] = old
-            elif cost or old is not None:
+            elif (cost or old is not None
+                  or not g['_raster_images_equal'](start, end, include_inputs=True)):
                 pending[key] = (start, end)
             else:
                 # An unchanged material is not this animation's write axis.
@@ -229,7 +230,7 @@ def install_raster_transform(native):
         if len(a) != len(b):
             return any(Plan.between(obj, obj) is not None for obj in (*a, *b))
         for start, end in zip(a, b):
-            if not g['_raster_images_equal'](start, end):
+            if not g['_raster_images_equal'](start, end, include_inputs=True):
                 return True
             if (start.has_updaters() or end.has_updaters()) and Plan.between(start, start) is not None:
                 return True

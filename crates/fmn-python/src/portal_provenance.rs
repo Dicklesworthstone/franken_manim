@@ -169,6 +169,59 @@ fn scene_read_items(reads: Vec<(String, String)>) -> PyResult<Vec<ClosureItem>> 
         .collect()
 }
 
+/// Native receipts cover images prepared before a certified generation and
+/// in-memory bytes that do not produce a Python filesystem audit event.
+fn image_input_items(inputs: Option<Bound<'_, PyAny>>) -> PyResult<Vec<ClosureItem>> {
+    let Some(inputs) = inputs else {
+        return Ok(Vec::new());
+    };
+    let inputs: Vec<Bound<'_, PyDict>> = inputs.extract()?;
+    if inputs.len() > MAX_SCENE_READS {
+        return Err(PyValueError::new_err(
+            "image inputs exceed the 4096-input budget",
+        ));
+    }
+    let mut items = std::collections::BTreeMap::new();
+    for input in inputs {
+        let field = |name| -> PyResult<String> {
+            input
+                .get_item(name)?
+                .ok_or_else(|| PyValueError::new_err(format!("missing image receipt {name}")))?
+                .extract()
+        };
+        let format = field("container")?;
+        let decoder = field("decoder")?;
+        if !matches!(
+            (format.as_str(), decoder.as_str()),
+            ("png" | "jpeg", "native") | ("rgba8", "embedded-rgba8")
+        ) {
+            return Err(CapabilityError::new_err(
+                "certified image inputs require native PNG/JPEG or explicitly baked RGBA pixels",
+            ));
+        }
+        for (field_name, kind) in [
+            ("source_sha256", format.as_str()),
+            ("pixel_sha256", "normalized-rgba8"),
+        ] {
+            let hex = field(field_name)?;
+            let digest =
+                Digest::from_hex(&hex).map_err(|error| PyValueError::new_err(error.to_string()))?;
+            let path = format!("image/{}/{kind}", digest.to_hex());
+            if let std::collections::btree_map::Entry::Vacant(entry) = items.entry(path.clone()) {
+                let item = ClosureItem::digest_input(
+                    6,
+                    path.clone(),
+                    digest,
+                    "native image input receipt",
+                )
+                .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+                entry.insert(item);
+            }
+        }
+    }
+    Ok(items.into_values().collect())
+}
+
 pub(crate) fn adjacent_manifest_destination(artifact: &Path) -> Result<PathBuf, String> {
     let leaf = artifact.file_name().ok_or_else(|| {
         format!(
@@ -473,6 +526,8 @@ pub(crate) fn _portal_publish_manifest(
     // content and basename, so equal inputs give equal closures on any host.
     let read_items = scene_read_items(scene_reads.unwrap_or_default())?;
     let read_count = read_items.len();
+    let image_items = image_input_items(artifact_report.get_item("image_inputs")?)?;
+    let image_count = image_items.len();
 
     // Fonts: every face compiled into the extension is a C6 byte input, as
     // on the native route (bundling is not an exemption).
@@ -490,32 +545,45 @@ pub(crate) fn _portal_publish_manifest(
         })
         .collect::<PyResult<Vec<_>>>()?;
     let face_count = bundled_faces.len() as u64;
-    let c6 = match (cue_count, read_count) {
-        (0, 0) => ClosureItem::structural(
+    let c6 = if image_count != 0 {
+        ClosureItem::structural(
             6,
-            "no asset reads on the portal route; bundled fonts listed",
+            "native image inputs, scene file and sound-cue reads; bundled fonts listed",
             &[
-                StructuralField::Absent("asset reads"),
-                StructuralField::U64(face_count),
-            ],
-        ),
-        (_, 0) => ClosureItem::structural(
-            6,
-            "scene sound-cue asset reads on the portal route; bundled fonts listed",
-            &[
-                StructuralField::U64(cue_count as u64),
-                StructuralField::U64(face_count),
-            ],
-        ),
-        _ => ClosureItem::structural(
-            6,
-            "scene file and sound-cue asset reads on the portal route; bundled fonts listed",
-            &[
+                StructuralField::U64(image_count as u64),
                 StructuralField::U64(cue_count as u64),
                 StructuralField::U64(read_count as u64),
                 StructuralField::U64(face_count),
             ],
-        ),
+        )
+    } else {
+        match (cue_count, read_count) {
+            (0, 0) => ClosureItem::structural(
+                6,
+                "no asset reads on the portal route; bundled fonts listed",
+                &[
+                    StructuralField::Absent("asset reads"),
+                    StructuralField::U64(face_count),
+                ],
+            ),
+            (_, 0) => ClosureItem::structural(
+                6,
+                "scene sound-cue asset reads on the portal route; bundled fonts listed",
+                &[
+                    StructuralField::U64(cue_count as u64),
+                    StructuralField::U64(face_count),
+                ],
+            ),
+            _ => ClosureItem::structural(
+                6,
+                "scene file and sound-cue asset reads on the portal route; bundled fonts listed",
+                &[
+                    StructuralField::U64(cue_count as u64),
+                    StructuralField::U64(read_count as u64),
+                    StructuralField::U64(face_count),
+                ],
+            ),
+        }
     }
     .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
 
@@ -675,6 +743,7 @@ pub(crate) fn _portal_publish_manifest(
     ];
     items.extend(source_items);
     items.extend(read_items);
+    items.extend(image_items);
     items.extend(font_items);
 
     let manifest = ProvenanceManifest::new(ManifestMode::Certified, items, identity, outputs, None)
@@ -695,6 +764,45 @@ pub(crate) fn _portal_publish_manifest(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_receipts_bind_sources_and_normalized_pixels_in_certified_closure() {
+        Python::initialize();
+        Python::attach(|py| {
+            let source = fmn_hash::sha256(b"native encoded image").to_hex();
+            let pixels = fmn_hash::sha256(b"normalized dimensions, transfer and pixels").to_hex();
+            let input = PyDict::new(py);
+            input.set_item("container", "png").unwrap();
+            input.set_item("decoder", "native").unwrap();
+            input.set_item("source_sha256", &source).unwrap();
+            input.set_item("pixel_sha256", &pixels).unwrap();
+            let list = pyo3::types::PyList::new(py, [&input, &input]).unwrap();
+            let items = image_input_items(Some(list.into_any())).expect("native image closure");
+            assert_eq!(
+                items.len(),
+                2,
+                "copies share the content-addressed input closure"
+            );
+            let source_name = format!("image/{source}/png");
+            let pixels_name = format!("image/{pixels}/normalized-rgba8");
+            assert!(
+                items
+                    .iter()
+                    .any(|item| item.virtual_path.as_deref() == Some(source_name.as_str()))
+            );
+            assert!(
+                items
+                    .iter()
+                    .any(|item| item.virtual_path.as_deref() == Some(pixels_name.as_str()))
+            );
+            input.set_item("decoder", "ffmpeg").unwrap();
+            let list = pyo3::types::PyList::new(py, [&input]).unwrap();
+            assert!(
+                image_input_items(Some(list.into_any())).is_err(),
+                "external products cannot enter a native certificate"
+            );
+        });
+    }
 
     #[test]
     fn pinned_toolchain_is_present() {

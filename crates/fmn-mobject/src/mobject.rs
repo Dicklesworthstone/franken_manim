@@ -251,6 +251,14 @@ impl ImageResource {
         &self.pixels
     }
 
+    /// Share immutable pixel storage without copying it. Host input receipts
+    /// can follow this allocation through copies and in-memory snapshots
+    /// without changing the resource's rendered identity or durable format.
+    #[must_use]
+    pub fn shared_pixels(&self) -> Arc<[u8]> {
+        Arc::clone(&self.pixels)
+    }
+
     /// SHA-256 of the raw pixel bytes, suitable for `fmn-cache` addressing.
     #[must_use]
     pub const fn content_digest(&self) -> Digest {

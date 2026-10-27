@@ -840,6 +840,10 @@ impl Entry {
 
     fn replace_image_resource(&mut self, image: Option<ImageResource>) -> bool {
         if self.image == image {
+            // Equal rendered pixels still admit the caller's immutable
+            // allocation: host input receipts may follow its lifetime. Keep
+            // cache/revision identity stable while preserving that ownership.
+            self.image = image;
             return false;
         }
         self.image = image;

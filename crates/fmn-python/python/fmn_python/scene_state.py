@@ -119,6 +119,12 @@ def install_scene_state(native: Any) -> None:
     State, Scene, np = g["SceneState"], g["Scene"], g["_np"]
     original_restore = State.restore_scene
 
+    def images_match(left, right):
+        # Equal pixels can come from different decoder jobs. A reused mirror
+        # must retain the current input origin, including partial checkpoints
+        # whose restoration uses mirrors instead of native checkpoint bytes.
+        return g["_raster_images_equal"](left, right, include_inputs=True)
+
     def initialize(self, scene, ignore=None):
         if not isinstance(scene, Scene):
             raise TypeError("SceneState scene must be a Scene")
@@ -148,7 +154,7 @@ def install_scene_state(native: Any) -> None:
                     and self._root_topologies[id(root)] == old_topologies.get(id(root))
                     and attributes_match(self, previous, id(root))
                     and bool(prior.looks_identical(root))
-                    and _same_mobject(np, root, prior, g["_raster_images_equal"])):
+                    and _same_mobject(np, root, prior, images_match)):
                 saved = prior
             else:
                 saved = root.copy()
@@ -213,7 +219,7 @@ def install_scene_state(native: Any) -> None:
         # A plain dict equality loses root order, which controls compositing.
         return (len(left) == len(right)
                 and self._root_topologies == state._root_topologies
-                and all(a is b and _same_mobject(np, ac, bc, g["_raster_images_equal"])
+                and all(a is b and _same_mobject(np, ac, bc, images_match)
                         for (a, ac), (b, bc) in zip(left.items(), right.items()))
                 and scene_attributes.same(np,
                     _projection(self._attributes, self._uniforms),
@@ -231,7 +237,7 @@ def install_scene_state(native: Any) -> None:
             raise TypeError("n_changes expects a SceneState")
         if self is state:
             live, live_uniforms = scene_attributes.capture_projection(self._attribute_members, np)
-            count = sum(not _same_mobject(np, mob, saved, g["_raster_images_equal"])
+            count = sum(not _same_mobject(np, mob, saved, images_match)
                         or not scene_attributes.same(np,
                             _projection(self._attributes, self._uniforms,
                                         [key for key, _ in self._root_topologies[id(mob)]]),
@@ -253,7 +259,7 @@ def install_scene_state(native: Any) -> None:
         count = sum(mob not in other
                     or self._root_topologies[id(mob)] != state._root_topologies.get(id(mob))
                     or not attributes_match(self, state, id(mob))
-                    or not _same_mobject(np, saved, other[mob], g["_raster_images_equal"])
+                    or not _same_mobject(np, saved, other[mob], images_match)
                     for mob, saved in self.mobjects_to_copies.items())
         count += int(not camera_matches(self, state))
         # Cross-root container aliasing can change while each root still has

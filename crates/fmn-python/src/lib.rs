@@ -43,6 +43,9 @@ mod portal_streamlines;
 mod portal_studio;
 mod portal_svg;
 mod portal_texture;
+#[cfg(feature = "gauntlet")]
+pub use portal_raster::run_portal_gauntlet_image_inputs;
+use portal_texture::raster as portal_raster;
 mod portal_typography;
 mod portal_video;
 #[cfg(any(test, feature = "gauntlet"))]
@@ -180,6 +183,7 @@ struct PortalArtifactReport {
     digest: fmn_output::ArtifactDigest,
     invocations: Vec<fmn_output::InvocationReport>,
     audio_inputs: Vec<portal_audio::PortalAudioInput>,
+    image_inputs: Vec<portal_raster::PortalImageInput>,
     /// Frames rasterized on Lumen's retained planar route and on the camera
     /// route (fm-sq8.11).
     routes: PortalRoutes,
@@ -239,6 +243,7 @@ impl From<NativeArtifactReport> for PortalArtifactReport {
             digest: report.digest,
             invocations: Vec::new(),
             audio_inputs: Vec::new(),
+            image_inputs: Vec::new(),
             routes: PortalRoutes::default(),
         }
     }
@@ -420,6 +425,7 @@ impl PortalRenderSession {
                         digest: report.digest,
                         invocations: audio.invocations(),
                         audio_inputs: std::mem::take(&mut audio.inputs),
+                        image_inputs: Vec::new(),
                         routes: PortalRoutes::default(),
                     },
                     "native-sound-mixer".to_owned(),
@@ -442,6 +448,7 @@ struct PortalFrameSession {
     receipt: PortalReceipt,
     soundtrack: Option<fmn_output::FfmpegSoundtrack>,
     audio: Box<portal_audio::PortalAudio>,
+    image_inputs: portal_raster::ImageInputs,
     light_mob: Option<Mob>,
     conversion: portal_video::RetainedConversion,
     opaque_video: bool,
@@ -803,6 +810,7 @@ impl PortalFrameSession {
                 receipt,
                 soundtrack,
                 audio,
+                image_inputs: portal_raster::ImageInputs::new(reproducible),
                 light_mob: None,
                 conversion,
                 opaque_video,
@@ -865,6 +873,7 @@ impl PortalFrameSession {
         preparation_start: Instant,
         mut reservation: fmn_output::FrameReservation,
     ) -> Result<(), fmn_scene::IntegrationError> {
+        self.image_inputs.observe(stage.image_resources())?;
         if let Some(light) = self.light_mob {
             if stage.get(light).is_none() {
                 return Err(fmn_scene::IntegrationError::new(
@@ -969,6 +978,9 @@ impl PortalFrameSession {
         &mut self,
         segment: &fmn_anim::pure_frame::PureSegment,
     ) -> Result<Vec<f64>, fmn_scene::IntegrationError> {
+        // Inspect all prepared endpoint materials before any prefix worker
+        // can publish a frame, including images decoded before this session.
+        self.image_inputs.observe(segment.image_resources())?;
         let output = self
             .emitter
             .as_ref()
@@ -1075,6 +1087,7 @@ impl PortalFrameSession {
                     digest: report.boundary.artifact_digest,
                     invocations: report.boundary.invocations,
                     audio_inputs: Vec::new(),
+                    image_inputs: Vec::new(),
                     routes: PortalRoutes::default(),
                 }
             }
@@ -1086,6 +1099,10 @@ impl PortalFrameSession {
             .invocations
             .splice(index..index, self.audio.invocations());
         report.audio_inputs = std::mem::take(&mut self.audio.inputs);
+        report
+            .invocations
+            .splice(0..0, self.image_inputs.invocations());
+        report.image_inputs = std::mem::take(&mut self.image_inputs.inputs);
         report.routes = self.routes;
         Ok((report, renderer.engine.closure_string(), renderer.threads))
     }
@@ -1218,6 +1235,8 @@ struct PyScene {
     render: Arc<Mutex<Option<PortalRenderSession>>>,
     render_invocations: Vec<fmn_output::InvocationReport>,
     render_audio_inputs: Vec<portal_audio::PortalAudioInput>,
+    render_image_inputs: Vec<portal_raster::PortalImageInput>,
+    image_checkpoints: RefCell<portal_raster::ImageCheckpoints>,
     render_ffmpeg_limits: Option<fmn_output::FfmpegLimitsReport>,
     /// The last render's frame routes (fm-sq8.11).
     render_routes: PortalRoutes,
@@ -1853,6 +1872,8 @@ pub(crate) fn install_pristine_arena(
         owner.engine = Rc::clone(&replacement);
         owner.render_invocations.clear();
         owner.render_audio_inputs.clear();
+        owner.render_image_inputs.clear();
+        *owner.image_checkpoints.borrow_mut() = portal_raster::ImageCheckpoints::default();
         owner.render_ffmpeg_limits = None;
     }
     if let (Some((proxy, _)), Some((old_mob, new_mob))) = (frame, carried) {
@@ -8586,6 +8607,8 @@ impl PyScene {
             render: Arc::new(Mutex::new(None)),
             render_invocations: Vec::new(),
             render_audio_inputs: Vec::new(),
+            render_image_inputs: Vec::new(),
+            image_checkpoints: RefCell::new(portal_raster::ImageCheckpoints::default()),
             render_ffmpeg_limits: None,
             render_routes: PortalRoutes::default(),
         })
@@ -8800,6 +8823,7 @@ impl PyScene {
             let mut scene = slf.borrow_mut();
             scene.render_invocations = report.invocations;
             scene.render_audio_inputs = report.audio_inputs;
+            scene.render_image_inputs = report.image_inputs;
             scene.render_routes = report.routes;
         }
         Ok((
@@ -8876,6 +8900,11 @@ impl PyScene {
     #[getter]
     fn _render_audio_inputs(slf: &Bound<'_, Self>) -> PyResult<Py<PyList>> {
         portal_audio::input_facts(slf)
+    }
+
+    #[getter]
+    fn _render_image_inputs(slf: &Bound<'_, Self>) -> PyResult<Py<PyList>> {
+        portal_raster::input_facts(slf)
     }
 
     /// Admitted resource policy for the current or most recent output generation.
@@ -9933,10 +9962,14 @@ impl PyScene {
     }
 
     fn _checkpoint_bytes(&self) -> PyResult<Vec<u8>> {
-        self.engine
-            .borrow_mut()
+        let mut engine = self.engine.borrow_mut();
+        let bytes = engine
             .state_bytes()
-            .map_err(|error| PyRuntimeError::new_err(error.to_string()))
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        self.image_checkpoints
+            .borrow_mut()
+            .capture(&bytes, engine.stage().image_resources())?;
+        Ok(bytes)
     }
 
     /// Restore the canonical SceneState document captured by
@@ -9948,6 +9981,9 @@ impl PyScene {
         engine
             .restore_state_bytes(&bytes)
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        self.image_checkpoints
+            .borrow()
+            .restore(&bytes, engine.stage().image_resources())?;
         let restored = engine
             .state_bytes()
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;

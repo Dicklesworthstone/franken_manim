@@ -3965,6 +3965,13 @@ fn python_textured_surfaces_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenario
         .with_artifact("textures_last.png", last))
 }
 
+fn python_image_inputs_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let checks = manimlib::run_portal_gauntlet_image_inputs()
+        .map_err(|error| fail(format!("Python image input lifecycle: {error}")))?;
+    ctx.event(LogEvent::new("e2e.python.image_inputs").field("checks", checks));
+    Ok(RunOutcome::ok().with_counter("image_input_checks", checks))
+}
+
 fn python_scene_console_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let checks = manimlib::run_portal_gauntlet_console()
         .map_err(|error| fail(format!("Python scene console: {error}")))?;
@@ -11552,6 +11559,20 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             ],
         )],
     ));
+    specs.push(
+        spec(
+            "lifecycle.python_image_inputs.v1",
+            ScenarioClass::LifecycleDrill,
+            Surface::PythonInProcess,
+            Invocation::new(python_image_inputs_run),
+            vec![Assertion::ExitCode(0), counter_eq("image_input_checks", 3)],
+            vec![LogExpect::span_present(
+                "e2e.python.image_inputs",
+                vec![FieldPred::u64_eq("checks", 3)],
+            )],
+        )
+        .tier(Tier::Fast),
+    );
     specs.push(spec(
         "render_matrix.python_surface_mesh.v1",
         ScenarioClass::RenderMatrix,
@@ -13305,6 +13326,16 @@ fn python_textured_surfaces_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.python_textured_surfaces.v1")
         .expect("textured surface scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn python_image_inputs_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.python_image_inputs.v1")
+        .expect("Python image input lifecycle is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

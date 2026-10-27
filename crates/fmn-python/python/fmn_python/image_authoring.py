@@ -1,7 +1,8 @@
 """In-memory images and live pixels over immutable native raster resources.
 
 Array conversion is an explicit input boundary, not an image codec or renderer.
-PNG/JPEG decoding, texture storage, revisions, copies and snapshots stay native.
+PNG/JPEG decode natively; GIF/BMP/WebP/TIFF require explicit ``ffmpeg_bin``.
+Texture storage, revisions, copies and snapshots stay native.
 Input arrays and returned arrays never become writable aliases of live pixels.
 """
 from __future__ import annotations
@@ -45,8 +46,12 @@ def _encoded(value):
     return bytes(value)
 
 
-def _source(g, value):
+def _source(g, value, ffmpeg_bin=None):
     """Prepare one raster and informational path without touching a target."""
+    if ffmpeg_bin is not None:
+        ffmpeg_bin = os.fsdecode(os.fspath(ffmpeg_bin))
+        if not ffmpeg_bin or "\0" in ffmpeg_bin:
+            raise ValueError("ffmpeg_bin must be nonempty and contain no NUL")
     if isinstance(value, g["_RasterImage"]):
         return value, None
     if isinstance(value, (str, os.PathLike)):
@@ -55,9 +60,11 @@ def _source(g, value):
         path = g["_resolve_raster_image_path"](os.fsdecode(os.fspath(value)))
         with path.open("rb") as stream:
             encoded = stream.read(_MAX_ENCODED_BYTES + 1)
-        return g["_RasterImage"].decode(_encoded(encoded)), str(path)
+        return g["_RasterImage"].decode(
+            _encoded(encoded), ffmpeg_bin=ffmpeg_bin, source_path=str(path),
+        ), str(path)
     if isinstance(value, (bytes, bytearray, memoryview)):
-        return g["_RasterImage"].decode(_encoded(value)), None
+        return g["_RasterImage"].decode(_encoded(value), ffmpeg_bin=ffmpeg_bin), None
     return g["_RasterImage"](*_pixels(g["_np"], value)), None
 
 
@@ -110,6 +117,7 @@ def install_image_authoring(native):
             fixed = bool(kwargs.pop("is_fixed_in_frame", False))
             depth = bool(kwargs.pop("depth_test", False))
             color = kwargs.pop("color", None)
+            ffmpeg_bin = kwargs.pop("ffmpeg_bin", None)
             if kwargs:
                 raise TypeError("ImageMobject() got unexpected keyword arguments: " + ", ".join(sorted(kwargs)))
             height = float(height)
@@ -118,7 +126,7 @@ def install_image_authoring(native):
                 raise ValueError("image height/opacity must be finite and f32-representable; height must be positive")
             if not -(1 << 31) <= z_index < (1 << 31):
                 raise ValueError("image z_index must fit a signed 32-bit integer")
-            raster, path = _source(g, filename)
+            raster, path = _source(g, filename, ffmpeg_bin)
             width, pixel_height = raster.size
             if height * width / pixel_height > np.finfo(np.float32).max:
                 raise ValueError("image aspect ratio produces an unrepresentable scene width")
@@ -150,12 +158,18 @@ def install_image_authoring(native):
         return cls(raster, height=height, **kwargs)
 
     def from_bytes(cls, encoded, height=4.0, **kwargs):
-        """Construct from bounded native PNG/JPEG bytes, without filesystem I/O."""
-        if not isinstance(encoded, (bytes, bytearray, memoryview)):
-            raise TypeError("encoded image must be PNG/JPEG bytes")
-        return cls(g["_RasterImage"].decode(_encoded(encoded)), height=height, **kwargs)
+        """Construct from encoded bytes; exotic formats require ffmpeg_bin.
 
-    def set_image(self, image):
+        PNG/JPEG always decode natively. GIF/BMP/WebP/TIFF use the bounded
+        native media boundary only when an executable is explicitly supplied.
+        Animated inputs contribute their first frame.
+        """
+        if not isinstance(encoded, (bytes, bytearray, memoryview)):
+            raise TypeError("encoded image must be bytes, bytearray or memoryview")
+        raster, _ = _source(g, encoded, kwargs.pop("ffmpeg_bin", None))
+        return cls(raster, height=height, **kwargs)
+
+    def set_image(self, image, *, ffmpeg_bin=None):
         """Replace raster content, retaining geometry, UVs, opacity and identity.
 
         Pixel dimensions may change without resizing or reorienting the scene
@@ -163,7 +177,7 @@ def install_image_authoring(native):
         A failed preparation does not replace the current native resource.
         """
         with _editing(self):
-            raster, path = _source(g, image)
+            raster, path = _source(g, image, ffmpeg_bin)
             g["_replace_raster_image"](self, raster)
             width, height = raster.size
             vars(self).update(image_path=path, pixel_width=width, pixel_height=height)
@@ -279,15 +293,16 @@ def install_image_authoring(native):
 
     _method(g["Mobject"], "looks_identical", looks_identical)
 
-    def set_textures(self, image, dark_image=None):
+    def set_textures(self, image, dark_image=None, *, ffmpeg_bin=None):
         """Prepare and replace a whole material atomically; None removes the pair.
 
-        Both images may be arrays, bounded PNG/JPEG bytes, or local paths.
+        Both images may be arrays, encoded bytes, or local paths. Exotic
+        formats require an explicitly supplied ffmpeg_bin executable.
         No geometry, UV, opacity, lighting, child or updater state is rebuilt.
         """
         with _editing(self):
-            light, path = _source(g, image)
-            dark, dark_path = (None, path) if dark_image is None else _source(g, dark_image)
+            light, path = _source(g, image, ffmpeg_bin)
+            dark, dark_path = (None, path) if dark_image is None else _source(g, dark_image, ffmpeg_bin)
             if path is not None and dark_path is not None:
                 if g["_pathlib"].Path(path).resolve() == g["_pathlib"].Path(dark_path).resolve():
                     dark = None
