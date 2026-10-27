@@ -65,6 +65,26 @@ fn decode_argv(
     argv
 }
 
+fn read_bounded_artifact(
+    reader: impl Read,
+    cap: u64,
+) -> Result<Vec<u8>, BoundaryError> {
+    let mut bytes = Vec::new();
+    reader
+        .take(cap.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|e| BoundaryError::Workdir {
+            detail: format!("read bounded decoded image: {e}"),
+        })?;
+    if bytes.len() as u64 > cap {
+        return Err(BoundaryError::ArtifactOversized {
+            bytes: bytes.len() as u64,
+            max: cap,
+        });
+    }
+    Ok(bytes)
+}
+
 impl Boundary {
     /// Decode one immutable image byte snapshot to a native RGBA8 raster.
     /// The first frame is selected for animated inputs. No path is reopened,
@@ -136,19 +156,7 @@ impl Boundary {
             let file = File::open(&artifact).map_err(|e| BoundaryError::Workdir {
                 detail: format!("read decoded image: {e}"),
             })?;
-            let mut png = Vec::new();
-            file.take(cap + 1)
-                .read_to_end(&mut png)
-                .map_err(|e| BoundaryError::Workdir {
-                    detail: format!("read bounded decoded image: {e}"),
-                })?;
-            if png.len() as u64 >= cap {
-                return Err(BoundaryError::ArtifactOversized {
-                    bytes: png.len() as u64,
-                    max: cap,
-                }
-                .into());
-            }
+            let png = read_bounded_artifact(file, cap)?;
             let image = fmn_codec::decode_png(&png, &limits.png_limits())
                 .map_err(ImageDecodeError::NativePng)?;
             let report = invocation_report(
@@ -204,5 +212,22 @@ mod tests {
                     .any(|v| ["-vf", "-s", "-filter_complex"].contains(&v.as_str()))
             );
         }
+    }
+
+    #[test]
+    fn decoded_artifact_limit_is_inclusive() {
+        use std::io::Cursor;
+
+        let exact = vec![17_u8; 64];
+        assert_eq!(
+            read_bounded_artifact(Cursor::new(exact.clone()), 64).unwrap(),
+            exact
+        );
+
+        let oversized = read_bounded_artifact(Cursor::new(vec![23_u8; 65]), 64).unwrap_err();
+        assert!(matches!(
+            oversized,
+            BoundaryError::ArtifactOversized { bytes: 65, max: 64 }
+        ));
     }
 }
