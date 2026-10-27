@@ -32,6 +32,12 @@ fmn-platform = { workspace = true, features = ["exact-process"] }
 # Off by default so the native-codec facade keeps no process substrate;
 # callers may instead inject their own `FfmpegCapability`.
 ffmpeg = ["fmn-platform/exact-process", "fmn-output/exact-process"]
+# The steady-state allocation harness's planted defect
+# (fm-counting-allocator-harness-r4-ndz8): every captured frame then makes
+# `rendering::PLANTED_FRAME_ALLOCATIONS` throwaway heap allocations, zero
+# unless the harness sets it. Only fmn-conformance's dev-dependency enables
+# it; no shipped artifact does.
+planted-frame-allocation = []
 
 # `cargo test` runs the explainer's own unit tests (its argument parser);
 # examples are otherwise only compiled, never tested.

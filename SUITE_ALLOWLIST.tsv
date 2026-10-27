@@ -359,6 +359,12 @@ zeroize	1.9.0	crates-io	e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0
 zeroize_derive	1.5.0	crates-io	3c50655cbb0fe3fc43170059e702f1ce5e19b84cec58dc87b037a09935c2f328	-	Apache-2.0 OR MIT	no	yes	no	no	expansion	dev	fm-3df asupersync LabRuntime deterministic scheduler harness; test-only closure, never shipped	fm	with-asupersync-pin
 zmij	1.0.23	crates-io	29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b	-	MIT	yes	no	no	no	expansion	dev	fm-3df asupersync LabRuntime deterministic scheduler harness; test-only closure, never shipped	fm	with-asupersync-pin
 
+# --- PG-6 process-level allocation counter (ADR-0003 class=dev, fm-counting-allocator-harness-r4-ndz8) ---
+# --- A counting global allocator needs `unsafe impl GlobalAlloc`, which D3 forbids in project code.  ---
+# --- Audited 2026-10-26 (0.1.10, 283 lines): its only unsafe is one pass-through GlobalAlloc impl    ---
+# --- forwarding each call unchanged to the inner allocator after atomic counter updates; no deps.     ---
+stats_alloc	0.1.10	crates-io	5c0e04424e733e69714ca1bbb9204c1a57f09f5493439520f9f68c132ad25eec	-	MIT	no	no	no	no	expansion	dev	PG-6 steady-state allocation counter for test binaries (tests/steady_state_allocations.rs); audited pass-through GlobalAlloc; test-only closure, never shipped	fm	deliberate+gauntlet
+
 # --- fm-ntp fuzz tier (ADR-0003 class=fuzz): the cargo-fuzz harness for the ---
 # --- fmn-codec untrusted-input parsers. Non-member crate, own lockfile       ---
 # --- (fuzz/Cargo.lock), scheduled job only — unreachable from any shipped    ---

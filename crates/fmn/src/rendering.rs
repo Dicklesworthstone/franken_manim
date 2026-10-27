@@ -85,6 +85,16 @@ pub use fmn_output::{EmitterReport, JobLimits, NativeArtifactReport};
 pub use fmn_render::{CameraConfig, CameraFrame};
 pub use fmn_runtime::ExecutionPlan;
 
+/// The steady-state allocation harness's planted defect
+/// (fm-counting-allocator-harness-r4-ndz8): each frame the native pipeline
+/// captures makes this many throwaway heap allocations on the scene owner.
+/// Zero unless the harness sets it; compiled only with the test-only
+/// `planted-frame-allocation` feature.
+#[cfg(feature = "planted-frame-allocation")]
+#[doc(hidden)]
+pub static PLANTED_FRAME_ALLOCATIONS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 /// Read optional `file_writer` video controls after configuration layering.
 ///
 /// Both native front doors use the same typed encoder catalogs. This performs

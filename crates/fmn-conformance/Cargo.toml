@@ -62,6 +62,14 @@ fmn-python = { workspace = true, features = ["gauntlet"] }
 # The browser player's frame path for the semantic sanity oracles
 # (tests/semantic_oracles.rs, fm-5wq.46), run natively.
 fmn-wasm = { path = "../fmn-wasm" }
+# PG-6's process-level allocation counter (tests/steady_state_allocations.rs,
+# fm-counting-allocator-harness-r4-ndz8): a counting global allocator needs an
+# `unsafe impl GlobalAlloc`, which D3's forbid rules out in project code, so it
+# enters as an audited class=dev row under ADR-0003. Test binaries only.
+stats_alloc = "=0.1.10"
+# The same harness's planted defect: a per-frame allocation behind fmn's
+# test-only feature, zero unless the harness sets it.
+fmn = { workspace = true, features = ["planted-frame-allocation"] }
 
 [lints]
 workspace = true

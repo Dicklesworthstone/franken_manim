@@ -843,6 +843,10 @@ impl NativeFramePipeline {
     }
 
     fn capture_ready(&mut self, frame: NativeFrame, sequence: u64) -> Result<(), RenderError> {
+        #[cfg(feature = "planted-frame-allocation")]
+        for _ in 0..super::PLANTED_FRAME_ALLOCATIONS.load(std::sync::atomic::Ordering::Relaxed) {
+            std::hint::black_box(Vec::<u8>::with_capacity(1));
+        }
         let stream = self
             .stream
             .as_mut()
