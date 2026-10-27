@@ -428,6 +428,31 @@ fn submobjects_follow_tex_emission_order() {
     assert_eq!(chars.iter().collect::<String>(), "N∑n=1n");
 }
 
+/// fm-fm-long-arrows-joinrel-r11-b2c5: TeX builds the long arrows from
+/// shorter relations, and the Reference's Tex has their pieces as separate
+/// submobjects (fm-aia1's piece-count table), so every later index matches.
+#[test]
+fn long_arrows_are_the_references_pieces() {
+    let e = engine();
+    for (src, pieces) in [
+        (r"a\longrightarrow b", "a−→b"),
+        (r"a\Longrightarrow b", "a=⇒b"),
+        (r"a\longleftrightarrow b", "a←→b"),
+        (r"x\mapsto y", "x↦→y"),
+    ] {
+        let t = e.typeset(Mode::Math(Style::Display), src).unwrap();
+        let chars: String = t
+            .subs
+            .iter()
+            .map(|sub| match sub.prim {
+                fmn_tex::Prim::Glyph(g) => t.layout.glyphs[g].ch,
+                _ => '?',
+            })
+            .collect();
+        assert_eq!(chars, pieces, "{src}");
+    }
+}
+
 #[test]
 fn the_codec_refuses_a_broken_emission_order() {
     let e = engine();

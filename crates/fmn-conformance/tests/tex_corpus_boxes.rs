@@ -46,23 +46,30 @@ use std::path::PathBuf;
 /// authored AMS symbols and the native default-pack minus (9b457a38, fm-0byq),
 /// 556 with amsmath's \mod kern (4b705d14, fm-eo8l), captured with
 /// \if@display set as the Reference's align* sets it, 559 with amsmath's
-/// \dddot as an operator under a period row (1ffcadc9, fm-ew7o).
+/// \dddot as an operator under a period row (1ffcadc9, fm-ew7o), 565 with
+/// the long arrows from CM pieces and amsmath's dots look-ahead (d99fee96,
+/// fm-fm-long-arrows-joinrel-r11-b2c5, fm-fm-amsmath-dots-context-r11-ymdd).
 /// Raise it when layout improves; never lower it to land a change.
-const WITHIN_5_PERCENT_FLOOR: usize = 559;
+const WITHIN_5_PERCENT_FLOOR: usize = 565;
 /// The same at 10%: 315, 316, 330, 365, 367, 385, 421, 423, 437, 444, 543,
 /// 564, 565, 570 with the AMS/default-pack correction (9b457a38), 573 with
-/// amsmath's \mod (4b705d14), then 574 with its \dddot (1ffcadc9).
-const WITHIN_10_PERCENT_FLOOR: usize = 574;
+/// amsmath's \mod (4b705d14), 574 with its \dddot (1ffcadc9), then 578 with
+/// the long arrows and the dots (d99fee96).
+const WITHIN_10_PERCENT_FLOOR: usize = 578;
 
 /// Census strings within 5% of TeX's box, of the 4175 math-mode corpus strings
 /// TeX typesets alone: 4132 when the census was first measured
 /// (franken_markdown 8667819a), covering 11107 of its 11183 occurrences. The
 /// stratified sample's 559 of 585 understates it, since the sample takes four
-/// strings of every construct class however rare. Raise it when layout
-/// improves; never lower it to land a change.
-const CENSUS_WITHIN_5_PERCENT_FLOOR: usize = 4132;
-/// The same at 10%: 4157 at 8667819a.
-const CENSUS_WITHIN_10_PERCENT_FLOOR: usize = 4157;
+/// strings of every construct class however rare. 4139 (11130 occurrences)
+/// with the long arrows from CM pieces and amsmath's dots look-ahead
+/// (d99fee96): five arrow and three `(\dots)` rows enter, and `\sin(\dots)`
+/// leaves, since physics' `\sin(...)` hides the `)` from `\dots`
+/// (fm-fm-physics-trig-parens-r11-nou8). Raise it when layout improves; never
+/// lower it to land a change.
+const CENSUS_WITHIN_5_PERCENT_FLOOR: usize = 4139;
+/// The same at 10%: 4157 at 8667819a, 4161 at d99fee96.
+const CENSUS_WITHIN_10_PERCENT_FLOOR: usize = 4161;
 
 fn rows() -> Vec<OracleRow> {
     parse_oracle_fixture(ORACLE_FIXTURE).expect("the oracle fixture parses")

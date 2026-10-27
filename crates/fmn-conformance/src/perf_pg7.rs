@@ -1774,12 +1774,13 @@ mod tests {
         // the identity names the provider revision, so a test-only provider
         // commit moves it too), 4b705d14 (fm-eo8l: amsmath's \mod), and
         // 1ffcadc9 and 8667819a (fm-ew7o: \dddot as amsmath's operator over a
-        // period row; \ex@ without powf).
+        // period row; \ex@ without powf), and d99fee96 (the long arrows from
+        // CM pieces, \binrel@'s class for \overset, amsmath's dots look-ahead).
         assert_eq!(
             [cold.digest(), cached.digest(), text.digest()].map(|digest| digest.to_string()),
             [
-                "8ea6178e36ca2f454656c91e94f51b0701b50a049570af24720eb330a14c97e9",
-                "538f24ab76cbe68f25f5410d17165768a29bf370a51dd1d2a1ae1220192b881f",
+                "7e39b61bac428ca913c2f35b59cf397544e1124301df3fb81339849fbfcb283d",
+                "6577cb63677bed3639805ec31713d3112c46bc421ba49c2f93cf9629f6a2afdf",
                 "0fa22e64fe9e1901eea58a596899ec843bc0d6db46f1cd91607925a50fea3e6f",
             ]
         );

@@ -5,27 +5,23 @@ real 3b1b formula corpus typesets natively. The denominator is **frozen**
 (G0-4: `9269` distinct strings, `17711` occurrences, corpus hash
 `a8325e49e0ce78fcc735533952740e9adeaaa5cb10f9c13d73aaa3ba4bf883fc`, rules_version 1); the numbers may only rise.
 
-**Computed against franken_markdown `8667819a0a5a`.**
+**Computed against franken_markdown `d99fee964a47`.**
 
 | Plane | Occurrence-weighted | Unique-string |
 |---|---|---|
 | **Parse** | 99.994 % | 99.989 % |
 | **Parse + typeset returned Ok** | 99.994 % | 99.989 % |
-| **Layout within 5% of real TeX (oracle)** | 62.712 % | 44.579 % |
-| **Noto math or Plex Sans face usage** | 0.136 % | 0.097 % |
+| **Layout within 5% of real TeX (oracle)** | 62.842 % | 44.654 % |
+| **Noto math or Plex Sans face usage** | 0.006 % | 0.011 % |
 
-"Typeset returned Ok" means fmd-math produced a layout without an error. It does not show that the layout is right. The corpus TeX box oracle (fm-tex-layout-oracle-bkbc) lays out every math-mode corpus string TeX can typeset alone (4175 strings, 11183 occurrences) and compares each box with real TeX's: 4132 are within 5% and 4157 within 10%, covering 11107 occurrences within 5%. The oracle row counts only those verified strings against the whole corpus; text-mode strings, which this math oracle does not measure, and math fragments TeX cannot typeset alone count as unverified.
+"Typeset returned Ok" means fmd-math produced a layout without an error. It does not show that the layout is right. The corpus TeX box oracle (fm-tex-layout-oracle-bkbc) lays out every math-mode corpus string TeX can typeset alone (4175 strings, 11183 occurrences) and compares each box with real TeX's: 4139 are within 5% and 4161 within 10%, covering 11130 occurrences within 5%. The oracle row counts only those verified strings against the whole corpus; text-mode strings, which this math oracle does not measure, and math fragments TeX cannot typeset alone count as unverified.
 
 ## Noto math or Plex Sans face usage
 
-9 strings (24 occurrences) lay out with at least one glyph from Noto math or Plex Sans. Standard relations among those glyphs: 0. This includes explicitly requested sans styling and excludes bundled AMS faces. It does not measure ink fidelity. The standard relation set never falls back.
+1 strings (1 occurrences) lay out with at least one glyph from Noto math or Plex Sans. Standard relations among those glyphs: 0. This includes explicitly requested sans styling and excludes bundled AMS faces. It does not measure ink fidelity. The standard relation set never falls back.
 
 | Character | Code point | Occurrences |
 |---|---|---|
-| ⟶ | U+27F6 | 13 |
-| ⟹ | U+27F9 | 6 |
-| ⟵ | U+27F5 | 2 |
-| ⟷ | U+27F7 | 2 |
 | ∯ | U+222F | 1 |
 
 ## Pending constructs (parse plane)
@@ -85,6 +81,7 @@ real 3b1b formula corpus typesets natively. The denominator is **frozen**
 | `4b705d147c10` | 99.994 | 99.989 | 99.994 | 99.989 |
 | `1ffcadc92e9f` | 99.994 | 99.989 | 99.994 | 99.989 |
 | `8667819a0a5a` | 99.994 | 99.989 | 99.994 | 99.989 |
+| `d99fee964a47` | 99.994 | 99.989 | 99.994 | 99.989 |
 
 ## How this is enforced
 

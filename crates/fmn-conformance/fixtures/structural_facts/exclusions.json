@@ -60,7 +60,7 @@
       "scope": "scenes",
       "under": ["Tex", "TexText", "OldTex", "OldTexText", "SingleStringTex"],
       "fact": ["member", "class", "mro", "string", "n_points", "style.*"],
-      "reason": "The portal's Tex submobjects are every glyph, then every rule, then every drawn path, where the Reference keeps TeX's emission order (39 corpus scenes: equal glyph counts, a t2c color on a different index). It also emits multi-piece TeX constructions (long arrows, \\mapsto, quotes, extensible brackets, brace fills) as one submobject (20 scenes). Measured on a clean Reference after fm-0v8k fixed its TeX cache race (Appendix C-22)."
+      "reason": "The portal's Tex submobjects are every glyph, then every rule, then every drawn path, where the Reference keeps TeX's emission order (39 corpus scenes: equal glyph counts, a t2c color on a different index). It also emitted multi-piece TeX constructions (long arrows, \\mapsto, quotes, extensible brackets, brace fills) as one submobject (20 scenes); the long arrows and \\mapsto are TeX's pieces since fm-fm-long-arrows-joinrel-r11-b2c5. Measured on a clean Reference after fm-0v8k fixed its TeX cache race (Appendix C-22)."
     },
     {
       "id": "bn05-text-geometry",

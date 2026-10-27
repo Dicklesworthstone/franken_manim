@@ -39,11 +39,10 @@ const PLAIN_TOLERANCE: f64 = 0.03;
 const FALLBACK_TOLERANCE: f64 = 0.06;
 
 /// Rows an open bead owns, by source (authored) or digest prefix (corpus):
-/// each must still miss its tolerance.
-const OWNED: &[(&str, &str)] = &[
-    // `\Longrightarrow`: LaTeX's \Relbar\joinrel\Rightarrow.
-    ("6dd733048688bc3e", "fm-aia1"),
-];
+/// each must still miss its tolerance. Empty since `\Longrightarrow` is
+/// LaTeX's \Relbar\joinrel\Rightarrow (fm-fm-long-arrows-joinrel-r11-b2c5,
+/// franken_markdown 094d4f6).
+const OWNED: &[(&str, &str)] = &[];
 
 struct Row<'a> {
     kind: &'a str,

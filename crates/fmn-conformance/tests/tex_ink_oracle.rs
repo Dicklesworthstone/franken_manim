@@ -90,14 +90,21 @@ const PUBLIC_FLOORS: InkFloors = InkFloors {
 /// (1ffcadc9, fm-ew7o): its three rows' IoU rises from 0.07-0.12 to
 /// 0.98-0.99 and all three match. The p95 Hausdorff falls to 6.000 px, the
 /// p95 sliced W1 to 2.9750 px, and the p05 IoU rises to 0.2815.
+/// 528 with the long arrows from CM pieces and amsmath's dots look-ahead
+/// (d99fee96, fm-fm-long-arrows-joinrel-r11-b2c5,
+/// fm-fm-amsmath-dots-context-r11-ymdd): seven long-arrow rows' IoU rises
+/// from 0.14-0.55 to 0.93-0.99 and six match, a `(\dots)` row matches
+/// (0.11 -> 0.99), and no row's IoU falls. The p95 Hausdorff falls to
+/// 5.099 px, the p95 sliced W1 to 2.4729 px, and the p05 IoU rises to
+/// 0.2915.
 const CORPUS_FLOORS: InkFloors = InkFloors {
-    matches: 521,
+    matches: 528,
     median_hausdorff_px: 1.0,
-    p95_hausdorff_px: 6.001,
-    median_sliced_w1_px: 0.0694,
-    p95_sliced_w1_px: 2.976,
-    median_iou: 0.9893,
-    p05_iou: 0.2814,
+    p95_hausdorff_px: 5.100,
+    median_sliced_w1_px: 0.0688,
+    p95_sliced_w1_px: 2.473,
+    median_iou: 0.9895,
+    p05_iou: 0.2914,
 };
 
 /// cmr10's stem (`stem# = 25/36 pt`) in scene units at font size 48: an em
