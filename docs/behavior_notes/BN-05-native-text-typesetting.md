@@ -250,3 +250,50 @@ Reference source at the pinned revision:
 [string selectors](https://github.com/3b1b/manim/blob/6199a00d4c1b1127ebe45cb629c3f22538b10e13/manimlib/mobject/svg/string_mobject.py),
 [TeX counting](https://github.com/3b1b/manim/blob/6199a00d4c1b1127ebe45cb629c3f22538b10e13/manimlib/mobject/svg/tex_mobject.py),
 [matching blocks and Tex alias](https://github.com/3b1b/manim/blob/6199a00d4c1b1127ebe45cb629c3f22538b10e13/manimlib/animation/transform_matching_parts.py).
+
+## TexText paragraphs and line breaking
+
+The Reference sets `TexText` as a `\centering` paragraph in a `standalone[preview]`
+page whose `\linewidth` is 345 pt, so TeX breaks a string wider than that into
+centred lines. FrankenManim breaks it the same way (franken_markdown 61304ccc through 450111a4,
+fm-texttext-line-breaking-r11-bfdx):
+
+- **The breaker is TeX's** (tex.web §813–890), with the Reference document's parameters
+  read from TeX: `\linepenalty` 10, `\adjdemerits` 10000, `\pretolerance` 100, and the class's
+  `\sloppy` (`\tolerance` 9999, `\emergencystretch` 3 em). Every ragged line has badness 0,
+  so TeX's tie rule fills each line. A line shrinks its interword glue, rather than
+  breaking, where TeX would. A word wider than the line is set alone and overfull.
+- **Interword glue is TeX's**: cmr10's space, stretch and shrink, sized by the space factor
+  under LaTeX's `\nonfrenchspacing`. After `.`, `?`, `!` and `:` the space is 0.111 em wider,
+  unless a capital precedes the period (`U.S. Army`). This holds on one line too: `Yes. No`
+  is as wide as TeX sets it.
+- **The block's width is its widest line**, not 345 pt. Lines centre on a common axis, as in
+  the Reference. Since the Reference's mobject is the ink of its glyphs, the positions agree.
+- **Line pitch follows the size declaration**, as LaTeX's `size10.clo` sets it: `\Large` lines
+  are 18 pt apart, not 1.2 × 14.4 pt. In `center`, `flushleft` and `flushright`, a size or
+  colour declaration carries over `\\`, which is LaTeX's `\par` there.
+- **A blank line ends the paragraph**, as TeX's `\par` does, so `First⏎⏎second` is two
+  lines. Repeated blank lines and a final one add no empty line. Inside `\text{…}` a blank
+  line stays a space.
+- **`\\` drops the glue before it**: a trailing `\quad` or `\hspace` too, not only a space.
+  A centred line therefore carries no invisible offset.
+
+Not modelled:
+- hyphenation, and breaks after explicit hyphens;
+- breaks inside a math island, where `\relpenalty` and `\binoppenalty` would add at least
+  250000 demerits;
+- breaks inside a font-switch group (`\emph{…}`);
+- microtype's character protrusion. It moves a line by up to about 1 pt and changes no
+  break in the corpus.
+
+`\Large` and `\huge` paragraphs can break differently. The Reference's T1 fonts have
+optical sizes (ecrm1440 is about 5% narrower than cmr10 scaled to 14.4 pt), and fmd-math
+scales cmr10.
+
+Verification: fmd-math's placement tests compare break positions, line widths, centring and
+pitch with TeX's `\showbox`, within 1e-4 em. Over the 3b1b corpus, the paragraph census
+(`tex_text_paragraphs_census.v1.tsv`) compares every multi-line or wrapping text-mode
+string's widest line and total height with real TeX's.
+
+Migration: none. A long `TexText` that the Reference breaks now breaks the same way, where it
+used to be one line up to 185 em wide.

@@ -27,6 +27,11 @@ tie-break), then the most frequent remaining strings until TARGET candidates.
 The sample stays the ink capture's input and the quick-run set. Strings TeX cannot typeset alone (fragments of
 multi-argument Tex calls) are left out and counted.
 
+With --text, the text-mode strings too: each one-line string's box
+(tex_text_boxes_census.v1.tsv), and each multi-line or wrapping string as the
+Reference's \\centering paragraph at 345 pt, with its line count, widest line
+and box (tex_text_paragraphs_census.v1.tsv).
+
 Usage:
   capture_tex_corpus_boxes.py --corpus corpus/tex_corpus.jsonl [--jobs 8] [--sample-only]
   (needs `latex` from the TeX installation the Reference uses)
@@ -46,6 +51,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "crates" / "fmn-conformance" / "fixtures" / "tex_corpus_boxes.v1.tsv"
 CENSUS = ROOT / "crates" / "fmn-conformance" / "fixtures" / "tex_corpus_boxes_census.v1.tsv"
 TEXT_CENSUS = ROOT / "crates" / "fmn-conformance" / "fixtures" / "tex_text_boxes_census.v1.tsv"
+PARAGRAPH_CENSUS = ROOT / "crates" / "fmn-conformance" / "fixtures" / "tex_text_paragraphs_census.v1.tsv"
 # The Reference's standalone[preview] page: \linewidth and \parindent under its template.
 LINE_WIDTH_EM = 34.5
 TEMPLATES = ROOT / "scripts" / "manim_ref" / "manimlib" / "tex_templates.yml"
@@ -217,11 +223,133 @@ def write_text_census(items: list[dict], measured: dict) -> None:
         f"# Census: every text-mode string of the frozen G0-4 corpus, {len(items)} candidates.",
         f"# Omitted: {omitted['multi-line']} multi-line (\\\\, \\par or a blank line), {omitted['wraps']}",
         f"# wider than the line (the Reference breaks them), {omitted['fragment']} TeX could not typeset alone.",
+        "# The multi-line and wider strings are measured as paragraphs in tex_text_paragraphs_census.v1.tsv.",
         "# Regenerate only with scripts/capture_tex_corpus_boxes.py; never edit by hand.",
         "# sha256\twidth\theight\tdepth\tcount\tclasses (|-separated construct names)",
     ]
     TEXT_CENSUS.write_text("\n".join(header + rows) + "\n", encoding="utf-8")
     print(f"{len(rows)} rows, omitted {omitted} -> {TEXT_CENSUS.relative_to(ROOT)}")
+
+
+# Peels a \vbox's lines off its end, reporting each line's natural width (its
+# \unhcopy: the material plus the ragged skips' natural widths, which are 0;
+# a \vbox line its own width) and its height and depth. e-TeX's
+# \lastnodetype steps over the glue, kerns and penalties between lines
+# (several where `\\` ends a paragraph); anything else ends the peel. The
+# glue and kerns below the last line and above the first (a list's \topsep, a
+# display's skips) are summed into \fmntrail and \fmnlead: they set no ink.
+PEEL = r"""
+\newcount\fmntype \newdimen\fmnlead \newdimen\fmntrail \newif\iffmnseen
+\def\fmnline{\setbox4\lastbox
+  \ifnum\fmntype=1 \setbox6\hbox{\unhcopy4}\else\setbox6\hbox{\copy4}\fi
+  \immediate\write16{FMNLINE \the\wd6 / \the\ht4 / \the\dp4}%
+  \global\fmnseentrue \global\fmnlead=0pt }
+\def\fmnspace#1{\iffmnseen\global\advance\fmnlead#1\else\global\advance\fmntrail#1\fi}
+\def\fmnpeel{\fmntype=\lastnodetype
+  \let\fmnnext\fmnpeel
+  \ifnum\fmntype=1 \fmnline
+  \else\ifnum\fmntype=2 \fmnline
+  \else\ifnum\fmntype=11 \fmnspace\lastskip \unskip
+  \else\ifnum\fmntype=12 \fmnspace\lastkern \unkern
+  \else\ifnum\fmntype=13 \unpenalty
+  \else\let\fmnnext\relax
+  \fi\fi\fi\fi\fi
+  \fmnnext}
+"""
+LINE = re.compile(r"FMNLINE ([0-9.]+)pt ?/ ?([0-9.]+)pt ?/ ?([0-9.]+)pt")
+PARAGRAPH = re.compile(r"FMNPAR ([0-9.]+)pt ?/ ?([0-9.]+)pt")
+GAPS = re.compile(r"FMNGAPS (-?[0-9.]+)pt ?/ ?(-?[0-9.]+)pt")
+OVERFULL = re.compile(r"Overfull \\hbox \(([0-9.]+)pt too wide\) in paragraph")
+SET_LINE = re.compile(r"^\.\\[hv]box\([^)]*\)x[0-9.]+(?:, glue set (- )?([0-9.]+)(fil+)?)?", re.M)
+
+
+def measure_paragraph(text: str, preamble: str) -> tuple[int, float, float, float] | str:
+    """A multi-line or wrapping TexText string as the Reference sets it.
+
+    The paragraph is the Reference's: `\\centering` text at \\linewidth (345 pt)
+    in a `standalone[preview]` page under its default template, boxed with
+    \\vbox. Returns the line count, the widest line as TeX sets it, the first
+    line's height and the depth below its baseline of everything to the last
+    line's bottom, in ems at 10 pt. A line is its natural width when the
+    ragged skips take its slack, the line width when its glue shrinks to fit,
+    and the line width plus TeX's reported excess when it is overfull. Glue
+    above the first line and below the last (a list's \\topsep, a display's
+    skips) sets no ink and is left out.
+    """
+    text = text.strip()
+    document = (
+        "\\documentclass[preview]{standalone}\n" + preamble + "\n" + PEEL
+        + "\\begin{document}\n\\hfuzz=0pt \\hbadness=10000 \\showboxdepth=1 \\showboxbreadth=100000\n"
+        "\\setbox0\\vbox{\\hsize\\linewidth\\centering\n" + text + "\n\\par}\n"
+        "\\immediate\\write16{FMNPAR \\the\\ht0 / \\the\\dp0}\n\\showbox0\n"
+        "\\setbox2\\vbox{\\unvcopy0 \\fmnpeel}\n"
+        "\\immediate\\write16{FMNGAPS \\the\\fmnlead / \\the\\fmntrail}\n\\end{document}\n"
+    )
+    with tempfile.TemporaryDirectory(prefix="tex-corpus-paragraph-") as work:
+        (pathlib.Path(work) / "f.tex").write_text(document, encoding="utf-8")
+        try:
+            subprocess.run(["latex", "-interaction=batchmode", "f.tex"],
+                           cwd=work, capture_output=True, timeout=60, check=False)
+        except subprocess.TimeoutExpired:
+            return "fragment"
+        log = (pathlib.Path(work) / "f.log").read_text(encoding="latin-1", errors="replace")
+    # \showbox stops as an error, so latex exits nonzero either way; a real
+    # error is any other `!` message.
+    errors = [line for line in log.splitlines() if line.startswith("! ") and line != "! OK."]
+    paragraph, gaps = PARAGRAPH.search(log), GAPS.search(log)
+    if paragraph is None or gaps is None or errors:
+        return "fragment"
+    lines = [tuple(float(v) for v in m) for m in LINE.findall(log)][::-1]
+    naturals = [line[0] for line in lines]
+    shown = SET_LINE.findall(log[log.find("> \\box0="):])
+    if not naturals or len(shown) != len(naturals):
+        return "fragment"
+    excess = iter(float(v) for v in OVERFULL.findall(log))
+    widest = 0.0
+    for natural, (shrinking, ratio, order) in zip(naturals, shown):
+        if shrinking and not order:
+            # Shrunk to the line, or overfull past its whole shrink.
+            width = LINE_WIDTH_EM * 10.0 + (next(excess, 0.0) if float(ratio) >= 1.0 else 0.0)
+        else:
+            width = natural
+        widest = max(widest, width)
+    lead, trail = (float(v) for v in gaps.groups())
+    extent = sum(float(v) for v in paragraph.groups()) - lead - trail
+    first_height = lines[0][1]
+    return (len(naturals), widest / 10.0, first_height / 10.0, (extent - first_height) / 10.0)
+
+
+def write_paragraph_census(items: list[dict], measured: dict) -> None:
+    rows, fragments = [], 0
+    for item in items:
+        box = measured[item["sha256"]]
+        if isinstance(box, str) or box[1] <= 0.0 or box[2] + box[3] <= 0.0:
+            fragments += 1
+            continue
+        classes = "|".join(sorted(item["constructs"])) or "(plain)"
+        lines, width, height, depth = box
+        rows.append(
+            f"{item['sha256']}\t{lines}\t{width:.5f}\t{height:.5f}\t{depth:.5f}\t{item['count']}\t{classes}"
+        )
+    header = [
+        "# Real TeX paragraphs for every multi-line or wrapping text-mode corpus string",
+        "# (fm-texttext-line-breaking-r11-bfdx). Strings are private fixtures (plan §15.3): each row",
+        "# names its corpus string by sha256(mode + NUL + string). Each string is the Reference's",
+        "# TexText paragraph: \\centering text at \\linewidth 345 pt in its standalone[preview]",
+        "# document with its default template's preamble, boxed with \\vbox. `lines` counts the lines",
+        "# TeX sets; `width` is the widest as set (natural, the line width when its glue shrinks to",
+        "# fit, plus TeX's reported excess when overfull); height is the first line's, and depth",
+        "# reaches from its baseline to the last line's bottom, without the glue above the first",
+        "# line and below the last (a list's \\topsep, a display's skips), in ems at 10 pt.",
+        "# Preamble: the pinned Reference's default template (3b1b/manim 6199a00d); TeX Live",
+        "# 2025 on the dev host.",
+        f"# Census: every text-mode string of the frozen G0-4 corpus with \\\\, \\par or a blank line, or",
+        f"# wider than the line: {len(items)} candidates, {fragments} TeX could not typeset alone.",
+        "# Regenerate only with scripts/capture_tex_corpus_boxes.py; never edit by hand.",
+        "# sha256\tlines\twidth\theight\tdepth\tcount\tclasses (|-separated construct names)",
+    ]
+    PARAGRAPH_CENSUS.write_text("\n".join(header + rows) + "\n", encoding="utf-8")
+    print(f"{len(rows)} rows, {fragments} fragments -> {PARAGRAPH_CENSUS.relative_to(ROOT)}")
 
 
 def main() -> int:
@@ -249,7 +377,14 @@ def main() -> int:
         items = ranked_text(args.corpus)
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
             boxes = list(pool.map(lambda item: measure_text(item["text"], preamble), items))
-        write_text_census(items, {item["sha256"]: box for item, box in zip(items, boxes)})
+        measured = {item["sha256"]: box for item, box in zip(items, boxes)}
+        write_text_census(items, measured)
+        # The strings the one-line census omits as multi-line or wider than
+        # the line are measured again as the Reference's paragraphs.
+        paragraphs = [item for item in items if measured[item["sha256"]] in ("multi-line", "wraps")]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            laid = list(pool.map(lambda item: measure_paragraph(item["text"], preamble), paragraphs))
+        write_paragraph_census(paragraphs, {item["sha256"]: box for item, box in zip(paragraphs, laid)})
         if args.text_only:
             return 0
     ranked = ranked_math(args.corpus)

@@ -8,8 +8,12 @@
 //! `fixtures/tex_text_boxes_census.v1.tsv` holds TeX's box for every
 //! text-mode string the Reference sets on one line, laid out natively through
 //! the TexText contract (fm-texttext-box-oracle-r11-hkdv).
+//! `fixtures/tex_text_paragraphs_census.v1.tsv` holds TeX's paragraph for every
+//! other text-mode string, multi-line or wider than the Reference's 345 pt
+//! line: its line count, widest line and box, laid out natively as TexText's
+//! default `\centering` paragraph (fm-texttext-line-breaking-r11-bfdx).
 //! Each string is named only by its public digest (plan §15.3); one run of
-//! `scripts/capture_tex_corpus_boxes.py` captures both. The evaluation lives in
+//! `scripts/capture_tex_corpus_boxes.py` captures them all. The evaluation lives in
 //! `fmn_conformance::ratchet`, which the coverage ratchet's dashboard shares.
 //!
 //! Where the corpus is present (`FMN_TEX_CORPUS`, or `corpus/tex_corpus.jsonl`),
@@ -25,9 +29,11 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::print_stderr)]
 
 use fmn_conformance::ratchet::{
-    CENSUS_FIXTURE, ORACLE_FIXTURE, OracleRow, TEXT_CENSUS_FIXTURE, corpus_digest,
-    oracle_dashboard_line, oracle_error, oracle_ndjson, parse_corpus_entry, parse_oracle_fixture,
-    run_layout_oracle, run_text_layout_oracle, summarize_oracle, text_oracle_dashboard_line,
+    CENSUS_FIXTURE, ORACLE_FIXTURE, OracleRow, PARAGRAPH_CENSUS_FIXTURE, TEXT_CENSUS_FIXTURE,
+    corpus_digest, oracle_dashboard_line, oracle_error, oracle_ndjson,
+    paragraph_oracle_dashboard_line, parse_corpus_entry, parse_oracle_fixture,
+    parse_paragraph_fixture, run_layout_oracle, run_paragraph_oracle, run_text_layout_oracle,
+    summarize_oracle, text_oracle_dashboard_line,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -89,6 +95,14 @@ const TEXT_CENSUS_WITHIN_5_PERCENT_FLOOR: usize = 3733;
 /// The same at 10%: 3743 at cc470d1a.
 const TEXT_CENSUS_WITHIN_10_PERCENT_FLOOR: usize = 3743;
 
+/// Paragraph census strings within 5% of TeX (widest line and total
+/// height), of the text-mode corpus strings that are multi-line or wider
+/// than the Reference's 345 pt line (fm-texttext-line-breaking-r11-bfdx).
+/// PARAGRAPH_FLOOR_HISTORY_5
+const PARAGRAPH_CENSUS_WITHIN_5_PERCENT_FLOOR: usize = 0; // MEASURING: set to the measured count before any commit
+/// The same at 10%: PARAGRAPH_FLOOR_HISTORY_10
+const PARAGRAPH_CENSUS_WITHIN_10_PERCENT_FLOOR: usize = 0; // MEASURING: set to the measured count before any commit
+
 fn rows() -> Vec<OracleRow> {
     parse_oracle_fixture(ORACLE_FIXTURE).expect("the oracle fixture parses")
 }
@@ -99,6 +113,10 @@ fn census_rows() -> Vec<OracleRow> {
 
 fn text_census_rows() -> Vec<OracleRow> {
     parse_oracle_fixture(TEXT_CENSUS_FIXTURE).expect("the text census fixture parses")
+}
+
+fn paragraph_rows() -> Vec<(OracleRow, usize)> {
+    parse_paragraph_fixture(PARAGRAPH_CENSUS_FIXTURE).expect("the paragraph census fixture parses")
 }
 
 #[test]
@@ -121,7 +139,22 @@ fn fixture_names_corpus_strings_only_by_digest() {
         "the text census thinned out: {} rows",
         text_census.len()
     );
-    for fixture in [&rows, &census, &text_census] {
+    let paragraphs = paragraph_rows();
+    assert!(
+        paragraphs.len() >= 800,
+        "the paragraph census thinned out: {} rows",
+        paragraphs.len()
+    );
+    assert!(paragraphs.iter().all(|(_, lines)| *lines >= 1));
+    // A paragraph census string is never also a one-line census string.
+    let one_line: HashSet<&str> = text_census.iter().map(|row| row.digest.as_str()).collect();
+    assert!(
+        paragraphs
+            .iter()
+            .all(|(row, _)| !one_line.contains(row.digest.as_str()))
+    );
+    let paragraphs: Vec<OracleRow> = paragraphs.into_iter().map(|(row, _)| row).collect();
+    for fixture in [&rows, &census, &text_census, &paragraphs] {
         assert_rows_are_digest_only(fixture);
     }
 }
@@ -187,14 +220,59 @@ fn corpus_text_boxes_track_tex_and_never_regress() {
         "{} text strings within 10% of TeX, below the floor {TEXT_CENSUS_WITHIN_10_PERCENT_FLOOR}",
         summary.within_10
     );
+    // The paragraph census: the widest line, the first line's height and the
+    // depth to the last line of each multi-line or wrapping string's centred
+    // paragraph.
+    let paragraphs: Vec<OracleRow> = paragraph_rows().into_iter().map(|(row, _)| row).collect();
+    let laid = run_paragraph_oracle(&paragraphs, &texts)
+        .expect("every paragraph census string is in the corpus");
+    let errors: Vec<f64> = paragraphs
+        .iter()
+        .zip(&laid)
+        .map(|(row, &laid)| oracle_error(row, laid))
+        .collect();
+    eprint!(
+        "{}",
+        oracle_ndjson(
+            &paragraphs,
+            &laid,
+            &errors,
+            (
+                PARAGRAPH_CENSUS_WITHIN_5_PERCENT_FLOOR,
+                PARAGRAPH_CENSUS_WITHIN_10_PERCENT_FLOOR
+            )
+        )
+    );
+    let paragraph_summary = summarize_oracle(&paragraphs, &errors);
+    eprintln!(
+        "{{\"schema\":\"fmn.tex-corpus-boxes.v1\",\"kind\":\"paragraph_summary\",\"rows\":{},\"within_5\":{},\"within_10\":{},\"refused\":{},\"occurrences\":{},\"occurrences_within_5\":{}}}",
+        paragraph_summary.rows,
+        paragraph_summary.within_5,
+        paragraph_summary.within_10,
+        paragraph_summary.refused,
+        paragraph_summary.occurrences,
+        paragraph_summary.occurrences_within_5
+    );
+    assert!(
+        paragraph_summary.within_5 >= PARAGRAPH_CENSUS_WITHIN_5_PERCENT_FLOOR,
+        "{} paragraphs within 5% of TeX, below the floor {PARAGRAPH_CENSUS_WITHIN_5_PERCENT_FLOOR}",
+        paragraph_summary.within_5
+    );
+    assert!(
+        paragraph_summary.within_10 >= PARAGRAPH_CENSUS_WITHIN_10_PERCENT_FLOOR,
+        "{} paragraphs within 10% of TeX, below the floor {PARAGRAPH_CENSUS_WITHIN_10_PERCENT_FLOOR}",
+        paragraph_summary.within_10
+    );
     let dashboard = std::fs::read_to_string(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/ratchet/dashboard.md"),
     )
     .expect("the ratchet dashboard");
     assert!(
-        dashboard.contains(&text_oracle_dashboard_line(&summary)),
-        "docs/ratchet/dashboard.md does not publish the text census ({summary:?}); re-bless it \
-         with RATCHET_UPDATE=1 cargo test -p fmn-conformance --test coverage_ratchet"
+        dashboard.contains(&text_oracle_dashboard_line(&summary))
+            && dashboard.contains(&paragraph_oracle_dashboard_line(&paragraph_summary)),
+        "docs/ratchet/dashboard.md does not publish the text censuses ({summary:?}, \
+         {paragraph_summary:?}); re-bless it with RATCHET_UPDATE=1 cargo test -p \
+         fmn-conformance --test coverage_ratchet"
     );
 }
 

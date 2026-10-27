@@ -10,6 +10,7 @@
 # Census: every text-mode string of the frozen G0-4 corpus, 4705 candidates.
 # Omitted: 919 multi-line (\\, \par or a blank line), 25
 # wider than the line (the Reference breaks them), 14 TeX could not typeset alone.
+# The multi-line and wider strings are measured as paragraphs in tex_text_paragraphs_census.v1.tsv.
 # Regenerate only with scripts/capture_tex_corpus_boxes.py; never edit by hand.
 # sha256	width	height	depth	count	classes (|-separated construct names)
 7f94d2215fa6907312580def2767629e69bee3d1852a71e503821f63cbbbe0a8	0.47211	0.68872	0.00000	44	(plain)

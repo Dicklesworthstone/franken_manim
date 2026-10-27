@@ -16,10 +16,11 @@
 //! dashboard in one stroke).
 
 use fmn_conformance::ratchet::{
-    Baseline, CENSUS_FIXTURE, CorpusCounts, FallbackSummary, OracleSummary, Pending, SECOND_CORPUS,
-    SECOND_CORPUS_BASELINE, TEXT_CENSUS_FIXTURE, corpus_digest, fallback_chars,
-    fallback_dashboard_line, measure_corpus, oracle_error, parse_corpus_entry,
-    parse_oracle_fixture, parse_trend_tsv, ratchet_violations, render_dashboard, run_layout_oracle,
+    Baseline, CENSUS_FIXTURE, CorpusCounts, FallbackSummary, OracleRow, OracleSummary,
+    PARAGRAPH_CENSUS_FIXTURE, Pending, SECOND_CORPUS, SECOND_CORPUS_BASELINE, TEXT_CENSUS_FIXTURE,
+    corpus_digest, fallback_chars, fallback_dashboard_line, measure_corpus, oracle_error,
+    parse_corpus_entry, parse_oracle_fixture, parse_paragraph_fixture, parse_trend_tsv,
+    ratchet_violations, render_dashboard, run_layout_oracle, run_paragraph_oracle,
     run_text_layout_oracle, summarize_oracle, with_second_corpus_section,
 };
 use std::collections::{BTreeMap, HashMap};
@@ -343,9 +344,9 @@ fn recompute_and_enforce_the_ratchet() -> Result<(), String> {
     );
     let advanced = current != committed;
     if std::env::var("RATCHET_UPDATE").is_ok() {
-        // The dashboard publishes the TeX box oracle's census counts, math
-        // and text, beside the coverage (tests/tex_corpus_boxes.rs checks
-        // they stay current).
+        // The dashboard publishes the TeX box oracle's census counts (math,
+        // one-line text and paragraphs) beside the coverage
+        // (tests/tex_corpus_boxes.rs checks they stay current).
         let texts = |mode: &str| -> HashMap<String, String> {
             data.lines()
                 .filter_map(parse_corpus_entry)
@@ -369,10 +370,22 @@ fn recompute_and_enforce_the_ratchet() -> Result<(), String> {
         };
         let oracle = summary(CENSUS_FIXTURE, false)?;
         let text_oracle = summary(TEXT_CENSUS_FIXTURE, true)?;
+        let paragraph_rows: Vec<OracleRow> = parse_paragraph_fixture(PARAGRAPH_CENSUS_FIXTURE)?
+            .into_iter()
+            .map(|(row, _)| row)
+            .collect();
+        let paragraph_laid = run_paragraph_oracle(&paragraph_rows, &texts("text"))?;
+        let paragraph_errors: Vec<f64> = paragraph_rows
+            .iter()
+            .zip(&paragraph_laid)
+            .map(|(row, &laid)| oracle_error(row, laid))
+            .collect();
+        let paragraph_oracle = summarize_oracle(&paragraph_rows, &paragraph_errors);
         bless(
             &current,
             &oracle,
             &text_oracle,
+            &paragraph_oracle,
             &fallback,
             &parse_pending,
             &layout_pending,
@@ -402,6 +415,7 @@ fn bless(
     current: &Baseline,
     oracle: &OracleSummary,
     text_oracle: &OracleSummary,
+    paragraph_oracle: &OracleSummary,
     fallback: &FallbackSummary,
     parse_pending: &BTreeMap<String, u64>,
     layout_pending: &BTreeMap<String, u64>,
@@ -464,6 +478,7 @@ fn bless(
         current,
         oracle,
         text_oracle,
+        paragraph_oracle,
         fallback,
         &to_pending(parse_pending),
         &to_pending(layout_pending),

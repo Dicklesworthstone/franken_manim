@@ -550,6 +550,7 @@ pub fn render_dashboard(
     baseline: &Baseline,
     oracle: &OracleSummary,
     text_oracle: &OracleSummary,
+    paragraph_oracle: &OracleSummary,
     fallback: &FallbackSummary,
     parse_pending: &[Pending],
     layout_pending: &[Pending],
@@ -563,9 +564,9 @@ pub fn render_dashboard(
             100.0 * part as f64 / whole as f64
         }
     };
-    let both = oracle.plus(*text_oracle);
-    let oracle_occ = share(both.occurrences_within_5, baseline.occurrence_total);
-    let oracle_uniq = share(both.within_5 as u64, baseline.unique_total);
+    let all = oracle.plus(*text_oracle).plus(*paragraph_oracle);
+    let oracle_occ = share(all.occurrences_within_5, baseline.occurrence_total);
+    let oracle_uniq = share(all.within_5 as u64, baseline.unique_total);
     let mut out = String::new();
     let _ = writeln!(out, "# The fmd-math coverage ratchet\n");
     let _ = writeln!(
@@ -602,12 +603,12 @@ pub fn render_dashboard(
     let _ = writeln!(
         out,
         "\n\"Typeset returned Ok\" means fmd-math produced a layout without an \
-         error. It does not show that the layout is right. {} {} The oracle row \
-         counts only those verified strings against the whole corpus; \
-         multi-line text, text the Reference breaks across lines, and \
+         error. It does not show that the layout is right. {} {} {} The oracle \
+         row counts only those verified strings against the whole corpus; \
          fragments TeX cannot typeset alone count as unverified.",
         oracle_dashboard_line(oracle),
-        text_oracle_dashboard_line(text_oracle)
+        text_oracle_dashboard_line(text_oracle),
+        paragraph_oracle_dashboard_line(paragraph_oracle)
     );
     let _ = writeln!(out, "\n## Noto math or Plex Sans face usage\n");
     let gaps = STANDARD_RELATION_GAPS
@@ -713,6 +714,13 @@ pub const CENSUS_FIXTURE: &str = include_str!("../fixtures/tex_corpus_boxes_cens
 /// capture script. The dashboard's oracle plane counts both censuses.
 pub const TEXT_CENSUS_FIXTURE: &str = include_str!("../fixtures/tex_text_boxes_census.v1.tsv");
 
+/// The paragraph census: real TeX's paragraph for every text-mode corpus
+/// string the one-line census omits, multi-line or wider than the line
+/// (fm-texttext-line-breaking-r11-bfdx): its line count, widest line and
+/// box, from the same capture script.
+pub const PARAGRAPH_CENSUS_FIXTURE: &str =
+    include_str!("../fixtures/tex_text_paragraphs_census.v1.tsv");
+
 /// One fixture row: real TeX's box for one sampled corpus string, in ems.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OracleRow {
@@ -775,7 +783,7 @@ pub fn run_layout_oracle(
     rows: &[OracleRow],
     texts: &std::collections::HashMap<String, String>,
 ) -> Result<Vec<OracleBox>, String> {
-    run_oracle(rows, texts, false)
+    run_oracle(rows, texts, Surface::Tex)
 }
 
 /// [`run_layout_oracle`] for the text-mode census: each string through
@@ -788,13 +796,38 @@ pub fn run_text_layout_oracle(
     rows: &[OracleRow],
     texts: &std::collections::HashMap<String, String>,
 ) -> Result<Vec<OracleBox>, String> {
-    run_oracle(rows, texts, true)
+    run_oracle(rows, texts, Surface::TexText)
+}
+
+/// [`run_layout_oracle`] for the paragraph census: each string as TexText's
+/// default `\centering` sets it, inside fmd-math's `center` block (as
+/// fmn-tex's `LineAlign::Center` wraps it), under the default pack and its
+/// 345 pt line.
+///
+/// # Errors
+/// As [`run_layout_oracle`].
+pub fn run_paragraph_oracle(
+    rows: &[OracleRow],
+    texts: &std::collections::HashMap<String, String>,
+) -> Result<Vec<OracleBox>, String> {
+    run_oracle(rows, texts, Surface::Paragraph)
+}
+
+/// How an oracle lays its strings out.
+#[derive(Clone, Copy)]
+enum Surface {
+    /// The Tex surface: display style.
+    Tex,
+    /// TexText's mainland.
+    TexText,
+    /// TexText's `\centering` paragraph.
+    Paragraph,
 }
 
 fn run_oracle(
     rows: &[OracleRow],
     texts: &std::collections::HashMap<String, String>,
-    text_mode: bool,
+    surface: Surface,
 ) -> Result<Vec<OracleBox>, String> {
     let engine = fmd_math::Engine::bundled().map_err(|error| format!("bundled faces: {error}"))?;
     let pack = fmd_math::MacroSet::pack("fmd-math/pack/default")
@@ -804,10 +837,13 @@ fn run_oracle(
             let text = texts
                 .get(&row.digest)
                 .ok_or_else(|| format!("fixture row {} is not in the corpus", row.digest))?;
-            let layout = if text_mode {
-                engine.typeset_text_with_macros(text.trim(), &pack)
-            } else {
-                engine.typeset_with_macros(text, fmd_math::Style::Display, &pack)
+            let layout = match surface {
+                Surface::Tex => engine.typeset_with_macros(text, fmd_math::Style::Display, &pack),
+                Surface::TexText => engine.typeset_text_with_macros(text.trim(), &pack),
+                Surface::Paragraph => engine.typeset_text_with_macros(
+                    &format!("\\begin{{center}}{}\\end{{center}}", text.trim()),
+                    &pack,
+                ),
             };
             Ok(layout
                 .ok()
@@ -831,6 +867,39 @@ pub fn oracle_error(row: &OracleRow, laid: OracleBox) -> f64 {
     let h = (height - row.height).abs() / total;
     let d = (depth - row.depth).abs() / total;
     w.max(h).max(d)
+}
+
+/// The paragraph census's fixture rows, each with the number of lines TeX
+/// sets. The row's width is the widest line as set; its height is the first
+/// line's, and its depth reaches from the first baseline to the last line's
+/// bottom, so [`oracle_error`] compares a paragraph as it compares a box: a
+/// line set differently moves the depth by a whole line pitch.
+///
+/// # Errors
+///
+/// A row without seven tab-separated fields, or with an unparsable number.
+pub fn parse_paragraph_fixture(text: &str) -> Result<Vec<(OracleRow, usize)>, String> {
+    text.lines()
+        .enumerate()
+        .filter(|(_, line)| !line.starts_with('#') && !line.trim().is_empty())
+        .map(|(i, line)| {
+            let bad = || format!("paragraph fixture line {}: {line:?}", i + 1);
+            let fields: Vec<&str> = line.split('\t').collect();
+            let [digest, lines, width, height, depth, count, classes] = fields.as_slice() else {
+                return Err(bad());
+            };
+            let number = |field: &str| field.parse::<f64>().map_err(|_| bad());
+            let row = OracleRow {
+                digest: (*digest).to_owned(),
+                width: number(width)?,
+                height: number(height)?,
+                depth: number(depth)?,
+                count: count.parse().map_err(|_| bad())?,
+                classes: classes.split('|').map(str::to_owned).collect(),
+            };
+            Ok((row, lines.parse().map_err(|_| bad())?))
+        })
+        .collect()
 }
 
 /// The oracle's counts over its sample.
@@ -869,7 +938,7 @@ pub fn summarize_oracle(rows: &[OracleRow], errors: &[f64]) -> OracleSummary {
 
 impl OracleSummary {
     /// Two censuses' counts together: the dashboard's oracle plane counts
-    /// the math-mode and the text-mode census.
+    /// the math-mode, one-line text and paragraph censuses.
     #[must_use]
     pub fn plus(self, other: Self) -> Self {
         Self {
@@ -892,6 +961,21 @@ pub fn text_oracle_dashboard_line(s: &OracleSummary) -> String {
          text-mode corpus string the Reference sets on one line ({} strings, {} \
          occurrences) and compares each box with real TeX's: {} are within 5% \
          and {} within 10%, covering {} occurrences within 5%.",
+        s.rows, s.occurrences, s.within_5, s.within_10, s.occurrences_within_5
+    )
+}
+
+/// The dashboard's sentence about the paragraph census, which
+/// `tests/tex_corpus_boxes.rs` requires verbatim.
+#[must_use]
+pub fn paragraph_oracle_dashboard_line(s: &OracleSummary) -> String {
+    format!(
+        "The paragraph census (fm-texttext-line-breaking-r11-bfdx) lays out every \
+         multi-line text-mode corpus string, and every one wider than the \
+         Reference's 345 pt line, as its centred paragraph ({} strings, {} \
+         occurrences) and compares the widest line, the first line's height and \
+         the depth to the last line with real TeX's: {} are within 5% and {} within 10%, covering {} occurrences \
+         within 5%.",
         s.rows, s.occurrences, s.within_5, s.within_10, s.occurrences_within_5
     )
 }
@@ -1654,6 +1738,14 @@ mod tests {
             occurrences: 200,
             occurrences_within_5: 100,
         };
+        let paragraph_oracle = OracleSummary {
+            rows: 5,
+            within_5: 2,
+            within_10: 3,
+            refused: 0,
+            occurrences: 60,
+            occurrences_within_5: 50,
+        };
         let mut fallback = FallbackSummary::default();
         fallback.add(&BTreeSet::from(['ℝ', '✓']), 50);
         fallback.add(&BTreeSet::from(['ℝ']), 30);
@@ -1662,6 +1754,7 @@ mod tests {
             &base(),
             &oracle,
             &text_oracle,
+            &paragraph_oracle,
             &fallback,
             &[Pending {
                 construct: "\\substack".to_owned(),
@@ -1674,11 +1767,12 @@ mod tests {
         assert!(d.contains("95.000 %"));
         assert!(d.contains("\\substack"));
         assert!(d.contains("escalation path"));
-        // Both censuses together: 250 + 100 of the corpus's 1000 occurrences
-        // and 8 + 4 of its 100 strings are verified within 5%.
-        assert!(d.contains("| 35.000 % | 12.000 % |"));
+        // The three censuses together: 250 + 100 + 50 of the corpus's 1000
+        // occurrences and 8 + 4 + 2 of its 100 strings are verified within 5%.
+        assert!(d.contains("| 40.000 % | 14.000 % |"));
         assert!(d.contains(&oracle_dashboard_line(&oracle)));
         assert!(d.contains(&text_oracle_dashboard_line(&text_oracle)));
+        assert!(d.contains(&paragraph_oracle_dashboard_line(&paragraph_oracle)));
         // 80 of 1000 occurrences, 2 of 100 strings; ℝ ranks first.
         assert!(d.contains("| 8.000 % | 2.000 % |"));
         assert!(d.contains("| ℝ | U+211D | 80 |\n| ✓ | U+2713 | 50 |"));

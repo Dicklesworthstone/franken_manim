@@ -5255,6 +5255,102 @@ fn tex_cancel_frak_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         .with_artifact("render_matrix.tex_cancel_frak.v1", png))
 }
 
+/// The paragraph `parity.textext_paragraph_lines.v1` sets. It is wider
+/// than the Reference's 345 pt line, and TeX breaks it after "of", the 63rd
+/// of its 128 glyphs. fmd-math's placement tests pin that break, the line
+/// widths and the pitch to TeX's `\showbox`.
+const TEXTEXT_PARAGRAPH: &str = "Every paragraph that is wider than its line breaks where the line breaker of TeX would break it. The lines are centred, and they stack twelve points apart.";
+
+/// fm-texttext-line-breaking-r11-bfdx: a `TexText` paragraph under the
+/// default pack (the Reference's 345 pt line) sets TeX's two lines, centred
+/// on one axis. Under the basic pack, which has no line width, the same
+/// paragraph is one line with the same glyphs.
+fn textext_paragraph_lines_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    /// Each glyph's ink box, `(min, max)`, in emission order.
+    let glyphs = |pack: &str| -> Result<Vec<(Vec3, Vec3)>, ScenarioError> {
+        let engine = fmn_library::TexEngine::new(pack, None)
+            .map_err(|error| fail(format!("the {pack} engine: {error}")))?;
+        let text = fmn_library::TexText::new(TEXTEXT_PARAGRAPH)
+            .build(&engine)
+            .map_err(|error| fail(format!("the paragraph under {pack}: {error}")))?;
+        let mut boxes = Vec::new();
+        for glyph in text.vmob.children() {
+            let mut points = glyph.points().iter();
+            let first = *points
+                .next()
+                .ok_or_else(|| fail("a glyph without points".to_owned()))?;
+            let (mut min, mut max) = (first, first);
+            for point in points {
+                for axis in 0..3 {
+                    min[axis] = min[axis].min(point[axis]);
+                    max[axis] = max[axis].max(point[axis]);
+                }
+            }
+            boxes.push((min, max));
+        }
+        Ok(boxes)
+    };
+    let broken = glyphs("fmd-math/pack/default")?;
+    let one_line = glyphs("fmd-math/pack/basic")?;
+    if broken.len() != 128 || one_line.len() != 128 {
+        return Err(fail(format!(
+            "the paragraph sets {} and {} glyphs, not 128",
+            broken.len(),
+            one_line.len()
+        )));
+    }
+    // One line's ink height; on a line every glyph's centre lies within it,
+    // and \baselineskip puts the next line's centres further away.
+    let line_height = one_line
+        .iter()
+        .map(|(_, max)| max[1])
+        .fold(f64::MIN, f64::max)
+        - one_line
+            .iter()
+            .map(|(min, _)| min[1])
+            .fold(f64::MAX, f64::min);
+    let mut lines: Vec<Vec<(Vec3, Vec3)>> = Vec::new();
+    for glyph in &broken {
+        let centre = (glyph.0[1] + glyph.1[1]) / 2.0;
+        match lines.last_mut() {
+            Some(line)
+                if (centre - (line[0].0[1] + line[0].1[1]) / 2.0).abs() < line_height / 2.0 =>
+            {
+                line.push(*glyph);
+            }
+            _ => lines.push(vec![*glyph]),
+        }
+    }
+    // Centred lines share an axis: each line's ink centre, within a tenth
+    // of the line height (side bearings).
+    let centres: Vec<f64> = lines
+        .iter()
+        .map(|line| {
+            let left = line.iter().map(|(min, _)| min[0]).fold(f64::MAX, f64::min);
+            let right = line.iter().map(|(_, max)| max[0]).fold(f64::MIN, f64::max);
+            (left + right) / 2.0
+        })
+        .collect();
+    let centred = centres
+        .iter()
+        .all(|centre| (centre - centres[0]).abs() < line_height / 10.0);
+    let first_line = lines.first().map_or(0, Vec::len);
+    ctx.event(
+        LogEvent::new("e2e.parity.textext_paragraph_lines")
+            .field("lines", lines.len() as u64)
+            .field("first_line_glyphs", first_line as u64)
+            .field("centred", truth(centred)),
+    );
+    if !centred {
+        return Err(fail(format!(
+            "the lines are not centred on one axis: {centres:?}"
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("textext_paragraph_lines", lines.len() as u64)
+        .with_counter("textext_paragraph_first_line_glyphs", first_line as u64))
+}
+
 /// fm-cache-eviction-wired-1w05: exercise the real render-completion hook
 /// with no disk retention, ordinary retention, and memory-only typesetting.
 /// All three render teams must publish exactly the same certified PNG.
@@ -10164,6 +10260,26 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "parity.textext_paragraph_lines.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(textext_paragraph_lines_run),
+        vec![
+            Assertion::ExitCode(0),
+            // TeX's lines: two, the first ending after "of" (63 glyphs).
+            counter_eq("textext_paragraph_lines", 2),
+            counter_eq("textext_paragraph_first_line_glyphs", 63),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.parity.textext_paragraph_lines",
+            vec![
+                FieldPred::u64_eq("lines", 2),
+                FieldPred::u64_eq("first_line_glyphs", 63),
+                FieldPred::str_eq("centred", truth(true)),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.native_shape_matching.v1",
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
@@ -12544,6 +12660,16 @@ fn tex_cancel_frak_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.tex_cancel_frak.v1")
         .expect("the Fraktur and cancel scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn textext_paragraph_lines_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "parity.textext_paragraph_lines.v1")
+        .expect("the TexText paragraph scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }
