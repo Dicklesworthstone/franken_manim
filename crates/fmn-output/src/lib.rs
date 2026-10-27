@@ -44,6 +44,7 @@
 pub mod audio;
 pub mod emitter;
 pub mod ffmpeg;
+pub mod image;
 pub mod negotiate;
 pub mod provenance;
 pub mod sinks;
@@ -55,6 +56,11 @@ pub use fmn_hash::Digest as ArtifactDigest;
 pub use audio::{
     AudioDecodeError, AudioDecodeLimits, AudioDecodeReport, AudioDecoder, AudioInputFormat,
     DecodedAudio,
+};
+
+pub use image::{
+    DecodedImage, ImageDecodeError, ImageDecodeLimits, ImageDecodeReport, ImageDecoder,
+    ImageInputFormat, RasterImage,
 };
 
 pub use emitter::{

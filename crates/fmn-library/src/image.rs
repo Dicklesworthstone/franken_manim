@@ -53,7 +53,8 @@ impl std::fmt::Display for ImageError {
             Self::UnknownFormat => write!(
                 f,
                 "not a recognized image: input leads with neither the PNG \
-                 signature nor a JPEG SOI marker"
+                 signature nor a JPEG SOI marker; GIF/BMP/WebP/TIFF require \
+                 the optional governed ffmpeg image decoder, or convert the asset to PNG/JPEG"
             ),
             Self::PairedResource => f.write_str("image quads require an unpaired image resource"),
             Self::Png(e) => write!(f, "PNG decode refused the input: {e}"),

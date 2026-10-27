@@ -112,6 +112,53 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
         return Ok(0);
     };
     match mode.as_str() {
+        "image-decode" | "image-decode-swap" | "image-decode-corrupt" => {
+            let source_index = argv
+                .iter()
+                .position(|arg| arg == "-i")
+                .ok_or("image decode has no source")?;
+            let source = Path::new(&argv[source_index + 1]);
+            if source.file_name().is_none_or(|name| name != "source.image") {
+                return Err("image decode reopened an authored path".into());
+            }
+            let expected = [
+                ("-protocol_whitelist", "file"),
+                ("-f", "bmp_pipe"),
+                ("-frames:v", "1"),
+                ("-pix_fmt", "rgba"),
+                ("-map", "0:v:0"),
+            ];
+            for (name, value) in expected {
+                if !argv
+                    .windows(2)
+                    .any(|pair| pair[0] == name && pair[1] == value)
+                {
+                    return Err(format!("image decode omitted {name} {value}").into());
+                }
+            }
+            let bytes = std::fs::read(source)?;
+            if !bytes.starts_with(b"BM") {
+                return Err("image decode did not stage the actual source bytes".into());
+            }
+            if mode == "image-decode-swap" {
+                std::fs::write(source, b"BM substituted")?;
+            }
+            let artifact = artifact_path(&argv)?;
+            let png = if mode == "image-decode-corrupt" {
+                b"not PNG".to_vec()
+            } else {
+                fmn_codec::encode_rgba8(
+                    2,
+                    2,
+                    &[
+                        255, 0, 0, 255, 0, 255, 0, 128, 0, 0, 255, 64, 255, 255, 0, 0,
+                    ],
+                    fmn_codec::CompressionLevel::Fast,
+                )
+            };
+            std::fs::write(artifact, png)?;
+            Ok(0)
+        }
         "timeout" => {
             let mut child = Command::new(std::env::current_exe()?)
                 .arg("--fmn-sleep-child")
