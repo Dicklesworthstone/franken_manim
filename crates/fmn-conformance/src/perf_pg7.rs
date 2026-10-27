@@ -1774,13 +1774,15 @@ mod tests {
         // the identity names the provider revision, so a test-only provider
         // commit moves it too), 4b705d14 (fm-eo8l: amsmath's \mod), and
         // 1ffcadc9 and 8667819a (fm-ew7o: \dddot as amsmath's operator over a
-        // period row; \ex@ without powf), and d99fee96 (the long arrows from
-        // CM pieces, \binrel@'s class for \overset, amsmath's dots look-ahead).
+        // period row; \ex@ without powf), d99fee96 (the long arrows from CM
+        // pieces, \binrel@'s class for \overset, amsmath's dots look-ahead),
+        // and cc470d1a (physics' function arguments in the default pack,
+        // whose macro identity gains the physics flag).
         assert_eq!(
             [cold.digest(), cached.digest(), text.digest()].map(|digest| digest.to_string()),
             [
-                "7e39b61bac428ca913c2f35b59cf397544e1124301df3fb81339849fbfcb283d",
-                "6577cb63677bed3639805ec31713d3112c46bc421ba49c2f93cf9629f6a2afdf",
+                "33cd3585b642ed932c8cf41296c8949cbb152856732752c2401b6183082aa880",
+                "897ada886575ee93dbf42019a1042d3452b90a69e3fde7cc90513a2fc456f7c3",
                 "0fa22e64fe9e1901eea58a596899ec843bc0d6db46f1cd91607925a50fea3e6f",
             ]
         );

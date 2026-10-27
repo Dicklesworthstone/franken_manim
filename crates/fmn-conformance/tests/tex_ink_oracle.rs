@@ -48,9 +48,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// 102 since `\vec` is cmmi's own accent (439a910, fm-zxxy): \vec{v} goes
 /// from IoU 0.86 to 0.986.
 /// 104 with authored AMS symbols and blackboard capitals (9b457a38, fm-0byq).
+/// 105 since operator names keep their last italic correction (cc470d1a,
+/// fm-fm-physics-trig-parens-r11-nou8): `\log_2 n` goes from IoU 0.864 to
+/// 0.989.
 /// Improve the floors when the ink improves; never loosen one to land a change.
 const PUBLIC_FLOORS: InkFloors = InkFloors {
-    matches: 104,
+    matches: 105,
     median_hausdorff_px: 1.0,
     p95_hausdorff_px: 4.124,
     median_sliced_w1_px: 0.057,
@@ -97,12 +100,17 @@ const PUBLIC_FLOORS: InkFloors = InkFloors {
 /// (0.11 -> 0.99), and no row's IoU falls. The p95 Hausdorff falls to
 /// 5.099 px, the p95 sliced W1 to 2.4729 px, and the p05 IoU rises to
 /// 0.2915.
+/// 532 with physics' function arguments and operator names keeping their
+/// last italic correction (cc470d1a, fm-fm-physics-trig-parens-r11-nou8):
+/// four `\log` rows match (IoU 0.84-0.87 -> 0.99), one long `\log p` row's
+/// IoU falls 0.9025 -> 0.9022 (no match before or after), and the p95
+/// sliced W1 falls to 2.4523 px.
 const CORPUS_FLOORS: InkFloors = InkFloors {
-    matches: 528,
+    matches: 532,
     median_hausdorff_px: 1.0,
     p95_hausdorff_px: 5.100,
     median_sliced_w1_px: 0.0688,
-    p95_sliced_w1_px: 2.473,
+    p95_sliced_w1_px: 2.453,
     median_iou: 0.9895,
     p05_iou: 0.2914,
 };

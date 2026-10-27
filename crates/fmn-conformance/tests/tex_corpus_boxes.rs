@@ -65,11 +65,13 @@ const WITHIN_10_PERCENT_FLOOR: usize = 578;
 /// with the long arrows from CM pieces and amsmath's dots look-ahead
 /// (d99fee96): five arrow and three `(\dots)` rows enter, and `\sin(\dots)`
 /// leaves, since physics' `\sin(...)` hides the `)` from `\dots`
-/// (fm-fm-physics-trig-parens-r11-nou8). Raise it when layout improves; never
-/// lower it to land a change.
-const CENSUS_WITHIN_5_PERCENT_FLOOR: usize = 4139;
-/// The same at 10%: 4157 at 8667819a, 4161 at d99fee96.
-const CENSUS_WITHIN_10_PERCENT_FLOOR: usize = 4161;
+/// (fm-fm-physics-trig-parens-r11-nou8). 4146 (11139 occurrences) with
+/// physics' function arguments in the default pack (cc470d1a): the six
+/// auto-sized `\cos(...)` rows and `\sin(\dots)` enter, and none leaves.
+/// Raise it when layout improves; never lower it to land a change.
+const CENSUS_WITHIN_5_PERCENT_FLOOR: usize = 4146;
+/// The same at 10%: 4157 at 8667819a, 4161 at d99fee96, 4166 at cc470d1a.
+const CENSUS_WITHIN_10_PERCENT_FLOOR: usize = 4166;
 
 fn rows() -> Vec<OracleRow> {
     parse_oracle_fixture(ORACLE_FIXTURE).expect("the oracle fixture parses")
