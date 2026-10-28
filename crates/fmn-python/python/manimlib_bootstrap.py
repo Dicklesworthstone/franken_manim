@@ -11173,50 +11173,7 @@ class Surface(Mobject):
     pointlike_data_keys = ["point", "d_normal_point"]
     render_primitive = 4  # moderngl.TRIANGLES, without importing a renderer
 
-    def __init__(
-        self,
-        color=_GREY,
-        shading=(0.3, 0.2, 0.4),
-        depth_test=True,
-        u_range=(0.0, 1.0),
-        v_range=(0.0, 1.0),
-        resolution=(101, 101),
-        preferred_creation_axis=1,
-        epsilon=0.001,
-        normal_nudge=0.001,
-        **kwargs,
-    ):
-        opacity = kwargs.pop("opacity", None)
-        z_index = int(kwargs.pop("z_index", 0))
-        _refuse_surface_keywords(type(self).__name__ + "()", kwargs)
-        _install_live_state(self)
-        self.u_range = tuple(u_range)
-        self.v_range = tuple(v_range)
-        self.resolution = (int(resolution[0]), int(resolution[1]))
-        self.preferred_creation_axis = int(preferred_creation_axis)
-        self.epsilon = float(epsilon)
-        self.normal_nudge = float(normal_nudge)
-        self.z_index = z_index
-        if self.resolution[0] == 0 or self.resolution[1] == 0:
-            self._engine_init()
-        else:
-            specs = self._build_parametric_surface(
-                _native_surface_shell_factory,
-                self.uv_func,
-                (float(self.u_range[0]), float(self.u_range[1])),
-                (float(self.v_range[0]), float(self.v_range[1])),
-                self.resolution,
-                self.epsilon,
-                self.normal_nudge,
-            )
-            _hang_native_children(self, specs)
-        self.set_z_index(z_index)
-        self.compute_triangle_indices()
-        self._apply_surface_style(color, opacity, shading, depth_test)
-
-    def init_points(self):
-        # Native construction already installed the sampled grid.
-        return None
+    # The constructor and init_points are installed by fmn_python.surface_lifecycle.
 
     def apply_points_function(self, *args, **kwargs):
         super().apply_points_function(*args, **kwargs)
@@ -11402,47 +11359,14 @@ class TexturedSurface(Surface):
         ("opacity", _np.float32, (1,)),
     ]
 
-    def __init__(self, uv_surface, image_file, dark_image_file=None, **kwargs):
-        if kwargs:
-            raise TypeError(
-                "unexpected keyword arguments: " + ", ".join(sorted(kwargs))
-            )
-        if not isinstance(uv_surface, Surface):
-            raise TypeError("TexturedSurface uv_surface must be a Surface")
-        del image_file, dark_image_file
-        raise _CapabilityError(
-            "TexturedSurface is unavailable until Marionette can retain a "
-            "light/dark texture pair without changing the surface grid into "
-            "an ImageQuad"
-        )
-
-    def set_image_coords_by_uv_func(self, uv_func):
-        # Reference surface.py:353: resample im_coords over the wrapped
-        # uv surface grid with the reversed v direction.
-        nu, nv = self.uv_surface.resolution
-        values = _np.array([
-            uv_func(float(u), float(v))
-            for u in _np.linspace(0, 1, nu)
-            for v in _np.linspace(1, 0, nv)
-        ])
-        self.data["im_coords"][:] = values
-        return self
+    # The constructor and set_image_coords_by_uv_func are installed by
+    # fmn_python.surface_textures.
 
 
 class TexturedGeometry(TexturedSurface):
     """Trimesh-backed textured surface. Same Marionette texture-pair gap."""
 
-    def __init__(self, geometry, texture_file, **kwargs):
-        if kwargs:
-            raise TypeError(
-                "unexpected keyword arguments: " + ", ".join(sorted(kwargs))
-            )
-        del geometry, texture_file
-        raise _CapabilityError(
-            "TexturedGeometry is unavailable until Marionette can retain a "
-            "light/dark texture pair without changing the surface grid into "
-            "an ImageQuad"
-        )
+    # The constructor is installed by fmn_python.surface_textures.
 
 
 def _native_surface_shell_factory():
@@ -11492,18 +11416,7 @@ def _mtl_textures(path):
 class ThreeDModel(Group):
     """Atlas's owned OBJ-subset reader under the Reference Group surface."""
 
-    def __init__(self, obj_file: str, height=3):
-        super().__init__()
-        path = _pathlib.Path(obj_file)
-        payload = path.read_bytes()
-        specs = self._build_three_d_model(
-            _native_surface_shell_factory,
-            payload,
-            float(height),
-        )
-        _hang_native_children(self, specs)
-        self.obj_file = str(path)
-        self.height = float(height)
+    # The constructor is installed by fmn_python.obj_models.
 
     def get_textures_from_mtl(self, obj_filepath, suppress_warnings=True):
         """Reference ThreeDModel.get_textures_from_mtl (surface.py:460) over
@@ -11544,96 +11457,15 @@ class ThreeDModel(Group):
         )
 
 
-# The module postpones annotations globally, while the pinned Reference
-# signature exposes the concrete builtin rather than the string ``'str'``.
-ThreeDModel.__init__.__annotations__["obj_file"] = str
-
-
 class ParametricSurface(Surface):
-    def __init__(self, uv_func, u_range=(0, 1), v_range=(0, 1), **kwargs):
-        self.passed_uv_func = uv_func
-        color = kwargs.pop("color", None)
-        opacity = kwargs.pop("opacity", None)
-        shading = kwargs.pop("shading", None)
-        depth_test = kwargs.pop("depth_test", True)
-        resolution = kwargs.pop("resolution", (101, 101))
-        preferred_creation_axis = kwargs.pop("preferred_creation_axis", 1)
-        epsilon = kwargs.pop("epsilon", 0.001)
-        normal_nudge = kwargs.pop("normal_nudge", 0.001)
-        _refuse_unrouted(
-            "ParametricSurface()", [(name, True) for name in sorted(kwargs)]
-        )
-        _install_live_state(self)
-        self.u_range = tuple(u_range)
-        self.v_range = tuple(v_range)
-        self.resolution = (int(resolution[0]), int(resolution[1]))
-        self.preferred_creation_axis = int(preferred_creation_axis)
-        self.epsilon = float(epsilon)
-        self.normal_nudge = float(normal_nudge)
-        specs = self._build_parametric_surface(
-            _native_surface_shell_factory,
-            uv_func,
-            (float(u_range[0]), float(u_range[1])),
-            (float(v_range[0]), float(v_range[1])),
-            self.resolution,
-            self.epsilon,
-            self.normal_nudge,
-        )
-        _hang_native_children(self, specs)
-        # Reference Surface.__init__ computes the grid triangles.
-        self.compute_triangle_indices()
-        self._apply_surface_style(color, opacity, shading, depth_test)
+    # The constructor is installed by fmn_python.surface_plotting.
 
     def uv_func(self, u, v):
         return self.passed_uv_func(u, v)
 
 
 class Sphere(Surface):
-    def __init__(
-        self,
-        u_range=(0, _math.tau),
-        v_range=(0, _math.pi),
-        resolution=(101, 51),
-        radius=1.0,
-        true_normals=True,
-        clockwise=False,
-        **kwargs,
-    ):
-        color = kwargs.pop("color", None)
-        opacity = kwargs.pop("opacity", None)
-        shading = kwargs.pop("shading", None)
-        depth_test = kwargs.pop("depth_test", True)
-        preferred_creation_axis = kwargs.pop("preferred_creation_axis", 1)
-        epsilon = kwargs.pop("epsilon", 0.001)
-        normal_nudge = kwargs.pop("normal_nudge", 0.001)
-        _refuse_surface_keywords("Sphere()", kwargs)
-        _install_live_state(self)
-        self.radius = float(radius)
-        self.clockwise = bool(clockwise)
-        self.true_normals = bool(true_normals)
-        self.u_range = tuple(u_range)
-        self.v_range = tuple(v_range)
-        self.resolution = (int(resolution[0]), int(resolution[1]))
-        self.preferred_creation_axis = int(preferred_creation_axis)
-        self.epsilon = float(epsilon)
-        self.normal_nudge = float(normal_nudge)
-        self._solid_params = ("sphere", self.radius)
-        specs = self._build_sphere(
-            _native_surface_shell_factory,
-            self.radius,
-            (float(u_range[0]), float(u_range[1])),
-            (float(v_range[0]), float(v_range[1])),
-            self.resolution,
-            self.true_normals,
-            self.clockwise,
-            self.preferred_creation_axis,
-            self.epsilon,
-            self.normal_nudge,
-        )
-        _hang_native_children(self, specs)
-        # Reference Surface.__init__ computes the grid triangles.
-        self.compute_triangle_indices()
-        self._apply_surface_style(color, opacity, shading, depth_test)
+    # The constructor is installed by fmn_python.solid_lifecycle.
 
     def uv_func(self, u, v):
         return _np.array(
@@ -11642,51 +11474,7 @@ class Sphere(Surface):
 
 
 class Torus(Surface):
-    def __init__(
-        self,
-        u_range=(0, _math.tau),
-        v_range=(0, _math.tau),
-        r1=3.0,
-        r2=1.0,
-        **kwargs,
-    ):
-        color = kwargs.pop("color", None)
-        opacity = kwargs.pop("opacity", None)
-        shading = kwargs.pop("shading", None)
-        depth_test = kwargs.pop("depth_test", True)
-        resolution = kwargs.pop("resolution", (101, 101))
-        preferred_creation_axis = kwargs.pop("preferred_creation_axis", 1)
-        epsilon = kwargs.pop("epsilon", 0.001)
-        normal_nudge = kwargs.pop("normal_nudge", 0.001)
-        z_index = int(kwargs.pop("z_index", 0))
-        _refuse_surface_keywords("Torus()", kwargs)
-        _install_live_state(self)
-        self.r1 = float(r1)
-        self.r2 = float(r2)
-        self.u_range = tuple(u_range)
-        self.v_range = tuple(v_range)
-        self.resolution = (int(resolution[0]), int(resolution[1]))
-        self.preferred_creation_axis = int(preferred_creation_axis)
-        self.epsilon = float(epsilon)
-        self.normal_nudge = float(normal_nudge)
-        specs = self._build_torus(
-            _native_surface_shell_factory,
-            self.r1,
-            self.r2,
-            (float(u_range[0]), float(u_range[1])),
-            (float(v_range[0]), float(v_range[1])),
-            self.resolution,
-            self.preferred_creation_axis,
-            self.epsilon,
-            self.normal_nudge,
-            z_index,
-        )
-        _hang_native_children(self, specs)
-        # Reference Surface.__init__ computes the grid triangles.
-        self.compute_triangle_indices()
-        self._apply_surface_style(color, opacity, shading, depth_test)
-        self._solid_params = ("torus", self.r1, self.r2)
-        self._solid_native_height = self.get_height()
+    # The constructor is installed by fmn_python.solid_lifecycle.
 
     def uv_func(self, u, v):
         return _np.array(
@@ -11697,314 +11485,40 @@ class Torus(Surface):
 class Cylinder(Surface):
     """The Reference cylinder over Atlas's native sampled solid."""
 
-    def __init__(
-        self,
-        u_range=(0, _math.tau),
-        v_range=(-1, 1),
-        resolution=(101, 11),
-        height=2,
-        radius=1,
-        axis=_OUT,
-        **kwargs,
-    ):
-        color = kwargs.pop("color", None)
-        opacity = kwargs.pop("opacity", None)
-        shading = kwargs.pop("shading", None)
-        depth_test = kwargs.pop("depth_test", True)
-        preferred_creation_axis = kwargs.pop("preferred_creation_axis", 1)
-        epsilon = kwargs.pop("epsilon", 0.001)
-        normal_nudge = kwargs.pop("normal_nudge", 0.001)
-        z_index = int(kwargs.pop("z_index", 0))
-        _refuse_surface_keywords("Cylinder()", kwargs)
-        _install_live_state(self)
-        self.height = float(height)
-        self.radius = float(radius)
-        self.axis = _np.array(_vec3(axis), dtype=float)
-        self.u_range = tuple(u_range)
-        self.v_range = tuple(v_range)
-        self.resolution = (int(resolution[0]), int(resolution[1]))
-        self.preferred_creation_axis = int(preferred_creation_axis)
-        self.epsilon = float(epsilon)
-        self.normal_nudge = float(normal_nudge)
-        specs = self._build_cylinder(
-            _native_surface_shell_factory,
-            self.height,
-            self.radius,
-            _vec3(self.axis),
-            (float(u_range[0]), float(u_range[1])),
-            (float(v_range[0]), float(v_range[1])),
-            self.resolution,
-            self.preferred_creation_axis,
-            self.epsilon,
-            self.normal_nudge,
-            z_index,
-        )
-        _hang_native_children(self, specs)
-        # Reference Surface.__init__ computes the grid triangles.
-        self.compute_triangle_indices()
-        self._apply_surface_style(color, opacity, shading, depth_test)
-        self._solid_params = (
-            "cylinder",
-            self.height,
-            self.radius,
-            tuple(float(component) for component in self.axis),
-        )
-        self._solid_native_height = self.get_height()
+    # The constructor and init_points are installed by fmn_python.solid_lifecycle.
 
     def uv_func(self, u, v):
         return _np.array(self._cylinder_uv(float(u), float(v)))
 
-    def init_points(self):
-        # Native construction already installed the sampled grid.
-        return None
-
 
 class Cone(Cylinder):
-    def __init__(
-        self,
-        u_range=(0, _math.tau),
-        v_range=(0, 1),
-        *args,
-        **kwargs,
-    ):
-        if args:
-            raise TypeError(
-                "Cylinder.__init__() got multiple values for argument 'u_range'"
-            )
-        color = kwargs.pop("color", None)
-        opacity = kwargs.pop("opacity", None)
-        shading = kwargs.pop("shading", None)
-        depth_test = kwargs.pop("depth_test", True)
-        resolution = kwargs.pop("resolution", (101, 11))
-        height = kwargs.pop("height", 2)
-        radius = kwargs.pop("radius", 1)
-        axis = kwargs.pop("axis", _OUT)
-        preferred_creation_axis = kwargs.pop("preferred_creation_axis", 1)
-        epsilon = kwargs.pop("epsilon", 0.001)
-        normal_nudge = kwargs.pop("normal_nudge", 0.001)
-        z_index = int(kwargs.pop("z_index", 0))
-        _refuse_surface_keywords("Cone()", kwargs)
-        _install_live_state(self)
-        self.height = float(height)
-        self.radius = float(radius)
-        self.axis = _np.array(_vec3(axis), dtype=float)
-        self.u_range = tuple(u_range)
-        self.v_range = tuple(v_range)
-        self.resolution = (int(resolution[0]), int(resolution[1]))
-        self.preferred_creation_axis = int(preferred_creation_axis)
-        self.epsilon = float(epsilon)
-        self.normal_nudge = float(normal_nudge)
-        specs = self._build_cone(
-            _native_surface_shell_factory,
-            self.height,
-            self.radius,
-            _vec3(self.axis),
-            (float(u_range[0]), float(u_range[1])),
-            (float(v_range[0]), float(v_range[1])),
-            self.resolution,
-            self.preferred_creation_axis,
-            self.epsilon,
-            self.normal_nudge,
-            z_index,
-        )
-        _hang_native_children(self, specs)
-        # Reference Surface.__init__ computes the grid triangles.
-        self.compute_triangle_indices()
-        self._apply_surface_style(color, opacity, shading, depth_test)
-        self._solid_params = (
-            "cone",
-            self.height,
-            self.radius,
-            tuple(float(component) for component in self.axis),
-        )
-        self._solid_native_height = self.get_height()
+    # The constructor is installed by fmn_python.solid_lifecycle.
 
     def uv_func(self, u, v):
         return _np.array(self._cone_uv(float(u), float(v)))
 
 
 class Line3D(Cylinder):
-    def __init__(
-        self,
-        start,
-        end,
-        width=0.05,
-        resolution=(21, 25),
-        **kwargs,
-    ):
-        color = kwargs.pop("color", None)
-        opacity = kwargs.pop("opacity", None)
-        shading = kwargs.pop("shading", None)
-        depth_test = kwargs.pop("depth_test", True)
-        u_range = kwargs.pop("u_range", (0, _math.tau))
-        v_range = kwargs.pop("v_range", (-1, 1))
-        preferred_creation_axis = kwargs.pop("preferred_creation_axis", 1)
-        epsilon = kwargs.pop("epsilon", 0.001)
-        normal_nudge = kwargs.pop("normal_nudge", 0.001)
-        z_index = int(kwargs.pop("z_index", 0))
-        _refuse_surface_keywords("Line3D()", kwargs)
-        _install_live_state(self)
-        start_point = _np.array(_vec3(start), dtype=float)
-        end_point = _np.array(_vec3(end), dtype=float)
-        self.height = float(_np.linalg.norm(end_point - start_point))
-        self.radius = float(width) / 2.0
-        self.axis = end_point - start_point
-        self.u_range = tuple(u_range)
-        self.v_range = tuple(v_range)
-        self.resolution = (int(resolution[0]), int(resolution[1]))
-        self.preferred_creation_axis = int(preferred_creation_axis)
-        self.epsilon = float(epsilon)
-        self.normal_nudge = float(normal_nudge)
-        specs = self._build_line3d(
-            _native_surface_shell_factory,
-            _vec3(start_point),
-            _vec3(end_point),
-            float(width),
-            (float(u_range[0]), float(u_range[1])),
-            (float(v_range[0]), float(v_range[1])),
-            self.resolution,
-            self.preferred_creation_axis,
-            self.epsilon,
-            self.normal_nudge,
-            z_index,
-        )
-        _hang_native_children(self, specs)
-        # Reference Surface.__init__ computes the grid triangles.
-        self.compute_triangle_indices()
-        self._apply_surface_style(color, opacity, shading, depth_test)
-        self._solid_params = (
-            "cylinder",
-            self.height,
-            self.radius,
-            tuple(float(component) for component in self.axis),
-        )
-        self._solid_native_height = self.get_height()
+    # The constructor is installed by fmn_python.solid_lifecycle.
+    pass
 
 
 class Disk3D(Surface):
-    def __init__(
-        self,
-        radius=1,
-        u_range=(0, 1),
-        v_range=(0, _math.tau),
-        resolution=(2, 100),
-        **kwargs,
-    ):
-        color = kwargs.pop("color", None)
-        opacity = kwargs.pop("opacity", None)
-        shading = kwargs.pop("shading", None)
-        depth_test = kwargs.pop("depth_test", True)
-        preferred_creation_axis = kwargs.pop("preferred_creation_axis", 1)
-        epsilon = kwargs.pop("epsilon", 0.001)
-        normal_nudge = kwargs.pop("normal_nudge", 0.001)
-        z_index = int(kwargs.pop("z_index", 0))
-        _refuse_surface_keywords("Disk3D()", kwargs)
-        _install_live_state(self)
-        self.radius = float(radius)
-        self.u_range = tuple(u_range)
-        self.v_range = tuple(v_range)
-        self.resolution = (int(resolution[0]), int(resolution[1]))
-        self.preferred_creation_axis = int(preferred_creation_axis)
-        self.epsilon = float(epsilon)
-        self.normal_nudge = float(normal_nudge)
-        specs = self._build_disk3d(
-            _native_surface_shell_factory,
-            self.radius,
-            (float(u_range[0]), float(u_range[1])),
-            (float(v_range[0]), float(v_range[1])),
-            self.resolution,
-            self.preferred_creation_axis,
-            self.epsilon,
-            self.normal_nudge,
-            z_index,
-        )
-        _hang_native_children(self, specs)
-        # Reference Surface.__init__ computes the grid triangles.
-        self.compute_triangle_indices()
-        self._apply_surface_style(color, opacity, shading, depth_test)
-        self._solid_params = ("disk", self.radius)
-        self._solid_native_height = self.get_height()
+    # The constructor is installed by fmn_python.solid_lifecycle.
 
     def uv_func(self, u, v):
         return _np.array(self._disk3d_uv(float(u), float(v)))
 
 
 class Square3D(Surface):
-    def __init__(
-        self,
-        side_length=2.0,
-        u_range=(-1, 1),
-        v_range=(-1, 1),
-        resolution=(2, 2),
-        **kwargs,
-    ):
-        color = kwargs.pop("color", None)
-        opacity = kwargs.pop("opacity", None)
-        shading = kwargs.pop("shading", None)
-        depth_test = kwargs.pop("depth_test", True)
-        preferred_creation_axis = kwargs.pop("preferred_creation_axis", 1)
-        epsilon = kwargs.pop("epsilon", 0.001)
-        normal_nudge = kwargs.pop("normal_nudge", 0.001)
-        z_index = int(kwargs.pop("z_index", 0))
-        _refuse_surface_keywords("Square3D()", kwargs)
-        _install_live_state(self)
-        self.side_length = float(side_length)
-        self.u_range = tuple(u_range)
-        self.v_range = tuple(v_range)
-        self.resolution = (int(resolution[0]), int(resolution[1]))
-        self.preferred_creation_axis = int(preferred_creation_axis)
-        self.epsilon = float(epsilon)
-        self.normal_nudge = float(normal_nudge)
-        specs = self._build_square3d(
-            _native_surface_shell_factory,
-            self.side_length,
-            (float(u_range[0]), float(u_range[1])),
-            (float(v_range[0]), float(v_range[1])),
-            self.resolution,
-            self.preferred_creation_axis,
-            self.epsilon,
-            self.normal_nudge,
-            z_index,
-        )
-        _hang_native_children(self, specs)
-        # Reference Surface.__init__ computes the grid triangles.
-        self.compute_triangle_indices()
-        self._apply_surface_style(color, opacity, shading, depth_test)
-        self._solid_params = ("square", self.side_length)
-        self._solid_native_height = self.get_height()
+    # The constructor is installed by fmn_python.solid_lifecycle.
 
     def uv_func(self, u, v):
         return _np.array(self._square3d_uv(float(u), float(v)))
 
 
 class Cube(SGroup):
-    def __init__(
-        self,
-        color=None,
-        opacity=1,
-        shading=(0.1, 0.5, 0.1),
-        square_resolution=(2, 2),
-        side_length=2,
-        **kwargs,
-    ):
-        depth_test = kwargs.pop("depth_test", True)
-        z_index = int(kwargs.pop("z_index", 0))
-        _refuse_surface_keywords(type(self).__name__ + "()", kwargs)
-        _install_live_state(self)
-        self.resolution = (
-            int(square_resolution[0]),
-            int(square_resolution[1]),
-        )
-        self.preferred_creation_axis = 1
-        specs = self._build_cube(
-            _native_surface_shell_factory,
-            float(side_length),
-            self.resolution,
-            z_index,
-        )
-        _hang_native_children(self, specs)
-        self._index_faces()
-        self._apply_surface_style(color, opacity, shading, depth_test)
+    # The constructor is installed by fmn_python.solid_groups.
 
     def _index_faces(self):
         # Reference Cube faces are Square3D surfaces on square_resolution
@@ -12015,26 +11529,8 @@ class Cube(SGroup):
 
 
 class Prism(Cube):
-    def __init__(self, width=3.0, height=2.0, depth=1.0, **kwargs):
-        color = kwargs.pop("color", None)
-        opacity = kwargs.pop("opacity", None)
-        shading = kwargs.pop("shading", None)
-        depth_test = kwargs.pop("depth_test", True)
-        z_index = int(kwargs.pop("z_index", 0))
-        _refuse_surface_keywords("Prism()", kwargs)
-        _install_live_state(self)
-        self.resolution = (2, 2)
-        self.preferred_creation_axis = 1
-        specs = self._build_prism(
-            _native_surface_shell_factory,
-            float(width),
-            float(height),
-            float(depth),
-            z_index,
-        )
-        _hang_native_children(self, specs)
-        self._index_faces()
-        self._apply_surface_style(color, opacity, shading, depth_test)
+    # The constructor is installed by fmn_python.solid_groups.
+    pass
 
 
 class VGroup3D(VGroup):
@@ -12055,65 +11551,13 @@ class VGroup3D(VGroup):
 
 
 class VCube(VGroup3D):
-    def __init__(
-        self,
-        side_length=2.0,
-        fill_color=_StyleDefault(_BLUE_D),
-        fill_opacity=1,
-        stroke_width=0,
-        **kwargs,
-    ):
-        z_index = int(kwargs.pop("z_index", 0))
-        style, depth_test, shading, joint_type = _split_native_vgroup3d_kwargs(
-            "VCube()", kwargs, (0.2, 0.2, 0.2)
-        )
-        _install_live_state(self)
-        specs = self._build_vcube(
-            _native_shell_factory,
-            float(side_length),
-            fill_color,
-            float(fill_opacity),
-            float(stroke_width),
-            z_index,
-        )
-        _hang_native_children(self, specs)
-        style.setdefault("fill_color", fill_color)
-        style.setdefault("fill_opacity", fill_opacity)
-        style.setdefault("stroke_width", stroke_width)
-        _apply_vmobject_style_kwargs(self, style)
-        _apply_vgroup3d_config(self, depth_test, shading, joint_type)
+    # The constructor is installed by fmn_python.vector_solid_groups.
+    pass
 
 
 class VPrism(VCube):
-    def __init__(self, width=3.0, height=2.0, depth=1.0, **kwargs):
-        side_length = kwargs.pop("side_length", 2.0)
-        z_index = int(kwargs.pop("z_index", 0))
-        _refuse_unrouted(
-            "VPrism()", [("side_length", float(side_length) != 2.0)]
-        )
-        fill_color = kwargs.pop("fill_color", _BLUE_D)
-        fill_opacity = kwargs.pop("fill_opacity", 1)
-        stroke_width = kwargs.pop("stroke_width", 0)
-        style, depth_test, shading, joint_type = _split_native_vgroup3d_kwargs(
-            "VPrism()", kwargs, (0.2, 0.2, 0.2)
-        )
-        _install_live_state(self)
-        specs = self._build_vprism(
-            _native_shell_factory,
-            float(width),
-            float(height),
-            float(depth),
-            fill_color,
-            float(fill_opacity),
-            float(stroke_width),
-            z_index,
-        )
-        _hang_native_children(self, specs)
-        style.setdefault("fill_color", fill_color)
-        style.setdefault("fill_opacity", fill_opacity)
-        style.setdefault("stroke_width", stroke_width)
-        _apply_vmobject_style_kwargs(self, style)
-        _apply_vgroup3d_config(self, depth_test, shading, joint_type)
+    # The constructor is installed by fmn_python.vector_solid_groups.
+    pass
 
 
 class Tetrahedron(VGroup3D):
@@ -12172,90 +11616,13 @@ class Tetrahedron(VGroup3D):
 
 
 class Dodecahedron(VGroup3D):
-    def __init__(
-        self,
-        fill_color=_StyleDefault(_BLUE_E),
-        fill_opacity=1,
-        stroke_color=_StyleDefault(_BLUE_E),
-        stroke_width=1,
-        shading=(0.2, 0.2, 0.2),
-        **kwargs,
-    ):
-        z_index = int(kwargs.pop("z_index", 0))
-        style, depth_test, resolved_shading, joint_type = (
-            _split_native_vgroup3d_kwargs(
-                "Dodecahedron()", kwargs, tuple(shading)
-            )
-        )
-        _install_live_state(self)
-        specs = self._build_dodecahedron(
-            _native_shell_factory,
-            fill_color,
-            float(fill_opacity),
-            stroke_color,
-            float(stroke_width),
-            tuple(float(value) for value in resolved_shading),
-            z_index,
-        )
-        _hang_native_children(self, specs)
-        style.setdefault("fill_color", fill_color)
-        style.setdefault("fill_opacity", fill_opacity)
-        style.setdefault("stroke_color", stroke_color)
-        style.setdefault("stroke_width", stroke_width)
-        _apply_vmobject_style_kwargs(self, style)
-        _apply_vgroup3d_config(
-            self, depth_test, resolved_shading, joint_type
-        )
+    # The constructor is installed by fmn_python.vector_solid_groups.
+    pass
 
 
 class Prismify(VGroup3D):
-    def __init__(self, vmobject, depth=1.0, direction=_IN, **kwargs):
-        if not isinstance(vmobject, VMobject):
-            raise TypeError("Prismify source must be a VMobject")
-        direction = tuple(float(value) for value in _vec3(direction))
-        if not _math.isfinite(float(depth)) or not all(
-            _math.isfinite(value) for value in direction
-        ):
-            raise ValueError("Prismify depth and direction must be finite")
-        style, depth_test, shading, joint_type = _split_native_vgroup3d_kwargs(
-            "Prismify()", kwargs, (0.2, 0.2, 0.2)
-        )
-        _install_live_state(self)
-        if vmobject.submobjects:
-            # One native extrusion per pointful family member, in family
-            # order (fm-5wq.4.81); each piece matches its own source's
-            # style, the Reference's per-child reading of match_style.
-            family_sources = [
-                member
-                for member in vmobject.family_members_with_points()
-                if isinstance(member, VMobject)
-            ]
-            if not family_sources:
-                raise ValueError(
-                    "Prismify family has no pointful VMobject members to "
-                    "extrude"
-                )
-            specs = self._build_prismify_family(
-                _native_shell_factory,
-                vmobject,
-                float(depth),
-                direction,
-            )
-            _hang_native_children(self, specs)
-            for piece, family_source in zip(self.submobjects, family_sources):
-                piece.match_style(family_source)
-        else:
-            specs = self._build_prismify(
-                _native_shell_factory,
-                vmobject,
-                float(depth),
-                direction,
-            )
-            _hang_native_children(self, specs)
-            for piece in self.submobjects:
-                piece.match_style(vmobject)
-        _apply_vmobject_style_kwargs(self, style, recurse=False)
-        _apply_vgroup3d_config(self, depth_test, shading, joint_type)
+    # The constructor is installed by fmn_python.vector_solid_groups.
+    pass
 
 
 class SurfaceMesh(VGroup):
@@ -12303,9 +11670,7 @@ class SurfaceMesh(VGroup):
             self.deactivate_depth_test()
         self.set_joint_type(joint_type)
 
-    def init_points(self):
-        # Native construction already hung the wireframe family.
-        return None
+    # init_points is installed by fmn_python.surface_mesh.
 
 
 def square_to_cube_faces(square):
@@ -12556,18 +11921,7 @@ class ControlMobject(ValueTracker):
     preserves the Reference's tracker-first MRO and fixed-frame composition.
     """
 
-    def __init__(self, value, *mobjects, **kwargs):
-        if kwargs:
-            raise TypeError(
-                "unexpected keyword arguments: " + ", ".join(sorted(kwargs))
-            )
-        if not all(isinstance(mobject, Mobject) for mobject in mobjects):
-            raise TypeError("ControlMobject children must be Mobject instances")
-        _install_live_state(self)
-        self._init_value_tracker(0, float(value), 0.0)
-        self.add(*mobjects)
-        self.add_updater(lambda mob: None)
-        self.fix_in_frame()
+    # The constructor is installed by fmn_python.tracker_lifecycle.
 
     def assert_value(self, value):
         del value
@@ -12670,13 +12024,7 @@ class Checkbox(ControlMobject):
         if not isinstance(value, bool):
             raise AssertionError("Checkbox value must be bool")
 
-    def get_checkmark(self):
-        _, content = self._native_checkbox_parts(True)
-        return content
-
-    def get_cross(self):
-        _, content = self._native_checkbox_parts(False)
-        return content
+    # get_checkmark and get_cross are installed by fmn_python.control_events.
 
     def set_value_anim(self, value):
         mark = self.get_checkmark() if value else self.get_cross()
@@ -12762,9 +12110,7 @@ class EnableDisableButton(ControlMobject):
         if not isinstance(value, bool):
             raise AssertionError("EnableDisableButton value must be bool")
 
-    def set_value_anim(self, value):
-        (box,) = self._native_enable_disable_parts(value, colored=True)
-        self.box.become(box)
+    # set_value_anim is installed by fmn_python.control_events.
 
     def toggle_value(self):
         self.set_value(not bool(self.get_value()))
@@ -13109,19 +12455,7 @@ class ColorSliders(Group):
         red, green, blue, alpha = self._color_slider_components
         return _np.array([red / 255.0, green / 255.0, blue / 255.0, alpha])
 
-    def set_value(self, r, g, b, a):
-        components = tuple(
-            float(self._slider_value_type(value)) for value in (r, g, b, a)
-        )
-        swatch, sliders, native_components = self._native_color_slider_parts(
-            components,
-            apply_value=True,
-        )
-        next_background, next_color_box = swatch.submobjects
-        self.background.become(next_background)
-        self.selected_color_box.become(next_color_box)
-        self.sliders.become(sliders)
-        self._color_slider_components = native_components
+    # set_value is installed by fmn_python.color_sliders.
 
     def get_picked_color(self):
         return _rgb_to_hex(self.get_value()[:3])
@@ -13242,49 +12576,13 @@ class Textbox(ControlMobject):
     def set_value_anim(self, value):
         self.update_text(value)
 
-    def update_text(self, value):
-        if not isinstance(value, str):
-            raise TypeError("Textbox value must be a string")
-        _, candidate = self._native_textbox_parts(
-            self._textbox_value,
-            value,
-        )
-        self.text.become(candidate)
-
-    def active_anim(self, isActive):
-        was = self.isActive
-        self.isActive = bool(isActive)
-        box, _ = self._native_textbox_parts(self._textbox_value, None)
-        self.box.become(box)
-        self.isActive = was
+    # update_text, active_anim and on_key_press are installed by
+    # fmn_python.control_events.
 
     def box_on_mouse_press(self, mob, event_data):
         del mob, event_data
         self.isActive = not self.isActive
         self.active_anim(self.isActive)
-        return False
-
-    def on_key_press(self, mob, event_data):
-        # PygletWindowKeys is a refused leak; these are pyglet.window.key.
-        symbol = int(event_data["symbol"])
-        modifiers = int(event_data["modifiers"])
-        char = chr(symbol)
-        if not mob.isActive:
-            return None
-        old_value = mob.get_value()
-        new_value = old_value
-        if char.isalnum():
-            if (modifiers & 1) or (modifiers & 8):
-                new_value = old_value + char.upper()
-            else:
-                new_value = old_value + char.lower()
-        elif symbol == 0x020:
-            new_value = old_value + char
-        elif symbol == 0xFF09:
-            new_value = old_value + "\t"
-        elif symbol == 0xFF08:
-            new_value = old_value[:-1] or ""
-        mob.set_value(new_value)
         return False
 
 
@@ -13535,13 +12833,7 @@ class ControlPanel(Group):
     def move_panel_and_controls_to_panel_opener(self):
         self._layout_controls_against_opener()
 
-    def add_controls(self, *new_controls):
-        if not all(isinstance(control, ControlMobject) for control in new_controls):
-            raise TypeError(
-                "ControlPanel controls must be ControlMobject instances"
-            )
-        self.controls.add(*new_controls)
-        self.move_panel_and_controls_to_panel_opener()
+    # add_controls is installed by fmn_python.color_sliders.
 
     def remove_controls(self, *controls_to_remove):
         self.controls.remove(*controls_to_remove)
@@ -13581,31 +12873,7 @@ class CameraFrame(Mobject):
     numpy array rather than a `scipy.spatial.transform.Rotation`.
     """
 
-    def __init__(
-        self,
-        frame_shape=_FRAME_SHAPE,
-        center_point=_ORIGIN,
-        fovy=45 * _DEG,
-        euler_axes="zxz",
-        z_index=-1,
-        **kwargs,
-    ):
-        super().__init__(z_index=z_index, **kwargs)
-        # The Reference's Scene.add sorts its list by z_index, where the
-        # frame's -1 keeps it ahead of default content (fm-6l2i). Write the
-        # engine sort key, not only the instance attribute.
-        self.set_z_index(z_index)
-        self._core = _CameraFrameCore(
-            (float(frame_shape[0]), float(frame_shape[1])),
-            _vec3(center_point),
-            float(fovy),
-            euler_axes,
-        )
-        self.set_points(_np.array([_ORIGIN, _LEFT, _RIGHT, _DOWN, _UP]))
-        self._core._bind_points(self, initialize=True)
-        self.set_width(frame_shape[0], stretch=True)
-        self.set_height(frame_shape[1], stretch=True)
-        self.move_to(center_point)
+    # The constructor is installed by fmn_python.camera_frame_lifecycle.
 
     def copy(self, deep=False):
         # The generic shallow copy shares non-mobject attributes by
@@ -14090,17 +13358,7 @@ class Camera:
             "Lumen owns rasterization for the sovereign pipeline"
         )
 
-    def clear(self):
-        raise _CapabilityError(
-            "Camera.clear is the OpenGL framebuffer clear; "
-            "Lumen owns rasterization for the sovereign pipeline"
-        )
-
-    def capture(self):
-        raise _CapabilityError(
-            "Camera.capture requires a Lumen capture generation; "
-            "call Scene.run/render for native PNG output"
-        )
+    # clear, capture and get_pixel_array are installed by fmn_python.camera_capture.
 
     def get_image(self):
         raise _CapabilityError(
@@ -14125,12 +13383,6 @@ class Camera:
         raise _CapabilityError(
             "Camera.get_raw_fbo_data is the OpenGL readback; "
             "native PNG/y4m output or the fmn CLI owns capture bytes"
-        )
-
-    def get_pixel_array(self):
-        raise _CapabilityError(
-            "Camera.get_pixel_array requires a Lumen capture generation; "
-            "call Scene.run/render for native PNG output"
         )
 
     def reset_pixel_shape(self, new_width=None, new_height=None):
@@ -14275,107 +13527,8 @@ class Scene(_SceneCore):
         # Reference scene.py:143; SceneFileWriter names outputs with it.
         return self.__class__.__name__
 
-    def __init__(self, *args, **kwargs):
-        self.args = args
-        self.kwargs = kwargs
-        scene_defaults = _portal_configuration_section("scene")
-        # Reference Scene.__init__: deterministic scenes are the default.
-        # The compatibility portal seeds the two RNG modules source-unedited
-        # scenes actually call; engine-owned randomness remains Marionette's
-        # named PCG64DXSM streams.
-        self.random_seed = kwargs.get(
-            "random_seed", getattr(type(self), "random_seed", 0)
-        )
-        if self.random_seed is not None:
-            getattr(_FMN_ROOT, "random").seed(self.random_seed)
-            _np.random.seed(self.random_seed)
-        # Reference Scene.__init__ constructs the camera and starts the scene
-        # list as `[self.camera.frame]` (scene.py:117). The frame is an
-        # ordinary member of that list (fm-6l2i): Scene.add sorts it by its
-        # z_index of -1, clear() and remove() drop it, and only a listed
-        # frame's updaters run. It has no points, so Lumen draws nothing for
-        # it; the camera reads its engine core. The native add skips
-        # id_to_mobject_map, which the Reference fills only from add().
-        self.frame = CameraFrame()
-        self.frame.reorient(*self.default_frame_orientation)
-        self.frame.make_orientation_default()
-        _SceneCore.add(self, self.frame)
-        self.__dict__["_fmn_construction_frame"] = self.frame
-        self.num_plays = 0
-        self.undo_stack = []
-        self.redo_stack = []
-        self.id_to_mobject_map = {}
-        self.pan_sensitivity = float(
-            kwargs.get("pan_sensitivity", type(self).pan_sensitivity)
-        )
-        self.scroll_sensitivity = float(
-            kwargs.get("scroll_sensitivity", type(self).scroll_sensitivity)
-        )
-        self.drag_to_pan = bool(
-            kwargs.get("drag_to_pan", type(self).drag_to_pan)
-        )
-        self.max_num_saved_states = int(
-            kwargs.get("max_num_saved_states", type(self).max_num_saved_states)
-        )
-        # Reference Scene.__init__ keeps two live Point mobjects, distinct
-        # from the dispatcher's coordinate arrays. InteractiveScene's label
-        # updater reads the scene's hover Point on every frame. A drag moves
-        # the other Point without changing that hover position.
-        self.mouse_point = Point()
-        self.mouse_drag_point = Point()
-        # Host window is Studio-owned. Pointer/scroll/key chords below stay
-        # live without one; pan_3d/pan key-state is skipped until a host
-        # adapter is bound.
-        self.window = kwargs.get("window")
-        self.presenter_mode = bool(kwargs.get("presenter_mode", False))
-        self.hold_on_wait = self.presenter_mode
-        self.preview_while_skipping = bool(
-            kwargs.get("preview_while_skipping", scene_defaults.get("preview_while_skipping", True))
-        )
-        self.quit_interaction = False
-        self.skip_animations = bool(kwargs.get("skip_animations", False))
-        self.start_at_animation_number = kwargs.get("start_at_animation_number")
-        self.end_at_animation_number = kwargs.get("end_at_animation_number")
-        # Reference order: original_skipping_status is captured BEFORE the
-        # start-at forcing, so update_skipping_status can stop_skipping back
-        # to live rendering once num_plays reaches start_at_animation_number.
-        self.original_skipping_status = self.skip_animations
-        if self.start_at_animation_number is not None:
-            self.skip_animations = True
-        self.show_animation_progress = bool(
-            kwargs.get("show_animation_progress", scene_defaults.get("show_animation_progress", False))
-        )
-        self.always_update_mobjects = bool(
-            kwargs.get("always_update_mobjects", False)
-        )
-        self.default_wait_time = float(
-            kwargs.get("default_wait_time", scene_defaults.get("default_wait_time", type(self).default_wait_time)
-                       if type(self).default_wait_time == Scene.default_wait_time else type(self).default_wait_time)
-        )
-        self.leave_progress_bars = bool(kwargs.get("leave_progress_bars", scene_defaults.get("leave_progress_bars", False)))
-        # Reference Scene.__init__ merge: manim_config.camera (the pinned
-        # defaults plus the cwd custom_config.yml, resolved natively), then
-        # class default_camera_config, then the constructor camera_config.
-        # Camera construction stays lazy so a refused Camera seam (window,
-        # background_image, …) names itself on first camera access rather
-        # than at Scene().
-        camera_config = kwargs.get("camera_config", None)
-        if camera_config is not None and not isinstance(camera_config, dict):
-            raise TypeError("Scene camera_config must be a dict")
-        merged = _reference_camera_layer()
-        merged.update(type(self).default_camera_config)
-        merged.update(camera_config or {})
-        self.camera_config = merged
-        # Reference order: configured writer defaults, class defaults, then
-        # constructor input. This records knobs without output I/O.
-        file_writer_config = kwargs.get("file_writer_config", None)
-        if file_writer_config is not None and not isinstance(file_writer_config, dict):
-            raise TypeError("Scene file_writer_config must be a dict")
-        merged = _portal_configuration_section("file_writer")
-        merged.update(type(self).default_file_writer_config)
-        merged.update(file_writer_config or {})
-        self.file_writer_config = merged
-        self.file_writer = SceneFileWriter(self, **self.file_writer_config)
+    # The constructor is installed by fmn_python.typesetting. save_state and undo are
+    # installed by fmn_python.scene_state.
 
     @property
     def frame(self):
@@ -14933,22 +14086,6 @@ class Scene(_SceneCore):
 
     def get_state(self):
         return SceneState(self)
-
-    def save_state(self):
-        self.undo_stack.append(self.get_state())
-        if len(self.undo_stack) > self.max_num_saved_states:
-            self.undo_stack.pop(0)
-        return self
-
-    def undo(self):
-        # Reference Scene.undo (scene.py): push the live state onto
-        # redo_stack, pop undo_stack into restore_state; an empty stack is
-        # a no-op. The Reference tail call refresh_static_mobjects() has no
-        # portal surface yet, so it is skipped like save_state's was.
-        if not self.undo_stack:
-            return
-        self.redo_stack.append(self.get_state())
-        self.restore_state(self.undo_stack.pop())
 
     def redo(self):
         # Reference Scene.redo (scene.py): undo's mirror — push the live
