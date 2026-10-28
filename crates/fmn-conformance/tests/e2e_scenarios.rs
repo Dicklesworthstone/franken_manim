@@ -2976,6 +2976,14 @@ impl StudioProcess {
         directory: &std::path::Path,
         scene: &str,
     ) -> Result<(Self, StudioEndpoint), ScenarioError> {
+        Self::launch_named_with_flags(directory, scene, &[])
+    }
+
+    fn launch_named_with_flags(
+        directory: &std::path::Path,
+        scene: &str,
+        flags: &[&str],
+    ) -> Result<(Self, StudioEndpoint), ScenarioError> {
         let (ready_send, ready_recv) = std::sync::mpsc::sync_channel(1);
         let (stdout_send, stdout_done) = std::sync::mpsc::sync_channel(1);
         let (stderr_send, stderr_done) = std::sync::mpsc::sync_channel(1);
@@ -2991,9 +2999,9 @@ impl StudioProcess {
                 "8",
                 "--threads",
                 "1",
-                fmn_cli::BUILTIN_SCENE_SOURCE,
-                scene,
             ])
+            .args(flags)
+            .args([fmn_cli::BUILTIN_SCENE_SOURCE, scene])
             .current_dir(directory)
             .env_clear()
             .env("PATH", "")
@@ -3571,6 +3579,56 @@ fn studio_builtin_inputs_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
     }
     ctx.counter("studio_live_builtin_families", 5);
     Ok(outcome.with_counter("studio_live_builtin_families", 5))
+}
+
+fn studio_presenter_holds_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    ctx.set_fps((30, 1));
+    let directory = scenario_dir("studio_presenter_holds")?;
+    let (mut process, endpoint) =
+        StudioProcess::launch_named_with_flags(&directory, "circle_shift.v1", &["-p"])?;
+    let mut frames = endpoint.stream()?;
+    let initial = frames.frame(0, 0)?;
+    let mut outcome = RunOutcome::ok().with_artifact("presenter.0.png", initial);
+    for (publication, (frame, boundary)) in
+        [(0, true), (1, false), (8, true), (9, false), (12, true)]
+            .into_iter()
+            .enumerate()
+    {
+        if frame != 0 {
+            endpoint.request(
+                "POST",
+                "/api/scrub",
+                format!("frame={frame}&commit=false").as_bytes(),
+                200,
+            )?;
+            outcome = outcome.with_artifact(
+                &format!("presenter.{frame}.png"),
+                frames.frame(frame, publication)?,
+            );
+        }
+        let inspection = endpoint.request("GET", "/api/inspect", b"", 200)?;
+        studio_contains(
+            &inspection,
+            &format!("\"presenter\":{{\"enabled\":true,\"at_boundary\":{boundary}}}"),
+        )?;
+        studio_view(&inspection, frame)?;
+        for _ in 0..3 {
+            if endpoint.request("GET", "/api/inspect", b"", 200)? != inspection {
+                return Err(fail(
+                    "presenter inspection advanced a paused native capture",
+                ));
+            }
+        }
+        ctx.event(
+            LogEvent::new("e2e.studio.presenter")
+                .field("frame", frame as u64)
+                .field("boundary", truth(boundary)),
+        );
+    }
+    drop(frames);
+    process.finish()?;
+    ctx.counter("presenter_boundaries", 3);
+    Ok(outcome.with_counter("presenter_boundaries", 3))
 }
 
 fn studio_interactive_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -11078,6 +11136,23 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         .collect(),
     ));
     specs.push(spec(
+        "lifecycle.studio_presenter_holds.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::StudioSubprocess,
+        Invocation::new(studio_presenter_holds_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(
+                [0, 1, 8, 9, 12]
+                    .into_iter()
+                    .map(|frame| format!("presenter.{frame}.png"))
+                    .collect(),
+            ),
+            counter_eq("presenter_boundaries", 3),
+        ],
+        vec![LogExpect::span_present("e2e.studio.presenter", vec![])],
+    ));
+    specs.push(spec(
         "lifecycle.studio_builtin_inputs.v1",
         ScenarioClass::LifecycleDrill,
         Surface::StudioSubprocess,
@@ -13446,6 +13521,16 @@ fn studio_native_interactive_lifecycle_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.studio_native_interactive.v1")
         .expect("native Studio interactive lifecycle scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn studio_presenter_holds_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.studio_presenter_holds.v1")
+        .expect("native Studio presenter scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

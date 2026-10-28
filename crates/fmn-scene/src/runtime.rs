@@ -743,6 +743,13 @@ pub struct SteppedWait {
 }
 
 impl SteppedPlay {
+    /// Whether every nominal frame has been captured. The animation epilogue
+    /// remains pending until `finish_stepped_play` is explicitly called.
+    #[must_use]
+    pub fn frames_complete(&self) -> bool {
+        self.open.frames_complete()
+    }
+
     /// The unborrowed host completed all scene updater work for this frame.
     /// Native completion still drains events and captures exactly once.
     ///
@@ -764,6 +771,12 @@ impl SteppedPlay {
 }
 
 impl SteppedWait {
+    /// Whether every nominal wait frame has been captured, without ending it.
+    #[must_use]
+    pub fn frames_complete(&self) -> bool {
+        self.open.frames_complete()
+    }
+
     /// The unborrowed host completed all scene updater work for this frame.
     ///
     /// # Errors

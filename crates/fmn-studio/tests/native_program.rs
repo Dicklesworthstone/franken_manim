@@ -182,6 +182,49 @@ fn empty_and_zero_duration_segments_use_the_engine_lifecycle() {
 }
 
 #[test]
+fn presenter_boundary_inspection_never_executes_deferred_authoring_or_advances_time() {
+    let (scene, _, calls) = source();
+    let builds = Rc::new(Cell::new(0));
+    let observed = Rc::clone(&builds);
+    let mut program = NativeSceneProgram::new(
+        scene,
+        vec![
+            NativeSegment::Wait {
+                duration: Some(0.125),
+            },
+            NativeSegment::edit(move |_| {
+                observed.set(observed.get() + 1);
+                Ok(())
+            }),
+            NativeSegment::Wait {
+                duration: Some(0.25),
+            },
+        ],
+        20,
+    )
+    .unwrap();
+    assert!(program.at_segment_boundary());
+    program.advance_to(3).unwrap();
+    assert!(!program.at_segment_boundary());
+    program.advance_to(4).unwrap();
+    let captured = program.state_bytes().unwrap();
+    let updates = calls.get();
+    for _ in 0..100 {
+        assert!(program.at_segment_boundary());
+        assert_eq!(program.state_bytes().unwrap(), captured);
+    }
+    assert_eq!(calls.get(), updates);
+    assert_eq!(builds.get(), 0);
+    assert_eq!(program.preview().scene().play_count(), 0);
+    program.advance_to(5).unwrap();
+    assert!(!program.at_segment_boundary());
+    assert_eq!(builds.get(), 1);
+    assert_eq!(program.preview().scene().play_count(), 1);
+    program.advance_to(12).unwrap();
+    assert!(program.at_segment_boundary());
+}
+
+#[test]
 fn invalid_segment_poisoning_prevents_reusing_partial_execution() {
     let (scene, _, _) = source();
     let mut program = NativeSceneProgram::new(

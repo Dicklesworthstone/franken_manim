@@ -78,6 +78,7 @@ const STUDIO_INDEX_HTML_PREFIX: &str = concat!(
 <label for="frame">Frame</label><input id="frame" type="number" min="0" max="0" value="0" required>
 <button id="seek" type="submit">Go</button></div></form>
 <p id="replay">Release the timeline to commit a replay position.</p>
+<p id="presenter-status" role="status" hidden></p>
 <fieldset id="narration"><legend>Recorded narration</legend>
 <button id="audio-play" type="button" disabled aria-pressed="false">Play narration</button>
 <label for="audio-volume">Volume</label>

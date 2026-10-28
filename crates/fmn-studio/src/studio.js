@@ -13,7 +13,8 @@
   const MAX_JSON = 8 * 1024 * 1024, MAX_PNG = 64 * 1024 * 1024;
   const state = {snapshot: null, overlay: null, selected: null, collapsed: new Set(),
     shown: null, expected: null, busy: false, busyKind: null, pending: null, refreshNeeded: false, playing: false, connected: false,
-    generation: null, inputs: [], restartPending: false, savePending: false, canSave: false, liveRunning: false};
+    generation: null, inputs: [], restartPending: false, savePending: false, canSave: false, liveRunning: false,
+    presenterBoundary: null};
   const safeText = value => String(value).split(capability).join("[session]").slice(0, 600);
   function report(error) {
     $("error").textContent = safeText(error.message || error);
@@ -79,6 +80,10 @@
   }
   function viewOf(snapshot) {
     const v = snapshot?.view;
+    if (snapshot?.presenter !== undefined &&
+        (typeof snapshot.presenter?.enabled !== "boolean" || typeof snapshot.presenter?.at_boundary !== "boolean")) {
+      throw new Error("Worker returned invalid presenter metadata.");
+    }
     if (snapshot?.version !== 1 || !Number.isFinite(snapshot.scene_time) || !Array.isArray(snapshot.nodes) || snapshot.nodes.length > 50000 ||
         !v || !Number.isSafeInteger(v.frame_count) || v.frame_count < 1 ||
         !Number.isSafeInteger(v.frame_index) || v.frame_index < 0 || v.frame_index >= v.frame_count ||
@@ -99,6 +104,7 @@
   }
   function displayState() {
     liveControls();
+    presenterControls();
     $("save-session").disabled = !state.canSave || state.savePending || state.busyKind === "save";
     const matched = matchesFrame(), shown = state.shown;
     $("display").textContent = shown ? `Displayed frame ${shown.index}${matched ? " · inspector synchronized" : " · waiting for synchronized inspector / stream"}` : "Waiting for the first frame…";
@@ -111,6 +117,30 @@
     $("display").dataset.publication = shown ? String(shown.publication) : "";
     $("details").hidden = !matched;
     drawOverlay();
+  }
+  function presenterControls() {
+    const presenter = state.snapshot?.presenter, view = state.snapshot?.view;
+    const enabled = presenter?.enabled === true;
+    const ended = enabled && view.frame_index === view.frame_count - 1;
+    const status = $("presenter-status");
+    status.hidden = !enabled;
+    status.dataset.boundary = String(enabled && presenter.at_boundary);
+    status.dataset.playing = String(state.playing);
+    status.textContent = !enabled ? "" : ended
+      ? "Presentation complete. Use the timeline to revisit a segment."
+      : state.playing ? "Presenter mode · playing to the next segment boundary."
+      : $("input-events").checked ? "Presenter mode · paused. Continue resumes playback; preview input edits the scene."
+      : "Presenter mode · paused. Press Space or Enter, click the preview, or choose Continue. The scene clock stays paused.";
+    $("play").textContent = state.playing ? "Pause" : ended ? "Finished" : enabled ? "Continue" : "Play";
+    $("play").disabled = ended || state.savePending || state.busyKind === "save";
+  }
+  function observePresenterCapture(snapshot, view) {
+    // Inspecting a hold must not cancel a Continue already requested there.
+    if (snapshot.presenter?.enabled && snapshot.presenter.at_boundary) {
+      const boundary = `${state.generation}:${view.frame_index}`;
+      if (state.presenterBoundary !== boundary) state.playing = false;
+      state.presenterBoundary = boundary;
+    } else if (!snapshot.presenter?.enabled) state.presenterBoundary = null;
   }
   function layers() {
     return [...$("layers").querySelectorAll("input:checked")].reduce((mask, box) => mask | Number(box.value), 0);
@@ -126,6 +156,10 @@
     }
     if (changedCapture) { state.selected = null; state.collapsed.clear(); }
     state.snapshot = snapshot; state.overlay = overlay;
+    // Hold the last real sample, without issuing another seek or executing the
+    // next segment's epilogue/construction. Repeated inspection of this same
+    // boundary must not cancel a Continue already requested by the presenter.
+    observePresenterCapture(snapshot, v);
     for (const id of ["timeline", "frame"]) {
       $(id).max = String(v.frame_count - 1);
       if (!state.pending) $(id).value = String(v.frame_index);
@@ -269,8 +303,9 @@
     try { clearError(); await operation(); }
     catch (error) { stopLive(); state.playing = false; state.savePending = false; report(error); }
     finally {
-      state.busy = false; state.busyKind = null; $("restart").disabled = false; $("inspect").disabled = false; $("play").textContent = state.playing ? "Pause" : "Play";
+      state.busy = false; state.busyKind = null; $("restart").disabled = false; $("inspect").disabled = false;
       liveControls();
+      presenterControls();
       if (state.inputs.length) void drainInputs();
       else if (state.restartPending) void restartWorker();
       else if (state.pending) void drain();
@@ -345,7 +380,16 @@
     ["previous", () => Math.max(0, state.snapshot.view.frame_index - 1)], ["next", () => Math.min(state.snapshot.view.frame_count - 1, state.snapshot.view.frame_index + 1)]]) {
     $(id).addEventListener("click", () => { state.playing = false; if (state.snapshot) seek(next()); });
   }
-  $("play").addEventListener("click", () => { if (state.savePending || state.busyKind === "save") return; stopLive(); const playing = !state.playing; releaseInputs(); state.playing = playing; $("play").textContent = state.playing ? "Pause" : "Play"; });
+  function togglePlayback() {
+    const v = state.snapshot?.view;
+    if (!v || state.savePending || state.busy || state.inputs.length || state.restartPending ||
+        (state.snapshot.presenter?.enabled && v.frame_index === v.frame_count - 1)) return;
+    stopLive();
+    const playing = !state.playing;
+    releaseInputs(); state.playing = playing;
+    presenterControls();
+  }
+  $("play").addEventListener("click", togglePlayback);
   // Preview playback advances nominal frames; it never invents variable sampling
   // or claims real-time rendering when the worker takes longer than a frame.
   let lastTick = 0;
@@ -487,6 +531,12 @@
     heldKeys.clear();
   }
   $("preview").addEventListener("keydown", event => {
+    if (state.snapshot?.presenter?.enabled && !$("input-events").checked &&
+        modifierBits(event) === "0" && (event.key === " " || event.key === "Enter")) {
+      event.preventDefault();
+      if (!event.repeat) togglePlayback();
+      return;
+    }
     if (!$("input-events").checked || !supportsInput()) return;
     const key = sceneKey(event);
     if (!key) return;
@@ -514,6 +564,10 @@
   }
   const pointerButton = event => ["left","middle","right"][event.button] || `other:${event.button}`;
   $("preview").addEventListener("pointerdown", event => {
+    if (state.snapshot?.presenter?.enabled && !$("input-events").checked &&
+        event.button === 0 && modifierBits(event) === "0") {
+      event.preventDefault(); $("preview").focus(); togglePlayback(); return;
+    }
     if (!$("input-events").checked || !supportsInput() || heldPointer) return;
     const point = pointerPoint(event); if (!point) return;
     event.preventDefault(); $("preview").focus();

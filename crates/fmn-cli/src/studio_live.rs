@@ -226,10 +226,10 @@ pub(super) fn validate_selection(command: &RenderCommand) -> Result<(), CliError
             "live Studio requires exactly one registered scene",
         ));
     }
-    if command.skip_animations || command.animation_range.is_some() || command.presenter_mode {
+    if command.skip_animations || command.animation_range.is_some() {
         return Err(CliError::new(
             "config",
-            "live Studio uses its timeline controls, not offline skip/range/presenter flags",
+            "live Studio uses its timeline controls, not offline skip/range flags",
         ));
     }
     Ok(())
@@ -247,6 +247,9 @@ fn configuration(fs: &dyn FileSystem, command: &StudioCommand) -> Result<Configu
     let config = resolve_render_config(fs, &command.render)?;
     let mut runtime = command.render.runtime_config(&config);
     runtime.windowed = true;
+    // Studio holds a completed capture between requests. A blocking Scene
+    // HoldController would prevent the worker from receiving the next input.
+    runtime.presenter_mode = false;
     // Use Proscenium's effective windowed FPS rather than a second clock policy.
     let fps = runtime.effective_fps();
     let name = &command.render.scene_names[0];
@@ -312,6 +315,7 @@ fn configuration(fs: &dyn FileSystem, command: &StudioCommand) -> Result<Configu
         renderer,
     );
     native.replay = NativeReplayPolicy::ColdVerified;
+    native.presenter_mode = command.render.presenter_mode;
     native.checkpoint_frames = command.checkpoint_frames;
     if camera {
         let mut base = camera_route::camera_config(&config)?;

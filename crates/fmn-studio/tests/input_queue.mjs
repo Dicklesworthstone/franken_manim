@@ -14,11 +14,14 @@ const controller = source.slice(start, end);
 const overlayStart = source.indexOf('  function drawOverlay() {');
 const viewStart = source.indexOf('  function viewOf(snapshot) {');
 const viewEnd = source.indexOf('  function matchesFrame() {', viewStart);
+const presenterStart = source.indexOf('  function presenterControls() {');
+const presenterEnd = source.indexOf('  function layers() {', presenterStart);
 assert.ok(overlayStart >= 0 && overlayStart < start && viewStart >= 0 && viewEnd > viewStart,
   'production inspector and overlay boundaries');
+assert.ok(presenterStart >= 0 && presenterEnd > presenterStart, 'production presenter controls');
 
 class Element {
-  constructor() { this.events = new Map(); this.style = {}; this.checked = true; this.capture = new Set(); }
+  constructor() { this.events = new Map(); this.style = {}; this.dataset = {}; this.checked = true; this.capture = new Set(); }
   addEventListener(name, callback) {
     if (!this.events.has(name)) this.events.set(name, []);
     this.events.get(name).push(callback);
@@ -34,7 +37,7 @@ class Element {
   hasPointerCapture(id) { return this.capture.has(id); }
   releasePointerCapture(id) { this.capture.delete(id); this.emit('lostpointercapture', {pointerId:id}); }
 }
-function fixture({yUp = true} = {}) {
+function fixture({yUp = true, presenter = false} = {}) {
   const elements = new Map(), $ = id => {
     if (!elements.has(id)) elements.set(id, new Element());
     return elements.get(id);
@@ -42,14 +45,16 @@ function fixture({yUp = true} = {}) {
   const window = new Element(), document = new Element();
   let frame = 5, revision = 0, generation = 3, release, first = true, animationFrame;
   const gate = new Promise(resolve => { release = resolve; });
-  const calls = [], errors = [], control = {fail:false, conflict:false};
+  const calls = [], errors = [], control = {fail:false, conflict:false, presenter};
   const state = {snapshot:null, shown:null, expected:null, connected:true, generation,
     inputs:[], restartPending:false, busy:false, pending:null, playing:false,
-    collapsed:new Set(), refreshNeeded:false, canSave:true, savePending:false, liveRunning:false};
+    collapsed:new Set(), refreshNeeded:false, canSave:true, savePending:false, liveRunning:false, presenterBoundary:null};
   const refresh = async () => {
     state.generation = generation;
     state.snapshot = {view:{frame_index:frame, frame_count:control.live ? 6 : 61, width:96, height:54,
-      scale:6, origin:[48,27], y_up:yUp, fps:30, input_events:true, input_revision:revision, live_advance:Boolean(control.live)}};
+      scale:6, origin:[48,27], y_up:yUp, fps:30, input_events:true, input_revision:revision, live_advance:Boolean(control.live)},
+      presenter:{enabled:control.presenter, at_boundary:[5,8,60].includes(frame)}};
+    control.observePresenterCapture?.(state.snapshot, state.snapshot.view);
   };
   void refresh();
   const api = async (path, fields) => {
@@ -69,7 +74,9 @@ function fixture({yUp = true} = {}) {
     async downloadSession() { calls.push({path:'/api/session'}); if (control.failDownload) throw new Error('download refused'); },
     clearError() {}, report(error) { errors.push(error.message); }, displayState() {},
     matchesFrame() { return control.matched !== false; }, requestAnimationFrame(callback) { animationFrame = callback; }});
-  vm.runInContext(controller + '\n globalThis.queue = {enqueueInput,seek,heldKeys};', context);
+  vm.runInContext(source.slice(presenterStart, presenterEnd) + controller + '\n globalThis.queue = {enqueueInput,seek,heldKeys};', context);
+  control.observePresenterCapture = context.observePresenterCapture;
+  control.observePresenterCapture(state.snapshot, state.snapshot.view);
   return {$,window,document,state,calls,errors,control,release,queue:context.queue, refresh,
     tick(now) { animationFrame(now); },
     async settled() {
@@ -81,6 +88,53 @@ function fixture({yUp = true} = {}) {
     }};
 }
 const eventCalls = f => f.calls.filter(call => call.path === '/api/event');
+test('presenter playback holds each native boundary and repeated keys cannot skip it', async () => {
+  const f = fixture({presenter:true}), preview = f.$('preview');
+  f.$('input-events').checked = false;
+  f.tick(500);
+  assert.equal(f.calls.length, 0);
+  preview.emit('keydown', {key:'Enter'});
+  preview.emit('keydown', {key:'Enter', repeat:true});
+  assert.equal(f.state.playing, true);
+  await f.refresh();
+  assert.equal(f.state.playing, true, 'inspection of the same hold preserves Continue');
+  for (const time of [1000,2000,3000]) { f.tick(time); await f.settled(); }
+  assert.deepEqual(f.calls.map(call => [call.path,call.frame]), [
+    ['/api/scrub','6'], ['/api/scrub','7'], ['/api/scrub','8'],
+  ]);
+  assert.equal(f.state.playing, false, 'actual native boundary stops playback');
+  preview.emit('keydown', {key:'Enter', repeat:true});
+  f.tick(10000);
+  assert.equal(f.calls.length, 3, 'wall time and key repeat consume no additional frame');
+  assert.equal(f.$('play').textContent, 'Continue');
+  preview.emit('pointerdown');
+  f.tick(11000); await f.settled();
+  assert.equal(f.calls[3].frame, '9');
+  assert.equal(eventCalls(f).length, 0, 'presentation input must not mutate the scene');
+  f.queue.seek(5, false); await f.settled();
+  assert.equal(f.state.playing, false, 'scrubbing restores an earlier hold');
+  f.$('input-events').checked = true;
+  preview.emit('keydown', {key:'Enter'}); await f.settled();
+  assert.equal(eventCalls(f).length, 1, 'explicit edit mode retains scene keyboard input');
+});
+
+test('presentation completion disables continuation and replacement workers restore a hold', async () => {
+  const f = fixture({presenter:true});
+  f.$('input-events').checked = false;
+  f.queue.seek(60, false); await f.settled();
+  assert.equal(f.$('play').textContent, 'Finished');
+  assert.equal(f.$('play').disabled, true);
+  f.$('preview').emit('keydown', {key:' '}); f.tick(1000);
+  assert.equal(f.calls.length, 1);
+  f.queue.seek(5, false); await f.settled();
+  f.$('play').emit('click');
+  assert.equal(f.state.playing, true);
+  f.$('restart').emit('click'); await f.settled();
+  assert.equal(f.state.playing, false);
+  assert.equal(f.$('play').disabled, false);
+  assert.equal(f.$('play').textContent, 'Continue');
+});
+
 test('saving drains accepted gestures and releases before exactly one export', async () => {
   const f = fixture(), preview = f.$('preview');
   preview.emit('keydown', {key:'g'}); preview.emit('pointerdown', {buttons:1});

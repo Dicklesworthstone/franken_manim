@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 
 const binary = resolve(process.argv[2]), output = resolve(process.argv[3]);
 const chrome = process.env.FMN_CHROME || "/usr/bin/google-chrome";
-const userAgent = "OpenAI File Downloader, XaiImageApiFetch/1.0";
+const userAgent = "franken_manim-agent (+https://github.com/Dicklesworthstone/franken_manim)";
 await mkdir(output, {recursive:true});
 const profile = await mkdtemp(join(tmpdir(), "fmn-studio-browser-"));
 const secrets = [];
@@ -240,6 +240,39 @@ try {
     }
   `});
   await command("Emulation.setDeviceMetricsOverride",{width:1280,height:1000,deviceScaleFactor:1,mobile:false});
+  studio = await startStudio("circle_shift.v1", ["-p"]);
+  await command("Page.navigate", {url:studio.url.href});
+  await synchronized(0);
+  const presentation = await inspect();
+  assert.deepEqual(presentation.presenter, {enabled:true, at_boundary:true});
+  assert.equal(await evaluate("document.getElementById('play').textContent"), "Continue");
+  await sleep(300);
+  assert.equal((await inspect()).scene_time, 0, "initial presenter hold never advances the clock");
+  await evaluate("document.getElementById('preview').focus()");
+  await key("Enter", "Enter", 13);
+  await synchronized(8);
+  const held = await inspect();
+  assert.equal(held.presenter.at_boundary, true);
+  assert.equal(await evaluate("document.getElementById('presenter-status').dataset.playing"), "false");
+  await command("Input.dispatchKeyEvent", {type:"keyDown",key:"Enter",code:"Enter",windowsVirtualKeyCode:13,autoRepeat:true});
+  await command("Input.dispatchKeyEvent", {type:"keyUp",key:"Enter",code:"Enter",windowsVirtualKeyCode:13});
+  await sleep(300);
+  assert.deepEqual(await inspect(), held, "a held key and wall time cannot skip a presenter boundary");
+  await click("#preview");
+  await synchronized(12);
+  assert.equal(await evaluate("document.getElementById('play').textContent"), "Finished");
+  assert.equal(await evaluate("document.getElementById('play').disabled"), true);
+  await click("#first"); await synchronized(0);
+  await click("#play"); await synchronized(8);
+  await click("#inspect"); await synchronized(8);
+  assert.equal(await evaluate("document.getElementById('presenter-status').dataset.playing"), "false");
+  await screenshot("presenter.boundary.png");
+  receipt.scenarios.push({scene:"presenter.v1",initial_hold:true,segment_hold:8,
+    enter_continue:true,click_continue:true,button_continue:true,key_repeat_ignored:true,
+    clock_frozen:true,scrubbing:true,inspector_responsive:true});
+  await command("Page.navigate", {url:"about:blank"}); await stop(studio.child);
+  assert.equal(studio.child.exitCode,0); assert.equal(studio.stderr(),""); studio = null;
+  if (process.env.FMN_STUDIO_PRESENTER_ONLY !== "1") {
   for (const scene of ["circle_shift.v1","tex_span.v1"]) {
     studio = await startStudio(scene);
     await command("Page.navigate",{url:studio.url.href});
@@ -561,6 +594,7 @@ try {
     cross_thread_resume:true,undo_history:true,continued_editing:true,rotated_capability:true,
     rejected_imports:rejected,session_sha256:createHash("sha256").update(saved.bytes).digest("hex"),
     saved_frame:committedFrame,saved_pixels:finalPixels,continued_pixels:continuedPixels});
+  }
   assert.deepEqual(receipt.browser_errors,[]);
   receipt.passed = true;
 } catch (error) {

@@ -596,6 +596,16 @@ impl OpenSegment {
         self.stepped
     }
 
+    /// All nominal frames have completed, without running the segment epilogue.
+    /// Interactive hosts can pause here without preparing another frame or
+    /// prematurely executing animation cleanup and deferred construction.
+    #[must_use]
+    pub fn frames_complete(&self) -> bool {
+        self.stepped >= self.segment.n_frames()
+            && self.current_sample.is_none()
+            && self.prepared.is_none()
+    }
+
     pub(crate) fn is_at_begin(&self) -> bool {
         self.stepped == 0
             && self.current_sample.is_none()
@@ -938,6 +948,12 @@ pub struct OpenWait {
 }
 
 impl OpenWait {
+    /// All nominal wait frames have completed; reading this never advances time.
+    #[must_use]
+    pub fn frames_complete(&self) -> bool {
+        self.stepped >= self.segment.n_frames() && self.prepared.is_none()
+    }
+
     pub(crate) fn report(&self) -> &SegmentReport {
         &self.report
     }

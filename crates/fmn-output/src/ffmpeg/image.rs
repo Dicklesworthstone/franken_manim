@@ -65,10 +65,7 @@ fn decode_argv(
     argv
 }
 
-fn read_bounded_artifact(
-    reader: impl Read,
-    cap: u64,
-) -> Result<Vec<u8>, BoundaryError> {
+fn read_bounded_artifact(reader: impl Read, cap: u64) -> Result<Vec<u8>, BoundaryError> {
     let mut bytes = Vec::new();
     reader
         .take(cap.saturating_add(1))

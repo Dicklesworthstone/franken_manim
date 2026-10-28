@@ -77,6 +77,39 @@ continue the same callback owner. Backward scrubs reconstruct from a new factory
 and execute to the target. Native Scene/animation/editor snapshots retain their
 ordinary memory costs; only one capture packet is held during stepping.
 
+## Present a native scene
+
+The standalone Studio accepts presenter mode for its executable native scenes:
+
+```sh
+fmn studio -p @builtin circle_shift.v1
+```
+
+The browser starts paused at the constructed frame. Choose **Continue**, press
+Space or Enter with the preview focused, or click the preview to play through
+the next native `play` or `wait` segment. Playback pauses on that segment's last
+nominal capture. Key repeat does not consume another pause. The scene clock,
+updaters, animation cleanup and deferred constructors stay paused until playback
+continues; waiting for the presenter adds no frames to the authored timeline.
+Zero-duration segments produce no extra presentation frame.
+
+Scrubbing and inspection remain available while paused. With **Send preview
+input to the scene** enabled, preview clicks and keys edit the scene; the
+**Continue** button still controls presentation. At the final capture the
+transport shows **Finished**; use the timeline to revisit an earlier segment.
+
+Custom native hosts opt in with `worker_config.presenter_mode = true`. Keep
+the underlying `Scene`'s `RuntimeConfig.presenter_mode` false: Studio holds
+between worker requests, while a blocking runtime hold would prevent that
+worker from receiving input. The worker exposes `presenter.enabled` and
+`presenter.at_boundary` in inspection, and binds this policy into its recovery
+input closure. The shipped browser uses those native boundary observations;
+it does not infer segment duration from elapsed wall time.
+
+Offline rendering and recorded FMTL playback still reject `-p`: they have no
+interactive authored segment controller. The standalone offline diagnostic
+names `fmn studio` as the interactive alternative.
+
 ## Mixed camera rendering
 
 The default `camera: None` keeps affine vector rendering. Select a base camera

@@ -521,3 +521,105 @@ fn handshake_and_requests_round_trip_through_the_actual_worker_pipe() {
         }
     }
 }
+
+#[test]
+fn presenter_boundaries_survive_worker_protocol_and_cold_seek_without_extra_samples() {
+    let mut policy = config();
+    policy.presenter_mode = true;
+    assert!(
+        policy
+            .base_input_reads()
+            .iter()
+            .any(|read| read.path == "native/presenter-policy")
+    );
+    let mut worker = NativeSceneWorker::new(policy, || {
+        let scene = Scene::new(RuntimeConfig::default(), 71).unwrap();
+        NativeSceneProgram::new(
+            scene,
+            vec![
+                NativeSegment::Wait {
+                    duration: Some(0.125),
+                },
+                NativeSegment::Wait {
+                    duration: Some(0.25),
+                },
+            ],
+            12,
+        )
+    })
+    .unwrap();
+    let limits = ProtocolLimits::default();
+    let mut requests = vec![SupervisorRequest::Hello {
+        version: CURRENT_VERSION,
+        supervisor_build: protocol_digest(b"presenter-supervisor"),
+        max_frame_bytes: 1_000_000,
+    }];
+    // A repeated inspect is a hold, and a backward seek reconstructs exactly
+    // the same boundary. Explicit frame requests are the presenter's release.
+    let states = [
+        (0, true),
+        (1, false),
+        (4, true),
+        (4, true),
+        (5, false),
+        (4, true),
+        (12, true),
+    ];
+    for (frame, _) in states {
+        requests.push(SupervisorRequest::Scrub {
+            scene: NAME.into(),
+            frame,
+        });
+        requests.push(SupervisorRequest::Inspect { scene: NAME.into() });
+    }
+    requests.push(SupervisorRequest::Shutdown);
+    let mut input = Vec::new();
+    for (index, request) in requests.into_iter().enumerate() {
+        write_request(
+            &mut input,
+            &RequestEnvelope {
+                request_id: index as u64 + 1,
+                request,
+            },
+            limits,
+        )
+        .unwrap();
+    }
+    let mut output = Vec::new();
+    assert!(matches!(
+        serve_worker(&mut worker, &mut Cursor::new(input), &mut output, limits).unwrap(),
+        WorkerServeOutcome::Shutdown
+    ));
+    let mut output = Cursor::new(output);
+    assert!(matches!(
+        read_response(&mut output, limits).unwrap().response,
+        WorkerResponse::Hello { .. }
+    ));
+    for (frame, boundary) in states {
+        let WorkerResponse::Frame(capture) = read_response(&mut output, limits).unwrap().response
+        else {
+            panic!("presenter continuation must produce a real capture");
+        };
+        assert_eq!(capture.frame_index, frame as u64);
+        let WorkerResponse::StudioData { bytes, .. } =
+            read_response(&mut output, limits).unwrap().response
+        else {
+            panic!("presenter inspection must remain responsive");
+        };
+        let json = String::from_utf8(bytes).unwrap();
+        assert!(
+            json.contains(&format!(
+                "\"presenter\":{{\"enabled\":true,\"at_boundary\":{boundary}}}"
+            )),
+            "{json}"
+        );
+        assert!(
+            json.contains(&format!("\"frame_index\":{frame},")),
+            "{json}"
+        );
+    }
+    assert_eq!(
+        read_response(&mut output, limits).unwrap().response,
+        WorkerResponse::Bye
+    );
+}

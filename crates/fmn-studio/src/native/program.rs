@@ -48,6 +48,13 @@ enum ActiveSegment {
 }
 
 impl ActiveSegment {
+    fn frames_complete(&self) -> bool {
+        match self {
+            Self::Play(play) => play.frames_complete(),
+            Self::Wait(wait) => wait.frames_complete(),
+        }
+    }
+
     fn advance(&mut self, scene: &mut Scene, sink: &mut CaptureOne) -> Result<bool, SceneError> {
         match self {
             Self::Play(play) => {
@@ -252,6 +259,17 @@ impl NativeSceneProgram {
     #[must_use]
     pub const fn frame_index(&self) -> u64 {
         self.frame
+    }
+
+    /// A presenter may pause at this capture before starting the next segment.
+    /// Frame zero is also a boundary. This read does not run finish callbacks,
+    /// consume deferred authoring, or advance the scene's rational clock.
+    /// Explicit timeline seeks remain available while presentation is paused.
+    #[must_use]
+    pub fn at_segment_boundary(&self) -> bool {
+        self.active
+            .as_ref()
+            .is_none_or(ActiveSegment::frames_complete)
     }
 
     /// Highest admitted capture index (zero is always available initially).

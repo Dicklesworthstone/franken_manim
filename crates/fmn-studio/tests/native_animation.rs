@@ -103,6 +103,10 @@ fn rotation_then_wait_matches_every_ordinary_capture_and_final_runtime_state() {
             100,
         )
         .unwrap();
+        assert!(
+            program.at_segment_boundary(),
+            "constructed frame zero is a hold"
+        );
         for expected in &captures.0 {
             let actual = program
                 .next_frame()
@@ -111,6 +115,11 @@ fn rotation_then_wait_matches_every_ordinary_capture_and_final_runtime_state() {
             assert_eq!(actual.time(), expected.time());
             assert_eq!(actual.alpha(), expected.alpha());
             assert_eq!(actual.segment_frame(), expected.segment_frame());
+            assert_eq!(
+                program.at_segment_boundary(),
+                actual.segment_frame() == i64::from(fps) / 2,
+                "play and wait expose only their completed nominal capture as a hold"
+            );
             assert_eq!(
                 actual.materialize_stage().snapshot().to_bytes().unwrap(),
                 expected.materialize_stage().snapshot().to_bytes().unwrap(),

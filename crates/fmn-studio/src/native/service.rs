@@ -71,6 +71,10 @@ pub struct NativeWorkerConfig {
     /// batch. A noncommitting scrub discards them. Disabled by default; requires
     /// ColdVerified and affine input support. No new protocol variant is used.
     pub stage_input_events: bool,
+    /// Pause browser playback at native play/wait boundaries. The worker stays
+    /// responsive to input, inspection and explicit seeks while the host holds
+    /// the last capture; presenter wall time never becomes animation samples.
+    pub presenter_mode: bool,
 }
 
 impl NativeWorkerConfig {
@@ -100,6 +104,7 @@ impl NativeWorkerConfig {
             max_recorded_inputs: 4096,
             max_replay_inputs: 65_536,
             stage_input_events: false,
+            presenter_mode: false,
         }
     }
 
@@ -112,7 +117,7 @@ impl NativeWorkerConfig {
         contract.extend_from_slice(&self.fps.to_le_bytes());
         contract.extend_from_slice(&self.frame_count.to_le_bytes());
         contract.extend_from_slice(self.scene.as_bytes());
-        vec![
+        let mut reads = vec![
             AssetRead {
                 path: "native/source-closure".into(),
                 digest: self.source_digest,
@@ -129,7 +134,14 @@ impl NativeWorkerConfig {
                 path: "native/input-track-semantics".into(),
                 digest: protocol_digest(b"frame-stamped-native-input-track-v2"),
             },
-        ]
+        ];
+        if self.presenter_mode {
+            reads.push(AssetRead {
+                path: "native/presenter-policy".into(),
+                digest: protocol_digest(b"native-segment-boundary-holds-v1"),
+            });
+        }
+        reads
     }
 }
 
@@ -545,12 +557,14 @@ impl NativeSceneWorker {
             .ok_or_else(|| invalid("native preview requires a successful seek"))?;
         let max = self.config.limits.max_studio_data_bytes;
         let suffix = format!(
-            ",\"native_edit\":{{\"revision\":{},\"committed_inputs\":{},\"enabled\":{},\"preview_commit\":{},\"pending_inputs\":{}}}}}",
+            ",\"native_edit\":{{\"revision\":{},\"committed_inputs\":{},\"enabled\":{},\"preview_commit\":{},\"pending_inputs\":{}}},\"presenter\":{{\"enabled\":{},\"at_boundary\":{}}}}}",
             self.position,
             self.edits.len(),
             self.input_enabled(),
             self.input_enabled() && self.config.stage_input_events,
-            self.pending_inputs.len()
+            self.pending_inputs.len(),
+            self.config.presenter_mode,
+            program.at_segment_boundary()
         );
         // The existing inspector remains the authority for the whole object tree.
         // Only additive, bounded native command metadata is appended here.
