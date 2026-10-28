@@ -55,7 +55,7 @@ jobs:
           python -m pip install 'numpy==2.5.2' 'maturin==1.14.1'
           cargo test --locked -p fmn-geom --lib --test svg 2>&1 | tee /tmp/svg-ingress-geometry.log
           cargo test --locked -p fmn-library --test svg_paints --test drawings --test structural_classes 2>&1 | tee /tmp/svg-ingress-native.log
-          cargo test --locked -p fmn-python --lib portal_svg_ingress::tests::record_precision -- --test-threads=1 2>&1 | tee /tmp/svg-ingress-precision.log
+          cargo test --locked -p fmn-python --lib record_precision_ -- --test-threads=1 2>&1 | tee /tmp/svg-ingress-precision.log
           cargo clippy --locked -p fmn-library --all-targets -- -D warnings 2>&1 | tee /tmp/svg-ingress-library-clippy.log
           cargo clippy --locked -p fmn-python --lib -- -D warnings 2>&1 | tee /tmp/svg-ingress-clippy.log
       - name: Build and exercise native SVG ingress
