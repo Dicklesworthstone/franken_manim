@@ -45,6 +45,34 @@ camera example checks camera/surface animation and recovery both during a
 Transform and after a stateful camera updater has resumed. Neither example
 requires CPython, system fonts or ffmpeg.
 
+## Control the terminal preview
+
+The standalone CLI accepts commands on stdin when `--tui` is selected. Run it
+in a Kitty or sixel-capable terminal, including over SSH:
+
+```sh
+fmn studio --tui --no-browser @builtin circle_shift.v1
+```
+
+Type each command and press Enter. `play`, `pause` and `toggle` control playback;
+`next` and `prev` move one frame; `step -1s` moves back one second; `seek 2.5s`
+seeks to a time; and `first` / `last` reach the endpoints. Playback visits every
+nominal frame and slows under rendering or terminal backpressure. Presenter
+mode (`-p`) pauses at the same native segment boundaries as the browser.
+
+`labels` lists authored FMTL labels and session bookmarks. `label NAME` jumps to
+one, and `mark NAME` bookmarks the current frame for this terminal session.
+`inspect` lists the current family graph; `inspect ID` shows an object's record
+fields, bounds, uniforms and source span. Object IDs belong to that capture.
+These preview operations do not edit the scene or append replay commands.
+
+`help` prints the command list and `status` reports the acknowledged frame.
+`quit`, or EOF after any queued commands, shuts down the host and reaps its
+worker. Input is line-based; raw arrow and function keys are not bindings.
+The same browser URL remains available while the terminal controls are active,
+and browser seeks are reflected in the terminal. Narrated immutable recordings
+retain their browser-only adapter.
+
 ## Build a native worker
 
 Construct a fresh `Scene` and owned `Vec<NativeSegment>` in a factory.

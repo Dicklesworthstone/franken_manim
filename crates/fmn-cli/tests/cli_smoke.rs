@@ -190,6 +190,195 @@ fn assert_code(output: &Output, expected: i32) {
 }
 
 #[cfg(feature = "batch")]
+fn terminal_studio(fixture: &Fixture, script: &[u8], wait_for: Option<&'static str>) -> Output {
+    use std::io::{Read as _, Write as _};
+    use std::time::{Duration, Instant};
+
+    let source = fixture.root.join("terminal.fmtl");
+    let mut stage = fmn_scene::studio_bridge::Stage::new();
+    let mut timeline = fmn_scene::studio_bridge::Timeline::new(8).unwrap();
+    timeline.label("start").wait(1.0).unwrap();
+    timeline.label("second").wait(1.0).unwrap();
+    timeline.label("end");
+    let bytes = fmn_scene::export_timeline_bundle(
+        timeline,
+        &mut stage,
+        &fmn_core::rng::RngRoot::from_seed(0),
+    )
+    .unwrap();
+    fs::write(&source, bytes).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_fmn"));
+    command
+        .args([
+            "studio",
+            "--tui",
+            "--no-browser",
+            "--port",
+            "0",
+            "--resolution",
+            "16x16",
+            "--fps",
+            "8",
+            "--threads",
+            "1",
+        ])
+        .arg(source)
+        .current_dir(&fixture.root)
+        .env_clear()
+        .env("PATH", "")
+        .env("TERM", "xterm-kitty")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if cfg!(windows)
+        && let Some(root) = std::env::var_os("SystemRoot")
+    {
+        command.env("SystemRoot", root);
+    }
+    let mut child = command.spawn().expect("terminal Studio starts");
+    let mut output = child.stdout.take().unwrap();
+    let mut errors = child.stderr.take().unwrap();
+    let (observed_send, observed_receive) = std::sync::mpsc::sync_channel(1);
+    let output = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let mut chunk = [0; 4096];
+        let mut observed = false;
+        loop {
+            let count = output.read(&mut chunk).unwrap();
+            if count == 0 {
+                break;
+            }
+            if bytes.len() + count > 512 * 1024 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk[..count]);
+            if !observed
+                && wait_for.is_some_and(|needle| {
+                    bytes
+                        .windows(needle.len())
+                        .any(|window| window == needle.as_bytes())
+                })
+            {
+                observed = true;
+                let _ = observed_send.send(());
+            }
+        }
+        bytes
+    });
+    let errors = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        errors
+            .by_ref()
+            .take(64 * 1024)
+            .read_to_end(&mut bytes)
+            .unwrap();
+        bytes
+    });
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(script).unwrap();
+    if wait_for.is_some() {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            match observed_receive.recv_timeout(Duration::from_millis(20)) {
+                Ok(()) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) if Instant::now() < deadline => {
+                    // A read-only command must neither restart the playback
+                    // timer nor starve nominal frame advancement.
+                    if input.write_all(b"status\n").is_ok() {
+                        continue;
+                    }
+                }
+                Err(_) => {}
+            }
+            drop(input);
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("terminal playback did not advance while status commands arrived");
+        }
+        input.write_all(b"pause\nstatus\nquit\n").unwrap();
+    }
+    drop(input);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("terminal Studio did not shut down after its command stream ended");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    Output {
+        status,
+        stdout: output.join().unwrap(),
+        stderr: errors.join().unwrap(),
+    }
+}
+
+#[cfg(feature = "batch")]
+#[test]
+fn shipped_studio_terminal_commands_seek_label_inspect_and_quit_through_worker() {
+    let fixture = Fixture::new();
+    let output = terminal_studio(&fixture, b"labels\nlabel second\nstep -0.5s\nmark halfway\nseek 0\nlabel halfway\ninspect\ninspect 999\nseek 999\nstatus\nplay\npause\nnext\nprev\nfirst\nlast\nquit\nseek 1\n", None);
+    assert_code(&output, 0);
+    assert!(stderr(&output).is_empty());
+    let text = stdout(&output);
+    for expected in [
+        "type a command, then press Enter",
+        "start: frame 0",
+        "second: frame 8",
+        "end: frame 15",
+        "Frame 8/15 | 1.000 s | paused",
+        "Frame 4/15 | 0.500 s | paused",
+        "Bookmark saved",
+        "Inspector at frame 4",
+        "Showing 0/0 objects",
+        "object ID is not present",
+        "seek is outside the timeline",
+        "Frame 4/15 | 0.500 s | playing",
+        "Frame 5/15 | 0.625 s | paused",
+        "Frame 15/15 | 1.875 s | paused",
+    ] {
+        assert!(
+            text.contains(expected),
+            "missing {expected:?} in terminal transcript"
+        );
+    }
+    assert!(
+        text.contains("\u{1b}_Ga=T,f=100"),
+        "terminal received PNG graphics"
+    );
+    assert!(
+        !text.contains("Frame 1/15"),
+        "commands after quit must not execute"
+    );
+}
+
+#[cfg(feature = "batch")]
+#[test]
+fn shipped_studio_terminal_eof_processes_the_last_unterminated_command() {
+    let fixture = Fixture::new();
+    let output = terminal_studio(&fixture, b"seek 1s\nstep -1", None);
+    assert_code(&output, 0);
+    assert!(stderr(&output).is_empty());
+    assert!(stdout(&output).contains("Frame 7/15 | 0.875 s | paused"));
+}
+
+#[cfg(feature = "batch")]
+#[test]
+fn shipped_studio_terminal_plays_while_status_commands_keep_arriving() {
+    let fixture = Fixture::new();
+    let output = terminal_studio(&fixture, b"play\n", Some("Frame 2/15 | 0.250 s | playing"));
+    assert_code(&output, 0);
+    assert!(stderr(&output).is_empty());
+    assert!(stdout(&output).contains("Frame 1/15 | 0.125 s | playing"));
+    assert!(stdout(&output).contains("Frame 2/15 | 0.250 s | playing"));
+    assert!(stdout(&output).trim_end().ends_with("paused"));
+}
+
+#[cfg(feature = "batch")]
 #[test]
 fn shipped_binary_reports_version_and_generated_help() {
     let fixture = Fixture::new();

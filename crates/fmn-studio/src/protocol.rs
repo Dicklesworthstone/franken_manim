@@ -1811,6 +1811,106 @@ fn valid_json_container(bytes: &[u8]) -> bool {
     parser.index == bytes.len()
 }
 
+/// Project a canonical inspector object without searching inside strings or
+/// nested records. Reuse the protocol's depth-bounded scanner; no second JSON
+/// grammar is needed by the terminal client. Inspector keys are fixed ASCII
+/// spellings, and escaped/duplicate keys fail closed rather than being guessed.
+pub(crate) fn json_object_member<'a>(
+    bytes: &'a [u8],
+    name: &str,
+) -> Result<Option<&'a [u8]>, ProtocolError> {
+    let invalid = || ProtocolError::Malformed("terminal inspector JSON object");
+    let mut parser = JsonParser { bytes, index: 0 };
+    parser.skip_whitespace();
+    if !parser.consume(b'{') {
+        return Err(invalid());
+    }
+    parser.skip_whitespace();
+    let mut found = None;
+    if !parser.consume(b'}') {
+        loop {
+            let start = parser.index;
+            if !parser.string() {
+                return Err(invalid());
+            }
+            let key = &bytes[start + 1..parser.index - 1];
+            if key.contains(&b'\\') {
+                return Err(invalid());
+            }
+            parser.skip_whitespace();
+            if !parser.consume(b':') {
+                return Err(invalid());
+            }
+            parser.skip_whitespace();
+            let start = parser.index;
+            if !parser.value(1) {
+                return Err(invalid());
+            }
+            if key == name.as_bytes() {
+                if found.is_some() {
+                    return Err(invalid());
+                }
+                found = Some(&bytes[start..parser.index]);
+            }
+            parser.skip_whitespace();
+            if parser.consume(b'}') {
+                break;
+            }
+            if !parser.consume(b',') {
+                return Err(invalid());
+            }
+            parser.skip_whitespace();
+        }
+    }
+    parser.skip_whitespace();
+    if parser.index != bytes.len() {
+        return Err(invalid());
+    }
+    Ok(found)
+}
+
+/// Borrow array elements under a caller-supplied element ceiling. The scanner
+/// validates every element before any projection is used by the host.
+pub(crate) fn json_array_values(bytes: &[u8], maximum: usize) -> Result<Vec<&[u8]>, ProtocolError> {
+    let invalid = || ProtocolError::Malformed("terminal inspector JSON array");
+    let mut parser = JsonParser { bytes, index: 0 };
+    parser.skip_whitespace();
+    if !parser.consume(b'[') {
+        return Err(invalid());
+    }
+    parser.skip_whitespace();
+    let mut values = Vec::new();
+    if !parser.consume(b']') {
+        loop {
+            parser.skip_whitespace();
+            let start = parser.index;
+            if values.len() >= maximum || !parser.value(1) {
+                return Err(invalid());
+            }
+            values
+                .try_reserve(1)
+                .map_err(|source| ProtocolError::StorageUnavailable {
+                    field: "terminal inspector array",
+                    additional: 1,
+                    source,
+                })?;
+            values.push(&bytes[start..parser.index]);
+            parser.skip_whitespace();
+            if parser.consume(b']') {
+                break;
+            }
+            if !parser.consume(b',') {
+                return Err(invalid());
+            }
+        }
+    }
+    parser.skip_whitespace();
+    if parser.index != bytes.len() {
+        return Err(invalid());
+    }
+    Ok(values)
+}
+
 struct JsonParser<'a> {
     bytes: &'a [u8],
     index: usize,

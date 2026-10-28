@@ -2941,6 +2941,143 @@ const STUDIO_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15
 const STUDIO_HEADER_LIMIT: usize = 16 * 1024;
 const STUDIO_BODY_LIMIT: usize = 8 * 1024 * 1024;
 
+/// The actual Enter-based terminal front door, including its disposable worker,
+/// frame IPC, inspector and clean shutdown. The capability-bearing readiness
+/// line is never retained in an artifact or included in failure diagnostics.
+fn studio_terminal_controls_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            drop(self.0.stdin.take());
+            if !matches!(self.0.try_wait(), Ok(Some(_))) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+    }
+
+    let directory = scenario_dir("studio_terminal_controls")?;
+    let mut command = std::process::Command::new(env!("CARGO_BIN_FILE_FMN_CLI_fmn"));
+    command
+        .args([
+            "studio",
+            "--tui",
+            "--no-browser",
+            "--port",
+            "0",
+            "--resolution",
+            "32x18",
+            "--fps",
+            "8",
+            "--threads",
+            "1",
+            fmn_cli::BUILTIN_SCENE_SOURCE,
+            "circle_shift.v1",
+        ])
+        .current_dir(&directory)
+        .env_clear()
+        .env("PATH", "")
+        .env("TERM", "xterm-kitty")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    if cfg!(windows)
+        && let Some(root) = std::env::var_os("SystemRoot")
+    {
+        command.env("SystemRoot", root);
+    }
+    let mut process = ChildGuard(
+        command
+            .spawn()
+            .map_err(|error| studio_io_error("terminal spawn", error))?,
+    );
+    let stdout = process
+        .0
+        .stdout
+        .take()
+        .ok_or_else(|| fail("terminal stdout missing"))?;
+    let stderr = process
+        .0
+        .stderr
+        .take()
+        .ok_or_else(|| fail("terminal stderr missing"))?;
+    let (output_send, output_receive) = std::sync::mpsc::sync_channel(1);
+    let (error_send, error_receive) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stdout
+            .take((STUDIO_BODY_LIMIT + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes);
+        let _ = output_send.send(result);
+    });
+    std::thread::spawn(move || {
+        let _ = error_send.send(studio_drain(stderr));
+    });
+    process
+        .0
+        .stdin
+        .take()
+        .ok_or_else(|| fail("terminal stdin missing"))?
+        .write_all(b"seek 1s\nstep -4\nmark middle\nfirst\nlabel middle\ninspect\nquit\n")
+        .map_err(|error| studio_io_error("terminal commands", error))?;
+    let deadline = std::time::Instant::now() + STUDIO_IO_TIMEOUT;
+    loop {
+        if let Some(status) = process
+            .0
+            .try_wait()
+            .map_err(|error| studio_io_error("terminal reap", error))?
+        {
+            if !status.success() {
+                return Err(fail("terminal Studio did not exit successfully"));
+            }
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(fail("terminal Studio shutdown deadline expired"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let output = output_receive
+        .recv_timeout(STUDIO_IO_TIMEOUT)
+        .map_err(|_| fail("terminal output reader did not finish"))?
+        .map_err(|error| studio_io_error("terminal output", error))?;
+    let errors = error_receive
+        .recv_timeout(STUDIO_IO_TIMEOUT)
+        .map_err(|_| fail("terminal error reader did not finish"))?
+        .map_err(|error| studio_io_error("terminal diagnostics", error))?;
+    if output.len() > STUDIO_BODY_LIMIT || errors != 0 {
+        return Err(fail(
+            "terminal transcript exceeded its budget or emitted diagnostics",
+        ));
+    }
+    let transcript =
+        std::str::from_utf8(&output).map_err(|_| fail("terminal transcript is not UTF-8"))?;
+    for expected in [
+        "type a command, then press Enter",
+        "Frame 8/",
+        "Frame 4/",
+        "Bookmark saved",
+        "Inspector at frame 4",
+        "root=",
+        "\u{1b}_Ga=T,f=100",
+    ] {
+        if !transcript.contains(expected) {
+            return Err(fail("terminal control or graphics response is missing"));
+        }
+    }
+    if transcript.contains("Studio: ") {
+        return Err(fail("terminal command was refused unexpectedly"));
+    }
+    ctx.set_fps((8, 1));
+    ctx.event(
+        LogEvent::new("e2e.studio.terminal")
+            .field("commands", 6u64)
+            .field("clean_exit", "true"),
+    );
+    Ok(RunOutcome::ok().with_counter("studio_terminal_commands", 6))
+}
+
 /// Own the real CLI process from spawn through every failure path. Pipe
 /// readers retain no diagnostics containing the readiness capability.
 struct StudioProcess {
@@ -11260,6 +11397,23 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             vec![
                 FieldPred::str_eq("scene", "mixed_camera.v1"),
                 FieldPred::str_eq("camera_identity", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.studio_terminal_controls.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::StudioSubprocess,
+        Invocation::new(studio_terminal_controls_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("studio_terminal_commands", 6),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.studio.terminal",
+            vec![
+                FieldPred::u64_eq("commands", 6),
+                FieldPred::str_eq("clean_exit", "true"),
             ],
         )],
     ));

@@ -8322,6 +8322,15 @@ pub fn is_studio_invocation_os(args: &[OsString]) -> bool {
         .is_ok_and(|invocation| matches!(invocation, Invocation::Studio(_)))
 }
 
+/// Whether stdin belongs to the Enter-based terminal controller rather than
+/// the ordinary Studio EOF-only shutdown watcher.
+#[must_use]
+pub fn is_studio_tui_invocation_os(args: &[OsString]) -> bool {
+    os_args_to_utf8(args)
+        .and_then(parse_args)
+        .is_ok_and(|invocation| matches!(invocation, Invocation::Studio(command) if command.tui))
+}
+
 /// Whether these arguments select the private disposable-worker entry point.
 #[must_use]
 pub fn is_internal_studio_worker_os(args: &[OsString]) -> bool {
@@ -8510,10 +8519,19 @@ fn write_studio_terminal_frame(
 
 fn serve_studio_tui(
     host: fmn_studio::StudioHost,
+    session: &fmn_studio::StudioWorkerSession,
     frames: &fmn_studio::FrameHub,
+    commands: &std::sync::mpsc::Receiver<fmn_studio::tui::TerminalInput>,
+    labels: Vec<(String, u64)>,
     ready: &mut dyn std::io::Write,
     shutdown: &AtomicBool,
 ) -> Result<(), CliError> {
+    use fmn_studio::tui::{
+        TerminalAction, TerminalController, terminal_inspection, terminal_safe_text,
+    };
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::time::Instant;
+
     let protocol = studio_terminal_protocol(
         std::env::var_os("TERM").as_deref(),
         std::env::var_os("TERM_PROGRAM").as_deref(),
@@ -8521,22 +8539,157 @@ fn serve_studio_tui(
     );
     let preview = fmn_studio::TerminalPreview::new(protocol, fmn_studio::TuiLimits::default())
         .map_err(|error| CliError::new("capability", format!("Studio TUI: {error}")))?;
-
+    let mut capture = session
+        .terminal_capture(None, frames)
+        .map_err(|error| CliError::new("scene", format!("Studio terminal inspection: {error}")))?;
+    let mut controller = TerminalController::new(capture.view, labels)
+        .map_err(|error| CliError::new("scene", error))?;
+    let write_text = |ready: &mut dyn std::io::Write, text: &str| {
+        ready
+            .write_all(text.as_bytes())
+            .and_then(|()| ready.flush())
+            .map_err(|error| internal(format!("Studio terminal output: {error}")))
+    };
+    write_text(ready, fmn_studio::tui::TERMINAL_HELP)?;
+    write_studio_terminal_frame(preview, ready, &capture.frame)?;
+    write_text(ready, &controller.status())?;
     std::thread::scope(|scope| {
         let server = scope.spawn(|| host.serve_until(shutdown));
-        let mut last_publication = None;
-        let mut terminal_result = Ok(());
-        while !shutdown.load(Ordering::Acquire) && !server.is_finished() {
-            let Some(frame) = frames.wait_after(last_publication, Duration::from_millis(50)) else {
-                continue;
-            };
-            last_publication = Some(frame.publication_sequence);
-            if let Err(error) = write_studio_terminal_frame(preview, ready, &frame) {
-                shutdown.store(true, Ordering::Release);
-                terminal_result = Err(error);
-                break;
+        let terminal_result = (|| {
+            let mut next_tick = Instant::now();
+            'terminal: while !shutdown.load(Ordering::Acquire) && !server.is_finished() {
+                let timeout = if controller.playing() {
+                    next_tick
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_millis(50))
+                } else {
+                    Duration::from_millis(50)
+                };
+                let received = commands.recv_timeout(timeout);
+                // Browser and terminal share one serialized session. Observe a
+                // browser seek/restart after the input wait, before computing a
+                // relative command or a playback step from the current capture.
+                if frames.latest().is_some_and(|latest| {
+                    latest.publication_sequence != capture.frame.publication_sequence
+                }) {
+                    match session.terminal_capture(None, frames) {
+                        Ok(next) => {
+                            if next.worker_generation != capture.worker_generation {
+                                controller.pause();
+                            }
+                            controller.observe(next.view).map_err(internal)?;
+                            write_studio_terminal_frame(preview, ready, &next.frame)?;
+                            write_text(ready, &controller.status())?;
+                            capture = next;
+                        }
+                        Err(error) => {
+                            controller.pause();
+                            write_text(
+                                ready,
+                                &format!(
+                                    "Studio: {}\n",
+                                    terminal_safe_text(&error.to_string(), 1024)
+                                ),
+                            )?;
+                        }
+                    }
+                }
+                let mut action = match received {
+                    Ok(command) => {
+                        let was_playing = controller.playing();
+                        let result = command.and_then(|command| controller.apply(command));
+                        if !was_playing && controller.playing() {
+                            next_tick =
+                                Instant::now() + terminal_frame_period(controller.view().fps);
+                        }
+                        match result {
+                            Ok(action) => Some(action),
+                            Err(error) => {
+                                write_text(ready, &format!("Studio: {error}\n"))?;
+                                None
+                            }
+                        }
+                    }
+                    Err(RecvTimeoutError::Disconnected) => Some(TerminalAction::Quit),
+                    Err(RecvTimeoutError::Timeout) => None,
+                };
+                // One input action followed by at most one playback action;
+                // even a slow consumer gets another chance to pause or quit.
+                for _ in 0..2 {
+                    match action {
+                        Some(TerminalAction::Quit) => break 'terminal,
+                        Some(TerminalAction::Print(text)) => write_text(ready, &text)?,
+                        Some(TerminalAction::Seek(frame)) => {
+                            match session.terminal_capture(Some(frame), frames) {
+                                Ok(next) => {
+                                    if next.worker_generation != capture.worker_generation {
+                                        controller.pause();
+                                    }
+                                    controller.observe(next.view).map_err(internal)?;
+                                    write_studio_terminal_frame(preview, ready, &next.frame)?;
+                                    write_text(ready, &controller.status())?;
+                                    capture = next;
+                                }
+                                Err(error) => {
+                                    controller.pause();
+                                    write_text(
+                                        ready,
+                                        &format!(
+                                            "Studio: {}\n",
+                                            terminal_safe_text(&error.to_string(), 1024)
+                                        ),
+                                    )?;
+                                }
+                            }
+                            // Backpressure slows playback; it never drops nominal
+                            // frames or catches up by jumping over scene samples.
+                            next_tick =
+                                Instant::now() + terminal_frame_period(controller.view().fps);
+                        }
+                        Some(TerminalAction::Inspect(selected)) => {
+                            match session.terminal_capture(None, frames) {
+                                Ok(next) => {
+                                    controller.observe(next.view).map_err(internal)?;
+                                    if next.frame.publication_sequence
+                                        != capture.frame.publication_sequence
+                                    {
+                                        write_studio_terminal_frame(preview, ready, &next.frame)?;
+                                    }
+                                    match terminal_inspection(&next.inspection, selected) {
+                                        Ok(text) => write_text(ready, &text)?,
+                                        Err(error) => {
+                                            write_text(ready, &format!("Studio: {error}\n"))?
+                                        }
+                                    }
+                                    capture = next;
+                                }
+                                Err(error) => write_text(
+                                    ready,
+                                    &format!(
+                                        "Studio: {}\n",
+                                        terminal_safe_text(&error.to_string(), 1024)
+                                    ),
+                                )?,
+                            }
+                        }
+                        None => {}
+                    }
+                    // Non-seeking commands do not reset playback's deadline or
+                    // starve it while stdin remains busy. Handle pause/quit first,
+                    // then at most one due frame; its capture arms a fresh tick.
+                    action = if !shutdown.load(Ordering::Acquire) && Instant::now() >= next_tick {
+                        controller.next_frame().map(TerminalAction::Seek)
+                    } else {
+                        None
+                    };
+                    if action.is_none() {
+                        break;
+                    }
+                }
             }
-        }
+            Ok(())
+        })();
+        shutdown.store(true, Ordering::Release);
         let server_result = server
             .join()
             .map_err(|_| internal("Studio host thread panicked"))?
@@ -8545,11 +8698,37 @@ fn serve_studio_tui(
     })
 }
 
+fn terminal_frame_period(fps: u32) -> Duration {
+    Duration::from_nanos((1_000_000_000 / u64::from(fps)).max(1_000_000))
+}
+
+fn studio_terminal_labels(
+    fs: &dyn FileSystem,
+    command: &RenderCommand,
+) -> Result<Vec<(String, u64)>, CliError> {
+    if studio_live::selected(command) {
+        return Ok(Vec::new());
+    }
+    match resolve_native_render_input(fs, command)? {
+        NativeRenderInput::Builtin { .. } => Ok(Vec::new()),
+        NativeRenderInput::Compiled { bundle, .. } => Ok(bundle
+            .labels()
+            .iter()
+            .filter_map(|label| {
+                bundle
+                    .frame_of_label(&label.name)
+                    .map(|frame| (label.name.clone(), u64::from(frame)))
+            })
+            .collect()),
+    }
+}
+
 fn execute_studio(
     public_args: Vec<String>,
     command: StudioCommand,
     ready: &mut dyn std::io::Write,
     shutdown: &AtomicBool,
+    terminal_commands: Option<&std::sync::mpsc::Receiver<fmn_studio::tui::TerminalInput>>,
 ) -> Result<(), CliError> {
     if command.tui && command.render.common.robot {
         return Err(usage(
@@ -8562,8 +8741,18 @@ fn execute_studio(
             "MJPEG Studio preview is not yet wired; use --preview-codec png",
         ));
     }
+    if command.tui && terminal_commands.is_none() {
+        return Err(usage(
+            "--tui requires an Enter-based command stream; embedders use run_studio_terminal_os",
+        ));
+    }
     let fs: Arc<dyn FileSystem> = Arc::new(fmn_platform::fs::StdFs);
     let scene = studio_scene_name(fs.as_ref(), &command.render)?;
+    let terminal_labels = if command.tui {
+        studio_terminal_labels(fs.as_ref(), &command.render)?
+    } else {
+        Vec::new()
+    };
     let config = resolve_render_config(fs.as_ref(), &command.render)?;
     // Validate the complete Studio execution policy in the supervisor before
     // entropy, socket, or worker-process side effects. The disposable worker
@@ -8706,7 +8895,15 @@ fn execute_studio(
         .map_err(|error| internal(format!("Studio launch URL: {error}")))
         .and_then(|url| write_studio_ready(ready, &command, &scene, &url, generation))
         .and_then(|()| match tui_frames.as_ref() {
-            Some(frames) => serve_studio_tui(host, frames, ready, shutdown),
+            Some(frames) => serve_studio_tui(
+                host,
+                &session,
+                frames,
+                terminal_commands.ok_or_else(|| internal("missing terminal command stream"))?,
+                terminal_labels,
+                ready,
+                shutdown,
+            ),
             None => host
                 .serve_until(shutdown)
                 .map_err(|error| CliError::new("scene", format!("Studio host: {error}"))),
@@ -8722,6 +8919,28 @@ pub fn run_studio_os(
     args: &[OsString],
     ready: &mut dyn std::io::Write,
     shutdown: &AtomicBool,
+) -> RunOutput {
+    run_studio_with_input_os(args, ready, shutdown, None)
+}
+
+/// Run the same Studio host with a bounded, Enter-based terminal command
+/// stream. `read_terminal_commands` supplies it from stdin or a test script;
+/// disconnecting it shuts down the host after queued commands are handled.
+#[must_use]
+pub fn run_studio_terminal_os(
+    args: &[OsString],
+    ready: &mut dyn std::io::Write,
+    shutdown: &AtomicBool,
+    commands: &std::sync::mpsc::Receiver<fmn_studio::tui::TerminalInput>,
+) -> RunOutput {
+    run_studio_with_input_os(args, ready, shutdown, Some(commands))
+}
+
+fn run_studio_with_input_os(
+    args: &[OsString],
+    ready: &mut dyn std::io::Write,
+    shutdown: &AtomicBool,
+    commands: Option<&std::sync::mpsc::Receiver<fmn_studio::tui::TerminalInput>>,
 ) -> RunOutput {
     let requested_robot = args
         .iter()
@@ -8747,7 +8966,7 @@ pub fn run_studio_os(
     if let Some(output) = python_source_refusal(&command.render) {
         return output;
     }
-    match execute_studio(utf8, command, ready, shutdown) {
+    match execute_studio(utf8, command, ready, shutdown, commands) {
         Ok(()) => RunOutput::success(String::new()),
         Err(error) => error_output(requested_robot, &error),
     }

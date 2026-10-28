@@ -41,6 +41,32 @@ fn main() -> ExitCode {
         studio_recorded::run_worker_os(&args)
     } else if fmn_cli::is_internal_studio_worker_os(&args) {
         fmn_cli::run_internal_studio_worker_os(&args)
+    } else if fmn_cli::is_studio_tui_invocation_os(&args) {
+        let shutdown = AtomicBool::new(false);
+        let (sender, commands) =
+            std::sync::mpsc::sync_channel(fmn_studio::tui::TERMINAL_COMMAND_QUEUE);
+        let watcher = std::thread::Builder::new()
+            .name("fmn-studio-terminal-input".to_owned())
+            .spawn(move || {
+                let mut input = std::io::stdin().lock();
+                if fmn_studio::tui::read_terminal_commands(&mut input, &sender).is_err() {
+                    let _ = sender.send(Err("could not read terminal input"));
+                }
+            });
+        if let Err(error) = watcher {
+            fmn_cli::RunOutput {
+                code: fmn_cli::internal_exit_code(),
+                stdout: String::new(),
+                stderr: format!("fmn: cannot start Studio terminal input: {error}\n"),
+            }
+        } else {
+            let stdout = std::io::stdout();
+            let mut ready = stdout.lock();
+            match studio_recorded::try_run_os(&args, &mut ready, &shutdown) {
+                Some(output) => output,
+                None => fmn_cli::run_studio_terminal_os(&args, &mut ready, &shutdown, &commands),
+            }
+        }
     } else if fmn_cli::is_studio_invocation_os(&args) {
         let shutdown = Arc::new(AtomicBool::new(false));
         let watcher_shutdown = Arc::clone(&shutdown);

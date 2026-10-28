@@ -510,6 +510,16 @@ pub struct StudioWorkerSession {
     fresh_capture_reload: bool,
 }
 
+/// One synchronized, read-only terminal preview. The operation lock keeps a
+/// browser seek/restart from interleaving the frame and inspector capture.
+#[derive(Debug)]
+pub struct TerminalCapture {
+    pub frame: Arc<PngFrame>,
+    pub inspection: Vec<u8>,
+    pub view: crate::tui::TerminalView,
+    pub worker_generation: u64,
+}
+
 impl fmt::Debug for StudioWorkerSession {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StudioWorkerSession")
@@ -575,6 +585,60 @@ impl StudioWorkerSession {
     /// it before the stable host exits.
     pub fn shutdown_worker(&self) {
         lock(&self.supervisor).shutdown_worker();
+    }
+
+    /// Read the current capture or scrub to one frame through the existing
+    /// isolated-worker protocol. This in-process capability is for a trusted
+    /// local terminal; HTTP callers still pass the host's authentication gates.
+    /// No command is journalled and no input event or source code is injected.
+    pub fn terminal_capture(
+        &self,
+        frame: Option<u64>,
+        frames: &FrameHub,
+    ) -> Result<TerminalCapture, HostError> {
+        let _operation = lock(&self.operations);
+        if let Some(frame) = frame {
+            let frame = i64::try_from(frame)
+                .map_err(|_| HostError::BadRequest("terminal frame exceeds i64"))?;
+            match self.request(SupervisorRequest::Scrub {
+                scene: self.try_owned_scene()?,
+                frame,
+            })? {
+                WorkerResponse::Frame(frame) => {
+                    frames.publish(&frame, self.protocol_limits)?;
+                }
+                WorkerResponse::Error { message, .. } => {
+                    return Err(HostError::WorkerRejected(message));
+                }
+                _ => return Err(HostError::UnexpectedWorkerResponse),
+            }
+        }
+        let frame = frames
+            .latest()
+            .ok_or(HostError::Frame("no terminal preview frame"))?;
+        let (response, worker_generation) = self.inspect_generation()?;
+        let inspection = match response {
+            WorkerResponse::StudioData {
+                kind: StudioDataKind::Inspection,
+                bytes,
+                ..
+            } => bytes,
+            WorkerResponse::Error { message, .. } => {
+                return Err(HostError::WorkerRejected(message));
+            }
+            _ => return Err(HostError::UnexpectedWorkerResponse),
+        };
+        let view =
+            crate::tui::TerminalView::from_json(&inspection).map_err(HostError::BadRequest)?;
+        if view.frame != frame.frame_index {
+            return Err(HostError::Frame("terminal inspector and preview disagree"));
+        }
+        Ok(TerminalCapture {
+            frame,
+            inspection,
+            view,
+            worker_generation,
+        })
     }
 
     fn try_owned_scene(&self) -> Result<String, HostError> {
@@ -2286,6 +2350,8 @@ pub enum HostError {
     Supervisor(SupervisorError),
     /// Worker crashed and the supervisor recovered it.
     WorkerRecovered(String),
+    /// The worker explicitly refused a local terminal preview operation.
+    WorkerRejected(String),
     /// Frame could not be admitted to the preview hub.
     Frame(&'static str),
     /// The owned codec rejected an inline preview PNG.
@@ -2374,6 +2440,7 @@ impl HostError {
             Self::RateLimited => Some((429, "Too Many Requests")),
             Self::Supervisor(_)
             | Self::WorkerRecovered(_)
+            | Self::WorkerRejected(_)
             | Self::Frame(_)
             | Self::FramePng(_)
             | Self::UnexpectedWorkerResponse
@@ -2407,6 +2474,7 @@ impl fmt::Display for HostError {
             Self::WorkerRecovered(message) => {
                 write!(f, "scene worker recovered after crash: {message}")
             }
+            Self::WorkerRejected(message) => write!(f, "scene worker refused preview: {message}"),
             Self::Frame(message) => write!(f, "Studio preview frame: {message}"),
             Self::FramePng(error) => write!(f, "Studio preview PNG: {error}"),
             Self::UnexpectedWorkerResponse => {
