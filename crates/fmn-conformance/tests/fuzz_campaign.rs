@@ -1076,6 +1076,7 @@ const SVG_LIMITS: fmn_geom::SvgLimits = fmn_geom::SvgLimits {
     max_bytes: 1 << 18,
     max_depth: 24,
     max_path_commands: 1 << 12,
+    max_output_points: 1 << 16,
     max_use_expansions: 128,
     max_elements: 1 << 12,
 };

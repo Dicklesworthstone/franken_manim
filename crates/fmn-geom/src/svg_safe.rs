@@ -55,6 +55,18 @@ impl SvgDocument {
         validate_admission(bytes, limits)?;
         svg_parser::SvgDocument::parse_with_limits(bytes, limits).map(Into::into)
     }
+
+    /// Parse with an explicit cubic-reduction error bound in resolved
+    /// viewport units, after document transforms. The same UTF-8 admission
+    /// and resource budgets apply as for the ordinary parser.
+    pub fn parse_with_tolerance(
+        bytes: &[u8],
+        limits: &SvgLimits,
+        tolerance: f64,
+    ) -> Result<Self, SvgError> {
+        validate_admission(bytes, limits)?;
+        svg_parser::SvgDocument::parse_with_tolerance(bytes, limits, tolerance).map(Into::into)
+    }
 }
 
 /// Emit one resolved document back to SVG bytes without cloning its retained

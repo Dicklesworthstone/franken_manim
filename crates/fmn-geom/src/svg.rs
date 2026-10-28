@@ -51,11 +51,13 @@
 //! selectors (`class` attributes are inert), unknown *properties* inside the
 //! `style` attribute (they configure features outside this matrix), text
 //! layout, raster images, scripting, animation, and all paint servers.
-//! Text content between elements is ignored. Element-local tolerances: the
-//! cubic→quadratic conversion runs at [`DEFAULT_SVG_TOLERANCE`] user units
-//! *before* the transform cascade is applied, and `stroke-width`/dash
-//! lengths are rescaled by `sqrt|det|` of the cascaded affine — both
-//! documented flattening choices, per the matrix.
+//! Text content between elements is ignored. The cubic→quadratic tolerance
+//! is measured in the resulting viewport: every element divides it by a
+//! conservative bound on its full affine cascade's maximum stretch before
+//! calling the shared converter. Magnification, skew and `use` expansion
+//! therefore cannot magnify the conversion error beyond the stated bound.
+//! `stroke-width`/dash lengths are rescaled by `sqrt|det|` of the cascaded
+//! affine, a documented flattening choice, per the matrix.
 //!
 //! # Security posture (§16.5, R14)
 //!
@@ -74,9 +76,10 @@ use fmn_core::types::Vec3;
 
 use crate::{FillRule, GeomError, QuadPath, cubic, scalar};
 
-/// The cubic→quadratic conversion tolerance for SVG ingress, in path-local
-/// user units: the G0-2 pixel tolerance applied to SVG's px-scaled user
-/// space. See [`crate::cubic::DEFAULT_TOLERANCE_PX`].
+/// The cubic→quadratic conversion tolerance for SVG ingress, in resulting
+/// viewport user units: the G0-2 tolerance applied to SVG's px-scaled space.
+/// Consumers that later resize geometry should supply the corresponding
+/// viewport tolerance through [`SvgDocument::parse_with_tolerance`].
 pub const DEFAULT_SVG_TOLERANCE: f64 = cubic::DEFAULT_TOLERANCE_PX;
 
 // ------------------------------------------------------------------ errors
@@ -143,6 +146,12 @@ pub enum SvgError {
     /// The path-command count (across the whole document) exceeded the
     /// budget.
     TooManyCommands {
+        /// The configured budget.
+        limit: usize,
+    },
+    /// Derived path points across the document exceeded the output budget.
+    /// Subdivision and repeated `use` instances count toward this budget.
+    TooManyPoints {
         /// The configured budget.
         limit: usize,
     },
@@ -236,6 +245,9 @@ impl std::fmt::Display for SvgError {
             Self::TooManyCommands { limit } => {
                 write!(f, "path-command budget of {limit} exceeded")
             }
+            Self::TooManyPoints { limit } => {
+                write!(f, "SVG output-point budget of {limit} exceeded")
+            }
             Self::TooManyUseExpansions { limit } => {
                 write!(f, "use-expansion budget of {limit} exceeded")
             }
@@ -277,6 +289,9 @@ pub struct SvgLimits {
     /// Maximum path-data commands across the whole document (implicit
     /// repetitions count). Default `1 << 20`.
     pub max_path_commands: usize,
+    /// Maximum derived path points across all shapes, including subdivision
+    /// and `use` instances. Default `1 << 20`.
+    pub max_output_points: usize,
     /// Maximum `use`-element expansions across the whole document.
     /// Default 1024.
     pub max_use_expansions: usize,
@@ -290,6 +305,7 @@ impl Default for SvgLimits {
             max_bytes: 1 << 20,
             max_depth: 32,
             max_path_commands: 1 << 20,
+            max_output_points: 1 << 20,
             max_use_expansions: 1024,
             max_elements: 1 << 16,
         }
@@ -458,17 +474,35 @@ impl SvgDocument {
 
     /// Parse SVG bytes under explicit budgets (the untrusted-input path).
     pub fn parse_with_limits(bytes: &[u8], limits: &SvgLimits) -> Result<Self, SvgError> {
+        Self::parse_with_tolerance(bytes, limits, DEFAULT_SVG_TOLERANCE)
+    }
+
+    /// Parse under explicit budgets and a cubic-reduction error bound in
+    /// resulting viewport coordinates, after all document transforms.
+    ///
+    /// The tolerance must be positive and finite. Later caller scaling is
+    /// outside the document: for a known final scale `s`, use the desired
+    /// final-space tolerance divided by `abs(s)`. Primitive circle/ellipse
+    /// arc density remains the separate BN-09 contract.
+    pub fn parse_with_tolerance(
+        bytes: &[u8],
+        limits: &SvgLimits,
+        tolerance: f64,
+    ) -> Result<Self, SvgError> {
         if bytes.len() > limits.max_bytes {
             return Err(SvgError::TooLarge {
                 bytes: bytes.len(),
                 limit: limits.max_bytes,
             });
         }
+        if !tolerance.is_finite() || tolerance <= 0.0 {
+            return Err(geom(GeomError::InvalidTolerance));
+        }
         let text = std::str::from_utf8(bytes).map_err(|e| SvgError::NotUtf8 {
             offset: e.valid_up_to(),
         })?;
         let root = build_tree(text, limits)?;
-        Interpreter::new(limits, &root).document(&root)
+        Interpreter::new(limits, &root, tolerance).document(&root)
     }
 }
 
@@ -565,6 +599,68 @@ impl Affine {
         [self.a, self.b, self.c, self.d, self.e, self.f]
             .iter()
             .all(|v| v.is_finite())
+    }
+
+    /// Convert a viewport error bound to an element-local bound. For a 2x2
+    /// matrix, the largest singular value is
+    /// `(hypot(a+d, b-c) + hypot(a-d, b+c)) / 2`. Scale the inputs first to
+    /// avoid overflow, and round the result outwards. Diagonal maps have an
+    /// exact maximum stretch, preserving identity/translation conversions.
+    fn local_tolerance(self, viewport_tolerance: f64, line: usize) -> Result<f64, SvgError> {
+        if !self.is_finite() {
+            return Err(SvgError::NonFinite {
+                line,
+                context: "transform cascade",
+            });
+        }
+        let stretch = if self.b == 0.0 && self.c == 0.0 {
+            self.a.abs().max(self.d.abs())
+        } else {
+            let magnitude = self
+                .a
+                .abs()
+                .max(self.b.abs())
+                .max(self.c.abs())
+                .max(self.d.abs());
+            let a = self.a / magnitude;
+            let b = self.b / magnitude;
+            let c = self.c / magnitude;
+            let d = self.d / magnitude;
+            let first = ((a + d) * (a + d) + (b - c) * (b - c)).sqrt();
+            let second = ((a - d) * (a - d) + (b + c) * (b + c)).sqrt();
+            magnitude * (0.5 * first + 0.5 * second) * (1.0 + 16.0 * f64::EPSILON)
+        };
+        // Never coarsen existing small/identity geometry. A collapsed map
+        // needs no tighter bound; an unrepresentable bound refuses by name.
+        // A nonidentity affine also rounds when its controls are published.
+        // Reserve half the viewport budget for that separate operation; emit
+        // checks the corresponding absolute bound before publishing points.
+        let budget = if self == Self::IDENTITY {
+            viewport_tolerance
+        } else {
+            0.5 * viewport_tolerance
+        };
+        let tolerance = budget / stretch.max(1.0);
+        if tolerance == 0.0 || !tolerance.is_finite() {
+            return Err(geom(GeomError::ToleranceUnreachable { needed: usize::MAX }));
+        }
+        Ok(tolerance)
+    }
+
+    /// Outward bound on the two multiply/add coordinate evaluations. The
+    /// absolute-term sum handles cancellation and large translations, which
+    /// a maximum-stretch bound alone cannot cover. Identity is exact.
+    fn rounding_guard(self, point: Vec3) -> f64 {
+        if self == Self::IDENTITY {
+            return 0.0;
+        }
+        let magnitude = (self.a * point[0]).abs()
+            + (self.c * point[1]).abs()
+            + self.e.abs()
+            + (self.b * point[0]).abs()
+            + (self.d * point[1]).abs()
+            + self.f.abs();
+        32.0 * f64::EPSILON * magnitude + 8.0 * f64::from_bits(1)
     }
 }
 
@@ -1635,6 +1731,7 @@ struct PathSink<'a> {
     line: usize,
     commands: &'a mut usize,
     limit: usize,
+    tolerance: f64,
 }
 
 impl PathSink<'_> {
@@ -1668,7 +1765,7 @@ impl PathSink<'_> {
                 [h1.0, h1.1, 0.0],
                 [h2.0, h2.1, 0.0],
                 [to.0, to.1, 0.0],
-                DEFAULT_SVG_TOLERANCE,
+                self.tolerance,
             )
             .map_err(geom)?;
         Ok(())
@@ -1879,12 +1976,15 @@ fn parse_path_data(
     line: usize,
     commands: &mut usize,
     limit: usize,
+    tolerance: f64,
+    point_limit: usize,
 ) -> Result<QuadPath, SvgError> {
     let mut sink = PathSink {
         path: QuadPath::new(),
         line,
         commands,
         limit,
+        tolerance,
     };
     let mut cursor = PathCursor {
         bytes: d.as_bytes(),
@@ -2017,6 +2117,9 @@ fn parse_path_data(
                     format!("unknown path command `{}`", cmd as char),
                 ));
             }
+        }
+        if sink.path.num_points() > point_limit {
+            return Err(SvgError::TooManyPoints { limit: point_limit });
         }
         prev = cmd.to_ascii_uppercase();
         // After a move's first pair, subsequent implicit pairs are lines.
@@ -2335,21 +2438,25 @@ fn parse_viewbox(text: Option<&str>, line: usize) -> Result<Option<[f64; 4]>, Sv
 /// declared budgets.
 struct Interpreter<'a, 'tree> {
     limits: &'a SvgLimits,
+    tolerance: f64,
     ids: HashMap<String, &'tree Element>,
     commands: usize,
+    points: usize,
     expansions: usize,
     use_stack: Vec<String>,
     shapes: Vec<SvgShape>,
 }
 
 impl<'a, 'tree> Interpreter<'a, 'tree> {
-    fn new(limits: &'a SvgLimits, root: &'tree Element) -> Self {
+    fn new(limits: &'a SvgLimits, root: &'tree Element, tolerance: f64) -> Self {
         let mut ids = HashMap::new();
         collect_ids(root, &mut ids);
         Self {
             limits,
+            tolerance,
             ids,
             commands: 0,
+            points: 0,
             expansions: 0,
             use_stack: Vec::new(),
             shapes: Vec::new(),
@@ -2372,7 +2479,11 @@ impl<'a, 'tree> Interpreter<'a, 'tree> {
             return Err(malformed(line, "svg viewport must have positive size"));
         }
         let vp = Viewport { width, height };
-        let affine = viewbox_affine(view_box, vp, attr(root, "preserveAspectRatio"), line)?;
+        let viewbox = viewbox_affine(view_box, vp, attr(root, "preserveAspectRatio"), line)?;
+        let affine = match attr(root, "transform") {
+            Some(value) => parse_transform(value, line)?.then(viewbox),
+            None => viewbox,
+        };
         let mut style = Style::default();
         style.cascade(root, vp)?;
         self.render_children(root, affine, &style, vp)?;
@@ -2507,8 +2618,20 @@ impl<'a, 'tree> Interpreter<'a, 'tree> {
             "use" => self.render_use(el, affine, &style, vp)?,
             "path" => {
                 let d = attr(el, "d").ok_or_else(|| malformed(line, "path element without `d`"))?;
-                let path =
-                    parse_path_data(d, line, &mut self.commands, self.limits.max_path_commands)?;
+                let path = parse_path_data(
+                    d,
+                    line,
+                    &mut self.commands,
+                    self.limits.max_path_commands,
+                    affine.local_tolerance(self.tolerance, line)?,
+                    self.limits.max_output_points.saturating_sub(self.points),
+                )
+                .map_err(|error| match error {
+                    SvgError::TooManyPoints { .. } => SvgError::TooManyPoints {
+                        limit: self.limits.max_output_points,
+                    },
+                    other => other,
+                })?;
                 self.emit(path, SvgShapeKind::Path, affine, &style, line)?;
                 self.render_children(el, affine, &style, vp)?;
             }
@@ -2676,6 +2799,13 @@ impl<'a, 'tree> Interpreter<'a, 'tree> {
         if !path.has_points() {
             return Ok(());
         }
+        self.points = self
+            .points
+            .checked_add(path.num_points())
+            .filter(|&count| count <= self.limits.max_output_points)
+            .ok_or(SvgError::TooManyPoints {
+                limit: self.limits.max_output_points,
+            })?;
         let mut points: Vec<Vec3> = Vec::with_capacity(path.num_points());
         for &p in path.points() {
             let (x, y) = affine.apply(p[0], p[1]);
@@ -2685,7 +2815,26 @@ impl<'a, 'tree> Interpreter<'a, 'tree> {
                     context: "transformed coordinate",
                 });
             }
+            if affine.rounding_guard(p) > 0.5 * self.tolerance {
+                return Err(geom(GeomError::ToleranceUnreachable { needed: usize::MAX }));
+            }
             points.push([x, y, 0.0]);
+        }
+        for (before, after) in path
+            .points()
+            .windows(3)
+            .step_by(2)
+            .zip(points.windows(3).step_by(2))
+        {
+            if before[1] != before[0]
+                && before[1] != before[2]
+                && after[0] != after[2]
+                && (after[1] == after[0] || after[1] == after[2])
+            {
+                // Rounded placement must not erase the converter's handle
+                // separation and turn a real curve into a subpath break.
+                return Err(geom(GeomError::ToleranceUnreachable { needed: usize::MAX }));
+            }
         }
         let mut path = path;
         path.set_points(points).map_err(geom)?;
@@ -3103,14 +3252,28 @@ mod tests {
     #[test]
     fn arc_reaches_its_endpoint() {
         let mut commands = 0usize;
-        let path =
-            parse_path_data("M0 0 A1 1 0 0 1 3 4", 1, &mut commands, 1 << 10).expect("arc parses");
+        let path = parse_path_data(
+            "M0 0 A1 1 0 0 1 3 4",
+            1,
+            &mut commands,
+            1 << 10,
+            DEFAULT_SVG_TOLERANCE,
+            1 << 20,
+        )
+        .expect("arc parses");
         let last = path.points().last().copied().expect("nonempty");
         assert!((last[0] - 3.0).abs() < 1e-9 && (last[1] - 4.0).abs() < 1e-9);
         // The arc's midpoint lies on the unit circle x²+y² around its center.
         let mut commands = 0usize;
-        let path =
-            parse_path_data("M1 0 A1 1 0 0 1 0 1", 1, &mut commands, 1 << 10).expect("arc parses");
+        let path = parse_path_data(
+            "M1 0 A1 1 0 0 1 0 1",
+            1,
+            &mut commands,
+            1 << 10,
+            DEFAULT_SVG_TOLERANCE,
+            1 << 20,
+        )
+        .expect("arc parses");
         let n = path.num_points() / 2;
         let mid = path.nth_curve_point(n / 2, 0.5).expect("point");
         let r = (mid[0] * mid[0] + mid[1] * mid[1]).sqrt();
@@ -3120,8 +3283,15 @@ mod tests {
     #[test]
     fn relative_and_implicit_commands_parse() {
         let mut commands = 0usize;
-        let path =
-            parse_path_data("m10 10 20 0 0 20 z", 1, &mut commands, 1 << 10).expect("parses");
+        let path = parse_path_data(
+            "m10 10 20 0 0 20 z",
+            1,
+            &mut commands,
+            1 << 10,
+            DEFAULT_SVG_TOLERANCE,
+            1 << 20,
+        )
+        .expect("parses");
         // m + 2 implicit l + z ⇒ the path closes at (10,10).
         assert!(path.is_closed());
         let first = path.points()[0];
@@ -3139,6 +3309,8 @@ mod tests {
             1,
             &mut commands,
             1 << 10,
+            DEFAULT_SVG_TOLERANCE,
+            1 << 20,
         )
         .expect("parses");
         let last = path.points().last().copied().expect("nonempty");
@@ -3402,6 +3574,7 @@ mod tests {
             max_bytes: 1 << 16,
             max_depth: 12,
             max_path_commands: 1 << 10,
+            max_output_points: 1 << 16,
             max_use_expansions: 64,
             max_elements: 1 << 10,
         };

@@ -358,6 +358,7 @@ fn custom_budgets_bite() {
         max_bytes: 1 << 16,
         max_depth: 4,
         max_path_commands: 16,
+        max_output_points: 64,
         max_use_expansions: 2,
         max_elements: 16,
     };
@@ -456,4 +457,198 @@ fn closure_state_survives_the_round_trip() {
         let d_is_closed = emitted.contains("Z</svg") || emitted.contains("Z\"");
         assert_eq!(d_is_closed, expect_closed, "{label}: closure flag drifted");
     }
+}
+
+fn assert_cubic_viewport_bound(document: &SvgDocument, source: [[f64; 3]; 4], tolerance: f64) {
+    let path = &document.shapes[0].path;
+    let count = path.num_curves();
+    assert!(count > 1, "witness must exercise adaptive subdivision");
+    let derivative = |t: f64| {
+        let mut result = [0.0; 3];
+        for axis in 0..3 {
+            result[axis] = 3.0
+                * ((1.0 - t) * (1.0 - t) * (source[1][axis] - source[0][axis])
+                    + 2.0 * (1.0 - t) * t * (source[2][axis] - source[1][axis])
+                    + t * t * (source[3][axis] - source[2][axis]));
+        }
+        result
+    };
+    let evaluate = |t| fmn_geom::bezier::cubic_point(source[0], source[1], source[2], source[3], t);
+    for index in 0..count {
+        let start = index as f64 / count as f64;
+        let end = (index + 1) as f64 / count as f64;
+        let a = evaluate(start);
+        let b = evaluate(end);
+        let da = derivative(start);
+        let db = derivative(end);
+        let quad = path.nth_curve_points(index).unwrap();
+        // The difference is a cubic Bernstein polynomial. Every control
+        // difference within the tolerance proves the whole interval's bound.
+        for control in 0..4 {
+            let mut squared = 0.0;
+            for axis in 0..3 {
+                let original = match control {
+                    0 => a[axis],
+                    1 => a[axis] + da[axis] / (3.0 * count as f64),
+                    2 => b[axis] - db[axis] / (3.0 * count as f64),
+                    _ => b[axis],
+                };
+                let elevated = match control {
+                    0 => quad[0][axis],
+                    1 => (quad[0][axis] + 2.0 * quad[1][axis]) / 3.0,
+                    2 => (2.0 * quad[1][axis] + quad[2][axis]) / 3.0,
+                    _ => quad[2][axis],
+                };
+                squared += (original - elevated) * (original - elevated);
+            }
+            assert!(
+                squared.sqrt() <= tolerance + 1e-9,
+                "piece {index}/{count}, control {control}: deviation {} > {tolerance}",
+                squared.sqrt()
+            );
+        }
+    }
+}
+
+#[test]
+fn cubic_error_is_bounded_after_magnification_skew_and_viewbox() {
+    for (source, controls) in [
+        (
+            r#"<svg transform="scale(1000)"><path d="M0 0C0 1 1 -1 1 0"/></svg>"#,
+            [
+                [0., 0., 0.],
+                [0., 1000., 0.],
+                [1000., -1000., 0.],
+                [1000., 0., 0.],
+            ],
+        ),
+        (
+            r#"<svg><path transform="scale(1000 1)" d="M0 0C0 1 1 -1 1 0"/></svg>"#,
+            [
+                [0., 0., 0.],
+                [0., 1., 0.],
+                [1000., -1., 0.],
+                [1000., 0., 0.],
+            ],
+        ),
+        (
+            r#"<svg><path transform="matrix(1 .25 20 1 0 0)" d="M0 0C0 1 1 -1 1 0"/></svg>"#,
+            [
+                [0., 0., 0.],
+                [20., 1., 0.],
+                [-19., -0.75, 0.],
+                [1., 0.25, 0.],
+            ],
+        ),
+        (
+            r#"<svg width="1024" height="768" viewBox="0 0 16 16" preserveAspectRatio="none"><path d="M0 0C0 16 16 -16 16 0"/></svg>"#,
+            [
+                [0., 0., 0.],
+                [0., 768., 0.],
+                [1024., -768., 0.],
+                [1024., 0., 0.],
+            ],
+        ),
+        (
+            r##"<svg width="800" height="600" viewBox="0 0 16 12"><defs><g id="curve" transform="matrix(1 0 2 1 0 0)"><path d="M0 0C0 1 1 -1 1 0"/></g></defs><g transform="scale(4 2)"><use href="#curve" x="3" y="5"/></g></svg>"##,
+            [
+                [600., 500., 0.],
+                [1000., 600., 0.],
+                [400., 400., 0.],
+                [800., 500., 0.],
+            ],
+        ),
+    ] {
+        let document = SvgDocument::parse(source.as_bytes()).unwrap();
+        assert_cubic_viewport_bound(&document, controls, fmn_geom::svg::DEFAULT_SVG_TOLERANCE);
+        assert_eq!(
+            dump(&document),
+            dump(&SvgDocument::parse(source.as_bytes()).unwrap())
+        );
+    }
+}
+
+#[test]
+fn explicit_svg_tolerance_is_validated_and_controls_refinement() {
+    let source = br#"<svg><path d="M0 0C0 1 1 -1 1 0"/></svg>"#;
+    let limits = SvgLimits::default();
+    let ordinary = SvgDocument::parse(source).unwrap();
+    let fine = SvgDocument::parse_with_tolerance(source, &limits, 1e-5).unwrap();
+    assert!(fine.shapes[0].path.num_curves() > ordinary.shapes[0].path.num_curves());
+    assert_cubic_viewport_bound(
+        &fine,
+        [[0., 0., 0.], [0., 1., 0.], [1., -1., 0.], [1., 0., 0.]],
+        1e-5,
+    );
+    assert_eq!(
+        dump(&ordinary),
+        dump(
+            &SvgDocument::parse_with_tolerance(
+                source,
+                &limits,
+                fmn_geom::svg::DEFAULT_SVG_TOLERANCE
+            )
+            .unwrap()
+        )
+    );
+    for tolerance in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(matches!(
+            SvgDocument::parse_with_tolerance(source, &limits, tolerance),
+            Err(SvgError::Geometry {
+                source: fmn_geom::GeomError::InvalidTolerance
+            })
+        ));
+    }
+}
+
+#[test]
+fn svg_affine_rounding_cannot_spend_the_curve_error_budget_silently() {
+    let source = br#"<svg><path transform="translate(1e16 0)" d="M0 0C0.6666666666666666 1.3333333333333333 1.3333333333333333 1.3333333333333333 2 0"/></svg>"#;
+    assert!(matches!(
+        SvgDocument::parse(source),
+        Err(SvgError::Geometry {
+            source: fmn_geom::GeomError::ToleranceUnreachable { .. }
+        })
+    ));
+    // A moderate offset remains representable and keeps the viewport bound.
+    let accepted = br#"<svg><path transform="translate(1000000 0)" d="M0 0C0 1 1 -1 1 0"/></svg>"#;
+    let document = SvgDocument::parse(accepted).unwrap();
+    assert_cubic_viewport_bound(
+        &document,
+        [
+            [1e6, 0., 0.],
+            [1e6, 1., 0.],
+            [1e6 + 1., -1., 0.],
+            [1e6 + 1., 0., 0.],
+        ],
+        fmn_geom::svg::DEFAULT_SVG_TOLERANCE,
+    );
+}
+
+#[test]
+fn svg_derived_geometry_has_a_document_wide_point_budget() {
+    let limits = SvgLimits {
+        max_output_points: 10,
+        ..SvgLimits::default()
+    };
+    assert!(matches!(
+        SvgDocument::parse_with_limits(
+            br#"<svg><path transform="scale(10000)" d="M0 0C0 1 1 -1 1 0"/></svg>"#,
+            &limits
+        ),
+        Err(SvgError::TooManyPoints { limit: 10 })
+    ));
+    let limits = SvgLimits {
+        max_output_points: 20,
+        ..SvgLimits::default()
+    };
+    assert!(matches!(SvgDocument::parse_with_limits(
+        br##"<svg><defs><path id="p" d="M0 0L1 0L1 1L0 1Z"/></defs><use href="#p"/><use href="#p"/><use href="#p"/></svg>"##, &limits),
+        Err(SvgError::TooManyPoints { limit: 20 })));
+    assert!(matches!(
+        SvgDocument::parse(br#"<svg><path transform="scale(1e300)" d="M0 0C0 1 1 -1 1 0"/></svg>"#),
+        Err(SvgError::Geometry {
+            source: fmn_geom::GeomError::ToleranceUnreachable { .. }
+        })
+    ));
 }
