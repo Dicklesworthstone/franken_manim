@@ -524,3 +524,22 @@ Reference's does, so default labels are unchanged.
 
 **Migration:** none for the default labels or for numbers that are all
 real or all imaginary. A scene that wanted "3i" should pass `3j`.
+
+## `shift` takes a scalar or one 3-vector (fm-mumk)
+
+The Reference's `Mobject.shift` adds its argument to the points with numpy
+(`mobject.py:919`, `points + vector`), so a scalar moves every coordinate:
+`shift(0)` is a no-op and `shift(0.5)` moves by (0.5, 0.5, 0.5). Corpus scenes
+write `.animate.shift(0)`. The same broadcast also accepts an `(N, 3)` array
+whose rows shift each point by its own vector, which only works when N
+happens to equal the point count.
+
+**FrankenManim:** a scalar broadcasts as in the Reference, and a 3-vector or a
+`(1, 3)` row shifts as usual, directly and through `.animate` and the camera
+frame. Any other shape is refused by name: "shift() takes a 3-vector or a
+scalar; got an array of shape (2,)". The portal no longer raises an internal
+`IndexError`, and no longer truncates a longer vector to its first three
+coordinates.
+
+**Migration:** none for scalars or 3-vectors. A scene that shifted each point
+by its own row should set the points with `set_points(points + offsets)`.

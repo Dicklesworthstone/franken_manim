@@ -109,6 +109,7 @@ pub mod planes;
 pub mod pointcloud;
 pub mod poly;
 pub mod probability;
+pub mod reference_defaults;
 pub mod solids;
 pub mod spans;
 pub mod special_tex;

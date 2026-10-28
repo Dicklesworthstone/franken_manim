@@ -1092,14 +1092,14 @@ VMobject.add_subpath	VMobject	bootstrap	1	bootstrap
 VMobject.align_points	VMobject	bootstrap	1	bootstrap
 VMobject.append_points	VMobject	bootstrap	1	bootstrap
 VMobject.append_vectorized_mobject	VMobject	bootstrap	1	bootstrap
-VMobject.apply_depth_test	Mobject	bootstrap	2	bootstrap > bootstrap
+VMobject.apply_depth_test	VMobject	bootstrap	1	bootstrap
 VMobject.apply_function	VMobject	bootstrap	1	bootstrap
 VMobject.apply_matrix	VMobject	bootstrap	1	bootstrap
 VMobject.change_anchor_mode	VMobject	bootstrap	1	bootstrap
 VMobject.close_path	VMobject	bootstrap	1	bootstrap
 VMobject.consider_points_equal	VMobject	bootstrap	1	bootstrap
 VMobject.curve_and_prop_of_partial_point	VMobject	placeholder	1	placeholder
-VMobject.deactivate_depth_test	Mobject	bootstrap	2	bootstrap > bootstrap
+VMobject.deactivate_depth_test	VMobject	bootstrap	1	bootstrap
 VMobject.ensure_positive_orientation	VMobject	bootstrap	1	bootstrap
 VMobject.fade	VMobject	bootstrap	1	bootstrap
 VMobject.get_anchors	VMobject	bootstrap	1	bootstrap
@@ -1155,7 +1155,7 @@ VMobject.insert_n_curves	VMobject	bootstrap	1	bootstrap
 VMobject.insert_n_curves_to_point_list	VMobject	bootstrap	1	bootstrap
 VMobject.is_closed	VMobject	bootstrap	1	bootstrap
 VMobject.is_smooth	VMobject	bootstrap	1	bootstrap
-VMobject.lock_matching_data	Mobject	bootstrap	1	bootstrap
+VMobject.lock_matching_data	VMobject	bootstrap	1	bootstrap
 VMobject.make_approximately_smooth	VMobject	bootstrap	1	bootstrap
 VMobject.make_jagged	VMobject	bootstrap	1	bootstrap
 VMobject.make_smooth	VMobject	bootstrap	1	bootstrap

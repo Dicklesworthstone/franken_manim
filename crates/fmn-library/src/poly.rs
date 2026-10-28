@@ -9,21 +9,18 @@
 
 use fmn_core::color::Srgb;
 use fmn_core::constants::{
-    BLACK, DEFAULT_MOBJECT_COLOR, DEG, DL, DR, FRAME_HEIGHT, FRAME_WIDTH, GREY_E, ORIGIN, OUT,
-    RIGHT, TAU, UL, UR,
+    BLACK, DEG, DL, DR, FRAME_HEIGHT, FRAME_WIDTH, GREY_E, ORIGIN, OUT, RIGHT, TAU, UL, UR,
 };
 use fmn_core::types::Vec3;
 use fmn_geom::{GeomError, QuadPath, SpaceOpsError, bezier, space_ops};
 use fmn_mobject::Mobject;
 use fmn_mobject::ShapeTag;
 
+use crate::reference_defaults as defaults;
 use crate::style::Style;
 use crate::vmobject::VMobject;
 
-/// The Reference's `DEFAULT_ARROW_TIP_LENGTH`.
-pub const DEFAULT_ARROW_TIP_LENGTH: f64 = 0.35;
-/// The Reference's `DEFAULT_ARROW_TIP_WIDTH`.
-pub const DEFAULT_ARROW_TIP_WIDTH: f64 = 0.35;
+pub use crate::reference_defaults::{DEFAULT_ARROW_TIP_LENGTH, DEFAULT_ARROW_TIP_WIDTH};
 
 /// `CubicBezier(a0, h0, h1, a1)`: one cubic, converted to the shared-anchor
 /// quadratic model on the way in.
@@ -284,8 +281,8 @@ impl RegularPolygon {
     pub fn new(n: usize) -> Self {
         Self {
             n,
-            radius: 1.0,
-            start_angle: None,
+            radius: defaults::regular_polygon::RADIUS,
+            start_angle: defaults::regular_polygon::START_ANGLE,
             style: Style::default(),
         }
     }
@@ -375,6 +372,19 @@ pub enum TipStyle {
     Dot,
 }
 
+// A schema `tip_style` code with no variant fails to compile.
+const _: () = assert!(
+    matches!(defaults::arrow_tip::TIP_STYLE, 0..=2),
+    "the schema's ArrowTip tip_style has no TipStyle variant"
+);
+
+/// The schema's default `tip_style` code as its variant.
+const DEFAULT_TIP_STYLE: TipStyle = match defaults::arrow_tip::TIP_STYLE {
+    1 => TipStyle::InnerSmooth,
+    2 => TipStyle::Dot,
+    _ => TipStyle::Triangle,
+};
+
 /// `ArrowTip(angle, width, length, tip_style)`: the head every tipped
 /// mobject attaches.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -397,14 +407,17 @@ impl ArrowTip {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            angle: 0.0,
-            width: DEFAULT_ARROW_TIP_WIDTH,
-            length: DEFAULT_ARROW_TIP_LENGTH,
-            tip_style: TipStyle::Triangle,
+            angle: defaults::arrow_tip::ANGLE,
+            width: defaults::arrow_tip::WIDTH,
+            length: defaults::arrow_tip::LENGTH,
+            tip_style: DEFAULT_TIP_STYLE,
             // The Reference's tip_config: filled, unstroked.
             style: Style::default()
-                .fill(DEFAULT_MOBJECT_COLOR, 1.0)
-                .stroke(BLACK, 0.0, 1.0),
+                .fill(
+                    defaults::arrow_tip::FILL_COLOR,
+                    defaults::arrow_tip::FILL_OPACITY,
+                )
+                .stroke(BLACK, defaults::arrow_tip::STROKE_WIDTH, 1.0),
         }
     }
 
@@ -547,8 +560,8 @@ impl Rectangle {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            width: 4.0,
-            height: 2.0,
+            width: defaults::rectangle::WIDTH,
+            height: defaults::rectangle::HEIGHT,
             corner_radius: None,
             style: Style::default(),
         }
@@ -701,7 +714,7 @@ impl Square {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            side_length: 2.0,
+            side_length: defaults::square::SIDE_LENGTH,
             style: Style::default(),
         }
     }

@@ -34,16 +34,16 @@ def install_surface_alignment(native):
         # need UV alignment; never invent a grid for empty container records.
         return isinstance(right, Mobject) and not left.has_points() and not right.has_points()
 
-    def align_points(self, other):
-        if not isinstance(self, Surface) and not isinstance(other, Surface):
-            return original_align(self, other)
-        if empty_pair(self, other):
-            return original_align(self, other)
-        if not isinstance(self, Surface) or not isinstance(other, Surface):
+    def align_points(self, mobject):
+        if not isinstance(self, Surface) and not isinstance(mobject, Surface):
+            return original_align(self, mobject)
+        if empty_pair(self, mobject):
+            return original_align(self, mobject)
+        if not isinstance(self, Surface) or not isinstance(mobject, Surface):
             raise TypeError("a UV-grid surface cannot align with an unstructured mobject")
-        a, b = pair_shapes(self, other)
+        a, b = pair_shapes(self, mobject)
         if a is None:  # Both are unstructured meshes, not sampled UV grids.
-            return original_align(self, other)
+            return original_align(self, mobject)
         shape = (max(a[0], b[0]), max(a[1], b[1]))
         if shape[0] * shape[1] > GRID_BUDGET:
             raise ValueError(f"surface alignment exceeds its {GRID_BUDGET}-point UV-grid budget")
@@ -55,25 +55,25 @@ def install_surface_alignment(native):
             if old == shape and tuple(vars(member).get("resolution", ())) == shape
             and "triangle_indices" in vars(member)
             else triangles(SimpleNamespace(resolution=shape))
-            for member, old in ((self, a), (other, b))
+            for member, old in ((self, a), (mobject, b))
         ]
-        g["_align_surface_grids"](self, other)
-        for member, data in zip((self, other), indices):
+        g["_align_surface_grids"](self, mobject)
+        for member, data in zip((self, mobject), indices):
             vars(member).update(resolution=shape, triangle_indices=data)
         return self
 
-    def is_aligned_with(self, other):
-        if isinstance(self, Surface) or isinstance(other, Surface):
-            if empty_pair(self, other):
-                return original_aligned(self, other)
-            if not isinstance(self, Surface) or not isinstance(other, Surface):
+    def is_aligned_with(self, mobject):
+        if isinstance(self, Surface) or isinstance(mobject, Surface):
+            if empty_pair(self, mobject):
+                return original_aligned(self, mobject)
+            if not isinstance(self, Surface) or not isinstance(mobject, Surface):
                 return False
-            a, b = pair_shapes(self, other)
+            a, b = pair_shapes(self, mobject)
             if a is None:
-                return original_aligned(self, other)
-            if a != b or self.data.dtype != other.data.dtype:
+                return original_aligned(self, mobject)
+            if a != b or self.data.dtype != mobject.data.dtype:
                 return False
-        return original_aligned(self, other)
+        return original_aligned(self, mobject)
 
     for cls, name, method in ((Mobject, "align_points", align_points),
                               (Surface, "align_points", align_points),

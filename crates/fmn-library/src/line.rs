@@ -12,21 +12,19 @@
 //! spaces its dashes evenly along the real path.
 
 use fmn_core::color::Srgb;
-use fmn_core::constants::{
-    DEFAULT_LIGHT_COLOR, LEFT, MED_SMALL_BUFF, ORIGIN, OUT, PI, RIGHT, TAU, UP, UR,
-};
+use fmn_core::constants::{DEFAULT_LIGHT_COLOR, LEFT, ORIGIN, OUT, PI, RIGHT, TAU, UP, UR};
 use fmn_core::types::Vec3;
 use fmn_geom::{ArcLengthTable, GeomError, QuadPath, space_ops};
 use fmn_mobject::{Mobject, ShapeTag};
 
+use crate::reference_defaults as defaults;
 use crate::style::Style;
 use crate::vmobject::{
     DashError, VMobject, dashed_vmobject, validate_dash_count, validate_dash_length,
     validate_positive_space_ratio,
 };
 
-/// The Reference's `DEFAULT_DASH_LENGTH`.
-pub const DEFAULT_DASH_LENGTH: f64 = 0.05;
+pub use crate::reference_defaults::DEFAULT_DASH_LENGTH;
 
 /// `Line(start, end, buff, path_arc)`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -52,8 +50,8 @@ impl Line {
         Self {
             start,
             end,
-            buff: 0.0,
-            path_arc: 0.0,
+            buff: defaults::line::BUFF,
+            path_arc: defaults::line::PATH_ARC,
             style: Style::default(),
         }
     }
@@ -242,8 +240,8 @@ impl DashedLine {
     pub fn new(start: Vec3, end: Vec3) -> Self {
         Self {
             line: Line::new(start, end),
-            dash_length: DEFAULT_DASH_LENGTH,
-            positive_space_ratio: 0.5,
+            dash_length: defaults::dashed_line::DASH_LENGTH,
+            positive_space_ratio: defaults::dashed_line::POSITIVE_SPACE_RATIO,
         }
     }
 
@@ -401,8 +399,8 @@ impl Elbow {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            width: 0.2,
-            angle: 0.0,
+            width: defaults::elbow::WIDTH,
+            angle: defaults::elbow::ANGLE,
             style: Style::default(),
         }
     }
@@ -491,25 +489,23 @@ impl Arrow {
         Self {
             start,
             end,
-            buff: MED_SMALL_BUFF,
-            path_arc: 0.0,
-            thickness: 3.0,
-            tip_width_ratio: 5.0,
-            tip_angle: PI / 3.0,
-            max_tip_length_to_length_ratio: 0.5,
-            max_width_to_length_ratio: 0.1,
-            style: Style::default().fill(DEFAULT_LIGHT_COLOR, 1.0).stroke(
-                DEFAULT_LIGHT_COLOR,
-                0.0,
-                1.0,
-            ),
+            buff: defaults::arrow::BUFF,
+            path_arc: defaults::arrow::PATH_ARC,
+            thickness: defaults::arrow::THICKNESS,
+            tip_width_ratio: defaults::arrow::TIP_WIDTH_RATIO,
+            tip_angle: defaults::arrow::TIP_ANGLE,
+            max_tip_length_to_length_ratio: defaults::arrow::MAX_TIP_LENGTH_TO_LENGTH_RATIO,
+            max_width_to_length_ratio: defaults::arrow::MAX_WIDTH_TO_LENGTH_RATIO,
+            style: Style::default()
+                .fill(defaults::arrow::FILL_COLOR, defaults::arrow::FILL_OPACITY)
+                .stroke(DEFAULT_LIGHT_COLOR, defaults::arrow::STROKE_WIDTH, 1.0),
         }
     }
 
     /// `Vector(direction)`: an arrow from the origin, with no buffer.
     #[must_use]
     pub fn vector(direction: Vec3) -> Self {
-        Self::new(ORIGIN, direction).buff(0.0)
+        Self::new(ORIGIN, direction).buff(defaults::vector::BUFF)
     }
 
     /// Distance trimmed from each end.
@@ -791,12 +787,16 @@ impl StrokeArrow {
     pub fn new(start: Vec3, end: Vec3) -> Self {
         Self {
             line: Line::new(start, end)
-                .buff(0.25)
-                .style(Style::default().stroke(DEFAULT_LIGHT_COLOR, 5.0, 1.0)),
-            tip_width_ratio: 5.0,
-            tip_len_to_width: 0.0075,
-            max_tip_length_to_length_ratio: 0.3,
-            max_width_to_length_ratio: 8.0,
+                .buff(defaults::stroke_arrow::BUFF)
+                .style(Style::default().stroke(
+                    defaults::stroke_arrow::STROKE_COLOR,
+                    defaults::stroke_arrow::STROKE_WIDTH,
+                    1.0,
+                )),
+            tip_width_ratio: defaults::stroke_arrow::TIP_WIDTH_RATIO,
+            tip_len_to_width: defaults::stroke_arrow::TIP_LEN_TO_WIDTH,
+            max_tip_length_to_length_ratio: defaults::stroke_arrow::MAX_TIP_LENGTH_TO_LENGTH_RATIO,
+            max_width_to_length_ratio: defaults::stroke_arrow::MAX_WIDTH_TO_LENGTH_RATIO,
         }
     }
 
@@ -971,7 +971,7 @@ fn mul_point_mat(p: Vec3, m: &[[f64; 3]; 3]) -> Vec3 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fmn_core::constants::TAU;
+    use fmn_core::constants::{MED_SMALL_BUFF, TAU};
 
     fn close(a: f64, b: f64, tol: f64) -> bool {
         (a - b).abs() < tol

@@ -40,6 +40,24 @@ through `mobject.uniforms` is faithful) and readable, but it changes no
 rendered bits. A test toggles it on a real fixture scene and asserts that
 no point moves and the bounding box is untouched.
 
+### The depth test keeps the anti-alias width
+
+The Reference's `VMobject.apply_depth_test(anti_alias_width=0, recurse=True)`
+and `deactivate_depth_test(anti_alias_width=1.0, recurse=True)` also set the
+stroke's anti-alias width (`vectorized_mobject.py:448-464`). Depth testing a
+VMobject, including `depth_test=True` at construction as in `SurfaceMesh`,
+therefore draws it aliased. This spares its OpenGL pipeline the artifacts
+of blending anti-aliased edges under a depth test. Lumen's analytic strokes
+have no such artifact.
+
+FrankenManim takes both signatures as written, so positional calls bind as
+in the Reference: `apply_depth_test(0)` does not set `recurse` to 0
+(fm-schema-codegen-front-doors-r8-z206). It leaves the anti-alias width as
+it was, and a depth-tested 3D wireframe stays anti-aliased.
+
+**Migration:** a scene that wants the Reference's aliased look calls
+`set_anti_alias_width(0)` after the depth test.
+
 ## Migration guidance
 
 ### Native-built shapes accept inherited rendering options

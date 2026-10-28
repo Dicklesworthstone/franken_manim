@@ -7408,6 +7408,43 @@ builder_scene.play(
 )
 assert np.allclose(builder_mover.get_center(), builder_start + manimlib.RIGHT)
 
+# fm-mumk: Reference Mobject.shift is `points + vector` under numpy
+# broadcasting, so a scalar moves every coordinate and shift(0) is a no-op,
+# directly and through .animate. Any other shape that is not one 3-vector is
+# refused by name.
+scalar_mover = geometry.Square()
+scalar_points = scalar_mover.get_points().copy()
+assert scalar_mover.shift(0) is scalar_mover
+assert np.array_equal(scalar_mover.get_points(), scalar_points)
+scalar_mover.shift(0.5)
+assert np.allclose(scalar_mover.get_points(), scalar_points + 0.5)
+scalar_mover.shift(np.float64(-0.5))
+assert np.allclose(scalar_mover.get_points(), scalar_points)
+scalar_mover.shift(np.array([[1.0, 2.0, 0.0]]))
+assert np.allclose(scalar_mover.get_points(), scalar_points + [1.0, 2.0, 0.0])
+for refused_shift in ([1.0, 2.0], [1.0, 2.0, 3.0, 4.0], np.zeros((2, 3))):
+    try:
+        scalar_mover.shift(refused_shift)
+    except ValueError as error:
+        assert str(error).startswith("shift() takes a 3-vector or a scalar; got an array of shape"), error
+    else:
+        raise AssertionError(f"shift({refused_shift!r}) was accepted")
+scalar_scene = Scene()
+scalar_animated = geometry.Square()
+scalar_animated_points = scalar_animated.get_points().copy()
+scalar_scene.play(
+    scalar_animated.animate.shift(0), run_time=1.0 / 30.0, rate_func=manimlib.linear
+)
+assert np.allclose(scalar_animated.get_points(), scalar_animated_points)
+scalar_scene.play(
+    scalar_animated.animate.shift(0.25), run_time=1.0 / 30.0, rate_func=manimlib.linear
+)
+assert np.allclose(scalar_animated.get_points(), scalar_animated_points + 0.25)
+scalar_scene.frame.shift(0)
+scalar_frame_center = scalar_scene.frame.get_center().copy()
+scalar_scene.frame.shift(0.5)
+assert np.allclose(scalar_scene.frame.get_center(), scalar_frame_center + 0.5)
+
 chain_mover = geometry.Rectangle(width=1.0, height=0.5)
 chain = chain_mover.animate(
     run_time=2.0 / 30.0,

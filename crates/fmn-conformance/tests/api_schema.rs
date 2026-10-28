@@ -29,6 +29,7 @@ use std::path::{Path, PathBuf};
 use fmn_conformance::schema::{
     Schema, Status, SymbolKind, generate_cli_rs, generate_cli_table_md, generate_config_rs,
     generate_coverage_badge_svg, generate_docs_md, generate_ledger_tsv, generate_out_of_tier_tsv,
+    generate_reference_defaults_rs,
 };
 
 /// File-read envelope shared by `API_SCHEMA.tsv`, `API_OVERLAY.tsv`, and
@@ -382,6 +383,24 @@ fn defaults_are_recorded_as_source_expressions() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn the_baseline_signature_rulings_only_shrink() {
+    // fm-schema-codegen-front-doors-r8-z206: the parser refuses more
+    // `baseline` rows than the cap; this keeps the cap at the count, so
+    // adjudicating a row also lowers it.
+    let schema = schema();
+    let baseline = schema
+        .signature_rulings
+        .values()
+        .filter(|ruling| ruling.ruling == "baseline")
+        .count();
+    assert_eq!(
+        baseline,
+        fmn_conformance::schema::MAX_BASELINE_SIGNATURE_RULINGS,
+        "lower MAX_BASELINE_SIGNATURE_RULINGS in schema.rs to the remaining baseline rows"
+    );
+}
+
+#[test]
 fn every_public_surface_typo_has_a_canonical_name() {
     // Appendix C, C-9. The plan names three examples; the extracted surface
     // shows the real extent. Whatever the extractor finds must be ruled on —
@@ -542,6 +561,17 @@ fn the_generated_config_extraction_matches_the_schema() {
     artifact(
         "crates/fmn-config/src/generated.rs",
         &generate_config_rs(&schema()),
+    );
+}
+
+#[test]
+fn the_generated_geometry_defaults_match_the_schema() {
+    // fm-schema-codegen-front-doors-r8-z206: fmn-library's geometry builders
+    // read these constants, so a hand edit here, or a schema default the file
+    // was not regenerated for, is the Rust door drifting.
+    artifact(
+        "crates/fmn-library/src/reference_defaults.rs",
+        &generate_reference_defaults_rs(&schema()),
     );
 }
 

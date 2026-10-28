@@ -560,19 +560,8 @@ def install(native, subsystems=True):
             )
         ])
 
-    def transform_submobject(
-        self,
-        submobject,
-        starting_submobject,
-        target_copy,
-        alpha,
-    ):
-        submobject.interpolate(
-            starting_submobject,
-            target_copy,
-            alpha,
-            self.path_func,
-        )
+    def transform_submobject(self, submob, start, target_copy, alpha):
+        submob.interpolate(start, target_copy, alpha, self.path_func)
         return self
 
     def transform_interpolate_mobject(self, alpha):

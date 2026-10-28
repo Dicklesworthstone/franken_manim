@@ -168,8 +168,8 @@ def install_matching(native: Any) -> None:
             consumed = {id(obj) for obj in members}
             pieces[:] = [obj for obj in pieces if id(obj) not in consumed]
 
-    def find_pairs_with_matching_shapes(self, sources, targets):
-        sources, targets = _bounded(sources, "source pieces"), _bounded(targets, "target pieces")
+    def find_pairs_with_matching_shapes(self, chars1, chars2):
+        sources, targets = _bounded(chars1, "source pieces"), _bounded(chars2, "target pieces")
         if len(sources) * len(targets) > _MAX_COMPARISONS:
             raise ValueError("shape matching exceeds the 1048576-comparison budget; supply explicit matched_pairs")
         return _bounded(((source, target) for source in sources for target in targets

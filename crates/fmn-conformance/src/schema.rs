@@ -233,6 +233,7 @@ const OVERLAY_SECTIONS: &[&str] = &[
     "meta",
     "canonical",
     "param_canonical",
+    "signature_rulings",
     "constants",
     "optional_config",
     "config_binding",
@@ -973,6 +974,36 @@ pub struct ParamRename {
     pub ruling: String,
 }
 
+/// One ruled divergence of a portal callable's signature from the
+/// Reference's (`[signature_rulings]`). fmn-python's signature conformance
+/// test requires a ruling for every claimed callable that does not bind
+/// calls as the Reference does, and refuses a ruling with no divergence left.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignatureRuling {
+    /// `module:Class.method` or `module:function`.
+    pub owner: String,
+    /// One of [`SIGNATURE_RULINGS`].
+    pub ruling: String,
+    /// What differs and why.
+    pub note: String,
+}
+
+/// The kinds of signature ruling, defined in API_OVERLAY.tsv's
+/// `[signature_rulings]` header.
+pub const SIGNATURE_RULINGS: &[&str] = &[
+    "self-bound",
+    "keyword-bound",
+    "forwarding",
+    "native-data",
+    "abstract",
+    "baseline",
+];
+
+/// `baseline` rulings recorded when the portal signature check landed
+/// (fm-schema-codegen-front-doors-r8-z206). Adjudicating one lowers this;
+/// nothing raises it.
+pub const MAX_BASELINE_SIGNATURE_RULINGS: usize = 30;
+
 /// A C-16 constant-value ruling: one Reference module constant whose
 /// effective value is a governed override of its extracted spelling.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1179,6 +1210,8 @@ pub struct Schema {
     pub renames: BTreeMap<String, Rename>,
     /// C-9 parameter renames.
     pub param_renames: Vec<ParamRename>,
+    /// Ruled portal signature divergences, by callable owner.
+    pub signature_rulings: BTreeMap<String, SignatureRuling>,
     /// C-16 constant-value rulings, by `module:Name`.
     pub constant_overrides: BTreeMap<String, ConstantOverride>,
     /// Config-key bindings, in emission order.
@@ -1433,6 +1466,54 @@ impl Schema {
                 reference_name: f[1].clone(),
                 canonical: f[2].clone(),
                 ruling: f[3].clone(),
+            });
+        }
+
+        let mut signature_identities = BTreeMap::new();
+        for row in ov.typed("signature_rulings", 3)? {
+            let f = &row.fields;
+            if !schema.params.iter().any(|p| p.owner == f[0]) {
+                return Err(SchemaError::DanglingOverlay {
+                    section: "signature_rulings",
+                    key: f[0].clone(),
+                });
+            }
+            if !SIGNATURE_RULINGS.contains(&f[1].as_str()) {
+                return Err(SchemaError::Field {
+                    file: ov.file,
+                    line: row.line,
+                    column: "ruling",
+                    found: f[1].clone(),
+                });
+            }
+            record_identity(
+                &mut signature_identities,
+                ov.file,
+                row.line,
+                "signature_rulings",
+                f[0].clone(),
+            )?;
+            schema.signature_rulings.insert(
+                f[0].clone(),
+                SignatureRuling {
+                    owner: f[0].clone(),
+                    ruling: f[1].clone(),
+                    note: f[2].clone(),
+                },
+            );
+        }
+        let baseline = schema
+            .signature_rulings
+            .values()
+            .filter(|ruling| ruling.ruling == "baseline")
+            .count();
+        if baseline > MAX_BASELINE_SIGNATURE_RULINGS {
+            return Err(SchemaError::Document {
+                file: ov.file,
+                detail: format!(
+                    "{baseline} baseline signature rulings exceed the {MAX_BASELINE_SIGNATURE_RULINGS} \
+                     recorded when the portal signature check landed; the baseline only shrinks"
+                ),
             });
         }
 
@@ -2596,6 +2677,188 @@ pub fn generate_ledger_tsv(schema: &Schema) -> String {
     out
 }
 
+/// The Reference module whose constructor defaults fmn-library's builders
+/// read from [`generate_reference_defaults_rs`].
+const DEFAULTS_MODULE: &str = "manimlib.mobject.geometry";
+
+/// Generate `crates/fmn-library/src/reference_defaults.rs`: the geometry
+/// lineage's constructor defaults and module constants as Rust constants
+/// (§15.1, §16.2, fm-schema-codegen-front-doors-r8-z206).
+///
+/// fmn-library's builders read these instead of literals, so the Rust door's
+/// defaults are the schema's. A default this cannot translate becomes a
+/// `compile_error!` naming it, so a schema change fails the build rather than
+/// dropping the constant.
+#[must_use]
+pub fn generate_reference_defaults_rs(schema: &Schema) -> String {
+    let mut out = banner(
+        Comment::PerLine("//!"),
+        "The Reference's geometry defaults (§15.1, §16.2).",
+        schema.reference_commit(),
+    );
+    out.push_str(
+        "//!\n\
+         //! One module per `manimlib.mobject.geometry` constructor, one constant per\n\
+         //! parameter default, spelled as the schema records it. The builders read\n\
+         //! these, and fmn-python's signature check holds the portal's defaults to\n\
+         //! the same schema rows, so the two front doors cannot drift apart.\n\n",
+    );
+    let locals: std::collections::BTreeSet<&str> = schema
+        .symbols
+        .iter()
+        .filter(|s| {
+            s.module == DEFAULTS_MODULE && s.kind == SymbolKind::Constant && !s.name.contains('.')
+        })
+        .map(|s| s.name.as_str())
+        .collect();
+    for symbol in schema.symbols.iter().filter(|s| {
+        s.module == DEFAULTS_MODULE && s.kind == SymbolKind::Constant && !s.name.contains('.')
+    }) {
+        let text = symbol.detail.as_deref().unwrap_or("-");
+        let _ = writeln!(out, "/// `{} = {text}`", symbol.name);
+        push_default_const(&mut out, "", &symbol.name, Some("float"), text, &locals);
+    }
+    let mut constructors: BTreeMap<&str, Vec<&Param>> = BTreeMap::new();
+    for param in &schema.params {
+        let Some(class) = param
+            .owner
+            .strip_prefix(DEFAULTS_MODULE)
+            .and_then(|rest| rest.strip_prefix(':'))
+            .and_then(|rest| rest.strip_suffix(".__init__"))
+        else {
+            continue;
+        };
+        if param.default.is_some() {
+            constructors.entry(class).or_default().push(param);
+        }
+    }
+    for (class, mut params) in constructors {
+        params.sort_by_key(|p| p.ordinal);
+        let _ = writeln!(
+            out,
+            "\n/// `{class}.__init__`.\npub mod {} {{",
+            snake_case(class)
+        );
+        for param in params {
+            let text = param.default.as_deref().unwrap_or("-");
+            let _ = writeln!(out, "    /// `{}={text}`", param.name);
+            let name = param.name.to_ascii_uppercase();
+            let annotation = param.annotation.as_deref();
+            push_default_const(&mut out, "    ", &name, annotation, text, &locals);
+        }
+        out.push_str("}\n");
+    }
+    out
+}
+
+fn snake_case(class: &str) -> String {
+    let mut out = String::new();
+    for (index, ch) in class.chars().enumerate() {
+        if ch.is_ascii_uppercase() && index > 0 {
+            out.push('_');
+        }
+        out.push(ch.to_ascii_lowercase());
+    }
+    out
+}
+
+fn push_default_const(
+    out: &mut String,
+    indent: &str,
+    name: &str,
+    annotation: Option<&str>,
+    text: &str,
+    locals: &std::collections::BTreeSet<&str>,
+) {
+    // Inside a constructor module, the file's own constants are `super::`.
+    let local_prefix = if indent.is_empty() { "" } else { "super::" };
+    let translated = rust_default_type(annotation)
+        .and_then(|ty| rust_default_value(ty, text, locals, local_prefix).map(|value| (ty, value)));
+    match translated {
+        Some((ty, value)) => {
+            let _ = writeln!(out, "{indent}pub const {name}: {ty} = {value};");
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "{indent}compile_error!(\"no Rust translation for the schema default {name} = {}\");",
+                text.replace('\\', "\\\\").replace('"', "\\\"")
+            );
+        }
+    }
+}
+
+fn rust_default_type(annotation: Option<&str>) -> Option<&'static str> {
+    Some(match annotation? {
+        "float" => "f64",
+        "int" => "usize",
+        "Vect3" | "Vect3 | Mobject" => "fmn_core::types::Vec3",
+        "ManimColor" => "fmn_core::color::Srgb",
+        "Optional[int]" => "Option<usize>",
+        "float | None" => "Option<f64>",
+        _ => return None,
+    })
+}
+
+/// A schema default expression in Rust: numbers and constant names joined by
+/// arithmetic operators for numbers, one constant name for a vector or color.
+fn rust_default_value(
+    ty: &str,
+    text: &str,
+    locals: &std::collections::BTreeSet<&str>,
+    local_prefix: &str,
+) -> Option<String> {
+    if let Some(inner) = ty.strip_prefix("Option<").and_then(|t| t.strip_suffix('>')) {
+        return if text == "None" {
+            Some("None".to_owned())
+        } else {
+            rust_default_value(inner, text, locals, local_prefix)
+                .map(|value| format!("Some({value})"))
+        };
+    }
+    let constant = |token: &str| {
+        let named = token.starts_with(|c: char| c.is_ascii_uppercase())
+            && token
+                .bytes()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_');
+        named.then(|| {
+            if locals.contains(token) {
+                format!("{local_prefix}{token}")
+            } else {
+                format!("fmn_core::constants::{token}")
+            }
+        })
+    };
+    if ty != "f64" && ty != "usize" {
+        return constant(text);
+    }
+    let mut parts = Vec::new();
+    for (index, token) in text.split(' ').enumerate() {
+        if index % 2 == 1 {
+            if !matches!(token, "+" | "-" | "*" | "/") {
+                return None;
+            }
+            parts.push(token.to_owned());
+            continue;
+        }
+        let digits = token.strip_prefix('-').unwrap_or(token);
+        if digits.starts_with(|c: char| c.is_ascii_digit()) {
+            let float = digits.contains(['.', 'e', 'E']);
+            if !token.parse::<f64>().is_ok_and(f64::is_finite) || (ty == "usize" && float) {
+                return None;
+            }
+            parts.push(if ty == "f64" && !float {
+                format!("{token}.0")
+            } else {
+                token.to_owned()
+            });
+        } else {
+            parts.push(constant(token)?);
+        }
+    }
+    (parts.len() % 2 == 1).then(|| parts.join(" "))
+}
+
 /// Generate the §16.6 out-of-tier ledger with a concrete revisit trigger for
 /// every honest fringe or excluded surface.
 #[must_use]
@@ -3338,6 +3601,46 @@ mod tests {
         let error = Schema::parse(EXTRACT, &weakened_trigger).unwrap_err();
         assert!(
             matches!(error, SchemaError::ReviewRatchet { .. }),
+            "got {error}"
+        );
+    }
+
+    #[test]
+    fn signature_rulings_name_one_known_callable_and_a_defined_kind() {
+        let ruled = OVERLAY.replace(
+            "[param_canonical]\n\n",
+            "[param_canonical]\n\n[signature_rulings]\nm:A.foo_listner\tforwarding\twhy\n\n",
+        );
+        let s = Schema::parse(EXTRACT, &ruled).expect("a known owner and kind parse");
+        assert_eq!(s.signature_rulings["m:A.foo_listner"].ruling, "forwarding");
+        let dangling = ruled.replace("m:A.foo_listner\tforwarding", "m:Gone.f\tforwarding");
+        let error = Schema::parse(EXTRACT, &dangling).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                SchemaError::DanglingOverlay {
+                    section: "signature_rulings",
+                    ..
+                }
+            ),
+            "got {error}"
+        );
+        let unknown = ruled.replace("\tforwarding\t", "\tharmless\t");
+        let error = Schema::parse(EXTRACT, &unknown).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                SchemaError::Field {
+                    column: "ruling",
+                    ..
+                }
+            ),
+            "got {error}"
+        );
+        let twice = ruled.replace("why\n", "why\nm:A.foo_listner\tabstract\tagain\n");
+        let error = Schema::parse(EXTRACT, &twice).unwrap_err();
+        assert!(
+            matches!(error, SchemaError::DuplicateIdentity { .. }),
             "got {error}"
         );
     }

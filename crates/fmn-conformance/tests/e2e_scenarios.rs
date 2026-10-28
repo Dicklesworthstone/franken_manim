@@ -4041,6 +4041,157 @@ fn python_asset_root_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> 
     Ok(RunOutcome::ok().with_counter("asset_root_checks", checks))
 }
 
+/// Both front doors build every geometry class the Reference constructs with
+/// no arguments (fm-schema-codegen-front-doors-r8-z206). The portal applies its
+/// Python defaults; fmn-library's builders read the constants generated from
+/// the same API_SCHEMA.tsv rows. Equal family points mean the doors agree; an
+/// Arc built at 1.5 times the schema's radius must not.
+fn geometry_defaults_both_doors_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let portal = manimlib::run_portal_gauntlet_geometry_defaults()
+        .map_err(|error| fail(format!("portal geometry defaults: {error}")))?;
+    let native = native_geometry_defaults(fmn_library::reference_defaults::arc::RADIUS)
+        .map_err(|error| fail(format!("native geometry defaults: {error}")))?;
+    let portal_names: Vec<&str> = portal.iter().map(|(name, _)| name.as_str()).collect();
+    let native_names: Vec<&str> = native.iter().map(|(name, _)| *name).collect();
+    if portal_names != native_names {
+        return Err(fail(format!(
+            "the doors built {portal_names:?} and {native_names:?}"
+        )));
+    }
+    for ((name, points), (_, native_points)) in portal.iter().zip(&native) {
+        if let Some(problem) = points_differ(points, native_points) {
+            return Err(fail(format!("{name}: {problem}")));
+        }
+    }
+    let planted = native_geometry_defaults(fmn_library::reference_defaults::arc::RADIUS * 1.5)
+        .map_err(|error| fail(format!("planted geometry defaults: {error}")))?;
+    let detected = points_differ(&portal[0].1, &planted[0].1).is_some();
+    let classes = u64::try_from(portal.len()).unwrap_or(u64::MAX);
+    ctx.event(
+        LogEvent::new("e2e.parity.geometry_defaults")
+            .field("classes", classes)
+            .field("planted_detected", u64::from(detected)),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("geometry_classes_compared", classes)
+        .with_counter("planted_default_detected", u64::from(detected)))
+}
+
+/// `(class, family points in preorder)` per geometry class.
+type NamedPoints = Vec<(&'static str, Vec<[f64; 3]>)>;
+
+/// The Rust door's no-argument geometry, in the portal's `GEOMETRY_DEFAULTS`
+/// order. Where a builder takes required arguments, they are the generated
+/// schema defaults.
+fn native_geometry_defaults(arc_radius: f64) -> Result<NamedPoints, String> {
+    use fmn_library::reference_defaults as d;
+    let built = [
+        (
+            "Arc",
+            fmn_library::Arc::new()
+                .radius(arc_radius)
+                .build()
+                .map_err(|e| e.to_string())?,
+        ),
+        ("Circle", fmn_library::Circle::new().build()),
+        ("Dot", fmn_library::Dot::new().build()),
+        (
+            "SmallDot",
+            fmn_library::small_dot(d::small_dot::POINT).build(),
+        ),
+        ("Ellipse", fmn_library::Ellipse::new().build()),
+        (
+            "AnnularSector",
+            fmn_library::AnnularSector::new()
+                .build()
+                .map_err(|e| e.to_string())?,
+        ),
+        (
+            "Sector",
+            fmn_library::sector(d::sector::ANGLE, d::sector::RADIUS)
+                .build()
+                .map_err(|e| e.to_string())?,
+        ),
+        ("Annulus", fmn_library::Annulus::new().build()),
+        ("Elbow", fmn_library::Elbow::new().build()),
+        (
+            "Rectangle",
+            fmn_library::Rectangle::new()
+                .build()
+                .map_err(|e| e.to_string())?,
+        ),
+        ("Square", fmn_library::Square::new().build()),
+        (
+            "RoundedRectangle",
+            fmn_library::rounded_rectangle(
+                d::rounded_rectangle::WIDTH,
+                d::rounded_rectangle::HEIGHT,
+                d::rounded_rectangle::CORNER_RADIUS,
+            )
+            .build()
+            .map_err(|e| e.to_string())?,
+        ),
+        (
+            "RegularPolygon",
+            fmn_library::RegularPolygon::new(d::regular_polygon::N)
+                .build()
+                .map_err(|e| e.to_string())?,
+        ),
+        (
+            "Triangle",
+            fmn_library::triangle().build().map_err(|e| e.to_string())?,
+        ),
+        (
+            "Line",
+            fmn_library::Line::new(d::line::START, d::line::END)
+                .build()
+                .map_err(|e| e.to_string())?,
+        ),
+        (
+            "DashedLine",
+            fmn_library::DashedLine::new(d::dashed_line::START, d::dashed_line::END)
+                .build()
+                .map_err(|e| e.to_string())?,
+        ),
+        (
+            "Vector",
+            fmn_library::vector(d::vector::DIRECTION)
+                .build()
+                .map_err(|e| e.to_string())?,
+        ),
+        ("ArrowTip", fmn_library::ArrowTip::new().build()),
+    ];
+    Ok(built
+        .into_iter()
+        .map(|(name, vmobject)| (name, family_points(&vmobject)))
+        .collect())
+}
+
+fn family_points(vmobject: &VMobject) -> Vec<[f64; 3]> {
+    let mut points = vmobject.points().to_vec();
+    for child in vmobject.children() {
+        points.extend(family_points(child));
+    }
+    points
+}
+
+/// The portal's records are f32, so equal geometry agrees to f32 precision.
+fn points_differ(portal: &[[f64; 3]], native: &[[f64; 3]]) -> Option<String> {
+    if portal.len() != native.len() {
+        return Some(format!(
+            "{} points through the portal, {} natively",
+            portal.len(),
+            native.len()
+        ));
+    }
+    let worst = portal
+        .iter()
+        .zip(native)
+        .flat_map(|(p, q)| p.iter().zip(q).map(|(x, y)| (x - y).abs()))
+        .fold(0.0_f64, f64::max);
+    (worst > 1e-5).then(|| format!("coordinates differ by up to {worst:e}"))
+}
+
 fn python_scene_console_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let checks = manimlib::run_portal_gauntlet_console()
         .map_err(|error| fail(format!("Python scene console: {error}")))?;
@@ -11673,6 +11824,27 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )
         .tier(Tier::Fast),
     );
+    specs.push(
+        spec(
+            "parity.geometry_defaults_both_doors.v1",
+            ScenarioClass::ParityDrill,
+            Surface::PythonInProcess,
+            Invocation::new(geometry_defaults_both_doors_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("geometry_classes_compared", 18),
+                counter_eq("planted_default_detected", 1),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.parity.geometry_defaults",
+                vec![
+                    FieldPred::u64_eq("classes", 18),
+                    FieldPred::u64_eq("planted_detected", 1),
+                ],
+            )],
+        )
+        .tier(Tier::Fast),
+    );
     specs.push(spec(
         "render_matrix.python_surface_mesh.v1",
         ScenarioClass::RenderMatrix,
@@ -13436,6 +13608,16 @@ fn python_image_inputs_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.python_image_inputs.v1")
         .expect("Python image input lifecycle is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn geometry_defaults_both_doors_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "parity.geometry_defaults_both_doors.v1")
+        .expect("both-doors geometry defaults scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

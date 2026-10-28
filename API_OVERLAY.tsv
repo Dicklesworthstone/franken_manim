@@ -75,6 +75,68 @@ manimlib.event_handler.event_dispatcher:EventDispatcher.remove_listner	event_lis
 
 
 # ---------------------------------------------------------------------------
+# [signature_rulings] — portal signatures that do not bind calls as the
+# Reference's do (fm-schema-codegen-front-doors-r8-z206).
+#
+# fmn-python's signature conformance test (tests/signature_conformance.py)
+# checks every callable in the compatibility claim against [params]: names
+# (or [param_canonical] spellings), kinds, positional order and default
+# values. Each callable that fails needs a row here, and a row whose
+# divergence is gone fails as stale. Kinds:
+#   self-bound     the body binds the Reference's parameters itself, with
+#                  Python's own TypeErrors, from *args/**kwargs
+#   keyword-bound  the body reads the Reference's keyword parameters from
+#                  **kwargs; positional calls past the first are refused
+#   forwarding     the Reference forwards *args/**kwargs; the portal spells
+#                  out the signature they reach
+#   native-data    a raw-data hook whose records are native here
+#   abstract       an abstract base whose concrete classes carry the
+#                  Reference constructors
+#   baseline       a None default the portal had when this check landed,
+#                  not yet adjudicated; the count only shrinks
+#                  (schema.rs MAX_BASELINE_SIGNATURE_RULINGS)
+#
+# owner	ruling	note
+[signature_rulings]
+manimlib.animation.animation:Animation.__init__	baseline	rate_func=None; Reference smooth
+manimlib.animation.composition:AnimationGroup.__init__	baseline	lag_ratio=None; Reference 0.0
+manimlib.animation.composition:LaggedStart.__init__	baseline	AnimationGroup's __init__ with lag_ratio=None; Reference DEFAULT_LAGGED_START_LAG_RATIO
+manimlib.animation.composition:Succession.__init__	baseline	AnimationGroup's __init__ with lag_ratio=None; Reference 1.0
+manimlib.animation.creation:AddTextWordByWord.__init__	baseline	rate_func=None; Reference linear
+manimlib.animation.creation:DrawBorderThenFill.__init__	baseline	rate_func=None; Reference double_smooth
+manimlib.animation.creation:ShowIncreasingSubsets.__init__	baseline	int_func=None; Reference np.round
+manimlib.animation.creation:ShowSubmobjectsOneByOne.__init__	baseline	ShowIncreasingSubsets's __init__ with int_func=None; Reference np.ceil
+manimlib.animation.creation:Uncreate.__init__	baseline	rate_func=None; Reference lambda t: smooth(1 - t)
+manimlib.animation.creation:Write.__init__	baseline	rate_func=None; Reference linear
+manimlib.camera.camera_frame:CameraFrame.interpolate	forwarding	the Reference's (*args, **kwargs) reaches Mobject.interpolate(mobject1, mobject2, alpha, path_func)
+manimlib.mobject.changing:TracedPath.__init__	baseline	time_traced=None, stroke_color=None; Reference np.inf, DEFAULT_MOBJECT_COLOR
+manimlib.mobject.changing:TracingTail.__init__	baseline	stroke_color=None; Reference DEFAULT_MOBJECT_COLOR
+manimlib.mobject.coordinate_systems:CoordinateSystem.get_area_under_graph	baseline	fill_color=None; Reference BLUE
+manimlib.mobject.coordinate_systems:CoordinateSystem.get_axis_label	baseline	buff=None; Reference MED_SMALL_BUFF
+manimlib.mobject.coordinate_systems:CoordinateSystem.get_graph_label	baseline	buff=None; Reference MED_SMALL_BUFF
+manimlib.mobject.coordinate_systems:CoordinateSystem.get_line_from_axis_to_point	baseline	line_func=None, color=None; Reference DashedLine, GREY_A
+manimlib.mobject.coordinate_systems:CoordinateSystem.get_riemann_rectangles	baseline	stroke_color, colors, negative_color=None; Reference BLACK, (BLUE, GREEN), RED
+manimlib.mobject.coordinate_systems:CoordinateSystem.get_tangent_line	baseline	line_func=None; Reference Line
+manimlib.mobject.coordinate_systems:ThreeDAxes.get_graph	baseline	color=None; Reference BLUE_E
+manimlib.mobject.coordinate_systems:ThreeDAxes.get_parametric_surface	baseline	color=None; Reference BLUE_E
+manimlib.mobject.mobject:Mobject.__init__	self-bound	(*args, **kwargs) binding color, opacity, shading, texture_paths, is_fixed_in_frame, depth_test, z_index positionally and by keyword with Python's TypeErrors (fm-5wq.20); unpassed seeds keep the class attributes
+manimlib.mobject.mobject:Mobject.init_data	native-data	records are native and sized by the engine; init_data(self) is a no-op hook and takes no length
+manimlib.mobject.mobject:Mobject.interpolate	baseline	path_func=None; Reference straight_path
+manimlib.mobject.number_line:NumberLine.__init__	keyword-bound	(x_range, **kwargs): every Reference keyword is read and validated from kwargs
+manimlib.mobject.numbers:DecimalNumber.__init__	baseline	color=None; Reference DEFAULT_MOBJECT_COLOR
+manimlib.mobject.numbers:DecimalNumber.interpolate	baseline	path_func=None; Reference straight_path
+manimlib.mobject.probability:SampleSpace.add_title	baseline	buff=None; Reference MED_SMALL_BUFF
+manimlib.mobject.probability:SampleSpace.get_subdivision_braces_and_labels	baseline	buff=None; Reference SMALL_BUFF
+manimlib.mobject.svg.drawings:VideoSeries.__init__	baseline	width=None; Reference FRAME_WIDTH - MED_LARGE_BUFF
+manimlib.mobject.svg.string_mobject:StringMobject.__init__	abstract	the portal's StringMobject is the span-selection base of Tex and MarkupText and defines no constructor; subclassing it directly is unsupported
+manimlib.mobject.three_dimensions:Cube.__init__	baseline	color=None; Reference BLUE
+manimlib.mobject.three_dimensions:SurfaceMesh.__init__	baseline	stroke_color=None; Reference GREY_A
+manimlib.mobject.types.vectorized_mobject:VMobject.stretch	forwarding	the Reference's (*args, **kwargs) reaches Mobject.stretch(factor, dim, **kwargs)
+manimlib.mobject.vector_field:StreamLines.__init__	baseline	stroke_color=None; Reference DEFAULT_MOBJECT_COLOR
+manimlib.scene.scene:Scene.__init__	keyword-bound	(*args, **kwargs): the Reference's keywords are read from kwargs with class-attribute defaults
+manimlib.utils.bezier:set_array_by_interpolation	baseline	interp_func=None; Reference interpolate
+
+# ---------------------------------------------------------------------------
 # [constants] — C-16 constant-value rulings.
 #
 # One row per Reference module constant whose EFFECTIVE value is governed by

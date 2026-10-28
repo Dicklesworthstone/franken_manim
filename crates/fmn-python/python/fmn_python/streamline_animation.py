@@ -221,11 +221,11 @@ def install_streamline_animation(native: Any) -> None:
     previous_remove, previous_clear = Mobject.remove_updater, Mobject.clear_updaters
 
     @wraps(previous_remove)
-    def remove(self, updater):
-        owner = getattr(updater, "_fmn_streamline_controller", None)
+    def remove(self, update_func):
+        owner = getattr(update_func, "_fmn_streamline_controller", None)
         if isinstance(owner, _StreamlineController) and owner.anchor is self and not owner.closed:
             owner.cancel()
-        return previous_remove(self, updater)
+        return previous_remove(self, update_func)
 
     @wraps(previous_clear)
     def clear(self, recurse=True):

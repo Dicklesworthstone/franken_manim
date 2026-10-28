@@ -34,11 +34,12 @@ def _install_wiggle(g, Wiggle):
                 if point.shape != (3,) or not g["_np"].isfinite(point).all():
                     raise ValueError("WiggleOutThenIn." + name + " must be a finite 3D point")
 
-    def interpolate_submobject(self, submobject, starting_submobject, alpha):
-        # Absolute, rather than cumulative, geometry. The public getters and
-        # Mobject operations deliberately remain virtual for authored scenes.
+    def interpolate_submobject(self, submobject, starting_sumobject, alpha):
+        # The Reference's parameter spelling (indication.py), so keyword calls
+        # bind. Absolute, rather than cumulative, geometry. The public getters
+        # and Mobject operations deliberately remain virtual for authored scenes.
         alpha = _finite(alpha, "WiggleOutThenIn alpha")
-        submobject.match_points(starting_submobject)
+        submobject.match_points(starting_sumobject)
         swell = g["there_and_back"](alpha)
         submobject.scale(
             (1.0 - swell) + swell * self.scale_value,
@@ -96,8 +97,8 @@ def _install_width_flash(g, Flash):
         self.submob_to_widths = profiles
         self._flash_original_widths = originals
 
-    def interpolate_submobject(self, submobject, starting_submobject, alpha):
-        del starting_submobject
+    def interpolate_submobject(self, submobject, starting_sumobject, alpha):
+        del starting_sumobject  # the Reference's spelling, so keyword calls bind
         alpha = _finite(alpha, "VShowPassingFlash alpha")
         widths = self.submob_to_widths[hash(submobject)]
         if not len(widths):

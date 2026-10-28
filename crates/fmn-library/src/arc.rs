@@ -17,22 +17,18 @@
 //! Behaviour Note BN-09 carries the migration guidance.
 
 use fmn_core::color::Srgb;
-use fmn_core::constants::{
-    BLACK, DEFAULT_LIGHT_COLOR, DEFAULT_MOBJECT_COLOR, ORIGIN, OUT, RED, TAU,
-};
+use fmn_core::constants::{BLACK, ORIGIN, OUT, TAU};
 use fmn_core::types::Vec3;
 use fmn_geom::{GeomError, QuadPath, bezier, space_ops};
 use fmn_mobject::{Mobject, ShapeTag};
 
 use crate::poly::{ArrowTip, arc_between_points};
+use crate::reference_defaults as defaults;
 use crate::style::Style;
 use crate::tip::{TipEnd, attach_tip};
 use crate::vmobject::VMobject;
 
-/// The Reference's `DEFAULT_DOT_RADIUS`.
-pub const DEFAULT_DOT_RADIUS: f64 = 0.08;
-/// The Reference's `DEFAULT_SMALL_DOT_RADIUS`.
-pub const DEFAULT_SMALL_DOT_RADIUS: f64 = 0.04;
+pub use crate::reference_defaults::{DEFAULT_DOT_RADIUS, DEFAULT_SMALL_DOT_RADIUS};
 
 /// `Arc(start_angle, angle, radius, n_components, arc_center)`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -57,11 +53,11 @@ impl Arc {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            start_angle: 0.0,
-            angle: TAU / 4.0,
-            radius: 1.0,
-            n_components: None,
-            arc_center: ORIGIN,
+            start_angle: defaults::arc::START_ANGLE,
+            angle: defaults::arc::ANGLE,
+            radius: defaults::arc::RADIUS,
+            n_components: defaults::arc::N_COMPONENTS,
+            arc_center: defaults::arc::ARC_CENTER,
             style: Style::default(),
         }
     }
@@ -182,7 +178,7 @@ impl ArcBetweenPoints {
         Self {
             start,
             end,
-            angle: TAU / 4.0,
+            angle: defaults::arc_between_points::ANGLE,
             n_components: None,
             style: Style::default(),
         }
@@ -305,11 +301,14 @@ impl Circle {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            arc: Arc::new().angle(TAU).style(Style::default().stroke(
-                RED,
-                Style::default().stroke_width,
-                1.0,
-            )),
+            arc: Arc::new()
+                .start_angle(defaults::circle::START_ANGLE)
+                .angle(TAU)
+                .style(Style::default().stroke(
+                    defaults::circle::STROKE_COLOR,
+                    Style::default().stroke_width,
+                    1.0,
+                )),
         }
     }
 
@@ -401,18 +400,24 @@ impl Dot {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            center: ORIGIN,
-            radius: DEFAULT_DOT_RADIUS,
+            center: defaults::dot::POINT,
+            radius: defaults::dot::RADIUS,
             style: Style::default()
-                .fill(DEFAULT_MOBJECT_COLOR, 1.0)
-                .stroke(BLACK, 0.0, 1.0),
+                .fill(defaults::dot::FILL_COLOR, defaults::dot::FILL_OPACITY)
+                .stroke(
+                    defaults::dot::STROKE_COLOR,
+                    defaults::dot::STROKE_WIDTH,
+                    1.0,
+                ),
         }
     }
 
     /// `SmallDot`: the same at [`DEFAULT_SMALL_DOT_RADIUS`].
     #[must_use]
     pub fn small() -> Self {
-        Self::new().radius(DEFAULT_SMALL_DOT_RADIUS)
+        Self::new()
+            .point(defaults::small_dot::POINT)
+            .radius(defaults::small_dot::RADIUS)
     }
 
     /// Centre.
@@ -487,11 +492,15 @@ impl Ellipse {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            width: 2.0,
-            height: 1.0,
+            width: defaults::ellipse::WIDTH,
+            height: defaults::ellipse::HEIGHT,
             center: ORIGIN,
-            start_angle: 0.0,
-            style: Style::default().stroke(RED, Style::default().stroke_width, 1.0),
+            start_angle: defaults::circle::START_ANGLE,
+            style: Style::default().stroke(
+                defaults::circle::STROKE_COLOR,
+                Style::default().stroke_width,
+                1.0,
+            ),
         }
     }
 
@@ -586,14 +595,17 @@ impl AnnularSector {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            angle: TAU / 4.0,
-            start_angle: 0.0,
-            inner_radius: 1.0,
-            outer_radius: 2.0,
-            center: ORIGIN,
+            angle: defaults::annular_sector::ANGLE,
+            start_angle: defaults::annular_sector::START_ANGLE,
+            inner_radius: defaults::annular_sector::INNER_RADIUS,
+            outer_radius: defaults::annular_sector::OUTER_RADIUS,
+            center: defaults::annular_sector::ARC_CENTER,
             style: Style::default()
-                .fill(DEFAULT_LIGHT_COLOR, 1.0)
-                .stroke(BLACK, 0.0, 1.0),
+                .fill(
+                    defaults::annular_sector::FILL_COLOR,
+                    defaults::annular_sector::FILL_OPACITY,
+                )
+                .stroke(BLACK, defaults::annular_sector::STROKE_WIDTH, 1.0),
         }
     }
 
@@ -737,12 +749,15 @@ impl Annulus {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            inner_radius: 1.0,
-            outer_radius: 2.0,
-            center: ORIGIN,
+            inner_radius: defaults::annulus::INNER_RADIUS,
+            outer_radius: defaults::annulus::OUTER_RADIUS,
+            center: defaults::annulus::CENTER,
             style: Style::default()
-                .fill(DEFAULT_LIGHT_COLOR, 1.0)
-                .stroke(BLACK, 0.0, 1.0),
+                .fill(
+                    defaults::annulus::FILL_COLOR,
+                    defaults::annulus::FILL_OPACITY,
+                )
+                .stroke(BLACK, defaults::annulus::STROKE_WIDTH, 1.0),
         }
     }
 
@@ -870,7 +885,7 @@ fn sub(a: Vec3, b: Vec3) -> Vec3 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fmn_core::constants::PI;
+    use fmn_core::constants::{PI, RED};
 
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-9

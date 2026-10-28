@@ -276,9 +276,6 @@ TRIAGE = (
      "the strip updater's match_points leaves stale subpath ends, and the next joint refresh "
      "indexes past the points (Appendix C-23, BN-07)",
      r"^_2024/puzzles/added_dimension\.py:StruggleWithStrips$"),
-    ("portal-alone", r"IndexError: invalid index to scalar variable|'int' object is not subscriptable",
-     "bug", "fm-mumk: Mobject.shift with a scalar argument fails inside the portal",
-     r"^_2026/print_gallery/misc_scenes\.py:(MobiusTransformation1|NaiveLinearScaling)$"),
 )
 
 

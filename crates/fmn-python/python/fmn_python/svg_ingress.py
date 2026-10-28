@@ -268,11 +268,11 @@ def install_svg_ingress(native):
             if width is not None:
                 self.set_width(width)
 
-    def parts(self, source):
+    def parts(self, svg_string):
         # This API returns detached shapes; it must not replace the receiver's
         # nursery as the former native-builder call on self did.
         root = VM()
-        specs = _reclass_children(g, root, tag(builder(root, g["_native_shell_factory"], source, {})))
+        specs = _reclass_children(g, root, tag(builder(root, g["_native_shell_factory"], svg_string, {})))
         g["_hang_native_children"](root, specs)
         result = list(root.submobjects)
         root.remove(*result)

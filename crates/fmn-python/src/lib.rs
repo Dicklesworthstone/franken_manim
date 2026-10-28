@@ -13472,6 +13472,33 @@ pub struct PortalOutputGauntletReport {
     pub video_capability_refusals: u64,
 }
 
+/// `(class, family points in preorder)` for each geometry class built with no
+/// arguments.
+#[cfg(feature = "gauntlet")]
+pub type GeometryDefaultPoints = Vec<(String, Vec<[f64; 3]>)>;
+
+/// The geometry classes the Reference constructs with no arguments, built
+/// through the portal, in the order of `tests/signature_conformance.py`'s
+/// `GEOMETRY_DEFAULTS` (fm-schema-codegen-front-doors-r8-z206).
+#[cfg(feature = "gauntlet")]
+pub fn run_portal_gauntlet_geometry_defaults() -> Result<GeometryDefaultPoints, String> {
+    crate::with_python_test_module("geometry defaults", |py, module, globals| {
+        let source = CString::new(include_str!("../tests/signature_conformance.py"))
+            .map_err(|error| error.to_string())?;
+        py.run(source.as_c_str(), Some(globals), Some(globals))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        globals
+            .get_item("geometry_default_points")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "signature_conformance.py omitted geometry_default_points".to_owned())?
+            .call1((module,))
+            .inspect_err(|error| error.print(py))
+            .and_then(|points| points.extract())
+            .map_err(|error| error.to_string())
+    })
+}
+
 /// Exercise live sampled wireframes and an independently authored PNG oracle.
 #[cfg(feature = "gauntlet")]
 pub fn run_portal_gauntlet_surface_mesh(
@@ -14317,6 +14344,36 @@ mod tests {
                 .and_then(|value| value.extract::<u64>())
                 .expect("native surface mesh acceptance");
             assert_eq!(checks, 12);
+        });
+    }
+
+    #[test]
+    fn portal_signatures_bind_calls_as_the_reference_does() {
+        // fm-schema-codegen-front-doors-r8-z206: API_SCHEMA.tsv [params] is
+        // the authority for the Python door's signatures; every divergence is
+        // fixed or ruled in API_OVERLAY.tsv [signature_rulings].
+        crate::with_python_test_module("signature conformance", |py, module, globals| {
+            let source = CString::new(include_str!("../tests/signature_conformance.py"))
+                .expect("signature conformance source contains no NUL");
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .unwrap();
+            let call = |name: &str| {
+                globals
+                    .get_item(name)
+                    .unwrap()
+                    .unwrap()
+                    .call1((module,))
+                    .inspect_err(|error| error.print(py))
+                    .unwrap()
+            };
+            let report = call("run_signature_conformance");
+            let checked: usize = report.get_item("checked").unwrap().extract().unwrap();
+            let ruled: usize = report.get_item("ruled").unwrap().extract().unwrap();
+            assert!(checked >= 1200, "{checked} claimed callables checked");
+            assert!(ruled < checked / 20, "{ruled} ruled of {checked}");
+            let planted: usize = call("run_planted_divergences").extract().unwrap();
+            assert_eq!(planted, 4);
         });
     }
 

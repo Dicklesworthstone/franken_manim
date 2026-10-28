@@ -180,6 +180,25 @@ def _vec3(value):
     return (float(value[0]), float(value[1]), float(value[2]))
 
 
+def _shift_vector(vector):
+    """The displacement Reference Mobject.shift adds to every point
+    (mobject.py:919, `points + vector`). numpy broadcasts a scalar to all
+    three coordinates, so shift(0) is a no-op and shift(s) moves by
+    (s, s, s) (fm-mumk). A shape that is neither a scalar nor one 3-vector
+    is refused by name, never as an internal IndexError."""
+    if type(vector) in (tuple, list) and len(vector) == 3:
+        return _vec3(vector)
+    array = _np.asarray(vector, dtype=float)
+    if array.ndim == 0:
+        scalar = float(array)
+        return (scalar, scalar, scalar)
+    if array.shape not in ((3,), (1, 3)):
+        raise ValueError(
+            f"shift() takes a 3-vector or a scalar; got an array of shape {array.shape}"
+        )
+    return _vec3(array.reshape(3))
+
+
 def _vec3_rows(points):
     """[_vec3(point) for point in points], exactly, computed in C for an
     (N, 3) float32/float64 array (both widen to a double exactly). A live
@@ -1371,7 +1390,7 @@ class Mobject(_BridgeMobject):
         return self.apply_function(real_function, **kwargs)
 
     def shift(self, vector):
-        vector = _vec3(vector)
+        vector = _shift_vector(vector)
         for target in self._each_stage_target():
             target._shift(vector)
         self._refresh_parent_boxes()
@@ -2499,24 +2518,26 @@ class Mobject(_BridgeMobject):
     def clear(self):
         return self.remove(*list(self.submobjects), recurse=False)
 
-    def add_updater(self, updater, index=None, call=True):
-        if not callable(updater):
+    def add_updater(self, update_func, call=True, index=None):
+        # The Reference's (update_func, call=True); the portal's keyword-only
+        # use of `index` comes after, so positional calls bind as they do there.
+        if not callable(update_func):
             raise TypeError(
                 "Mobject.add_updater requires a callable updater; got "
-                + type(updater).__name__
+                + type(update_func).__name__
             )
         if index is None:
-            self.updaters.append(updater)
+            self.updaters.append(update_func)
         else:
-            self.updaters.insert(index, updater)
+            self.updaters.insert(index, update_func)
         if call:
             # BN-07: one canonical child-first update pass, rather than the
             # Reference's accidental double pass or a new-updater-only call.
             self.update(0.0)
         return self
 
-    def remove_updater(self, updater):
-        self.updaters = [item for item in self.updaters if item is not updater]
+    def remove_updater(self, update_func):
+        self.updaters = [item for item in self.updaters if item is not update_func]
         return self
 
     def clear_updaters(self, recurse=True):
@@ -4273,6 +4294,28 @@ class VMobject(Mobject):
 
     def get_anti_alias_width(self):
         return float(self.uniforms["anti_alias_width"])
+
+    def apply_depth_test(self, anti_alias_width=0, recurse=True):
+        # Reference vectorized_mobject.py:448's signature, so positional calls
+        # bind as there. Its body also zeroes the anti-alias width, which
+        # spares OpenGL's depth-tested blending; Lumen's analytic strokes have
+        # no such artifact, so the width is kept (BN-07, stroke uniforms).
+        del anti_alias_width
+        super().apply_depth_test(recurse)
+        return self
+
+    def deactivate_depth_test(self, anti_alias_width=1.0, recurse=True):
+        # Reference vectorized_mobject.py:457's signature; the width is kept,
+        # as above.
+        del anti_alias_width
+        super().deactivate_depth_test(recurse)
+        return self
+
+    def lock_matching_data(self, vmobject1, vmobject2):
+        # Reference vectorized_mobject.py:1221 first warms each joint-angle
+        # shader cache, which Lumen does not keep; the lock itself is Mobject's.
+        super().lock_matching_data(vmobject1, vmobject2)
+        return self
 
     def use_winding_fill(self, value=True, recurse=True):
         # C-7: the Reference body is a no-op kept "because some old scene
@@ -15163,7 +15206,7 @@ class CameraFrame(Mobject):
         return _np.array([center - half, center, center + half])
 
     def shift(self, vector):
-        vector = _vec3(vector)
+        vector = _shift_vector(vector)
         center = self._core.center()
         self._core.set_center(
             (
@@ -23558,8 +23601,8 @@ def _install_space_ops():
         else:
             return a[0] * b[1] - b[0] * a[1]
 
-    def norm_squared(vect):
-        return sum(x * x for x in vect)
+    def norm_squared(v):
+        return sum(x * x for x in v)
 
     def poly_line_length(points):
         return _BridgeMobject._poly_line_length(_vec3_rows(points))

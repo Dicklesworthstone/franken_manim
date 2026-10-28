@@ -358,11 +358,11 @@ def _install_removal(g):
     previous_remove = Mobject.remove_updater
 
     @wraps(previous_remove)
-    def remove(self, updater):
-        owner = getattr(updater, "_fmn_persistent_controller", None)
+    def remove(self, update_func):
+        owner = getattr(update_func, "_fmn_persistent_controller", None)
         if isinstance(owner, _PersistentAnimation) and owner.anchor is self and not owner.closed:
             owner.cancel()
-        return previous_remove(self, updater)
+        return previous_remove(self, update_func)
 
     Mobject.remove_updater = remove
     previous_clear = getattr(Mobject, "clear_updaters", None)
