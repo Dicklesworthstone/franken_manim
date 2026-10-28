@@ -6865,86 +6865,8 @@ class ThreeDAxes(Axes):
     dimension = 3
     default_z_axis_config = dict()
 
-    def __init__(
-        self,
-        x_range=(-6.0, 6.0, 1.0),
-        y_range=(-5.0, 5.0, 1.0),
-        z_range=(-4.0, 4.0, 1.0),
-        z_axis_config=None,
-        z_normal=None,
-        depth=None,
-        **kwargs,
-    ):
-        if z_normal is None:
-            z_normal_vect = None
-        else:
-            # planes.rs: the normal reorients the z-axis tick construction
-            # by angle_of_vector(z_normal) about OUT; the axis line itself
-            # stays along z (the Reference's exact behaviour).
-            try:
-                z_normal_vect = tuple(float(v) for v in _vec3(z_normal))
-            except (TypeError, ValueError, IndexError) as error:
-                raise TypeError(
-                    "ThreeDAxes z_normal must be a 3-vector; got "
-                    + repr(z_normal)
-                ) from error
-        axis_config = kwargs.pop("axis_config", None)
-        x_axis_config = kwargs.pop("x_axis_config", None)
-        y_axis_config = kwargs.pop("y_axis_config", None)
-        height = kwargs.pop("height", None)
-        width = kwargs.pop("width", None)
-        unit_size = kwargs.pop("unit_size", 1.0)
-        self.num_sampled_graph_points_per_tick = kwargs.pop(
-            "num_sampled_graph_points_per_tick", 5
-        )
-        if kwargs:
-            raise TypeError(
-                "ThreeDAxes() got unexpected keyword arguments: "
-                + ", ".join(sorted(kwargs))
-            )
-        _install_live_state(self)
-        self._axes_params = (
-            tuple(float(v) for v in _FULL_RANGE_SPECIFIER(x_range)),
-            tuple(float(v) for v in _FULL_RANGE_SPECIFIER(y_range)),
-            dict(axis_config or {}),
-            dict(x_axis_config or {}),
-            dict(y_axis_config or {}),
-            None if height is None else float(height),
-            None if width is None else float(width),
-            float(unit_size),
-        )
-        z_terms = tuple(float(v) for v in _FULL_RANGE_SPECIFIER(z_range))
-        specs = self._build_three_d_axes(
-            _native_shell_factory,
-            self._axes_params[0],
-            self._axes_params[1],
-            z_terms,
-            self._axes_params[2],
-            self._axes_params[3],
-            self._axes_params[4],
-            dict(z_axis_config or {}),
-            self._axes_params[5],
-            self._axes_params[6],
-            None if depth is None else float(depth),
-            z_normal_vect,
-            self._axes_params[7],
-        )
-        _hang_native_children(self, specs)
-        self.x_axis, self.y_axis, self.z_axis = _adopt_native_axes(
-            self, self._axes_params[2], self._axes_params[7], (
-                (self.submobjects[0], self._axes_params[0],
-                 self.default_x_axis_config, self._axes_params[3]),
-                (self.submobjects[1], self._axes_params[1],
-                 self.default_y_axis_config, self._axes_params[4]),
-                (self.submobjects[2], z_terms,
-                 self.default_z_axis_config, dict(z_axis_config or {})),
-            ),
-        )
-        self.axes = VGroup(self.x_axis, self.y_axis, self.z_axis)
-        self.x_range = self._axes_params[0]
-        self.y_range = self._axes_params[1]
-        self.z_range = z_terms
-        self.dimension = 3
+    # The constructor is installed by fmn_python.coordinate_lifecycle. get_graph and
+    # get_parametric_surface are installed by fmn_python.surface_plotting.
 
     def get_z_axis(self):
         return self.z_axis
@@ -6972,57 +6894,6 @@ class ThreeDAxes(Axes):
             axis.add(label)
         self.axis_labels = labels
 
-    def get_graph(
-        self,
-        func,
-        color=None,
-        opacity=0.9,
-        u_range=None,
-        v_range=None,
-        **kwargs,
-    ):
-        # Reference coordinate_systems.py:585. z = func(u, v) is sampled as
-        # a ParametricSurface, then the live axis basis maps it into scene
-        # space. This shadows CoordinateSystem.get_graph (a 2D curve).
-        if color is None:
-            color = _BLUE_E
-        u_range = u_range or self.x_range[:2]
-        v_range = v_range or self.y_range[:2]
-        ranges = (self.x_range, self.y_range, self.z_range)
-        axes = (self.x_axis, self.y_axis, self.z_axis)
-        matrix = _np.array(
-            [
-                _axis_number_to_point(axis, rng[0], rng[1], 1.0)
-                - _axis_number_to_point(axis, rng[0], rng[1], 0.0)
-                for axis, rng in zip(axes, ranges)
-            ]
-        ).T
-        surface = ParametricSurface(
-            lambda u, v: [u, v, func(u, v)],
-            u_range=u_range,
-            v_range=v_range,
-            color=color,
-            opacity=opacity,
-            **kwargs,
-        )
-        surface.apply_matrix(matrix, about_point=_ORIGIN)
-        surface.shift(self.c2p(0, 0, 0))
-        return surface
-
-    def get_parametric_surface(self, func, color=None, opacity=0.9, **kwargs):
-        if color is None:
-            color = _BLUE_E
-        surface = ParametricSurface(func, color=color, opacity=opacity, **kwargs)
-        for dim, axis in zip(range(3), (self.x_axis, self.y_axis, self.z_axis)):
-            unit = _axis_unit_size(
-                axis,
-                (self.x_range, self.y_range, self.z_range)[dim][0],
-                (self.x_range, self.y_range, self.z_range)[dim][1],
-            )
-            surface.stretch(unit, dim, about_point=_ORIGIN)
-        surface.shift(self.get_origin())
-        return surface
-
 
 class NumberPlane(Axes):
     default_axis_config = dict(
@@ -7035,78 +6906,8 @@ class NumberPlane(Axes):
     )
     default_y_axis_config = dict(line_to_number_direction=_DL)
 
-    def __init__(
-        self,
-        x_range=(-8.0, 8.0, 1.0),
-        y_range=(-4.0, 4.0, 1.0),
-        background_line_style=None,
-        faded_line_style=None,
-        faded_line_ratio=4,
-        make_smooth_after_applying_functions=True,
-        **kwargs,
-    ):
-        axis_config = kwargs.pop("axis_config", None)
-        x_axis_config = kwargs.pop("x_axis_config", None)
-        y_axis_config = kwargs.pop("y_axis_config", None)
-        height = kwargs.pop("height", None)
-        width = kwargs.pop("width", None)
-        unit_size = kwargs.pop("unit_size", 1.0)
-        self.num_sampled_graph_points_per_tick = kwargs.pop(
-            "num_sampled_graph_points_per_tick", 5
-        )
-        if kwargs:
-            raise TypeError(
-                type(self).__name__
-                + "() got unexpected keyword arguments: "
-                + ", ".join(sorted(kwargs))
-            )
-        _install_live_state(self)
-        self.make_smooth_after_applying_functions = make_smooth_after_applying_functions
-        self._plane_params = (
-            tuple(float(v) for v in _FULL_RANGE_SPECIFIER(x_range)),
-            tuple(float(v) for v in _FULL_RANGE_SPECIFIER(y_range)),
-            dict(axis_config or {}),
-            dict(x_axis_config or {}),
-            dict(y_axis_config or {}),
-            None if background_line_style is None else dict(background_line_style),
-            None if faded_line_style is None else dict(faded_line_style),
-            int(faded_line_ratio),
-            None if height is None else float(height),
-            None if width is None else float(width),
-            float(unit_size),
-        )
-        # Axes.add_coordinate_labels rebuilds only the two native axes.
-        # Preserve NumberPlane's class defaults in that shared shell path,
-        # then layer the caller's ordinary axis configs over them in the
-        # same order as the native NumberPlane builder.
-        label_axis_config = dict(self.default_axis_config)
-        label_axis_config.update(self._plane_params[2])
-        label_y_axis_config = dict(self.default_y_axis_config)
-        self._axes_params = (
-            self._plane_params[0],
-            self._plane_params[1],
-            label_axis_config,
-            self._plane_params[3],
-            label_y_axis_config,
-            self._plane_params[8],
-            self._plane_params[9],
-            self._plane_params[10],
-        )
-        specs = self._native_plane_specs()
-        _hang_native_children(self, specs)
-        self.faded_lines, self.background_lines = self.submobjects[:2]
-        self.x_axis, self.y_axis = _adopt_native_axes(
-            self, self._plane_params[2], self._plane_params[10], (
-                (self.submobjects[2], self._plane_params[0],
-                 self.default_x_axis_config, self._plane_params[3]),
-                (self.submobjects[3], self._plane_params[1],
-                 self.default_y_axis_config, self._plane_params[4]),
-            ),
-        )
-        self.axes = VGroup(self.x_axis, self.y_axis)
-        self.x_range = self._plane_params[0]
-        self.y_range = self._plane_params[1]
-        self.dimension = 2
+    # The constructor, init_background_lines, get_lines and get_lines_parallel_to_axis
+    # are installed by fmn_python.plane_lifecycle.
 
     def _native_plane_specs(self):
         (x_range, y_range, axis_config, x_axis_config, y_axis_config,
@@ -7147,60 +6948,6 @@ class NumberPlane(Axes):
             **kwargs,
         )
 
-
-    def init_background_lines(self):
-        # Reference coordinate_systems.py:667. Construction already hangs
-        # the native line groups; this re-run composes fresh lines exactly
-        # as the pinned helper does for callers that rebuild them.
-        faded_style = dict(self._plane_params[6] or {})
-        if "stroke_color" not in faded_style:
-            faded_style["stroke_color"] = (self._plane_params[5] or {})[
-                "stroke_color"
-            ]
-        self.background_lines, self.faded_lines = self.get_lines()
-        self.background_lines.set_style(**(self._plane_params[5] or {}))
-        self.faded_lines.set_style(**faded_style)
-        self.add_to_back(self.faded_lines, self.background_lines)
-
-    def get_lines(self):
-        x_axis = self.get_x_axis()
-        y_axis = self.get_y_axis()
-        x_lines1, x_lines2 = self.get_lines_parallel_to_axis(x_axis, y_axis)
-        y_lines1, y_lines2 = self.get_lines_parallel_to_axis(y_axis, x_axis)
-        lines1 = VGroup(*x_lines1, *y_lines1)
-        lines2 = VGroup(*x_lines2, *y_lines2)
-        return lines1, lines2
-
-    def get_lines_parallel_to_axis(self, axis1, axis2):
-        ranges = self.get_all_ranges()
-        if axis2 is self.x_axis:
-            low, high, freq = ranges[0]
-        elif axis2 is self.y_axis:
-            low, high, freq = ranges[1]
-        else:
-            raise ValueError(
-                "get_lines_parallel_to_axis axis2 must be one of the plane axes"
-            )
-        ratio = self._plane_params[7]
-        line = Line(axis1.get_start(), axis1.get_end())
-        dense_freq = 1 + ratio
-        step = (1 / dense_freq) * freq
-        lines1 = VGroup()
-        lines2 = VGroup()
-        inputs = _np.arange(low, high + step, step)
-        for i, x in enumerate(inputs):
-            if abs(x) < 1e-8:
-                continue
-            new_line = line.copy()
-            new_line.shift(
-                _axis_number_to_point(axis2, low, high, float(x))
-                - _axis_number_to_point(axis2, low, high, 0.0)
-            )
-            if i % dense_freq == 0:
-                lines1.add(new_line)
-            else:
-                lines2.add(new_line)
-        return lines1, lines2
 
     def get_x_unit_size(self):
         return _axis_unit_size(self.x_axis, self.x_range[0], self.x_range[1])
@@ -7281,45 +7028,7 @@ class ComplexPlane(NumberPlane):
             unit,
         )
 
-    def add_coordinate_labels(self, numbers=None, skip_first=True, font_size=36, **kwargs):
-        del skip_first  # accepted, never used — the Reference's own contract
-        if kwargs:
-            raise TypeError(
-                "add_coordinate_labels() got unexpected keyword arguments: "
-                + ", ".join(sorted(kwargs))
-            )
-        values = None
-        if numbers is not None:
-            values = [
-                (float(z.real), float(z.imag))
-                if isinstance(z, complex)
-                else (float(z[0]), float(z[1]))
-                if not isinstance(z, (int, float))
-                else (float(z), 0.0)
-                for z in numbers
-            ]
-        (x_range, y_range, axis_config, x_axis_config, y_axis_config,
-         background, faded, ratio, _height, _width, unit) = self._plane_params
-        specs = _BridgeMobject._complex_plane_label_shells(
-            _native_shell_factory,
-            x_range,
-            y_range,
-            axis_config,
-            x_axis_config,
-            y_axis_config,
-            background,
-            faded,
-            ratio,
-            unit,
-            float(self.get_width()),
-            float(self.get_height()),
-            _vec3(self.get_center()),
-            values,
-            float(font_size),
-        )
-        _hang_native_children(self, specs)
-        self.coordinate_labels = self.submobjects[-1]
-        return self
+    # add_coordinate_labels is installed by fmn_python.coordinate_mapping.
 
 
 def _refuse_unrouted(class_name, entries):
@@ -7641,11 +7350,7 @@ class SVGMobject(VMobject):
         if width is not None:
             self.set_width(width)
 
-    def init_svg_mobject(self):
-        # Reference svg_mobject.py:120 over the native processor: rebuild
-        # and attach the shape family, then apply the y-flip.
-        specs = self._build_svg_mobject(_native_shell_factory, "", self.svg_string)
-        _hang_native_children(self, specs)
+    # init_svg_mobject is installed by fmn_python.svg_ingress.
 
     @property
     def hash_seed(self):
@@ -8272,8 +7977,7 @@ class MarkupText(StringMobject):
     def get_parts_by_text(self, selector):
         return self.select_parts(selector)
 
-    def get_part_by_text(self, selector, **kwargs):
-        return self.select_part(selector, **kwargs)
+    # get_part_by_text is installed by fmn_python.text_authoring.
 
     def set_color_by_text(self, selector, color):
         return self.set_parts_color(selector, color)
@@ -8542,113 +8246,7 @@ class Tex(StringMobject):
         self.font_size *= scale_factor
         return self
 
-    def make_number_changeable(self, value, index=0, replace_all=False, **config):
-        substr = str(value)
-        occurrences = [
-            ordinals for ordinals in self._selected_string_ordinals(substr) if ordinals
-        ]
-        if not occurrences or index >= len(occurrences):
-            return VMobject()
-        selected = occurrences if replace_all else [occurrences[index]]
-        # fm-5wq.4.85: two-level families (multi-part Tex, sub-paths
-        # [part, glyph]) replace inside the owning part, keeping the part
-        # structure. What is genuinely missing refuses by name: deeper or
-        # mixed nesting, and a number whose glyphs cross a part boundary.
-        nested = any(len(path) != 1 for path in self._string_sub_paths)
-        if nested and not all(
-            len(path) == 2 for path in self._string_sub_paths
-        ):
-            raise NotImplementedError(
-                "Tex.make_number_changeable over glyph families nested "
-                "deeper than one part level awaits a general grouped-span "
-                "replacement seam"
-            )
-        if nested:
-            for ordinals in selected:
-                touched = {
-                    self._string_sub_paths[ordinal][0]
-                    for ordinal in ordinals
-                }
-                if len(touched) != 1:
-                    raise NotImplementedError(
-                        "Tex.make_number_changeable across part "
-                        "boundaries awaits the grouped-span replacement "
-                        "seam"
-                    )
-
-        if "num_decimal_places" not in config:
-            config["num_decimal_places"] = (
-                len(substr.split(".", 1)[1]) if "." in substr else 0
-            )
-        replacements = []
-        for ordinals in selected:
-            part = VGroup(*(self._string_submobject(ordinal) for ordinal in ordinals))
-            decimal = DecimalNumber(float(value), **config)
-            decimal.replace(part)
-            decimal.match_style(part)
-            replacements.append((ordinals, decimal))
-
-        by_first = {ordinals[0]: (set(ordinals), decimal) for ordinals, decimal in replacements}
-        removed = {ordinal for ordinals, _ in replacements for ordinal in ordinals[1:]}
-        if nested:
-            # Rebuild inside each owning part: replaced runs collapse to
-            # their DecimalNumber, later glyphs in the same part re-index,
-            # and the root's part list never changes.
-            parts = list(self.submobjects)
-            part_children = {index: [] for index in range(len(parts))}
-            spans = []
-            paths = []
-            for ordinal, span in enumerate(self._string_sub_spans):
-                part_index = self._string_sub_paths[ordinal][0]
-                bucket = part_children[part_index]
-                replacement = by_first.get(ordinal)
-                if replacement is not None:
-                    selected_ordinals, decimal = replacement
-                    bucket.append(decimal)
-                    spans.append(
-                        (
-                            min(self._string_sub_spans[item][0] for item in selected_ordinals),
-                            max(self._string_sub_spans[item][1] for item in selected_ordinals),
-                        )
-                    )
-                    paths.append([part_index, len(bucket) - 1])
-                elif ordinal not in removed:
-                    bucket.append(self._string_submobject(ordinal))
-                    spans.append(span)
-                    paths.append([part_index, len(bucket) - 1])
-            for part_index, part in enumerate(parts):
-                part.set_submobjects(part_children[part_index])
-            self._string_sub_spans = spans
-            self._string_sub_paths = paths
-        else:
-            children = []
-            spans = []
-            paths = []
-            for ordinal, span in enumerate(self._string_sub_spans):
-                replacement = by_first.get(ordinal)
-                if replacement is not None:
-                    selected_ordinals, decimal = replacement
-                    children.append(decimal)
-                    spans.append(
-                        (
-                            min(self._string_sub_spans[item][0] for item in selected_ordinals),
-                            max(self._string_sub_spans[item][1] for item in selected_ordinals),
-                        )
-                    )
-                    paths.append([len(children) - 1])
-                elif ordinal not in removed:
-                    children.append(self._string_submobject(ordinal))
-                    spans.append(span)
-                    paths.append([len(children) - 1])
-            self.set_submobjects(children)
-            self._string_sub_spans = spans
-            self._string_sub_paths = paths
-        self.tex_string = self.tex_string.replace(substr, "\\decimalmob", len(replacements))
-        if not nested:
-            self.tex_strings = [self.tex_string]
-        self.string = self.tex_string
-        decimal_mobs = [decimal for _, decimal in replacements]
-        return VGroup(*decimal_mobs) if replace_all else decimal_mobs[0]
+    # make_number_changeable is installed by fmn_python.live_tex.
 
 
 class TexText(Tex):
@@ -9165,53 +8763,9 @@ class Matrix(VMobject):
         result.brackets = [mapping[bracket] for bracket in self.brackets]
         return result
 
-    def create_mobject_matrix(self, *args, **kwargs):
-        del args, kwargs
-        raise NotImplementedError(
-            "Matrix.create_mobject_matrix is constructor-owned by the native "
-            "grid engine; use Matrix(...)"
-        )
-
-    def element_to_mobject(self, element):
-        if not isinstance(self, Matrix):
-            raise TypeError(
-                "Matrix.element_to_mobject requires a Matrix instance"
-            )
-        if isinstance(element, VMobject):
-            return element
-        style = dict(self._matrix_entry_style)
-        if isinstance(element, (complex, _np.complexfloating)):
-            # matrix.py routes complex entries through DecimalNumber
-            # (fm-5wq.4.108): the degenerate-component reductions ride the
-            # native formatter (fm-5wq.4.80), and a general complex entry
-            # inherits BN-08's named refusal from DecimalNumber itself —
-            # never Tex(str(...))'s silent "(1+2j)" fallthrough.
-            return DecimalNumber(
-                complex(element),
-                num_decimal_places=self._matrix_decimal_places,
-                font_size=self._matrix_entry_font_size,
-                **style,
-            )
-        if isinstance(element, (float, _np.floating)) and not isinstance(
-            element, bool
-        ):
-            return DecimalNumber(
-                float(element),
-                num_decimal_places=self._matrix_decimal_places,
-                font_size=self._matrix_entry_font_size,
-                **style,
-            )
-        return Tex(
-            str(element),
-            font_size=self._matrix_entry_font_size,
-            **style,
-        )
-
-    def create_brackets(self, *args, **kwargs):
-        del args, kwargs
-        raise NotImplementedError(
-            "Matrix.create_brackets is owned by the bundled native delimiter engine"
-        )
+    # create_mobject_matrix, element_to_mobject, create_brackets, set_column_colors,
+    # add_background_to_entries, swap_entry_for_dots and swap_entries_for_ellipses are
+    # installed by fmn_python.matrix.
 
     def get_column(self, index):
         n_cols = self._matrix_shape[1]
@@ -9234,37 +8788,6 @@ class Matrix(VMobject):
 
     def get_rows(self):
         return self.rows
-
-    def set_column_colors(self, *colors):
-        for column, color in enumerate(colors[: self._matrix_shape[1]]):
-            for row in self.mob_matrix:
-                row[column].set_color(color)
-        return self
-
-    def add_background_to_entries(self):
-        for entry in list(self.elements):
-            entry.add_background_rectangle()
-        return self
-
-    def swap_entry_for_dots(self, entry, dots):
-        del entry, dots
-        raise NotImplementedError(
-            "Matrix ellipsis replacement is native and constructor-time; "
-            "pass ellipses_row or ellipses_col"
-        )
-
-    def swap_entries_for_ellipses(
-        self,
-        row_index=None,
-        col_index=None,
-        height_ratio=0.65,
-        width_ratio=0.4,
-    ):
-        del row_index, col_index, height_ratio, width_ratio
-        raise NotImplementedError(
-            "Matrix ellipsis replacement is native and constructor-time; "
-            "pass ellipses_row or ellipses_col"
-        )
 
     def get_mob_matrix(self):
         return self.mob_matrix
@@ -9305,11 +8828,7 @@ class DecimalMatrix(Matrix):
             **common,
         )
 
-    def element_to_mobject(self, *args, **kwargs):
-        del args, kwargs
-        raise NotImplementedError(
-            "DecimalMatrix.element_to_mobject is constructor-owned by Atlas"
-        )
+    # element_to_mobject is installed by fmn_python.matrix.
 
 
 class IntegerMatrix(DecimalMatrix):
@@ -10359,98 +9878,23 @@ class VideoSeries(VGroup):
 class Cross(VGroup):
     """Atlas's native tapered cross over a live family extent."""
 
-    def __init__(
-        self,
-        mobject,
-        stroke_color=_RED,
-        stroke_width=[0, 6, 0],
-        **kwargs,
-    ):
-        if not isinstance(mobject, _BridgeMobject):
-            raise TypeError("Cross expects a Mobject")
-        _install_live_state(self)
-        rows = mobject._bbox_rows()
-        has_extent = any(member._has_points() for member in _family_preorder(mobject))
-        specs = self._build_cross(
-            _native_shell_factory,
-            (_vec3(rows[0]), _vec3(rows[2])) if has_extent else None,
-            stroke_color,
-        )
-        _hang_native_children(self, specs)
-        _apply_vmobject_style_kwargs(self, kwargs)
-        self.set_stroke(stroke_color, width=stroke_width)
+    # The constructor is installed by fmn_python.shape_matchers.
 
 
 class Underline(Line):
     """Atlas's native tapered rule beneath a live family extent."""
 
-    def __init__(
-        self,
-        mobject,
-        buff=_SMALL_BUFF,
-        stroke_color=_WHITE,
-        stroke_width=[0, 3, 3, 0],
-        stretch_factor=1.2,
-        **kwargs,
-    ):
-        if not isinstance(mobject, _BridgeMobject):
-            raise TypeError("Underline expects a Mobject")
-        path_arc = float(kwargs.pop("path_arc", 0.0))
-        _install_live_state(self)
-        self.path_arc = 0.0
-        self.buff = float(buff)
-        rows = mobject._bbox_rows()
-        has_extent = any(member._has_points() for member in _family_preorder(mobject))
-        specs = self._build_underline(
-            _native_shell_factory,
-            (_vec3(rows[0]), _vec3(rows[2])) if has_extent else None,
-            stroke_color,
-            self.buff,
-            float(stretch_factor),
-        )
-        _hang_native_children(self, specs)
-        # Atlas owns the extent-derived endpoints; inherited Line owns the
-        # native path_arc rebuild, so curvature does not rederive placement.
-        if path_arc != 0.0:
-            self.set_path_arc(path_arc)
-        _apply_vmobject_style_kwargs(self, kwargs)
-        self.set_stroke(stroke_color, width=stroke_width)
+    # The constructor is installed by fmn_python.shape_matchers.
 
 
 class Brace(Tex):
     """Atlas's parametric brace with Reference-compatible live tip helpers."""
 
-    def __init__(
-        self,
-        mobject,
-        direction=_DOWN,
-        buff=0.2,
-        tex_string=r"\underbrace{\qquad}",
-        **kwargs,
-    ):
-        _install_live_state(self)
-        # Brace keeps the Reference's Tex MRO even though Atlas supplies its
-        # points directly. Preserve Tex's public scale bookkeeping so an
-        # inherited group transform cannot reach a half-initialized object.
-        self.font_size = float(kwargs.pop("font_size", 48))
-        self.tex_string = str(tex_string)
-        self.tex_strings = [self.tex_string]
-        specs, tip_index = self._build_brace(
-            _native_shell_factory,
-            mobject,
-            _vec3(direction),
-            float(buff),
-        )
-        self.tip_point_index = int(tip_index)
-        _hang_native_children(self, specs)
-        _apply_vmobject_style_kwargs(self, kwargs)
+    # The constructor and get_tip are installed by fmn_python.brace_lifecycle.
 
     def set_initial_width(self, width):
         self.set_width(float(width), stretch=True)
         return self
-
-    def get_tip(self):
-        return self.get_points()[self.tip_point_index].copy()
 
     def get_direction(self):
         vector = self.get_tip() - self.get_center()
@@ -10480,23 +9924,8 @@ class Brace(Tex):
 
 
 class LineBrace(Brace):
-    def __init__(self, line, direction=_UP, **kwargs):
-        buff = float(kwargs.pop("buff", 0.2))
-        tex_string = kwargs.pop("tex_string", r"\underbrace{\qquad}")
-        _install_live_state(self)
-        self.font_size = float(kwargs.pop("font_size", 48))
-        self.tex_string = str(tex_string)
-        self.tex_strings = [self.tex_string]
-        specs, tip_index = self._build_line_brace(
-            _native_shell_factory,
-            _vec3(line.get_start()),
-            _vec3(line.get_end()),
-            _vec3(direction),
-            buff,
-        )
-        self.tip_point_index = int(tip_index)
-        _hang_native_children(self, specs)
-        _apply_vmobject_style_kwargs(self, kwargs)
+    # The constructor is installed by fmn_python.brace_lifecycle.
+    pass
 
 
 class SingleStringTex(SVGMobject):
@@ -10955,56 +10384,8 @@ class DecimalNumber(VMobject):
             "group_with_commas": bool(params[3]),
         }
 
-    def set_submobjects_from_number(self, number):
-        # The Reference's rebuild seam (numbers.py:82), named identically:
-        # record the value and its string, then populate glyph children.
-        # The fm-5wq.4.92 scratch-build/adopt mechanics are unchanged —
-        # extracting them here only names the step set_value shares with
-        # __init__.
-        original = number
-        number = self._reduced_build_value(number)
-        self.number = original if isinstance(original, complex) else number
-        self.num_string = self.get_num_string(original)
-        donor = next(
-            (sm for sm in self.submobjects if sm.has_points()), None
-        )
-        style = donor.get_style() if donor is not None else None
-        params = list(self._decimal_params)
-        params[9] = float(self.font_size)  # scale side effects track here
-        if len(self.submobjects) == 0:
-            # Fresh construction: the shells hang straight onto self.
-            # Family adoption (the branch below) needs an attached arena
-            # handle, which a pre-init mobject does not have yet — the
-            # suite caught exactly that (StaleHandleError on __init__).
-            specs = self._build_decimal_number(
-                _native_shell_factory, number, *params
-            )
-            _hang_native_children(self, specs)
-        else:
-            scratch = VMobject.__new__(VMobject)
-            _install_live_state(scratch)
-            specs = scratch._build_decimal_number(
-                _native_shell_factory, number, *params
-            )
-            _hang_native_children(scratch, specs)
-            if scratch.n_records() != 0:
-                # fm-5wq.4.92: root-level records (the background
-                # rectangle's geometry lives on the root) cannot ride
-                # set_submobjects, but the live-state become seam replaces
-                # them: align_family pads the two families, then per-member
-                # data assignment rewrites the root's own records and every
-                # glyph child in place, in both proxy states — the fm-p107
-                # upgrade this branch used to await.
-                self.become(scratch)
-            else:
-                self.set_submobjects(list(scratch.submobjects))
-        if style is not None:
-            # fm-5wq.4.92: the donor style is a GLYPH's; restyle the glyph
-            # children only, so the root's background-rectangle records
-            # keep their camera-background paint. A rect-less number is
-            # unchanged (its root carries no records to spare).
-            for child in self.submobjects:
-                child.set_style(**style)
+    # set_submobjects_from_number, get_num_string and char_to_mob are installed by
+    # fmn_python.decimal_authoring.
 
     def set_value(self, number):
         # Reference set_value (numbers.py:207): fresh glyphs through the
@@ -11013,52 +10394,6 @@ class DecimalNumber(VMobject):
         self.set_submobjects_from_number(number)
         self.move_to(move_to_point, self.edge_to_fix)
         return self
-
-    def get_num_string(self, number):
-        # Reference formula (numbers.py:126) with BN-08's complex-formatter
-        # exclusion kept precise: hide-zero reductions format exactly like
-        # the native f64 path; a general complex refuses by name.
-        formatter = self.get_formatter()
-        if isinstance(number, complex):
-            if self.hide_zero_components_on_complex and number.imag == 0:
-                if self._complex_imag_mode:
-                    raise NotImplementedError(
-                        "DecimalNumber cannot switch an imaginary display "
-                        "to a real value; the native complex formatter is "
-                        "deliberately absent (BN-08)"
-                    )
-                number = number.real
-            elif (
-                self.hide_zero_components_on_complex and number.real == 0
-            ):
-                if not self._complex_imag_mode:
-                    raise NotImplementedError(
-                        "DecimalNumber cannot switch a real display to an "
-                        "imaginary value; the native complex formatter is "
-                        "deliberately absent (BN-08)"
-                    )
-                number = number.imag
-                formatter = formatter + "i"
-            else:
-                raise NotImplementedError(
-                    "DecimalNumber over a general complex value awaits "
-                    "the native complex formatter; fmn-library's numbers "
-                    "shelf deliberately formats f64 only (BN-08)"
-                )
-        if self._decimal_params[0] == 0 and isinstance(number, float):
-            number = int(number)
-        num_string = formatter.format(number)
-
-        rounded_num = _np.round(number, self._decimal_params[0])
-        if num_string.startswith("-") and rounded_num == 0:
-            if self._decimal_params[2]:
-                num_string = "+" + num_string[1:]
-            else:
-                num_string = num_string[1:]
-        return num_string.replace("-", "–")
-
-    def char_to_mob(self, char):
-        return char_to_cahced_mob(char, **getattr(self, "text_config", {}))
 
     def interpolate(
         self, mobject1, mobject2, alpha, path_func=None
@@ -11269,15 +10604,7 @@ class PMobject(Mobject):
 class PGroup(PMobject):
     """The Reference's variadic PMobject-only family container."""
 
-    def __init__(self, *pmobs, **kwargs):
-        if not all(isinstance(mob, PMobject) for mob in pmobs):
-            raise Exception("All submobjects must be of type PMobject")
-        _install_live_state(self)
-        for key, value in kwargs.items():
-            setattr(self, key, value)
-        specs = self._build_p_group(_native_shell_factory)
-        _hang_native_children(self, specs)
-        self.add(*pmobs)
+    # The constructor is installed by fmn_python.point_cloud_lifecycle.
 
 
 class DotCloud(PMobject):
@@ -11294,37 +10621,8 @@ class DotCloud(PMobject):
         ("rgba", _np.float32, (4,)),
     ]
 
-    def __init__(
-        self,
-        points=None,
-        color=_GREY_C,
-        opacity=1.0,
-        radius=0.05,
-        glow_factor=0.0,
-        anti_alias_width=2.0,
-        **kwargs,
-    ):
-        _install_live_state(self)
-        for key, val in kwargs.items():
-            setattr(self, key, val)
-        self.radius = float(radius)
-        self.glow_factor = float(glow_factor)
-        self.anti_alias_width = float(anti_alias_width)
-        if points is None:
-            point_rows = [[0.0, 0.0, 0.0]]
-        else:
-            point_rows = _vec3_rows(points)
-        specs = self._build_dot_cloud(
-            _native_shell_factory,
-            point_rows,
-            color,
-            float(opacity),
-            float(radius),
-            float(glow_factor),
-            float(anti_alias_width),
-        )
-        _hang_native_children(self, specs)
-        self.init_uniforms()
+    # The constructor is installed by fmn_python.point_cloud_lifecycle. set_glow_factor
+    # is installed by fmn_python.point_cloud_materials.
 
     def init_uniforms(self):
         super().init_uniforms()
@@ -11366,13 +10664,6 @@ class DotCloud(PMobject):
         super().scale(scale_factor, **kwargs)
         if scale_radii:
             self.set_radii(scale_factor * self.get_radii())
-        return self
-
-    def set_glow_factor(self, glow_factor):
-        self.glow_factor = float(glow_factor)
-        self.uniforms["glow_factor"] = self.glow_factor
-        if self.get_num_points() > 0 and "glow_factor" in self.data.dtype.names:
-            self.data["glow_factor"][:] = self.glow_factor
         return self
 
     def get_glow_factor(self):
@@ -11441,17 +10732,8 @@ class TrueDot(DotCloud):
 
 
 class GlowDots(DotCloud):
-    def __init__(
-        self,
-        points=None,
-        color="#FFFF00",
-        radius=0.2,
-        glow_factor=2.0,
-        **kwargs,
-    ):
-        super().__init__(
-            points, color=color, radius=radius, glow_factor=glow_factor, **kwargs
-        )
+    # The constructor is installed by fmn_python.point_cloud_lifecycle.
+    pass
 
 
 class GlowDot(GlowDots):
@@ -11516,102 +10798,9 @@ class VectorField(VMobject):
     field kernel owns tanh length mapping, tip geometry, and stroke records.
     """
 
-    def __init__(
-        self,
-        func,
-        coordinate_system,
-        sample_coords=None,
-        density=2.0,
-        magnitude_range=None,
-        color=None,
-        color_map_name="3b1b_colormap",
-        color_map=None,
-        stroke_opacity=1.0,
-        stroke_width=3.0,
-        tip_width_ratio=4.0,
-        tip_len_to_width=0.01,
-        max_vect_len=None,
-        max_vect_len_to_step_size=0.8,
-        flat_stroke=False,
-        norm_to_opacity_func=None,
-        **kwargs,
-    ):
-        if color is None and color_map is None and color_map_name not in (
-            None,
-            "3b1b_colormap",
-        ):
-            raise NotImplementedError(
-                "VectorField color_map_name requires a non-bundled matplotlib "
-                f"map: {color_map_name!r}; pass color=, color_map=, or "
-                "color_map_name=None"
-            )
-        style_kwargs = dict(kwargs)
-        _preflight_vmobject_style_kwargs(style_kwargs)
-        _install_live_state(self)
-        self.func = func
-        self.coordinate_system = coordinate_system
-        self.sample_coords = (
-            _vector_field_sample_coords(coordinate_system, density)
-            if sample_coords is None
-            else _vector_field_rows(sample_coords, "VectorField sample_coords")
-        )
-        self.stroke_width = float(stroke_width)
-        self.stroke_opacity = float(stroke_opacity)
-        self.tip_width_ratio = float(tip_width_ratio)
-        self.tip_len_to_width = float(tip_len_to_width)
-        self.flat_stroke = bool(flat_stroke)
-        self.color = color
-        self.norm_to_opacity_func = norm_to_opacity_func
-        self._native_default_color_map = (
-            color is None
-            and color_map is None
-            and color_map_name == "3b1b_colormap"
-        )
-        if color is not None:
-            self.color_map = None
-        elif color_map is not None:
-            if not callable(color_map):
-                raise TypeError("VectorField color_map must be callable")
-            self.color_map = color_map
-        elif color_map_name == "3b1b_colormap":
-            self.color_map = _vector_field_default_color_map
-        else:
-            self.color_map = None
-        self.update_sample_points()
-        if len(self.sample_points) < 2:
-            raise ValueError("VectorField needs at least two sample points")
-        if max_vect_len is None:
-            self.max_displayed_vect_len = float(max_vect_len_to_step_size) * float(
-                _np.linalg.norm(self.sample_points[1] - self.sample_points[0])
-            )
-        else:
-            dimension = int(getattr(coordinate_system, "dimension", 2))
-            unit = _np.zeros((1, 3))
-            unit[0, 0] = 1.0
-            origin = _np.asarray(
-                coordinate_system.c2p(*([0.0] * dimension)), dtype=float
-            )
-            unit_size = _np.linalg.norm(
-                _vector_field_c2p_rows(coordinate_system, unit)[0] - origin
-            )
-            self.max_displayed_vect_len = float(max_vect_len) * float(unit_size)
-        outputs = self._evaluate_outputs()
-        self.magnitude_range = (
-            (0.0, float(_np.linalg.norm(outputs, axis=1).max(initial=0.0)))
-            if magnitude_range is None
-            else (float(magnitude_range[0]), float(magnitude_range[1]))
-        )
-        self.init_base_stroke_width_array(len(self.sample_coords))
-        specs = self._build_geometry(_native_shell_factory, outputs)
-        _hang_native_children(self, specs)
-        _apply_vmobject_style_kwargs(self, style_kwargs)
-        self.set_stroke(
-            color=color,
-            width=stroke_width,
-            opacity=stroke_opacity,
-            flat=flat_stroke,
-        )
-        self._apply_callback_style(outputs)
+    # The constructor is installed by fmn_python.vector_field_lifecycle.
+    # init_base_stroke_width_array, update_sample_points, set_sample_coords and
+    # update_vectors are installed by fmn_python.vector_fields.
 
     def _evaluate_outputs(self):
         outputs = _vector_field_rows(
@@ -11698,14 +10887,6 @@ class VectorField(VMobject):
             dtype=float,
         )
 
-    def init_base_stroke_width_array(self, n_sample_points):
-        arr = _np.ones(8 * _operator.index(n_sample_points) - 1)
-        arr[4::8] = self.tip_width_ratio
-        arr[5::8] = self.tip_width_ratio * 0.5
-        arr[6::8] = 0
-        arr[7::8] = 0
-        self.base_stroke_width_array = arr
-
     def set_stroke(
         self,
         color=None,
@@ -11734,33 +10915,6 @@ class VectorField(VMobject):
                 float(width) * self.base_stroke_width_array
             )
             self.stroke_width = float(width)
-        return self
-
-    def update_sample_points(self):
-        self.sample_points = _vector_field_c2p_rows(
-            self.coordinate_system, self.sample_coords
-        )
-
-    def set_sample_coords(self, sample_coords):
-        self.sample_coords = _vector_field_rows(
-            sample_coords, "VectorField sample_coords"
-        )
-        return self
-
-    def update_vectors(self):
-        outputs = self._evaluate_outputs()
-        scratch = VMobject.__new__(VMobject)
-        _install_live_state(scratch)
-        specs = self._build_geometry(
-            _native_shell_factory, outputs, target=scratch
-        )
-        # The field kernel is a single VMobject root; keep an explicit guard
-        # so a future native family expansion cannot be silently discarded.
-        if specs:
-            raise RuntimeError("native VectorField unexpectedly returned children")
-        self.match_points(scratch)
-        self.data["stroke_width"][:] = scratch.data["stroke_width"]
-        self._apply_callback_style(outputs)
         return self
 
 
@@ -11903,11 +11057,7 @@ class StreamLines(VGroup):
         self._stream_rng_draws = int(rng_draws)
         _apply_vmobject_style_kwargs(self, style_kwargs)
 
-    def point_func(self, points):
-        in_coords = _np.array(self.coordinate_system.p2c(points)).T
-        out_coords = self.func(in_coords)
-        origin = self.coordinate_system.get_origin()
-        return self.coordinate_system.c2p(*out_coords.T) - origin
+    # point_func is installed by fmn_python.streamline_authoring.
 
 
 class AnimatedStreamLines(VGroup):
@@ -11920,71 +11070,7 @@ class AnimatedStreamLines(VGroup):
 
     _FLASH_TAPER_WIDTH = 0.05
 
-    def __init__(
-        self,
-        stream_lines,
-        lag_range=4,
-        rate_multiple=1.0,
-        line_anim_config=None,
-        **kwargs,
-    ):
-        if not isinstance(stream_lines, StreamLines):
-            raise TypeError(
-                "AnimatedStreamLines requires a StreamLines instance; got "
-                + type(stream_lines).__name__
-            )
-        config = dict(line_anim_config or {})
-        time_width = float(config.pop("time_width", 1.0))
-        rate_func = config.pop("rate_func", None)
-        _refuse_unrouted(
-            "AnimatedStreamLines()",
-            [(name, True) for name in sorted(config)]
-            + [
-                (
-                    "rate_func",
-                    rate_func is not None
-                    and getattr(rate_func, "__name__", "") != "linear",
-                )
-            ],
-        )
-        super().__init__(stream_lines)
-        _preflight_vmobject_style_kwargs(dict(kwargs))
-        self.stream_lines = stream_lines
-        self.lag_range = float(lag_range)
-        self.rate_multiple = float(rate_multiple)
-        self.time_width = time_width
-        lines = list(stream_lines.submobjects)
-        uniforms = _BridgeMobject._stream_line_lag_uniforms(
-            0, stream_lines._stream_rng_draws, len(lines)
-        )
-        self._line_times = [-self.lag_range * value for value in uniforms]
-        self._line_run_times = [
-            virtual_time / self.rate_multiple
-            for virtual_time in stream_lines._stream_virtual_times
-        ]
-        self._line_xs = []
-        self._line_base_profiles = []
-        taper = self._FLASH_TAPER_WIDTH
-
-        def taper_kernel(x):
-            if x < taper:
-                return x
-            if x > 1.0 - taper:
-                return 1.0 - x
-            return 1.0
-
-        for line in lines:
-            widths = _np.asarray(line.data["stroke_width"], dtype=float).reshape(-1)
-            count = len(widths)
-            xs = (
-                _np.arange(count, dtype=float) / (count - 1)
-                if count > 1
-                else _np.zeros(count)
-            )
-            kernel = _np.asarray([taper_kernel(x) for x in xs])
-            self._line_xs.append(xs)
-            self._line_base_profiles.append(widths * kernel)
-        self.add_updater(lambda mob, dt: mob.update(dt))
+    # The constructor is installed by fmn_python.streamline_animation.
 
     def update(self, dt=0):
         sigma = self.time_width / 6.0
