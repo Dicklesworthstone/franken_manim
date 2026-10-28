@@ -5,7 +5,8 @@ fm-box-oracle-full-corpus-r11-lykz) and its stratified sample (fm-tex-layout-ora
 TeX itself reports each formula's box: width, height and depth, from \\wd,
 \\ht and \\dp of a saved box, in display style. The preamble is the pinned
 Reference's default template (scripts/manim_ref/manimlib/tex_templates.yml,
-packages and \\minus), and the document class is 10 pt, so 1 em = 10 pt.
+packages and \\minus), without tipa for math (Appendix C-41: it breaks math-mode
+\\!, \\; and \\:), and the document class is 10 pt, so 1 em = 10 pt.
 Each string is stripped, as the Reference strips it. A single line is braced
 as amsmath braces an align* cell; multi-line strings (`\\\\` or `&`) are
 boxed as a top-aligned `aligned`, the inner form of the Reference's align*
@@ -93,6 +94,18 @@ def reference_preamble() -> str:
             break
         lines.append(line[4:])
     return "\n".join(lines).strip()
+
+
+def ruled_math_preamble() -> str:
+    """The Reference's preamble without tipa, for math-mode boxes (Appendix C-41).
+
+    tipa redefines `\\!`, `\\;` and `\\:` as IPA diacritics, so under the
+    Reference's own preamble they set no math space and swallow the token
+    after them. FrankenManim keeps LaTeX's math spacing (BN-05), so the math
+    oracles measure LaTeX without that defect. Text-mode captures keep the
+    Reference's preamble.
+    """
+    return "\n".join(line for line in reference_preamble().splitlines() if "{tipa}" not in line)
 
 
 def measure_one(text: str, preamble: str) -> tuple[float, float, float] | None:
@@ -387,6 +400,7 @@ def main() -> int:
         write_paragraph_census(paragraphs, {item["sha256"]: box for item, box in zip(paragraphs, laid)})
         if args.text_only:
             return 0
+    preamble = ruled_math_preamble()
     ranked = ranked_math(args.corpus)
     chosen = sample(ranked)
     # The census measures every math string; the sample is a subset of the same measurements.
@@ -437,8 +451,8 @@ def write_fixture(path: pathlib.Path, title: str, scope: list[str], items: list[
         "# of the stripped string boxed in display style, in ems at 10 pt: braced like an align*",
         "# cell, or for multi-line strings as `aligned`[t] without its invisible struts and glue,",
         "# with amsmath's \\if@display set as align* sets it.",
-        "# Preamble: the pinned Reference's default template (3b1b/manim 6199a00d); TeX Live",
-        "# 2025 on the dev host.",
+        "# Preamble: the pinned Reference's default template (3b1b/manim 6199a00d) without tipa,",
+        "# which breaks math-mode \\!, \\; and \\: (Appendix C-41); TeX Live 2025 on the dev host.",
         *scope,
         f"# {failed} TeX could not typeset alone (fragments of multi-argument Tex calls) are",
         "# omitted. Regenerate only with scripts/capture_tex_corpus_boxes.py; never edit by hand.",

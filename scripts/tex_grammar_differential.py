@@ -319,25 +319,12 @@ def tex_batch(batch: list[tuple[str, str]], preamble: str, multiline: bool,
     return result
 
 
-def oracle_preamble() -> str:
-    """The Reference preamble without tipa.
-
-    tipa redefines `\\!`, `\\;` and `\\:` (IPA diacritics), so under the
-    Reference preamble they set no math space and swallow the token after
-    them: `3 \\; \\bigcup_{m=4}^{n}` loses both the space and the operator's
-    limits. fmd-math sets LaTeX's math spacing, the correct behavior, so the
-    oracle is LaTeX without that defect (fm-reference-tipa-math-spacing-r12-9ujn).
-    Only that package is dropped.
-    """
-    return "\n".join(line for line in census.reference_preamble().splitlines()
-                     if "{tipa}" not in line)
-
-
 def tex(args: argparse.Namespace) -> int:
     run = pathlib.Path(args.run)
     cases = [tuple(line.split("\t", 1)) for line in
              (run / "cases.tsv").read_text(encoding="utf-8").splitlines() if line]
-    preamble = oracle_preamble()
+    # The census's math preamble: the Reference's without tipa (Appendix C-41).
+    preamble = census.ruled_math_preamble()
     plant = PLANTS[args.plant] if args.plant else ""
     groups = {False: [], True: []}
     for key, text in cases:

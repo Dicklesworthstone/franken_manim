@@ -251,6 +251,32 @@ Reference source at the pinned revision:
 [TeX counting](https://github.com/3b1b/manim/blob/6199a00d4c1b1127ebe45cb629c3f22538b10e13/manimlib/mobject/svg/tex_mobject.py),
 [matching blocks and Tex alias](https://github.com/3b1b/manim/blob/6199a00d4c1b1127ebe45cb629c3f22538b10e13/manimlib/animation/transform_matching_parts.py).
 
+## Math spacing: `\!`, `\;` and `\:` (Appendix C-41)
+
+The Reference's default template loads `tipa` for IPA symbols. tipa redefines
+`\!`, `\;` and `\:` as phonetic diacritics. So in the Reference's math these
+commands set no space and take the next token as their argument:
+
+- `7 \! 4` is 1.0 em wide, where LaTeX's negative thin space sets 0.8333.
+- `3 \; x` is 1.0715 em, where LaTeX's thick space sets 1.3493.
+- `3 \; \bigcup_{m=4}^{n} x` loses the operator's limits, which the swallowed
+  `\bigcup` turns into ordinary scripts.
+
+FrankenManim sets LaTeX's math spacing: `\!` is −3 mu, `\:` 4 mu, `\;` 5 mu,
+and the next token is untouched. That is what the authors of the 25 corpus
+strings with `\!` and the 12 with `\;` wrote. The math box census measures
+LaTeX without tipa for the same reason (`ruled_math_preamble` in
+scripts/capture_tex_corpus_boxes.py). Text mode keeps the Reference's
+preamble.
+
+Migration: a scene whose look depends on the Reference's missing space can
+delete the command. `\negthinspace`, `\medspace` and `\thickspace` were never
+affected and behave the same in both.
+
+Measured with TeX Live 2025, 2026-10-28, by the grammar differential
+(fm-tex-grammar-differential-r12-i0nh). Recapturing the math census without
+tipa changed exactly the 22 rows whose strings use these commands.
+
 ## TexText paragraphs and line breaking
 
 The Reference sets `TexText` as a `\centering` paragraph in a `standalone[preview]`

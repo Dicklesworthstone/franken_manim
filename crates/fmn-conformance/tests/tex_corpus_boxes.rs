@@ -58,14 +58,17 @@ use std::path::PathBuf;
 /// \if@display set as the Reference's align* sets it, 559 with amsmath's
 /// \dddot as an operator under a period row (1ffcadc9, fm-ew7o), 565 with
 /// the long arrows from CM pieces and amsmath's dots look-ahead (d99fee96,
-/// fm-fm-long-arrows-joinrel-r11-b2c5, fm-fm-amsmath-dots-context-r11-ymdd).
+/// fm-fm-long-arrows-joinrel-r11-b2c5, fm-fm-amsmath-dots-context-r11-ymdd),
+/// 579 when the capture dropped tipa, which breaks math-mode `\!`, `\;` and
+/// `\:` in the Reference's preamble (Appendix C-41,
+/// fm-reference-tipa-math-spacing-r12-9ujn).
 /// Raise it when layout improves; never lower it to land a change.
-const WITHIN_5_PERCENT_FLOOR: usize = 565;
+const WITHIN_5_PERCENT_FLOOR: usize = 579;
 /// The same at 10%: 315, 316, 330, 365, 367, 385, 421, 423, 437, 444, 543,
 /// 564, 565, 570 with the AMS/default-pack correction (9b457a38), 573 with
 /// amsmath's \mod (4b705d14), 574 with its \dddot (1ffcadc9), then 578 with
-/// the long arrows and the dots (d99fee96).
-const WITHIN_10_PERCENT_FLOOR: usize = 578;
+/// the long arrows and the dots (d99fee96), 581 without tipa (C-41).
+const WITHIN_10_PERCENT_FLOOR: usize = 581;
 
 /// Census strings within 5% of TeX's box, of the 4175 math-mode corpus strings
 /// TeX typesets alone: 4132 when the census was first measured
@@ -82,11 +85,15 @@ const WITHIN_10_PERCENT_FLOOR: usize = 578;
 /// \nulldelimiterspace and the radical bar at its sign's height (04d811db,
 /// fm-fm-delim-size-chain-r11-khsh): the three `\left(…\right)` superscripts
 /// enter, fourteen script-fraction rows tighten to TeX's box, and none leaves.
+/// 4166 (11171 occurrences) when the capture dropped tipa (Appendix C-41,
+/// fm-reference-tipa-math-spacing-r12-9ujn): the recapture changed exactly
+/// the 22 rows whose strings use `\!`, `\;` or `\:`, 17 of them enter, and
+/// none leaves.
 /// Raise it when layout improves; never lower it to land a change.
-const CENSUS_WITHIN_5_PERCENT_FLOOR: usize = 4149;
+const CENSUS_WITHIN_5_PERCENT_FLOOR: usize = 4166;
 /// The same at 10%: 4157 at 8667819a, 4161 at d99fee96, 4166 at cc470d1a,
-/// 4167 at 04d811db.
-const CENSUS_WITHIN_10_PERCENT_FLOOR: usize = 4167;
+/// 4167 at 04d811db, 4171 without tipa (C-41).
+const CENSUS_WITHIN_10_PERCENT_FLOOR: usize = 4171;
 
 /// Text-mode census strings within 5% of TeX's box, of the 3747 text-mode
 /// corpus strings the Reference sets on one line
