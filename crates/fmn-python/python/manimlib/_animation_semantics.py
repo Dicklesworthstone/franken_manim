@@ -115,7 +115,13 @@ def install(native, subsystems=True):
                 np.asarray(end, dtype=float),
                 alpha,
             )
-            return tuple(value.tolist())
+
+            # A nested tuple uniform (a clip-plane matrix) keeps tuple rows,
+            # so it stays hashable; tuple(value.tolist()) made them lists.
+            def as_tuple(rows):
+                return tuple(as_tuple(row) if isinstance(row, list) else row for row in rows)
+
+            return as_tuple(value.tolist())
         if isinstance(start, list) or isinstance(end, list):
             value = interpolate_value(
                 np.asarray(start, dtype=float),

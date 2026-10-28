@@ -410,7 +410,7 @@ arc_target.uniforms["clip_planes"] = [[2.0, 4.0, 6.0, 8.0] for _ in range(4)]
 arc_source.uniforms["depth_test"] = True
 arc_target.uniforms["depth_test"] = False
 arc_source.uniforms["joint_type"] = 2.0
-arc_target.uniforms["joint_type"] == 3.0
+arc_target.uniforms["joint_type"] = 3.0
 arc_transform = Transform(
     arc_source,
     arc_target,
@@ -444,6 +444,29 @@ assert arc_source.uniforms["joint_type"] == 2.0
 arc_transform.finish()
 assert arc_source.uniforms["depth_test"] is True
 assert arc_source.uniforms["joint_type"] == 2.0
+
+# Uniform interpolation on the live Mobject.interpolate path: a nested tuple
+# uniform keeps tuple rows (hashable), a list matrix stays a list, a locked
+# uniform and one absent from an endpoint keep the live value.
+uniform_live, uniform_start, uniform_end = Mobject(), Mobject(), Mobject()
+uniform_live.locked_uniform_keys = {"locked"}
+uniform_live.uniforms.update(
+    {"planes": ((0.0, 0.0), (0.0, 0.0)), "matrix": [[0.0, 0.0], [0.0, 0.0]],
+     "locked": ((9.0, 9.0),), "absent": 7.0}
+)
+uniform_start.uniforms.update(
+    {"planes": ((0.0, 2.0), (4.0, 6.0)), "matrix": [[0, 2], [4, 6]], "locked": ((0.0, 0.0),)}
+)
+uniform_end.uniforms.update(
+    {"planes": ((4.0, 6.0), (8.0, 10.0)), "matrix": [[4, 6], [8, 10]], "locked": ((2.0, 2.0),)}
+)
+uniform_live.interpolate(uniform_start, uniform_end, 0.25)
+assert uniform_live.uniforms["planes"] == ((1.0, 3.0), (5.0, 7.0))
+assert all(type(row) is tuple for row in uniform_live.uniforms["planes"])
+hash(uniform_live.uniforms["planes"])
+assert uniform_live.uniforms["matrix"] == [[1.0, 3.0], [5.0, 7.0]]
+assert uniform_live.uniforms["locked"] == ((9.0, 9.0),)
+assert uniform_live.uniforms["absent"] == 7.0
 
 copy_source = Mobject().set_points([[0.0, 0.0, 0.0]])
 copy_target = Mobject().set_points([[1.0, 0.0, 0.0]])

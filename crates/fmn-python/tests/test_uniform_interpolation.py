@@ -1,21 +1,25 @@
-"""Isolated source-level regressions; these do not load the native extension."""
+"""Isolated source-level regressions; these do not load the native extension.
+
+They exercise the uniform interpolator the portal ships: install()'s nested
+`interpolate_uniform` in the embedded manimlib/_animation_semantics.py, compiled on its own.
+The live Mobject.interpolate path, uniform locks included, is covered by
+tests/animation_semantics.py against the wheel.
+"""
 import ast
-import os
 from pathlib import Path
-from types import SimpleNamespace
 import unittest
 import numpy as np
 
-SOURCE = Path(os.environ.get('FMN_ANIMATION_SEMANTICS', str(Path(__file__).resolve().parents[1] / 'python' / 'animation_semantics.py')))
-NAMES = {'_fmn_uniform_tuple', '_fmn_interpolate_uniform', '_fmn_mobject_interpolate'}
-parsed = ast.parse(SOURCE.read_text(encoding='utf-8'), filename=str(SOURCE))
-functions = [node for node in parsed.body if isinstance(node, ast.FunctionDef) and node.name in NAMES]
-found = {node.name for node in functions}
-if not {'_fmn_interpolate_uniform', '_fmn_mobject_interpolate'} <= found:
-    raise RuntimeError('Source does not contain the production interpolation functions')
-namespace = {'_np': np, '_interpolate': lambda a, b, t: (1-t)*a+t*b}
-exec(compile(ast.Module(body=functions, type_ignores=[]), str(SOURCE), 'exec'), namespace)
-lerp = namespace['_fmn_interpolate_uniform']
+SOURCE = Path(__file__).resolve().parents[1] / 'python' / 'manimlib' / '_animation_semantics.py'
+installer = next(node for node in ast.parse(SOURCE.read_text(encoding='utf-8')).body
+                 if isinstance(node, ast.FunctionDef) and node.name == 'install')
+functions = [node for node in installer.body
+             if isinstance(node, ast.FunctionDef) and node.name == 'interpolate_uniform']
+if len(functions) != 1:
+    raise RuntimeError('install() does not define exactly one interpolate_uniform')
+namespace = {'np': np, 'interpolate_value': lambda a, b, t: (1-t)*a+t*b}
+exec(compile(ast.Module(body=functions, type_ignores=[]), str(SOURCE), 'exec'), namespace)  # ubs:ignore -- test-only named function parsed from the fixed repository semantics path; no external input.
+lerp = namespace['interpolate_uniform']
 
 
 def tuple_tree(value):
@@ -91,21 +95,6 @@ class UniformInterpolationTests(unittest.TestCase):
     def test_endpoints_and_extrapolation(self):
         for alpha, expected in [(0., [[0., 2.]]), (1., [[4., 6.]]), (1.5, [[6., 8.]])]:
             self.assertEqual(lerp([[0, 2]], [[4, 6]], alpha), expected)
-
-    def test_mobject_interpolation_respects_uniform_locks(self):
-        dtype = np.dtype([('point', np.float64, (3,))])
-        live = SimpleNamespace(
-            data=np.zeros(1, dtype=dtype), locked_data_keys={'point'},
-            locked_uniform_keys={'locked'}, pointlike_data_keys={'point'},
-            uniforms={'matrix': [[0., 0.], [0., 0.]], 'locked': ((9., 9.),), 'absent': 7},
-        )
-        start = SimpleNamespace(uniforms={'matrix': [[0, 2], [4, 6]], 'locked': ((0, 0),)})
-        end = SimpleNamespace(uniforms={'matrix': [[4, 6], [8, 10]], 'locked': ((2, 2),)})
-        returned = namespace['_fmn_mobject_interpolate'](live, start, end, .25, path_func=lambda a, b, t: None)
-        self.assertIs(returned, live)
-        self.assertEqual(live.uniforms['matrix'], [[1., 3.], [5., 7.]])
-        self.assertEqual(live.uniforms['locked'], ((9., 9.),))
-        self.assertEqual(live.uniforms['absent'], 7)
 
 
 if __name__ == '__main__':
