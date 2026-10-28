@@ -1777,13 +1777,14 @@ mod tests {
         // period row; \ex@ without powf), d99fee96 (the long arrows from CM
         // pieces, \binrel@'s class for \overset, amsmath's dots look-ahead),
         // cc470d1a (physics' function arguments in the default pack, whose
-        // macro identity gains the physics flag), and 450111a4 (TexText line
-        // breaking, whose macro identity gains the pack's line width).
+        // macro identity gains the physics flag), 450111a4 (TexText line
+        // breaking, whose macro identity gains the pack's line width), and
+        // 04d811db (TeX's delimiter size chain).
         assert_eq!(
             [cold.digest(), cached.digest(), text.digest()].map(|digest| digest.to_string()),
             [
-                "4ce8d2aeba886ebc2dbc7a7926b8829d076489242cc72ccdfcfb1f7def281e64",
-                "f79717625cd9c78d592a54ed4a0d1c193cf2c50c3f0d99bae56c70665ade87bb",
+                "837b0b371b14899e9b6497b8ecb5f0d7438eab286a7c71a459a45869f3b9bad2",
+                "dc453c9ad82f06a521c4ecd6c9d5b4aa3d987a56e22d199ec28d60b48e2db2f8",
                 "0fa22e64fe9e1901eea58a596899ec843bc0d6db46f1cd91607925a50fea3e6f",
             ]
         );

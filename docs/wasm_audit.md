@@ -1,6 +1,21 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-run, 2026-10-27, against `Cargo.lock` `716d4655` and `SUITE.lock` `41856fe9`,
+**Status:** re-run, 2026-10-27, against `Cargo.lock` `acaa8946` and `SUITE.lock` `bd60055e`,
+for the franken_markdown repin from `450111a4` to `04d811db` (fm-fm-delim-size-chain-r11-khsh:
+delimiters walk TeX's size chain, null delimiters unscaled, a radical's bar its sign's height).
+The lock delta changes only the franken_markdown Git revisions; no package, version, checksum or
+WASM manifest changes.
+
+- **VERIFIED (mechanical):** `cargo tree -p fmn-wasm --target wasm32-unknown-unknown -e
+  normal --prefix none --locked` through RCH gives 134 lines, byte-identical to the tree at
+  `450111a4` once each workspace path is replaced by one placeholder, with no fmd,
+  franken_markdown, PyO3 or fmn-python package.
+- **VERIFIED (build):** `cargo build --locked -p fmn-wasm --target wasm32-unknown-unknown`
+  passes through RCH at this tree.
+- Not re-run: the wasm-smoke Node execution and the package/browser gate. fmn-wasm's tree does
+  not reach franken_markdown. This is no fresh smoke, package, browser or size-budget pass.
+
+Earlier re-run, 2026-10-27, against `Cargo.lock` `716d4655` and `SUITE.lock` `41856fe9`,
 for the franken_markdown repin from `cc470d1a` to `450111a4` (fm-texttext-line-breaking-r11-bfdx:
 TexText paragraphs break at the 345 pt line, a blank line ends a paragraph, alignment blocks
 keep their first baseline). The lock delta changes only the franken_markdown Git revisions; no
@@ -656,8 +671,8 @@ The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
-- `SUITE.lock` SHA-256: `41856fe935dce9d2ea642e0d836181ce9e4d3cb6487e85ea8e550e7dda98e4cc`
-- `Cargo.lock` SHA-256: `716d46556a4ce29ac999cc0e3d4ce7acac3ac0fc4092358be6131016b178b81b`
+- `SUITE.lock` SHA-256: `bd60055e74b93e0aa88a0a5d3263188471c192029684b7248051da80a42e03a2`
+- `Cargo.lock` SHA-256: `acaa8946cfc65368de247a69341e7cb1f1e7b7636cb84782a924729c6b7be189`
 - Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `93a7c2dc6acf3dfef88a4a490efbfda7970bd963b4740aa7f879a08fff395061`
 
 The 0.5.0 release bump re-bound both lock identities above. That bump changed

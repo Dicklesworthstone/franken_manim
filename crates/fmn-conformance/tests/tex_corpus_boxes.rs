@@ -78,10 +78,15 @@ const WITHIN_10_PERCENT_FLOOR: usize = 578;
 /// (fm-fm-physics-trig-parens-r11-nou8). 4146 (11139 occurrences) with
 /// physics' function arguments in the default pack (cc470d1a): the six
 /// auto-sized `\cos(...)` rows and `\sin(\dots)` enter, and none leaves.
+/// 4149 (11142 occurrences) with TeX's delimiter size chain, an unscaled
+/// \nulldelimiterspace and the radical bar at its sign's height (04d811db,
+/// fm-fm-delim-size-chain-r11-khsh): the three `\left(…\right)` superscripts
+/// enter, fourteen script-fraction rows tighten to TeX's box, and none leaves.
 /// Raise it when layout improves; never lower it to land a change.
-const CENSUS_WITHIN_5_PERCENT_FLOOR: usize = 4146;
-/// The same at 10%: 4157 at 8667819a, 4161 at d99fee96, 4166 at cc470d1a.
-const CENSUS_WITHIN_10_PERCENT_FLOOR: usize = 4166;
+const CENSUS_WITHIN_5_PERCENT_FLOOR: usize = 4149;
+/// The same at 10%: 4157 at 8667819a, 4161 at d99fee96, 4166 at cc470d1a,
+/// 4167 at 04d811db.
+const CENSUS_WITHIN_10_PERCENT_FLOOR: usize = 4167;
 
 /// Text-mode census strings within 5% of TeX's box, of the 3747 text-mode
 /// corpus strings the Reference sets on one line
