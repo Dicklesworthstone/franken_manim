@@ -97,7 +97,7 @@ pub struct HarnessRun {
 const PYTHON_PRELUDE: &str = r"
 import numpy as np
 import manimlib
-from manimlib import Mobject, Scene
+from manimlib import CameraFrame, Mobject, Scene
 from manimlib import _NativeUpdater as NativeUpdater
 
 VELOCITY = (0.1, -0.2, 0.3)
@@ -105,6 +105,11 @@ VELOCITY = (0.1, -0.2, 0.3)
 def state_bytes(scene):
     out = bytearray()
     for mob in scene.mobjects:
+        # The workload's mobjects only. Every scene lists its camera frame,
+        # whose native control-point records no workload touches and the
+        # pure-Rust twin does not model.
+        if isinstance(mob, CameraFrame):
+            continue
         fields = mob.field_names()
         for i in range(mob.n_records()):
             for f in fields:
