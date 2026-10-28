@@ -236,10 +236,9 @@ def _outer_interpolate(start, end, alpha):
 
 
 def _binary_search(function, target, lower_bound, upper_bound, tolerance=1e-4):
-    # manimlib/utils/simple_functions.py binary_search, verbatim. This is
-    # intentionally the Reference's monotonic-coordinate search rather than
-    # Chisel's true-arclength inverse: CoordinateSystem uses it only when a
-    # graph does not retain its underlying function.
+    # manimlib/utils/simple_functions.py binary_search, verbatim, exported as
+    # the Reference utility. It is the Reference's monotonic-coordinate
+    # search, not Chisel's true-arclength inverse.
     left = lower_bound
     right = upper_bound
     middle = (left + right) / 2
@@ -2204,18 +2203,10 @@ class Mobject(_BridgeMobject):
         self.refresh_bounding_box()
         return self
 
-    def set_points(self, points):
-        self.resize_points(len(points), resize_func=resize_preserving_order)
-        self.data["point"][:] = points
-        return self
-
-    def append_points(self, new_points):
-        n = self.get_num_points()
-        self.resize_points(n + len(new_points))
-        data = self.data
-        data[n:] = data[n - 1]
-        data["point"][n:] = new_points
-        return self
+    # set_points, append_points and get_shader_data are installed by
+    # fmn_python.point_editing. update is installed by fmn_python.updater_dispatch.
+    # set_color_by_rgba_func and set_color_by_rgb_func are installed by
+    # fmn_python.functional_color. interpolate is installed by fmn_python.trackers.
 
     def clear_points(self):
         self.resize_points(0)
@@ -2581,15 +2572,6 @@ class Mobject(_BridgeMobject):
         for updater in list(self.updaters):
             self._dispatch_updater(updater, dt)
 
-    def update(self, dt=0, recurse=True):
-        dt = float(dt)
-        recurse = bool(recurse)
-        self._update_python_family(dt, recurse)
-        # Native updaters run only after host callbacks have returned, so the
-        # Stage RefCell is never held across Python code.
-        self._update_native_mobject(dt, recurse)
-        return self
-
     def suspend_updating(self, recurse=True):
         recurse = bool(recurse)
         if self._is_bound() or not recurse:
@@ -2945,27 +2927,6 @@ class Mobject(_BridgeMobject):
 
     shader_folder = ""
 
-    def set_color_by_rgba_func(self, func, recurse=True):
-        for mob in self.get_family(recurse):
-            if not mob.has_points():
-                continue
-            mob.set_rgba_array(func(mob.get_points()))
-        return self
-
-    def set_color_by_rgb_func(self, func, opacity=1, recurse=True):
-        for mob in self.get_family(recurse):
-            if not mob.has_points():
-                continue
-            points = mob.get_points()
-            opacity_column = _np.full((points.shape[0], 1), float(opacity))
-            mob.set_rgba_array(_np.hstack((func(points), opacity_column)))
-        return self
-
-    def get_shader_data(self):
-        if indices := self.get_shader_vert_indices():
-            return self.data[indices]
-        return self.data
-
     def get_shader_vert_indices(self):
         return None
 
@@ -3063,23 +3024,6 @@ class Mobject(_BridgeMobject):
     def align_data_and_family(self, mobject):
         self.align_family(mobject)
         self.align_data(mobject)
-        return self
-
-    def interpolate(self, mobject1, mobject2, alpha, path_func=None):
-        if path_func is None:
-            path_func = getattr(_FMN_ROOT, "straight_path")
-        locked = getattr(self, "locked_data_keys", ())
-        const = getattr(self, "const_data_keys", ())
-        keys = [k for k in self.data.dtype.names if k not in locked]
-        if keys:
-            self.note_changed_data()
-        for key in keys:
-            md1 = mobject1.data[key]
-            md2 = mobject2.data[key]
-            if key in const:
-                self.data[key][:] = md1
-            else:
-                self.data[key][:] = path_func(md1, md2, alpha)
         return self
 
     def set_data(self, data):
@@ -3630,14 +3574,8 @@ class EventDispatcher:
     def get_listners_count(self):
         return sum(len(bucket) for bucket in self.event_listners.values())
 
-    def get_mouse_point(self):
-        return self.mouse_point
-
-    def get_mouse_drag_point(self):
-        return self.mouse_drag_point
-
-    def is_key_pressed(self, symbol):
-        return symbol in self.pressed_keys
+    # get_mouse_point, get_mouse_drag_point and is_key_pressed are installed by
+    # fmn_python.interaction.
 
     __iadd__ = add_listner
     __isub__ = remove_listner
@@ -4808,14 +4746,7 @@ class VGroup(VMobject):
     (rather than schema-synthesized) so the native coordinate classes can
     keep the Reference MRO `Axes < VGroup < VMobject`."""
 
-    def __init__(self, *vmobjects, **kwargs):
-        super().__init__(**kwargs)
-        if any(
-            isinstance(vmob, _BridgeMobject) and not isinstance(vmob, VMobject)
-            for vmob in vmobjects
-        ):
-            raise Exception("Only VMobjects can be passed into VGroup")
-        self._ingest_args(*vmobjects)
+    # The constructor is installed by fmn_python.grouping.
 
 
 class VectorizedPoint(Point, VMobject):
@@ -4848,46 +4779,13 @@ class VectorizedPoint(Point, VMobject):
 class CurvesAsSubmobjects(VGroup):
     """One native shared-anchor child for each source quadratic curve."""
 
-    def __init__(self, vmobject, **kwargs):
-        if not isinstance(vmobject, VMobject):
-            raise TypeError("CurvesAsSubmobjects expects a VMobject")
-        _install_live_state(self)
-        specs = self._build_curves_as_submobjects(
-            _native_shell_factory, vmobject
-        )
-        _hang_native_children(self, specs)
-        _apply_vmobject_style_kwargs(self, kwargs)
-        for part in self.submobjects:
-            part.match_style(vmobject)
+    # The constructor is installed by fmn_python.derived_curves.
 
 
 class DashedVMobject(VMobject):
     """Atlas's true-arclength dash placement over native partial slices."""
 
-    def __init__(
-        self,
-        vmobject,
-        num_dashes=15,
-        positive_space_ratio=0.5,
-        **kwargs,
-    ):
-        if not isinstance(vmobject, VMobject):
-            raise TypeError("DashedVMobject expects a VMobject")
-        super().__init__(**kwargs)
-        num_dashes = _operator.index(num_dashes)
-        if num_dashes > 0:
-            intervals = vmobject._dash_curve_intervals(
-                num_dashes, float(positive_space_ratio)
-            )
-            self.add(
-                *(vmobject.get_subcurve(start, end) for start, end in intervals)
-            )
-        self.match_style(vmobject, recurse=False)
-        if "stroke_behind" in kwargs:
-            self.set_stroke(behind=kwargs["stroke_behind"], recurse=False)
-        if "flat_stroke" in kwargs:
-            self.set_flat_stroke(kwargs["flat_stroke"], recurse=False)
-            self.flat_stroke = bool(kwargs["flat_stroke"])
+    # The constructor is installed by fmn_python.derived_curves.
 
 
 class VHighlight(VGroup):
@@ -5305,62 +5203,7 @@ class FullScreenFadeRectangle(FullScreenRectangle):
 class SurroundingRectangle(Rectangle):
     """Atlas's native shape matcher over Marionette's live family extent."""
 
-    def __init__(self, mobject, buff=0.1, color="#FFFF00", **kwargs):
-        if not isinstance(mobject, _BridgeMobject):
-            raise TypeError("SurroundingRectangle expects a Mobject")
-        _install_live_state(self)
-        self.mobject = mobject
-        self.buff = float(buff)
-        rows = mobject._bbox_rows()
-        has_extent = any(member._has_points() for member in _family_preorder(mobject))
-        specs = self._build_surrounding_rectangle(
-            _native_shell_factory,
-            _vec3(rows[0]),
-            _vec3(rows[2]),
-            has_extent,
-            self.buff,
-        )
-        _hang_native_children(self, specs)
-        # This constructor's color is the fallback for each channel. An
-        # explicit stroke/fill color must survive the native style pass.
-        if kwargs.get("fill_color") is None:
-            kwargs["fill_color"] = color
-        if kwargs.get("stroke_color") is None:
-            kwargs["stroke_color"] = color
-        _apply_vmobject_style_kwargs(self, kwargs)
-        if mobject.is_fixed_in_frame():
-            self.fix_in_frame()
-
-    def surround(self, mobject, buff=None):
-        if not isinstance(mobject, _BridgeMobject):
-            raise TypeError("SurroundingRectangle.surround expects a Mobject")
-        style = self.get_style()
-        self.mobject = mobject
-        self.buff = self.buff if buff is None else float(buff)
-        rows = mobject._bbox_rows()
-        has_extent = any(member._has_points() for member in _family_preorder(mobject))
-        if self._is_bound():
-            self._rebuild_surrounding_rectangle(
-                _vec3(rows[0]),
-                _vec3(rows[2]),
-                has_extent,
-                self.buff,
-            )
-        else:
-            specs = self._build_surrounding_rectangle(
-                _native_shell_factory,
-                _vec3(rows[0]),
-                _vec3(rows[2]),
-                has_extent,
-                self.buff,
-            )
-            self.submobjects.clear()
-            _hang_native_children(self, specs)
-        self.set_style(**style)
-        return self
-
-    def set_buff(self, buff):
-        return self.surround(self.mobject, buff)
+    # The constructor, surround and set_buff are installed by fmn_python.shape_matchers.
 
 
 class BackgroundRectangle(SurroundingRectangle):
@@ -5568,68 +5411,18 @@ class Arc(TipableVMobject):
 
 
 class ArcBetweenPoints(Arc):
-    def __init__(self, start, end, angle=_math.tau / 4, **kwargs):
-        n_components = kwargs.pop("n_components", None)
-        # The Reference builds a provisional Arc and then fits it to these
-        # endpoints, so these inherited knobs cancel exactly.
-        kwargs.pop("start_angle", 0)
-        kwargs.pop("radius", 1.0)
-        kwargs.pop("arc_center", _ORIGIN)
-        _install_live_state(self)
-        self.angle = float(angle)
-        specs = self._build_arc_between_points(
-            _native_shell_factory,
-            _vec3(start),
-            _vec3(end),
-            self.angle,
-            None if n_components is None else _operator.index(n_components),
-        )
-        _hang_native_children(self, specs)
-        _apply_vmobject_style_kwargs(self, kwargs)
+    # The constructor is installed by fmn_python.arrow_geometry.
+    pass
 
 
 class CurvedArrow(ArcBetweenPoints):
-    def __init__(self, start_point, end_point, **kwargs):
-        angle = float(kwargs.pop("angle", _math.tau / 4))
-        n_components = kwargs.pop("n_components", None)
-        kwargs.pop("start_angle", 0)
-        kwargs.pop("radius", 1.0)
-        kwargs.pop("arc_center", _ORIGIN)
-        _install_live_state(self)
-        self.angle = angle
-        specs = self._build_curved_arrow(
-            _native_shell_factory,
-            _vec3(start_point),
-            _vec3(end_point),
-            angle,
-            None if n_components is None else _operator.index(n_components),
-            False,
-        )
-        _hang_native_children(self, specs)
-        self.tip = self.submobjects[-1]
-        _apply_vmobject_style_kwargs(self, kwargs)
+    # The constructor is installed by fmn_python.arrow_geometry.
+    pass
 
 
 class CurvedDoubleArrow(CurvedArrow):
-    def __init__(self, start_point, end_point, **kwargs):
-        angle = float(kwargs.pop("angle", _math.tau / 4))
-        n_components = kwargs.pop("n_components", None)
-        kwargs.pop("start_angle", 0)
-        kwargs.pop("radius", 1.0)
-        kwargs.pop("arc_center", _ORIGIN)
-        _install_live_state(self)
-        self.angle = angle
-        specs = self._build_curved_arrow(
-            _native_shell_factory,
-            _vec3(start_point),
-            _vec3(end_point),
-            angle,
-            None if n_components is None else _operator.index(n_components),
-            True,
-        )
-        _hang_native_children(self, specs)
-        self.tip, self.start_tip = self.submobjects
-        _apply_vmobject_style_kwargs(self, kwargs)
+    # The constructor is installed by fmn_python.arrow_geometry.
+    pass
 
 
 class Circle(Arc):
@@ -5817,52 +5610,8 @@ class ImageMobject(Mobject):
     render_primitive = 4  # moderngl.TRIANGLES, without importing a renderer
     pointlike_data_keys = ["point"]
 
-    def __init__(self, filename, height=4.0, **kwargs):
-        opacity = float(kwargs.pop("opacity", 1.0))
-        z_index = int(kwargs.pop("z_index", 0))
-        fixed_in_frame = bool(kwargs.pop("is_fixed_in_frame", False))
-        depth_test = bool(kwargs.pop("depth_test", False))
-        color = kwargs.pop("color", None)
-        if kwargs:
-            raise TypeError(
-                "ImageMobject() got unexpected keyword arguments: "
-                + ", ".join(sorted(kwargs))
-            )
-        path = _resolve_raster_image_path(filename)
-        payload = path.read_bytes()
-        _install_live_state(self)
-        self.height = float(height)
-        self.opacity = opacity
-        self.image_path = str(path)
-        specs = self._build_image(
-            _native_shell_factory,
-            payload,
-            self.height,
-            self.opacity,
-            z_index,
-        )
-        _hang_native_children(self, specs)
-        self.pixel_width, self.pixel_height = self._image_dimensions()
-        if fixed_in_frame:
-            self.fix_in_frame()
-        if depth_test:
-            self.apply_depth_test()
-        if color is not None:
-            self.set_color(color)
-
-    def init_data(self):
-        self.data["point"][:] = [_UP + _LEFT, _DOWN + _LEFT, _UP + _RIGHT,
-                                 _DOWN + _RIGHT, _UP + _RIGHT, _DOWN + _LEFT]
-        self.data["im_coords"][:] = [
-            (0, 0), (0, 1), (1, 0), (1, 1), (1, 0), (0, 1)
-        ]
-        self.data["opacity"][:] = self.opacity
-        return self
-
-    def init_points(self):
-        self.set_width(2 * self.pixel_width / self.pixel_height, stretch=True)
-        self.set_height(self.height)
-        return self
+    # The constructor, init_data and init_points are installed by
+    # fmn_python.image_authoring.
 
     def set_opacity(self, opacity, recurse=True):
         values = _resize_with_interpolation(
@@ -6040,37 +5789,7 @@ class Line(TipableVMobject):
 
 
 class DashedLine(Line):
-    def __init__(
-        self,
-        start=_LEFT,
-        end=_RIGHT,
-        dash_length=0.05,
-        positive_space_ratio=0.5,
-        **kwargs,
-    ):
-        buff = float(kwargs.pop("buff", 0.0))
-        path_arc = kwargs.pop("path_arc", 0.0)
-        unknown = sorted(
-            set(kwargs) - _NATIVE_VMOBJECT_STYLE_KEYS - {"shading"}
-        )
-        _refuse_unrouted(
-            "DashedLine()", [(name, True) for name in unknown]
-        )
-        _install_live_state(self)
-        self.path_arc = float(path_arc)
-        self.buff = buff
-        self.set_start_and_end_attrs(start, end)
-        specs = self._build_dashed_line(
-            _native_shell_factory,
-            _vec3(self.start),
-            _vec3(self.end),
-            float(dash_length),
-            float(positive_space_ratio),
-            self.buff,
-            self.path_arc,
-        )
-        _hang_native_children(self, specs)
-        _apply_vmobject_style_kwargs(self, kwargs)
+    # The constructor is installed by fmn_python.derived_lines.
 
     def calculate_num_dashes(self, dash_length, positive_space_ratio):
         return self._calculate_dashed_line_num_dashes(
@@ -6102,71 +5821,14 @@ class DashedLine(Line):
 
 
 class TangentLine(Line):
-    def __init__(self, vmob, alpha, length=2, d_alpha=1e-6, **kwargs):
-        _install_live_state(self)
-        self.path_arc = 0.0
-        self.buff = 0.0
-        specs = self._build_tangent_line(
-            _native_shell_factory,
-            vmob,
-            float(alpha),
-            float(length),
-            float(d_alpha),
-        )
-        _hang_native_children(self, specs)
-        if self.has_points():
-            self.start = self.get_start().copy()
-            self.end = self.get_end().copy()
-        else:
-            self.start = _np.zeros(3)
-            self.end = _np.zeros(3)
-        _apply_vmobject_style_kwargs(self, kwargs)
+    # The constructor is installed by fmn_python.derived_lines.
+    pass
 
 
 class StrokeArrow(Line):
     """The pinned one-path stroke taper over Atlas's BN-03 geometry."""
 
-    def __init__(
-        self,
-        start,
-        end,
-        stroke_color=_StyleDefault(_DEFAULT_LIGHT_COLOR),
-        stroke_width=5,
-        buff=0.25,
-        tip_width_ratio=5,
-        tip_len_to_width=0.0075,
-        max_tip_length_to_length_ratio=0.3,
-        max_width_to_length_ratio=8.0,
-        **kwargs,
-    ):
-        _install_live_state(self)
-        self.path_arc = float(kwargs.pop("path_arc", 0.0))
-        self.buff = float(buff)
-        self.tip_width_ratio = float(tip_width_ratio)
-        self.tip_len_to_width = float(tip_len_to_width)
-        self.max_tip_length_to_length_ratio = float(
-            max_tip_length_to_length_ratio
-        )
-        self.max_width_to_length_ratio = float(max_width_to_length_ratio)
-        self.n_tip_points = 3
-        self.original_stroke_width = float(stroke_width)
-        self.set_start_and_end_attrs(start, end)
-        specs = self._build_stroke_arrow(
-            _native_shell_factory,
-            _vec3(self.start),
-            _vec3(self.end),
-            self.original_stroke_width,
-            self.buff,
-            self.path_arc,
-            self.tip_width_ratio,
-            self.tip_len_to_width,
-            self.max_tip_length_to_length_ratio,
-            self.max_width_to_length_ratio,
-        )
-        _hang_native_children(self, specs)
-        kwargs.setdefault("stroke_color", stroke_color)
-        kwargs.setdefault("stroke_width", stroke_width)
-        _apply_vmobject_style_kwargs(self, kwargs, recurse=False)
+    # The constructor is installed by fmn_python.arrow_geometry.
 
     def _replace_stroke_arrow_geometry(self, start, end, buff=0, path_arc=0):
         self._rebuild_stroke_arrow(
@@ -6227,50 +5889,7 @@ class StrokeArrow(Line):
 class Arrow(Line):
     tickness_multiplier = 0.015
 
-    def __init__(
-        self,
-        start=_LEFT,
-        end=_LEFT,
-        buff=0.25,
-        path_arc=0.0,
-        fill_color=_StyleDefault(_DEFAULT_LIGHT_COLOR),
-        fill_opacity=1.0,
-        stroke_width=0.0,
-        thickness=3.0,
-        tip_width_ratio=5,
-        tip_angle=_math.pi / 3,
-        max_tip_length_to_length_ratio=0.5,
-        max_width_to_length_ratio=0.1,
-        **kwargs,
-    ):
-        _install_live_state(self)
-        self.path_arc = float(path_arc)
-        self.buff = float(buff)
-        self.thickness = float(thickness)
-        self.tip_width_ratio = float(tip_width_ratio)
-        self.tip_angle = float(tip_angle)
-        self.max_tip_length_to_length_ratio = float(
-            max_tip_length_to_length_ratio
-        )
-        self.max_width_to_length_ratio = float(max_width_to_length_ratio)
-        self.set_start_and_end_attrs(start, end)
-        specs, self.tip_index = self._build_arrow(
-            _native_shell_factory,
-            _vec3(self.start),
-            _vec3(self.end),
-            self.buff,
-            self.path_arc,
-            self.thickness,
-            self.tip_width_ratio,
-            self.tip_angle,
-            self.max_tip_length_to_length_ratio,
-            self.max_width_to_length_ratio,
-        )
-        _hang_native_children(self, specs)
-        kwargs.setdefault("fill_color", fill_color)
-        kwargs.setdefault("fill_opacity", fill_opacity)
-        kwargs.setdefault("stroke_width", stroke_width)
-        _apply_vmobject_style_kwargs(self, kwargs)
+    # The constructor and set_points_by_ends are installed by fmn_python.arrow_geometry.
 
     def get_key_dimensions(self, length):
         return self._arrow_key_dimensions(
@@ -6281,36 +5900,6 @@ class Arrow(Line):
             self.max_tip_length_to_length_ratio,
             self.max_width_to_length_ratio,
         )
-
-    def set_points_by_ends(self, start, end, buff=0, path_arc=0):
-        start = _vec3(start)
-        end = _vec3(end)
-        style = self.get_style()
-        uniforms = self.uniforms.copy()
-        params = (
-            float(buff),
-            float(path_arc),
-            self.thickness,
-            self.tip_width_ratio,
-            self.tip_angle,
-            self.max_tip_length_to_length_ratio,
-            self.max_width_to_length_ratio,
-        )
-        if self._is_bound():
-            self.tip_index = self._rebuild_arrow(start, end, *params)
-        else:
-            specs, self.tip_index = self._build_arrow(
-                _native_shell_factory,
-                start,
-                end,
-                *params,
-            )
-            _hang_native_children(self, specs)
-        self.set_style(**style, recurse=False)
-        self.uniforms.update(uniforms)
-        self.start = _np.array(start)
-        self.end = _np.array(end)
-        return self
 
     def get_start(self):
         points = self.get_points()
@@ -6433,14 +6022,9 @@ class NumberLine(Line):
     MRO so `isinstance(line, Line)` matches the pinned class.
     """
 
-    def __init__(self, x_range=(-8, 8, 1), **kwargs):
-        _install_live_state(self)
-        _set_number_line_state(self, x_range, dict(kwargs))
-        specs = self._build_number_line(
-            _native_shell_factory, self.x_range, dict(kwargs)
-        )
-        _hang_native_children(self, specs)
-        _set_number_line_ticks(self)
+    # The constructor, get_tick_range and add_ticks are installed by
+    # fmn_python.number_line_lifecycle. add_numbers is installed by
+    # fmn_python.coordinate_mapping.
 
     # The coordinate mapping reads the proxy's LIVE line geometry (its own
     # first/last points), so a rescaled, moved, or even stretched line maps
@@ -6476,16 +6060,6 @@ class NumberLine(Line):
         # or moving the axis changes the unit size exactly as measured.
         return self.get_length() / (self.x_max - self.x_min)
 
-    def get_tick_range(self):
-        # Reference number_line.py:104: pure range arithmetic, ending at
-        # x_max unless the axis carries a tip that already occupies it.
-        if self._number_line_params[1].get("include_tip"):
-            tick_max = self.x_max
-        else:
-            tick_max = self.x_max + self.x_step
-        result = _np.arange(self.x_min, tick_max, self.x_step)
-        return result[result <= self.x_max]
-
     def get_tick(self, x, size=None):
         # Reference number_line.py:122 — a short Line, rotated onto the
         # axis, seated at n2p(x), and styled like the parent.
@@ -6496,18 +6070,6 @@ class NumberLine(Line):
         result.move_to(self.number_to_point(x))
         result.match_style(self)
         return result
-
-    def add_ticks(self):
-        ticks = VGroup()
-        big = _np.asarray(self.big_tick_numbers, dtype=float)
-        for x in self.get_tick_range():
-            size = self.tick_size
-            if big.size and _np.isclose(big, x).any():
-                size *= self.longer_tick_multiple
-            ticks.add(self.get_tick(x, size))
-        self.add(ticks)
-        self.ticks = ticks
-        return self
 
     def get_tick_marks(self):
         return self.ticks
@@ -6546,34 +6108,6 @@ class NumberLine(Line):
                 )
             num_mob.move_to(center)
         return num_mob
-
-    def add_numbers(self, x_values=None, excluding=None, font_size=24, **kwargs):
-        # The Reference forwards **kwargs to get_number_mobject; the native
-        # label builder owns the supported placement/precision overrides.
-        direction = kwargs.pop("direction", None)
-        buff = kwargs.pop("buff", None)
-        num_decimal_places = kwargs.pop("num_decimal_places", None)
-        _refuse_unrouted(
-            "NumberLine.add_numbers()",
-            [(name, True) for name in sorted(kwargs)],
-        )
-        x_range, config = self._number_line_params
-        specs = _BridgeMobject._number_line_label_shells(
-            _native_shell_factory,
-            x_range,
-            config,
-            float(font_size),
-            float(self.get_width()),
-            _vec3(self.get_center()),
-            None if x_values is None else [float(v) for v in x_values],
-            None if excluding is None else [float(v) for v in excluding],
-            None if direction is None else _vec3(direction),
-            None if buff is None else float(buff),
-            None if num_decimal_places is None else int(num_decimal_places),
-        )
-        _hang_native_children(self, specs)
-        self.numbers = self.submobjects[-1]
-        return self.numbers
 
 
 class UnitInterval(NumberLine):
@@ -6977,11 +6511,7 @@ class BarChart(VGroup):
         self.bars = bars
         self.bar_labels = bar_labels
 
-    def change_bar_values(self, values):
-        for bar, value in zip(self.bars, values):
-            bar_bottom = bar.get_bottom()
-            bar.stretch_to_fit_height((value / self.max_value) * self.height)
-            bar.move_to(bar_bottom, _DOWN)
+    # change_bar_values is installed by fmn_python.bar_chart.
 
 
 def _space_angle_of_vector(vector):
@@ -7127,59 +6657,12 @@ class CoordinateSystem(_abc.ABC):
         graph.underlying_function = function
         return graph
 
-    def input_to_graph_point(self, x, graph):
-        if hasattr(graph, "underlying_function"):
-            return self.coords_to_point(x, graph.underlying_function(x))
-        alpha = _binary_search(
-            function=lambda value: self.point_to_coords(
-                graph.quick_point_from_proportion(value)
-            )[0],
-            target=x,
-            lower_bound=self.x_range[0],
-            upper_bound=self.x_range[1],
-        )
-        if alpha is None:
-            return None
-        return graph.quick_point_from_proportion(alpha)
+    # input_to_graph_point and bind_graph_to_func are installed by fmn_python.graphing.
+    # get_riemann_rectangles and get_area_under_graph are installed by
+    # fmn_python.calculus.
 
     def i2gp(self, x, graph):
         return self.input_to_graph_point(x, graph)
-
-    def bind_graph_to_func(
-        self,
-        graph,
-        func,
-        jagged=False,
-        get_discontinuities=None,
-    ):
-        x_values = _np.array(
-            [
-                _axis_point_to_number(
-                    self.x_axis,
-                    self.x_range[0],
-                    self.x_range[1],
-                    point,
-                )
-                for point in graph.get_points()
-            ]
-        )
-
-        def get_graph_points():
-            xs = x_values
-            if get_discontinuities:
-                epsilon = 1e-6
-                added_xs = [
-                    value
-                    for discontinuity in get_discontinuities()
-                    for value in (discontinuity - epsilon, discontinuity + epsilon)
-                ]
-                xs[:] = sorted([*x_values, *added_xs])[: len(x_values)]
-            return self.c2p(xs, func(xs))
-
-        graph.add_updater(lambda current: current.set_points_as_corners(get_graph_points()))
-        if not jagged:
-            graph.add_updater(lambda current: current.make_smooth(approx=True))
-        return graph
 
     def get_z_axis(self):
         return self.get_axis(2)
@@ -7312,146 +6795,14 @@ class CoordinateSystem(_abc.ABC):
         line.move_to(self.input_to_graph_point(x, graph))
         return line
 
-    def get_riemann_rectangles(
-        self,
-        graph,
-        x_range=None,
-        dx=None,
-        input_sample_type="left",
-        stroke_width=1,
-        stroke_color=None,
-        fill_opacity=1,
-        colors=(_BLUE, _GREEN),
-        negative_color=None,
-        stroke_background=True,
-        show_signed_area=True,
-    ):
-        del show_signed_area  # accepted for signature fidelity
-        if stroke_color is None:
-            stroke_color = _BLACK
-        if negative_color is None:
-            negative_color = _RED
-        if x_range is None:
-            x_range = self.x_range[:2]
-        if dx is None:
-            dx = self.x_range[2]
-        if len(x_range) < 3:
-            x_range = [*x_range, dx]
-        rects = []
-        xs = _np.arange(x_range[0], x_range[1] + dx, x_range[2])
-        for x0, x1 in zip(xs, xs[1:]):
-            if input_sample_type == "left":
-                sample = x0
-            elif input_sample_type == "right":
-                sample = x1
-            elif input_sample_type == "center":
-                sample = 0.5 * x0 + 0.5 * x1
-            else:
-                raise ValueError(
-                    "get_riemann_rectangles input_sample_type must be "
-                    "left, right, or center"
-                )
-            height_vect = self.i2gp(sample, graph) - self.c2p(sample, 0)
-            rect = Rectangle(
-                width=_axis_number_to_point(
-                    self.x_axis, self.x_range[0], self.x_range[1], float(x1)
-                )[0]
-                - _axis_number_to_point(
-                    self.x_axis, self.x_range[0], self.x_range[1], float(x0)
-                )[0],
-                height=_space_get_norm(height_vect),
-            )
-            rect.positive = bool(height_vect[1] > 0)
-            rect.move_to(self.c2p(float(x0), 0), _DL if rect.positive else _UL)
-            rects.append(rect)
-        result = VGroup(*rects)
-        result.set_submobject_colors_by_gradient(*colors)
-        result.set_style(
-            stroke_width=stroke_width,
-            stroke_color=stroke_color,
-            fill_opacity=fill_opacity,
-            stroke_behind=stroke_background,
-        )
-        for rect in result:
-            if not rect.positive:
-                rect.set_fill(negative_color)
-        return result
-
-    def get_area_under_graph(self, graph, x_range=None, fill_color=None, fill_opacity=0.5):
-        if fill_color is None:
-            fill_color = _BLUE
-        if x_range is None:
-            x_range = [
-                self.x_axis.p2n(graph.get_start()),
-                self.x_axis.p2n(graph.get_end()),
-            ]
-        alpha_bounds = [
-            inverse_interpolate(*graph.x_range[:2], x)
-            for x in x_range
-        ]
-        sub_graph = graph.copy()
-        sub_graph.clear_updaters()
-        sub_graph.pointwise_become_partial(graph, *alpha_bounds)
-        sub_graph.add_line_to(self.c2p(x_range[1], 0))
-        sub_graph.add_line_to(self.c2p(x_range[0], 0))
-        sub_graph.add_line_to(sub_graph.get_start())
-        sub_graph.set_stroke(width=0)
-        sub_graph.set_fill(fill_color, fill_opacity)
-        return sub_graph
-
 
 class Axes(VGroup, CoordinateSystem):
     default_axis_config = dict()
     default_x_axis_config = dict()
     default_y_axis_config = dict(line_to_number_direction=_LEFT)
 
-    def __init__(
-        self,
-        x_range=(-8.0, 8.0, 1.0),
-        y_range=(-4.0, 4.0, 1.0),
-        axis_config=None,
-        x_axis_config=None,
-        y_axis_config=None,
-        height=None,
-        width=None,
-        unit_size=1.0,
-        **kwargs,
-    ):
-        # The one remaining Reference keyword configures graph sampling
-        # (`get_graph`), not built geometry; it is stored for that binding.
-        self.num_sampled_graph_points_per_tick = kwargs.pop(
-            "num_sampled_graph_points_per_tick", 5
-        )
-        if kwargs:
-            raise TypeError(
-                "Axes() got unexpected keyword arguments: "
-                + ", ".join(sorted(kwargs))
-            )
-        _install_live_state(self)
-        self._axes_params = (
-            tuple(float(v) for v in _FULL_RANGE_SPECIFIER(x_range)),
-            tuple(float(v) for v in _FULL_RANGE_SPECIFIER(y_range)),
-            dict(axis_config or {}),
-            dict(x_axis_config or {}),
-            dict(y_axis_config or {}),
-            None if height is None else float(height),
-            None if width is None else float(width),
-            float(unit_size),
-        )
-        specs = self._build_axes(_native_shell_factory, *self._axes_params)
-        _hang_native_children(self, specs)
-        self.x_axis, self.y_axis = _adopt_native_axes(
-            self, self._axes_params[2], self._axes_params[7], (
-                (self.submobjects[0], self._axes_params[0],
-                 self.default_x_axis_config, self._axes_params[3]),
-                (self.submobjects[1], self._axes_params[1],
-                 self.default_y_axis_config, self._axes_params[4]),
-            ),
-        )
-        self.axes = VGroup(self.x_axis, self.y_axis)
-        self.x_range = self._axes_params[0]
-        self.y_range = self._axes_params[1]
-        self.dimension = 2
+    # The constructor is installed by fmn_python.coordinate_lifecycle.
+    # add_coordinate_labels is installed by fmn_python.coordinate_mapping.
 
     def get_axes(self):
         return self.axes
@@ -7508,39 +6859,6 @@ class Axes(VGroup, CoordinateSystem):
 
     def get_origin(self):
         return self.c2p(*[0] * self.dimension)
-
-    def add_coordinate_labels(self, x_values=None, y_values=None, excluding=(0,), **kwargs):
-        font_size = kwargs.pop("font_size", None)
-        if kwargs:
-            raise TypeError(
-                "add_coordinate_labels() got unexpected keyword arguments: "
-                + ", ".join(sorted(kwargs))
-            )
-        (x_range, y_range, axis_config, x_axis_config, y_axis_config, _h, _w, unit) = (
-            self._axes_params
-        )
-        x_specs, y_specs = _BridgeMobject._axes_label_shells(
-            _native_shell_factory,
-            x_range,
-            y_range,
-            axis_config,
-            x_axis_config,
-            y_axis_config,
-            unit,
-            float(self.get_width()),
-            float(self.get_height()),
-            _vec3(self.get_center()),
-            None if x_values is None else [float(v) for v in x_values],
-            None if y_values is None else [float(v) for v in y_values],
-            [float(v) for v in excluding],
-            None if font_size is None else float(font_size),
-        )
-        _hang_native_children(self.x_axis, x_specs)
-        _hang_native_children(self.y_axis, y_specs)
-        # coordinate_systems.py:520 keeps both axes' number groups and
-        # returns them, not the axes.
-        self.coordinate_labels = VGroup(self.x_axis.numbers, self.y_axis.numbers)
-        return self.coordinate_labels
 
 
 class ThreeDAxes(Axes):
