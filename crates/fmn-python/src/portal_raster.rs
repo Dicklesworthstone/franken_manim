@@ -783,7 +783,7 @@ mod tests {
         let pixels = resource.shared_pixels();
         let baseline = std::sync::Arc::weak_count(&pixels);
         let receipt = super::PortalImageInput::embedded(&resource);
-        let history = vec![receipt.clone(), receipt];
+        let history = [receipt.clone(), receipt];
         assert_eq!(std::sync::Arc::weak_count(&pixels), baseline);
         assert!(history[0].same_input(&history[1]));
         let independently_baked = fmn_mobject::ImageResource::rgba8(
