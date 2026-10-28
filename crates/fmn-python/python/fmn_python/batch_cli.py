@@ -94,10 +94,7 @@ def try_batch_cli(native: Any, arguments: list[str]) -> int | None:
     if any(count > 1 for count in flags.values()):
         return native._portal_cli_emit(2, "usage", "usage-error", "batch switches must not be repeated", robot)
     if help_only:
-        text = native._portal_cli_help().replace(
-            "Certified output, opener flags, write-all, and Studio",
-            "Certified output, opener flags, and Studio",
-        ) + "\n\n" + _BATCH_HELP + "\n" + PLAYBACK_HELP
+        text = native._portal_cli_help() + "\n\n" + _BATCH_HELP + "\n" + PLAYBACK_HELP
         if robot:
             return native._portal_cli_emit(0, "success", "help", "fmn-python usage", True, help=text)
         print(text)

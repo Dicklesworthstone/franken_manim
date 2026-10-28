@@ -273,10 +273,7 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
         return native._portal_cli_emit(2, "usage", "usage-error", "render switches must not be repeated", robot)
     if ((not raw_positionals and native_options in (["--help"], ["-h"]))
             or (job_files and {"--help", "-h"}.intersection(switches))):
-        text = native._portal_cli_help().replace(
-            "Certified output, opener flags, write-all, and Studio",
-            "Certified output, opener flags, and Studio",
-        ).replace("Certified output, opener flags, and Studio", "Certified output and opener flags")
+        text = native._portal_cli_help()
         from .studio import _HELP as _STUDIO_HELP
         text += "\n\n" + _BATCH_HELP + "\n" + _SELECTION_HELP + "\n" + PLAYBACK_HELP + "\n" + _OUTPUT_HELP + "\n" + SUBDIVISION_HELP + "\n" + PAIRED_HELP + "\n" + CHECKPOINT_HELP + "\n" + _STUDIO_HELP
         text += "\n" + VIDEO_HELP + "\n" + PARALLEL_HELP + "\n" + _REFERENCE_HELP + "\n" + JOBS_FILE_HELP
