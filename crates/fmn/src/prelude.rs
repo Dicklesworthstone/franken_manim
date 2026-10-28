@@ -71,8 +71,9 @@ pub use fmn_library::{
     VMobject, VPrism, VStyle, VectorField, VectorFieldMobject, VectorFieldStyle,
     background_rectangle, checkmark, cross, curved_arrow, curved_double_arrow,
     curves_as_submobjects, dashed_vmobject, exmark, glow_dot, glow_dots, group, line_brace,
-    p_group, polyline, rounded_rectangle, sector, small_dot, svg_document_mobject, svg_mobject,
-    tangent_line, triangle, true_dot, underline, v_group, v_highlight, vector, vectorized_point,
+    p_group, polyline, rounded_rectangle, sector, small_dot, svg_document_for_size,
+    svg_document_for_size_with_tolerance, svg_document_mobject, svg_mobject, tangent_line,
+    triangle, true_dot, underline, v_group, v_highlight, vector, vectorized_point,
     vmobject_from_svg_path,
 };
 pub use fmn_mobject::{

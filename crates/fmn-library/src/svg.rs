@@ -37,6 +37,9 @@ use fmn_geom::svg::{Paint, SvgShape, SvgStyle};
 // depending on the geometry kernel directly.
 pub use fmn_geom::svg::{SvgDocument, SvgError, SvgLimits, named_color};
 
+/// The shared cubic-reduction bound in scene units at the canonical frame.
+pub const DEFAULT_SVG_SCENE_TOLERANCE: f64 = fmn_geom::cubic::DEFAULT_TOLERANCE_SCENE;
+
 use crate::style::Style;
 use crate::vmobject::{VMobject, v_group};
 
@@ -78,6 +81,104 @@ pub fn svg_reference_frame(family: VMobject) -> VMobject {
 pub fn svg_mobject(bytes: &[u8]) -> Result<VMobject, SvgError> {
     let document = SvgDocument::parse(bytes)?;
     Ok(svg_document_mobject(&document))
+}
+
+/// Parse an SVG whose native family will subsequently be resized to `height`,
+/// then `width`, preserving the shared converter's default scene-unit bound.
+///
+/// Coordinates and paint widths are still in the SVG viewport. This function
+/// only selects subdivision density; callers keep their usual framing,
+/// authored assembly hooks, and final resizing order. A width takes precedence
+/// over height for a nondegenerate family, as in `SVGMobject`.
+///
+/// The native paint family's actual point bounds determine the normalization
+/// scale. If reduction changes those bounds, bounded refinement checks the new
+/// scale before returning. There is no geometry cache or size-independent
+/// approximation to reuse accidentally. Later authored geometry changes or
+/// additional scaling require their own tolerance decision.
+///
+/// # Errors
+/// Invalid sizes, the ordinary bounded SVG/paint refusals, or an error bound
+/// that cannot be represented or reached within eight refinement passes.
+pub fn svg_document_for_size(
+    bytes: &[u8],
+    height: Option<f64>,
+    width: Option<f64>,
+) -> Result<SvgDocument, SvgPaintError> {
+    svg_document_for_size_with_tolerance(bytes, height, width, DEFAULT_SVG_SCENE_TOLERANCE)
+}
+
+/// [`svg_document_for_size`] with an explicit final scene-unit error budget.
+/// A consumer can reserve part of its budget for subsequent record conversion.
+/// With no requested dimensions, the ordinary viewport tolerance applies.
+///
+/// # Errors
+/// The same refusals as [`svg_document_for_size`], plus a nonpositive or
+/// nonfinite scene tolerance.
+pub fn svg_document_for_size_with_tolerance(
+    bytes: &[u8],
+    height: Option<f64>,
+    width: Option<f64>,
+    scene_tolerance: f64,
+) -> Result<SvgDocument, SvgPaintError> {
+    if !scene_tolerance.is_finite() || scene_tolerance <= 0.0 {
+        return Err(SvgPaintError::Geometry(
+            fmn_geom::GeomError::InvalidTolerance,
+        ));
+    }
+    for size in [height, width].into_iter().flatten() {
+        if !size.is_finite() || size <= 0.0 || size > f64::from(f32::MAX) {
+            return Err(SvgPaintError::Invalid(
+                "requested size must be positive, finite and f32-representable",
+            ));
+        }
+    }
+    let limits = SvgLimits::default();
+    let mut tolerance = fmn_geom::svg::DEFAULT_SVG_TOLERANCE;
+    for _ in 0..8 {
+        let document = SvgDocument::parse_with_tolerance(bytes, &limits, tolerance)
+            .map_err(SvgPaintError::Document)?;
+        if height.is_none() && width.is_none() {
+            return Ok(document);
+        }
+        let family = svg_document_with_paints(&document, SvgPaintOverrides::default())?;
+        let Some((min, max)) = family.extent() else {
+            return Ok(document);
+        };
+        let span_x = max[0] - min[0];
+        let span_y = max[1] - min[1];
+        if !span_x.is_finite() || !span_y.is_finite() {
+            return Err(SvgPaintError::Invalid("nonfinite normalization bounds"));
+        }
+        let scale = if let Some(width) = width.filter(|_| span_x > 0.0) {
+            width / span_x
+        } else if let Some(height) = height.filter(|_| span_y > 0.0) {
+            height / span_y
+        } else {
+            // Rescaling an empty axis is the positional API's no-op.
+            1.0
+        };
+        if !scale.is_finite() || scale <= 0.0 {
+            return Err(SvgPaintError::Invalid(
+                "unrepresentable normalization scale",
+            ));
+        }
+        let desired = scene_tolerance / scale;
+        if tolerance <= desired {
+            return Ok(document);
+        }
+        // Leave room for the new approximation's changed control bounds.
+        // Recheck rather than assuming those bounds remain unchanged.
+        tolerance = 0.5 * desired;
+        if tolerance <= 0.0 || !tolerance.is_finite() {
+            return Err(SvgPaintError::Geometry(
+                fmn_geom::GeomError::ToleranceUnreachable { needed: usize::MAX },
+            ));
+        }
+    }
+    Err(SvgPaintError::Geometry(
+        fmn_geom::GeomError::ToleranceUnreachable { needed: usize::MAX },
+    ))
 }
 
 /// `VMobjectFromSVGPath`: one SVG path-data string (`d`) as a VMobject in

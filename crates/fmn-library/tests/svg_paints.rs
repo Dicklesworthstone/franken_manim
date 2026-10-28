@@ -174,3 +174,112 @@ fn dense_source_paths_do_not_duplicate_all_collapsed_points_for_every_dash() {
         assert!((piece.path().unwrap().get_arc_length() - 1.).abs() < 1e-8);
     }
 }
+
+fn cubic_svg(size: f64) -> String {
+    format!(
+        r#"<svg viewBox="0 0 {size} {size}"><path d="M0 0C{size} 0 0 {size} {size} {size}"/></svg>"#
+    )
+}
+
+fn normalized_cubic_error(
+    source_size: f64,
+    height: Option<f64>,
+    width: Option<f64>,
+) -> (usize, f64) {
+    let document =
+        fmn_library::svg::svg_document_for_size(cubic_svg(source_size).as_bytes(), height, width)
+            .unwrap();
+    let family =
+        fmn_library::svg::svg_document_with_paints(&document, SvgPaintOverrides::default())
+            .unwrap();
+    let (min, max) = family.extent().unwrap();
+    let span_x = max[0] - min[0];
+    let span_y = max[1] - min[1];
+    assert!((span_x - source_size).abs() < 1e-10);
+    assert!((span_y - source_size).abs() < 1e-10);
+    let final_size = width.or(height).unwrap();
+    let scale = final_size / source_size;
+    let path = &document.shapes[0].path;
+    let count = path.num_curves();
+    let mut max_error: f64 = 0.0;
+    for sample in 0..=8192 {
+        let t = f64::from(sample) / 8192.0;
+        let curve = (t * count as f64).floor() as usize;
+        let curve = curve.min(count - 1);
+        let local = t * count as f64 - curve as f64;
+        let actual = path.nth_curve_point(curve, local).unwrap();
+        let expected = [
+            final_size * (3.0 * t - 6.0 * t * t + 4.0 * t * t * t),
+            final_size * (3.0 * t * t - 2.0 * t * t * t),
+        ];
+        let x = actual[0] * scale - expected[0];
+        let y = actual[1] * scale - expected[1];
+        max_error = max_error.max((x * x + y * y).sqrt());
+    }
+    (count, max_error)
+}
+
+#[test]
+fn small_and_large_viewboxes_preserve_the_scene_space_cubic_bound() {
+    let tolerance = fmn_geom::cubic::DEFAULT_TOLERANCE_SCENE;
+    for source_size in [16.0, 1000.0] {
+        let (_, error) = normalized_cubic_error(source_size, Some(4.0), None);
+        assert!(
+            error <= tolerance,
+            "viewBox {source_size}: {error} > {tolerance}"
+        );
+        let (_, error) = normalized_cubic_error(source_size, Some(4.0), Some(9.0));
+        assert!(
+            error <= tolerance,
+            "width normalization {source_size}: {error} > {tolerance}"
+        );
+    }
+    let plain = fmn_library::svg::SvgDocument::parse(cubic_svg(16.0).as_bytes()).unwrap();
+    let (refined_count, _) = normalized_cubic_error(16.0, Some(4.0), None);
+    assert!(refined_count > plain.shapes[0].path.num_curves());
+}
+
+#[test]
+fn sized_svg_import_handles_empty_and_degenerate_axes_without_inventing_geometry() {
+    use fmn_library::svg::{SvgDocument, svg_document_for_size};
+    let empty = svg_document_for_size(b"<svg/>", Some(4.0), Some(8.0)).unwrap();
+    assert!(empty.shapes.is_empty());
+    let line = br#"<svg><path d="M0 0H16"/></svg>"#;
+    let sized = svg_document_for_size(line, Some(4.0), None).unwrap();
+    assert_eq!(
+        sized.shapes[0].path.points(),
+        SvgDocument::parse(line).unwrap().shapes[0].path.points()
+    );
+    let source = cubic_svg(16.0);
+    let original_size = svg_document_for_size(source.as_bytes(), None, None).unwrap();
+    assert_eq!(
+        original_size.shapes[0].path.points(),
+        SvgDocument::parse(source.as_bytes()).unwrap().shapes[0]
+            .path
+            .points()
+    );
+}
+
+#[test]
+fn sized_svg_import_refuses_invalid_or_unreachable_size_by_name() {
+    use fmn_library::svg::{SvgPaintError, svg_document_for_size};
+    let source = cubic_svg(16.0);
+    for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::MAX] {
+        assert!(matches!(
+            svg_document_for_size(source.as_bytes(), Some(invalid), None),
+            Err(SvgPaintError::Invalid(_))
+        ));
+        assert!(matches!(
+            svg_document_for_size(source.as_bytes(), None, Some(invalid)),
+            Err(SvgPaintError::Invalid(_))
+        ));
+    }
+    assert!(matches!(
+        svg_document_for_size(source.as_bytes(), Some(1e38), None),
+        Err(SvgPaintError::Document(
+            fmn_library::svg::SvgError::Geometry {
+                source: fmn_geom::GeomError::ToleranceUnreachable { .. }
+            }
+        ))
+    ));
+}

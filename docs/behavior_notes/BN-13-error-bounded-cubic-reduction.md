@@ -14,7 +14,7 @@ take a one-quadratic shortcut. The selected mechanism changes point counts
 and can move the curve by several output pixels.
 
 FrankenManim has one cubic-to-quadratic converter for API cubics, smoothing,
-and future SVG ingestion. It emits a C1 quadratic spline and proves the
+and SVG ingestion. It emits a C1 quadratic spline and proves the
 parameter-matched deviation of every piece from the source cubic using a
 Bernstein convex-hull bound. The default is **0.1 output pixel**, expressed
 as `0.1 / 135` scene units at the canonical 1920-pixel frame. Callers that
@@ -25,6 +25,49 @@ The `use_simple_quadratic_approx` compatibility setting is accepted, but it
 cannot bypass the bound. The audited converter emits one quadratic for
 effectively quadratic input when that preserves both the bound and
 shared-anchor encoding; otherwise fidelity wins over the old shortcut.
+
+## SVG coordinates and final size
+
+SVG cubic reduction measures its default 0.1-unit bound in the resolved
+viewport, after the root viewBox, element transforms, nested viewports and
+`use` placements. The importer divides the requested viewport tolerance by
+a conservative maximum singular value of each full affine cascade before
+calling the same converter. An anisotropic scale or skew can no longer
+magnify a path-local approximation error beyond that bound.
+Nonidentity transforms reserve part of the budget for publishing transformed
+f64 controls. Very large coordinate offsets that cannot preserve the bound
+refuse instead of silently losing precision in the affine operation.
+
+`SVGMobject` supplies its pending height and width to the native importer.
+The native paint family's actual point bounds determine the later uniform
+scale, including width's precedence when both dimensions are set. Bounded
+refinement checks those bounds again after subdivision changes them; the
+returned cubics retain the canonical `0.1 / 135` scene-unit bound after
+ordinary constructor normalization. Empty axes keep the existing no-op
+resizing semantics. Invalid sizes, unrepresentable scales, converter limits
+and the aggregate SVG point budget produce named refusals.
+
+The Python portal reserves half the scene-space budget for native f32
+records. Admission checks the initial records, the mandatory materialization
+after `flip(RIGHT)` during orientation inspection, and a later writable
+`get_points()` materialization after centering and sizing. Each phase must
+preserve shared-anchor path topology. Normalization uses the actual rounded
+family bounds; a requested scale below the positional API's per-call minimum
+also refuses, including a small width fit after a very large height fit.
+Unsized constructors retain the viewport-space approximation contract and
+still check finite records and topology through ordinary flipping, centering
+and writable-record access. Raw factory calls keep their returned parts in
+viewport coordinates and check only the initial records. Excessive
+offsets or requested dimensions can therefore produce a precision refusal;
+reducing those values lets the caller preserve the stated bound.
+
+Rust callers can use `svg_document_for_size` before their usual framing and
+resizing, or `SvgDocument::parse_with_tolerance` for a known output-space
+tolerance. Neither path caches an approximation independently of its size.
+Authored assembly hooks still execute once and own their geometry; arbitrary
+later edits or rescaling require a new tolerance decision. The cubic bound
+does not replace BN-09's circle/ellipse primitive density or claim an exact
+elliptical-arc-to-cubic conversion.
 
 ## Migration guidance
 
@@ -64,6 +107,10 @@ its approximation (measured 2026-10-21, fm-4ptw).
 
 ## Evidence
 
+- `crates/fmn-geom/tests/svg.rs`, `crates/fmn-library/tests/svg_paints.rs`,
+  and `crates/fmn-python/tests/svg_lifecycle.py`: transformed cubic bounds,
+  equivalent 16/1000-unit viewBoxes normalized to one scene size, budget
+  refusals and authored-hook lifecycle witnesses.
 - `crates/fmn-geom/src/cubic.rs`: the construction, proof, deterministic
   subdivision, degenerate handling, property tests, and bit-locked fixture
   corpus.

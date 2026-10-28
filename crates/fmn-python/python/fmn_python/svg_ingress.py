@@ -206,7 +206,8 @@ def install_svg_ingress(native):
             source = vars(self)["svg_string"]
         else:
             source = self.file_name_to_svg_string(file_name)
-        return _reclass_children(g, self, tag(builder(self, factory, source, {})))
+        size = vars(self).get("_fmn_svg_import_size", {})
+        return _reclass_children(g, self, tag(builder(self, factory, source, size)))
 
     old_init = Svg.__init__
     init_signature = inspect.signature(old_init)
@@ -250,7 +251,18 @@ def install_svg_ingress(native):
             # Do not install a replacement tree over init_data-owned columns
             # or children. Both public assembly hooks produce the real family.
             g["_init_native_vmobject"](self, options)
-            self.init_svg_mobject()
+            # Inform the native converter about the normalization that follows
+            # assembly. Authored hooks still run once and own their geometry.
+            self._fmn_svg_import_size = {"height": height, "width": width}
+            # Keep authored truthiness at its established place below.
+            # Unknown boolean-like values take conservative native admission
+            # for both centering choices.
+            if type(p["should_center"]) is bool:
+                self._fmn_svg_import_size["should_center"] = p["should_center"]
+            try:
+                self.init_svg_mobject()
+            finally:
+                vars(self).pop("_fmn_svg_import_size", None)
             self.flip(g["_RIGHT"])
             # Reference svg_mobject.py:100, after generate_mobject's flip: every
             # clockwise path turns counter-clockwise (fm-hc78).
@@ -272,7 +284,8 @@ def install_svg_ingress(native):
         # This API returns detached shapes; it must not replace the receiver's
         # nursery as the former native-builder call on self did.
         root = VM()
-        specs = _reclass_children(g, root, tag(builder(root, g["_native_shell_factory"], svg_string, {})))
+        size = vars(self).get("_fmn_svg_import_size", {})
+        specs = _reclass_children(g, root, tag(builder(root, g["_native_shell_factory"], svg_string, size)))
         g["_hang_native_children"](root, specs)
         result = list(root.submobjects)
         root.remove(*result)
