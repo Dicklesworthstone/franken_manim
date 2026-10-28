@@ -15328,7 +15328,8 @@ def verify_portal_console_scene():
     try:
         manimlib.ImageMobject(str(source))
     except ValueError as error:
-        assert "not a recognized image" in str(error)
+        # The governed media boundary's named refusal (a8870cc0).
+        assert "unrecognized raster image" in str(error), error
     else:
         raise AssertionError("ImageMobject accepted non-image bytes")
 
