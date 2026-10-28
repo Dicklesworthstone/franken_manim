@@ -537,6 +537,33 @@ impl QuadPath {
         Ok(self)
     }
 
+    /// Append an authored quadratic, keeping a handle that is distinct from
+    /// the last anchor however close it lies. Unlike
+    /// [`Self::add_quadratic_bezier_curve_to`], a handle inside the
+    /// point-equality tolerance stays real curve data, so a near-stationary
+    /// start keeps its tangent and parametrization. Only an exactly coincident
+    /// handle moves to the segment midpoint, because `[anchor, anchor, ...]`
+    /// is the shared-anchor encoding's subpath-break marker. Importers use
+    /// this; projection repair later restores a representable separation.
+    pub fn add_authored_quadratic_bezier_curve_to(
+        &mut self,
+        handle: Vec3,
+        anchor: Vec3,
+    ) -> Result<&mut Self, GeomError> {
+        let last = self.last_point().ok_or(GeomError::EmptyPath)?;
+        if self.consider_points_equal(last, anchor) {
+            return Ok(self);
+        }
+        let handle = if handle == last {
+            space_ops::midpoint(handle, anchor)
+        } else {
+            handle
+        };
+        self.points.push(handle);
+        self.points.push(anchor);
+        Ok(self)
+    }
+
     /// `add_cubic_bezier_curve_to`: reduce the cubic at the G0-2 canonical
     /// 1080p tolerance and append it.
     pub fn add_cubic_bezier_curve_to(
@@ -1488,6 +1515,43 @@ mod tests {
         } else {
             value.next_down()
         })
+    }
+
+    #[test]
+    fn authored_quadratics_keep_tiny_handles_and_split_only_exact_ones() {
+        let start = [0.0, 0.0, 0.0];
+        let end = [1.0, 1.0, 0.0];
+        for offset in [1e-30, 1e-12, 1e-8] {
+            let handle = [offset, 0.0, 0.0];
+            let mut authored = QuadPath::new();
+            authored.start_new_path(start);
+            authored
+                .add_authored_quadratic_bezier_curve_to(handle, end)
+                .unwrap();
+            assert_eq!(authored.points(), &[start, handle, end], "{offset}");
+            assert_eq!(authored.subpath_end_indices(), vec![2], "{offset}");
+        }
+        // The Reference-faithful builder still moves a handle inside the
+        // point-equality tolerance onto the chord midpoint.
+        let mut reference = QuadPath::new();
+        reference.start_new_path(start);
+        reference
+            .add_quadratic_bezier_curve_to([1e-30, 0.0, 0.0], end, false)
+            .unwrap();
+        assert_eq!(reference.points()[1], [0.5, 0.5, 0.0]);
+        // An exactly coincident handle would encode a subpath break.
+        let mut exact = QuadPath::new();
+        exact.start_new_path(start);
+        exact
+            .add_authored_quadratic_bezier_curve_to(start, end)
+            .unwrap();
+        assert_eq!(exact.points()[1], [0.5, 0.5, 0.0]);
+        // A null curve is skipped exactly as add_quadratic_bezier_curve_to does.
+        let mut null = QuadPath::new();
+        null.start_new_path(start);
+        null.add_authored_quadratic_bezier_curve_to(end, start)
+            .unwrap();
+        assert_eq!(null.points(), &[start]);
     }
 
     #[test]

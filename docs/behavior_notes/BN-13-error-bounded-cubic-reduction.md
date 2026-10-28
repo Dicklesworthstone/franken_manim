@@ -69,7 +69,16 @@ charges the repair against its reserved affine budget. The portal installs
 a repaired f32 candidate before constructor hooks, then compares its complete
 normalization with the untouched original family; the repair consumes the
 same record-error budget. This includes cancellation during f64 placement
-as well as f32 materialization. Six bounded repair attempts cover changing
+as well as f32 materialization.
+
+SVG quadratics (`Q`, `q`, `T`, `t`) keep an authored handle that lies within
+the point-equality tolerance of its start anchor. The Reference's
+`add_quadratic_bezier_curve_to` moves such a handle to the chord midpoint.
+That keeps the straight segment but changes its parametrization from a
+stationary start to uniform speed, which partial-curve animations show. Only
+an exactly coincident handle still takes the midpoint, because
+`[anchor, anchor, ...]` encodes a subpath break. The programmatic
+`add_quadratic_bezier_curve_to` keeps the Reference's rule. Six bounded repair attempts cover changing
 family bounds without an unbounded refinement loop. Unsized representation
 repairs have a separate raw-viewport displacement cap; they do not imply an
 error guarantee for later arbitrary authored scaling.

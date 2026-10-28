@@ -1753,8 +1753,10 @@ impl PathSink<'_> {
     }
 
     fn quad_to(&mut self, hx: f64, hy: f64, x: f64, y: f64) -> Result<(), SvgError> {
+        // An authored handle is curve data even when it lies within the
+        // point-equality tolerance of the start anchor (BN-13).
         self.path
-            .add_quadratic_bezier_curve_to([hx, hy, 0.0], [x, y, 0.0], false)
+            .add_authored_quadratic_bezier_curve_to([hx, hy, 0.0], [x, y, 0.0])
             .map_err(geom)?;
         Ok(())
     }
@@ -3290,6 +3292,27 @@ mod tests {
         let mid = path.nth_curve_point(n / 2, 0.5).expect("point");
         let r = (mid[0] * mid[0] + mid[1] * mid[1]).sqrt();
         assert!((r - 1.0).abs() < 0.01, "midpoint radius {r}");
+    }
+
+    #[test]
+    fn tiny_quadratic_handles_stay_authored() {
+        for data in ["M0 0Q1e-30 0 1 1", "M0 0q1e-30 0 1 1"] {
+            let mut commands = 0usize;
+            let path = parse_path_data(
+                data,
+                1,
+                &mut commands,
+                1 << 10,
+                DEFAULT_SVG_TOLERANCE,
+                1 << 20,
+            )
+            .expect("quadratic parses");
+            assert_eq!(
+                path.points(),
+                &[[0.0, 0.0, 0.0], [1e-30, 0.0, 0.0], [1.0, 1.0, 0.0]],
+                "{data}"
+            );
+        }
     }
 
     #[test]
