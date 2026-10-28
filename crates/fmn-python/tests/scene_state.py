@@ -428,6 +428,7 @@ def rendered_restore():
 def numeric_history_restores_values_and_rendered_glyphs():
     scene = m.Scene()
     scene.camera.reset_pixel_shape(160, 90)
+    frame, core = scene.frame, scene.frame._core
     number = m.DecimalNumber(1.25)
     scene.add(number)
     def pixels():
@@ -437,17 +438,55 @@ def numeric_history_restores_values_and_rendered_glyphs():
     number.set_value(99)
     edited = pixels()
     assert original != edited
-    for _ in range(2):
+    for _ in range(4):
         scene.undo()
         close(number.get_value(), 1.25)
         assert number.num_string == "1.25" and pixels() == original
         scene.redo()
         close(number.get_value(), 99)
         assert number.num_string == "99.00" and pixels() == edited
+        # A camera helper allocated in an earlier history generation can
+        # occupy a restored glyph's handle. Copies must resolve every source
+        # through the restored family identities, including after repeated
+        # undo/redo, rather than treating a glyph as that old camera helper.
+        copied = number.copy()
+        assert [type(mob) for mob in copied.get_family()] == [type(mob) for mob in number.get_family()]
+        for live, saved in zip(number.get_family(), copied.get_family()):
+            np.testing.assert_array_equal(live.get_points(), saved.get_points())
+        camera_copy = frame.copy()
+        assert camera_copy._core is not core
+        camera_copy.shift(m.RIGHT)
+        close(frame.get_center(), m.ORIGIN)
+        assert scene.frame is frame and frame._core is core and frame.get_num_points() == 5
     scene.undo()
     number.increment_value(.75)
     close(number.get_value(), 2.)
     assert number.num_string == "2.00" and pixels() != original
+
+
+def family_reseating_rejects_mismatched_python_children():
+    scene = m.Scene()
+    child, other = m.Square(), m.Circle()
+    group = m.Group(child)
+    scene.add(group, other)
+    roots = tuple(scene.mobjects)
+    checkpoint = bytes(scene._checkpoint_bytes())
+    group.submobjects._replace_projection([other])
+    try:
+        try:
+            scene._reseat_engine_roots(*roots, family=True)
+        except RuntimeError as error:
+            assert "restored engine children" in str(error), str(error)
+        else:
+            raise AssertionError("mismatched Python family must not replace native proxy identities")
+    finally:
+        group.submobjects._replace_projection([child])
+    assert bytes(scene._checkpoint_bytes()) == checkpoint
+    scene._reseat_engine_roots(*roots, family=True)
+    assert scene.mobjects[1] is group and group[0] is child
+    copied = group.copy()
+    assert type(copied[0]) is type(child)
+    np.testing.assert_array_equal(copied[0].get_points(), child.get_points())
 
 
 def live_tex_source_maps_remain_editable_after_undo():
@@ -635,6 +674,7 @@ CASES = (
     repeated_history, history_branch_and_limit, rejected_checkpoint_preserves_history,
     foreign_owner_refusal, ignored_camera, rendered_restore,
     numeric_history_restores_values_and_rendered_glyphs,
+    family_reseating_rejects_mismatched_python_children,
     live_tex_source_maps_remain_editable_after_undo,
     matrix_entry_tables_and_live_values_restore_together,
     shared_owned_data_cycles_and_camera_attributes_roundtrip,
@@ -644,7 +684,7 @@ CASES = (
     capture_refusal_preserves_history_and_native_arena,
     ignored_camera_keeps_its_authored_attributes,
 )
-assert len(CASES) == 26
+assert len(CASES) == 27
 for case in CASES:
     case()
     print("scene snapshot acceptance:", case.__name__)

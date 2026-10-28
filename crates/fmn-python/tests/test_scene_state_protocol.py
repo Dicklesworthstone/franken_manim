@@ -208,8 +208,10 @@ def environment(install=True):
                 obj.data = data.copy()
                 dict.clear(obj.uniforms)
                 dict.update(obj.uniforms, uniforms)
-        def _reseat_engine_roots(self, *objects):
+        def _reseat_engine_roots(self, *objects, family=False):
             assert [id(obj) for obj in self.roots] == [id(obj) for obj in objects]
+            if family:
+                self.registry.update((id(mob), mob) for mob in module._family(objects))
         def get_state(self): return g["SceneState"](self)
         def restore_state(self, state): return state.restore_scene(self)
     g = {"Scene": Scene, "_np": np, "_ForeignStageError": ValueError,
@@ -308,6 +310,25 @@ class SceneStateProtocol(unittest.TestCase):
         self.assertIs(self.child.updaters[0], updater)
         self.assertIn(self.group, self.child.parents)
         np.testing.assert_array_equal(self.child.data["point"], [[1., 0., 0.]])
+
+    def test_family_reseating_follows_restored_python_topology(self):
+        first = self.state()
+        original_children = tuple(self.group.submobjects)
+        replacement = Mob(x=8.)
+        self.group.submobjects._replace_projection([replacement])
+        calls, reseat = [], self.scene._reseat_engine_roots
+        def observe(*roots, family=False):
+            calls.append((family, tuple(self.group.submobjects)))
+            return reseat(*roots, family=family)
+        self.scene._reseat_engine_roots = observe
+        first.restore_scene(self.scene)
+        self.assertEqual(calls, [(False, (replacement,)), (True, original_children)])
+
+    def test_camera_control_cache_is_not_authored_history_state(self):
+        first = self.state()
+        self.scene.frame._fmn_camera_control_cache = ((1., 2., 3.), (4., 5.))
+        self.assertTrue(first.mobjects_match(self.state()))
+        self.assertEqual(first.n_changes(first), 0)
 
     def test_extension_uniforms_restored_independently_on_each_restore(self):
         first = self.state()

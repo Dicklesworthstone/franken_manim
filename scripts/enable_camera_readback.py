@@ -17,9 +17,10 @@ def replace_once(path, old, new):
     path.write_text(source.replace(old, new, 1))
 
 
-replace_once('crates/fmn-python/src/lib.rs',
-             'mod portal_studio;\n',
-             'mod portal_readback;\nmod portal_studio;\n')
+if 'mod portal_readback;' not in Path('crates/fmn-python/src/lib.rs').read_text():
+    replace_once('crates/fmn-python/src/lib.rs',
+                 'mod portal_studio;\n',
+                 'mod portal_readback;\nmod portal_studio;\n')
 replace_once('crates/fmn-python/src/lib.rs',
              '    module.add_class::<PyCameraCore>()?;\n    module.add_class::<PyFieldProbe>()?;',
              '    module.add_class::<PyCameraCore>()?;\n    module.add_class::<portal_readback::CameraCapture>()?;\n    module.add_class::<PyFieldProbe>()?;')

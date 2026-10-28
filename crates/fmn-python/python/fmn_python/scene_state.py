@@ -307,6 +307,12 @@ def install_scene_state(native: Any) -> None:
                 member.updaters[:] = updaters
                 for name, values in zip(("locked_data_keys", "const_data_keys", "locked_uniform_keys"), locks):
                     setattr(member, name, set(values))
+            # Arena rollback also rolls back handle allocation. A newer
+            # helper copy may have occupied a restored descendant's handle;
+            # root-only reseating would leave that helper in the native
+            # proxy registry. Rebind the complete captured family only after
+            # its Python child lists agree with the restored native graph.
+            scene._reseat_engine_roots(*self.mobjects_to_copies, family=True)
             # Rehydrate native-only roots and refresh back-edges before a caller
             # reads a retained child reference without first reading mobjects.
             _ = scene.mobjects

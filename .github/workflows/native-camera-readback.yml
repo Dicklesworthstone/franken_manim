@@ -17,6 +17,9 @@ on:
       - 'crates/fmn-python/tests/camera_readback.py'
       - 'crates/fmn-python/tests/camera_snapshot.py'
       - 'crates/fmn-python/tests/camera_frame_lifecycle.py'
+      - 'crates/fmn-python/tests/camera_animation_semantics.py'
+      - 'crates/fmn-python/tests/camera_motion.py'
+      - 'crates/fmn-python/tests/camera_execution.py'
       - 'crates/fmn-python/tests/scene_state.py'
       - 'crates/fmn-python/tests/terminal_preview.py'
       - 'crates/fmn-python/tests/terminal_editor.py'
@@ -73,7 +76,7 @@ jobs:
           python -m maturin build --locked --interpreter python --profile dev --out target/camera-wheel 2>&1 | tee /tmp/camera-build.log
           python -m venv target/camera-venv
           target/camera-venv/bin/python -m pip install 'numpy==2.5.2' 'IPython==9.14.0' target/camera-wheel/*.whl
-          for suite in camera_readback camera_snapshot camera_frame_lifecycle scene_state terminal_preview terminal_editor; do
+          for suite in camera_readback camera_snapshot camera_frame_lifecycle camera_animation_semantics camera_motion camera_execution scene_state terminal_preview terminal_editor; do
             target/camera-venv/bin/python -I "crates/fmn-python/tests/$suite.py" 2>&1 | tee "/tmp/camera-$suite.log"
           done
       - name: Preserve exact native validation and source

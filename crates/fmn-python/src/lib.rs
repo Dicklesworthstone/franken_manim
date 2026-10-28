@@ -9069,18 +9069,67 @@ impl PyScene {
     }
 
     /// Reassert the exact handle-to-Python identity mapping for an already
-    /// restored engine root batch. This deliberately performs no Stage write:
-    /// SceneState's canonical checkpoint bytes must survive proxy reseating.
-    #[pyo3(signature = (*mobjects))]
-    fn _reseat_engine_roots(slf: &Bound<'_, Self>, mobjects: &Bound<'_, PyTuple>) -> PyResult<()> {
+    /// restored engine root batch. Once its Python child lists are restored,
+    /// `family` also reseats every descendant: arena rollback can reuse a
+    /// helper's handle for a different captured member. This deliberately
+    /// performs no Stage write, preserving canonical checkpoint bytes.
+    #[pyo3(signature = (*mobjects, family=false))]
+    fn _reseat_engine_roots<'py>(
+        slf: &Bound<'py, Self>,
+        mobjects: &Bound<'py, PyTuple>,
+        family: bool,
+    ) -> PyResult<()> {
         let handles = scene_proxy_handles(slf, mobjects)?;
-        let roots = slf.borrow().engine.borrow().stage().roots().to_vec();
+        let engine = Rc::clone(&slf.borrow().engine);
+        let roots = engine.borrow().stage().roots().to_vec();
         if handles != roots {
             return Err(PyRuntimeError::new_err(
                 "captured SceneState proxies do not match restored engine roots",
             ));
         }
-        for (handle, proxy) in handles.into_iter().zip(mobjects.iter()) {
+        let mut pairs: Vec<_> = handles.into_iter().zip(mobjects.iter()).collect();
+        if family {
+            let mut identities = HashMap::new();
+            let mut members = Vec::new();
+            for root in mobjects.iter() {
+                for proxy in collect_proxy_graph(&root)? {
+                    let proxy = proxy.into_bound(slf.py());
+                    let member = proxy.cast::<BridgeMobject>()?;
+                    let (owner, handle) = bound_parts(&member.borrow())?;
+                    if !same_engine(&engine, &owner) {
+                        return Err(ForeignStageError::new_err(
+                            "captured SceneState family belongs to another Scene",
+                        ));
+                    }
+                    let identity = proxy.as_ptr() as usize;
+                    if let Some(previous) = identities.insert(handle, identity) {
+                        if previous != identity {
+                            return Err(PyRuntimeError::new_err(
+                                "captured SceneState family aliases one handle with different proxies",
+                            ));
+                        }
+                        continue;
+                    }
+                    let children = proxy_children(&proxy)?;
+                    let child_handles =
+                        scene_proxy_handles(slf, &PyTuple::new(slf.py(), children)?)?;
+                    let matches = engine
+                        .borrow()
+                        .stage()
+                        .get(handle)
+                        .is_some_and(|entry| entry.submobjects() == child_handles.as_slice());
+                    if !matches {
+                        return Err(PyRuntimeError::new_err(
+                            "captured SceneState family does not match restored engine children",
+                        ));
+                    }
+                    members.push((handle, proxy));
+                }
+            }
+            pairs = members;
+        }
+        // Validate the entire family before publishing any registry changes.
+        for (handle, proxy) in pairs {
             register_proxy(slf.py(), slf, handle, &proxy)?;
         }
         Ok(())

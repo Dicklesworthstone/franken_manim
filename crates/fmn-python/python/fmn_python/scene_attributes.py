@@ -14,6 +14,7 @@ _PROJECTIONS = frozenset({
     "data", "submobjects", "uniforms", "updaters", "parents", "_scene", "_core",
     "locked_data_keys", "const_data_keys", "locked_uniform_keys", "event_listners",
     "_fmn_persistent_controller",
+    "_fmn_camera_control_cache",
 })
 _MAX_NODES = 262_144
 _MAX_BYTES = 64 * 1024 * 1024
