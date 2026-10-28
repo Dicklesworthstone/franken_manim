@@ -11925,15 +11925,32 @@ impl PyCameraFrameCore {
     fn snapshot(&self, py: Python<'_>) -> PyResult<fmn_scene::studio_bridge::CameraFrame> {
         if let Some(owner) = self.owner(py)? {
             let points = Self::read_points(&owner)?;
-            if self.mirrored_points.get() != Some(points) {
+            let previous = self.mirrored_points.get();
+            if previous != Some(points) {
                 // Validate a private value before changing the renderer pose.
                 // Reference camera_frame.py reads these exact indexed spans;
                 // orientation does not rotate the five spatial control points.
+                // Preserve authored f64 components when their corresponding
+                // f32 controls have not changed: an auxiliary z edit or an
+                // x-only translation must not quantize unrelated camera axes.
                 let mut frame = self.frame.borrow().clone();
-                frame.set_center(points[0]).map_err(camera_error)?;
-                frame
-                    .set_shape([points[2][0] - points[1][0], points[4][1] - points[3][1]])
-                    .map_err(camera_error)?;
+                let mut center = frame.center();
+                for (axis, coordinate) in center.iter_mut().enumerate() {
+                    if previous.is_none_or(|old| old[0][axis] != points[0][axis]) {
+                        *coordinate = points[0][axis];
+                    }
+                }
+                let spans = [points[2][0] - points[1][0], points[4][1] - points[3][1]];
+                let previous_spans =
+                    previous.map(|old| [old[2][0] - old[1][0], old[4][1] - old[3][1]]);
+                let mut shape = frame.shape();
+                for (axis, span) in shape.iter_mut().enumerate() {
+                    if previous_spans.is_none_or(|old| old[axis] != spans[axis]) {
+                        *span = spans[axis];
+                    }
+                }
+                frame.set_center(center).map_err(camera_error)?;
+                frame.set_shape(shape).map_err(camera_error)?;
                 *self.frame.borrow_mut() = frame;
                 self.mirrored_points.set(Some(points));
             }

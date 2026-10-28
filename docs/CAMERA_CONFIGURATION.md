@@ -68,9 +68,10 @@ and camera uniforms. Copies own independent points and native cores. Same-sized
 camera edits and animation samples preserve retained NumPy views.
 
 Lumen remains responsible for camera validation, projection and rendering.
-Its core retains exact authored f64 pose values until the f32 controls change;
-orientation and field of view remain native camera state. The frame itself
-draws nothing.
+Its core retains each exact authored f64 center coordinate and dimension until
+the controls for that component change; editing an auxiliary coordinate does
+not round unrelated pose values. Orientation and field of view remain native
+camera state. The frame itself draws nothing.
 
 ## Acceptance boundary
 

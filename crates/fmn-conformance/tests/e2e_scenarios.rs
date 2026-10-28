@@ -11753,11 +11753,11 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         Invocation::new(python_camera_frame_points_run),
         vec![
             Assertion::ExitCode(0),
-            counter_ge("camera_frame_point_cases", 25),
+            counter_ge("camera_frame_point_cases", 26),
         ],
         vec![LogExpect::span_present(
             "e2e.python.camera_frame_points",
-            vec![FieldPred::u64_ge("cases", 25)],
+            vec![FieldPred::u64_ge("cases", 26)],
         )],
     ));
     specs.push(spec(

@@ -53,6 +53,33 @@ class CameraFrameLifecycleTests(unittest.TestCase):
         self.assertEqual(frame.get_shape(), before[1])
         np.testing.assert_array_equal(frame.get_view_matrix(), before[2])
 
+    def test_raw_control_edits_preserve_unaffected_exact_pose_components(self):
+        frame = m.CameraFrame(frame_shape=(7.3, 2.1), center_point=(.1, .2, .3))
+        center, shape = frame.get_center().copy(), frame.get_shape()
+        matrix = frame.get_view_matrix().copy()
+        points = frame.get_points()
+        points[1, 2] += 1.25
+        points[2, 1] += .75
+        np.testing.assert_array_equal(frame.get_center(), center)
+        self.assertEqual(frame.get_shape(), shape)
+        np.testing.assert_array_equal(frame.get_view_matrix(), matrix)
+
+        points[2, 0] += .5
+        width = float(points[2, 0]) - float(points[1, 0])
+        self.assertEqual(frame.get_shape(), (width, shape[1]))
+        np.testing.assert_array_equal(frame.get_center(), center)
+
+        points[0, 1] += .25
+        center[1] = float(points[0, 1])
+        np.testing.assert_array_equal(frame.get_center(), center)
+        self.assertEqual(frame.get_shape(), (width, shape[1]))
+        right = float(points[2, 0])
+        points[2, 0] = points[1, 0]
+        with self.assertRaises(ValueError):
+            frame.get_shape()
+        points[2, 0] = right
+        self.assertEqual(frame.get_shape(), (width, shape[1]))
+
     def test_group_bounds_and_affine_edits_include_the_camera(self):
         scene = m.Scene()
         scene.add(m.Square())
@@ -278,21 +305,32 @@ class CameraFrameLifecycleTests(unittest.TestCase):
 
     def test_records_decorations_and_updaters_survive_finalization(self):
         updater = lambda mob, dt: None
+        marker_radius = .08
+        target = np.array((4., 0., 0.))
         class Authored(m.CameraFrame):
             data_dtype = m.CameraFrame.data_dtype + [('mass', 1)]
             def init_points(self):
                 self.set_points([[1., 2., 0.]])
                 self.data['mass'][:] = 7
-                self.marker = m.Dot()
+                self.marker = m.Dot(radius=marker_radius)
                 self.add(self.marker)
                 self.add_updater(updater)
                 self.shift(m.RIGHT)
-        frame = Authored(center_point=(4., 0., 0.))
+        frame = Authored(center_point=target)
         self.assertIn(frame.marker, frame.submobjects)
         self.assertIn(updater, frame.updaters)
         np.testing.assert_array_equal(frame.data['mass'], [[7.]] * 5)
         self.assertEqual(frame.get_num_points(), 5)
-        np.testing.assert_array_equal(frame.get_center(), (4., 0., 0.))
+        # Finalization resets the camera controls to [-1, 1], while the
+        # shifted Dot reaches 1 + radius. Public sizing and move_to act on
+        # that family box; the indexed camera center remains left of it.
+        x_scale = m.FRAME_WIDTH / (2. + marker_radius)
+        expected_center = target - np.array((marker_radius * x_scale / 2., 0., 0.))
+        np.testing.assert_allclose(frame.get_bounding_box()[1], target, rtol=0, atol=1e-6)
+        np.testing.assert_allclose(frame.get_center(), expected_center, rtol=0, atol=1e-6)
+        np.testing.assert_allclose(frame.get_center(), frame.get_points()[0], rtol=0, atol=1e-6)
+        np.testing.assert_allclose(frame.get_shape(), (2*x_scale, m.FRAME_HEIGHT),
+                                   rtol=0, atol=1e-6)
 
     def test_copy_taken_during_initialization_has_independent_native_pose(self):
         class Authored(m.CameraFrame):

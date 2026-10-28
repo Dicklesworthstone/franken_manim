@@ -385,7 +385,7 @@ mod tests {
     fn production_camera_frame_points_acceptance_suite() {
         let cases = super::run_portal_gauntlet_camera_frame_points()
             .expect("camera point views, groups, copies, animation and rendered capture agree");
-        assert!(cases >= 25, "camera lifecycle cases did not all run");
+        assert!(cases >= 26, "camera lifecycle cases did not all run");
     }
 
     #[test]
