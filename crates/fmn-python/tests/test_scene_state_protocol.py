@@ -211,7 +211,7 @@ def environment(install=True):
         def restore_state(self, state): return state.restore_scene(self)
     g = {"Scene": Scene, "_np": np, "_ForeignStageError": ValueError,
          # This suite doubles native records and owns no image resources.
-         "_raster_images_equal": lambda left, right: True}
+         "_raster_images_equal": lambda left, right, *, include_inputs=False: True}
     exec(LEGACY, g)
     native = SimpleNamespace(**g)
     # Real bootstrap methods share the native module dictionary, including

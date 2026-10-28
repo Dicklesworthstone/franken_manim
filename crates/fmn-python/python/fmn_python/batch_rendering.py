@@ -526,7 +526,7 @@ def _restored_outcome(row):
         data.pop("channels", None)
     data["destination"] = Path(data["destination"])
     data["resolution"] = tuple(resolution)
-    for name in ("ffmpeg_invocations", "audio_inputs"):
+    for name in ("ffmpeg_invocations", "audio_inputs", "image_inputs"):
         items = data.get(name, [])
         if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
             raise ValueError("invalid checkpoint receipt field: " + name)
