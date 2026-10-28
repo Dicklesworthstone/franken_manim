@@ -3369,10 +3369,18 @@ fn studio_contains(bytes: &[u8], expected: &str) -> Result<(), ScenarioError> {
 
 fn studio_view(bytes: &[u8], frame: usize) -> Result<(), ScenarioError> {
     // Constructed frame zero plus the 0.25 s hold's eight native samples.
+    studio_view_with_frame_count(bytes, frame, 9)
+}
+
+fn studio_view_with_frame_count(
+    bytes: &[u8],
+    frame: usize,
+    frame_count: usize,
+) -> Result<(), ScenarioError> {
     studio_contains(
         bytes,
         &format!(
-            "\"view\":{{\"frame_index\":{frame},\"frame_count\":9,\"fps\":30,\"width\":96,\"height\":54,\"scale\":6.75,\"origin\":[48,27],\"y_up\":true,\"input_events\":true,\"input_revision\":"
+            "\"view\":{{\"frame_index\":{frame},\"frame_count\":{frame_count},\"fps\":30,\"width\":96,\"height\":54,\"scale\":6.75,\"origin\":[48,27],\"y_up\":true,\"input_events\":true,\"input_revision\":"
         ),
     )
 }
@@ -3611,7 +3619,9 @@ fn studio_presenter_holds_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioEr
             &inspection,
             &format!("\"presenter\":{{\"enabled\":true,\"at_boundary\":{boundary}}}"),
         )?;
-        studio_view(&inspection, frame)?;
+        // circle_shift has eight play samples and four wait samples, plus
+        // its constructed frame zero. The interactive fixture has only nine.
+        studio_view_with_frame_count(&inspection, frame, 13)?;
         for _ in 0..3 {
             if endpoint.request("GET", "/api/inspect", b"", 200)? != inspection {
                 return Err(fail(
