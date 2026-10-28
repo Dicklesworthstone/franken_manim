@@ -15223,9 +15223,83 @@ class CameraFrame(Mobject):
 
     # -- the positional primitives, routed to the engine camera state
 
+    def _remember_control_points(self, points, exact):
+        self._fmn_camera_control_cache = (
+            (tuple(self._core.center()), tuple(self._core.shape())),
+            tuple(map(tuple, points)), tuple(map(tuple, exact)),
+        )
+
+    def _precise_control_points(self):
+        # The records remain the live edit surface. Keep only a mirror-keyed
+        # cache of precision that is otherwise lost when an authored affine
+        # placement is materialized into those f32 records. Immutable tuples
+        # make shallow/deep graph copies safe; raw edits invalidate individual
+        # coordinates and changed native pose axes invalidate their cache.
+        center = _np.array(self._core.center())
+        width, height = self._core.shape()
+        points = _np.array(self.get_points(), dtype=float, copy=True)
+        if points.shape != (5, 3):
+            return points
+        pose = (tuple(center), (width, height))
+        previous = vars(self).get("_fmn_camera_control_cache")
+        if previous is not None and previous[0] == pose and _np.array_equal(points, previous[1]):
+            return _np.array(previous[2], dtype=float)
+        canonical = center + _np.array([
+            [0., 0., 0.], [-width / 2., 0., 0.], [width / 2., 0., 0.],
+            [0., -height / 2., 0.], [0., height / 2., 0.],
+        ])
+        exact = _np.where(points == canonical.astype(_np.float32), canonical, points)
+        if previous is not None:
+            compatible = _np.array([
+                previous[0][0][axis] == center[axis]
+                and (axis == 2 or previous[0][1][axis] == pose[1][axis])
+                for axis in range(3)
+            ])
+            exact = _np.where((points == previous[1]) & compatible, previous[2], exact)
+        self._remember_control_points(points, exact)
+        return exact
+
+    def _finish_control_transform(self, before, exact, transform, center, shape,
+                                  record_transform=None):
+        if before.shape != (5, 3):
+            self._core._adopt_geometry(center, shape)
+            return
+        points = _np.array(self.get_points(), dtype=float, copy=True)
+        if record_transform is None:
+            record_transform = transform
+        expected = _np.asarray(record_transform(before), dtype=_np.float32).astype(float)
+        changed_center = points[0] != expected[0]
+        spans = _np.array((points[2, 0] - points[1, 0], points[4, 1] - points[3, 1]))
+        expected_spans = _np.array((expected[2, 0] - expected[1, 0],
+                                    expected[4, 1] - expected[3, 1]))
+        changed_shape = spans != expected_spans
+        if changed_center.any() or changed_shape.any():
+            # Scale side-effect hooks run after the Stage transform. Their
+            # raw writes or public camera setters own changed components;
+            # never replace them with the pre-hook affine prediction.
+            center = tuple(_np.where(changed_center, self._core.center(), center))
+            shape = tuple(_np.where(changed_shape, self._core.shape(), shape))
+        self._core._adopt_geometry(center, shape)
+        # A public scale-side-effect hook may have authored a further edit.
+        # Preserve precision only where the native records still witness the
+        # known transform; never cache over a callback's different result.
+        transformed = transform(exact)
+        unchanged = points == expected
+        if not unchanged.all():
+            transformed = _np.where(unchanged, transformed, self._precise_control_points())
+        self._remember_control_points(points, transformed)
+
     def _bbox_rows(self):
         if self._has_points():
-            return super()._bbox_rows()
+            points = self._precise_control_points()
+            controls = [points]
+            controls.extend(
+                member.get_bounding_box() for member in self.get_family()[1:]
+                if member.has_points()
+            )
+            values = _np.vstack(controls)
+            low, high = values.min(0), values.max(0)
+            return _np.array([low, (low + high) / 2., high])
         # Authored base initialization hooks can inspect the pose before the
         # five points are installed at the end of CameraFrame initialization.
         center = _np.array(self._core.center())
@@ -15235,12 +15309,14 @@ class CameraFrame(Mobject):
 
     def shift(self, vector):
         vector = _shift_vector(vector)
+        exact = self._precise_control_points()
+        before = _np.array(self.get_points(), dtype=float, copy=True)
         center = self._core.center()
         center = tuple(center[axis] + vector[axis] for axis in range(3))
         shape = self._core.shape()
         _copy.copy(self._core)._adopt_geometry(center, shape)
         super().shift(vector)
-        self._core._adopt_geometry(center, shape)
+        self._finish_control_transform(before, exact, lambda points: points + vector, center, shape)
         return self
 
     def scale(
@@ -15251,6 +15327,8 @@ class CameraFrame(Mobject):
         about_edge=_ORIGIN,
     ):
         pivot = _np.array(self._resolve_pivot(about_point, about_edge))
+        exact = self._precise_control_points()
+        before = _np.array(self.get_points(), dtype=float, copy=True)
         factor = max(float(scale_factor), float(min_scale_factor))
         center = _np.array(self._core.center())
         width, height = self._core.shape()
@@ -15258,7 +15336,13 @@ class CameraFrame(Mobject):
         shape = (width * factor, height * factor)
         _copy.copy(self._core)._adopt_geometry(center, shape)
         super().scale(factor, min_scale_factor=min_scale_factor, about_point=pivot)
-        self._core._adopt_geometry(center, shape)
+        offset = pivot - factor * pivot
+        self._finish_control_transform(
+            before, exact, lambda points: pivot + factor * (points - pivot), center, shape,
+            # Match Placement::about/apply_point's multiply-add order when
+            # deciding whether the native records contain a further edit.
+            record_transform=lambda points: factor * points + offset,
+        )
         return self
 
     def stretch(self, factor, dim, **kwargs):
@@ -15276,6 +15360,8 @@ class CameraFrame(Mobject):
         dim = int(dim)
         if dim not in (0, 1, 2):
             raise ValueError("stretch dimension must be 0, 1, or 2")
+        exact = self._precise_control_points()
+        before = _np.array(self.get_points(), dtype=float, copy=True)
         center = _np.array(self._core.center())
         center[dim] = pivot[dim] + factor * (center[dim] - pivot[dim])
         width, height = self._core.shape()
@@ -15287,7 +15373,13 @@ class CameraFrame(Mobject):
         shape = (width, height)
         _copy.copy(self._core)._adopt_geometry(tuple(center), shape)
         super().stretch(factor, dim, about_point=pivot)
-        self._core._adopt_geometry(tuple(center), shape)
+        factors = _np.ones(3)
+        factors[dim] = factor
+        offset = pivot - factors * pivot
+        self._finish_control_transform(
+            before, exact, lambda points: pivot + factors * (points - pivot), tuple(center), shape,
+            record_transform=lambda points: factors * points + offset,
+        )
         return self
 
     # -- orientation

@@ -70,8 +70,11 @@ camera edits and animation samples preserve retained NumPy views.
 Lumen remains responsible for camera validation, projection and rendering.
 Its core retains each exact authored f64 center coordinate and dimension until
 the controls for that component change; editing an auxiliary coordinate does
-not round unrelated pose values. Orientation and field of view remain native
-camera state. The frame itself draws nothing.
+not round unrelated pose values. Repeated placement, sizing and animation also
+retain that precision while preserving the live f32 record views. Raw control
+edits and authored scale hooks still determine the affected geometry, and
+decorations remain part of the family bounds used for placement. Orientation
+and field of view remain native camera state. The frame itself draws nothing.
 
 ## Acceptance boundary
 

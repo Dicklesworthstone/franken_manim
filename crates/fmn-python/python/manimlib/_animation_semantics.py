@@ -1633,14 +1633,45 @@ def _install_camera_pose(g):
         changes = []
         points = None
         if "point" not in getattr(self, "locked_data_keys", ()):
-            points = np.asarray(path_func(control_points(mobject1), control_points(mobject2), alpha), dtype=float)
+            exact_start = mobject1._precise_control_points()
+            exact_end = mobject2._precise_control_points()
+            start_points, end_points = control_points(mobject1), control_points(mobject2)
+            # Reconcile endpoint records before reading the authored f64 pose.
+            # The path still sees the actual controls, including auxiliary
+            # coordinates, and runs exactly once on independent arrays.
+            centers = [np.asarray(frame._core.center(), dtype=float)
+                       for frame in (mobject1, mobject2)]
+            shapes = [np.asarray(frame._core.shape(), dtype=float)
+                      for frame in (mobject1, mobject2)]
+            linear_points = np.asarray(lerp(start_points, end_points, alpha), dtype=float)
+            points = np.asarray(path_func(start_points, end_points, alpha), dtype=float)
             if points.shape != (5, 3) or not np.isfinite(points).all():
                 raise ValueError("CameraFrame path_func must return a finite (5, 3) point array")
             if (np.abs(points) > np.finfo(np.float32).max).any():
                 raise ValueError("CameraFrame path_func points must be finite in float32 records")
-            changes.append(("set_center", tuple(points[0])))
-            changes.append(("set_shape", (float(points[2, 0] - points[1, 0]),
-                                          float(points[4, 1] - points[3, 1]))))
+            center = np.where(points[0] == linear_points[0],
+                              lerp(*centers, alpha), points[0])
+            shape = np.array((points[2, 0] - points[1, 0],
+                              points[4, 1] - points[3, 1]))
+            linear_shape = np.array((linear_points[2, 0] - linear_points[1, 0],
+                                     linear_points[4, 1] - linear_points[3, 1]))
+            # A component untouched by the authored path follows the exact
+            # native endpoints, not a round trip through their f32 mirrors.
+            # Custom path excursions and changed spans remain authoritative.
+            unchanged_shape = shape == linear_shape
+            shape = np.where(unchanged_shape, lerp(*shapes, alpha), shape)
+            changes.append(("set_center", tuple(center)))
+            changes.append(("set_shape", tuple(shape)))
+            exact_linear = lerp(exact_start, exact_end, alpha)
+            exact_points = np.where(points == linear_points, exact_linear, points)
+            exact_points[0] = center
+            for axis, (low, high) in enumerate(((1, 2), (3, 4))):
+                for index in (low, high):
+                    exact_points[index, axis] = points[index, axis]
+                    if unchanged_shape[axis]:
+                        exact_points[index, axis] += (
+                            exact_linear[index, axis] - linear_points[index, axis]
+                        )
         locked = getattr(self, "locked_uniform_keys", ())
         if "fovy" not in locked:
             changes.append(("set_field_of_view", float(lerp(mobject1._core.field_of_view(),
@@ -1660,6 +1691,9 @@ def _install_camera_pose(g):
         if points is not None:
             self._set_field_rows("point", points.tolist())
             self._core._adopt_geometry(candidate.center(), candidate.shape())
+            # Carry the same known geometry into subsequent move_to/scale
+            # calls, including a copied endpoint's previous affine precision.
+            self._remember_control_points(self.get_points(), exact_points)
         for method, value in changes:
             if method not in ("set_center", "set_shape"):
                 getattr(self._core, method)(value)

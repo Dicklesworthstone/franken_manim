@@ -389,6 +389,17 @@ mod tests {
     }
 
     #[test]
+    fn production_scene_state_acceptance_suite() {
+        crate::with_python_test_module("scene state", |py, _module, globals| {
+            let source = std::ffi::CString::new(include_str!("../tests/scene_state.py"))
+                .expect("scene state suite contains no NUL");
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .expect("native scene snapshots preserve family identities, camera and pixels");
+        });
+    }
+
+    #[test]
     fn production_terminal_preview_acceptance_suite() {
         crate::with_python_test_module("terminal preview", |py, _module, globals| {
             let source =

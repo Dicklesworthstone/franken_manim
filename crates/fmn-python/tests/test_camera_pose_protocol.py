@@ -66,6 +66,10 @@ def environment():
             self.revisions = 0
         def get_points(self):
             return self._points
+        def _precise_control_points(self):
+            return np.array(self._points, dtype=float, copy=True)
+        def _remember_control_points(self, points, exact):
+            self.precise_points = np.array(exact, copy=True)
         def _set_field_rows(self, field, points):
             assert field == "point"
             self._points[:] = points
@@ -111,6 +115,38 @@ class CameraPoseTests(unittest.TestCase):
         for alpha, expected in [(0., self.start), (1., self.end)]:
             self.live.interpolate(self.start, self.end, alpha)
             self.assertEqual(pose(self.live), pose(expected))
+    def test_float32_controls_keep_authored_native_linear_components(self):
+        start = self.Frame(center=(.1, .2, .3), shape=(7.3, 2.1))
+        end = self.Frame(center=(2.7, -.4, .9), shape=(5.7, 4.3))
+        for frame in (start, end, self.live):
+            frame._points = frame._points.astype(np.float32)
+        for alpha in (0., .25, .5, 1.):
+            self.live.interpolate(start, end, alpha)
+            np.testing.assert_array_equal(self.live._core.center(),
+                (1-alpha)*np.array(start._core.center()) + alpha*np.array(end._core.center()))
+            np.testing.assert_array_equal(self.live._core.shape(),
+                (1-alpha)*np.array(start._core.shape()) + alpha*np.array(end._core.shape()))
+    def test_authored_path_changes_only_its_native_components(self):
+        start = self.Frame(center=(.1, .2, .3), shape=(7.3, 2.1))
+        end = self.Frame(center=(2.7, -.4, .9), shape=(5.7, 4.3))
+        for frame in (start, end):
+            frame._points = frame._points.astype(np.float32)
+        results = []
+        def path(a, b, alpha):
+            np.testing.assert_array_equal(a, start.get_points())
+            np.testing.assert_array_equal(b, end.get_points())
+            result = ((1-alpha)*a + alpha*b).astype(float)
+            result[2, 0] += .5
+            result[1, 2] += .75
+            results.append(result.copy())
+            return result
+        self.live.interpolate(start, end, .5, path)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(self.live._core.shape(),
+                         (results[0][2, 0] - results[0][1, 0], 3.2))
+        np.testing.assert_array_equal(self.live.get_points(), results[0])
+        np.testing.assert_array_equal(self.live._core.center(),
+            .5*np.array(start._core.center()) + .5*np.array(end._core.center()))
     def test_extrapolation_is_not_silently_clamped(self):
         self.live.interpolate(self.start, self.end, 1.5)
         self.assertEqual(self.live._core.center(), (6., 3., -3.))

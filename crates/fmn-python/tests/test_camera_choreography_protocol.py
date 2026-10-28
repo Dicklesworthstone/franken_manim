@@ -111,6 +111,10 @@ def environment():
             return self
         def get_center(self):
             return np.array(self._core.center())
+        def _precise_control_points(self):
+            return np.array(self.get_points(), dtype=float, copy=True)
+        def _remember_control_points(self, points, exact):
+            self.precise_points = np.array(exact, copy=True)
     class Animation:
         _native_kind = None
     class NativeAnimation(Animation):

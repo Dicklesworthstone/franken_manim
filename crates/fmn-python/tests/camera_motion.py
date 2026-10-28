@@ -340,6 +340,92 @@ def frame_rotation_ends_at_its_angle_whatever_the_frame_count():
         close(scene.frame.get_euler_angles(), [m.PI / 2, 0, 0])
 
 
+def affine_precision_survives_placement_copy_and_raw_control_edits():
+    # Two equivalent f64 affine expressions straddle this f32 tie. Native
+    # Placement multiplies the point before adding its retained offset;
+    # mistaking its rounding for a callback edit loses authored precision.
+    coordinate = float(np.float32(1.2345678))
+    low = float(np.nextafter(np.float32(1.), np.float32(2.)))
+    high = float(np.nextafter(np.float32(low), np.float32(2.)))
+    factor = .9
+    pivot = ((low + high)/2 - factor*coordinate) / (1-factor)
+    expected = pivot + factor*(coordinate-pivot)
+    native = factor*coordinate + (pivot-factor*pivot)
+    assert np.float32(expected) != np.float32(native)
+    boundary = m.CameraFrame(frame_shape=(8., 4.), center_point=(coordinate, 0., 0.))
+    boundary.scale(factor, about_point=(pivot, 0., 0.))
+    np.testing.assert_allclose(boundary.get_center(), (expected, 0., 0.), rtol=0, atol=1e-15)
+    assert boundary.get_points()[0, 0] == np.float32(native)
+
+    frame = m.CameraFrame(frame_shape=(7.3, 2.1), center_point=(.1, .2, .3))
+    view = frame.get_points()
+    pointer = view.__array_interface__['data'][0]
+    target = np.array((1.1, -.7, .2))
+    for _ in range(12):
+        frame.move_to(target).set_shape(7.3, 2.1)
+        frame.scale(.5).scale(2.)
+        np.testing.assert_allclose(frame.get_center(), target, rtol=0, atol=1e-13)
+        np.testing.assert_allclose(frame.get_shape(), (7.3, 2.1), rtol=0, atol=1e-13)
+    assert pointer == frame.get_points().__array_interface__['data'][0]
+    destination = m.CameraFrame().shift((4., 2., -2.)).scale(.5)
+    frame.interpolate(frame.copy(), destination, 1.)
+    for _ in range(12):
+        frame.move_to(target).set_shape(7.3, 2.1)
+        np.testing.assert_allclose(frame.get_center(), target, rtol=0, atol=1e-13)
+        np.testing.assert_allclose(frame.get_shape(), (7.3, 2.1), rtol=0, atol=1e-13)
+    for deep in (False, True):
+        copied = frame.copy(deep=deep)
+        copied.move_to((-.9, .4, .8))
+        np.testing.assert_allclose(copied.get_center(), (-.9, .4, .8), rtol=0, atol=1e-13)
+        np.testing.assert_allclose(frame.get_center(), target, rtol=0, atol=1e-13)
+
+    # A cached placement must not hide an asymmetric raw control edit or an
+    # auxiliary coordinate that extends the family box beyond the pose span.
+    view[1, 0] -= 1.
+    view[2, 1] += 4.
+    view[1, 2] = 2.75
+    before = frame.get_bounding_box()
+    assert before[0, 0] == float(view[1, 0])
+    assert before[2, 1] == float(view[2, 1])
+    assert before[2, 2] == 2.75
+    center = frame.get_center().copy()
+    frame.move_to((3., 2., 1.))
+    np.testing.assert_allclose(frame.get_bounding_box()[1], (3., 2., 1.), rtol=0, atol=1e-13)
+    np.testing.assert_allclose(frame.get_center(), center + (3., 2., 1.) - before[1],
+                               rtol=0, atol=1e-13)
+
+    decorated = m.CameraFrame(frame_shape=(8., 4.))
+    decorated.add(m.Dot((5., 0., 0.), radius=.5))
+    decorated.move_to((3., 0., 0.))
+    np.testing.assert_allclose(decorated.get_center(), (2.25, 0., 0.), rtol=0, atol=1e-13)
+    decorated.set_width(19., stretch=True)
+    np.testing.assert_allclose(decorated.get_center(), (1.5, 0., 0.), rtol=0, atol=1e-13)
+    np.testing.assert_allclose(decorated.get_shape(), (16., 4.), rtol=0, atol=1e-13)
+
+
+def scale_side_effects_keep_their_authored_camera_pose():
+    class Authored(m.CameraFrame):
+        def _handle_scale_side_effects(self, factor):
+            self.get_points()[2, 0] += 1.
+            self.shift((0., .1, 0.))
+    frame = Authored(frame_shape=(8., 4.))
+    frame.scale(.5, about_point=m.ORIGIN)
+    np.testing.assert_array_equal(frame.get_center(), (0., .1, 0.))
+    np.testing.assert_array_equal(frame.get_shape(), (5., 2.))
+    np.testing.assert_array_equal(frame.get_points()[2], (3., np.float32(.1), 0.))
+    frame.move_to((2., .3, .5))
+    np.testing.assert_allclose(frame.get_bounding_box()[1], (2., .3, .5), rtol=0, atol=1e-13)
+
+    class Raw(m.CameraFrame):
+        def _handle_scale_side_effects(self, factor):
+            self.get_points()[0, 1] += .25
+            self.get_points()[1, 2] = 3.
+    frame = Raw(frame_shape=(8., 4.)).scale(.5, about_point=m.ORIGIN)
+    np.testing.assert_array_equal(frame.get_center(), (0., .25, 0.))
+    np.testing.assert_array_equal(frame.get_shape(), (4., 2.))
+    assert frame.get_bounding_box()[2, 2] == 3.
+
+
 _CASES = (rotation_is_absolute_at_every_native_sample,
           rotation_obeys_live_rates_windows_and_final_alpha,
           succession_captures_predecessor_camera_orientation,
@@ -354,6 +440,8 @@ _CASES = (rotation_is_absolute_at_every_native_sample,
           authored_rotation_dispatch_preserves_live_receiver,
           authored_rates_observe_restored_pose_and_may_edit_it,
           authored_rotation_owns_axis_interpretation,
+          affine_precision_survives_placement_copy_and_raw_control_edits,
+          scale_side_effects_keep_their_authored_camera_pose,
           final_camera_motion_changes_real_native_pixels)
 for _case in _CASES:
     _case()

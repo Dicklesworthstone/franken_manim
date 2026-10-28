@@ -3019,7 +3019,9 @@ fn studio_terminal_controls_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenario
         .stdin
         .take()
         .ok_or_else(|| fail("terminal stdin missing"))?
-        .write_all(b"seek 1s\nstep -4\nmark middle\nfirst\nlabel middle\ninspect\nquit\n")
+        // The builtin has a 0.25 s play and 0.125 s hold: at 8 FPS,
+        // constructed frame zero is followed by exactly three captures.
+        .write_all(b"seek 0.25s\nstep -1\nmark middle\nfirst\nlabel middle\ninspect\nquit\n")
         .map_err(|error| studio_io_error("terminal commands", error))?;
     let deadline = std::time::Instant::now() + STUDIO_IO_TIMEOUT;
     loop {
@@ -3055,15 +3057,18 @@ fn studio_terminal_controls_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenario
         std::str::from_utf8(&output).map_err(|_| fail("terminal transcript is not UTF-8"))?;
     for expected in [
         "type a command, then press Enter",
-        "Frame 8/",
-        "Frame 4/",
+        "Frame 2/3 | 0.250 s | paused",
+        "Frame 1/3 | 0.125 s | paused",
+        "Frame 0/3 | 0.000 s | paused",
         "Bookmark saved",
-        "Inspector at frame 4",
+        "Inspector at frame 1",
         "root=",
         "\u{1b}_Ga=T,f=100",
     ] {
         if !transcript.contains(expected) {
-            return Err(fail("terminal control or graphics response is missing"));
+            return Err(fail(format!(
+                "terminal control or graphics response is missing: {expected:?}"
+            )));
         }
     }
     if transcript.contains("Studio: ") {
