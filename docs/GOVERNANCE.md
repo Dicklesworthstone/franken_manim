@@ -248,5 +248,8 @@ Primitives belonging in a foundation crate land there and are tracked in `UPSTRE
 1. Propose the ledger row with primitive, target repository, owner, status, and coordination dependency.
 2. Land the implementation upstream under that repository's governance.
 3. Pin the new commit in `SUITE.lock` and update affected allowlist rows in a single-purpose commit.
-4. Run the full Gauntlet and diff self-goldens and Look Gallery evidence.
+4. Run the full Gauntlet and diff self-goldens and Look Gallery evidence. The Gauntlet includes the suites whose inputs only some hosts hold, which skip elsewhere. fmn-python's corpus harness (`cargo test -p fmn-python --lib corpus::`) checks the seed scenes' structural rows, which a TeX repin can move.
+   - Run it with `FMN_VIDEOS_REF` naming the pinned videos checkout and `FMN_REQUIRE_FULL_INPUTS=1`, so a missing checkout fails instead of skipping.
+   - On the rch fleet, hz2 and vmi1227854 hold the checkout at `/data/projects/franken_manim/scripts/videos_ref`.
+   - A moved row is adjudicated like any self-golden (§4).
 5. Record the adjudication and advance the ledger row. Land only green.

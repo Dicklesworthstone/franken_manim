@@ -16,8 +16,10 @@
 //! land on top of the modules that import.
 //!
 //! Environment: needs host CPython + NumPy (like every test in this
-//! crate) and the gitignored `scripts/videos_ref` checkout (the G0-4
-//! convention); without the checkout the test skips loudly.
+//! crate) and the pinned videos checkout: `FMN_VIDEOS_REF`, as on an rch
+//! worker that holds a private copy, else the gitignored `scripts/videos_ref`
+//! (the G0-4 convention). Without it the tests skip loudly, or fail under
+//! `FMN_REQUIRE_FULL_INPUTS=1`.
 
 use std::path::{Path, PathBuf};
 
@@ -330,14 +332,14 @@ mod tests {
     /// The printed report is fm-d3gt's live parity worklist.
     #[test]
     fn seed_modules_reach_precise_verdicts_under_the_import_shim() {
-        let videos_ref = repo_root().join("scripts/videos_ref");
-        if !videos_ref.join(".git").exists() {
+        let Some(videos_ref) = crate::videos_ref_checkout() else {
             fmn_core::test_inputs::skip_or_fail(
                 "fmn-python::corpus::seed_modules_reach_precise_verdicts_under_the_import_shim",
-                "scripts/videos_ref (G0-4; scripts/video_corpus.py verify prints the clone commands)",
+                "the videos checkout: FMN_VIDEOS_REF or scripts/videos_ref (G0-4; \
+                 scripts/video_corpus.py verify prints the clone commands)",
             );
             return;
-        }
+        };
 
         crate::with_python_test_module("source-unedited corpus", move |py, _module, _globals| {
             put_videos_ref_on_sys_path(py, &videos_ref);
@@ -475,14 +477,14 @@ mod tests {
     /// multiplying the private corpus by hundreds of intermediate artifacts.
     #[test]
     fn seed_scenes_publish_deterministic_final_state_pngs() {
-        let videos_ref = repo_root().join("scripts/videos_ref");
-        if !videos_ref.join(".git").exists() {
+        let Some(videos_ref) = crate::videos_ref_checkout() else {
             fmn_core::test_inputs::skip_or_fail(
                 "fmn-python::corpus::seed_scenes_publish_deterministic_final_state_pngs",
-                "scripts/videos_ref (G0-4; scripts/video_corpus.py verify prints the clone commands)",
+                "the videos checkout: FMN_VIDEOS_REF or scripts/videos_ref (G0-4; \
+                 scripts/video_corpus.py verify prints the clone commands)",
             );
             return;
-        }
+        };
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("the test host clock is after the Unix epoch")

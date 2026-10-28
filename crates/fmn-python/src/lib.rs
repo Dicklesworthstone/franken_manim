@@ -12658,6 +12658,21 @@ pub(crate) fn python_embedding_lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|error| error.into_inner())
 }
 
+/// The pinned 3b1b/videos checkout (G0-4), canonical: `FMN_VIDEOS_REF` when
+/// set, as on an rch worker that holds a private copy outside the synced tree,
+/// else the gitignored `scripts/videos_ref`. `None` when it is not a checkout.
+#[cfg(any(test, feature = "gauntlet"))]
+pub(crate) fn videos_ref_checkout() -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("FMN_VIDEOS_REF").map_or_else(
+        || std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scripts/videos_ref"),
+        std::path::PathBuf::from,
+    );
+    if !path.join(".git").exists() {
+        return None;
+    }
+    path.canonicalize().ok()
+}
+
 /// Run one embedded-Python suite with explicit owner-thread teardown.
 ///
 /// PyO3's `unsendable` guard intentionally refuses to destroy a proxy on a
@@ -12691,10 +12706,20 @@ pub(crate) fn with_python_test_module<T>(
             before.iter().all(|name| !name.starts_with("manimlib")),
             "{suite}: a prior Python suite leaked manimlib modules"
         );
-        let videos_ref = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../scripts/videos_ref")
-            .canonicalize()
-            .ok();
+        // The import roots a suite puts on sys.path (the corpus harness's
+        // videos checkout, a test's own package directory) own the modules
+        // imported from them. Strings only: an entry that is not one cannot
+        // be a filesystem root.
+        let path_entries = || -> HashSet<String> {
+            sys.getattr("path")
+                .and_then(|path| path.try_iter())
+                .map(|entries| {
+                    entries
+                        .filter_map(|entry| entry.ok()?.extract::<String>().ok())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
 
         let hook_globals = PyDict::new(py);
         hook_globals
@@ -12750,10 +12775,18 @@ _fmn_sys.unraisablehook = _fmn_capture_unraisable
             .set_item("__name__", format!("__fmn_{suite}_tests__"))
             .expect("set suite module name");
 
+        let path_before = path_entries();
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             manimlib(py, &module).expect("initialize manimlib");
             body(py, &module, &suite_globals)
         }));
+        // Canonical, so a root reached through a symlink still contains the
+        // canonical paths CPython may record for its modules, and vice versa.
+        let suite_roots: Vec<std::path::PathBuf> = path_entries()
+            .difference(&path_before)
+            .filter_map(|entry| std::path::Path::new(entry).canonicalize().ok())
+            .chain(videos_ref_checkout())
+            .collect();
         py.run(
             c"_fmn_sys.path[:] = _fmn_previous_path",
             Some(&hook_globals),
@@ -12785,28 +12818,53 @@ _fmn_sys.unraisablehook = _fmn_capture_unraisable
         suite_globals.clear();
 
         let after = module_names().expect("snapshot suite-added modules");
-        for name in after.difference(&before) {
-            let is_manimlib = name.starts_with("manimlib");
-            let is_corpus_module = videos_ref.as_ref().is_some_and(|root| {
-                modules
-                    .get_item(name)
-                    .and_then(|module| module.getattr("__file__"))
-                    .and_then(|path| path.extract::<String>())
-                    .is_ok_and(|path| std::path::Path::new(&path).starts_with(root))
-            });
-            if is_manimlib || is_corpus_module {
-                if let Ok(value) = modules.get_item(name)
-                    && let Ok(owned_module) = value.cast_into::<PyModule>()
-                {
-                    owned_module.dict().clear();
-                }
-                let removal = modules.del_item(name);
-                assert!(
-                    removal.is_ok(),
-                    "{suite}: remove module {name}: {:?}",
-                    removal.err()
-                );
+        // A module's files: `__file__`, or a namespace package's `__path__`
+        // (the videos tree's `custom` and year directories have no
+        // `__init__.py`, and they hold their submodules as attributes).
+        let owned_by_suite_root = |module: &Bound<'_, PyAny>| -> bool {
+            let file = module
+                .getattr("__file__")
+                .and_then(|path| path.extract::<String>())
+                .ok();
+            let package_paths: Vec<String> = module
+                .getattr("__path__")
+                .and_then(|paths| paths.try_iter())
+                .map(|paths| {
+                    paths
+                        .filter_map(|path| path.ok()?.extract::<String>().ok())
+                        .collect()
+                })
+                .unwrap_or_default();
+            file.into_iter().chain(package_paths).any(|location| {
+                std::path::Path::new(&location)
+                    .canonicalize()
+                    .is_ok_and(|location| suite_roots.iter().any(|root| location.starts_with(root)))
+            })
+        };
+        // Decide every module before removing any: a namespace package's
+        // `__path__` recomputes itself through `sys.modules[parent]`, so it
+        // must be read while the parents are still installed.
+        let owned: Vec<&String> = after
+            .difference(&before)
+            .filter(|name| {
+                name.starts_with("manimlib")
+                    || modules
+                        .get_item(name.as_str())
+                        .is_ok_and(|module| owned_by_suite_root(&module))
+            })
+            .collect();
+        for name in owned {
+            if let Ok(value) = modules.get_item(name)
+                && let Ok(owned_module) = value.cast_into::<PyModule>()
+            {
+                owned_module.dict().clear();
             }
+            let removal = modules.del_item(name);
+            assert!(
+                removal.is_ok(),
+                "{suite}: remove module {name}: {:?}",
+                removal.err()
+            );
         }
         // PyO3 functions added with `module.add_function` keep the extension
         // module as their `__self__`. CPython does not collect that builtin
@@ -13925,6 +13983,59 @@ except Exception:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A suite owns the modules imported from the import roots it added, even
+    /// when it panics, through a symlinked root, and inside nested namespace
+    /// packages, like the videos tree's year directories
+    /// (fm-corpus-harness-unrun-r4-exzt). The planted leaf keeps `manimlib`
+    /// alive, so a module the teardown missed would surface as the leak
+    /// assertion instead of the planted panic, and in the next suite.
+    #[cfg(unix)]
+    #[test]
+    fn a_panicking_suite_leaves_no_module_from_its_import_roots() {
+        let root = std::env::temp_dir().join(format!(
+            "fmn-suite-root-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("the test host clock is after the Unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("real/planted_ns/inner")).unwrap();
+        std::fs::write(
+            root.join("real/planted_ns/inner/leaf.py"),
+            "import manimlib\nVALUE = manimlib\n",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
+        let link = root.join("link");
+        let link = link.to_str().expect("UTF-8 temp path").to_owned();
+
+        let outcome = std::panic::catch_unwind(|| {
+            crate::with_python_test_module("planted panic", |py, _module, _globals| {
+                py.import("sys")
+                    .unwrap()
+                    .getattr("path")
+                    .unwrap()
+                    .call_method1("insert", (0, link.as_str()))
+                    .unwrap();
+                py.import("planted_ns.inner.leaf").unwrap();
+                std::panic::panic_any("planted");
+            })
+        });
+        let payload = outcome.expect_err("the planted panic propagates");
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&"planted"));
+
+        crate::with_python_test_module("after the planted panic", |py, _module, _globals| {
+            let modules = py.import("sys").unwrap().getattr("modules").unwrap();
+            for name in ["planted_ns", "planted_ns.inner", "planted_ns.inner.leaf"] {
+                assert!(
+                    !modules.contains(name).unwrap(),
+                    "{name} survived the suite that imported it"
+                );
+            }
+        });
+    }
 
     #[test]
     fn fallible_native_graph_sampling() {
