@@ -59,6 +59,7 @@ pub mod ladder;
 pub mod movement;
 pub mod pure_frame;
 pub mod purity;
+pub mod rate_table;
 pub mod rotation;
 pub mod timeline;
 pub mod transform;

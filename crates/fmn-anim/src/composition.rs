@@ -519,7 +519,16 @@ impl Animation for AnimationGroup {
     fn deferred_error(&self) -> Option<AnimError> {
         self.updater_error
             .clone()
+            .or_else(|| self.state.config.rate_func.error())
             .or_else(|| self.animations.iter().find_map(|a| a.deferred_error()))
+    }
+
+    fn has_preparing_rate(&self) -> bool {
+        self.state.config.rate_func.is_preparing()
+            || self
+                .animations
+                .iter()
+                .any(|animation| animation.has_preparing_rate())
     }
 }
 
@@ -958,12 +967,23 @@ impl Animation for Succession {
 
     /// A member's just-in-time `begin` failure, recorded by name.
     fn deferred_error(&self) -> Option<AnimError> {
-        self.deferred.clone().or_else(|| {
-            self.animations
+        self.deferred
+            .clone()
+            .or_else(|| self.state.config.rate_func.error())
+            .or_else(|| {
+                self.animations
+                    .iter()
+                    .take(self.active + 1)
+                    .find_map(|a| a.deferred_error())
+            })
+    }
+
+    fn has_preparing_rate(&self) -> bool {
+        self.state.config.rate_func.is_preparing()
+            || self
+                .animations
                 .iter()
-                .take(self.active + 1)
-                .find_map(|a| a.deferred_error())
-        })
+                .any(|animation| animation.has_preparing_rate())
     }
 }
 

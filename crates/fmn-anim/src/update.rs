@@ -149,7 +149,9 @@ impl Animation for UpdateFromFunc {
     }
 
     fn deferred_error(&self) -> Option<AnimError> {
-        self.error.clone()
+        self.error
+            .clone()
+            .or_else(|| self.state.config.rate_func.error())
     }
 
     fn interpolate_submobject(&mut self, _stage: &mut Stage, _mobs: &[Mob], _sub_alpha: f64) {

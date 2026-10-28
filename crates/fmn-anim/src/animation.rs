@@ -164,14 +164,18 @@ pub enum RateFunc {
     /// A pre-sampled rate curve on a uniform grid over `[0, 1]`, linearly
     /// interpolated between samples (at least two).
     ///
-    /// This is the capturing-closure seam the type docs promise the Python
-    /// front door: the portal evaluates a pure Python rate callable for
-    /// every grid point BEFORE a segment runs, so the segment drivers stay
-    /// free of mid-segment interpreter crossings. Sampled at a segment's
-    /// frame count, the curve is exact at every unlagged capture boundary;
-    /// lagged or time-spanned members evaluate between grid points and see
-    /// the linear interpolant of the pure callable.
+    /// This explicit approximation interpolates between a caller-provided
+    /// uniform grid. Lagged and time-spanned members can evaluate between
+    /// those grid points. Use [`RateFunc::Preparing`] and [`RateFunc::Exact`]
+    /// to preserve a declared pure callable at the actual native sample
+    /// arguments, including discontinuities, without interpolation.
     Sampled(std::sync::Arc<[f64]>),
+    /// Owner-side preparation of an explicitly declared pure function.
+    /// This effectful collector is always refused by pure-frame admission.
+    Preparing(std::sync::Arc<crate::rate_table::RateSampler>),
+    /// Exact observations from the native schedule, with no interpolation
+    /// and no retained callback. A missing argument is a deferred error.
+    Exact(std::sync::Arc<crate::rate_table::ExactRateTable>),
     /// The Reference's `squish_rate_func(func, a, b)`: run `inner`'s whole
     /// arc inside `[a, b]`, clamping outside; degenerate `a == b` returns
     /// `a` (kept exactly).
@@ -238,6 +242,8 @@ impl RateFunc {
         match self {
             Self::Catalog(rate) => rate.function()(t),
             Self::Base(f) => f(t),
+            Self::Preparing(sampler) => sampler.eval(t),
+            Self::Exact(table) => table.eval(t),
             Self::Sampled(samples) => match samples.len() {
                 0 => t,
                 1 => samples[0],
@@ -265,6 +271,27 @@ impl RateFunc {
                 }
             }
             Self::Scaled { inner, proportion } => proportion * inner.eval(t),
+        }
+    }
+
+    /// Whether evaluating this value can still execute an owner callback.
+    #[must_use]
+    pub fn is_preparing(&self) -> bool {
+        match self {
+            Self::Preparing(_) => true,
+            Self::Squish { inner, .. } | Self::Scaled { inner, .. } => inner.is_preparing(),
+            _ => false,
+        }
+    }
+
+    /// A preparation failure or violated exact-table sampling contract.
+    #[must_use]
+    pub fn error(&self) -> Option<AnimError> {
+        match self {
+            Self::Preparing(sampler) => sampler.error(),
+            Self::Exact(table) => table.error(),
+            Self::Squish { inner, .. } | Self::Scaled { inner, .. } => inner.error(),
+            _ => None,
         }
     }
 }
@@ -997,9 +1024,15 @@ pub trait Animation {
     /// A failure recorded during `interpolate`, which has no error channel.
     /// Composition operators and fallible update callbacks retain their first
     /// error here so drivers can refuse the failed segment instead of treating
-    /// a frozen display as successful playback. The default is infallible.
+    /// a frozen display as successful playback. The default checks the rate
+    /// function's preparation and exact-lookup errors.
     fn deferred_error(&self) -> Option<AnimError> {
-        None
+        self.state().config.rate_func.error()
+    }
+
+    /// Owner-side rate collectors are effects, even on native animations.
+    fn has_preparing_rate(&self) -> bool {
+        self.state().config.rate_func.is_preparing()
     }
 
     /// The declared effect signature (§9.5). Default: unclassified —

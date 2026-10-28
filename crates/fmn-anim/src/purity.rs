@@ -140,7 +140,9 @@ fn scan_family(stage: &Stage, mob: Mob, effects: &mut Vec<ImpureEffect>) {
 pub fn classify_play(stage: &Stage, animations: &[Box<dyn Animation>]) -> Purity {
     let mut effects = Vec::new();
     for animation in animations {
-        if animation.effect_signature() != AnimationSignature::Pure {
+        if animation.effect_signature() != AnimationSignature::Pure
+            || animation.has_preparing_rate()
+        {
             note(&mut effects, ImpureEffect::UnclassifiedAnimation);
         }
         // Animation-owned mobjects (starting/target) tick every frame

@@ -76,6 +76,39 @@ fn square(stage: &mut Stage, x: f64) -> Mob {
     mob
 }
 
+#[test]
+fn owner_rate_collectors_demote_and_incomplete_exact_tables_fail_before_rendering() {
+    use fmn_anim::rate_table::RateSampler;
+
+    let mut stage = Stage::new();
+    let source = square(&mut stage, 0.0);
+    let target = square(&mut stage, 1.0);
+    let clock = RationalFrameClock::new(10).unwrap();
+    let rng = RngRoot::from_seed(5);
+    let sampler = RateSampler::new(10, |alpha| Ok(alpha * alpha * alpha));
+    let mut preparing = Transform::new(source, target);
+    preparing.state_mut().config.rate_func = RateFunc::Preparing(Arc::clone(&sampler));
+    assert!(!fmn_anim::classify_play(&stage, &[Box::new(preparing.clone())]).is_pure());
+    preparing.begin(&mut stage).unwrap();
+    assert!(preparing.freeze_interpolation().is_none());
+    preparing.finish(&mut stage);
+    // The collector observed only begin/finish, not the 0.1 frame. An exact
+    // lookup must report that omitted input rather than interpolate 0 and 1.
+    let rate = sampler.finish().unwrap();
+    let mut animation = Transform::new(source, target);
+    animation.state_mut().config.rate_func = rate;
+    let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(animation)];
+    let open = open_play(&mut stage, &clock, &mut animations).unwrap();
+    let frozen = PureSegment::freeze(&stage, &clock, &rng, &animations, &open).unwrap();
+    let failure = frozen
+        .job(1)
+        .unwrap()
+        .try_materialize()
+        .err()
+        .expect("missing sample must fail");
+    assert!(failure.to_string().contains("unprepared rate input"));
+}
+
 type StageFacts = (Vec<Vec<Mob>>, Vec<u64>, Vec<String>);
 
 fn facts(stage: &Stage) -> StageFacts {

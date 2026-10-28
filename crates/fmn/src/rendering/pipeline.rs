@@ -40,6 +40,8 @@ thread_local! {
 pub enum NativeFrameError {
     /// A validated compiled frame refused reconstruction on its worker.
     Bundle(BundleReadError),
+    /// A prepared animation could not evaluate its exact native sample.
+    Animation(fmn_anim::AnimError),
     /// Lumen refused the frozen input.
     Renderer(RetainedFrameRendererError),
     /// A frozen camera/light capture was invalid.
@@ -56,6 +58,7 @@ impl fmt::Display for NativeFrameError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Bundle(error) => error.fmt(f),
+            Self::Animation(error) => error.fmt(f),
             Self::Renderer(error) => error.fmt(f),
             Self::Camera(error) => error.fmt(f),
             Self::Frame(error) => error.fmt(f),
@@ -69,6 +72,7 @@ impl std::error::Error for NativeFrameError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Bundle(error) => Some(error),
+            Self::Animation(error) => Some(error),
             Self::Renderer(error) => Some(error),
             Self::Camera(error) => Some(error),
             Self::Frame(error) => Some(error),
@@ -415,7 +419,7 @@ impl PipelineStages for NativeFrameStages {
                 // Only a closed prepared native program crosses here. Its
                 // per-frame animation and arena are created on this render
                 // team, not on the ordered preparation worker or scene owner.
-                let stage = job.materialize();
+                let stage = job.try_materialize().map_err(NativeFrameError::Animation)?;
                 self.rasterize_reconstructed(&stage, config, camera, team, &mut output)?;
             }
             NativeFrame::AdaptivePure {
@@ -423,7 +427,7 @@ impl PipelineStages for NativeFrameStages {
                 mut config,
                 camera,
             } => {
-                let stage = job.materialize();
+                let stage = job.try_materialize().map_err(NativeFrameError::Animation)?;
                 let (pose, refusal) = camera.for_stage(&stage)?;
                 config.frame.background = camera.background();
                 self.rasterize_reconstructed(&stage, config, pose, team, &mut output)?;

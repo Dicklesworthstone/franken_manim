@@ -68,6 +68,8 @@ fn freeze_rate(rate: &RateFunc) -> Option<RateFunc> {
             RateFunc::Catalog(CatalogRate::from_tag(fmn_core::rate::tag_of(*function)?)?)
         }
         RateFunc::Sampled(samples) => RateFunc::Sampled(Arc::clone(samples)),
+        RateFunc::Preparing(_) => return None,
+        RateFunc::Exact(table) => RateFunc::Exact(Arc::clone(table)),
         RateFunc::Squish { inner, a, b } => RateFunc::Squish {
             inner: Box::new(freeze_rate(inner)?),
             a: *a,
@@ -191,6 +193,16 @@ impl FrozenAnimation {
             FrozenMechanism::Rotation(animation) => animation.state(),
             FrozenMechanism::Group(group) => &group.state,
         }
+    }
+
+    fn rate_error(&self) -> Option<AnimError> {
+        self.state().config.rate_func.error().or_else(|| {
+            if let FrozenMechanism::Group(group) = &self.mechanism {
+                group.animations.iter().find_map(Self::rate_error)
+            } else {
+                None
+            }
+        })
     }
 
     fn interpolate(&self, stage: &mut Stage, time: f64) {
@@ -586,14 +598,32 @@ impl PureFrameJob {
     /// Reconstruct using Choreo's native interpolation, not whole-scene lerp
     /// between guessed endpoints. In particular, arcs, lagged families and
     /// non-monotone catalog rates keep their real intermediate states.
+    ///
+    /// # Panics
+    /// If an exact rate table does not cover this sample. Use
+    /// [`Self::try_materialize`] to handle that failure as an error.
     #[must_use]
     pub fn materialize(&self) -> Stage {
+        self.try_materialize()
+            .expect("pure frame interpolation failed")
+    }
+
+    /// Reconstruct with a typed failure when an exact rate table does not
+    /// cover the requested sample. Production renderers use this checked
+    /// boundary, so no partially interpolated frame can reach an emitter.
+    ///
+    /// # Errors
+    /// An exact rate's preparation contract was violated.
+    pub fn try_materialize(&self) -> Result<Stage, AnimError> {
         let mut stage = self.data.begin.clone().materialize();
         for animation in &self.data.animations {
             animation.interpolate(&mut stage, self.sample.time.to_f64());
+            if let Some(error) = animation.rate_error() {
+                return Err(error);
+            }
         }
         stage.set_time_from_clock(self.time().to_f64());
-        stage
+        Ok(stage)
     }
 }
 

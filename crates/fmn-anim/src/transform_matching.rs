@@ -279,6 +279,9 @@ impl Animation for TransformMatchingParts {
     fn effect_signature(&self) -> AnimationSignature {
         self.group.effect_signature()
     }
+    fn has_preparing_rate(&self) -> bool {
+        self.group.has_preparing_rate()
+    }
     fn freeze_interpolation(&self) -> Option<crate::pure_frame::FrozenAnimation> {
         if !self.begun || self.finished || self.cleaned || self.deferred_error().is_some() {
             return None;

@@ -127,6 +127,40 @@ try {
     return evaluate(`fetch("/api/inspect",{headers:{"X-FMN-Capability":${JSON.stringify(studio.cap)}},signal:AbortSignal.timeout(10000)}).then(r=>r.json())`);
   }
   async function screenshot(name) { const result = await command("Page.captureScreenshot",{format:"png",captureBeyondViewport:true}); await writeFile(join(output,name),Buffer.from(result.data,"base64")); }
+  async function inputReady(revision) {
+    await until(async () => {
+      const error = await evaluate("document.getElementById('error').hidden ? null : document.getElementById('error').textContent");
+      if (error) throw new Error(`Native input refused: ${error}`);
+      if (!await evaluate("!document.getElementById('inspect').disabled && document.getElementById('display').dataset.synchronized === 'true'")) return false;
+      return (await inspect()).view.input_revision >= revision;
+    }, `native input revision ${revision}`);
+    assert.equal(await evaluate("document.getElementById('error').hidden"), true);
+  }
+  async function nativeKey(value, modifiers = 0, types = ["keyDown", "keyUp"]) {
+    // CDP modifiers use Alt=1, Control=2, Meta=4, Shift=8; Studio maps DOM
+    // modifier flags into its separate native bit layout after delivery.
+    const view = (await inspect()).view, revision = view.input_revision;
+    const code = value === "ArrowRight" ? "ArrowRight" : "Key" + value.toUpperCase();
+    const windowsVirtualKeyCode = value === "ArrowRight" ? 39 : value.toUpperCase().charCodeAt(0);
+    for (const type of types) await command("Input.dispatchKeyEvent", {type,key:value,code,windowsVirtualKeyCode,modifiers});
+    await inputReady(revision + types.length);
+    assert.equal((await inspect()).view.frame_index,view.frame_index,"keyboard input keeps its admitted frame owner");
+  }
+  async function nativePointer(point, type = "mouseMoved", modifiers = 0, buttons = 0) {
+    const view = (await inspect()).view, revision = view.input_revision;
+    const yScale = view.y_up ? -view.scale : view.scale;
+    const position = await evaluate(`(() => { const r=document.getElementById('preview').getBoundingClientRect(); return {x:r.x + (${point[0]} * ${view.scale} + ${view.origin[0]}) * r.width / ${view.width}, y:r.y + (${point[1]} * ${yScale} + ${view.origin[1]}) * r.height / ${view.height}}; })()`);
+    // CDP requires the held button on mouseMoved too. Omitting it can drop
+    // pointer capture even when the buttons bitmask still says left is down.
+    await command("Input.dispatchMouseEvent", {type,...position,modifiers,buttons,
+      button: type === "mouseMoved" ? (buttons & 1 ? "left" : "none") : "left",
+      ...(type === "mouseMoved" ? {} : {clickCount:1})});
+    await inputReady(revision + 1);
+    assert.equal((await inspect()).view.frame_index,view.frame_index,"pointer input keeps its admitted frame owner");
+  }
+  async function pixelHash() {
+    return evaluate("(async () => { const c=document.getElementById('preview'); const bytes=c.getContext('2d').getImageData(0,0,c.width,c.height).data; return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),x=>x.toString(16).padStart(2,'0')).join(''); })()");
+  }
   async function editBuiltinScene(scene, initial, frame) {
     await command("Emulation.setDeviceMetricsOverride",{width:1280,height:1000,deviceScaleFactor:1,mobile:false});
     await click("#inspect"); await synchronized(frame);
@@ -403,40 +437,6 @@ try {
   await click("#input-events");
   assert.equal(await evaluate("document.getElementById('input-events').checked"), true);
   await evaluate("document.getElementById('preview').focus()");
-  async function inputReady(revision) {
-    await until(async () => {
-      const error = await evaluate("document.getElementById('error').hidden ? null : document.getElementById('error').textContent");
-      if (error) throw new Error(`Native input refused: ${error}`);
-      if (!await evaluate("!document.getElementById('inspect').disabled && document.getElementById('display').dataset.synchronized === 'true'")) return false;
-      return (await inspect()).view.input_revision >= revision;
-    }, `native input revision ${revision}`);
-    assert.equal(await evaluate("document.getElementById('error').hidden"), true);
-  }
-  async function nativeKey(value, modifiers = 0, types = ["keyDown", "keyUp"]) {
-    // CDP modifiers use Alt=1, Control=2, Meta=4, Shift=8; Studio maps DOM
-    // modifier flags into its separate native bit layout after delivery.
-    const view = (await inspect()).view, revision = view.input_revision;
-    const code = value === "ArrowRight" ? "ArrowRight" : "Key" + value.toUpperCase();
-    const windowsVirtualKeyCode = value === "ArrowRight" ? 39 : value.toUpperCase().charCodeAt(0);
-    for (const type of types) await command("Input.dispatchKeyEvent", {type,key:value,code,windowsVirtualKeyCode,modifiers});
-    await inputReady(revision + types.length);
-    assert.equal((await inspect()).view.frame_index,view.frame_index,"keyboard input keeps its admitted frame owner");
-  }
-  async function nativePointer(point, type = "mouseMoved", modifiers = 0, buttons = 0) {
-    const view = (await inspect()).view, revision = view.input_revision;
-    const yScale = view.y_up ? -view.scale : view.scale;
-    const position = await evaluate(`(() => { const r=document.getElementById('preview').getBoundingClientRect(); return {x:r.x + (${point[0]} * ${view.scale} + ${view.origin[0]}) * r.width / ${view.width}, y:r.y + (${point[1]} * ${yScale} + ${view.origin[1]}) * r.height / ${view.height}}; })()`);
-    // CDP requires the held button on mouseMoved too. Omitting it can drop
-    // pointer capture even when the buttons bitmask still says left is down.
-    await command("Input.dispatchMouseEvent", {type,...position,modifiers,buttons,
-      button: type === "mouseMoved" ? (buttons & 1 ? "left" : "none") : "left",
-      ...(type === "mouseMoved" ? {} : {clickCount:1})});
-    await inputReady(revision + 1);
-    assert.equal((await inspect()).view.frame_index,view.frame_index,"pointer input keeps its admitted frame owner");
-  }
-  async function pixelHash() {
-    return evaluate("(async () => { const c=document.getElementById('preview'); const bytes=c.getContext('2d').getImageData(0,0,c.width,c.height).data; return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),x=>x.toString(16).padStart(2,'0')).join(''); })()");
-  }
   const initialPixels = await pixelHash();
   await nativeKey("t", 2);
   await nativePointer([-1.5,0]);
