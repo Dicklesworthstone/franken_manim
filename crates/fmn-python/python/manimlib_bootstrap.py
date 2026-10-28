@@ -15294,75 +15294,11 @@ class InteractiveSceneEmbed:
 
 
 class Animation:
-    def __init__(
-        self,
-        mobject=None,
-        run_time=1.0,
-        rate_func=None,
-        time_span=None,
-        lag_ratio=0.0,
-        name="",
-        remover=False,
-        final_alpha_value=1.0,
-        suspend_mobject_updating=False,
-        **kwargs,
-    ):
-        self.mobject = mobject
-        self.run_time = float(run_time)
-        self.rate_func = (
-            rate_func
-            if rate_func is not None
-            else getattr(_FMN_ROOT, "smooth", lambda alpha: alpha)
-        )
-        self.time_span = time_span
-        self.lag_ratio = float(lag_ratio)
-        self.name = name or type(self).__name__
-        self.remover = bool(remover)
-        self.final_alpha_value = float(final_alpha_value)
-        self.suspend_mobject_updating = bool(suspend_mobject_updating)
-        self.__dict__.update(kwargs)
-
-    def begin(self):
-        if self.time_span is not None:
-            self.run_time = max(float(self.time_span[1]), self.run_time)
-        self.interpolate(0.0)
-
-    def finish(self):
-        self.interpolate(self.final_alpha_value)
-
-    def interpolate(self, alpha):
-        self.interpolate_mobject(float(alpha))
-        return self
-
-    def time_spanned_alpha(self, alpha):
-        if self.time_span is None:
-            return float(alpha)
-        start, end = self.time_span
-        return _np.clip(float(alpha) * self.run_time - start, 0.0, end - start) / (
-            end - start
-        )
-
-    def interpolate_mobject(self, alpha):
-        del alpha
-
-    def set_run_time(self, run_time):
-        self.run_time = float(run_time)
-        return self
-
-    def get_run_time(self):
-        if self.time_span:
-            return max(self.run_time, float(self.time_span[1]))
-        return self.run_time
-
-    def is_remover(self):
-        return bool(self.remover)
-
-    def clean_up_from_scene(self, scene):
-        if self.is_remover():
-            scene.remove(self.mobject)
-
-    def copy(self):
-        return _copy.copy(self)
+    # The constructor, begin, finish, interpolate, time_spanned_alpha,
+    # interpolate_mobject, set_run_time, is_remover, clean_up_from_scene and copy are
+    # installed by the embedded animation semantics. get_run_time is installed by
+    # fmn_python.live_rates.
+    pass
 
 
 class UpdateFromFunc(Animation):
@@ -15492,65 +15428,7 @@ class TracedPath(VMobject):
     smooth-points and stroke surfaces. A non-callable trace source is a
     named refusal instead of the Reference's mid-play crash."""
 
-    def __init__(
-        self,
-        traced_point_func,
-        time_traced=None,
-        time_per_anchor=1.0 / 15,
-        stroke_color=None,
-        stroke_width=2.0,
-        stroke_opacity=1.0,
-        **kwargs,
-    ):
-        if not callable(traced_point_func):
-            raise TypeError(
-                "TracedPath requires a callable returning the traced "
-                "point; got " + type(traced_point_func).__name__
-            )
-        self.stroke_config = dict(
-            color=stroke_color if stroke_color is not None else "#FFFFFF",
-            width=stroke_width,
-            opacity=stroke_opacity,
-        )
-        super().__init__(**kwargs)
-        self.traced_point_func = traced_point_func
-        self.time_traced = (
-            float(time_traced) if time_traced is not None else _np.inf
-        )
-        self.time_per_anchor = time_per_anchor
-        self.time = 0.0
-        self.traced_points = []
-        self.add_updater(lambda m, dt: m.update_path(dt))
-
-    def update_path(self, dt):
-        # changing.py:122, verbatim (including the finite-window resample
-        # and the every-now-and-then list refresh).
-        if dt == 0:
-            return self
-        point = _np.array(self.traced_point_func(), dtype=float).copy()
-        self.traced_points.append(point)
-
-        if self.time_traced < _np.inf:
-            n_relevant_points = int(self.time_traced / dt + 0.5)
-            n_tps = len(self.traced_points)
-            if n_tps < n_relevant_points:
-                points = self.traced_points + [point] * (
-                    n_relevant_points - n_tps
-                )
-            else:
-                points = self.traced_points[n_tps - n_relevant_points:]
-            if n_tps > 10 * n_relevant_points:
-                self.traced_points = self.traced_points[-n_relevant_points:]
-        else:
-            points = self.traced_points
-
-        if points:
-            self.set_points_smoothly(points)
-
-        self.set_stroke(**self.stroke_config)
-
-        self.time += dt
-        return self
+    # The constructor and update_path are installed by fmn_python.traced_path.
 
 
 class ChangeSpeed(Animation):
@@ -16025,27 +15903,7 @@ class Uncreate(ShowCreation):
     # should_match_start surface passes through to ShowPartial.
     _native_kind = "uncreate"
 
-    def __init__(
-        self,
-        mobject,
-        rate_func=None,
-        remover=True,
-        should_match_start=True,
-        **kwargs,
-    ):
-        _refuse_unrouted("Uncreate()", [("remover", remover is not True)])
-        super().__init__(
-            mobject,
-            rate_func=rate_func,
-            should_match_start=should_match_start,
-            **kwargs,
-        )
-        if (
-            isinstance(mobject, Surface)
-            and hasattr(mobject, "resolution")
-            and hasattr(mobject, "preferred_creation_axis")
-        ):
-            self._native_kind = "uncreate_surface"
+    # The constructor is installed by the embedded animation semantics.
 
     def _native_params(self):
         if self._native_kind != "uncreate_surface":
@@ -16151,32 +16009,8 @@ class ShowIncreasingSubsets(Animation):
     _int_round_default = "round"
     _one_by_one = False
 
-    def __init__(
-        self,
-        group,
-        int_func=None,
-        suspend_mobject_updating=False,
-        **kwargs,
-    ):
-        if not isinstance(group, Mobject):
-            raise TypeError(
-                type(self).__name__
-                + " requires a Mobject family; "
-                + type(group).__name__
-                + " has no submobject list to reveal"
-            )
-        if not group.submobjects:
-            raise ValueError(
-                type(self).__name__
-                + " requires a family with submobjects; the group is empty"
-            )
-        self._int_round = self._classify_int_func(int_func)
-        self.all_submobs = list(group.submobjects)
-        super().__init__(
-            group,
-            suspend_mobject_updating=suspend_mobject_updating,
-            **kwargs,
-        )
+    # The constructor, interpolate_mobject and update_submobject_list are installed by
+    # fmn_python.subset_reveal.
 
     def _classify_int_func(self, int_func):
         # The two Reference rounding rules the native shelf keeps as data
@@ -16196,33 +16030,6 @@ class ShowIncreasingSubsets(Animation):
 
     def _native_params(self):
         return {"int_round": self._int_round}
-
-    def interpolate_mobject(self, alpha):
-        # The Reference overrides interpolate_mobject (creation.py:190):
-        # the rate function applies to the RAW alpha, then the rounding
-        # rule turns it into a child count.
-        rated = self.rate_func(float(alpha))
-        count = len(self.all_submobs)
-        value = rated * count
-        if self._int_round == "ceil":
-            index = int(_np.ceil(value))
-        else:
-            index = int(_np.round(value))  # ties-to-even, IntRound::Round
-        self.update_submobject_list(index)
-
-    def update_submobject_list(self, index):
-        # creation.py:196 / creation.py:207, with Python-slice clamping
-        # and set_submobjects' identity short-circuit.
-        count = len(self.all_submobs)
-        if count == 0:
-            return
-        if self._one_by_one:
-            clipped = int(min(max(index, 0), count - 1))
-            desired = [] if clipped == 0 else [self.all_submobs[clipped - 1]]
-        else:
-            desired = self.all_submobs[:index]
-        if list(self.mobject.submobjects) != desired:
-            self.mobject.set_submobjects(list(desired))
 
 
 class ShowSubmobjectsOneByOne(ShowIncreasingSubsets):
@@ -16621,15 +16428,8 @@ class Transform(_NativeAnimation):
     def _allows_deferred_target(self):
         return True
 
-    def create_target(self):
-        # Reference create_target hands back the stored target; the
-        # in-place reading (fm-5wq.4.83): a None target resolves to a copy
-        # of the mobject's play-time state, so `Transform(mob)` after
-        # in-place mutation snaps records to that state through the same
-        # native transform kind.
-        if getattr(self, "target_mobject", None) is not None:
-            return self.target_mobject
-        return self.mobject.copy()
+    # create_target is installed by the embedded animation semantics. begin is installed
+    # by fmn_python.raster_transform.
 
     def _native_target(self):
         # Subclasses that carry no target at all (CyclicReplace/Swap set
@@ -16648,16 +16448,6 @@ class Transform(_NativeAnimation):
             elif hasattr(starting, "updaters"):
                 starting.updaters.clear()
         return starting
-
-    def begin(self):
-        # fm-5wq.4.91: the Python updater-driving fallback (never touched
-        # by native Scene.play, which builds Choreo segments instead).
-        if self.time_span is not None:
-            self.run_time = max(float(self.time_span[1]), self.run_time)
-        self.target_mobject = self.create_target()
-        self.starting_mobject = self.create_starting_mobject()
-        self.target_copy = self.target_mobject.copy()
-        self.interpolate(0.0)
 
     def interpolate_mobject(self, alpha):
         # Straight-path, same-structure record lerp only: family alignment
@@ -16748,18 +16538,7 @@ class FadeIn(Fade):
 class FadeOut(Fade):
     _native_kind = "fade_out"
 
-    def __init__(self, mobject, shift=_ORIGIN, remover=True, final_alpha_value=0.0, **kwargs):
-        scale = kwargs.pop("scale", 1.0)
-        _refuse_unrouted(
-            "FadeOut()",
-            [
-                ("remover", remover is not True),
-                ("final_alpha_value", final_alpha_value != 0.0),
-            ],
-        )
-        super().__init__(mobject, shift=shift, scale=scale, **kwargs)
-        # fading.py:76: finish() restores the pre-fade state.
-        self.final_alpha_value = 0.0
+    # The constructor is installed by fmn_python.fading.
 
     def create_target(self):
         result = self.mobject.copy()
@@ -17107,12 +16886,7 @@ class WiggleOutThenIn(Animation):
 class ShowPassingFlash(_NativeAnimation):
     _native_kind = "show_passing_flash"
 
-    def __init__(self, mobject, time_width=0.1, remover=True, **kwargs):
-        _refuse_unrouted(
-            "ShowPassingFlash()", [("remover", remover is not True)]
-        )
-        super().__init__(mobject, **kwargs)
-        self.time_width = float(time_width)
+    # The constructor is installed by the embedded animation semantics.
 
     def get_bounds(self, alpha):
         upper = _interpolate(0.0, 1.0 + self.time_width, float(alpha))
@@ -17132,20 +16906,7 @@ class ShowCreationThenDestruction(ShowPassingFlash):
 class VShowPassingFlash(Animation):
     _native_kind = "v_show_passing_flash"
 
-    def __init__(
-        self,
-        vmobject,
-        time_width=0.3,
-        taper_width=0.05,
-        remover=True,
-        **kwargs,
-    ):
-        _refuse_unrouted(
-            "VShowPassingFlash()", [("remover", remover is not True)]
-        )
-        super().__init__(vmobject, remover=True, **kwargs)
-        self.time_width = float(time_width)
-        self.taper_width = float(taper_width)
+    # The constructor is installed by fmn_python.indication.
 
     def taper_kernel(self, x):
         if x < self.taper_width:
@@ -17206,17 +16967,7 @@ class FlashUnder(FlashAround):
 class ApplyWave(Animation):
     _native_kind = "apply_wave"
 
-    def __init__(
-        self,
-        mobject,
-        direction=_UP,
-        amplitude=0.2,
-        run_time=1.0,
-        **kwargs,
-    ):
-        super().__init__(mobject, run_time=run_time, **kwargs)
-        self.direction = _vec3(direction)
-        self.amplitude = float(amplitude)
+    # The constructor is installed by fmn_python.indication.
 
     def _native_params(self):
         return {"direction": self.direction, "amplitude": self.amplitude}
@@ -17423,8 +17174,7 @@ class ReplacementTransform(Transform):
 class TransformFromCopy(Transform):
     _native_kind = "transform_from_copy"
 
-    def __init__(self, mobject, target_mobject, **kwargs):
-        super().__init__(mobject, target_mobject, **kwargs)
+    # The constructor is installed by the embedded animation semantics.
 
 
 class CyclicReplace(Transform):
@@ -17435,19 +17185,7 @@ class CyclicReplace(Transform):
     _native_kind = "cyclic_replace"
     _target_attr = None
 
-    def __init__(self, *mobjects, path_arc=0.5 * _math.pi, **kwargs):
-        if len(mobjects) < 2:
-            raise ValueError(
-                type(self).__name__
-                + " needs at least two mobjects to cycle; got "
-                + str(len(mobjects))
-            )
-        if not all(isinstance(mobject, Mobject) for mobject in mobjects):
-            raise TypeError(type(self).__name__ + " cycles Mobjects only")
-        _NativeAnimation.__init__(self, mobjects[0], **kwargs)
-        self.mobjects = list(mobjects)
-        self.path_arc = float(path_arc)
-        self._native_extra_mobjects = tuple(self.mobjects[1:])
+    # The constructor is installed by fmn_python.playback.
 
     def _native_params(self):
         return {"mobs": self.mobjects, "path_arc": self.path_arc}
@@ -17461,30 +17199,7 @@ class FadeTransform(_NativeAnimation):
     _native_kind = "fade_transform"
     _target_attr = "target_mobject"
 
-    def __init__(self, mobject, target_mobject, stretch=True, dim_to_match=1, **kwargs):
-        # fm-5wq.4.98: stretch and dim_to_match route to the native
-        # builder's own knobs (fading.py:91 semantics); the unrouted
-        # refusal retires. A non-Mobject endpoint refuses by name here
-        # instead of failing anonymously at spec build.
-        if not isinstance(mobject, _BridgeMobject) or not isinstance(
-            target_mobject, _BridgeMobject
-        ):
-            raise TypeError(
-                "FadeTransform requires a source Mobject and a target "
-                "Mobject; got "
-                + type(mobject).__name__
-                + " and "
-                + type(target_mobject).__name__
-            )
-        super().__init__(mobject, **kwargs)
-        self.target_mobject = target_mobject
-        self.stretch = bool(stretch)
-        self.dim_to_match = int(dim_to_match)
-        if self.dim_to_match not in (0, 1, 2):
-            raise ValueError(
-                "FadeTransform dim_to_match must be 0, 1, or 2; got "
-                + repr(dim_to_match)
-            )
+    # The constructor is installed by fmn_python.fading.
 
     def _native_params(self):
         return {"stretch": self.stretch, "dim_to_match": self.dim_to_match}
@@ -17530,62 +17245,11 @@ class TransformMatchingParts(_NativeAnimation):
     _native_kind = "transform_matching_parts"
     _target_attr = "target_mobject"
 
-    def __init__(
-        self,
-        source,
-        target,
-        matched_pairs=(),
-        match_animation=Transform,
-        mismatch_animation=Transform,
-        run_time=2,
-        lag_ratio=0,
-        **kwargs,
-    ):
-        if not isinstance(source, Mobject) or not isinstance(target, Mobject):
-            raise TypeError(
-                type(self).__name__ + " expects two Mobject families"
-            )
-        _refuse_unrouted(
-            type(self).__name__ + "()",
-            [
-                ("match_animation", match_animation is not Transform),
-                ("mismatch_animation", mismatch_animation is not Transform),
-            ],
-        )
-        pairs = [tuple(pair) for pair in matched_pairs]
-        if not all(
-            len(pair) == 2
-            and isinstance(pair[0], Mobject)
-            and isinstance(pair[1], Mobject)
-            for pair in pairs
-        ):
-            raise TypeError(
-                type(self).__name__ + " matched_pairs must pair Mobjects"
-            )
-        if (
-            not source.family_members_with_points()
-            or not target.family_members_with_points()
-        ):
-            raise ValueError(
-                type(self).__name__
-                + " requires point-bearing families on both sides"
-            )
-        self.target_mobject = target
-        self.matched_pairs = pairs
-        super().__init__(
-            source, run_time=run_time, lag_ratio=lag_ratio, **kwargs
-        )
+    # The constructor and find_pairs_with_matching_shapes are installed by
+    # fmn_python.matching.
 
     def _native_params(self):
         return {"matched_pairs": self.matched_pairs}
-
-    def find_pairs_with_matching_shapes(self, chars1, chars2):
-        import itertools as it
-        result = []
-        for c1, c2 in it.product(chars1, chars2):
-            if hasattr(c1, "has_same_shape_as") and c1.has_same_shape_as(c2):
-                result.append((c1, c2))
-        return result
 
 
 class TransformMatchingShapes(TransformMatchingParts):
@@ -17608,49 +17272,7 @@ class TransformMatchingStrings(_NativeAnimation):
     _target_attr = "target_mobject"
     _match_by_blocks = True
 
-    def __init__(
-        self,
-        source,
-        target,
-        matched_keys=(),
-        key_map=None,
-        matched_pairs=(),
-        run_time=2,
-        lag_ratio=0,
-        **kwargs,
-    ):
-        if not isinstance(source, StringMobject) or not isinstance(
-            target, StringMobject
-        ):
-            raise TypeError(
-                type(self).__name__
-                + " expects two StringMobject instances"
-            )
-        if not source._string_sub_spans or not target._string_sub_spans:
-            raise _TexError(
-                type(self).__name__
-                + " requires non-empty native span maps"
-            )
-        pairs = [tuple(pair) for pair in matched_pairs]
-        if not all(
-            len(pair) == 2
-            and isinstance(pair[0], Mobject)
-            and isinstance(pair[1], Mobject)
-            for pair in pairs
-        ):
-            raise TypeError(
-                type(self).__name__ + " matched_pairs must pair Mobjects"
-            )
-        self.matched_pairs = pairs
-        self.target_mobject = target
-        self.matched_keys = tuple(matched_keys)
-        self.key_map = dict(key_map or {})
-        super().__init__(
-            source,
-            run_time=run_time,
-            lag_ratio=lag_ratio,
-            **kwargs,
-        )
+    # The constructor is installed by fmn_python.matching.
 
     def _native_span_keys(self, mobject):
         encoded = mobject.get_string().encode("utf-8")
@@ -18100,76 +17722,8 @@ class _CompositionCallbackDriver:
 class Flash(AnimationGroup):
     _native_kind = "flash"
 
-    def __init__(
-        self,
-        point,
-        color=_YELLOW,
-        line_length=0.2,
-        num_lines=12,
-        flash_radius=0.3,
-        line_stroke_width=3.0,
-        run_time=1.0,
-        **kwargs,
-    ):
-        if isinstance(point, _BridgeMobject):
-            self._flash_target = point
-            self.point = _np.array(_vec3(point.get_center()))
-        else:
-            self._flash_target = None
-            try:
-                self.point = _np.array(_vec3(point))
-            except Exception as error:
-                raise TypeError(
-                    "Flash point must be a 3D point or a Mobject; got "
-                    + type(point).__name__
-                ) from error
-        self.color = color
-        self.line_length = float(line_length)
-        self.flash_radius = float(flash_radius)
-        self.line_stroke_width = float(line_stroke_width)
-        try:
-            self.num_lines = _operator.index(num_lines)
-        except TypeError:
-            raise TypeError("Flash num_lines must be an integer") from None
-        if self.num_lines <= 0:
-            raise ValueError("Flash num_lines must be greater than zero")
-        for name, value in (
-            ("line_length", self.line_length),
-            ("flash_radius", self.flash_radius),
-            ("line_stroke_width", self.line_stroke_width),
-        ):
-            if not _math.isfinite(value) or value < 0:
-                raise ValueError(
-                    "Flash " + name + " must be non-negative and finite"
-                )
-        self.lines = self.create_lines()
-        super().__init__(
-            *self.create_line_anims(),
-            run_time=run_time,
-            **kwargs,
-        )
-        if self._flash_target is not None:
-            # fm-5wq.4.78: the Mobject-point case is Python-driven end to
-            # end — the same architecture whose co-play pin runs green for
-            # FocusOn (fm-5wq.4.77): the instance drops its native kind and
-            # rides the 4.97 python-callback slot, so each release-window
-            # frame re-applies every line's passing-flash window from its
-            # begin copy and re-centres the radial group on the target's
-            # CURRENT centre. The numeric-point case keeps the native
-            # flash composition untouched.
-            self._native_kind = None
-            self.mobject = self.lines
-            self.remover = True
-            # The python-callback slot floats these; the native spec path
-            # tolerates None but the callback path must not crash on it —
-            # the same normalization FocusOn's follow case carries
-            # (fm-5wq.4.77).
-            if self.rate_func is None:
-                self.rate_func = getattr(
-                    _FMN_ROOT, "smooth", lambda value: value
-                )
-            if self.lag_ratio is None:
-                self.lag_ratio = 0.0
+    # The constructor, create_lines and create_line_anims are installed by
+    # fmn_python.composite_effects.
 
     # The Python-driven follow lifecycle (only the Mobject-point case is
     # ever driven; the numeric case plays natively and never calls these).
@@ -18202,21 +17756,6 @@ class Flash(AnimationGroup):
         for line, source in zip(self.lines, self._follow_sources):
             line.pointwise_become_partial(source, lower, upper)
         self.lines.move_to(self._flash_target)
-
-    def create_lines(self):
-        lines = VGroup()
-        for index in range(self.num_lines):
-            angle = index * _math.tau / self.num_lines
-            line = Line(_ORIGIN, self.line_length * _RIGHT)
-            line.shift((self.flash_radius - self.line_length) * _RIGHT)
-            line.rotate(angle, about_point=_ORIGIN)
-            lines.add(line)
-        lines.set_stroke(color=self.color, width=self.line_stroke_width)
-        lines.move_to(self.point)
-        return lines
-
-    def create_line_anims(self):
-        return [ShowCreationThenDestruction(line) for line in self.lines]
 
 
 class ShowCreationThenFadeOut(Succession):
@@ -18405,28 +17944,8 @@ class ShowCreationThenFadeAround(AnimationOnSurroundingRectangle):
 
 
 class LaggedStartMap(LaggedStart):
-    def __init__(self, anim_func, group, run_time=2.0, lag_ratio=0.05, **kwargs):
-        # Reference composition.py:166 verbatim: one animation per member,
-        # through the native lagged_start composition. Named refusals for
-        # a non-callable constructor and a non-Mobject family beat the
-        # Reference's bare mid-map crashes (fm-5wq.4.95).
-        if not callable(anim_func):
-            raise TypeError(
-                "LaggedStartMap requires an animation constructor to map; "
-                "got " + type(anim_func).__name__
-            )
-        if not isinstance(group, Mobject):
-            raise TypeError(
-                "LaggedStartMap requires a Mobject family to map over; "
-                "got " + type(group).__name__
-            )
-        anim_kwargs = dict(kwargs)
-        anim_kwargs.pop("lag_ratio", None)
-        super().__init__(
-            *(anim_func(submob, **anim_kwargs) for submob in group),
-            run_time=run_time,
-            lag_ratio=lag_ratio,
-        )
+    # The constructor is installed by fmn_python.composite_effects.
+    pass
 
 
 class BraceLabel(VMobject):
@@ -18944,12 +18463,7 @@ class SceneFileWriter:
     ):
         del file, sub_desc  # presentation awaits the Studio host surface
 
-    def save_final_image(self, image):
-        del image
-        raise _CapabilityError(
-            "SceneFileWriter final-image capture requires a Lumen capture"
-            " generation; call Scene.run/render for native PNG output"
-        )
+    # save_final_image is installed by fmn_python.camera_capture.
 
     def print_file_ready_message(self, file_path):
         if not self.quiet:
