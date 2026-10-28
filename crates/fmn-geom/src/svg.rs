@@ -74,7 +74,7 @@ use std::collections::HashMap;
 use fmn_core::color::Srgb;
 use fmn_core::types::Vec3;
 
-use crate::{FillRule, GeomError, QuadPath, cubic, scalar};
+use crate::{FillRule, GeomError, QuadPath, cubic, repair_projected_path_handles, scalar};
 
 /// The cubic→quadratic conversion tolerance for SVG ingress, in resulting
 /// viewport user units: the G0-2 tolerance applied to SVG's px-scaled space.
@@ -2807,6 +2807,7 @@ impl<'a, 'tree> Interpreter<'a, 'tree> {
                 limit: self.limits.max_output_points,
             })?;
         let mut points: Vec<Vec3> = Vec::with_capacity(path.num_points());
+        let mut maximum_rounding = 0.0_f64;
         for &p in path.points() {
             let (x, y) = affine.apply(p[0], p[1]);
             if !x.is_finite() || !y.is_finite() {
@@ -2815,26 +2816,37 @@ impl<'a, 'tree> Interpreter<'a, 'tree> {
                     context: "transformed coordinate",
                 });
             }
-            if affine.rounding_guard(p) > 0.5 * self.tolerance {
+            maximum_rounding = maximum_rounding.max(affine.rounding_guard(p));
+            if maximum_rounding > 0.5 * self.tolerance {
                 return Err(geom(GeomError::ToleranceUnreachable { needed: usize::MAX }));
             }
             points.push([x, y, 0.0]);
         }
-        for (before, after) in path
-            .points()
-            .windows(3)
-            .step_by(2)
-            .zip(points.windows(3).step_by(2))
-        {
-            if before[1] != before[0]
-                && before[1] != before[2]
-                && after[0] != after[2]
-                && (after[1] == after[0] || after[1] == after[2])
-            {
-                // Rounded placement must not erase the converter's handle
-                // separation and turn a real curve into a subpath break.
-                return Err(geom(GeomError::ToleranceUnreachable { needed: usize::MAX }));
-            }
+        let repair_displacement = repair_projected_path_handles(
+            path.points(),
+            &mut points,
+            [0.0; 3],
+            |value, positive| {
+                if positive {
+                    value.next_up()
+                } else {
+                    value.next_down()
+                }
+            },
+            |direction| {
+                [
+                    affine.a * direction[0] + affine.c * direction[1],
+                    affine.b * direction[0] + affine.d * direction[1],
+                    0.0,
+                ]
+            },
+        )
+        .map_err(geom)?;
+        // Nonidentity affines reserve half the viewport tolerance before
+        // cubic conversion. Both their rounded arithmetic and any necessary
+        // representable-handle repair spend that same remaining budget.
+        if maximum_rounding + repair_displacement > 0.5 * self.tolerance {
+            return Err(geom(GeomError::ToleranceUnreachable { needed: usize::MAX }));
         }
         let mut path = path;
         path.set_points(points).map_err(geom)?;

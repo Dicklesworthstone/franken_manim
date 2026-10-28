@@ -88,21 +88,68 @@ class SvgLifecycleTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "f32 records.*curve tolerance"):
                     m.SVGMobject(svg_string=source, height=height)
 
-    def test_svg_refuses_new_break_markers_during_flip_and_final_bake(self):
-        # Class defaults are the Reference's source of an explicitly unsized
-        # constructor; passing None alone means to use those defaults.
+    def test_svg_refuses_unrepresentable_break_repair_during_flip(self):
         class Unsized(m.SVGMobject):
             height = None
             width = None
+        source = '<svg><path d="M0 0Q0 0.015625 2 33554432"/></svg>'
+        with self.assertRaisesRegex(ValueError, "shared-anchor path topology"):
+            Unsized(svg_string=source)
+
+    def test_svg_repairs_small_handles_lost_at_final_record_access(self):
+        for handle in (1e-8, 1e-30):
+            with self.subTest(handle=handle):
+                obj = m.SVGMobject(
+                    svg_string=f'<svg><path d="M0 0Q{handle} 0 1 1"/></svg>',
+                    height=4,
+                )
+                points = obj[0].get_points()
+                if points[0, 0] > points[-1, 0]:
+                    points = points[::-1]
+                self.assertEqual(len(obj[0].get_subpaths()), 1)
+                self.assertFalse(np.array_equal(points[0], points[1]))
+                self.assertFalse(np.array_equal(points[1], points[2]))
+                midpoint = (points[0] + 2*points[1] + points[2]) / 4
+                expected = np.array([-1 + 2*handle, 1, 0])
+                self.assertLess(np.linalg.norm(midpoint - expected), 0.1 / 135)
+
+    def test_stationary_cubic_endpoints_survive_import_transforms_and_sizing(self):
         cases = (
-            (Unsized, "M0 0Q0 0.015625 2 33554432", {}),
-            (m.SVGMobject, "M0 0Q0.00000001 0 1 1", {"height": 4}),
+            ("M0 0C0 0 1 1 1 1", ((0, 0), (0, 0), (1, 1), (1, 1))),
+            ("M0 0C0 0 1 1 1 0", ((0, 0), (0, 0), (1, 1), (1, 0))),
+            ("M0 0C0 1 1 1 1 1", ((0, 0), (0, 1), (1, 1), (1, 1))),
         )
-        for factory, path, options in cases:
-            with self.subTest(path=path):
-                source = f'<svg><path d="{path}"/></svg>'
-                with self.assertRaisesRegex(ValueError, "shared-anchor path topology"):
-                    factory(svg_string=source, **options)
+        for path, controls in cases:
+            for transform in ("", "translate(1 1)"):
+                for width in (None, 9):
+                    with self.subTest(path=path, transform=transform, width=width):
+                        source = f'<svg><path transform="{transform}" d="{path}"/></svg>'
+                        obj = m.SVGMobject(svg_string=source, height=4, width=width)
+                        points = obj[0].get_points()
+                        if points[0, 0] > points[-1, 0]:
+                            points = points[::-1]
+                        self.assertEqual(len(obj[0].get_subpaths()), 1)
+                        for index in range(0, len(points) - 2, 2):
+                            self.assertFalse(np.array_equal(points[index], points[index + 1]))
+                            self.assertFalse(np.array_equal(points[index + 1], points[index + 2]))
+                        count = (len(points) - 1) // 2
+                        t = np.linspace(0, 1, 4097)
+                        index = np.minimum((t * count).astype(int), count - 1)
+                        local = (t * count - index)[:, None]
+                        actual = ((1-local)**2 * points[2*index]
+                                  + 2*local*(1-local) * points[2*index+1]
+                                  + local**2 * points[2*index+2])
+                        u = t[:, None]
+                        a, b, c, d = (np.array(point, dtype=float) for point in controls)
+                        cubic = (1-u)**3*a + 3*u*(1-u)**2*b + 3*u*u*(1-u)*c + u**3*d
+                        scale = float(points[-1, 0] - points[0, 0])
+                        expected = np.column_stack((
+                            points[0, 0] + scale*cubic[:, 0],
+                            points[0, 1] - scale*cubic[:, 1],
+                            np.zeros_like(t),
+                        ))
+                        self.assertLessEqual(np.linalg.norm(actual-expected, axis=1).max(),
+                                             0.1 / 135 + 2e-6)
 
     def test_svg_refuses_large_offsets_and_sequential_scale_clamping(self):
         source = '<svg><path d="M1000000 0Q1000005.1 6.2 1000016 16"/></svg>'
@@ -130,6 +177,12 @@ class SvgLifecycleTests(unittest.TestCase):
         raw_flip_witness = '<svg><path d="M0 0Q0 0.015625 2 33554432"/></svg>'
         parts = receiver.mobjects_from_svg_string(raw_flip_witness)
         np.testing.assert_array_equal(parts[0].get_points()[:, 1], [0, 0.015625, 33554432])
+
+    def test_raw_svg_factory_refuses_erased_distinct_endpoints(self):
+        receiver = m.SVGMobject(svg_string=SOURCE)
+        source = '<svg><path d="M100000000 0Q100000008 1 100000001 0"/></svg>'
+        with self.assertRaisesRegex(ValueError, "shared-anchor path topology"):
+            receiver.mobjects_from_svg_string(source)
 
     def test_svg_authored_centering_truthiness_runs_once_after_assembly(self):
         events = []

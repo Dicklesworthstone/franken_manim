@@ -41,6 +41,197 @@ const SUBPATH_END_ATOL: f64 = 1e-4;
 /// The angle below which `add_arc_to` degrades to a line.
 const ARC_ANGLE_THRESHOLD: f64 = 1e-3;
 
+/// Preserve real handles when a coordinate projection rounds them onto an
+/// adjacent anchor. Anchors and authored subpath-break entries are never moved.
+///
+/// `source` is the untouched path before projection and `projected` contains
+/// the actual output coordinates. `adjacent(value, positive)` returns the next
+/// representable output-grid value in the requested direction; for an f32
+/// record grid it can cast to f32, call `next_up`/`next_down`, and widen to f64.
+/// `map_direction` applies the projection's linear part to a direction, and
+/// may zero axes which a caller must keep unchanged. Directions are normalized
+/// before this callback so subnormal stationary handles retain their sign.
+/// `minimum_separation` optionally requests a larger step along the selected
+/// repair axis; zero means the immediately adjacent grid value.
+///
+/// A repair follows the mapped original tangent (or the anchor chord when the
+/// tangent vanishes), rather than introducing a new axis. The returned maximum
+/// Euclidean handle displacement is a conservative bound on the additional
+/// quadratic error. The caller must charge it against its approximation budget.
+///
+/// # Errors
+/// Refuses non-finite data, mismatched layouts, erased distinct anchors, or a
+/// handle with no finite representable repair. An intentional singular linear
+/// map may collapse a chord exactly; this is distinct from grid precision loss.
+/// No points change on failure.
+pub fn repair_projected_path_handles(
+    source: &[Vec3],
+    projected: &mut [Vec3],
+    minimum_separation: Vec3,
+    mut adjacent: impl FnMut(f64, bool) -> f64,
+    mut map_direction: impl FnMut(Vec3) -> Vec3,
+) -> Result<f64, GeomError> {
+    let refused = || GeomError::ToleranceUnreachable { needed: usize::MAX };
+    if source.len() != projected.len() {
+        return Err(refused());
+    }
+    if !source.is_empty() && source.len().is_multiple_of(2) {
+        return Err(GeomError::EvenPointCount { len: source.len() });
+    }
+    if minimum_separation
+        .iter()
+        .any(|value| !value.is_finite() || *value < 0.0)
+    {
+        return Err(GeomError::InvalidTolerance);
+    }
+    if source
+        .iter()
+        .chain(projected.iter())
+        .flatten()
+        .any(|value| !value.is_finite())
+    {
+        return Err(refused());
+    }
+    let normalize = |direction: Vec3| {
+        let scale = direction
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0, f64::max);
+        if scale == 0.0 || !scale.is_finite() {
+            [0.0; 3]
+        } else {
+            direction.map(|value| value / scale)
+        }
+    };
+    let mut mapped_direction = |direction: Vec3| -> Result<Vec3, GeomError> {
+        if direction.iter().any(|value| !value.is_finite()) {
+            return Err(refused());
+        }
+        let mapped = map_direction(normalize(direction));
+        if mapped.iter().any(|value| !value.is_finite()) {
+            return Err(refused());
+        }
+        Ok(normalize(mapped))
+    };
+    let mut repairs = Vec::new();
+    let mut maximum_displacement = 0.0_f64;
+    for (curve_index, (before, after)) in source
+        .windows(3)
+        .step_by(2)
+        .zip(projected.windows(3).step_by(2))
+        .enumerate()
+    {
+        let authored_break = before[0] == before[1]
+            && (0..3).any(|axis| (before[1][axis] - before[2][axis]).abs() > SUBPATH_END_ATOL);
+        let exact_chord_collapse = after[0] == after[2]
+            && mapped_direction(std::array::from_fn(|axis| {
+                before[2][axis] - before[0][axis]
+            }))? == [0.0; 3];
+        if authored_break {
+            let still_a_break = after[0] == after[1]
+                && (0..3).any(|axis| (after[1][axis] - after[2][axis]).abs() > SUBPATH_END_ATOL);
+            if !still_a_break && !exact_chord_collapse {
+                return Err(refused());
+            }
+            continue;
+        }
+        if before[0] != before[2] && after[0] == after[2] && !exact_chord_collapse {
+            // A moved handle cannot recover anchors erased by rounding.
+            // An authored singular map, however, can identify them exactly.
+            return Err(refused());
+        }
+        if before[1] == before[0]
+            || before[1] == before[2]
+            || (after[1] != after[0] && after[1] != after[2])
+        {
+            continue;
+        }
+        let anchor_index = if after[1] == after[0] { 0 } else { 2 };
+        let anchor = after[anchor_index];
+        let tangent = std::array::from_fn(|axis| before[1][axis] - before[anchor_index][axis]);
+        let mut direction = mapped_direction(tangent)?;
+        if direction == [0.0; 3] {
+            if exact_chord_collapse {
+                // Both the chord and tangent are annihilated by the declared
+                // linear map, so this is an intentional constant curve.
+                continue;
+            }
+            let chord = std::array::from_fn(|axis| {
+                before[2 - anchor_index][axis] - before[anchor_index][axis]
+            });
+            direction = mapped_direction(chord)?;
+        }
+        let mut axes = [0, 1, 2];
+        axes.sort_by(|&left, &right| direction[right].abs().total_cmp(&direction[left].abs()));
+        let mut repair = None;
+        for axis in axes {
+            if direction[axis] == 0.0 {
+                continue;
+            }
+            let positive = direction[axis] > 0.0;
+            let requested = anchor[axis]
+                + if positive {
+                    minimum_separation[axis]
+                } else {
+                    -minimum_separation[axis]
+                };
+            let mut component = adjacent(requested, positive);
+            for _ in 0..3 {
+                if !component.is_finite()
+                    || (positive && component <= anchor[axis])
+                    || (!positive && component >= anchor[axis])
+                {
+                    break;
+                }
+                let mut candidate = anchor;
+                candidate[axis] = component;
+                let distance = (component - anchor[axis]) / direction[axis];
+                for other in 0..3 {
+                    if other != axis && direction[other] != 0.0 {
+                        let value = anchor[other] + distance * direction[other];
+                        // Keep components which cannot move on this grid;
+                        // the selected axis already separates the handle.
+                        if value != anchor[other] {
+                            candidate[other] = adjacent(value, direction[other] > 0.0);
+                        }
+                    }
+                }
+                if candidate.iter().all(|value| value.is_finite())
+                    && candidate != after[0]
+                    && candidate != after[2]
+                {
+                    repair = Some(candidate);
+                    break;
+                }
+                component = adjacent(component, positive);
+            }
+            if repair.is_some() {
+                break;
+            }
+        }
+        let repair = repair.ok_or_else(refused)?;
+        let delta: Vec3 = std::array::from_fn(|axis| repair[axis] - after[1][axis]);
+        let scale = delta.iter().map(|value| value.abs()).fold(0.0, f64::max);
+        let displacement = (scale
+            * delta
+                .iter()
+                .map(|value| (value / scale) * (value / scale))
+                .sum::<f64>()
+                .sqrt()
+            * (1.0 + 16.0 * f64::EPSILON))
+            .next_up();
+        if !displacement.is_finite() {
+            return Err(refused());
+        }
+        maximum_displacement = maximum_displacement.max(displacement);
+        repairs.push((2 * curve_index + 1, repair));
+    }
+    for (index, repair) in repairs {
+        projected[index] = repair;
+    }
+    Ok(maximum_displacement)
+}
+
 const NO_CURVE: usize = usize::MAX;
 
 fn curve_priority(norm: f64, index: usize) -> f64 {
@@ -1289,6 +1480,158 @@ impl QuadPath {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    fn adjacent_f32(value: f64, positive: bool) -> f64 {
+        let value = value as f32;
+        f64::from(if positive {
+            value.next_up()
+        } else {
+            value.next_down()
+        })
+    }
+
+    #[test]
+    fn projected_handle_repair_preserves_anchors_breaks_and_tangent_signs() {
+        let source = [
+            [-8.0, 0.0, 0.0],
+            [-1e-9, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [1e-9, 0.0, 0.0],
+            [8.0, 0.0, 0.0],
+            [8.0, 0.0, 0.0], // Authored subpath break.
+            [16.0, 0.0, 0.0],
+            [16.0 + 1e-9, 0.0, 0.0],
+            [24.0, 0.0, 0.0],
+        ];
+        let mut projected =
+            source.map(|point| [f64::from((point[0] + 33_554_432.0) as f32), 0.0, 0.0]);
+        let before = projected;
+        let bound = repair_projected_path_handles(
+            &source,
+            &mut projected,
+            [0.0; 3],
+            adjacent_f32,
+            |direction| direction,
+        )
+        .unwrap();
+        for index in (0..source.len()).step_by(2) {
+            assert_eq!(projected[index], before[index], "anchor {index} moved");
+        }
+        assert_eq!(projected[5], before[5], "authored break moved");
+        assert!(projected[1][0] < projected[2][0]);
+        assert!(projected[3][0] > projected[2][0]);
+        assert!(projected[7][0] > projected[6][0]);
+        assert!(
+            projected
+                .iter()
+                .all(|point| point[1] == 0.0 && point[2] == 0.0)
+        );
+        let maximum_actual = [1, 3, 7]
+            .map(|index| (projected[index][0] - before[index][0]).abs())
+            .into_iter()
+            .fold(0.0_f64, f64::max);
+        assert!(bound >= maximum_actual);
+        assert!(bound <= maximum_actual * (1.0 + 32.0 * f64::EPSILON));
+    }
+
+    #[test]
+    fn projected_handle_repair_maps_subnormal_tangents_and_requested_separation() {
+        let source = [
+            [0.0, 0.0, 0.0],
+            [f64::from_bits(1), 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+        ];
+        let mut projected = [[5.0, 5.0, 0.0], [5.0, 5.0, 0.0], [5.0, 6.0, 0.0]];
+        let bound = repair_projected_path_handles(
+            &source,
+            &mut projected,
+            [0.0, 0.125, 0.0],
+            adjacent_f32,
+            |direction| [0.0, direction[0], 0.0],
+        )
+        .unwrap();
+        assert_eq!(projected[0], [5.0, 5.0, 0.0]);
+        assert_eq!(projected[2], [5.0, 6.0, 0.0]);
+        assert_eq!(projected[1][0], 5.0);
+        assert_eq!(projected[1][2], 0.0);
+        assert!(projected[1][1] - 5.0 >= 0.125);
+        assert!(projected[1][1] < 6.0);
+        assert!(bound >= projected[1][1] - 5.0);
+    }
+
+    #[test]
+    fn projected_handle_repair_refuses_erased_anchors_before_mutating_any_handle() {
+        let source = [
+            [-8.0, 0.0, 0.0],
+            [-1e-9, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [2e-9, 1e-9, 0.0],
+            [4e-9, 0.0, 0.0],
+        ];
+        let mut projected = source.map(|point| {
+            [
+                f64::from((point[0] + 33_554_432.0) as f32),
+                f64::from(point[1] as f32),
+                0.0,
+            ]
+        });
+        let before = projected;
+        assert!(matches!(
+            repair_projected_path_handles(
+                &source,
+                &mut projected,
+                [0.0; 3],
+                adjacent_f32,
+                |direction| direction,
+            ),
+            Err(GeomError::ToleranceUnreachable { .. })
+        ));
+        assert_eq!(projected, before);
+    }
+
+    #[test]
+    fn projected_handle_repair_refuses_erased_authored_breaks() {
+        let source = [[1e8, 0.0, 0.0], [1e8, 0.0, 0.0], [1e8 + 1.0, 0.0, 0.0]];
+        for mut projected in [
+            source.map(|point| point.map(|value| f64::from(value as f32))),
+            [[0.0; 3], [0.0; 3], [5e-5, 0.0, 0.0]],
+        ] {
+            let before = projected;
+            assert!(matches!(
+                repair_projected_path_handles(
+                    &source,
+                    &mut projected,
+                    [0.0; 3],
+                    adjacent_f32,
+                    |direction| direction,
+                ),
+                Err(GeomError::ToleranceUnreachable { .. })
+            ));
+            assert_eq!(projected, before);
+        }
+    }
+
+    #[test]
+    fn projected_handle_repair_never_invents_an_unmapped_axis() {
+        let source = [
+            [0.0, 0.0, 0.0],
+            [f64::from_bits(1), 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+        ];
+        let mut projected = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        let before = projected;
+        assert!(matches!(
+            repair_projected_path_handles(
+                &source,
+                &mut projected,
+                [0.0; 3],
+                adjacent_f32,
+                |_| [0.0; 3],
+            ),
+            Err(GeomError::ToleranceUnreachable { .. })
+        ));
+        assert_eq!(projected, before);
+    }
 
     fn right_angle_curve() -> QuadPath {
         QuadPath::from_points(vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]]).unwrap()

@@ -96,8 +96,9 @@ fn _build_svg_paints<'py>(
             .map(|shape| shape.kind.name())
             .collect();
         let prepared = svg_document_with_paints(&document, overrides).map_err(native_error)?;
-        admit_native_precision(&prepared, height, width, should_center, constructor)
-            .map_err(PyValueError::new_err)?;
+        let prepared =
+            prepare_native_precision(prepared, height, width, should_center, constructor)
+                .map_err(PyValueError::new_err)?;
         Ok::<_, PyErr>((prepared, kinds))
     })?;
     let children = install_native_tree(slf, factory, prepared)?;
@@ -251,6 +252,23 @@ fn visit_import_paths(
     Ok(())
 }
 
+fn visit_import_path_pairs(
+    source: &VMobject,
+    candidate: &VMobject,
+    visitor: &mut impl FnMut(&[[f64; 3]], &[[f64; 3]]) -> Result<(), &'static str>,
+) -> Result<(), &'static str> {
+    if source.points().len() != candidate.points().len()
+        || source.children().len() != candidate.children().len()
+    {
+        return Err(LOST_PATH_TOPOLOGY);
+    }
+    visitor(source.points(), candidate.points())?;
+    for (original, proposed) in source.children().iter().zip(candidate.children()) {
+        visit_import_path_pairs(original, proposed, visitor)?;
+    }
+    Ok(())
+}
+
 fn record_point(point: [f64; 3]) -> Result<[f64; 3], &'static str> {
     if point.iter().any(|value| !value.is_finite()) {
         return Err(NONFINITE_RECORD);
@@ -271,38 +289,35 @@ fn shared_anchor_break(curve: [[f64; 3]; 3]) -> bool {
     curve[0] == curve[1] && (0..3).any(|axis| (curve[1][axis] - curve[2][axis]).abs() > 1e-4)
 }
 
-fn retain_path_topology(points: &[[f64; 3]]) -> Result<(), &'static str> {
-    if !points.is_empty() && points.len().is_multiple_of(2) {
+fn retain_curve_topology(
+    original: [[f64; 3]; 3],
+    rounded: [[f64; 3]; 3],
+) -> Result<(), &'static str> {
+    let was_break = shared_anchor_break(original);
+    if was_break != shared_anchor_break(rounded) {
         return Err(LOST_PATH_TOPOLOGY);
     }
-    for curve in points.windows(3).step_by(2) {
-        let original = [curve[0], curve[1], curve[2]];
-        let rounded = [
-            record_point(curve[0])?,
-            record_point(curve[1])?,
-            record_point(curve[2])?,
-        ];
-        let was_break = shared_anchor_break(original);
-        if was_break != shared_anchor_break(rounded) {
-            return Err(LOST_PATH_TOPOLOGY);
-        }
-        if !was_break
-            && (original[0] != original[1] || original[1] != original[2])
-            && rounded[0] == rounded[1]
-            && rounded[1] == rounded[2]
-        {
-            return Err(LOST_PATH_TOPOLOGY);
-        }
-        if !was_break
-            && original[1] != original[0]
-            && original[1] != original[2]
-            && rounded[0] != rounded[2]
-            && (rounded[1] == rounded[0] || rounded[1] == rounded[2])
-        {
-            // The converter deliberately nudges stationary handles. Losing
-            // that nudge can introduce a break now or on point reversal.
-            return Err(LOST_PATH_TOPOLOGY);
-        }
+    if !was_break && original[0] != original[2] && rounded[0] == rounded[2] {
+        // A surviving handle cannot recover two distinct erased anchors;
+        // accepting it would silently turn an open curve into a closed loop.
+        return Err(LOST_PATH_TOPOLOGY);
+    }
+    if !was_break
+        && (original[0] != original[1] || original[1] != original[2])
+        && rounded[0] == rounded[1]
+        && rounded[1] == rounded[2]
+    {
+        return Err(LOST_PATH_TOPOLOGY);
+    }
+    if !was_break
+        && original[1] != original[0]
+        && original[1] != original[2]
+        && rounded[0] != rounded[2]
+        && (rounded[1] == rounded[0] || rounded[1] == rounded[2])
+    {
+        // The converter deliberately separates stationary handles. Losing
+        // that separation can introduce a break now or on point reversal.
+        return Err(LOST_PATH_TOPOLOGY);
     }
     Ok(())
 }
@@ -364,6 +379,257 @@ fn normalized_record_error(
     Ok(error)
 }
 
+#[derive(Clone, Copy)]
+struct RecordProjection {
+    flip: Placement,
+    normalization: ImportNormalization,
+    source_bounds: ImportBounds,
+}
+
+impl RecordProjection {
+    fn new(
+        original: &VMobject,
+        candidate: &VMobject,
+        height: Option<f64>,
+        width: Option<f64>,
+        constructor: bool,
+    ) -> Result<Self, &'static str> {
+        let mut source_bounds = ImportBounds::empty();
+        let mut bounds = ImportBounds::empty();
+        visit_import_path_pairs(original, candidate, &mut |points, proposed| {
+            for (&source, &point) in points.iter().zip(proposed) {
+                source_bounds.include(source);
+                bounds.include(record_point(point)?);
+            }
+            Ok(())
+        })?;
+        let flip = if constructor {
+            Placement::about(
+                fmn_library::rotation_matrix(std::f64::consts::PI, [1.0, 0.0, 0.0]),
+                ImportNormalization::new(bounds, None, None)?.center,
+            )
+        } else {
+            Placement::IDENTITY
+        };
+        let mut flipped = ImportBounds::empty();
+        visit_import_paths(candidate, &mut |points| {
+            for &point in points {
+                flipped.include(record_point(flip.apply_point(record_point(point)?))?);
+            }
+            Ok(())
+        })?;
+        Ok(Self {
+            flip,
+            normalization: ImportNormalization::new(flipped, height, width)?,
+            source_bounds,
+        })
+    }
+
+    fn flipped(self, point: [f64; 3]) -> Result<[f64; 3], &'static str> {
+        record_point(self.flip.apply_point(record_point(point)?))
+    }
+}
+
+fn adjacent_record(value: f64, positive: bool) -> f64 {
+    #[allow(clippy::cast_possible_truncation)]
+    let value = value as f32;
+    f64::from(if positive {
+        value.next_up()
+    } else {
+        value.next_down()
+    })
+}
+
+fn record_spacing(value: f64) -> Result<f64, &'static str> {
+    let value = record_point([value, 0.0, 0.0])?[0];
+    Ok(
+        [adjacent_record(value, false), adjacent_record(value, true)]
+            .into_iter()
+            .filter(|neighbor| neighbor.is_finite())
+            .map(|neighbor| (neighbor - value).abs())
+            .fold(0.0, f64::max),
+    )
+}
+
+fn collapsed_handle(curve: [[f64; 3]; 3]) -> Option<usize> {
+    if curve[1] == curve[0] {
+        Some(0)
+    } else if curve[1] == curve[2] {
+        Some(2)
+    } else {
+        None
+    }
+}
+
+fn repair_record_family(
+    original: &VMobject,
+    candidate: VMobject,
+    projection: RecordProjection,
+    should_center: Option<bool>,
+    constructor: bool,
+    growth: f64,
+) -> Result<VMobject, &'static str> {
+    let mut points = candidate
+        .points()
+        .iter()
+        .copied()
+        .map(record_point)
+        .collect::<Result<Vec<_>, _>>()?;
+    for offset in (0..points.len().saturating_sub(2)).step_by(2) {
+        let source = &original.points()[offset..offset + 3];
+        let source_curve = [source[0], source[1], source[2]];
+        if shared_anchor_break(source_curve) || source[1] == source[0] || source[1] == source[2] {
+            continue;
+        }
+        let curve = [points[offset], points[offset + 1], points[offset + 2]];
+        let mut collision = collapsed_handle(curve);
+        let mut minimum = [0.0_f64; 3];
+        if constructor {
+            let flipped = [
+                projection.flipped(curve[0])?,
+                projection.flipped(curve[1])?,
+                projection.flipped(curve[2])?,
+            ];
+            collision = collision.or_else(|| collapsed_handle(flipped));
+            for centered in [true, false] {
+                if should_center.is_some_and(|value| value != centered) {
+                    continue;
+                }
+                let placed =
+                    flipped.map(|point| projection.normalization.point_after_flip(point, centered));
+                let baked = [
+                    record_point(placed[0])?,
+                    record_point(placed[1])?,
+                    record_point(placed[2])?,
+                ];
+                collision = collision.or_else(|| collapsed_handle(baked));
+                for index in 0..3 {
+                    for axis in 0..2 {
+                        minimum[axis] = minimum[axis]
+                            .max(record_spacing(curve[index][axis])?)
+                            .max(record_spacing(flipped[index][axis])?)
+                            .max(
+                                record_spacing(placed[index][axis])?
+                                    / projection.normalization.scale,
+                            );
+                    }
+                }
+            }
+        }
+        let Some(anchor) = collision else {
+            continue;
+        };
+        // Request a representable separation in the records actually installed
+        // before hooks. A later-phase collision is repaired here, never merely
+        // in the admission simulation. The source stays untouched for the
+        // complete original-versus-candidate error comparison below.
+        points[offset + 1] = curve[anchor];
+        minimum.iter_mut().for_each(|step| *step *= 2.0 * growth);
+        fmn_library::repair_projected_path_handles(
+            source,
+            &mut points[offset..offset + 3],
+            minimum,
+            adjacent_record,
+            |direction| {
+                std::array::from_fn(|axis| {
+                    if axis < 2 && projection.source_bounds.span(axis) > 0.0 {
+                        direction[axis]
+                    } else {
+                        0.0
+                    }
+                })
+            },
+        )
+        .map_err(|_| LOST_PATH_TOPOLOGY)?;
+    }
+    let mut index = 0;
+    let mut failure = None;
+    let repaired = candidate.with_points(points).map_children(|child| {
+        let source = &original.children()[index];
+        index += 1;
+        match repair_record_family(
+            source,
+            child,
+            projection,
+            should_center,
+            constructor,
+            growth,
+        ) {
+            Ok(child) => child,
+            Err(error) => {
+                failure = Some(error);
+                VMobject::new()
+            }
+        }
+    });
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    Ok(repaired)
+}
+
+fn prepare_native_precision(
+    original: VMobject,
+    height: Option<f64>,
+    width: Option<f64>,
+    should_center: Option<bool>,
+    constructor: bool,
+) -> Result<VMobject, &'static str> {
+    match admit_native_precision(
+        &original,
+        &original,
+        height,
+        width,
+        should_center,
+        constructor,
+    ) {
+        Ok(()) => return Ok(original),
+        Err(LOST_PATH_TOPOLOGY) => {}
+        Err(error) => return Err(error),
+    }
+    let mut candidate = original.clone();
+    // One normal-grid step is normally enough. Recompute normalization after
+    // repair; a fixed retry cap prevents hostile data from expanding work.
+    for attempt in 0..6 {
+        let projection = RecordProjection::new(&original, &candidate, height, width, constructor)?;
+        candidate = repair_record_family(
+            &original,
+            candidate,
+            projection,
+            should_center,
+            constructor,
+            f64::from(1_u32 << attempt),
+        )?;
+        if height.is_none() && width.is_none() {
+            // There is no final scene-space scale for an unsized import.
+            // Still bound a representation repair in its raw viewport units.
+            let budget = 0.5 * fmn::geometry::DEFAULT_SVG_TOLERANCE;
+            visit_import_path_pairs(&original, &candidate, &mut |before, after| {
+                for (&source, &point) in before.iter().zip(after) {
+                    let delta = std::array::from_fn::<_, 3, _>(|axis| point[axis] - source[axis]);
+                    if delta[0].hypot(delta[1]).hypot(delta[2]) > budget {
+                        return Err(LOST_PATH_TOPOLOGY);
+                    }
+                }
+                Ok(())
+            })?;
+        }
+        match admit_native_precision(
+            &original,
+            &candidate,
+            height,
+            width,
+            should_center,
+            constructor,
+        ) {
+            Ok(()) => return Ok(candidate),
+            Err(LOST_PATH_TOPOLOGY) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(LOST_PATH_TOPOLOGY)
+}
+
 /// Refuse a false scene-space guarantee before any native nodes are installed.
 ///
 /// A quadratic is a convex combination of its controls, so bounding every
@@ -372,6 +638,7 @@ fn normalized_record_error(
 /// to the centering and fitted scale, which raw coordinate error alone misses.
 fn admit_native_precision(
     family: &VMobject,
+    candidate: &VMobject,
     height: Option<f64>,
     width: Option<f64>,
     should_center: Option<bool>,
@@ -380,10 +647,29 @@ fn admit_native_precision(
     let mut original_bounds = ImportBounds::empty();
     let mut native_bounds = ImportBounds::empty();
     let mut any_points = false;
-    visit_import_paths(family, &mut |points| {
-        retain_path_topology(points)?;
-        for &point in points {
-            let rounded = record_point(point)?;
+    visit_import_path_pairs(family, candidate, &mut |points, proposed| {
+        if !points.is_empty() && points.len().is_multiple_of(2) {
+            return Err(LOST_PATH_TOPOLOGY);
+        }
+        for (before, after) in points
+            .windows(3)
+            .step_by(2)
+            .zip(proposed.windows(3).step_by(2))
+        {
+            retain_curve_topology(
+                [before[0], before[1], before[2]],
+                [
+                    record_point(after[0])?,
+                    record_point(after[1])?,
+                    record_point(after[2])?,
+                ],
+            )?;
+        }
+        for (&point, &proposed) in points.iter().zip(proposed) {
+            if point.iter().any(|value| !value.is_finite()) {
+                return Err(NONFINITE_RECORD);
+            }
+            let rounded = record_point(proposed)?;
             original_bounds.include(point);
             native_bounds.include(rounded);
             any_points = true;
@@ -408,16 +694,20 @@ fn admit_native_precision(
         |point| -> Result<[f64; 3], &'static str> { Ok(flip.apply_point(record_point(point)?)) };
     let flipped_record = |point| record_point(flip_point(point)?);
     let mut flipped_bounds = ImportBounds::empty();
-    visit_import_paths(family, &mut |points| {
-        for curve in points.windows(3).step_by(2) {
+    visit_import_path_pairs(family, candidate, &mut |points, proposed| {
+        for (source, curve) in points
+            .windows(3)
+            .step_by(2)
+            .zip(proposed.windows(3).step_by(2))
+        {
             let reflected = [
-                flip_point(curve[0])?,
-                flip_point(curve[1])?,
-                flip_point(curve[2])?,
+                flipped_record(curve[0])?,
+                flipped_record(curve[1])?,
+                flipped_record(curve[2])?,
             ];
-            retain_path_topology(&reflected)?;
+            retain_curve_topology([source[0], source[1], source[2]], reflected)?;
         }
-        for &point in points {
+        for &point in proposed {
             flipped_bounds.include(flipped_record(point)?);
         }
         Ok(())
@@ -430,20 +720,33 @@ fn admit_native_precision(
     let original = ImportNormalization::new(original_bounds, height, width)?;
     let native = ImportNormalization::new(flipped_bounds, height, width)?;
     let budget = 0.5 * DEFAULT_SVG_SCENE_TOLERANCE;
-    visit_import_paths(family, &mut |points| {
+    visit_import_path_pairs(family, candidate, &mut |points, proposed| {
         for centered in [true, false] {
             if should_center.is_some_and(|value| value != centered) {
                 continue;
             }
-            for curve in points.windows(3).step_by(2) {
+            for (source, curve) in points
+                .windows(3)
+                .step_by(2)
+                .zip(proposed.windows(3).step_by(2))
+            {
                 let placed = [
                     native.point_after_flip(flipped_record(curve[0])?, centered),
                     native.point_after_flip(flipped_record(curve[1])?, centered),
                     native.point_after_flip(flipped_record(curve[2])?, centered),
                 ];
-                // The post-placement bake must also retain deliberate
-                // handle separation and authored subpath break markers.
-                retain_path_topology(&placed)?;
+                // Compare to original structure: an affine f64 cancellation
+                // can erase a handle before the following f32 conversion.
+                let source = [source[0], source[1], source[2]];
+                retain_curve_topology(source, placed)?;
+                retain_curve_topology(
+                    source,
+                    [
+                        record_point(placed[0])?,
+                        record_point(placed[1])?,
+                        record_point(placed[2])?,
+                    ],
+                )?;
             }
         }
         if height.is_none() && width.is_none() {
@@ -452,8 +755,8 @@ fn admit_native_precision(
             // the final scene-space approximation promise is inapplicable.
             return Ok(());
         }
-        for &point in points {
-            let rounded = flipped_record(point)?;
+        for (&point, &proposed) in points.iter().zip(proposed) {
+            let rounded = flipped_record(proposed)?;
             for centered in [true, false] {
                 if should_center.is_some_and(|value| value != centered) {
                     continue;
@@ -477,7 +780,7 @@ mod tests {
         width: Option<f64>,
         should_center: Option<bool>,
     ) -> Result<(), &'static str> {
-        admit_native_precision(family, height, width, should_center, true)
+        admit_native_precision(family, family, height, width, should_center, true)
     }
 
     fn offset_curve(offset: f64) -> VMobject {
@@ -578,6 +881,24 @@ mod tests {
     }
 
     #[test]
+    fn record_precision_refuses_erased_anchors_even_when_the_handle_survives() {
+        let curve = VMobject::from_points(vec![
+            [100_000_000.0, 0.0, 0.0],
+            [100_000_008.0, 1.0, 0.0],
+            [100_000_001.0, 0.0, 0.0],
+        ]);
+        assert_eq!(
+            admit_native_precision(&curve, &curve, None, None, None, false),
+            Err(LOST_PATH_TOPOLOGY)
+        );
+        assert_eq!(
+            prepare_native_precision(curve, None, None, None, false),
+            Err(LOST_PATH_TOPOLOGY),
+            "moving a handle cannot repair erased endpoint identity"
+        );
+    }
+
+    #[test]
     fn record_precision_refuses_nonfinite_and_unrepresentable_points() {
         for value in [f64::NAN, f64::INFINITY, f64::MAX, -f64::MAX] {
             let curve = VMobject::from_points(vec![[value, 0.0, 0.0]]);
@@ -654,7 +975,7 @@ mod tests {
             "without centering or sizing, the constructor leaves these points unchanged"
         );
         assert_eq!(
-            admit_native_precision(&family, None, None, None, false),
+            admit_native_precision(&family, &family, None, None, None, false),
             Ok(()),
             "raw factory calls do not run the constructor's placement phases"
         );
@@ -664,10 +985,83 @@ mod tests {
             [2.0, 33_554_432.0, 0.0],
         ]);
         assert_eq!(
-            admit_native_precision(&fragile_flip, None, None, None, false),
+            admit_native_precision(&fragile_flip, &fragile_flip, None, None, None, false),
             Ok(()),
             "a later authored flip is outside an unframed factory's admission"
         );
+    }
+
+    #[test]
+    fn record_precision_repairs_stationary_cubics_through_real_native_bakes() {
+        for data in ["M0 0C0 0 1 1 1 1", "M0 0C0 0 1 1 1 0", "M0 0C0 1 1 1 1 1"] {
+            for transform in ["", "translate(1 1)"] {
+                for width in [None, Some(9.0)] {
+                    let source =
+                        format!(r#"<svg><path transform="{transform}" d="{data}"/></svg>"#);
+                    let document = svg_document_for_size_with_tolerance(
+                        source.as_bytes(),
+                        Some(4.0),
+                        width,
+                        0.5 * DEFAULT_SVG_SCENE_TOLERANCE,
+                    )
+                    .unwrap();
+                    let original =
+                        svg_document_with_paints(&document, SvgPaintOverrides::default()).unwrap();
+                    let (min, max) = original.extent().unwrap();
+                    let expected =
+                        ImportNormalization::new(ImportBounds { min, max }, Some(4.0), width)
+                            .unwrap();
+                    let repaired = prepare_native_precision(
+                        original.clone(),
+                        Some(4.0),
+                        width,
+                        Some(true),
+                        true,
+                    )
+                    .unwrap_or_else(|error| panic!("{data} / {transform} / {width:?}: {error}"));
+                    let mut stage = fmn_mobject::Stage::new();
+                    let root = stage.add(repaired);
+                    let leaf = stage
+                        .family(root)
+                        .into_iter()
+                        .find(|&member| {
+                            stage
+                                .get_points(member)
+                                .is_some_and(|points| !points.is_empty())
+                        })
+                        .unwrap();
+                    stage.rotate(root, std::f64::consts::PI, [1.0, 0.0, 0.0], None, None);
+                    stage.bake_family_placements(root).unwrap();
+                    stage.center(root);
+                    stage.set_height(root, 4.0, false);
+                    if let Some(width) = width {
+                        stage.set_width(root, width, false);
+                    }
+                    stage.bake_family_placements(root).unwrap();
+                    let points = stage.get_points(leaf).unwrap();
+                    let path = fmn_library::QuadPath::from_points(points.clone()).unwrap();
+                    assert_eq!(
+                        path.subpaths().len(),
+                        1,
+                        "stationary endpoint became a break: {source}"
+                    );
+                    for curve in points.windows(3).step_by(2) {
+                        assert_ne!(curve[1], curve[0]);
+                        assert_ne!(curve[1], curve[2]);
+                    }
+                    for (&control, &actual) in original.children()[0].points().iter().zip(&points) {
+                        let ideal = expected.point(control, true);
+                        let distance = (ideal[0] - actual[0])
+                            .hypot(ideal[1] - actual[1])
+                            .hypot(ideal[2] - actual[2]);
+                        assert!(
+                            distance <= 0.5 * DEFAULT_SVG_SCENE_TOLERANCE,
+                            "repair exceeded record budget: {distance}, {source}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

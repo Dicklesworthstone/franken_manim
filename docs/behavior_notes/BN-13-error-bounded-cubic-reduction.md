@@ -61,6 +61,19 @@ viewport coordinates and check only the initial records. Excessive
 offsets or requested dimensions can therefore produce a precision refusal;
 reducing those values lets the caller preserve the stated bound.
 
+Ordinary stationary cubic endpoints can need a representable handle
+separation after an affine map or a record conversion. The shared path
+representation helper repairs those accidentally collapsed real handles
+without moving anchors or authored subpath-break markers. SVG publication
+charges the repair against its reserved affine budget. The portal installs
+a repaired f32 candidate before constructor hooks, then compares its complete
+normalization with the untouched original family; the repair consumes the
+same record-error budget. This includes cancellation during f64 placement
+as well as f32 materialization. Six bounded repair attempts cover changing
+family bounds without an unbounded refinement loop. Unsized representation
+repairs have a separate raw-viewport displacement cap; they do not imply an
+error guarantee for later arbitrary authored scaling.
+
 Rust callers can use `svg_document_for_size` before their usual framing and
 resizing, or `SvgDocument::parse_with_tolerance` for a known output-space
 tolerance. Neither path caches an approximation independently of its size.

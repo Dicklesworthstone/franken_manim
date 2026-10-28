@@ -58,6 +58,7 @@ pub use isolines::{
 };
 pub use quadpath::{
     AnchorMode, DEFAULT_TOLERANCE_FOR_POINT_EQUALITY, MAX_SUBDIVIDED_CURVES, QuadPath,
+    repair_projected_path_handles,
 };
 pub use rotation::{EulerAngles, EulerSeq, Quat};
 pub use smoothing::{MAX_CLOSED_SMOOTHING_DIMENSION, MAX_CLOSED_SMOOTHING_MATRIX_CELLS};

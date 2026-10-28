@@ -652,3 +652,107 @@ fn svg_derived_geometry_has_a_document_wide_point_budget() {
         })
     ));
 }
+
+#[test]
+fn stationary_cubic_handles_survive_affine_and_record_projection_within_budget() {
+    for (data, controls) in [
+        (
+            "M0 0 C0 0 1 1 1 1",
+            [[0., 0., 0.], [0., 0., 0.], [1., 1., 0.], [1., 1., 0.]],
+        ),
+        (
+            "M0 0 C0 0 1 1 1 0",
+            [[0., 0., 0.], [0., 0., 0.], [1., 1., 0.], [1., 0., 0.]],
+        ),
+        (
+            "M0 0 C0 1 1 1 1 1",
+            [[0., 0., 0.], [0., 1., 0.], [1., 1., 0.], [1., 1., 0.]],
+        ),
+    ] {
+        for (transform, affine) in [
+            ("", [1., 0., 0., 1., 0., 0.]),
+            ("translate(1 1)", [1., 0., 0., 1., 1., 1.]),
+            ("matrix(0 2 -3 0 7 11)", [0., 2., -3., 0., 7., 11.]),
+        ] {
+            let source = format!(r#"<svg><path transform="{transform}" d="{data}"/></svg>"#);
+            let document = SvgDocument::parse(source.as_bytes()).unwrap();
+            let transformed = controls.map(|point| {
+                [
+                    affine[0] * point[0] + affine[2] * point[1] + affine[4],
+                    affine[1] * point[0] + affine[3] * point[1] + affine[5],
+                    0.0,
+                ]
+            });
+            assert_cubic_viewport_bound(
+                &document,
+                transformed,
+                fmn_geom::svg::DEFAULT_SVG_TOLERANCE,
+            );
+            let path = &document.shapes[0].path;
+            for curve in path.points().windows(3).step_by(2) {
+                assert_ne!(curve[1], curve[0], "{data} / {transform}: false break");
+                assert_ne!(
+                    curve[1], curve[2],
+                    "{data} / {transform}: erased final handle"
+                );
+            }
+            let mut records: Vec<_> = path
+                .points()
+                .iter()
+                .map(|point| point.map(|value| f64::from(value as f32)))
+                .collect();
+            let repair = fmn_geom::repair_projected_path_handles(
+                path.points(),
+                &mut records,
+                [0.0; 3],
+                |value, positive| {
+                    f64::from(if positive {
+                        (value as f32).next_up()
+                    } else {
+                        (value as f32).next_down()
+                    })
+                },
+                |direction| direction,
+            )
+            .unwrap();
+            assert!(repair < fmn_geom::svg::DEFAULT_SVG_TOLERANCE / 2.0);
+            for curve in records.windows(3).step_by(2) {
+                assert_ne!(curve[1], curve[0], "{data} / {transform}: f32 false break");
+                assert_ne!(
+                    curve[1], curve[2],
+                    "{data} / {transform}: f32 erased handle"
+                );
+                assert!(curve.iter().all(|point| point[2] == 0.0));
+            }
+            assert_eq!(
+                dump(&document),
+                dump(&SvgDocument::parse(source.as_bytes()).unwrap())
+            );
+        }
+    }
+}
+
+#[test]
+fn explicit_singular_svg_affines_keep_their_exact_collapsed_geometry() {
+    for data in ["M0 0H1", "M0 0C0 0 1 1 1 1", "M0 0H1 M2 0H3"] {
+        let source = format!(r#"<svg><path transform="scale(0)" d="{data}"/></svg>"#);
+        let document = SvgDocument::parse(source.as_bytes()).unwrap();
+        assert_eq!(document.shapes.len(), 1);
+        assert!(
+            document.shapes[0]
+                .path
+                .points()
+                .iter()
+                .all(|point| *point == [0.0; 3])
+        );
+    }
+    // A singular map can also intentionally identify only the anchors while
+    // preserving the handle: the resulting folded curve is authored geometry.
+    let document =
+        SvgDocument::parse(br#"<svg><path transform="scale(0 1)" d="M0 0Q1 1 2 0"/></svg>"#)
+            .unwrap();
+    assert_eq!(
+        document.shapes[0].path.points(),
+        &[[0., 0., 0.], [0., 1., 0.], [0., 0., 0.]]
+    );
+}
