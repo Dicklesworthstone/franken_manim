@@ -5728,33 +5728,16 @@ class Annulus(VMobject):
 
 
 def _resolve_raster_image_path(filename):
-    """Resolve the Reference's local image search without its URL downloader.
+    """Reference image_mobject.py:37: ``get_full_raster_image_path``.
 
-    Exact paths win. Extension-less names additionally search the current
-    working directory and its ``raster_images`` directory for the pinned
-    JPEG/PNG suffix catalog. Network input is a capability refusal: the
-    sovereign engine never downloads assets implicitly.
+    That is find_file over the configured raster_images directory
+    (custom_config.yml ``directories``) with .jpg, .jpeg, .png, .gif or no
+    extension, after the name itself; a miss is its "<name> not Found"
+    IOError. A URL is a capability refusal: the sovereign engine never
+    downloads assets implicitly (D-02).
     """
-    raw = str(filename)
-    if raw.lower().startswith(("http://", "https://")):
-        raise _CapabilityError(
-            "ImageMobject URL fetching is unavailable; provide a local file "
-            "or supply bytes through the host AssetFetcher boundary"
-        )
-    supplied = _pathlib.Path(raw)
-    directories = (_pathlib.Path(""), _pathlib.Path("raster_images"))
-    suffixes = (".jpg", ".jpeg", ".png", "")
-    candidates = [supplied, *( _pathlib.Path(f"{raw}{suffix}") for suffix in suffixes)]
-    if not supplied.is_absolute():
-        candidates.extend(
-            directory / f"{raw}{suffix}"
-            for directory in directories
-            for suffix in suffixes
-        )
-    for candidate in dict.fromkeys(candidates):
-        if candidate.is_file():
-            return candidate
-    raise OSError(f"{filename} not Found")
+    images = _sys.modules["manimlib.utils.images"]
+    return _pathlib.Path(images.get_full_raster_image_path(str(filename)))
 
 
 class ImageMobject(Mobject):
@@ -24703,6 +24686,14 @@ def _install_reference_utils():
             extensions=[".obj", ""],
         )
 
+    def get_full_sound_file_path(sound_file_name):
+        # Reference utils/sounds.py:11.
+        return find_file(
+            sound_file_name,
+            directories=[directories.get_sound_dir()],
+            extensions=[".wav", ".mp3", ""],
+        )
+
     _bind_reference_function("manimlib.utils.dict_ops", merge_dicts_recursively)
     _bind_reference_function("manimlib.utils.color", random_color)
     _bind_reference_function("manimlib.utils.color", random_bright_color)
@@ -24712,6 +24703,7 @@ def _install_reference_utils():
         get_full_three_d_model_path,
     ):
         _bind_reference_function("manimlib.utils.images", function)
+    _bind_reference_function("manimlib.utils.sounds", get_full_sound_file_path)
 
 
 def _install_config_module():

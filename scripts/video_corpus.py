@@ -106,7 +106,7 @@ ERA_EXCLUSIONS: tuple[tuple[str, str], ...] = (
 SHIMS: tuple[tuple[str, str, str], ...] = (
     # (name, mechanism, hashed file relative to videos_ref or "-")
     ("import-virtualization", "manimlib import surface served by fmn-python; the era shim manim_imports_ext plus its in-tree custom/** closure import-resolve inside the pinned tree", "manim_imports_ext.py"),
-    ("asset-path-virtualization", "corpus asset references resolve through the AssetFetcher/cache capability, never the host filesystem; the seed allowlist requires no assets", "-"),
+    ("asset-path-virtualization", "corpus asset names resolve as the Reference resolves them (find_file over the configured directories) under the harness working directory's custom_config.yml, never the videos tree's, which names the author's machine; certified reads enter the input closure by content hash; URLs refuse toward the host AssetFetcher; the seed allowlist requires no assets", "-"),
     ("fonts", "bundled OFL faces substitute for the era's system fonts (documented divergence; Look-Gallery reviewed)", "-"),
     ("kwarg-vintage", "era renames between a scene's vintage and the Reference pin are aliased narrowly and per-kwarg, never wholesale: set_stroke/set_backstroke background= (pre-2023 manimgl) aliases to the pin's behind= (R13 ruling 2026-08-10, fm-d3gt tranche 19: Cubic)", "-"),
 )

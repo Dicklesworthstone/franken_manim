@@ -32,6 +32,13 @@ refusals rather than guessed.
 
 ## What stayed familiar
 
+- `sound_file` is found as the Reference's `get_full_sound_file_path` finds it:
+  the name itself, else the configured `sounds` directory (custom_config.yml
+  `directories`) with `.wav`, `.mp3` or no extension. A URL refuses at the
+  call, toward the host AssetFetcher. One difference: the Reference raised
+  "<name> not Found" at the call, while a name the lookup cannot find is
+  recorded as authored here, and the mix refuses it by name. Cues are not read
+  until they are mixed.
 - `gain` is foreground gain in dB.
 - `gain_to_background` is dB ducking applied to the already-mixed background
   during the new sound's active interval.
@@ -125,6 +132,10 @@ encode/mux `ffmpeg` list.
 - `crates/fmn-conformance/tests/e2e_scenarios.rs`,
   `lifecycle.scene_soundtrack_windows.v1`: real scene clock and skip events
   through the shared audio composer and adjacent sample windows.
+- `crates/fmn-conformance/tests/e2e_scenarios.rs`,
+  `lifecycle.portal_asset_root.v1` (`crates/fmn-python/tests/asset_root.py`):
+  a named cue found in the configured `sounds` directory reaches the mix, and
+  a missing or network name refuses by name.
 - Pinned Reference
   `manimlib/scene/scene.py::add_sound` and
   `manimlib/scene/scene_file_writer.py::add_sound`.

@@ -721,6 +721,28 @@ pub(crate) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
+/// Named assets under the configured asset root (fm-portal-asset-virtualization-r13-qve7):
+/// ImageMobject, SVGMobject and Scene.add_sound find their files as the
+/// Reference does, over custom_config.yml's `directories`, and a missing or
+/// network asset refuses by name. Returns the number of passing cases.
+#[cfg(feature = "gauntlet")]
+pub fn run_portal_gauntlet_asset_root() -> Result<u64, String> {
+    crate::with_python_test_module("asset root", |py, _module, globals| {
+        let source = std::ffi::CString::new(include_str!("../tests/asset_root.py"))
+            .map_err(|error| error.to_string())?;
+        py.run(source.as_c_str(), Some(globals), Some(globals))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        globals
+            .get_item("result")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "asset-root acceptance omitted its test result".to_owned())?
+            .getattr("testsRun")
+            .and_then(|count| count.extract())
+            .map_err(|error| error.to_string())
+    })
+}
+
 /// Production image preparation, rendering and certification through the
 /// embedded portal. The three native cases need no optional host executable;
 /// the complete acceptance suite additionally exercises real external decoding.
@@ -807,6 +829,16 @@ mod tests {
             py.run(source.as_c_str(), Some(globals), Some(globals))
                 .inspect_err(|error| error.print(py))
                 .expect("governed image sources, pixels, receipts and certification");
+        });
+    }
+
+    #[test]
+    fn asset_root_acceptance() {
+        crate::with_python_test_module("asset root", |py, _module, globals| {
+            let source = std::ffi::CString::new(include_str!("../tests/asset_root.py")).unwrap();
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .expect("configured asset directories, named refusals and the mix");
         });
     }
 

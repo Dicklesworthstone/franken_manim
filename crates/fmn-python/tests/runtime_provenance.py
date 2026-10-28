@@ -5,14 +5,18 @@ No injected inventory, monkeypatch, or renderer double satisfies these cases.
 """
 from contextlib import redirect_stderr, redirect_stdout
 import hashlib
+import importlib
 import io
 import json
 import os
 from pathlib import Path
+import struct
 import subprocess
 import sys
 import tempfile
 import tomllib
+import wave
+import zlib
 
 import manimlib as ml
 from fmn_python.console_rendering import try_render_cli
@@ -77,6 +81,76 @@ def test_scene_file_reads_are_content_named_c6_inputs():
     assert [item["detail"] for item in c6] == [
         "scene file and sound-cue asset reads on the portal route; bundled fonts listed"
     ]
+
+
+def _png(rgba, width, height):
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+    rows = b"".join(b"\0" + bytes(rgba) * width for _ in range(height))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
+
+
+_SWATCH = _png((40, 120, 200, 255), 3, 2)
+
+
+class _NamedPicture(ml.Scene):
+    """Draws an image and an SVG named relative to the configured asset root."""
+
+    def construct(self):
+        self.add(ml.ImageMobject("swatch", height=2), ml.SVGMobject("glyph").shift(2 * ml.RIGHT))
+
+
+class _NamedCue(ml.Scene):
+    """Cues a sound named relative to the configured asset root."""
+
+    def construct(self):
+        self.add_sound("tick")
+        self.wait(0.25)
+
+
+def _render_named(name, scene_class, fmt):
+    # Each asset is found as the Reference finds it, by find_file over the
+    # directories that hang from custom_config.yml's directories.base.
+    root = _ROOT / name
+    for subdirectory in ("raster_images", "vector_images", "sounds"):
+        (root / subdirectory).mkdir(parents=True)
+    (root / "raster_images" / "swatch.png").write_bytes(_SWATCH)
+    (root / "vector_images" / "glyph.svg").write_bytes(_SVG)
+    with wave.open(str(root / "sounds" / "tick.wav"), "wb") as stream:
+        stream.setnchannels(1)
+        stream.setsampwidth(2)
+        stream.setframerate(48000)
+        stream.writeframes(struct.pack("<h", 8000) * 2400)
+    config = importlib.import_module("manimlib.config")
+    directories = config.manim_config.directories
+    saved = dict(directories)
+    directories["base"] = str(root)
+    config.update_directory_config(config.manim_config)
+    try:
+        return root, scene_class().render(root / ("named." + fmt), format=fmt, reproducible=True,
+                                          sources=_SOURCE, resolution=(96, 54), fps=4, threads=1)
+    finally:
+        directories.clear()
+        directories.update(saved)
+
+
+def test_named_assets_under_the_configured_root_are_content_named_inputs():
+    # fm-portal-asset-virtualization-r13-qve7: every asset a scene names enters
+    # the closure by content hash and basename, never by host path.
+    _, first = _render_named("named-a", _NamedPicture, "png")
+    _, moved = _render_named("named-b", _NamedPicture, "png")
+    assert set(_reads(first)) == {
+        "read/" + hashlib.sha256(_SWATCH).hexdigest() + "/swatch.png",
+        "read/" + hashlib.sha256(_SVG).hexdigest() + "/glyph.svg",
+    }, _reads(first)
+    assert moved.closure_digest == first.closure_digest
+    assert moved.destination.read_bytes() == first.destination.read_bytes()
+    root, cue = _render_named("named-wav", _NamedCue, "wav")
+    tick = (root / "sounds" / "tick.wav").read_bytes()
+    audio = [item["virtual_path"] for item in _items(cue)
+             if item["id"] == 1 and item.get("virtual_path", "").startswith("audio/")]
+    assert audio == ["audio/" + hashlib.sha256(tick).hexdigest() + "/tick.wav"], audio
 
 
 class _Effect(ml.Scene):
@@ -268,7 +342,7 @@ def test_false_runtime_labels_refuse_without_native_publication():
 assert getattr(ml, "__franken_manim__", False), "requires the installed native FrankenManim portal"
 _cases = sorted((name, case) for name, case in globals().items()
                 if name.startswith("test_") and callable(case))
-assert len(_cases) == 7, "runtime provenance native acceptance inventory changed"
+assert len(_cases) == 8, "runtime provenance native acceptance inventory changed"
 for _name, _case in _cases:
     _case()
     print("runtime provenance native acceptance passed:", _name)

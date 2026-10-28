@@ -44,7 +44,7 @@ mod portal_studio;
 mod portal_svg;
 mod portal_texture;
 #[cfg(feature = "gauntlet")]
-pub use portal_raster::run_portal_gauntlet_image_inputs;
+pub use portal_raster::{run_portal_gauntlet_asset_root, run_portal_gauntlet_image_inputs};
 use portal_texture::raster as portal_raster;
 mod portal_typography;
 mod portal_video;
@@ -9128,7 +9128,21 @@ impl PyScene {
         if portal_playback::requested_skip(slf)? {
             return Ok(());
         }
-        let mut sound_file = PathBuf::from(sound_file);
+        // Reference scene_file_writer.py:171 finds the file as
+        // get_full_sound_file_path does: the name itself, else the configured
+        // sounds directory with .wav, .mp3 or no extension; a URL refuses
+        // toward the AssetFetcher. A name it cannot find is recorded as
+        // authored, and reading it fails by name when the cues are mixed (BN-14).
+        let py = slf.py();
+        let found = py
+            .import("manimlib.utils.sounds")?
+            .getattr("get_full_sound_file_path")?
+            .call1((sound_file.as_str(),));
+        let mut sound_file = match found {
+            Ok(path) => path.extract::<PathBuf>()?,
+            Err(error) if error.is_instance_of::<PyOSError>(py) => PathBuf::from(sound_file),
+            Err(error) => return Err(error),
+        };
         let active = slf
             .borrow()
             .render

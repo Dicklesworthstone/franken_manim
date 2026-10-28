@@ -3972,6 +3972,17 @@ fn python_image_inputs_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
     Ok(RunOutcome::ok().with_counter("image_input_checks", checks))
 }
 
+/// fm-portal-asset-virtualization-r13-qve7: a scene's named image, SVG and sound
+/// assets resolve under the configured asset root (`directories.base`), reach the
+/// rendered frame and the mix, and a missing or network asset refuses by name.
+/// The fixture assets are authored by the test, so they are public.
+fn python_asset_root_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let checks = manimlib::run_portal_gauntlet_asset_root()
+        .map_err(|error| fail(format!("Python asset root: {error}")))?;
+    ctx.event(LogEvent::new("e2e.python.asset_root").field("checks", checks));
+    Ok(RunOutcome::ok().with_counter("asset_root_checks", checks))
+}
+
 fn python_scene_console_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let checks = manimlib::run_portal_gauntlet_console()
         .map_err(|error| fail(format!("Python scene console: {error}")))?;
@@ -11573,6 +11584,20 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )
         .tier(Tier::Fast),
     );
+    specs.push(
+        spec(
+            "lifecycle.portal_asset_root.v1",
+            ScenarioClass::LifecycleDrill,
+            Surface::PythonInProcess,
+            Invocation::new(python_asset_root_run),
+            vec![Assertion::ExitCode(0), counter_eq("asset_root_checks", 3)],
+            vec![LogExpect::span_present(
+                "e2e.python.asset_root",
+                vec![FieldPred::u64_eq("checks", 3)],
+            )],
+        )
+        .tier(Tier::Fast),
+    );
     specs.push(spec(
         "render_matrix.python_surface_mesh.v1",
         ScenarioClass::RenderMatrix,
@@ -13336,6 +13361,16 @@ fn python_image_inputs_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.python_image_inputs.v1")
         .expect("Python image input lifecycle is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn portal_asset_root_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.portal_asset_root.v1")
+        .expect("portal asset-root lifecycle is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }
