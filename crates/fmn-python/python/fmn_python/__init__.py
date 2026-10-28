@@ -89,6 +89,11 @@ def _ensure_exclusive_manimlib_namespace():
 
 
 def __getattr__(name):
+    if name == "PureRateFunction":
+        _ensure_exclusive_manimlib_namespace()
+        import manimlib
+
+        return manimlib._PureRateFunction
     if name in {"BundleExportSession", "BundleExportResult", "export_bundle"}:
         from . import bundle_export
 

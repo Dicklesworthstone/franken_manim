@@ -4792,6 +4792,36 @@ fn python_portal_native_offload_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scen
         .with_counter("python_offload_fallback_cases", fallback_cases))
 }
 
+/// Declared pure rates retain the exact stepped Python output at every native
+/// sample, including lagged families, discontinuities and nested time windows.
+fn python_exact_rate_offload_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let root = scenario_dir("rate_func_tabulated_offload")?;
+    let (compared_frames, distinct_samples, table_bytes) =
+        manimlib::run_portal_gauntlet_exact_rates(&root)
+            .map_err(|error| fail(format!("run exact Python rate offload: {error}")))?;
+    if compared_frames == 0
+        || distinct_samples == 0
+        || distinct_samples.checked_mul(16) != Some(table_bytes)
+    {
+        return Err(fail(format!(
+            "exact rate accounting: frames={compared_frames}, samples={distinct_samples}, \
+             table_bytes={table_bytes}"
+        )));
+    }
+    ctx.event(
+        LogEvent::new("e2e.python.exact_rate_offload")
+            .field("compared_frames", compared_frames)
+            .field("distinct_samples", distinct_samples)
+            .field("logical_table_bytes", table_bytes)
+            .field("serial_pixels_identical", truth(true))
+            .field("ordinary_callbacks_preserved", truth(true)),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("exact_rate_compared_frames", compared_frames)
+        .with_counter("exact_rate_distinct_samples", distinct_samples)
+        .with_counter("exact_rate_logical_table_bytes", table_bytes))
+}
+
 /// The portal's final-state still route: semantic construction completes with
 /// intermediate raster work skipped, then the same Lumen/Reel composition root
 /// atomically publishes exactly one canonical PNG.
@@ -11934,6 +11964,25 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.rate_func_tabulated_offload.v1",
+        ScenarioClass::Lifecycle,
+        Surface::PythonInProcess,
+        Invocation::new(python_exact_rate_offload_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_ge("exact_rate_compared_frames", 1),
+            counter_ge("exact_rate_distinct_samples", 1),
+            counter_ge("exact_rate_logical_table_bytes", 16),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.exact_rate_offload",
+            vec![
+                FieldPred::str_eq("serial_pixels_identical", "true"),
+                FieldPred::str_eq("ordinary_callbacks_preserved", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.python_portal_native_offload.v1",
         ScenarioClass::RenderMatrix,
         Surface::PythonInProcess,
@@ -13470,6 +13519,16 @@ fn python_native_offload_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.python_portal_native_offload.v1")
         .expect("Python native offload scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn python_exact_rate_offload_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.rate_func_tabulated_offload.v1")
+        .expect("exact Python rate offload scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

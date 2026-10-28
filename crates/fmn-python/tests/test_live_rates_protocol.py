@@ -37,6 +37,11 @@ def environment(install=True):
             return []
     class CameraFrame(Mobject):
         pass
+    class PureRateFunction:
+        def __init__(self, function):
+            self.function = function
+        def __call__(self, alpha):
+            return self.function(alpha)
     class Animation:
         _native_kind = None
         def __init__(self, rate_func=None, run_time=1., time_span=None, lag_ratio=0., family_size=1):
@@ -132,6 +137,7 @@ def environment(install=True):
     g.update(Animation=Animation, Transform=Transform, Unsupported=Unsupported,
              AnimationGroup=AnimationGroup, Scene=Scene, Mobject=Mobject,
              _BridgeMobject=Mobject, CameraFrame=CameraFrame, _AnimationBuilder=Builder,
+             _PureRateFunction=PureRateFunction,
              _CompositionCallbackDriver=_CompositionCallbackDriver,
              _fmn_ensure_composition_root=ensure_root,
              _requires_python_animation=requires, _python_composition_members=lambda group: [],
@@ -389,6 +395,130 @@ class LiveRateTests(unittest.TestCase):
         self.scene.lower_only = True
         self.scene.play(group, group)
         self.assertEqual(calls, [group])
+
+    def test_declared_rate_reaches_native_admission_without_probing(self):
+        calls = []
+        declaration = self.n._PureRateFunction(lambda alpha: calls.append(alpha) or alpha)
+        animation = self.n.Transform(rate_func=declaration)
+        self.scene.lower_only = True
+        self.scene.play(animation)
+        specs, callbacks, _, _, _, _ = self.scene.executions[-1]
+        self.assertIs(specs[0][4], declaration)
+        self.assertEqual(callbacks, [None])
+        self.assertEqual(calls, [])
+
+    def test_callback_selection_retains_declaration_for_native_refusal(self):
+        for reason in ("authored", "updater"):
+            with self.subTest(reason=reason):
+                native = environment()
+                scene = native.Scene()
+                scene.lower_only = True
+                calls = []
+                declaration = native._PureRateFunction(lambda alpha: calls.append(alpha) or alpha)
+                animation = native.Transform(rate_func=declaration)
+                if reason == "authored":
+                    animation.authored = True
+                else:
+                    animation.mobject.get_updaters = lambda: [object()]
+                scene.play(animation)
+                specs, callbacks, _, _, _, _ = scene.executions[-1]
+                self.assertEqual(specs[0][0], "python_callback")
+                self.assertIs(callbacks[0], animation)
+                self.assertIs(specs[0][4], declaration)
+                self.assertEqual(calls, [])
+
+    def test_ordinary_override_does_not_retain_an_inactive_declaration(self):
+        declaration = self.n._PureRateFunction(lambda _: self.fail("inactive rate was called"))
+        animation = self.n.Transform(rate_func=declaration)
+        animation.authored = True
+        self.scene.lower_only = True
+        self.scene.play(animation, rate_func=self.n.linear)
+        specs, callbacks, _, _, _, _ = self.scene.executions[-1]
+        self.assertIs(callbacks[0], animation)
+        self.assertIsNone(specs[0][4])
+        self.assertIs(animation.rate_func, self.n.linear)
+
+    def test_camera_declaration_is_not_lost_when_no_drawable_spec_is_emitted(self):
+        calls = []
+        rooted = []
+        self.scene.add = rooted.append
+        declaration = self.n._PureRateFunction(lambda alpha: calls.append(alpha) or alpha)
+        animation = self.n.Transform(rate_func=declaration)
+        animation.mobject = self.n.CameraFrame()
+        animation.target_mobject = self.n.CameraFrame()
+        animation.mobject._core = object()
+        animation.target_mobject._core = object()
+        self.scene.lower_only = True
+        self.scene.play(animation)
+        specs, callbacks, camera, _, rate, _ = self.scene.executions[-1]
+        self.assertEqual(specs, [])
+        self.assertEqual(callbacks, [])
+        self.assertEqual(camera, (animation.mobject._core, animation.target_mobject._core))
+        self.assertIs(rate, declaration)
+        self.assertEqual(calls, [])
+        self.assertEqual(rooted, [])
+
+    def test_camera_with_declared_drawable_keeps_removed_frame_unrooted(self):
+        declaration = self.n._PureRateFunction(lambda _: self.fail("rate was probed"))
+        camera = self.n.Transform(rate_func=self.n.linear)
+        camera.mobject = self.n.CameraFrame()
+        camera.target_mobject = self.n.CameraFrame()
+        camera.mobject._core = object()
+        camera.target_mobject._core = object()
+        drawable = self.n.Transform(rate_func=declaration)
+        rooted = []
+        self.scene.add = rooted.append
+        self.scene.lower_only = True
+        self.scene.play(camera, drawable)
+        self.assertEqual(rooted, [])
+        self.assertIs(self.scene.executions[-1][0][0][4], declaration)
+
+    def test_ordinary_override_clears_inactive_native_root_and_camera_declarations(self):
+        declaration = self.n._PureRateFunction(lambda _: self.fail("inactive rate was called"))
+        animation = self.n.Transform(rate_func=declaration)
+        self.scene.lower_only = True
+        self.scene.play(animation, rate_func=self.n.linear)
+        self.assertIsNone(self.scene.executions[-1][0][0][4])
+        self.assertEqual(self.scene.executions[-1][4], "linear")
+
+        camera = self.n.Transform(rate_func=declaration)
+        camera.mobject = self.n.CameraFrame()
+        camera.target_mobject = self.n.CameraFrame()
+        camera.mobject._core = object()
+        camera.target_mobject._core = object()
+        rooted = []
+        self.scene.add = rooted.append
+        self.scene.play(camera, rate_func=self.n.linear)
+        self.assertEqual(rooted, [camera.mobject])
+        self.assertEqual(self.scene.executions[-1][4], "linear")
+
+    def test_override_preserves_active_nested_declarations(self):
+        declaration = self.n._PureRateFunction(lambda _: self.fail("rate was probed"))
+        group = self.n.AnimationGroup(self.n.Transform(rate_func=declaration),
+                                      rate_func=declaration)
+        self.scene.lower_only = True
+        self.scene.play(group, rate_func=self.n.linear)
+        spec = self.scene.executions[-1][0][0]
+        self.assertIsNone(spec[4])
+        self.assertIs(spec[6]["members"][0][4], declaration)
+
+    def test_native_extra_operands_bind_without_rooting_during_planning(self):
+        rooted, adopted = [], []
+        def add(mobject):
+            rooted.append(mobject)
+            mobject.bound = True
+        def adopt(mobject):
+            adopted.append(mobject)
+            mobject.bound = True
+        self.scene.add, self.scene._adopt = add, adopt
+        animation = self.n.Transform()
+        extra = self.n.Mobject()
+        animation._native_extra_mobjects = (extra,)
+        self.scene.lower_only = True
+        self.scene.play(animation)
+        self.assertEqual(rooted, [])
+        self.assertEqual(adopted, [animation.mobject, animation.target_mobject, extra])
+        self.assertTrue(extra._is_bound())
 
 
 if __name__ == "__main__":

@@ -88,6 +88,62 @@ lowering, including its table approximation. Target-less `CyclicReplace` and
 Their independent native-only leaf-rate behavior is not repaired here. This
 is not a claim that every animation kind's arbitrary easing is complete.
 
+## Explicit exact-rate preparation for native rendering
+
+The current source tree offers `PureRateFunction` for a custom easing curve
+whose result depends only on its alpha argument. This explicit declaration
+allows a callback-free native play to use the native render teams even when
+its rate function is written in Python:
+
+```python
+from fmn_python import PureRateFunction
+from manimlib import Scene, Square, Transform, RIGHT
+
+class ExactCubic(Scene):
+    def construct(self):
+        square = Square()
+        self.add(square)
+        self.play(
+            Transform(square, square.copy().shift(2 * RIGHT)),
+            run_time=1.137,
+            rate_func=PureRateFunction(lambda alpha: alpha ** 3),
+        )
+```
+
+The declaration promises a deterministic, finite scalar result, with no side
+effects or reads of changing scene state, time, RNGs or closure counters. The
+engine does not infer this promise from repeated probes. Ordinary callables
+continue to run through their existing Python lifecycle.
+
+Preparation runs Choreo's real animation lifecycle on an isolated copy of the
+stage, without rendering or publishing frames. It observes the actual native
+arguments, including family lag, nested composition intervals, time windows,
+begin/finish interpolation and duration rounding at the selected FPS. Each
+distinct binary64 argument is evaluated once per declaration per play; the
+native render uses an immutable exact lookup table. There is no uniform-grid
+approximation, so discontinuous easing curves also retain their values.
+Reusing a declaration in a later play prepares a new table for that schedule.
+
+Preparation is bounded to 1,048,576 nominal frames and 1,048,576 distinct rate
+samples per play. Authored exceptions, nonfinite results and budget refusals
+escape before the live animation begins. A missing table argument is a named
+rendering error, never an interpolated substitute. The callback itself never
+enters the worker program.
+
+This opt-in currently requires a native play with no Python animation hooks,
+scene or mobject updaters, camera track, interactive event source or effective
+skip mode. Unsupported contexts refuse with a diagnostic; pass the wrapper's
+`.function` to request ordinary Python playback. Known native rates retain
+their existing path. This feature does not relax the restrictions on authored
+callbacks or infer purity for arbitrary Python.
+
+`scene._render_performance` reports `exact_rate_segments`,
+`exact_rate_samples` and `exact_rate_prepare_ns` alongside
+`pure_play_segments`/`pure_play_frames`, so callers can see both preparation
+cost and whether a segment actually used native offload. The regression
+`crates/fmn-python/tests/exact_rate_offload.py` compares real PNG bytes and final
+geometry against live Python execution at 15, 24, 30 and 60 FPS.
+
 ## Installation and execution boundaries
 
 `fmn_python.playback.install_scene_playback` installs both adapters after the

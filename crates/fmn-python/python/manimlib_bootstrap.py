@@ -15996,17 +15996,18 @@ class Scene(_SceneCore):
         # Scene/Stage borrow survives the Python callback phase.
         if not proto_animations:
             return
-        for proto in proto_animations:
-            # Reference Scene.begin_animations adds an animated mobject that
-            # is not in the scene list. For the camera frame, which
-            # clear() and remove() drop, that puts it back first (fm-6l2i).
-            mobject = getattr(proto, "mobject", None)
-            if isinstance(mobject, CameraFrame) and not any(
-                listed is mobject for listed in self.mobjects
-            ):
-                self.add(mobject)
-        def rate_payload(value, where, run_time_hint):
+        def rate_payload(value, where, run_time_hint, nested=True):
             if value is None or isinstance(value, str):
+                return value
+            if isinstance(value, globals().get("_PureRateFunction", ())):
+                # A play-level override replaces a root animation's rate.
+                # Do not register its inactive declaration with preparation;
+                # nested members retain their independently applied easing.
+                if not nested and rate_func is not None:
+                    return None
+                # Explicit opt-in: Choreo collects the actual native calls on
+                # an isolated stage, including lag, groups and time windows.
+                # Never reduce this declaration to an interpolated grid.
                 return value
             name = _RATE_FUNC_NAMES.get(value)
             if name is not None:
@@ -16069,6 +16070,7 @@ class Scene(_SceneCore):
                         spec_args.get("rate_func"),
                         "animate",
                         spec_args.get("run_time") or run_time or 1.0,
+                        nested,
                     ),
                     spec_args.get("lag_ratio"),
                     spec_params,
@@ -16111,6 +16113,7 @@ class Scene(_SceneCore):
                             proto.rate_func,
                             type(proto).__name__,
                             proto.run_time or run_time or 1.0,
+                            nested,
                         ),
                         None,
                         params,
@@ -16138,7 +16141,11 @@ class Scene(_SceneCore):
                     self._adopt(target)
                 for extra in getattr(proto, "_native_extra_mobjects", ()):
                     if not extra._is_bound():
-                        self.add(extra)
+                        # Bind every operand for native preflight, without
+                        # changing live membership before preparation succeeds.
+                        # The native composition roots its complete family
+                        # through the ordinary begin_animations lifecycle.
+                        self._adopt(extra)
                 return (
                     proto._native_kind,
                     mobject,
@@ -16148,6 +16155,7 @@ class Scene(_SceneCore):
                         proto.rate_func,
                         type(proto).__name__,
                         proto.run_time or run_time or 1.0,
+                        nested,
                     ),
                     None if proto.lag_ratio is None else float(proto.lag_ratio),
                     params,
@@ -16187,7 +16195,13 @@ class Scene(_SceneCore):
                     mobject,
                     None,
                     float(proto.run_time),
-                    None,
+                    # Ordinary easing belongs to the Python lifecycle. Keep
+                    # an explicit declaration visible to native admission so
+                    # a callback-selected animation cannot silently bypass
+                    # PureRateFunction's preparation contract.
+                    proto.rate_func if isinstance(
+                        proto.rate_func, globals().get("_PureRateFunction", ())
+                    ) else None,
                     float(getattr(proto, "lag_ratio", 0.0)),
                     params,
                 )
@@ -16217,6 +16231,7 @@ class Scene(_SceneCore):
         specs = []
         callbacks = []
         camera_pair = None
+        camera_rate_declaration = None
         for proto in proto_animations:
             if isinstance(proto, _AnimationBuilder) and isinstance(
                 proto.mobject, CameraFrame
@@ -16233,6 +16248,9 @@ class Scene(_SceneCore):
                 # engine lerp to that target reproduces it; no second
                 # camera clock exists or is needed.
                 camera_pair = (proto.mobject._core, proto.mobject.target._core)
+                candidate_rate = proto.anim_args.get("rate_func")
+                if isinstance(candidate_rate, globals().get("_PureRateFunction", ())):
+                    camera_rate_declaration = candidate_rate
                 continue
             if (
                 isinstance(proto, Animation)
@@ -16250,6 +16268,8 @@ class Scene(_SceneCore):
                     target = proto._native_target()
                     if isinstance(target, CameraFrame):
                         camera_pair = (proto.mobject._core, target._core)
+                        if isinstance(proto.rate_func, globals().get("_PureRateFunction", ())):
+                            camera_rate_declaration = proto.rate_func
                         continue
                     raise NotImplementedError(
                         "Transform of the camera frame must target a "
@@ -16281,13 +16301,42 @@ class Scene(_SceneCore):
             else:
                 callbacks.append(None)
             specs.append(build_spec(proto, False))
+        # Camera membership is a begin-time effect. Keep a removed frame out
+        # of the scene until lowering has succeeded, and leave it untouched
+        # when native admission must refuse a declared-pure camera play.
+        # The native bridge owns that refusal and its error message.
+        declaration_type = globals().get("_PureRateFunction", ())
+        def has_declaration(spec):
+            return isinstance(spec[4], declaration_type) or any(
+                has_declaration(member) for member in spec[6].get("members", ())
+            )
+        active_camera_rate = rate_func if rate_func is not None else camera_rate_declaration
+        preparing_camera = camera_pair is not None and (
+            isinstance(active_camera_rate, declaration_type)
+            or any(has_declaration(spec) for spec in specs)
+        )
+        if not preparing_camera:
+            for proto in proto_animations:
+                # Reference begin_animations adds an animated mobject that
+                # clear() or remove() dropped, including the frame (fm-6l2i).
+                mobject = getattr(proto, "mobject", None)
+                if isinstance(mobject, CameraFrame) and not any(
+                    listed is mobject for listed in self.mobjects
+                ):
+                    self.add(mobject)
         try:
             result = self._play_animations(
                 specs,
                 callbacks,
                 camera_pair,
                 None if run_time is None else float(run_time),
-                rate_payload(rate_func, "play", run_time or 1.0),
+                # Camera specs use their own track. Preserve an active
+                # declaration solely for the native camera-preparation refusal;
+                # a real play-level override still takes precedence.
+                rate_payload(
+                    rate_func if rate_func is not None else camera_rate_declaration,
+                    "play", run_time or 1.0,
+                ),
                 None if lag_ratio is None else float(lag_ratio),
             )
         except BaseException:

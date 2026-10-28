@@ -29,6 +29,7 @@ mod portal_console;
 mod portal_network;
 mod portal_ode;
 mod portal_offload;
+mod portal_rates;
 #[cfg(feature = "gauntlet")]
 pub use portal_console::{
     run_portal_gauntlet_console, run_portal_gauntlet_parallel_batch_checkpoint,
@@ -36,6 +37,8 @@ pub use portal_console::{
 };
 #[cfg(feature = "gauntlet")]
 pub use portal_ode::run_portal_gauntlet_ode_solution;
+#[cfg(feature = "gauntlet")]
+pub use portal_rates::run_portal_gauntlet_exact_rates;
 mod portal_playback;
 mod portal_readback;
 mod portal_recording;
@@ -213,6 +216,9 @@ struct PortalRoutes {
 struct PortalPerformance {
     pure_play_segments: u64,
     pure_play_frames: u64,
+    exact_rate_segments: u64,
+    exact_rate_samples: u64,
+    exact_rate_prepare_ns: u64,
     native_offload_ns: u64,
     raw_frame_reuses: u64,
     converted_frames: u64,
@@ -1018,7 +1024,9 @@ impl PortalFrameSession {
                         // the prefix has joined before this owner reservation.
                         let reservation = self.reserve_output()?;
                         let preparation_start = Instant::now();
-                        let stage = job.materialize();
+                        let stage = job.try_materialize().map_err(|error| {
+                            fmn_scene::IntegrationError::new("choreo", error.to_string())
+                        })?;
                         self.capture_stage(&stage, preparation_start, reservation)
                     },
                 )
@@ -8876,6 +8884,9 @@ impl PyScene {
             ("camera_frames", routes.camera),
             ("pure_play_segments", stats.pure_play_segments),
             ("pure_play_frames", stats.pure_play_frames),
+            ("exact_rate_segments", stats.exact_rate_segments),
+            ("exact_rate_samples", stats.exact_rate_samples),
+            ("exact_rate_prepare_ns", stats.exact_rate_prepare_ns),
             ("native_offload_ns", stats.native_offload_ns),
             ("raw_frame_reuses", stats.raw_frame_reuses),
             ("converted_frames", stats.converted_frames),
@@ -9452,7 +9463,11 @@ impl PyScene {
         &self,
         spec: &Bound<'_, PyAny>,
     ) -> PyResult<PyNativeAnimationDriver> {
-        let spec = parse_anim_spec(&self.engine, spec)?;
+        let mut rates = portal_rates::Preparation::default();
+        let spec = parse_anim_spec(&self.engine, spec, &mut rates)?;
+        if !rates.is_empty() {
+            return Err(portal_rates::Preparation::refusal());
+        }
         let animation = build_native_animation(self.engine.borrow_mut().stage_mut(), spec)?;
         Ok(PyNativeAnimationDriver {
             engine: Rc::clone(&self.engine),
@@ -9492,10 +9507,14 @@ impl PyScene {
         let callback_count = callbacks.iter().flatten().count();
 
         // Resolve every Python-side value before the engine borrow.
-        let play_rate = rate_func.as_ref().map(rate_func_from_py).transpose()?;
+        let mut rates = portal_rates::Preparation::default();
+        let play_rate = rate_func
+            .as_ref()
+            .map(|value| rates.parse(value))
+            .transpose()?;
         let mut resolved = Vec::with_capacity(specs.len());
         for spec in &specs {
-            resolved.push(parse_anim_spec(&engine, spec)?);
+            resolved.push(parse_anim_spec(&engine, spec, &mut rates)?);
         }
 
         let mut pending = Vec::new();
@@ -9503,6 +9522,34 @@ impl PyScene {
         let host_updates = portal_playback::requires_public_scene_update(slf)?
             || has_python_updaters(slf, &pending)?;
         let render_observes_frames = portal_has_frame_render(slf)?;
+        let mut overrides = fmn_scene::PlayOverrides {
+            run_time,
+            rate_func: play_rate,
+            lag_ratio,
+        };
+        if !rates.is_empty() {
+            if callback_count != 0
+                || host_updates
+                || camera.is_some()
+                || resolved.is_empty()
+                || has_python_updaters(slf, &portal_rates::Preparation::inputs(&resolved))?
+            {
+                return Err(portal_rates::Preparation::refusal());
+            }
+            let started = Instant::now();
+            let samples = rates.prepare(&engine, &mut resolved, &mut overrides)?;
+            let elapsed = portal_elapsed_ns(started);
+            let render = Arc::clone(&slf.borrow().render);
+            if let Some(PortalRenderSession::Frames(session)) = render
+                .lock()
+                .map_err(|_| PyRuntimeError::new_err("portal render session lock was poisoned"))?
+                .as_mut()
+            {
+                session.routes.performance.exact_rate_segments += 1;
+                session.routes.performance.exact_rate_samples += samples as u64;
+                session.routes.performance.exact_rate_prepare_ns += elapsed;
+            }
+        }
         for callback in callbacks.iter().flatten() {
             crossing::record(CrossingClass::MethodDispatch);
             callback.bind(slf.py()).call_method0("begin")?;
@@ -9526,15 +9573,10 @@ impl PyScene {
                     core: live.unbind(),
                     start_time,
                     run_time: effective_run_time,
-                    rate: play_rate.clone().unwrap_or_default(),
+                    rate: overrides.rate_func.clone().unwrap_or_default(),
                 })
             })
             .transpose()?;
-        let overrides = fmn_scene::PlayOverrides {
-            run_time,
-            rate_func: play_rate,
-            lag_ratio,
-        };
         let pure_play = callback_count == 0
             && !host_updates
             && camera_lerp.is_none()
@@ -10149,6 +10191,7 @@ impl fmn_anim::Animation for PythonAnimationSlot {
 
 /// One parsed play spec: a leaf animation or a composition carrying
 /// nested members (fm-d3gt, the explicit-animation seam).
+#[derive(Clone)]
 struct AnimSpec {
     kind: String,
     mob: Option<Mob>,
@@ -10203,12 +10246,21 @@ struct AnimSpec {
 fn animated_mobjects(specs: &[AnimSpec], out: &mut Vec<Mob>) {
     for spec in specs {
         out.extend(spec.mob);
+        // Multi-object native animations bind every operand before begin,
+        // while their generated composition owns eventual scene membership.
+        // Include unrooted operands when deciding whether Python updaters
+        // require the ordered callback boundary.
+        out.extend(spec.mobs.iter().copied());
         animated_mobjects(&spec.members, out);
     }
 }
 
 #[allow(clippy::type_complexity)]
-fn parse_anim_spec(engine: &Engine, spec: &Bound<'_, PyAny>) -> PyResult<AnimSpec> {
+fn parse_anim_spec(
+    engine: &Engine,
+    spec: &Bound<'_, PyAny>,
+    rates: &mut portal_rates::Preparation,
+) -> PyResult<AnimSpec> {
     let (kind, mobject, target, run_time, rate, lag, params): (
         String,
         Option<Bound<'_, BridgeMobject>>,
@@ -10218,7 +10270,7 @@ fn parse_anim_spec(engine: &Engine, spec: &Bound<'_, PyAny>) -> PyResult<AnimSpe
         Option<f64>,
         Bound<'_, PyDict>,
     ) = spec.extract()?;
-    let rate = rate.as_ref().map(rate_func_from_py).transpose()?;
+    let rate = rate.as_ref().map(|value| rates.parse(value)).transpose()?;
     let resolve = |proxy: &Bound<'_, BridgeMobject>| -> PyResult<Mob> {
         let (mob_engine, mob) = bound_parts(&proxy.borrow())?;
         if same_engine(engine, &mob_engine) {
@@ -10274,7 +10326,7 @@ fn parse_anim_spec(engine: &Engine, spec: &Bound<'_, PyAny>) -> PyResult<AnimSpe
     let members = match params.get_item("members")? {
         Some(list) => list
             .try_iter()?
-            .map(|item| parse_anim_spec(engine, &item?))
+            .map(|item| parse_anim_spec(engine, &item?, rates))
             .collect::<PyResult<Vec<_>>>()?,
         None => Vec::new(),
     };
@@ -12571,6 +12623,7 @@ fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<(
     module.add_class::<ladder::PyBatchedUpdater>()?;
     module.add_class::<ladder::PyArrayUpdater>()?;
     module.add_class::<ladder::PyNativeUpdater>()?;
+    module.add_class::<portal_rates::PyPureRateFunction>()?;
     module.add_function(wrap_pyfunction!(
         crossing::_crossing_stats_snapshot,
         module

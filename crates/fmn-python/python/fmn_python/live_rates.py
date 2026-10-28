@@ -48,7 +48,9 @@ def install_live_rates(native: Any) -> None:
     def custom(rate):
         # Identity lookup also accepts callable objects with __hash__ = None;
         # checking a rate must never evaluate it or invoke its equality hook.
-        return callable(rate) and all(rate is not known for known in g["_RATE_FUNC_NAMES"])
+        declared = g.get("_PureRateFunction", ())
+        return (callable(rate) and not isinstance(rate, declared)
+                and all(rate is not known for known in g["_RATE_FUNC_NAMES"]))
 
     def catalog(rate):
         if not isinstance(rate, str):
