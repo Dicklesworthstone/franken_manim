@@ -1,6 +1,20 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-run, 2026-10-27, against `Cargo.lock` `acaa8946` and `SUITE.lock` `bd60055e`,
+**Status:** re-run, 2026-10-28, against `Cargo.lock` `e854a472` and `SUITE.lock` `491d0436`,
+for the franken_markdown repin from `04d811db` to `4f2bcc95` (fm-script-greek-capitals-r12-nbcf:
+script and scriptscript Greek capitals take cmr7's and cmr5's own designs).
+The lock delta changes only the franken_markdown Git revisions; no package, version, checksum or
+WASM manifest changes.
+
+- **VERIFIED (mechanical):** `cargo tree -p fmn-wasm --target wasm32-unknown-unknown -e
+  normal --prefix none --locked` through RCH gives 134 lines, byte-identical to the tree at
+  `04d811db`, with no fmd, franken_markdown, PyO3 or fmn-python package.
+- **VERIFIED (build):** `cargo build --locked -p fmn-wasm --target wasm32-unknown-unknown`
+  passes through RCH at this tree.
+- Not re-run: the wasm-smoke Node execution and the package/browser gate. fmn-wasm's tree does
+  not reach franken_markdown. This is no fresh smoke, package, browser or size-budget pass.
+
+Earlier re-run, 2026-10-27, against `Cargo.lock` `acaa8946` and `SUITE.lock` `bd60055e`,
 for the franken_markdown repin from `450111a4` to `04d811db` (fm-fm-delim-size-chain-r11-khsh:
 delimiters walk TeX's size chain, null delimiters unscaled, a radical's bar its sign's height).
 The lock delta changes only the franken_markdown Git revisions; no package, version, checksum or
@@ -671,8 +685,8 @@ The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
-- `SUITE.lock` SHA-256: `bd60055e74b93e0aa88a0a5d3263188471c192029684b7248051da80a42e03a2`
-- `Cargo.lock` SHA-256: `acaa8946cfc65368de247a69341e7cb1f1e7b7636cb84782a924729c6b7be189`
+- `SUITE.lock` SHA-256: `491d04362a15d8f0f0463e542ba6cd45ee5738ff265d664c8deb35811b952490`
+- `Cargo.lock` SHA-256: `e854a472107a9698fba972bfe12a2faf92909650362567f4ea5c057380d237f8`
 - Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `93a7c2dc6acf3dfef88a4a490efbfda7970bd963b4740aa7f879a08fff395061`
 
 The 0.5.0 release bump re-bound both lock identities above. That bump changed

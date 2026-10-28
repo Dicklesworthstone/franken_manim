@@ -1778,13 +1778,14 @@ mod tests {
         // pieces, \binrel@'s class for \overset, amsmath's dots look-ahead),
         // cc470d1a (physics' function arguments in the default pack, whose
         // macro identity gains the physics flag), 450111a4 (TexText line
-        // breaking, whose macro identity gains the pack's line width), and
-        // 04d811db (TeX's delimiter size chain).
+        // breaking, whose macro identity gains the pack's line width),
+        // 04d811db (TeX's delimiter size chain), and 4f2bcc95 (script Greek
+        // capitals in cmr7's and cmr5's designs).
         assert_eq!(
             [cold.digest(), cached.digest(), text.digest()].map(|digest| digest.to_string()),
             [
-                "837b0b371b14899e9b6497b8ecb5f0d7438eab286a7c71a459a45869f3b9bad2",
-                "dc453c9ad82f06a521c4ecd6c9d5b4aa3d987a56e22d199ec28d60b48e2db2f8",
+                "b008e58faed02f1d7f2cc2447dc019e8a53efc126406d7aa59374dbb67dfd8c5",
+                "51a4e13769d1922fd46f4538263bc8097606ac0442ee2ddec387ef77633e9d71",
                 "0fa22e64fe9e1901eea58a596899ec843bc0d6db46f1cd91607925a50fea3e6f",
             ]
         );
