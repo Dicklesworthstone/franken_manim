@@ -1304,6 +1304,251 @@ fn skip_value(s: &str, start: usize) -> Option<usize> {
     }
 }
 
+// ── Outside the denominator: dynamic Tex arguments (fm-ruw4) ────────────
+
+/// The G0-4 harvest's committed manifest: counts and construct names only
+/// (§15.3), written by `scripts/harvest_tex_corpus.py`.
+pub const HARVEST_MANIFEST: &str =
+    include_str!("../../../docs/g0/g0-4-corpus/harvest_manifest.json");
+
+/// What the frozen denominator leaves out (fm-ruw4): Tex-family arguments
+/// built at run time (f-strings, concatenations, variables, `*` unpacking).
+/// The harvest counts them and lexes their literal string fragments into
+/// an advisory construct tally, but a fragment is not a formula, so none
+/// of it enters the headline.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DynamicExclusion {
+    /// Dynamic positional arguments, per constructor name.
+    pub arguments: BTreeMap<String, u64>,
+    /// The denominator's literal occurrences.
+    pub literal_occurrences: u64,
+    /// Literal string fragments inside the dynamic arguments.
+    pub fragments: u64,
+    /// Constructs lexed from those fragments, weighted by use (advisory).
+    pub constructs: BTreeMap<String, u64>,
+}
+
+impl DynamicExclusion {
+    /// Read the tallies from a harvest manifest.
+    ///
+    /// # Errors
+    /// A description of the first missing or malformed tally.
+    pub fn from_manifest(text: &str) -> Result<Self, String> {
+        let mut out = Self::default();
+        let mut seen = BTreeSet::new();
+        walk_object(text, 0, |key, at| {
+            let end = match key {
+                "dynamic_args_excluded" => {
+                    let (counts, end) = read_counts(text, at)?;
+                    out.arguments = counts;
+                    end
+                }
+                "advisory_dynamic_constructs" => {
+                    let (counts, end) = read_counts(text, at)?;
+                    out.constructs = counts;
+                    end
+                }
+                "dynamic_fragments_advisory" => {
+                    let (count, end) = read_number(text.as_bytes(), at)?;
+                    out.fragments = count;
+                    end
+                }
+                "denominator" => walk_object(text, at, |inner, value| {
+                    if inner == "total_occurrences" {
+                        let (count, end) = read_number(text.as_bytes(), value)?;
+                        out.literal_occurrences = count;
+                        Some(end)
+                    } else {
+                        skip_json(text, value)
+                    }
+                })?,
+                _ => skip_json(text, at)?,
+            };
+            seen.insert(key.to_owned());
+            Some(end)
+        })
+        .ok_or("the harvest manifest is not the expected JSON object")?;
+        for key in [
+            "dynamic_args_excluded",
+            "advisory_dynamic_constructs",
+            "dynamic_fragments_advisory",
+            "denominator",
+        ] {
+            if !seen.contains(key) {
+                return Err(format!("the harvest manifest has no {key}"));
+            }
+        }
+        if out.literal_occurrences == 0 {
+            return Err("the harvest manifest's denominator has no total_occurrences".to_owned());
+        }
+        Ok(out)
+    }
+
+    /// Dynamic arguments in all.
+    #[must_use]
+    pub fn total(&self) -> u64 {
+        self.arguments.values().sum()
+    }
+
+    /// The fragment constructs fmd-math does not parse, most used first:
+    /// `(construct, uses, status)`.
+    #[must_use]
+    pub fn pending(&self) -> Vec<(String, u64, fmd_math::ConstructStatus)> {
+        let mut pending: Vec<_> = self
+            .constructs
+            .iter()
+            .filter_map(|(construct, &uses)| {
+                let status = fmd_math::construct_status(construct);
+                (status != fmd_math::ConstructStatus::Supported)
+                    .then(|| (construct.clone(), uses, status))
+            })
+            .collect();
+        pending.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        pending
+    }
+
+    /// The dashboard's disclosure of what the headline does not cover.
+    #[must_use]
+    pub fn dashboard_section(&self) -> String {
+        let total = self.total();
+        let mut names: Vec<(&String, &u64)> = self.arguments.iter().collect();
+        names.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        let names = names
+            .iter()
+            .map(|(name, count)| format!("`{name}` {count}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let all = total + self.literal_occurrences;
+        let share = if all == 0 {
+            0.0
+        } else {
+            100.0 * total as f64 / all as f64
+        };
+        let mut out = String::new();
+        let _ = writeln!(out, "## {DYNAMIC_SECTION_HEAD}\n");
+        let _ = writeln!(
+            out,
+            "The denominator holds fully literal Tex-family arguments. The G0-4 harvest also \
+             met {total} arguments built at run time (f-strings, concatenations, variables, \
+             `*` unpacking): {names}. Beside the denominator's {} literal occurrences they are \
+             {share:.1} % of all arguments, and the headline above does not cover them. Their \
+             {} literal string fragments use {} distinct constructs ({} uses), an advisory \
+             tally from `harvest_manifest.json`. The constructs among them that fmd-math does \
+             not parse:\n",
+            self.literal_occurrences,
+            self.fragments,
+            self.constructs.len(),
+            self.constructs.values().sum::<u64>()
+        );
+        let _ = writeln!(
+            out,
+            "| Construct | Uses in fragments | Status | Tracked at |"
+        );
+        let _ = writeln!(out, "|---|---|---|---|");
+        for (construct, uses, status) in self.pending() {
+            let (label, tracked) = match status {
+                fmd_math::ConstructStatus::UnsupportedT2 => {
+                    ("tier 2", fmd_math::tier2_tracking(&construct))
+                }
+                _ => ("untiered", fmd_math::OUTSIDE_CORPUS_TRACKING),
+            };
+            let _ = writeln!(out, "| `{construct}` | {uses} | {label} | {tracked} |");
+        }
+        out.push('\n');
+        out
+    }
+}
+
+/// The heading [`DynamicExclusion::dashboard_section`] writes.
+pub const DYNAMIC_SECTION_HEAD: &str = "Outside the denominator: dynamic Tex arguments";
+
+/// Replace (or insert) the dynamic-argument disclosure in a rendered
+/// dashboard: right after the headline, before the face-usage section.
+#[must_use]
+pub fn with_dynamic_exclusion_section(dashboard: &str, section: &str) -> String {
+    let head = format!("## {DYNAMIC_SECTION_HEAD}");
+    const NEXT: &str = "## Noto math or Plex Sans face usage";
+    let mut text = dashboard.to_owned();
+    if let Some(start) = text.find(&head) {
+        let end = text[start + head.len()..]
+            .find("\n## ")
+            .map_or(text.len(), |offset| start + head.len() + offset + 1);
+        text.replace_range(start..end, "");
+    }
+    match text.find(NEXT) {
+        Some(at) => {
+            text.insert_str(at, section);
+            text
+        }
+        None => format!("{text}\n{section}"),
+    }
+}
+
+/// Walk one JSON object's members, handing each key and its value's offset
+/// to `member`, which returns the offset after the value.
+fn walk_object(
+    s: &str,
+    start: usize,
+    mut member: impl FnMut(&str, usize) -> Option<usize>,
+) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut i = skip_ws(bytes, start);
+    if bytes.get(i) != Some(&b'{') {
+        return None;
+    }
+    i += 1;
+    loop {
+        i = skip_ws(bytes, i);
+        match bytes.get(i)? {
+            b'}' => return Some(i + 1),
+            b',' => {
+                i += 1;
+                continue;
+            }
+            b'"' => {}
+            _ => return None,
+        }
+        let (key, after) = read_string(s, i)?;
+        i = skip_ws(bytes, after);
+        if bytes.get(i) != Some(&b':') {
+            return None;
+        }
+        i = skip_ws(bytes, i + 1);
+        i = member(&key, i)?;
+    }
+}
+
+/// Skip one JSON value of any shape, nested objects and arrays included.
+fn skip_json(s: &str, start: usize) -> Option<usize> {
+    let bytes = s.as_bytes();
+    match bytes.get(start)? {
+        b'{' => walk_object(s, start, |_, at| skip_json(s, at)),
+        b'[' => {
+            let mut i = start + 1;
+            loop {
+                i = skip_ws(bytes, i);
+                match bytes.get(i)? {
+                    b']' => return Some(i + 1),
+                    b',' => i += 1,
+                    _ => i = skip_json(s, i)?,
+                }
+            }
+        }
+        _ => skip_value(s, start),
+    }
+}
+
+/// A JSON object of non-negative integer counts.
+fn read_counts(s: &str, start: usize) -> Option<(BTreeMap<String, u64>, usize)> {
+    let mut counts = BTreeMap::new();
+    let end = walk_object(s, start, |key, at| {
+        let (count, after) = read_number(s.as_bytes(), at)?;
+        counts.insert(key.to_owned(), count);
+        Some(after)
+    })?;
+    Some((counts, end))
+}
+
 // ── The second ranking corpus (fm-tex-constructs-t2-1wfq) ───────────────
 
 /// ManimCommunity/manim's TeX strings: its library, example scenes and
@@ -1733,6 +1978,78 @@ mod tests {
         assert!((pu - 90.0).abs() < 1e-9);
         assert!((lo - 92.0).abs() < 1e-9);
         assert!((lu - 85.0).abs() < 1e-9);
+    }
+
+    const MANIFEST: &str = r#"{
+  "bead": "fm-x",
+  "pins": {"videos": "abc", "nested": {"deep": [1, {"x": "y"}]}},
+  "trees": ["a", "b"],
+  "dynamic_args_excluded": {"OldTex": 30, "Tex": 10},
+  "denominator": {"distinct_strings": 9, "total_occurrences": 360, "corpus_sha256": "f"},
+  "dynamic_fragments_advisory": 7,
+  "advisory_dynamic_constructs": {"\\frac": 5, "\\notacommand": 2, "env:gather": 1, "script:sup": 4}
+}"#;
+
+    #[test]
+    fn the_dynamic_exclusion_reads_the_manifest_tallies_past_nested_values() {
+        let dynamic = DynamicExclusion::from_manifest(MANIFEST).expect("manifest parses");
+        assert_eq!(dynamic.total(), 40);
+        assert_eq!(dynamic.literal_occurrences, 360);
+        assert_eq!(dynamic.fragments, 7);
+        assert_eq!(dynamic.constructs.len(), 4);
+        // Supported constructs are not pending; an untiered one and a tier-2
+        // environment are, most used first.
+        let pending: Vec<(String, u64)> = dynamic
+            .pending()
+            .into_iter()
+            .map(|(construct, uses, _)| (construct, uses))
+            .collect();
+        assert_eq!(
+            pending,
+            vec![
+                ("\\notacommand".to_owned(), 2),
+                ("env:gather".to_owned(), 1)
+            ]
+        );
+        let section = dynamic.dashboard_section();
+        assert!(
+            section.contains("met 40 arguments built at run time"),
+            "{section}"
+        );
+        assert!(section.contains("`OldTex` 30, `Tex` 10"), "{section}");
+        assert!(
+            section.contains("they are 10.0 % of all arguments"),
+            "{section}"
+        );
+        assert!(
+            section.contains("| `\\notacommand` | 2 | untiered |"),
+            "{section}"
+        );
+        assert!(
+            section.contains("| `env:gather` | 1 | tier 2 |"),
+            "{section}"
+        );
+        let missing = MANIFEST.replace("\"dynamic_fragments_advisory\": 7,", "");
+        assert!(DynamicExclusion::from_manifest(&missing).is_err());
+        assert!(DynamicExclusion::from_manifest("[1, 2]").is_err());
+    }
+
+    #[test]
+    fn the_dynamic_section_splices_after_the_headline_once() {
+        let dashboard = "# Head\n\ntext\n\n## Noto math or Plex Sans face usage\n\nmore\n";
+        let section = DynamicExclusion::from_manifest(MANIFEST)
+            .expect("manifest parses")
+            .dashboard_section();
+        let once = with_dynamic_exclusion_section(dashboard, &section);
+        assert!(
+            once.starts_with("# Head\n\ntext\n\n## Outside the denominator"),
+            "{once}"
+        );
+        assert!(
+            once.contains("|\n\n## Noto math or Plex Sans face usage"),
+            "{once}"
+        );
+        assert_eq!(with_dynamic_exclusion_section(&once, &section), once);
     }
 
     #[test]

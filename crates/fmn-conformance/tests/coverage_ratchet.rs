@@ -16,12 +16,13 @@
 //! dashboard in one stroke).
 
 use fmn_conformance::ratchet::{
-    Baseline, CENSUS_FIXTURE, CorpusCounts, FallbackSummary, OracleCensuses, OracleRow,
-    OracleSummary, PARAGRAPH_CENSUS_FIXTURE, Pending, SECOND_CORPUS, SECOND_CORPUS_BASELINE,
-    TEXT_CENSUS_FIXTURE, corpus_digest, fallback_chars, fallback_dashboard_line, measure_corpus,
-    oracle_error, parse_corpus_entry, parse_oracle_fixture, parse_paragraph_fixture,
-    parse_trend_tsv, ratchet_violations, render_dashboard, run_layout_oracle, run_paragraph_oracle,
-    run_text_layout_oracle, summarize_oracle, with_second_corpus_section,
+    Baseline, CENSUS_FIXTURE, CorpusCounts, DynamicExclusion, FallbackSummary, HARVEST_MANIFEST,
+    OracleCensuses, OracleRow, OracleSummary, PARAGRAPH_CENSUS_FIXTURE, Pending, SECOND_CORPUS,
+    SECOND_CORPUS_BASELINE, TEXT_CENSUS_FIXTURE, corpus_digest, fallback_chars,
+    fallback_dashboard_line, measure_corpus, oracle_error, parse_corpus_entry,
+    parse_oracle_fixture, parse_paragraph_fixture, parse_trend_tsv, ratchet_violations,
+    render_dashboard, run_layout_oracle, run_paragraph_oracle, run_text_layout_oracle,
+    summarize_oracle, with_dynamic_exclusion_section, with_second_corpus_section,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
@@ -485,6 +486,8 @@ fn bless(
     let engine = fmd_math::Engine::bundled().map_err(|error| format!("bundled faces: {error}"))?;
     let second = measure_corpus(SECOND_CORPUS, &engine)?;
     let dashboard = with_second_corpus_section(&dashboard, &second.dashboard_section());
+    let dynamic = DynamicExclusion::from_manifest(HARVEST_MANIFEST)?;
+    let dashboard = with_dynamic_exclusion_section(&dashboard, &dynamic.dashboard_section());
     let _guard = DASHBOARD_WRITE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -497,6 +500,58 @@ fn bless(
 /// whole page or only its own section, so the result does not depend on
 /// their order.
 static DASHBOARD_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// fm-ruw4: the dashboard says what its denominator leaves out. The section
+/// is generated from the committed harvest manifest on every checkout, and
+/// the committed dashboard must carry it verbatim; `RATCHET_UPDATE=1`
+/// writes it in. The headline itself is unchanged (G0-4's frozen
+/// denominator).
+#[test]
+fn the_dashboard_discloses_the_dynamic_arguments_outside_its_denominator() -> Result<(), String> {
+    let dynamic = DynamicExclusion::from_manifest(HARVEST_MANIFEST)?;
+    assert!(dynamic.total() > 0 && dynamic.fragments > 0, "{dynamic:?}");
+    // The construct that found this gap (`\square` in an f-string of
+    // _2023/clt MeanAndStandardDeviation, which the harvest never counted) is
+    // in the fragment tally and now parses, so it is not pending.
+    assert!(
+        dynamic
+            .constructs
+            .get("\\square")
+            .is_some_and(|&uses| uses >= 1)
+    );
+    assert_eq!(
+        fmd_math::construct_status("\\square"),
+        fmd_math::ConstructStatus::Supported
+    );
+    assert!(
+        dynamic
+            .pending()
+            .iter()
+            .all(|(construct, _, status)| construct != "\\square"
+                && *status != fmd_math::ConstructStatus::Supported),
+        "{:?}",
+        dynamic.pending()
+    );
+    let section = dynamic.dashboard_section();
+    let _guard = DASHBOARD_WRITE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dashboard = repo_file("docs/ratchet/dashboard.md", MAX_DASHBOARD_BYTES)?;
+    if std::env::var("RATCHET_UPDATE").is_ok() {
+        std::fs::write(
+            repo_path("docs/ratchet/dashboard.md"),
+            with_dynamic_exclusion_section(&dashboard, &section),
+        )
+        .map_err(|error| format!("dashboard: {error}"))?;
+        return Ok(());
+    }
+    assert!(
+        dashboard.contains(&section),
+        "docs/ratchet/dashboard.md lacks the dynamic-argument disclosure generated from \
+         docs/g0/g0-4-corpus/harvest_manifest.json; regenerate it with RATCHET_UPDATE=1"
+    );
+    Ok(())
+}
 
 /// fm-tex-constructs-t2-1wfq: the second corpus (ManimCommunity/manim, MIT,
 /// committed) is measured on every checkout. Its counts may only rise, an

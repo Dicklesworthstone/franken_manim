@@ -16,6 +16,18 @@ real 3b1b formula corpus typesets natively. The denominator is **frozen**
 
 "Typeset returned Ok" means fmd-math produced a layout without an error. It does not show that the layout is right. The corpus TeX box oracle (fm-tex-layout-oracle-bkbc) lays out every math-mode corpus string TeX can typeset alone (4175 strings, 11183 occurrences) and compares each box with real TeX's: 4166 are within 5% and 4171 within 10%, covering 11171 occurrences within 5%. The text-mode census (fm-texttext-box-oracle-r11-hkdv) lays out every text-mode corpus string the Reference sets on one line (3747 strings, 4689 occurrences) and compares each box with real TeX's: 3733 are within 5% and 3743 within 10%, covering 4666 occurrences within 5%. The paragraph census (fm-texttext-line-breaking-r11-bfdx) lays out every multi-line text-mode corpus string, and every one wider than the Reference's 345 pt line, as its centred paragraph (925 strings, 956 occurrences) and compares the widest line, the first line's height and the depth to the last line with real TeX's: 915 are within 5% and 916 within 10%, covering 946 occurrences within 5%. The oracle row counts only those verified strings against the whole corpus; fragments TeX cannot typeset alone count as unverified.
 
+## Outside the denominator: dynamic Tex arguments
+
+The denominator holds fully literal Tex-family arguments. The G0-4 harvest also met 2209 arguments built at run time (f-strings, concatenations, variables, `*` unpacking): `OldTex` 1380, `OldTexText` 491, `Tex` 311, `TexText` 26, `SingleStringTex` 1. Beside the denominator's 17711 literal occurrences they are 11.1 % of all arguments, and the headline above does not cover them. Their 1116 literal string fragments use 89 distinct constructs (1676 uses), an advisory tally from `harvest_manifest.json`. The constructs among them that fmd-math does not parse:
+
+| Construct | Uses in fragments | Status | Tracked at |
+|---|---|---|---|
+| `\item` | 3 | untiered | franken_manim fm-tex-numbered-displays-bxl9 (numbered displays and the constructs outside the G0-4 corpus still refused) |
+| `\atop` | 1 | untiered | franken_manim fm-tex-numbered-displays-bxl9 (numbered displays and the constructs outside the G0-4 corpus still refused) |
+| `\calligra` | 1 | untiered | franken_manim fm-tex-numbered-displays-bxl9 (numbered displays and the constructs outside the G0-4 corpus still refused) |
+| `\normalfont` | 1 | untiered | franken_manim fm-tex-numbered-displays-bxl9 (numbered displays and the constructs outside the G0-4 corpus still refused) |
+| `env:enumerate` | 1 | untiered | franken_manim fm-tex-numbered-displays-bxl9 (numbered displays and the constructs outside the G0-4 corpus still refused) |
+
 ## Noto math or Plex Sans face usage
 
 1 strings (1 occurrences) lay out with at least one glyph from Noto math or Plex Sans. Standard relations among those glyphs: 0. This includes explicitly requested sans styling and excludes bundled AMS faces. It does not measure ink fidelity. The standard relation set never falls back.
