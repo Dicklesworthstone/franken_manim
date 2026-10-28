@@ -14087,15 +14087,8 @@ class Scene(_SceneCore):
     def get_state(self):
         return SceneState(self)
 
-    def redo(self):
-        # Reference Scene.redo (scene.py): undo's mirror — push the live
-        # state onto undo_stack, pop redo_stack into restore_state; an
-        # empty stack is a no-op. refresh_static_mobjects() is skipped for
-        # the same missing-portal-surface reason as in undo.
-        if not self.redo_stack:
-            return
-        self.undo_stack.append(self.get_state())
-        self.restore_state(self.redo_stack.pop())
+    # redo is installed by fmn_python.scene_state. update_mobjects and
+    # should_update_mobjects are installed by fmn_python.updater_dispatch.
 
     def restore_state(self, scene_state):
         if not isinstance(scene_state, SceneState):
@@ -14292,16 +14285,6 @@ class Scene(_SceneCore):
 
     def increment_time(self, dt):
         super().increment_time(float(dt))
-
-    def update_mobjects(self, dt):
-        dt = float(dt)
-        for mobject in list(self.mobjects):
-            mobject.update(dt)
-
-    def should_update_mobjects(self):
-        return bool(self.always_update_mobjects) or any(
-            bool(getattr(mobject, "updaters", ())) for mobject in self.mobjects
-        )
 
     def update_frame(self, dt=0, force_draw=False):
         dt = float(dt)
@@ -14505,49 +14488,8 @@ def _mobject_looks_identical(mobject, other):
 class SceneState:
     """Reference identities over Proscenium's canonical native checkpoint."""
 
-    def __init__(self, scene, ignore=None):
-        if not isinstance(scene, Scene):
-            raise TypeError("SceneState scene must be a Scene")
-        self._scene = scene
-        self.time = scene.get_time()
-        self.num_plays = int(getattr(scene, "num_plays", 0))
-        skip = set() if ignore is None else set(ignore)
-        last = {}
-        if getattr(scene, "undo_stack", None):
-            last = scene.undo_stack[-1].mobjects_to_copies
-        copies = {}
-        for mobject in list(scene.mobjects):
-            if mobject in skip:
-                continue
-            prior = last.get(mobject)
-            if prior is not None and _mobject_looks_identical(mobject, prior):
-                copies[mobject] = prior
-            else:
-                copies[mobject] = mobject.copy()
-        self.mobjects_to_copies = copies
-        # Bound mobject.copy() allocates the copied family in the native Stage.
-        # Capture only after that identity map is complete so the checkpoint
-        # is byte-identical to the next read of an otherwise unchanged scene.
-        # An explicitly empty ignore collection still captures native state.
-        self._checkpoint = None if skip else bytes(scene._checkpoint_bytes())
-
-    def mobjects_match(self, state):
-        if not isinstance(state, SceneState):
-            raise TypeError("mobjects_match expects a SceneState")
-        return self.mobjects_to_copies == state.mobjects_to_copies
-
-    def n_changes(self, state):
-        if not isinstance(state, SceneState):
-            raise TypeError("n_changes expects a SceneState")
-        other = state.mobjects_to_copies
-        return sum(
-            1
-            - int(
-                mobject in other
-                and _mobject_looks_identical(mobject, other[mobject])
-            )
-            for mobject in self.mobjects_to_copies
-        )
+    # The constructor, mobjects_match and n_changes are installed by
+    # fmn_python.scene_state.
 
     def restore_scene(self, scene):
         if not isinstance(scene, Scene):
@@ -14690,27 +14632,11 @@ class InteractiveScene(Scene):
     def checkpoint_paste(self):
         return _portal_checkpoint_paste(self)
 
-    def on_mouse_motion(self, point, d_point):
-        super().on_mouse_motion(point, d_point)
-
-        crosshair = getattr(self, "crosshair", None)
-        if crosshair is not None:
-            crosshair.move_to(self.frame.to_fixed_frame_point(point))
-
-        if getattr(self, "is_grabbing", False):
-            self.handle_grabbing(point)
-        elif getattr(self, "window", None) is not None:
-            raise NotImplementedError(
-                "InteractiveScene windowed resize/sweep motion requires a "
-                "host key-state adapter"
-            )
-
-    def on_mouse_drag(self, point, d_point, buttons, modifiers):
-        super().on_mouse_drag(point, d_point, buttons, modifiers)
-
-        crosshair = getattr(self, "crosshair", None)
-        if crosshair is not None:
-            crosshair.move_to(self.frame.to_fixed_frame_point(point))
+    # on_mouse_motion, on_mouse_drag, on_key_press and on_key_release are installed by
+    # fmn_python.interaction. get_state, restore_state, regenerate_selection_search_set,
+    # gather_new_selection, prepare_grab, handle_grabbing, prepare_resizing,
+    # handle_resizing, toggle_color_palette, handle_sweeping_selection and choose_color
+    # are installed by fmn_python.interactive_editing.
 
     def on_mouse_release(self, point, button, mods):
         super().on_mouse_release(point, button, mods)
@@ -14719,82 +14645,6 @@ class InteractiveScene(Scene):
             self.choose_color(point)
         else:
             self.clear_selection()
-
-    def on_key_press(self, symbol, modifiers):
-        super().on_key_press(symbol, modifiers)
-        try:
-            char = chr(int(symbol))
-        except (OverflowError, ValueError, TypeError):
-            return
-        keys = _pinned_manim_config().key_bindings
-        grab_keys = (keys.grab, keys.x_grab, keys.y_grab, keys.z_grab)
-        all_mods = _PYGLET_MOD_CTRL | _PYGLET_MOD_COMMAND | _PYGLET_MOD_SHIFT
-        modifiers = int(modifiers)
-        ctrl = modifiers & (_PYGLET_MOD_CTRL | _PYGLET_MOD_COMMAND)
-        if char == keys.select and (modifiers & all_mods) == 0:
-            self.enable_selection()
-        if char == keys.unselect:
-            self.clear_selection()
-        elif char in grab_keys and (modifiers & all_mods) == 0:
-            self.prepare_grab()
-        elif char == keys.resize and (modifiers & _PYGLET_MOD_SHIFT):
-            self.prepare_resizing(about_corner=True)
-        elif char == keys.color and (modifiers & all_mods) == 0:
-            self.toggle_color_palette()
-        elif char == keys.information and (modifiers & all_mods) == 0:
-            self.display_information()
-        elif char == "c" and ctrl:
-            self.copy_selection()
-        elif char == "v" and ctrl:
-            self.paste_selection()
-        elif char == "x" and ctrl:
-            self.copy_selection()
-            self.delete_selection()
-        elif char == "g" and ctrl and (modifiers & _PYGLET_MOD_SHIFT):
-            self.ungroup_selection()
-        elif char == "g" and ctrl:
-            self.group_selection()
-        elif char == "t" and ctrl:
-            self.toggle_selection_mode()
-        elif char == "a" and ctrl:
-            self.clear_selection()
-            self.add_to_selection(*self.mobjects)
-        elif int(symbol) == _PYGLET_BACKSPACE:
-            self.delete_selection()
-        elif char == "d" and (modifiers & _PYGLET_MOD_SHIFT):
-            self.copy_frame_positioning()
-        elif char == "c" and (modifiers & _PYGLET_MOD_SHIFT):
-            self.copy_cursor_position()
-        elif int(symbol) in _PYGLET_ARROW_SYMBOLS:
-            vects = (_LEFT, _UP, _RIGHT, _DOWN)
-            self.nudge_selection(
-                vects[_PYGLET_ARROW_SYMBOLS.index(int(symbol))],
-                large=bool(modifiers & _PYGLET_MOD_SHIFT),
-            )
-        if char == keys.cursor:
-            if self.crosshair in self.mobjects:
-                self.remove(self.crosshair)
-            else:
-                self.add(self.crosshair)
-        if char == keys.select:
-            self.add(self.crosshair)
-        if char in grab_keys or char == keys.resize:
-            self.save_state()
-
-    def on_key_release(self, symbol, modifiers):
-        super().on_key_release(symbol, modifiers)
-        del modifiers
-        try:
-            char = chr(int(symbol))
-        except (OverflowError, ValueError, TypeError):
-            return
-        keys = _pinned_manim_config().key_bindings
-        if char == keys.select:
-            self.gather_new_selection()
-        if char in (keys.grab, keys.x_grab, keys.y_grab, keys.z_grab):
-            self.is_grabbing = False
-        elif char == keys.information:
-            self.display_information(False)
 
     def add(self, *mobjects):
         super().add(*mobjects)
@@ -15080,36 +14930,6 @@ class InteractiveScene(Scene):
         self.is_grabbing = False
         self.add(self.selection_highlight)
 
-    def get_state(self):
-        return SceneState(
-            self,
-            ignore=[
-                self.selection_highlight,
-                self.selection_rectangle,
-                self.crosshair,
-            ],
-        )
-
-    def restore_state(self, scene_state):
-        super().restore_state(scene_state)
-        self.add(self.selection_highlight)
-        self.bring_to_back(self.selection_highlight)
-
-    def regenerate_selection_search_set(self):
-        selectable = [
-            mobject
-            for mobject in self.mobjects
-            if mobject not in self.unselectables
-        ]
-        if self.select_top_level_mobs:
-            self.selection_search_set = selectable
-        else:
-            self.selection_search_set = [
-                submob
-                for mob in selectable
-                for submob in mob.family_members_with_points()
-            ]
-
     def get_selection_search_set(self):
         return self.selection_search_set
 
@@ -15130,121 +14950,11 @@ class InteractiveScene(Scene):
         ])
         return rect
 
-    def gather_new_selection(self):
-        self.is_selecting = False
-        rectangle = getattr(self, "selection_rectangle", None)
-        if rectangle is None or rectangle not in self.mobjects:
-            return
-        self.remove(rectangle)
-        additions = []
-        rect_bb = rectangle.get_bounding_box()
-        buff = 1e-2
-        for mob in reversed(self.get_selection_search_set()):
-            mob_bb = mob.get_bounding_box()
-            ff_min = self.frame.to_fixed_frame_point(mob_bb[0])
-            ff_max = self.frame.to_fixed_frame_point(mob_bb[2])
-            is_in_selection = not any(
-                (
-                    (ff_max < rect_bb[0] - buff).any(),
-                    (ff_min > rect_bb[2] + buff).any(),
-                )
-            )
-            if is_in_selection:
-                additions.append(mob)
-                if rectangle.get_arc_length() < 1e-2:
-                    break
-        self.toggle_from_selection(*additions)
-
     def nudge_selection(self, vect, large=False):
         nudge = self.selection_nudge_size
         if large:
             nudge *= 10
         self.selection.shift(nudge * vect)
-
-    def prepare_grab(self):
-        mouse_point = self.mouse_point.get_center()
-        selection_points = self.selection.get_all_points()
-        selection_center = (
-            self.selection.get_center()
-            if len(selection_points) > 0
-            else _ORIGIN
-        )
-        self.mouse_to_selection = mouse_point - selection_center
-        self.is_grabbing = True
-
-    def handle_grabbing(self, point):
-        if getattr(self, "window", None) is not None:
-            raise NotImplementedError(
-                "InteractiveScene constrained h/v/z grabs require a host "
-                "window key-state adapter"
-            )
-        self.selection.move_to(
-            _np.array(_vec3(point)) - self.mouse_to_selection
-        )
-
-    def prepare_resizing(self, about_corner=False):
-        center = self.selection.get_center()
-        mouse_point = self.mouse_point.get_center()
-        if about_corner:
-            self.scale_about_point = self.selection.get_corner(
-                center - mouse_point
-            )
-        else:
-            self.scale_about_point = center
-        self.scale_ref_vect = mouse_point - self.scale_about_point
-        self.scale_ref_width = self.selection.get_width()
-        self.scale_ref_height = self.selection.get_height()
-
-    def handle_resizing(self, point):
-        if not hasattr(self, "scale_about_point"):
-            return
-        if getattr(self, "window", None) is not None:
-            raise NotImplementedError(
-                "InteractiveScene ctrl-stretch resize requires a host "
-                "window key-state adapter"
-            )
-        vect = _np.array(_vec3(point)) - self.scale_about_point
-        ref = _np.linalg.norm(self.scale_ref_vect)
-        if ref == 0.0:
-            return
-        scalar = _np.linalg.norm(vect) / ref
-        self.selection.set_width(
-            scalar * self.scale_ref_width,
-            about_point=self.scale_about_point,
-        )
-
-    def toggle_color_palette(self):
-        if len(self.selection) == 0:
-            return
-        if self.color_palette not in self.mobjects:
-            self.save_state()
-            self.add(self.color_palette)
-        else:
-            self.remove(self.color_palette)
-
-    def handle_sweeping_selection(self, point):
-        mobject = self.point_to_mobject(
-            point,
-            search_set=self.get_selection_search_set(),
-            buff=_SMALL_BUFF,
-        )
-        if mobject is not None:
-            self.add_to_selection(mobject)
-
-    def choose_color(self, point):
-        unselectables = getattr(self, "unselectables", None) or []
-        to_search = [
-            member
-            for mobject in self.mobjects
-            for member in mobject.family_members_with_points()
-            if mobject not in unselectables
-        ]
-        mobject = self.point_to_mobject(point, to_search)
-        if mobject is not None:
-            self.selection.set_color(mobject.get_color())
-        palette = getattr(self, "color_palette", None)
-        if palette is not None:
-            self.remove(palette)
 
     def copy_selection(self):
         raise _CapabilityError(
@@ -15509,23 +15219,8 @@ def main(scene_config, run_config):
 class CheckpointManager:
     """Named SceneState snapshots for interactive re-run of a comment-keyed block."""
 
-    def __init__(self):
-        self.checkpoint_states = {}
-
-    def checkpoint_paste(self, shell, scene):
-        try:
-            pyperclip = _importlib.import_module("pyperclip")
-        except ImportError as error:
-            raise _CapabilityError(
-                "pyperclip is not installed; CheckpointManager.checkpoint_paste "
-                "needs a clipboard, or call handle_checkpoint_key directly"
-            ) from error
-        code_string = _textwrap.dedent(
-            "\n".join(line.rstrip() for line in str(pyperclip.paste()).splitlines())
-        )
-        self.handle_checkpoint_key(scene, self.get_leading_comment(code_string))
-        if shell is not None:
-            shell.run_cell(code_string)
+    # The constructor, checkpoint_paste, handle_checkpoint_key and clear_checkpoints are
+    # installed by fmn_python.embedded_shell.
 
     @staticmethod
     def get_leading_comment(code_string):
@@ -15533,21 +15228,6 @@ class CheckpointManager:
         if leading_line.startswith("#"):
             return leading_line
         return ""
-
-    def handle_checkpoint_key(self, scene, key):
-        if not key:
-            return
-        if key in self.checkpoint_states:
-            scene.restore_state(self.checkpoint_states[key])
-            all_keys = list(self.checkpoint_states.keys())
-            index = all_keys.index(key)
-            for later_key in all_keys[index + 1 :]:
-                self.checkpoint_states.pop(later_key)
-        else:
-            self.checkpoint_states[key] = scene.get_state()
-
-    def clear_checkpoints(self):
-        self.checkpoint_states = {}
 
 
 class InteractiveSceneEmbed:
@@ -15558,19 +15238,9 @@ class InteractiveSceneEmbed:
     Studio owns interactive windows.
     """
 
-    def __init__(self, scene):
-        if not isinstance(scene, Scene):
-            raise TypeError("InteractiveSceneEmbed scene must be a Scene")
-        self.scene = scene
-        self.checkpoint_manager = CheckpointManager()
-        self.shell = None
-
-    def launch(self):
-        self.shell = self.get_ipython_shell_for_embedded_scene()
-        return self.shell
-
-    def get_ipython_shell_for_embedded_scene(self):
-        return _portal_embed(self.scene)
+    # The constructor, get_ipython_shell_for_embedded_scene and checkpoint_paste are
+    # installed by fmn_python.embedded_shell. launch, ensure_frame_update_post_cell and
+    # auto_reload are installed by fmn_python.project_autorebuild.
 
     def get_shortcuts(self):
         scene = self.scene
@@ -15596,17 +15266,7 @@ class InteractiveSceneEmbed:
                 shortcuts[name] = getattr(scene, name)
         return shortcuts
 
-    def checkpoint_paste(self, skip=False, record=False, progress_bar=True):
-        del skip, record, progress_bar
-        return self.checkpoint_manager.checkpoint_paste(self.shell, self.scene)
-
     def enable_gui(self):
-        raise _CapabilityError(
-            "the Reference IPython GUI hook is unavailable; "
-            "FrankenManim Studio owns interactive windows"
-        )
-
-    def ensure_frame_update_post_cell(self):
         raise _CapabilityError(
             "the Reference IPython GUI hook is unavailable; "
             "FrankenManim Studio owns interactive windows"
@@ -15616,11 +15276,6 @@ class InteractiveSceneEmbed:
         raise _CapabilityError(
             "the Reference IPython GUI hook is unavailable; "
             "FrankenManim Studio owns interactive windows"
-        )
-
-    def auto_reload(self):
-        raise _CapabilityError(
-            "auto_reload requires the manimgl IPython embed loop"
         )
 
     def reload_scene(self, embed_line=None):
