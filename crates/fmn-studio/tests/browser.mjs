@@ -161,6 +161,22 @@ try {
   async function pixelHash() {
     return evaluate("(async () => { const c=document.getElementById('preview'); const bytes=c.getContext('2d').getImageData(0,0,c.width,c.height).data; return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),x=>x.toString(16).padStart(2,'0')).join(''); })()");
   }
+  // Shared by authored-scene editing and the interactive saved-session cases.
+  // Keep all helpers outside the presenter-only scenario selection below.
+  async function download(directory) {
+    const folder = join(output, directory); await mkdir(folder, {recursive:true});
+    await command("Browser.setDownloadBehavior", {behavior:"allow",downloadPath:folder});
+    assert.equal(await evaluate("document.getElementById('save-session').disabled"), false);
+    await click("#save-session");
+    const path = join(folder, "studio-session.fmns");
+    const bytes = await until(async () => {
+      try { const data = await readFile(path); return data.length > 4 ? data : null; } catch { return null; }
+    }, "complete browser session download");
+    assert.equal(bytes.subarray(0,4).toString(), "FMNS");
+    assert.ok(secrets.every(secret => !bytes.includes(Buffer.from(secret))), "saved data carries no session capability");
+    await until(() => evaluate("document.getElementById('session-save').textContent.includes('download started') && !document.getElementById('inspect').disabled"), "save status");
+    return {path,bytes};
+  }
   async function editBuiltinScene(scene, initial, frame) {
     await command("Emulation.setDeviceMetricsOverride",{width:1280,height:1000,deviceScaleFactor:1,mobile:false});
     await click("#inspect"); await synchronized(frame);
@@ -532,20 +548,6 @@ try {
 
   // Download through the actual UI, terminate the entire host (not /restart),
   // then resume with an independent process, cache and fresh capability.
-  async function download(directory) {
-    const folder = join(output, directory); await mkdir(folder, {recursive:true});
-    await command("Browser.setDownloadBehavior", {behavior:"allow",downloadPath:folder});
-    assert.equal(await evaluate("document.getElementById('save-session').disabled"), false);
-    await click("#save-session");
-    const path = join(folder, "studio-session.fmns");
-    const bytes = await until(async () => {
-      try { const data = await readFile(path); return data.length > 4 ? data : null; } catch { return null; }
-    }, "complete browser session download");
-    assert.equal(bytes.subarray(0,4).toString(), "FMNS");
-    assert.ok(secrets.every(secret => !bytes.includes(Buffer.from(secret))), "saved data carries no session capability");
-    await until(() => evaluate("document.getElementById('session-save').textContent.includes('download started') && !document.getElementById('inspect').disabled"), "save status");
-    return {path,bytes};
-  }
   const saved = await download("saved-session");
   for (const headers of [{}, {"X-FMN-Capability":"0".repeat(64)}, {"X-FMN-Capability":studio.cap,"Origin":"https://untrusted.invalid"}]) {
     const response = await fetch(new URL("/api/session",studio.url), {headers:{"User-Agent":userAgent,...headers},signal:AbortSignal.timeout(10000)});
