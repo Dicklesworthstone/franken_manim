@@ -1917,7 +1917,10 @@ fn derive_execution_plan_with_annex(
     if matches!(intent, fmn_runtime::RenderIntent::Offline)
         && config.render.engine == fmn_config::config::Engine::Cpu
     {
-        surface.working_bytes_per_pixel += 8; // one retained tile cache per active team
+        // One retained tile cache and one persistent raster-team band surface
+        // per active team. Charging every slot also covers single-thread teams
+        // conservatively; those render inline without a second band surface.
+        surface.working_bytes_per_pixel += 16;
         if camera {
             // In addition to a compiled camera frame per team, the serial
             // owner retains a preparation frame. Teams <= in-flight slots;

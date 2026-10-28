@@ -767,7 +767,7 @@ impl AaStats {
             .saturating_add(self.complex_edge_tiles)
     }
 
-    fn merge(&mut self, other: AaStats) {
+    pub(crate) fn merge(&mut self, other: AaStats) {
         self.output_cells = self.output_cells.saturating_add(other.output_cells);
         self.native_cells = self.native_cells.saturating_add(other.native_cells);
         self.ssaa2x_cells = self.ssaa2x_cells.saturating_add(other.ssaa2x_cells);
@@ -1263,6 +1263,18 @@ pub struct FrameJob<'a> {
     cols: u32,
 }
 
+/// A prepared frame's offsets and fixed raster policy. All referenced storage
+/// remains owned by the persistent team's immutable frame payload.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PreparedBands {
+    draws: PoolRange,
+    cols: u32,
+    config: FrameConfig,
+    identity: EngineIdentity,
+    pub(crate) band_rows: usize,
+    pub(crate) stride: usize,
+}
+
 /// Who owns the arena: the job (one-shot renders) or the caller (the
 /// reused-across-frames PG-6 path).
 #[derive(Debug)]
@@ -1282,6 +1294,136 @@ impl FrameJob<'_> {
             ArenaStorage::Owned(arena) => arena,
             ArenaStorage::Shared(arena) => arena,
         }
+    }
+
+    /// Validate the destination and size every kernel scratch slot before a
+    /// persistent team sees the frame. The owned band buffers use tight rows,
+    /// independently of padding in the caller's destination.
+    pub(crate) fn prepare_bands(
+        &self,
+        threads: usize,
+        destination: &FrameBuffer,
+    ) -> Result<PreparedBands, FrameError> {
+        if destination.layout().format() != PixelFormat::Rgba16F {
+            return Err(FrameError::FormatMismatch {
+                expected: "Rgba16F raw frame",
+                got: destination.layout().format(),
+            });
+        }
+        if destination.layout().width() != self.config.viewport.width
+            || destination.layout().height() != self.config.viewport.height
+        {
+            return Err(FrameError::DimensionMismatch);
+        }
+        let tile = self.binning.tiling().fine_tile.max(1);
+        let rows = self.config.viewport.height.div_ceil(tile);
+        if self.binning.tile_count() != self.cols as usize * rows as usize {
+            return Err(FrameError::DimensionMismatch);
+        }
+        let width = usize::try_from(tile.min(self.config.viewport.width))
+            .map_err(|_| FrameError::TooLarge)?;
+        let cols = self.cols as usize;
+        let pool = &self.arena().workers;
+        match (self.identity.engine, self.identity.tier) {
+            (EngineKind::CertifiedCpu, Tier::Scalar) => {
+                pool.prepare::<CertifiedScalar>(width, cols, threads)?;
+            }
+            (EngineKind::CertifiedCpu, _) => {
+                pool.prepare::<CertifiedBuildTier>(width, cols, threads)?;
+            }
+            (EngineKind::FastCpu, Tier::Scalar) => {
+                pool.prepare::<FastScalar>(width, cols, threads)?;
+            }
+            (EngineKind::FastCpu, _) => {
+                pool.prepare::<FastBuildTier>(width, cols, threads)?;
+            }
+            (EngineKind::Metal | EngineKind::Cuda, _) => {
+                unreachable!("annex jobs must use their backend-specific renderer")
+            }
+        }
+        Ok(PreparedBands {
+            draws: self.draws,
+            cols: self.cols,
+            config: self.config,
+            identity: self.identity,
+            band_rows: tile.min(self.config.viewport.height) as usize,
+            stride: (self.config.viewport.width as usize)
+                .checked_mul(8)
+                .ok_or(FrameError::TooLarge)?,
+        })
+    }
+
+    /// Rebind already-derived draw offsets; no geometry is copied or prepared
+    /// again when a parked worker takes its next frame.
+    pub(crate) fn from_prepared_bands<'a>(
+        plan: &'a RenderPlan,
+        mono: &'a fill::MonoTable,
+        binning: &'a Binning,
+        arena: &'a FrameArena,
+        prepared: PreparedBands,
+    ) -> FrameJob<'a> {
+        FrameJob {
+            plan,
+            mono,
+            binning,
+            config: prepared.config,
+            identity: prepared.identity,
+            arena: ArenaStorage::Shared(arena),
+            draws: prepared.draws,
+            cols: prepared.cols,
+        }
+    }
+
+    /// The same band kernel as scoped rendering, with owned, write-disjoint
+    /// buffers so no borrowed destination escapes onto a persistent thread.
+    pub(crate) fn render_owned_bands(
+        &self,
+        bands: &[Mutex<Vec<u8>>],
+        next: &std::sync::atomic::AtomicUsize,
+        stride: usize,
+        cache: &PixelTileCache,
+    ) -> AaStats {
+        match (self.identity.engine, self.identity.tier) {
+            (EngineKind::CertifiedCpu, Tier::Scalar) => {
+                self.render_owned_bands_with::<CertifiedScalar>(bands, next, stride, cache)
+            }
+            (EngineKind::CertifiedCpu, _) => {
+                self.render_owned_bands_with::<CertifiedBuildTier>(bands, next, stride, cache)
+            }
+            (EngineKind::FastCpu, Tier::Scalar) => {
+                self.render_owned_bands_with::<FastScalar>(bands, next, stride, cache)
+            }
+            (EngineKind::FastCpu, _) => {
+                self.render_owned_bands_with::<FastBuildTier>(bands, next, stride, cache)
+            }
+            (EngineKind::Metal | EngineKind::Cuda, _) => {
+                unreachable!("annex jobs must use their backend-specific renderer")
+            }
+        }
+    }
+
+    fn render_owned_bands_with<K: PixelKernel>(
+        &self,
+        bands: &[Mutex<Vec<u8>>],
+        next: &std::sync::atomic::AtomicUsize,
+        stride: usize,
+        cache: &PixelTileCache,
+    ) -> AaStats {
+        let tile = self.binning.tiling().fine_tile.max(1);
+        let width = tile.min(self.config.viewport.width) as usize;
+        let mut worker = self
+            .arena()
+            .workers
+            .checkout::<K>(width, self.cols as usize);
+        loop {
+            let band = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let Some(bytes) = bands.get(band) else {
+                break;
+            };
+            let mut bytes = bytes.lock().unwrap_or_else(PoisonError::into_inner);
+            self.render_band::<K, true>(&mut worker, band, &mut bytes, stride, Some(cache));
+        }
+        worker.stats
     }
 }
 

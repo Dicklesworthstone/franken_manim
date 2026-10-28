@@ -16,7 +16,7 @@ use fmn_mobject::FrozenRenderState;
 use fmn_output::{EmitterError, EmitterHandle, FrameReservation};
 use fmn_render::{
     Camera, CameraConfig, EngineIdentity, FrameArena, OwnedVectorFrame, PixelTileCache,
-    PreparedCameraFrame, RetainedFrameRenderer, RetainedFrameRendererConfig,
+    PreparedCameraFrame, RasterTeam, RetainedFrameRenderer, RetainedFrameRendererConfig,
     RetainedFrameRendererError, VectorFrameCompiler, Viewport,
 };
 use fmn_runtime::{
@@ -169,6 +169,9 @@ impl CameraCompiler {
 struct RenderWorker {
     arena: FrameArena,
     cache: PixelTileCache,
+    // Keep raster workers alive for the entire render stream. Each team owns
+    // disjoint reusable bands; only immutable frame inputs cross to them.
+    raster_team: Option<RasterTeam>,
     compiled_vector: Option<VectorFrameCompiler>,
     compiled_camera: Option<CameraCompiler>,
     // One raw surface shared by camera and vector frames. Only a vector
@@ -190,15 +193,33 @@ impl RenderWorker {
         threads: usize,
         output: &mut FrameBuffer,
     ) -> Result<(), NativeFrameError> {
+        if threads == 0 {
+            return Err(NativeFrameError::Renderer(
+                RetainedFrameRendererError::InvalidThreads,
+            ));
+        }
         self.camera_pixels = Weak::new();
         let layout = frame.raster_layout().map_err(NativeFrameError::Frame)?;
         let (mut raster, resume) = match self.spare.take() {
             Some((raster, serial)) if *raster.layout() == layout => (raster, serial),
             _ => (FrameBuffer::new(layout), None),
         };
+        if self
+            .raster_team
+            .as_ref()
+            .is_none_or(|team| team.threads() != fmn_render::effective_threads(threads))
+        {
+            self.raster_team = Some(RasterTeam::new(threads).map_err(NativeFrameError::Renderer)?);
+        }
+        let team = self
+            .raster_team
+            .as_mut()
+            .ok_or(NativeFrameError::WorkerState(
+                "missing persistent raster team",
+            ))?;
         frame
-            .render_cached_into(
-                threads,
+            .render_cached_into_with_team(
+                team,
                 &mut self.arena,
                 &mut self.cache,
                 &mut raster,
@@ -520,8 +541,12 @@ fn convert_into(
 /// unfinished adapter cancels the emitter before joining all pipeline workers.
 ///
 /// Pixel admission must include one retained RGBA16F cache per affine render
-/// team (or a retained camera frame on the preparation worker and each
-/// compiled-camera render team), in addition to the plan's in-flight surfaces.
+/// team and one RGBA16F band surface per multithreaded vector team, in addition
+/// to the plan's in-flight surfaces. Camera compilation retains another raw
+/// frame on the preparation worker or each compiled-camera render team. A
+/// team that switches routes retains both its vector cache and band surface
+/// alongside its camera compiler. Caller-owned serial renderers and their
+/// caches require a separate allowance when they coexist with this pipeline.
 /// Output conversion runs directly from the RGBA16F raster into the reserved output
 /// slot; no per-frame intermediate surface is allocated. Frozen graph/record
 /// storage is additional to that pixel budget, with at most one input per
@@ -1195,6 +1220,106 @@ mod handoff_tests {
             worker.spare.is_some(),
             "only reusable pixel storage remains"
         );
+    }
+
+    #[test]
+    fn vector_pipeline_reuses_raster_workers_across_frames_and_camera_switches() {
+        let (mut stage, config, camera) = camera_fixture();
+        let mut compiler = VectorFrameCompiler::new(config).unwrap();
+        let mut camera_compiler = CameraCompiler::new(config).unwrap();
+        let mut worker = RenderWorker::default();
+        let layout = fmn_frame::FrameLayout::tight(PixelFormat::Rgba8, 16, 16).unwrap();
+        let mut output = FrameBuffer::new(layout.clone());
+        let mut expected = FrameBuffer::new(layout);
+        let mob = stage.roots()[0];
+        for frame_index in 0..24 {
+            // Exercise geometry invalidation as well as unchanged-frame hits.
+            if frame_index % 3 == 0 {
+                stage.shift(mob, [0.125, 0.0, 0.0]);
+            }
+            let frame = compiler.capture(&stage, 0).unwrap();
+            let (raw, _) = frame
+                .render_cached(
+                    1,
+                    &mut FrameArena::default(),
+                    &mut PixelTileCache::default(),
+                )
+                .unwrap();
+            convert_into(&raw, &mut expected, 1).unwrap();
+            worker.render_vector(&frame, 4, &mut output).unwrap();
+            assert_eq!(output.as_bytes(), expected.as_bytes());
+            assert_eq!(
+                worker.raster_team.as_ref().unwrap().stats().workers_spawned,
+                4
+            );
+            if frame_index % 5 == 0 {
+                let camera_frame = camera_compiler
+                    .prepare_with_camera(&stage, &camera)
+                    .unwrap();
+                worker.render_camera(&camera_frame, 1, &mut output).unwrap();
+                worker.render_vector(&frame, 4, &mut output).unwrap();
+                assert_eq!(output.as_bytes(), expected.as_bytes());
+                assert_eq!(
+                    worker.raster_team.as_ref().unwrap().stats().workers_spawned,
+                    4
+                );
+            }
+        }
+        let final_frame = compiler.capture(&stage, 0).unwrap();
+        worker.render_vector(&final_frame, 1, &mut output).unwrap();
+        assert_eq!(
+            worker.raster_team.as_ref().unwrap().stats().workers_spawned,
+            0
+        );
+        assert_eq!(output.as_bytes(), expected.as_bytes());
+    }
+
+    #[test]
+    fn failed_vector_conversion_discards_pixels_without_restarting_the_team() {
+        let (stage, config, _) = camera_fixture();
+        let mut compiler = VectorFrameCompiler::new(config).unwrap();
+        let frame = compiler.capture(&stage, 0).unwrap();
+        let mut worker = RenderWorker::default();
+        let mut output =
+            FrameBuffer::new(fmn_frame::FrameLayout::tight(PixelFormat::Rgba8, 16, 16).unwrap());
+        worker.render_vector(&frame, 4, &mut output).unwrap();
+        let expected = output.as_bytes().to_vec();
+        let first_serial = worker.spare.as_ref().unwrap().1;
+        let first_raster = worker.spare.as_ref().unwrap().0.as_bytes().as_ptr();
+        let first_stats = worker.raster_team.as_ref().unwrap().stats();
+
+        assert!(matches!(
+            worker.render_vector(&frame, 0, &mut output),
+            Err(NativeFrameError::Renderer(
+                RetainedFrameRendererError::InvalidThreads
+            ))
+        ));
+        assert_eq!(output.as_bytes(), expected);
+        assert_eq!(worker.spare.as_ref().unwrap().1, first_serial);
+        assert_eq!(
+            worker.spare.as_ref().unwrap().0.as_bytes().as_ptr(),
+            first_raster
+        );
+        assert_eq!(worker.raster_team.as_ref().unwrap().stats(), first_stats);
+
+        let mut wrong_size =
+            FrameBuffer::new(fmn_frame::FrameLayout::tight(PixelFormat::Rgba8, 8, 8).unwrap());
+        assert!(matches!(
+            worker.render_vector(&frame, 4, &mut wrong_size),
+            Err(NativeFrameError::Frame(FrameError::DimensionMismatch))
+        ));
+        assert!(worker.spare.is_none());
+        // Rasterization succeeded, but its converted output could not be
+        // published. Recovery restores cache hits into a fresh raw surface.
+        assert_ne!(Some(worker.cache.serial()), first_serial);
+        output.plane_mut(0).fill(0xA5);
+        worker.render_vector(&frame, 4, &mut output).unwrap();
+        assert_eq!(output.as_bytes(), expected);
+        assert!(worker.spare.is_some());
+        let stats = worker.raster_team.as_ref().unwrap().stats();
+        assert_eq!(stats.workers_spawned, first_stats.workers_spawned);
+        assert_eq!(stats.frames_completed, first_stats.frames_completed + 2);
+        assert_eq!(stats.band_buffer_bytes, first_stats.band_buffer_bytes);
     }
 
     #[test]

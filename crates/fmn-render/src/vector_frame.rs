@@ -4,6 +4,9 @@
 //! compiled Lumen IR crosses threads. Workers use the ordinary `FrameJob` and
 //! content-keyed tile cache, so scheduling changes neither pixels nor semantics.
 
+mod team;
+pub use team::{RasterTeam, RasterTeamStats};
+
 use std::sync::{Arc, Mutex, OnceLock};
 
 use fmn_frame::{FrameBuffer, FrameError, FrameLayout};
@@ -318,6 +321,29 @@ impl OwnedVectorFrame {
             self.config.engine,
         )?;
         Ok(job.render_into_cached_resuming(threads, frame, self.camera_revision, cache, resume)?)
+    }
+
+    /// Render with a persistent raster team and reusable owned band storage.
+    ///
+    /// The team starts its workers once, retains them between frames, and uses
+    /// the same prepared draw records and raster kernels as [`Self::render_cached_into`].
+    /// Its band buffers retain one additional tight RGBA16F frame per team;
+    /// callers must include that storage in their pipeline admission budget.
+    /// With one worker, this uses the ordinary serial path and no band storage.
+    ///
+    /// # Errors
+    /// Preserves the ordinary cached-render errors. A worker panic is joined
+    /// at the frame boundary and reported as a typed error without publishing
+    /// the incomplete bands or abandoning the arena and cache.
+    pub fn render_cached_into_with_team(
+        &self,
+        team: &mut RasterTeam,
+        arena: &mut FrameArena,
+        cache: &mut PixelTileCache,
+        frame: &mut FrameBuffer,
+        resume: Option<u64>,
+    ) -> Result<CachedRenderStats, RetainedFrameRendererError> {
+        team.render(self, arena, cache, frame, resume)
     }
 }
 

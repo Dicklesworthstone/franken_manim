@@ -44,6 +44,9 @@ pub struct RetainedFrameRendererConfig {
 pub enum RetainedFrameRendererError {
     /// A renderer cannot execute with an empty worker team.
     InvalidThreads,
+    /// A persistent raster worker panicked. All workers reached the frame
+    /// boundary, and incomplete band buffers were not published.
+    RasterWorkerPanicked,
     /// The configured raw-frame layout is invalid.
     Layout(FrameError),
     /// Retained-plan synchronization failed.
@@ -89,6 +92,7 @@ impl fmt::Display for RetainedFrameRendererError {
             Self::InvalidThreads => {
                 f.write_str("retained CPU rendering requires at least one thread")
             }
+            Self::RasterWorkerPanicked => f.write_str("persistent CPU raster worker panicked"),
             Self::Layout(error) => error.fmt(f),
             Self::Sync(error) => error.fmt(f),
             Self::Mono(error) => error.fmt(f),
@@ -121,7 +125,7 @@ impl fmt::Display for RetainedFrameRendererError {
 impl std::error::Error for RetainedFrameRendererError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::InvalidThreads => None,
+            Self::InvalidThreads | Self::RasterWorkerPanicked => None,
             Self::Layout(error) => Some(error),
             Self::Sync(error) => Some(error),
             Self::Mono(error) => Some(error),

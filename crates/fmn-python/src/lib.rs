@@ -528,9 +528,12 @@ impl PortalFrameSession {
         let mut surface = fmn_runtime::SurfaceSpec::lumen(width, height);
         // Pure-play workers may retain one camera compiler and one raw raster
         // per team alongside the serial renderer. Teams never outnumber the
-        // in-flight slots; charging three extra RGBA16F surfaces per slot also
-        // covers the retained serial frame conservatively.
-        surface.working_bytes_per_pixel += 24
+        // in-flight slots. In addition to the working raster, an adaptive team
+        // can retain its tile cache, band surface, and camera compiler raster.
+        // The paused serial renderer also retains its raster and tile cache.
+        // Charging five extra RGBA16F surfaces per slot covers that worst case
+        // even when the RAM-derived plan has only one multithreaded team/slot.
+        surface.working_bytes_per_pixel += 40
             + match wire {
                 fmn_output::WireFormat::Rgba8 | fmn_output::WireFormat::Bgra8 => 4,
                 fmn_output::WireFormat::Nv12 => 2,

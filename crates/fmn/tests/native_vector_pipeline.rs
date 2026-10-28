@@ -297,3 +297,43 @@ fn retained_worker_pixels_are_included_in_preflight_budget() {
     ));
     assert!(!fs.exists(Path::new("/limited")));
 }
+
+#[test]
+fn persistent_raster_bands_are_charged_before_scene_construction() {
+    let fs = Arc::new(VirtualFs::new());
+    let report = render_with_fs(
+        &mut Still,
+        options("/measured", RenderFormat::PngSequence, 2, 16),
+        fs.clone(),
+    )
+    .unwrap();
+    let plan = &report.execution_plan;
+    let band_surfaces = plan
+        .render_teams
+        .iter()
+        .filter(|team| team.threads() > 1)
+        .count();
+    let retained_surfaces = plan.render_teams.len() + band_surfaces;
+    let admitted_bytes = plan.estimated_in_flight_bytes as u64
+        + retained_surfaces as u64 * 48 * 32 * 8
+        + 64 * 1024 * 1024;
+    let mut exact = options("/exact", RenderFormat::PngSequence, 2, 16);
+    exact.max_resident_bytes = admitted_bytes;
+    render_with_fs(&mut Still, exact, fs.clone()).unwrap();
+
+    struct MustNotRun;
+    impl SceneConstruct for MustNotRun {
+        fn construct(&mut self, _: &mut Stage<'_>) -> fmn::Result<()> {
+            panic!("raster-band memory refusal must precede scene construction");
+        }
+    }
+    let mut short = options("/insufficient", RenderFormat::PngSequence, 2, 16);
+    short.max_resident_bytes = admitted_bytes - 1;
+    assert!(matches!(
+        render_with_fs(&mut MustNotRun, short, fs.clone()),
+        Err(RenderError::InvalidOptions(
+            "render plan exceeds max_resident_bytes"
+        ))
+    ));
+    assert!(!fs.exists(Path::new("/insufficient")));
+}

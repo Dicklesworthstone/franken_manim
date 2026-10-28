@@ -930,7 +930,8 @@ impl RenderSink {
         }
         let plan = ExecutionPlan::derive(request, &topology, None).map_err(RenderError::Plan)?;
         // Account for retained pixels separately from in-flight raw/output
-        // surfaces. Each affine render team retains its own tile cache; camera
+        // surfaces. Each affine render team retains its own tile cache and
+        // each multithreaded team owns disjoint raster bands. Camera
         // preparation retains one raw frame. Check before allocating anything.
         let retained_frames = if options.camera.is_some() {
             // Live-camera preparation plus the largest compiled-camera mode:
@@ -942,7 +943,17 @@ impl RenderSink {
                     "retained frame count overflowed",
                 ))?
         } else {
-            plan.render_teams.len()
+            plan.render_teams
+                .len()
+                .checked_add(
+                    plan.render_teams
+                        .iter()
+                        .filter(|team| team.threads() > 1)
+                        .count(),
+                )
+                .ok_or(RenderError::InvalidOptions(
+                    "retained frame count overflowed",
+                ))?
         };
         let retained_bytes = u64::try_from(retained_frames).ok().and_then(|count| {
             u64::from(width)
