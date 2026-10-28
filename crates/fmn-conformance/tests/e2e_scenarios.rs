@@ -4364,6 +4364,15 @@ fn python_surface_hooks_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErro
     Ok(RunOutcome::ok().with_counter("surface_hook_cases", cases))
 }
 
+/// The same real five-point camera lifecycle suite as the installed-wheel gate,
+/// including live views, Group transforms, capture and SceneState restoration.
+fn python_camera_frame_points_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let cases = manimlib::run_portal_gauntlet_camera_frame_points()
+        .map_err(|error| fail(format!("Python live camera frame points: {error}")))?;
+    ctx.event(LogEvent::new("e2e.python.camera_frame_points").field("cases", cases));
+    Ok(RunOutcome::ok().with_counter("camera_frame_point_cases", cases))
+}
+
 /// Structural parity (fm-5wq.36): the fixed construction set, extracted in
 /// the embedded portal by the same `structural_facts.py` the Reference ran,
 /// matches the checked-in Reference facts except for BN-keyed and open-bead
@@ -11738,6 +11747,20 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.python_camera_frame_points.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_camera_frame_points_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_ge("camera_frame_point_cases", 25),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.camera_frame_points",
+            vec![FieldPred::u64_ge("cases", 25)],
+        )],
+    ));
+    specs.push(spec(
         "parity.structural_facts.v1",
         ScenarioClass::ParityDrill,
         Surface::PythonInProcess,
@@ -14261,6 +14284,16 @@ fn python_surface_hooks_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.python_surface_hooks.v1")
         .expect("Python surface hooks scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn python_camera_frame_points_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.python_camera_frame_points.v1")
+        .expect("live camera frame geometry is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

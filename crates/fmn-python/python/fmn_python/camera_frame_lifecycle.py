@@ -24,8 +24,8 @@ def install_camera_frame_lifecycle(native):
         **kwargs,
     ):
         # Validate and own constructor inputs before running authored hooks.
-        # CameraFrame's positional methods use a native pose, not drawable
-        # records, so that pose must already exist during Mobject initialization.
+        # The pose must already exist while base hooks run, before the
+        # Reference installs its five spatial control points.
         self._core = g["_CameraFrameCore"](
             (float(frame_shape[0]), float(frame_shape[1])),
             g["_vec3"](center_point),
@@ -53,6 +53,10 @@ def install_camera_frame_lifecycle(native):
         self._core.set_euler_axes(euler_axes)
         self._core.set_shape((2.0, 2.0))
         self._core.set_center((0.0, 0.0, 0.0))
+        self.set_points(g["_np"].array([
+            g["_ORIGIN"], g["_LEFT"], g["_RIGHT"], g["_DOWN"], g["_UP"],
+        ]))
+        self._core._bind_points(self, initialize=True)
         self.set_width(width, stretch=True)
         self.set_height(height, stretch=True)
         self.move_to(center)

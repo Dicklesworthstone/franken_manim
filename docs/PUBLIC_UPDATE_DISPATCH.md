@@ -24,8 +24,8 @@ with a mobject.
 the start of the call, in list order. As in the Reference, the list starts as
 `[scene.frame]` and the frame's `z_index` of -1 keeps it ahead of default
 content, so its callbacks run first; once `clear()` or `remove()` drops the
-frame, its callbacks stop until it is listed again (fm-6l2i). The frame is a
-point-less root and draws nothing. Camera callbacks can edit scene membership,
+frame, its callbacks stop until it is listed again (fm-6l2i). The frame has five
+live control points and draws nothing. Camera callbacks can edit scene membership,
 but those changes affect the next root snapshot. Camera suspension does not
 suspend unrelated drawable roots.
 

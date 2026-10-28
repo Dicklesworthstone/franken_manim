@@ -77,6 +77,8 @@ mod tex_preamble;
 pub use tex_preamble::run_portal_gauntlet_tex_preamble;
 
 #[cfg(feature = "gauntlet")]
+pub use portal_readback::run_portal_gauntlet_camera_frame_points;
+#[cfg(feature = "gauntlet")]
 pub use portal_svg::{PortalSvgReport, run_portal_gauntlet_svg};
 
 #[cfg(any(test, feature = "gauntlet"))]
@@ -8455,6 +8457,18 @@ fn portal_allows_native_play(
     if !stable_light {
         return Ok(false);
     }
+    // A replacement frame can remain detached from the drawable Stage. Its
+    // control-point views can be written while the GIL is released, just like
+    // light data; check its owner as well as the Stage's ordinary live views.
+    let frame = scene.getattr("camera")?.getattr("frame")?;
+    let stable_frame = with_stage(frame.cast::<BridgeMobject>()?, |stage, mob| {
+        stage
+            .get(mob)
+            .is_some_and(|entry| entry.buffer.live_view_count() == 0)
+    })?;
+    if !stable_frame {
+        return Ok(false);
+    }
     // All actual host reads happen before borrowing Scene for play. Native
     // light animation is sampled from each immutable worker Stage afterward.
     synchronize_portal_camera(scene)?;
@@ -8471,8 +8485,7 @@ fn synchronize_portal_camera(scene: &Bound<'_, PyScene>) -> PyResult<()> {
     let core = camera.getattr("frame")?.getattr("_core")?;
     let frame = core
         .extract::<PyRef<'_, PyCameraFrameCore>>()?
-        .frame
-        .clone();
+        .snapshot(scene.py())?;
     let rgba: [f64; 4] = camera.getattr("background_rgba")?.extract()?;
     if !rgba.iter().all(|component| component.is_finite()) {
         return Err(PyValueError::new_err(
@@ -8800,7 +8813,7 @@ impl PyScene {
                 .map_err(|_| PyRuntimeError::new_err("portal render session lock was poisoned"))?
                 .as_mut()
                 .ok_or_else(|| PyRuntimeError::new_err("no portal render generation is active"))?
-                .bind_camera(camera.frame.clone(), light_position, None, None)?,
+                .bind_camera(camera.snapshot(slf.py())?, light_position, None, None)?,
             (None, None) => {}
             _ => {
                 return Err(PyValueError::new_err(
@@ -9571,8 +9584,10 @@ impl PyScene {
         let camera_lerp = camera
             .map(|(live, target)| -> PyResult<CameraLerp> {
                 Ok(CameraLerp {
-                    start: live.borrow().frame.clone(),
-                    end: target.borrow().frame.clone(),
+                    start: live.borrow().snapshot(slf.py())?,
+                    end: target.borrow().snapshot(slf.py())?,
+                    start_points: live.borrow().points(slf.py())?,
+                    end_points: target.borrow().points(slf.py())?,
                     core: live.unbind(),
                     start_time,
                     run_time: effective_run_time,
@@ -9585,9 +9600,15 @@ impl PyScene {
             && camera_lerp.is_none()
             && !animations.is_empty()
             && portal_allows_native_play(slf, &animations, &pending)?;
-        let release_for_python_updaters = host_updates || (render_observes_frames && !pure_play);
+        // A camera now owns real Scene records. Apply its native track at the
+        // existing release boundary, before updaters/capture, so publishing
+        // those points never re-enters an already borrowed Scene.
+        let camera_needs_release = camera_lerp.is_some();
+        let release_for_python_updaters =
+            host_updates || camera_needs_release || (render_observes_frames && !pure_play);
         let mut sink = PortalSceneSink {
             camera: camera_lerp,
+            camera_preapplied: camera_needs_release,
             render: Arc::clone(&slf.borrow().render),
             pure_play,
             ..PortalSceneSink::default()
@@ -10968,10 +10989,9 @@ fn lerp(a: f64, b: f64, t: f64) -> f64 {
 }
 
 /// Cut T3 (fm-d3gt): the camera-frame interpolation a play segment
-/// carries. The camera core is its OWN pyclass cell, independent of the
-/// Scene RefCell the segment driver holds — so per-frame interpolation
-/// inside the sink never crosses the live engine borrow, and no Python
-/// dispatch happens mid-segment (the lerp is pure Rust). Semantics mirror
+/// carries. It publishes the core and its five real point records at the
+/// existing Scene release boundary before updaters and capture. No authored
+/// Python dispatch participates in this interpolation. Semantics mirror
 /// the Reference's frame Transform: componentwise quaternion lerp
 /// (normalized on write, scipy's own read-side rule), linear
 /// center/shape/fovy.
@@ -10979,6 +10999,8 @@ struct CameraLerp {
     core: Py<PyCameraFrameCore>,
     start: fmn_scene::studio_bridge::CameraFrame,
     end: fmn_scene::studio_bridge::CameraFrame,
+    start_points: [[f64; 3]; 5],
+    end_points: [[f64; 3]; 5],
     start_time: f64,
     run_time: f64,
     rate: fmn_anim::RateFunc,
@@ -10987,7 +11009,7 @@ struct CameraLerp {
 impl CameraLerp {
     fn apply(&self, py: Python<'_>, raw_alpha: f64) -> PyResult<()> {
         let alpha = self.rate.eval(raw_alpha.clamp(0.0, 1.0));
-        let mut core = self.core.bind(py).borrow_mut();
+        let core = self.core.bind(py).borrow();
         let (start, end) = (&self.start, &self.end);
         let center = [
             lerp(start.center()[0], end.center()[0], alpha),
@@ -11005,19 +11027,26 @@ impl CameraLerp {
             lerp(start.orientation()[2], end.orientation()[2], alpha),
             lerp(start.orientation()[3], end.orientation()[3], alpha),
         ];
-        core.frame.set_center(center).map_err(camera_error)?;
-        core.frame.set_shape(shape).map_err(camera_error)?;
-        core.frame.set_field_of_view(fovy).map_err(camera_error)?;
-        core.frame
-            .set_orientation(orientation)
-            .map_err(camera_error)?;
-        Ok(())
+        let mut frame = core.frame.borrow().clone();
+        frame.set_center(center).map_err(camera_error)?;
+        frame.set_shape(shape).map_err(camera_error)?;
+        frame.set_field_of_view(fovy).map_err(camera_error)?;
+        frame.set_orientation(orientation).map_err(camera_error)?;
+        let points = std::array::from_fn(|point| {
+            std::array::from_fn(|axis| {
+                lerp(
+                    self.start_points[point][axis],
+                    self.end_points[point][axis],
+                    alpha,
+                )
+            })
+        });
+        core.publish(py, frame, points)
     }
 
     fn finish_exact(&self, py: Python<'_>) -> PyResult<()> {
-        let mut core = self.core.bind(py).borrow_mut();
-        core.frame = self.end.clone();
-        Ok(())
+        let core = self.core.bind(py).borrow();
+        core.publish(py, self.end.clone(), self.end_points)
     }
 }
 
@@ -11814,15 +11843,130 @@ fn install_native_tree<'py>(
 /// Lumen's [`fmn_scene::studio_bridge::CameraFrame`], the ONE implementation of the
 /// Reference's euler/orientation/shape/fov semantics (fm-0gy).
 ///
-/// The bootstrap's `CameraFrame(Mobject)` owns one of these as its
-/// authoritative state; every camera method delegates here, so orientation,
-/// center, shape, and field of view round-trip exactly (D5, state-real).
-/// This value is also the renderer-binding seam: final native PNG capture
-/// hands the same `fmn_scene::studio_bridge::CameraFrame` to Lumen's `Camera`
-/// unchanged.
+/// The five real Mobject point records own spatial edits, including writes
+/// through retained NumPy views and transforms of an enclosing Group. The
+/// camera value owns orientation/FOV and preserves authored f64 pose values
+/// until those records change. Every projection/capture reads that same seam.
 #[pyclass(unsendable, name = "_CameraFrameCore")]
 struct PyCameraFrameCore {
-    frame: fmn_scene::studio_bridge::CameraFrame,
+    frame: RefCell<fmn_scene::studio_bridge::CameraFrame>,
+    points_owner: Option<Py<PyAny>>,
+    mirrored_points: Cell<Option<[[f64; 3]; 5]>>,
+}
+
+impl PyCameraFrameCore {
+    fn detached(frame: fmn_scene::studio_bridge::CameraFrame) -> Self {
+        Self {
+            frame: RefCell::new(frame),
+            points_owner: None,
+            mirrored_points: Cell::new(None),
+        }
+    }
+
+    fn owner<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, BridgeMobject>>> {
+        let Some(reference) = &self.points_owner else {
+            return Ok(None);
+        };
+        let owner = reference.bind(py).call0()?;
+        if owner.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(owner.cast_into::<BridgeMobject>()?))
+    }
+
+    fn read_points(owner: &Bound<'_, BridgeMobject>) -> PyResult<[[f64; 3]; 5]> {
+        // Materialize lazy affine placement before taking the mirror. Merely
+        // observing get_points() later must not round it again and masquerade
+        // as a new authored edit. These are the actual public f32 records.
+        with_buffer_ref(owner, |buffer| {
+            if buffer.len() != 5 {
+                return Err(PyValueError::new_err(
+                    "CameraFrame requires exactly five control points",
+                ));
+            }
+            let mut points = [[0.0; 3]; 5];
+            for (index, point) in points.iter_mut().enumerate() {
+                let row = buffer.read(index, "point").ok_or_else(|| {
+                    PyValueError::new_err("CameraFrame requires a point record field")
+                })?;
+                let row: [f32; 3] = row.try_into().map_err(|_| {
+                    PyValueError::new_err("CameraFrame point records require three coordinates")
+                })?;
+                *point = row.map(f64::from);
+            }
+            if !points.iter().flatten().all(|value| value.is_finite()) {
+                return Err(PyValueError::new_err(
+                    "CameraFrame control points must be finite",
+                ));
+            }
+            Ok(points)
+        })?
+    }
+
+    fn canonical_points(frame: &fmn_scene::studio_bridge::CameraFrame) -> [[f64; 3]; 5] {
+        let [x, y, z] = frame.center();
+        let [width, height] = frame.shape();
+        [
+            [x, y, z],
+            [x - width / 2.0, y, z],
+            [x + width / 2.0, y, z],
+            [x, y - height / 2.0, z],
+            [x, y + height / 2.0, z],
+        ]
+    }
+
+    fn points(&self, py: Python<'_>) -> PyResult<[[f64; 3]; 5]> {
+        match self.owner(py)? {
+            Some(owner) => Self::read_points(&owner),
+            None => Ok(Self::canonical_points(&self.frame.borrow())),
+        }
+    }
+
+    fn snapshot(&self, py: Python<'_>) -> PyResult<fmn_scene::studio_bridge::CameraFrame> {
+        if let Some(owner) = self.owner(py)? {
+            let points = Self::read_points(&owner)?;
+            if self.mirrored_points.get() != Some(points) {
+                // Validate a private value before changing the renderer pose.
+                // Reference camera_frame.py reads these exact indexed spans;
+                // orientation does not rotate the five spatial control points.
+                let mut frame = self.frame.borrow().clone();
+                frame.set_center(points[0]).map_err(camera_error)?;
+                frame
+                    .set_shape([points[2][0] - points[1][0], points[4][1] - points[3][1]])
+                    .map_err(camera_error)?;
+                *self.frame.borrow_mut() = frame;
+                self.mirrored_points.set(Some(points));
+            }
+        }
+        Ok(self.frame.borrow().clone())
+    }
+
+    fn publish(
+        &self,
+        py: Python<'_>,
+        frame: fmn_scene::studio_bridge::CameraFrame,
+        points: [[f64; 3]; 5],
+    ) -> PyResult<()> {
+        if let Some(owner) = self.owner(py)? {
+            #[allow(clippy::cast_possible_truncation)]
+            if !points
+                .iter()
+                .flatten()
+                .all(|value| (*value as f32).is_finite())
+            {
+                return Err(PyValueError::new_err(
+                    "CameraFrame control points must be finite in float32 records",
+                ));
+            }
+            // Same-sized Stage writes retain the live allocation and refresh
+            // ancestor bounds; no synthetic ndarray or per-write resize.
+            with_stage(&owner, |stage, mob| stage.set_points(mob, &points))?
+                .map_err(stage_error)?;
+            self.mirrored_points.set(Some(Self::read_points(&owner)?));
+        }
+        *self.frame.borrow_mut() = frame;
+        Ok(())
+    }
 }
 
 /// Lumen's capture-camera configuration behind the public Python `Camera`.
@@ -11848,88 +11992,142 @@ impl PyCameraFrameCore {
         fovy: f64,
         euler_axes: &str,
     ) -> PyResult<Self> {
-        Ok(Self {
-            frame: fmn_scene::studio_bridge::CameraFrame::new(
-                frame_shape,
-                center_point,
-                fovy,
-                euler_axes,
-            )
-            .map_err(camera_error)?,
-        })
+        Ok(Self::detached(
+            fmn_scene::studio_bridge::CameraFrame::new(frame_shape, center_point, fovy, euler_axes)
+                .map_err(camera_error)?,
+        ))
     }
 
-    fn __copy__(&self) -> Self {
-        Self {
-            frame: self.frame.clone(),
+    fn __copy__(&self, py: Python<'_>) -> PyResult<Self> {
+        Ok(Self::detached(self.snapshot(py)?))
+    }
+
+    fn __deepcopy__(&self, py: Python<'_>, _memo: &Bound<'_, PyAny>) -> PyResult<Self> {
+        self.__copy__(py)
+    }
+
+    /// Bind a weak owner after base initialization or graph copying. Early
+    /// copies taken inside init_points still have no camera records yet.
+    #[pyo3(signature = (owner, initialize=false))]
+    fn _bind_points(&mut self, owner: &Bound<'_, BridgeMobject>, initialize: bool) -> PyResult<()> {
+        if !initialize && with_buffer_ref(owner, RecordBuffer::len)? != 5 {
+            return Ok(());
         }
-    }
-
-    fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
-        Self {
-            frame: self.frame.clone(),
+        let points = Self::read_points(owner)?;
+        if initialize {
+            let mut frame = self.frame.borrow().clone();
+            frame.set_center(points[0]).map_err(camera_error)?;
+            frame
+                .set_shape([points[2][0] - points[1][0], points[4][1] - points[3][1]])
+                .map_err(camera_error)?;
+            *self.frame.get_mut() = frame;
         }
-    }
-
-    fn center(&self) -> [f64; 3] {
-        self.frame.center()
-    }
-
-    fn set_center(&mut self, center: [f64; 3]) -> PyResult<()> {
-        self.frame.set_center(center).map_err(camera_error)?;
+        self.points_owner = Some(
+            owner
+                .py()
+                .import("weakref")?
+                .call_method1("ref", (owner,))?
+                .unbind(),
+        );
+        self.mirrored_points.set(Some(points));
         Ok(())
     }
 
-    fn shape(&self) -> (f64, f64) {
-        let [width, height] = self.frame.shape();
-        (width, height)
-    }
-
-    fn set_shape(&mut self, shape: [f64; 2]) -> PyResult<()> {
-        self.frame.set_shape(shape).map_err(camera_error)?;
+    /// Public Mobject transforms have already moved the complete family.
+    /// Retain their exact authored f64 pose without rewriting the rounded
+    /// point buffer or losing extra coordinates supplied by a path function.
+    fn _adopt_geometry(&self, py: Python<'_>, center: [f64; 3], shape: [f64; 2]) -> PyResult<()> {
+        let mut frame = self.frame.borrow().clone();
+        frame.set_center(center).map_err(camera_error)?;
+        frame.set_shape(shape).map_err(camera_error)?;
+        if let Some(owner) = self.owner(py)? {
+            self.mirrored_points.set(Some(Self::read_points(&owner)?));
+        }
+        *self.frame.borrow_mut() = frame;
         Ok(())
     }
 
-    fn aspect_ratio(&self) -> f64 {
-        self.frame.aspect_ratio()
+    fn center(&self, py: Python<'_>) -> PyResult<[f64; 3]> {
+        Ok(self.snapshot(py)?.center())
     }
 
-    fn scale(&self) -> f64 {
-        self.frame.scale()
+    fn set_center(&self, py: Python<'_>, center: [f64; 3]) -> PyResult<()> {
+        let mut frame = self.snapshot(py)?;
+        let previous = frame.center();
+        frame.set_center(center).map_err(camera_error)?;
+        let points = self
+            .points(py)?
+            .map(|point| std::array::from_fn(|axis| point[axis] + center[axis] - previous[axis]));
+        self.publish(py, frame, points)
+    }
+
+    fn shape(&self, py: Python<'_>) -> PyResult<(f64, f64)> {
+        let [width, height] = self.snapshot(py)?.shape();
+        Ok((width, height))
+    }
+
+    fn set_shape(&self, py: Python<'_>, shape: [f64; 2]) -> PyResult<()> {
+        let mut frame = self.snapshot(py)?;
+        let previous = frame.shape();
+        let center = frame.center();
+        frame.set_shape(shape).map_err(camera_error)?;
+        let points = self.points(py)?.map(|mut point| {
+            for axis in 0..2 {
+                point[axis] =
+                    center[axis] + (point[axis] - center[axis]) * (shape[axis] / previous[axis]);
+            }
+            point
+        });
+        self.publish(py, frame, points)
+    }
+
+    fn aspect_ratio(&self, py: Python<'_>) -> PyResult<f64> {
+        Ok(self.snapshot(py)?.aspect_ratio())
+    }
+
+    fn scale(&self, py: Python<'_>) -> PyResult<f64> {
+        Ok(self.snapshot(py)?.scale())
     }
 
     fn orientation(&self) -> [f64; 4] {
-        self.frame.orientation()
+        self.frame.borrow().orientation()
     }
 
     fn set_orientation(&mut self, orientation: [f64; 4]) -> PyResult<()> {
         self.frame
+            .get_mut()
             .set_orientation(orientation)
             .map_err(camera_error)?;
         Ok(())
     }
 
     fn make_orientation_default(&mut self) {
-        self.frame.make_orientation_default();
+        self.frame.get_mut().make_orientation_default();
     }
 
     // Reference-verbatim pymethod name; the Rust naming lint does not apply.
     #[allow(clippy::wrong_self_convention)]
-    fn to_default_state(&mut self) {
-        self.frame.to_default_state();
+    fn to_default_state(&self, py: Python<'_>) -> PyResult<()> {
+        let mut frame = self.frame.borrow().clone();
+        frame.to_default_state();
+        let points = Self::canonical_points(&frame);
+        self.publish(py, frame, points)
     }
 
     fn euler_axes(&self) -> String {
-        self.frame.euler_axes().to_owned()
+        self.frame.borrow().euler_axes().to_owned()
     }
 
     fn set_euler_axes(&mut self, seq: &str) -> PyResult<()> {
-        self.frame.set_euler_axes(seq).map_err(camera_error)?;
+        self.frame
+            .get_mut()
+            .set_euler_axes(seq)
+            .map_err(camera_error)?;
         Ok(())
     }
 
     fn euler_angles(&self) -> [f64; 3] {
-        self.frame.euler_angles()
+        self.frame.borrow().euler_angles()
     }
 
     fn set_euler_angles(
@@ -11939,6 +12137,7 @@ impl PyCameraFrameCore {
         gamma: Option<f64>,
     ) -> PyResult<()> {
         self.frame
+            .get_mut()
             .set_euler_angles(theta, phi, gamma)
             .map_err(camera_error)?;
         Ok(())
@@ -11946,54 +12145,73 @@ impl PyCameraFrameCore {
 
     fn increment_euler_angles(&mut self, dtheta: f64, dphi: f64, dgamma: f64) -> PyResult<()> {
         self.frame
+            .get_mut()
             .increment_euler_angles(dtheta, dphi, dgamma)
             .map_err(camera_error)?;
         Ok(())
     }
 
     fn rotate(&mut self, angle: f64, axis: [f64; 3]) -> PyResult<()> {
-        self.frame.rotate(angle, axis).map_err(camera_error)?;
-        Ok(())
-    }
-
-    fn field_of_view(&self) -> f64 {
-        self.frame.field_of_view()
-    }
-
-    fn set_field_of_view(&mut self, fovy: f64) -> PyResult<()> {
-        self.frame.set_field_of_view(fovy).map_err(camera_error)?;
-        Ok(())
-    }
-
-    fn focal_distance(&self) -> f64 {
-        self.frame.focal_distance()
-    }
-
-    fn set_focal_distance(&mut self, focal_distance: f64) -> PyResult<()> {
         self.frame
-            .set_focal_distance(focal_distance)
+            .get_mut()
+            .rotate(angle, axis)
             .map_err(camera_error)?;
         Ok(())
     }
 
-    fn view_matrix(&self) -> [[f64; 4]; 4] {
-        self.frame.view_matrix()
+    fn field_of_view(&self) -> f64 {
+        self.frame.borrow().field_of_view()
+    }
+
+    fn set_field_of_view(&mut self, fovy: f64) -> PyResult<()> {
+        self.frame
+            .get_mut()
+            .set_field_of_view(fovy)
+            .map_err(camera_error)?;
+        Ok(())
+    }
+
+    fn focal_distance(&self, py: Python<'_>) -> PyResult<f64> {
+        Ok(self.snapshot(py)?.focal_distance())
+    }
+
+    fn set_focal_distance(&self, py: Python<'_>, focal_distance: f64) -> PyResult<()> {
+        let mut frame = self.snapshot(py)?;
+        frame
+            .set_focal_distance(focal_distance)
+            .map_err(camera_error)?;
+        *self.frame.borrow_mut() = frame;
+        Ok(())
+    }
+
+    fn view_matrix(&self, py: Python<'_>) -> PyResult<[[f64; 4]; 4]> {
+        Ok(self.snapshot(py)?.view_matrix())
     }
 
     // The `to_*`/`from_*` names mirror the Reference's Python API verbatim;
     // Rust's self-convention lint does not apply to a pymethod surface.
     #[allow(clippy::wrong_self_convention)]
-    fn to_fixed_frame_point(&self, point: [f64; 3], relative: bool) -> [f64; 3] {
-        self.frame.to_fixed_frame_point(point, relative)
+    fn to_fixed_frame_point(
+        &self,
+        py: Python<'_>,
+        point: [f64; 3],
+        relative: bool,
+    ) -> PyResult<[f64; 3]> {
+        Ok(self.snapshot(py)?.to_fixed_frame_point(point, relative))
     }
 
     #[allow(clippy::wrong_self_convention)]
-    fn from_fixed_frame_point(&self, point: [f64; 3], relative: bool) -> [f64; 3] {
-        self.frame.from_fixed_frame_point(point, relative)
+    fn from_fixed_frame_point(
+        &self,
+        py: Python<'_>,
+        point: [f64; 3],
+        relative: bool,
+    ) -> PyResult<[f64; 3]> {
+        Ok(self.snapshot(py)?.from_fixed_frame_point(point, relative))
     }
 
-    fn implied_camera_location(&self) -> [f64; 3] {
-        self.frame.implied_camera_location()
+    fn implied_camera_location(&self, py: Python<'_>) -> PyResult<[f64; 3]> {
+        Ok(self.snapshot(py)?.implied_camera_location())
     }
 }
 
@@ -12024,7 +12242,7 @@ impl PyCameraCore {
             max_allowable_norm,
             samples,
             light_source_position,
-            frame: frame.frame.clone(),
+            frame: frame.snapshot(frame.py())?,
         })
         .map_err(camera_error)?;
         Ok(Self { camera })

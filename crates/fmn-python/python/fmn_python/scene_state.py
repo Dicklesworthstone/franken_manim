@@ -100,13 +100,14 @@ def _camera_values(core):
 
 def _restore_camera(core, values):
     center, shape, orientation, fovy, axes, default_orientation = values
-    # Keep the very same native camera object; invalidate its derived caches
-    # through the real setters rather than replacing a renderer-held handle.
+    # The native checkpoint (or become for a partial snapshot) has already
+    # restored the five actual point records. Adopt the saved f64 pose without
+    # rescaling those f32 controls or changing the checkpoint's record epoch.
+    # Keep the same native object held by renderers and animation tracks.
     core.set_orientation(default_orientation)
     core.make_orientation_default()
     core.set_euler_axes(axes)
-    core.set_shape(shape)
-    core.set_center(center)
+    core._adopt_geometry(center, shape)
     core.set_field_of_view(fovy)
     core.set_orientation(orientation)
 
@@ -181,6 +182,9 @@ def install_scene_state(native: Any) -> None:
         self._camera_snapshot = None if id(frame) in ignored else (
             frame, _camera_values(frame._core), tuple(frame.updaters),
         )
+        self._camera_records = (None if id(frame) in ignored
+                                else np.array(frame.data, copy=True))
+        self._ignored_camera = frame if id(frame) in ignored else None
         # Copying a bound Mobject allocates native helper entries. Capture
         # AFTER those allocations. Ignoring a non-drawable camera does not
         # require discarding the native record/clock/RNG checkpoint, even
@@ -206,6 +210,7 @@ def install_scene_state(native: Any) -> None:
         if a is None or b is None:
             return a is b
         return (a[0] is b[0] and _same_value(np, a[1], b[1])
+                and _same_value(np, self._camera_records, other._camera_records)
                 and len(a[2]) == len(b[2])
                 and all(x is y for x, y in zip(a[2], b[2]))
                 and scene_attributes.same(np,
@@ -247,6 +252,7 @@ def install_scene_state(native: Any) -> None:
             if self._camera_snapshot is not None:
                 frame, values, callbacks = self._camera_snapshot
                 count += int(not _same_value(np, values, _camera_values(frame._core))
+                             or not _same_value(np, self._camera_records, frame.data)
                              or len(callbacks) != len(frame.updaters)
                              or any(a is not b for a, b in zip(callbacks, frame.updaters))
                              or not scene_attributes.same(np,
@@ -279,7 +285,19 @@ def install_scene_state(native: Any) -> None:
         # refusal must not leave restored geometry with newer authored data.
         prepared, uniforms = scene_attributes.prepare_projection(
             self._attributes, self._uniforms, np, self._attribute_members)
+        # The native document also contains the ignored frame's live records.
+        # Preserve their current values across that restore, just as its
+        # separate orientation/FOV and Python attributes remain untouched.
+        ignored_camera = self._ignored_camera
+        ignored_geometry = None
+        if ignored_camera is not None and self._checkpoint is not None:
+            ignored_geometry = (np.array(ignored_camera.data, copy=True),
+                                ignored_camera._core.center(), ignored_camera._core.shape())
         original_restore(self, scene)
+        if ignored_geometry is not None:
+            records, center, shape = ignored_geometry
+            ignored_camera.data[:] = records
+            ignored_camera._core._adopt_geometry(center, shape)
         if self._checkpoint is not None:
             # Native restore has already restored all graph edges and records.
             # Refresh ONLY Python projections, without become/alignment writes
@@ -302,6 +320,17 @@ def install_scene_state(native: Any) -> None:
         if self._camera_snapshot is not None:
             frame, values, updaters = self._camera_snapshot
             scene.frame = frame
+            # A replacement camera can still be detached, and partial states
+            # can omit an unlisted frame from their become walk. Its records
+            # then need explicit restoration. For a checkpoint-owned frame
+            # the bytes already match: do not write or advance its revision.
+            records = self._camera_records
+            current = frame.data
+            if current.shape != records.shape:
+                frame.resize(len(records))
+                current = frame.data
+            if current.tobytes() != records.tobytes():
+                current[:] = records
             _restore_camera(frame._core, values)
             frame.updaters[:] = updaters
 

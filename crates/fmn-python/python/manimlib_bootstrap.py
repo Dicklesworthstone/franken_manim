@@ -921,6 +921,8 @@ def _copy_member_state(old, new, mapping, deep, memo):
     core = old.__dict__.get("_core")
     if core is not None and new.__dict__.get("_core") is core:
         new.__dict__["_core"] = _copy.copy(core)
+    if isinstance(core, _CameraFrameCore):
+        new._core._bind_points(new)
 
     extras = old.uniforms._extras
     # Reference Mobject.copy copies every ndarray uniform, so writing a
@@ -3289,8 +3291,8 @@ class Mobject(_BridgeMobject):
                 )
             elif "_data_defaults" in receiver.__dict__:
                 receiver.__dict__.pop("_data_defaults", None)
-            # A frame's pose is in its camera core, not its records, so the
-            # data copy above leaves it; take it explicitly (fm-rgr0).
+            # Spatial records are copied above; transfer camera uniforms and
+            # the source's exact authored pose onto the receiver's live core.
             if isinstance(receiver, CameraFrame) and isinstance(source, CameraFrame):
                 receiver._take_pose(source)
         if match_updaters:
@@ -15164,14 +15166,10 @@ class CameraFrame(Mobject):
     real Mobject whose authoritative state lives in one engine
     `_CameraFrameCore` (Lumen's `fmn_render::CameraFrame`, fm-0gy).
 
-    State-real by construction (D5): orientation, center, shape, and field
-    of view round-trip exactly through the engine value — never an inert
-    stub. The positional primitives (`shift`/`scale`/`stretch`/`_bbox_rows`)
-    are overridden to read and write that same state, so every inherited
-    Mobject method (`move_to`, `set_x`, `set_height`, `center`, ...)
-    operates on the camera frame exactly as the Reference's point-backed
-    implementation does. `self._core` is the renderer-binding seam: final
-    native PNG capture hands this same engine value to Lumen's `Camera`.
+    Five live point records carry the center, left, right, bottom and top
+    controls. Group operations, point functions and NumPy writes change those
+    same records; the native core synchronizes them before projection or
+    capture. Orientation and field of view remain native camera state.
 
     Divergence note: without a SciPy dependency, `set_orientation` accepts
     a scipy-order `(x, y, z, w)` quaternion sequence (or any object with an
@@ -15199,6 +15197,11 @@ class CameraFrame(Mobject):
             float(fovy),
             euler_axes,
         )
+        self.set_points(_np.array([_ORIGIN, _LEFT, _RIGHT, _DOWN, _UP]))
+        self._core._bind_points(self, initialize=True)
+        self.set_width(frame_shape[0], stretch=True)
+        self.set_height(frame_shape[1], stretch=True)
+        self.move_to(center_point)
 
     def copy(self, deep=False):
         # The generic shallow copy shares non-mobject attributes by
@@ -15207,21 +15210,24 @@ class CameraFrame(Mobject):
         result = super().copy(deep)
         if getattr(result, "_core", None) is self._core:
             result.__dict__["_core"] = _copy.copy(self._core)
+            result._core._bind_points(result)
         return result
 
     def _take_pose(self, source):
-        # The Reference's become copies the frame's points and uniforms, so
-        # it takes the source's center, shape, orientation and field of view;
-        # here they live in the camera core (fm-rgr0).
+        # become has already copied the actual points. Preserve their exact
+        # coordinates while taking the source's native camera uniforms.
         core = source._core
-        self._core.set_center(core.center())
-        self._core.set_shape(core.shape())
+        self._core._adopt_geometry(core.center(), core.shape())
         self._core.set_orientation(core.orientation())
         self._core.set_field_of_view(core.field_of_view())
 
     # -- the positional primitives, routed to the engine camera state
 
     def _bbox_rows(self):
+        if self._has_points():
+            return super()._bbox_rows()
+        # Authored base initialization hooks can inspect the pose before the
+        # five points are installed at the end of CameraFrame initialization.
         center = _np.array(self._core.center())
         width, height = self._core.shape()
         half = _np.array([width / 2.0, height / 2.0, 0.0])
@@ -15230,13 +15236,11 @@ class CameraFrame(Mobject):
     def shift(self, vector):
         vector = _shift_vector(vector)
         center = self._core.center()
-        self._core.set_center(
-            (
-                center[0] + vector[0],
-                center[1] + vector[1],
-                center[2] + vector[2],
-            )
-        )
+        center = tuple(center[axis] + vector[axis] for axis in range(3))
+        shape = self._core.shape()
+        _copy.copy(self._core)._adopt_geometry(center, shape)
+        super().shift(vector)
+        self._core._adopt_geometry(center, shape)
         return self
 
     def scale(
@@ -15250,8 +15254,11 @@ class CameraFrame(Mobject):
         factor = max(float(scale_factor), float(min_scale_factor))
         center = _np.array(self._core.center())
         width, height = self._core.shape()
-        self._core.set_shape((width * factor, height * factor))
-        self._core.set_center(tuple(pivot + factor * (center - pivot)))
+        center = tuple(pivot + factor * (center - pivot))
+        shape = (width * factor, height * factor)
+        _copy.copy(self._core)._adopt_geometry(center, shape)
+        super().scale(factor, min_scale_factor=min_scale_factor, about_point=pivot)
+        self._core._adopt_geometry(center, shape)
         return self
 
     def stretch(self, factor, dim, **kwargs):
@@ -15267,16 +15274,20 @@ class CameraFrame(Mobject):
             )
         factor = float(factor)
         dim = int(dim)
+        if dim not in (0, 1, 2):
+            raise ValueError("stretch dimension must be 0, 1, or 2")
         center = _np.array(self._core.center())
         center[dim] = pivot[dim] + factor * (center[dim] - pivot[dim])
+        width, height = self._core.shape()
         if dim in (0, 1):
-            width, height = self._core.shape()
             if dim == 0:
                 width *= factor
             else:
                 height *= factor
-            self._core.set_shape((width, height))
-        self._core.set_center(tuple(center))
+        shape = (width, height)
+        _copy.copy(self._core)._adopt_geometry(tuple(center), shape)
+        super().stretch(factor, dim, about_point=pivot)
+        self._core._adopt_geometry(tuple(center), shape)
         return self
 
     # -- orientation

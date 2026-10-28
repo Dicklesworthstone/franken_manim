@@ -37,6 +37,9 @@ class Core:
             raise ValueError("invalid dimensions")
         self.writes.append("shape")
         self._shape = tuple(value)
+    def _adopt_geometry(self, center, shape):
+        self.set_center(center)
+        self.set_shape(shape)
     def set_field_of_view(self, value):
         if not math.isfinite(value) or not 0 < value < math.pi:
             raise ValueError("invalid field of view")
@@ -53,8 +56,19 @@ def environment():
     class CameraFrame:
         def __init__(self, **kwargs):
             self._core = Core(**kwargs)
+            center = np.asarray(self._core.center())
+            width, height = self._core.shape()
+            self._points = center + np.array([
+                [0., 0., 0.], [-width/2, 0., 0.], [width/2, 0., 0.],
+                [0., -height/2, 0.], [0., height/2, 0.],
+            ])
             self.locked_data_keys, self.locked_uniform_keys = set(), set()
             self.revisions = 0
+        def get_points(self):
+            return self._points
+        def _set_field_rows(self, field, points):
+            assert field == "point"
+            self._points[:] = points
         def note_changed_data(self):
             self.revisions += 1
     return {"CameraFrame": CameraFrame, "_np": np, "_copy": copy,
@@ -126,6 +140,12 @@ class CameraPoseTests(unittest.TestCase):
             return result
         self.live.interpolate(self.start, self.end, .5, path)
         self.assertEqual(self.live._core.shape(), (13., 6.))
+    def test_path_uses_and_preserves_noncamera_components_of_actual_points(self):
+        self.start._points[1, 2] = 3.
+        self.end._points[2, 1] = 7.
+        expected = (self.start.get_points() + self.end.get_points()) / 2
+        self.live.interpolate(self.start, self.end, .5)
+        np.testing.assert_array_equal(self.live.get_points(), expected)
     def test_callback_cannot_mutate_endpoint_storage_through_arrays(self):
         before = pose(self.start), pose(self.end)
         def path(a, b, alpha):

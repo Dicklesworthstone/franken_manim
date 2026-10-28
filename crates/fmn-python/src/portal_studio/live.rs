@@ -360,7 +360,7 @@ fn dispatch(scene: &Bound<'_, PyScene>, event: EventPayload) -> PyResult<()> {
     // the existing dispatcher maps fixed-frame controls back exactly once.
     let frame = scene.getattr("frame")?;
     let core: Bound<'_, PyCameraFrameCore> = frame.getattr("_core")?.cast_into()?;
-    let camera = core.borrow().frame.clone();
+    let camera = core.borrow().snapshot(scene.py())?;
     let np = scene.py().import("numpy")?;
     let deliver = scene
         .py()

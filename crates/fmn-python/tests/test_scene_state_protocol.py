@@ -161,6 +161,8 @@ class CameraCore:
     def euler_axes(self): return self._axes
     def set_center(self, value): self._center = tuple(value)
     def set_shape(self, value): self._shape = tuple(value)
+    def _adopt_geometry(self, center, shape):
+        self._center, self._shape = tuple(center), tuple(shape)
     def set_orientation(self, value): self._orientation = tuple(value)
     def set_euler_axes(self, value): self._axes = value
     def set_field_of_view(self, value): self._fov = value
@@ -171,6 +173,7 @@ class CameraCore:
 class Frame:
     def __init__(self):
         self._core, self.updaters = CameraCore(), []
+        self.data = np.zeros(5, dtype=[("point", "f4", 3)])
 
 
 def environment(install=True):

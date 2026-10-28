@@ -1606,21 +1606,16 @@ def _install_composition_lifecycle(g):
 
 
 def _install_camera_pose(g):
-    """Interpolate CameraFrame's real native pose, not its empty record buffer."""
+    """Interpolate the live five-point geometry and native camera uniforms."""
     CameraFrame = g["CameraFrame"]
     np = g["_np"]
     copy_core = g["_copy"].copy
     lerp = g["_interpolate"]
 
     def control_points(frame):
-        center = np.asarray(frame._core.center(), dtype=float)
-        width, height = frame._core.shape()
-        # The pinned CameraFrame uses center, left, right, bottom, top. A
-        # path_func must see that same point array, including during zooms.
-        return center + np.array([
-            [0., 0., 0.], [-width / 2., 0., 0.], [width / 2., 0., 0.],
-            [0., -height / 2., 0.], [0., height / 2., 0.],
-        ])
+        # Copy the actual controls, including arbitrary point-function edits.
+        # An authored path cannot mutate either endpoint through these inputs.
+        return np.array(frame.get_points(), copy=True)
 
     def interpolate(self, mobject1, mobject2, alpha, path_func=None):
         if not isinstance(mobject1, CameraFrame) or not isinstance(mobject2, CameraFrame):
@@ -1636,10 +1631,13 @@ def _install_camera_pose(g):
         # Lumen owns dimension/FOV/quaternion validity and normalization; no
         # callback failure can leave a half-updated live camera pose.
         changes = []
+        points = None
         if "point" not in getattr(self, "locked_data_keys", ()):
             points = np.asarray(path_func(control_points(mobject1), control_points(mobject2), alpha), dtype=float)
             if points.shape != (5, 3) or not np.isfinite(points).all():
                 raise ValueError("CameraFrame path_func must return a finite (5, 3) point array")
+            if (np.abs(points) > np.finfo(np.float32).max).any():
+                raise ValueError("CameraFrame path_func points must be finite in float32 records")
             changes.append(("set_center", tuple(points[0])))
             changes.append(("set_shape", (float(points[2, 0] - points[1, 0]),
                                           float(points[4, 1] - points[3, 1]))))
@@ -1659,8 +1657,12 @@ def _install_camera_pose(g):
         # Preserve the core identity held by the renderer and native tracks.
         # Publish the raw inputs, not an already-normalized quaternion, so
         # normalization occurs exactly once on the live value as in Lumen.
+        if points is not None:
+            self._set_field_rows("point", points.tolist())
+            self._core._adopt_geometry(candidate.center(), candidate.shape())
         for method, value in changes:
-            getattr(self._core, method)(value)
+            if method not in ("set_center", "set_shape"):
+                getattr(self._core, method)(value)
         if changes:
             self.note_changed_data()
         return self
@@ -1692,14 +1694,12 @@ def _install_camera_motion(g):
             if not isinstance(frame, CameraFrame):
                 return original_rotation_interpolate(self, alpha)
             starting = self.starting_mobject
-            # A CameraFrame has no drawable records. Rotating's ordinary
-            # family_members_with_points()/match_points() loop therefore
-            # cannot restore its pose. Reset the spatial components before
-            # each absolute-angle rotation, including begin(0) and finish,
+            # Restore the complete control array and orientation before each
+            # absolute-angle rotation, including begin(0) and finish,
             # so orientation does not accumulate with the frame count.
             # FOV is an optical uniform, not part of that spatial reset.
-            frame._core.set_center(starting._core.center())
-            frame._core.set_shape(starting._core.shape())
+            frame._set_field_rows("point", starting.get_points().tolist())
+            frame._core._adopt_geometry(starting._core.center(), starting._core.shape())
             frame._core.set_orientation(starting._core.orientation())
             # As for drawable Rotating, restoration precedes rate evaluation:
             # an authored easing function may inspect or modify the live pose.

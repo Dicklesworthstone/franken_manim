@@ -51,6 +51,10 @@ def environment():
             return self.data.shape == other.data.shape
         def get_center(self):
             return self.data["point"][0].copy() if len(self.data) else np.zeros(3)
+        def get_points(self):
+            return self.data["point"]
+        def _set_field_rows(self, field, points):
+            self.data[field][:] = points
         def shift(self, vector):
             self.data["point"] += vector
             return self
@@ -97,9 +101,12 @@ def environment():
     class CameraFrame(Mobject):
         def __init__(self):
             super().__init__()
-            self.data = self.data[:0]
+            self.data = np.zeros(5, dtype=self.data.dtype)
+            self.data['point'][:] = [[0., 0., 0.], [-8., 0., 0.], [8., 0., 0.],
+                                     [0., -4., 0.], [0., 4., 0.]]
             self._core = Core()
         def shift(self, vector):
+            super().shift(vector)
             self._core.set_center(np.array(self._core.center()) + vector)
             return self
         def get_center(self):

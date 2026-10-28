@@ -19,6 +19,8 @@ use fmn_render::{
 };
 use fmn_studio::{TerminalPreview, TerminalProtocol, TuiLimits};
 use pyo3::prelude::*;
+#[cfg(any(test, feature = "gauntlet"))]
+use pyo3::types::PyDictMethods;
 use pyo3::types::{PyBytes, PyList};
 
 use crate::{
@@ -152,7 +154,7 @@ impl CameraCapture {
             ));
         }
         let mut camera = core.try_borrow()?.camera.clone();
-        *camera.frame_mut() = frame.try_borrow()?.frame.clone();
+        *camera.frame_mut() = frame.try_borrow()?.snapshot(frame.py())?;
         let (width, height) = camera.pixel_shape();
         if u64::from(width) * u64::from(height) > MAX_PIXELS {
             return Err(PyValueError::new_err(
@@ -349,8 +351,43 @@ impl CameraCapture {
     }
 }
 
+/// Run the installed-wheel camera lifecycle suite through the production portal.
+/// Returns the number of cases that exercised live points, rendering and restore.
+///
+/// # Errors
+/// Reports Python initialization errors, failed cases, or an unreadable summary.
+#[cfg(any(test, feature = "gauntlet"))]
+pub fn run_portal_gauntlet_camera_frame_points() -> Result<u64, String> {
+    crate::with_python_test_module("camera frame points", |py, _module, globals| {
+        let source = std::ffi::CString::new(concat!(
+            include_str!("../tests/camera_frame_lifecycle.py"),
+            "\n_result = unittest.TextTestRunner(verbosity=2).run(\n",
+            "    unittest.defaultTestLoader.loadTestsFromTestCase(CameraFrameLifecycleTests))\n",
+            "assert _result.wasSuccessful(), 'live camera frame geometry acceptance failed'\n",
+            "_camera_frame_point_cases = _result.testsRun\n",
+        ))
+        .map_err(|error| error.to_string())?;
+        py.run(source.as_c_str(), Some(globals), Some(globals))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        globals
+            .get_item("_camera_frame_point_cases")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "camera point acceptance summary is absent".to_owned())?
+            .extract()
+            .map_err(|error| error.to_string())
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn production_camera_frame_points_acceptance_suite() {
+        let cases = super::run_portal_gauntlet_camera_frame_points()
+            .expect("camera point views, groups, copies, animation and rendered capture agree");
+        assert!(cases >= 25, "camera lifecycle cases did not all run");
+    }
+
     #[test]
     fn production_terminal_preview_acceptance_suite() {
         crate::with_python_test_module("terminal preview", |py, _module, globals| {

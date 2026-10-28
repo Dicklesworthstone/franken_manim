@@ -12,7 +12,8 @@ from creation_protocol_support import BOOTSTRAP
 
 
 def environment():
-    g = {"_copy": copy, "_FamilyCycleError": ValueError}
+    g = {"_copy": copy, "_FamilyCycleError": ValueError,
+         "_CameraFrameCore": type("CameraFrameCore", (), {})}
     wanted = {"_family_preorder", "_copy_mobject_graph", "_copy_member_state",
               "_COPY_RELATIONSHIP_ATTRIBUTES"}
 

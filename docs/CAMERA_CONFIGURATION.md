@@ -54,10 +54,23 @@ constructor's final requested pose; customize these final public methods or
 modify the frame after construction to do that. Authored record fields, children
 and updaters are not discarded by pose finalization.
 
-This continues to use the separate native CameraFrame pose representation, not
-a replacement drawable point buffer. Lumen remains responsible for camera
-validation, projection and rendering, and existing camera animation drivers own
-interpolation and timing. No new native API, renderer or dependency is introduced.
+## Live frame geometry
+
+The frame has five real f32 point records, ordered as center, left, right,
+bottom and top. `get_points()` and `data["point"]` expose the same live storage.
+Edits through either view affect the camera's center and dimensions; projection
+and capture synchronize those edits even when no pose getter was called first.
+Reorientation changes the camera orientation without rotating these controls.
+
+`Group(*scene.mobjects)` includes the frame in its bounds. Shifting or scaling
+that group moves or zooms the camera, and group save/restore restores its points
+and camera uniforms. Copies own independent points and native cores. Same-sized
+camera edits and animation samples preserve retained NumPy views.
+
+Lumen remains responsible for camera validation, projection and rendering.
+Its core retains exact authored f64 pose values until the f32 controls change;
+orientation and field of view remain native camera state. The frame itself
+draws nothing.
 
 ## Acceptance boundary
 
@@ -68,6 +81,10 @@ PNG sequences at one/four threads. The unchanged implementation fails these
 witnesses. Local development can run them with the changed bootstrap methods
 overlaid on a retained native extension, but that is not an exact-tree wheel
 build, an embedded Rust-harness pass, or cross-platform certification.
+
+The registered `lifecycle.python_camera_frame_points.v1` scenario runs the same
+camera lifecycle suite through the production embedded portal, including raw
+point writes reaching PNG capture and SceneState restoration.
 
 Production installation uses `camera_lifecycle` and `camera_frame_lifecycle`
 through the shared portal initializer. The original saved bootstrap patch is

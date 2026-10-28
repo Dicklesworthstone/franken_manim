@@ -39,7 +39,7 @@ def install_scene_camera_configuration(native):
             g["_np"].random.seed(self.random_seed)
         # Reference Scene.__init__ constructs the camera and starts the scene
         # list as `[self.camera.frame]` (scene.py:117); the frame is an
-        # ordinary, point-less member of that list (fm-6l2i, below).
+        # ordinary, non-drawing member of that list (fm-6l2i, below).
         # Resolve the frame recipe before publishing the identity used by
         # animations and updaters. The capture Camera stays lazy, but must not
         # discard frame_config by replacing its frame with a default one.

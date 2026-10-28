@@ -26,9 +26,11 @@ Python updater identities, extension uniforms, and public data-lock sets.
 Mutable numeric arrays and built-in containers in extension uniforms are
 copied rather than left as shallow aliases to the live scene.
 
-The separate camera frame is also captured: center, shape, quaternion, field
-of view, Euler axes, default orientation, and Python updater list. Restoration
-uses the native camera setters on the original core, not a replacement handle.
+The camera frame is also captured: its five point records, center, shape,
+quaternion, field of view, Euler axes, default orientation, and Python updater
+list. Restoration retains the original core and adopts its saved pose after
+restoring the points, without rescaling their coordinates. Detached replacement
+frames retain their records too.
 Mobject-owned Python attributes and the camera frame's authored attributes
 are now captured with the same original identities. This includes numerical
 readout values and formatting parameters, TeX source strings/span maps, matrix
@@ -101,7 +103,8 @@ variables, generators, external files, Python-global RNGs, and already-running
 persistent-animation controllers are not rewound. Neither are bytes already
 emitted to an active output sink; restoring scene time is not media rollback.
 
-`SceneState(scene, ignore=[scene.frame])` leaves the current camera pose alone
+`SceneState(scene, ignore=[scene.frame])` leaves the current camera pose and
+point records alone
 while retaining the full native checkpoint when all drawable roots are still
 included. Excluding a drawable root continues to use the existing partial
 `become`/root replacement path. That partial path does not promise native
