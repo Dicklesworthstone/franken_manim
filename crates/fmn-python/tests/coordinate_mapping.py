@@ -122,6 +122,42 @@ class CoordinateMappingTests(unittest.TestCase):
         np.testing.assert_allclose(other.p2c(other.c2p(*point)), point, atol=2e-6)
         np.testing.assert_allclose(axes.p2c(axes.c2p(*point)), point, atol=2e-6)
 
+    def test_a_chart_is_solved_once_per_state_and_scalar_paths_match_the_array_paths(self):
+        # fm-cpyl: the dual-basis solve is cached by the axes' live endpoints
+        # and ranges. Count solves rather than time them.
+        import fmn_python.coordinate_mapping as mapping
+
+        solves = []
+        solve = mapping._dual_basis
+        mapping._dual_basis = lambda basis: (solves.append(1), solve(basis))[1]
+        # A transform no other test uses, so the module-wide cache starts cold.
+        matrix = [[1, .2731, 0], [0, 1, .0917], [0, 0, 1]]
+        try:
+            axes = self.axes(True)
+            axes.apply_matrix(matrix)
+            points = np.random.default_rng(3).uniform(-2, 2, size=(64, 3))
+            singles = [axes.p2c(point) for point in points]
+            self.assertEqual(len(solves), 1)
+            batch = axes.p2c(points)
+            self.assertEqual(len(solves), 1)
+            twin = self.axes(True)
+            twin.apply_matrix(matrix)
+            self.assertEqual(tuple(twin.p2c(points[0])), tuple(singles[0]))
+            self.assertEqual(len(solves), 1, 'the same chart state reuses its solve')
+            axes.shift((.5371, 0, 0))
+            axes.p2c(points[0])
+            axes.p2c(points[1])
+            self.assertEqual(len(solves), 2, 'a moved axis is solved again, once')
+        finally:
+            mapping._dual_basis = solve
+        # One point in Python floats and many points in numpy arrays perform the
+        # same IEEE operations, so they agree bit for bit.
+        for index, single in enumerate(singles):
+            self.assertEqual(tuple(single), tuple(column[index] for column in batch))
+        forward = axes.c2p(np.array([.3, -1.2]), np.array([.7, .4]), np.array([1.1, -.9]))
+        for index, coords in enumerate(((.3, .7, 1.1), (-1.2, .4, -.9))):
+            self.assertEqual(tuple(axes.c2p(*coords)), tuple(forward[index]))
+
     def test_complex_plane_alias_uses_the_correct_inverse(self):
         axes = m.ComplexPlane(x_range=(-2, 2, 1), y_range=(-2, 2, 1))
         axes.apply_matrix([[1, .75, 0], [0, -2, 0], [0, 0, 1]])

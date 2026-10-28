@@ -7,6 +7,7 @@ This is the host's existing coordinate adapter, not a geometry/renderer owner.
 from __future__ import annotations
 
 import math
+import struct
 import sys
 import itertools
 import inspect
@@ -328,8 +329,10 @@ def _unit(vector):
     return tuple(value / length for value in vector), length
 
 
-def _inverse(basis, offset):
-    """Fixed-order dual-basis solve, with no BLAS or unscaled Gram matrix."""
+def _dual_basis(basis):
+    """Fixed-order dual-basis solve, with no BLAS or unscaled Gram matrix:
+    ``(duals, determinant, scales)``, whose per-point use is
+    ``(dot(offset, dual) / determinant) / scale`` for each chart axis."""
     normalized = [_unit(column) for column in basis]
     vectors = [item[0] for item in normalized]
     if len(vectors) == 2:
@@ -341,9 +344,15 @@ def _inverse(basis, offset):
     determinant = _dot(a, duals[0])
     if not math.isfinite(determinant) or abs(determinant) <= 64 * sys.float_info.epsilon:
         raise ValueError("axes coordinate mapping is singular or numerically degenerate")
-    result = tuple((_dot(offset, dual) / determinant) / scale
-                   for dual, (_, scale) in zip(duals, normalized))
-    return result
+    return duals, determinant, tuple(scale for _, scale in normalized)
+
+
+# A chart's inverse is a pure function of its axes' live endpoints and ranges,
+# so prepared inverses are kept by exactly those values (fm-cpyl): an edited
+# axis is a different key, never a stale entry.
+_PREPARED_LIMIT = 64
+_KEY_2D = struct.Struct("16d")  # two axes: start and end each, then two ranges
+_KEY_3D = struct.Struct("24d")
 
 
 def install_coordinate_mapping(native):
@@ -374,18 +383,68 @@ def install_coordinate_mapping(native):
         if target.ndim == 0 or target.shape[-1] != 3 or np.iscomplexobj(target):
             raise ValueError("axes points must have a final dimension of three real coordinates")
         target = target.astype(float, copy=False)
-        if not np.isfinite(target).all():
+        if target.ndim == 1:
+            values = target.tolist()
+            if not all(math.isfinite(v) for v in values):
+                raise ValueError("axes points must contain finite coordinates")
+        elif not np.isfinite(target).all():
             raise ValueError("axes points must contain finite coordinates")
         axes, ranges = tuple(self.axes), tuple(self.get_all_ranges())
         if len(axes) not in (2, 3) or len(ranges) != len(axes):
             raise ValueError("affine coordinate mapping requires two or three axes and matching ranges")
+        origin, duals, determinant, scales = prepare(axes, ranges)
+        if target.ndim == 1:
+            # One point, in Python floats: the same IEEE operations in the
+            # same order as the array path (and _dot), without a numpy call
+            # per scalar.
+            x, y, z = values
+            ox, oy, oz = x - origin[0], y - origin[1], z - origin[2]
+            if not (math.isfinite(ox) and math.isfinite(oy) and math.isfinite(oz)):
+                raise ValueError("axes point displacement must be finite")
+            result = tuple(((ox * dual[0] + oy * dual[1] + oz * dual[2]) / determinant) / scale
+                           for dual, scale in zip(duals, scales))
+            if not all(math.isfinite(v) for v in result):
+                raise ValueError("axes inverse coordinates are not finite")
+            return result
+        offset = tuple(target[..., d] - origin[d] for d in range(3))
+        if not all(np.isfinite(v).all() for v in offset):
+            raise ValueError("axes point displacement must be finite")
+        result = tuple((_dot(offset, dual) / determinant) / scale
+                       for dual, scale in zip(duals, scales))
+        if not all(np.isfinite(v).all() for v in result):
+            raise ValueError("axes inverse coordinates are not finite")
+        return result
+
+    prepared = {}
+
+    def prepare(axes, ranges):
+        """``(origin, duals, determinant, scales)`` of the live chart, kept by
+        the axes' current endpoints and ranges (the values it is computed
+        from), so a repeated query skips the solve and a moved axis misses."""
+        starts = [axis._get_start() for axis in axes]
+        ends = [axis._get_end() for axis in axes]
+        try:
+            # Bit patterns: -0.0 and 0.0 compare equal but can solve to
+            # differently signed zeros, so they must not share an entry.
+            if len(axes) == 2:
+                key = _KEY_2D.pack(*starts[0], *ends[0], *starts[1], *ends[1],
+                                   ranges[0][0], ranges[0][1], ranges[1][0], ranges[1][1])
+            else:
+                key = _KEY_3D.pack(*starts[0], *ends[0], *starts[1], *ends[1],
+                                   *starts[2], *ends[2], ranges[0][0], ranges[0][1],
+                                   ranges[1][0], ranges[1][1], ranges[2][0], ranges[2][1])
+        except (struct.error, TypeError, ValueError, IndexError):
+            key = None  # a malformed chart: solve (and refuse) without keeping it
+        hit = None if key is None else prepared.get(key)
+        if hit is not None:
+            return hit
         basis, origins = [], []
-        for axis, domain in zip(axes, ranges):
+        for start, end, domain in zip(starts, ends, ranges):
             low, high = float(domain[0]), float(domain[1])
             span = high - low
             if not math.isfinite(low) or not math.isfinite(high) or not math.isfinite(span) or span == 0:
                 raise ValueError("axes coordinate ranges must have distinct finite bounds")
-            start, end = vector(axis._get_start(), "axis start"), vector(axis._get_end(), "axis end")
+            start, end = vector(start, "axis start"), vector(end, "axis end")
             column = tuple((b - a) / span for a, b in zip(start, end))
             alpha = -low / span
             origin = tuple((1 - alpha) * a + alpha * b for a, b in zip(start, end))
@@ -395,13 +454,12 @@ def install_coordinate_mapping(native):
         # axes were moved independently. Do not assume they still intersect.
         origin = tuple(origins[0][d] + sum(row[d] - origins[0][d] for row in origins)
                        for d in range(3))
-        offset = tuple(target[..., d] - origin[d] for d in range(3))
-        if not all(np.isfinite(v).all() for v in offset):
-            raise ValueError("axes point displacement must be finite")
-        result = _inverse(basis, offset)
-        if not all(np.isfinite(v).all() for v in result):
-            raise ValueError("axes inverse coordinates are not finite")
-        return tuple(float(v) for v in result) if target.ndim == 1 else result
+        solved = (origin, *_dual_basis(basis))
+        if key is not None:
+            if len(prepared) >= _PREPARED_LIMIT:
+                prepared.clear()
+            prepared[key] = solved
+        return solved
 
     point_to_coords.__name__ = "point_to_coords"
     point_to_coords.__qualname__ = Axes.__qualname__ + ".point_to_coords"

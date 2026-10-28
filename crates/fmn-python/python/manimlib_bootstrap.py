@@ -275,6 +275,26 @@ def _axis_number_to_point(axis, x_min, x_max, number):
     return _outer_interpolate(start, end, alpha)
 
 
+def _axes_scalar_point(axes, ranges, coords):
+    # Axes.coords_to_point for scalar coordinates in Python floats: the same
+    # IEEE operations, in the same order, as the array path through
+    # _axis_number_to_point and _interpolate, without a numpy call per
+    # scalar (fm-cpyl).
+    def at(axis, rng, number):
+        alpha = (float(number) - rng[0]) / (rng[1] - rng[0])
+        return [
+            (1 - alpha) * start + alpha * end
+            for start, end in zip(axis._get_start(), axis._get_end())
+        ]
+
+    origin = at(axes[0], ranges[0], 0)
+    result = list(origin)
+    for axis, rng, coord in zip(axes, ranges, coords):
+        point = at(axis, rng, coord)
+        result = [r + (p - o) for r, p, o in zip(result, point, origin)]
+    return _np.array(result, dtype=float)
+
+
 def _axis_point_to_number(axis, x_min, x_max, point):
     # NumberLine.point_to_number (number_line.py:140), verbatim.
     start = _np.array(axis._get_start())
@@ -7458,6 +7478,8 @@ class Axes(VGroup, CoordinateSystem):
     def coords_to_point(self, *coords):
         axes = list(self.axes)
         ranges = self.get_all_ranges()
+        if all(isinstance(coord, (int, float)) for coord in coords):
+            return _axes_scalar_point(axes, ranges, coords)
         origin = _axis_number_to_point(axes[0], ranges[0][0], ranges[0][1], 0)
         result = _np.array(origin, dtype=float)
         for axis, rng, coord in zip(axes, ranges, coords):
