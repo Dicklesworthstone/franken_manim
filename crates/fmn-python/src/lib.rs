@@ -12984,6 +12984,47 @@ pub fn run_portal_gauntlet_native_outputs(
     })
 }
 
+/// One embedded Python scene through the production portal route to y4m: a
+/// square sliding right for `seconds` at 128x72, 30 fps, on a fixed team of
+/// `threads`. Returns the frame count. PG-6's process-level allocation harness
+/// renders it twice, short and long, and takes the per-frame cost from the
+/// difference (fm-counting-allocator-harness-r4-ndz8).
+#[cfg(feature = "gauntlet")]
+pub fn render_portal_slide(
+    destination: &std::path::Path,
+    seconds: f64,
+    threads: usize,
+) -> Result<u64, String> {
+    with_python_test_module("portal slide", |py, _module, globals| {
+        globals
+            .set_item("_fmn_destination", destination.to_string_lossy().as_ref())
+            .and_then(|()| globals.set_item("_fmn_seconds", seconds))
+            .and_then(|()| globals.set_item("_fmn_threads", threads))
+            .map_err(|error| error.to_string())?;
+        let source = CString::new(
+            "import manimlib as m\n\
+             class Slide(m.Scene):\n\
+             \x20   def construct(self):\n\
+             \x20       square = m.Square(side_length=1).set_color(m.BLUE)\n\
+             \x20       self.add(square)\n\
+             \x20       self.play(square.animate.shift(2 * m.RIGHT), run_time=_fmn_seconds,\n\
+             \x20                 rate_func=m.linear)\n\
+             _fmn_frames = Slide().render(_fmn_destination, format='y4m', resolution=(128, 72),\n\
+             \x20                            fps=30, threads=_fmn_threads).frame_count\n",
+        )
+        .expect("the slide scene contains no NUL");
+        py.run(source.as_c_str(), Some(globals), Some(globals))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        globals
+            .get_item("_fmn_frames")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "the slide scene reported no frame count".to_owned())?
+            .extract::<u64>()
+            .map_err(|error| error.to_string())
+    })
+}
+
 /// Exercise negotiated output through both programmatic and console owners.
 /// The shared acceptance source independently decodes real encoder output;
 /// `FMN_REQUIRE_FFMPEG=1` makes encoder availability a hard prerequisite.

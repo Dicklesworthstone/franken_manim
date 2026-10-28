@@ -421,6 +421,37 @@ producer emits evidence. The measured batch still forces host qualification
 false in calibration mode; this makes shared-host output useful without
 inventing a closeable whole-PG-6 verdict.
 
+## Process-level steady-state allocations (calibration, not a gate verdict)
+
+The arena counter above sees only the raster arena. The e2e scenario
+`lifecycle.steady_state_allocations.v1` (`tests/steady_state_allocations.rs`)
+counts every heap allocation the test process makes while it renders, through
+a counting global allocator. Each rate is the difference of a long and a short
+render of one scene: their events over their frames, the fewest of five
+repetitions. A planted allocation in the frame loop moves the one-thread
+`fmn::render` y4m rate by exactly 1 (28.233 to 29.233); the scenario asserts
+that. The rates themselves are informational until fm-render-team-pool-j9ub
+and fm-soa-mirrors-dead-p0gc land.
+
+Calibration readings, 2026-10-28, tree 1322959a, shared rch worker vmi1227854,
+128x72, events per frame:
+
+| route | 1 thread | 4 threads |
+|---|---|---|
+| `fmn::render` y4m | 28.2 | 41.2 |
+| `fmn::render` PNG sequence | 2551 | 2564 |
+| CLI y4m, the 25-scene primitive corpus | median 22.0, range 21.0-37.7 | 34.3 (`circle_shift.v1`) |
+| CLI PNG sequence, `circle_shift.v1` | 8950 | 8964 |
+| portal Python scene, y4m (Rust allocations; CPython's own allocator is not counted) | 36.9 | 49.9 |
+| `fmn::render` y4m with a no-op scene updater | 58.9, repetitions spread by up to 320 events | - |
+
+- The four-thread team adds exactly 13 events per frame on every route.
+- Dashed lines are the corpus's heaviest scenes, at about 16 more per frame
+  than solid shapes.
+- The portal adds 8.6 per frame over `fmn::render` at one thread.
+- PNG encoding dominates the PNG routes: 0.45-0.7 MB and 2.5k-9k events per
+  frame for a 37 KB frame.
+
 ## Canonical PG-6 4K 3D peak-residency workload
 
 The `fmn-perf-pg6-peak-definition/1` bytes bind three camera states over one
