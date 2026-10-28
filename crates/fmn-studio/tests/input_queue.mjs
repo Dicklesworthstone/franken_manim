@@ -135,6 +135,23 @@ test('presentation completion disables continuation and replacement workers rest
   assert.equal(f.$('play').textContent, 'Continue');
 });
 
+for (const presenter of [false, true]) {
+  test(`playback can pause while a ${presenter ? 'presenter' : 'normal'} frame is still rendering`, async () => {
+    const f = fixture({presenter});
+    f.$('input-events').checked = false;
+    f.$('play').emit('click');
+    f.tick(1000);
+    assert.equal(f.state.busy, true, 'the worker request is still in flight');
+    assert.equal(f.state.playing, true);
+    f.$('play').emit('click');
+    assert.equal(f.state.playing, false, 'Pause takes effect before the worker returns');
+    await f.settled();
+    f.tick(2000);
+    assert.equal(f.calls.length, 1, 'the completed request does not restart playback');
+    assert.equal(f.$('play').textContent, presenter ? 'Continue' : 'Play');
+  });
+}
+
 test('saving drains accepted gestures and releases before exactly one export', async () => {
   const f = fixture(), preview = f.$('preview');
   preview.emit('keydown', {key:'g'}); preview.emit('pointerdown', {buttons:1});

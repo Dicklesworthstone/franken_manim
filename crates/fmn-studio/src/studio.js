@@ -382,8 +382,11 @@
   }
   function togglePlayback() {
     const v = state.snapshot?.view;
-    if (!v || state.savePending || state.busy || state.inputs.length || state.restartPending ||
+    if (!v || state.savePending || state.busyKind === "save" ||
         (state.snapshot.presenter?.enabled && v.frame_index === v.frame_count - 1)) return;
+    // A slow in-flight render must never prevent Pause. Starting playback
+    // waits for the current operation so it cannot race a seek or worker swap.
+    if (!state.playing && (state.busy || state.inputs.length || state.restartPending)) return;
     stopLive();
     const playing = !state.playing;
     releaseInputs(); state.playing = playing;

@@ -1,5 +1,6 @@
 //! Run: cargo run -p fmn-studio --example native_live
 //! Headless real-process + HTTP acceptance: append `-- --self-test`.
+//! Presenter holds between authored segments: append `-- --presenter`.
 //! The parent owns only host/supervisor state. The factory runs in the child.
 
 use std::error::Error;
@@ -152,7 +153,7 @@ fn program() -> std::result::Result<NativeSceneProgram, ServiceError> {
     )
 }
 
-fn config(build_id: ProtocolDigest) -> NativeWorkerConfig {
+fn config(build_id: ProtocolDigest, presenter_mode: bool) -> NativeWorkerConfig {
     let renderer = RetainedFrameRendererConfig {
         frame: FrameConfig::new(
             Viewport {
@@ -189,6 +190,7 @@ fn config(build_id: ProtocolDigest) -> NativeWorkerConfig {
     // This demo has no external assets, I/O or shared factory captures.
     config.replay = NativeReplayPolicy::ColdVerified;
     config.checkpoint_frames = 30;
+    config.presenter_mode = presenter_mode;
     config
 }
 
@@ -339,16 +341,28 @@ fn http_smoke(host: &StudioHost, frames: &FrameHub, cap: &str) -> Result<()> {
 
 fn run() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    let worker_mode = args.len() == 1 && args[0] == WORKER_ARG;
-    let self_test = args.len() == 1 && args[0] == "--self-test";
-    if !args.is_empty() && !worker_mode && !self_test {
-        return Err("usage: native_live [--self-test]".into());
+    let mut worker_mode = false;
+    let mut self_test = false;
+    let mut presenter_mode = false;
+    for arg in &args {
+        if arg == WORKER_ARG && !worker_mode {
+            worker_mode = true;
+        } else if arg == "--self-test" && !self_test {
+            self_test = true;
+        } else if arg == "--presenter" && !presenter_mode {
+            presenter_mode = true;
+        } else {
+            return Err("usage: native_live [--self-test] [--presenter]".into());
+        }
+    }
+    if worker_mode && self_test {
+        return Err("the native worker cannot run the host self-test".into());
     }
     let executable = std::env::current_exe()?;
     // Host composition only: hash the exact executable the launcher will own.
     // Scene construction/playback never reads the filesystem or ambient clock.
     let build_id = protocol_digest(&std::fs::read(&executable)?);
-    let config = config(build_id);
+    let config = config(build_id, presenter_mode);
     let limits = config.limits;
     if worker_mode {
         let mut worker = NativeSceneWorker::new(config, program)?;
@@ -376,9 +390,13 @@ fn run() -> Result<()> {
             ceiling_bytes: Some(64 * 1024 * 1024),
         },
     )?;
+    let mut worker_argv = vec![WORKER_ARG.into()];
+    if presenter_mode {
+        worker_argv.push("--presenter".into());
+    }
     let mut builder = SameExecutable(WorkerArtifact {
         executable,
-        argv: vec![WORKER_ARG.into()],
+        argv: worker_argv,
         env: Vec::new(),
         cwd: None,
         build_id,

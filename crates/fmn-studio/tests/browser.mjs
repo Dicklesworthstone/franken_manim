@@ -1,6 +1,8 @@
 // Real Chrome + shipped fmn Studio acceptance. No browser framework or mock
 // server. Build fmn through RCH first, then pass its exact executable path.
 // Usage: /usr/bin/node browser.mjs /absolute/fmn /absolute/evidence-directory
+// The same presenter acceptance can use the native_live example with
+// FMN_STUDIO_NATIVE_LIVE=1 FMN_STUDIO_PRESENTER_ONLY=1.
 import {spawn, spawnSync, execFileSync} from "node:child_process";
 import {mkdir, mkdtemp, readFile, writeFile, open, symlink} from "node:fs/promises";
 import {createHash} from "node:crypto";
@@ -10,6 +12,10 @@ import {once} from "node:events";
 import assert from "node:assert/strict";
 
 const binary = resolve(process.argv[2]), output = resolve(process.argv[3]);
+const nativeLive = process.env.FMN_STUDIO_NATIVE_LIVE === "1";
+if (nativeLive && process.env.FMN_STUDIO_PRESENTER_ONLY !== "1") {
+  throw new Error("The native_live example supports only the presenter acceptance; set FMN_STUDIO_PRESENTER_ONLY=1.");
+}
 const chrome = process.env.FMN_CHROME || "/usr/bin/google-chrome";
 const userAgent = "franken_manim-agent (+https://github.com/Dicklesworthstone/franken_manim)";
 await mkdir(output, {recursive:true});
@@ -31,7 +37,9 @@ async function stop(child) {
   try { await stopped; } finally { clearTimeout(timer); clearTimeout(killTimer); }
 }
 async function startStudio(scene, extra = [], threads = "1") {
-  const child = spawn(binary, ["studio","--robot","--no-browser","--resolution","384x216","--fps","8","--threads",threads,...extra,"@builtin",scene],
+  const argv = nativeLive ? ["--presenter"]
+    : ["studio","--robot","--no-browser","--resolution","384x216","--fps","8","--threads",threads,...extra,"@builtin",scene];
+  const child = spawn(binary, argv,
     {stdio:["pipe","pipe","pipe"], env:{...process.env, PYTHONHOME:"", PYTHONPATH:""}});
   let stdout = "";
   let stderr = "";
@@ -40,7 +48,10 @@ async function startStudio(scene, extra = [], threads = "1") {
   try {
     const ready = await until(() => {
       if (child.exitCode !== null) throw new Error(`Studio exited ${child.exitCode}: ${redact(stderr)}`);
-      for (const line of stdout.split("\n")) { try { const data = JSON.parse(line); if (data.kind === "studio_ready") return data; } catch {} }
+      for (const line of stdout.split("\n")) {
+        if (nativeLive && line.startsWith("http://")) return {url:line};
+        try { const data = JSON.parse(line); if (data.kind === "studio_ready") return data; } catch {}
+      }
     }, "native Studio ready");
     const url = new URL(ready.url), cap = url.searchParams.get("cap");
     assert.equal(url.protocol,"http:"); assert.ok(["127.0.0.1","[::1]"].includes(url.hostname));
@@ -240,6 +251,8 @@ try {
     }
   `});
   await command("Emulation.setDeviceMetricsOverride",{width:1280,height:1000,deviceScaleFactor:1,mobile:false});
+  const firstBoundary = nativeLive ? 30 : 8;
+  const secondBoundary = nativeLive ? 60 : 12;
   studio = await startStudio("circle_shift.v1", ["-p"]);
   await command("Page.navigate", {url:studio.url.href});
   await synchronized(0);
@@ -250,7 +263,7 @@ try {
   assert.equal((await inspect()).scene_time, 0, "initial presenter hold never advances the clock");
   await evaluate("document.getElementById('preview').focus()");
   await key("Enter", "Enter", 13);
-  await synchronized(8);
+  await synchronized(firstBoundary);
   const held = await inspect();
   assert.equal(held.presenter.at_boundary, true);
   assert.equal(await evaluate("document.getElementById('presenter-status').dataset.playing"), "false");
@@ -259,19 +272,29 @@ try {
   await sleep(300);
   assert.deepEqual(await inspect(), held, "a held key and wall time cannot skip a presenter boundary");
   await click("#preview");
-  await synchronized(12);
+  await synchronized(secondBoundary);
+  if (nativeLive) {
+    assert.equal((await inspect()).presenter.at_boundary, true,
+      "the deferred second animation ends at its own presenter hold");
+    await evaluate("document.getElementById('frame').value='899'; document.getElementById('timeline-form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true}))");
+    await synchronized(899);
+    await click("#play"); await synchronized(900);
+  }
   assert.equal(await evaluate("document.getElementById('play').textContent"), "Finished");
   assert.equal(await evaluate("document.getElementById('play').disabled"), true);
   await click("#first"); await synchronized(0);
-  await click("#play"); await synchronized(8);
-  await click("#inspect"); await synchronized(8);
+  await click("#play"); await synchronized(firstBoundary);
+  await click("#inspect"); await synchronized(firstBoundary);
   assert.equal(await evaluate("document.getElementById('presenter-status').dataset.playing"), "false");
   await screenshot("presenter.boundary.png");
-  receipt.scenarios.push({scene:"presenter.v1",initial_hold:true,segment_hold:8,
+  receipt.scenarios.push({scene:nativeLive ? "native_live.presenter.v1" : "presenter.v1",
+    initial_hold:true,segment_hold:firstBoundary,
     enter_continue:true,click_continue:true,button_continue:true,key_repeat_ignored:true,
     clock_frozen:true,scrubbing:true,inspector_responsive:true});
   await command("Page.navigate", {url:"about:blank"}); await stop(studio.child);
-  assert.equal(studio.child.exitCode,0); assert.equal(studio.stderr(),""); studio = null;
+  assert.equal(studio.child.exitCode,0);
+  assert.equal(studio.stderr(), nativeLive ? "Open this private URL. Press Enter in this terminal to close Studio.\n" : "");
+  studio = null;
   if (process.env.FMN_STUDIO_PRESENTER_ONLY !== "1") {
   for (const scene of ["circle_shift.v1","tex_span.v1"]) {
     studio = await startStudio(scene);
