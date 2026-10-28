@@ -4,13 +4,27 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/native-camera-readback.yml'
+      - 'crates/fmn-python/src/lib.rs'
       - 'crates/fmn-python/src/portal_readback.rs'
+      - 'crates/fmn-python/src/portal_studio/live.rs'
+      - 'crates/fmn-python/python/manimlib_bootstrap.py'
+      - 'crates/fmn-python/python/manimlib/_animation_semantics.py'
       - 'crates/fmn-python/python/fmn_python/camera_capture.py'
+      - 'crates/fmn-python/python/fmn_python/camera_frame_lifecycle.py'
+      - 'crates/fmn-python/python/fmn_python/camera_lifecycle.py'
+      - 'crates/fmn-python/python/fmn_python/scene_state.py'
       - 'crates/fmn-python/python/fmn_python/terminal_preview.py'
       - 'crates/fmn-python/tests/camera_readback.py'
+      - 'crates/fmn-python/tests/camera_snapshot.py'
+      - 'crates/fmn-python/tests/camera_frame_lifecycle.py'
+      - 'crates/fmn-python/tests/scene_state.py'
       - 'crates/fmn-python/tests/terminal_preview.py'
       - 'crates/fmn-python/tests/terminal_editor.py'
       - 'crates/fmn-python/tests/test_camera_capture_protocol.py'
+      - 'crates/fmn-python/tests/test_camera_pose_protocol.py'
+      - 'crates/fmn-python/tests/test_camera_choreography_protocol.py'
+      - 'crates/fmn-python/tests/test_scene_state_protocol.py'
+      - 'crates/fmn-conformance/tests/e2e_scenarios.rs'
   workflow_dispatch:
 permissions:
   contents: read
@@ -51,6 +65,7 @@ jobs:
           set -euo pipefail
           cargo test --locked -p fmn-python --lib portal_readback::tests -- --nocapture 2>&1 | tee /tmp/camera-native.log
           cargo test --locked -p fmn-studio tui 2>&1 | tee /tmp/camera-terminal-codecs.log
+          PYTHONPATH="$PWD/crates/fmn-python/python" cargo test --locked -p fmn-conformance --test e2e_scenarios python_camera_frame_points_scenario_passes -- --nocapture 2>&1 | tee /tmp/camera-frame-points.log
           cargo clippy --locked -p fmn-python --lib -- -D warnings 2>&1 | tee /tmp/camera-clippy.log
       - name: Build and exercise the installed native wheel
         run: |
@@ -58,7 +73,7 @@ jobs:
           python -m maturin build --locked --interpreter python --profile dev --out target/camera-wheel 2>&1 | tee /tmp/camera-build.log
           python -m venv target/camera-venv
           target/camera-venv/bin/python -m pip install 'numpy==2.5.2' 'IPython==9.14.0' target/camera-wheel/*.whl
-          for suite in camera_readback camera_snapshot terminal_preview terminal_editor; do
+          for suite in camera_readback camera_snapshot camera_frame_lifecycle scene_state terminal_preview terminal_editor; do
             target/camera-venv/bin/python -I "crates/fmn-python/tests/$suite.py" 2>&1 | tee "/tmp/camera-$suite.log"
           done
       - name: Preserve exact native validation and source

@@ -7,6 +7,7 @@ on:
       - '.github/workflows/native-studio-live.yml'
       - 'crates/fmn-cli/src/**'
       - 'crates/fmn-cli/tests/camera_studio.rs'
+      - 'crates/fmn-cli/tests/cli_smoke.rs'
       - 'crates/fmn-studio/src/**'
       - 'crates/fmn-studio/tests/**'
       - 'crates/fmn-conformance/tests/e2e_scenarios.rs'
@@ -83,12 +84,15 @@ jobs:
         run: |
           cargo test --locked -p fmn-studio --test camera_bundle_worker
           cargo test --locked -p fmn-cli --features cli,batch --test camera_studio
+          cargo test --locked -p fmn-cli --features cli,batch --test cli_smoke shipped_studio_terminal
           cargo test --locked -p fmn-studio --lib
           cargo test --locked -p fmn-studio --test native_committed_input --test native_worker --test native_deferred_worker --test studio
           cargo test --locked -p fmn-cli --features cli,batch --lib studio_live
           cargo test --locked -p fmn-scene --test runtime
       - name: Exercise authenticated HTTP and worker restart through the shipping executable
-        run: cargo test --locked -p fmn-conformance --test e2e_scenarios studio_native_ -- --nocapture
+        run: |
+          cargo test --locked -p fmn-conformance --test e2e_scenarios studio_native_ -- --nocapture
+          cargo test --locked -p fmn-conformance --test e2e_scenarios studio_terminal_controls_scenario_passes -- --nocapture
       - name: Exercise real Chrome editing and exact streamed pixels
         if: ${{ !cancelled() }}
         shell: bash

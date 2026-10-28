@@ -12142,7 +12142,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
     ));
     specs.push(spec(
         "lifecycle.rate_func_tabulated_offload.v1",
-        ScenarioClass::Lifecycle,
+        ScenarioClass::LifecycleDrill,
         Surface::PythonInProcess,
         Invocation::new(python_exact_rate_offload_run),
         vec![
@@ -13929,6 +13929,16 @@ fn studio_camera_preview_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.studio_camera_preview.v1")
         .expect("the live Studio camera scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn studio_terminal_controls_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.studio_terminal_controls.v1")
+        .expect("terminal Studio controls scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }
