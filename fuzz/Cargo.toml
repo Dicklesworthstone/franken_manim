@@ -113,6 +113,24 @@ test = false
 doc = false
 
 [[bin]]
+name = "tex_layout"
+path = "fuzz_targets/tex_layout.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "ttf_glyf_outlines"
+path = "fuzz_targets/ttf_glyf_outlines.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "ttf_cff"
+path = "fuzz_targets/ttf_cff.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "path_boolean"
 path = "fuzz_targets/path_boolean.rs"
 test = false

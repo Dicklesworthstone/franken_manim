@@ -13,7 +13,7 @@ call it).
 
 ## Targets
 
-Ten coverage-guided harnesses over the §14.2 untrusted-input surfaces.
+Thirteen coverage-guided harnesses over the §14.2 untrusted-input surfaces.
 Each asserts the contract (§16.5/R14): for any input, refuse with a
 typed error **or** succeed inside the declared budget — never panic,
 never hang, never overallocate.
@@ -28,7 +28,10 @@ never hang, never overallocate.
 | `svg_document` | `fmn_geom::svg::SvgDocument::parse_with_limits(data, &SvgLimits::default())` | totality only |
 | `yaml_config` | `fmn_config::yaml::parse_with_limits(text, Limits::default())` (UTF-8 inputs) | totality only |
 | `tex_math` | `fmd_math::parse(text)` (UTF-8 inputs) | totality only |
+| `tex_layout` | `fmn_library::{Tex, TexText}::build` over the default pack: fmd-math parse, layout and outline emission (first byte picks display `Tex`, inline `Tex` or `TexText`) | a refusal is a precise fmd-math error (a construct name or byte position); a build stays inside `fmd_math::Budgets::DEFAULT` with one child per primitive; each input finishes within 100 ms; a slow one is re-timed three times beside a calibration formula and counts only if its best time also exceeds 50 times the calibration's and 10 times its per-unit time over the input's bytes or placed primitives, whichever is larger, so host load and linear cost on large inputs or outputs are not findings |
 | `ttf_font_parse` | `fmd_font::Font::parse(bytes)` | totality only |
+| `ttf_glyf_outlines` | `Font::parse`, then every glyph's `glyph_outline` (composites), `glyph_components`, GSUB/GPOS, and the `gvar` instancer at the `wght` ends and default | outline coordinates finite; at most 3 × `MAX_OUTLINE_POINTS` emitted points per glyph. A first byte ≥ 0x40 reads the rest as byte edits on a valid base font (fmd-font's variable fixture, run-time subsets of bundled OFL faces) |
+| `ttf_cff` | `Font::cff_outline` for the first 64 glyphs, then `Font::try_subset_glyphs` on an `OTTO` font | CFF points finite; a subset parses again and every kept glyph decodes to the same outline. Base-edit mode starts from a minimal four-glyph CFF1 font built in the harness |
 | `path_boolean` | `fmn_library::boolean_ops::{union, difference}` (and `_with_options`) over two paths built from f32 point triples | totality only |
 
 Hangs are policed by libFuzzer's `-timeout` and allocation by
@@ -57,9 +60,24 @@ FMN_FUZZ_SECONDS=600 bash scripts/fuzz_scheduled.sh   # longer session
 
 If `cargo-fuzz` is not installed, the script falls back to
 `cargo build --release --manifest-path fuzz/Cargo.toml --target-dir fuzz/target`
-and drives the libFuzzer binaries directly — degraded guidance (no
-coverage flags), but the budget assertions, hang timeout, rss cap, and
-corpus replay all still hold.
+and drives the libFuzzer binaries directly. It passes the flags cargo-fuzz
+0.13 passes (sanitizer-coverage instrumentation, `--cfg fuzzing`,
+AddressSanitizer) and builds for the host triple, so guidance and checks
+match the primary path.
+
+On the rch fleet, where no worker has cargo-fuzz and local builds are
+banned, a campaign is one job per target. `-j 3` is how rch sizes the
+reserved worker; the result dir brings back the grown corpus and any
+reproducer:
+
+```sh
+rch exec --job --worker <w> --result-dir frames/<run>/<target> -- env \
+    FMN_FUZZ_SECONDS=3600 FMN_FUZZ_TARGETS=<target> \
+    FMN_FUZZ_CORPUS_ROOT=frames/<run>/<target>/corpus \
+    FMN_FUZZ_SEED_ROOT=frames/<seeds> \
+    FMN_FUZZ_ARTIFACTS=frames/<run>/<target>/artifacts/ \
+    bash scripts/fuzz_scheduled.sh -j 3
+```
 
 ## CI
 
@@ -87,7 +105,13 @@ Longer recorded campaigns, with per-target tables, live in
   committing — `cargo fuzz cmin <target>` — and prefer a small corpus of
   high-coverage units over bulk.
 - Crash reproducers never go in the corpus; they are fixed at the
-  source, then a regression fixture lands in the fmn-codec test suite.
+  source, then a regression fixture lands in the crate under test, with
+  the write-up under `fuzz/findings/`.
+- The G0-4 TeX corpus (CC BY-NC-SA, `corpus/tex_corpus.jsonl`) seeds
+  `tex_layout` campaigns only at run time, through `FMN_FUZZ_SEED_ROOT`
+  under the gitignored `frames/`. Units grown from it and reproducers
+  derived from it stay there too; a committed reproducer is minimized to
+  synthetic input first.
 - `fuzz/target/` and `fuzz/artifacts/` are gitignored build/reproducer
   sinks; `fuzz/Cargo.lock` is committed and governed (class=`fuzz` rows
   in `SUITE_ALLOWLIST.tsv`).

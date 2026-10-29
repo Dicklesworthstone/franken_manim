@@ -230,6 +230,12 @@ cargo test -p fmn-python --lib production_
 echo "==> cargo check --target wasm32-unknown-unknown (W5 wasm tier-1 axis)"
 cargo check --target wasm32-unknown-unknown -p fmn-render -p fmn-scene -p fmn-geom -p fmn-mobject -p fmn-anim -p fmn-core
 
+# The libFuzzer targets (fuzz/, ADR-0003 class=fuzz) run only on schedule,
+# so this compile check is what keeps them building against today's APIs
+# (fm-fmd-math-fuzz-budgets-k8fe). No sanitizer: type-checking is the point.
+echo "==> cargo check --manifest-path fuzz/Cargo.toml --bins (fuzz targets compile)"
+cargo check --manifest-path fuzz/Cargo.toml --bins
+
 echo "==> cargo clippy --all-targets -- -D warnings"
 cargo clippy --all-targets -- -D warnings
 
