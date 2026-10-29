@@ -1779,13 +1779,16 @@ mod tests {
         // cc470d1a (physics' function arguments in the default pack, whose
         // macro identity gains the physics flag), 450111a4 (TexText line
         // breaking, whose macro identity gains the pack's line width),
-        // 04d811db (TeX's delimiter size chain), and 4f2bcc95 (script Greek
-        // capitals in cmr7's and cmr5's designs).
+        // 04d811db (TeX's delimiter size chain), 4f2bcc95 (script Greek
+        // capitals in cmr7's and cmr5's designs), and e7b4309d
+        // (fm-fmd-math-fuzz-budgets-k8fe: named resource budgets, physics
+        // arguments parsed once; no layout changes, so only the revision moves
+        // the identity).
         assert_eq!(
             [cold.digest(), cached.digest(), text.digest()].map(|digest| digest.to_string()),
             [
-                "b008e58faed02f1d7f2cc2447dc019e8a53efc126406d7aa59374dbb67dfd8c5",
-                "51a4e13769d1922fd46f4538263bc8097606ac0442ee2ddec387ef77633e9d71",
+                "8cb215a54ebe579687b76b92d3bd641cd8de88085d70e3a04ab7286dfecb60c1",
+                "2b04443dd820349e0131afbaa11137548b339337058479b5c71fa31f229938da",
                 "0fa22e64fe9e1901eea58a596899ec843bc0d6db46f1cd91607925a50fea3e6f",
             ]
         );

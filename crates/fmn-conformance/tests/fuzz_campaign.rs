@@ -541,7 +541,7 @@ impl Target for TexMath {
             }
             Err(fmn_tex::TexError::Math(m)) => {
                 let class = match &m {
-                    // Tier-tagged and bounded to three classes — the precise
+                    // Tier-tagged and bounded to a few classes — the precise
                     // construct name stays in the error message (asserted
                     // below) and the summary stats; per-name classes would
                     // bloat the committed corpus with one file per soup
@@ -555,6 +555,10 @@ impl Target for TexMath {
                     }
                     fmd_math::MathError::Malformed { .. } => "malformed",
                     fmd_math::MathError::UnmappedChar { .. } => "unmapped-char",
+                    // The input, nesting and macro budgets (fmd-math's
+                    // named resource budgets); the kind and limit stay in the
+                    // message.
+                    fmd_math::MathError::Budget { .. } => "budget",
                 };
                 Verdict::Refused {
                     class: class.to_owned(),

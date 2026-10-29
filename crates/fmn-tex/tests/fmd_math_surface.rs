@@ -164,6 +164,40 @@ fn typeset_produces_placed_output_through_the_pin() {
     assert_eq!(a, b);
 }
 
+/// fmd-math's named resource budgets, through the Tex engine the Studio and
+/// the portal hand user strings to (fm-fmd-math-fuzz-budgets-k8fe): oversized
+/// and over-deep input is refused by name, and nested unclosed physics
+/// arguments (`\ln(` under the default pack's physics option) parse in
+/// bounded time. Before the e7b4309d pin, parse time doubled per nested
+/// `\ln(`, so this input would run for minutes.
+#[test]
+fn the_resource_budgets_hold_through_the_pin() {
+    let engine = fmn_tex::TexEngine::new("fmd-math/pack/default", None).unwrap();
+    let display = fmn_tex::Mode::Math(Style::Display);
+    let budget = |source: &str| match engine.typeset(display, source) {
+        Err(fmn_tex::TexError::Math(MathError::Budget { kind, limit, .. })) => (kind, limit),
+        other => panic!("expected a named budget error, got {other:?}"),
+    };
+    // The engine's input budget is the combined preamble-plus-formula limit.
+    assert_eq!(
+        budget(&"x+".repeat(1 << 19)),
+        (
+            fmd_math::BudgetKind::InputBytes,
+            fmn_tex::TEX_PREAMBLE_SOURCE_MAX_BYTES
+        )
+    );
+    let braces = format!("{}x{}", "{".repeat(10_000), "}".repeat(10_000));
+    assert_eq!(budget(&braces), (fmd_math::BudgetKind::Nesting, 64));
+    let start = std::time::Instant::now();
+    let chain = format!("{}x", r"\ln(".repeat(24));
+    assert!(engine.typeset(display, &chain).is_ok());
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "24 nested unclosed physics arguments took {:?}",
+        start.elapsed()
+    );
+}
+
 #[test]
 fn cm_multiple_integrals_and_tall_radicals_cross_the_pin() {
     use fmd_math::faces::FACE_MATH_EXTENSION;

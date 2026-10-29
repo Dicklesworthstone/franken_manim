@@ -1041,6 +1041,61 @@ fn failure_tex_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     }
 }
 
+/// Resource budget: a Tex string past fmd-math's input budget, and one
+/// nested past its depth bound, are named budget refusals
+/// (`MathError::Budget`, fm-fmd-math-fuzz-budgets-k8fe) that surface
+/// verbatim through the e2e runner, in bounded time — never a hang, a stack
+/// overflow, or a malformed-input report.
+fn failure_tex_budget_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let engine = &scene_goldens::corpus().tex;
+    let cases = [
+        ("input-bytes", "x+".repeat(1 << 19)),
+        (
+            "nesting",
+            format!("{}x{}", "{".repeat(10_000), "}".repeat(10_000)),
+        ),
+    ];
+    let mut named = 0_u64;
+    for (budget, source) in &cases {
+        let start = std::time::Instant::now();
+        let result = engine.typeset(fmn_tex::Mode::Math(fmd_math::Style::Display), source);
+        let elapsed = start.elapsed();
+        let Err(error) = result else {
+            return Err(fail(format!(
+                "a {}-byte string past the `{budget}` budget typeset successfully",
+                source.len()
+            )));
+        };
+        let message = error.to_string();
+        let is_budget = matches!(error, TexError::Math(fmd_math::MathError::Budget { .. }));
+        let names_budget = message.contains(&format!("resource budget `{budget}`"));
+        let prompt = elapsed < std::time::Duration::from_secs(1);
+        ctx.event(
+            LogEvent::new("e2e.failure")
+                .field("budget", *budget)
+                .field(
+                    "error_kind",
+                    if is_budget {
+                        "MathError::Budget"
+                    } else {
+                        "other"
+                    },
+                )
+                .field("names_budget", truth(names_budget))
+                .field("prompt", truth(prompt)),
+        );
+        if !(is_budget && names_budget && prompt) {
+            return Err(fail(format!(
+                "the `{budget}` refusal lost its name or took {elapsed:?}: {message}"
+            )));
+        }
+        named += 1;
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("budgets_named", named)
+        .with_counter("exit_code", 0))
+}
+
 /// Corrupt cache: a flipped byte in a store object is detected, evicted,
 /// and reported as a miss — and the read-through path recomputes. The
 /// whole drill runs in the deterministic lab (VirtualFs + FakeClock), so
@@ -12382,6 +12437,21 @@ pub fn catalog() -> Vec<ScenarioSpec> {
     ));
 
     // FAILURE-PATH DRILLS.
+    specs.push(spec(
+        "failure_path.tex_resource_budget_named.v1",
+        ScenarioClass::FailurePath,
+        Surface::RustApi,
+        Invocation::new(failure_tex_budget_run),
+        vec![Assertion::ExitCode(0), counter_eq("budgets_named", 2)],
+        vec![LogExpect::span_present(
+            "e2e.failure",
+            vec![
+                FieldPred::str_eq("error_kind", "MathError::Budget"),
+                FieldPred::str_eq("names_budget", "true"),
+                FieldPred::str_eq("prompt", "true"),
+            ],
+        )],
+    ));
     specs.push(spec(
         "failure_path.tex_unsupported_construct_named.v1",
         ScenarioClass::FailurePath,

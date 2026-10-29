@@ -209,9 +209,18 @@ impl TexEngine {
     /// corruption); [`TexError::UnknownPack`] if the content id names no
     /// pack (registry/pack drift — a wiring bug, reported precisely).
     pub fn new(pack_content_id: &'static str, extra: Option<&MacroSet>) -> Result<Self, TexError> {
-        let math = fmd_math::Engine::bundled().map_err(|e| TexError::Faces {
-            what: e.to_string(),
-        })?;
+        // A preamble is typeset in front of its formula, so fmd-math's input
+        // budget is this crate's combined-source limit, not fmd-math's 64 KiB
+        // default (fm-fmd-math-fuzz-budgets-k8fe); its output, nesting and
+        // macro budgets stay fmd-math's.
+        let math = fmd_math::Engine::bundled()
+            .map_err(|e| TexError::Faces {
+                what: e.to_string(),
+            })?
+            .with_budgets(fmd_math::Budgets {
+                max_input_bytes: crate::TEX_PREAMBLE_SOURCE_MAX_BYTES,
+                ..fmd_math::Budgets::DEFAULT
+            });
         let mut macros = MacroSet::pack(pack_content_id).ok_or(TexError::UnknownPack {
             content_id: pack_content_id,
         })?;

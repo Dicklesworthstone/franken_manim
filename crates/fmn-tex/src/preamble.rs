@@ -181,7 +181,7 @@ fn rebase_error(error: TexError, head: usize, offset: usize, source_len: usize) 
     }
     let rebase = |at: usize| at.saturating_sub(offset).min(source_len);
     match &mut error {
-        MathError::Malformed { at, .. } => *at = rebase(*at),
+        MathError::Malformed { at, .. } | MathError::Budget { at, .. } => *at = rebase(*at),
         MathError::UnsupportedCommand { span, .. } | MathError::UnmappedChar { span, .. } => {
             span.start = rebase(span.start);
             span.end = rebase(span.end);
