@@ -537,6 +537,12 @@ def matrix_entry_tables_and_live_values_restore_together():
     # The restored indexes drive the next actual authoring operation.
     matrix.swap_entries_for_ellipses(row_index=0)
     assert matrix.ellipses and len(matrix.elements) < len(entries)
+    # NumPy object arrays take no part in cyclic GC. The live matrix and the
+    # snapshot's saved copy each hold an array whose entries' parents lead
+    # back to their matrix, so neither family could be collected and both
+    # would fail the embedded owner-thread teardown check. Break both cycles.
+    matrix.array_aliases = None
+    state.mobjects_to_copies[matrix].array_aliases = None
 
 
 def shared_owned_data_cycles_and_camera_attributes_roundtrip():
@@ -562,6 +568,10 @@ def shared_owned_data_cycles_and_camera_attributes_roundtrip():
         assert left.lookup[0] is right and left.lookup[1] is left.model
         assert not hasattr(right, "new_attribute")
         left.model["values"].append(3)
+    # The left -> object array -> right -> partner -> left cycle runs
+    # through an array cyclic GC cannot traverse; break it explicitly so
+    # the scene's proxies die with their owner thread.
+    left.lookup = None
 
 
 def attribute_only_edits_are_real_history_entries():
