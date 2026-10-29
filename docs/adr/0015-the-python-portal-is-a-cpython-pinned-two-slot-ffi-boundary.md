@@ -184,3 +184,31 @@ remains off. NumPy 2.5.2 is an exact host-side runtime requirement, and the
 portable CPU tier is the wheel baseline. The platform matrix and production
 pixel-render smoke remain fm-vsq acceptance until observed on their native
 hosts; a Linux import/construct-only smoke cannot satisfy them.
+
+## Amendment 4 — fm-5wq.66 holds method-cache entries weakly
+
+**Status:** Accepted
+**Date:** 2026-10-29
+**Bead:** fm-5wq.66
+
+Amendment 1's sentence "the cache holds a strong reference to each keyed type
+so a keyed pointer can never dangle or be recycled while an entry lives" is
+replaced. Strong references made the thread-local cache a GC root. Every
+instantiated subclass stayed alive for the process lifetime, together with
+whatever its methods close over: a `super()` call's `__class__` cell, or
+instances a closure retains. A function-local `Mobject` subclass was never
+collected, while the same class on a plain-Python base was.
+
+Each entry now holds its type through a weak reference. A hit requires the
+tag to match and the weak reference to name the very type being looked up.
+A dead or recycled type therefore never reuses an entry: the no-recycling
+guarantee now comes from liveness plus identity, not pinning.
+
+Callables are held weakly when Python allows it. CPython's native callables
+and method descriptors cannot be weakly referenced, but they reference only
+their own native owner, so they stay strong. Any other callable that cannot
+be weakly referenced, such as a `property`, is resolved without caching.
+
+Dead entries are swept whenever the cache doubles past a 1024-entry floor.
+The `tp_version_tag` observer of Amendment 1 is unchanged, and no new unsafe
+code is added.

@@ -10,9 +10,10 @@
 //! sentinel and never matches, so a mid-mutation read degrades to a
 //! re-resolve, never a stale hit. A tag can only collide after exactly 2³²
 //! intervening type mutations on a recycled type object — the same residual
-//! risk CPython accepts for its own caches; the cache holds a strong
-//! reference to the type, so the keyed pointer can never dangle or be
-//! recycled while an entry lives.
+//! risk CPython accepts for its own caches. The cache holds the keyed type
+//! only weakly, and a hit requires that weak reference to name the very type
+//! being looked up, so a recycled pointer can never reuse an entry while the
+//! cache itself never keeps a dropped class alive (ADR-0015, Amendment 4).
 //!
 //! Correctness envelope (documented semantics):
 //! - Resolution goes through `type.__getattribute__` (`PyType::getattr`), so
@@ -38,22 +39,108 @@ use std::collections::HashMap;
 
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyTuple, PyType};
+use pyo3::types::{PyDict, PyTuple, PyType, PyWeakrefMethods, PyWeakrefReference};
 
 /// One resolved `(type, method)` pair plus the tag it was resolved under.
+///
+/// Nothing the program can drop is held strongly: a strong type reference
+/// pinned every instantiated subclass, and whatever its methods close over,
+/// for the life of the process (fm-5wq.66).
 struct CacheEntry {
     version_tag: u32,
-    callable: Py<PyAny>,
-    /// Keeps the keyed type pointer valid for the entry's lifetime.
-    _owner: Py<PyType>,
+    callable: Held,
+    /// The keyed type, weakly. A hit requires it alive and identical to the
+    /// looked-up type.
+    owner: Py<PyWeakrefReference>,
 }
 
-#[derive(Default)]
+/// A cached callable: weak when Python allows it. CPython's native callables
+/// and descriptors cannot be weakly referenced, but they reference only their
+/// own native owner, so they are held strongly.
+enum Held {
+    Weak(Py<PyWeakrefReference>),
+    Native(Py<PyAny>),
+}
+
+impl Held {
+    fn get<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyAny>> {
+        match self {
+            Self::Weak(reference) => reference.bind(py).upgrade(),
+            Self::Native(callable) => Some(callable.bind(py).clone()),
+        }
+    }
+
+    fn alive(&self, py: Python<'_>) -> bool {
+        self.get(py).is_some()
+    }
+}
+
+/// Type names of CPython's native callables and method descriptors.
+const NATIVE_CALLABLES: [&str; 5] = [
+    "builtin_function_or_method",
+    "method_descriptor",
+    "wrapper_descriptor",
+    "method-wrapper",
+    "classmethod_descriptor",
+];
+
+/// How the cache may hold `callable`, or `None` when it can be neither
+/// weakly referenced nor safely pinned (a `property`, say, whose getter may
+/// close over instances). Such a resolution is simply not cached.
+fn hold(callable: &Bound<'_, PyAny>) -> Option<Held> {
+    if let Ok(reference) = PyWeakrefReference::new(callable) {
+        return Some(Held::Weak(reference.unbind()));
+    }
+    let kind = callable.get_type().name().ok()?;
+    let kind = kind.to_str().ok()?;
+    NATIVE_CALLABLES
+        .contains(&kind)
+        .then(|| Held::Native(callable.clone().unbind()))
+}
+
+/// Entries kept before the first sweep of dead ones; a sweep then waits until
+/// the cache has doubled, so sweeping stays amortized O(1) per insertion.
+const SWEEP_FLOOR: usize = 1024;
+
 struct Cache {
     entries: HashMap<(usize, &'static str), CacheEntry>,
+    next_sweep: usize,
     hits: u64,
     misses: u64,
     invalidations: u64,
+}
+
+impl Default for Cache {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            next_sweep: SWEEP_FLOOR,
+            hits: 0,
+            misses: 0,
+            invalidations: 0,
+        }
+    }
+}
+
+impl Cache {
+    /// Remove entries whose type or callable has died, returning them so the
+    /// caller drops them after releasing the cache borrow.
+    fn sweep(&mut self, py: Python<'_>) -> Vec<CacheEntry> {
+        let dead: Vec<_> = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| {
+                entry.owner.bind(py).upgrade().is_none() || !entry.callable.alive(py)
+            })
+            .map(|(key, _)| *key)
+            .collect();
+        let removed = dead
+            .iter()
+            .filter_map(|key| self.entries.remove(key))
+            .collect();
+        self.next_sweep = SWEEP_FLOOR.max(2 * self.entries.len());
+        removed
+    }
 }
 
 thread_local! {
@@ -81,51 +168,71 @@ fn type_version_tag(ty: &Bound<'_, PyType>) -> u32 {
 /// Resolve `(type, name)` through the cache. A miss or tag mismatch
 /// re-resolves through the full Python attribute machinery.
 fn resolve(ty: &Bound<'_, PyType>, name: &'static str) -> PyResult<Py<PyAny>> {
+    let py = ty.py();
     let key = (ty.as_type_ptr() as usize, name);
     let tag = type_version_tag(ty);
-    let cached = CACHE.with(|cache| {
+    let (cached, stale) = CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
-        let validity = cache
-            .entries
-            .get(&key)
-            .map(|entry| entry.version_tag == tag && tag != 0);
-        match validity {
-            Some(true) => {
-                cache.hits += 1;
-                cache
-                    .entries
-                    .get(&key)
-                    .map(|entry| entry.callable.clone_ref(ty.py()))
-            }
-            Some(false) => {
-                cache.invalidations += 1;
-                cache.entries.remove(&key);
+        // Some(Some(callable)): a valid hit. Some(None): a stale entry (a
+        // changed tag, a dead or different type, or a dead callable).
+        let lookup = cache.entries.get(&key).map(|entry| {
+            let current = entry.version_tag == tag && tag != 0;
+            let same_type = entry
+                .owner
+                .bind(py)
+                .upgrade()
+                .is_some_and(|owner| owner.is(ty));
+            if current && same_type {
+                entry.callable.get(py)
+            } else {
                 None
             }
-            None => None,
+        });
+        match lookup {
+            Some(Some(callable)) => {
+                cache.hits += 1;
+                (Some(callable.unbind()), None)
+            }
+            Some(None) => {
+                cache.invalidations += 1;
+                (None, cache.entries.remove(&key))
+            }
+            None => (None, None),
         }
     });
+    // A decref may run Python code that reenters this cache, so stale entries
+    // are dropped only after the borrow is released.
+    drop(stale);
     if let Some(callable) = cached {
         return Ok(callable);
     }
-    let callable = ty.getattr(name)?.unbind();
+    let callable = ty.getattr(name)?;
     // Re-read after resolution: the lookup itself can assign a fresh tag to
     // a type that was mid-mutation. A still-zero tag is stored as-is and
     // simply never hits — correct, just uncached.
     let tag = type_version_tag(ty);
-    CACHE.with(|cache| {
+    let entry = match (hold(&callable), PyWeakrefReference::new(ty.as_any())) {
+        (Some(held), Ok(owner)) => Some(CacheEntry {
+            version_tag: tag,
+            callable: held,
+            owner: owner.unbind(),
+        }),
+        _ => None,
+    };
+    let released = CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         cache.misses += 1;
-        cache.entries.insert(
-            key,
-            CacheEntry {
-                version_tag: tag,
-                callable: callable.clone_ref(ty.py()),
-                _owner: ty.clone().unbind(),
-            },
-        );
+        let mut released = Vec::new();
+        if let Some(entry) = entry {
+            released.extend(cache.entries.insert(key, entry));
+            if cache.entries.len() >= cache.next_sweep {
+                released.extend(cache.sweep(py));
+            }
+        }
+        released
     });
-    Ok(callable)
+    drop(released);
+    Ok(callable.unbind())
 }
 
 /// Whether the instance's own `__dict__` shadows `name` (rare path; falls
@@ -204,9 +311,9 @@ pub fn reset_stats() {
     });
 }
 
-/// Release this embedding worker's cached Python owners while its thread is
-/// still attached. ADR-0015's strong type references remain intact throughout
-/// execution; they must not outlive the isolated worker's module teardown.
+/// Release this embedding worker's cached entries while its thread is still
+/// attached: their weak references and native callables must not outlive the
+/// isolated worker's module teardown.
 pub(crate) fn clear_for_worker_teardown(_py: Python<'_>) {
     let entries = CACHE.with(|cache| std::mem::take(&mut cache.borrow_mut().entries));
     // A decref can invoke Python finalizers. Release the RefCell borrow before
@@ -246,6 +353,55 @@ pub(crate) fn _type_version_tags(cls: &Bound<'_, PyType>) -> (u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// fm-5wq.66: a dropped subclass, and what its methods close over, is
+    /// collected after it used the cache; live classes still hit; dead
+    /// entries are swept rather than accumulating.
+    #[test]
+    fn cache_entries_never_pin_dropped_classes() {
+        crate::with_python_test_module("method cache lifetime", |py, _module, globals| {
+            py.run(
+                cr#"
+import gc
+import weakref
+import manimlib as m
+
+def local_subclass(captured):
+    class Local(m.VGroup):
+        def init_data(self, *args, **kwargs):
+            captured.append(self)  # the class's method closes over its instance
+            super().init_data(*args, **kwargs)
+    Local()  # init_data/init_points/init_uniforms resolve through the cache
+    return weakref.ref(Local)
+
+captured = []
+refs = [local_subclass(captured) for _ in range(3)]
+instances = [weakref.ref(obj) for obj in captured]
+captured.clear()
+gc.collect(); gc.collect()
+assert all(ref() is None for ref in refs), "a dropped subclass outlived its cached methods"
+assert all(ref() is None for ref in instances), "an instance outlived its dropped subclass"
+
+m._method_cache_reset()
+m.VGroup(); m.VGroup()
+stats = m._method_cache_stats()
+assert stats["hits"] > 0, stats
+
+for index in range(1500):
+    local_subclass([])
+    if index % 100 == 0:
+        gc.collect()  # the classes are cyclic garbage (super()'s __class__ cell)
+gc.collect()
+m.VGroup()
+assert m._method_cache_stats()["entries"] < 2200, m._method_cache_stats()
+"#,
+                Some(globals),
+                Some(globals),
+            )
+            .inspect_err(|error| error.print(py))
+            .expect("method cache lifetime");
+        });
+    }
 
     #[test]
     fn stats_start_zeroed() {
