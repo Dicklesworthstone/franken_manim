@@ -4296,12 +4296,21 @@ fn translated_arc_centers_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioEr
                 .map_err(|error| fail(format!("build translated arc: {error}")))?;
             let center = fmn_library::arc::arc_center_of(arc.points())
                 .ok_or_else(|| fail("translated arc has no center"))?;
-            let error = |point: [f64; 3]| {
-                fmn_geom::space_ops::get_norm([point[0], point[1], point[2] - z])
-            };
+            let error =
+                |point: [f64; 3]| fmn_geom::space_ops::get_norm([point[0], point[1], point[2] - z]);
             if error(center) > radius * 1e-9 {
+                return Err(fail(format!("radius={radius}, z={z}: center={center:?}")));
+            }
+            let tilted = arc.clone().rotated_about(
+                fmn_core::constants::TAU / 4.0,
+                [1.0, 0.0, 0.0],
+                [0.0, 0.0, z],
+            );
+            let tilted_center = fmn_library::arc::arc_center_of(tilted.points())
+                .ok_or_else(|| fail("tilted arc has no center"))?;
+            if error(tilted_center) > radius * 1e-9 {
                 return Err(fail(format!(
-                    "radius={radius}, z={z}: center={center:?}"
+                    "radius={radius}, z={z}: tilted center={tilted_center:?}"
                 )));
             }
             checked += 1;
