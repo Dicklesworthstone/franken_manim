@@ -937,6 +937,27 @@ mod tests {
     }
 
     #[test]
+    fn arc_center_is_independent_of_radius_and_z_translation() {
+        for radius in [1e-5, 0.08, 1.0, 1e3] {
+            for z in [-1e-9, 0.0, 1e-9, 7.0] {
+                let arc = Arc::new()
+                    .radius(radius)
+                    .arc_center([0.0, 0.0, z])
+                    .build()
+                    .expect("finite translated arc");
+                let center = arc_center_of(arc.points()).expect("arc has a component");
+                let error = space_ops::get_norm(sub(center, [0.0, 0.0, z]));
+                assert!(
+                    error <= radius * 1e-9,
+                    "radius={radius}, z={z}: center={center:?}, error={error}"
+                );
+            }
+        }
+        assert_eq!(arc_center_of(&[]), None);
+        assert_eq!(arc_center_of(&[[1.0, 2.0, 3.0]; 3]), Some([1.0, 2.0, 3.0]));
+    }
+
+    #[test]
     fn circle_is_closed_red_and_tagged() {
         let circle = Circle::new().radius(3.0).build();
         assert_eq!(circle.points().len(), 33, "16 components, shared anchors");
