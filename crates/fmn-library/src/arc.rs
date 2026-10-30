@@ -17,7 +17,7 @@
 //! Behaviour Note BN-09 carries the migration guidance.
 
 use fmn_core::color::Srgb;
-use fmn_core::constants::{BLACK, ORIGIN, OUT, TAU};
+use fmn_core::constants::{BLACK, ORIGIN, TAU};
 use fmn_core::types::Vec3;
 use fmn_geom::{GeomError, QuadPath, bezier, space_ops};
 use fmn_mobject::{Mobject, ShapeTag};
