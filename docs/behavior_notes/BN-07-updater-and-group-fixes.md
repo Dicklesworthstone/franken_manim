@@ -576,6 +576,49 @@ as C-33 rules for the point-less case: the square's box is ±1.1427. Locked by
 **Migration:** none needed. A scene that positioned something against a
 mobject it had just animated gets the box of the points drawn.
 
+## C-44 — small arcs retain their center after translation
+
+The pinned Reference's `Arc.get_arc_center` (`geometry.py:247`) intersects
+the first component's normals through `find_intersection`
+(`utils/space_ops.py:298`). Any nonzero z selects its 3-D branch, whose
+absolute denominator cutoff scales with the fourth power of tangent length.
+For a radius-0.08 Dot moved inside `Group(Cube(side_length=1.89), dot)`,
+rounding leaves z near −3.58e−9: the Reference reports the first anchor
+(3.9725, 1.09), rather than the center (3.8925, 1.09). Flattening z changes
+the answer. A small Circle explicitly translated in z also exposes this
+defect in the former native helper.
+
+**FrankenManim:** the native helper intersects unit normals in the component's
+own plane, with a dimensionless parallel test. Tilting a circular arc carries
+its center with it, rather than rotating tangents about world z. Scale and translation cannot trigger the
+first-anchor fallback; a collapsed or numerically parallel component keeps
+that defined fallback. This does not redefine a deformed arc as a circle.
+
+**Migration:** remove workarounds that flatten z or substitute a stored
+center solely to avoid the cutoff. The public method and point data remain
+the same. ADR-0030 records the ruling. Coverage: `arc_center_is_independent_of_radius_and_z_translation`,
+`parity.translated_arc_centers.v1`, and the real portal's
+`test_small_dot_arc_center_survives_a_three_dimensional_group_move`.
+
+## C-45 — scene z-order sorting preserves each entry's position
+
+The Reference's `Scene.add` (`scene.py:336–338`) maps each object identity
+to its last scene-list index, then sorts by `(z_index, last_index)`. If
+recursive removal leaves the same root twice, both entries move to the
+last occurrence. With `v5 = Group(VGroup(v0, v1), v2)`, a scene containing
+`[v4, v1, v2, v5]`, followed by `add(v6, v4, v1)`, becomes
+`[v0, v2, v2, v6, v4, v1]` at the pin.
+
+**FrankenManim:** sorting is stable per entry, giving
+`[v2, v0, v2, v6, v4, v1]`. Both occurrences of v2 remain; recursive
+removal, family traversal and render-family deduplication are unchanged.
+
+**Migration:** use explicit z indices or explicit scene-list operations
+when an ordering is intended; do not rely on an identity dictionary moving
+an earlier duplicate. ADR-0030 records the ruling. Coverage:
+`test_nested_add_preserves_each_duplicate_roots_relative_order` in
+`crates/fmn-python/tests/native_curved_lifecycle.py`.
+
 ## `shift` takes a scalar or one 3-vector (fm-mumk)
 
 The Reference's `Mobject.shift` adds its argument to the points with numpy
