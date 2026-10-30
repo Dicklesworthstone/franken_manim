@@ -135,13 +135,15 @@ class ConfiguredSubdivision(unittest.TestCase):
 
     def test_configured_subdivision_refuses_certification_without_running_or_publishing(self):
         scene = self.scene()
+        clock = m._portal_scene_clock(scene)
+        self.assertEqual(clock, (8, 0))
         for method in (scene.render, scene.render_session):
             with self.assertRaisesRegex(m._CapabilityError, 'subdivided.*certify'):
                 method(self.root / 'certified', format='y4m', reproducible=True,
                        sources={'scene.py': b'pass'}, threads=1)
         self.assertEqual(self.calls, [])
         self.assertFalse((self.root / 'certified').exists())
-        self.assertEqual(m._portal_scene_clock(scene), (30, 0))
+        self.assertEqual(m._portal_scene_clock(scene), clock)
 
     def test_ordinary_scene_methods_and_explicit_flat_api_keep_their_contract(self):
         ordinary = self.Motion()
