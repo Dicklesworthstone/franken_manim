@@ -452,6 +452,87 @@ fn ensure_managed_directory(
     Ok(())
 }
 
+/// Read one already-validated managed leaf without allocating past the limit.
+fn read_only_managed_file(
+    fs: &dyn FileSystem,
+    root: &Path,
+    path: &Path,
+    max_bytes: usize,
+) -> Result<Vec<u8>, CacheError> {
+    match managed_leaf_kind(fs, root, path, DirectoryMode::Existing)? {
+        Some(FsNodeKind::RegularFile) => fs
+            .read_bounded(path, max_bytes)
+            .map_err(CacheError::Storage),
+        Some(kind) => Err(managed_node_refused(path, "regular file", kind)),
+        None => Err(managed_not_found(path)),
+    }
+}
+
+/// Validate an existing root through its capability, without claiming it or
+/// repairing missing lifecycle markers. An absent root is a cache miss.
+fn read_only_owned_root(
+    fs: &dyn FileSystem,
+    root: &Path,
+) -> Result<Option<OwnerManifest>, CacheError> {
+    if !root.is_absolute()
+        || root
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(root_refused(
+            root,
+            RootRefusalCode::InvalidPath,
+            "a cache read requires an absolute root without parent-directory components",
+        ));
+    }
+    let ancestors: Vec<&Path> = root.ancestors().collect();
+    for ancestor in ancestors.into_iter().rev() {
+        match fs.node_kind_no_follow(ancestor)? {
+            Some(FsNodeKind::Directory) => {}
+            Some(kind) => return Err(managed_node_refused(ancestor, "real directory", kind)),
+            None => return Ok(None),
+        }
+    }
+    let owner_path = root.join(OWNER_FILE);
+    let owner_bytes = match read_only_managed_file(fs, root, &owner_path, OWNER_MANIFEST_MAX_BYTES)
+    {
+        Err(CacheError::Storage(FsError::NotFound { .. })) => {
+            return Err(root_refused(
+                root,
+                RootRefusalCode::OwnershipMissing,
+                "an existing cache root has no ownership manifest",
+            ));
+        }
+        result => result?,
+    };
+    let owner = parse_owner_manifest(root, &owner_bytes)?;
+    let format_path = root.join(FORMAT_FILE);
+    let format_bytes = match read_only_managed_file(fs, root, &format_path, FORMAT_STAMP_MAX_BYTES)
+    {
+        Err(CacheError::Storage(FsError::NotFound { .. })) => {
+            return Err(root_refused(
+                root,
+                RootRefusalCode::MarkerInvalid,
+                "an existing cache root has no format stamp",
+            ));
+        }
+        result => result?,
+    };
+    let format = std::str::from_utf8(&format_bytes).map_err(|_| {
+        root_refused(
+            root,
+            RootRefusalCode::MarkerInvalid,
+            "format stamp is not UTF-8",
+        )
+    })?;
+    if format.trim_end() != FORMAT_STAMP {
+        return Err(CacheError::FormatUnsupported {
+            found: format.trim_end().to_owned(),
+        });
+    }
+    Ok(Some(owner))
+}
+
 /// Create `root` and any missing ancestors as real directories.
 ///
 /// With `system_links_trusted` (only the ambient host filesystem can vouch
@@ -1836,6 +1917,83 @@ impl fmt::Debug for Store {
 }
 
 impl Store {
+    /// Read one keyed entry through a borrowed filesystem capability.
+    ///
+    /// The root must already be owned and carry the supported store format.
+    /// Missing roots, namespaces, and objects are misses. This operation
+    /// creates no paths, repairs no markers, updates no index, and evicts
+    /// nothing, including corrupt entries.
+    ///
+    /// Both lifecycle markers and the entry envelope use allocation-bounded
+    /// reads. The root generation is checked again after reading the entry.
+    /// Non-host capabilities never consult the ambient host filesystem.
+    ///
+    /// # Errors
+    /// Invalid namespaces, ownership or traversal refusals, unsupported store
+    /// formats, or storage failures. A corrupt entry is a storage error with
+    /// InvalidData; consumers may report it and continue without the cache.
+    pub fn read_keyed(
+        fs: &dyn FileSystem,
+        root: &Path,
+        name: &str,
+        version: u32,
+        key: &CacheKey,
+        max_payload_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, CacheError> {
+        validate_namespace_name(name)?;
+        let path = if fs.grants_host_destructive_lifecycle() {
+            let cwd = env::current_dir().map_err(|err| host_io(Path::new("."), err))?;
+            let configured = absolute_without_parent_components(root, &cwd)?;
+            match validate_host_owned_root(&configured, &cwd) {
+                Ok((path, _owner)) => path,
+                Err(CacheError::Storage(FsError::NotFound { .. })) => return Ok(None),
+                Err(err) => return Err(err),
+            }
+        } else {
+            root.to_path_buf()
+        };
+        let Some(owner) = read_only_owned_root(fs, &path)? else {
+            return Ok(None);
+        };
+        let root = RootContext { path, owner };
+        let object = root
+            .path
+            .join("ns")
+            .join(name)
+            .join(format!("v{version}"))
+            .join("objects")
+            .join(object_relative_path(key.digest()));
+        let limits = Limits {
+            max_field: max_payload_bytes,
+            max_total: max_payload_bytes.saturating_add(4096),
+        };
+        let read = read_only_managed_file(fs, &root.path, &object, limits.max_total);
+        let current = read_only_owned_root(fs, &root.path)?.ok_or_else(|| {
+            root_refused(
+                &root.path,
+                RootRefusalCode::IdentityChanged,
+                "cache root disappeared during the read",
+            )
+        })?;
+        root.validate_current(current)?;
+        let bytes = match read {
+            Ok(bytes) => bytes,
+            Err(CacheError::Storage(FsError::NotFound { .. })) => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        entry::decode(&bytes, EntryKind::Keyed, key.digest(), limits)
+            .map(Some)
+            .map_err(|err| {
+                CacheError::Storage(FsError::Io {
+                    path: object,
+                    err: io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("read-only cache entry verification failed: {err:?}"),
+                    ),
+                })
+            })
+    }
+
     /// Inspect an existing owned host namespace without opening or changing it.
     ///
     /// Sums the byte lengths of regular files in its two-level object tree,
@@ -3018,6 +3176,309 @@ mod tests {
                 "{bad:?} unexpectedly accepted"
             );
         }
+    }
+
+    /// The borrowed reader must use bounded reads and must never invoke a
+    /// filesystem mutation, namespace scan, or ambient-host capability.
+    struct BorrowedReadProbe<'a> {
+        inner: &'a fmn_platform::fs::VirtualFs,
+        root: &'a Path,
+        link: Option<&'a Path>,
+        rotate_at: Option<&'a Path>,
+    }
+
+    impl<'a> BorrowedReadProbe<'a> {
+        fn new(inner: &'a fmn_platform::fs::VirtualFs, root: &'a Path) -> Self {
+            Self {
+                inner,
+                root,
+                link: None,
+                rotate_at: None,
+            }
+        }
+    }
+
+    impl FileSystem for BorrowedReadProbe<'_> {
+        fn node_kind_no_follow(&self, path: &Path) -> Result<Option<FsNodeKind>, FsError> {
+            if self.link == Some(path) {
+                return Ok(Some(FsNodeKind::Link));
+            }
+            self.inner.node_kind_no_follow(path)
+        }
+
+        fn read_bounded(&self, path: &Path, max_bytes: usize) -> Result<Vec<u8>, FsError> {
+            let bytes = self.inner.read_bounded(path, max_bytes)?;
+            if self.rotate_at == Some(path) {
+                self.inner.insert(
+                    self.root.join(OWNER_FILE),
+                    OwnerManifest {
+                        path: sha256(self.root.as_os_str().as_encoded_bytes()),
+                        generation: sha256(b"borrowed-read-replacement-generation"),
+                    }
+                    .encode(),
+                );
+            }
+            Ok(bytes)
+        }
+
+        fn read(&self, _path: &Path) -> Result<Vec<u8>, FsError> {
+            panic!("borrowed cache reads must enforce allocation limits")
+        }
+
+        fn create_dir(&self, _path: &Path) -> Result<bool, FsError> {
+            panic!("borrowed cache reads must not create directories")
+        }
+
+        fn write_atomic(&self, _path: &Path, _bytes: &[u8]) -> Result<(), FsError> {
+            panic!("borrowed cache reads must not write files")
+        }
+
+        fn create_new(&self, _path: &Path, _bytes: &[u8]) -> Result<bool, FsError> {
+            panic!("borrowed cache reads must not create files")
+        }
+
+        fn remove_file(&self, _path: &Path) -> Result<(), FsError> {
+            panic!("borrowed cache reads must not evict files")
+        }
+
+        fn remove_dir_all(&self, _path: &Path) -> Result<(), FsError> {
+            panic!("borrowed cache reads must not remove directories")
+        }
+
+        fn exists(&self, _path: &Path) -> bool {
+            panic!("borrowed cache reads must preserve classification errors")
+        }
+
+        fn list_dir(&self, _path: &Path) -> Result<Vec<PathBuf>, FsError> {
+            panic!("borrowed cache reads must not scan namespaces")
+        }
+
+        fn count_dir_entries_bounded(
+            &self,
+            _path: &Path,
+            _max_entries: usize,
+        ) -> Result<usize, FsError> {
+            panic!("borrowed cache reads must not scan namespaces")
+        }
+    }
+
+    fn borrowed_read_fixture(
+        payload: &[u8],
+    ) -> (Arc<fmn_platform::fs::VirtualFs>, PathBuf, CacheKey, PathBuf) {
+        let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+        let root = test_absolute("borrowed-cache-read");
+        let store = Store::open(
+            fs.clone(),
+            Arc::new(fmn_platform::clock::FakeClock::new()),
+            root.clone(),
+            StoreConfig::default(),
+        )
+        .unwrap();
+        let key = CacheKey::from_digest(sha256(b"borrowed-read-key"));
+        store
+            .namespace("tune", 1, NamespacePolicy::default())
+            .unwrap()
+            .put(&key, payload)
+            .unwrap();
+        let object = root
+            .join("ns/tune/v1/objects")
+            .join(object_relative_path(key.digest()));
+        (fs, root, key, object)
+    }
+
+    #[test]
+    fn borrowed_keyed_read_round_trips_without_mutating_bookkeeping() {
+        let (fs, root, key, object) = borrowed_read_fixture(b"measured profile");
+        let index = root.join("ns/tune/v1/index");
+        let before_index = fs.read(&index).unwrap();
+        let before_object = fs.read(&object).unwrap();
+        let probe = BorrowedReadProbe::new(fs.as_ref(), &root);
+        assert_eq!(
+            Store::read_keyed(&probe, &root, "tune", 1, &key, 16).unwrap(),
+            Some(b"measured profile".to_vec()),
+        );
+        assert_eq!(
+            Store::read_keyed(&probe, &root, "tune", 2, &key, 16).unwrap(),
+            None
+        );
+        assert_eq!(
+            Store::read_keyed(&probe, &root, "absent", 1, &key, 16).unwrap(),
+            None
+        );
+        assert_eq!(
+            fs.node_kind_no_follow(&root.join("ns/tune/v2")).unwrap(),
+            None
+        );
+        assert_eq!(
+            fs.node_kind_no_follow(&root.join("ns/absent")).unwrap(),
+            None
+        );
+        assert_eq!(fs.read(&index).unwrap(), before_index);
+        assert_eq!(fs.read(&object).unwrap(), before_object);
+    }
+
+    #[test]
+    fn borrowed_keyed_read_does_not_claim_missing_roots_or_repair_markers() {
+        let root = test_absolute("missing-borrowed-cache");
+        let key = CacheKey::from_digest(sha256(b"missing-key"));
+        let empty = fmn_platform::fs::VirtualFs::new();
+        let probe = BorrowedReadProbe::new(&empty, &root);
+        assert_eq!(
+            Store::read_keyed(&probe, &root, "tune", 1, &key, 64).unwrap(),
+            None
+        );
+        assert_eq!(empty.node_kind_no_follow(&root).unwrap(), None);
+
+        for missing_owner in [true, false] {
+            let fs = fmn_platform::fs::VirtualFs::new();
+            let missing = if missing_owner {
+                fs.insert(
+                    root.join(FORMAT_FILE),
+                    format!("{FORMAT_STAMP}\n").into_bytes(),
+                );
+                OWNER_FILE
+            } else {
+                fs.insert(
+                    root.join(OWNER_FILE),
+                    OwnerManifest {
+                        path: sha256(root.as_os_str().as_encoded_bytes()),
+                        generation: sha256(b"existing-borrowed-generation"),
+                    }
+                    .encode(),
+                );
+                FORMAT_FILE
+            };
+            let probe = BorrowedReadProbe::new(&fs, &root);
+            assert!(matches!(
+                Store::read_keyed(&probe, &root, "tune", 1, &key, 64),
+                Err(CacheError::RootRefused { .. }),
+            ));
+            assert_eq!(fs.node_kind_no_follow(&root.join(missing)).unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn borrowed_keyed_read_requires_the_supported_store_format() {
+        let (fs, root, key, _) = borrowed_read_fixture(b"profile");
+        fs.insert(root.join(FORMAT_FILE), b"fmn-cache 99\n".to_vec());
+        let probe = BorrowedReadProbe::new(fs.as_ref(), &root);
+        assert!(matches!(
+            Store::read_keyed(&probe, &root, "tune", 1, &key, 64),
+            Err(CacheError::FormatUnsupported { found }) if found == "fmn-cache 99",
+        ));
+        assert_eq!(fs.read(&root.join(FORMAT_FILE)).unwrap(), b"fmn-cache 99\n");
+    }
+
+    #[test]
+    fn borrowed_keyed_read_reports_corruption_without_eviction() {
+        let (fs, root, key, object) = borrowed_read_fixture(b"profile");
+        let mut corrupt = fs.read(&object).unwrap();
+        corrupt[0] ^= 1;
+        let wrong_address = entry::encode(
+            EntryKind::Keyed,
+            &sha256(b"another-address"),
+            b"profile",
+            Limits::DEFAULT,
+        )
+        .unwrap();
+        let wrong_kind =
+            entry::encode(EntryKind::Blob, key.digest(), b"profile", Limits::DEFAULT).unwrap();
+        for bytes in [corrupt, wrong_address, wrong_kind] {
+            fs.insert(object.clone(), bytes.clone());
+            let probe = BorrowedReadProbe::new(fs.as_ref(), &root);
+            assert!(matches!(
+                Store::read_keyed(&probe, &root, "tune", 1, &key, 64),
+                Err(CacheError::Storage(FsError::Io { err, .. }))
+                    if err.kind() == io::ErrorKind::InvalidData,
+            ));
+            assert_eq!(fs.read(&object).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn borrowed_keyed_read_refuses_traversal_and_link_like_components() {
+        let (fs, root, key, object) = borrowed_read_fixture(b"profile");
+        let before = fs.read(&object).unwrap();
+        let probe = BorrowedReadProbe::new(fs.as_ref(), &root);
+        for name in ["..", "tune/escape", "tune\\escape"] {
+            assert!(matches!(
+                Store::read_keyed(&probe, &root, name, 1, &key, 64),
+                Err(CacheError::InvalidNamespace { .. }),
+            ));
+        }
+        for link in [
+            root.parent().unwrap().to_path_buf(),
+            root.clone(),
+            root.join(OWNER_FILE),
+            root.join(FORMAT_FILE),
+            root.join("ns"),
+            root.join("ns/tune"),
+            root.join("ns/tune/v1"),
+            root.join("ns/tune/v1/objects"),
+            object.parent().unwrap().to_path_buf(),
+            object.clone(),
+        ] {
+            let mut probe = BorrowedReadProbe::new(fs.as_ref(), &root);
+            probe.link = Some(&link);
+            assert!(
+                Store::read_keyed(&probe, &root, "tune", 1, &key, 64).is_err(),
+                "link-like path was accepted: {}",
+                link.display(),
+            );
+        }
+        assert_eq!(fs.read(&object).unwrap(), before);
+    }
+
+    #[test]
+    fn borrowed_keyed_read_bounds_markers_and_envelope_before_allocation() {
+        for (marker, limit) in [
+            (OWNER_FILE, OWNER_MANIFEST_MAX_BYTES),
+            (FORMAT_FILE, FORMAT_STAMP_MAX_BYTES),
+        ] {
+            let (fs, root, key, _) = borrowed_read_fixture(b"profile");
+            fs.insert(root.join(marker), vec![b'x'; limit + 1]);
+            let probe = BorrowedReadProbe::new(fs.as_ref(), &root);
+            assert!(matches!(
+                Store::read_keyed(&probe, &root, "tune", 1, &key, 64),
+                Err(CacheError::Storage(FsError::TooLarge { limit: found, .. })) if found == limit,
+            ));
+        }
+        let (fs, root, key, _) = borrowed_read_fixture(b"profile");
+        let probe = BorrowedReadProbe::new(fs.as_ref(), &root);
+        assert!(matches!(
+            Store::read_keyed(&probe, &root, "tune", 1, &key, 6),
+            Err(CacheError::Storage(FsError::Io { err, .. }))
+                if err.kind() == io::ErrorKind::InvalidData,
+        ));
+        let payload = vec![b'x'; 8 * 1024];
+        let (fs, root, key, object) = borrowed_read_fixture(&payload);
+        let before = fs.read(&object).unwrap();
+        let probe = BorrowedReadProbe::new(fs.as_ref(), &root);
+        assert!(matches!(
+            Store::read_keyed(&probe, &root, "tune", 1, &key, 32),
+            Err(CacheError::Storage(FsError::TooLarge { limit: 4128, .. })),
+        ));
+        assert_eq!(
+            Store::read_keyed(&probe, &root, "tune", 1, &key, payload.len()).unwrap(),
+            Some(payload),
+        );
+        assert_eq!(fs.read(&object).unwrap(), before);
+    }
+
+    #[test]
+    fn borrowed_keyed_read_rejects_a_generation_changed_during_the_read() {
+        let (fs, root, key, object) = borrowed_read_fixture(b"profile");
+        let before = fs.read(&object).unwrap();
+        let mut probe = BorrowedReadProbe::new(fs.as_ref(), &root);
+        probe.rotate_at = Some(&object);
+        assert!(matches!(
+            Store::read_keyed(&probe, &root, "tune", 1, &key, 64),
+            Err(CacheError::RootRefused {
+                code: RootRefusalCode::GenerationChanged,
+                ..
+            }),
+        ));
+        assert_eq!(fs.read(&object).unwrap(), before);
     }
 
     #[test]

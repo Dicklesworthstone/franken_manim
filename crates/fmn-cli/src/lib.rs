@@ -1976,7 +1976,7 @@ fn derive_execution_plan_with_annex(
             .map_err(|_| CliError::new("config", "thread count does not fit this target"))?;
         request = request.with_max_cpu_threads(threads);
     }
-    let plan = fmn_runtime::ExecutionPlan::derive(request, &topology, None)
+    let plan = fmn::autotune::derive_execution_plan(fs, config, request, &topology)
         .map_err(execution_plan_error)?;
     Ok((plan, topology, topology_source))
 }
@@ -2007,6 +2007,7 @@ pub fn collect_doctor_snapshot(
         fmn_runtime::RenderIntent::Offline,
         output_format,
     )?;
+    let tuning_diagnostic = plan.tuning_diagnostic.clone();
     let plan = ExecutionPlanReport {
         determinism: match plan.determinism {
             fmn_runtime::Determinism::Standard => "standard",
@@ -2040,11 +2041,25 @@ pub fn collect_doctor_snapshot(
 
     let ffmpeg_path = PathBuf::from(&config.file_writer.ffmpeg_bin);
     let ffmpeg = locate_and_probe_ffmpeg(locator, runner, &ffmpeg_path);
-    let cache = cache_report_from_resolution(
+    let mut cache = cache_report_from_resolution(
         fs,
         fmn_cache::resolve_host_cache_root(&config.directories.cache),
         config.cache.max_bytes,
     )?;
+    if let Some(diagnostic) = tuning_diagnostic {
+        match &mut cache {
+            CacheReport::Configured { warning, .. } => {
+                *warning = Some(match warning.take() {
+                    Some(existing) => format!("{existing}; {diagnostic}"),
+                    None => diagnostic,
+                });
+            }
+            CacheReport::Unresolved { reason, .. } => {
+                reason.push_str("; ");
+                reason.push_str(&diagnostic);
+            }
+        }
+    }
     let math_packs = fmn_config::PackRegistry::builtin()
         .names()
         .into_iter()
@@ -2959,6 +2974,8 @@ struct CompletedRender {
     engine: String,
     backend: RenderBackendReport,
     render_threads: usize,
+    tuning_source: &'static str,
+    tuning_diagnostic: Option<String>,
     subdivision: Option<u64>,
     prerun: Option<PreRunSummary>,
     manifest: Option<ProvenanceManifest>,
@@ -6569,6 +6586,8 @@ fn execute_native_render_with_cancellation(
             engine: backend.identity.clone(),
             backend,
             render_threads,
+            tuning_source: plan_tuning_name(plan.tuning_source),
+            tuning_diagnostic: plan.tuning_diagnostic.clone(),
             subdivision,
             prerun,
             manifest: Some(manifest),
@@ -7256,6 +7275,8 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
         engine,
         backend,
         render_threads,
+        tuning_source,
+        tuning_diagnostic,
         subdivision,
         prerun,
         manifest,
@@ -7317,6 +7338,17 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
             .as_ref()
             .filter(|report| report.initialized)
             .map_or_else(String::new, typesetting_human_summary);
+        let tuning_json = format!(
+            ",\"tuning_source\":{},\"tuning_warning\":{}",
+            json_string(tuning_source),
+            tuning_diagnostic
+                .as_ref()
+                .map_or_else(|| "null".to_owned(), |value| json_string(value)),
+        );
+        let human_tuning = tuning_diagnostic.as_ref().map_or_else(
+            || format!("; {tuning_source}"),
+            |warning| format!("; {tuning_source}; {warning}"),
+        );
         let mut backend_json = format!(
             ",\"backend\":{{\"route\":{},\"frames\":{},\"upload_bytes\":{},\"readback_bytes\":{},\"elapsed_ns\":{}}}",
             json_string(backend.route),
@@ -7331,6 +7363,7 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
                 .elapsed_ns
                 .map_or_else(|| "null".to_owned(), |value| value.to_string()),
         );
+        backend_json.push_str(&tuning_json);
         backend_json.push_str(&format!(
             ",\"execution_dispatch\":{}",
             backend.dispatch.to_json()
@@ -7388,7 +7421,7 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
                 } else if !command.common.quiet {
                     let _ = writeln!(
                         stdout,
-                        "rendered {scene}{human_source}{human_subdivision} as {}: {} ({} frames, {} bytes; {engine}, {render_threads} threads{human_backend}{human_manifest}{human_typesetting})",
+                        "rendered {scene}{human_source}{human_subdivision} as {}: {} ({} frames, {} bytes; {engine}, {render_threads} threads{human_backend}{human_tuning}{human_manifest}{human_typesetting})",
                         match report.kind {
                             fmn_output::NativeArtifactKind::PngSequence => "PNG sequence",
                             fmn_output::NativeArtifactKind::Y4m => "y4m",
@@ -7448,7 +7481,7 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
                 } else if !command.common.quiet {
                     let _ = writeln!(
                         stdout,
-                        "rendered {scene}{human_source}{human_subdivision} as ffmpeg video: {} ({} frames, {} input bytes; {engine}, {render_threads} threads; {} via {}{human_backend}{human_manifest}{human_typesetting})",
+                        "rendered {scene}{human_source}{human_subdivision} as ffmpeg video: {} ({} frames, {} input bytes; {engine}, {render_threads} threads; {} via {}{human_backend}{human_tuning}{human_manifest}{human_typesetting})",
                         report.path.display(),
                         report.frame_count,
                         report.input_bytes,

@@ -930,7 +930,8 @@ impl RenderSink {
                 .map_err(|_| RenderError::InvalidOptions("thread count exceeds this target"))?;
             request = request.with_max_cpu_threads(threads);
         }
-        let plan = ExecutionPlan::derive(request, &topology, None).map_err(RenderError::Plan)?;
+        let plan = crate::autotune::derive_execution_plan(fs.as_ref(), config, request, &topology)
+            .map_err(RenderError::Plan)?;
         // Account for retained pixels separately from in-flight raw/output
         // surfaces. Each affine render team retains its own tile cache and
         // each multithreaded team owns disjoint raster bands. Camera

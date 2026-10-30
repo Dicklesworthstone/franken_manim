@@ -186,6 +186,41 @@ impl PlanRequest {
         self
     }
 
+    /// Surface dimensions and working sample cost of this request.
+    #[must_use]
+    pub const fn surface(self) -> SurfaceSpec {
+        self.surface
+    }
+
+    /// Stable context for a raster autotune measurement.
+    ///
+    /// Output conversion, working-surface bytes and queue ceilings are not
+    /// measured by the raster probe. They remain live admission constraints
+    /// applied by `derive`, so a cache never overrides them.
+    #[must_use]
+    pub fn autotune_key_material(self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(18);
+        bytes.push(match self.engine {
+            ExecutionEngine::CertifiedCpu => 0,
+            ExecutionEngine::FastCpu => 1,
+            ExecutionEngine::Metal => 2,
+            ExecutionEngine::Cuda => 3,
+        });
+        bytes.push(match self.intent {
+            RenderIntent::Preview => 0,
+            RenderIntent::Offline => 1,
+        });
+        bytes.extend_from_slice(&self.surface.width.to_le_bytes());
+        bytes.extend_from_slice(&self.surface.height.to_le_bytes());
+        bytes.extend_from_slice(
+            &self
+                .max_cpu_threads
+                .map_or(0, |limit| u64::try_from(limit).unwrap_or(u64::MAX))
+                .to_le_bytes(),
+        );
+        bytes
+    }
+
     /// Bound queue depth below the intent/topology default.
     #[must_use]
     pub const fn with_max_frames_in_flight(mut self, limit: usize) -> Self {
@@ -299,6 +334,65 @@ pub struct AutotuneProfile {
     pub scratch_bytes_per_worker: usize,
 }
 
+impl AutotuneProfile {
+    /// Encode one measured profile with a fixed, versioned byte layout.
+    ///
+    /// Storage integrity is supplied by the cache envelope. The embedded
+    /// topology identity additionally prevents moving a valid record to a
+    /// different hardware key.
+    ///
+    /// # Errors
+    /// Refuses invalid values or a target size that does not fit the format.
+    pub fn encode(self) -> Result<[u8; 56], PlanError> {
+        validate_profile(&self)?;
+        let fields = [
+            self.topology.value(),
+            u64::try_from(self.threads_per_render_team).map_err(|_| PlanError::SizeOverflow)?,
+            u64::try_from(self.frames_in_flight).map_err(|_| PlanError::SizeOverflow)?,
+            u64::from(self.fine_tile),
+            u64::from(self.macro_tile),
+            u64::try_from(self.scratch_bytes_per_worker).map_err(|_| PlanError::SizeOverflow)?,
+        ];
+        let mut bytes = [0; 56];
+        bytes[..8].copy_from_slice(b"FMNATN01");
+        for (field, chunk) in fields.into_iter().zip(bytes[8..].chunks_exact_mut(8)) {
+            chunk.copy_from_slice(&field.to_le_bytes());
+        }
+        Ok(bytes)
+    }
+
+    /// Decode exactly one record for the supplied topology.
+    ///
+    /// # Errors
+    /// Refuses version, length, topology, integer-range or scheduling violations.
+    pub fn decode(bytes: &[u8], topology: &HardwareTopology) -> Result<Self, PlanError> {
+        if bytes.len() != 56 || &bytes[..8] != b"FMNATN01" {
+            return Err(PlanError::InvalidAutotune);
+        }
+        let mut fields = [0; 6];
+        for (field, chunk) in fields.iter_mut().zip(bytes[8..].chunks_exact(8)) {
+            let array = chunk.try_into().map_err(|_| PlanError::InvalidAutotune)?;
+            *field = u64::from_le_bytes(array);
+        }
+        let fingerprint = TopologyFingerprint::of(topology);
+        if fields[0] != fingerprint.value() {
+            return Err(PlanError::InvalidAutotune);
+        }
+        let profile = Self {
+            topology: fingerprint,
+            threads_per_render_team: usize::try_from(fields[1])
+                .map_err(|_| PlanError::InvalidAutotune)?,
+            frames_in_flight: usize::try_from(fields[2]).map_err(|_| PlanError::InvalidAutotune)?,
+            fine_tile: u32::try_from(fields[3]).map_err(|_| PlanError::InvalidAutotune)?,
+            macro_tile: u32::try_from(fields[4]).map_err(|_| PlanError::InvalidAutotune)?,
+            scratch_bytes_per_worker: usize::try_from(fields[5])
+                .map_err(|_| PlanError::InvalidAutotune)?,
+        };
+        validate_profile(&profile)?;
+        Ok(profile)
+    }
+}
+
 /// In-memory view of the standard-only autotune cache.
 ///
 /// Persistence belongs to the platform/cache boundary. This type gives that
@@ -307,9 +401,25 @@ pub struct AutotuneProfile {
 #[derive(Debug, Clone, Default)]
 pub struct AutotuneCache {
     records: Vec<AutotuneProfile>,
+    raster_tiles_only: bool,
 }
 
 impl AutotuneCache {
+    /// A measurement of raster tile geometry, without measured team or queue
+    /// policy. The planner keeps deriving every unmeasured value from the
+    /// live request and topology, including all memory and caller ceilings.
+    ///
+    /// # Errors
+    /// Refuses structurally invalid profile fields.
+    pub fn for_raster_tiles(profile: AutotuneProfile) -> Result<Self, PlanError> {
+        let mut cache = Self {
+            records: Vec::new(),
+            raster_tiles_only: true,
+        };
+        cache.insert(profile)?;
+        Ok(cache)
+    }
+
     /// Insert or replace the record for one topology.
     ///
     /// # Errors
@@ -435,6 +545,9 @@ pub struct ExecutionPlan {
     pub topology_fingerprint: TopologyFingerprint,
     /// Provenance of tuning values.
     pub tuning_source: TuningSource,
+    /// A persistent-cache refusal reported by a composition root. Never part
+    /// of certified artifact identity; pure derivation leaves this empty.
+    pub tuning_diagnostic: Option<String>,
 }
 
 impl ExecutionPlan {
@@ -479,11 +592,16 @@ impl ExecutionPlan {
             (Determinism::Standard, Some(_)) => TuningSource::StandardAutotuneCache,
             (Determinism::Standard, None) => TuningSource::StandardBaseline,
         };
-        let target_threads = cached.map_or_else(
+        let scheduling = if cache.is_some_and(|cache| cache.raster_tiles_only) {
+            None
+        } else {
+            cached
+        };
+        let target_threads = scheduling.map_or_else(
             || baseline_threads_per_team(request, topology),
             |profile| profile.threads_per_render_team,
         );
-        let scratch_per_worker = cached.map_or(DEFAULT_SCRATCH_PER_WORKER, |profile| {
+        let scratch_per_worker = scheduling.map_or(DEFAULT_SCRATCH_PER_WORKER, |profile| {
             profile.scratch_bytes_per_worker
         });
         let (fine_tile, macro_tile) = match request.determinism {
@@ -505,7 +623,7 @@ impl ExecutionPlan {
             scratch_per_worker,
         );
 
-        let requested_slots = cached.map_or_else(
+        let requested_slots = scheduling.map_or_else(
             || baseline_frames_in_flight(request, render_teams.len()),
             |profile| profile.frames_in_flight,
         );
@@ -615,6 +733,7 @@ impl ExecutionPlan {
             estimated_in_flight_bytes,
             topology_fingerprint: fingerprint,
             tuning_source,
+            tuning_diagnostic: None,
         })
     }
 }
@@ -1347,6 +1466,97 @@ mod tests {
                 scratch_bytes_per_worker: 1,
             }),
             Err(PlanError::InvalidAutotune)
+        );
+    }
+    #[test]
+    fn profile_encoding_rejects_wrong_hardware_version_truncation_and_values() {
+        let topology = topology_96();
+        let profile = AutotuneProfile {
+            topology: TopologyFingerprint::of(&topology),
+            threads_per_render_team: 24,
+            frames_in_flight: 4,
+            fine_tile: 8,
+            macro_tile: 64,
+            scratch_bytes_per_worker: 128 * 1024,
+        };
+        let bytes = profile.encode().unwrap();
+        assert_eq!(AutotuneProfile::decode(&bytes, &topology).unwrap(), profile);
+        for length in 0..bytes.len() {
+            assert!(AutotuneProfile::decode(&bytes[..length], &topology).is_err());
+        }
+        let mut extra = bytes.to_vec();
+        extra.push(0);
+        assert!(AutotuneProfile::decode(&extra, &topology).is_err());
+        assert!(AutotuneProfile::decode(&bytes, &HardwareTopology::fallback(8)).is_err());
+        let mut bad = bytes;
+        bad[7] = b'2';
+        assert!(AutotuneProfile::decode(&bad, &topology).is_err());
+        let mut bad = bytes;
+        bad[16..24].fill(0);
+        assert!(AutotuneProfile::decode(&bad, &topology).is_err());
+        let mut bad = bytes;
+        bad[32..40].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(AutotuneProfile::decode(&bad, &topology).is_err());
+    }
+
+    #[test]
+    fn raster_tile_measurements_never_reuse_stale_team_queue_or_scratch_policy() {
+        let topology = topology_96();
+        let profile = AutotuneProfile {
+            topology: TopologyFingerprint::of(&topology),
+            threads_per_render_team: 1,
+            frames_in_flight: 1,
+            fine_tile: 8,
+            macro_tile: 64,
+            scratch_bytes_per_worker: usize::MAX,
+        };
+        let cache = AutotuneCache::for_raster_tiles(profile).unwrap();
+        for request in [
+            offline(),
+            offline()
+                .with_max_cpu_threads(7)
+                .with_max_frames_in_flight(1),
+            PlanRequest::standard(RenderIntent::Preview, surface(), OutputPixelFormat::Nv12),
+            PlanRequest::certified(RenderIntent::Offline, surface(), OutputPixelFormat::Rgba8),
+        ] {
+            let baseline = ExecutionPlan::derive(request, &topology, None).unwrap();
+            let mut selected = ExecutionPlan::derive(request, &topology, Some(&cache)).unwrap();
+            if baseline.determinism == Determinism::Standard {
+                assert_eq!((selected.fine_tile, selected.macro_tile), (8, 64));
+                assert_eq!(selected.tuning_source, TuningSource::StandardAutotuneCache);
+                selected.fine_tile = baseline.fine_tile;
+                selected.macro_tile = baseline.macro_tile;
+                selected.tuning_source = baseline.tuning_source;
+            }
+            assert_eq!(selected, baseline, "unmeasured scheduling changed");
+        }
+    }
+
+    #[test]
+    fn raster_tuning_identity_keeps_workload_and_explicit_cpu_budget_distinct() {
+        let request = offline();
+        assert_ne!(
+            request.autotune_key_material(),
+            request.with_max_cpu_threads(2).autotune_key_material()
+        );
+        assert_ne!(
+            request.autotune_key_material(),
+            request
+                .with_engine(ExecutionEngine::CertifiedCpu)
+                .autotune_key_material()
+        );
+        assert_eq!(
+            request.autotune_key_material(),
+            request.with_max_frames_in_flight(1).autotune_key_material()
+        );
+        assert_ne!(
+            request.autotune_key_material(),
+            PlanRequest::standard(
+                RenderIntent::Offline,
+                SurfaceSpec::lumen(320, 180),
+                OutputPixelFormat::Rgba8
+            )
+            .autotune_key_material()
         );
     }
 }

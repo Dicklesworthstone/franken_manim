@@ -9,6 +9,7 @@ description = "The first-class Rust API for FrankenManim"
 [dependencies]
 fmn-core.workspace = true
 fmn-config.workspace = true
+fmn-cache.workspace = true
 fmn-platform.workspace = true
 fmn-geom.workspace = true
 fmn-mobject.workspace = true
