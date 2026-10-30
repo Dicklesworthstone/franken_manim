@@ -5732,19 +5732,23 @@ class Line(TipableVMobject):
         result[: len(arr)] = arr[:3]
         return result
 
+    def _line_ends(self):
+        # The Reference's get_vector is `get_end() - get_start()`: the end is
+        # read first, so a point-less line refuses under get_end's name.
+        end = _vec3(self.get_end())
+        return _vec3(self.get_start()), end
+
     def get_vector(self):
-        return _np.array(self._line_vector(_vec3(self.get_start()), _vec3(self.get_end())))
+        return _np.array(self._line_vector(*self._line_ends()))
 
     def get_unit_vector(self):
-        return _np.array(
-            self._line_unit_vector(_vec3(self.get_start()), _vec3(self.get_end()))
-        )
+        return _np.array(self._line_unit_vector(*self._line_ends()))
 
     def get_angle(self):
-        return self._line_angle(_vec3(self.get_start()), _vec3(self.get_end()))
+        return self._line_angle(*self._line_ends())
 
     def get_slope(self):
-        return self._line_slope(_vec3(self.get_start()), _vec3(self.get_end()))
+        return self._line_slope(*self._line_ends())
 
     def set_angle(self, angle, about_point=None):
         # Reference geometry.py:723-730: preserve the start by default and
@@ -5755,7 +5759,9 @@ class Line(TipableVMobject):
         return self
 
     def get_length(self):
-        vect = self.get_vector()
+        # Reference TipableVMobject.get_length (geometry.py:200).
+        start, end = self.get_start_and_end()
+        vect = _np.array(self._line_vector(_vec3(start), _vec3(end)))
         return float(_np.sqrt((vect * vect).sum()))
 
     def get_arc_length(self):
