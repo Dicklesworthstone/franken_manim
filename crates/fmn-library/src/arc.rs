@@ -822,22 +822,27 @@ impl From<Annulus> for Mobject {
     }
 }
 
-/// Reference `Arc.get_arc_center`: the intersection of the normals at the
-/// first two anchors.
+/// `Arc.get_arc_center`: the intersection of the normals at the first two
+/// anchors. The parallel test depends on their angle, not on arc radius or
+/// absolute z: small translated arcs must not return their first anchor.
 #[must_use]
 pub fn arc_center_of(points: &[Vec3]) -> Option<Vec3> {
     let (&a1, &h, &a2) = (points.first()?, points.get(1)?, points.get(2)?);
     let t1 = sub(h, a1);
     let t2 = sub(h, a2);
-    let n1 = space_ops::rotate_vector(t1, TAU / 4.0, OUT);
-    let n2 = space_ops::rotate_vector(t2, TAU / 4.0, OUT);
-    Some(space_ops::find_intersection(
-        a1,
-        n1,
-        a2,
-        n2,
-        space_ops::DEFAULT_INTERSECTION_THRESHOLD,
-    ))
+    let n1 = space_ops::normalize(space_ops::rotate_vector(t1, TAU / 4.0, OUT));
+    let n2 = space_ops::normalize(space_ops::rotate_vector(t2, TAU / 4.0, OUT));
+    let crossed = space_ops::cross(n2, n1);
+    let denominator = space_ops::dot(crossed, crossed);
+    // Unit normals make this a dimensionless sin²(angle) test. Preserve the
+    // defined first-anchor result for a collapsed or numerically parallel
+    // component, without the Reference's radius-dependent quartic cutoff.
+    let distance = if denominator <= 64.0 * f64::EPSILON {
+        0.0
+    } else {
+        space_ops::dot(space_ops::cross(n2, sub(a2, a1)), crossed) / denominator
+    };
+    Some(std::array::from_fn(|i| a1[i] + distance * n1[i]))
 }
 
 /// Reference `Arc.get_start_angle`: the angle of the first anchor about

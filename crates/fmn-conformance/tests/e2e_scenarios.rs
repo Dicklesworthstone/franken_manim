@@ -4284,6 +4284,41 @@ fn geometry_defaults_both_doors_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scen
         .with_counter("planted_default_detected", u64::from(detected)))
 }
 
+fn translated_arc_centers_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let mut checked = 0;
+    let mut rejected_anchors = 0;
+    for radius in [1e-5, 0.08, 1.0, 1e3] {
+        for z in [-1e-9, 0.0, 1e-9, 7.0] {
+            let arc = fmn_library::Arc::new()
+                .radius(radius)
+                .arc_center([0.0, 0.0, z])
+                .build()
+                .map_err(|error| fail(format!("build translated arc: {error}")))?;
+            let center = fmn_library::arc::arc_center_of(arc.points())
+                .ok_or_else(|| fail("translated arc has no center"))?;
+            let error = |point: [f64; 3]| {
+                fmn_geom::space_ops::get_norm([point[0], point[1], point[2] - z])
+            };
+            if error(center) > radius * 1e-9 {
+                return Err(fail(format!(
+                    "radius={radius}, z={z}: center={center:?}"
+                )));
+            }
+            checked += 1;
+            // The Reference's small-arc failure returns this exact anchor.
+            rejected_anchors += u64::from(error(arc.points()[0]) > radius * 1e-9);
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.geometry.arc_centers")
+            .field("checked", checked)
+            .field("rejected_anchors", rejected_anchors),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("arc_centers_checked", checked)
+        .with_counter("arc_first_anchor_rejected", rejected_anchors))
+}
+
 /// `(class, family points in preorder)` per geometry class.
 type NamedPoints = Vec<(&'static str, Vec<[f64; 3]>)>;
 
@@ -12210,6 +12245,27 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 vec![
                     FieldPred::u64_eq("classes", 18),
                     FieldPred::u64_eq("planted_detected", 1),
+                ],
+            )],
+        )
+        .tier(Tier::Fast),
+    );
+    specs.push(
+        spec(
+            "parity.translated_arc_centers.v1",
+            ScenarioClass::ParityDrill,
+            Surface::RustApi,
+            Invocation::new(translated_arc_centers_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("arc_centers_checked", 16),
+                counter_eq("arc_first_anchor_rejected", 16),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.geometry.arc_centers",
+                vec![
+                    FieldPred::u64_eq("checked", 16),
+                    FieldPred::u64_eq("rejected_anchors", 16),
                 ],
             )],
         )
