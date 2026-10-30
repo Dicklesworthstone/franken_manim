@@ -2808,6 +2808,11 @@ impl<'a> FrameJob<'a> {
                     subcell.y,
                 )
                 .unwrap_or_else(|| {
+                    // The supersampled pixel visits every draw binned to its
+                    // tile, and in dense scenes most of them cannot reach it.
+                    if pixel_misses_hull(rec.fill_slab, subcell.px, subcell.py) {
+                        return 0.0;
+                    }
                     fill::coverage_at_subcell(
                         self.pieces_of(rec),
                         rec.translate,
@@ -2849,6 +2854,13 @@ impl<'a> FrameJob<'a> {
             return dst;
         };
         let p = subcell.centre();
+        // The aggregate slab is the union of the segment slabs `shade_in_tile`
+        // tests one by one, so a point outside it admits no segment and shades
+        // to exactly zero. Same comparisons, made once instead of per segment.
+        let slab = stroke.slab();
+        if p[0] < slab[0] || p[0] > slab[2] || p[1] < slab[1] || p[1] > slab[3] {
+            return dst;
+        }
         let (coverage, s) = stroke.shade_in_tile(
             tile,
             self.segments_of(rec),
@@ -3530,6 +3542,33 @@ fn write_premul_f32_pixels(pixels: impl Iterator<Item = [f32; 4]>, out: &mut [u8
 fn row_misses(slab: [f64; 4], py: u32) -> bool {
     let lo = f64::from(py);
     slab[3] <= lo || slab[1] >= lo + 1.0
+}
+
+/// How far a fill's monotone pieces may sit outside its [`hull_slab`] by
+/// rounding alone. The pieces are subdivisions of the same segments, so they
+/// lie inside the control hull up to a few ulps of the pixel coordinates;
+/// this margin is many orders of magnitude wider than that.
+const HULL_ROUNDING_MARGIN_PX: f64 = 1.0 / 64.0;
+
+/// Whether the general coverage integral is exactly zero at every subcell of
+/// pixel `(px, py)` for the fill pieces the control hull `slab` bounds.
+///
+/// Two cases, each a no-op for every piece in `accumulate_piece_row`:
+/// - the pixel row misses the hull, so no piece has a part in its band;
+/// - the pixel lies left of the hull, so every piece is right of the cell,
+///   both of its tile-edge crossings clamp to the same endpoint, and it adds
+///   neither carry nor a deposit.
+///
+/// A pixel right of the hull is not skipped: the pieces left of it add their
+/// signed heights to the carry, which cancels only up to rounding. [`row_misses`]
+/// without the margin is the native row's skip; this one stands in for an
+/// evaluation that runs today, so it must hold even if a piece rounds past
+/// the hull.
+fn pixel_misses_hull(slab: [f64; 4], px: u32, py: u32) -> bool {
+    let (x, y) = (f64::from(px), f64::from(py));
+    slab[3] + HULL_ROUNDING_MARGIN_PX <= y
+        || slab[1] - HULL_ROUNDING_MARGIN_PX >= y + 1.0
+        || slab[0] - HULL_ROUNDING_MARGIN_PX >= x + 1.0
 }
 
 /// A prepared segment run's screen-space control-hull AABB.
@@ -4750,6 +4789,149 @@ mod tests {
                 "the frame moved at {threads} threads"
             );
         }
+    }
+
+    /// A grid of small general-path outlines, filled and stroked, packed so
+    /// that each fine tile holds several draws. A supersampled pixel here
+    /// visits mostly draws that cannot reach it.
+    fn dense_grid() -> Stage {
+        let mut stage = Stage::new();
+        for row in 0..12u32 {
+            for col in 0..8u32 {
+                let x = 3.0 + 13.0 * f64::from(col);
+                let y = 2.0 + 9.0 * f64::from(row);
+                let points = if (row + col) % 2 == 0 {
+                    ring(x + 5.5, y + 3.7, 3.4, 6, true)
+                } else {
+                    rect_points(x + 0.3, y + 0.4, x + 11.6, y + 7.3)
+                };
+                let h = stage.add(vmob(
+                    &points,
+                    [1.0, 0.8, 0.1, 0.9],
+                    [0.2, 0.4, 1.0, 1.0],
+                    120.0,
+                ));
+                stage.add_to_scene(h).expect("live");
+            }
+        }
+        stage
+    }
+
+    #[test]
+    fn supersampled_slab_skips_stand_in_for_exact_zeros() {
+        // A supersampled pixel composites every draw binned to its tile.
+        // fill_sample skips the general integral on a pixel the fill's control
+        // hull misses by row or lies right of, and stroke_sample skips a sample
+        // outside the stroke slab. Each skip returns the destination unchanged,
+        // so it is exact only if the evaluation it replaces comes out <= 0
+        // there. Check that against the real pieces and prepared strokes, at
+        // the pixels and samples just past each slab's edges, where rounding
+        // could matter.
+        let stage = dense_grid();
+        let identity = EngineIdentity {
+            engine: EngineKind::FastCpu,
+            ..EngineIdentity::certified()
+        };
+        let cfg = config().with_aa_policy(AaPolicy::Ssaa4x);
+        let (plan, mono, binning) = derive(&stage, cfg, default_tiling());
+        let job = FrameJob::with_identity(&plan, &mono, &binning, cfg, identity)
+            .expect("matching frame artifacts");
+        let (width, height) = (cfg.viewport.width, cfg.viewport.height);
+        let near = |lo: f64, hi: f64, limit: u32| {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let (a, b) = ((lo - 3.0).max(0.0) as u32, (hi + 4.0).max(0.0) as u32);
+            a..b.min(limit)
+        };
+        let (mut fill_skips, mut left_skips) = (0u64, 0u64);
+        let (mut stroke_skips, mut stroke_hits) = (0u64, 0u64);
+        for rec in job.draws().iter().flatten() {
+            let pieces = job.pieces_of(rec);
+            if rec.draws_fill && !pieces.is_empty() {
+                for py in near(rec.fill_slab[1], rec.fill_slab[3], height) {
+                    for px in near(rec.fill_slab[0], rec.fill_slab[2] + 8.0, width) {
+                        if !pixel_misses_hull(rec.fill_slab, px, py) {
+                            continue;
+                        }
+                        let beside = f64::from(py) + 1.0 > rec.fill_slab[1]
+                            && f64::from(py) < rec.fill_slab[3];
+                        left_skips += u64::from(beside);
+                        for samples in [2, 4] {
+                            for sy in 0..samples {
+                                for sx in 0..samples {
+                                    let coverage = fill::coverage_at_subcell(
+                                        pieces,
+                                        rec.translate,
+                                        py,
+                                        px,
+                                        samples,
+                                        sx,
+                                        sy,
+                                    );
+                                    assert_eq!(
+                                        coverage, 0.0,
+                                        "fill reaches pixel ({px}, {py}) outside its hull"
+                                    );
+                                    fill_skips += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                // The control: the same probe through the hull's middle row
+                // sees coverage, so the zeros above are not vacuous.
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let mid = (0.5 * (rec.fill_slab[1] + rec.fill_slab[3])) as u32;
+                assert!(
+                    near(rec.fill_slab[0], rec.fill_slab[2], width).any(|px| {
+                        fill::coverage_at_subcell(pieces, rec.translate, mid, px, 4, 2, 2) > 0.0
+                    }),
+                    "the probe saw no fill inside the hull"
+                );
+            }
+            let Some(stroke) = job.stroke_of(rec) else {
+                continue;
+            };
+            let slab = stroke.slab();
+            for py in near(slab[1], slab[3], height) {
+                for px in near(slab[0], slab[2], width) {
+                    let tile = binning.tile_of(px, py).expect("in the viewport");
+                    for samples in [2, 4] {
+                        for (sx, sy) in (0..samples).flat_map(|x| (0..samples).map(move |y| (x, y)))
+                        {
+                            let p = Subcell {
+                                px,
+                                py,
+                                samples,
+                                x: sx,
+                                y: sy,
+                            }
+                            .centre();
+                            let (coverage, _) = stroke.shade_in_tile(
+                                tile,
+                                job.segments_of(rec),
+                                job.joins_of(rec),
+                                &rec.style,
+                                cfg.map,
+                                rec.translate,
+                                p,
+                            );
+                            if p[0] < slab[0] || p[0] > slab[2] || p[1] < slab[1] || p[1] > slab[3]
+                            {
+                                assert!(coverage <= 0.0, "stroke reaches {p:?} outside {slab:?}");
+                                stroke_skips += 1;
+                            } else if coverage > 0.0 {
+                                stroke_hits += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            fill_skips > 10_000 && left_skips > 100 && stroke_skips > 10_000 && stroke_hits > 1_000,
+            "the fixture must exercise every skip and the control: {fill_skips} fill \
+             ({left_skips} pixels beside the hull), {stroke_skips} stroke, {stroke_hits} stroke hits"
+        );
     }
 
     #[test]
