@@ -41,6 +41,32 @@ pub enum WireFormat {
 }
 
 impl WireFormat {
+    /// Resolve the configured wire format for the native, CLI, and Python
+    /// front doors. Automatic selection uses NV12 for ordinary video and RGBA
+    /// for alpha; ten-bit P010 remains an explicit request. The Reference's
+    /// default yuv420p also admits the alpha wire for transparent MOV.
+    ///
+    /// This selects the bytes sent to the encoder, not an encoder or a
+    /// hardware backend. Those still undergo the normal capability probe.
+    ///
+    /// # Errors
+    /// An unsupported setting is refused before any output or process exists.
+    pub fn from_config(value: &str, transparent: bool) -> Result<Self, NegotiationError> {
+        match value.to_ascii_lowercase().as_str() {
+            "auto" | "yuv420p" if transparent => Ok(Self::Rgba8),
+            "rgba" | "rgba8" => Ok(Self::Rgba8),
+            "bgra" | "bgra8" => Ok(Self::Bgra8),
+            // The supported portal hosts represent native-endian ARGB
+            // words as BGRA bytes (SceneFileWriter.use_fast_encoding).
+            "rgb32" if cfg!(target_endian = "little") => Ok(Self::Bgra8),
+            "auto" | "nv12" | "yuv420p" => Ok(Self::Nv12),
+            "p010" | "p010le" | "yuv420p10le" => Ok(Self::P010),
+            _ => Err(NegotiationError(
+                "unsupported file_writer.pixel_format; choose auto, rgba, bgra, nv12/yuv420p, or p010le",
+            )),
+        }
+    }
+
     /// The ffmpeg `-pix_fmt` name.
     #[must_use]
     pub const fn ffmpeg_pix_fmt(self) -> &'static str {

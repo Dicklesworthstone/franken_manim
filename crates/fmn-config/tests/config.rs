@@ -4,7 +4,7 @@
 //! surface as W6 will consume it.
 
 use fmn_config::config::{
-    AaPolicy, DeterminismMode, Engine, Layer, LogLevel, ThreadPolicy, overlay,
+    AaPolicy, DeterminismMode, Engine, Layer, LogLevel, ThreadPolicy, normalize_layer, overlay,
 };
 use fmn_config::{Config, ConfigError, PackError, PackRegistry, Value, yaml};
 
@@ -253,6 +253,262 @@ fn typed_extraction_diagnostics_are_golden() {
 // ---------------------------------------------------------------------------
 // The precedence matrix
 // ---------------------------------------------------------------------------
+
+const DOCUMENTED_SPELLINGS: &[(&str, &str)] = &[
+    ("style.font", "text.font"),
+    ("style.tex_pack", "tex.template"),
+    ("output.vcodec", "file_writer.video_codec"),
+    ("output.pix_fmt", "file_writer.pixel_format"),
+    ("directories.output", "directories.subdirs.output"),
+    (
+        "directories.raster_images",
+        "directories.subdirs.raster_images",
+    ),
+];
+
+fn typed_setting<'a>(config: &'a Config, path: &str) -> &'a str {
+    match path {
+        "text.font" => &config.text.font,
+        "tex.template" => &config.tex.template,
+        "file_writer.video_codec" => &config.file_writer.video_codec,
+        "file_writer.pixel_format" => &config.file_writer.pixel_format,
+        path if path.starts_with("directories.subdirs.") => {
+            let name = path.strip_prefix("directories.subdirs.").unwrap();
+            &config
+                .directories
+                .subdirs
+                .iter()
+                .find(|(key, _)| key == name)
+                .unwrap()
+                .1
+        }
+        _ => panic!("unknown typed setting: {path}"),
+    }
+}
+
+fn setting_document(path: &str, value: &str) -> String {
+    let mut document = String::new();
+    let parts: Vec<_> = path.split('.').collect();
+    for (depth, part) in parts.iter().enumerate() {
+        document.push_str(&"  ".repeat(depth));
+        document.push_str(part);
+        if depth + 1 == parts.len() {
+            document.push_str(&format!(": {value:?}\n"));
+        } else {
+            document.push_str(":\n");
+        }
+    }
+    document
+}
+
+#[test]
+fn documented_config_keys_change_typed_settings_and_effective_identity() {
+    let defaults = Config::resolve(&[], None).unwrap().config;
+    for &(alias, canonical) in DOCUMENTED_SPELLINGS {
+        let configured = Config::resolve(
+            &[Layer {
+                name: "native.yml",
+                text: &setting_document(alias, "chosen"),
+            }],
+            None,
+        )
+        .unwrap()
+        .config;
+        let reference = Config::resolve(
+            &[Layer {
+                name: "reference.yml",
+                text: &setting_document(canonical, "chosen"),
+            }],
+            None,
+        )
+        .unwrap()
+        .config;
+        assert_eq!(typed_setting(&configured, canonical), "chosen", "{alias}");
+        assert_eq!(configured, reference, "{alias}");
+        assert_eq!(configured.raw.get_path(alias), None, "{alias}");
+        assert_eq!(
+            configured.canonical_bytes().unwrap(),
+            reference.canonical_bytes().unwrap(),
+            "equivalent spellings must name the same effective C4: {alias}"
+        );
+        assert_ne!(
+            configured.canonical_bytes().unwrap(),
+            defaults.canonical_bytes().unwrap(),
+            "a changed effective setting must change C4: {alias}"
+        );
+    }
+}
+
+#[test]
+fn documented_spellings_obey_layer_order_in_both_directions() {
+    for &(alias, canonical) in DOCUMENTED_SPELLINGS {
+        for (early, late) in [(alias, canonical), (canonical, alias)] {
+            let first = setting_document(early, "first");
+            let second = setting_document(late, "second");
+            let layers = [
+                Layer {
+                    name: "custom_config.yml",
+                    text: &first,
+                },
+                Layer {
+                    name: "explicit.yml",
+                    text: &second,
+                },
+            ];
+            let configured = Config::resolve(&layers, None).unwrap().config;
+            assert_eq!(typed_setting(&configured, canonical), "second", "{late}");
+            for cli_path in [alias, canonical] {
+                let configured = Config::resolve(
+                    &layers,
+                    Some(overlay([(cli_path, Value::Str("cli".into()))])),
+                )
+                .unwrap()
+                .config;
+                assert_eq!(typed_setting(&configured, canonical), "cli", "{cli_path}");
+                let cli_only = Config::resolve(
+                    &[],
+                    Some(overlay([(canonical, Value::Str("cli".into()))])),
+                )
+                .unwrap()
+                .config;
+                assert_eq!(configured, cli_only, "shadowed values must not remain");
+            }
+        }
+    }
+}
+
+#[test]
+fn same_layer_spelling_conflicts_refuse_independent_of_key_order() {
+    for &(alias, canonical) in DOCUMENTED_SPELLINGS {
+        for (first, second) in [(alias, canonical), (canonical, alias)] {
+            let error = Config::resolve(
+                &[],
+                Some(overlay([
+                    (first, Value::Str("one".into())),
+                    (second, Value::Str("two".into())),
+                ])),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains(alias), "{error}");
+            assert!(error.contains(canonical), "{error}");
+            assert!(error.contains("same configuration layer"), "{error}");
+        }
+        let duplicates = Config::resolve(
+            &[],
+            Some(overlay([
+                (alias, Value::Str("same".into())),
+                (canonical, Value::Str("same".into())),
+            ])),
+        )
+        .unwrap()
+        .config;
+        let one = Config::resolve(
+            &[],
+            Some(overlay([(canonical, Value::Str("same".into()))])),
+        )
+        .unwrap()
+        .config;
+        assert_eq!(duplicates, one);
+    }
+}
+
+#[test]
+fn native_spellings_reject_malformed_values_and_do_not_repair_bad_parents() {
+    for &(alias, canonical) in DOCUMENTED_SPELLINGS {
+        for value in [
+            Value::Null,
+            Value::Bool(false),
+            Value::Int(1),
+            Value::Float(1.5),
+            Value::Map(Vec::new()),
+        ] {
+            let error = Config::resolve(&[], Some(overlay([(alias, value)])))
+                .unwrap_err()
+                .to_string();
+            assert!(error.starts_with(&format!("{alias}:")), "{error}");
+            assert!(error.contains("expected a string"), "{error}");
+        }
+        let parent = canonical.rsplit_once('.').unwrap().0;
+        let error = Config::resolve(
+            &[],
+            Some(overlay([
+                (parent, Value::Bool(false)),
+                (alias, Value::Str("value".into())),
+            ])),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.starts_with(&format!("{parent}:")), "{error}");
+        assert!(error.contains("expected mapping"), "{error}");
+    }
+    for section in ["style", "output"] {
+        for value in [Value::Null, Value::Str("invalid".into()), Value::Bool(false)] {
+            let error = Config::resolve(&[], Some(overlay([(section, value)])))
+                .unwrap_err()
+                .to_string();
+            assert!(error.starts_with(&format!("{section}:")), "{error}");
+        }
+    }
+}
+
+#[test]
+fn native_normalization_preserves_unknown_siblings_and_default_identity() {
+    let document = "style:\n  font: IBM Plex Sans\n  extension: 7\noutput:\n  pix_fmt: nv12\n  extension: custom\ndirectories:\n  output: media\n  extension: local\n";
+    let configured = Config::resolve(
+        &[Layer {
+            name: "extended.yml",
+            text: document,
+        }],
+        None,
+    )
+    .unwrap()
+    .config;
+    assert_eq!(configured.text.font, "IBM Plex Sans");
+    assert_eq!(configured.file_writer.pixel_format, "nv12");
+    assert_eq!(
+        configured.raw.get_path("style.extension"),
+        Some(&Value::Int(7))
+    );
+    assert_eq!(
+        configured.raw.get_path("output.extension"),
+        Some(&Value::Str("custom".into()))
+    );
+    assert_eq!(
+        configured.raw.get_path("directories.extension"),
+        Some(&Value::Str("local".into()))
+    );
+    let normalized = normalize_layer(parse(document)).unwrap();
+    assert_eq!(normalize_layer(normalized.clone()).unwrap(), normalized);
+    let defaults = Config::resolve(&[], None).unwrap().config;
+    assert_eq!(defaults.raw, parse(Config::DEFAULT_DOCUMENT));
+    let empty_sections = overlay([
+        ("style", Value::Map(Vec::new())),
+        ("output", Value::Map(Vec::new())),
+    ]);
+    assert_eq!(
+        Config::resolve(&[], Some(empty_sections)).unwrap().config,
+        defaults
+    );
+}
+
+#[test]
+fn direct_typed_conversion_normalizes_the_same_single_document() {
+    let mut raw = Config::resolve(&[], None).unwrap().config.raw;
+    raw = yaml::merge(
+        raw,
+        overlay([
+            ("text.font", Value::Str("IBM Plex Sans".into())),
+            ("style.font", Value::Str("IBM Plex Sans".into())),
+            ("output.pix_fmt", Value::Str("yuv420p".into())),
+        ]),
+    );
+    let config = Config::from_value(raw).unwrap();
+    assert_eq!(config.text.font, "IBM Plex Sans");
+    assert_eq!(config.raw.get("style"), None);
+    assert_eq!(config.raw.get("output"), None);
+    assert_eq!(Config::from_value(config.raw.clone()).unwrap(), config);
+}
 
 #[test]
 fn optional_video_quality_keys_layer_and_clear_without_changing_defaults() {

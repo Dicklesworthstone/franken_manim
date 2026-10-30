@@ -6,7 +6,9 @@
 //! user config file(s) (`custom_config.yml` from the working directory,
 //! then `--config_file` if given) → the CLI overlay — all merged with the
 //! Reference-exact recursive rules ([`crate::yaml::merge`]), then typed
-//! once. Tuple-strings (`(1920, 1080)`) are typed here, the way the
+//! once. Documented native spellings are normalized in each layer before
+//! merging, so a lower-priority spelling cannot defeat a CLI override.
+//! Tuple-strings (`(1920, 1080)`) are typed here, the way the
 //! Reference `literal_eval`s them after YAML loading.
 //!
 //! The struct family is hand-written against the shipped key surface; it
@@ -428,7 +430,7 @@ impl Config {
                 line: w.line,
                 message: w.message,
             }));
-            Ok(value)
+            normalize_layer(value)
         };
 
         let mut merged = parse_layer("built-in defaults", Self::DEFAULT_DOCUMENT)?;
@@ -437,7 +439,7 @@ impl Config {
             merged = yaml::merge(merged, value);
         }
         if let Some(overlay) = cli_overlay {
-            merged = yaml::merge(merged, overlay);
+            merged = yaml::merge(merged, normalize_layer(overlay)?);
         }
 
         let config = Self::from_value(merged)?;
@@ -457,7 +459,7 @@ impl Config {
     /// A [`ConfigError`] naming the key path and the expected-vs-found
     /// shapes.
     pub fn from_value(root: Value) -> Result<Self, ConfigError> {
-        crate::generated::config_from_value(root)
+        crate::generated::config_from_value(normalize_layer(root)?)
     }
 
     /// Serialize the fully merged, closure-relevant document after all
@@ -568,6 +570,105 @@ pub fn overlay<'a>(pairs: impl IntoIterator<Item = (&'a str, Value)>) -> Value {
         root = yaml::merge(root, nested);
     }
     root
+}
+
+/// Normalize one configuration layer to the keys consumed by the generated
+/// typed reader. Native and Reference spellings share the same fields; they
+/// are not competing settings. Call this **before** merging independently
+/// authored layers, as [Config::resolve] does.
+///
+/// style.font and style.tex_pack name text.font and tex.template;
+/// output.vcodec and output.pix_fmt name the corresponding file_writer
+/// settings. Flat asset/output directory names name their subdirs entries,
+/// retaining the existing directories.base joining semantics.
+///
+/// Two spellings in the same layer must agree. Equal values coalesce;
+/// conflicting values are rejected, independent of YAML key order. Recognized
+/// aliases are removed from the resolved document, so equivalent spellings
+/// have the same C4 identity. Unknown siblings remain available in the raw
+/// configuration and retain their existing provenance behavior.
+///
+/// # Errors
+/// A [ConfigError] naming a malformed native section/key, an invalid
+/// destination parent, or both spellings of a same-layer conflict.
+pub fn normalize_layer(mut root: Value) -> Result<Value, ConfigError> {
+    for section in ["style", "output"] {
+        if let Some(value) = root.get(section)
+            && !matches!(value, Value::Map(_))
+        {
+            return Err(Cx::type_err(section, "a mapping", value));
+        }
+    }
+
+    const ALIASES: &[(&str, &str)] = &[
+        ("style.font", "text.font"),
+        ("style.tex_pack", "tex.template"),
+        ("output.vcodec", "file_writer.video_codec"),
+        ("output.pix_fmt", "file_writer.pixel_format"),
+        ("directories.output", "directories.subdirs.output"),
+        (
+            "directories.raster_images",
+            "directories.subdirs.raster_images",
+        ),
+        (
+            "directories.vector_images",
+            "directories.subdirs.vector_images",
+        ),
+        (
+            "directories.three_d_models",
+            "directories.subdirs.three_d_models",
+        ),
+        ("directories.sounds", "directories.subdirs.sounds"),
+        ("directories.data", "directories.subdirs.data"),
+        ("directories.downloads", "directories.subdirs.downloads"),
+        (
+            "directories.latex_cache",
+            "directories.subdirs.latex_cache",
+        ),
+    ];
+
+    for &(alias, canonical) in ALIASES {
+        let Some(value) = root.get_path(alias).cloned() else {
+            continue;
+        };
+        if !matches!(value, Value::Str(_)) {
+            return Err(Cx::type_err(alias, "a string", &value));
+        }
+        match (Cx { root: &root }).lookup(canonical) {
+            Ok(existing) if existing != &value => {
+                return Err(ConfigError::Value {
+                    path: alias.to_owned(),
+                    message: format!(
+                        "conflicts with {canonical} in the same configuration layer; use one spelling or equal values"
+                    ),
+                });
+            }
+            // Missing keys/parents are supplied by this alias. A scalar
+            // parent, however, must not be silently repaired by the merge.
+            Err(error @ ConfigError::Type { .. }) => return Err(error),
+            _ => {}
+        }
+
+        if let Some((section, key)) = alias.split_once('.')
+            && let Value::Map(sections) = &mut root
+            && let Some((_, Value::Map(entries))) =
+                sections.iter_mut().find(|(name, _)| name == section)
+        {
+            entries.retain(|(name, _)| name != key);
+        }
+        root = yaml::merge(root, overlay([(canonical, value)]));
+    }
+
+    // A section containing only aliases has no remaining semantic content.
+    // Keep unknown entries (and their order) rather than silently discarding
+    // extension settings alongside the recognized names.
+    if let Value::Map(sections) = &mut root {
+        sections.retain(|(name, value)| {
+            !matches!(name.as_str(), "style" | "output")
+                || !matches!(value, Value::Map(entries) if entries.is_empty())
+        });
+    }
+    Ok(root)
 }
 
 // ---------------------------------------------------------------------------

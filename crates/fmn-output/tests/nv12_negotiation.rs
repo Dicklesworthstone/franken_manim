@@ -27,6 +27,59 @@ fn formats(argv: &[String]) -> Vec<&str> {
         .collect()
 }
 
+#[test]
+fn configured_auto_negotiates_real_opaque_and_alpha_encoder_arguments() {
+    for (transparent, container, wire, encoder, expected_formats) in [
+        (
+            false,
+            Container::Mp4,
+            WireFormat::Nv12,
+            "libx264",
+            ["nv12", "yuv420p"],
+        ),
+        (
+            true,
+            Container::MovTransparent,
+            WireFormat::Rgba8,
+            "qtrle",
+            ["rgba", "argb"],
+        ),
+    ] {
+        for spelling in ["auto", "AUTO", "yuv420p"] {
+            let selected = WireFormat::from_config(spelling, transparent).unwrap();
+            assert_eq!(selected, wire);
+            let mut configured = job("unused", selected, container);
+            configured.encoder = EncoderChoice::Auto;
+            configured.color = ColorDescription::for_native_wire(selected);
+            let argv = encode_argv(&configured, Path::new("/out/movie")).unwrap();
+            assert_eq!(formats(&argv), expected_formats);
+            assert!(argv.windows(2).any(|pair| pair == ["-c:v", encoder]));
+        }
+    }
+    // Explicit high-depth and alpha choices remain authoritative. An opaque
+    // explicit wire is not silently changed to repair an incompatible request.
+    assert_eq!(
+        WireFormat::from_config("p010le", false).unwrap(),
+        WireFormat::P010
+    );
+    assert_eq!(
+        WireFormat::from_config("bgra", true).unwrap(),
+        WireFormat::Bgra8
+    );
+    let explicit = WireFormat::from_config("nv12", true).unwrap();
+    assert!(
+        encode_argv(
+            &job("qtrle", explicit, Container::MovTransparent),
+            Path::new("/alpha.mov"),
+        )
+        .is_err()
+    );
+    for invalid in ["", "automatic", "rgb48le", "-vf eq=gamma=2"] {
+        let error = WireFormat::from_config(invalid, true).unwrap_err();
+        assert!(error.to_string().contains("file_writer.pixel_format"));
+    }
+}
+
 #[cfg(unix)]
 fn probe_formats_retaining_failure(
     caps: &fmn_output::EncoderCapabilities,
