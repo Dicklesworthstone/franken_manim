@@ -1,6 +1,6 @@
 //! Persistent native raster workers over owned compiled frame generations.
 //!
-//! The scene and output buffer never cross threads. The team temporarily owns
+//! Live scene state and the output buffer never cross threads. The team temporarily owns
 //! the caller's prepared arena and tile cache, plus either an immutable frame
 //! generation or the synchronous renderer's compiler tables, and rasterizes
 //! into reusable, disjoint row bands. Only completed dirty tiles are copied to
@@ -15,9 +15,10 @@ use fmn_frame::{FrameBuffer, FrameError};
 
 use super::OwnedVectorFrame;
 use crate::engine::PreparedBands;
+use crate::retained::PreparedCameraBands;
 use crate::{
     AaStats, Binning, CachedRenderError, CachedRenderStats, FrameArena, FrameJob, MonoTable,
-    PixelTileCache, RenderPlan, RetainedFrameRendererConfig, RetainedFrameRendererError, TileWork,
+    PixelTileCache, PreparedCameraFrame, RenderPlan, RetainedFrameRendererConfig, RetainedFrameRendererError, TileWork,
 };
 
 /// Mutable compiler tables lent to a synchronous raster call by ownership
@@ -64,6 +65,7 @@ enum RasterInput {
     #[default]
     Empty,
     Frozen(OwnedVectorFrame),
+    Camera(PreparedCameraBands),
     // Keep the empty exchange tables between calls. Box allocation and empty
     // compiler initialization happen once, never on each changing frame.
     Retained(Box<RetainedInput>),
@@ -81,6 +83,7 @@ impl RasterInput {
     fn tables(&self) -> Result<RasterTables<'_>, RetainedFrameRendererError> {
         match self {
             Self::Empty => unreachable!("a dispatched raster owns its input"),
+            Self::Camera(_) => unreachable!("camera frames use their owned projection"),
             Self::Frozen(frame) => Ok(RasterTables {
                 plan: &frame.plan,
                 mono: frame.mono.get(&frame.plan)?,
@@ -148,14 +151,23 @@ impl Payload {
             !self.panic_next.swap(false, Ordering::Relaxed),
             "injected persistent raster worker panic"
         );
+        if let RasterInput::Camera(frame) = &self.input {
+            frame.raster(&self.bands, &self.next);
+            return AaStats::default();
+        }
         let prepared = self.prepared.expect("published frame is prepared");
         let frame = self.input.tables().expect("raster tables were prepared");
         FrameJob::from_prepared_bands(frame.plan, frame.mono, frame.binning, &self.arena, prepared)
             .render_owned_bands(&self.bands, &self.next, prepared.stride, &self.cache)
     }
 
-    fn reserve_bands(&mut self, prepared: PreparedBands, height: usize) -> Result<(), FrameError> {
-        let layout = (prepared.stride, prepared.band_rows, height);
+    fn reserve_bands(
+        &mut self,
+        stride: usize,
+        band_rows: usize,
+        height: usize,
+    ) -> Result<(), FrameError> {
+        let layout = (stride, band_rows, height);
         if self.band_layout != Some(layout) {
             // A differently shaped surface must not retain the old bands'
             // larger capacities as well as allocating its new shape. This
@@ -164,7 +176,7 @@ impl Payload {
             self.bands = Vec::new();
             self.band_layout = Some(layout);
         }
-        let count = height.div_ceil(prepared.band_rows);
+        let count = height.div_ceil(band_rows);
         if self.bands.len() < count {
             self.bands
                 .try_reserve_exact(count - self.bands.len())
@@ -174,9 +186,9 @@ impl Payload {
             self.bands.truncate(count);
         }
         for (index, band) in self.bands.iter_mut().enumerate() {
-            let rows = prepared.band_rows.min(height - index * prepared.band_rows);
+            let rows = band_rows.min(height - index * band_rows);
             let bytes = rows
-                .checked_mul(prepared.stride)
+                .checked_mul(stride)
                 .ok_or(FrameError::TooLarge)?;
             let buffer = band.get_mut().unwrap_or_else(PoisonError::into_inner);
             if buffer.len() < bytes {
@@ -195,6 +207,13 @@ impl Payload {
         destination: &FrameBuffer,
         resume: Option<u64>,
     ) -> Result<(), RetainedFrameRendererError> {
+        if let RasterInput::Camera(frame) = &self.input {
+            let layout = frame.layout;
+            self.reserve_bands(layout.stride, layout.band_rows, layout.height)?;
+            self.prepared = None;
+            self.next.store(0, Ordering::Relaxed);
+            return Ok(());
+        }
         let frame = self.input.tables()?;
         let prepared = FrameJob::with_identity_in(
             &mut self.arena,
@@ -205,7 +224,11 @@ impl Payload {
             frame.config.engine,
         )?
         .prepare_bands(threads, destination)?;
-        self.reserve_bands(prepared, destination.layout().height() as usize)?;
+        self.reserve_bands(
+            prepared.stride,
+            prepared.band_rows,
+            destination.layout().height() as usize,
+        )?;
         self.prepared = Some(prepared);
         self.next.store(0, Ordering::Relaxed);
         // No destination pixels are changed until every worker succeeds.
@@ -229,6 +252,22 @@ impl Payload {
         destination: &mut FrameBuffer,
         raster: AaStats,
     ) -> Result<CachedRenderStats, RetainedFrameRendererError> {
+        if let RasterInput::Camera(frame) = &self.input {
+            let layout = frame.layout;
+            let stride = destination.layout().stride(0);
+            let output = destination.plane_mut(0);
+            for (band, buffer) in self.bands.iter_mut().enumerate() {
+                let buffer = buffer.get_mut().unwrap_or_else(PoisonError::into_inner);
+                for (row, bytes) in buffer.chunks_exact(layout.stride).enumerate() {
+                    let y = band * layout.band_rows + row;
+                    output[y * stride..y * stride + layout.stride].copy_from_slice(bytes);
+                }
+            }
+            return Ok(CachedRenderStats {
+                cache: crate::CacheStats::default(),
+                raster,
+            });
+        }
         let frame = self.input.tables()?;
         let prepared = self.prepared.expect("completed frame is prepared");
         let binning = frame.binning;
@@ -408,6 +447,31 @@ impl RasterTeam {
             self.frames_completed = self.frames_completed.saturating_add(1);
         }
         result
+    }
+
+    /// Camera and planar frames share one team and one owned band surface.
+    /// The caller regains its prior compiler exchange tables on every result.
+    pub(crate) fn render_camera(
+        &mut self,
+        frame: &PreparedCameraFrame,
+        destination: &mut FrameBuffer,
+    ) -> Result<(), RetainedFrameRendererError> {
+        if self.threads == 1 {
+            frame.render_into(1, destination)?;
+            self.frames_completed = self.frames_completed.saturating_add(1);
+            return Ok(());
+        }
+        let camera = frame.prepare_owned_bands(self.threads, destination)?;
+        let payload = Arc::get_mut(&mut self.payload).expect("previous frame was joined");
+        let previous = std::mem::replace(&mut payload.input, RasterInput::Camera(camera));
+        let result = self.render_owned(destination, None);
+        let payload = Arc::get_mut(&mut self.payload).expect("all camera readers released");
+        payload.input = previous;
+        payload.prepared = None;
+        if result.is_ok() {
+            self.frames_completed = self.frames_completed.saturating_add(1);
+        }
+        result.map(|_| ())
     }
 
     /// Synchronous retained rendering uses the same workers and raster kernels

@@ -18,7 +18,7 @@ use fmn_mobject::{
 };
 
 use crate::plan::PlanIdentity;
-use crate::three_d::{PreparedThreeDProjection, same_projection_camera};
+use crate::three_d::{CameraBandLayout, PreparedThreeDProjection, same_projection_camera};
 use crate::vector_frame::RetainedVectorFrame;
 use crate::{
     AllocStats, Binning, BinningError, CachedRenderError, CachedRenderStats, Camera,
@@ -405,7 +405,13 @@ impl RetainedFrameRenderer {
         // A failed raster may have partially written the destination. Never
         // leave a success key installed across a fallible write.
         self.camera_pixels = Weak::new();
-        prepared.render_into(self.config.threads, &mut self.frame)?;
+        if self.raster_team.is_none() {
+            self.raster_team = Some(RasterTeam::new(self.config.threads)?);
+        }
+        prepared.render_into_with_team(
+            self.raster_team.as_mut().expect("raster team initialized above"),
+            &mut self.frame,
+        )?;
         self.camera_pixels = Arc::downgrade(&prepared.projection);
         Ok(())
     }
@@ -530,11 +536,11 @@ impl RetainedFrameRenderer {
         self.arena.stats()
     }
 
-    /// Persistent planar workers and their retained band storage.
+    /// Persistent planar/camera workers and their retained band storage.
     ///
     /// Unchanged frames reuse the complete raster and do not dispatch work, so
     /// `frames_completed` counts successful rasterizations rather than emitted
-    /// frames. Before the first planar raster every counter is zero. Single-
+    /// frames. Before the first raster every counter is zero. Single-
     /// thread and browser renders keep the inline path with no band surface.
     #[must_use]
     pub fn raster_team_stats(&self) -> RasterTeamStats {
@@ -603,6 +609,52 @@ impl PreparedCameraFrame {
             .map_err(RetainedFrameRendererError::ThreeDFrame)
     }
 
+    /// Rasterize through a persistent CPU team, sharing workers and owned
+    /// bands with planar frames. Worker failure leaves the destination intact.
+    ///
+    /// # Errors
+    /// Refuses invalid destinations and camera preparation, and reports worker
+    /// panic after every worker has released its immutable input.
+    pub fn render_into_with_team(
+        &self,
+        team: &mut RasterTeam,
+        frame: &mut FrameBuffer,
+    ) -> Result<(), RetainedFrameRendererError> {
+        team.render_camera(self, frame)
+    }
+
+    pub(crate) fn prepare_owned_bands(
+        &self,
+        threads: usize,
+        destination: &FrameBuffer,
+    ) -> Result<PreparedCameraBands, RetainedFrameRendererError> {
+        // A warm projection needs no temporary draw or material-binding rows.
+        // Borrow its texture pixels directly from the immutable capture.
+        let cached = self
+            .projection
+            .prepared
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(Arc::clone);
+        let projection = if let Some(projection) = cached {
+            projection
+        } else {
+            let draws = camera_draws(&self.plan, &self.scene)?;
+            self.projection
+                .get_or_prepare(&draws)
+                .map_err(RetainedFrameRendererError::ThreeD)?
+        };
+        let layout = projection
+            .prepare_owned_bands(threads, destination)
+            .map_err(RetainedFrameRendererError::ThreeDFrame)?;
+        Ok(PreparedCameraBands {
+            frame: self.clone(),
+            projection,
+            layout,
+        })
+    }
+
     /// Rasterize into a new worker-owned raw frame.
     ///
     /// # Errors
@@ -614,6 +666,32 @@ impl PreparedCameraFrame {
         let mut frame = FrameBuffer::new(self.layout()?);
         self.render_into(threads, &mut frame)?;
         Ok(frame)
+    }
+}
+
+/// An immutable camera generation plus admitted scratch. Workers borrow
+/// texture pixels directly from this capture's owned image table.
+#[derive(Debug)]
+pub(crate) struct PreparedCameraBands {
+    frame: PreparedCameraFrame,
+    projection: Arc<PreparedThreeDProjection>,
+    pub(crate) layout: CameraBandLayout,
+}
+
+impl PreparedCameraBands {
+    pub(crate) fn raster(
+        &self,
+        bands: &[Mutex<Vec<u8>>],
+        next: &std::sync::atomic::AtomicUsize,
+    ) {
+        self.projection
+            .render_owned_bands(bands, next, self.layout.stride, |index| {
+                self.frame
+                    .scene
+                    .texture_material(index)
+                    .expect("camera preparation validated every material")
+                    .expect("only texture shaders resolve a material")
+            });
     }
 }
 
@@ -650,6 +728,42 @@ struct PreparedCameraScene {
     images: crate::ImageTable,
     meshes: Vec<SurfaceMesh>,
     commands: Vec<PreparedCommand>,
+}
+
+impl PreparedCameraScene {
+    fn texture_material(
+        &self,
+        index: usize,
+    ) -> Result<Option<crate::TextureMaterial<'_>>, RetainedFrameRendererError> {
+        let (image, dark_image, surface) = match self.commands.get(index) {
+            Some(PreparedCommand::Surface {
+                image: Some(image),
+                dark_image,
+                ..
+            }) => (*image, *dark_image, true),
+            Some(PreparedCommand::Image { image, .. }) => (*image, None, false),
+            Some(_) => return Ok(None),
+            None => return Err(RetainedFrameRendererError::VectorPlanMismatch),
+        };
+        let image = self
+            .images
+            .get(image)
+            .ok_or(RetainedFrameRendererError::VectorPlanMismatch)?;
+        let dark = dark_image
+            .map(|index| {
+                self.images
+                    .get(index)
+                    .ok_or(RetainedFrameRendererError::VectorPlanMismatch)
+            })
+            .transpose()?;
+        let mut material = if surface {
+            crate::TextureMaterial::surface(image.texture(), dark.map(|image| image.texture()))
+        } else {
+            crate::TextureMaterial::image(image.texture())
+        };
+        material.sampler = image.sampler();
+        Ok(Some(material))
+    }
 }
 
 // The camera rasterizer reads geometry, styles and instance metadata, but not
@@ -922,9 +1036,7 @@ fn camera_draws<'a>(
     scene: &'a PreparedCameraScene,
 ) -> Result<Vec<ThreeDDraw<'a>>, RetainedFrameRendererError> {
     let PreparedCameraScene {
-        images: image_frame,
-        meshes,
-        commands,
+        meshes, commands, ..
     } = scene;
     let mut draws = Vec::new();
     draws.try_reserve_exact(commands.len()).map_err(|_| {
@@ -933,37 +1045,21 @@ fn camera_draws<'a>(
             requested: commands.len(),
         }
     })?;
-    for command in commands {
+    for (index, command) in commands.iter().enumerate() {
         draws.push(match *command {
             PreparedCommand::Vector(instance) => {
                 ThreeDDraw::Vector(VectorDraw::new(plan, instance))
             }
             PreparedCommand::Surface {
                 mesh,
-                image,
-                dark_image,
                 uniforms,
+                ..
             } => {
                 let mesh = meshes
                     .get(mesh)
                     .ok_or(RetainedFrameRendererError::VectorPlanMismatch)?;
                 let mut draw = SurfaceDraw::new(mesh);
-                if let Some(image) = image {
-                    let image = image_frame
-                        .get(image)
-                        .ok_or(RetainedFrameRendererError::VectorPlanMismatch)?;
-                    let dark = dark_image
-                        .map(|index| {
-                            image_frame
-                                .get(index)
-                                .ok_or(RetainedFrameRendererError::VectorPlanMismatch)
-                        })
-                        .transpose()?;
-                    let mut material = crate::TextureMaterial::surface(
-                        image.texture(),
-                        dark.map(|image| image.texture()),
-                    );
-                    material.sampler = image.sampler();
+                if let Some(material) = scene.texture_material(index)? {
                     draw.material = SurfaceMaterial::Texture(material);
                 }
                 draw.shading = uniforms.shading;
@@ -975,19 +1071,17 @@ fn camera_draws<'a>(
             PreparedCommand::Dot(dot) => ThreeDDraw::TrueDot(dot),
             PreparedCommand::Image {
                 mesh,
-                image,
                 uniforms,
+                ..
             } => {
                 let mesh = meshes
                     .get(mesh)
                     .ok_or(RetainedFrameRendererError::VectorPlanMismatch)?;
-                let image = image_frame
-                    .get(image)
+                let material = scene
+                    .texture_material(index)?
                     .ok_or(RetainedFrameRendererError::VectorPlanMismatch)?;
-                let mut draw = SurfaceDraw::image(mesh, image.texture());
-                if let SurfaceMaterial::Texture(material) = &mut draw.material {
-                    material.sampler = image.sampler();
-                }
+                let mut draw = SurfaceDraw::image(mesh, material.light);
+                draw.material = SurfaceMaterial::Texture(material);
                 draw.is_fixed_in_frame = uniforms.is_fixed_in_frame;
                 draw.clip_planes = uniforms.clip_planes;
                 draw.depth_test = uniforms.depth_test;
@@ -1499,7 +1593,12 @@ mod tests {
                 .into_iter()
                 .map(|threads| {
                     let frozen = &repeated;
-                    scope.spawn(move || frozen.render(threads).unwrap())
+                    scope.spawn(move || {
+                        let mut team = RasterTeam::new(threads).unwrap();
+                        let mut pixels = FrameBuffer::new(frozen.layout().unwrap());
+                        frozen.render_into_with_team(&mut team, &mut pixels).unwrap();
+                        pixels
+                    })
                 })
                 .collect();
             for replay in replays {
@@ -1913,10 +2012,125 @@ mod tests {
         drop(renderer);
         drop(stage);
         for threads in [1, 4, 16] {
-            assert_eq!(third.render(threads).unwrap().as_bytes(), third_bits);
-            assert_eq!(second.render(threads).unwrap().as_bytes(), second_bits);
-            assert_eq!(first.render(threads).unwrap().as_bytes(), first_bits);
+            let mut team = RasterTeam::new(threads).unwrap();
+            let workers = team.worker_ids();
+            for (frame, expected) in [
+                (&third, &third_bits),
+                (&second, &second_bits),
+                (&first, &first_bits),
+            ] {
+                let mut pixels = FrameBuffer::new(frame.layout().unwrap());
+                frame.render_into_with_team(&mut team, &mut pixels).unwrap();
+                assert_eq!(pixels.as_bytes(), expected);
+                assert_eq!(team.worker_ids(), workers);
+                assert_eq!(
+                    team.stats().band_buffer_bytes,
+                    if threads == 1 { 0 } else { 32 * 18 * 8 },
+                );
+            }
+            assert_eq!(team.stats().frames_completed, 3);
         }
+    }
+
+    #[test]
+    fn camera_team_preserves_padding_and_bounds_storage_across_resize() {
+        let mut team = RasterTeam::new(4).unwrap();
+        let workers = team.worker_ids();
+        for (width, height) in [(63, 17), (7, 41), (31, 23), (8, 8)] {
+            let camera = Camera::new(CameraConfig {
+                resolution: (width, height),
+                background: config(1).frame.background,
+                ..CameraConfig::default()
+            })
+            .unwrap();
+            let mut stage = Stage::new();
+            for object in [
+                vector(),
+                image_quad(&camera, [40, 70, 100, 255].repeat(4)),
+                surface((2, 2)),
+                dot_cloud(),
+            ] {
+                let mob = stage.add(object);
+                stage.add_to_scene(mob).unwrap();
+            }
+            let expected = fresh_camera_bits(&stage, &camera);
+            let mut resized = config(4);
+            resized.frame.viewport = Viewport { width, height };
+            let mut renderer = RetainedFrameRenderer::new(resized).unwrap();
+            let frozen = renderer.prepare_with_camera(&stage, &camera).unwrap();
+            let row_bytes = width as usize * 8;
+            let stride = row_bytes + 24;
+            let mut pixels = FrameBuffer::new(
+                fmn_frame::FrameLayout::with_strides(
+                    fmn_frame::PixelFormat::Rgba16F,
+                    width,
+                    height,
+                    &[stride],
+                )
+                .unwrap(),
+            );
+            pixels.plane_mut(0).fill(0x53);
+            frozen.render_into_with_team(&mut team, &mut pixels).unwrap();
+            for (actual, expected) in pixels
+                .plane(0)
+                .chunks_exact(stride)
+                .zip(expected.chunks_exact(row_bytes))
+            {
+                assert_eq!(&actual[..row_bytes], expected);
+                assert!(actual[row_bytes..].iter().all(|byte| *byte == 0x53));
+            }
+            assert_eq!(team.worker_ids(), workers);
+            assert_eq!(team.stats().band_buffer_bytes, row_bytes * height as usize);
+            let completed = team.stats().frames_completed;
+            for layout in [
+                fmn_frame::FrameLayout::tight(fmn_frame::PixelFormat::Rgba8, width, height).unwrap(),
+                fmn_frame::FrameLayout::tight(
+                    fmn_frame::PixelFormat::Rgba16F,
+                    width + 1,
+                    height,
+                )
+                .unwrap(),
+            ] {
+                let mut invalid = FrameBuffer::new(layout);
+                invalid.plane_mut(0).fill(0x74);
+                assert!(frozen.render_into_with_team(&mut team, &mut invalid).is_err());
+                assert!(invalid.as_bytes().iter().all(|byte| *byte == 0x74));
+                assert_eq!(team.stats().frames_completed, completed);
+                assert_eq!(team.worker_ids(), workers);
+            }
+        }
+    }
+
+    #[test]
+    fn camera_worker_failure_preserves_pixels_and_recovers_on_the_same_team() {
+        let camera = camera();
+        let mut stage = Stage::new();
+        let mob = stage.add(vector());
+        stage.add_to_scene(mob).unwrap();
+        let mut renderer = RetainedFrameRenderer::new(config(4)).unwrap();
+        renderer.render_with_camera(&stage, &camera).unwrap();
+        let previous = renderer.frame().as_bytes().to_vec();
+        let workers = renderer.raster_team.as_ref().unwrap().worker_ids();
+        stage.shift(mob, [0.5, 0.0, 0.0]);
+        renderer.raster_team.as_ref().unwrap().panic_next_frame();
+        assert!(matches!(
+            renderer.render_with_camera(&stage, &camera),
+            Err(RetainedFrameRendererError::RasterWorkerPanicked),
+        ));
+        assert_eq!(renderer.frame().as_bytes(), previous);
+        assert!(!renderer.last_camera_frame_reused());
+        assert!(!renderer.last_frame_reused());
+        assert_eq!(renderer.raster_team_stats().frames_completed, 1);
+        let expected = fresh_camera_bits(&stage, &camera);
+        assert_ne!(expected, previous);
+        renderer.render_with_camera(&stage, &camera).unwrap();
+        assert_eq!(renderer.frame().as_bytes(), expected);
+        assert_eq!(renderer.raster_team_stats().frames_completed, 2);
+        renderer.render(&stage, camera.revision()).unwrap();
+        renderer.render_with_camera(&stage, &camera).unwrap();
+        assert_eq!(renderer.frame().as_bytes(), expected);
+        assert_eq!(renderer.raster_team_stats().frames_completed, 4);
+        assert_eq!(renderer.raster_team.as_ref().unwrap().worker_ids(), workers);
     }
 
     #[test]
@@ -2488,7 +2702,7 @@ mod tests {
         renderer.render(&stage, 0).unwrap();
         assert_eq!(renderer.frame().as_bytes(), oracle.frame().as_bytes());
         assert_eq!(renderer.raster_team.as_ref().unwrap().worker_ids(), workers);
-        assert_eq!(renderer.raster_team_stats().frames_completed, 3);
+        assert_eq!(renderer.raster_team_stats().frames_completed, 4);
     }
 
     #[test]
@@ -2516,6 +2730,7 @@ mod tests {
                 assert_eq!(renderer.frame().as_bytes(), expected);
                 assert_eq!(renderer.frame().as_bytes().as_ptr(), storage);
                 assert_eq!(Arc::strong_count(&prepared.projection), owners);
+                assert_eq!(renderer.raster_team_stats().frames_completed, 1);
             }
         }
     }

@@ -259,8 +259,21 @@ impl RenderWorker {
             _ => (FrameBuffer::new(layout), false),
         };
         if !reused {
+            if self
+                .raster_team
+                .as_ref()
+                .is_none_or(|team| team.threads() != fmn_render::effective_threads(threads))
+            {
+                self.raster_team =
+                    Some(RasterTeam::new(threads).map_err(NativeFrameError::Renderer)?);
+            }
             frame
-                .render_into(threads, &mut raster)
+                .render_into_with_team(
+                    self.raster_team.as_mut().ok_or(NativeFrameError::WorkerState(
+                        "missing persistent camera raster team",
+                    ))?,
+                    &mut raster,
+                )
                 .map_err(NativeFrameError::Renderer)?;
         }
         convert_into(&raster, output, threads)?;
@@ -1232,6 +1245,7 @@ mod handoff_tests {
         let mut output = FrameBuffer::new(layout.clone());
         let mut expected = FrameBuffer::new(layout);
         let mob = stage.roots()[0];
+        let mut rasterizations = 0;
         for frame_index in 0..24 {
             // Exercise geometry invalidation as well as unchanged-frame hits.
             if frame_index % 3 == 0 {
@@ -1247,6 +1261,7 @@ mod handoff_tests {
                 .unwrap();
             convert_into(&raw, &mut expected, 1).unwrap();
             worker.render_vector(&frame, 4, &mut output).unwrap();
+            rasterizations += 1;
             assert_eq!(output.as_bytes(), expected.as_bytes());
             assert_eq!(
                 worker.raster_team.as_ref().unwrap().stats().workers_spawned,
@@ -1256,14 +1271,19 @@ mod handoff_tests {
                 let camera_frame = camera_compiler
                     .prepare_with_camera(&stage, &camera)
                     .unwrap();
-                worker.render_camera(&camera_frame, 1, &mut output).unwrap();
+                worker.render_camera(&camera_frame, 4, &mut output).unwrap();
                 worker.render_vector(&frame, 4, &mut output).unwrap();
+                rasterizations += 2;
                 assert_eq!(output.as_bytes(), expected.as_bytes());
                 assert_eq!(
                     worker.raster_team.as_ref().unwrap().stats().workers_spawned,
                     4
                 );
             }
+            assert_eq!(
+                worker.raster_team.as_ref().unwrap().stats().frames_completed,
+                rasterizations,
+            );
         }
         let final_frame = compiler.capture(&stage, 0).unwrap();
         worker.render_vector(&final_frame, 1, &mut output).unwrap();

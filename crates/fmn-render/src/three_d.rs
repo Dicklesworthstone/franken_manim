@@ -14,7 +14,7 @@
 //! crossfade. `dark_shift` is deliberately absent from [`finalize_color`].
 
 use std::collections::TryReserveError;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
 use fmn_core::color::{LinearRgba, PremulRgba};
@@ -1532,7 +1532,73 @@ pub(crate) struct PreparedThreeDProjection {
     scratch_pool: Arc<TileScratchPool>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CameraBandLayout {
+    pub(crate) stride: usize,
+    pub(crate) band_rows: usize,
+    pub(crate) height: usize,
+}
+
 impl PreparedThreeDProjection {
+    pub(crate) fn prepare_owned_bands(
+        &self,
+        threads: usize,
+        destination: &FrameBuffer,
+    ) -> Result<CameraBandLayout, FrameError> {
+        if destination.layout().format() != PixelFormat::Rgba16F {
+            return Err(FrameError::FormatMismatch {
+                expected: "Rgba16F raw frame",
+                got: destination.layout().format(),
+            });
+        }
+        if destination.layout().width() != self.camera.pixel_width()
+            || destination.layout().height() != self.camera.pixel_height()
+        {
+            return Err(FrameError::DimensionMismatch);
+        }
+        let width = usize::try_from(self.camera.pixel_width())
+            .map_err(|_| FrameError::TooLarge)?;
+        let height = usize::try_from(self.camera.pixel_height())
+            .map_err(|_| FrameError::TooLarge)?;
+        let tile = self.tiling.fine_tile.max(1) as usize;
+        let band_rows = tile.min(height.max(1));
+        let scratch_pixels = tile.min(width.max(1))
+            .checked_mul(band_rows)
+            .ok_or(FrameError::TooLarge)?;
+        let stride = width.checked_mul(8).ok_or(FrameError::TooLarge)?;
+        self.scratch_pool.begin_frame();
+        self.scratch_pool.prepare(scratch_pixels, self.sample_grid, threads.max(1))?;
+        Ok(CameraBandLayout { stride, band_rows, height })
+    }
+
+    pub(crate) fn render_owned_bands<'texture>(
+        &self,
+        bands: &[Mutex<Vec<u8>>],
+        next: &AtomicUsize,
+        stride: usize,
+        material: impl Fn(usize) -> TextureMaterial<'texture> + Copy,
+    ) {
+        let raster = RasterPass {
+            camera: &self.camera,
+            draws: &self.draws,
+            tiling: self.tiling,
+            sample_grid: self.sample_grid,
+        };
+        let mut scratch = self.scratch_pool.checkout();
+        loop {
+            let band = next.fetch_add(1, Ordering::Relaxed);
+            let Some(bytes) = bands.get(band) else { break };
+            let mut bytes = bytes.lock().unwrap_or_else(PoisonError::into_inner);
+            raster.render_band(
+                &mut scratch,
+                band,
+                &mut bytes,
+                stride,
+                |index, ()| material(index),
+            );
+        }
+    }
+
     /// Revisions alone cannot identify cameras created by separate callers.
     /// Compare the complete value, then distinguish signed-zero inputs that
     /// ordinary float equality treats as equal but raster arithmetic may read.
@@ -1869,6 +1935,34 @@ impl<'a> ThreeDJob<'a> {
     }
 
     fn render_band(&self, scratch: &mut TileScratch, band: usize, bytes: &mut [u8], stride: usize) {
+        RasterPass {
+            camera: self.camera,
+            draws: &self.draws,
+            tiling: self.tiling,
+            sample_grid: self.sample_grid,
+        }
+        .render_band(scratch, band, bytes, stride, |_, material| material);
+    }
+}
+
+/// The same painter-ordered raster kernel serves borrowed scoped jobs and
+/// immutable captures on persistent workers. Only texture lookup differs.
+struct RasterPass<'a, M> {
+    camera: &'a Camera,
+    draws: &'a [ProjectedDraw<M>],
+    tiling: Tiling,
+    sample_grid: u32,
+}
+
+impl<M: Copy> RasterPass<'_, M> {
+    fn render_band<'texture>(
+        &self,
+        scratch: &mut TileScratch,
+        band: usize,
+        bytes: &mut [u8],
+        stride: usize,
+        material: impl Fn(usize, M) -> TextureMaterial<'texture> + Copy,
+    ) {
         let tile = self.tiling.fine_tile.max(1);
         let width = self.camera.pixel_width();
         let height = self.camera.pixel_height();
@@ -1878,16 +1972,17 @@ impl<'a> ThreeDJob<'a> {
         for column in 0..columns {
             let x0 = column * tile;
             let x1 = (x0 + tile).min(width);
-            self.render_tile(scratch, [x0, y0, x1, y1], bytes, stride);
+            self.render_tile(scratch, [x0, y0, x1, y1], bytes, stride, material);
         }
     }
 
-    fn render_tile(
+    fn render_tile<'texture>(
         &self,
         scratch: &mut TileScratch,
         rectangle: [u32; 4],
         bytes: &mut [u8],
         stride: usize,
+        material: impl Fn(usize, M) -> TextureMaterial<'texture> + Copy,
     ) {
         let [x0, y0, x1, y1] = rectangle;
         let width = (x1 - x0) as usize;
@@ -1897,17 +1992,17 @@ impl<'a> ThreeDJob<'a> {
         }
         scratch.clear(width, height, self.camera.background());
         if self.sample_grid > 1 {
-            for draw in &self.draws {
+            for draw in self.draws {
                 if !bounds_intersect(draw.bounds, rectangle) {
                     continue;
                 }
                 match &draw.primitive {
-                    CompiledPrimitive::Triangles { triangles, .. } => {
+                    ProjectedPrimitive::Triangles { triangles, .. } => {
                         for triangle in triangles {
                             scratch.mark_triangle_boundary(triangle, rectangle, width, height);
                         }
                     }
-                    CompiledPrimitive::Vector(vector) => {
+                    ProjectedPrimitive::Vector(vector) => {
                         scratch.mark_vector_boundaries(
                             self.camera,
                             vector.get(),
@@ -1920,16 +2015,17 @@ impl<'a> ThreeDJob<'a> {
             }
         }
 
-        for draw in &self.draws {
+        for (index, draw) in self.draws.iter().enumerate() {
             if !bounds_intersect(draw.bounds, rectangle) {
                 continue;
             }
             match &draw.primitive {
-                CompiledPrimitive::Triangles { triangles, shader } => {
+                ProjectedPrimitive::Triangles { triangles, shader } => {
+                    let shader = shader.map_material(|value| material(index, value));
                     for triangle in triangles {
                         scratch.raster_triangle(
                             triangle,
-                            *shader,
+                            shader,
                             draw.depth_test,
                             rectangle,
                             width,
@@ -1937,7 +2033,7 @@ impl<'a> ThreeDJob<'a> {
                         );
                     }
                 }
-                CompiledPrimitive::Vector(vector) => {
+                ProjectedPrimitive::Vector(vector) => {
                     scratch.raster_vector(
                         self.camera,
                         vector.get(),
