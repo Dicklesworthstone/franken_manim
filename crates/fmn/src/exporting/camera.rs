@@ -102,6 +102,7 @@ where
         program: &mut program,
         front_door_error: None,
         typesetting: &typesetting,
+        text_defaults: Some(&options.config.text),
         preflight_workers: crate::typesetting::DEFAULT_PREFLIGHT_WORKERS,
     };
     let run = scene.run(&mut adapter, &mut sink);

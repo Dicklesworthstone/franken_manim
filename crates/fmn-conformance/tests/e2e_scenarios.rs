@@ -1305,6 +1305,203 @@ fn failure_cli_video_quality_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenari
         .with_counter("cli_video_quality_tool_calls", tool_calls))
 }
 
+/// Documented native keys must reach the actual constructor, artifact publisher,
+/// and video negotiator, with one effective C4 identity for either spelling.
+fn documented_config_effects_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_config::config::Layer;
+    use fmn_output::negotiate::{
+        ColorDescription, Container, EncoderChoice, VideoJob, WireFormat, encode_argv,
+    };
+    use fmn_platform::fs::VirtualFs;
+    use fmn_platform::process::{FfmpegExecutable, FfmpegLocator, FfmpegLocatorError};
+    use std::path::Path;
+
+    struct NoTool(AtomicU64);
+    impl FfmpegLocator for NoTool {
+        fn locate_ffmpeg(&self, _: &Path) -> Result<FfmpegExecutable, FfmpegLocatorError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(FfmpegLocatorError::NotFound)
+        }
+    }
+    let locator = NoTool(AtomicU64::new(0));
+    let runner = Arc::new(fmn_platform::process::ScriptedRunner::new());
+    let native = "directories:\n  base: /project\n  output: media\nstyle:\n  font: IBM Plex Sans\n  tex_pack: empty\noutput:\n  vcodec: auto\n  pix_fmt: auto\ncamera:\n  resolution: (160, 90)\n  fps: 8\nrender:\n  threads: 1\n";
+    let reference = "directories:\n  base: /project\n  subdirs:\n    output: media\ntext:\n  font: IBM Plex Sans\ntex:\n  template: empty\nfile_writer:\n  video_codec: auto\n  pixel_format: auto\ncamera:\n  resolution: (160, 90)\n  fps: 8\nrender:\n  threads: 1\n";
+    let render = |document: &str| -> Result<_, ScenarioError> {
+        let fs = Arc::new(VirtualFs::new());
+        fs.insert("/scene.yml", document.as_bytes().to_vec());
+        let output = fmn_cli::run_with_capabilities(
+            [
+                "--robot",
+                "--config_file",
+                "/scene.yml",
+                "--format",
+                "png",
+                "--file_name",
+                "configured",
+                fmn_cli::BUILTIN_SCENE_SOURCE,
+                "tex_span.v1",
+            ],
+            fs.clone(),
+            runner.clone(),
+            &locator,
+        );
+        if output.code != 0 || !output.stderr.is_empty() {
+            return Err(fail(format!(
+                "documented config render: code={} stdout={:?} stderr={:?}",
+                output.code, output.stdout, output.stderr
+            )));
+        }
+        let bytes = fs
+            .read(Path::new("/project/media/configured.png"))
+            .map_err(|error| fail(format!("configured output directory: {error}")))?;
+        let decoded = fmn_codec::decode_png(&bytes, &fmn_codec::PngLimits::default())
+            .map_err(|error| fail(format!("decode configured PNG: {error}")))?;
+        if (decoded.width, decoded.height) != (160, 90)
+            || !decoded
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .windows(2)
+                .any(|pair| pair[0] != pair[1])
+        {
+            return Err(fail("configured scene did not publish visible 160x90 ink"));
+        }
+        let manifest_bytes = fs
+            .read(Path::new(
+                "/project/media/configured.png.manifest/manifest.fmnp",
+            ))
+            .map_err(|error| fail(format!("configured manifest path: {error}")))?;
+        let manifest = ProvenanceManifest::from_bytes(&manifest_bytes)
+            .map_err(|error| fail(format!("decode configured manifest: {error}")))?;
+        let c4 = manifest
+            .items
+            .iter()
+            .find(|item| item.item_id == 4)
+            .ok_or_else(|| fail("configured render omitted C4"))?
+            .digest;
+        Ok((bytes, manifest, c4))
+    };
+    let (native_png, native_manifest, native_c4) = render(native)?;
+    let (reference_png, _, reference_c4) = render(reference)?;
+    let alternate = native.replace("IBM Plex Sans", "Computer Modern");
+    let (alternate_png, _, alternate_c4) = render(&alternate)?;
+    let (repeated_png, _, repeated_c4) = render(native)?;
+    if native_png != reference_png
+        || native_c4 != reference_c4
+        || native_png != repeated_png
+        || native_c4 != repeated_c4
+    {
+        return Err(fail(
+            "alias spelling or a preceding scene changed the effective render",
+        ));
+    }
+    if native_png == alternate_png || native_c4 == alternate_c4 {
+        return Err(fail(
+            "style.font did not change both real ink and effective C4",
+        ));
+    }
+
+    let config = fmn_config::Config::resolve(
+        &[Layer {
+            name: "scene.yml",
+            text: native,
+        }],
+        None,
+    )
+    .map_err(|error| fail(format!("typed documented config: {error}")))?
+    .config;
+    let canonical = config
+        .canonical_bytes()
+        .map_err(|error| fail(format!("canonical documented config: {error}")))?;
+    if sha256(&canonical) != native_c4 {
+        return Err(fail("CLI C4 differs from the shared typed resolver"));
+    }
+
+    // Observe the engine actually used to construct math, not just the field
+    // that was parsed. Rendering also proves the empty pack remains usable.
+    #[derive(Default)]
+    struct PackProbe {
+        selected: String,
+    }
+    impl fmn::SceneConstruct for PackProbe {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let engine = stage.tex_engine()?;
+            self.selected = engine.pack_content_id().to_owned();
+            let math = fmn_library::Tex::new(r"\frac{x}{y}").build(engine)?;
+            stage.add(math)?;
+            Ok(())
+        }
+    }
+    let probe_fs = Arc::new(VirtualFs::new());
+    let mut options = fmn::RenderOptions::with_format("/pack.png", fmn::RenderFormat::Png)
+        .map_err(|error| fail(format!("pack probe options: {error}")))?;
+    options.config = config.clone();
+    options.typeset_cache = false;
+    let mut probe = PackProbe::default();
+    fmn::render_with_fs(&mut probe, options, probe_fs.clone())
+        .map_err(|error| fail(format!("configured math construction: {error}")))?;
+    if probe.selected != "fmd-math/pack/empty" || !probe_fs.exists(Path::new("/pack.png")) {
+        return Err(fail("style.tex_pack did not reach the rendering engine"));
+    }
+
+    // Exercise the production ffmpeg argument planner without claiming a
+    // compressed artifact or requiring a host ffmpeg for this native scenario.
+    let wire = WireFormat::from_config(&config.file_writer.pixel_format, false)
+        .map_err(|error| fail(format!("configured wire: {error}")))?;
+    let encoder = if config.file_writer.video_codec.eq_ignore_ascii_case("auto") {
+        EncoderChoice::Auto
+    } else {
+        EncoderChoice::Named(config.file_writer.video_codec.clone())
+    };
+    let job = VideoJob {
+        width: config.camera.resolution.0,
+        height: config.camera.resolution.1,
+        fps: (config.camera.fps, 1),
+        wire,
+        color: ColorDescription::for_native_wire(wire),
+        container: Container::Mp4,
+        encoder,
+        crf: None,
+    };
+    let argv = encode_argv(&job, Path::new("/project/media/configured.mp4"))
+        .map_err(|error| fail(format!("configured sink plan: {error}")))?;
+    let encoder = job
+        .resolved_encoder()
+        .map_err(|error| fail(format!("configured encoder: {error}")))?;
+    let tool_calls = locator.0.load(Ordering::SeqCst);
+    if wire != WireFormat::Nv12
+        || encoder.as_deref() != Some("libx264")
+        || !argv.windows(2).any(|pair| pair == ["-pix_fmt", "nv12"])
+        || !argv.windows(2).any(|pair| pair == ["-c:v", "libx264"])
+        || tool_calls != 0
+    {
+        return Err(fail(
+            "documented auto output selection or native capability boundary drifted",
+        ));
+    }
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.documented_config_effects")
+            .field("output", "/project/media/configured.png")
+            .field("font", config.text.font.as_str())
+            .field("pack", probe.selected.as_str())
+            .field("wire", wire.ffmpeg_pix_fmt())
+            .field("encoder", encoder.as_deref().unwrap_or("none"))
+            .field("config_c4", native_c4.to_hex())
+            .field("alternate_c4", alternate_c4.to_hex())
+            .field("build_id", native_manifest.identity.build_id.as_str())
+            .field("tool_calls", tool_calls),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("configured.png", native_png)
+        .with_artifact("alternate_font.png", alternate_png)
+        .with_counter("documented_config_renders", 5)
+        .with_counter("documented_config_alias_identity", 1)
+        .with_counter("documented_config_font_effect", 1)
+        .with_counter("documented_config_pack_effect", 1)
+        .with_counter("documented_config_tool_calls", tool_calls))
+}
+
 /// Native CLI job limits are admitted without spawning; invalid limits fail
 /// with stable identities before a tool or output generation is selected.
 fn failure_cli_ffmpeg_limits_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -10772,6 +10969,29 @@ fn spec(
 pub fn catalog() -> Vec<ScenarioSpec> {
     let mut specs = vec![
         spec(
+            "lifecycle.documented_config_effects.v1",
+            ScenarioClass::LifecycleDrill,
+            Surface::CliInProcess,
+            Invocation::new(documented_config_effects_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("documented_config_renders", 5),
+                counter_eq("documented_config_alias_identity", 1),
+                counter_eq("documented_config_font_effect", 1),
+                counter_eq("documented_config_pack_effect", 1),
+                counter_eq("documented_config_tool_calls", 0),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.lifecycle.documented_config_effects",
+                vec![
+                    FieldPred::str_eq("pack", "fmd-math/pack/empty"),
+                    FieldPred::str_eq("wire", "nv12"),
+                    FieldPred::str_eq("encoder", "libx264"),
+                    FieldPred::u64_eq("tool_calls", 0),
+                ],
+            )],
+        ),
+        spec(
             "lifecycle.metadata_only_capture.v1",
             ScenarioClass::LifecycleDrill,
             Surface::RustApi,
@@ -14867,6 +15087,16 @@ fn cli_pure_dispatch_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "determinism.cli_pure_segments.v1")
         .expect("native CLI pure dispatch scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn documented_config_effects_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.documented_config_effects.v1")
+        .expect("documented configuration effects scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

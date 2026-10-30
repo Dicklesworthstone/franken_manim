@@ -19,6 +19,7 @@ pub use crate::{
     export_bundle_bytes, export_bundle_with_fs, render, render_soundtrack,
     render_soundtrack_with_fs, render_svg, render_svg_camera, render_svg_camera_with_fs,
     render_svg_with_fs, render_with_fs, run_scene, run_scene_with_typesetting,
+    run_scene_with_typography,
 };
 pub use fmn_anim::{
     AnimConfig, AnimError, Animation, AnimationGroup, ApplyMethod, DrawBorderThenFill,

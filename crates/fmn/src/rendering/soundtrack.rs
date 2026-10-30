@@ -562,12 +562,13 @@ pub fn render_soundtrack_with_fs<P: SceneConstruct + ?Sized>(
         captures: 0,
         failure: None,
     };
-    let completed = crate::run_scene_with_typesetting(
+    let completed = crate::run_scene_with_typography(
         program,
         runtime,
         options.config.determinism.seed,
         &mut sink,
         &typesetting,
+        &options.config.text,
         options.typeset_preflight_workers,
     );
     let completed = completed.map_err(|error| {

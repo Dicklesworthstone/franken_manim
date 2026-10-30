@@ -178,12 +178,13 @@ fn export_bundle_bytes_inner<P: SceneConstruct + ?Sized>(
     let mut recorder = SceneBundleRecorder::new(runtime.effective_fps(), options.limits)
         .map_err(BundleExportError::Recording)?;
     let typesetting = fmn_tex::TexSession::memory(options.config.tex.template.clone());
-    let run = crate::run_scene_with_typesetting(
+    let run = crate::run_scene_with_typography(
         program,
         runtime,
         options.config.determinism.seed,
         &mut recorder,
         &typesetting,
+        &options.config.text,
         crate::typesetting::DEFAULT_PREFLIGHT_WORKERS,
     );
     let completed = match run {

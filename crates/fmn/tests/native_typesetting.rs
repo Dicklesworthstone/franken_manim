@@ -5,8 +5,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use fmn::prelude::*;
-use fmn::rendering::render_camera_with_fs;
+use fmn::rendering::{render_bundle_with_fs, render_camera_with_fs};
 use fmn::tex::{LineAlign, Mode, Style as MathStyle, TexError};
+use fmn::text::TextError;
 use fmn_config::config::{DeterminismMode, ThreadPolicy};
 use fmn_platform::fs::{FileSystem, VirtualFs};
 use fmn_scene::CameraRig;
@@ -152,6 +153,7 @@ fn shape_only_scenes_do_not_initialize_fonts_or_create_a_typeset_cache() {
     let fs = Arc::new(VirtualFs::new());
     let mut options = options("/shapes", 1);
     options.config.tex.template = "not-needed-by-this-scene".to_owned();
+    options.config.text.font = "also-not-needed-by-this-scene".to_owned();
     let report = render_with_fs(&mut ShapeOnly, options, fs.clone()).unwrap();
     assert_eq!(report.typesetting, TypesetSessionReport::default());
     assert!(!fs.exists(Path::new(cache_root())));
@@ -444,4 +446,243 @@ fn the_report_separates_preflighted_layouts_from_typesetting_inside_play() {
     assert_eq!(dynamic.layouts_before_first_frame, Some(2));
     assert_eq!(dynamic.layouts_inside_segments, 2);
     assert_eq!(dynamic.layout_computations, 4);
+}
+
+#[derive(Default)]
+struct ConfiguredFontScene {
+    explicit_font: Option<&'static str>,
+    markup: bool,
+    inline_font: bool,
+}
+
+impl SceneConstruct for ConfiguredFontScene {
+    fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+        let source = if self.inline_font {
+            r#"<span font_family="Computer Modern">Config</span>"#
+        } else {
+            "Config"
+        };
+        let mut builder = if self.markup {
+            stage.markup_text(source)
+        } else {
+            stage.text(source)
+        };
+        if let Some(font) = self.explicit_font {
+            builder = builder.font(font);
+        }
+        let text = builder.font_size(72.0).build(stage.font_book()?)?;
+        let text = stage.add(text)?;
+        stage.shift(text, [-1.0, 0.0, 0.0]);
+        Ok(())
+    }
+}
+
+fn configured_font_png(
+    fs: &Arc<VirtualFs>,
+    destination: &str,
+    family: &str,
+    mut scene: ConfiguredFontScene,
+) -> Vec<u8> {
+    let mut settings = options(destination, 1);
+    settings.config.text.font = family.to_owned();
+    render_with_fs(&mut scene, settings, fs.clone()).unwrap();
+    png(fs, destination)
+}
+
+#[test]
+fn configured_native_font_changes_pixels_without_leaking_between_runs() {
+    let fs = Arc::new(VirtualFs::new());
+    let cm = configured_font_png(
+        &fs,
+        "/font-cm",
+        "Computer Modern",
+        ConfiguredFontScene::default(),
+    );
+    let plex = configured_font_png(
+        &fs,
+        "/font-plex",
+        "IBM Plex Sans",
+        ConfiguredFontScene::default(),
+    );
+    assert_ne!(
+        cm, plex,
+        "configured families must select different native glyph outlines"
+    );
+    let repeated = configured_font_png(
+        &fs,
+        "/font-cm-again",
+        "Computer Modern",
+        ConfiguredFontScene::default(),
+    );
+    assert_eq!(
+        cm, repeated,
+        "a prior scene's font must not become a process default"
+    );
+    let explicit = configured_font_png(
+        &fs,
+        "/font-explicit",
+        "IBM Plex Sans",
+        ConfiguredFontScene {
+            explicit_font: Some("Computer Modern"),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        cm, explicit,
+        "an authored builder font must override the configured family"
+    );
+}
+
+#[test]
+fn configured_markup_font_keeps_builder_and_inner_span_precedence() {
+    let fs = Arc::new(VirtualFs::new());
+    let cm = configured_font_png(
+        &fs,
+        "/markup-reference-cm",
+        "Computer Modern",
+        ConfiguredFontScene::default(),
+    );
+    let plex = configured_font_png(
+        &fs,
+        "/markup-reference-plex",
+        "IBM Plex Sans",
+        ConfiguredFontScene::default(),
+    );
+    let inherited = configured_font_png(
+        &fs,
+        "/markup-inherited",
+        "IBM Plex Sans",
+        ConfiguredFontScene {
+            markup: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(plex, inherited);
+    let explicit = configured_font_png(
+        &fs,
+        "/markup-explicit",
+        "IBM Plex Sans",
+        ConfiguredFontScene {
+            markup: true,
+            explicit_font: Some("Computer Modern"),
+            ..Default::default()
+        },
+    );
+    assert_eq!(cm, explicit);
+    let inner = configured_font_png(
+        &fs,
+        "/markup-inner",
+        "IBM Plex Sans",
+        ConfiguredFontScene {
+            markup: true,
+            inline_font: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        cm, inner,
+        "authored span font must retain precedence over the inherited default"
+    );
+}
+
+struct ConfiguredText {
+    family: &'static str,
+    explicit: Option<&'static str>,
+}
+
+impl ConfiguredText {
+    fn new(family: &'static str) -> Self {
+        Self {
+            family,
+            explicit: None,
+        }
+    }
+}
+
+impl SceneConstruct for ConfiguredText {
+    fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+        let mut builder = stage.text("AVM wide");
+        if let Some(font) = self.explicit {
+            builder = builder.font(font);
+        }
+        let text = builder.build(stage.font_book()?)?;
+        assert!(!text.layout.glyphs.is_empty());
+        assert!(
+            text.layout
+                .glyphs
+                .iter()
+                .all(|glyph| glyph.face.family == self.family),
+            "the source scene must observe the configured or explicitly authored face"
+        );
+        stage.add(text)?;
+        Ok(())
+    }
+}
+
+#[test]
+fn unavailable_configured_font_preserves_the_named_refusal_and_publishes_nothing() {
+    let fs = Arc::new(VirtualFs::new());
+    let mut settings = options("/unavailable-font", 1);
+    settings.config.text.font = "Unbundled Lesson Font".to_owned();
+    let error = render_with_fs(
+        &mut ConfiguredText::new("Unbundled Lesson Font"),
+        settings,
+        fs.clone(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        RenderError::Scene(Error::Text(fmn::library::TextMobjectError::Text(
+            TextError::FontUnavailable { ref family, .. }
+        ))) if family == "Unbundled Lesson Font"
+    ));
+    assert!(!fs.exists(Path::new("/unavailable-font")));
+
+    // An authored available face does not require the unused default to exist.
+    let mut settings = options("/explicit-available-font", 1);
+    settings.config.text.font = "Unbundled Lesson Font".to_owned();
+    let mut scene = ConfiguredText {
+        family: "CM Typewriter",
+        explicit: Some("CM Typewriter"),
+    };
+    render_with_fs(&mut scene, settings, fs).unwrap();
+}
+
+#[test]
+fn configured_font_reaches_camera_svg_and_recorded_scene_construction() {
+    let fs = Arc::new(VirtualFs::new());
+    let mut direct = options("/configured-direct", 1);
+    direct.config.text.font = "IBM Plex Sans".to_owned();
+    let config = direct.config.clone();
+    render_with_fs(&mut ConfiguredText::new("IBM Plex Sans"), direct, fs.clone()).unwrap();
+
+    let mut export = BundleExportOptions::new().unwrap();
+    export.config = config.clone();
+    let bundle =
+        export_bundle_bytes(&mut ConfiguredText::new("IBM Plex Sans"), export).unwrap();
+    let mut replay = options("/configured-replay", 1);
+    replay.config = config.clone();
+    render_bundle_with_fs(&bundle.bundle.bytes, replay, fs.clone()).unwrap();
+    assert_eq!(png(&fs, "/configured-direct"), png(&fs, "/configured-replay"));
+
+    let mut camera = options("/configured-camera", 1);
+    camera.config = config.clone();
+    render_camera_with_fs(
+        |scene, camera| {
+            Ok((
+                ConfiguredText::new("IBM Plex Sans"),
+                CameraRig::new(scene, camera)?,
+            ))
+        },
+        camera,
+        fs.clone(),
+    )
+    .unwrap();
+    assert!(!png(&fs, "/configured-camera").is_empty());
+
+    let mut svg = SvgRenderOptions::new("/configured.svg").unwrap();
+    svg.config = config;
+    render_svg_with_fs(&mut ConfiguredText::new("IBM Plex Sans"), svg, fs.clone()).unwrap();
+    let source = String::from_utf8(fs.read(Path::new("/configured.svg")).unwrap()).unwrap();
+    assert!(source.contains("<path"));
 }

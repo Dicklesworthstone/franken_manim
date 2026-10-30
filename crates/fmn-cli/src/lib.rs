@@ -6368,9 +6368,17 @@ fn run_builtin_scene(
             inner: sink,
             cancellation,
         };
-        fmn::run_scene_with_typesetting(scene, runtime, seed, &mut cancellable, session, workers)
+        fmn::run_scene_with_typography(
+            scene,
+            runtime,
+            seed,
+            &mut cancellable,
+            session,
+            &config.text,
+            workers,
+        )
     } else {
-        fmn::run_scene_with_typesetting(scene, runtime, seed, sink, session, workers)
+        fmn::run_scene_with_typography(scene, runtime, seed, sink, session, &config.text, workers)
     }
     .map_err(native_scene_error)
 }

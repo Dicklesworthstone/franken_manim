@@ -62,6 +62,7 @@ where
     let mut scene = Scene::new(runtime, options.config.determinism.seed)
         .map_err(|error| RenderError::Scene(error.into()))?;
     let typesetting = options.typesetting_session(Arc::clone(&fs));
+    let text_defaults = options.config.text.clone();
     let preflight_workers = options.typeset_preflight_workers;
     let inner = RenderSink::new(options, fs)?;
     let (mut program, rig) = factory(&mut scene, &base).map_err(RenderError::Scene)?;
@@ -76,6 +77,7 @@ where
         program: &mut program,
         front_door_error: None,
         typesetting: &typesetting,
+        text_defaults: Some(&text_defaults),
         preflight_workers,
     };
     let run = scene.run(

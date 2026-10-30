@@ -744,14 +744,16 @@ pub fn render_with_fs<P: SceneConstruct + ?Sized>(
     }
     let seed = options.config.determinism.seed;
     let typesetting = options.typesetting_session(Arc::clone(&fs));
+    let text_defaults = options.config.text.clone();
     let preflight_workers = options.typeset_preflight_workers;
     let mut sink = RenderSink::new(options, fs)?;
-    let completed = crate::run_scene_with_typesetting(
+    let completed = crate::run_scene_with_typography(
         program,
         runtime,
         seed,
         &mut sink,
         &typesetting,
+        &text_defaults,
         preflight_workers,
     );
     sink.surface_failure()?;
@@ -1408,23 +1410,8 @@ fn negotiate_video(
             "a translucent background requires alpha-preserving RenderFormat::Mov",
         ));
     }
-    let wire = match config
-        .file_writer
-        .pixel_format
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "yuv420p" if transparent => WireFormat::Rgba8,
-        "rgba" | "rgba8" => WireFormat::Rgba8,
-        "bgra" | "bgra8" => WireFormat::Bgra8,
-        "nv12" | "yuv420p" => WireFormat::Nv12,
-        "p010" | "p010le" | "yuv420p10le" => WireFormat::P010,
-        _ => {
-            return Err(RenderError::InvalidOptions(
-                "unsupported file_writer.pixel_format; choose rgba, bgra, nv12/yuv420p, or p010le",
-            ));
-        }
-    };
+    let wire = WireFormat::from_config(&config.file_writer.pixel_format, transparent)
+        .map_err(|error| RenderError::InvalidOptions(error.0))?;
     if transparent && !wire.has_alpha() {
         return Err(RenderError::InvalidOptions(
             "transparent video requires an rgba or bgra file_writer.pixel_format",

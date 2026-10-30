@@ -364,9 +364,18 @@ pub mod builtins {
             stage: &mut crate::mobject::Stage,
             engine: &crate::tex::TexEngine,
         ) -> crate::Result<[Mob; 2]> {
-            let tex = Tex::new(r"\frac{x}{y}").build(engine)?;
             let text = Text::new("hello")
                 .build(&FontBook::bundled().map_err(crate::library::TextMobjectError::Text)?)?;
+            self.populate_with_text(stage, engine, text)
+        }
+
+        fn populate_with_text(
+            &mut self,
+            stage: &mut crate::mobject::Stage,
+            engine: &crate::tex::TexEngine,
+            text: TextMobject,
+        ) -> crate::Result<[Mob; 2]> {
+            let tex = Tex::new(r"\frac{x}{y}").build(engine)?;
             let (tex_data, text_data) = (tex.span_map(), text.span_map());
             // Record order is the span table's order: root ordinal 0 is
             // the formula, 1 is the text. Both roots share the default
@@ -391,7 +400,8 @@ pub mod builtins {
         }
 
         fn construct(&mut self, stage: &mut Stage<'_>) -> crate::Result<()> {
-            self.populate(stage.scene.stage_mut(), stage.typesetting.engine()?)?;
+            let text = stage.text("hello").build(stage.font_book()?)?;
+            self.populate_with_text(stage.scene.stage_mut(), stage.typesetting.engine()?, text)?;
             stage.wait(Self::WAIT_DURATION)?;
             Ok(())
         }
@@ -682,6 +692,18 @@ pub mod builtins {
             stage: &mut crate::mobject::Stage,
             engine: &crate::tex::TexEngine,
         ) -> crate::Result<Vec<crate::library::SpanRecord>> {
+            let text = Text::new(witness::TEXT)
+                .font_size(witness::FONT_SIZE)
+                .build(&FontBook::bundled().map_err(crate::library::TextMobjectError::Text)?)?;
+            self.populate_with_text(stage, engine, text)
+        }
+
+        fn populate_with_text(
+            &self,
+            stage: &mut crate::mobject::Stage,
+            engine: &crate::tex::TexEngine,
+            text: TextMobject,
+        ) -> crate::Result<Vec<crate::library::SpanRecord>> {
             let mut collector = crate::library::SpanCollector::default();
             let triangle = add_builtin_mobject(stage, Polygon::new(witness::TRIANGLE_VERTICES))?;
             paint_solid(stage, triangle, witness::TRIANGLE, true);
@@ -697,9 +719,6 @@ pub mod builtins {
                 )?;
                 paint_solid(stage, dot, color, true);
             }
-            let text = Text::new(witness::TEXT)
-                .font_size(witness::FONT_SIZE)
-                .build(&FontBook::bundled().map_err(crate::library::TextMobjectError::Text)?)?;
             let text_spans = text.span_map();
             let text = add_builtin_mobject(stage, text.vmob)?;
             collector.record(stage, text, text_spans)?;
@@ -727,7 +746,11 @@ pub mod builtins {
         }
 
         fn construct(&mut self, stage: &mut Stage<'_>) -> crate::Result<()> {
-            self.populate(stage.scene.stage_mut(), stage.typesetting.engine()?)?;
+            let text = stage
+                .text(witness::TEXT)
+                .font_size(witness::FONT_SIZE)
+                .build(stage.font_book()?)?;
+            self.populate_with_text(stage.scene.stage_mut(), stage.typesetting.engine()?, text)?;
             // A short hold so every route emits real frames: the CLI refuses
             // a generation with none.
             stage.wait(Self::WAIT_DURATION)?;
@@ -1450,6 +1473,8 @@ pub struct Stage<'a> {
     scene: &'a mut Scene,
     sink: &'a mut dyn SceneSink,
     typesetting: &'a TexSession,
+    text_defaults: Option<&'a fmn_config::config::TextConfig>,
+    font_book: std::cell::OnceCell<fmn_text::FontBook>,
 }
 
 impl Stage<'_> {
@@ -1588,6 +1613,7 @@ struct ProgramAdapter<'a, P: ?Sized> {
     program: &'a mut P,
     front_door_error: Option<Error>,
     typesetting: &'a TexSession,
+    text_defaults: Option<&'a fmn_config::config::TextConfig>,
     preflight_workers: NonZeroUsize,
 }
 
@@ -1611,6 +1637,8 @@ where
                 scene,
                 sink,
                 typesetting: self.typesetting,
+                text_defaults: self.text_defaults,
+                font_book: std::cell::OnceCell::new(),
             };
             self.program.construct(&mut stage)
         })();
@@ -1761,11 +1789,69 @@ pub fn run_scene_with_typesetting<P>(
 where
     P: SceneConstruct + ?Sized,
 {
+    run_scene_with_text_defaults(
+        program,
+        config,
+        seed,
+        sink,
+        typesetting,
+        None,
+        preflight_workers,
+    )
+}
+
+/// Run with the resolved text defaults and a shared native math session.
+///
+/// [`Stage::text`] and [`Stage::markup_text`] inherit `text_defaults.font`;
+/// their ordinary builder methods and per-span styles can override it. The
+/// stage lazily opens one bundled font book, so shape-only runs remain free
+/// of font initialization. Every native render/export entry point passes its
+/// resolved configuration through this same construction boundary.
+///
+/// # Errors
+/// As [`run_scene_with_typesetting`]. A requested unavailable text family is
+/// refused by Scribe when the scene builds text, without font substitution.
+pub fn run_scene_with_typography<P>(
+    program: &mut P,
+    config: RuntimeConfig,
+    seed: u64,
+    sink: &mut dyn SceneSink,
+    typesetting: &TexSession,
+    text_defaults: &fmn_config::config::TextConfig,
+    preflight_workers: NonZeroUsize,
+) -> Result<CompletedScene>
+where
+    P: SceneConstruct + ?Sized,
+{
+    run_scene_with_text_defaults(
+        program,
+        config,
+        seed,
+        sink,
+        typesetting,
+        Some(text_defaults),
+        preflight_workers,
+    )
+}
+
+fn run_scene_with_text_defaults<P>(
+    program: &mut P,
+    config: RuntimeConfig,
+    seed: u64,
+    sink: &mut dyn SceneSink,
+    typesetting: &TexSession,
+    text_defaults: Option<&fmn_config::config::TextConfig>,
+    preflight_workers: NonZeroUsize,
+) -> Result<CompletedScene>
+where
+    P: SceneConstruct + ?Sized,
+{
     let mut scene = Scene::new(config, seed)?;
     let mut adapter = ProgramAdapter {
         program,
         front_door_error: None,
         typesetting,
+        text_defaults,
         preflight_workers,
     };
     let mut sink = SegmentAccountingSink {

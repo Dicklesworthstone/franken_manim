@@ -476,7 +476,20 @@ fmn-python hello.py Hello --reproducible
 
 `fmn` reads the Reference's config file shapes exactly (defaults → user file → CLI). The `tex_templates.yml` concept is reborn as **fmd-math preamble packs** (named macro/symbol bundles), with a compatibility mapping for the common templates.
 
-> **A tense marker, per the CLI blocks above.** The typed config surface that exists today is the Reference-shaped section set — `directories` / `camera` / `file_writer` / `scene` / `vmobject` / `mobject` / `tex` / `text` / `embed` / `resolution_options` — plus the native `determinism` and `render` sections. The `style:` and `output:` sections in the example below, and its flat `directories.output` key, are the **1.0 target**: today they survive only in the raw config tree, because their typed homes are the fields that already exist (`text.font`, `tex.template`, `file_writer.video_codec`, `directories.subdirs.output`). The example is kept as written because it *is* the target state.
+The native spellings below and the Reference spellings resolve to the same typed fields:
+
+| Native spelling | Reference spelling |
+|---|---|
+| `style.font` | `text.font` |
+| `style.tex_pack` | `tex.template` |
+| `output.vcodec` | `file_writer.video_codec` |
+| `output.pix_fmt` | `file_writer.pixel_format` |
+| `directories.output` | `directories.subdirs.output` |
+| `directories.raster_images` | `directories.subdirs.raster_images` |
+
+The other built-in asset subdirectories accept the same flat spelling. Each layer is normalized **before** merging, so a later file or CLI setting wins even when it uses the other spelling. Within one layer, equal values coalesce; different values are refused with both key names. Effective configuration and C4 provenance use the canonical fields, so changing a spelling alone does not change the identity.
+
+Native scene authors use `stage.text(...)` or `stage.markup_text(...)` with `stage.font_book()?` to inherit the scene's configured font; explicit builder and markup font choices still win. `stage.tex_engine()?` uses the configured math pack. Python `Text`, `MarkupText`, and `Tex` capture their defaults when constructed inside the scene's configuration scope, so later scope changes do not alter an existing object. Fonts come from the bundled font book; an unavailable font or pack produces a named error.
 
 ```yaml
 # custom_config.yml
@@ -485,7 +498,7 @@ directories:
   raster_images: "./assets"
 
 camera:
-  resolution: [1920, 1080]
+  resolution: (1920, 1080)      # Reference tuple-string syntax
   fps: 30
   background_color: "#333333"
 
@@ -503,9 +516,11 @@ render:
   threads: "auto"                # ExecutionPlan derived from HardwareTopology
 
 output:
-  vcodec: "auto"                 # software x264/x265, or hevc_videotoolbox / nvenc via ffmpeg
-  pix_fmt: "auto"                # negotiated: NV12/P010 for video, RGBA for alpha/certified
+  vcodec: "auto"                 # libx264; qtrle for transparent MOV
+  pix_fmt: "auto"                # NV12 for opaque video; RGBA for transparent video
 ```
+
+Use an explicit codec name to select another software or hardware encoder; `auto` does not probe for hardware acceleration. Select `p010le` explicitly for 10-bit video. Native certified artifacts keep their own format policy, and ffmpeg video remains outside the certified artifact set.
 
 ## Performance
 

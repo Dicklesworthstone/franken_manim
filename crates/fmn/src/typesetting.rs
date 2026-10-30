@@ -86,6 +86,58 @@ pub(crate) fn preflight<P: SceneConstruct + ?Sized>(
 }
 
 impl crate::Stage<'_> {
+    /// A native text builder inheriting this run's configured font family.
+    ///
+    /// Build with [`Self::font_book`] to share the scene's bundled faces.
+    /// An explicit `.font(...)` or a substring font map takes precedence over
+    /// the inherited family. Construction is lazy; no fonts load until build.
+    ///
+    /// ```
+    /// # use fmn::prelude::*;
+    /// # fn label(stage: &mut Stage<'_>) -> fmn::Result<()> {
+    /// let text = stage.text("Hello").font_size(36.0).build(stage.font_book()?)?;
+    /// stage.add(text)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn text<'source>(&self, source: &'source str) -> fmn_library::Text<'source> {
+        self.text_builder(fmn_library::Text::new(source))
+    }
+
+    /// A markup-text builder with the same scoped defaults as [`Self::text`].
+    /// Markup font attributes and substring maps retain their ordinary priority.
+    #[must_use]
+    pub fn markup_text<'source>(&self, source: &'source str) -> fmn_library::Text<'source> {
+        self.text_builder(fmn_library::Text::markup(source))
+    }
+
+    fn text_builder<'source>(
+        &self,
+        builder: fmn_library::Text<'source>,
+    ) -> fmn_library::Text<'source> {
+        match self.text_defaults {
+            Some(defaults) => builder.font(&defaults.font),
+            None => builder,
+        }
+    }
+
+    /// The run's lazily initialized sovereign font book.
+    ///
+    /// This never consults global font configuration or the host font system.
+    /// Use [`Self::text`] or [`Self::markup_text`] for builders inheriting the
+    /// run's font choice; explicitly authored builders keep their own choices.
+    ///
+    /// # Errors
+    /// A malformed bundled face retains Scribe's named font-parse diagnostic.
+    pub fn font_book(&self) -> crate::Result<&fmn_text::FontBook> {
+        if let Some(book) = self.font_book.get() {
+            return Ok(book);
+        }
+        let book = fmn_text::FontBook::bundled().map_err(fmn_library::TextMobjectError::Text)?;
+        Ok(self.font_book.get_or_init(|| book))
+    }
+
     /// Warm formulas discovered during construction on this scene's engine.
     ///
     /// Call this before building their `Tex`/`TexText` mobjects or starting the

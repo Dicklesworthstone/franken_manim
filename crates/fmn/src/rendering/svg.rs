@@ -222,12 +222,13 @@ pub fn render_svg_with_fs<P: SceneConstruct + ?Sized>(
     let camera = Camera::new(options.admit(fs.as_ref())?).map_err(SvgRenderError::Camera)?;
     let typesetting = options.typesetting(Arc::clone(&fs));
     let mut sink = SvgCapture::new(options.max_scene_frames);
-    let completed = crate::run_scene_with_typesetting(
+    let completed = crate::run_scene_with_typography(
         program,
         RuntimeConfig::from_config(&options.config),
         options.config.determinism.seed,
         &mut sink,
         &typesetting,
+        &options.config.text,
         options.typeset_preflight_workers,
     )
     .map_err(|error| sink.scene_error(error))?;
@@ -307,6 +308,7 @@ where
         program: &mut program,
         front_door_error: None,
         typesetting: &typesetting,
+        text_defaults: Some(&options.config.text),
         preflight_workers: options.typeset_preflight_workers,
     };
     let run = scene.run(
