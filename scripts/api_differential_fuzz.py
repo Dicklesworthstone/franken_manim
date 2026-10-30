@@ -54,7 +54,7 @@ import structural_facts as sf  # noqa: E402
 
 LOG_SCHEMA = "fmn.api-fuzz"
 LOG_VERSION = 1
-GENERATOR_VERSION = 2
+GENERATOR_VERSION = 3
 ONE_THREAD = {"OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}
 SCOPE = "fuzz"
 
@@ -128,7 +128,11 @@ BY_CLASS = {c.cls: c for c in CONSTRUCTORS}
 #   differs by design, and moves every box laid out against them;
 # - RoundedRectangle: corner arcs drawn through add_arc_to (BN-09; open bead fm-c1up);
 # - VMobject.insert_n_curves: the same greedy rule in both engines, but a circle's equal
-#   chords tie, and the first-index tie breaks on ulp-level noise that differs between them.
+#   chords tie, and the first-index tie breaks on ulp-level noise that differs between them;
+# - a mobject in two groups (a member reachable twice): the Reference's get_family does
+#   not deduplicate, so a group operation moves it once per path, while the portal's
+#   family is deduplicated (R-11, Appendix C-42). Each mobject joins at most one group
+#   here (Var.owner), and add never closes a cycle.
 OMITTED = ("Sector", "AnnularSector", "Annulus", "RoundedRectangle", "insert_n_curves")
 
 
@@ -137,6 +141,7 @@ class Var:
     name: str
     kind: str          # FLAT (a VMobject), SOLID (any other Mobject)
     group: bool = False
+    owner: "Var | None" = None   # the one group holding it (see OMITTED: shared members)
 
 
 class State:
@@ -169,18 +174,27 @@ def construct(state):
 
 def group(state):
     rng = state.rng
-    flat = [v for v in state.vars if v.kind == FLAT]
+    free = [v for v in state.vars if v.owner is None]
+    flat = [v for v in free if v.kind == FLAT]
     if len(flat) >= 2 and rng.random() < 0.7:
         members = rng.sample(flat, rng.randint(2, min(4, len(flat))))
         var = Var(state.new_name(), FLAT, group=True)
         state.emit(f"{var.name} = VGroup({', '.join(m.name for m in members)})")
-    elif len(state.vars) >= 2:
-        members = rng.sample(state.vars, rng.randint(2, min(4, len(state.vars))))
+    elif len(free) >= 2:
+        members = rng.sample(free, rng.randint(2, min(4, len(free))))
         var = Var(state.new_name(), SOLID, group=True)
         state.emit(f"{var.name} = Group({', '.join(m.name for m in members)})")
     else:
         return construct(state)
+    for member in members:
+        member.owner = var
     state.vars.append(var)
+
+
+def _ancestors(var):
+    while var is not None:
+        yield var
+        var = var.owner
 
 
 def positional(state):
@@ -239,8 +253,11 @@ def structure(state):
     groups = [g for g in state.vars if g.group]
     if roll < 0.6 and groups:
         g = rng.choice(groups)
-        member = state.pick(FLAT) if g.kind == FLAT else state.pick()
-        if member is not None and member is not g:
+        free = [v for v in state.vars if v.owner is None and (g.kind != FLAT or v.kind == FLAT)
+                and not any(v is a for a in _ancestors(g))]
+        if free:
+            member = rng.choice(free)
+            member.owner = g
             state.emit(f"{g.name}.add({member.name})")
             return
     if roll < 0.7 and groups:

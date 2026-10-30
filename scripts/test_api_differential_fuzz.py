@@ -86,6 +86,24 @@ class GeneratorTests(unittest.TestCase):
             for name in fuzz.OMITTED:
                 self.assertNotIn(f"{name}(", source)
 
+    def test_no_mobject_joins_two_groups(self):
+        # Appendix C-42: the Reference moves a member reachable twice once per path.
+        for index in range(300):
+            program = fuzz.generate_program(19, index)
+            members = {}
+            for line in program["statements"]:
+                for node in ast.walk(ast.parse(line)):
+                    if not isinstance(node, ast.Call):
+                        continue
+                    grouping = isinstance(node.func, ast.Name) and node.func.id in ("VGroup", "Group")
+                    adding = (isinstance(node.func, ast.Attribute) and node.func.attr == "add"
+                              and isinstance(node.func.value, ast.Name) and node.func.value.id != "self")
+                    if grouping or adding:
+                        for arg in node.args:
+                            if isinstance(arg, ast.Name):
+                                members[arg.id] = members.get(arg.id, 0) + 1
+            self.assertTrue(all(count == 1 for count in members.values()), program["source"])
+
     def test_view_writes_come_after_every_other_statement(self):
         # C-35: the Reference's box ignores a write through a view, so nothing may read
         # a box after one.

@@ -525,6 +525,33 @@ Reference's does, so default labels are unchanged.
 **Migration:** none for the default labels or for numbers that are all
 real or all imaginary. A scene that wanted "3i" should pass `3j`.
 
+## C-42 — a member reachable twice is transformed once
+
+The Reference's `get_family` concatenates the sub-families without
+deduplication (`mobject.py:426-433`), and the family-wide operations walk
+that list. A mobject reachable twice in one family (the same mobject directly
+in a group and inside a sub-group of it) is therefore transformed once per
+path. On the pinned Reference (2026-10-30, fm-5wq.34's differential fuzzer):
+
+| code (`a = Square(); g = VGroup(a, VGroup(a, Circle()))`) | Reference | FrankenManim |
+|---|---|---|
+| `g.shift(RIGHT)`, then `a.get_center()` | (2, 0, 0) | (1, 0, 0) |
+| `g.scale(2, about_point=ORIGIN)`, then `a.get_width()` | 4 | 2 |
+
+`arrange` followed by its `center()` drifts such a member by twice the
+centring offset.
+
+**FrankenManim:** each family member is transformed once. This is the same
+deduplicated family that RENDER_ORDER.md R-11 draws once. `get_family()` still
+returns the Reference's list, repeats included, so code that counts or indexes
+it is unaffected. Locked by
+`test_a_member_reachable_twice_is_transformed_once` in
+`crates/fmn-python/tests/vector_group_protocol.py`.
+
+**Migration:** none for families without sharing. A scene that put one
+mobject in two groups and relied on it moving twice should transform it
+explicitly.
+
 ## `shift` takes a scalar or one 3-vector (fm-mumk)
 
 The Reference's `Mobject.shift` adds its argument to the points with numpy

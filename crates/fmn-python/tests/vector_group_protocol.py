@@ -215,6 +215,23 @@ class VectorGroupProtocol(unittest.TestCase):
         self.assertEqual(list(group), before)
         self.assertEqual(list(foreign.mobjects), [foreign.frame, square])
 
+    def test_a_member_reachable_twice_is_transformed_once(self):
+        # Appendix C-42: the Reference's get_family repeats a member reachable twice, and its
+        # family-wide operations move it once per path (2 units for shift(RIGHT), 4x the
+        # width for scale(2)). The family R-11 draws once is transformed once; get_family()
+        # still returns the Reference's list.
+        shared = m.Square(side_length=1.0)
+        group = m.VGroup(shared, m.VGroup(shared, m.Circle(radius=0.5).shift(3 * m.LEFT)))
+        self.assertEqual(len(group.get_family()), 5)
+        group.shift(m.RIGHT)
+        np.testing.assert_allclose(shared.get_center(), [1.0, 0.0, 0.0], atol=1e-6)
+        group.scale(2, about_point=m.ORIGIN)
+        self.assertAlmostEqual(shared.get_width(), 2.0, places=5)
+        np.testing.assert_allclose(shared.get_center(), [2.0, 0.0, 0.0], atol=1e-6)
+        arranged = m.VGroup(shared, m.VGroup(shared, m.Circle(radius=1.9)))
+        arranged.arrange(m.UR, buff=0.18)
+        np.testing.assert_allclose(arranged.get_center(), [0.0, 0.0, 0.0], atol=1e-6)
+
     def test_installation_is_idempotent(self):
         from fmn_python.grouping import install_grouping
         native = getattr(m, '_native', m)

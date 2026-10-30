@@ -221,7 +221,9 @@ is the portal's:
   `n_components`, so BN-09's density differs;
 - `RoundedRectangle`'s corners (BN-09, open bead fm-c1up);
 - `insert_n_curves`: it uses the same greedy rule in both engines, but a
-  circle's chords tie, and the first-index tie breaks on ulp-level noise.
+  circle's chords tie, and the first-index tie breaks on ulp-level noise;
+- a mobject in two groups: the Reference moves a member reachable twice once
+  per path (Appendix C-42), so each mobject joins at most one group.
 
 `Arc` always passes `n_components`, which BN-09 honors verbatim.
 
