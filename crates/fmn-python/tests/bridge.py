@@ -7938,8 +7938,11 @@ assert np.allclose(composition_edge.get_center(), manimlib.RIGHT)
 
 try:
     growing.GrowArrow(VMobject())
-except ValueError as error:
-    assert str(error) == "Cannot get points of Mobject with no points"
+except Exception as error:
+    # The Reference's throw_error_if_no_points: a plain Exception naming the
+    # caller (fm-point-getter-exception-class-8vjgn).
+    assert type(error) is Exception, type(error)
+    assert str(error) == "Cannot call Mobject.get_start for a Mobject with no points"
 else:
     raise AssertionError("GrowArrow accepted a pointless mobject")
 

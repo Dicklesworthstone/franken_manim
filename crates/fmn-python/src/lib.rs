@@ -3303,17 +3303,22 @@ impl BridgeMobject {
     }
 
     /// Reference `get_start`: this entry's own first world-space point.
+    /// Without points it raises the Reference's `throw_error_if_no_points`
+    /// error: a plain `Exception` naming the caller (mobject.py:2188).
     fn _get_start(slf: &Bound<'_, Self>) -> PyResult<[f64; 3]> {
         crossing::record(CrossingClass::Other);
-        with_stage(slf, |stage, mob| stage.get_start(mob))?
-            .ok_or_else(|| PyValueError::new_err("Cannot get points of Mobject with no points"))
+        with_stage(slf, |stage, mob| stage.get_start(mob))?.ok_or_else(|| {
+            PyException::new_err("Cannot call Mobject.get_start for a Mobject with no points")
+        })
     }
 
-    /// Reference `get_end`: this entry's own last world-space point.
+    /// Reference `get_end`: this entry's own last world-space point, with
+    /// `_get_start`'s refusal.
     fn _get_end(slf: &Bound<'_, Self>) -> PyResult<[f64; 3]> {
         crossing::record(CrossingClass::Other);
-        with_stage(slf, |stage, mob| stage.get_end(mob))?
-            .ok_or_else(|| PyValueError::new_err("Cannot get points of Mobject with no points"))
+        with_stage(slf, |stage, mob| stage.get_end(mob))?.ok_or_else(|| {
+            PyException::new_err("Cannot call Mobject.get_end for a Mobject with no points")
+        })
     }
 
     /// Materialize this entry's object-to-world placement into its point

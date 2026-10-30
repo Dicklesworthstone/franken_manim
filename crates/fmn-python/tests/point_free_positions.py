@@ -617,11 +617,66 @@ class PointFreeInterpolation(unittest.TestCase):
         self.assertMatchesReference("path_arc_half", r(a.get_center()), r(expected))
 
 
+class PointFreeGetterRefusals(unittest.TestCase):
+    # fm-point-getter-exception-class-8vjgn: on a mobject without points the Reference's
+    # getters reach throw_error_if_no_points (mobject.py:2188), a plain Exception naming the
+    # method that checked. Classes and messages recorded on the pinned Reference; the
+    # mobjects lose their points through become, as in the API fuzzer's s34-000083 and
+    # s34-000123.
+    REFERENCE = {
+        "Circle.get_radius": "get_start",
+        "Circle.get_start": "get_start",
+        "Circle.get_end": "get_end",
+        "Line.get_angle": "get_end",
+        "Line.get_length": "get_start_and_end",
+        "Line.get_start_and_end": "get_start_and_end",
+        "Arc.get_start_angle": "get_start",
+        "VMobject.get_start": "get_start",
+    }
+
+    def calls(self, bind):
+        circle = bind(m.Circle(radius=0.73))
+        circle.become(m.VCube(side_length=1.99))
+        line = bind(m.Line(np.array([-0.51, 1.99, 0.0]), np.array([-2.45, 2.6, 0.0])))
+        line.become(m.DashedLine(np.array([-1.84, 0.23, 0.0]), np.array([-2.59, 0.18, 0.0])))
+        arc = bind(m.Arc(start_angle=0.3, angle=1.2))
+        arc.become(m.VCube(side_length=1.0))
+        return {
+            "Circle.get_radius": circle.get_radius,
+            "Circle.get_start": circle.get_start,
+            "Circle.get_end": circle.get_end,
+            "Line.get_angle": line.get_angle,
+            "Line.get_length": line.get_length,
+            "Line.get_start_and_end": line.get_start_and_end,
+            "Arc.get_start_angle": arc.get_start_angle,
+            "VMobject.get_start": bind(m.VMobject()).get_start,
+        }
+
+    def check(self, bind):
+        calls = self.calls(bind)
+        self.assertEqual(sorted(calls), sorted(self.REFERENCE))
+        for name, call in calls.items():
+            with self.subTest(getter=name):
+                with self.assertRaises(Exception) as caught:
+                    call()
+                self.assertIs(type(caught.exception), Exception)
+                self.assertEqual(
+                    str(caught.exception),
+                    f"Cannot call Mobject.{self.REFERENCE[name]} for a Mobject with no points")
+
+    def test_detached_getters_refuse_like_the_reference(self):
+        self.check(detached)
+
+    def test_scene_bound_getters_refuse_like_the_reference(self):
+        self.check(scene_binder())
+
+
 _suite = unittest.TestSuite([
     unittest.defaultTestLoader.loadTestsFromTestCase(PointFreePositionTests),
     unittest.defaultTestLoader.loadTestsFromTestCase(PointFreeInterpolation),
+    unittest.defaultTestLoader.loadTestsFromTestCase(PointFreeGetterRefusals),
 ])
-assert _suite.countTestCases() == 9, "point-free position inventory changed"
+assert _suite.countTestCases() == 11, "point-free position inventory changed"
 _result = unittest.TextTestRunner(verbosity=2).run(_suite)
 if not _result.wasSuccessful():
     raise AssertionError("point-free position acceptance failed")

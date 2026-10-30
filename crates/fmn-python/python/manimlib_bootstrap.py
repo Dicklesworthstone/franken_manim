@@ -2173,6 +2173,8 @@ class Mobject(_BridgeMobject):
         return _np.array(self._get_end())
 
     def get_start_and_end(self):
+        # Reference mobject.py:1613 refuses under its own name first.
+        self.throw_error_if_no_points()
         return (self.get_start(), self.get_end())
 
     def get_points(self):
