@@ -294,9 +294,49 @@ class NativeCopyingTests(unittest.TestCase):
         self.assertEqual(calls, [(square, saved, False)])
         np.testing.assert_array_equal(square.get_points(), saved.get_points())
 
+    def test_a_point_view_follows_an_equal_size_become_or_restore(self):
+        # fm-view-detach-on-become-p8c23: the Reference's become is set_data, which resizes
+        # only when the record count changes and otherwise copies in place, so a view taken
+        # before an equal-size become (or restore) stays attached and a write through it moves
+        # the mobject. Programs from the API fuzzer (s34-002176, s34-001777); each relation
+        # holds on the pinned Reference, bound and detached.
+        for bound in (False, True):
+            with self.subTest(bound=bound):
+                scene = m.Scene()
+                arrow = m.Arrow(np.array([2.18, 0.08, 0.0]), np.array([-1.74, 2.09, 0.0]), buff=0.16)
+                other = m.Arrow(np.array([-2.15, 1.89, 0.0]), np.array([-0.83, -1.86, 0.0]), buff=0.13)
+                dot = m.Dot(point=np.array([-1.32, -0.39, 0.0]))
+                ellipse = m.Ellipse(width=2.18, height=2.92)
+                square, resized, circle = m.Square(), m.Square(), m.Circle()
+                if bound:
+                    scene.add(arrow, other, dot, square, resized)
+                    self.assertTrue(arrow._is_bound())
+                view = arrow.get_points()
+                arrow.become(other)
+                view *= 0.59
+                np.testing.assert_allclose(arrow.get_points(), 0.59 * other.get_points(), atol=1e-6)
+                view = dot.get_points()
+                dot.become(ellipse)
+                view += 0.7 * m.UL
+                np.testing.assert_allclose(dot.get_points(), ellipse.get_points() + 0.7 * m.UL,
+                                           atol=1e-6)
+                start = square.get_points().copy()
+                square.save_state()
+                view = square.get_points()
+                square.shift(m.RIGHT)
+                square.restore()
+                view += m.UP
+                np.testing.assert_allclose(square.get_points(), start + m.UP, atol=1e-6)
+                # A become that changes the record count resizes: the old view detaches.
+                view = resized.get_points()
+                self.assertNotEqual(len(view), len(circle.get_points()))
+                resized.become(circle)
+                view += m.UP
+                np.testing.assert_allclose(resized.get_points(), circle.get_points(), atol=1e-6)
+
 
 suite = unittest.defaultTestLoader.loadTestsFromTestCase(NativeCopyingTests)
-assert suite.countTestCases() == 20
+assert suite.countTestCases() == 21
 result = unittest.TextTestRunner(verbosity=2).run(suite)
 if not result.wasSuccessful():
     raise AssertionError("native mobject array-copy acceptance failed")

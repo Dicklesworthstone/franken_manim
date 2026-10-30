@@ -296,27 +296,9 @@ impl Stage {
                 "surface changed after alignment was prepared",
             ));
         }
-        if entry.buffer.len() == update.buffer.len() {
-            // set_data/become intentionally detaches even equal-size views.
-            // Regridding is an in-place edit instead: prepare all field copies
-            // before writing, then use the existing snapshot-aware write path.
-            let columns: Vec<_> = update
-                .buffer
-                .schema()
-                .fields()
-                .iter()
-                .map(|field| {
-                    (
-                        field.name.clone(),
-                        update.buffer.read_column(&field.name).unwrap_or_default(),
-                    )
-                })
-                .collect();
-            for (name, values) in columns {
-                let written = entry.buffer.write_range(&name, 0, &values);
-                debug_assert!(written, "prepared surface column has the validated layout");
-            }
-        } else if !entry.buffer.assign_from(&update.buffer) {
+        // An equal-size regrid edits in place, so live views stay attached;
+        // a different size swaps in a fresh generation and detaches them.
+        if !entry.buffer.set_data(&update.buffer) {
             return Err(StageError::SchemaMismatch);
         }
         entry.render_primitive = RenderPrimitive::SurfaceGrid {

@@ -120,11 +120,11 @@ fn _initialize_raster_image(
             let _ = stage.delete(candidate);
             return Err(stage_error(error));
         }
-        // Generic become intentionally replaces storage even at equal sizes
-        // (V6). Run that existing metadata transfer against private scratch
-        // storage, then put back the exact original RecordBuffer. No Python
-        // callback or proxy observation occurs while this Stage is borrowed.
-        // This preserves live views without changing become/copy semantics.
+        // Generic become also copies the candidate's records. Run its
+        // metadata transfer against private scratch storage, then put back
+        // the exact original RecordBuffer, records and live views included.
+        // No Python callback or proxy observation occurs while this Stage is
+        // borrowed.
         let retained = std::mem::replace(
             &mut stage.get_mut(mob).expect("prechecked image target").buffer,
             scratch,

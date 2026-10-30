@@ -1956,8 +1956,11 @@ impl Stage {
     /// before this lower-level copy. The two families must arrive with equal
     /// member counts and member-for-member child counts. Per zipped member: record data
     /// (schema-checked — the Reference's `set_data` asserts dtype
-    /// equality), uniforms, and tracker state copy across; outstanding live
-    /// views on `mob` detach as under resize (V6). Updater lists are
+    /// equality), uniforms, and tracker state copy across. As in the
+    /// Reference, an equal record count copies in place, so a member's live
+    /// views stay attached and read the new world-space points (its
+    /// placement is baked); a different count is a resize and detaches
+    /// them ([`RecordBuffer::set_data`]). Updater lists are
     /// untouched unless `match_updaters`, which then shares the root's
     /// list by reference (the Reference's `match_updaters` call — root
     /// only, not the family). Animating/suspension flags, scene membership,
@@ -1991,6 +1994,7 @@ impl Stage {
                 return Err(StageError::SchemaMismatch);
             }
         }
+        let mut viewed = Vec::new();
         for (&a, &b) in family1.iter().zip(family2.iter()) {
             if a == b {
                 continue;
@@ -2008,7 +2012,7 @@ impl Stage {
                 )
             };
             let e1 = self.get_mut(a).expect("prechecked");
-            if !e1.buffer.assign_from(&src) {
+            if !e1.buffer.set_data(&src) {
                 return Err(StageError::SchemaMismatch); // unreachable: prechecked
             }
             e1.set_placement(placement);
@@ -2017,6 +2021,14 @@ impl Stage {
             e1.tracker = tracker;
             e1.render_primitive = render_primitive;
             e1.replace_image_resource(image);
+            if e1.buffer.live_view_count() > 0 {
+                viewed.push(a);
+            }
+        }
+        // A view exposes world-space records, and the copied records are in
+        // the source's object space.
+        for member in viewed {
+            self.bake_placement(member)?;
         }
         if match_updaters {
             self.match_updaters(mob, other)?;

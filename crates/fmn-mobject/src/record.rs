@@ -1029,13 +1029,42 @@ impl RecordBuffer {
         }
     }
 
-    /// Reference `set_data`, the `become` data plane (§8.3): replace this
-    /// buffer's records with an independent copy of `other`'s. Schemas must
-    /// match — the Reference asserts dtype equality — else this returns
-    /// `false` and leaves the buffer untouched. Flows through the
-    /// copy-on-resize path: a fresh generation with every revision bumped
-    /// past the old ones, so mirrors and bounding-box signatures resync and
-    /// outstanding views detach exactly as under resize (V6).
+    /// Reference `set_data` (mobject.py: `resize_points(len(data))`, then
+    /// `self.data[:] = data`), the `become` data plane (§8.3). An equal
+    /// length copies `other`'s records into the current generation, so live
+    /// views stay attached and see the new contents (V3), with every field's
+    /// revision bumped (V4). A different length is a resize: views detach
+    /// exactly as under [`RecordBuffer::assign_from`]. Schemas must match —
+    /// the Reference asserts dtype equality — else this returns `false` and
+    /// leaves the buffer untouched.
+    pub fn set_data(&mut self, other: &RecordBuffer) -> bool {
+        if self.len != other.len {
+            return self.assign_from(other);
+        }
+        if !(Arc::ptr_eq(&self.schema, &other.schema) || *self.schema == *other.schema) {
+            return false;
+        }
+        if self.len == 0 {
+            return true;
+        }
+        let lanes = self.len * self.schema.stride();
+        let source = other.storage.copy_cells();
+        self.unshare();
+        self.storage.cells.write().expect("storage lock poisoned")[..lanes]
+            .copy_from_slice(&source[..lanes]);
+        for field_index in 0..self.schema.fields().len() {
+            self.storage.mark_written(field_index, 0, self.len - 1);
+        }
+        true
+    }
+
+    /// Replace this buffer's records with an independent copy of `other`'s
+    /// through the copy-on-resize path: a fresh generation with every
+    /// revision bumped past the old ones, so mirrors and bounding-box
+    /// signatures resync and outstanding views detach exactly as under
+    /// resize — the snapshot and checkpoint restore data plane (V6).
+    /// Schemas must match, else this returns `false` and leaves the buffer
+    /// untouched.
     pub fn assign_from(&mut self, other: &RecordBuffer) -> bool {
         if !(Arc::ptr_eq(&self.schema, &other.schema) || *self.schema == *other.schema) {
             return false;

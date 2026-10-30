@@ -820,11 +820,11 @@ fn copies_do_not_resurrect_a_hint_while_points_are_writably_viewed() {
     drop(view);
 }
 
-/// `become_mobject` detaches outstanding views exactly as under resize (V6)
-/// and bumps revisions past the old ones, so mirrors and bbox signatures
-/// can never confuse the new contents with the old.
+/// A `become_mobject` that changes the record count is a resize: it detaches
+/// outstanding views and bumps revisions past the old ones, so mirrors and
+/// bbox signatures can never confuse the new contents with the old.
 #[test]
-fn become_detaches_views_and_advances_revisions() {
+fn resizing_become_detaches_views_and_advances_revisions() {
     let mut stage = Stage::new();
     let a = stage.add(Mobject::from_points(&[[1.0, 0.0, 0.0]]));
     let b = stage.add(Mobject::from_points(&[[2.0, 0.0, 0.0], [3.0, 0.0, 0.0]]));
@@ -836,11 +836,52 @@ fn become_detaches_views_and_advances_revisions() {
     let buffer = &stage.get(a).unwrap().buffer;
     assert_eq!(buffer.len(), 2, "records replaced, length matches source");
     assert_eq!(buffer.read(1, "point"), Some(vec![3.0, 0.0, 0.0]));
-    assert!(!view.is_attached_to(buffer), "old view detached (V6)");
+    assert!(
+        !view.is_attached_to(buffer),
+        "old view detached, as under resize"
+    );
     assert!(
         buffer.revision() > rev_before,
         "revisions advance past the old generation"
     );
+}
+
+/// An equal-count `become_mobject` copies in place, as the Reference's
+/// `set_data` does (`self.data[:] = data`): a live view stays attached and
+/// reads the source's world-space points, even when the source carries an
+/// unbaked placement, and revisions advance (fm-view-detach-on-become-p8c23).
+#[test]
+fn equal_count_become_keeps_views_attached_to_world_points() {
+    let mut stage = Stage::new();
+    let a = stage.add(Mobject::from_points(&[[1.0, 0.0, 0.0], [2.0, 0.0, 0.0]]));
+    let b = stage.add(Mobject::from_points(&[[0.0, 1.0, 0.0], [0.0, 2.0, 0.0]]));
+    stage.shift(b, [3.0, 0.0, 0.0]);
+    assert!(
+        !stage.placement(b).unwrap().is_identity(),
+        "the source's shift lives in its placement, so the bake is exercised"
+    );
+    let view = stage.get_mut(a).unwrap().buffer.export_view(true);
+    let rev_before = stage.get(a).unwrap().buffer.revision();
+
+    stage.become_mobject(a, b, false).expect("become");
+
+    let buffer = &stage.get(a).unwrap().buffer;
+    assert!(
+        view.is_attached_to(buffer),
+        "an equal-count become keeps the view"
+    );
+    assert_eq!(view.read(0, "point"), Some(vec![3.0, 1.0, 0.0]));
+    assert_eq!(view.read(1, "point"), Some(vec![3.0, 2.0, 0.0]));
+    assert!(
+        stage.placement(a).unwrap().is_identity(),
+        "placement baked for the view"
+    );
+    assert_eq!(
+        stage.get_points(a).unwrap(),
+        stage.get_points(b).unwrap(),
+        "world points match the source"
+    );
+    assert!(buffer.revision() > rev_before, "revisions advance");
 }
 
 #[test]
