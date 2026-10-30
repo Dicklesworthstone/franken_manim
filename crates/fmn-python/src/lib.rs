@@ -1914,6 +1914,130 @@ struct RootsProjection {
     verified: HashMap<Mob, u64, ByAddress>,
 }
 
+/// The proxy of every projected member, and each member's verified child
+/// epoch.
+type FamilyProjection<'py> = (
+    HashMap<Mob, Bound<'py, PyAny>, ByAddress>,
+    HashMap<Mob, u64, ByAddress>,
+);
+
+/// Project the Python families under `roots` from the native graph: one
+/// proxy per member (its live proxy, an adopted padding ghost, or a fresh
+/// shell), and each member's `submobjects` re-projected where it moved.
+/// Returns the proxies and each member's verified child epoch.
+fn project_families<'py>(
+    slf: &Bound<'py, PyScene>,
+    roots: &[Mob],
+    shell_factory: &Bound<'py, PyAny>,
+    ghost_adopter: Option<&Bound<'py, PyAny>>,
+) -> PyResult<FamilyProjection<'py>> {
+    let py = slf.py();
+    let engine = Rc::clone(&slf.borrow().engine);
+    // Choreo can create composition containers without a Python proxy.
+    // Snapshot the native graph first, then release the Stage borrow
+    // before allocating shells or touching Python family/back edges.
+    let (graph, padding) = {
+        let runtime = engine.borrow();
+        let stage = runtime.stage();
+        let mut seen: HashSet<Mob, ByAddress> = HashSet::default();
+        let mut graph = Vec::new();
+        let mut padding: HashMap<Mob, Mob, ByAddress> = HashMap::default();
+        for root in roots {
+            for mob in stage.family(*root) {
+                if seen.insert(mob) {
+                    let entry = stage.get(mob).ok_or_else(|| {
+                        StaleHandleError::new_err("scene family contains a stale handle")
+                    })?;
+                    // A point-less vector member with children is a
+                    // native group (Choreo's composition container over
+                    // VMobjects): the Reference's VGroup (fm-3jw2).
+                    let vector = entry.buffer.schema().offset("fill_rgba").is_some();
+                    let group = entry.buffer.is_empty() && !entry.submobjects().is_empty();
+                    graph.push((
+                        mob,
+                        (vector, group),
+                        entry.submobjects().to_vec(),
+                        entry.children_epoch(),
+                    ));
+                    if let Some(source) = stage.padding_source(mob) {
+                        padding.insert(mob, source);
+                    }
+                }
+            }
+        }
+        (graph, padding)
+    };
+    let mut proxies: HashMap<Mob, Bound<'py, PyAny>, ByAddress> =
+        HashMap::with_capacity_and_hasher(graph.len(), ByAddress::default());
+    let mut ghosts: Vec<(Bound<'py, PyAny>, Bound<'py, PyAny>)> = Vec::new();
+    for (mob, (vector_records, group), _, _) in &graph {
+        // A padding copy's source precedes it in family order, so the
+        // source's proxy is already projected when it has one. Without an
+        // adopter to install its Python state, a ghost gets a plain shell.
+        let source_proxy = ghost_adopter.and(padding.get(mob)).and_then(|source| {
+            proxies
+                .get(source)
+                .cloned()
+                .or_else(|| live_proxy(py, slf, *source))
+        });
+        let proxy = if let Some(proxy) = live_proxy(py, slf, *mob) {
+            proxy
+        } else if let Some(source_proxy) = source_proxy {
+            let proxy = new_bound_proxy(py, slf, &source_proxy, &engine, *mob)?;
+            ghosts.push((source_proxy, proxy.clone()));
+            proxy
+        } else {
+            let proxy = shell_factory.call1((*vector_records, *group))?;
+            {
+                let bridge = proxy.cast::<BridgeMobject>()?;
+                let mut cell = bridge.borrow_mut();
+                cell.nursery = None;
+                cell.engine = Some(Rc::clone(&engine));
+                cell.mob = Some(*mob);
+                cell.initialized = true;
+            }
+            engine
+                .borrow_mut()
+                .stage_mut()
+                .pin(*mob)
+                .map_err(stage_error)?;
+            register_proxy(py, slf, *mob, &proxy)?;
+            proxy.setattr("_scene", slf)?;
+            proxy
+        };
+        proxies.insert(*mob, proxy);
+    }
+    if let Some(adopter) = ghost_adopter
+        && !ghosts.is_empty()
+    {
+        adopter.call1((PyList::new(py, ghosts)?,))?;
+    }
+    for (mob, _, children, _) in &graph {
+        let submobjects = projected_children(&proxies[mob])?;
+        // Re-projecting a list that already holds exactly these proxies
+        // in this order clears and re-extends the same items with no
+        // back-edge change. Skip that call: this walk covers the whole
+        // scene family, so unchanged lists would otherwise cost one
+        // Python call per member on every `Scene.mobjects` read.
+        if let Ok(current) = submobjects.cast::<PyList>()
+            && current.len() == children.len()
+            && current
+                .iter()
+                .zip(children)
+                .all(|(item, child)| item.is(&proxies[child]))
+        {
+            continue;
+        }
+        let children = PyList::new(py, children.iter().map(|child| &proxies[child]))?;
+        submobjects.call_method1("_replace_projection", (children,))?;
+    }
+    let verified = graph
+        .iter()
+        .map(|(mob, _, _, epoch)| (*mob, *epoch))
+        .collect();
+    Ok((proxies, verified))
+}
+
 /// Keep a finished projection when nothing moved while it ran: shells
 /// registered during it, or Python run by `_replace_projection`, change the
 /// key, and the next read then projects again.
@@ -9282,7 +9406,6 @@ impl PyScene {
         shell_factory: &Bound<'py, PyAny>,
         ghost_adopter: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Vec<Py<PyAny>>> {
-        let py = slf.py();
         // fm-5wq.31: this projection walks the whole scene family, and
         // per-frame admission reads `Scene.mobjects` every frame (62 ms of
         // PrimeRace's frames at ~19K members). Skip it while no root, edge
@@ -9303,115 +9426,31 @@ impl PyScene {
         {
             return Ok(roots);
         }
-        let engine = Rc::clone(&slf.borrow().engine);
-        // Choreo can create composition containers without a Python proxy.
-        // Snapshot the native graph first, then release the Stage borrow
-        // before allocating shells or touching Python family/back edges.
-        let (roots, graph, padding) = {
-            let runtime = engine.borrow();
-            let stage = runtime.stage();
-            let roots = stage.roots().to_vec();
-            let mut seen: HashSet<Mob, ByAddress> = HashSet::default();
-            let mut graph = Vec::new();
-            let mut padding: HashMap<Mob, Mob, ByAddress> = HashMap::default();
-            for root in &roots {
-                for mob in stage.family(*root) {
-                    if seen.insert(mob) {
-                        let entry = stage.get(mob).ok_or_else(|| {
-                            StaleHandleError::new_err("scene family contains a stale handle")
-                        })?;
-                        // A point-less vector member with children is a
-                        // native group (Choreo's composition container over
-                        // VMobjects): the Reference's VGroup (fm-3jw2).
-                        let vector = entry.buffer.schema().offset("fill_rgba").is_some();
-                        let group = entry.buffer.is_empty() && !entry.submobjects().is_empty();
-                        graph.push((
-                            mob,
-                            (vector, group),
-                            entry.submobjects().to_vec(),
-                            entry.children_epoch(),
-                        ));
-                        if let Some(source) = stage.padding_source(mob) {
-                            padding.insert(mob, source);
-                        }
-                    }
-                }
-            }
-            (roots, graph, padding)
-        };
-        let mut proxies: HashMap<Mob, Bound<'py, PyAny>, ByAddress> =
-            HashMap::with_capacity_and_hasher(graph.len(), ByAddress::default());
-        let mut ghosts: Vec<(Bound<'py, PyAny>, Bound<'py, PyAny>)> = Vec::new();
-        for (mob, (vector_records, group), _, _) in &graph {
-            // A padding copy's source precedes it in family order, so the
-            // source's proxy is already projected when it has one. Without an
-            // adopter to install its Python state, a ghost gets a plain shell.
-            let source_proxy = ghost_adopter.and(padding.get(mob)).and_then(|source| {
-                proxies
-                    .get(source)
-                    .cloned()
-                    .or_else(|| live_proxy(py, slf, *source))
-            });
-            let proxy = if let Some(proxy) = live_proxy(py, slf, *mob) {
-                proxy
-            } else if let Some(source_proxy) = source_proxy {
-                let proxy = new_bound_proxy(py, slf, &source_proxy, &engine, *mob)?;
-                ghosts.push((source_proxy, proxy.clone()));
-                proxy
-            } else {
-                let proxy = shell_factory.call1((*vector_records, *group))?;
-                {
-                    let bridge = proxy.cast::<BridgeMobject>()?;
-                    let mut cell = bridge.borrow_mut();
-                    cell.nursery = None;
-                    cell.engine = Some(Rc::clone(&engine));
-                    cell.mob = Some(*mob);
-                    cell.initialized = true;
-                }
-                engine
-                    .borrow_mut()
-                    .stage_mut()
-                    .pin(*mob)
-                    .map_err(stage_error)?;
-                register_proxy(py, slf, *mob, &proxy)?;
-                proxy.setattr("_scene", slf)?;
-                proxy
-            };
-            proxies.insert(*mob, proxy);
-        }
-        if let Some(adopter) = ghost_adopter
-            && !ghosts.is_empty()
-        {
-            adopter.call1((PyList::new(py, ghosts)?,))?;
-        }
-        for (mob, _, children, _) in &graph {
-            let submobjects = projected_children(&proxies[mob])?;
-            // Re-projecting a list that already holds exactly these proxies
-            // in this order clears and re-extends the same items with no
-            // back-edge change. Skip that call: this walk covers the whole
-            // scene family, so unchanged lists would otherwise cost one
-            // Python call per member on every `Scene.mobjects` read.
-            if let Ok(current) = submobjects.cast::<PyList>()
-                && current.len() == children.len()
-                && current
-                    .iter()
-                    .zip(children)
-                    .all(|(item, child)| item.is(&proxies[child]))
-            {
-                continue;
-            }
-            let children = PyList::new(py, children.iter().map(|child| &proxies[child]))?;
-            submobjects.call_method1("_replace_projection", (children,))?;
-        }
-        let verified = graph
-            .iter()
-            .map(|(mob, _, _, epoch)| (*mob, *epoch))
-            .collect();
+        let roots = slf.borrow().engine.borrow().stage().roots().to_vec();
+        let (proxies, verified) = project_families(slf, &roots, shell_factory, ghost_adopter)?;
         store_projection(slf, key, &roots, verified);
         Ok(roots
             .into_iter()
             .map(|mob| proxies[&mob].clone().unbind())
             .collect())
+    }
+
+    /// Project the Python families of bound `mobjects` that are not scene
+    /// roots, which `_engine_roots` never walks. A play can change such a
+    /// family natively and then unroot it: ReplacementTransform pads its
+    /// source while aligning, then removes the source from the scene, and the
+    /// pads would otherwise never reach the source's Python `submobjects`
+    /// (fm-pointless-target-alignment-b0y0v).
+    #[pyo3(signature = (mobjects, shell_factory, ghost_adopter = None))]
+    fn _project_families<'py>(
+        slf: &Bound<'py, Self>,
+        mobjects: &Bound<'py, PyTuple>,
+        shell_factory: &Bound<'py, PyAny>,
+        ghost_adopter: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<()> {
+        let handles = scene_proxy_handles(slf, mobjects)?;
+        project_families(slf, &handles, shell_factory, ghost_adopter)?;
+        Ok(())
     }
 
     /// Rung 0 (always-correct default): Python updater callbacks run with

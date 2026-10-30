@@ -14033,7 +14033,34 @@ class Scene(_SceneCore):
                     callback.abort()
             raise
         self._record_played_roots()
+        self._project_unrooted(proto_animations)
         return result
+
+    def _project_unrooted(self, animations):
+        # fm-pointless-target-alignment-b0y0v: a native play can change an
+        # animated mobject's family and then unroot it (ReplacementTransform
+        # pads its source, then removes it from the scene). Only scene roots'
+        # families are projected into Python, so project these too.
+        roots = {id(root) for root in self.mobjects}
+        pending, seen, unrooted = list(animations), set(), []
+        while pending:
+            animation = pending.pop()
+            if id(animation) in seen:
+                continue
+            seen.add(id(animation))
+            pending.extend(getattr(animation, "animations", None) or ())
+            mobject = getattr(animation, "mobject", None)
+            if (
+                isinstance(mobject, _BridgeMobject)
+                and mobject._is_bound()
+                and getattr(mobject, "_scene", None) is self
+                and id(mobject) not in roots
+            ):
+                unrooted.append(mobject)
+        if unrooted:
+            self._project_families(
+                tuple(unrooted), _native_scene_shell_factory, _adopt_padding_ghosts
+            )
 
     def _record_played_roots(self):
         # fm-v1aq: the Reference's begin_animations roots each animated
