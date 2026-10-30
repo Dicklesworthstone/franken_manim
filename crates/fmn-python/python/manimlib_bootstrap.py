@@ -3995,6 +3995,15 @@ class VMobject(Mobject):
         return self
 
     def align_points(self, vmobject):
+        if self.get_num_points() != vmobject.get_num_points():
+            # Reference vectorized_mobject.py:970: a side without points
+            # starts a path at its center. Only the Python family knows a
+            # detached point-less root's center (a DashedLine's dashes), and
+            # the seeded record takes the root's remembered style rather than
+            # zeroed cells (fm-pointless-target-alignment-b0y0v).
+            for mob in (self, vmobject):
+                if not mob.has_points():
+                    mob.start_new_path(mob.get_center())
         aligned = self._align_vmobject_points(
             vmobject, float(self.tolerance_for_point_equality)
         )

@@ -671,12 +671,91 @@ class PointFreeGetterRefusals(unittest.TestCase):
         self.check(scene_binder())
 
 
+class PointLessTargetAlignment(unittest.TestCase):
+    # fm-pointless-target-alignment-b0y0v: the Reference's VMobject.align_points
+    # (vectorized_mobject.py:970) starts a path at a point-less side's center before it pads,
+    # so a transform toward a point-less root (a DashedLine, a VCube) collapses onto that root's
+    # family center with the root's own style. The values are the pinned Reference's for the
+    # API fuzzer's minimized programs s34-000953, s34-001408, s34-000762, s34-003940,
+    # s34-001685 and s34-009260.
+    REFERENCE = {
+        "transform_to_bound_dashed": {
+            "fill": "#888888", "n": 9, "first": [1.475, -0.645, 0], "family_len": 41},
+        "replacement_to_dashed_copy": {
+            "fill": "#888888", "n": 11, "first": [0.55, -0.52, 0], "family_len": 35},
+        "replacement_to_vcube_copy": {
+            "fill": "#29ABCA", "n": 33, "first": [0, 0, 0], "family_len": 7},
+        "triangle_to_dashed": {
+            "fill": "#888888", "n": 7, "first": [1.93, 0.57, 0], "family_len": 42},
+        "polygon_to_dashed": {
+            "fill": "#888888", "n": 7, "first": [-0.47, 0.025, 0], "family_len": 41},
+        "square_to_arc_dashed_copy": {
+            "fill": "#888888", "n": 23, "first": [1.0, 0.02, 0], "family_len": 20},
+    }
+
+    def play(self, scene, animation):
+        scene.play(animation, run_time=1 / 15)
+
+    def cases(self):
+        scene = m.Scene()
+        out = {}
+        rect = m.Rectangle(width=3.15, height=0.39)
+        dashed = m.DashedLine(np.array([2.64, -2.26, 0.0]), np.array([0.31, 0.97, 0.0]))
+        self.play(scene, dashed.animate.scale(0.6).scale(1.96).scale(1.76))
+        self.play(scene, m.Transform(rect, dashed))
+        out["transform_to_bound_dashed"] = rect
+        scene.clear()
+        dashed = m.DashedLine(np.array([0.99, -2.15, 0.0]), np.array([0.11, 1.11, 0.0]))
+        scene.add(dashed)
+        pentagon = m.RegularPolygon(n=5)
+        self.play(scene, m.ReplacementTransform(pentagon, dashed.copy()))
+        out["replacement_to_dashed_copy"] = pentagon
+        scene.clear()
+        cube = m.VCube(side_length=1.72)
+        scene.add(cube)
+        dot = m.Dot(point=np.array([0.47, -0.02, 0.0]))
+        self.play(scene, m.ReplacementTransform(dot, cube.copy()))
+        out["replacement_to_vcube_copy"] = dot
+        scene.clear()
+        triangle = m.Triangle()
+        self.play(scene, m.Transform(
+            triangle, m.DashedLine(np.array([2.91, 2.33, 0.0]), np.array([0.95, -1.19, 0.0]))))
+        out["triangle_to_dashed"] = triangle
+        scene.clear()
+        polygon = m.Polygon(np.array([-0.44, 2.81, 0.0]), np.array([2.15, -1.53, 0.0]),
+                            np.array([-1.23, 1.05, 0.0]))
+        self.play(scene, m.Transform(
+            polygon, m.DashedLine(np.array([1.52, 0.22, 0.0]), np.array([-2.46, -0.17, 0.0]))))
+        out["polygon_to_dashed"] = polygon
+        scene.clear()
+        dashed = m.DashedLine(np.array([1.93, -2.88, 0.0]), np.array([0.46, -1.78, 0.0]))
+        dashed.become(m.Arc(start_angle=0.02, angle=3.1, radius=1.0, n_components=11))
+        square = m.RegularPolygon(n=4)
+        self.play(scene, m.ReplacementTransform(square, dashed.copy()))
+        out["square_to_arc_dashed_copy"] = square
+        return out
+
+    def test_transforms_toward_point_less_roots_match_the_reference(self):
+        cases = self.cases()
+        self.assertEqual(sorted(cases), sorted(self.REFERENCE))
+        for name, mob in cases.items():
+            expected = self.REFERENCE[name]
+            with self.subTest(case=name):
+                points = mob.get_points()
+                self.assertEqual(mob.get_fill_color(), expected["fill"])
+                self.assertEqual(len(points), expected["n"])
+                np.testing.assert_allclose(points[0], expected["first"], atol=1e-3)
+                self.assertEqual(len(mob.get_family()), expected["family_len"])
+                self.assertTrue(all(type(member) is type(mob) for member in mob.get_family()))
+
+
 _suite = unittest.TestSuite([
     unittest.defaultTestLoader.loadTestsFromTestCase(PointFreePositionTests),
     unittest.defaultTestLoader.loadTestsFromTestCase(PointFreeInterpolation),
     unittest.defaultTestLoader.loadTestsFromTestCase(PointFreeGetterRefusals),
+    unittest.defaultTestLoader.loadTestsFromTestCase(PointLessTargetAlignment),
 ])
-assert _suite.countTestCases() == 11, "point-free position inventory changed"
+assert _suite.countTestCases() == 12, "point-free position inventory changed"
 _result = unittest.TextTestRunner(verbosity=2).run(_suite)
 if not _result.wasSuccessful():
     raise AssertionError("point-free position acceptance failed")
