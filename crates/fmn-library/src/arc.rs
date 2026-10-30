@@ -828,10 +828,13 @@ impl From<Annulus> for Mobject {
 #[must_use]
 pub fn arc_center_of(points: &[Vec3]) -> Option<Vec3> {
     let (&a1, &h, &a2) = (points.first()?, points.get(1)?, points.get(2)?);
-    let t1 = sub(h, a1);
-    let t2 = sub(h, a2);
-    let n1 = space_ops::normalize(space_ops::rotate_vector(t1, TAU / 4.0, OUT));
-    let n2 = space_ops::normalize(space_ops::rotate_vector(t2, TAU / 4.0, OUT));
+    let t1 = space_ops::normalize(sub(h, a1));
+    let t2 = space_ops::normalize(sub(h, a2));
+    // The component itself defines its plane. Rotating about world OUT would
+    // return a tangent, rather than a normal, for an arc tilted into xz.
+    let axis = space_ops::normalize(space_ops::cross(t1, t2));
+    let n1 = space_ops::normalize(space_ops::cross(axis, t1));
+    let n2 = space_ops::normalize(space_ops::cross(axis, t2));
     let crossed = space_ops::cross(n2, n1);
     let denominator = space_ops::dot(crossed, crossed);
     // Unit normals make this a dimensionless sin²(angle) test. Preserve the
@@ -960,6 +963,24 @@ mod tests {
         }
         assert_eq!(arc_center_of(&[]), None);
         assert_eq!(arc_center_of(&[[1.0, 2.0, 3.0]; 3]), Some([1.0, 2.0, 3.0]));
+    }
+
+    #[test]
+    fn arc_center_follows_the_component_plane_under_rotation() {
+        let center = [1.0, -2.0, 3.0];
+        for axis in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 2.0, 3.0]] {
+            let arc = Arc::new()
+                .radius(0.08)
+                .arc_center(center)
+                .build()
+                .expect("finite arc")
+                .rotated_about(TAU / 4.0, axis, center);
+            let actual = arc_center_of(arc.points()).expect("rotated arc has a component");
+            assert!(
+                close_vec(actual, center),
+                "axis={axis:?}, center={actual:?}"
+            );
+        }
     }
 
     #[test]

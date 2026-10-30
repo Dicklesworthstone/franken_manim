@@ -67,6 +67,8 @@ class NativeCurvedLifecycle(unittest.TestCase):
         for z in (-1e-9, 1e-9):
             circle = m.Circle(radius=.08).shift([1., 2., z])
             self.assert_points(circle.get_arc_center(), [1., 2., z])
+        tilted = m.Circle(radius=.08).rotate(m.PI / 2, axis=m.RIGHT).shift([1., 2., 3.])
+        self.assert_points(tilted.get_arc_center(), [1., 2., 3.])
 
     def test_transformed_arrow_has_explicit_degenerate_angle_facts(self):
         import runpy
