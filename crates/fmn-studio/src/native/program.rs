@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 
 use fmn_render::CameraConfig;
-use fmn_scene::studio_bridge::{Animation, FramePacket};
+use fmn_scene::studio_bridge::{Animation, FrameMetadata, FramePacket};
 use fmn_scene::{
     CameraRig, CaptureReason, EventPayload, IntegrationError, InteractiveScene, NullSceneSink,
     PlayOverrides, Scene, SceneError, SceneSink, SteppedPlay, SteppedWait,
@@ -93,10 +93,38 @@ impl ActiveSegment {
     }
 }
 
-#[derive(Default)]
 struct CaptureOne {
+    metadata: Option<FrameMetadata>,
     packet: Option<FramePacket>,
+    state_required: bool,
     invalid: bool,
+}
+
+impl CaptureOne {
+    fn new(state_required: bool) -> Self {
+        Self {
+            metadata: None,
+            packet: None,
+            state_required,
+            invalid: false,
+        }
+    }
+
+    fn record(
+        &mut self,
+        reason: CaptureReason,
+        metadata: FrameMetadata,
+    ) -> Result<(), IntegrationError> {
+        if reason != CaptureReason::Segment || self.metadata.is_some() {
+            self.invalid = true;
+            return Err(IntegrationError::new(
+                "studio",
+                "expected one native segment capture",
+            ));
+        }
+        self.metadata = Some(metadata);
+        Ok(())
+    }
 }
 
 impl SceneSink for CaptureOne {
@@ -105,15 +133,21 @@ impl SceneSink for CaptureOne {
         reason: CaptureReason,
         packet: FramePacket,
     ) -> Result<(), IntegrationError> {
-        if reason != CaptureReason::Segment || self.packet.is_some() {
-            self.invalid = true;
-            return Err(IntegrationError::new(
-                "studio",
-                "expected one native segment capture",
-            ));
-        }
+        self.record(reason, packet.metadata())?;
         self.packet = Some(packet);
         Ok(())
+    }
+
+    fn capture_state_required(&self) -> bool {
+        self.state_required
+    }
+
+    fn capture_metadata(
+        &mut self,
+        reason: CaptureReason,
+        metadata: FrameMetadata,
+    ) -> Result<(), IntegrationError> {
+        self.record(reason, metadata)
     }
 }
 
@@ -333,21 +367,29 @@ impl NativeSceneProgram {
     /// deferred callback. Errors and panics poison the cursor: a caller catching
     /// an unwind cannot accidentally reuse partially consumed authoring work.
     pub fn next_frame(&mut self) -> Result<Option<FramePacket>, ServiceError> {
+        self.advance_one(true)
+            .map(|capture| capture.and_then(|capture| capture.packet))
+    }
+
+    fn advance_one(&mut self, state_required: bool) -> Result<Option<CaptureOne>, ServiceError> {
         self.require_healthy()?;
         if self.frame >= self.frame_limit {
             return Err(invalid("native execution reached its frame budget"));
         }
         self.failed = true;
-        let result = self.next_frame_inner().and_then(|packet| {
+        let result = self.advance_one_inner(state_required).and_then(|capture| {
             self.validate_camera()?;
-            Ok(packet)
+            Ok(capture)
         });
         self.failed = result.is_err();
         result
     }
 
-    /// Advance by real execution only. Backward movement requires a fresh
-    /// factory instance; changing the clock alone is never treated as replay.
+    /// Advance by real execution only. Every animation, updater, input and
+    /// deferred-construction boundary still runs, while intermediate captures
+    /// retain only timing metadata instead of freezing discarded scene state.
+    /// Backward movement requires a fresh factory instance; changing the clock
+    /// alone is never treated as replay.
     pub fn advance_to(&mut self, target: u64) -> Result<(), ServiceError> {
         self.require_healthy()?;
         if target < self.frame || target > self.frame_limit {
@@ -356,7 +398,7 @@ impl NativeSceneProgram {
             ));
         }
         while self.frame < target {
-            if self.next_frame()?.is_none() {
+            if self.advance_one(false)?.is_none() {
                 return Err(invalid("native program ended before the requested frame"));
             }
         }
@@ -391,7 +433,10 @@ impl NativeSceneProgram {
         Ok(())
     }
 
-    fn next_frame_inner(&mut self) -> Result<Option<FramePacket>, ServiceError> {
+    fn advance_one_inner(
+        &mut self,
+        state_required: bool,
+    ) -> Result<Option<CaptureOne>, ServiceError> {
         loop {
             if self.active.is_none() {
                 let Some(segment) = self.segments.pop_front() else {
@@ -430,7 +475,7 @@ impl NativeSceneProgram {
             let Some(mut active) = self.active.take() else {
                 return Err(execution_error("native segment cursor disappeared"));
             };
-            let mut capture = CaptureOne::default();
+            let mut capture = CaptureOne::new(state_required);
             match active.advance(self.preview.scene_mut(), &mut capture) {
                 Ok(false) => active
                     .finish(self.preview.scene_mut())
@@ -438,19 +483,20 @@ impl NativeSceneProgram {
                 Ok(true) => {
                     self.active = Some(active);
                     let expected = self.frame + 1;
-                    let packet = capture
-                        .packet
+                    let metadata = capture
+                        .metadata
                         .ok_or_else(|| execution_error("native step omitted its capture"))?;
                     if capture.invalid
-                        || u64::try_from(packet.frame_index()).ok() != Some(expected)
-                        || self.preview.scene().time() != packet.time()
+                        || (state_required && capture.packet.is_none())
+                        || u64::try_from(metadata.frame_index()).ok() != Some(expected)
+                        || self.preview.scene().time() != metadata.time()
                     {
                         return Err(execution_error(
                             "native capture disagreed with its rational clock",
                         ));
                     }
                     self.frame = expected;
-                    return Ok(Some(packet));
+                    return Ok(Some(capture));
                 }
                 Err(error) => {
                     active.abort(self.preview.scene_mut());

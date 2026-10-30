@@ -175,3 +175,73 @@ fn pausing_on_the_last_animation_capture_does_not_finalize_early() {
         "native completion must resume the suspended updater"
     );
 }
+
+#[test]
+fn seeking_without_packets_matches_stateful_playback_and_preserves_held_captures() {
+    fn program(fps: u32) -> (NativeSceneProgram, Rc<Cell<u32>>) {
+        let (scene, root, calls) = source(fps);
+        let program = NativeSceneProgram::new(
+            scene,
+            vec![
+                NativeSegment::Play {
+                    animations: vec![Box::new(rotate(root, PI))],
+                    overrides: PlayOverrides {
+                        run_time: Some(0.5),
+                        ..PlayOverrides::default()
+                    },
+                },
+                NativeSegment::Wait {
+                    duration: Some(0.5),
+                },
+            ],
+            100,
+        )
+        .unwrap();
+        (program, calls)
+    }
+
+    for fps in [8, 30] {
+        let (mut captured, captured_calls) = program(fps);
+        let (mut seeking, seeking_calls) = program(fps);
+        let expected_first = captured.next_frame().unwrap().unwrap();
+        let held = seeking.next_frame().unwrap().unwrap();
+        let frozen = held.materialize_stage().snapshot().to_bytes().unwrap();
+        assert_eq!(held.metadata(), expected_first.metadata());
+        assert_eq!(
+            frozen,
+            expected_first
+                .materialize_stage()
+                .snapshot()
+                .to_bytes()
+                .unwrap(),
+        );
+        for target in [u64::from(fps / 2), u64::from(fps / 2 + 1), u64::from(fps)] {
+            while captured.frame_index() < target {
+                assert!(captured.next_frame().unwrap().is_some());
+            }
+            seeking.advance_to(target).unwrap();
+            assert_eq!(seeking.frame_index(), captured.frame_index());
+            assert_eq!(
+                seeking.at_segment_boundary(),
+                captured.at_segment_boundary()
+            );
+            assert_eq!(seeking_calls.get(), captured_calls.get());
+            assert_eq!(
+                seeking.state_bytes().unwrap(),
+                captured.state_bytes().unwrap()
+            );
+            assert_eq!(
+                held.materialize_stage().snapshot().to_bytes().unwrap(),
+                frozen,
+                "metadata-only stepping must not mutate a previously emitted packet",
+            );
+        }
+        assert!(captured.next_frame().unwrap().is_none());
+        assert!(seeking.next_frame().unwrap().is_none());
+        assert_eq!(seeking_calls.get(), captured_calls.get());
+        assert_eq!(
+            seeking.state_bytes().unwrap(),
+            captured.state_bytes().unwrap()
+        );
+    }
+}
