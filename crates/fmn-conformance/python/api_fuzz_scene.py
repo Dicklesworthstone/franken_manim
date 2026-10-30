@@ -152,7 +152,10 @@ def engine_header():
     """Which engine measured the batch: the portal names itself and its native
     extension's digest; the Reference is identified by its source commit, which
     the driver adds."""
-    native = getattr(getattr(manimlib, "manimlib", None), "__file__", None)
+    # The extension module is `manimlib.manimlib` in sys.modules; the package's
+    # own `manimlib` attribute is the package itself, whose __init__.py is the
+    # same in every wheel.
+    native = getattr(sys.modules.get("manimlib.manimlib"), "__file__", None)
     digest = None
     if native and getattr(manimlib, "__franken_manim__", False):
         with open(native, "rb") as image:
