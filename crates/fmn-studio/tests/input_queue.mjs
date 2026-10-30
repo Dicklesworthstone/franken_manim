@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
+import {createHash, webcrypto} from 'node:crypto';
 
 const source = readFileSync(new URL('../src/studio.js', import.meta.url), 'utf8');
 const start = source.indexOf('  async function run(');
@@ -485,4 +486,121 @@ test('hidden documents and unsynchronized previews never execute live clock requ
   assert.equal(f.state.liveRunning, false, 'returning to a tab does not authorize execution');
   f.control.matched = false; f.$('live-run').emit('click'); f.tick(3000);
   assert.equal(f.calls.length, 0);
+});
+
+
+// Preview tests execute the shipped multipart parser with a controlled browser
+// decoder. Minimal headers isolate admission; the native JPEG corpus and real
+// browser suite independently cover decoding.
+const previewStart = source.indexOf('  function previewDimensions(');
+const previewEnd = source.indexOf('  async function stream() {', previewStart);
+assert.ok(previewStart >= 0 && previewEnd > previewStart, 'production preview boundaries');
+const previewSource = source.slice(previewStart, previewEnd);
+
+function pngHeader(width = 2, height = 3) {
+  const bytes = Buffer.alloc(24);
+  bytes.set([137,80,78,71,13,10,26,10]);
+  bytes.writeUInt32BE(width, 16); bytes.writeUInt32BE(height, 20);
+  return bytes;
+}
+function jpegHeader(width = 64, height = 48, sof = 0xc0) {
+  return Buffer.from([0xff,0xd8,0xff,0xe0,0,6,0,0,0,0,
+    0xff,sof,0,11,8,height >> 8,height & 255,width >> 8,width & 255,
+    1,1,0x11,0,0xff,0xd9]);
+}
+function previewPart(bytes, {mime = 'image/jpeg', publication = 0, index = 0, hash, extra = ''} = {}) {
+  hash ||= createHash('sha256').update(bytes).digest('hex');
+  const header = '--fmn-frame\r\nContent-Type: ' + mime + '\r\nContent-Length: ' + bytes.length +
+    '\r\nX-FMN-Publication-Sequence: ' + publication + '\r\nX-FMN-Frame-Index: ' + index +
+    '\r\nX-FMN-SHA256: ' + hash + '\r\n' + extra + '\r\n';
+  return Buffer.concat([Buffer.from(header), bytes, Buffer.from('\r\n')]);
+}
+function previewFixture(wire, {decodedSize} = {}) {
+  let offset = 0, cancelled = 0, closed = 0, drawn = 0;
+  const types = [], elements = new Map();
+  const $ = id => {
+    if (!elements.has(id)) elements.set(id, {width:0,height:0,
+      getContext() { return {drawImage() { drawn++; }}; }});
+    return elements.get(id);
+  };
+  const state = {connected:false, shown:{index:-1,hash:'previous'}};
+  const reader = {
+    async read() {
+      if (offset === wire.length) return {done:true};
+      const end = Math.min(wire.length, offset + 7);
+      const value = new Uint8Array(wire.subarray(offset, end)); offset = end;
+      return {done:false,value};
+    },
+    async cancel() { cancelled++; }
+  };
+  const context = vm.createContext({
+    $, state, headers:{}, MAX_PREVIEW_BYTES:64 * 1024 * 1024,
+    Uint8Array, DataView, TextDecoder, AbortController, Blob, crypto:webcrypto,
+    setTimeout() { return 1; }, clearTimeout() {}, displayState() {},
+    async fetch() {
+      return {ok:true,headers:{get() { return 'multipart/x-mixed-replace; boundary=fmn-frame'; }},
+        body:{getReader() { return reader; }}};
+    },
+    async createImageBitmap(blob) {
+      types.push(blob.type);
+      const [width,height] = decodedSize || (blob.type === 'image/png' ? [2,3] : [64,48]);
+      return {width,height,close() { closed++; }};
+    }
+  });
+  vm.runInContext(previewSource + '\nglobalThis.previewApi = {previewDimensions, streamOnce};', context);
+  return {state,types,$,api:context.previewApi,
+    counts() { return {cancelled,closed,drawn}; }};
+}
+
+test('multipart preview admits JPEG and PNG with matching MIME, digest and dimensions', async () => {
+  const jpeg = jpegHeader(), png = pngHeader();
+  const wire = Buffer.concat([previewPart(jpeg), previewPart(png, {
+    mime:'image/png', publication:1, index:4
+  }), Buffer.from('--fmn-frame--\r\n')]);
+  const f = previewFixture(wire);
+  await f.api.streamOnce();
+  assert.deepEqual(f.types, ['image/jpeg','image/png']);
+  assert.equal(f.state.shown.index, 4);
+  assert.equal(f.state.shown.publication, 1);
+  assert.equal(f.state.shown.hash, createHash('sha256').update(png).digest('hex'));
+  assert.equal(f.$('preview').width, 2);
+  assert.equal(f.$('preview').height, 3);
+  assert.deepEqual(f.counts(), {cancelled:1,closed:2,drawn:2});
+  assert.deepEqual(Array.from(f.api.previewDimensions(jpegHeader(64,48,0xc2), 'image/jpeg')), [64,48]);
+  const padded = Buffer.concat([Buffer.from([0xff,0xd8]), Buffer.alloc(65536,0xff), jpegHeader().subarray(11)]);
+  assert.throws(() => f.api.previewDimensions(padded, 'image/jpeg'), /bounded frame dimensions/);
+});
+
+test('preview refuses wrong MIME, oversized dimensions, hashes and duplicate headers before decode', async () => {
+  for (const [wire, reason] of [
+    [previewPart(jpegHeader(), {mime:'image/png'}), /not PNG/],
+    [previewPart(jpegHeader(65535,65535)), /dimensions exceed/],
+    [previewPart(jpegHeader(), {hash:'0'.repeat(64)}), /digest mismatch/],
+    [previewPart(jpegHeader(), {extra:'Content-Length: 25\r\n'}), /Duplicate/],
+    [previewPart(Buffer.from([0xff,0xd8,0xff,0xd9])), /metadata or payload budget/]
+  ]) {
+    const f = previewFixture(wire);
+    await assert.rejects(f.api.streamOnce(), reason);
+    assert.deepEqual(f.types, []);
+    assert.equal(f.state.shown.hash, 'previous');
+    assert.equal(f.counts().cancelled, 1);
+  }
+});
+
+test('a decoder dimension change closes the bitmap without replacing the displayed frame', async () => {
+  const f = previewFixture(previewPart(jpegHeader()), {decodedSize:[48,64]});
+  await assert.rejects(f.api.streamOnce(), /Decoded preview dimensions changed/);
+  assert.equal(f.state.shown.hash, 'previous');
+  assert.deepEqual(f.counts(), {cancelled:1,closed:1,drawn:0});
+});
+
+test('a truncated later MJPEG frame preserves the latest complete publication', async () => {
+  const first = jpegHeader();
+  const later = previewPart(jpegHeader(), {publication:1,index:9});
+  const f = previewFixture(Buffer.concat([previewPart(first), later.subarray(0,later.length - 8)]));
+  await assert.rejects(f.api.streamOnce(), /Incomplete preview frame/);
+  assert.equal(f.state.shown.publication, 0);
+  assert.equal(f.state.shown.index, 0);
+  assert.equal(f.state.shown.hash, createHash('sha256').update(first).digest('hex'));
+  assert.deepEqual(f.counts(), {cancelled:1,closed:1,drawn:1});
 });

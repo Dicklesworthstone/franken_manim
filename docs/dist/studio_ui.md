@@ -67,7 +67,7 @@ The keyboard-accessible family tree opens live records, uniforms, placement,
 bounds, and UTF-8 source spans. Object IDs belong to one capture, so a frame
 change clears the inspector's selection. Debug layers draw tiles, control points,
 bounds, winding, and depth over the preview using the renderer's coordinate map.
-The browser verifies multipart framing, publication order, PNG hashes and
+The browser verifies multipart framing, publication order, PNG/JPEG hashes and
 dimensions before marking the inspector synchronized. Large trees and
 overlays have explicit display limits.
 
@@ -77,6 +77,53 @@ one over the existing native `InteractiveScene` and replay engine. Immutable
 FMTL and other captured preview artifacts still report no live adapter and
 return a typed refusal without disabling timeline controls. The capability is
 removed from browser history after asset startup and redacted from errors.
+
+## Optional MJPEG browser preview
+
+PNG remains the default, including for the terminal preview and Python surfaces.
+For native or recorded browser Studio, request JPEG delivery explicitly:
+
+```bash
+fmn studio --preview-codec mjpeg --resolution 640x360 --threads 1 @builtin circle_shift.v1
+```
+
+The supervisor resolves the configured `ffmpeg_bin` through the existing
+fingerprinted ffmpeg capability. A missing executable produces an explicitly
+reported native PNG fallback. Robot readiness names both
+`requested_preview_codec` and the effective `preview_codec`, with a
+`preview_fallback` reason. A malformed executable policy, an integrity
+refusal, or an encoding failure remains an error naming
+`--preview-codec png`; these errors do not silently change the stream codec.
+
+Each newly published capture runs one bounded ffmpeg process with raw RGBA8
+input, a single JPEG frame and the `mpjpeg` muxer. The existing exact executable
+binding, cleared environment, two-second encode deadline, 8 KiB log ceiling,
+private output/scratch budget and process-tree cleanup govern that invocation.
+The native decoder verifies the complete one-part envelope and JPEG geometry
+before publication. The browser independently checks the MIME type, byte
+length, publication order, SHA-256, pixel budget and decoded dimensions.
+Transparency is refused because JPEG cannot preserve alpha; use PNG for a
+transparent preview. JPEG dimensions are limited to 65,535 per side and the
+browser's 33,554,432-pixel ceiling, also subject to the worker/frame byte budgets.
+
+The frame hub retains the canonical PNG for terminal clients and one JPEG
+shared by all browser subscribers. Each encoding has the existing per-frame
+byte ceiling, so retained encoded-frame memory can be up to twice the PNG-only
+ceiling. Scrub/restart responses identify the exact browser payload hash.
+An encoder error leaves the most recent valid publication intact and reaches
+the requesting browser as an error. A later corrupt or truncated stream part
+does not replace the last complete frame displayed.
+
+Robot readiness reports first-capture `preview_png_bytes` and
+`preview_bytes`, `preview_process_per_capture`, and the successful first
+encode's tool identity, argv and process policy in `preview_encoder`.
+JPEG multipart parts also carry `X-FMN-PNG-Bytes` and `X-FMN-JPEG-Bytes`.
+These are observed sizes for that capture. This implementation pays process
+startup and private-tool binding costs per capture; it makes no lower-latency,
+throughput, or compression-ratio guarantee. The process capability currently
+exposes stdout at completion, so a persistent streaming encoder is separate work.
+
+---
 
 ## Edit the shipped native canvas
 

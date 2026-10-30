@@ -63,6 +63,8 @@
 #[allow(dead_code)]
 #[path = "support/semantic_routes.rs"]
 mod semantic_routes;
+#[path = "support/studio_mjpeg.rs"]
+mod studio_mjpeg;
 
 // fm-longform-native-e2e-hoeffding-l59d: the Hoeffding's D explainer
 // (crates/fmn/examples/hoeffding_d), compiled here from its own sources so
@@ -11807,6 +11809,33 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.studio_mjpeg_preview.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(studio_mjpeg::run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "preview.multipart".into(),
+                "preview.jpg".into(),
+                "preview.png".into(),
+                "preview_fallback.json".into(),
+            ]),
+            counter_eq("studio_mjpeg_frames", 1),
+            counter_eq("studio_mjpeg_receipts", 1),
+            counter_eq("studio_mjpeg_fallback", 1),
+            counter_eq("studio_mjpeg_failure_preserved", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.studio.mjpeg",
+            vec![
+                FieldPred::str_eq("codec", "mjpeg"),
+                FieldPred::str_eq("fallback", "png"),
+                FieldPred::str_eq("failure_preserved", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.studio_terminal_controls.v1",
         ScenarioClass::LifecycleDrill,
         Surface::StudioSubprocess,
@@ -14382,6 +14411,16 @@ fn studio_camera_preview_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.studio_camera_preview.v1")
         .expect("the live Studio camera scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn studio_mjpeg_preview_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.studio_mjpeg_preview.v1")
+        .expect("MJPEG preview scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

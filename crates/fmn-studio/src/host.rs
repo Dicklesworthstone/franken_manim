@@ -1,4 +1,4 @@
-//! Secure loopback Studio host and multipart-PNG preview hub (§13.3).
+//! Secure loopback Studio host and bounded PNG/JPEG preview hub (§13.3).
 //!
 //! This is intentionally a small HTTP/1.1 server rather than a general web
 //! framework. It serves only embedded assets and exact routes, validates both
@@ -20,7 +20,9 @@ use std::sync::{
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use fmn_codec::{CompressionLevel, PngError, PngLimits, decode_png, encode_rgba8};
+use fmn_codec::{
+    CompressionLevel, JpegLimits, PngError, PngLimits, decode_jpeg, decode_png, encode_rgba8,
+};
 use fmn_hash::{Digest, sha256};
 use fmn_platform::clock::Clock;
 use fmn_scene::{AssetRead, EventPayload, Key, Modifiers, MouseButton};
@@ -251,8 +253,59 @@ pub struct PngFrame {
     pub height: u32,
     /// Canonical PNG bytes.
     pub png: Vec<u8>,
-    /// Digest of `png`.
+    /// Digest of the canonical PNG.
     pub digest: Digest,
+    /// Optional validated browser JPEG. Terminal consumers keep using PNG.
+    pub jpeg: Option<JpegPreview>,
+}
+
+/// An optional browser encoding retained once for all stream subscribers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JpegPreview {
+    /// Complete JPEG bytes.
+    pub bytes: Vec<u8>,
+    /// Digest of the exact JPEG bytes sent to the browser.
+    pub digest: Digest,
+}
+
+impl PngFrame {
+    /// Browser payload; canonical PNG remains available independently.
+    #[must_use]
+    pub fn stream_bytes(&self) -> &[u8] {
+        self.jpeg
+            .as_ref()
+            .map_or(self.png.as_slice(), |jpeg| jpeg.bytes.as_slice())
+    }
+
+    /// MIME type matching the browser payload.
+    #[must_use]
+    pub fn stream_content_type(&self) -> &'static str {
+        if self.jpeg.is_some() {
+            "image/jpeg"
+        } else {
+            "image/png"
+        }
+    }
+
+    /// Identity used by both multipart delivery and frame-operation replies.
+    #[must_use]
+    pub fn stream_digest(&self) -> &Digest {
+        self.jpeg.as_ref().map_or(&self.digest, |jpeg| &jpeg.digest)
+    }
+}
+
+/// Host-supplied JPEG capability. Studio itself has no process dependency.
+/// Implementations receive validated, tightly packed opaque RGBA8 and must
+/// bound every external operation. The hub independently verifies the result.
+pub trait JpegPreviewEncoder: fmt::Debug + Send + Sync {
+    /// Encode one capture under the supplied JPEG byte ceiling.
+    fn encode(
+        &self,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, String>;
 }
 
 #[derive(Debug)]
@@ -274,6 +327,7 @@ pub struct FrameHub {
     inner: Arc<FrameHubInner>,
     max_history: usize,
     max_png_bytes: usize,
+    jpeg_encoder: Option<Arc<dyn JpegPreviewEncoder>>,
 }
 
 impl FrameHub {
@@ -300,17 +354,81 @@ impl FrameHub {
             }),
             max_history,
             max_png_bytes,
+            jpeg_encoder: None,
         })
     }
 
-    /// Validate and publish one inline worker frame.
+    /// Select JPEG browser delivery before publishing or sharing this hub.
+    /// Each retained frame may own a PNG and a JPEG, each bounded by the
+    /// existing per-frame byte ceiling. PNG delivery is the default.
+    pub fn with_jpeg_encoder(
+        mut self,
+        encoder: Arc<dyn JpegPreviewEncoder>,
+    ) -> Result<Self, HostError> {
+        if Arc::strong_count(&self.inner) != 1 {
+            return Err(HostError::Configuration(
+                "preview encoding must be selected before sharing the hub",
+            ));
+        }
+        {
+            let state = lock(&self.inner.state);
+            if state.closed || !state.frames.is_empty() {
+                return Err(HostError::Configuration(
+                    "preview encoding must be selected before publication",
+                ));
+            }
+        }
+        self.jpeg_encoder = Some(encoder);
+        Ok(self)
+    }
+
+    fn encode_jpeg(
+        &self,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Result<Option<JpegPreview>, HostError> {
+        let Some(encoder) = &self.jpeg_encoder else {
+            return Ok(None);
+        };
+        if rgba.chunks_exact(4).any(|pixel| pixel[3] != 255) {
+            return Err(HostError::PreviewEncode(
+                "JPEG cannot preserve transparency; use --preview-codec png".into(),
+            ));
+        }
+        let bytes = encoder
+            .encode(width, height, rgba, self.max_png_bytes)
+            .map_err(HostError::PreviewEncode)?;
+        if bytes.len() > self.max_png_bytes {
+            return Err(HostError::Frame("preview JPEG exceeds the host budget"));
+        }
+        let decoded = decode_jpeg(
+            &bytes,
+            &JpegLimits {
+                max_pixels: u64::from(width) * u64::from(height),
+            },
+        )
+        .map_err(|error| HostError::PreviewEncode(error.to_string()))?;
+        if decoded.width != width || decoded.height != height || decoded.orientation != 1 {
+            return Err(HostError::Frame(
+                "preview JPEG dimensions or orientation do not match frame metadata",
+            ));
+        }
+        Ok(Some(JpegPreview {
+            digest: sha256(&bytes),
+            bytes,
+        }))
+    }
+
+    /// Validate and publish one inline worker frame. An encoding failure
+    /// preserves the latest valid frame and does not consume a sequence number.
     pub fn publish(
         &self,
         frame: &FrameStream,
         limits: ProtocolLimits,
     ) -> Result<Arc<PngFrame>, HostError> {
         frame.validate(limits)?;
-        let png = match (&frame.encoding, &frame.payload) {
+        let (png, jpeg) = match (&frame.encoding, &frame.payload) {
             (FrameEncoding::Png, FramePayload::Pipe { bytes, .. }) => {
                 if bytes.len() > self.max_png_bytes {
                     return Err(HostError::Frame("preview PNG exceeds the host budget"));
@@ -331,8 +449,9 @@ impl FrameHub {
                         "preview PNG dimensions do not match frame metadata",
                     ));
                 }
+                let jpeg = self.encode_jpeg(frame.width, frame.height, &decoded.rgba)?;
                 drop(decoded);
-                bytes.clone()
+                (bytes.clone(), jpeg)
             }
             (FrameEncoding::Rgba8, FramePayload::Pipe { bytes, .. }) => {
                 let tight_stride = usize::try_from(frame.width)
@@ -344,12 +463,14 @@ impl FrameHub {
                 let height = usize::try_from(frame.height)
                     .map_err(|_| HostError::Frame("RGBA height overflows usize"))?;
                 let rgba = compact_rgba_rows(bytes, stride, tight_stride, height)?;
-                encode_rgba8(
+                let jpeg = self.encode_jpeg(frame.width, frame.height, rgba.as_ref())?;
+                let png = encode_rgba8(
                     frame.width,
                     frame.height,
                     rgba.as_ref(),
                     CompressionLevel::Fast,
-                )
+                );
+                (png, jpeg)
             }
             (_, FramePayload::SharedMemory { .. }) => {
                 return Err(HostError::Frame(
@@ -376,6 +497,7 @@ impl FrameHub {
             height: frame.height,
             digest: sha256(&png),
             png,
+            jpeg,
         });
         if state.frames.len() == self.max_history {
             state.frames.pop_front();
@@ -418,27 +540,37 @@ impl FrameHub {
         self.inner.changed.notify_all();
     }
 
-    /// Write one multipart body part without copying the retained PNG payload.
+    /// Write one multipart part without copying the retained browser payload.
     pub fn write_multipart_part(writer: &mut impl Write, frame: &PngFrame) -> std::io::Result<()> {
+        let bytes = frame.stream_bytes();
         let mut header = [0u8; 512];
         let header_len = {
             let mut cursor = std::io::Cursor::new(header.as_mut_slice());
             write!(
                 cursor,
-                "--{MULTIPART_BOUNDARY}\r\nContent-Type: image/png\r\nContent-Length: {}\r\nX-FMN-Publication-Sequence: {}\r\nX-FMN-Frame-Index: {}\r\nX-FMN-SHA256: ",
-                frame.png.len(),
+                "--{MULTIPART_BOUNDARY}\r\nContent-Type: {}\r\nContent-Length: {}\r\nX-FMN-Publication-Sequence: {}\r\nX-FMN-Frame-Index: {}\r\nX-FMN-SHA256: ",
+                frame.stream_content_type(),
+                bytes.len(),
                 frame.publication_sequence,
                 frame.frame_index,
             )?;
-            for &byte in frame.digest.as_bytes() {
+            for &byte in frame.stream_digest().as_bytes() {
                 cursor.write_all(&[hex_digit_byte(byte >> 4), hex_digit_byte(byte & 0x0f)])?;
+            }
+            if frame.jpeg.is_some() {
+                write!(
+                    cursor,
+                    "\r\nX-FMN-PNG-Bytes: {}\r\nX-FMN-JPEG-Bytes: {}",
+                    frame.png.len(),
+                    bytes.len()
+                )?;
             }
             cursor.write_all(b"\r\n\r\n")?;
             usize::try_from(cursor.position())
                 .map_err(|_| std::io::Error::other("multipart header length overflows usize"))?
         };
         writer.write_all(&header[..header_len])?;
-        writer.write_all(&frame.png)?;
+        writer.write_all(bytes)?;
         writer.write_all(b"\r\n")
     }
 
@@ -1232,7 +1364,7 @@ impl HostHandler {
             &restarted.recovery,
             restarted.reexecuted_entries,
             published.frame_index,
-            &published.digest,
+            published.stream_digest(),
         )?;
         write_json_response(stream, body.as_bytes())
     }
@@ -1314,7 +1446,7 @@ impl HostHandler {
             }
             WorkerResponse::Frame(frame) if expected_data.is_none() => {
                 let published = self.frames.publish(&frame, self.session.protocol_limits)?;
-                let body = frame_response_body(published.frame_index, &published.digest)?;
+                let body = frame_response_body(published.frame_index, published.stream_digest())?;
                 write_json_response(stream, body.as_bytes())
             }
             WorkerResponse::Ack {
@@ -2356,6 +2488,8 @@ pub enum HostError {
     Frame(&'static str),
     /// The owned codec rejected an inline preview PNG.
     FramePng(PngError),
+    /// The explicitly selected preview encoder failed; no frame was published.
+    PreviewEncode(String),
     /// Worker answered a route with the wrong response class.
     UnexpectedWorkerResponse,
     /// A bounded client handler panicked before it could be joined.
@@ -2443,6 +2577,7 @@ impl HostError {
             | Self::WorkerRejected(_)
             | Self::Frame(_)
             | Self::FramePng(_)
+            | Self::PreviewEncode(_)
             | Self::UnexpectedWorkerResponse
             | Self::ClientThreadPanicked => Some((502, "Bad Gateway")),
             Self::Configuration(_)
@@ -2477,6 +2612,10 @@ impl fmt::Display for HostError {
             Self::WorkerRejected(message) => write!(f, "scene worker refused preview: {message}"),
             Self::Frame(message) => write!(f, "Studio preview frame: {message}"),
             Self::FramePng(error) => write!(f, "Studio preview PNG: {error}"),
+            Self::PreviewEncode(error) => write!(
+                f,
+                "Studio MJPEG preview failed: {error}; use --preview-codec png"
+            ),
             Self::UnexpectedWorkerResponse => {
                 f.write_str("worker returned an unexpected Studio response")
             }
@@ -3739,6 +3878,173 @@ mod tests {
             ..StudioHostConfig::default()
         };
         assert!(bind_test_host(tighter, 1, 8).is_ok());
+    }
+
+    #[derive(Debug)]
+    struct TestJpegEncoder {
+        calls: std::sync::atomic::AtomicUsize,
+        fail: AtomicBool,
+        bytes: Mutex<Vec<u8>>,
+    }
+
+    impl TestJpegEncoder {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                fail: AtomicBool::new(false),
+                bytes: Mutex::new(
+                    include_bytes!("../../fmn-codec/tests/fixtures/jpeg/baseline_444.jpg").to_vec(),
+                ),
+            }
+        }
+    }
+
+    impl JpegPreviewEncoder for TestJpegEncoder {
+        fn encode(
+            &self,
+            width: u32,
+            height: u32,
+            rgba: &[u8],
+            _max_bytes: usize,
+        ) -> Result<Vec<u8>, String> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            assert_eq!(rgba.len(), width as usize * height as usize * 4);
+            if self.fail.load(Ordering::Relaxed) {
+                Err("injected encoder failure".into())
+            } else {
+                Ok(lock(&self.bytes).clone())
+            }
+        }
+    }
+
+    fn jpeg_test_frame(encoding: FrameEncoding, width: u32, height: u32) -> FrameStream {
+        let rgba = vec![255; width as usize * height as usize * 4];
+        let bytes = match encoding {
+            FrameEncoding::Png => encode_rgba8(width, height, &rgba, CompressionLevel::Fast),
+            FrameEncoding::Rgba8 => rgba,
+        };
+        FrameStream {
+            scene: "Preview".into(),
+            frame_index: 4,
+            width,
+            height,
+            stride: if encoding == FrameEncoding::Rgba8 {
+                width * 4
+            } else {
+                0
+            },
+            encoding,
+            payload: FramePayload::Pipe {
+                digest: sha256(&bytes),
+                bytes,
+            },
+            render_backends: vec![test_render_backend()],
+        }
+    }
+
+    #[test]
+    fn jpeg_preview_is_encoded_once_shared_and_identified_by_its_wire_digest() {
+        let encoder = Arc::new(TestJpegEncoder::new());
+        let hub = FrameHub::new(2, 65_536)
+            .unwrap()
+            .with_jpeg_encoder(encoder.clone())
+            .unwrap();
+        for (sequence, encoding) in [FrameEncoding::Png, FrameEncoding::Rgba8]
+            .into_iter()
+            .enumerate()
+        {
+            let input = jpeg_test_frame(encoding, 64, 48);
+            let frame = hub.publish(&input, ProtocolLimits::default()).unwrap();
+            let png = FrameHub::new(1, 65_536)
+                .unwrap()
+                .publish(&input, ProtocolLimits::default())
+                .unwrap();
+            assert_eq!(frame.png, png.png);
+            assert_eq!(frame.digest, png.digest);
+            assert_eq!(frame.publication_sequence, sequence as u64);
+            assert_eq!(frame.stream_content_type(), "image/jpeg");
+            assert_ne!(frame.stream_digest(), &frame.digest);
+            assert_eq!(*frame.stream_digest(), sha256(frame.stream_bytes()));
+            assert!(Arc::ptr_eq(&frame, &hub.latest().unwrap()));
+            let mut first = Vec::new();
+            let mut second = Vec::new();
+            FrameHub::write_multipart_part(&mut first, &frame).unwrap();
+            FrameHub::write_multipart_part(&mut second, &frame).unwrap();
+            assert_eq!(first, second);
+            let split = first
+                .windows(4)
+                .position(|bytes| bytes == b"\r\n\r\n")
+                .unwrap()
+                + 4;
+            let headers = std::str::from_utf8(&first[..split]).unwrap();
+            assert!(headers.contains("Content-Type: image/jpeg\r\n"));
+            assert!(headers.contains(&format!(
+                "Content-Length: {}\r\n",
+                frame.stream_bytes().len()
+            )));
+            assert!(headers.contains(&format!("X-FMN-PNG-Bytes: {}\r\n", frame.png.len())));
+            assert!(headers.contains(&format!(
+                "X-FMN-JPEG-Bytes: {}\r\n",
+                frame.stream_bytes().len()
+            )));
+            let hash: String = frame
+                .stream_digest()
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            assert!(headers.contains(&format!("X-FMN-SHA256: {hash}\r\n")));
+            assert!(
+                frame_response_body(frame.frame_index, frame.stream_digest())
+                    .unwrap()
+                    .contains(&hash)
+            );
+            assert_eq!(&first[split..first.len() - 2], frame.stream_bytes());
+            assert_eq!(encoder.calls.load(Ordering::Relaxed), sequence + 1);
+        }
+    }
+
+    #[test]
+    fn jpeg_failures_preserve_the_last_valid_frame_and_publication_sequence() {
+        let encoder = Arc::new(TestJpegEncoder::new());
+        let hub = FrameHub::new(2, 65_536)
+            .unwrap()
+            .with_jpeg_encoder(encoder.clone())
+            .unwrap();
+        let input = jpeg_test_frame(FrameEncoding::Rgba8, 64, 48);
+        let first = hub.publish(&input, ProtocolLimits::default()).unwrap();
+        encoder.fail.store(true, Ordering::Relaxed);
+        let error = hub.publish(&input, ProtocolLimits::default()).unwrap_err();
+        assert!(error.to_string().contains("--preview-codec png"));
+        assert!(Arc::ptr_eq(&first, &hub.latest().unwrap()));
+        encoder.fail.store(false, Ordering::Relaxed);
+        assert!(
+            hub.publish(
+                &jpeg_test_frame(FrameEncoding::Png, 48, 64),
+                ProtocolLimits::default()
+            )
+            .is_err()
+        );
+        assert!(Arc::ptr_eq(&first, &hub.latest().unwrap()));
+        let mut transparent = input.clone();
+        if let FramePayload::Pipe { bytes, digest } = &mut transparent.payload {
+            bytes[3] = 0;
+            *digest = sha256(bytes);
+        }
+        let calls = encoder.calls.load(Ordering::Relaxed);
+        assert!(
+            hub.publish(&transparent, ProtocolLimits::default())
+                .is_err()
+        );
+        assert_eq!(encoder.calls.load(Ordering::Relaxed), calls);
+        let valid = lock(&encoder.bytes).clone();
+        *lock(&encoder.bytes) = vec![0; 65_537];
+        assert!(hub.publish(&input, ProtocolLimits::default()).is_err());
+        assert!(Arc::ptr_eq(&first, &hub.latest().unwrap()));
+        *lock(&encoder.bytes) = valid;
+        let next = hub.publish(&input, ProtocolLimits::default()).unwrap();
+        assert_eq!(next.publication_sequence, first.publication_sequence + 1);
+        assert!(hub.clone().with_jpeg_encoder(encoder).is_err());
     }
 
     fn authorized_get(token: &CapabilityToken) -> HttpRequest {

@@ -10,7 +10,7 @@
   css.href = "/studio.css?cap=" + encodeURIComponent(capability);
   document.head.append(css);
   history.replaceState(null, "", "/");
-  const MAX_JSON = 8 * 1024 * 1024, MAX_PNG = 64 * 1024 * 1024;
+  const MAX_JSON = 8 * 1024 * 1024, MAX_PREVIEW_BYTES = 64 * 1024 * 1024;
   const state = {snapshot: null, overlay: null, selected: null, collapsed: new Set(),
     shown: null, expected: null, busy: false, busyKind: null, pending: null, refreshNeeded: false, playing: false, connected: false,
     generation: null, inputs: [], restartPending: false, savePending: false, canSave: false, liveRunning: false,
@@ -616,6 +616,32 @@
   $("input-events").addEventListener("change", () => { if (!$("input-events").checked) releaseInputs(); });
   // FrameHub parts carry a length, frame index and digest. Decode only a bounded
   // complete part; image arrival is independent from the inspector HTTP request.
+  function previewDimensions(bytes, mime) {
+    const data = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    if (mime === "image/png") {
+      if (bytes.length < 24 || data.getUint32(0) !== 0x89504e47 || data.getUint32(4) !== 0x0d0a1a0a) throw new Error("Preview payload is not PNG.");
+      return [data.getUint32(16), data.getUint32(20)];
+    }
+    if (mime !== "image/jpeg" || bytes.length < 4 || data.getUint16(0) !== 0xffd8 ||
+      data.getUint16(bytes.length - 2) !== 0xffd9) throw new Error("Preview payload is not JPEG.");
+    let at = 2;
+    while (at + 3 < bytes.length && at < 65536) {
+      if (bytes[at++] !== 0xff) throw new Error("Invalid JPEG preview marker.");
+      while (at < 65536 && bytes[at] === 0xff) at++;
+      if (at >= 65536) break;
+      const marker = bytes[at++];
+      if (marker === 0xda || marker === 0xd9 || marker === 0xd8 || marker === 0 ||
+        marker === 1 || (marker >= 0xd0 && marker <= 0xd7) || at + 2 > bytes.length) break;
+      const length = data.getUint16(at);
+      if (length < 2 || at + length > bytes.length) throw new Error("Invalid JPEG preview segment.");
+      if (marker === 0xc0 || marker === 0xc2) {
+        if (length < 8 || bytes[at + 2] !== 8) throw new Error("Unsupported JPEG preview frame.");
+        return [data.getUint16(at + 5), data.getUint16(at + 3)];
+      }
+      at += length;
+    }
+    throw new Error("JPEG preview has no bounded frame dimensions.");
+  }
   async function streamOnce() {
     const controller = new AbortController();
     let watchdog = setTimeout(() => controller.abort(), 45000);
@@ -657,21 +683,22 @@
         }
         const length = Number(fields.get("content-length")), index = Number(fields.get("x-fmn-frame-index")), hash = fields.get("x-fmn-sha256");
         const publication = Number(fields.get("x-fmn-publication-sequence"));
-        if (!ended || fields.get("content-type") !== "image/png" || !Number.isSafeInteger(publication) || publication <= lastPublication ||
-          !Number.isSafeInteger(length) || length < 24 || length > MAX_PNG || !Number.isSafeInteger(index) || index < 0 || !/^[a-f0-9]{64}$/.test(hash)) throw new Error("Invalid preview frame metadata or payload budget.");
+        const mime = fields.get("content-type");
+        if (!ended || !["image/png", "image/jpeg"].includes(mime) || !Number.isSafeInteger(publication) || publication <= lastPublication ||
+          !Number.isSafeInteger(length) || length < 24 || length > MAX_PREVIEW_BYTES || !Number.isSafeInteger(index) || index < 0 || !/^[a-f0-9]{64}$/.test(hash)) throw new Error("Invalid preview frame metadata or payload budget.");
         const bytes = new Uint8Array(length); let at = 0;
         while (at < length) {
           if (offset === chunk.length) { const next = await reader.read(); if (next.done) throw new Error("Incomplete preview frame."); chunk = next.value; offset = 0; }
           const n = Math.min(length-at,chunk.length-offset); bytes.set(chunk.subarray(offset,offset+n),at); offset += n; at += n;
         }
-        const png = new DataView(bytes.buffer), width = png.getUint32(16), height = png.getUint32(20);
-        if (png.getUint32(0) !== 0x89504e47 || png.getUint32(4) !== 0x0d0a1a0a) throw new Error("Preview payload is not PNG.");
+        const [width, height] = previewDimensions(bytes, mime);
         if (width < 1 || height < 1 || width * height > 33554432) throw new Error("Preview dimensions exceed the browser budget.");
         const digest = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map(n => n.toString(16).padStart(2,"0")).join("");
-        // ubs:ignore — public PNG content hashes do not authenticate a bearer token.
+        // ubs:ignore — public preview content hashes do not authenticate a bearer token.
         if (digest !== hash) throw new Error("Preview frame digest mismatch.");
-        const bitmap = await createImageBitmap(new Blob([bytes], {type:"image/png"}));
+        const bitmap = await createImageBitmap(new Blob([bytes], {type:mime}));
         try {
+          if (bitmap.width !== width || bitmap.height !== height) throw new Error("Decoded preview dimensions changed.");
           for (const id of ["preview", "overlay"]) { $(id).width = width; $(id).height = height; }
           $("preview").getContext("2d").drawImage(bitmap,0,0);
         } finally { bitmap.close(); }

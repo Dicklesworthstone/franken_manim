@@ -112,6 +112,97 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
         return Ok(0);
     };
     match mode.as_str() {
+        "mjpeg-preview"
+        | "mjpeg-preview-corrupt"
+        | "mjpeg-preview-truncated"
+        | "mjpeg-preview-swap"
+        | "mjpeg-preview-extra" => {
+            for (flag, value) in [
+                ("-protocol_whitelist", "file"),
+                ("-f", "rawvideo"),
+                ("-pixel_format", "rgba"),
+                ("-framerate", "1"),
+                ("-map", "0:v:0"),
+                ("-frames:v", "1"),
+                ("-c:v", "mjpeg"),
+                ("-q:v", "3"),
+                ("-pix_fmt", "yuvj444p"),
+                ("-f", "mpjpeg"),
+                ("-boundary_tag", "fmn-preview"),
+            ] {
+                if !argv
+                    .windows(2)
+                    .any(|pair| pair[0] == flag && pair[1] == value)
+                {
+                    return Err(format!("MJPEG preview omitted {flag} {value}").into());
+                }
+            }
+            let value = |flag: &str| -> Result<&OsString, Box<dyn std::error::Error>> {
+                let at = argv
+                    .iter()
+                    .position(|arg| arg == flag)
+                    .ok_or("missing preview argument")?;
+                argv.get(at + 1)
+                    .ok_or_else(|| "missing preview value".into())
+            };
+            let source = Path::new(value("-i")?);
+            if source != private_dir.join("preview.rgba") {
+                return Err("MJPEG preview reopened an authored input path".into());
+            }
+            let size = value("-video_size")?
+                .to_str()
+                .ok_or("non-UTF8 preview dimensions")?;
+            let (width, height) = size.split_once('x').ok_or("invalid preview dimensions")?;
+            let width: usize = width.parse()?;
+            let height: usize = height.parse()?;
+            let expected = width
+                .checked_mul(height)
+                .and_then(|pixels| pixels.checked_mul(4))
+                .filter(|&bytes| bytes > 0 && bytes <= 64 * 48 * 4)
+                .ok_or("preview fixture pixel budget")?;
+            let source_bytes = std::fs::read(source)?;
+            if source_bytes.len() != expected
+                || source_bytes.chunks_exact(4).any(|pixel| pixel[3] != 255)
+            {
+                return Err("MJPEG preview input is not the opaque RGBA snapshot".into());
+            }
+            if value("-fs")?
+                .to_str()
+                .ok_or("non-UTF8 preview budget")?
+                .parse::<u64>()?
+                == 0
+            {
+                return Err("zero MJPEG artifact ceiling".into());
+            }
+            if mode == "mjpeg-preview-swap" {
+                let mut changed = source_bytes;
+                changed[0] ^= 1;
+                std::fs::write(source, changed)?;
+            }
+            let jpeg: &[u8] = if mode == "mjpeg-preview-corrupt" {
+                b"not JPEG"
+            } else {
+                include_bytes!("../../../fmn-codec/tests/fixtures/jpeg/baseline_444.jpg")
+            };
+            let mut multipart = format!(
+                "--fmn-preview\r\nContent-type: image/jpeg\r\nContent-length: {}\r\n\r\n",
+                jpeg.len()
+            )
+            .into_bytes();
+            multipart.extend_from_slice(jpeg);
+            multipart.extend_from_slice(b"\r\n--fmn-preview\r\n");
+            if mode == "mjpeg-preview-truncated" {
+                let _ = multipart.pop();
+            } else if mode == "mjpeg-preview-extra" {
+                multipart.extend_from_within(..);
+            }
+            let artifact = artifact_path(&argv)?;
+            if artifact != private_dir.join("preview.mjpeg") {
+                return Err("MJPEG preview output escaped its private job".into());
+            }
+            std::fs::write(artifact, multipart)?;
+            Ok(0)
+        }
         "image-decode" | "image-decode-swap" | "image-decode-corrupt" => {
             let source_index = argv
                 .iter()

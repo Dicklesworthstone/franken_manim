@@ -54,6 +54,7 @@
 mod audio;
 mod encoders;
 mod image;
+pub mod mjpeg;
 mod watch;
 
 pub use encoders::{EncoderPixelFormats, EncoderProbe};

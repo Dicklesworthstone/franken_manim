@@ -351,3 +351,144 @@ mod boundary {
         ));
     }
 }
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "ffmpeg-test-fixture"))]
+mod mjpeg_preview {
+    use fmn_output::ffmpeg::mjpeg::MjpegPreviewError;
+    use fmn_output::{Boundary, BoundaryError, FfmpegTool, JobLimits};
+    use fmn_platform::process::{FfmpegLocator, StdFfmpegLocator, StdProcessRunner};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    const JPEG: &[u8] = include_bytes!("../../fmn-codec/tests/fixtures/jpeg/baseline_444.jpg");
+
+    fn boundary(mode: &str, max_artifact_bytes: u64) -> Boundary {
+        let root = std::env::temp_dir().join(format!(
+            "fmn-mjpeg-preview-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join(".fmn-native-ffmpeg-mode"), mode).unwrap();
+        let executable = StdFfmpegLocator::default()
+            .locate_ffmpeg(&PathBuf::from(env!(
+                "CARGO_BIN_EXE_fmn-ffmpeg-test-fixture"
+            )))
+            .unwrap();
+        let runner = Arc::new(StdProcessRunner);
+        let tool = FfmpegTool::resolve(executable, runner.as_ref(), &root).unwrap();
+        Boundary::new(
+            tool,
+            runner,
+            JobLimits {
+                timeout: Duration::from_secs(2),
+                max_log_bytes: 8192,
+                max_artifact_bytes,
+                keep_workdir: false,
+            },
+            root,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn exact_process_mpjpeg_preview_returns_one_valid_jpeg_and_complete_receipt() {
+        let boundary = boundary("mjpeg-preview", 8192);
+        let rgba = vec![255; 64 * 48 * 4];
+        let first = boundary.encode_mjpeg_preview(64, 48, &rgba, 4096).unwrap();
+        let second = boundary.encode_mjpeg_preview(64, 48, &rgba, 4096).unwrap();
+        assert_eq!(first.jpeg, JPEG);
+        assert_eq!(second.jpeg, first.jpeg);
+        let report = first.invocation;
+        assert_eq!(report.provenance.encoder.as_deref(), Some("mjpeg"));
+        assert_eq!(report.provenance.tool_sha256_hex.len(), 64);
+        assert_eq!(report.provenance.tool_version, "ffmpeg version 7.1-fake");
+        assert!(
+            report
+                .provenance
+                .argv
+                .windows(2)
+                .any(|pair| pair == ["-f", "mpjpeg"])
+        );
+        assert!(
+            report
+                .provenance
+                .argv
+                .windows(2)
+                .any(|pair| pair == ["-boundary_tag", "fmn-preview"])
+        );
+        assert_ne!(
+            report.provenance.bound_tool_path,
+            second.invocation.provenance.bound_tool_path
+        );
+        assert!(
+            !report.artifact.exists(),
+            "private multipart output escaped its job"
+        );
+        assert!(
+            !report.provenance.bound_tool_path.exists(),
+            "private executable escaped its job"
+        );
+        let decoded =
+            fmn_codec::decode_jpeg(&first.jpeg, &fmn_codec::JpegLimits { max_pixels: 3072 })
+                .unwrap();
+        assert_eq!(
+            (decoded.width, decoded.height, decoded.orientation),
+            (64, 48, 1)
+        );
+    }
+
+    #[test]
+    fn exact_process_preview_refuses_source_swap_bad_framing_dimensions_and_resource_overflow() {
+        let rgba = vec![255; 64 * 48 * 4];
+        for mode in [
+            "mjpeg-preview-corrupt",
+            "mjpeg-preview-truncated",
+            "mjpeg-preview-extra",
+        ] {
+            assert!(
+                matches!(
+                    boundary(mode, 8192).encode_mjpeg_preview(64, 48, &rgba, 4096),
+                    Err(MjpegPreviewError::InvalidMultipart(_))
+                ),
+                "{mode}"
+            );
+        }
+        assert!(matches!(
+            boundary("mjpeg-preview-swap", 8192).encode_mjpeg_preview(64, 48, &rgba, 4096),
+            Err(MjpegPreviewError::InvalidFrame(
+                "staged preview snapshot changed"
+            ))
+        ));
+        assert!(matches!(
+            boundary("mjpeg-preview", 8192).encode_mjpeg_preview(48, 64, &rgba, 4096),
+            Err(MjpegPreviewError::InvalidFrame(
+                "encoded JPEG dimensions or orientation changed"
+            ))
+        ));
+        assert!(matches!(
+            boundary("mjpeg-preview", 64).encode_mjpeg_preview(64, 48, &rgba, 4096),
+            Err(MjpegPreviewError::Boundary(
+                BoundaryError::ArtifactOversized { .. }
+            ))
+        ));
+        let boundary = boundary("mjpeg-preview", 8192);
+        let mut transparent = rgba.clone();
+        transparent[3] = 0;
+        assert!(matches!(
+            boundary.encode_mjpeg_preview(64, 48, &transparent, 4096),
+            Err(MjpegPreviewError::InvalidFrame(_))
+        ));
+        assert!(matches!(
+            boundary.encode_mjpeg_preview(64, 48, &rgba[..4], 4096),
+            Err(MjpegPreviewError::InvalidFrame(_))
+        ));
+        assert!(matches!(
+            boundary.encode_mjpeg_preview(65_536, 1, &[], 4096),
+            Err(MjpegPreviewError::InvalidFrame(_))
+        ));
+    }
+}

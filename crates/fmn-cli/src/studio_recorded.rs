@@ -9,7 +9,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-use fmn_cli::{Invocation, PreviewCodec, RunOutput, StudioCommand};
+use fmn_cli::studio_preview::StudioPreview;
+use fmn_cli::{Invocation, RunOutput, StudioCommand};
 use fmn_config::config::{DeterminismMode, Engine, ThreadPolicy};
 use fmn_hash::{Digest, sha256};
 use fmn_platform::clock::{Clock, StdClock};
@@ -17,9 +18,9 @@ use fmn_platform::fs::{FileSystem, StdFs, VirtualFs};
 use fmn_scene::{AssetRead, DEFAULT_MAX_BUNDLE_BYTES, Journal, TimelineBundle};
 use fmn_studio::camera_bundle::{CameraBundleView, CameraBundleWorker};
 use fmn_studio::{
-    BuildError, CapabilityToken, FrameHub, RebuildDriver, StdWorkerLauncher, StudioHost,
-    StudioHostConfig, StudioRecordedAudio, StudioWorkerSession, Supervisor, SupervisorConfig,
-    SupervisorReply, SupervisorRequest, WorkerArtifact, WorkerResponse, WorkerServeOutcome,
+    BuildError, CapabilityToken, RebuildDriver, StdWorkerLauncher, StudioHost, StudioHostConfig,
+    StudioRecordedAudio, StudioWorkerSession, Supervisor, SupervisorConfig, SupervisorReply,
+    SupervisorRequest, WorkerArtifact, WorkerResponse, WorkerServeOutcome,
 };
 
 mod launch;
@@ -162,7 +163,6 @@ fn validate(command: &StudioCommand) -> Result<(), Failure> {
         ));
     }
     if command.tui
-        || command.preview_codec != PreviewCodec::Png
         || command.restore_session.is_some()
         || render.animation_range.is_some()
         || render.skip_animations
@@ -176,7 +176,7 @@ fn validate(command: &StudioCommand) -> Result<(), Failure> {
     {
         return Err(Failure::new(
             "capability",
-            "narrated Studio is immutable browser preview with PNG frames; live editing, saved live sessions, ranges, file output, TUI and MJPEG are not supported by this adapter",
+            "narrated Studio is immutable browser preview; live editing, saved live sessions, ranges, file output and TUI are not supported by this adapter",
         ));
     }
     Ok(())
@@ -331,6 +331,16 @@ fn run(
         .canonicalize()
         .map_err(|error| Failure::new("scene", error))?;
     let launch = prepare_launch(command, &bundle, &audio, &StdFs, source_path)?;
+    let mut preview_render = command.render.clone();
+    preview_render.fps = Some(bundle.fps());
+    let preview_config = fmn_cli::resolve_render_config(&StdFs, &preview_render)
+        .map_err(|error| Failure::new(error.exit_name(), error))?;
+    let preview = StudioPreview::prepare(
+        command.preview_codec,
+        Path::new(&preview_config.file_writer.ffmpeg_bin),
+        StudioHostConfig::default().max_png_bytes,
+    )
+    .map_err(|error| Failure::new(error.exit_name(), error))?;
     let view = launch.view(&bundle)?;
     let build_id = launch.build_id();
     let reads = CameraBundleWorker::input_reads(build_id, audio.source(), &bundle, &view)
@@ -405,9 +415,10 @@ fn run(
         bind_addr: SocketAddr::new(command.bind, command.port),
         ..StudioHostConfig::default()
     };
-    let frames = FrameHub::new(config.max_frame_history, config.max_png_bytes)
-        .map_err(|error| Failure::new("budget", error))?;
-    frames
+    let frames = preview
+        .frame_hub(config.max_frame_history, config.max_png_bytes)
+        .map_err(|error| Failure::new(error.exit_name(), error))?;
+    let first = frames
         .publish(&first, supervisor.protocol_limits())
         .map_err(|error| Failure::new("render", error))?;
     let session = Arc::new(
@@ -422,13 +433,17 @@ fn run(
         .launch_url()
         .map_err(|error| Failure::new("internal", error))?;
     if command.render.common.robot {
-        writeln!(ready, "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"studio_ready\",\"scene\":{},\"url\":{},\"preview_codec\":\"png\",\"browser_launch\":false,\"worker_generation\":{generation},\"recorded_audio\":true,\"source_sha256\":{},\"fps\":{},\"picture_frames\":{}}}",
+        let codec_fields = preview
+            .ready_fields(&first)
+            .map_err(|error| Failure::new(error.exit_name(), error))?;
+        writeln!(ready, "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"studio_ready\",\"scene\":{},\"url\":{},{codec_fields},\"browser_launch\":false,\"worker_generation\":{generation},\"recorded_audio\":true,\"source_sha256\":{},\"fps\":{},\"picture_frames\":{}}}",
             fmn_cli::ROBOT_SCHEMA_VERSION, quote(&scene), quote(&url), quote(&audio.info().source.to_hex()), audio.fps(), audio.picture_frames())
             .map_err(|error| Failure::new("internal", error))?;
     } else {
         writeln!(
             ready,
-            "Studio: {url}\nRecorded narration is available; close stdin to stop the session."
+            "Studio: {url}\n{}\nRecorded narration is available; close stdin to stop the session.",
+            preview.description()
         )
         .map_err(|error| Failure::new("internal", error))?;
     }

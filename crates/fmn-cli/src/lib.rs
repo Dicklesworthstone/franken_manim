@@ -15,6 +15,7 @@ mod cargo_profile;
 mod generated;
 mod offline_cpu;
 mod studio_live;
+pub mod studio_preview;
 mod studio_session;
 
 pub use generated::{
@@ -8478,15 +8479,18 @@ fn write_studio_ready(
     scene: &str,
     url: &str,
     generation: u64,
+    preview: &studio_preview::StudioPreview,
+    first: &fmn_studio::PngFrame,
 ) -> Result<(), CliError> {
     let text = if command.render.common.robot {
         format!(
             "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"studio_ready\",\
-             \"scene\":{},\"url\":{},\"preview_codec\":\"png\",\
+             \"scene\":{},\"url\":{},{},\
              \"browser_launch\":{},\"checkpoint_frames\":{},\"worker_generation\":{}}}\n",
             ROBOT_SCHEMA_VERSION,
             json_string(scene),
             json_string(url),
+            preview.ready_fields(first)?,
             json_string(if command.no_browser {
                 "suppressed"
             } else {
@@ -8501,7 +8505,10 @@ fn write_studio_ready(
         } else {
             "open manually; the one-external-tool policy forbids spawning a browser"
         };
-        format!("Studio ready for {scene}: {url} ({launch})\n")
+        format!(
+            "Studio ready for {scene}: {url} ({launch}; {})\n",
+            preview.description()
+        )
     };
     ready
         .write_all(text.as_bytes())
@@ -8764,12 +8771,6 @@ fn execute_studio(
             "--tui writes terminal escape records and cannot be combined with --robot",
         ));
     }
-    if command.preview_codec != PreviewCodec::Png {
-        return Err(CliError::new(
-            "capability",
-            "MJPEG Studio preview is not yet wired; use --preview-codec png",
-        ));
-    }
     if command.tui && terminal_commands.is_none() {
         return Err(usage(
             "--tui requires an Enter-based command stream; embedders use run_studio_terminal_os",
@@ -8789,6 +8790,11 @@ fn execute_studio(
     let _ =
         derive_studio_execution_plan(fs.as_ref(), &config, fmn_runtime::OutputPixelFormat::Rgba8)?;
     let protocol_limits = fmn_studio::ProtocolLimits::default();
+    let preview = studio_preview::StudioPreview::prepare(
+        command.preview_codec,
+        Path::new(&config.file_writer.ffmpeg_bin),
+        protocol_limits.max_frame_bytes,
+    )?;
     let (session_context, saved) =
         studio_session::prepare(&*fs, &command, &scene, &config, protocol_limits)?;
     let restored_frame = saved.as_ref().map_or(0, |saved| saved.committed_frame());
@@ -8888,9 +8894,8 @@ fn execute_studio(
             ));
         }
     };
-    let frames = fmn_studio::FrameHub::new(4, protocol_limits.max_frame_bytes)
-        .map_err(|error| internal(format!("Studio frame hub: {error}")))?;
-    frames
+    let frames = preview.frame_hub(4, protocol_limits.max_frame_bytes)?;
+    let first = frames
         .publish(&initial, protocol_limits)
         .map_err(|error| CliError::new("render", format!("Studio first frame: {error}")))?;
     let tui_frames = command.tui.then(|| frames.clone());
@@ -8922,7 +8927,9 @@ fn execute_studio(
     let result = host
         .launch_url()
         .map_err(|error| internal(format!("Studio launch URL: {error}")))
-        .and_then(|url| write_studio_ready(ready, &command, &scene, &url, generation))
+        .and_then(|url| {
+            write_studio_ready(ready, &command, &scene, &url, generation, &preview, &first)
+        })
         .and_then(|()| match tui_frames.as_ref() {
             Some(frames) => serve_studio_tui(
                 host,

@@ -221,3 +221,18 @@ fn explicit_clock_and_unsupported_modes_refuse_instead_of_silently_changing_repl
         );
     }
 }
+
+#[test]
+fn recorded_browser_accepts_an_explicit_mjpeg_request_without_changing_the_capture() {
+    let (fs, bundle, audio, png) = prepared();
+    let jpeg = prepare_launch(
+        &command(&["--preview-codec", "mjpeg"]),
+        &bundle,
+        &audio,
+        &fs,
+        PathBuf::from("/recording.fmtl"),
+    )
+    .unwrap();
+    assert_eq!(jpeg.argv().unwrap(), png.argv().unwrap());
+    assert_eq!(jpeg.build_id(), png.build_id());
+}
