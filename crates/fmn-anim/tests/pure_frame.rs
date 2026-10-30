@@ -381,7 +381,8 @@ fn updaters_live_views_skips_and_animated_endpoints_demote() {
         }
         let clock = RationalFrameClock::new(30).unwrap();
         let rng = RngRoot::from_seed(7);
-        let open = open_play_with_mode(&mut stage, &clock, &mut animations, kind == 2).unwrap();
+        let begin = fmn_anim::BeginState::retained(kind != 2);
+        let open = open_play_with_mode(&mut stage, &clock, &mut animations, begin).unwrap();
         let refusal = PureSegment::freeze(&stage, &clock, &rng, &animations, &open).unwrap_err();
         match kind {
             0 | 2 => assert_eq!(refusal, PureFrameRefusal::NotAtPureBegin),
@@ -891,9 +892,10 @@ fn waits_with_live_views_or_open_host_phases_refuse_compact_jobs() {
         let view = (kind == 0).then(|| stage.get_mut(mob).unwrap().buffer.export_view(true));
         let mut clock = RationalFrameClock::new(8).unwrap();
         let mut open = if kind == 1 {
-            fmn_anim::open_wait_after_updaters(&mut stage, &clock, 0.5, false).unwrap()
+            fmn_anim::open_wait_after_updaters(&mut stage, &clock, 0.5).unwrap()
         } else {
-            fmn_anim::open_wait(&mut stage, &clock, 0.5, kind == 2).unwrap()
+            let begin = fmn_anim::BeginState::retained(kind != 2);
+            fmn_anim::open_wait(&mut stage, &clock, 0.5, begin).unwrap()
         };
         if kind == 3 {
             fmn_anim::prepare_wait_frame(&mut stage, &mut clock, &mut open).unwrap();

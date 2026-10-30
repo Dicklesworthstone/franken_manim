@@ -150,6 +150,50 @@ fn metadata_only_play_and_wait_preserve_updates_samples_and_lifecycle() {
 }
 
 #[test]
+fn segments_without_a_pure_program_consumer_keep_no_begin_snapshot() {
+    // A begin snapshot copies the whole arena, and only a pure frame program
+    // reads it. These sinks accept no pure program and the stepped host path
+    // never offers one, so pure segments carry no snapshot, whether or not
+    // their frames are frozen. Each segment used to copy the arena once.
+    for metadata_only in [false, true] {
+        let mut scene = scene();
+        let mob = scene
+            .add_mobject(Mobject::from_points(&[[0.0; 3]]))
+            .unwrap();
+        let animation = transform(&mut scene, mob);
+        let mut sink = Sink {
+            metadata_only,
+            ..Sink::default()
+        };
+        let play = scene
+            .play(
+                vec![Box::new(animation)],
+                PlayOverrides::default(),
+                &mut sink,
+            )
+            .unwrap()
+            .unwrap();
+        let wait = scene.wait(Some(0.25), &mut sink).unwrap();
+        let mut stepped = scene.begin_stepped_wait(Some(0.25), &mut sink).unwrap();
+        while scene
+            .prepare_stepped_wait_frame(&mut stepped)
+            .unwrap()
+            .is_some()
+        {
+            scene
+                .complete_stepped_wait_frame(&mut stepped, &mut sink)
+                .unwrap();
+        }
+        let stepped = scene.finish_stepped_wait(stepped, &mut sink).unwrap();
+        for report in [&play, &wait, &stepped] {
+            assert!(report.purity.is_pure(), "{report:?}");
+            assert!(report.begin_state.is_none(), "{report:?}");
+        }
+        assert_eq!(sink.samples.len(), 7);
+    }
+}
+
+#[test]
 fn stepped_host_path_observes_the_same_metadata_as_native_playback() {
     let mut results = Vec::new();
     for metadata_only in [false, true] {

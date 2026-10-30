@@ -272,7 +272,9 @@ impl Preparation {
         // failure abort instead of running an endpoint/cleanup rehearsal:
         // a later finish callback must never replace the initiating error.
         let rng = fmn_core::rng::RngRoot::from_seed(0);
-        let result = fmn_anim::open_play_with_mode(&mut stage, &clock, &mut animations, true)
+        // A rehearsal never becomes a pure program: no begin snapshot.
+        let omit = fmn_anim::BeginState::Omit;
+        let result = fmn_anim::open_play_with_mode(&mut stage, &clock, &mut animations, omit)
             .and_then(|mut open| {
                 let body = (|| {
                     while fmn_anim::prepare_play_frame(

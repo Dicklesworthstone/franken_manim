@@ -27,13 +27,13 @@ mod parallel;
 pub use idle::IdleFrame;
 
 use fmn_anim::{
-    AnimError, Animation, AnimationBoundary, FrameMetadata, FramePacket, ImpureEffect, OpenSegment,
-    OpenWait, Purity, RateFunc, RationalFrameClock, RationalTime, SceneUpdaterBoundary,
-    SegmentKind, SegmentReport, abort_open_play, abort_open_wait, complete_play_frame_with_capture,
-    complete_wait_frame_with_capture, finish_open_play, finish_open_play_animations,
-    finish_open_wait, open_play_with_mode, open_wait, open_wait_after_updaters,
-    prepare_play_animation, prepare_play_frame, prepare_wait_frame, validate_play,
-    wait_segment_with_capture,
+    AnimError, Animation, AnimationBoundary, BeginState, FrameMetadata, FramePacket, ImpureEffect,
+    OpenSegment, OpenWait, Purity, RateFunc, RationalFrameClock, RationalTime,
+    SceneUpdaterBoundary, SegmentKind, SegmentReport, abort_open_play, abort_open_wait,
+    complete_play_frame_with_capture, complete_wait_frame_with_capture, finish_open_play,
+    finish_open_play_animations, finish_open_wait, open_play_with_mode, open_wait,
+    open_wait_after_updaters, prepare_play_animation, prepare_play_frame, prepare_wait_frame,
+    validate_play, wait_segment_with_capture,
 };
 use fmn_core::constants::{FRAME_HEIGHT, FRAME_WIDTH};
 use fmn_core::rng::{Pcg64Dxsm, RngRoot};
@@ -1211,8 +1211,14 @@ impl Scene {
             .collect();
         self.pre_play(SegmentKind::Play, &animation_anchors, sink)?;
         self.emit_event(sink, LifecyclePhase::DriveSegment, Some(SegmentKind::Play))?;
-        let open =
-            open_play_with_mode(&mut self.stage, &self.clock, &mut animations, self.skipping)?;
+        // A stepped play is host-driven frame by frame and never becomes a
+        // pure program, so nothing would read its begin snapshot.
+        let open = open_play_with_mode(
+            &mut self.stage,
+            &self.clock,
+            &mut animations,
+            BeginState::Omit,
+        )?;
         Ok(Some(SteppedPlay {
             animations,
             open,
@@ -1501,9 +1507,10 @@ impl Scene {
         self.pre_play(SegmentKind::Wait, &[], sink)?;
         self.emit_event(sink, LifecyclePhase::DriveSegment, Some(SegmentKind::Wait))?;
         let open = if updaters_completed {
-            open_wait_after_updaters(&mut self.stage, &self.clock, duration, self.skipping)?
+            open_wait_after_updaters(&mut self.stage, &self.clock, duration)?
         } else {
-            open_wait(&mut self.stage, &self.clock, duration, self.skipping)?
+            // As a stepped play: no pure program reads a begin snapshot.
+            open_wait(&mut self.stage, &self.clock, duration, BeginState::Omit)?
         };
         Ok(SteppedWait {
             open,

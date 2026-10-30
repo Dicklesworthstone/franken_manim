@@ -679,10 +679,12 @@ pub fn play_segment_with_pure_dispatch(
     boundary: &mut dyn FnMut(&mut Stage, RationalTime),
     capture: &mut dyn PlayCapture,
 ) -> Result<SegmentReport, AnimError> {
-    let open = crate::open_play_with_mode(stage, clock, animations, skip)?;
-    if allow_pure
-        && !skip
-        && capture.accepts_pure_segments()
+    // The begin snapshot is the pure program's input and nothing else reads
+    // it here, so decide whether one can be offered before copying the arena.
+    let offer = allow_pure && !skip && capture.accepts_pure_segments();
+    let open =
+        crate::open_play_with_mode(stage, clock, animations, crate::BeginState::retained(offer))?;
+    if offer
         && let Ok(segment) = PureSegment::freeze(stage, clock, rng, animations, &open)
         && capture.capture_pure_segment(&segment)
     {
@@ -709,10 +711,9 @@ pub fn wait_segment_with_pure_dispatch(
     boundary: &mut dyn FnMut(&mut Stage, RationalTime),
     capture: &mut dyn PlayCapture,
 ) -> Result<SegmentReport, AnimError> {
-    let mut open = crate::open_wait(stage, clock, duration, skip)?;
-    if allow_pure
-        && !skip
-        && capture.accepts_pure_segments()
+    let offer = allow_pure && !skip && capture.accepts_pure_segments();
+    let mut open = crate::open_wait(stage, clock, duration, crate::BeginState::retained(offer))?;
+    if offer
         && let Ok(segment) = PureSegment::freeze_wait(stage, clock, rng, &open)
         && capture.capture_pure_segment(&segment)
     {

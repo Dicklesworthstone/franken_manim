@@ -520,18 +520,40 @@ fn plan_play(
     Ok((segment, run_time))
 }
 
+/// Whether an opened segment keeps its begin-state snapshot (§9.5's worker
+/// input). The snapshot copies the whole arena, and only a pure frame program
+/// or [`reconstruct_pure_frame`](crate::purity::reconstruct_pure_frame) reads
+/// it. A skipped segment, and a driver that will not offer the segment to
+/// such a consumer, omits it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BeginState {
+    /// Snapshot the begin state when the segment is pure.
+    Retain,
+    /// Never snapshot it.
+    Omit,
+}
+
+impl BeginState {
+    /// [`Self::Retain`] when `keep`, else [`Self::Omit`].
+    #[must_use]
+    pub const fn retained(keep: bool) -> Self {
+        if keep { Self::Retain } else { Self::Omit }
+    }
+}
+
 /// The opening of every play segment, whole or partial.
 fn play_prologue(
     stage: &mut Stage,
     clock: &RationalFrameClock,
     animations: &mut [Box<dyn Animation>],
-    skip: bool,
+    begin: BeginState,
 ) -> Result<Prologue, AnimError> {
     let (segment, run_time) = plan_play(stage, clock, animations)?;
     begin_animations(stage, animations)?;
     let purity = classify_play(stage, animations);
     let base_frame = clock.now().frames();
-    let begin_state = (purity.is_pure() && !skip).then(|| Rc::new(stage.snapshot()));
+    let begin_state =
+        (purity.is_pure() && begin == BeginState::Retain).then(|| Rc::new(stage.snapshot()));
     Ok(Prologue {
         segment,
         purity,
@@ -663,11 +685,10 @@ pub fn open_play(
     clock: &RationalFrameClock,
     animations: &mut [Box<dyn Animation>],
 ) -> Result<OpenSegment, AnimError> {
-    open_play_with_mode(stage, clock, animations, false)
+    open_play_with_mode(stage, clock, animations, BeginState::Retain)
 }
 
-/// Open a play while carrying the caller's effective skip mode into purity
-/// classification and begin-state retention.
+/// Open a play, keeping its begin-state snapshot only as `begin` asks.
 ///
 /// # Errors
 /// As [`open_play`].
@@ -675,9 +696,9 @@ pub fn open_play_with_mode(
     stage: &mut Stage,
     clock: &RationalFrameClock,
     animations: &mut [Box<dyn Animation>],
-    skip: bool,
+    begin: BeginState,
 ) -> Result<OpenSegment, AnimError> {
-    let prologue = play_prologue(stage, clock, animations, skip)?;
+    let prologue = play_prologue(stage, clock, animations, begin)?;
     let segment = prologue.segment;
     Ok(OpenSegment {
         report: prologue.report(SegmentKind::Play),
@@ -1012,14 +1033,15 @@ pub fn open_wait(
     stage: &mut Stage,
     clock: &RationalFrameClock,
     duration: f64,
-    skip: bool,
+    begin: BeginState,
 ) -> Result<OpenWait, AnimError> {
     update_scene_mobjects(stage, 0.0)?;
-    plan_open_wait(stage, clock, duration, skip, false)
+    plan_open_wait(stage, clock, duration, begin, false)
 }
 
 /// Open a wait after a host has completed BOTH halves of its initial zero-dt
-/// scene-updater phase. This does not repeat native updater slots.
+/// scene-updater phase. This does not repeat native updater slots. The host
+/// phase makes the wait stateful, so it never has a begin state to keep.
 ///
 /// # Errors
 /// [`AnimError::Clock`] for an invalid duration.
@@ -1027,25 +1049,25 @@ pub fn open_wait_after_updaters(
     stage: &mut Stage,
     clock: &RationalFrameClock,
     duration: f64,
-    skip: bool,
 ) -> Result<OpenWait, AnimError> {
-    plan_open_wait(stage, clock, duration, skip, true)
+    plan_open_wait(stage, clock, duration, BeginState::Omit, true)
 }
 
 fn plan_open_wait(
     stage: &Stage,
     clock: &RationalFrameClock,
     duration: f64,
-    skip: bool,
+    begin: BeginState,
     external_updaters: bool,
 ) -> Result<OpenWait, AnimError> {
     check_updater_error(stage)?;
     let segment = clock.segment(duration).map_err(AnimError::Clock)?;
     let purity = classify_wait(stage, false);
+    let retain = purity.is_pure() && begin == BeginState::Retain && !external_updaters;
     let mut report = SegmentReport {
         kind: SegmentKind::Wait,
         purity: purity.clone(),
-        begin_state: (purity.is_pure() && !skip).then(|| Rc::new(stage.snapshot())),
+        begin_state: retain.then(|| Rc::new(stage.snapshot())),
         base_frame: clock.now().frames(),
         n_frames: segment.n_frames(),
         run_time: duration,
@@ -1340,7 +1362,8 @@ pub fn play_segment_with_boundary(
     boundary: &mut dyn FnMut(&mut Stage, RationalTime),
     emit: &mut dyn FnMut(FramePacket),
 ) -> Result<SegmentReport, AnimError> {
-    let open = open_play_with_mode(stage, clock, animations, skip)?;
+    // A skipped segment emits nothing to reconstruct.
+    let open = open_play_with_mode(stage, clock, animations, BeginState::retained(!skip))?;
     drive_open_play(
         stage,
         clock,

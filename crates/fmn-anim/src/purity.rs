@@ -92,7 +92,9 @@ pub struct SegmentReport {
     /// The classification, with its recorded reasons when stateful.
     pub purity: Purity,
     /// The begin-state CoW snapshot — the §9.5 worker input. `Some` only
-    /// for pure, non-skipped segments.
+    /// for pure, non-skipped segments whose opener asked to keep it
+    /// ([`BeginState`](crate::BeginState)): a driver with no pure-program
+    /// consumer omits it.
     pub begin_state: Option<Rc<Snapshot>>,
     /// The clock's frame counter at segment start (frame *k* of the
     /// segment is global frame `base_frame + k`).
