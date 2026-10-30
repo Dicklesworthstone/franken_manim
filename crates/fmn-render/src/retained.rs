@@ -409,7 +409,9 @@ impl RetainedFrameRenderer {
             self.raster_team = Some(RasterTeam::new(self.config.threads)?);
         }
         prepared.render_into_with_team(
-            self.raster_team.as_mut().expect("raster team initialized above"),
+            self.raster_team
+                .as_mut()
+                .expect("raster team initialized above"),
             &mut self.frame,
         )?;
         self.camera_pixels = Arc::downgrade(&prepared.projection);
@@ -679,11 +681,7 @@ pub(crate) struct PreparedCameraBands {
 }
 
 impl PreparedCameraBands {
-    pub(crate) fn raster(
-        &self,
-        bands: &[Mutex<Vec<u8>>],
-        next: &std::sync::atomic::AtomicUsize,
-    ) {
+    pub(crate) fn raster(&self, bands: &[Mutex<Vec<u8>>], next: &std::sync::atomic::AtomicUsize) {
         self.projection
             .render_owned_bands(bands, next, self.layout.stride, |index| {
                 self.frame
@@ -1050,11 +1048,7 @@ fn camera_draws<'a>(
             PreparedCommand::Vector(instance) => {
                 ThreeDDraw::Vector(VectorDraw::new(plan, instance))
             }
-            PreparedCommand::Surface {
-                mesh,
-                uniforms,
-                ..
-            } => {
+            PreparedCommand::Surface { mesh, uniforms, .. } => {
                 let mesh = meshes
                     .get(mesh)
                     .ok_or(RetainedFrameRendererError::VectorPlanMismatch)?;
@@ -1069,11 +1063,7 @@ fn camera_draws<'a>(
                 ThreeDDraw::Surface(draw)
             }
             PreparedCommand::Dot(dot) => ThreeDDraw::TrueDot(dot),
-            PreparedCommand::Image {
-                mesh,
-                uniforms,
-                ..
-            } => {
+            PreparedCommand::Image { mesh, uniforms, .. } => {
                 let mesh = meshes
                     .get(mesh)
                     .ok_or(RetainedFrameRendererError::VectorPlanMismatch)?;
@@ -1596,7 +1586,9 @@ mod tests {
                     scope.spawn(move || {
                         let mut team = RasterTeam::new(threads).unwrap();
                         let mut pixels = FrameBuffer::new(frozen.layout().unwrap());
-                        frozen.render_into_with_team(&mut team, &mut pixels).unwrap();
+                        frozen
+                            .render_into_with_team(&mut team, &mut pixels)
+                            .unwrap();
                         pixels
                     })
                 })
@@ -2070,7 +2062,9 @@ mod tests {
                 .unwrap(),
             );
             pixels.plane_mut(0).fill(0x53);
-            frozen.render_into_with_team(&mut team, &mut pixels).unwrap();
+            frozen
+                .render_into_with_team(&mut team, &mut pixels)
+                .unwrap();
             for (actual, expected) in pixels
                 .plane(0)
                 .chunks_exact(stride)
@@ -2083,17 +2077,18 @@ mod tests {
             assert_eq!(team.stats().band_buffer_bytes, row_bytes * height as usize);
             let completed = team.stats().frames_completed;
             for layout in [
-                fmn_frame::FrameLayout::tight(fmn_frame::PixelFormat::Rgba8, width, height).unwrap(),
-                fmn_frame::FrameLayout::tight(
-                    fmn_frame::PixelFormat::Rgba16F,
-                    width + 1,
-                    height,
-                )
-                .unwrap(),
+                fmn_frame::FrameLayout::tight(fmn_frame::PixelFormat::Rgba8, width, height)
+                    .unwrap(),
+                fmn_frame::FrameLayout::tight(fmn_frame::PixelFormat::Rgba16F, width + 1, height)
+                    .unwrap(),
             ] {
                 let mut invalid = FrameBuffer::new(layout);
                 invalid.plane_mut(0).fill(0x74);
-                assert!(frozen.render_into_with_team(&mut team, &mut invalid).is_err());
+                assert!(
+                    frozen
+                        .render_into_with_team(&mut team, &mut invalid)
+                        .is_err()
+                );
                 assert!(invalid.as_bytes().iter().all(|byte| *byte == 0x74));
                 assert_eq!(team.stats().frames_completed, completed);
                 assert_eq!(team.worker_ids(), workers);

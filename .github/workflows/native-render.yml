@@ -10,6 +10,9 @@ on:
       - 'crates/fmn-core/**'
       - 'crates/fmn-anim/**'
       - 'crates/fmn-scene/**'
+      - 'crates/fmn-render/**'
+      - 'crates/fmn-studio/**'
+      - 'crates/fmn/**'
       - 'crates/fmn-cli/**'
       - 'crates/fmn-python/src/lib.rs'
       - 'crates/fmn-python/src/catalog_rate_identity.rs'
@@ -48,18 +51,6 @@ jobs:
           key: fmtl-rates-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: |
             cargo-${{ runner.os }}-${{ runner.arch }}-portable-
-      - name: Verify formatting of the rate protocol and witnesses
-        run: |
-          rustfmt --check --edition 2024 --config skip_children=true \
-            crates/fmn-core/src/rate.rs \
-            crates/fmn-anim/src/animation.rs crates/fmn-anim/src/bundle.rs \
-            crates/fmn-anim/src/creation.rs crates/fmn-anim/src/fading.rs \
-            crates/fmn-anim/src/indication.rs crates/fmn-anim/src/rotation.rs \
-            crates/fmn-anim/tests/catalog_rates.rs crates/fmn-anim/tests/builtin_rate_identity.rs \
-            crates/fmn-anim/tests/composition.rs crates/fmn-scene/src/timeline_bundle.rs \
-            crates/fmn-scene/tests/exported_rate_identity.rs crates/fmn-scene/tests/shared_bundle.rs \
-            crates/fmn-cli/tests/timeline_catalog.rs crates/fmn-cli/tests/compiled_pipeline.rs \
-            crates/fmn-python/src/lib.rs crates/fmn-python/src/catalog_rate_identity.rs
       - name: Test actual source without applying patches or changing refs
         run: |
           python3 - <<'PY'
@@ -68,13 +59,18 @@ jobs:
           out.mkdir()
           (out / 'source-commit.txt').write_text(os.environ['GITHUB_SHA'] + '\n')
           commands = [
+              ('format', ["rustfmt","--check","--edition","2024","--config","skip_children=true","crates/fmn-core/src/rate.rs","crates/fmn-anim/src/animation.rs","crates/fmn-anim/src/bundle.rs","crates/fmn-anim/src/creation.rs","crates/fmn-anim/src/fading.rs","crates/fmn-anim/src/indication.rs","crates/fmn-anim/src/rotation.rs","crates/fmn-anim/tests/catalog_rates.rs","crates/fmn-anim/tests/builtin_rate_identity.rs","crates/fmn-anim/tests/composition.rs","crates/fmn-scene/src/timeline_bundle.rs","crates/fmn-scene/tests/exported_rate_identity.rs","crates/fmn-scene/tests/shared_bundle.rs","crates/fmn-cli/tests/timeline_catalog.rs","crates/fmn-cli/tests/compiled_pipeline.rs","crates/fmn-python/src/lib.rs","crates/fmn-python/src/catalog_rate_identity.rs","crates/fmn-cli/src/lib.rs","crates/fmn/src/rendering/pipeline.rs","crates/fmn-render/src/retained.rs","crates/fmn-render/src/three_d.rs","crates/fmn-render/src/vector_frame.rs","crates/fmn-render/src/vector_frame/team.rs","crates/fmn-studio/src/native/program.rs","crates/fmn-studio/src/native/edits.rs","crates/fmn-studio/src/native/service.rs","crates/fmn-studio/src/native/service/recovery.rs","crates/fmn-studio/tests/native_animation.rs","crates/fmn-studio/tests/native_worker.rs","crates/fmn-studio/tests/native_committed_input.rs"]),
+              ('retained-renderer', ['cargo','test','--locked','-p','fmn-render','--lib','--test','texture_pairs']),
+              ('native-pipeline', ['cargo','test','--locked','-p','fmn','--lib','--test','native_cpu_pipeline','--test','native_pure_pipeline','--test','native_vector_pipeline','--test','native_camera_pipeline']),
+              ('studio-replay-seek', ['cargo','test','--locked','-p','fmn-studio','--test','native_worker','--test','native_committed_input','--test','native_animation','--test','native_deferred','--test','native_deferred_context']),
+              ('cpu-memory-admission', ['cargo','test','--locked','-p','fmn-cli','--features','cli,batch','--lib','cpu_preview_and_export_admit_retained_raster_storage']),
               ('debug-core-anim-scene', ['cargo','test','--locked','-p','fmn-core','-p','fmn-anim','-p','fmn-scene','--no-fail-fast']),
               ('release-catalog', ['cargo','test','--release','--locked','-p','fmn-anim','--test','catalog_rates','--test','builtin_rate_identity']),
               ('release-bundle', ['cargo','test','--release','--locked','-p','fmn-scene','--test','exported_rate_identity','--test','shared_bundle','--test','shared_rate_catalog','--test','tracker_bundle','--test','method_bundle']),
               ('release-cli', ['cargo','test','--release','--locked','-p','fmn-cli','--features','cli,batch','--test','timeline_catalog','--test','compiled_pipeline','--test','readme_bundle']),
               ('wasm-player-host', ['cargo','test','--release','--locked','-p','fmn-wasm','--lib']),
               ('portal-named-rates', ['cargo','test','--locked','-p','fmn-python','--lib','catalog_rate_identity','--','--nocapture']),
-              ('clippy', ['cargo','clippy','--locked','-p','fmn-core','-p','fmn-anim','-p','fmn-scene','--all-targets','--','-D','warnings']),
+              ('clippy', ['cargo','clippy','--locked','-p','fmn-core','-p','fmn-anim','-p','fmn-scene','-p','fmn-render','-p','fmn-studio','-p','fmn','-p','fmn-cli','--features','cli,batch','--all-targets','--','-D','warnings']),
               ('workspace-check', ['cargo','check','--locked','--workspace','--all-targets']),
           ]
           statuses = {}

@@ -1556,19 +1556,24 @@ impl PreparedThreeDProjection {
         {
             return Err(FrameError::DimensionMismatch);
         }
-        let width = usize::try_from(self.camera.pixel_width())
-            .map_err(|_| FrameError::TooLarge)?;
-        let height = usize::try_from(self.camera.pixel_height())
-            .map_err(|_| FrameError::TooLarge)?;
+        let width = usize::try_from(self.camera.pixel_width()).map_err(|_| FrameError::TooLarge)?;
+        let height =
+            usize::try_from(self.camera.pixel_height()).map_err(|_| FrameError::TooLarge)?;
         let tile = self.tiling.fine_tile.max(1) as usize;
         let band_rows = tile.min(height.max(1));
-        let scratch_pixels = tile.min(width.max(1))
+        let scratch_pixels = tile
+            .min(width.max(1))
             .checked_mul(band_rows)
             .ok_or(FrameError::TooLarge)?;
         let stride = width.checked_mul(8).ok_or(FrameError::TooLarge)?;
         self.scratch_pool.begin_frame();
-        self.scratch_pool.prepare(scratch_pixels, self.sample_grid, threads.max(1))?;
-        Ok(CameraBandLayout { stride, band_rows, height })
+        self.scratch_pool
+            .prepare(scratch_pixels, self.sample_grid, threads.max(1))?;
+        Ok(CameraBandLayout {
+            stride,
+            band_rows,
+            height,
+        })
     }
 
     pub(crate) fn render_owned_bands<'texture>(
@@ -1589,13 +1594,9 @@ impl PreparedThreeDProjection {
             let band = next.fetch_add(1, Ordering::Relaxed);
             let Some(bytes) = bands.get(band) else { break };
             let mut bytes = bytes.lock().unwrap_or_else(PoisonError::into_inner);
-            raster.render_band(
-                &mut scratch,
-                band,
-                &mut bytes,
-                stride,
-                |index, ()| material(index),
-            );
+            raster.render_band(&mut scratch, band, &mut bytes, stride, |index, ()| {
+                material(index)
+            });
         }
     }
 

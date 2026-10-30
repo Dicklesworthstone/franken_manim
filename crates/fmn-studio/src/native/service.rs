@@ -56,7 +56,9 @@ pub struct NativeWorkerConfig {
     pub checkpoint_frames: u64,
     /// Explicit factory replay contract; disabled by default.
     pub replay: NativeReplayPolicy,
-    /// Maximum aggregate frame steps in one replay, or one cold seek.
+    /// Maximum aggregate executed frame steps in one replay, or one cold seek.
+    /// Forward journal entries share a candidate; backwards entries charge a
+    /// fresh reconstruction from frame zero.
     pub max_replay_frames: u64,
     /// Maximum viewport pixels, checked before allocating render buffers.
     pub max_pixels: u64,

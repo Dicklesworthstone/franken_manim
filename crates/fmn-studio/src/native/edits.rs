@@ -114,13 +114,34 @@ impl EditTrack {
         target: u64,
         after: Option<u64>,
     ) -> Result<(), ServiceError> {
-        for row in &self.rows {
+        let applied = after.map_or(0, |frame| {
+            self.rows
+                .partition_point(|row| row.input.frame.cast_unsigned() <= frame)
+        });
+        self.advance_after_inputs(program, target, applied)
+    }
+
+    /// Continue a verified replay candidate whose first `applied` rows have
+    /// already run. Unlike a frame cutoff, this keeps newly appended inputs at
+    /// the current frame visible: selection, nudge and undo can share a capture
+    /// while still being distinct ordered commands.
+    ///
+    /// The caller preserves the applied prefix, or reconstructs a fresh owner
+    /// after moving backwards. Never reuse a cursor after replacing that prefix.
+    pub fn advance_after_inputs(
+        &self,
+        program: &mut NativeSceneProgram,
+        target: u64,
+        applied: usize,
+    ) -> Result<(), ServiceError> {
+        let remaining = self
+            .rows
+            .get(applied..)
+            .ok_or_else(|| invalid("native replay input cursor exceeds its track"))?;
+        for row in remaining {
             let frame = row.input.frame.cast_unsigned();
             if frame > target {
                 break;
-            }
-            if after.is_some_and(|previous| frame <= previous) {
-                continue;
             }
             program.advance_to(frame)?;
             program.dispatch(row.input.event.clone())?;

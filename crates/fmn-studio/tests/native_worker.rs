@@ -313,6 +313,90 @@ fn replay_suffix_executes_and_checks_every_actual_state_hash() {
 }
 
 #[test]
+fn forward_journal_reuses_one_candidate_without_repeating_stateful_frames() {
+    let mut original = worker();
+    let mut journal = Journal::new();
+    let mut hashes = Vec::new();
+    for frame in [2, 2, 5, 9] {
+        let entry = commit(&mut original, frame);
+        hashes.push(entry.state_hash);
+        journal.record(entry).unwrap();
+    }
+    let expected = seek(&mut original, 12);
+    let builds = Rc::new(Cell::new(0));
+    let observed = Rc::clone(&builds);
+    let mut policy = config();
+    // Nine actual frame steps fit; rerunning every command from zero would
+    // consume eighteen and fail this same production work budget.
+    policy.max_replay_frames = 12;
+    let mut recovered = NativeSceneWorker::new(policy, move || {
+        observed.set(observed.get() + 1);
+        program()
+    })
+    .unwrap();
+    let before = builds.get();
+    assert_eq!(
+        recovered
+            .handle(SupervisorRequest::ReplayJournal(JournalReplay {
+                scene: NAME.into(),
+                from_entry: 0,
+                through_entry: 4,
+                journal: journal.to_bytes().unwrap(),
+            }))
+            .unwrap(),
+        WorkerResponse::ReplayComplete {
+            from_entry: 0,
+            state_hashes: hashes,
+        }
+    );
+    assert_eq!(builds.get(), before + 1);
+    assert_eq!(recovered.program().unwrap().frame_index(), 9);
+    assert_eq!(png(&seek(&mut recovered, 12)), png(&expected));
+    assert_eq!(
+        builds.get(),
+        before + 1,
+        "continued playback keeps its callbacks"
+    );
+}
+
+#[test]
+fn backward_journal_reconstructs_a_new_candidate_and_charges_each_forward_run() {
+    let mut original = worker();
+    let mut journal = Journal::new();
+    for frame in [2, 5, 1, 7] {
+        journal.record(commit(&mut original, frame)).unwrap();
+    }
+    let expected = seek(&mut original, 7);
+    for budget in [11, 12] {
+        let builds = Rc::new(Cell::new(0));
+        let observed = Rc::clone(&builds);
+        let mut policy = config();
+        policy.max_replay_frames = budget;
+        let mut recovered = NativeSceneWorker::new(policy, move || {
+            observed.set(observed.get() + 1);
+            program()
+        })
+        .unwrap();
+        let before = builds.get();
+        let result = recovered.handle(SupervisorRequest::ReplayJournal(JournalReplay {
+            scene: NAME.into(),
+            from_entry: 0,
+            through_entry: 4,
+            journal: journal.to_bytes().unwrap(),
+        }));
+        if budget == 11 {
+            assert_eq!(result.unwrap_err().code, WorkerErrorCode::ReplayFailed);
+            assert_eq!(builds.get(), before, "work is refused before any callback");
+            assert_eq!(recovered.journal_position(), 0);
+        } else {
+            result.unwrap();
+            assert_eq!(builds.get(), before + 2, "one owner per monotonic run");
+            assert_eq!(seek(&mut recovered, 7), expected);
+        }
+    }
+}
+
+#[test]
 fn divergent_replay_installs_no_prefix_and_leaves_the_existing_owner_intact() {
     let mut original = worker();
     let first = commit(&mut original, 3);
@@ -342,7 +426,7 @@ fn divergent_replay_installs_no_prefix_and_leaves_the_existing_owner_intact() {
 fn changed_source_closure_and_aggregate_work_budget_refuse_before_factory_execution() {
     let mut original = worker();
     let first = commit(&mut original, 3);
-    let second = commit(&mut original, 3);
+    let second = commit(&mut original, 2);
     let mut journal = Journal::new();
     journal.record(first).unwrap();
     journal.record(second).unwrap();
@@ -353,7 +437,7 @@ fn changed_source_closure_and_aggregate_work_budget_refuse_before_factory_execut
         if changed_source {
             policy.source_digest = protocol_digest(b"different source");
         } else {
-            policy.max_replay_frames = 5;
+            policy.max_replay_frames = 4; // three frames, then a fresh two-frame run
         }
         let mut recovered = NativeSceneWorker::new(policy, move || {
             observed.set(observed.get() + 1);

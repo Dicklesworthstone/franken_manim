@@ -1,4 +1,9 @@
 //! Transactional native command replay and cold checkpoint reconstruction.
+//!
+//! A forward journal run keeps one independent executable candidate. Every
+//! entry still verifies its actual state hash before the transaction can be
+//! published. Backward seeks reconstruct fresh callback captures; decoded
+//! snapshots are never mistaken for executable animation or editor state.
 
 use fmn_scene::Journal;
 use fmn_scene::studio_bridge::{SceneState, Stage};
@@ -8,6 +13,13 @@ use super::{NativeSceneWorker, execution_error, refuse_owned};
 use crate::{
     Checkpoint, JournalReplay, ServiceError, WorkerErrorCode, WorkerResponse, protocol_digest,
 };
+
+struct ReplayStep {
+    frame: u64,
+    /// None starts a fresh callback owner; Some continues its verified input
+    /// prefix, including new events at that owner's current frame.
+    applied_inputs: Option<usize>,
+}
 
 impl NativeSceneWorker {
     pub(super) fn replay(&mut self, replay: JournalReplay) -> Result<WorkerResponse, ServiceError> {
@@ -51,6 +63,12 @@ impl NativeSceneWorker {
         let mut simulated = self.edits.try_clone()?;
         let mut total_frames = 0_u64;
         let mut total_inputs = 0_u64;
+        let mut previous_frame = None;
+        let mut previous_inputs = 0_u64;
+        let mut steps = Vec::new();
+        steps
+            .try_reserve_exact(entries.len())
+            .map_err(execution_error)?;
         for (offset, entry) in entries.iter().enumerate() {
             if entry.reads != self.reads
                 || entry.effect != self.effect()
@@ -64,11 +82,28 @@ impl NativeSceneWorker {
             let frame = self
                 .prepare_command(&entry.command, position, &mut simulated)
                 .map_err(|error| refuse_owned(WorkerErrorCode::ReplayFailed, error))?;
+            let inputs = simulated.visible_count(frame);
+            // An append at or after the candidate's current frame preserves
+            // every input it has already executed. A backwards command starts
+            // another monotonic run and recreates both callbacks and editor
+            // history. Charge the exact work that execution below will do.
+            let (frame_work, input_work, applied_inputs) = match previous_frame {
+                Some(previous) if previous <= frame => (
+                    frame - previous,
+                    inputs.checked_sub(previous_inputs).ok_or_else(|| {
+                        refuse("native replay replaced an already applied input prefix")
+                    })?,
+                    Some(usize::try_from(previous_inputs).map_err(|_| {
+                        refuse("native replay input cursor exceeds usize")
+                    })?),
+                ),
+                _ => (frame, inputs, None),
+            };
             total_frames = total_frames
-                .checked_add(frame)
+                .checked_add(frame_work)
                 .ok_or_else(|| refuse("native replay work overflows"))?;
             total_inputs = total_inputs
-                .checked_add(simulated.visible_count(frame))
+                .checked_add(input_work)
                 .ok_or_else(|| refuse("native input replay work overflows"))?;
             if total_frames > self.config.max_replay_frames
                 || total_inputs > self.config.max_replay_inputs
@@ -85,6 +120,12 @@ impl NativeSceneWorker {
                     "native replay checkpoint digest or budget is invalid",
                 ));
             }
+            steps.push(ReplayStep {
+                frame,
+                applied_inputs,
+            });
+            previous_frame = Some(frame);
+            previous_inputs = inputs;
         }
         let mut edits = self.edits.try_clone()?;
         let mut hashes = Vec::new();
@@ -93,13 +134,27 @@ impl NativeSceneWorker {
             .map_err(execution_error)?;
         let mut candidate = None;
         let mut last_checkpoint = self.last_checkpoint;
-        for (offset, entry) in entries.iter().enumerate() {
+        for ((offset, entry), step) in entries.iter().enumerate().zip(steps) {
             let position = replay.from_entry + offset as u64;
             let frame = self.prepare_command(&entry.command, position, &mut edits)?;
-            let mut program = self
-                .fresh_at(frame, &edits)
-                .map_err(|error| refuse_owned(WorkerErrorCode::ReplayFailed, error))?;
-            let state = self.state_bytes(&mut program, &edits, position + 1)?;
+            debug_assert_eq!(frame, step.frame);
+            if let Some(applied) = step.applied_inputs {
+                let program = candidate
+                    .as_mut()
+                    .ok_or_else(|| refuse("native replay candidate is absent"))?;
+                edits
+                    .advance_after_inputs(program, frame, applied)
+                    .map_err(|error| refuse_owned(WorkerErrorCode::ReplayFailed, error))?;
+            } else {
+                candidate = Some(
+                    self.fresh_at(frame, &edits)
+                        .map_err(|error| refuse_owned(WorkerErrorCode::ReplayFailed, error))?,
+                );
+            }
+            let program = candidate
+                .as_mut()
+                .ok_or_else(|| refuse("native replay candidate is absent"))?;
+            let state = self.state_bytes(program, &edits, position + 1)?;
             let hash = protocol_digest(&state);
             if hash != entry.state_hash {
                 return Err(refuse(
@@ -110,7 +165,6 @@ impl NativeSceneWorker {
             if entry.checkpoint.is_some() {
                 last_checkpoint = Some(frame);
             }
-            candidate = Some(program);
         }
         let mut tail = None;
         if let Some(entry) = entries.last() {

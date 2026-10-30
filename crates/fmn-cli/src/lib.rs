@@ -11921,8 +11921,7 @@ mod tests {
     fn cpu_preview_and_export_admit_retained_raster_storage() {
         let fs = VirtualFs::new();
         let command = render(
-            parse_args(["--resolution", "64x48", "--threads", "4"])
-                .expect("bounded CPU render"),
+            parse_args(["--resolution", "64x48", "--threads", "4"]).expect("bounded CPU render"),
         );
         let config = resolve_render_config(&fs, &command).expect("valid CPU config");
         for intent in [
@@ -11945,8 +11944,8 @@ mod tests {
                     .map(fmn_runtime::TeamPlan::scratch_bytes)
                     .max()
                     .expect("at least one render team");
-                let surface_bytes = plan.estimated_in_flight_bytes / plan.frames_in_flight
-                    - scratch;
+                let surface_bytes =
+                    plan.estimated_in_flight_bytes / plan.frames_in_flight - scratch;
                 // A worker can simultaneously own the RGBA16F destination,
                 // cached tile pixels and persistent bands, plus its RGBA8
                 // output slot. Preview uses the same retained CPU renderer.

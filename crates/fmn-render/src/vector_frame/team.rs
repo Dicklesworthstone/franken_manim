@@ -18,7 +18,8 @@ use crate::engine::PreparedBands;
 use crate::retained::PreparedCameraBands;
 use crate::{
     AaStats, Binning, CachedRenderError, CachedRenderStats, FrameArena, FrameJob, MonoTable,
-    PixelTileCache, PreparedCameraFrame, RenderPlan, RetainedFrameRendererConfig, RetainedFrameRendererError, TileWork,
+    PixelTileCache, PreparedCameraFrame, RenderPlan, RetainedFrameRendererConfig,
+    RetainedFrameRendererError, TileWork,
 };
 
 /// Mutable compiler tables lent to a synchronous raster call by ownership
@@ -187,9 +188,7 @@ impl Payload {
         }
         for (index, band) in self.bands.iter_mut().enumerate() {
             let rows = band_rows.min(height - index * band_rows);
-            let bytes = rows
-                .checked_mul(stride)
-                .ok_or(FrameError::TooLarge)?;
+            let bytes = rows.checked_mul(stride).ok_or(FrameError::TooLarge)?;
             let buffer = band.get_mut().unwrap_or_else(PoisonError::into_inner);
             if buffer.len() < bytes {
                 buffer

@@ -269,9 +269,11 @@ impl RenderWorker {
             }
             frame
                 .render_into_with_team(
-                    self.raster_team.as_mut().ok_or(NativeFrameError::WorkerState(
-                        "missing persistent camera raster team",
-                    ))?,
+                    self.raster_team
+                        .as_mut()
+                        .ok_or(NativeFrameError::WorkerState(
+                            "missing persistent camera raster team",
+                        ))?,
                     &mut raster,
                 )
                 .map_err(NativeFrameError::Renderer)?;
@@ -1281,7 +1283,12 @@ mod handoff_tests {
                 );
             }
             assert_eq!(
-                worker.raster_team.as_ref().unwrap().stats().frames_completed,
+                worker
+                    .raster_team
+                    .as_ref()
+                    .unwrap()
+                    .stats()
+                    .frames_completed,
                 rasterizations,
             );
         }

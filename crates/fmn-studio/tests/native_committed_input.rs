@@ -356,7 +356,17 @@ fn mixed_seek_and_input_journal_replays_the_complete_track_and_exact_hashes() {
         commit_seek(&mut original, 7),
     ];
     let expected = seek(&mut original, 7);
-    let mut recovered = worker();
+    let builds = Rc::new(Cell::new(0));
+    let observed = Rc::clone(&builds);
+    let mut policy = config();
+    policy.max_replay_frames = 7;
+    policy.max_replay_inputs = 2;
+    let mut recovered = NativeSceneWorker::new(policy, move || {
+        observed.set(observed.get() + 1);
+        program()
+    })
+    .unwrap();
+    let before = builds.get();
     let response = recovered
         .handle(SupervisorRequest::ReplayJournal(JournalReplay {
             scene: NAME.into(),
@@ -375,6 +385,61 @@ fn mixed_seek_and_input_journal_replays_the_complete_track_and_exact_hashes() {
     assert_eq!(seek(&mut recovered, 7), expected);
     assert_eq!(recovered.journal_position(), 4);
     assert_eq!(recovered.committed_input_count(), 2);
+    assert_eq!(builds.get(), before + 1, "same-frame inputs keep their owner");
+}
+
+#[test]
+fn replay_rewinds_then_replaces_future_input_without_reusing_the_abandoned_branch() {
+    let mut original = worker();
+    let mut entries = vec![
+        select(&mut original),
+        commit_seek(&mut original, 5),
+        input(&mut original, nudge()),
+        commit_seek(&mut original, 2),
+        input(&mut original, key(Key::ArrowDown, Modifiers::SHIFT)),
+        commit_seek(&mut original, 7),
+    ];
+    // Undo/redo after a branch replacement needs the genuine native editor
+    // history from that branch, including the two commands at frame two.
+    entries.push(input(
+        &mut original,
+        key(Key::Character('z'), Modifiers::PRIMARY),
+    ));
+    entries.push(input(
+        &mut original,
+        key(Key::Character('z'), Modifiers::PRIMARY | Modifiers::SHIFT),
+    ));
+    let expected = seek(&mut original, 9);
+    let builds = Rc::new(Cell::new(0));
+    let observed = Rc::clone(&builds);
+    let mut policy = config();
+    policy.max_replay_frames = 12; // frame 0..5, then a new frame 0..7 run
+    policy.max_replay_inputs = 6; // two input prefixes, then undo and redo
+    let mut recovered = NativeSceneWorker::new(policy, move || {
+        observed.set(observed.get() + 1);
+        program()
+    })
+    .unwrap();
+    let before = builds.get();
+    let response = recovered
+        .handle(SupervisorRequest::ReplayJournal(JournalReplay {
+            scene: NAME.into(),
+            from_entry: 0,
+            through_entry: entries.len() as u64,
+            journal: journal(&entries),
+        }))
+        .unwrap();
+    assert_eq!(
+        response,
+        WorkerResponse::ReplayComplete {
+            from_entry: 0,
+            state_hashes: entries.iter().map(|entry| entry.state_hash).collect(),
+        }
+    );
+    assert_eq!(builds.get(), before + 2);
+    assert_eq!(recovered.committed_input_count(), 4);
+    assert_eq!(seek(&mut recovered, 9), expected);
+    assert!((y(&recovered) + 0.5).abs() < 1.0e-6);
 }
 
 #[test]
@@ -494,11 +559,15 @@ fn input_count_limit_refuses_before_execution_and_allows_replacing_a_future_bran
 #[test]
 fn zero_frame_input_replay_has_an_aggregate_work_budget_before_any_factory_runs() {
     let mut original = worker();
-    let entries = vec![select(&mut original), input(&mut original, nudge())];
+    let entries = vec![
+        select(&mut original),
+        input(&mut original, nudge()),
+        input(&mut original, nudge()),
+    ];
     let calls = Rc::new(Cell::new(0));
     let observed = Rc::clone(&calls);
     let mut policy = config();
-    policy.max_replay_inputs = 2; // two entries require 1 + 2 dispatches
+    policy.max_replay_inputs = 2; // three distinct frame-zero input dispatches
     let mut recovered = NativeSceneWorker::new(policy, move || {
         observed.set(observed.get() + 1);
         program()
@@ -510,7 +579,7 @@ fn zero_frame_input_replay_has_an_aggregate_work_budget_before_any_factory_runs(
             .handle(SupervisorRequest::ReplayJournal(JournalReplay {
                 scene: NAME.into(),
                 from_entry: 0,
-                through_entry: 2,
+                through_entry: 3,
                 journal: journal(&entries),
             }))
             .is_err()
