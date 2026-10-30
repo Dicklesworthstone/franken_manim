@@ -232,6 +232,42 @@ class VectorGroupProtocol(unittest.TestCase):
         arranged.arrange(m.UR, buff=0.18)
         np.testing.assert_allclose(arranged.get_center(), [0.0, 0.0, 0.0], atol=1e-6)
 
+    def test_a_scene_bound_member_of_a_detached_group_is_transformed_once(self):
+        # fm-group-op-bound-member-i057t: a group built before its members join a Scene stays
+        # detached, and its family-wide operations used to reach a bound member's descendants
+        # twice (once through the member's own Stage call). Expected values are the pinned
+        # Reference's, from the API fuzzer's minimized programs (s34-001276, s34-003074,
+        # s34-000067).
+        for bound in (True, False):
+            with self.subTest(bound=bound):
+                scene = m.Scene()
+                dashed = m.DashedLine(np.array([2.47, -0.63, 0.0]), np.array([0.5, 2.4, 0.0]))
+                triangle = m.RegularPolygon(n=3)
+                group = m.VGroup(triangle, dashed)
+                if bound:
+                    scene.add(triangle, dashed)
+                    self.assertTrue(dashed._is_bound())
+                    self.assertFalse(group._is_bound())
+                group.arrange(m.DOWN, buff=0.35)
+                np.testing.assert_allclose(dashed.get_center()[:2], [0.0, -0.925], atol=1e-3)
+                np.testing.assert_allclose(triangle.get_center()[:2], [0.0, 1.69], atol=1e-3)
+                np.testing.assert_allclose(group.get_center(), [0.0, 0.0, 0.0], atol=1e-6)
+        scene = m.Scene()
+        prism = m.Prism(width=2.13, height=2.28, depth=2.07)
+        group = m.Group(m.RegularPolygon(n=7), prism)
+        scene.add(prism)
+        self.assertFalse(group._is_bound())
+        group.flip(m.RIGHT)
+        np.testing.assert_allclose(prism[0].get_center(), [0.0, 0.0, -1.035], atol=1e-3)
+        scene = m.Scene()
+        prism = m.Prism(width=1.09, height=1.28, depth=0.53)
+        group = m.Group(prism, m.Cone(height=0.95, radius=0.62, resolution=(8, 4)),
+                        m.Circle(radius=1.77))
+        scene.add(prism)
+        self.assertFalse(group._is_bound())
+        group.next_to(prism, m.DOWN, buff=0.05)
+        np.testing.assert_allclose(prism.get_center(), [0.0, -2.46, -0.355], atol=1e-3)
+
     def test_installation_is_idempotent(self):
         from fmn_python.grouping import install_grouping
         native = getattr(m, '_native', m)

@@ -1201,7 +1201,18 @@ class Mobject(_BridgeMobject):
         # root, so the transform distributes over the Python family list.
         if self._is_bound():
             return [self]
-        return _family_preorder(self)
+        family = _family_preorder(self)
+        # A detached root can own members a Scene holds (added one by one,
+        # or bound by a play). Each such member's call recurses its own
+        # Stage family, which the Scene keeps bound with it, so its
+        # descendants take no call of their own: the transform reaches each
+        # member once (fm-group-op-bound-member-i057t; arrange moved a bound
+        # DashedLine's dashes twice).
+        covered = set()
+        for member in family:
+            if id(member) not in covered and member._is_bound():
+                covered.update(id(mob) for mob in _family_preorder(member)[1:])
+        return [member for member in family if id(member) not in covered]
 
     def _bbox_rows(self):
         # The family bounding box as the Reference's [min, mid, max] rows.
