@@ -43,7 +43,8 @@ pub fn run_portal_gauntlet_subclass_hooks() -> Result<SubclassHookReport, String
               for case in (InitPointsOverrides, InterpolateOverride, LiveFadeRates))\n\
               _suite.addTests(CameraConfigurationTests(name) for name in (\n\
               'test_bare_runs_use_constructor_and_class_camera_fps',\n\
-              'test_constructor_clock_is_ready_for_imperative_playback'))\n\
+              'test_constructor_clock_is_ready_for_imperative_playback',\n\
+              'test_bare_clock_configuration_does_not_apply_a_recording_pixel_budget'))\n\
               _result = unittest.TextTestRunner(verbosity=2).run(_suite)\n\
               _summary = (_result.testsRun, len(_result.failures) + len(_result.errors), len(BASES) + 1)\n",
             Some(globals),
@@ -80,7 +81,8 @@ mod tests {
                 " for case in (InitPointsOverrides, InterpolateOverride, LiveFadeRates))\n",
                 "_suite.addTests(CameraConfigurationTests(name) for name in (\n",
                 "'test_bare_runs_use_constructor_and_class_camera_fps',\n",
-                "'test_constructor_clock_is_ready_for_imperative_playback'))\n",
+                "'test_constructor_clock_is_ready_for_imperative_playback',\n",
+                "'test_bare_clock_configuration_does_not_apply_a_recording_pixel_budget'))\n",
                 "_result = unittest.TextTestRunner(verbosity=2).run(_suite)\n",
                 "assert _result.wasSuccessful(), 'library subclass hook acceptance failed'\n",
             ))

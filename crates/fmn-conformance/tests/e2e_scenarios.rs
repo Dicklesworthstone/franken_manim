@@ -12108,7 +12108,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         vec![
             Assertion::ExitCode(0),
             counter_eq("subclass_hook_bases", 11),
-            counter_eq("subclass_hook_cases", 9),
+            counter_eq("subclass_hook_cases", 10),
         ],
         vec![LogExpect::span_present(
             "e2e.python.subclass_hooks",

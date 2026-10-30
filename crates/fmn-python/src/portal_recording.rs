@@ -30,6 +30,10 @@ pub(crate) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
         "_portal_prepare_recording_scene",
         wrap_pyfunction!(_portal_prepare_recording_scene, module)?,
     )?;
+    module.setattr(
+        "_portal_prepare_scene_clock",
+        wrap_pyfunction!(_portal_prepare_scene_clock, module)?,
+    )?;
     Ok(())
 }
 
@@ -49,6 +53,30 @@ fn _portal_prepare_recording_scene(
             "fresh recording requires positive dimensions and FPS, and at most 16777216 pixels",
         ));
     }
+    check_pristine_scene(scene)?;
+    let mut config = fmn_config::Config::resolve(&[], None)
+        .map_err(native_error)?
+        .config;
+    config.camera.resolution = (width, height);
+    config.camera.fps = fps;
+    config.determinism.mode = fmn_config::config::DeterminismMode::Standard;
+    install_pristine_runtime(scene, RuntimeConfig::from_config(&config), seed)
+}
+
+/// Select only a bare scene's clock. Camera recipes stay lazy, including
+/// invalid dimensions an author repairs before the first capture.
+#[pyfunction]
+fn _portal_prepare_scene_clock(scene: &Bound<'_, PyScene>, fps: u32) -> PyResult<()> {
+    if fps == 0 {
+        return Err(PyValueError::new_err("a fresh Scene requires positive FPS"));
+    }
+    check_pristine_scene(scene)?;
+    let mut config = scene.try_borrow()?.engine.borrow().config().clone();
+    config.fps = fps;
+    install_pristine_runtime(scene, config, 0)
+}
+
+fn check_pristine_scene(scene: &Bound<'_, PyScene>) -> PyResult<()> {
     check_available(scene)?;
     portal_video::check_scene_ownership(scene)?;
     let namespace = scene.getattr("__dict__")?;
@@ -63,14 +91,15 @@ fn _portal_prepare_recording_scene(
             ));
         }
     }
-    let mut config = fmn_config::Config::resolve(&[], None)
-        .map_err(native_error)?
-        .config;
-    config.camera.resolution = (width, height);
-    config.camera.fps = fps;
-    config.determinism.mode = fmn_config::config::DeterminismMode::Standard;
-    let replacement =
-        Scene::new(RuntimeConfig::from_config(&config), seed).map_err(native_error)?;
+    Ok(())
+}
+
+fn install_pristine_runtime(
+    scene: &Bound<'_, PyScene>,
+    config: RuntimeConfig,
+    seed: u64,
+) -> PyResult<()> {
+    let replacement = Scene::new(config, seed).map_err(native_error)?;
     // The same ownership check as ordinary rendering protects every live
     // proxy; the scene's own camera frame is carried into the new engine.
     crate::install_pristine_arena(scene, Rc::new(EngineState::new(replacement)))

@@ -50,6 +50,19 @@ class CameraConfigurationTests(unittest.TestCase):
         self.assertTrue(positive)
         np.testing.assert_allclose(positive, 1 / 60, rtol=0, atol=1e-15)
 
+    def test_bare_clock_configuration_does_not_apply_a_recording_pixel_budget(self):
+        scene = m.Scene(camera_config={"resolution": (7680, 4320), "fps": 60})
+        frame = scene.frame
+        self.assertNotIn("_camera", vars(scene))
+        scene.run()
+        self.assertIs(scene.frame, frame)
+        self.assertNotIn("_camera", vars(scene))
+        self.assertEqual(m._portal_scene_clock(scene), (60, 0))
+        # Selecting only a clock allocates no pixels. The existing recording
+        # boundary must still refuse this resolution at its unchanged limit.
+        with self.assertRaisesRegex(ValueError, "at most 16777216 pixels"):
+            m._portal_prepare_recording_scene(scene, 7680, 4320, 60, 0)
+
     def test_project_scene_and_writer_defaults_reach_the_installed_initializer(self):
         from fmn_python.scene_loading import SceneSource
         configuration = m._resolved_portal_config(None,
