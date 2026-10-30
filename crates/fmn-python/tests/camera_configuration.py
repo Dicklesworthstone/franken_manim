@@ -123,6 +123,7 @@ class CameraConfigurationTests(unittest.TestCase):
                 "import manimlib as m\n"
                 "from manimlib.mobject.svg.old_tex_mobject import SingleStringTex\n"
                 "TEXT = m.Text('Config', font_size=72, should_center=False)\n"
+                "CODE = m.Code('x = 1', font='', should_center=False)\n"
                 "TEX = m.Tex(r'\\minus', additional_preamble=r'\\newcommand{\\minus}{+}', should_center=False)\n"
                 "LEGACY = SingleStringTex(r'\\minus', additional_preamble=r'\\newcommand{\\minus}{+}')\n"
                 "class Configured(m.Scene): pass\n")
@@ -130,6 +131,10 @@ class CameraConfigurationTests(unittest.TestCase):
                 with SceneSource(path, m.Scene,
                                  configuration=m._resolved_portal_config(None, layer)) as source:
                     text, tex, legacy = source.module.TEXT, source.module.TEX, source.module.LEGACY
+                    code = source.module.CODE
+                    np.testing.assert_array_equal(
+                        code.get_all_points(),
+                        m.Code("x = 1", font="CM Typewriter", should_center=False).get_all_points())
                     explicit = m.Text("Config", font="IBM Plex Sans", font_size=72,
                                       should_center=False)
                     baseline = m.Text("Config", font="Computer Modern", font_size=72,
@@ -145,7 +150,8 @@ class CameraConfigurationTests(unittest.TestCase):
                     np.testing.assert_allclose(
                         legacy.get_all_points(), SingleStringTex("+", template="basic").get_all_points(),
                         rtol=0, atol=1e-6)
-                    self.assertEqual((text.font, tex.template, legacy.template), ("", "", ""))
+                    self.assertEqual((text.font, tex.template, legacy.template, code.font),
+                                     ("", "", "", ""))
                     # The default pack defines this macro, unlike basic. An
                     # explicit constructor selection must override the file.
                     with self.assertRaises(ValueError):
@@ -157,7 +163,7 @@ class CameraConfigurationTests(unittest.TestCase):
                         file_writer_config={"video_codec": "ffv1", "pixel_format": "bgra"})
                     self.assertEqual((authored.file_writer.video_codec, authored.file_writer.pixel_format),
                                      ("ffv1", "bgra"))
-                    retained.extend((obj, obj.get_all_points().copy()) for obj in (text, tex, legacy))
+                    retained.extend((obj, obj.get_all_points().copy()) for obj in (text, tex, legacy, code))
                 self.assertIs(m.manim_config, live)
                 self.assertIs(live["text"], text_config)
                 self.assertIs(live["tex"], tex_config)
@@ -167,6 +173,42 @@ class CameraConfigurationTests(unittest.TestCase):
             for target in (obj, obj.copy()):
                 target.init_points()
                 np.testing.assert_array_equal(target.get_all_points(), points)
+
+    def test_character_template_cache_respects_scoped_typography_defaults(self):
+        from fmn_python.scene_loading import SceneSource
+        from manimlib.mobject.numbers import char_to_cahced_mob
+        original = deepcopy(m.manim_config)
+        texts = []
+        preamble = r"\newcommand{\minus}{+}"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "cached_typography.py")
+            path.write_text("from manimlib import Scene\nclass CachedTypography(Scene): pass\n")
+            for font, template in (("IBM Plex Sans", "basic"), ("Computer Modern", "default")):
+                layer = f"text:\n  font: {font}\ntex:\n  template: {template}\n"
+                with SceneSource(path, m.Scene,
+                                 configuration=m._resolved_portal_config(None, layer)):
+                    text = char_to_cahced_mob("Config", font_size=72, should_center=False)
+                    explicit = m.Text("Config", font=font, font_size=72, should_center=False)
+                    np.testing.assert_array_equal(text.get_all_points(), explicit.get_all_points())
+                    self.assertEqual(text.font, "")
+                    texts.append(text)
+                    if template == "basic":
+                        tex = char_to_cahced_mob(r"\minus", additional_preamble=preamble,
+                                                should_center=False)
+                        np.testing.assert_allclose(
+                            tex.get_all_points(),
+                            m.Tex("+", template="basic", should_center=False).get_all_points(),
+                            rtol=0, atol=1e-6)
+                        self.assertEqual(tex.template, "")
+                    else:
+                        # The default pack already defines this macro. A hit
+                        # from the basic pack must not hide its refusal.
+                        with self.assertRaises(ValueError):
+                            char_to_cahced_mob(r"\minus", additional_preamble=preamble,
+                                              should_center=False)
+                self.assertEqual(m.manim_config, original)
+        self.assertIsNot(texts[0], texts[1])
+        self.assertFalse(np.array_equal(texts[0].get_all_points(), texts[1].get_all_points()))
 
     def test_failed_configured_typography_import_restores_scope(self):
         from fmn_python.scene_loading import SceneSource

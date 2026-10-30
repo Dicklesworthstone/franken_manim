@@ -158,7 +158,7 @@ mod tests {
                 .inspect_err(|error| error.print(py))
                 .expect("load native configuration tests");
             py.run(
-                c"suite = unittest.TestSuite(CameraConfigurationTests(name) for name in ('test_documented_typography_defaults_change_native_ink_and_survive_scope', 'test_failed_configured_typography_import_restores_scope', 'test_explicit_typography_file_routes_output_with_cli_precedence'))\nresult = unittest.TextTestRunner(verbosity=2).run(suite)\nassert result.wasSuccessful(), 'native documented configuration effects failed'",
+                c"suite = unittest.TestSuite(CameraConfigurationTests(name) for name in ('test_documented_typography_defaults_change_native_ink_and_survive_scope', 'test_character_template_cache_respects_scoped_typography_defaults', 'test_failed_configured_typography_import_restores_scope', 'test_explicit_typography_file_routes_output_with_cli_precedence'))\nresult = unittest.TextTestRunner(verbosity=2).run(suite)\nassert result.wasSuccessful(), 'native documented configuration effects failed'",
                 Some(globals),
                 Some(globals),
             )

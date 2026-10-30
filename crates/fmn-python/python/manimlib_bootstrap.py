@@ -10253,7 +10253,24 @@ class OldTexText(OldTex):
 _FUNCTOOLS_LRU_CACHE = _importlib.import_module("functools").lru_cache
 
 
-@_FUNCTOOLS_LRU_CACHE()
+def _cache_char_with_typesetting_default(function):
+    @_FUNCTOOLS_LRU_CACHE()
+    def cached(char, selected_default, /, **text_config):
+        return function(char, **text_config)
+
+    @_importlib.import_module("functools").wraps(function)
+    def current(char, **text_config):
+        section, key = ("tex", "template") if "\\" in char or char == "i" else ("text", "font")
+        selected = _typesetting_default(section, key, text_config.get(key, ""))
+        return cached(char, selected, **text_config)
+
+    current.cache_clear = cached.cache_clear
+    current.cache_info = cached.cache_info
+    current.cache_parameters = cached.cache_parameters
+    return current
+
+
+@_cache_char_with_typesetting_default
 def char_to_cahced_mob(char, **text_config):
     """The Reference's per-character template cache, verbatim including
     the Reference's own "cahced" spelling (numbers.py:22). LaTeX-command

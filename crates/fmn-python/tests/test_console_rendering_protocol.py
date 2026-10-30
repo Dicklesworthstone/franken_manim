@@ -658,5 +658,59 @@ class ConsoleRenderingProtocol(unittest.TestCase):
         self.assertIn('authored', err)
 
 
+
+class TypographyConfigurationProtocol(unittest.TestCase):
+    def test_character_cache_keys_include_scoped_typography_defaults(self):
+        source = ROOT / "python/manimlib_bootstrap.py"
+        wanted = {"_cache_char_with_typesetting_default", "char_to_cahced_mob", "_typesetting_default"}
+        nodes = [node for node in ast.parse(source.read_text()).body
+                 if isinstance(node, ast.FunctionDef) and node.name in wanted]
+        self.assertEqual({node.name for node in nodes}, wanted)
+        native = SimpleNamespace(manim_config={
+            "text": {"font": "IBM Plex Sans"}, "tex": {"template": "basic"},
+        })
+        calls = []
+
+        def constructor(kind, section, key):
+            def construct(char, **options):
+                item = SimpleNamespace(kind=kind, char=char, options=dict(options),
+                                       default=native.manim_config[section][key])
+                calls.append(item)
+                return item
+            return construct
+
+        namespace = {"_FUNCTOOLS_LRU_CACHE": importlib.import_module("functools").lru_cache,
+                     "_importlib": importlib, "_FMN_ROOT": native,
+                     "Text": constructor("Text", "text", "font"),
+                     "Tex": constructor("Tex", "tex", "template")}
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(source), "exec"), namespace)
+        cached = namespace["char_to_cahced_mob"]
+        first_text, first_tex = cached("x"), cached("i")
+        self.assertIs(cached("x"), first_text)
+        self.assertIs(cached("i"), first_tex)
+        self.assertEqual(len(calls), 2)
+        native.manim_config["text"]["font"] = "Computer Modern"
+        native.manim_config["tex"]["template"] = "default"
+        second_text, second_tex = cached("x"), cached("i")
+        self.assertIsNot(second_text, first_text)
+        self.assertIsNot(second_tex, first_tex)
+        self.assertEqual((second_text.default, second_tex.default), ("Computer Modern", "default"))
+        # Cache identity must include the selected defaults without replacing
+        # the caller's empty constructor sentinels with explicit arguments.
+        self.assertTrue(all(item.options == {} for item in calls))
+        explicit_text = cached("x", font="IBM Plex Sans")
+        explicit_tex = cached("i", template="basic")
+        native.manim_config["text"]["font"] = "CM Typewriter"
+        native.manim_config["tex"]["template"] = "basic"
+        self.assertIs(cached("x", font="IBM Plex Sans"), explicit_text)
+        self.assertIs(cached("i", template="basic"), explicit_tex)
+        self.assertEqual(explicit_text.options, {"font": "IBM Plex Sans"})
+        self.assertEqual(explicit_tex.options, {"template": "basic"})
+        self.assertIsNot(cached.__wrapped__("x"), cached.__wrapped__("x"))
+        self.assertEqual(cached.cache_parameters(), {"maxsize": 128, "typed": False})
+        self.assertGreater(cached.cache_info().hits, 0)
+        cached.cache_clear()
+        self.assertEqual(cached.cache_info().currsize, 0)
+
 if __name__ == "__main__":
     unittest.main()
