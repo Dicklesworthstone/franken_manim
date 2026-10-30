@@ -313,6 +313,14 @@ class ConsoleRenderingProtocol(unittest.TestCase):
         self.assertEqual(self.native.instances, [])
         self.assertEqual(self.native.config_documents, [])
 
+    def test_transparent_auto_pixel_format_reaches_native_negotiation(self):
+        self.assertEqual(
+            console._output_overrides({"format": "mov", "transparent": True, "pix_fmt": "auto"}),
+            {"transparent": True, "pix_fmt": "auto"},
+        )
+        with self.assertRaisesRegex(ValueError, "rgba or bgra"):
+            console._output_overrides({"format": "mov", "transparent": True, "pix_fmt": "nv12"})
+
     def test_invalid_color_and_unconnected_config_sections_refuse_before_source(self):
         self.source.write_text("raise AssertionError('must not execute source')\n")
         self.assertEqual(self.render("-c", "not-a-color")[0], 2)

@@ -102,6 +102,124 @@ class CameraConfigurationTests(unittest.TestCase):
         self.assertIs(m.manim_config["camera"], camera)
         self.assertEqual(m.manim_config, original)
 
+    def test_documented_typography_defaults_change_native_ink_and_survive_scope(self):
+        from fmn_python.scene_loading import SceneSource
+        from manimlib.mobject.svg.old_tex_mobject import SingleStringTex
+        live = m.manim_config
+        text_config, tex_config = live["text"], live["tex"]
+        original = deepcopy(live)
+        preamble = r"\newcommand{\minus}{+}"
+        layers = (
+            "style:\n  font: IBM Plex Sans\n  tex_pack: basic\n"
+            "output:\n  vcodec: auto\n  pix_fmt: auto\n",
+            "text:\n  font: IBM Plex Sans\ntex:\n  template: basic\n"
+            "file_writer:\n  video_codec: auto\n  pixel_format: auto\n",
+        )
+        retained, images = [], []
+        camera = m.Camera(resolution=(128, 72), samples=1)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "configured_typography.py")
+            path.write_text(
+                "import manimlib as m\n"
+                "from manimlib.mobject.svg.old_tex_mobject import SingleStringTex\n"
+                "TEXT = m.Text('Config', font_size=72, should_center=False)\n"
+                "TEX = m.Tex(r'\\minus', additional_preamble=r'\\newcommand{\\minus}{+}', should_center=False)\n"
+                "LEGACY = SingleStringTex(r'\\minus', additional_preamble=r'\\newcommand{\\minus}{+}')\n"
+                "class Configured(m.Scene): pass\n")
+            for layer in layers:
+                with SceneSource(path, m.Scene,
+                                 configuration=m._resolved_portal_config(None, layer)) as source:
+                    text, tex, legacy = source.module.TEXT, source.module.TEX, source.module.LEGACY
+                    explicit = m.Text("Config", font="IBM Plex Sans", font_size=72,
+                                      should_center=False)
+                    baseline = m.Text("Config", font="Computer Modern", font_size=72,
+                                      should_center=False)
+                    np.testing.assert_array_equal(text.get_all_points(), explicit.get_all_points())
+                    png = camera.capture_snapshot(text.copy().center()).png()
+                    self.assertEqual(png, camera.capture_snapshot(explicit.copy().center()).png())
+                    self.assertNotEqual(png, camera.capture_snapshot(baseline.copy().center()).png())
+                    images.append(png)
+                    np.testing.assert_allclose(
+                        tex.get_all_points(), m.Tex("+", template="basic", should_center=False).get_all_points(),
+                        rtol=0, atol=1e-6)
+                    np.testing.assert_allclose(
+                        legacy.get_all_points(), SingleStringTex("+", template="basic").get_all_points(),
+                        rtol=0, atol=1e-6)
+                    self.assertEqual((text.font, tex.template, legacy.template), ("", "", ""))
+                    # The default pack defines this macro, unlike basic. An
+                    # explicit constructor selection must override the file.
+                    with self.assertRaises(ValueError):
+                        m.Tex(r"\minus", template="default", additional_preamble=preamble)
+                    scene = source.scenes["Configured"]()
+                    self.assertEqual((scene.file_writer.video_codec, scene.file_writer.pixel_format),
+                                     ("auto", "auto"))
+                    authored = source.scenes["Configured"](
+                        file_writer_config={"video_codec": "ffv1", "pixel_format": "bgra"})
+                    self.assertEqual((authored.file_writer.video_codec, authored.file_writer.pixel_format),
+                                     ("ffv1", "bgra"))
+                    retained.extend((obj, obj.get_all_points().copy()) for obj in (text, tex, legacy))
+                self.assertIs(m.manim_config, live)
+                self.assertIs(live["text"], text_config)
+                self.assertIs(live["tex"], tex_config)
+                self.assertEqual(live, original)
+        self.assertEqual(images[0], images[1])
+        for obj, points in retained:
+            for target in (obj, obj.copy()):
+                target.init_points()
+                np.testing.assert_array_equal(target.get_all_points(), points)
+
+    def test_failed_configured_typography_import_restores_scope(self):
+        from fmn_python.scene_loading import SceneSource
+        live, original = m.manim_config, deepcopy(m.manim_config)
+        text_config, tex_config = live["text"], live["tex"]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "bad_configured_typography.py")
+            for layer, statement in (
+                ("style:\n  font: definitely-unbundled-font\n", "m.Text('unavailable')"),
+                ("style:\n  tex_pack: definitely-unavailable-pack\n", "m.Tex('x')"),
+            ):
+                path.write_text("import manimlib as m\n" + statement + "\n")
+                configuration = m._resolved_portal_config(None, layer)
+                with self.assertRaises(ValueError):
+                    with SceneSource(path, m.Scene, configuration=configuration):
+                        self.fail("invalid typography was accepted")
+                self.assertIs(m.manim_config, live)
+                self.assertIs(live["text"], text_config)
+                self.assertIs(live["tex"], tex_config)
+                self.assertEqual(live, original)
+
+    def test_explicit_typography_file_routes_output_with_cli_precedence(self):
+        from fmn_python.scene_loading import resolve_render_configuration
+        from fmn_python.console_rendering import _output_paths, _single_destination
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            path = root / "render.yml"
+            path.write_text(
+                "style:\n  font: IBM Plex Sans\n  tex_pack: basic\n"
+                "camera:\n  resolution: (80, 40)\n  fps: 8\n"
+                "output:\n  vcodec: auto\n  pix_fmt: auto\n"
+                f"directories:\n  base: {root}\n  output: configured-frames\n"
+                "  mirror_module_path: false\n")
+            options = {"config_file": str(path), "format": "png",
+                       "_resolution_explicit": True}
+            configuration, width, height, fps = resolve_render_configuration(m, options, 96, 54, 12)
+            self.assertEqual((width, height, fps), (96, 54, 12))
+            self.assertEqual(configuration["values"]["camera"]["fps"], 12)
+            self.assertEqual(configuration["values"]["text"]["font"], "IBM Plex Sans")
+            self.assertEqual(configuration["values"]["tex"]["template"], "basic")
+            selected, exact = _output_paths(options, root / "lesson.py")
+            self.assertEqual(selected, root / "configured-frames")
+            self.assertEqual(_single_destination(selected, exact, "Lesson", options),
+                             root / "configured-frames" / "Lesson.png")
+            selected, exact = _output_paths(dict(options, video_dir=str(root / "cli-dir")),
+                                            root / "lesson.py")
+            self.assertEqual(selected, root / "cli-dir")
+            selected, exact = _output_paths(dict(options, output=str(root / "exact.png")),
+                                            root / "lesson.py")
+            self.assertEqual(_single_destination(selected, exact, "Lesson", options), root / "exact.png")
+            with self.assertRaisesRegex(RuntimeError, "certified configuration-file/color provenance"):
+                resolve_render_configuration(m, dict(options, reproducible=True), 96, 54, 12)
+
     def test_manim_config_carries_the_reference_sections(self):
         # fm-e661: manim_config is default_config.yml at the pin, with the
         # camera layer under the cwd custom_config.yml, read once at import

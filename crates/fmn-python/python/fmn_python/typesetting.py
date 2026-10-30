@@ -254,6 +254,11 @@ def install_typesetting(native: Any) -> None:
         groups: dict[tuple[str, str, bool, str], list[str]] = {}
         total = 0
         for source, template, preamble, text_mode, align in requests:
+            template = g["_typesetting_default"]("tex", "template", template)
+            if not isinstance(template, str):
+                # Authored invalid live config must fail at construction,
+                # without turning an advisory warm-up into a second failure.
+                continue
             size = len(source.encode("utf-8")) + len(preamble.encode("utf-8"))
             if (len(source.encode("utf-8")) > _MAX_STATIC_SOURCE_BYTES
                     or len(preamble.encode("utf-8")) > _MAX_STATIC_SOURCE_BYTES
@@ -527,5 +532,6 @@ def preflight_tex(sources, *, template="", preamble="", text_mode=False,
         alignment=alignment, max_workers=max_workers,
     )
     module = import_module("manimlib")
+    options["template"] = module._typesetting_default("tex", "template", options["template"])
     module._fmn_ensure_tex_cache()
     return module._preflight_tex(batch, **options)

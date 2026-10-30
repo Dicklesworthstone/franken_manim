@@ -74,12 +74,13 @@ def _resolved_selector(obj, selector, offsets, budget, multiplier):
 
 def text_recipe(g, obj, source):
     """Compile the current public fields before publishing a new glyph family."""
+    from .string_lifecycle import typesetting_value
     size = len(source.encode("utf-8"))
     if size > _MAX_BYTES:
         raise ValueError("Text source exceeds 262144 bytes")
     if obj.global_config or obj.local_configs:
         raise NotImplementedError("Text global_config/local_configs require unsupported Pango attributes; use native font/style maps")
-    font = obj.font
+    font = typesetting_value(g, obj, "text", "font")
     if not isinstance(font, str):
         raise TypeError("Text font must be a family name")
     alignment = obj.alignment.upper() if isinstance(obj.alignment, str) else None
@@ -186,6 +187,7 @@ def install_text_authoring(native):
         g["_preflight_vmobject_style_kwargs"](style)
         self.text = self.string = source
         self.font_size, self.font = p["font_size"], p["font"]
+        self._fmn_default_font = g["_typesetting_default"]("text", "font", "")
         self.weight, self.slant = p["weight"], p["slant"]
         self.alignment, self.line_width = p["alignment"], p["line_width"]
         self.justify, self.indent, self.lsh = p["justify"], p["indent"], spacing

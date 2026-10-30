@@ -12805,6 +12805,8 @@ fn _resolved_portal_config<'py>(
     for layer in &layers {
         let (document, _) = fmn_config::yaml::parse(layer.text)
             .map_err(|error| PyValueError::new_err(format!("{}: {error}", layer.name)))?;
+        let document = fmn_config::config::normalize_layer(document)
+            .map_err(|error| PyValueError::new_err(format!("{}: {error}", layer.name)))?;
         if layer.name == "--config_file" {
             explicit_overrides = document.clone();
         }

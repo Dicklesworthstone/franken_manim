@@ -10,7 +10,7 @@ from functools import wraps
 import math
 
 from .invocation import InvocationGuard
-from .string_lifecycle import initialize_string, _publish
+from .string_lifecycle import initialize_string, _publish, typesetting_value
 
 _MAX_BYTES = 262_144
 
@@ -50,9 +50,10 @@ def install_legacy_tex_lifecycle(native):
         text = source_text(self.tex_string)
         size = scalar(self.font_size, "SingleStringTex font_size", positive=True)
         mode = bool(self.math_mode)
-        g["_validate_tex_options"](self.template, self.additional_preamble, not mode)
+        template = typesetting_value(g, self, "tex", "template")
+        g["_validate_tex_options"](template, self.additional_preamble, not mode)
         alignment = g["_tex_line_align"](self.alignment, not mode)
-        return text, size, mode, self.template, self.additional_preamble, alignment
+        return text, size, mode, template, self.additional_preamble, alignment
 
     @wraps(previous)
     def initialize(self, tex_string, height=None, fill_color=g["_StyleDefault"](g["_WHITE"]), fill_opacity=1.0,
@@ -67,7 +68,9 @@ def install_legacy_tex_lifecycle(native):
         size = scalar(font_size, "SingleStringTex font_size", positive=True)
         selected_height = None if height is None else scalar(height, "SingleStringTex height")
         mode = bool(math_mode)
-        g["_validate_tex_options"](template, additional_preamble, not mode)
+        default_template = g["_typesetting_default"]("tex", "template", "")
+        effective_template = default_template if isinstance(template, str) and not template else template
+        g["_validate_tex_options"](effective_template, additional_preamble, not mode)
         g["_tex_line_align"](alignment, not mode)
         style = dict(kwargs, fill_color=fill_color,
                      fill_opacity=(None if fill_opacity is None else
@@ -95,6 +98,7 @@ def install_legacy_tex_lifecycle(native):
             self.font_size, self.alignment, self.math_mode = size, alignment, mode
             self.organize_left_to_right = bool(organize_left_to_right)
             self.template, self.additional_preamble = template, additional_preamble
+            self._fmn_default_template = default_template
             self.base_color = g["_WHITE"]
             initialize_string(g, self, style)
             if selected_height is not None:

@@ -36,7 +36,7 @@ _MAX_CAPTURED_SOURCES = 4096
 _MAX_CAPTURED_SOURCE_BYTES = 64 * 1024 * 1024
 _MAX_CONFIG_BYTES = 1024 * 1024
 _CONFIG_BOUND_AT_IMPORT = frozenset({
-    "vmobject", "mobject", "text", "tex", "sizes", "colors", "key_bindings",
+    "vmobject", "mobject", "sizes", "colors", "key_bindings",
     "window", "embed", "determinism", "render", "log_level", "universal_import_line",
     "ignore_manimlib_modules_on_reload",
 })
@@ -89,11 +89,21 @@ def resolve_render_configuration(native, options, width, height, fps):
     explicit_text = read(Path(explicit)) if explicit is not None else None
     configuration = json.loads(json.dumps(resolver(custom_text, explicit_text), allow_nan=False))
     values = configuration["values"]
-    unsupported = sorted(set(configuration["explicit_overrides"]).intersection(_CONFIG_BOUND_AT_IMPORT))
+    explicit_overrides = configuration["explicit_overrides"]
+    unsupported = set(explicit_overrides).intersection(_CONFIG_BOUND_AT_IMPORT)
+    # Only these two constructor defaults are scoped here. Other text/tex
+    # defaults remain bound at import and must not become accepted no-ops.
+    for section, supported in (("text", {"font"}), ("tex", {"template"})):
+        unsupported.update(
+            section + "." + key
+            for key in explicit_overrides.get(section, {})
+            if key not in supported
+        )
+    unsupported = sorted(unsupported)
     if unsupported:
         raise RuntimeError("CAPABILITY: --config_file cannot rebind portal defaults for "
                            + ", ".join(unsupported)
-                           + "; camera, resolution_options, directories, file_writer, scene and cache are supported")
+                           + "; camera, resolution_options, directories, file_writer, scene, text.font, tex.template and cache are supported")
     camera = values["camera"]
     if not options.get("_resolution_explicit"):
         selected = options.get("_quality")
@@ -602,7 +612,7 @@ class SceneSource:
         _merge_configuration(live, {key: value for key, value in self._configuration["overrides"].items()
                                     if key not in _CONFIG_BOUND_AT_IMPORT})
         _merge_configuration(live, {key: values[key] for key in (
-            "camera", "resolution_options", "directories", "file_writer", "scene", "cache", "log_level"
+            "camera", "resolution_options", "directories", "file_writer", "scene", "text", "tex", "cache", "log_level"
         ) if key in values})
 
     def _restore_configuration(self):

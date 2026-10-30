@@ -150,6 +150,24 @@ def _run_parallel_batch_checkpoint_gauntlet():
 #[cfg(test)]
 mod tests {
     #[test]
+    fn native_documented_typography_configuration_effects() {
+        crate::with_python_test_module("native typography config", |py, _module, globals| {
+            let source = std::ffi::CString::new(include_str!("../tests/camera_configuration.py"))
+                .expect("camera configuration tests contain no NUL");
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .expect("load native configuration tests");
+            py.run(
+                c"suite = unittest.TestSuite(CameraConfigurationTests(name) for name in ('test_documented_typography_defaults_change_native_ink_and_survive_scope', 'test_failed_configured_typography_import_restores_scope', 'test_explicit_typography_file_routes_output_with_cli_precedence'))\nresult = unittest.TextTestRunner(verbosity=2).run(suite)\nassert result.wasSuccessful(), 'native documented configuration effects failed'",
+                Some(globals),
+                Some(globals),
+            )
+            .inspect_err(|error| error.print(py))
+            .expect("native documented configuration effects");
+        });
+    }
+
+    #[test]
     fn native_scene_console_acceptance() {
         assert_eq!(super::run_portal_gauntlet_console().unwrap(), 7);
     }
@@ -186,6 +204,21 @@ assert resolved['values']['resolution_options']['low'] == (60, 40)
 assert resolved['overrides']['camera']['fps'] == 24
 assert resolved['overrides']['authored'] == dict(enabled=True, absent=None)
 assert 'text' not in resolved['overrides']
+for lower, upper in [
+    ('text:\n  font: Computer Modern\ntex:\n  template: default\nfile_writer:\n  video_codec: libx264\n  pixel_format: yuv420p\n',
+     'style:\n  font: IBM Plex Sans\n  tex_pack: basic\noutput:\n  vcodec: auto\n  pix_fmt: rgba\ndirectories:\n  output: configured-frames\n'),
+    ('style:\n  font: Computer Modern\n  tex_pack: default\noutput:\n  vcodec: libx264\n  pix_fmt: yuv420p\n',
+     'text:\n  font: IBM Plex Sans\ntex:\n  template: basic\nfile_writer:\n  video_codec: auto\n  pixel_format: rgba\ndirectories:\n  subdirs:\n    output: configured-frames\n'),
+]:
+    configured = manimlib._resolved_portal_config(lower, upper)
+    for section in ('values', 'overrides', 'explicit_overrides'):
+        value = configured[section]
+        assert value['text']['font'] == 'IBM Plex Sans'
+        assert value['tex']['template'] == 'basic'
+        assert value['file_writer']['video_codec'] == 'auto'
+        assert value['file_writer']['pixel_format'] == 'rgba'
+        assert value['directories']['subdirs']['output'] == 'configured-frames'
+        assert 'style' not in value and 'output' not in value
 assert manimlib._portal_cli_color('red') == '#FF0000'
 assert manimlib._portal_cli_color('RebeccAPurple') == '#663399'
 assert manimlib._portal_cli_color('#abc') == '#AABBCC'

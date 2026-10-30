@@ -216,21 +216,8 @@ fn video_job(
     if transparent && format != PortalFrameFormat::Mov {
         return Err("transparent video requires MOV output; select format='mov'".into());
     }
-    let wire = match pixel_format.to_ascii_lowercase().as_str() {
-        "yuv420p" if transparent => WireFormat::Rgba8,
-        "rgba" | "rgba8" => WireFormat::Rgba8,
-        // ffmpeg's rgb32 is native-endian ARGB words: BGRA bytes on the
-        // little-endian hosts the portal supports. The Reference's
-        // SceneFileWriter.use_fast_encoding selects it.
-        "bgra" | "bgra8" | "rgb32" => WireFormat::Bgra8,
-        "nv12" | "yuv420p" => WireFormat::Nv12,
-        "p010" | "p010le" | "yuv420p10le" => WireFormat::P010,
-        _ => {
-            return Err(format!(
-                "unsupported file_writer.pixel_format {pixel_format:?}; choose rgba, bgra, nv12/yuv420p, or p010le"
-            ));
-        }
-    };
+    let wire =
+        WireFormat::from_config(pixel_format, transparent).map_err(|error| error.to_string())?;
     let codec = codec.trim();
     if codec.is_empty()
         || !codec
@@ -367,6 +354,7 @@ mod tests {
     #[test]
     fn portal_video_defaults_and_all_wire_aliases() {
         for (name, expected) in [
+            ("auto", WireFormat::Nv12),
             ("rgba", WireFormat::Rgba8),
             ("rgba8", WireFormat::Rgba8),
             ("BGRA", WireFormat::Bgra8),
@@ -396,7 +384,7 @@ mod tests {
 
     #[test]
     fn portal_video_transparent_defaults_and_bgra_preserve_alpha() {
-        for name in ["yuv420p", "rgba", "bgra"] {
+        for name in ["auto", "yuv420p", "rgba", "bgra"] {
             let job = video_job(PortalFrameFormat::Mov, 95, 53, 8, "libx264", name, true).unwrap();
             assert!(job.wire.has_alpha());
             assert_eq!(job.container, Container::MovTransparent);

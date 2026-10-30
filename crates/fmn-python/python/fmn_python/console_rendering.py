@@ -75,7 +75,7 @@ _REFERENCE_HELP = """Reference render flags:
 
 Quality presets preserve the configured frame rate (30 fps by default).
 Config files connect camera, resolution_options, directories, file_writer,
-scene and cache; unsupported portal-default sections name a capability refusal.
+scene, text.font, tex.template and cache; unsupported portal-default sections name a capability refusal.
 File layers are scoped before source import and restored after rendering.
 -c and --config_file require standard mode while their certified provenance
 contract remains open. Class/constructor camera defaults override global -c.
@@ -140,11 +140,11 @@ def _single_destination(root, exact, selected, options, *, subdivide=False, sele
 _OUTPUT_HELP = """Native output profiles:
   --transparent, -t       Preserve alpha in PNG, SVG or qtrle MOV.
   --vcodec ENCODER        Installed ffmpeg encoder name, or auto (video only).
-  --pix_fmt FORMAT        Native wire: rgba, bgra, nv12/yuv420p, p010le.
+  --pix_fmt FORMAT        Native wire: auto, rgba, bgra, nv12/yuv420p, p010le.
   --ffmpeg_bin PATH       Video encoder or WAV input decoder; paths with spaces work.
 
 Transparent MOV defaults to RGBA/qtrle. Explicit transparent video profiles
-require rgba/bgra and qtrle/auto. MP4, GIF, y4m and WAV do not accept -t.
+require auto/rgba/bgra and qtrle/auto. MP4, GIF, y4m and WAV do not accept -t.
 Output options apply to every selected scene without constructor changes.
 Video remains uncertified. P010 is a 10-bit transport, not an HDR claim.
 --format svg exports one final-state vector document, including native text
@@ -170,7 +170,7 @@ def _output_overrides(options):
         if format not in {"png", "png_sequence", "svg", "mov"}:
             raise ValueError("--transparent requires png, png_sequence, svg, or mov output")
         if format == "mov":
-            if result.get("pix_fmt", "rgba").lower() not in {"rgba", "rgba8", "bgra", "bgra8"}:
+            if result.get("pix_fmt", "rgba").lower() not in {"auto", "rgba", "rgba8", "bgra", "bgra8"}:
                 raise ValueError("transparent video requires an rgba or bgra wire pixel format")
             if result.get("vcodec", "auto").lower() not in {"auto", "qtrle"}:
                 raise ValueError("transparent video requires --vcodec qtrle or auto")

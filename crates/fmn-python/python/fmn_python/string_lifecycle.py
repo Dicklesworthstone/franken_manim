@@ -44,6 +44,15 @@ def explicit_channel_colors(style):
     return result
 
 
+def typesetting_value(g, obj, section, key):
+    """Resolve an object's empty public sentinel against its captured default."""
+    value = getattr(obj, key)
+    if isinstance(value, str) and not value:
+        captured = vars(obj).get("_fmn_default_" + key)
+        return captured if captured is not None else g["_typesetting_default"](section, key, value)
+    return value
+
+
 def initialize_string(g, obj, style):
     """Recipe fields must already exist before init_data/init_points execute."""
     with _initializing.hold(obj, message="StringMobject initialization is already active"):
@@ -185,7 +194,8 @@ def install_string_lifecycle(native):
         specs = candidate._build_tex(
             g["_native_shell_factory"], parts, separator,
             bool(self._native_text_mode), self.font_size, None,
-            bool(self._native_group_single_part), self.template, self.additional_preamble,
+            bool(self._native_group_single_part),
+            typesetting_value(g, self, "tex", "template"), self.additional_preamble,
             g["_tex_line_align"](self.alignment, bool(self._native_text_mode)),
         )
         _publish(g, self, candidate, specs)
@@ -205,7 +215,7 @@ def install_string_lifecycle(native):
         if selections:
             return 0
         return g["_tex_substring_path_count"](
-            substr, bool(self._native_text_mode), self.template,
+            substr, bool(self._native_text_mode), typesetting_value(g, self, "tex", "template"),
             self.additional_preamble,
         )
 
@@ -215,7 +225,9 @@ def install_string_lifecycle(native):
         should_center = kwargs.pop("should_center", True)
         self.base_color = kwargs.pop("base_color", "#FFFFFF")
         self.protect = kwargs.pop("protect", ())
-        g["_validate_tex_options"](template, additional_preamble, bool(self._native_text_mode))
+        default_template = g["_typesetting_default"]("tex", "template", "")
+        effective_template = default_template if isinstance(template, str) and not template else template
+        g["_validate_tex_options"](effective_template, additional_preamble, bool(self._native_text_mode))
         g["_tex_line_align"](alignment, bool(self._native_text_mode))
         colors = dict(t2c or {})
         colors.update(tex_to_color_map or {})
@@ -225,6 +237,7 @@ def install_string_lifecycle(native):
                 isolate = [isolate]
             isolate = [*(isolate or []), *tex_strings]
         self.alignment, self.template, self.additional_preamble = alignment, template, additional_preamble
+        self._fmn_default_template = default_template
         self.tex_to_color_map = colors
         self.use_labelled_svg, self.isolate = bool(use_labelled_svg), isolate
         separator = getattr(self, "_tex_arg_separator", " ")

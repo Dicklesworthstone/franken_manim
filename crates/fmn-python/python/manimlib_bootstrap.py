@@ -21398,6 +21398,17 @@ def _install_text_mobject_helpers():
 _install_text_mobject_helpers()
 
 
+def _typesetting_default(section, key, value):
+    # Empty font/template arguments are the Reference's default sentinel.
+    # Resolve at construction and retain a private selected name on the object,
+    # so later scene scopes cannot change its glyphs when copied or rebuilt.
+    # SceneSource owns and restores this mapping; no process-wide font or
+    # template engine is rebound. Nonempty authored arguments remain explicit.
+    if isinstance(value, str) and not value:
+        return _FMN_ROOT.manim_config.get(section, {}).get(key, value)
+    return value
+
+
 def _portal_configuration_section(name):
     # fmn_python.scene_loading.SceneSource installs the CLI configuration on the
     # manimlib package, which shares this module's manim_config. Reading the
@@ -21831,7 +21842,7 @@ def _install_config_module():
         resolved = _FMN_ROOT._resolved_portal_config(_cwd_custom_config())["values"]
         sections = {
             name: dict(vars(getattr(pinned, name)))
-            for name in ("sizes", "key_bindings", "vmobject", "mobject", "text", "tex")
+            for name in ("sizes", "key_bindings", "vmobject", "mobject")
         }
         config = _ConfigDict(
             {
@@ -21839,6 +21850,8 @@ def _install_config_module():
                 "colors": dict(pinned.colors),
                 "camera": resolved["camera"],
                 "directories": resolved["directories"],
+                "text": resolved["text"],
+                "tex": resolved["tex"],
                 "cache": resolved.get("cache", {}),
                 "log_level": resolved["log_level"],
             }
