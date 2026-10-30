@@ -1914,14 +1914,13 @@ fn derive_execution_plan_with_annex(
     let (topology, topology_source) = detect_topology(fs);
     let mut surface =
         fmn_runtime::SurfaceSpec::lumen(config.camera.resolution.0, config.camera.resolution.1);
-    if matches!(intent, fmn_runtime::RenderIntent::Offline)
-        && config.render.engine == fmn_config::config::Engine::Cpu
-    {
+    if config.render.engine == fmn_config::config::Engine::Cpu {
         // One retained tile cache and one persistent raster-team band surface
-        // per active team. Charging every slot also covers single-thread teams
-        // conservatively; those render inline without a second band surface.
+        // per active team, including the synchronous Studio preview renderer.
+        // Charging every slot also covers single-thread teams conservatively;
+        // those render inline without a second band surface.
         surface.working_bytes_per_pixel += 16;
-        if camera {
+        if camera && matches!(intent, fmn_runtime::RenderIntent::Offline) {
             // In addition to a compiled camera frame per team, the serial
             // owner retains a preparation frame. Teams <= in-flight slots;
             // charging an extra frame per slot conservatively covers it.
@@ -11915,6 +11914,48 @@ mod tests {
             let error = offline.expect_err("unavailable host must refuse offline Metal");
             assert_eq!(error.exit_name(), "capability");
             assert!(error.to_string().contains("Metal annex"));
+        }
+    }
+
+    #[test]
+    fn cpu_preview_and_export_admit_retained_raster_storage() {
+        let fs = VirtualFs::new();
+        let command = render(
+            parse_args(["--resolution", "64x48", "--threads", "4"])
+                .expect("bounded CPU render"),
+        );
+        let config = resolve_render_config(&fs, &command).expect("valid CPU config");
+        for intent in [
+            fmn_runtime::RenderIntent::Preview,
+            fmn_runtime::RenderIntent::Offline,
+        ] {
+            for camera in [false, true] {
+                let (plan, _, _) = derive_execution_plan_with_annex(
+                    &fs,
+                    &config,
+                    intent,
+                    fmn_runtime::OutputPixelFormat::Rgba8,
+                    MetalSelection::Offline,
+                    camera,
+                )
+                .expect("CPU render plan");
+                let scratch = plan
+                    .render_teams
+                    .iter()
+                    .map(fmn_runtime::TeamPlan::scratch_bytes)
+                    .max()
+                    .expect("at least one render team");
+                let surface_bytes = plan.estimated_in_flight_bytes / plan.frames_in_flight
+                    - scratch;
+                // A worker can simultaneously own the RGBA16F destination,
+                // cached tile pixels and persistent bands, plus its RGBA8
+                // output slot. Preview uses the same retained CPU renderer.
+                let minimum = 64 * 48 * (8 + 8 + 8 + 4);
+                assert!(
+                    surface_bytes >= minimum,
+                    "{intent:?}, camera={camera}: {surface_bytes} bytes omit retained storage"
+                );
+            }
         }
     }
 

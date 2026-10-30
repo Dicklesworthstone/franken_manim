@@ -5,6 +5,7 @@
 //! content-keyed tile cache, so scheduling changes neither pixels nor semantics.
 
 mod team;
+pub(crate) use team::RetainedVectorFrame;
 pub use team::{RasterTeam, RasterTeamStats};
 
 use std::sync::{Arc, Mutex, OnceLock};

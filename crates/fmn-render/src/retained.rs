@@ -19,11 +19,13 @@ use fmn_mobject::{
 
 use crate::plan::PlanIdentity;
 use crate::three_d::{PreparedThreeDProjection, same_projection_camera};
+use crate::vector_frame::RetainedVectorFrame;
 use crate::{
     AllocStats, Binning, BinningError, CachedRenderError, CachedRenderStats, Camera,
-    EngineIdentity, FrameArena, FrameConfig, FrameJob, FrameJobError, MonoTable, MonoTableError,
-    PixelTileCache, RenderPlan, SurfaceDraw, SurfaceMaterial, SurfaceMesh, SurfaceVertex,
-    SyncError, ThreeDDraw, ThreeDError, ThreeDJob, Tiling, TrueDotDraw, VectorDraw,
+    EngineIdentity, FrameArena, FrameConfig, FrameJobError, MonoTable, MonoTableError,
+    PixelTileCache, RasterTeam, RasterTeamStats, RenderPlan, SurfaceDraw, SurfaceMaterial,
+    SurfaceMesh, SurfaceVertex, SyncError, ThreeDDraw, ThreeDError, ThreeDJob, Tiling, TrueDotDraw,
+    VectorDraw,
 };
 
 /// Immutable policy for one retained CPU renderer.
@@ -187,6 +189,10 @@ pub struct RetainedFrameRenderer {
     arena: FrameArena,
     cache: PixelTileCache,
     frame: FrameBuffer,
+    /// Lazily started once, then shared by every changing planar frame. A
+    /// multithreaded team retains one additional tight RGBA16F band surface;
+    /// composition roots must include its eight bytes per pixel in admission.
+    raster_team: Option<RasterTeam>,
     /// Serial of the last successful planar render. Camera rasters and
     /// background changes clear it so the next planar frame restores tiles.
     last_cache_serial: Option<u64>,
@@ -227,6 +233,7 @@ impl RetainedFrameRenderer {
             arena: FrameArena::new(),
             cache: PixelTileCache::new(),
             frame,
+            raster_team: None,
             last_cache_serial: None,
             scratch_draw_items: Vec::new(),
             camera_scene: None,
@@ -320,21 +327,26 @@ impl RetainedFrameRenderer {
             )?;
             self.binning.prune_occluded(&self.plan)?;
         }
-        let stats = FrameJob::with_identity_in(
-            &mut self.arena,
-            &self.plan,
-            &self.mono,
-            &self.binning,
-            self.config.frame,
-            self.config.engine,
-        )?
-        .render_into_cached_resuming(
-            self.config.threads,
-            &mut self.frame,
-            camera_revision,
-            &mut self.cache,
-            self.last_cache_serial,
-        )?;
+        if self.raster_team.is_none() {
+            self.raster_team = Some(RasterTeam::new(self.config.threads)?);
+        }
+        let stats = self
+            .raster_team
+            .as_mut()
+            .expect("raster team initialized above")
+            .render_retained(
+                RetainedVectorFrame {
+                    plan: &mut self.plan,
+                    mono: &mut self.mono,
+                    binning: &mut self.binning,
+                    config: self.config,
+                    camera_revision,
+                },
+                &mut self.arena,
+                &mut self.cache,
+                &mut self.frame,
+                self.last_cache_serial,
+            )?;
         self.last_cache_serial = Some(self.cache.serial());
         self.last_frame_reused = previous_pixels == Some(pixels);
         self.planar_pixels = Some(pixels);
@@ -516,6 +528,19 @@ impl RetainedFrameRenderer {
     #[must_use]
     pub fn allocation_stats(&self) -> AllocStats {
         self.arena.stats()
+    }
+
+    /// Persistent planar workers and their retained band storage.
+    ///
+    /// Unchanged frames reuse the complete raster and do not dispatch work, so
+    /// `frames_completed` counts successful rasterizations rather than emitted
+    /// frames. Before the first planar raster every counter is zero. Single-
+    /// thread and browser renders keep the inline path with no band surface.
+    #[must_use]
+    pub fn raster_team_stats(&self) -> RasterTeamStats {
+        self.raster_team
+            .as_ref()
+            .map_or_else(RasterTeamStats::default, RasterTeam::stats)
     }
 }
 
@@ -2385,6 +2410,85 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn synchronous_planar_frames_reuse_their_workers_and_compiler_tables() {
+        for threads in [1, 4, 16] {
+            let mut stage = Stage::new();
+            let mob = stage.add(vector());
+            stage.add_to_scene(mob).unwrap();
+            let mut renderer = RetainedFrameRenderer::new(config(threads)).unwrap();
+            assert_eq!(renderer.raster_team_stats(), RasterTeamStats::default());
+            renderer.render(&stage, 0).unwrap();
+            let workers = renderer.raster_team.as_ref().unwrap().worker_ids();
+            let pieces = renderer.mono.pieces().as_ptr();
+            let band_bytes = renderer.raster_team_stats().band_buffer_bytes;
+            assert_eq!(band_bytes, if threads == 1 { 0 } else { 32 * 18 * 8 });
+
+            let mut oracle = RetainedFrameRenderer::new(config(1)).unwrap();
+            for frame in 1..=300 {
+                stage.shift(mob, [if frame % 2 == 0 { -0.25 } else { 0.25 }, 0.0, 0.0]);
+                renderer.render(&stage, 0).unwrap();
+                oracle.render(&stage, 0).unwrap();
+                assert_eq!(renderer.frame().as_bytes(), oracle.frame().as_bytes());
+                assert_eq!(renderer.plan().stats().shapes_compiled, 0);
+                assert_eq!(renderer.mono.pieces().as_ptr(), pieces);
+                assert_eq!(renderer.raster_team.as_ref().unwrap().worker_ids(), workers);
+                assert_eq!(
+                    renderer.raster_team_stats(),
+                    RasterTeamStats {
+                        workers_spawned: if threads == 1 { 0 } else { threads },
+                        frames_completed: frame + 1,
+                        band_buffer_bytes: band_bytes,
+                    }
+                );
+                // A subsequent static frame neither dispatches workers nor
+                // reallocates/clones the retained compiler tables.
+                renderer.render(&stage, 0).unwrap();
+                assert!(renderer.last_frame_reused());
+                assert_eq!(renderer.raster_team_stats().frames_completed, frame + 1);
+                assert_eq!(renderer.mono.pieces().as_ptr(), pieces);
+                assert_eq!(renderer.allocation_stats().heap_allocs_this_frame, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn synchronous_planar_worker_failure_restores_tables_and_keeps_prior_pixels() {
+        let mut stage = Stage::new();
+        let mob = stage.add(vector());
+        stage.add_to_scene(mob).unwrap();
+        let mut renderer = RetainedFrameRenderer::new(config(4)).unwrap();
+        renderer.render(&stage, 0).unwrap();
+        let before = renderer.frame().as_bytes().to_vec();
+        let pieces = renderer.mono.pieces().as_ptr();
+        let workers = renderer.raster_team.as_ref().unwrap().worker_ids();
+        stage.shift(mob, [0.75, 0.0, 0.0]);
+        renderer.raster_team.as_ref().unwrap().panic_next_frame();
+        assert!(matches!(
+            renderer.render(&stage, 0),
+            Err(RetainedFrameRendererError::RasterWorkerPanicked)
+        ));
+        assert_eq!(renderer.frame().as_bytes(), before);
+        assert!(!renderer.last_frame_reused());
+        assert_eq!(renderer.plan().stats().shapes_reused, 1);
+        assert_eq!(renderer.mono.pieces().as_ptr(), pieces);
+        assert_eq!(renderer.raster_team_stats().frames_completed, 1);
+        renderer.render(&stage, 0).unwrap();
+        let mut oracle = RetainedFrameRenderer::new(config(1)).unwrap();
+        oracle.render(&stage, 0).unwrap();
+        assert_eq!(renderer.frame().as_bytes(), oracle.frame().as_bytes());
+        assert_eq!(renderer.raster_team_stats().frames_completed, 2);
+        assert_eq!(renderer.raster_team.as_ref().unwrap().worker_ids(), workers);
+
+        // Visiting the camera route must not retire the planar workers, but
+        // its pixels invalidate the old planar surface-resume proof.
+        renderer.render_with_camera(&stage, &camera()).unwrap();
+        renderer.render(&stage, 0).unwrap();
+        assert_eq!(renderer.frame().as_bytes(), oracle.frame().as_bytes());
+        assert_eq!(renderer.raster_team.as_ref().unwrap().worker_ids(), workers);
+        assert_eq!(renderer.raster_team_stats().frames_completed, 3);
     }
 
     #[test]

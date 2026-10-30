@@ -1,9 +1,10 @@
 //! Persistent native raster workers over owned compiled frame generations.
 //!
 //! The scene and output buffer never cross threads. The team temporarily owns
-//! the caller's prepared arena and tile cache, shares that immutable payload,
-//! and rasterizes into reusable, disjoint row bands. Only completed dirty tiles
-//! are copied to the output. No thread-lifetime coercion or unsafe code is used.
+//! the caller's prepared arena and tile cache, plus either an immutable frame
+//! generation or the synchronous renderer's compiler tables, and rasterizes
+//! into reusable, disjoint row bands. Only completed dirty tiles are copied to
+//! the output. No thread-lifetime coercion or unsafe code is used.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -15,9 +16,88 @@ use fmn_frame::{FrameBuffer, FrameError};
 use super::OwnedVectorFrame;
 use crate::engine::PreparedBands;
 use crate::{
-    AaStats, CachedRenderError, CachedRenderStats, FrameArena, FrameJob, PixelTileCache,
-    RetainedFrameRendererError, TileWork,
+    AaStats, Binning, CachedRenderError, CachedRenderStats, FrameArena, FrameJob, MonoTable,
+    PixelTileCache, RenderPlan, RetainedFrameRendererConfig, RetainedFrameRendererError, TileWork,
 };
+
+/// Mutable compiler tables lent to a synchronous raster call by ownership
+/// exchange. None of these references are sent to a worker.
+pub(crate) struct RetainedVectorFrame<'a> {
+    pub(crate) plan: &'a mut RenderPlan,
+    pub(crate) mono: &'a mut MonoTable,
+    pub(crate) binning: &'a mut Binning,
+    pub(crate) config: RetainedFrameRendererConfig,
+    pub(crate) camera_revision: u64,
+}
+
+#[derive(Debug)]
+struct RetainedInput {
+    plan: RenderPlan,
+    mono: MonoTable,
+    binning: Binning,
+    config: RetainedFrameRendererConfig,
+    camera_revision: u64,
+}
+
+impl RetainedInput {
+    fn new(config: RetainedFrameRendererConfig) -> Self {
+        Self {
+            plan: RenderPlan::new(),
+            mono: MonoTable::default(),
+            binning: Binning::default(),
+            config,
+            camera_revision: 0,
+        }
+    }
+
+    fn exchange(&mut self, frame: &mut RetainedVectorFrame<'_>) {
+        std::mem::swap(&mut self.plan, frame.plan);
+        std::mem::swap(&mut self.mono, frame.mono);
+        std::mem::swap(&mut self.binning, frame.binning);
+        self.config = frame.config;
+        self.camera_revision = frame.camera_revision;
+    }
+}
+
+#[derive(Debug, Default)]
+enum RasterInput {
+    #[default]
+    Empty,
+    Frozen(OwnedVectorFrame),
+    // Keep the empty exchange tables between calls. Box allocation and empty
+    // compiler initialization happen once, never on each changing frame.
+    Retained(Box<RetainedInput>),
+}
+
+struct RasterTables<'a> {
+    plan: &'a RenderPlan,
+    mono: &'a MonoTable,
+    binning: &'a Binning,
+    config: RetainedFrameRendererConfig,
+    camera_revision: u64,
+}
+
+impl RasterInput {
+    fn tables(&self) -> Result<RasterTables<'_>, RetainedFrameRendererError> {
+        match self {
+            Self::Empty => unreachable!("a dispatched raster owns its input"),
+            Self::Frozen(frame) => Ok(RasterTables {
+                plan: &frame.plan,
+                mono: frame.mono.get(&frame.plan)?,
+                binning: frame.binning.get(&frame.plan)?,
+                config: frame.config,
+                camera_revision: frame.camera_revision,
+            }),
+            Self::Retained(frame) => Ok(RasterTables {
+                plan: &frame.plan,
+                mono: &frame.mono,
+                binning: &frame.binning,
+                config: frame.config,
+                camera_revision: frame.camera_revision,
+            }),
+        }
+    }
+}
 
 /// Lifetime counters for one persistent raster team.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -49,7 +129,7 @@ struct Shared {
 
 #[derive(Debug, Default)]
 struct Payload {
-    frame: Option<OwnedVectorFrame>,
+    input: RasterInput,
     prepared: Option<PreparedBands>,
     arena: FrameArena,
     cache: PixelTileCache,
@@ -68,15 +148,9 @@ impl Payload {
             !self.panic_next.swap(false, Ordering::Relaxed),
             "injected persistent raster worker panic"
         );
-        let frame = self.frame.as_ref().expect("published frame owns its IR");
         let prepared = self.prepared.expect("published frame is prepared");
-        let mono = frame.mono.table.get().expect("fill table was prepared");
-        let binning = frame
-            .binning
-            .table
-            .get()
-            .expect("tile commands were prepared");
-        FrameJob::from_prepared_bands(&frame.plan, mono, binning, &self.arena, prepared)
+        let frame = self.input.tables().expect("raster tables were prepared");
+        FrameJob::from_prepared_bands(frame.plan, frame.mono, frame.binning, &self.arena, prepared)
             .render_owned_bands(&self.bands, &self.next, prepared.stride, &self.cache)
     }
 
@@ -121,14 +195,12 @@ impl Payload {
         destination: &FrameBuffer,
         resume: Option<u64>,
     ) -> Result<(), RetainedFrameRendererError> {
-        let frame = self.frame.as_ref().expect("frame installed before prepare");
-        let mono = frame.mono.get(&frame.plan)?;
-        let binning = frame.binning.get(&frame.plan)?;
+        let frame = self.input.tables()?;
         let prepared = FrameJob::with_identity_in(
             &mut self.arena,
-            &frame.plan,
-            mono,
-            binning,
+            frame.plan,
+            frame.mono,
+            frame.binning,
             frame.config.frame,
             frame.config.engine,
         )?
@@ -138,12 +210,12 @@ impl Payload {
         self.next.store(0, Ordering::Relaxed);
         // No destination pixels are changed until every worker succeeds.
         // begin_render retires a failed or interrupted cache serial as usual.
-        let frame = self.frame.as_ref().expect("installed frame");
+        let frame = self.input.tables()?;
         self.resumed = self.cache.begin_render(resume);
         self.cache
             .prepare_frame_with_inputs(
-                frame.binning.get(&frame.plan)?,
-                &frame.plan,
+                frame.binning,
+                frame.plan,
                 frame.camera_revision,
                 frame.config.engine,
                 frame.config.frame,
@@ -157,9 +229,9 @@ impl Payload {
         destination: &mut FrameBuffer,
         raster: AaStats,
     ) -> Result<CachedRenderStats, RetainedFrameRendererError> {
-        let frame = self.frame.as_ref().expect("completed frame owns its IR");
+        let frame = self.input.tables()?;
         let prepared = self.prepared.expect("completed frame is prepared");
-        let binning = frame.binning.get(&frame.plan)?;
+        let binning = frame.binning;
         // Restoring reused tiles is safe after worker completion. An exact
         // resume token proves they already occupy this destination; a different
         // recycled surface restores from cache before copying its dirty tiles.
@@ -294,6 +366,19 @@ impl RasterTeam {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn worker_ids(&self) -> Vec<std::thread::ThreadId> {
+        self.workers
+            .iter()
+            .map(|worker| worker.thread().id())
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn panic_next_frame(&self) {
+        self.payload.panic_next.store(true, Ordering::Relaxed);
+    }
+
     pub(super) fn render(
         &mut self,
         frame: &OwnedVectorFrame,
@@ -310,14 +395,69 @@ impl RasterTeam {
         let payload = Arc::get_mut(&mut self.payload).expect("previous frame was joined");
         std::mem::swap(&mut payload.arena, arena);
         std::mem::swap(&mut payload.cache, cache);
-        payload.frame = Some(frame.clone());
+        payload.input = RasterInput::Frozen(frame.clone());
         let result = self.render_owned(destination, resume);
         let payload = Arc::get_mut(&mut self.payload).expect("all frame readers released");
         // Restore ownership on every typed failure, including preparation and
         // worker panics. An unsuccessful render never completes the cache.
         std::mem::swap(&mut payload.arena, arena);
         std::mem::swap(&mut payload.cache, cache);
-        payload.frame = None;
+        payload.input = RasterInput::Empty;
+        payload.prepared = None;
+        if result.is_ok() {
+            self.frames_completed = self.frames_completed.saturating_add(1);
+        }
+        result
+    }
+
+    /// Synchronous retained rendering uses the same workers and raster kernels
+    /// as an owned pipeline frame. Compiler tables are moved, not cloned, and
+    /// restored before returning even when preparation or a worker fails.
+    pub(crate) fn render_retained(
+        &mut self,
+        mut frame: RetainedVectorFrame<'_>,
+        arena: &mut FrameArena,
+        cache: &mut PixelTileCache,
+        destination: &mut FrameBuffer,
+        resume: Option<u64>,
+    ) -> Result<CachedRenderStats, RetainedFrameRendererError> {
+        if self.threads == 1 {
+            let stats = FrameJob::with_identity_in(
+                arena,
+                frame.plan,
+                frame.mono,
+                frame.binning,
+                frame.config.frame,
+                frame.config.engine,
+            )?
+            .render_into_cached_resuming(
+                1,
+                destination,
+                frame.camera_revision,
+                cache,
+                resume,
+            )?;
+            self.frames_completed = self.frames_completed.saturating_add(1);
+            return Ok(stats);
+        }
+        let payload = Arc::get_mut(&mut self.payload).expect("previous frame was joined");
+        if !matches!(payload.input, RasterInput::Retained(_)) {
+            payload.input = RasterInput::Retained(Box::new(RetainedInput::new(frame.config)));
+        }
+        let RasterInput::Retained(input) = &mut payload.input else {
+            unreachable!("retained input installed above")
+        };
+        input.exchange(&mut frame);
+        std::mem::swap(&mut payload.arena, arena);
+        std::mem::swap(&mut payload.cache, cache);
+        let result = self.render_owned(destination, resume);
+        let payload = Arc::get_mut(&mut self.payload).expect("all frame readers released");
+        let RasterInput::Retained(input) = &mut payload.input else {
+            unreachable!("workers cannot replace the retained input")
+        };
+        input.exchange(&mut frame);
+        std::mem::swap(&mut payload.arena, arena);
+        std::mem::swap(&mut payload.cache, cache);
         payload.prepared = None;
         if result.is_ok() {
             self.frames_completed = self.frames_completed.saturating_add(1);
@@ -639,7 +779,7 @@ mod tests {
         ));
         assert!(pixels.as_bytes().iter().all(|byte| *byte == 0x74));
         assert_eq!(team.stats().frames_completed, 0);
-        assert!(team.payload.frame.is_none());
+        assert!(matches!(team.payload.input, RasterInput::Empty));
         assert!(arena.stats().pool_slots >= 4);
         let actual = frame
             .render_cached_into_with_team(&mut team, &mut arena, &mut cache, &mut pixels, None)
@@ -801,6 +941,100 @@ mod tests {
             }
             assert_eq!(team.stats().band_buffer_bytes, row_bytes * height as usize);
             assert_eq!(team.stats().workers_spawned, 4);
+        }
+    }
+
+    #[test]
+    fn retained_tables_return_after_resize_and_destination_refusal() {
+        let mut team = RasterTeam::new(4).unwrap();
+        let workers = team.worker_ids();
+        let (mut arena, mut cache) = (FrameArena::new(), PixelTileCache::new());
+        let mut stage = Stage::new();
+        let mob = stage.add(vector());
+        stage.add_to_scene(mob).unwrap();
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, 0).unwrap();
+        let mut mono = MonoTable::default();
+        let mut binning = Binning::default();
+        for (width, height) in [(63, 17), (7, 41), (31, 23), (8, 8)] {
+            let mut config = config();
+            config.frame.viewport = Viewport { width, height };
+            mono.rebuild_in_place(&plan, config.frame.map).unwrap();
+            binning
+                .rebuild_in_place(
+                    &plan,
+                    config.frame.viewport,
+                    config.tiling,
+                    config.frame.map,
+                )
+                .unwrap();
+            binning.prune_occluded(&plan).unwrap();
+            let identity = plan.identity();
+            let pieces = mono.pieces().as_ptr();
+            let oracle =
+                FrameJob::with_identity(&plan, &mono, &binning, config.frame, config.engine)
+                    .unwrap()
+                    .render(1)
+                    .unwrap();
+            let row_bytes = width as usize * 8;
+            let stride = row_bytes + 24;
+            let mut pixels = FrameBuffer::new(
+                FrameLayout::with_strides(PixelFormat::Rgba16F, width, height, &[stride]).unwrap(),
+            );
+            pixels.plane_mut(0).fill(0x53);
+            team.render_retained(
+                RetainedVectorFrame {
+                    plan: &mut plan,
+                    mono: &mut mono,
+                    binning: &mut binning,
+                    config,
+                    camera_revision: 0,
+                },
+                &mut arena,
+                &mut cache,
+                &mut pixels,
+                None,
+            )
+            .unwrap();
+            for (actual, expected) in pixels
+                .plane(0)
+                .chunks_exact(stride)
+                .zip(oracle.plane(0).chunks_exact(row_bytes))
+            {
+                assert_eq!(&actual[..row_bytes], expected);
+                assert!(actual[row_bytes..].iter().all(|byte| *byte == 0x53));
+            }
+            assert_eq!(plan.identity(), identity);
+            assert_eq!(mono.pieces().as_ptr(), pieces);
+            assert_eq!(team.stats().band_buffer_bytes, row_bytes * height as usize);
+            assert_eq!(team.worker_ids(), workers);
+
+            let mut invalid =
+                FrameBuffer::new(FrameLayout::tight(PixelFormat::Rgba8, width, height).unwrap());
+            invalid.plane_mut(0).fill(0x74);
+            let completed = team.stats().frames_completed;
+            assert!(matches!(
+                team.render_retained(
+                    RetainedVectorFrame {
+                        plan: &mut plan,
+                        mono: &mut mono,
+                        binning: &mut binning,
+                        config,
+                        camera_revision: 0,
+                    },
+                    &mut arena,
+                    &mut cache,
+                    &mut invalid,
+                    None,
+                ),
+                Err(RetainedFrameRendererError::Layout(
+                    FrameError::FormatMismatch { .. }
+                ))
+            ));
+            assert_eq!(plan.identity(), identity);
+            assert_eq!(mono.pieces().as_ptr(), pieces);
+            assert_eq!(team.stats().frames_completed, completed);
+            assert!(invalid.as_bytes().iter().all(|byte| *byte == 0x74));
         }
     }
 }

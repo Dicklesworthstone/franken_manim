@@ -532,10 +532,11 @@ impl PortalFrameSession {
         // per team alongside the serial renderer. Teams never outnumber the
         // in-flight slots. In addition to the working raster, an adaptive team
         // can retain its tile cache, band surface, and camera compiler raster.
-        // The paused serial renderer also retains its raster and tile cache.
-        // Charging five extra RGBA16F surfaces per slot covers that worst case
+        // The paused serial renderer also retains its raster, tile cache, and
+        // persistent raster-team bands.
+        // Charging six extra RGBA16F surfaces per slot covers that worst case
         // even when the RAM-derived plan has only one multithreaded team/slot.
-        surface.working_bytes_per_pixel += 40
+        surface.working_bytes_per_pixel += 48
             + match wire {
                 fmn_output::WireFormat::Rgba8 | fmn_output::WireFormat::Bgra8 => 4,
                 fmn_output::WireFormat::Nv12 => 2,
