@@ -365,12 +365,10 @@ fn documented_spellings_obey_layer_order_in_both_directions() {
                 .unwrap()
                 .config;
                 assert_eq!(typed_setting(&configured, canonical), "cli", "{cli_path}");
-                let cli_only = Config::resolve(
-                    &[],
-                    Some(overlay([(canonical, Value::Str("cli".into()))])),
-                )
-                .unwrap()
-                .config;
+                let cli_only =
+                    Config::resolve(&[], Some(overlay([(canonical, Value::Str("cli".into()))])))
+                        .unwrap()
+                        .config;
                 assert_eq!(configured, cli_only, "shadowed values must not remain");
             }
         }
@@ -403,12 +401,9 @@ fn same_layer_spelling_conflicts_refuse_independent_of_key_order() {
         )
         .unwrap()
         .config;
-        let one = Config::resolve(
-            &[],
-            Some(overlay([(canonical, Value::Str("same".into()))])),
-        )
-        .unwrap()
-        .config;
+        let one = Config::resolve(&[], Some(overlay([(canonical, Value::Str("same".into()))])))
+            .unwrap()
+            .config;
         assert_eq!(duplicates, one);
     }
 }
@@ -443,7 +438,11 @@ fn native_spellings_reject_malformed_values_and_do_not_repair_bad_parents() {
         assert!(error.contains("expected mapping"), "{error}");
     }
     for section in ["style", "output"] {
-        for value in [Value::Null, Value::Str("invalid".into()), Value::Bool(false)] {
+        for value in [
+            Value::Null,
+            Value::Str("invalid".into()),
+            Value::Bool(false),
+        ] {
             let error = Config::resolve(&[], Some(overlay([(section, value)])))
                 .unwrap_err()
                 .to_string();

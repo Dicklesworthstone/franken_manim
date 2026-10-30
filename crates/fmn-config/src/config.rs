@@ -621,10 +621,7 @@ pub fn normalize_layer(mut root: Value) -> Result<Value, ConfigError> {
         ("directories.sounds", "directories.subdirs.sounds"),
         ("directories.data", "directories.subdirs.data"),
         ("directories.downloads", "directories.subdirs.downloads"),
-        (
-            "directories.latex_cache",
-            "directories.subdirs.latex_cache",
-        ),
+        ("directories.latex_cache", "directories.subdirs.latex_cache"),
     ];
 
     for &(alias, canonical) in ALIASES {

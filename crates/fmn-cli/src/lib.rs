@@ -2000,7 +2000,7 @@ pub fn collect_doctor_snapshot(
     command: &DoctorCommand,
 ) -> Result<DoctorSnapshot, CliError> {
     let config = resolve_common_config(fs, &command.common)?;
-    let output_format = planning_output_format(&config.file_writer.pixel_format);
+    let output_format = planning_output_format(&config.file_writer.pixel_format)?;
     let (plan, topology, topology_source) = derive_execution_plan(
         fs,
         &config,
@@ -2159,13 +2159,15 @@ fn execution_plan_error(error: fmn_runtime::PlanError) -> CliError {
     CliError::new(exit_name, format!("ExecutionPlan: {error}"))
 }
 
-fn planning_output_format(pixel_format: &str) -> fmn_runtime::OutputPixelFormat {
-    match pixel_format {
-        "bgra" | "bgra8" => fmn_runtime::OutputPixelFormat::Bgra8,
-        "nv12" => fmn_runtime::OutputPixelFormat::Nv12,
-        "p010" | "p010le" => fmn_runtime::OutputPixelFormat::P010,
-        _ => fmn_runtime::OutputPixelFormat::Rgba8,
-    }
+fn planning_output_format(pixel_format: &str) -> Result<fmn_runtime::OutputPixelFormat, CliError> {
+    let wire = WireFormat::from_config(pixel_format, false)
+        .map_err(|error| CliError::new("config", error.to_string()))?;
+    Ok(match wire {
+        WireFormat::Bgra8 => fmn_runtime::OutputPixelFormat::Bgra8,
+        WireFormat::Nv12 => fmn_runtime::OutputPixelFormat::Nv12,
+        WireFormat::P010 => fmn_runtime::OutputPixelFormat::P010,
+        WireFormat::Rgba8 => fmn_runtime::OutputPixelFormat::Rgba8,
+    })
 }
 
 fn probe_ffmpeg_in(
@@ -5958,26 +5960,13 @@ fn ffmpeg_wire_format(
     command: &RenderCommand,
     config: &fmn_config::Config,
 ) -> Result<WireFormat, CliError> {
-    if command.transparent && command.pix_fmt.is_none() {
-        return Ok(WireFormat::Rgba8);
-    }
-    match config
-        .file_writer
-        .pixel_format
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "rgba" | "rgba8" => Ok(WireFormat::Rgba8),
-        "bgra" | "bgra8" => Ok(WireFormat::Bgra8),
-        "nv12" | "yuv420p" => Ok(WireFormat::Nv12),
-        "p010" | "p010le" | "yuv420p10le" => Ok(WireFormat::P010),
-        other => Err(CliError::new(
-            "config",
-            format!(
-                "ffmpeg wire pixel format {other:?} is unsupported; choose rgba, bgra, nv12/yuv420p, or p010le"
-            ),
-        )),
-    }
+    let pixel_format = &config.file_writer.pixel_format;
+    // Preserve the CLI's explicit incompatible-format refusal, while auto
+    // and the implicit Reference default choose the alpha wire when needed.
+    let alpha_default = command.transparent
+        && (command.pix_fmt.is_none() || pixel_format.eq_ignore_ascii_case("auto"));
+    WireFormat::from_config(pixel_format, alpha_default)
+        .map_err(|error| CliError::new("config", error.to_string()))
 }
 
 fn ffmpeg_video_job(
@@ -9911,6 +9900,112 @@ mod tests {
             requested_render_format(&command).expect("codec implies video"),
             RequestedRenderFormat::Video
         );
+    }
+
+    #[test]
+    fn documented_config_reaches_native_directories_and_video_negotiation() {
+        let fs = VirtualFs::new();
+        fs.insert(
+            "/cfg/native.yml",
+            b"directories:\n  base: /project\n  output: media\n  raster_images: assets\nstyle:\n  font: IBM Plex Sans\n  tex_pack: empty\noutput:\n  vcodec: auto\n  pix_fmt: auto\n".to_vec(),
+        );
+        fs.insert(
+            "/cfg/reference.yml",
+            b"directories:\n  base: /project\n  subdirs:\n    output: media\n    raster_images: assets\ntext:\n  font: IBM Plex Sans\ntex:\n  template: empty\nfile_writer:\n  video_codec: auto\n  pixel_format: auto\n".to_vec(),
+        );
+        let command =
+            render(parse_args(["--config_file", "/cfg/native.yml", "--format", "video"]).unwrap());
+        let config = resolve_render_config(&fs, &command).unwrap();
+        let reference_command = render(
+            parse_args(["--config_file", "/cfg/reference.yml", "--format", "video"]).unwrap(),
+        );
+        let reference = resolve_render_config(&fs, &reference_command).unwrap();
+        assert_eq!(config, reference);
+        assert_eq!(config.text.font, "IBM Plex Sans");
+        assert_eq!(config.tex.template, "empty");
+        assert_eq!(
+            configured_output_directory(&config),
+            PathBuf::from("/project/media")
+        );
+        let job = ffmpeg_video_job(&command, &config).unwrap();
+        assert_eq!(job.wire, WireFormat::Nv12);
+        assert_eq!(job.resolved_encoder().unwrap().as_deref(), Some("libx264"));
+        assert_eq!(
+            planning_output_format(&config.file_writer.pixel_format).unwrap(),
+            fmn_runtime::OutputPixelFormat::Nv12
+        );
+
+        let override_command = render(
+            parse_args([
+                "--config_file",
+                "/cfg/native.yml",
+                "--format",
+                "video",
+                "--vcodec",
+                "libx265",
+                "--pix_fmt",
+                "p010le",
+                "--math-pack",
+                "basic",
+            ])
+            .unwrap(),
+        );
+        let overridden = resolve_render_config(&fs, &override_command).unwrap();
+        let job = ffmpeg_video_job(&override_command, &overridden).unwrap();
+        assert_eq!(job.wire, WireFormat::P010);
+        assert_eq!(job.resolved_encoder().unwrap().as_deref(), Some("libx265"));
+        assert_eq!(overridden.tex.template, "basic");
+        assert_ne!(
+            config.canonical_bytes().unwrap(),
+            overridden.canonical_bytes().unwrap()
+        );
+    }
+
+    #[test]
+    fn transparent_video_honors_configured_formats_and_explicit_auto() {
+        for (configured, explicit, expected) in [
+            ("auto", None, Some(WireFormat::Rgba8)),
+            ("bgra", None, Some(WireFormat::Bgra8)),
+            ("yuv420p", Some("auto"), Some(WireFormat::Rgba8)),
+            ("yuv420p", Some("AUTO"), Some(WireFormat::Rgba8)),
+            ("auto", Some("yuv420p"), None),
+            ("nv12", None, None),
+            ("p010le", None, None),
+            ("unsupported", None, None),
+        ] {
+            let fs = VirtualFs::new();
+            fs.insert(
+                "/cfg/alpha.yml",
+                format!("output:\n  pix_fmt: {configured}\n").into_bytes(),
+            );
+            let mut args = vec![
+                "--config_file",
+                "/cfg/alpha.yml",
+                "--format",
+                "video",
+                "--transparent",
+            ];
+            if let Some(explicit) = explicit {
+                args.extend(["--pix_fmt", explicit]);
+            }
+            let command = render(parse_args(args).unwrap());
+            let config = resolve_render_config(&fs, &command).unwrap();
+            match expected {
+                Some(wire) => {
+                    let job = ffmpeg_video_job(&command, &config).unwrap();
+                    assert_eq!(job.wire, wire);
+                    assert_eq!(job.container, Container::MovTransparent);
+                    assert_eq!(job.resolved_encoder().unwrap().as_deref(), Some("qtrle"));
+                }
+                None => {
+                    let error = ffmpeg_video_job(&command, &config).unwrap_err();
+                    assert_eq!(error.exit_name(), "config");
+                }
+            }
+        }
+        let error = planning_output_format("unsupported").unwrap_err();
+        assert_eq!(error.exit_name(), "config");
+        assert!(error.message().contains("file_writer.pixel_format"));
     }
 
     #[test]
