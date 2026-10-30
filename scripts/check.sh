@@ -118,6 +118,13 @@ python3 -m py_compile \
     scripts/test_corpus_differential.py
 python3 scripts/test_corpus_differential.py
 
+echo "==> differential API fuzzer"
+python3 -m py_compile \
+    scripts/api_differential_fuzz.py \
+    scripts/test_api_differential_fuzz.py \
+    crates/fmn-conformance/python/api_fuzz_scene.py
+python3 scripts/test_api_differential_fuzz.py
+
 echo "==> TeX grammar differential harness"
 python3 -m py_compile \
     scripts/tex_grammar_differential.py \

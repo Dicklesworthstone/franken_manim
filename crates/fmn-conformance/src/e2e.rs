@@ -24,6 +24,9 @@
 //! [`Surface::StudioInProcess`] drives the production Studio composition root;
 //! [`Surface::StudioSubprocess`] executes Cargo's shipping CLI artifact through
 //! its isolated worker and authenticated loopback host.
+//! [`Surface::ReferenceDifferential`] runs a dev-host differential tool against
+//! the pinned Reference and an installed portal wheel, both as subprocesses; on
+//! a host without them the run does not happen (`not-run: reference-env-absent`).
 //!
 //! ## The log contract and `LogExpect`
 //!
@@ -242,6 +245,11 @@ pub enum Surface {
     StudioInProcess,
     /// Studio's shipping CLI, isolated worker, and real loopback HTTP host.
     StudioSubprocess,
+    /// A dev-host differential tool driving the pinned Reference and an
+    /// installed portal wheel as subprocesses: `FMN_FUZZ_REFERENCE_PYTHON`
+    /// and `FMN_FUZZ_PORTAL_PYTHON` name their interpreters, and the
+    /// Reference needs `xvfb-run`.
+    ReferenceDifferential,
 }
 
 impl Surface {
@@ -255,6 +263,7 @@ impl Surface {
             Self::PythonInProcess => "python_in_process",
             Self::StudioInProcess => "studio_in_process",
             Self::StudioSubprocess => "studio_subprocess",
+            Self::ReferenceDifferential => "reference_differential",
         }
     }
 
@@ -272,11 +281,36 @@ impl Surface {
             | Self::CliInProcess
             | Self::PythonInProcess
             | Self::StudioInProcess
-            | Self::StudioSubprocess => None,
+            | Self::StudioSubprocess
+            | Self::ReferenceDifferential => None,
             Self::PythonPending => {
                 Some("surface pending: the Python binding lands with its bead (never stubbed)")
             }
         }
+    }
+
+    /// Why this host cannot run the surface, `None` when it can. Only
+    /// [`Self::ReferenceDifferential`] depends on the host: it needs both
+    /// interpreters and `xvfb-run`. A missing one means the run does not
+    /// happen; it never passes in their absence.
+    #[must_use]
+    pub fn unavailable_reason(self) -> Option<&'static str> {
+        if self != Self::ReferenceDifferential {
+            return None;
+        }
+        let interpreter = |name: &str| {
+            std::env::var_os(name).is_some_and(|path| std::path::Path::new(&path).is_file())
+        };
+        let xvfb = std::env::var_os("PATH").is_some_and(|path| {
+            std::env::split_paths(&path).any(|dir| dir.join("xvfb-run").is_file())
+        });
+        (!(interpreter("FMN_FUZZ_REFERENCE_PYTHON")
+            && interpreter("FMN_FUZZ_PORTAL_PYTHON")
+            && xvfb))
+            .then_some(
+                "not-run: reference-env-absent (set FMN_FUZZ_REFERENCE_PYTHON and \
+                 FMN_FUZZ_PORTAL_PYTHON, and install xvfb-run)",
+            )
     }
 }
 
@@ -2025,6 +2059,9 @@ impl Runner {
         }
         if !spec.tier.enabled(full_matrix) {
             return Status::Skipped("tier full requires FMN_E2E_FULL=1");
+        }
+        if let Some(reason) = spec.surface.unavailable_reason() {
+            return Status::Skipped(reason);
         }
         if !valid_scenario_name(spec.name) {
             return Status::SpecInvalid(format!(

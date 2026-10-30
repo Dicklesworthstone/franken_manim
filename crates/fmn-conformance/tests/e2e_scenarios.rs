@@ -4518,6 +4518,77 @@ fn python_structural_envelope_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenar
     Ok(RunOutcome::ok().with_counter("envelope_violations_detected", 1))
 }
 
+/// The differential API fuzzer's plumbing (fm-5wq.34): fifty seeded programs
+/// run in the pinned Reference and in an installed portal wheel through each
+/// engine's own CLI, and are diffed under the structural-facts exclusion
+/// table. A campaign is not an e2e, so this checks that both engines measured
+/// every program and that the log carries its fields, not that they agree.
+/// The surface skips (`not-run: reference-env-absent`) on a host without the
+/// two interpreters.
+fn differential_fuzz_smoke_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let out = scenario_dir("differential_fuzz_smoke")?;
+    let status = std::process::Command::new("python3")
+        .arg(root.join("scripts/api_differential_fuzz.py"))
+        .args(["campaign", "--seed", "5034", "--count", "50"])
+        .args(["--jobs", "2", "--batch", "25", "--limit", "0", "--out"])
+        .arg(&out)
+        .status()
+        .map_err(|error| fail(format!("run the differential fuzzer: {error}")))?;
+    if !status.success() {
+        return Err(fail(format!("the differential fuzzer exited {status}")));
+    }
+    let read = |name: &str| {
+        std::fs::read_to_string(out.join(name))
+            .map_err(|error| fail(format!("read {name}: {error}")))
+    };
+    let summary = read("summary.json")?;
+    let number = |key: &str| -> Result<u64, ScenarioError> {
+        let marker = format!("\"{key}\":");
+        let start = summary
+            .find(&marker)
+            .map(|at| at + marker.len())
+            .ok_or_else(|| fail(format!("summary.json lacks {key}: {summary}")))?;
+        let digits: String = summary[start..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        digits
+            .parse()
+            .map_err(|error| fail(format!("summary.json {key}: {error}")))
+    };
+    let programs = number("programs")?;
+    let exits = number("engine_exits")?;
+    let drift = number("position_mismatches")?;
+    let log = read("log.ndjson")?;
+    let fields = [
+        "\"seed\":5034",
+        "\"digest\":",
+        "\"statements\":",
+        "\"engines\":",
+        "\"outcome\":",
+        "\"first_difference\":",
+        "\"excluded_by\":",
+        "\"minimized\":",
+    ];
+    let complete = log
+        .lines()
+        .filter(|line| fields.iter().all(|field| line.contains(field)))
+        .count() as u64;
+    ctx.event(
+        LogEvent::new("e2e.parity.differential_fuzz")
+            .field("programs", programs)
+            .field("engine_exits", exits)
+            .field("position_mismatches", drift)
+            .field("complete_log_lines", complete),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("fuzz_programs", programs)
+        .with_counter("fuzz_engine_exits", exits)
+        .with_counter("fuzz_position_mismatches", drift)
+        .with_counter("fuzz_log_lines", complete))
+}
+
 /// Reference corpus regressions (fm-5wq.30 first; fm-5wq.27..29, fm-sq8.10
 /// and fm-5wq.11 add their cases): minimized constructs from corpus scenes the
 /// portal once refused or rendered differently, and Reference helpers it once
@@ -11883,6 +11954,26 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             ],
         )],
     ));
+    specs.push(
+        spec(
+            "parity.differential_fuzz_smoke.v1",
+            ScenarioClass::ParityDrill,
+            Surface::ReferenceDifferential,
+            Invocation::new(differential_fuzz_smoke_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("fuzz_programs", 50),
+                counter_eq("fuzz_engine_exits", 0),
+                counter_eq("fuzz_position_mismatches", 0),
+                counter_eq("fuzz_log_lines", 50),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.parity.differential_fuzz",
+                vec![FieldPred::u64_eq("programs", 50)],
+            )],
+        )
+        .tier(Tier::Full),
+    );
     specs.push(spec(
         "parity.reference_corpus_regressions.v1",
         ScenarioClass::ParityDrill,
@@ -14351,6 +14442,32 @@ fn python_tex_selection_scenario_passes() {
         .expect("Tex selection scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
+}
+
+/// fm-5wq.34: the differential fuzz smoke runs where the pinned Reference and a
+/// portal wheel are installed, and anywhere else reports that it did not run,
+/// which is never a pass. The full-matrix gate is forced on so the surface's own
+/// check decides.
+#[test]
+fn differential_fuzz_smoke_runs_or_reports_not_run() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "parity.differential_fuzz_smoke.v1")
+        .expect("differential fuzz smoke is registered");
+    let available = Surface::ReferenceDifferential
+        .unavailable_reason()
+        .is_none();
+    let report = Runner::from_env().run_gated(scenario, true);
+    if available {
+        assert!(report.is_pass(), "{}", report.summary());
+    } else {
+        assert!(
+            matches!(report.status, Status::Skipped(reason)
+                if reason.starts_with("not-run: reference-env-absent")),
+            "{}",
+            report.summary()
+        );
+    }
 }
 
 #[test]

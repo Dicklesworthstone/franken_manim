@@ -519,8 +519,9 @@ def validate_exclusions(rows) -> list[dict]:
             raise ValueError(f"exclusion {row['id']!r}: kind must be behavior-note, adr or open-bead")
         scopes = row.get("scope", "any")
         scopes = [scopes] if isinstance(scopes, str) else scopes
-        if not set(scopes) <= {"any", "constructions", "classes", "scenes"}:
-            raise ValueError(f"exclusion {row['id']!r}: scope must be any, constructions, classes or scenes")
+        if not set(scopes) <= {"any", "constructions", "classes", "scenes", "fuzz"}:
+            raise ValueError(f"exclusion {row['id']!r}: scope must be any, constructions, classes, "
+                             "scenes or fuzz")
         envelope = row.get("envelope")
         if envelope is None:
             if _covers(row, "bbox") and row["kind"] != "open-bead":
@@ -868,8 +869,9 @@ def _short(value):
 
 
 def in_scope(rows, scope: str):
-    """The rows that apply to a `constructions`, `classes` or `scenes` run. A row's
-    `scope` is one name or a list; `any` (the default) applies everywhere."""
+    """The rows that apply to a `constructions`, `classes`, `scenes` or `fuzz` (the
+    differential API fuzzer's) run. A row's `scope` is one name or a list; `any` (the
+    default) applies everywhere."""
     def scopes(row):
         value = row.get("scope", "any")
         return [value] if isinstance(value, str) else value

@@ -146,7 +146,7 @@ Besides `subject`, `class` and `fact` (a glob or list of globs each), a row may 
 - `under` (an ancestor's class);
 - `empty_only` (the Reference member's whole family has no points);
 - `mro_missing` (the difference is exactly those missing names);
-- `scope` (`constructions`, `classes`, `scenes`, a list, or `any`).
+- `scope` (`constructions`, `classes`, `scenes`, `fuzz`, a list, or `any`).
 
 `kind` is one of:
 - `behavior-note` (cites BN-nn);
@@ -188,6 +188,67 @@ the current table and reports stale open-bead rows. `--report DIR --dashboard
 PATH` renders the outcome-code dashboard, including envelope violations
 grouped by (class, broken envelope). Records carry scene identifiers and outcome codes only, because
 the corpus is CC BY-NC-SA.
+
+## Differential API fuzzer (fm-5wq.34)
+
+`scripts/api_differential_fuzz.py` writes seeded random programs over a typed
+grammar of the manim API. The grammar covers:
+- constructors with parameters from their documented domains;
+- positional calls and style setters;
+- copy, become, add and remove;
+- live point views;
+- `self.play` of `.animate` chains and animations.
+
+Each batch of programs runs once per engine through that engine's own CLI.
+`crates/fmn-conformance/python/api_fuzz_scene.py` is the batch scene, run by
+the Reference in skip mode and by the portal construct-only. It measures every
+program with this extractor (`points=full`), plus two facts of its own: the
+roots a program defines and the scene list's order.
+
+The diff and the table are the corpus differential's. Rows apply when their
+scope is `any` or `fuzz`.
+
+One normalization is built in, Appendix C-35. The Reference's box ignores an
+in-place write through a live point view, and so does its box-derived
+`Circle.get_radius`. Where a member's Reference box is not its own point box
+and the portal's box is that point box, the point box is compared; the count
+appears as `c35-stale-reference-box`. The grammar therefore writes through
+views only after every other statement.
+
+The grammar leaves out constructs that differ by design, so that a difference
+is the portal's:
+- `Sector`, `AnnularSector` and `Annulus`: their arcs take no
+  `n_components`, so BN-09's density differs;
+- `RoundedRectangle`'s corners (BN-09, open bead fm-c1up);
+- `insert_n_curves`: it uses the same greedy rule in both engines, but a
+  circle's chords tie, and the first-index tie breaks on ulp-level noise.
+
+`Arc` always passes `n_components`, which BN-09 honors verbatim.
+
+A differing program is delta-debugged:
+- ddmin over its statements, each round's candidates run as one batch;
+- down to the smallest program that keeps the first difference's fact and
+  class;
+- written out with a regression-test body.
+
+Each batch ends with a replay of its first program. A replay that measures
+differently is counted in `position_mismatches`: a program's facts must not
+depend on what ran before it in the same scene.
+
+Programs that an engine never measured (its process died) are `engine-exit`,
+never equal.
+
+The log is `fmn.api-fuzz` v1 NDJSON, one line per program with:
+- seed and program digest;
+- statement count and both engines' identities;
+- the verdict and the first differing fact path;
+- the exclusion rows used;
+- the minimized digest.
+
+Programs and facts stay under the gitignored `frames/`.
+`parity.differential_fuzz_smoke.v1` (full tier) runs 50 programs at seed 5034
+on a host with both interpreters (`FMN_FUZZ_REFERENCE_PYTHON`,
+`FMN_FUZZ_PORTAL_PYTHON`). Without them it is `not-run: reference-env-absent`.
 
 ## First measurement (2026-09-27, portal wheel from `fac2e515`)
 
