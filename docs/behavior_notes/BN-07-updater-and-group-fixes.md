@@ -552,6 +552,30 @@ it is unaffected. Locked by
 mobject in two groups and relied on it moving twice should transform it
 explicitly.
 
+## C-43 — a box over points follows the points after an animation
+
+The Reference's `Mobject.interpolate` writes the endpoints' cached
+`bounding_box` arrays along the path (`mobject.py:1837`), not their boxes,
+and leaves `_needs_new_bounding_box` clear. An `.animate` builder transforms
+its target without reading the target's box, so the target carries the box it
+had before the call. On the pinned Reference (2026-10-30, fm-5wq.34's
+differential fuzzer):
+
+| code | Reference box | its points |
+|---|---|---|
+| `square = Square(side_length=1.9)`, then `square.animate.rotate(2.91)` played to the end | ±0.95 | ±1.1427 |
+
+`get_width()` then reports 1.9. Every later positional call reads that box:
+`match_width`, `next_to`, `to_corner`, `arrange`.
+
+**FrankenManim:** a box over points follows the points after an animation,
+as C-33 rules for the point-less case: the square's box is ±1.1427. Locked by
+`test_a_box_over_points_follows_an_animated_rotation` in
+`crates/fmn-python/tests/point_free_positions.py`.
+
+**Migration:** none needed. A scene that positioned something against a
+mobject it had just animated gets the box of the points drawn.
+
 ## `shift` takes a scalar or one 3-vector (fm-mumk)
 
 The Reference's `Mobject.shift` adds its argument to the points with numpy

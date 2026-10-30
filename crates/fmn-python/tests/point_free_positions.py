@@ -592,6 +592,20 @@ class PointFreeInterpolation(unittest.TestCase):
 
         self.check_interpolation(scene_bound, scene)
 
+    def test_a_box_over_points_follows_an_animated_rotation(self):
+        # Appendix C-43: the Reference's interpolate copies the target's cached box, which
+        # the builder's rotate left stale, so its square keeps the unrotated box (+-0.95).
+        square = m.Square(side_length=1.9)
+        animation = square.animate.rotate(2.91).build()
+        animation.begin()
+        animation.interpolate(1.0)
+        animation.finish()
+        points = square.get_points()
+        box = square.get_bounding_box()
+        np.testing.assert_allclose(box[0], points.min(axis=0), atol=1e-5)
+        np.testing.assert_allclose(box[2], points.max(axis=0), atol=1e-5)
+        self.assertAlmostEqual(square.get_width(), 2.2854, places=3)
+
     def test_path_arc_moves_a_point_less_box_off_the_straight_line(self):
         start, end = np.array([1.0, 0.0, 0.0]), np.array([-1.0, 0.0, 0.0])
         expected = m.path_along_arc(m.PI)(np.array([start]), np.array([end]), 0.5)[0]
@@ -607,7 +621,7 @@ _suite = unittest.TestSuite([
     unittest.defaultTestLoader.loadTestsFromTestCase(PointFreePositionTests),
     unittest.defaultTestLoader.loadTestsFromTestCase(PointFreeInterpolation),
 ])
-assert _suite.countTestCases() == 8, "point-free position inventory changed"
+assert _suite.countTestCases() == 9, "point-free position inventory changed"
 _result = unittest.TextTestRunner(verbosity=2).run(_suite)
 if not _result.wasSuccessful():
     raise AssertionError("point-free position acceptance failed")

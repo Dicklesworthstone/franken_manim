@@ -366,6 +366,20 @@ class RowConditions(unittest.TestCase):
         full_ref["members"][0]["bbox"] = [[5000, 0, 0]] * 3
         self.assertEqual(sf.diff_subject(full_ref, full_portal, rows)["verdict"], "differs")
 
+    def test_pointless_only_applies_to_members_without_their_own_points(self):
+        # A group root has no points of its own even when its children have some.
+        rows = [{"id": "p", "kind": "behavior-note", "ref": "BN-07", "class": "*",
+                 "fact": "style.*", "pointless_only": True, "reason": "t"}]
+        ref = facts([VGroup(children=[Square(SQUARE)])])
+        portal = facts([VGroup(children=[Square(SQUARE)])])
+        ref["members"][0]["style"] = {"fill_color": "#888888"}
+        portal["members"][0]["style"] = {"fill_color": "#29ABCA"}
+        self.assertEqual(sf.diff_subject(ref, portal, rows)["verdict"], "equal-with-exclusions")
+        ref["members"][1]["style"] = {"fill_color": "#888888"}
+        portal["members"][1]["style"] = {"fill_color": "#29ABCA"}
+        result = sf.diff_subject(ref, portal, rows)
+        self.assertEqual((result["verdict"], result["first_difference"]["path"]), ("differs", "0.0"))
+
     def test_adr_kind_and_scope_lists_validate(self):
         import tempfile
 

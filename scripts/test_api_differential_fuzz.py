@@ -212,6 +212,14 @@ class CompareTests(unittest.TestCase):
         portal = {"subject": "p", "members": [_member("0", "Square", self.moved)]}
         self.assertEqual(fuzz.compare(ref, portal, [])["first_difference"]["fact"], "bbox")
 
+    def test_a_stale_box_after_play_is_c43_for_the_reference_only(self):
+        ref = {"subject": "p", "members": [], "stale_after_play": 2}
+        portal = {"subject": "p", "members": [], "stale_after_play": 0}
+        result = fuzz.compare(ref, portal, [])
+        self.assertEqual((result["verdict"], result["excluded"]), ("equal-with-exclusions", {fuzz.C43: 2}))
+        result = fuzz.compare(portal, {**portal, "stale_after_play": 1}, [])
+        self.assertEqual(result["first_difference"]["fact"], "stale_after_play")
+
     def test_scene_order_and_absent_roots_are_compared(self):
         ref = {"subject": "p", "members": [], "scene": [0, 1], "absent_roots": []}
         portal = {"subject": "p", "members": [], "scene": [1, 0], "absent_roots": []}

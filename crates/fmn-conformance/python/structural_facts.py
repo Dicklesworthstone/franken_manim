@@ -592,24 +592,28 @@ def envelope_violation(envelope, reference, portal):
             "center_offset": round(centre_seen, 4)}
 
 
-def _excluded_by(rows, subject, member_class, fact, ancestors=(), values=None, empty=False):
+def _excluded_by(rows, subject, member_class, fact, ancestors=(), values=None, empty=False,
+                 pointless=False):
     """The first row covering this difference (see `_resolve`), or None."""
-    return _resolve(rows, subject, member_class, fact, ancestors, values, empty)[0]
+    return _resolve(rows, subject, member_class, fact, ancestors, values, empty, pointless)[0]
 
 
-def _resolve(rows, subject, member_class, fact, ancestors=(), values=None, empty=False):
+def _resolve(rows, subject, member_class, fact, ancestors=(), values=None, empty=False,
+             pointless=False):
     """(row, violation): the first row admitting this difference. Rows name the Reference-side class.
 
     Optional row fields: `under` requires an ancestor whose class matches,
     `reference_values` requires the Reference-side value to be one of those,
-    `empty_only` requires the Reference member to have no points, and
+    `empty_only` requires the Reference member's whole family to have no points,
+    `pointless_only` requires the Reference member itself to have none (its
+    children may: a group root, or a shape after `become()` of a group), and
     `mro_missing` admits an `mro` difference only when the Reference chain equals
     the portal chain plus exactly those names. A numeric `envelope` admits a
     `bbox` difference only inside it; outside, matching continues down the table,
     and if no later row admits it the first envelope it broke is the violation.
     """
     violation = None
-    for row in _candidate_rows(rows, subject, member_class, fact, ancestors, values, empty):
+    for row in _candidate_rows(rows, subject, member_class, fact, ancestors, values, empty, pointless):
         envelope = row.get("envelope")
         if fact == "bbox" and _numeric_envelope(envelope):
             excess = envelope_violation(envelope, *(values or (None, None)))
@@ -621,7 +625,7 @@ def _resolve(rows, subject, member_class, fact, ancestors=(), values=None, empty
     return None, violation
 
 
-def _candidate_rows(rows, subject, member_class, fact, ancestors, values, empty):
+def _candidate_rows(rows, subject, member_class, fact, ancestors, values, empty, pointless=False):
     for row in rows:
         if not (_matches(subject, row.get("subject", "*"))
                 and _matches(member_class or "", row.get("class", "*"))
@@ -630,6 +634,8 @@ def _candidate_rows(rows, subject, member_class, fact, ancestors, values, empty)
         if "under" in row and not any(_matches(a, row["under"]) for a in ancestors):
             continue
         if row.get("empty_only") and not empty:
+            continue
+        if row.get("pointless_only") and not pointless:
             continue
         if "reference_values" in row and (values is None or values[0] not in row["reference_values"]):
             continue
@@ -763,6 +769,7 @@ def diff_subject(ref: dict, portal: dict, exclusions=(), limit: int = 50,
     # Points over each member's whole family: a group root has no points of its
     # own, so `empty_only` means a point-less family, not a point-less root.
     ref_points = {}
+    ref_own = {m["path"]: m.get("n_points") for m in ref.get("members", ())}
     for m in ref.get("members", ()):
         parts = m["path"].split(".")
         for depth in range(1, len(parts) + 1):
@@ -797,7 +804,7 @@ def diff_subject(ref: dict, portal: dict, exclusions=(), limit: int = 50,
         if fact.split(".")[0] in ignore:
             return
         row, violation = _resolve(exclusions, subject, member_class, fact, ancestors(path), (a, b),
-                                  empty=ref_points.get(path) == 0)
+                                  empty=ref_points.get(path) == 0, pointless=ref_own.get(path) == 0)
         if row is not None:
             excluded[row["id"]] = excluded.get(row["id"], 0) + 1
             return

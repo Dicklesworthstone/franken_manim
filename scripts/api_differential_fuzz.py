@@ -474,6 +474,7 @@ def run_both(engines: Engines, programs: list[dict], work: pathlib.Path):
 
 
 C35 = "c35-stale-reference-box"
+C43 = "c43-stale-box-after-play"
 
 
 def _normalize_stale_boxes(ref, portal):
@@ -532,6 +533,15 @@ def compare(ref: dict, portal: dict, exclusions) -> dict:
             if ref.get(key) != portal.get(key):
                 extra.append({"path": "", "class": None, "fact": key,
                               "reference": ref.get(key), "portal": portal.get(key)})
+        # Appendix C-43: a stale box right after a play is the Reference's defect, never
+        # the portal's, whose box follows the points.
+        if ref.get("stale_after_play"):
+            result["excluded"][C43] = result["excluded"].get(C43, 0) + ref["stale_after_play"]
+            if result["verdict"] == "equal":
+                result["verdict"] = "equal-with-exclusions"
+        if portal.get("stale_after_play"):
+            extra.append({"path": "", "class": None, "fact": "stale_after_play",
+                          "reference": ref.get("stale_after_play"), "portal": portal["stale_after_play"]})
     if extra:
         result["differences"] = extra + result["differences"]
         result["first_difference"] = result["differences"][0]
@@ -750,10 +760,10 @@ def main(argv=None) -> int:
     minimized = {}
     if args.command in ("campaign", "minimize"):
         exclusions = load_exclusions(args.exclusions)
-        seen = set()
+        seen, chosen = set(), []
         (out / "minimized").mkdir(parents=True, exist_ok=True)
         for verdict in differing:
-            if len(minimized) >= args.limit:
+            if len(chosen) >= args.limit:
                 break
             target = signature(verdict["result"])
             first = verdict["result"]["first_difference"]
@@ -761,13 +771,20 @@ def main(argv=None) -> int:
                                       and fnmatch.fnmatchcase(str(first.get("class")), args.match_class)):
                 continue  # one minimization per distinct first difference
             seen.add(target)
-            program = verdict["program"]
+            chosen.append((verdict["program"], target))
+
+        def minimize_one(job):
+            # Each program's ddmin rounds are sequential; different programs run side by side.
+            program, target = job
             small = minimize_program(engines, program, target, exclusions,
                                      out / "minimize" / program["id"], args.budget)
             refs_m, portals_m = run_both(engines, [small], out / "minimize" / program["id"] / "final")
             result = compare(refs_m[0], portals_m[0], exclusions)
-            minimized[program["id"]] = small
             (out / "minimized" / f"{program['id']}.py").write_text(regression_test(small, result))
+            return program["id"], small
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.jobs // 2)) as pool:
+            minimized.update(pool.map(minimize_one, chosen))
     with open(out / "log.ndjson", "w", encoding="utf-8") as log:
         for verdict in verdicts:
             program = verdict["program"]

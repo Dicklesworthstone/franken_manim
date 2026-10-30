@@ -316,6 +316,16 @@
       "class": "RoundedRectangle",
       "fact": ["n_points", "points", "points_sha256", "getters", "getters.*"],
       "reason": "An explicit-radius RoundedRectangle has 21 points against the Reference's 25 (corner arc construction). BN-16 covers only the default radius."
+    },
+    {
+      "id": "bn07-c29-c31-point-less-style-fuzz",
+      "kind": "behavior-note",
+      "ref": "BN-07",
+      "scope": ["fuzz"],
+      "class": "*",
+      "fact": ["style.fill_color", "style.fill_opacity", "style.stroke_color", "style.stroke_width", "style.stroke_opacity"],
+      "pointless_only": true,
+      "reason": "C-29 and C-31: a point-less Reference member keeps its colors in _data_defaults. become() and interpolation copy data only, and set_style and match_style write data only, so its style getters report the style it had before the call. FrankenManim carries the style through (BN-07). Only for a member with no points of its own: a group or DashedLine root, or a shape after become() of a group."
     }
   ]
 }

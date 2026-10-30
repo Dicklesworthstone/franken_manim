@@ -46,6 +46,7 @@ def run_program(scene, program, baseline):
     namespace = dict(EXPORTS)
     namespace["np"] = numpy
     namespace["self"] = scene
+    STALE_AFTER_PLAY[0] = 0
     previous = signal.signal(signal.SIGALRM, _alarm)
     signal.alarm(TIMEOUT)
     try:
@@ -57,6 +58,7 @@ def run_program(scene, program, baseline):
         record = sf.extract(program["id"], roots, namespace=manimlib, points_mode="full")
         _note_stale_boxes(record, roots)
         record["absent_roots"] = [name for name in program["roots"] if name not in namespace]
+        record["stale_after_play"] = STALE_AFTER_PLAY[0]
         added = [mob for mob in scene.mobjects if not any(mob is kept for kept in baseline)]
         record["scene"] = [program["roots"].index(name) if name in program["roots"] else -1
                            for name in _names_of(added, namespace, program["roots"])]
@@ -87,6 +89,20 @@ def _members(roots):
         stack.extend((f"{path}.{i}", child) for i, child in reversed(list(enumerate(children))))
 
 
+def _point_box(mob):
+    """The quantized box of a family's points, or None for a point-less family."""
+    try:
+        blocks = [m.get_points() for m in mob.get_family()]
+        blocks = [b for b in blocks if len(b)]
+        if not blocks:
+            return None
+        every = numpy.vstack(blocks)
+        low, high = every.min(axis=0), every.max(axis=0)
+        return sf.quantize([low, (low + high) / 2, high])
+    except Exception:  # noqa: BLE001 - a family that cannot be read has no point box
+        return None
+
+
 def _note_stale_boxes(record, roots):
     """Record, on each member whose reported box is not its family's point box, the
     point box itself (`bbox_points`). Appendix C-35: the Reference's box ignores an
@@ -97,18 +113,33 @@ def _note_stale_boxes(record, roots):
         member = members.get(path)
         if member is None or not isinstance(member.get("bbox"), list):
             continue
-        try:
-            blocks = [m.get_points() for m in mob.get_family()]
-            blocks = [b for b in blocks if len(b)]
-            if not blocks:
-                continue
-            every = numpy.vstack(blocks)
-            low, high = every.min(axis=0), every.max(axis=0)
-            fresh = sf.quantize([low, (low + high) / 2, high])
-        except Exception:  # noqa: BLE001 - a family that cannot be read has no point box
-            continue
-        if not sf._within_tolerance(fresh, member["bbox"]):
+        fresh = _point_box(mob)
+        if fresh is not None and not sf._within_tolerance(fresh, member["bbox"]):
             member["bbox_points"] = fresh
+
+
+STALE_AFTER_PLAY = [0]
+
+
+def _refresh_after_play(animations):
+    """Appendix C-43: the Reference's `Mobject.interpolate` copies the endpoints'
+    cached boxes, so after `play(m.animate.rotate(a))` m keeps its unrotated box,
+    and every later positional call reads it. Count every animated family member
+    whose box is not its point box, then refresh them all, so the next statement
+    reads the box of the points drawn. A stale portal box stays a difference."""
+    for item in animations:
+        mob = getattr(item, "mobject", None)
+        if mob is None:
+            continue
+        try:
+            family = list(mob.get_family())
+        except Exception:  # noqa: BLE001
+            continue
+        for member in family:
+            fresh = _point_box(member)
+            if fresh is not None and not sf._within_tolerance(fresh, sf.quantize(member.get_bounding_box())):
+                STALE_AFTER_PLAY[0] += 1
+        mob.refresh_bounding_box(recurse_down=True)
 
 
 def _names_of(mobjects, namespace, roots):
@@ -132,6 +163,11 @@ def engine_header():
 
 
 class FuzzBatch(manimlib.Scene):
+    def play(self, *animations, **kwargs):
+        result = super().play(*animations, **kwargs)
+        _refresh_after_play(animations)
+        return result
+
     def construct(self):
         with open(os.environ["FMN_FUZZ_PROGRAMS"], encoding="utf-8") as source, \
                 open(os.environ["FMN_FUZZ_FACTS"], "w", encoding="utf-8") as sink:

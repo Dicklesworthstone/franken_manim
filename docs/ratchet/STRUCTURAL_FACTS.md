@@ -145,6 +145,7 @@ The same check runs in the portal gate and, embedded, as the e2e scenario `parit
 Besides `subject`, `class` and `fact` (a glob or list of globs each), a row may carry:
 - `under` (an ancestor's class);
 - `empty_only` (the Reference member's whole family has no points);
+- `pointless_only` (the Reference member itself has no points, though its children may);
 - `mro_missing` (the difference is exactly those missing names);
 - `scope` (`constructions`, `classes`, `scenes`, `fuzz`, a list, or `any`).
 
@@ -227,6 +228,12 @@ is the portal's:
 
 `Arc` always passes `n_components`, which BN-09 honors verbatim.
 
+A second normalization covers Appendix C-43. After every `self.play` the batch scene counts the
+animated families' members whose box is not their point box (`stale_after_play`), then
+refreshes their boxes. The Reference's interpolation copies its endpoints' cached boxes, and
+without the refresh every later positional call would read that stale box. A Reference count is
+`c43-stale-box-after-play`. A portal count is a difference.
+
 A differing program is delta-debugged:
 - ddmin over its statements, each round's candidates run as one batch;
 - down to the smallest program that keeps the first difference's fact and
@@ -251,6 +258,47 @@ Programs and facts stay under the gitignored `frames/`.
 `parity.differential_fuzz_smoke.v1` (full tier) runs 50 programs at seed 5034
 on a host with both interpreters (`FMN_FUZZ_REFERENCE_PYTHON`,
 `FMN_FUZZ_PORTAL_PYTHON`). Without them it is `not-run: reference-env-absent`.
+
+### First campaign (2026-10-30, generator v3, portal wheel 75f1ddac)
+
+10000 programs at seed 34 (`frames/api_fuzz/campaign_2026-10-30_c43`) ran in 464 s on the dev
+host with 16 jobs. The full minimization took 277 s.
+
+| verdict | programs |
+|---|---|
+| equal | 7773 |
+| equal through cited rows | 1870 |
+| differs | 357 |
+| engine-exit | 0 |
+
+Position mismatches: 0.
+
+The 357 programs minimized to 53 distinct first differences, each filed:
+
+| bead | finding | minimized programs |
+|---|---|---|
+| fm-point-getter-exception-class-8vjgn | point getters raise `ValueError`, the Reference `Exception` | 4 (139 programs) |
+| fm-group-op-bound-member-i057t | group operations miss a scene-bound member | 8 |
+| fm-pointless-target-alignment-b0y0v | Transform toward a point-less root: black style, unsupported box, origin points, missing member | 14 |
+| fm-view-detach-on-become-p8c23 | a view detaches across an equal-size `become()` | 15 |
+| fm-align-chord-tie-norms-uw95o | alignment splits different equal-length curves | 7 |
+| fm-fuzz-misc-geometry-hdiyw | three unexplained divergences | 3 |
+| fm-fuzz-reference-defects-ab96s | two Reference defects to register | 2 |
+
+Two Reference defects were registered on the way, each locked by a portal test:
+- C-42: a member reachable twice is moved once per path.
+- C-43: a stale box after an animation.
+
+The C-29/C-31 point-less style row (`bn07-c29-c31-point-less-style-fuzz`) admits the rest of
+the style class.
+
+Planted negatives, with wheels built at the pre-fix commits and 2000-program campaigns at batch
+5:
+
+| fixed bug | wheel | rediscovered as | on 75f1ddac |
+|---|---|---|---|
+| a view taken before Scene adoption went stale (c03206ca) | 5edfaa91 | 7 statements | equal |
+| origin-relative Cone placement (0a5539ed) | b090db93 | 1 statement | equal |
 
 ## First measurement (2026-09-27, portal wheel from `fac2e515`)
 
