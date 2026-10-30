@@ -56,6 +56,49 @@ def reference_curve(start, end, angle=m.PI / 2, double=False, **kwargs):
 
 
 class NativeCurvedLifecycle(unittest.TestCase):
+    def test_small_dot_arc_center_survives_a_three_dimensional_group_move(self):
+        # fm-fuzz-misc-geometry-hdiyw: the pinned Reference's absolute 3-D
+        # tangent-intersection threshold returns the first anchor here.
+        dot = m.Dot(point=np.array([2.6, .37, 0.]))
+        group = m.Group(m.Cube(side_length=1.89), dot)
+        group.move_to(np.array([2.16, .72, 0.]))
+        self.assert_points(dot.get_arc_center(), [3.8925, 1.09, 0.])
+        self.assertGreater(np.linalg.norm(dot.get_points()[0] - dot.get_arc_center()), .079)
+        for z in (-1e-9, 1e-9):
+            circle = m.Circle(radius=.08).shift([1., 2., z])
+            self.assert_points(circle.get_arc_center(), [1., 2., z])
+
+    def test_transformed_arrow_has_explicit_degenerate_angle_facts(self):
+        import runpy
+
+        arrow = m.Arrow([.18, 1.88, 0.], [1.98, 1.82, 0.], buff=.32)
+        target = m.Line([.81, -1.48, 0.], [-.78, 1.98, 0.])
+        scene = m.Scene(skip_animations=True)
+        scene.play(m.ReplacementTransform(arrow, target.copy()))
+        self.assertLess(arrow.get_length(), 1e-6)
+        self.assert_points(arrow.get_start(), [.1285714, .00285714, 0.])
+        self.assert_points(arrow.get_end(), [.1285714, .00285714, 0.])
+        extractor = runpy.run_path(str(Path(__file__).resolve().parents[2]
+                                      / "fmn-conformance/python/structural_facts.py"))
+        facts = extractor["extract"]("transformed-arrow", [arrow], namespace=m)
+        getters = facts["members"][0]["getters"]
+        self.assertEqual(getters["get_length"], 0)
+        self.assertEqual(getters["get_angle"], "degenerate")
+        self.assertIn("get_start", getters)
+        self.assertIn("get_end", getters)
+
+    def test_nested_add_preserves_each_duplicate_roots_relative_order(self):
+        # Both Sphere entries survive recursive removal. A stable z-sort
+        # keeps each entry's position instead of sorting both at the last ID.
+        v0, v1, v2 = m.Dot(), m.Square(), m.Sphere()
+        v4, v6 = m.Circle(), m.Triangle()
+        v5 = m.Group(m.VGroup(v0, v1), v2)
+        scene = m.Scene().clear()
+        scene.add(v4, v1, v2, v5)
+        scene.add(v6, v4, v1)
+        self.assertEqual([id(obj) for obj in scene.mobjects],
+                         [id(obj) for obj in (v2, v0, v2, v6, v4, v1)])
+
     def assert_points(self, actual, expected):
         np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-5)
 
