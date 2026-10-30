@@ -162,6 +162,69 @@ class Extraction(unittest.TestCase):
         self.assertEqual(sf.canonical(facts([tree], points_mode="full")),
                          sf.canonical(facts([tree], points_mode="full")))
 
+    def test_direction_below_the_length_quantum_is_explicitly_degenerate(self):
+        class Line(Mobject):
+            def get_start(self):
+                return self.points[0]
+
+            def get_end(self):
+                return self.points[-1]
+
+            def get_length(self):
+                return math.dist(self.get_start(), self.get_end())
+
+            def get_angle(self):
+                start, end = self.get_start(), self.get_end()
+                return math.atan2(end[1] - start[1], end[0] - start[0])
+
+        namespace = types.SimpleNamespace(Mobject=Mobject, Line=Line)
+        for endpoint in [(0, 0, 0), (1e-8, 0, 0), (0, -1e-8, 0), (0.00049, 0, 0)]:
+            with self.subTest(endpoint=endpoint):
+                record = sf.extract("short", [Line([(0, 0, 0), endpoint])], namespace=namespace)
+                getters = record["members"][0]["getters"]
+                self.assertEqual(getters["get_length"], 0)
+                self.assertEqual(getters["get_angle"], "degenerate")
+                self.assertIn("get_start", getters)
+                self.assertIn("get_end", getters)
+
+    def test_degenerate_angle_normalization_preserves_failures_and_nonfinite_values(self):
+        class Line(Mobject):
+            def get_length(self):
+                return 0.0
+
+            def get_angle(self):
+                raise ValueError("invalid direction")
+
+        namespace = types.SimpleNamespace(Mobject=Mobject, Line=Line)
+        record = sf.extract("raising", [Line()], namespace=namespace)
+        self.assertEqual(record["members"][0]["getters"]["get_angle"], "raises ValueError")
+        for value in [math.nan, math.inf, -math.inf]:
+            with self.subTest(value=value):
+                Line.get_angle = lambda self, value=value: value
+                record = sf.extract("nonfinite", [Line()], namespace=namespace)
+                self.assertEqual(record["members"][0]["getters"]["get_angle"], sf.quantize(value))
+
+    def test_measurable_direction_retains_its_angle_and_detects_a_wrong_angle(self):
+        class Line(Mobject):
+            angle = 0.0
+
+            def get_length(self):
+                return 0.00051
+
+            def get_angle(self):
+                return self.angle
+
+        namespace = types.SimpleNamespace(Mobject=Mobject, Line=Line)
+        correct = sf.extract("line", [Line()], namespace=namespace)
+        broken = Line()
+        broken.angle = math.pi / 2
+        changed = sf.extract("line", [broken], namespace=namespace)
+        self.assertEqual(correct["members"][0]["getters"]["get_length"], 1)
+        self.assertEqual(correct["members"][0]["getters"]["get_angle"], 0)
+        result = sf.diff_subject(correct, changed)
+        self.assertEqual(result["verdict"], "differs")
+        self.assertIn("getters.get_angle", [d["fact"] for d in result["differences"]])
+
 
 class Diff(unittest.TestCase):
     def verdict(self, a, b, exclusions=(), mode="full"):

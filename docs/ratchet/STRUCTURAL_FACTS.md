@@ -43,6 +43,15 @@ Each member has these fields:
 **Quantization** is `round(x * 1000)`, half to even. Non-finite values map to
 distinct integer sentinels, and magnitudes are clamped at 2^61.
 
+A finite `get_angle` is recorded as `"degenerate"` when that member's
+already-recorded `get_length` is the integer zero. Below this position
+resolution, float noise in coincident endpoints can point in any direction
+(the transformed Arrow in `fm-fuzz-misc-geometry-hdiyw`). The rule is shared
+by every class and both engines; endpoints, points and length remain checked.
+Raising, missing and non-finite angle getters retain their original facts.
+Any positive quantized length still compares the angle normally. This changes
+no getter-table entry, field, ordering or quantum in schema version 1.
+
 **Canonical form** is JSON with sorted keys and no whitespace. Records hold
 only integers, strings, booleans, null, lists and objects, so equal facts are
 equal bytes.

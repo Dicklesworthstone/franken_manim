@@ -239,6 +239,12 @@ def _member_facts(mob, path, namespace, points_mode):
     for klass in facts["mro"]:
         for name in GETTERS.get(klass, ()):
             getters[name] = _call_getter(mob, name)
+    length, angle = getters.get("get_length"), getters.get("get_angle")
+    if type(length) is int and length == 0 and type(angle) is int and -_LIMIT < angle < _LIMIT:
+        # A direction below this extractor's position resolution has no
+        # measurable angle. Keep endpoints/length, and keep raising/nonfinite
+        # getters as facts; only a finite angle becomes explicitly degenerate.
+        getters["get_angle"] = "degenerate"
     if getters:
         facts["getters"] = getters
     return facts
