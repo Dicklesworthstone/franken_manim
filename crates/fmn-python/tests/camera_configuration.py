@@ -11,6 +11,45 @@ import manimlib as m
 
 
 class CameraConfigurationTests(unittest.TestCase):
+    def test_bare_runs_use_constructor_and_class_camera_fps(self):
+        class Timed(m.Scene):
+            default_camera_config = {"fps": 60}
+
+            def construct(self):
+                self.ticks = []
+                self.rates = []
+                dot = m.Dot()
+                dot.add_updater(lambda mob, dt: self.ticks.append(dt))
+                self.add(dot)
+                self.play(m.Square().animate.shift(m.RIGHT), run_time=.25,
+                          rate_func=lambda alpha: self.rates.append(alpha) or alpha)
+                self.wait(.25)
+
+        for options, fps in (({}, 60), ({"camera_config": {"fps": 24}}, 24)):
+            with self.subTest(fps=fps):
+                scene = Timed(**options)
+                frame = scene.frame
+                scene.run()
+                positive = [dt for dt in scene.ticks if dt > 0]
+                self.assertTrue(positive)
+                np.testing.assert_allclose(positive, 1 / fps, rtol=0, atol=1e-15)
+                self.assertEqual(scene.camera.fps, fps)
+                self.assertIs(scene.camera.frame, frame)
+                # Custom rates are evaluated on the same nominal frame grid.
+                self.assertTrue(any(abs(alpha - 4 / fps) < 1e-12
+                                    for alpha in scene.rates))
+                self.assertFalse(any(abs(dt - 1 / 30) < 1e-12 for dt in positive))
+
+    def test_constructor_clock_is_ready_for_imperative_playback(self):
+        scene = m.Scene(camera_config={"fps": 60})
+        ticks = []
+        dot = m.Dot().add_updater(lambda mob, dt: ticks.append(dt))
+        scene.add(dot)
+        scene.wait(.1)
+        positive = [dt for dt in ticks if dt > 0]
+        self.assertTrue(positive)
+        np.testing.assert_allclose(positive, 1 / 60, rtol=0, atol=1e-15)
+
     def test_project_scene_and_writer_defaults_reach_the_installed_initializer(self):
         from fmn_python.scene_loading import SceneSource
         configuration = m._resolved_portal_config(None,

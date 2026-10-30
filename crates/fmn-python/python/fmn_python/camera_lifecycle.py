@@ -54,6 +54,14 @@ def install_scene_camera_configuration(native):
             type(self).default_camera_config,
             {} if camera_config is None else camera_config,
         )
+        # Select Choreo's rational clock while the arena is still empty.
+        # Bare run()/play()/wait() must use the same configured frame grid as
+        # a render generation. Reuse the native pristine-scene boundary; it
+        # acquires no output sink, and later renders still select their own
+        # clock/seed before construction. Keep the initial native seed at 0.
+        native._portal_prepare_recording_scene(
+            self, *self.camera_config["resolution"], self.camera_config["fps"], 0
+        )
         frame_config = self.camera_config.get("frame_config", {})
         if not isinstance(frame_config, dict):
             raise TypeError("Camera frame_config must be a dict")

@@ -4652,6 +4652,8 @@ fn python_svg_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
 /// Library-class subclass hooks and authored easing (fm-5wq.13): an `init_points` override on
 /// each required library base is called once and renders, an `interpolate` override drives a
 /// Transform's frames, and authored rate functions are exact at 24/30/60 fps.
+/// fm-pr8c extends the same lifecycle scenario with constructor/class FPS on
+/// bare runs and imperative playback, observing updater dt and authored rates.
 fn python_subclass_hooks_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let report = manimlib::run_portal_gauntlet_subclass_hooks()
         .map_err(|error| fail(format!("library subclass hooks: {error}")))?;
@@ -12062,7 +12064,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         vec![
             Assertion::ExitCode(0),
             counter_eq("subclass_hook_bases", 11),
-            counter_eq("subclass_hook_cases", 7),
+            counter_eq("subclass_hook_cases", 9),
         ],
         vec![LogExpect::span_present(
             "e2e.python.subclass_hooks",
