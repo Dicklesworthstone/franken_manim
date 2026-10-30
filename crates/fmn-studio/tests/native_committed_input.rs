@@ -385,7 +385,11 @@ fn mixed_seek_and_input_journal_replays_the_complete_track_and_exact_hashes() {
     assert_eq!(seek(&mut recovered, 7), expected);
     assert_eq!(recovered.journal_position(), 4);
     assert_eq!(recovered.committed_input_count(), 2);
-    assert_eq!(builds.get(), before + 1, "same-frame inputs keep their owner");
+    assert_eq!(
+        builds.get(),
+        before + 1,
+        "same-frame inputs keep their owner"
+    );
 }
 
 #[test]

@@ -93,9 +93,10 @@ impl NativeSceneWorker {
                     inputs.checked_sub(previous_inputs).ok_or_else(|| {
                         refuse("native replay replaced an already applied input prefix")
                     })?,
-                    Some(usize::try_from(previous_inputs).map_err(|_| {
-                        refuse("native replay input cursor exceeds usize")
-                    })?),
+                    Some(
+                        usize::try_from(previous_inputs)
+                            .map_err(|_| refuse("native replay input cursor exceeds usize"))?,
+                    ),
                 ),
                 _ => (frame, inputs, None),
             };
