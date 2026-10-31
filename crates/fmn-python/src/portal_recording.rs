@@ -260,6 +260,12 @@ fn begin_recording(
     };
     let mut audio = portal_audio::PortalAudio::from_scene(scene, &format, video.as_ref())?;
     let ffmpeg_limits = audio.ffmpeg_limits.clone();
+    // Freeze the same typed raster context as a full render. A recording
+    // attaches output to the existing engine; its returned runtime is unused.
+    let config = portal_autotune::file_snapshot(
+        scene.py(),
+        !matches!(&format, PortalOutputFormat::Frames(_)),
+    )?;
     // Authored descriptors above may have run arbitrary Python. Recheck before
     // opening output; never steal a recursively acquired generation.
     check_available(scene)?;
@@ -293,6 +299,7 @@ fn begin_recording(
         video,
         audio,
         false,
+        config,
     )?;
     // Crucially, do NOT build or install a replacement Scene/EngineState here.
     // Every existing mobject, live NumPy view, updater and RNG keeps its owner.

@@ -5022,10 +5022,12 @@ fn python_portal_native_outputs_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scen
             .field("sample_frames", sample_frames)
             .field("video_formats", video_formats)
             .field("video_frames", video_frames)
-            .field("video_capability_refusals", video_refusals),
+            .field("video_capability_refusals", video_refusals)
+            .field("live_recording_config_suite", 1_u64),
     );
     let mut outcome = RunOutcome::ok()
         .with_counter("portal_output_options_suite", 1)
+        .with_counter("live_recording_config_suite", 1)
         .with_counter("native_output_frames", frames)
         .with_counter("native_output_formats", formats)
         .with_counter("native_output_publication_failures", refusals)
@@ -12064,6 +12066,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             Assertion::ExitCode(0),
             Assertion::FileInventory(portal_output_inventory),
             counter_eq("portal_output_options_suite", 1),
+            counter_eq("live_recording_config_suite", 1),
             counter_eq("video_output_capability_refusals", 1),
             counter_eq("native_output_frames", 4),
             counter_eq("native_output_formats", 3),
@@ -12079,6 +12082,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 FieldPred::u64_eq("publication_failures", 14),
                 FieldPred::u64_eq("thread_replays", 3),
                 FieldPred::u64_eq("sample_frames", 3000),
+                FieldPred::u64_eq("live_recording_config_suite", 1),
             ],
         )],
     ));

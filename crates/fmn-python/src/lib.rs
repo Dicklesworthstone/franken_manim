@@ -13524,17 +13524,22 @@ pub fn render_portal_slide(
     })
 }
 
-/// Exercise negotiated output through both programmatic and console owners.
+/// Exercise negotiated output and live recording through their production owners.
 /// The shared acceptance source independently decodes real encoder output;
 /// `FMN_REQUIRE_FFMPEG=1` makes encoder availability a hard prerequisite.
 #[cfg(feature = "gauntlet")]
 pub fn run_portal_gauntlet_video_options() -> Result<(), String> {
     with_python_test_module("video options Gauntlet", |py, _module, globals| {
-        let source = CString::new(include_str!("../tests/video_options.py"))
-            .expect("video options suite contains no NUL");
-        py.run(source.as_c_str(), Some(globals), Some(globals))
-            .inspect_err(|error| error.print(py))
-            .map_err(|error| error.to_string())
+        for suite in [
+            include_str!("../tests/video_options.py"),
+            include_str!("../tests/recording_sessions.py"),
+        ] {
+            let source = CString::new(suite).expect("output acceptance suite contains no NUL");
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     })
 }
 

@@ -1,5 +1,6 @@
 """Installed-wheel live recording API, checkpoint retries and real encoded video."""
 from pathlib import Path
+import copy
 import hashlib
 import os
 import shutil
@@ -8,7 +9,7 @@ import tempfile
 
 import numpy as np
 import manimlib as m
-from fmn_python import RecordingSession, SceneConsole, record_scene
+from fmn_python import RecordingSession, SceneConsole, record_scene, render_scene
 
 
 def make_scene():
@@ -138,10 +139,71 @@ def native_video(root):
     print("live recording MP4 and transparent MOV independently decoded")
 
 
+def configured_raster_preflight(root):
+    scene, square = make_scene()
+    square.rotate(0.27)
+    camera, core, clock = scene.camera, scene.camera._core, m._portal_scene_clock(scene)
+    before = square.get_points().copy()
+    saved = copy.deepcopy(m.manim_config)
+    try:
+        for section, key, value, error_type in (
+            ("render", "aa", "unknown-aa", ValueError),
+            ("cache", "max_bytes", object(), TypeError),
+            ("directories", "cache", object(), TypeError),
+        ):
+            m.manim_config.clear()
+            m.manim_config.update(copy.deepcopy(saved))
+            m.manim_config.setdefault(section, {})[key] = value
+            destination = root / ("invalid-" + section)
+            try:
+                with record_scene(scene, destination, format="png_sequence", resolution=(32, 18), threads=1):
+                    raise AssertionError("invalid typed raster config acquired a recording")
+            except error_type as error:
+                assert key in str(error), str(error)
+            else:
+                raise AssertionError("invalid typed raster config was accepted")
+            assert not destination.exists()
+            assert m._portal_scene_clock(scene) == clock
+            assert scene.camera is camera and scene.camera._core is core
+            assert scene.mobjects[1] is square
+            np.testing.assert_array_equal(square.get_points(), before)
+
+        m.manim_config.clear()
+        m.manim_config.update(copy.deepcopy(saved))
+        m.manim_config.setdefault("render", {})["aa"] = "ssaa2x"
+        with record_scene(scene, root / "configured-aa", format="png_sequence", resolution=(32, 18), threads=1) as clip:
+            pass
+        assert clip.result.frame_count == 1 and m._portal_scene_clock(scene) == clock
+        assert scene.mobjects[1] is square and scene.camera._core is core
+
+        class SameGeometry(m.Scene):
+            def construct(self):
+                self.add(square.copy())
+
+        full = render_scene(SameGeometry, root / "configured-aa.png", format="png", resolution=(32, 18), threads=1)
+        frames = list(clip.result.destination.glob("*.png"))
+        assert len(frames) == 1
+        assert frames[0].read_bytes() == full.destination.read_bytes()
+        m.manim_config["render"]["aa"] = "adaptive"
+        control = render_scene(SameGeometry, root / "adaptive-aa.png", format="png", resolution=(32, 18), threads=1)
+        assert control.destination.read_bytes() != full.destination.read_bytes(), "fixture must distinguish AA policies"
+        # Soundtrack output has no raster/cache consumer and must not inspect
+        # settings that are irrelevant to its output session.
+        m.manim_config.setdefault("directories", {})["cache"] = object()
+        m.manim_config.setdefault("cache", {})["max_bytes"] = object()
+        with record_scene(scene, root / "non-raster.wav", format="wav", resolution=(32, 18), threads=1) as sound:
+            scene.wait(0.125)
+        check(sound.result)
+    finally:
+        m.manim_config.clear()
+        m.manim_config.update(saved)
+
+
 with tempfile.TemporaryDirectory(prefix="fmn-recording-sessions-") as temporary:
     root = Path(temporary)
     repeated_contexts(root)
     recorded_checkpoint_cells(root)
     errors_preserve_existing_scene(root)
     native_video(root)
+    configured_raster_preflight(root)
 print("native recording sessions acceptance passed")
