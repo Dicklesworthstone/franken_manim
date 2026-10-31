@@ -73,6 +73,10 @@ fn has_admissible_workdir_ancestors(path: &Path) -> bool {
             }
         }
     }
+    // Canonicalization remains an admission check on every platform; only
+    // Unix has the ancestor permission bits inspected above.
+    #[cfg(not(unix))]
+    drop(canonical);
     true
 }
 
@@ -363,6 +367,7 @@ fn native_audio_quality_reaches_mux_without_changing_native_soundtrack() {
     std::fs::write(&audio, tone_wav()).unwrap();
     let mut reference_wav = None;
     for (index, bitrate) in [None, Some(96_000), Some(192_000)].into_iter().enumerate() {
+        // ubs:ignore - non-secret output filename suffix, never an authentication token or capability.
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()

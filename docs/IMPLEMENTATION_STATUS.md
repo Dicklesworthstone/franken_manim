@@ -4,13 +4,18 @@
 
 ## 2026-10-31 implementation follow-through — qualification in progress
 
-The October 30 vision-to-code assessment below remains bound to its named
-checkpoints. The preceding fixes are committed on local `main` through
-`b2db79fd4ce3feaed131050dc6fff30097fd3a88`; subsequent native Studio work
-is described below. The commits after published `7fba6606` remain unpushed
-while source qualification is red. The complete matching installed-wheel
-gate at `b2db79fd` now passes. Owned Beads remain open until
-their original acceptance conditions and complete gates are met.
+The October 30 assessment below remains bound to its named checkpoints.
+Runtime and qualification repairs through `56d7abde` and the tracker-only
+`047985d9` are published. New recovery commit `a73a18af` and the CI repairs
+below are qualification candidates. Publication was verified independently
+and is not qualification. The complete matching
+installed-wheel gates at `b2db79fd`, `3eb4f621` and `56d7abde` pass, but the
+latest complete **source gate at `56d7abde` exits 101**: 90 conformance e2e
+cases pass and the aggregate fast tier exceeds the original 15-second
+formula-sheet Studio restart deadline. Its individual builtin lifecycle
+scenario passes. All 23 owned leaves remain open pending original acceptance
+and the required complete gates. Current restart and hosted-CI repairs are
+not qualified deliveries.
 
 At `3eb4f621`, the unchanged source policy passed all Rust checks and tests,
 including **91/91 conformance e2e** at the original deadlines/default
@@ -19,9 +24,77 @@ The complete policy still exited **1**: its final crate-DAG check omitted the
 existing `fmn → fmn-cache` dependency used by standard-mode persistent
 autotuning (plan §17.4, D-24). The focused checker correction admits exactly
 that required internal edge; planted extra, missing, upward and spike edges
-still fail. It changes no runtime dependency or product contract. Its new
-complete policy run remains required. The matching `3eb4f621` installed-wheel
-gate is still running; no leaf has been closed from the partial source pass.
+still fail. It changes no runtime dependency or product contract. That
+checkpoint's matching installed-wheel gate completed successfully; the later
+`56d7abde` complete source attempt remains red at the restart failure above.
+
+The `56d7abde` installed-artifact gate runs the original named suites,
+including all six original three-second Studio cases. Unfiltered discovery
+executes 3,180 cases: **2,983 actual passes, 197 existing skips, zero errors**.
+The final behavioral witness reports 382 suites / 12,979 cases, and kills all
+25 applicable mutants; 15 planned but inapplicable mutants earn zero credit.
+Traced-only failures are printed and reconciled by the existing plain rerun;
+they are not described as absent. Wheel SHA-256 is
+`d5a0d614f445ae5c754da74e732bca2f97eec63acdd6e43ff15a250ea0c4aff5`.
+Both source and artifact runs preserve all 4,405 tracked non-Beads files
+before and after, aggregate
+`024017921b18a463b538d954cd71d2cda9294de83269177c184344faee1b712d`.
+This is bounded host/artifact evidence, not a complete source, release,
+platform-matrix, beauty or performance certificate.
+
+Actual restart stack samples show host-side canonical request and checkpoint
+hashing while the worker waits. The candidate retains the complete bounded
+canonical journal already produced during atomic installation. It also
+matches a cache-verified payload address to the journal hash instead of
+hashing that payload again; every cache envelope, payload-address and worker
+wire check remains. Memory increases by one journal buffer, bounded by the
+existing protocol ceiling. All 34 supervisor tests and strict test Clippy
+pass, including exact replay bytes after append, rejected replacement,
+corrupt-cache fallback and cold replay. A planted stale-buffer mutation
+executes exactly one test and fails on replaying entry 2 from the stale
+one-entry journal (33 unrelated tests filtered). The restored candidate
+passes all 34 tests again and **91/91 original default-profile e2e tests**,
+including the aggregate fast tier, in 475.79 seconds at unchanged deadlines
+and default concurrency. These preflights still require full source and
+matching installed-artifact qualification at a committed checkpoint.
+
+Three interleaved live formula-sheet pairs compare the actual `56d7abde` CLI
+with this candidate in one invocation. Each of the six runs passes all 13
+actual PNG/RGBA publications, exact inspected bytes and API/edit/undo/replay
+assertions. Median restart improves **4.282 s → 3.883 s**; median total requests
+improve **26.615 s → 26.132 s**. Median edit time worsens
+**15.814 s → 16.128 s**, and worst request worsens **4.332 s → 4.449 s**.
+This is a modest shared-host maintenance result, not a PG or tail-latency
+win. Receipt SHA-256:
+`9915727b6f51a94b5f07181dead780eb411cb8443a9b34355b1fb92bc5a11900`.
+Its source snapshot is dirty `047985d9`, aggregate `03862953…`; it is not a
+receipt for a later committed build. RCH's focused command and recovered
+delivery both exit zero, with terminal acknowledgment and independently
+verified source/CLI hashes. Recovery used a private RAM-backed output
+directory and a temporary relocation of a redundant captured CLI; its
+original path was restored with identical bytes. A second duplicate is
+temporarily retained in RAM with its other local and durable remote copies.
+All contents were kept.
+Protected RCH home state was left untouched after its rename was blocked.
+No source rerun, discarded data or gate waiver was used for recovery.
+
+Hosted run `41222236033` at `56d7abde` passes format admission, ARM and Windows
+exact-image jobs, and both actual PG-5 scene / certified-engine sweeps at
+{1,4,16}. macOS is cancelled, seven scheduled/manual lanes are skipped, and
+the run is not green. Portable Linux fails with explicit OS error 28 (disk
+full), followed by linker SIGBUS. Windows functional Clippy fails on a
+Unix-only use of `canonical` in the native video test helper, after the
+earlier `DirBuilder` repair compiles. Current CI edits consume that value on
+non-Unix while retaining canonicalization and Unix permissions checks, and
+select line-table debug metadata for dev/test builds. Ten affected target
+cache keys change so old full-debug artifacts do not refill the runner;
+registry-only fuzz and release-perf caches are unchanged. Actual Cargo JSON
+confirms opt-level 0, debug assertions and overflow checks enabled, and
+line-table debug information; all 26 unchanged hash tests pass under those
+CI metadata settings. Tests and timeouts are unchanged. Repaired hosted
+lanes remain required. The new complete owned-host source qualification
+will retain the original default debug profile; this small CI profile
+probe does not substitute for it. Release-perf settings are unchanged.
 
 - **Chisel:** arc-center recovery now solves in the actual component plane,
   including tilted circles and tiny radii. Native arc tests and real portal
