@@ -49,7 +49,10 @@ class NativeSourceAutoreloadAcceptance(unittest.TestCase):
         embedded.shell = embedded.get_ipython_shell_for_embedded_scene()
         # Drive the real mainloop rather than replacing __call__, which would
         # miss IPython's temporary locals/module-globals separation.
-        embedded.shell.interact = lambda: script(embedded)
+        def interact():
+            self.assertIs(m.get_ipython(), embedded.shell)
+            script(embedded)
+        embedded.shell.interact = interact
         result = embedded.launch()
         self.assertIs(result, embedded.shell)
         self.assertEqual(embedded._fmn_hooks, [])

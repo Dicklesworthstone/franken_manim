@@ -13264,6 +13264,14 @@ class Camera:
     that native camera.
     """
 
+    def __new__(cls, *_args, **_kwargs):
+        # Own a standalone dictionary before any caller can observe it.
+        # Early supported 3.13 hosts have inline-dictionary tracking/traversal
+        # defects (CPython GH-133543 and GH-130327) that can pin captured scenes.
+        camera = super().__new__(cls)
+        object.__setattr__(camera, "__dict__", {})
+        return camera
+
     def __init__(
         self,
         window=None,
@@ -18114,6 +18122,22 @@ def _portal_checkpoint_paste(scene):
     return scene._checkpoint_bytes()
 
 
+def _portal_get_ipython():
+    """Resolve the optional host shell only when host interop is requested."""
+    origin = "IPython.core.getipython.get_ipython"
+    try:
+        get_shell = _resolve_leaked_origin("get_ipython", origin)
+    except ImportError as error:
+        get_shell = _missing_leaked_import(
+            "manimlib.scene.interactive_scene", "get_ipython", origin, error
+        )
+    return get_shell()
+
+
+_portal_get_ipython.__name__ = _portal_get_ipython.__qualname__ = "get_ipython"
+_portal_get_ipython.__module__ = "manimlib.scene.interactive_scene"
+
+
 def _placeholder_function(module_name, name):
     def unavailable(*args, **kwargs):
         del args, kwargs
@@ -19593,6 +19617,8 @@ def _install_schema_surface():
                 value = _refused_render_import(module_name, qualified, _origin)
             elif _origin in _UNIMPORTED_LEAKED_ORIGINS:
                 value = _unimported_leaked_import(module_name, qualified, _origin)
+            elif _origin == "IPython.core.getipython.get_ipython":
+                value = _portal_get_ipython
             else:
                 try:
                     value = _resolve_leaked_origin(qualified, _origin)

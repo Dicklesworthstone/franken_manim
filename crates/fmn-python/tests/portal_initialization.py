@@ -1,9 +1,20 @@
 """Production initialization contract; run against either real entry point."""
 import importlib
+import sys
 import types
 
+ipython_before = {name for name in sys.modules if name == "IPython" or name.startswith("IPython.")}
 import manimlib as m
 from fmn_python import initialization
+
+assert {name for name in sys.modules if name == "IPython" or name.startswith("IPython.")} == ipython_before, (
+    "ordinary portal initialization must leave optional IPython unloaded"
+)
+assert importlib.import_module("manimlib.scene.interactive_scene").get_ipython is m.get_ipython
+# Explicit host interop resolves the actual provider, including its live shell
+# singleton. It is not a synthetic no-shell result or an unavailable placeholder.
+observed_shell = m.get_ipython()
+assert observed_shell is importlib.import_module("IPython.core.getipython").get_ipython()
 
 
 native = getattr(m, "_native", m)

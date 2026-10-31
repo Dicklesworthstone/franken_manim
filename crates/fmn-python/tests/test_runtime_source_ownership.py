@@ -170,6 +170,19 @@ class RuntimeSourceOwnership(unittest.TestCase):
             self.assertEqual(source.module.fmn_test_alias.VALUE, 7)
             self.assertEqual(set(source.sources), {'scene.py'})
 
+    def test_frozen_runtime_roots_recheck_a_retargeted_helper_symlink(self):
+        installed = self.install('fmn_test_retargeted.py', 'VALUE = 7\n')
+        local = self.write('local_helper.py', 'VALUE = 9\n')
+        alias = self.root / 'helper_alias.py'
+        alias.symlink_to(installed)
+        paths = runtime_paths.RuntimePaths(self.root)
+        self.assertTrue(paths.contains(alias))
+        alias.rename(self.root / 'original_alias.py')
+        alias.symlink_to(local)
+        self.assertFalse(paths.contains(alias), 'target resolution must not be cached')
+        self.assertTrue(paths.contains(installed))
+        self.assertFalse(paths.contains(self.root / 'site-packages-examples' / 'helper.py'))
+
     def test_source_file_inside_installation_is_refused_before_execution(self):
         path = self.install('example.py', "raise AssertionError('must not execute')\n")
         with self.assertRaisesRegex(ImportError, 'runtime installation'):

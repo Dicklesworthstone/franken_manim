@@ -62,6 +62,12 @@ class RuntimePaths:
                     roots.update((part, part.resolve()))
                     break
         self.roots = tuple(sorted(roots))
+        # Freeze component prefixes once, rather than rebuilding every parent
+        # Path for every imported module. normcase preserves Windows Path's
+        # case-insensitive comparison; components preserve directory boundaries.
+        self._root_parts = tuple(
+            tuple(os.path.normcase(part) for part in root.parts) for root in self.roots
+        )
 
     def contains(self, path: Path) -> bool:
         path = Path(path)
@@ -69,6 +75,9 @@ class RuntimePaths:
             return True
         lexical = Path(os.path.abspath(path))
         real = lexical.resolve()
+        lexical_parts = tuple(os.path.normcase(part) for part in lexical.parts)
+        real_parts = tuple(os.path.normcase(part) for part in real.parts)
         return bool(_INSTALL_COMPONENTS.intersection(real.parts)) or any(
-            lexical.is_relative_to(root) or real.is_relative_to(root) for root in self.roots
+            lexical_parts[:len(root)] == root or real_parts[:len(root)] == root
+            for root in self._root_parts
         )

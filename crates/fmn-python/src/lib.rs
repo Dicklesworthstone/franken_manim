@@ -13242,8 +13242,17 @@ _fmn_sys.unraisablehook = _fmn_capture_unraisable
         lifetime_globals
             .set_item("Bridge", py.get_type::<BridgeMobject>())
             .expect("proxy type");
+        lifetime_globals
+            .set_item("SceneCore", py.get_type::<PyScene>())
+            .expect("scene owner type");
+        lifetime_globals
+            .set_item(
+                "FrameType",
+                py.import("types").unwrap().getattr("FrameType").unwrap(),
+            )
+            .expect("frame owner type");
         py.run(
-            c"proxies = [\n    (weakref.ref(obj), type(obj).__name__)\n    for obj in gc.get_objects()\n    if isinstance(obj, Bridge)\n]",
+            c"proxies = [\n    (weakref.ref(obj), type(obj).__name__)\n    for obj in gc.get_objects()\n    if isinstance(obj, (Bridge, SceneCore))\n]",
             Some(&lifetime_globals),
             None,
         )
@@ -13330,7 +13339,19 @@ _fmn_sys.unraisablehook = _fmn_capture_unraisable
         gc.call_method0("collect")
             .expect("collect remaining scene class/global cycles");
         py.run(
-            c"survivors = [\n    (name, [type(owner).__name__ for owner in gc.get_referrers(ref())])\n    for ref, name in proxies\n    if ref() is not None\n]",
+            cr#"survivors = [
+    (name, [
+        type(owner).__name__ + (
+            ' keys=' + repr(sorted(key[:48] for key in owner if type(key) is str)[:12])
+            if type(owner) is dict else
+            ' at=' + owner.f_code.co_name[:120] + ':' + str(owner.f_lineno)
+            if type(owner) is FrameType else ''
+        )
+        for owner in gc.get_referrers(ref())
+    ])
+    for ref, name in proxies
+    if ref() is not None
+]"#,
             Some(&lifetime_globals),
             None,
         )

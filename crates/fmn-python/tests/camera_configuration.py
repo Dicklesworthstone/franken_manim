@@ -1,16 +1,68 @@
 """Native scene camera configuration, live frame identity and actual pixels."""
 from pathlib import Path
 from copy import deepcopy
+import gc
 import subprocess
 import sys
 import tempfile
 import unittest
+import weakref
 
 import numpy as np
 import manimlib as m
 
 
 class CameraConfigurationTests(unittest.TestCase):
+    def test_observed_camera_dictionary_preserves_live_owners_then_collects(self):
+        class AuthoredCamera(m.Camera):
+            def __setattr__(self, name, value):
+                if name == "__dict__":
+                    raise AssertionError("allocation must not invoke authored attribute writes")
+                super().__setattr__(name, value)
+
+        class ExplicitStill(m.Scene):
+            def construct(self):
+                self.add(m.Square())
+                self.show()
+
+        def own_camera():
+            # A subclass or host may observe __dict__ before initialization.
+            # It must stay the same writable dictionary throughout capture.
+            camera = AuthoredCamera.__new__(AuthoredCamera)
+            namespace = vars(camera)
+            gc.collect()
+            marker = object()
+            camera.authored_marker = marker
+            camera.__init__(resolution=(64, 36))
+            scene = ExplicitStill(camera_config={"resolution": (64, 36)})
+            camera.frame = scene.frame
+            scene.authored_camera = camera
+            ticks = []
+            scene.frame.add_updater(lambda frame, dt: ticks.append(dt))
+            with tempfile.TemporaryDirectory(prefix="fmn-camera-owner-") as directory:
+                from fmn_python import export_bundle
+                destination = Path(directory, "refused.fmtl")
+                with self.assertRaisesRegex(m._CapabilityError, "Scene.show"):
+                    export_bundle(scene, destination, audio=True, audio_sample_rate=8,
+                                  resolution=(64, 36), fps=8)
+                self.assertFalse(destination.exists())
+            previous = len(ticks)
+            scene.update_mobjects(.125)
+            self.assertGreaterEqual(previous, 2)
+            self.assertEqual(ticks[previous:], [.125])
+            self.assertIs(vars(camera), namespace)
+            self.assertIs(namespace["authored_marker"], marker)
+            self.assertIs(namespace["frame"], scene.frame)
+            self.assertEqual(camera.capture_snapshot(m.Square()).size, (64, 36))
+            return tuple(weakref.ref(value) for value in (
+                scene, camera, scene.camera, scene.frame, scene.mobjects[-1]))
+
+        owners = own_camera()
+        gc.collect()
+        gc.collect()
+        self.assertTrue(all(owner() is None for owner in owners),
+                        "observing a camera dictionary must not pin its scene or frame")
+
     def test_bare_runs_use_constructor_and_class_camera_fps(self):
         class Timed(m.Scene):
             default_camera_config = {"fps": 60}

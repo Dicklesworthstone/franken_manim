@@ -7,6 +7,12 @@ from fmn_python import SceneConsole
 
 
 def run_console_acceptance():
+    # The deferred root and qualified entry points share one callable and
+    # consult the real host provider when explicitly requested (fm-restore-green-ci-tqsr.16).
+    from manimlib.scene.interactive_scene import get_ipython
+    from IPython.core.getipython import get_ipython as host_shell
+    assert get_ipython is m.get_ipython
+    assert get_ipython() is host_shell()
     scene = m.Scene()
     scene.camera.reset_pixel_shape(96, 64)
     box = m.Square(side_length=1, fill_color=m.WHITE, fill_opacity=1, stroke_width=0)
@@ -127,7 +133,7 @@ def run_console_acceptance():
         pass
     else:
         raise AssertionError("unowned public paste did not refuse")
-    return 7
+    return 8
 
 
 if __name__ == "__main__":

@@ -12148,10 +12148,10 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         ScenarioClass::LifecycleDrill,
         Surface::PythonInProcess,
         Invocation::new(python_scene_console_run),
-        vec![Assertion::ExitCode(0), counter_eq("console_checks", 7)],
+        vec![Assertion::ExitCode(0), counter_eq("console_checks", 8)],
         vec![LogExpect::span_present(
             "e2e.python.scene_console",
-            vec![FieldPred::u64_eq("checks", 7)],
+            vec![FieldPred::u64_eq("checks", 8)],
         )],
     ));
     specs.push(spec(
@@ -12364,7 +12364,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         vec![
             Assertion::ExitCode(0),
             counter_eq("subclass_hook_bases", 11),
-            counter_eq("subclass_hook_cases", 10),
+            counter_eq("subclass_hook_cases", 11),
         ],
         vec![LogExpect::span_present(
             "e2e.python.subclass_hooks",

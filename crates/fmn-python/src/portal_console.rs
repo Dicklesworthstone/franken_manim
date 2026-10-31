@@ -169,7 +169,7 @@ mod tests {
 
     #[test]
     fn native_scene_console_acceptance() {
-        assert_eq!(super::run_portal_gauntlet_console().unwrap(), 7);
+        assert_eq!(super::run_portal_gauntlet_console().unwrap(), 8);
     }
 
     #[test]
