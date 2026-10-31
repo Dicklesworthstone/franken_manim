@@ -3273,8 +3273,9 @@ fn studio_terminal_controls_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenario
         .stdin
         .take()
         .ok_or_else(|| fail("terminal stdin missing"))?
-        // The builtin has a 0.25 s play and 0.125 s hold: at 8 FPS,
-        // constructed frame zero is followed by exactly three captures.
+        // Windowed scenes use the plan's fixed 30 FPS, overriding --fps 8.
+        // The 0.25 s play and 0.125 s hold produce 8 + 4 captures after
+        // constructed frame zero; seeking 0.25 s rounds to frame eight.
         .write_all(b"seek 0.25s\nstep -1\nmark middle\nfirst\nlabel middle\ninspect\nquit\n")
         .map_err(|error| studio_io_error("terminal commands", error))?;
     let deadline = std::time::Instant::now() + STUDIO_IO_TIMEOUT;
@@ -3311,11 +3312,11 @@ fn studio_terminal_controls_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenario
         std::str::from_utf8(&output).map_err(|_| fail("terminal transcript is not UTF-8"))?;
     for expected in [
         "type a command, then press Enter",
-        "Frame 2/3 | 0.250 s | paused",
-        "Frame 1/3 | 0.125 s | paused",
-        "Frame 0/3 | 0.000 s | paused",
+        "Frame 8/12 | 0.267 s | paused",
+        "Frame 7/12 | 0.233 s | paused",
+        "Frame 0/12 | 0.000 s | paused",
         "Bookmark saved",
-        "Inspector at frame 1",
+        "Inspector at frame 7",
         "root=",
         "\u{1b}_Ga=T,f=100",
     ] {
@@ -3328,7 +3329,7 @@ fn studio_terminal_controls_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenario
     if transcript.contains("Studio: ") {
         return Err(fail("terminal command was refused unexpectedly"));
     }
-    ctx.set_fps((8, 1));
+    ctx.set_fps((30, 1));
     ctx.event(
         LogEvent::new("e2e.studio.terminal")
             .field("commands", 6u64)
