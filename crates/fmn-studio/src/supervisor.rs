@@ -1171,7 +1171,26 @@ impl Supervisor {
         scene: impl Into<String>,
         journal: Journal,
     ) -> Result<(), SupervisorError> {
-        let scene = scene.into();
+        self.install_with_retained_prefix(scene.into(), journal, 0)
+    }
+
+    /// Only the two local journal builders may retain a prefix: they copy it
+    /// directly from our immutable, previously validated journal. Incoming
+    /// worker entries and public replacement sessions always validate anew.
+    fn install_with_retained_prefix(
+        &mut self,
+        scene: String,
+        journal: Journal,
+        retained_entries: usize,
+    ) -> Result<(), SupervisorError> {
+        if retained_entries > journal.entries().len()
+            || retained_entries > self.journal.entries().len()
+            || (retained_entries != 0 && self.scene.as_deref() != Some(scene.as_str()))
+        {
+            return Err(SupervisorError::InvalidSession(
+                "invalid retained journal prefix",
+            ));
+        }
         if scene.is_empty() {
             return Err(SupervisorError::InvalidSession("empty scene name"));
         }
@@ -1197,16 +1216,21 @@ impl Supervisor {
             .max_checkpoint_bytes
             .min(self.config.protocol_limits.max_field_bytes);
         let mut checkpoint_count = 0usize;
-        for entry in journal.entries() {
+        for (index, entry) in journal.entries().iter().enumerate() {
             if let Some(state) = &entry.checkpoint {
                 if state.len() > checkpoint_limit {
                     return Err(SupervisorError::InvalidSession(
                         "checkpoint exceeds protocol payload budget",
                     ));
                 }
-                if sha256(state) != entry.state_hash {
+                if index >= retained_entries && sha256(state) != entry.state_hash {
                     return Err(SupervisorError::InvalidSession(
                         "checkpoint bytes do not match their state hash",
+                    ));
+                }
+                if index < retained_entries && self.checkpoints.get(index).is_none() {
+                    return Err(SupervisorError::InvalidSession(
+                        "retained journal checkpoint is absent",
                     ));
                 }
                 checkpoint_count += 1;
@@ -1214,6 +1238,9 @@ impl Supervisor {
         }
         let mut checkpoints = CheckpointTable::try_with_capacity(checkpoint_count)?;
         for (index, entry) in journal.entries().iter().enumerate() {
+            if index < retained_entries {
+                continue;
+            }
             let Some(state) = &entry.checkpoint else {
                 continue;
             };
@@ -1230,6 +1257,23 @@ impl Supervisor {
 
         // Commit only after the complete incoming session has validated, so a
         // malformed replacement cannot erase a previously recoverable one.
+        // Capacity for every row was reserved above. Move immutable prefix
+        // fallbacks and cache bindings only now, without copying or rewarming
+        // their payloads on every edit. Independently pushed checkpoints not
+        // present in the retained journal still follow replacement semantics.
+        let mut retained_checkpoints = 0;
+        for (index, stored) in self.checkpoints.rows.drain(..) {
+            if index < retained_entries
+                && journal
+                    .entries()
+                    .get(index)
+                    .is_some_and(|entry| entry.checkpoint.is_some())
+            {
+                checkpoints.rows.push((index, stored));
+                retained_checkpoints += 1;
+            }
+        }
+        checkpoints.rows.rotate_right(retained_checkpoints);
         self.scene = Some(scene);
         self.journal = journal;
         self.checkpoints = checkpoints;
@@ -1668,7 +1712,7 @@ impl Supervisor {
         // mutate the supervisor's recovery authority.
         let mut amended = self.journal.try_clone()?;
         amended.record_render_backends(&frame.render_backends)?;
-        self.install_session(scene, amended)
+        self.install_with_retained_prefix(scene, amended, self.journal.entries().len())
     }
 
     fn merge_journal_segment(
@@ -1703,9 +1747,10 @@ impl Supervisor {
         merged.record_events(segment.events())?;
         merged.record_render_backends(self.journal.render_backends())?;
         merged.record_render_backends(segment.render_backends())?;
-        self.install_session(
+        self.install_with_retained_prefix(
             try_clone_string(scene, "merged session scene bytes")?,
             merged,
+            start,
         )
     }
 

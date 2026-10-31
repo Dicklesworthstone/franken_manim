@@ -4,7 +4,7 @@
 //! alive and automatically restores a replacement worker.
 
 use std::net::{Shutdown, TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -14,7 +14,7 @@ use fmn_anim::RationalTime;
 use fmn_cache::{Namespace, NamespacePolicy, Store, StoreConfig};
 use fmn_hash::{Digest, sha256};
 use fmn_platform::clock::{Clock, FakeClock};
-use fmn_platform::fs::{FileSystem, VirtualFs};
+use fmn_platform::fs::{FileSystem, FsError, FsNodeKind, VirtualFs};
 use fmn_scene::{
     AssetRead, CommandKind, CommandRecord, EffectClass, Entry, EventError, EventPayload,
     InputEvent, Journal, JournalError, Key, Modifiers, RenderBackendRecord, RenderBackendRole,
@@ -1305,6 +1305,161 @@ fn journal_segment_replaces_only_its_declared_tail() {
         state.lock().unwrap_or_else(lock_poisoned).replayed_events,
         vec![original_event, segment_event],
         "the retained and segment-local input streams must both reach replay"
+    );
+}
+
+#[test]
+fn journal_append_retains_checkpoint_cache_work_and_still_verifies_replacement() {
+    struct ObservedFs {
+        inner: VirtualFs,
+        watched: Mutex<Option<PathBuf>>,
+        attempts: AtomicUsize,
+    }
+    impl FileSystem for ObservedFs {
+        fn node_kind_no_follow(&self, path: &Path) -> Result<Option<FsNodeKind>, FsError> {
+            self.inner.node_kind_no_follow(path)
+        }
+        fn create_dir(&self, path: &Path) -> Result<bool, FsError> {
+            self.inner.create_dir(path)
+        }
+        fn read(&self, path: &Path) -> Result<Vec<u8>, FsError> {
+            self.inner.read(path)
+        }
+        fn file_len(&self, path: &Path) -> Result<u64, FsError> {
+            self.inner.file_len(path)
+        }
+        fn read_bounded(&self, path: &Path, max: usize) -> Result<Vec<u8>, FsError> {
+            self.inner.read_bounded(path, max)
+        }
+        fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), FsError> {
+            self.inner.write_atomic(path, bytes)
+        }
+        fn create_new(&self, path: &Path, bytes: &[u8]) -> Result<bool, FsError> {
+            let mut watched = self.watched.lock().unwrap_or_else(lock_poisoned);
+            if watched
+                .as_deref()
+                .is_some_and(|suffix| path.ends_with(suffix))
+            {
+                self.attempts.fetch_add(1, Ordering::Relaxed);
+                *watched = Some(path.to_path_buf());
+            }
+            drop(watched);
+            self.inner.create_new(path, bytes)
+        }
+        fn remove_file(&self, path: &Path) -> Result<(), FsError> {
+            self.inner.remove_file(path)
+        }
+        fn remove_dir_all(&self, path: &Path) -> Result<(), FsError> {
+            self.inner.remove_dir_all(path)
+        }
+        fn exists(&self, path: &Path) -> bool {
+            self.inner.exists(path)
+        }
+        fn list_dir(&self, path: &Path) -> Result<Vec<PathBuf>, FsError> {
+            self.inner.list_dir(path)
+        }
+        fn count_dir_entries_bounded(&self, path: &Path, max: usize) -> Result<usize, FsError> {
+            self.inner.count_dir_entries_bounded(path, max)
+        }
+    }
+    let fs = Arc::new(ObservedFs {
+        inner: VirtualFs::new(),
+        watched: Mutex::new(None),
+        attempts: AtomicUsize::new(0),
+    });
+    let clock = Arc::new(FakeClock::new());
+    let namespace = Store::open(
+        fs.clone(),
+        clock.clone(),
+        STUDIO_CACHE_ROOT,
+        StoreConfig::default(),
+    )
+    .unwrap()
+    .namespace("studio-replay", 1, NamespacePolicy::default())
+    .unwrap();
+    let original = make_journal(1, Some(0));
+    let checkpoint = original.entries()[0].checkpoint.clone().unwrap();
+    *fs.watched.lock().unwrap_or_else(lock_poisoned) =
+        Some(fmn_cache::object_relative_path(&sha256(&checkpoint)));
+    let state = Arc::new(Mutex::new(FakeState::default()));
+    let mut supervisor = Supervisor::new(
+        Box::new(FakeLauncher {
+            state: Arc::clone(&state),
+            clock: Arc::clone(&clock),
+            exchange_cost: Duration::ZERO,
+        }),
+        clock.clone(),
+        namespace,
+        SupervisorConfig::default(),
+    );
+    supervisor.install_session("Demo", original).unwrap();
+    assert_eq!(fs.attempts.load(Ordering::Relaxed), 1);
+    let checkpoint_path = fs
+        .watched
+        .lock()
+        .unwrap_or_else(lock_poisoned)
+        .clone()
+        .unwrap();
+    let mut builder = ScriptedBuilder::fake(clock, Duration::ZERO);
+    supervisor.build_and_start(&mut builder).unwrap();
+    let append = make_journal(1, None);
+    state.lock().unwrap_or_else(lock_poisoned).journal_segment =
+        Some((1, append.to_bytes().unwrap()));
+    supervisor
+        .request(SupervisorRequest::EnumerateScenes, &|_| true)
+        .unwrap();
+    assert_eq!(
+        fs.attempts.load(Ordering::Relaxed),
+        1,
+        "a journal append must not republish the retained checkpoint"
+    );
+    let commands = supervisor.current_commands().unwrap();
+    let digest = supervisor.journal_cache_digest();
+    assert!(
+        digest.is_some(),
+        "the complete amended journal remains cached"
+    );
+
+    let mut invalid = make_journal(1, None);
+    invalid
+        .record(Entry {
+            command: command(2),
+            effect: EffectClass::Pure,
+            reads: Vec::new(),
+            subprocesses: Vec::new(),
+            checkpoint: Some(b"unverified replacement".to_vec()),
+            state_hash: sha256(b"different checkpoint"),
+        })
+        .unwrap();
+    state.lock().unwrap_or_else(lock_poisoned).journal_segment =
+        Some((1, invalid.to_bytes().unwrap()));
+    assert!(matches!(
+        supervisor.request(SupervisorRequest::EnumerateScenes, &|_| true),
+        Err(SupervisorError::InvalidSession(
+            "checkpoint bytes do not match their state hash"
+        ))
+    ));
+    assert_eq!(supervisor.current_commands().unwrap(), commands);
+    assert_eq!(supervisor.journal_cache_digest(), digest);
+    assert_eq!(fs.attempts.load(Ordering::Relaxed), 1);
+
+    // Cache corruption must still fall back to the retained, verified bytes;
+    // prefix reuse cannot turn the disposable cache into recovery authority.
+    fs.inner
+        .write_atomic(&checkpoint_path, b"corrupt cache envelope")
+        .unwrap();
+    state.lock().unwrap_or_else(lock_poisoned).journal_segment = None;
+    let recovered = supervisor
+        .rebuild_and_restart(&mut builder, &commands, &|_| true)
+        .unwrap();
+    assert_eq!(recovered.restored_checkpoint, Some(0));
+    assert_eq!(
+        recovered.checkpoint_source,
+        Some(CheckpointSource::SupervisorMemory)
+    );
+    assert_eq!(
+        state.lock().unwrap_or_else(lock_poisoned).restored.last(),
+        Some(&checkpoint)
     );
 }
 

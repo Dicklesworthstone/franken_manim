@@ -3590,7 +3590,8 @@ impl StudioEndpoint {
     ) -> Result<Vec<u8>, ScenarioError> {
         let mut reader = self.connect(method, path, body)?;
         let deadline = std::time::Instant::now() + STUDIO_IO_TIMEOUT;
-        let header = studio_read_header(&mut reader, deadline)?;
+        let header = studio_read_header(&mut reader, deadline)
+            .map_err(|error| fail(format!("Studio {method} {path} headers: {error}")))?;
         if !header.starts_with(&format!("HTTP/1.1 {status} ")) {
             return Err(fail(format!(
                 "Studio {path} returned an unexpected HTTP status"
@@ -3600,7 +3601,8 @@ impl StudioEndpoint {
             return Err(fail("Studio API response is not JSON"));
         }
         let count = studio_header_number(&header, "Content-Length")?;
-        let bytes = studio_read_body(&mut reader, count, deadline)?;
+        let bytes = studio_read_body(&mut reader, count, deadline)
+            .map_err(|error| fail(format!("Studio {method} {path} body: {error}")))?;
         if bytes
             .windows(self.capability.len())
             .any(|part| part == self.capability.as_bytes())
@@ -3820,6 +3822,7 @@ fn studio_builtin_inputs_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
     let directory = scenario_dir("studio_builtin_inputs")?;
     let mut outcome = RunOutcome::ok();
     for (name, count, has_spans) in STUDIO_BUILTIN_INPUT_CASES {
+        ctx.event(LogEvent::new("e2e.studio.builtin_input.begin").field("scene", name));
         let (mut process, endpoint) = StudioProcess::launch_named(&directory, name)?;
         let mut frames = endpoint.stream()?;
         let initial_png = frames.frame(0, 0)?;

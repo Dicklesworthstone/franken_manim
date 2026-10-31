@@ -5,9 +5,11 @@
 ## 2026-10-31 implementation follow-through — qualification in progress
 
 The October 30 vision-to-code assessment below remains bound to its named
-checkpoints. The implementation continuation has landed real behavior on
-`main` through `4b54509b90f22520f71ea31bec305551b4d40067`, with further
-qualification repairs still under test. Its owned Beads remain open until
+checkpoints. The preceding fixes are committed on local `main` through
+`b2db79fd4ce3feaed131050dc6fff30097fd3a88`; subsequent native Studio work
+is described below. The commits after published `7fba6606` remain unpushed
+while source qualification is red. The complete matching installed-wheel
+gate at `b2db79fd` now passes. Owned Beads remain open until
 their original acceptance conditions and complete gates are met.
 
 - **Chisel:** arc-center recovery now solves in the actual component plane,
@@ -24,13 +26,23 @@ their original acceptance conditions and complete gates are met.
   installed-wheel recording acceptance passes, including native PNG comparison,
   a visibly different AA control and independent WAV behavior. Certified
   camera-rate refusal remains early and precise.
-- **Proscenium maintenance, pending final artifact proof:** ordinary portal
+- **Proscenium maintenance:** ordinary portal
   initialization defers optional IPython loading until the real host lookup is
   requested. Runtime source classification reuses frozen path components while
   still resolving live symlink targets. Camera ownership repair addresses early
   CPython managed-dictionary retention without dropping a supported patch
-  version, clearing live callbacks or adding unsafe code. The unchanged Studio
-  startup deadline and complete installed-wheel gate still need a fresh pass.
+  version, clearing live callbacks or adding unsafe code. The complete `b2db79fd`
+  installed-wheel gate passes, including the unchanged three-second Studio
+  hung-callback startup, cancellation and reload test.
+- **Reel maintenance:** cache retention now obtains object sizes through the
+  filesystem metadata capability rather than reading every payload. The
+  stale-index scan, byte ceilings, active pins and integrity checks remain;
+  this is maintenance, with no qualified PG speedup claim.
+- **Qualification repairs:** source-extracted protocol fixtures now load the
+  actual post-play projection and clock-admission helpers. The previous 107
+  discovery errors are eliminated without weakening assertions or skips.
+  CI provisions the supported Python host and runs formatting before expensive
+  jobs; the Windows warning repair still needs its actual hosted lane.
 
 The repaired native Python test binary passes unfiltered on supported
 CPython 3.13.1: **162 passed, zero failed/ignored/filtered**, 1,342.47 seconds.
@@ -41,15 +53,50 @@ soundtrack and owner-thread tests and the eight-scene baseline/determinism
 checks. It predates only a further strengthening of the new ownership
 fixture; it is not a complete committed-workspace or clean-wheel pass.
 
-The last complete workspace diagnostic at `7fba6606` is **red**: 4,977 passed,
+The earlier complete workspace diagnostic at `7fba6606` was **red**: 4,977 passed,
 73 failed and 11 ignored across 334 binary/doc summaries. Its five failed
 targets expose the CLI transparency oracle, stale WASM audit binding, scene
 ratchet, missing compressed-audio inputs and Python acceptance. Repeated
 native-owner survivors account for many Python failures; these are not 73
 independent feature defects. Focused repairs and real input preparation do not
-substitute for a new complete Cargo pass. The most recent complete installed
-wheel attempt also remains **red** at Studio's original three-second startup
-deadline, before its hung-callback exercise begins.
+substitute for a new complete Cargo pass. At `b2db79fd`, the explicitly supplied
+videos corpus first exposed a missing host dependency; provisioning the real
+35-package corpus host made all four original corpus tests pass. The next
+unchanged source policy still exits **101** in conformance e2e: **90 passed,
+one failed**. Native formula-sheet Studio input intermittently exceeds the
+original 15-second HTTP deadline under default test concurrency. A subsequent
+diagnostic with unchanged production code and added route errors passes all
+91 e2e cases, which confirms intermittency and does not make the required
+source gate green.
+
+Actual HTTP timing and a host backtrace localize increasing edit cost to
+`guarded_event` → journal merge → full session installation → cache hashing.
+Every edit republishes and rechecks earlier immutable checkpoint payloads
+while the worker waits. A bounded prefix-reuse repair and cache-corruption /
+atomic-replacement regression are implemented in `fm-restore-green-ci-tqsr.19`.
+Disabling prefix reuse makes the new regression fail on a second cache write;
+the restored candidate passes all 34 supervisor tests, including recovery from
+corrupt cache and rejection of a malformed suffix without losing the session.
+No deadline, concurrency setting, inventory, pixel or recovery assertion has
+been relaxed. Live paired comparison and complete source/artifact gates for
+the newer candidate remain pending; the focused suite grants no closure credit.
+
+The complete matching **installed-wheel gate at `b2db79fd` exits 0**. Its locked
+release wheel has SHA-256
+`7e13556f42eda3438d1f0e511eeae4a89df9abd1dd66d3fa5c27f3c702a580a2`;
+the functional native CLI used by its scenarios has SHA-256
+`ec0fe82c13c86de91c5837db3146577d6b7d7005ef3e77ccb8c762a8bac65d7d`.
+The supported CPython 3.13.1 host passes package consistency checks. The gate
+includes all six original live Studio cases, discovery with **2,983 actual
+passes and 197 existing skips**, the 1,963-row runtime receipt, and the final
+witness check: 382 suites, 12,979 cases, 25 applicable mutants killed. The 15
+inapplicable planned mutants receive no credit. The witness harness reports
+its traced-only failures and reconciles them against completed ordinary
+runs; this is not a claim that instrumented execution had no failures.
+The retained terminal receipt is
+`/data/tmp/fmn-execute-20261031-portal-b2db79fd-status.json`.
+This proves that named artifact checkpoint on that host, not the newer native
+candidate, the certified platform matrix, a qualified PG result or a release.
 
 The fresh **whole 2,814-scene still census at `7fba6606` reaches 1,073 successes
 (38.1%)**, meeting the unchanged 1,073 floor. Exactly five previous timeouts
