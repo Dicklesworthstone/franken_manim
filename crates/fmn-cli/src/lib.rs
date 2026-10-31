@@ -9349,6 +9349,7 @@ mod tests {
             height: 1,
             digest: fmn_studio::protocol_digest(&png),
             png,
+            jpeg: None,
         };
         for (protocol, prefix) in [
             (fmn_studio::TerminalProtocol::Kitty, b"\x1b_G".as_slice()),
