@@ -146,7 +146,7 @@ def write_report(args) -> dict:
         "",
         "## Census",
         "",
-        f"{len(portal_ok)} of the {args.portal_scenes} corpus scenes that run in the portal ran"
+        f"{len(portal_ok)} of the {args.portal_scenes} selected corpus scenes ran"
         f" under the census ({100 * len(portal_ok) / args.portal_scenes:.1f}%). Scenes among"
         f" them that play no segment at all: {sum(1 for c in censuses.values() if not c)}.",
         "",
@@ -173,7 +173,7 @@ def write_report(args) -> dict:
         "",
         "## Same-scene native vs portal",
         "",
-        "README `SquareToCircle` against `crates/fmn/examples/square_to_circle.rs`, 640x360 at 30"
+        "Portal `SquareToCircle` against `crates/fmn/examples/square_to_circle.rs`, 640x360 at 30"
         " fps, PNG sequence, interleaved. Medians.",
         "",
         "| measurement | native wall s | native CPU s | portal wall s | portal CPU s |"
@@ -218,7 +218,8 @@ def write_report(args) -> dict:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     from check_measurement_staleness import producer_header
     measured = getattr(args, "measured_commit", None) or commit
-    lines.insert(0, producer_header(measured, [f"{m}:{s}" for m, s in portal_ok]))
+    inputs = sorted({(row["module"], row["scene"]) for row in runs})
+    lines.insert(0, producer_header(measured, [f"{m}:{s}" for m, s in inputs]))
     args.out.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return {"census_scenes": len(portal_ok), "segments": len(segments),
             "predicted_scenes": len(predictions), "r": r, "current": current[0],
@@ -230,7 +231,7 @@ def main(argv=None) -> int:
     parser.add_argument("--runs", type=pathlib.Path, action="append", required=True,
                         help="a census run directory; repeat for re-measurements, later wins")
     parser.add_argument("--portal-scenes", type=int, required=True,
-                        help="corpus scenes that run in the portal (the coverage denominator)")
+                        help="original selected corpus cohort size (the coverage denominator)")
     parser.add_argument("--same-scene", action="append", default=[],
                         help="runs.json of a native-vs-portal pairing, optionally :LABEL")
     parser.add_argument("--ratio-from", required=True, help="the same-scene LABEL whose r to use")

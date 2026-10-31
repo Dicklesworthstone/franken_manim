@@ -63,6 +63,9 @@ class Prediction(unittest.TestCase):
             runs = [{"module": "m.py", "scene": s, "engine": e, "rep": 0, "exit": 0,
                      "seconds": t} for s, e, t in (("A", "portal", 10.0), ("A", "reference", 10.0),
                                                    ("B", "portal", 4.0), ("B", "reference", 2.0))]
+            runs.extend({"module": "m.py", "scene": "C", "engine": engine,
+                         "rep": 0, "exit": 1, "seconds": 1.0}
+                        for engine in ("portal", "reference"))
             (run / "runs.ndjson").write_text("".join(json.dumps(r) + "\n" for r in runs))
             (run / "work" / op.slug("m.py", "A") / "census-0.ndjson").write_text(
                 json.dumps(segment("native", 8.0)) + "\n")
@@ -79,7 +82,8 @@ class Prediction(unittest.TestCase):
         self.assertAlmostEqual(result["r"], 0.25)
         # A: (2 + 0.25 * 8) / 10 = 0.4; B has no segments: 4 / 2 = 2.0; median 1.2.
         self.assertTrue(result["strict"].startswith("1.20"))
-        self.assertIn("2 of the 4 corpus scenes", text)
+        self.assertIn("over 3 scene ids", text, "failed scenes must remain measured inputs")
+        self.assertIn("2 of the 4 selected corpus scenes", text)
         self.assertIn("| native | 1 | 8.0 | 100.0% |", text)
         self.assertIn("| scenes at <= 0.50x (PG-1, G2) | 0 | 1 | 1 |", text)
 
