@@ -358,6 +358,19 @@ pub trait FileSystem: Send + Sync {
     /// [`FsError::NotFound`] or [`FsError::Io`].
     fn read(&self, path: &Path) -> Result<Vec<u8>, FsError>;
 
+    /// Return the current file length without interpreting its contents.
+    ///
+    /// The default measures a read. Host and virtual filesystems override it
+    /// with metadata so accounting does not allocate or copy file payloads.
+    /// Consumers enforcing a no-follow boundary must perform the same node
+    /// checks they use before [`Self::read`].
+    ///
+    /// # Errors
+    /// [`FsError::NotFound`] or [`FsError::Io`].
+    fn file_len(&self, path: &Path) -> Result<u64, FsError> {
+        Ok(u64::try_from(self.read(path)?.len()).unwrap_or(u64::MAX))
+    }
+
     /// Read a regular file subject to an allocation-enforced byte limit.
     ///
     /// Implementations must accept a file of exactly `max_bytes`, refuse a
@@ -539,6 +552,20 @@ impl FileSystem for StdFs {
 
     fn read(&self, path: &Path) -> Result<Vec<u8>, FsError> {
         std::fs::read(path).map_err(|err| io_error(path, err))
+    }
+
+    fn file_len(&self, path: &Path) -> Result<u64, FsError> {
+        let metadata = std::fs::metadata(path).map_err(|err| io_error(path, err))?;
+        if !metadata.is_file() {
+            return Err(io_error(
+                path,
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "file length requires a regular file",
+                ),
+            ));
+        }
+        Ok(metadata.len())
     }
 
     fn read_bounded(&self, path: &Path, max_bytes: usize) -> Result<Vec<u8>, FsError> {
@@ -1151,6 +1178,32 @@ impl FileSystem for VirtualFs {
         self.read_bounded(path, usize::MAX)
     }
 
+    fn file_len(&self, path: &Path) -> Result<u64, FsError> {
+        self.with_state(|state| {
+            if let Some(blocker) = virtual_file_ancestor(state, path) {
+                return Err(io_error(
+                    &blocker,
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotADirectory,
+                        "a parent component is a file",
+                    ),
+                ));
+            }
+            if let Some(bytes) = state.files.get(path) {
+                Ok(u64::try_from(bytes.len()).unwrap_or(u64::MAX))
+            } else if virtual_node_kind(state, path) == Some(FsNodeKind::Directory) {
+                Err(io_error(
+                    path,
+                    std::io::Error::new(std::io::ErrorKind::IsADirectory, "path is a directory"),
+                ))
+            } else {
+                Err(FsError::NotFound {
+                    path: path.to_path_buf(),
+                })
+            }
+        })
+    }
+
     fn read_bounded(&self, path: &Path, max_bytes: usize) -> Result<Vec<u8>, FsError> {
         self.with_state(|state| {
             if let Some(blocker) = virtual_file_ancestor(state, path) {
@@ -1609,6 +1662,7 @@ mod tests {
         fs.insert("/a/b/two.txt", b"2".to_vec());
         fs.insert("/a/c.txt", b"3".to_vec());
         assert_eq!(fs.read(Path::new("/a/b/one.txt")).unwrap(), b"1");
+        assert_eq!(fs.file_len(Path::new("/a/b/one.txt")).unwrap(), 1);
         assert!(matches!(
             fs.read(Path::new("/a/missing")),
             Err(FsError::NotFound { .. })
@@ -1620,6 +1674,13 @@ mod tests {
             vec![PathBuf::from("/a/b"), PathBuf::from("/a/c.txt")]
         );
         fs.write_atomic(Path::new("/a/c.txt"), b"replaced").unwrap();
+        assert_eq!(fs.file_len(Path::new("/a/c.txt")).unwrap(), 8);
+        assert!(matches!(
+            fs.file_len(Path::new("/a/missing")),
+            Err(FsError::NotFound { .. })
+        ));
+        assert!(fs.file_len(Path::new("/a/b")).is_err());
+        assert!(fs.file_len(Path::new("/a/c.txt/blocked")).is_err());
         assert_eq!(
             fs.read_to_string(Path::new("/a/c.txt")).unwrap(),
             "replaced"

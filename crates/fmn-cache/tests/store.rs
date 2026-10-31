@@ -238,6 +238,7 @@ fn compute_errors_surface_and_cache_failures_do_not() {
 struct ReadOnlyFs {
     inner: VirtualFs,
     frozen: AtomicBool,
+    forbid_payload_reads: AtomicBool,
 }
 
 impl ReadOnlyFs {
@@ -246,6 +247,18 @@ impl ReadOnlyFs {
             path: path.to_path_buf(),
             err: std::io::Error::other("simulated read-only filesystem"),
         }
+    }
+
+    fn check_read(&self, path: &Path) -> Result<(), FsError> {
+        if self.forbid_payload_reads.load(Ordering::Relaxed)
+            && path.components().any(|part| part.as_os_str() == "objects")
+        {
+            return Err(FsError::Io {
+                path: path.to_path_buf(),
+                err: std::io::Error::other("cache accounting must not read object payloads"),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -260,9 +273,14 @@ impl FileSystem for ReadOnlyFs {
         self.inner.create_dir(path)
     }
     fn read(&self, path: &Path) -> Result<Vec<u8>, FsError> {
+        self.check_read(path)?;
         self.inner.read(path)
     }
+    fn file_len(&self, path: &Path) -> Result<u64, FsError> {
+        self.inner.file_len(path)
+    }
     fn read_bounded(&self, path: &Path, max_bytes: usize) -> Result<Vec<u8>, FsError> {
+        self.check_read(path)?;
         self.inner.read_bounded(path, max_bytes)
     }
     fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), FsError> {
@@ -305,6 +323,7 @@ fn a_cache_that_cannot_write_never_fails_the_consumer() {
     let fs = Arc::new(ReadOnlyFs {
         inner: VirtualFs::new(),
         frozen: AtomicBool::new(false),
+        forbid_payload_reads: AtomicBool::new(false),
     });
     let clock: Arc<dyn Clock> = Arc::new(FakeClock::new());
     let store = open_store(fs.clone(), clock);
@@ -789,6 +808,55 @@ fn stale_index_sizes_cannot_distort_usage_or_eviction() {
 }
 
 #[test]
+fn maintenance_measures_changed_files_and_preserves_pins_without_reading_payloads() {
+    let fs = Arc::new(ReadOnlyFs {
+        inner: VirtualFs::new(),
+        frozen: AtomicBool::new(false),
+        forbid_payload_reads: AtomicBool::new(false),
+    });
+    let store = open_store(fs.clone(), Arc::new(FakeClock::new()));
+    let per_entry = envelope_size(&store, 8);
+    let n = ns(&store, Some(0));
+    let pinned = key("metadata-pinned");
+    let other = key("metadata-other");
+    n.put(&pinned, &[1; 8]).unwrap();
+    n.put(&other, &[2; 8]).unwrap();
+    let pin = n.pin(&pinned);
+
+    let hex = pinned.digest().to_hex();
+    let path = Path::new(ROOT)
+        .join("ns/t/v1/objects")
+        .join(&hex[..2])
+        .join(&hex[2..]);
+    let mut changed = fs.inner.read(&path).unwrap();
+    assert_eq!(u64::try_from(changed.len()).unwrap(), per_entry);
+    changed.extend_from_slice(&[3; 37]);
+    fs.inner.write_atomic(&path, &changed).unwrap();
+    fs.forbid_payload_reads.store(true, Ordering::Relaxed);
+
+    assert_eq!(n.usage().unwrap(), 2 * per_entry + 37);
+    let EvictOutcome::Done(report) = n.evict_to_ceiling().unwrap() else {
+        panic!("maintenance must run");
+    };
+    assert_eq!(report.examined, 2);
+    assert_eq!(report.evicted, 1);
+    assert_eq!(report.evicted_bytes, per_entry);
+    assert_eq!(report.skipped_pinned, 1);
+    assert_eq!(report.retained_bytes, per_entry + 37);
+    assert_eq!(n.usage().unwrap(), per_entry + 37);
+    assert!(fs.inner.exists(&path));
+
+    drop(pin);
+    let EvictOutcome::Done(report) = n.evict_to_ceiling().unwrap() else {
+        panic!("maintenance must run after releasing the pin");
+    };
+    assert_eq!(report.evicted, 1);
+    assert_eq!(report.evicted_bytes, per_entry + 37);
+    assert_eq!(report.retained_bytes, 0);
+    assert_eq!(n.usage().unwrap(), 0);
+}
+
+#[test]
 fn eviction_is_lru_ordered_and_respects_the_ceiling() {
     let (_fs, _clock, store) = fresh();
     let per_entry = envelope_size(&store, 8);
@@ -920,6 +988,7 @@ fn foreign_lock_token(wall_nanos: u64) -> Vec<u8> {
     w.put_u64(99_999); // the foreign process id
     w.put_u64(7); // its store-instance id
     w.put_u64(wall_nanos); // when it acquired
+    // ubs:ignore -- This serializes a deterministic advisory-lock fixture, not a secret or RNG output.
     w.finish().expect("lock token")
 }
 

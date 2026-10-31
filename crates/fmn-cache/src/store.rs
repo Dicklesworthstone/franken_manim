@@ -1879,6 +1879,21 @@ impl StoreInner {
         read_managed_file(self.fs.as_ref(), &self.root.path, path)
     }
 
+    fn file_len(&self, path: &Path) -> Result<u64, CacheError> {
+        // Keep the payload-read traversal boundary before asking the
+        // capability for length metadata.
+        match managed_leaf_kind(
+            self.fs.as_ref(),
+            &self.root.path,
+            path,
+            DirectoryMode::Existing,
+        )? {
+            Some(FsNodeKind::RegularFile) => self.fs.file_len(path).map_err(CacheError::Storage),
+            Some(kind) => Err(managed_node_refused(path, "regular file", kind)),
+            None => Err(managed_not_found(path)),
+        }
+    }
+
     fn write_file(&self, path: &Path, bytes: &[u8]) -> Result<(), CacheError> {
         self.root.validate_generation(self.fs.as_ref())?;
         write_managed_file(self.fs.as_ref(), &self.root.path, path, bytes)
@@ -2689,15 +2704,16 @@ impl Namespace {
     }
 
     fn object_size(&self, digest: &Digest) -> Result<Option<u64>, CacheError> {
-        match self.inner.read_file(&self.object_path(digest)) {
-            Ok(bytes) => Ok(Some(u64::try_from(bytes.len()).unwrap_or(u64::MAX))),
+        match self.inner.file_len(&self.object_path(digest)) {
+            Ok(size) => Ok(Some(size)),
             Err(CacheError::Storage(FsError::NotFound { .. })) => Ok(None),
             Err(err) => Err(err),
         }
     }
 
     /// Reconcile the advisory index against one disk scan. Persisted sizes are
-    /// never authoritative: every surviving object is measured again.
+    /// never authoritative: every surviving object is measured again through
+    /// the filesystem capability. Accounting does not inspect payload contents.
     fn reconcile_index(
         &self,
         on_disk: &BTreeSet<Digest>,
@@ -2825,6 +2841,7 @@ impl Namespace {
         w.put_u64(u64::from(std::process::id()));
         w.put_u64(self.inner.instance);
         w.put_u64(self.now_wall_nanos());
+        // ubs:ignore -- Advisory lock ownership/staleness document, not an authentication secret or RNG.
         Ok(w.finish()?)
     }
 
