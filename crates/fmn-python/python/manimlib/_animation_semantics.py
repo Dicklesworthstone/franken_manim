@@ -2047,6 +2047,14 @@ def _install_camera_choreography(g):
 
         for animation in animations:
             visit(animation)
+        # This track executes Python callbacks instead of native rate-table
+        # preparation. Preserve explicit declarations before overrides, root
+        # restoration, driver construction or an authored rate can run.
+        declared_rate = g.get("_PureRateFunction", ())
+        if (isinstance(rate_func, declared_rate)
+                or any(isinstance(getattr(animation, "rate_func", None), declared_rate)
+                       for animation in nodes)):
+            raise ValueError("PureRateFunction requires a callback-free native play")
         for animation in animations:
             if run_time is not None:
                 value = float(run_time)

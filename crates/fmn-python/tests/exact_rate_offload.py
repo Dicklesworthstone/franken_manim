@@ -86,7 +86,40 @@ def render_case(directory, fps, threads, declared, curve, reproducible):
         assert stats["pure_play_segments"] == 0, stats
     points = [member.get_points().copy()
               for shape in shapes for member in shape.get_family()]
+    if curve is cubic:
+        # First child's rightmost point, from the authored square/child
+        # dimensions and translations. Native f64 placement rounds once;
+        # the live callback materializes an f32 view between the two plays.
+        coordinate = float(np.float32(.04)) - 1.4 + .04 + .3
+        expected = np.float32(coordinate + .1) if declared else np.float32(np.float32(coordinate) + .1)
+        assert points[1][0, 0] == expected, (declared, points[1][0, 0], expected)
     return frames, points, scene.get_time(), scene.num_plays, calls, stats
+
+
+def assert_same_record_geometry(actual, expected):
+    # Plan6.1/8.2/16.4: these are cross-engine f32 views of semantic f64
+    # geometry, not self-goldens. PNGs and same-native thread controls below
+    # retain bit equality. Reject nonfinite values and more than one f32 ULP.
+    assert actual.dtype == expected.dtype == np.float32
+    assert np.isfinite(actual).all() and np.isfinite(expected).all()
+    np.testing.assert_array_max_ulp(actual, expected, maxulp=1)
+
+
+def record_geometry_oracle_rejects_drift():
+    coordinate = float(np.float32(.04)) - 1.4 + .04 + .3
+    native = np.array([np.float32(coordinate + .1)])
+    live = np.array([np.float32(np.float32(coordinate) + .1)])
+    assert native[0] != live[0], "the independent double-rounding witness disappeared"
+    assert_same_record_geometry(native, live)
+    two_ulps = np.nextafter(np.nextafter(native, np.float32(np.inf)), np.float32(np.inf))
+    for bad in (two_ulps, np.array([np.nan], dtype=np.float32),
+                np.array([np.inf], dtype=np.float32)):
+        try:
+            assert_same_record_geometry(bad, native)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("record geometry oracle admitted excessive/nonfinite drift")
 
 
 def errors_precede_live_scene_mutation():
@@ -471,6 +504,7 @@ def detached_composition_observers_stay_serial(root):
 
 
 def _run_exact_rate_cases(root, reproducible):
+    record_geometry_oracle_rejects_drift()
     if not reproducible:
         embedded_certification_refuses_before_mutation(root)
     compared_frames = distinct_samples = 0
@@ -483,8 +517,14 @@ def _run_exact_rate_cases(root, reproducible):
                                  True, curve, reproducible)
             assert native[0] == serial[0], (name, fps, "PNG pixels differ")
             for actual, expected in zip(native[1], serial[1], strict=True):
-                np.testing.assert_array_equal(actual, expected)
+                assert_same_record_geometry(actual, expected)
             assert native[2:4] == serial[2:4], (name, fps, native[2:4], serial[2:4])
+            if threads != 1:
+                one_thread = render_case(root / f"native-one-thread-{name}-{fps}",
+                                         fps, 1, True, curve, reproducible)
+                assert native[0] == one_thread[0], (name, fps, "thread-dependent PNGs")
+                for actual, expected in zip(native[1], one_thread[1], strict=True):
+                    np.testing.assert_array_equal(actual, expected)
             compared_frames += len(native[0])
             distinct_samples += native[5]["exact_rate_samples"]
     errors_precede_live_scene_mutation()

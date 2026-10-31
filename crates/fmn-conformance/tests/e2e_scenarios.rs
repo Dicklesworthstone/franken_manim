@@ -5337,6 +5337,8 @@ fn python_exact_rate_offload_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenari
             .field("distinct_samples", distinct_samples)
             .field("logical_table_bytes", table_bytes)
             .field("serial_pixels_identical", truth(true))
+            .field("cross_path_record_max_ulp", 1u64)
+            .field("native_thread_geometry_bits_identical", truth(true))
             .field("ordinary_callbacks_preserved", truth(true)),
     );
     Ok(RunOutcome::ok()
