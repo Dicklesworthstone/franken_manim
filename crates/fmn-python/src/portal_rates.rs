@@ -236,7 +236,7 @@ impl Preparation {
                 overrides.rate_func.clone(),
                 overrides.lag_ratio,
             );
-            if animation.effect_signature() != AnimationSignature::Pure {
+            if !matches!(animation.effect_signature(), AnimationSignature::Pure) {
                 return Err(Self::refusal());
             }
         }
@@ -346,7 +346,9 @@ impl Preparation {
     }
 }
 
-/// Compare actual native/offloaded and live-Python renders, preserving PNGs.
+/// Compare actual standard-mode native/offloaded and live-Python renders,
+/// preserving PNGs. The embedded module must also refuse certification;
+/// the installed-wheel gate runs the same comparisons in certified mode.
 /// Returns compared frames, distinct rate samples, and logical table bytes.
 ///
 /// # Errors
@@ -368,7 +370,7 @@ fn run_exact_rate_acceptance(root: Option<&std::path::Path>) -> Result<(u64, u64
             .get_item("run_exact_rate_acceptance")
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "missing exact-rate acceptance function".to_owned())?
-            .call1((root.map(std::path::Path::to_path_buf),))
+            .call1((root.map(std::path::Path::to_path_buf), false))
             .inspect_err(|error| error.print(py))
             .and_then(|result| result.extract())
             .map_err(|error| error.to_string())

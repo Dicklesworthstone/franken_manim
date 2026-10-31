@@ -28,7 +28,7 @@ def discontinuous(alpha):
     return 1.0
 
 
-def render_case(directory, fps, threads, declared, curve):
+def render_case(directory, fps, threads, declared, curve, reproducible):
     scene = m.Scene()
     calls = []
 
@@ -38,8 +38,10 @@ def render_case(directory, fps, threads, declared, curve):
 
     rate = PureRateFunction(curve) if declared else outer
     step = PureRateFunction(discontinuous) if declared else discontinuous
+    sources = {"exact_rate_offload.py": Path(__file__).read_bytes()} if reproducible else None
     with scene.render_session(directory, format="png_sequence", resolution=(96, 54),
-                              fps=fps, threads=threads, reproducible=True) as session:
+                              fps=fps, threads=threads, reproducible=reproducible,
+                              sources=sources) as session:
         shapes = [m.Square(side_length=.24, fill_opacity=1,
                            fill_color=m.BLUE, stroke_width=0).shift(
                                ((index % 5 - 2) * .7, (index // 5 - 1.5) * .7, 0))
@@ -67,6 +69,10 @@ def render_case(directory, fps, threads, declared, curve):
     frames = [path.read_bytes() for path in sorted(directory.glob("*.png"))]
     expected_frames = math.ceil(.413 * fps) + math.ceil(.137 * fps) + 1
     assert session.result.frame_count == expected_frames
+    assert session.result.certified is reproducible
+    if reproducible:
+        assert session.result.manifest is not None
+        assert session.result.manifest.is_file()
     assert len(frames) == expected_frames
     assert scene.get_time() == expected_frames / fps
     stats = scene._render_performance
@@ -405,15 +411,76 @@ def multi_object_refusal_preserves_membership():
     assert any(member is second for member in visible_family)
 
 
-def _run_exact_rate_cases(root):
+def embedded_certification_refuses_before_mutation(root):
+    # The native Cargo harness is an in-memory module. It must never invent
+    # an installed extension identity to certify the standard-mode cases below.
+    scene = m.Scene()
+    before = _play_state(scene)
+    destination = root / "refused-certified"
+    try:
+        with scene.render_session(destination, format="png_sequence",
+                                  resolution=(96, 54), reproducible=True,
+                                  sources={"empty.py": b""}):
+            raise AssertionError("unidentified embedded runtime was certified")
+    except m._CapabilityError as error:
+        assert "portal runtime requires a file-backed native extension" in str(error), error
+    else:
+        raise AssertionError("embedded certification did not fail closed")
+    _assert_play_state(scene, before)
+    assert not destination.exists()
+    assert not destination.with_name(destination.name + ".manifest").exists()
+
+
+def detached_composition_observers_stay_serial(root):
+    for mode in ("public-update", "empty-updater-iterator"):
+        scene = m.Scene()
+        calls = []
+        destination = root / ("detached-" + mode)
+        with scene.render_session(destination, format="png_sequence",
+                                  resolution=(96, 54), fps=24, threads=4) as session:
+            square = m.Square()
+            scene.add(square)
+            group = m.LaggedStart(
+                m.Transform(square, square.copy().shift(m.RIGHT)),
+                run_time=.137, rate_func=m.linear)
+            container = group.mobject
+            assert all(container is not root for root in scene.mobjects)
+            if mode == "public-update":
+                original = container.update
+
+                def update(dt=0, recurse=True):
+                    calls.append(float(dt))
+                    return original(dt, recurse)
+
+                container.update = update
+            else:
+                class EmptyUpdaters(list):
+                    def __iter__(self):
+                        calls.append("iterate")
+                        return super().__iter__()
+
+                container.updaters = EmptyUpdaters()
+            calls.clear()
+            scene.play(group)
+        assert session.result.frame_count == 4
+        assert scene._render_performance["pure_play_frames"] == 0, mode
+        assert len(calls) >= 4, (mode, calls)
+        if mode == "public-update":
+            assert sum(dt > 0 for dt in calls) == 4, calls
+        np.testing.assert_allclose(square.get_center(), m.RIGHT, rtol=0, atol=1e-7)
+
+
+def _run_exact_rate_cases(root, reproducible):
+    if not reproducible:
+        embedded_certification_refuses_before_mutation(root)
     compared_frames = distinct_samples = 0
     for curve in (cubic, there_and_back_with_pause):
         for fps, threads in ((15, 1), (24, 4), (30, 1), (60, 16)):
             name = curve.__name__
             serial = render_case(root / f"serial-{name}-{fps}", fps, threads,
-                                 False, curve)
+                                 False, curve, reproducible)
             native = render_case(root / f"native-{name}-{fps}", fps, threads,
-                                 True, curve)
+                                 True, curve, reproducible)
             assert native[0] == serial[0], (name, fps, "PNG pixels differ")
             for actual, expected in zip(native[1], serial[1], strict=True):
                 np.testing.assert_array_equal(actual, expected)
@@ -426,17 +493,21 @@ def _run_exact_rate_cases(root):
     camera_refusal_preserves_removed_frame()
     multi_object_refusal_preserves_membership()
     undeclared_stateful_rates_keep_live_semantics()
+    detached_composition_observers_stay_serial(root)
     return compared_frames, distinct_samples, 16 * distinct_samples
 
 
-def run_exact_rate_acceptance(root=None):
+def run_exact_rate_acceptance(root=None, reproducible=True):
+    # The standalone installed-wheel gate always takes the certified default.
+    # Only the explicit embedded Rust caller selects standard rendering.
     if root is None:
         with tempfile.TemporaryDirectory(prefix="fmn-exact-rate-") as temporary:
-            return _run_exact_rate_cases(Path(temporary))
+            return _run_exact_rate_cases(Path(temporary), reproducible)
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
-    return _run_exact_rate_cases(root)
+    return _run_exact_rate_cases(root, reproducible)
 
 
 if __name__ == "__main__":
-    run_exact_rate_acceptance()
+    frames, samples, table_bytes = run_exact_rate_acceptance()
+    print(f"certified exact-rate acceptance: {frames} frames, {samples} samples, {table_bytes} table bytes")

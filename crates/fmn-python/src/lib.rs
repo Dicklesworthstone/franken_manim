@@ -8538,9 +8538,9 @@ fn portal_has_frame_render(scene: &Bound<'_, PyScene>) -> PyResult<bool> {
 }
 
 /// Prove that the render-only release boundary has no authored observer before
-/// choosing Scene's native play driver. Any uncertain case keeps the existing
-/// stepped path, including an implicitly added animation source whose public
-/// update protocol was absent from the rooted host admission scan.
+/// choosing Scene's native play driver. Scan both rooted families and pending
+/// animation inputs, including detached composition containers, without rooting
+/// them early. Any uncertain observer keeps the existing stepped path.
 fn portal_allows_native_play(
     scene: &Bound<'_, PyScene>,
     animations: &[Box<dyn fmn_anim::Animation>],
@@ -8570,28 +8570,33 @@ fn portal_allows_native_play(
             .stage()
             .roots()
             .iter()
+            .chain(pending)
             .flat_map(|&root| runtime.stage().family(root))
             .collect();
-        if pending.iter().any(|mob| !observed.contains(mob)) {
-            return Ok(false);
-        }
         observed
     };
+    let members = PyList::new(
+        scene.py(),
+        observed
+            .into_iter()
+            .filter_map(|mob| live_proxy(scene.py(), scene, mob)),
+    )?;
+    // Pending inputs were absent from the rooted Scene scan above. Reuse its
+    // descriptor-safe public update inspection rather than trusting their
+    // class, an empty updater list, or their eventual begin-time membership.
+    if scene
+        .call_method1("_fmn_requires_public_scene_update", (&members,))?
+        .extract::<bool>()?
+    {
+        return Ok(false);
+    }
     // Completed-runtime identity checks do not invoke authored accessors. In
     // particular, a custom light.get_center remains a per-frame callback.
     let light = scene
         .py()
         .import("manimlib")?
         .getattr("_fmn_native_playback_light")?
-        .call1((
-            scene,
-            PyList::new(
-                scene.py(),
-                observed
-                    .into_iter()
-                    .filter_map(|mob| live_proxy(scene.py(), scene, mob)),
-            )?,
-        ))?;
+        .call1((scene, members))?;
     if light.is_none() {
         return Ok(false);
     }

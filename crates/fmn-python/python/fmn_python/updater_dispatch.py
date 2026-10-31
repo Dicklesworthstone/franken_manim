@@ -302,7 +302,7 @@ def install_updater_dispatch(native):
         expected = next(frame_baselines[base] for base in cls.__mro__ if base in frame_baselines)
         return _class_implementation(cls, "update_frame", memo) is not expected
 
-    def requires_public_update(self):
+    def requires_public_update(self, pending=()):
         # Admission must not execute an authored getter, family walker, or
         # updater. Compare identities before reading ordinary shipping state.
         # Nothing authored runs during this scan, so no class can change in it:
@@ -339,7 +339,7 @@ def install_updater_dispatch(native):
                        for name, method in methods.items())
 
         return public_update_scan(
-            list(self.mobjects),
+            [*self.mobjects, *pending],
             (Mobject, hook_names, child_protocols, _instance_dict, _plain_instance_dict,
              member_changed, submobjects_kept, container_changed, _generic_getattr))
 

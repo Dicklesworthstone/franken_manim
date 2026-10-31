@@ -63,6 +63,7 @@ done
 python3 crates/fmn-python/tests/surface_alignment.py
 python3 crates/fmn-python/tests/textured_surfaces.py
 python3 crates/fmn-python/tests/callback_cleanup.py
+python3 crates/fmn-python/tests/exact_rate_offload.py
 
 python3 crates/fmn-conformance/python/test_structural_facts.py
 # Structural parity with the pinned Reference (fm-5wq.36): the installed
