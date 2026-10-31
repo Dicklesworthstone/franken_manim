@@ -654,16 +654,23 @@ fn configured_font_reaches_camera_svg_and_recorded_scene_construction() {
     let mut direct = options("/configured-direct", 1);
     direct.config.text.font = "IBM Plex Sans".to_owned();
     let config = direct.config.clone();
-    render_with_fs(&mut ConfiguredText::new("IBM Plex Sans"), direct, fs.clone()).unwrap();
+    render_with_fs(
+        &mut ConfiguredText::new("IBM Plex Sans"),
+        direct,
+        fs.clone(),
+    )
+    .unwrap();
 
     let mut export = BundleExportOptions::new().unwrap();
     export.config = config.clone();
-    let bundle =
-        export_bundle_bytes(&mut ConfiguredText::new("IBM Plex Sans"), export).unwrap();
+    let bundle = export_bundle_bytes(&mut ConfiguredText::new("IBM Plex Sans"), export).unwrap();
     let mut replay = options("/configured-replay", 1);
     replay.config = config.clone();
     render_bundle_with_fs(&bundle.bundle.bytes, replay, fs.clone()).unwrap();
-    assert_eq!(png(&fs, "/configured-direct"), png(&fs, "/configured-replay"));
+    assert_eq!(
+        png(&fs, "/configured-direct"),
+        png(&fs, "/configured-replay")
+    );
 
     let mut camera = options("/configured-camera", 1);
     camera.config = config.clone();
