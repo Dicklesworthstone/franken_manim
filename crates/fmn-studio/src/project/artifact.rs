@@ -64,12 +64,14 @@ impl ArtifactStore {
                 let directory = self
                     .parent
                     .join(format!("fmn-worker-{}-{id}", std::process::id()));
-                let mut builder = fs::DirBuilder::new();
+                let builder = fs::DirBuilder::new();
                 #[cfg(unix)]
-                {
+                let builder = {
                     use std::os::unix::fs::DirBuilderExt;
+                    let mut builder = builder;
                     builder.mode(0o700);
-                }
+                    builder
+                };
                 match builder.create(&directory) {
                     Ok(()) => {
                         self.directory = Some(directory);

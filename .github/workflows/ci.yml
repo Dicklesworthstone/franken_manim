@@ -28,12 +28,53 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
+  fmt:
+    name: format admission
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Check formatting before expensive jobs
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import subprocess
+          import sys
+
+          inputs = {
+              "source_tree": subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], text=True).strip(),
+              "toolchain_sha256": hashlib.sha256(pathlib.Path("rust-toolchain.toml").read_bytes()).hexdigest(),
+          }
+          command = ["cargo", "fmt", "--check"]
+          try:
+              result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                      text=True, encoding="utf-8", errors="replace", check=False)
+              code, diagnostic = result.returncode, result.stdout
+          except OSError as error:
+              code, diagnostic = 127, str(error)
+          print(json.dumps({"schema": "fmn.ci.fmt", "version": 1, "inputs": inputs,
+                            "command": command, "exit_code": code,
+                            "decision": "pass" if code == 0 else "refuse",
+                            "refusal_reason": None if code == 0 else "cargo fmt --check failed",
+                            "diagnostic": diagnostic[:16384],
+                            "diagnostic_truncated": len(diagnostic) > 16384}, sort_keys=True))
+          sys.exit(code)
+          PY
+
   portable:
+    needs: fmt
     name: check (portable, linux-x86-64)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
       CARGO_TARGET_DIR: target/portable
+      PYO3_PYTHON: python
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -45,6 +86,10 @@ jobs:
       - name: Install pinned toolchain
         run: rustup show active-toolchain
 
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: '3.13'
+
       - name: Cache cargo
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -54,10 +99,10 @@ jobs:
             target/portable
           key: cargo-${{ runner.os }}-${{ runner.arch }}-portable-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
 
-      # The PG-8 binding-tax bridge embeds the host CPython and imports real
-      # NumPy; without it the perf_pg8 suite fails with ModuleNotFoundError.
-      - name: Install NumPy for the PG-8 bridge
-        run: python3 -m pip install --user --break-system-packages numpy || python3 -m pip install --user numpy
+      # This is the gate's host, separate from the standalone runtime closure:
+      # NumPy serves the bridge, Pillow the review-kit tests, IPython the shell.
+      - name: Install the mandatory gate's Python host dependencies
+        run: python3 -m pip install 'numpy==2.5.2' 'Pillow==12.3.0' 'IPython==9.14.0'
 
       - name: Run the mandatory gate
         run: bash scripts/check.sh
@@ -74,11 +119,13 @@ jobs:
         run: cargo test --locked -p fmn-conformance --test fuzz_campaign full_campaign_is_the_campaign_authority
 
   x86-64-v3:
+    needs: fmt
     name: check (x86-64-v3)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
       CARGO_TARGET_DIR: target/x86-64-v3
+      PYO3_PYTHON: python
       RUSTFLAGS: -C target-feature=+avx2,+bmi2,+fma
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -98,6 +145,10 @@ jobs:
             }
           done
 
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: '3.13'
+
       - name: Cache cargo
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -107,15 +158,14 @@ jobs:
             target/x86-64-v3
           key: cargo-${{ runner.os }}-${{ runner.arch }}-x86-64-v3-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
 
-      # The PG-8 binding-tax bridge embeds the host CPython and imports real
-      # NumPy; without it the perf_pg8 suite fails with ModuleNotFoundError.
-      - name: Install NumPy for the PG-8 bridge
-        run: python3 -m pip install --user --break-system-packages numpy || python3 -m pip install --user numpy
+      - name: Install the mandatory gate's Python host dependencies
+        run: python3 -m pip install 'numpy==2.5.2' 'Pillow==12.3.0' 'IPython==9.14.0'
 
       - name: Run the mandatory gate
         run: bash scripts/check.sh
 
   x86-64-v4:
+    needs: fmt
     # qemu-user TCG cannot emulate AVX-512 (any qemu version to date), and
     # ADR-0016's crate-wide tier flags emit AVX-512 unconditionally, so the
     # v4 test binaries SIGILL under emulation by construction. The lane
@@ -131,6 +181,7 @@ jobs:
     env:
       CARGO_BUILD_TARGET: x86_64-unknown-linux-gnu
       CARGO_TARGET_DIR: target/x86-64-v4
+      PYO3_PYTHON: python
       FMN_SIMD_TIER_GATE: "1"
       RUSTFLAGS: -C target-feature=+avx512f,+avx512bw,+avx512dq,+avx512vl
     steps:
@@ -142,6 +193,10 @@ jobs:
       - name: Install pinned toolchain
         run: rustup show active-toolchain
 
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: '3.13'
+
       - name: Cache cargo
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -151,8 +206,8 @@ jobs:
             target/x86-64-v4
           key: cargo-${{ runner.os }}-${{ runner.arch }}-x86-64-v4-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
 
-      - name: Install NumPy for the PG-8 bridge
-        run: python3 -m pip install --user --break-system-packages numpy || python3 -m pip install --user numpy
+      - name: Install the mandatory gate's Python host dependencies
+        run: python3 -m pip install 'numpy==2.5.2' 'Pillow==12.3.0' 'IPython==9.14.0'
 
       - name: Run the SIMD tier gate (native AVX-512 or compile-only)
         run: |
@@ -166,12 +221,14 @@ jobs:
           fi
 
   aarch64-neon:
+    needs: fmt
     name: weekly check (aarch64-neon)
     if: github.event_name == 'schedule'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     env:
       CARGO_TARGET_DIR: target/aarch64-neon
+      PYO3_PYTHON: python
       RUSTFLAGS: -C target-feature=+neon
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -182,6 +239,10 @@ jobs:
       - name: Install pinned toolchain
         run: rustup show active-toolchain
 
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: '3.13'
+
       - name: Cache cargo
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
@@ -191,15 +252,14 @@ jobs:
             target/aarch64-neon
           key: cargo-${{ runner.os }}-${{ runner.arch }}-aarch64-neon-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
 
-      # The PG-8 binding-tax bridge embeds the host CPython and imports real
-      # NumPy; without it the perf_pg8 suite fails with ModuleNotFoundError.
-      - name: Install NumPy for the PG-8 bridge
-        run: python3 -m pip install --user --break-system-packages numpy || python3 -m pip install --user numpy
+      - name: Install the mandatory gate's Python host dependencies
+        run: python3 -m pip install 'numpy==2.5.2' 'Pillow==12.3.0' 'IPython==9.14.0'
 
       - name: Run the mandatory gate
         run: bash scripts/check.sh
 
   exact-image-native:
+    needs: fmt
     # fm-x4pp is deliberately narrower than fm-sol's future all-workspace
     # platform skeleton: this job proves the one-tool process capability on
     # every host/libc combination named by its acceptance contract.
@@ -257,6 +317,7 @@ jobs:
         run: cargo test --locked -p fmn-platform --test capabilities --target ${{ matrix.target }}
 
   windows:
+    needs: fmt
     # fm-sol (a), R18: windows-x86-64 FUNCTIONAL CI. This job promises
     # exactly that the workspace compiles and its tests pass on Windows on
     # the pinned nightly — it is NOT bit-certification. The certified
@@ -274,6 +335,7 @@ jobs:
         shell: bash
     env:
       CARGO_TARGET_DIR: target/windows-portable
+      PYO3_PYTHON: python
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -281,6 +343,13 @@ jobs:
 
       - name: Install pinned toolchain
         run: rustup show active-toolchain
+
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: '3.13'
+
+      - name: Install the mandatory gate's Python host dependencies
+        run: python -m pip install 'numpy==2.5.2' 'Pillow==12.3.0' 'IPython==9.14.0'
 
       - name: Cache cargo
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -306,9 +375,6 @@ jobs:
           cargo clippy -p fmn-cli --features batch --all-targets -- -D warnings
           cargo clippy -p fmn-output --features ffmpeg-test-fixture --all-targets -- -D warnings
 
-      - name: Install NumPy for the PG-8 bridge
-        run: python -m pip install numpy
-
       - name: test
         # --no-fail-fast: Windows-only failures surface crate by crate as this
         # lane comes up; showing them all per run beats one CI round-trip each.
@@ -331,6 +397,7 @@ jobs:
           cargo test -p fmn-output --features ffmpeg-test-fixture --test boundary
 
   certified-matrix:
+    needs: fmt
     # fm-sol (b): the certified matrix's CI legs (G0-6's frozen list, minus
     # linux-x86-64 whose leg is the per-commit `portable` job). Each leg
     # runs the workspace tests — which include the one certified
@@ -353,6 +420,7 @@ jobs:
             runner: macos-14
     env:
       CARGO_TARGET_DIR: target/certified-${{ matrix.label }}
+      PYO3_PYTHON: python
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -360,6 +428,10 @@ jobs:
 
       - name: Install pinned toolchain
         run: rustup show active-toolchain
+
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: '3.13'
 
       - name: Cache cargo
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -370,10 +442,8 @@ jobs:
             target/certified-${{ matrix.label }}
           key: cargo-${{ runner.os }}-${{ runner.arch }}-certified-${{ matrix.label }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
 
-      # The PG-8 bridge harness drives the host CPython against real
-      # NumPy; without it the perf_pg8 suite fails with ModuleNotFoundError.
-      - name: Install NumPy for the PG-8 bridge
-        run: python3 -m pip install --user --break-system-packages numpy || python3 -m pip install --user numpy
+      - name: Install the mandatory gate's Python host dependencies
+        run: python3 -m pip install 'numpy==2.5.2' 'Pillow==12.3.0' 'IPython==9.14.0'
 
       - name: Run the workspace tests
         run: cargo test
@@ -387,6 +457,7 @@ jobs:
         run: bash scripts/pg5_thread_determinism.sh
 
   pg5-thread-determinism:
+    needs: fmt
     # fm-sol (c), PG-5 per-commit lane: the {1,4,16}-thread determinism
     # check over today's thread-invariance tests, as its own named job so
     # scheduling drift reads as its own signal. Thread count is declared
@@ -419,6 +490,7 @@ jobs:
         run: bash scripts/pg5_thread_determinism.sh
 
   pg5-high-core:
+    needs: fmt
     # fm-sol (c), PG-5 weekly cadence: the {32,96} high-core sweep, env-gated
     # through FMN_PG5_THREAD_COUNTS (same harness, no code-path change).
     # Schedule-only — never a merge gate. Runner size is irrelevant to the
@@ -452,6 +524,7 @@ jobs:
         run: bash scripts/pg5_thread_determinism.sh
 
   fuzz-codec:
+    needs: fmt
     # fm-ntp (ADR-0003 class=fuzz): coverage-guided fuzzing of the
     # fmn-codec untrusted-input parsers. SCHEDULED ONLY — never a merge
     # gate; scripts/check.sh does not run it.
@@ -492,6 +565,7 @@ jobs:
         # the source in fmn-codec.
 
   e2e-full:
+    needs: fmt
     # fm-e2e-full-ci-lane-ryq3: the full-tier e2e matrix (fm-fjq catalog)
     # on its weekly budget. The fast tier already runs per-commit inside
     # scripts/check.sh's workspace test; this lane adds the FMN_E2E_FULL=1
@@ -514,6 +588,7 @@ jobs:
     timeout-minutes: 90
     env:
       CARGO_TARGET_DIR: target/e2e-full
+      PYO3_PYTHON: python
       FMN_E2E_FULL: "1"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -522,6 +597,10 @@ jobs:
 
       - name: Install pinned toolchain
         run: rustup show active-toolchain
+
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38
+        with:
+          python-version: '3.13'
 
       - name: Cache cargo
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -532,11 +611,8 @@ jobs:
             target/e2e-full
           key: cargo-${{ runner.os }}-${{ runner.arch }}-e2e-full-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
 
-      # The portal scenarios drive the real embedded-CPython bridge,
-      # whose record views are NumPy arrays (same requirement as the
-      # PG-8 bridge lanes above).
-      - name: Install NumPy for the embedded-CPython bridge
-        run: python3 -m pip install --user --break-system-packages numpy || python3 -m pip install --user numpy
+      - name: Install the mandatory gate's Python host dependencies
+        run: python3 -m pip install 'numpy==2.5.2' 'Pillow==12.3.0' 'IPython==9.14.0'
 
       - name: Run the full-tier e2e matrix
         run: cargo test --locked -p fmn-conformance --test e2e_scenarios
@@ -552,6 +628,7 @@ jobs:
           path: crates/fmn-conformance/goldens/e2e.certified.lock
 
   pg56-release-perf:
+    needs: fmt
     # fm-inr.2 / fm-0q0g (c): the release-perf producers on their weekly
     # cadence. These are the REAL timing rigs — PG-5's certified
     # thread-matrix + frame-parallel + ordered-pipeline schedule sweep over
