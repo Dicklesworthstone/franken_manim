@@ -120,6 +120,7 @@ struct FakeState {
     inspection_digest: Option<Digest>,
     restored: Vec<Vec<u8>>,
     replayed: Vec<(u64, u64)>,
+    replayed_journals: Vec<Vec<u8>>,
     replayed_events: Vec<InputEvent>,
 }
 
@@ -295,6 +296,7 @@ impl WorkerChannel for FakeChannel {
                     .replayed
                     .push((replay.from_entry, replay.through_entry));
                 state.replayed_events = journal.events().to_vec();
+                state.replayed_journals.push(replay.journal.clone());
                 if state.diverge_next_replay && !hashes.is_empty() {
                     state.diverge_next_replay = false;
                     hashes[0] = sha256(b"deliberate divergence");
@@ -867,6 +869,7 @@ fn replay_hash_divergence_discards_reuse_and_cold_reexecutes() {
         Duration::from_millis(1),
     );
     let journal = make_journal(3, Some(0));
+    let expected_journal = journal.to_bytes().expect("complete journal encodes");
     let incoming = commands(&journal);
     supervisor
         .install_session("Demo", journal)
@@ -884,6 +887,11 @@ fn replay_hash_divergence_discards_reuse_and_cold_reexecutes() {
     assert_eq!(
         state.lock().unwrap_or_else(lock_poisoned).replayed,
         vec![(1, 3), (0, 3)]
+    );
+    assert_eq!(
+        state.lock().unwrap_or_else(lock_poisoned).replayed_journals,
+        vec![expected_journal.clone(), expected_journal],
+        "both suffix recovery and cold fallback send the complete canonical journal"
     );
 }
 
@@ -1378,6 +1386,7 @@ fn journal_append_retains_checkpoint_cache_work_and_still_verifies_replacement()
     .namespace("studio-replay", 1, NamespacePolicy::default())
     .unwrap();
     let original = make_journal(1, Some(0));
+    let mut expected_journal = original.try_clone().unwrap();
     let checkpoint = original.entries()[0].checkpoint.clone().unwrap();
     *fs.watched.lock().unwrap_or_else(lock_poisoned) =
         Some(fmn_cache::object_relative_path(&sha256(&checkpoint)));
@@ -1403,6 +1412,10 @@ fn journal_append_retains_checkpoint_cache_work_and_still_verifies_replacement()
     let mut builder = ScriptedBuilder::fake(clock, Duration::ZERO);
     supervisor.build_and_start(&mut builder).unwrap();
     let append = make_journal(1, None);
+    expected_journal
+        .record(append.entries()[0].clone())
+        .unwrap();
+    let expected_journal = expected_journal.to_bytes().unwrap();
     state.lock().unwrap_or_else(lock_poisoned).journal_segment =
         Some((1, append.to_bytes().unwrap()));
     supervisor
@@ -1419,6 +1432,7 @@ fn journal_append_retains_checkpoint_cache_work_and_still_verifies_replacement()
         digest.is_some(),
         "the complete amended journal remains cached"
     );
+    assert_eq!(digest, Some(sha256(&expected_journal)));
 
     let mut invalid = make_journal(1, None);
     invalid
@@ -1460,6 +1474,11 @@ fn journal_append_retains_checkpoint_cache_work_and_still_verifies_replacement()
     assert_eq!(
         state.lock().unwrap_or_else(lock_poisoned).restored.last(),
         Some(&checkpoint)
+    );
+    assert_eq!(
+        state.lock().unwrap_or_else(lock_poisoned).replayed_journals,
+        vec![expected_journal],
+        "append updates recovery bytes; a refused replacement preserves them even without cache"
     );
 }
 

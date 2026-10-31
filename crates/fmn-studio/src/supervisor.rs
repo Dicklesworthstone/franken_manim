@@ -1043,6 +1043,11 @@ pub struct Supervisor {
     next_request_id: u64,
     scene: Option<String>,
     journal: Journal,
+    // The exact bounded document already produced by atomic installation.
+    // Keep it with the immutable journal instead of serializing and hashing
+    // every checkpoint again before each recovery. Wire validation remains
+    // mandatory when this complete document crosses the worker boundary.
+    journal_bytes: Vec<u8>,
     checkpoints: CheckpointTable,
     journal_cache_digest: Option<Digest>,
     crashes: Vec<CrashReport>,
@@ -1085,6 +1090,7 @@ impl Supervisor {
             next_request_id: 1,
             scene: None,
             journal: Journal::new(),
+            journal_bytes: Vec::new(),
             checkpoints: CheckpointTable::default(),
             journal_cache_digest: None,
             crashes: Vec::new(),
@@ -1276,6 +1282,7 @@ impl Supervisor {
         checkpoints.rows.rotate_right(retained_checkpoints);
         self.scene = Some(scene);
         self.journal = journal;
+        self.journal_bytes = journal_bytes;
         self.checkpoints = checkpoints;
         self.journal_cache_digest = journal_cache_digest;
         Ok(())
@@ -1474,7 +1481,6 @@ impl Supervisor {
             "recovery scene bytes",
         )?;
         let plan = plan_replay(&self.journal, incoming, asset_ok);
-        let journal_bytes = self.journal.to_bytes()?;
         let mut restored_checkpoint = None;
         let mut checkpoint_source = None;
         let mut replay_start = 0usize;
@@ -1524,7 +1530,7 @@ impl Supervisor {
         let mut diverged_at = None;
         let mut cold_fallback = false;
         if replay_start < plan.reuse {
-            let hashes = self.replay_range(&scene, &journal_bytes, replay_start, plan.reuse)?;
+            let hashes = self.replay_range(&scene, replay_start, plan.reuse)?;
             replayed_entries = hashes.len();
             let mut audit = ReplayAudit::new();
             for (offset, hash) in hashes.iter().enumerate() {
@@ -1546,7 +1552,7 @@ impl Supervisor {
                 .ok_or(SupervisorError::NoWorker)?
                 .try_clone()?;
             self.launch_and_handshake(artifact)?;
-            let hashes = self.replay_range(&scene, &journal_bytes, 0, plan.reuse)?;
+            let hashes = self.replay_range(&scene, 0, plan.reuse)?;
             if hashes.len() != plan.reuse {
                 return Err(SupervisorError::UnexpectedResponse(
                     "cold replay returned the wrong state-hash count",
@@ -1572,7 +1578,6 @@ impl Supervisor {
     fn replay_range(
         &mut self,
         scene: &str,
-        journal: &[u8],
         from: usize,
         through: usize,
     ) -> Result<Vec<Digest>, SupervisorError> {
@@ -1584,7 +1589,7 @@ impl Supervisor {
             scene: try_clone_string(scene, "replay scene bytes")?,
             from_entry,
             through_entry,
-            journal: try_clone_bytes(journal, "replay journal bytes")?,
+            journal: try_clone_bytes(&self.journal_bytes, "replay journal bytes")?,
         }))?;
         match response {
             WorkerResponse::ReplayComplete {
@@ -1781,8 +1786,11 @@ impl Supervisor {
     ) -> Result<(Vec<u8>, CheckpointSource, Digest), SupervisorError> {
         if let Some(stored) = self.checkpoints.get(index) {
             if let Some(digest) = stored.blob_digest
+                // Blob reads verify both their envelope and SHA-256 payload
+                // address. Bind that verified address to the journal rather
+                // than hashing the same checkpoint a second time here.
+                && digest == stored.state_hash
                 && let Ok(Some(bytes)) = self.checkpoint_cache.get_blob(&digest)
-                && sha256(&bytes) == stored.state_hash
             {
                 return Ok((bytes, CheckpointSource::Cache, stored.state_hash));
             }
