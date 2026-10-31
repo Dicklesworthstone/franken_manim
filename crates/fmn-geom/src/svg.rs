@@ -79,7 +79,7 @@ use crate::{FillRule, GeomError, QuadPath, cubic, repair_projected_path_handles,
 /// The cubic→quadratic conversion tolerance for SVG ingress, in resulting
 /// viewport user units: the G0-2 tolerance applied to SVG's px-scaled space.
 /// Consumers that later resize geometry should supply the corresponding
-/// viewport tolerance through [`SvgDocument::parse_with_tolerance`].
+/// viewport tolerance through [`crate::SvgDocument::parse_with_tolerance`].
 pub const DEFAULT_SVG_TOLERANCE: f64 = cubic::DEFAULT_TOLERANCE_PX;
 
 // ------------------------------------------------------------------ errors
