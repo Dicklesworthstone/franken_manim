@@ -12,6 +12,17 @@ while source qualification is red. The complete matching installed-wheel
 gate at `b2db79fd` now passes. Owned Beads remain open until
 their original acceptance conditions and complete gates are met.
 
+At `3eb4f621`, the unchanged source policy passed all Rust checks and tests,
+including **91/91 conformance e2e** at the original deadlines/default
+concurrency and **162/162 embedded Python tests** on supported CPython 3.13.1.
+The complete policy still exited **1**: its final crate-DAG check omitted the
+existing `fmn → fmn-cache` dependency used by standard-mode persistent
+autotuning (plan §17.4, D-24). The focused checker correction admits exactly
+that required internal edge; planted extra, missing, upward and spike edges
+still fail. It changes no runtime dependency or product contract. Its new
+complete policy run remains required. The matching `3eb4f621` installed-wheel
+gate is still running; no leaf has been closed from the partial source pass.
+
 - **Chisel:** arc-center recovery now solves in the actual component plane,
   including tilted circles and tiny radii. Native arc tests and real portal
   geometry witnesses cover the repaired behavior; ADR-0030/BN-07 document the

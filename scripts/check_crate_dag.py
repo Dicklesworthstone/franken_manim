@@ -73,6 +73,10 @@ EXPECTED: dict[str, set[str]] = {
     "fmn": {
         "fmn-core",
         "fmn-config",
+        # §17.4 / D-24: the native composition root persists standard-mode
+        # raster tuning through Reel's existing governed store. The planner
+        # in fmn-runtime stays storage-independent; certified bypasses it.
+        "fmn-cache",
         "fmn-platform",
         "fmn-geom",
         "fmn-mobject",
