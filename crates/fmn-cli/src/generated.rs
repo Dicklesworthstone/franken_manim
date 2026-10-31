@@ -777,6 +777,18 @@ pub const FLAG_SPECS: &[FlagSpec] = &[
         help: "Exit with capability status when ffmpeg is unavailable",
     },
     FlagSpec {
+        options: &["--autotune"],
+        binding: "autotune",
+        command: CommandScope::Doctor,
+        action: FlagAction::SetTrue,
+        arity: FlagArity::None,
+        default: Some("False"),
+        value_type: None,
+        status: FlagStatus::Improved,
+        source: FlagSource::Native,
+        help: "Measure and cache standard CPU raster tile geometry",
+    },
+    FlagSpec {
         options: &["--bind"],
         binding: "bind",
         command: CommandScope::Studio,

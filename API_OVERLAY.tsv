@@ -17,7 +17,7 @@
 
 [meta]
 overlay_version	1
-ledger_reviewed_digest	23bbc972773743365689de4ddb917da40fe352d188384f8751f985985da0b57a
+ledger_reviewed_digest	00378336efc3500ac180d21d918d8db3fadfea04b8186234321be6e81a13f868
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -2830,6 +2830,7 @@ scene_names	same	-	render	scene_names	crates/fmn-cli/src/lib.rs#tests	explicit s
 --fail-fast	store_true	-	False	-	batch	fail_fast	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Cancel remaining jobs after the first failure
 --manifest-dir	store	-	-	path	batch	manifest_dir	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Write per-scene manifests under this directory
 --require-ffmpeg	store_true	-	False	-	doctor	require_ffmpeg	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Exit with capability status when ffmpeg is unavailable
+--autotune	store_true	-	False	-	doctor	autotune	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Measure and cache standard CPU raster tile geometry
 --bind	store	-	127.0.0.1	ip	studio	bind	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Loopback address for the Studio host
 --port	store	-	0	u16	studio	port	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Studio TCP port, with zero selecting an ephemeral port
 --no-browser	store_true	-	False	-	studio	no_browser	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Do not launch the host browser

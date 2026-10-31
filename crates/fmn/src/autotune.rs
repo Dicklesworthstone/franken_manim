@@ -6,6 +6,8 @@
 //! CPU-team throughput is inferred from a raster sample. Certified planning
 //! returns before resolving a path or consulting any filesystem capability.
 
+pub mod calibration;
+
 use std::fmt;
 use std::sync::Arc;
 

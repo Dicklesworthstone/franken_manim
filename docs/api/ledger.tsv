@@ -16,6 +16,7 @@ fmn.cli.batch	--budget-ms	budget_ms	cli_flag	0	action=store;nargs=-;type=u64;def
 fmn.cli.batch	--fail-fast	fail_fast	cli_flag	0	action=store_true;nargs=-;type=-;default=False	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Cancel remaining jobs after the first failure
 fmn.cli.batch	--manifest-dir	manifest_dir	cli_flag	0	action=store;nargs=-;type=path;default=-	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Write per-scene manifests under this directory
 fmn.cli.batch	--max-scenes	max_scenes	cli_flag	0	action=store;nargs=-;type=usize;default=-	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Bound simultaneously active scene jobs
+fmn.cli.doctor	--autotune	autotune	cli_flag	0	action=store_true;nargs=-;type=-;default=False	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Measure and cache standard CPU raster tile geometry
 fmn.cli.doctor	--require-ffmpeg	require_ffmpeg	cli_flag	0	action=store_true;nargs=-;type=-;default=False	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Exit with capability status when ffmpeg is unavailable
 fmn.cli.global	--cache-dir	cache_dir	cli_flag	0	action=store;nargs=-;type=path;default=-	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Explicit FrankenManim content-store root
 fmn.cli.global	--clear-cache	clear_cache	cli_flag	0	action=store_true;nargs=-;type=-;default=False	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	safe content-store lifecycle operation

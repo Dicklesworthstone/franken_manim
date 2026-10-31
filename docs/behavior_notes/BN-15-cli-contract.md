@@ -156,6 +156,49 @@ gives this outcome through the real console entrypoint, with its effect checked.
   separation, doctor, cache lifecycle, and exhaustive interaction tests.
 - `docs/api/cli_flags.md`: generated user-facing flag and command tables.
 
+## Explicit CPU raster calibration
+
+`fmn doctor --autotune` is a native `doctor` flag. This is an intentional
+semantic amendment to the authored CLI schema and its reviewed-row digest:
+ordinary doctor remains observational, while this explicit option measures
+standard CPU raster tile geometry and publishes one immutable cache profile.
+The flag is refused for certified mode and accelerator engines.
+
+The command uses the same configuration, topology detector, request builder
+and cache key as CLI/native render planning. It measures the configured
+resolution without downscaling, up to 2,073,600 pixels and 32 workers in the
+baseline's first render team. A ten-second cooperative probe budget is checked
+between setup steps and before/after each frame; an already-running bounded
+frame may finish after that budget. No partial probe is published.
+
+Three interleaved rounds compare fine/macro tiles `(8, 64)`, `(16, 128)` and
+`(32, 256)`. Each candidate gets an untimed warm frame and a timed frame of
+moving layered curves, with only one renderer/team alive at a time. Pixels
+must satisfy the renderer's versioned linear-channel numerical error budget;
+malformed frames and non-finite samples are refused. A five-percent median
+improvement is required to choose another tile geometry; otherwise the
+measured baseline is retained. Worker placement, team count, frame queues,
+memory admission and encoder policy remain derived from the live request.
+
+A valid existing profile is reused without rerunning the probe. An immutable
+publication race preserves the winning profile and names that outcome. Normal
+renders treat invalid optional cache entries as a named baseline fallback;
+explicit calibration reports a cache refusal instead of claiming it measured
+successfully. Existing explicit cache clearing permits a later calibration.
+
+Robot mode prefixes the usual doctor snapshot with one `fmn.autotune` version-1
+receipt naming the outcome, exact profile key, topology, compiled tier, renderer
+version, surface, worker count, selected tiles, numerical comparison policy
+and this attempt's timings. Reuse has no new timing samples. This is raster-tile
+evidence for the declared workload; it is not an end-to-end throughput or
+arbitrary-scene speedup claim.
+
+Coverage: `crates/fmn/src/autotune/calibration.rs`,
+`crates/fmn/tests/autotune.rs`, and
+`crates/fmn-cli/src/doctor_autotune.rs` exercise real retained rendering,
+cache consumption/reuse, numerical equivalence, invalid records, bounded probes,
+immutable publication and certified isolation.
+
 ## Native video-quality controls
 
 The standalone Rust `fmn` command accepts `--crf`, `--preset`, `--tune`, and

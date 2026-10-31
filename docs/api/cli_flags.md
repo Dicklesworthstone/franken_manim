@@ -79,6 +79,7 @@ The Reference's `manimlib/config.py` declares 34 options. Every row has exactly 
 | `--fail-fast` | batch | `fail_fast` | improved | BN-15 | store_true | False | Cancel remaining jobs after the first failure |
 | `--manifest-dir` | batch | `manifest_dir` | improved | BN-15 | store | — | Write per-scene manifests under this directory |
 | `--require-ffmpeg` | doctor | `require_ffmpeg` | improved | BN-15 | store_true | False | Exit with capability status when ffmpeg is unavailable |
+| `--autotune` | doctor | `autotune` | improved | BN-15 | store_true | False | Measure and cache standard CPU raster tile geometry |
 | `--bind` | studio | `bind` | improved | BN-15 | store | 127.0.0.1 | Loopback address for the Studio host |
 | `--port` | studio | `port` | improved | BN-15 | store | 0 | Studio TCP port, with zero selecting an ephemeral port |
 | `--no-browser` | studio | `no_browser` | improved | BN-15 | store_true | False | Do not launch the host browser |

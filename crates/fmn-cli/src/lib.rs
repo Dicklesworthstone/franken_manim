@@ -12,6 +12,7 @@ mod camera_route;
 mod build_identity;
 #[cfg(test)]
 mod cargo_profile;
+mod doctor_autotune;
 mod generated;
 mod offline_cpu;
 mod studio_live;
@@ -429,6 +430,8 @@ pub struct DoctorCommand {
     /// Make missing ffmpeg an exit-4 requirement rather than a reported
     /// optional absence.
     pub require_ffmpeg: bool,
+    /// Explicitly measure and persist standard CPU raster tile geometry.
+    pub autotune: bool,
 }
 
 /// `fmn batch`.
@@ -526,7 +529,7 @@ impl FfmpegReport {
     }
 }
 
-/// Read-only cache observation. Doctor never opens or stamps a store.
+/// Read-only cache observation. Snapshot collection never opens or stamps a store.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CacheReport {
     /// A configured root was inspected without mutation.
@@ -779,7 +782,7 @@ fn typed_consumer_scope(binding: &str) -> Option<CommandScope> {
         | "format"
         | "engine"
         | "math_pack" => CommandScope::Render,
-        "require_ffmpeg" => CommandScope::Doctor,
+        "require_ffmpeg" | "autotune" => CommandScope::Doctor,
         "budget_ms" | "max_scenes" | "fail_fast" | "manifest_dir" => CommandScope::Batch,
         "bind" | "port" | "no_browser" | "tui" | "checkpoint_frames" | "preview_codec"
         | "restore_session" => CommandScope::Studio,
@@ -1159,6 +1162,7 @@ fn build_invocation(
         CommandScope::Doctor => Ok(Invocation::Doctor(DoctorCommand {
             common,
             require_ffmpeg: values.bool("require_ffmpeg"),
+            autotune: values.bool("autotune"),
         })),
         CommandScope::Batch => {
             let render = build_render(values.clone(), common)?;
@@ -1906,13 +1910,26 @@ fn derive_execution_plan_with_annex(
     ),
     CliError,
 > {
+    let request = execution_plan_request(config, intent, output_format, metal_selection, camera)?;
+    let (topology, topology_source) = detect_topology(fs);
+    let plan = fmn::autotune::derive_execution_plan(fs, config, request, &topology)
+        .map_err(execution_plan_error)?;
+    Ok((plan, topology, topology_source))
+}
+
+fn execution_plan_request(
+    config: &fmn_config::Config,
+    intent: fmn_runtime::RenderIntent,
+    output_format: fmn_runtime::OutputPixelFormat,
+    metal_selection: MetalSelection,
+    camera: bool,
+) -> Result<fmn_runtime::PlanRequest, CliError> {
     if camera && config.render.engine != fmn_config::config::Engine::Cpu {
         return Err(CliError::new(
             "capability",
             "mixed camera content requires the CPU renderer; no accelerator request is silently substituted",
         ));
     }
-    let (topology, topology_source) = detect_topology(fs);
     let mut surface =
         fmn_runtime::SurfaceSpec::lumen(config.camera.resolution.0, config.camera.resolution.1);
     if config.render.engine == fmn_config::config::Engine::Cpu {
@@ -1977,9 +1994,7 @@ fn derive_execution_plan_with_annex(
             .map_err(|_| CliError::new("config", "thread count does not fit this target"))?;
         request = request.with_max_cpu_threads(threads);
     }
-    let plan = fmn::autotune::derive_execution_plan(fs, config, request, &topology)
-        .map_err(execution_plan_error)?;
-    Ok((plan, topology, topology_source))
+    Ok(request)
 }
 
 /// Collect a truthful doctor snapshot. Optional capabilities are represented
@@ -8154,16 +8169,29 @@ where
             format!("fmn {}\n", env!("CARGO_PKG_VERSION"))
         }),
         Invocation::Doctor(command) => {
+            let calibration = if command.autotune {
+                match doctor_autotune::run(Arc::clone(&fs), &command) {
+                    Ok(receipt) => receipt,
+                    Err(error) => return error_output(command.common.robot, &error),
+                }
+            } else {
+                String::new()
+            };
             match collect_doctor_snapshot(fs.as_ref(), runner.as_ref(), locator, &command) {
                 Ok(snapshot) => {
                     let stdout = if command.common.robot {
                         match snapshot.to_ndjson() {
                             Ok(stdout) => stdout,
-                            Err(error) => return error_output(true, &error),
+                            Err(error) => {
+                                let mut output = error_output(true, &error);
+                                output.stdout = format!("{calibration}{}", output.stdout);
+                                return output;
+                            }
                         }
                     } else {
                         snapshot.to_human()
                     };
+                    let stdout = format!("{calibration}{stdout}");
                     if command.require_ffmpeg && !snapshot.ffmpeg.is_available() {
                         let error = CliError::new(
                             "capability",
@@ -8180,7 +8208,11 @@ where
                         RunOutput::success(stdout)
                     }
                 }
-                Err(error) => error_output(command.common.robot, &error),
+                Err(error) => {
+                    let mut output = error_output(command.common.robot, &error);
+                    output.stdout = format!("{calibration}{}", output.stdout);
+                    output
+                }
             }
         }
         Invocation::ClearCache { common } => clear_cache(fs.as_ref(), &common),
@@ -10973,6 +11005,26 @@ mod tests {
     }
 
     #[test]
+    fn autotune_is_an_explicit_doctor_only_request() {
+        let Invocation::Doctor(plain) = parse_args(["doctor"]).unwrap() else {
+            panic!("doctor variant expected");
+        };
+        assert!(!plain.autotune);
+        let Invocation::Doctor(calibration) =
+            parse_args(["doctor", "--autotune", "--robot", "--threads", "2"]).unwrap()
+        else {
+            panic!("doctor variant expected");
+        };
+        assert!(calibration.autotune);
+        assert!(calibration.common.robot);
+        assert_eq!(calibration.common.threads, Some(2));
+        for command in ["render", "studio", "batch"] {
+            let error = parse_args([command, "--autotune"]).unwrap_err();
+            assert_eq!(error.exit_name(), "usage");
+        }
+    }
+
+    #[test]
     fn command_scopes_and_loopback_security_are_enforced() {
         let error = parse_args(["doctor", "--fps", "60"]).expect_err("wrong command flag");
         assert_eq!(error.exit_name(), "usage");
@@ -11755,6 +11807,7 @@ mod tests {
                 log_level: None,
             },
             require_ffmpeg: false,
+            autotune: false,
         };
         let snapshot = collect_doctor_snapshot(&fs, &runner, &no_ffmpeg_locator(), &command)
             .expect("doctor snapshot resolves");
