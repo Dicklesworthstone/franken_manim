@@ -213,7 +213,7 @@ _2020/hamming.py	ReedSolomonPreview	portal_exception	TypeError
 _2020/hamming.py	Reinvention	missing_asset	OSError
 _2020/hamming.py	ReviewOfXOR	scene_code_error	TypeError
 _2020/hamming.py	RobustForLessThanNErrors	ok	
-_2020/hamming.py	ScaleUp	ok	
+_2020/hamming.py	ScaleUp	timeout	
 _2020/hamming.py	SenderReceiverDynamic	missing_asset	OSError
 _2020/hamming.py	SetupSixteenBitExample	scene_code_error	TypeError
 _2020/hamming.py	SimpleHoldUpBackground	missing_asset	OSError
@@ -461,7 +461,7 @@ _2020/sir.py	WideSpreadTesting	scene_code_error	TypeError
 _2020/surface_play.py	EarthMorph	missing_asset	OSError
 _2020/telestration_contribution.py	TelestrationContribution	missing_asset	OSError
 _2021/bertrands_paradox.py	CenterPoint	ok	
-_2021/bertrands_paradox.py	ChordsInSpaceWithCircle	timeout	
+_2021/bertrands_paradox.py	ChordsInSpaceWithCircle	portal_exception	ValueError
 _2021/bertrands_paradox.py	CoinFlips	ok	
 _2021/bertrands_paradox.py	CompareFirstTwoMethods	ok	
 _2021/bertrands_paradox.py	CorrectionInsert	ok	
@@ -719,7 +719,7 @@ _2021/quick_eigen.py	ShowSquishingAndStretching	ok
 _2021/quick_eigen.py	SimplerQuadraticFormula	ok	
 _2021/quick_eigen.py	SkipTheMiddleStep	ok	
 _2021/quick_eigen.py	SneakierEigenVector	scene_code_error	Exception
-_2021/quick_eigen.py	SpinMeasurements	ok	
+_2021/quick_eigen.py	SpinMeasurements	portal_exception	ValueError
 _2021/quick_eigen.py	ThreeSpinExamples	ok	
 _2021/quick_eigen.py	Thumbnail	ok	
 _2021/quick_eigen.py	TweakDiagonalValue	scene_code_error	Exception
@@ -1048,12 +1048,12 @@ _2022/quintic/cubic.py	CubicFormula	scene_code_error	TypeError
 _2022/quintic/cubic.py	CubicFormulaTest	scene_code_error	TypeError
 _2022/quintic/polynomial_baisics.py	ComplicatedSingleValuedFunction	ok	
 _2022/quintic/polynomial_baisics.py	ConstructPolynomialWithGivenRoots	scene_code_error	TypeError
-_2022/quintic/polynomial_baisics.py	CubeRootBehavior	scene_code_error	AttributeError
+_2022/quintic/polynomial_baisics.py	CubeRootBehavior	ok	
 _2022/quintic/polynomial_baisics.py	FactsAboutRootsToCoefficients	capability_refusal	NotImplementedError
-_2022/quintic/polynomial_baisics.py	FifthRootBehavior	scene_code_error	AttributeError
+_2022/quintic/polynomial_baisics.py	FifthRootBehavior	ok	
 _2022/quintic/polynomial_baisics.py	IntroduceUnsolvability	ok	
 _2022/quintic/polynomial_baisics.py	SolvabilityChart	scene_code_error	AttributeError
-_2022/quintic/polynomial_baisics.py	StudySqrt	scene_code_error	AttributeError
+_2022/quintic/polynomial_baisics.py	StudySqrt	scene_code_error	TypeError
 _2022/quintic/polynomial_baisics.py	SummarizeRootsToCyclesBehavior	ok	
 _2022/quintic/polynomial_baisics.py	TableOfContents	ok	
 _2022/quintic/roots_and_coefs.py	AmbientRootSwapping	ok	
@@ -1219,11 +1219,11 @@ _2023/clt/dice_sims.py	DiceSimulationAlt4	timeout
 _2023/clt/dice_sims.py	DiceSimulationAlt5	timeout	
 _2023/clt/dice_sims.py	LargerDiceSimulation	timeout	
 _2023/clt/dice_sims.py	LargerUSimulation	timeout	
-_2023/clt/dice_sims.py	SimulationWithExpDistribution	ok	
+_2023/clt/dice_sims.py	SimulationWithExpDistribution	timeout	
 _2023/clt/dice_sims.py	SimulationWithExpDistribution15Dice	timeout	
-_2023/clt/dice_sims.py	SimulationWithExpDistribution2	ok	
-_2023/clt/dice_sims.py	SimulationWithExpDistribution2Dice	ok	
-_2023/clt/dice_sims.py	SimulationWithExpDistribution5Dice	ok	
+_2023/clt/dice_sims.py	SimulationWithExpDistribution2	timeout	
+_2023/clt/dice_sims.py	SimulationWithExpDistribution2Dice	timeout	
+_2023/clt/dice_sims.py	SimulationWithExpDistribution5Dice	timeout	
 _2023/clt/dice_sims.py	SimulationWithRandomDistribution	timeout	
 _2023/clt/dice_sims.py	SimulationWithSteepUShapedDistribution	timeout	
 _2023/clt/dice_sims.py	SimulationWithUShapedDistribution	timeout	
@@ -1242,7 +1242,7 @@ _2023/clt/main.py	ExpDistSumDistributions	scene_code_error	NameError
 _2023/clt/main.py	HowVarianceAdds	ok	
 _2023/clt/main.py	InfiniteVariance	ok	
 _2023/clt/main.py	LimitingDistributions	ok	
-_2023/clt/main.py	MeanAndStandardDeviation	tex_unsupported	TexError
+_2023/clt/main.py	MeanAndStandardDeviation	ok	
 _2023/clt/main.py	RandomDieRolls	ok	
 _2023/clt/main.py	RuleOfThumb	ok	
 _2023/clt/main.py	Thumbnail	ok	
@@ -1284,7 +1284,7 @@ _2023/clt_proof/main.py	ConnectingArrow	ok
 _2023/clt_proof/main.py	CumulantsOfScaledSum	ok	
 _2023/clt_proof/main.py	DefineCGF	ok	
 _2023/clt_proof/main.py	DefineMGF	ok	
-_2023/clt_proof/main.py	DirectMGFInterpretation	ok	
+_2023/clt_proof/main.py	DirectMGFInterpretation	timeout	
 _2023/clt_proof/main.py	ExpandCGF	ok	
 _2023/clt_proof/main.py	FirstFewTermsOfCGF	ok	
 _2023/clt_proof/main.py	ImagineProving	missing_asset	OSError
@@ -1498,7 +1498,7 @@ _2023/moser_reboot/main.py	SimpleVLine	ok
 _2023/moser_reboot/main.py	VEquation	ok	
 _2023/moser_reboot/main.py	WhyThePowersOfTwo	missing_asset	OSError
 _2023/numberphile/prime_race.py	LongRaceGraph	ok	
-_2023/numberphile/prime_race.py	PrimeRace	ok	
+_2023/numberphile/prime_race.py	PrimeRace	timeout	
 _2023/numberphile/prime_race.py	RaceGraph	ok	
 _2023/optics_puzzles/adding_waves.py	AddTwoRotatingVectors	ok	
 _2023/optics_puzzles/adding_waves.py	AddTwoSineWaves	missing_asset	OSError
@@ -1856,7 +1856,7 @@ _2024/puzzles/added_dimension.py	ShowAsThreeD	scene_code_error	IndexError
 _2024/puzzles/added_dimension.py	ShowLozenge	ok	
 _2024/puzzles/added_dimension.py	ShowRhombicDodecTesselation	ok	
 _2024/puzzles/added_dimension.py	SimilarDiagrams	ok	
-_2024/puzzles/added_dimension.py	SphereStrips	ok	
+_2024/puzzles/added_dimension.py	SphereStrips	timeout	
 _2024/puzzles/added_dimension.py	StruggleWithStrips	ok	
 _2024/puzzles/added_dimension.py	TriPod	ok	
 _2024/puzzles/added_dimension.py	TriangleAreaFormula	ok	
@@ -2499,7 +2499,7 @@ _2025/laplace/exponentials.py	SPlane	timeout
 _2025/laplace/exponentials.py	Thumbnail	ok	
 _2025/laplace/exponentials.py	Thumbnail2	ok	
 _2025/laplace/integration.py	IntegrateConstant	ok	
-_2025/laplace/integration.py	IntegrateRealExponential	timeout	
+_2025/laplace/integration.py	IntegrateRealExponential	portal_exception	TypeError
 _2025/laplace/integration.py	SimplePole	portal_exception	ValueError
 _2025/laplace/main_equations.py	AlternateBreakDown	ok	
 _2025/laplace/main_equations.py	BreakUpCosineTex	ok	
@@ -2716,7 +2716,7 @@ _2026/print_gallery/conformal_maps.py	DerivativeMeaning	scene_code_error	Attribu
 _2026/print_gallery/conformal_maps.py	F_Of_Z_Equals_C_Times_Z	ok	
 _2026/print_gallery/conformal_maps.py	MoreComplicatedExamples1	ok	
 _2026/print_gallery/conformal_maps.py	OneTimesAnything	ok	
-_2026/print_gallery/conformal_maps.py	Warmup	scene_code_error	TypeError
+_2026/print_gallery/conformal_maps.py	Warmup	missing_asset	OSError
 _2026/print_gallery/conformal_maps.py	WhyComplexNumbers	ok	
 _2026/print_gallery/conformal_maps.py	ZeroTimesAnything	ok	
 _2026/print_gallery/exponential.py	CreateMeshWarp	missing_asset	OSError
@@ -2735,9 +2735,9 @@ _2026/print_gallery/exponential.py	TransformPrintGalleryFromStraightToLoop	missi
 _2026/print_gallery/exponential.py	UsePiCreatureLog	ok	
 _2026/print_gallery/exponential.py	ZoomWithColors	missing_asset	OSError
 _2026/print_gallery/misc_scenes.py	EllipticFunctions	ok	
-_2026/print_gallery/misc_scenes.py	MobiusTransformation1	scene_code_error	IndexError
+_2026/print_gallery/misc_scenes.py	MobiusTransformation1	timeout	
 _2026/print_gallery/misc_scenes.py	MobiusTransformation2BiggerGridTest	timeout	
-_2026/print_gallery/misc_scenes.py	NaiveLinearScaling	scene_code_error	TypeError
+_2026/print_gallery/misc_scenes.py	NaiveLinearScaling	ok	
 _2026/print_gallery/misc_scenes.py	RightAngles	ok	
 _2026/print_gallery/misc_scenes.py	WriteSquares	ok	
 _2026/print_gallery/supplements.py	AppreciatingWithMath	missing_asset	OSError

@@ -1,71 +1,41 @@
-<!-- fmn-measurement {"inputs_digest": "sha256:c758365cab1ad92e over 2814 scene ids", "max_age_commits": 200, "measured_at": "2026-10-22", "measured_commit": "ea5d83f78bfc", "producer": "python3 scripts/corpus_scene_sweep.py --report /data/tmp/claude-1000/-data-projects-franken-manim/78504355-0f8a-4ebd-9b46-b2bbc764b3b0/scratchpad/w11/dew9/out/records.ndjson --dashboard docs/ratchet/scene_dashboard.md --tsv docs/ratchet/scene_outcomes.tsv --title 3b1b corpus scene sweep (fmn-python) --note /data/tmp/claude-1000/-data-projects-franken-manim/78504355-0f8a-4ebd-9b46-b2bbc764b3b0/scratchpad/w11/dew9/note.md --measured-commit ea5d83f78bfc"} -->
+<!-- fmn-measurement {"inputs_digest": "sha256:c758365cab1ad92e over 2814 scene ids", "max_age_commits": 200, "measured_at": "2026-10-30", "measured_commit": "6ab48696475625c68fe09b2322e1df45bfc103f0", "producer": "python3 scripts/corpus_scene_sweep.py --report /run/fmn-execute-20261030/release/sweep/records.ndjson --dashboard docs/ratchet/scene_dashboard.md --tsv docs/ratchet/scene_outcomes.tsv --title 3b1b corpus scene sweep (fmn-python) --note /data/tmp/fmn-execute-20261030-scene-note.md --measured-commit 6ab48696475625c68fe09b2322e1df45bfc103f0"} -->
 # 3b1b corpus scene sweep (fmn-python)
 
-Every `Scene` subclass that a static AST pass finds in `scripts/videos_ref/_2020`–`_2026` (3b1b/videos@e317d6c5) is rendered to one final PNG at 320×180.
-- `ok` means the scene ran to completion and the portal wrote that PNG. The sweep does not judge the image; that is the Look Gallery's job.
-- Each scene runs through `fmn-python` in its own process, with a 180 s timeout and 16 scenes in parallel.
-- The portal is a release wheel of the tree at `ea5d83f7` (2026-10-22). Later commits up to the measurement touch only scripts, the README and the tracker.
-- It ran on CPython 3.13.1 with NumPy 2.5.2. Every record carries the same `portal_digest`, `eecea106…`.
+Measured with the release wheel built from `6ab48696475625c68fe09b2322e1df45bfc103f0`, wheel SHA-256 `317fe607f8dd8ba63037147cc8648c29bc89a9b6e76ce1d9baefcc76dc6c8b4f`. The wheel build and local checkout have identical hashes for all 4,395 tracked non-tracker files (aggregate `cafaa76a5daa6d7e2efc50ea90c20150cbaaf6508f39e61fcc338d0fa5b0df2b`); this is repository byte binding, not a full RCH source-closure receipt. Every scene record carries native payload digest `c050344deb5b27216b8c7d6662538af8126ebf81df89812fa2c4037b15752ba9`.
 
-Each record also carries its era and the scene process's own peak RSS from `os.wait4`: median 156 MiB, 95th percentile 226 MiB, maximum 3 GiB. Every scene that did not render was re-run with `--construct-only`, which runs its whole lifecycle without rasterizing. `construct_outcome` records the result.
+All 2,814 original scene ids from pinned `3b1b/videos@e317d6c5eaa8370a2deb4d148c246b0d0e9fbe6f` were freshly attempted: final PNG at 320x180, 180 s timeout, 16 concurrent scenes. Attribution and construct-only checks ran for failures; every outcome remains in the denominator. This is a compatibility census on the shared 64-logical-CPU host, **calibration-unqualified (ADR-0024)**. Concurrent measurements and host load affect timeout and timing results. No qualified PG, cross-platform certification, or human Look Gallery verdict is established.
 
-Third-party packages that scenes import themselves are installed beside the portal, as they would be for the Reference. They are the previous sweep's set plus tqdm:
-- scipy 1.18.1, matplotlib 3.11.2, sympy 1.14.0, mpmath 1.4.1, pandas 3.0.6, Pillow 12.3.0, colour 0.1.5 and tqdm 4.70.0.
-- sympy is installed without dependency resolution, because 1.14.0 declares `mpmath<1.4`.
-- The corpus's own `manim_imports_ext` imports tqdm. Without it every scene reports `missing_dependency`, which is what a first run today did.
+The host uses CPython 3.13.1, NumPy 2.5.2 and IPython 9.14.0, with the historical optional scene package set: scipy 1.18.1, matplotlib 3.11.2, sympy 1.14.0, mpmath 1.4.1, pandas 3.0.6, Pillow 12.3.0, colour 0.1.5 and tqdm 4.70.0. Sympy is installed without dependency resolution because it declares `mpmath<1.4`. Deliberately absent: gensim, transformers, torch, requests, mido and opencv. No private corpus image/SVG/texture assets are supplied. The corpus configuration has only `directories.base` emptied (config SHA-256 `9d79278259343e35d49d6b3d636a5a2d1d40db0af2aed8c5300b9a0153a15ca3`); missing packages and assets remain visible outcomes.
 
-The portal neither vendors nor shims these packages. gensim, transformers, torch, requests, mido and opencv are deliberately not installed; scenes importing them report `missing_dependency`.
+Compared with the previous published sweep at `ea5d83f7` (1,073 ok), this run has 1,068 ok: 4 previously unsuccessful scenes now succeed and 9 previous successes do not. This is an observational comparison across source and host load, not causal credit for the changes in this session. Success ids gained/lost are retained in the raw comparison beside the source-bound records.
 
-Scenes run under the corpus's own `custom_config.yml`, with `directories.base` pointed at an empty local folder. The corpus's image, SVG and texture assets are not public, so scenes that need them report `missing_asset`. `capability_refusal` includes scenes that request fonts FrankenManim does not bundle (mostly Consolas); the refusal names the family.
+Per-scene peak RSS is measured by `os.wait4`: median 158.2 MiB, 95th percentile 233.2 MiB, maximum 1,909.0 MiB. All 1,746 failed render attempts received construct-only probes: 691 `missing_asset`, 522 `runtime_error`, 428 `missing_dependency`, 68 `capability_refusal`, 32 `timeout`, 4 `tex_unsupported` and 1 `ok`. Construct outcomes are a separate diagnostic classification. Their 522 runtime errors do not establish 522 new portal faults. Render outcomes retain in-process attribution (34 `portal_exception` and 488 `scene_code_error`); where an exception surfaced does not establish fault.
 
-Failures not otherwise classified are re-run in-process, and `raised_in` records whether the exception surfaced in portal or scene code. That is where the exception surfaced, not proof of fault. Many `scene_code_error` scenes are written for pre-2022 manim, which the pinned Reference also rejects (`CONFIG` dictionaries, removed keywords such as `x_min` and `gloss`).
-
-`timeout` depends on host load. This sweep ran on the shared 64-core host, with the load average at about 18–27 at the start and end of the 36-minute run.
-
-Against the previous sweep (`15c65f1c`, 2026-09-26, 1,052 ok) this one gains 24 scenes and loses 3.
-- **Gained:** 14 former timeouts, 6 former `scene_code_error` and 4 former `portal_exception` now run to completion.
-- **Lost:** all three also fail in the pinned Reference (corpus differential, both engines).
-  - `covid` ShowVaryingExpCurve passes the removed keyword `x_min`. The portal now raises the Reference's TypeError instead of ignoring it.
-  - `ctracing` ContactTracingMisnomer and `newton_fractal` CyclicAttractor stop earlier in the Reference, on a missing SVG asset. The portal now refuses what the Reference also refuses: a non-VMobject in a `VGroup`, and the removed `gloss` keyword.
-
-Regenerate with `scripts/corpus_scene_sweep.py` (see its docstring), passing `--measured-commit`. The first line of this file is the staleness header that `scripts/check_measurement_staleness.py` reads. The records carry scene identifiers and outcome codes only, because the corpus is CC BY-NC-SA.
-
-Earlier measurements over the same 2,814 scenes:
-- 508 ok (18.1%) on 2026-09-24 at the start of the day: bare interpreter, corpus config;
-- 760 ok (27.0%) after `manimlib.utils.directories` was bound;
-- 890 ok (31.6%) at `95dfac40`;
-- 924 ok (32.8%) at `543b999a`;
-- 936 ok (33.3%) at `6b8315b6`;
-- 981 ok (34.9%) at `04599cc2`;
-- 990 ok (35.2%) at `67c87a03`;
-- 1,039 ok (36.9%) at `328b52f0`;
-- 1,052 ok (37.4%) at `15c65f1c` on 2026-09-26.
-
-2814 scene classes; **1073 ok (38.1%)**. Module-weighted: 14 of 136 modules render every scene (10.3%).
+2814 scene classes; **1068 ok (38.0%)**. Module-weighted: 13 of 136 modules render every scene (9.6%).
 
 | outcome | scenes | share |
 |---|---:|---:|
-| ok | 1073 | 38.1% |
+| ok | 1068 | 38.0% |
 | capability_refusal | 68 | 2.4% |
 | portal_unbound | 0 | 0.0% |
-| tex_unsupported | 5 | 0.2% |
+| tex_unsupported | 4 | 0.1% |
 | missing_dependency | 428 | 15.2% |
-| missing_asset | 690 | 24.5% |
-| scene_code_error | 493 | 17.5% |
-| portal_exception | 31 | 1.1% |
+| missing_asset | 691 | 24.6% |
+| scene_code_error | 488 | 17.3% |
+| portal_exception | 34 | 1.2% |
 | runtime_error | 0 | 0.0% |
-| timeout | 26 | 0.9% |
+| timeout | 33 | 1.2% |
 | crash | 0 | 0.0% |
 
 | year | scenes | ok | ok % |
 |---|---:|---:|---:|
-| _2020 | 461 | 79 | 17.1% |
-| _2021 | 395 | 137 | 34.7% |
-| _2022 | 350 | 129 | 36.9% |
-| _2023 | 481 | 256 | 53.2% |
-| _2024 | 461 | 119 | 25.8% |
+| _2020 | 461 | 78 | 16.9% |
+| _2021 | 395 | 136 | 34.4% |
+| _2022 | 350 | 131 | 37.4% |
+| _2023 | 481 | 251 | 52.2% |
+| _2024 | 461 | 118 | 25.6% |
 | _2025 | 505 | 262 | 51.9% |
-| _2026 | 161 | 91 | 56.5% |
+| _2026 | 161 | 92 | 57.1% |
 
 ## portal_exception: top clusters
 
@@ -104,13 +74,13 @@ Earlier measurements over the same 2,814 scenes:
 | 34 | ValueError: font family 'Consolas' is not available; bundled families: Computer Modern, CM Typewriter, IBM Plex Sans (load a TTF by path to  |
 | 16 | NotImplementedError: manimlib.camera.camera.moderngl (moderngl) is excluded (OOT-MODERNGL-SHADER-SURFACE): FrankenManim renders through Lume |
 | 5 | ValueError: font family '…' is not available; bundled families: Computer Modern, CM Typewriter, IBM Plex Sans (load a TTF by path to add one |
-| 2 | NotImplementedError: Lightbulb requires bundled SVG 'lightbulb'; the drawings SVG shelf is fm-3kr |
+| 2 | NotImplementedError: Lightbulb needs the SVG asset 'lightbulb', which FrankenManim does not bundle: the Reference's drawings assets are CC B |
 | 2 | ValueError: font family 'Kalam' is not available; bundled families: Computer Modern, CM Typewriter, IBM Plex Sans (load a TTF by path to add |
-| 1 | CapabilityError: ImageMobject URL fetching is unavailable; provide a local file or supply bytes through the host AssetFetcher boundary |
-| 1 | NotImplementedError: Bubble.get_body requires bundled SVG 'Bubbles_thought.svg'; SpeechBubble supplies a native body |
+| 1 | CapabilityError: find_file cannot download '…'; network assets enter through the host-provided AssetFetcher |
 | 1 | NotImplementedError: FadeIn() keyword(s) not yet routed to the native builder: suspend_updating |
 | 1 | NotImplementedError: FadeIn() keyword(s) not yet routed to the native builder: time_range |
 | 1 | NotImplementedError: NumberLine.add_numbers() keyword(s) not yet routed to the native builder: height |
+| 1 | NotImplementedError: OldThoughtBubble.get_body needs the SVG asset 'Bubbles_thought.svg', which FrankenManim does not bundle: the Reference' |
 
 ## tex_unsupported: top clusters
 
@@ -118,7 +88,6 @@ Earlier measurements over the same 2,814 scenes:
 |---:|---|
 | 3 | TexError: `\ding{55}` is not supported; untiered (not observed in the G0-4 corpus), report at https:/…  |
 | 1 | TexError: `\pii` is not supported; untiered (not observed in the G0-4 corpus), report at https:/…  |
-| 1 | TexError: `\square` is not supported; untiered (not observed in the G0-4 corpus), report at https:/…  |
 
 ## missing_dependency: top clusters
 
@@ -138,13 +107,13 @@ Earlier measurements over the same 2,814 scenes:
 
 | scenes | cluster |
 |---:|---|
-| 542 | OSError: SVGMobject cannot read "…": No such file or directory (os error 2) |
-| 20 | OSError: … not Found |
+| 484 | OSError: … not Found |
 | 17 | OSError: EarthTextureMap not Found |
 | 11 | OSError: SunTexture not Found |
+| 9 | OSError: woman_icon not Found |
 | 7 | FileNotFoundError: [Errno 2] No such file or directory: '…' |
+| 7 | OSError: videos/2026/print_gallery/textures/PrintGalleryLog.png not Found |
+| 5 | OSError: monster not Found |
 | 4 | OSError: PixelArtCat not Found |
-| 3 | OSError: MarioSmall not Found |
-| 3 | OSError: Newton not Found |
-| 3 | OSError: Richard_Hamming not Found |
-| 2 | FileNotFoundError: … Dropbox/3Blue1Brown/videos/2025/cosmic_distance/Data/galactic_data.csv not found. |
+| 4 | OSError: example_loop1 not Found |
+| 4 | OSError: person not Found |
