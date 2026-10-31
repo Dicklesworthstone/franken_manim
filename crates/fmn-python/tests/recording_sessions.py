@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import wave
 
 import numpy as np
 import manimlib as m
@@ -140,8 +141,19 @@ def native_video(root):
 
 
 def configured_raster_preflight(root):
-    scene, square = make_scene()
-    square.rotate(0.27)
+    def add_geometry(owner):
+        first = m.Square(side_length=1, fill_color=m.WHITE, fill_opacity=1, stroke_width=0)
+        first.shift(2 * m.LEFT)
+        first.rotate(0.27)
+        second = m.Square(side_length=1, fill_color=m.BLUE, fill_opacity=0.65, stroke_width=0)
+        second.shift(1.8 * m.LEFT + 0.15 * m.UP)
+        second.rotate(-0.19)
+        owner.add(first, second)
+        return first
+
+    scene = m.Scene()
+    square = add_geometry(scene)
+    scene.wait(0.125)
     camera, core, clock = scene.camera, scene.camera._core, m._portal_scene_clock(scene)
     before = square.get_points().copy()
     saved = copy.deepcopy(m.manim_config)
@@ -178,7 +190,7 @@ def configured_raster_preflight(root):
 
         class SameGeometry(m.Scene):
             def construct(self):
-                self.add(square.copy())
+                add_geometry(self)
 
         full = render_scene(SameGeometry, root / "configured-aa.png", format="png", resolution=(32, 18), threads=1)
         frames = list(clip.result.destination.glob("*.png"))
@@ -191,7 +203,12 @@ def configured_raster_preflight(root):
         # settings that are irrelevant to its output session.
         m.manim_config.setdefault("directories", {})["cache"] = object()
         m.manim_config.setdefault("cache", {})["max_bytes"] = object()
+        tone = root / "config-tone.wav"
+        with wave.open(str(tone), "wb") as writer:
+            writer.setparams((1, 2, 8000, 800, "NONE", "not compressed"))
+            writer.writeframes(b"\x00\x01" * 800)
         with record_scene(scene, root / "non-raster.wav", format="wav", resolution=(32, 18), threads=1) as sound:
+            scene.add_sound(str(tone))
             scene.wait(0.125)
         check(sound.result)
     finally:
