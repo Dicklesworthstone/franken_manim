@@ -1222,8 +1222,8 @@ _2023/clt/dice_sims.py	LargerUSimulation	timeout
 _2023/clt/dice_sims.py	SimulationWithExpDistribution	timeout	
 _2023/clt/dice_sims.py	SimulationWithExpDistribution15Dice	timeout	
 _2023/clt/dice_sims.py	SimulationWithExpDistribution2	timeout	
-_2023/clt/dice_sims.py	SimulationWithExpDistribution2Dice	timeout	
-_2023/clt/dice_sims.py	SimulationWithExpDistribution5Dice	timeout	
+_2023/clt/dice_sims.py	SimulationWithExpDistribution2Dice	ok	
+_2023/clt/dice_sims.py	SimulationWithExpDistribution5Dice	ok	
 _2023/clt/dice_sims.py	SimulationWithRandomDistribution	timeout	
 _2023/clt/dice_sims.py	SimulationWithSteepUShapedDistribution	timeout	
 _2023/clt/dice_sims.py	SimulationWithUShapedDistribution	timeout	
@@ -1284,7 +1284,7 @@ _2023/clt_proof/main.py	ConnectingArrow	ok
 _2023/clt_proof/main.py	CumulantsOfScaledSum	ok	
 _2023/clt_proof/main.py	DefineCGF	ok	
 _2023/clt_proof/main.py	DefineMGF	ok	
-_2023/clt_proof/main.py	DirectMGFInterpretation	timeout	
+_2023/clt_proof/main.py	DirectMGFInterpretation	ok	
 _2023/clt_proof/main.py	ExpandCGF	ok	
 _2023/clt_proof/main.py	FirstFewTermsOfCGF	ok	
 _2023/clt_proof/main.py	ImagineProving	missing_asset	OSError
@@ -1498,7 +1498,7 @@ _2023/moser_reboot/main.py	SimpleVLine	ok
 _2023/moser_reboot/main.py	VEquation	ok	
 _2023/moser_reboot/main.py	WhyThePowersOfTwo	missing_asset	OSError
 _2023/numberphile/prime_race.py	LongRaceGraph	ok	
-_2023/numberphile/prime_race.py	PrimeRace	timeout	
+_2023/numberphile/prime_race.py	PrimeRace	ok	
 _2023/numberphile/prime_race.py	RaceGraph	ok	
 _2023/optics_puzzles/adding_waves.py	AddTwoRotatingVectors	ok	
 _2023/optics_puzzles/adding_waves.py	AddTwoSineWaves	missing_asset	OSError
@@ -1856,7 +1856,7 @@ _2024/puzzles/added_dimension.py	ShowAsThreeD	scene_code_error	IndexError
 _2024/puzzles/added_dimension.py	ShowLozenge	ok	
 _2024/puzzles/added_dimension.py	ShowRhombicDodecTesselation	ok	
 _2024/puzzles/added_dimension.py	SimilarDiagrams	ok	
-_2024/puzzles/added_dimension.py	SphereStrips	timeout	
+_2024/puzzles/added_dimension.py	SphereStrips	ok	
 _2024/puzzles/added_dimension.py	StruggleWithStrips	ok	
 _2024/puzzles/added_dimension.py	TriPod	ok	
 _2024/puzzles/added_dimension.py	TriangleAreaFormula	ok	

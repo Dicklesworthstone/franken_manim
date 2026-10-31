@@ -1,6 +1,32 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-run, 2026-10-29, against `Cargo.lock` `722725cc` and `SUITE.lock` `908c6e62`,
+**Status:** re-run, 2026-10-31, against `Cargo.lock` `01a419e5` and `SUITE.lock`
+`908c6e62` (fm-restore-green-ci-tqsr.14). Commit `0c1b3483` adds exactly one
+lock edge, `fmn -> fmn-cache`; it adds no package, version, checksum, feature or
+WASM-manifest change. The host facade `fmn` is absent from the shipped WASM
+dependency graph; `fmn-cache` was already reached there. The serial and
+shared-memory artifacts use the same crate dependency graph, so this host-only
+edge changes neither browser closure.
+
+- **VERIFIED (mechanical):** the current locked `fmn-wasm` normal tree has
+  134 lines and excludes the host facade. The complete lock/manifest diff from
+  the previous audit contains only the edge above.
+- **VERIFIED (build):** `cargo build --locked -p fmn-wasm --target
+  wasm32-unknown-unknown` exits 0 through RCH on `vmi1149989`.
+- **VERIFIED (execution):** the unchanged `bash wasm-smoke/run.sh` builds its
+  locked release probe and executes it in Node: digest `1f248a71347b82aa`,
+  `process=capability-absent`, `topology=1-cpu`, `semantic_oracles=111111`,
+  `mirrored=101000`. The combined audit job exits 0.
+- Evidence: `.rch-results/fmn-execute-20261030-wasm-audit/` contains the tree,
+  all three lock digests, Node output and source boundary. The checkout was
+  `7fba6606` with only tracker and CLI-test overlays, both outside the reached
+  WASM graph. The original log is
+  `/data/tmp/fmn-execute-20261030-wasm-audit-build.log`.
+- Not re-run: package/Chromium, shared-memory runtime or size-budget gates.
+  No browser/package dependency is affected by this lock delta; this receipt
+  does not establish those release properties or cross-platform certification.
+
+Earlier re-run, 2026-10-29, against `Cargo.lock` `722725cc` and `SUITE.lock` `908c6e62`,
 for the franken_markdown repin from `4f2bcc95` to `e7b4309d` (fm-fmd-math-fuzz-budgets-k8fe:
 fmd-math's named resource budgets, a layout recursion that fits a 2 MiB stack, and physics
 arguments parsed once, plus nine Markdown-engine commits and a docs fix on franken_markdown's
@@ -703,13 +729,14 @@ either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
 - `SUITE.lock` SHA-256: `908c6e6290b78a4339c39231dcb4d5ba5e1b87162c2568fe368fb3c245d9e636`
-- `Cargo.lock` SHA-256: `722725ccba3b471c865e0a1520bc73b9a49d1f879421755c78f9fb5d6c8e8a6e`
+- `Cargo.lock` SHA-256: `01a419e54adeded6cbd7f6b8d5025a127cf753faa305fa1e949b66563ca8a67f`
 - Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `93a7c2dc6acf3dfef88a4a490efbfda7970bd963b4740aa7f879a08fff395061`
 
-The 0.5.0 release bump re-bound both lock identities above. That bump changed
+The earlier 0.5.0 release bump re-bound the lock identities at that revision.
+That bump changed
 only the lockstep workspace package versions (0.4.0 -> 0.5.0, path packages
 without a registry source); no third-party package, source or checksum in either
-lock changed, so the dependency graph audited here is unchanged. The full wasm
+lock changed, so that version-only dependency graph was unchanged. The full wasm
 package/browser gate was not re-run for that version-only change.
 
 Method labels are deliberately narrow:

@@ -1,21 +1,23 @@
-<!-- fmn-measurement {"inputs_digest": "sha256:c758365cab1ad92e over 2814 scene ids", "max_age_commits": 200, "measured_at": "2026-10-30", "measured_commit": "6ab48696475625c68fe09b2322e1df45bfc103f0", "producer": "python3 scripts/corpus_scene_sweep.py --report /run/fmn-execute-20261030/release/sweep/records.ndjson --dashboard docs/ratchet/scene_dashboard.md --tsv docs/ratchet/scene_outcomes.tsv --title 3b1b corpus scene sweep (fmn-python) --note /data/tmp/fmn-execute-20261030-scene-note.md --measured-commit 6ab48696475625c68fe09b2322e1df45bfc103f0"} -->
+<!-- fmn-measurement {"inputs_digest": "sha256:c758365cab1ad92e over 2814 scene ids", "max_age_commits": 200, "measured_at": "2026-10-31", "measured_commit": "7fba660635e931da6e7de2b08ea97f63d3141a85", "producer": "python3 scripts/corpus_scene_sweep.py --report /data/tmp/fmn-execute-20261031-whole-census/records.ndjson --dashboard docs/ratchet/scene_dashboard.md --tsv docs/ratchet/scene_outcomes.tsv --title 3b1b corpus scene sweep (fmn-python) --note /data/tmp/fmn-execute-20261031-scene-note.md --measured-commit 7fba660635e931da6e7de2b08ea97f63d3141a85"} -->
 # 3b1b corpus scene sweep (fmn-python)
 
-Measured with the release wheel built from `6ab48696475625c68fe09b2322e1df45bfc103f0`, wheel SHA-256 `317fe607f8dd8ba63037147cc8648c29bc89a9b6e76ce1d9baefcc76dc6c8b4f`. The wheel build and local checkout have identical hashes for all 4,395 tracked non-tracker files (aggregate `cafaa76a5daa6d7e2efc50ea90c20150cbaaf6508f39e61fcc338d0fa5b0df2b`); this is repository byte binding, not a full RCH source-closure receipt. Every scene record carries native payload digest `c050344deb5b27216b8c7d6662538af8126ebf81df89812fa2c4037b15752ba9`.
+Measured with the release wheel built from `7fba660635e931da6e7de2b08ea97f63d3141a85`, wheel SHA-256 `ffbf9c22f3128a0b037484b59018ea883eaf7f55ea3e81c4a089cebf744b4f9b`. Its 4,405 tracked non-tracker source entries matched both build workers (aggregate `e0c05295120aa997e4f82399a0855b941cd2918800c52829be04666f92698693`). This is repository byte binding, not a full RCH source-closure receipt. Every scene record carries installed payload digest `208605130e6ba56e00a0c03ce24f5f12db06be29529662e0be7f5db24f7efb1f`. Later uncommitted oracle, source-path and optional-shell changes are excluded from this measurement.
 
-All 2,814 original scene ids from pinned `3b1b/videos@e317d6c5eaa8370a2deb4d148c246b0d0e9fbe6f` were freshly attempted: final PNG at 320x180, 180 s timeout, 16 concurrent scenes. Attribution and construct-only checks ran for failures; every outcome remains in the denominator. This is a compatibility census on the shared 64-logical-CPU host, **calibration-unqualified (ADR-0024)**. Concurrent measurements and host load affect timeout and timing results. No qualified PG, cross-platform certification, or human Look Gallery verdict is established.
+All 2,814 original scene ids from pinned `3b1b/videos@e317d6c5eaa8370a2deb4d148c246b0d0e9fbe6f` were freshly attempted: final PNG at 320x180, 180 s timeout, 16 concurrent scenes. All 522 runtime errors received in-process attribution, and all 1,741 failed renders received construct-only checks. This is the complete census, not failed-only retries; every outcome remains in the denominator. Raw records: `/data/tmp/fmn-execute-20261031-whole-census/records.ndjson`, SHA-256 `208f84e50af781b3d5bd203c4c1869e3f39a4c1401fbb777019eb14b85ffeffc`. Original run log: `/data/tmp/fmn-execute-20261031-whole-census-writable.log`.
 
-The host uses CPython 3.13.1, NumPy 2.5.2 and IPython 9.14.0, with the historical optional scene package set: scipy 1.18.1, matplotlib 3.11.2, sympy 1.14.0, mpmath 1.4.1, pandas 3.0.6, Pillow 12.3.0, colour 0.1.5 and tqdm 4.70.0. Sympy is installed without dependency resolution because it declares `mpmath<1.4`. Deliberately absent: gensim, transformers, torch, requests, mido and opencv. No private corpus image/SVG/texture assets are supplied. The corpus configuration has only `directories.base` emptied (config SHA-256 `9d79278259343e35d49d6b3d636a5a2d1d40db0af2aed8c5300b9a0153a15ca3`); missing packages and assets remain visible outcomes.
+The host uses CPython 3.13.1, NumPy 2.5.2 and IPython 9.14.0 with the same frozen 35-package optional scene environment as the earlier sweep (requirements SHA-256 `c249191900f77fc76347e9edee19fb3e2d7a81c0357d4d0fa4e71e05f941cd03`). Sympy 1.14.0 remains installed without dependency resolution alongside mpmath 1.4.1 despite its declared upper bound. Gensim, transformers, torch, requests, mido, opencv and private corpus assets remain absent. The corpus configuration changes only `directories.base` to empty (SHA-256 `9d79278259343e35d49d6b3d636a5a2d1d40db0af2aed8c5300b9a0153a15ca3`). Missing dependencies and assets remain visible outcomes.
 
-Compared with the previous published sweep at `ea5d83f7` (1,073 ok), this run has 1,068 ok: 4 previously unsuccessful scenes now succeed and 9 previous successes do not. This is an observational comparison across source and host load, not causal credit for the changes in this session. Success ids gained/lost are retained in the raw comparison beside the source-bound records.
+This whole run has 1,073 successful scenes, meeting the unchanged 1,073 ratchet. Against the preceding `6ab48696` whole run's 1,068, exactly five outcomes change, all timeout -> ok: `SimulationWithExpDistribution2Dice`, `SimulationWithExpDistribution5Dice`, `DirectMGFInterpretation`, `PrimeRace` and `SphereStrips`. Every other outcome is unchanged. This is an observation across source and host conditions, not a claim that code caused those five gains. The earlier 1,068 result, its 33 timeouts and its four gains/nine losses against `ea5d83f7` remain recorded in Git and the retained raw archive. Current timeouts are 28; `SpinMeasurements` still refuses a nonplanar depth-tested fill. No floor, timeout, exclusion or denominator was changed.
 
-Per-scene peak RSS is measured by `os.wait4`: median 158.2 MiB, 95th percentile 233.2 MiB, maximum 1,909.0 MiB. All 1,746 failed render attempts received construct-only probes: 691 `missing_asset`, 522 `runtime_error`, 428 `missing_dependency`, 68 `capability_refusal`, 32 `timeout`, 4 `tex_unsupported` and 1 `ok`. Construct outcomes are a separate diagnostic classification. Their 522 runtime errors do not establish 522 new portal faults. Render outcomes retain in-process attribution (34 `portal_exception` and 488 `scene_code_error`); where an exception surfaced does not establish fault.
+All 1,741 failed renders received construct-only probes: 691 `missing_asset`, 522 `runtime_error`, 428 `missing_dependency`, 68 `capability_refusal`, 28 `timeout`, and four `tex_unsupported`. These are separate diagnostic outcomes, not 522 newly established portal defects. Render attribution remains 34 `portal_exception` and 488 `scene_code_error`; exception location alone does not establish fault. Peak RSS median is 157.6 MiB and maximum 2,705.7 MiB across all 2,814 attempts, including failures.
 
-2814 scene classes; **1068 ok (38.0%)**. Module-weighted: 13 of 136 modules render every scene (9.6%).
+This shared 64-logical-CPU host is **calibration-unqualified (ADR-0024)**. No qualified PG speed win, cross-platform certification or human Look Gallery verdict is established. Differential and full-frame/offload measurements remain separately bound to their earlier `6ab48696` artifact and denominators; this census does not refresh them.
+
+2814 scene classes; **1073 ok (38.1%)**. Module-weighted: 14 of 136 modules render every scene (10.3%).
 
 | outcome | scenes | share |
 |---|---:|---:|
-| ok | 1068 | 38.0% |
+| ok | 1073 | 38.1% |
 | capability_refusal | 68 | 2.4% |
 | portal_unbound | 0 | 0.0% |
 | tex_unsupported | 4 | 0.1% |
@@ -24,7 +26,7 @@ Per-scene peak RSS is measured by `os.wait4`: median 158.2 MiB, 95th percentile 
 | scene_code_error | 488 | 17.3% |
 | portal_exception | 34 | 1.2% |
 | runtime_error | 0 | 0.0% |
-| timeout | 33 | 1.2% |
+| timeout | 28 | 1.0% |
 | crash | 0 | 0.0% |
 
 | year | scenes | ok | ok % |
@@ -32,8 +34,8 @@ Per-scene peak RSS is measured by `os.wait4`: median 158.2 MiB, 95th percentile 
 | _2020 | 461 | 78 | 16.9% |
 | _2021 | 395 | 136 | 34.4% |
 | _2022 | 350 | 131 | 37.4% |
-| _2023 | 481 | 251 | 52.2% |
-| _2024 | 461 | 118 | 25.6% |
+| _2023 | 481 | 255 | 53.0% |
+| _2024 | 461 | 119 | 25.8% |
 | _2025 | 505 | 262 | 51.9% |
 | _2026 | 161 | 92 | 57.1% |
 

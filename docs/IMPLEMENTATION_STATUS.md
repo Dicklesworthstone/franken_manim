@@ -1,6 +1,65 @@
 # FrankenManim implementation status
 
-**Status date:** 2026-10-30 (America/New_York). The assessment below separates the inspected source, the published artifacts, recorded measurements, and fresh execution. Earlier assessments and execution records remain historical evidence.
+**Status date:** 2026-10-31 (America/New_York). The assessment below separates the inspected source, the published artifacts, recorded measurements, and fresh execution. Earlier assessments and execution records remain historical evidence.
+
+## 2026-10-31 implementation follow-through — qualification in progress
+
+The October 30 vision-to-code assessment below remains bound to its named
+checkpoints. The implementation continuation has landed real behavior on
+`main` through `4b54509b90f22520f71ea31bec305551b4d40067`, with further
+qualification repairs still under test. Its owned Beads remain open until
+their original acceptance conditions and complete gates are met.
+
+- **Chisel:** arc-center recovery now solves in the actual component plane,
+  including tilted circles and tiny radii. Native arc tests and real portal
+  geometry witnesses cover the repaired behavior; ADR-0030/BN-07 document the
+  deliberate Reference corrections.
+- **Choreo/portal:** configured class/constructor FPS reaches the native clock
+  before a bare Scene allocates its arena. Live updater/rate witnesses at
+  24/60 fps and a planted 30-fps mutant distinguish this from a Python-only
+  configuration attribute. Nested compositions now admit their detached
+  affected families before native play, retaining ownership and update guards.
+- **Reel/portal:** programmatic recording now passes the typed raster snapshot
+  into the existing native render-session constructor. Fresh `7fba6606`
+  installed-wheel recording acceptance passes, including native PNG comparison,
+  a visibly different AA control and independent WAV behavior. Certified
+  camera-rate refusal remains early and precise.
+- **Proscenium maintenance, pending final artifact proof:** ordinary portal
+  initialization defers optional IPython loading until the real host lookup is
+  requested. Runtime source classification reuses frozen path components while
+  still resolving live symlink targets. Camera ownership repair addresses early
+  CPython managed-dictionary retention without dropping a supported patch
+  version, clearing live callbacks or adding unsafe code. The unchanged Studio
+  startup deadline and complete installed-wheel gate still need a fresh pass.
+
+The repaired native Python test binary passes unfiltered on supported
+CPython 3.13.1: **162 passed, zero failed/ignored/filtered**, 1,342.47 seconds.
+Its archive is `/data/tmp/fmn-execute-20261031-native-tests-camera-allocation`
+on `vmi1149989`; `.rch-results/fmn-execute-20261031-native-all3131/` retains
+the exact binary digest and complete log. This run includes the original
+soundtrack and owner-thread tests and the eight-scene baseline/determinism
+checks. It predates only a further strengthening of the new ownership
+fixture; it is not a complete committed-workspace or clean-wheel pass.
+
+The last complete workspace diagnostic at `7fba6606` is **red**: 4,977 passed,
+73 failed and 11 ignored across 334 binary/doc summaries. Its five failed
+targets expose the CLI transparency oracle, stale WASM audit binding, scene
+ratchet, missing compressed-audio inputs and Python acceptance. Repeated
+native-owner survivors account for many Python failures; these are not 73
+independent feature defects. Focused repairs and real input preparation do not
+substitute for a new complete Cargo pass. The most recent complete installed
+wheel attempt also remains **red** at Studio's original three-second startup
+deadline, before its hung-callback exercise begins.
+
+The fresh **whole 2,814-scene still census at `7fba6606` reaches 1,073 successes
+(38.1%)**, meeting the unchanged 1,073 floor. Exactly five previous timeouts
+become successes; all other verdicts are unchanged. This is a shared-host
+remeasurement, not a code-caused or qualified performance win. The older
+`6ab48696` differential/full-frame/offload evidence retains its own identities:
+935/1,079 portal full-frame successes and a modeled current median of 1.03x
+Reference time do not establish the stated performance contract. Nonplanar
+depth-tested fills, broader compatibility, the Look Gallery, certified platform
+matrix, qualified PG hosts and the release gates remain open.
 
 ## 2026-10-30 reality check: a functioning engine, with major 1.0 obligations still open
 
