@@ -1,5 +1,5 @@
 use super::*;
-use fmn::autotune::{NAMESPACE, NAMESPACE_VERSION, store_profile};
+use fmn::autotune::{NAMESPACE, NAMESPACE_VERSION, load_profile, store_profile};
 use fmn_codec::{PngLimits, decode_png};
 use fmn_core::AaPolicy;
 use fmn_platform::clock::FakeClock;
@@ -218,6 +218,17 @@ fn real_portal_renders_consume_only_matching_planar_profiles_and_report_fallback
     )
     .unwrap();
 
+    // The profile reader itself must not create a cold shared cache root.
+    // A complete render may subsequently use that root for Scribe's cache.
+    let missing = root.join("missing-cache");
+    let mut config = fmn_config::Config::resolve(&[], None).unwrap().config;
+    config.directories.cache = missing.to_str().unwrap().to_owned();
+    assert_eq!(
+        load_profile(&StdFs, &config, request(), &topology).unwrap(),
+        None,
+    );
+    assert!(!missing.exists());
+
     crate::with_python_test_module("persisted portal raster autotune", |py, module, globals| {
         globals
             .set_item("_AUTOTUNE_ROOT", root.to_str().unwrap())
@@ -227,6 +238,12 @@ fn real_portal_renders_consume_only_matching_planar_profiles_and_report_fallback
             .unwrap();
         globals
             .set_item("_BASELINE_MACRO", baseline.macro_tile)
+            .unwrap();
+        globals
+            .set_item(
+                "_AUTOTUNE_NAMESPACE",
+                format!("ns/{NAMESPACE}/v{NAMESPACE_VERSION}"),
+            )
             .unwrap();
         globals
             .set_item(
@@ -262,7 +279,11 @@ fn real_portal_renders_consume_only_matching_planar_profiles_and_report_fallback
         );
     }
     assert!(
-        !root.join("missing-cache").exists(),
-        "cache misses never claim a root"
+        !missing
+            .join("ns")
+            .join(NAMESPACE)
+            .join(format!("v{NAMESPACE_VERSION}"))
+            .exists(),
+        "profile misses never create the autotune namespace"
     );
 }

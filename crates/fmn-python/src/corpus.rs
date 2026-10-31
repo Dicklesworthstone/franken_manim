@@ -241,10 +241,28 @@ facts = "\t".join(
     let globals = pyo3::types::PyDict::new(py);
     globals.set_item("scene", instance)?;
     py.run(code.as_c_str(), Some(&globals), Some(&globals))?;
-    globals
+    let facts: String = globals
         .get_item("facts")?
         .expect("snippet defines facts")
-        .extract()
+        .extract()?;
+    Ok(canonical_structural_facts(&facts))
+}
+
+/// The structural projection rounds to six decimal places. Its textual zero
+/// has one spelling, including values whose magnitude rounds to zero. This
+/// does not change engine values, bitwise comparisons, or nonzero facts.
+fn canonical_structural_facts(facts: &str) -> String {
+    facts
+        .split('\t')
+        .map(|field| {
+            if field == "-0.000000" {
+                "0.000000"
+            } else {
+                field
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\t")
 }
 
 /// The committed per-scene baseline table (fm-rqc's acceptance shape):
@@ -265,7 +283,7 @@ fn read_baselines() -> std::collections::HashMap<String, String> {
             continue;
         }
         if let Some((scene, facts)) = trimmed.split_once('\t') {
-            out.insert(scene.to_owned(), facts.to_owned());
+            out.insert(scene.to_owned(), canonical_structural_facts(facts));
         }
     }
     out
@@ -326,6 +344,38 @@ fn import_outcome(py: Python<'_>, module_path: &str, scene: &str) -> Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rounded_zero_is_canonical_without_hiding_nonzero_displacements() {
+        crate::with_python_test_module("corpus rounded-zero facts", |py, _module, globals| {
+            py.run(
+                c"from manimlib import Scene, Square\nfor name, z in [('near_negative', -0.00000025), ('near_positive', 0.00000025), ('far_negative', -0.00000075), ('far_positive', 0.00000075)]:\n    instance = Scene()\n    instance.add(Square().shift((0.0, 0.0, z)))\n    globals()[name] = instance\n",
+                Some(globals),
+                Some(globals),
+            )
+            .expect("construct real native geometry on both sides of the precision boundary");
+            let measure = |name| {
+                let instance = globals.get_item(name).unwrap().unwrap();
+                let lower: [f64; 3] = instance
+                    .call_method0("_engine_facts")
+                    .unwrap()
+                    .get_item(2)
+                    .unwrap()
+                    .extract()
+                    .unwrap();
+                (lower[2], scene_facts(py, &instance).unwrap())
+            };
+            let near_negative = measure("near_negative");
+            let near_positive = measure("near_positive");
+            let far_negative = measure("far_negative");
+            let far_positive = measure("far_positive");
+            assert!(near_negative.0 < 0.0 && near_positive.0 > 0.0);
+            assert_eq!(near_negative.1, near_positive.1);
+            assert_ne!(far_negative.1, near_negative.1);
+            assert_ne!(far_positive.1, near_positive.1);
+            assert_ne!(far_negative.1, far_positive.1);
+        });
+    }
 
     /// Every allowlisted seed module reaches a precise, deterministic
     /// verdict through the bridge — the corpus gate's error doctrine.
@@ -485,12 +535,13 @@ mod tests {
             );
             return;
         };
-        let nonce = std::time::SystemTime::now()
+        let nonce = std::time::SystemTime::now() // ubs:ignore -- Test directory suffix, not a credential; exclusive create_dir below refuses reuse.
             .duration_since(std::time::UNIX_EPOCH)
             .expect("the test host clock is after the Unix epoch")
             .as_nanos();
         let output_root =
             std::env::temp_dir().join(format!("fmn-corpus-stills-{}-{nonce}", std::process::id()));
+        std::fs::create_dir(&output_root).expect("create exclusive corpus PNG artifact directory");
 
         crate::with_python_test_module("source-unedited corpus PNG", move |py, _, _| {
             put_videos_ref_on_sys_path(py, &videos_ref);

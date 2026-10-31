@@ -112,7 +112,10 @@ try:
     miss = file_render("miss.png", (_BASELINE_FINE, _BASELINE_MACRO, "adaptive"))
     assert miss.autotune["source"] == "standard-baseline"
     assert miss.autotune["diagnostic"] is None
-    assert not (root / "missing-cache").exists()
+    # Other render consumers may initialize the shared root (Scribe currently
+    # does). A profile miss must leave its own namespace absent; the Rust
+    # witness separately checks that the cold profile read creates no root.
+    assert not (root / "missing-cache" / _AUTOTUNE_NAMESPACE).exists()
 
     # A populated FastCpu record must not enter the distinct camera engine.
     config["directories"]["cache"] = str(root / "warm-cache")

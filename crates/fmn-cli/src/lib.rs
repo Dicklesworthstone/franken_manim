@@ -10069,6 +10069,12 @@ mod tests {
             if let Some(explicit) = explicit {
                 args.extend(["--pix_fmt", explicit]);
             }
+            if explicit.is_some() && expected.is_none() {
+                let error = parse_args(args).expect_err("explicit opaque CLI format must refuse");
+                assert_eq!(error.exit_name(), "usage");
+                assert_eq!(error.rule(), Some("transparent-vs-opaque-pixel-format"));
+                continue;
+            }
             let command = render(parse_args(args).unwrap());
             let config = resolve_render_config(&fs, &command).unwrap();
             match expected {
