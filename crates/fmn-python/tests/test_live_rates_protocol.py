@@ -101,9 +101,14 @@ def environment(install=True):
             # This double binds mobjects without rooting them; the rooting
             # record is covered by the composition and movement doubles.
             self.mobjects = []
+            self.family_projections = []
         def add(self, mob):
             mob.bound = True
+            mob._scene = self
         _adopt = add
+        def _project_families(self, roots, factory, adopt):
+            # Only record the native projection boundary, never fake geometry.
+            self.family_projections.append((roots, factory, adopt))
         def _play_animations(self, specs, callbacks, camera, run_time, rate, lag):
             self.executions.append((specs, callbacks, camera, run_time, rate, lag))
             if self.lower_only:
@@ -144,17 +149,25 @@ def environment(install=True):
              _RATE_FUNC_NAMES={linear:"linear", smooth:"smooth"}, linear=linear, smooth=smooth,
              prepare_animation=lambda builder:builder.build(), np=np, _vec3=tuple)
     bootstrap = ROOT / "python/manimlib_bootstrap.py"
-    scene_node = next(node for node in ast.parse(bootstrap.read_text()).body if isinstance(node, ast.ClassDef) and node.name == "Scene")
-    # play() records the roots it played (fm-v1aq); both run as production code.
+    tree = ast.parse(bootstrap.read_text())
+    helpers = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+               and node.name in {"_native_scene_shell_factory", "_adopt_padding_ghosts"}]
+    scene_node = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Scene")
+    method_names = ("play", "_record_played_roots", "_project_unrooted")
     methods = [node for node in scene_node.body if isinstance(node, ast.FunctionDef)
-               and node.name in {"play", "_record_played_roots"}]
-    exec(compile(ast.Module(methods, []), str(bootstrap), "exec"), g)
-    Scene.play, Scene._record_played_roots = g["play"], g["_record_played_roots"]
+               and node.name in method_names]
+    if {node.name for node in methods} != set(method_names):
+        raise RuntimeError("Production Scene playback definitions are missing")
+    # ubs:ignore -- executes only definitions AST-parsed from this repository's fixed bootstrap file.
+    exec(compile(ast.Module(helpers + methods, []), str(bootstrap), "exec"), g)
+    for name in method_names:
+        setattr(Scene, name, g[name])
     source = ROOT / "python/manimlib/_animation_semantics.py"
     installer = next(node for node in ast.parse(source.read_text()).body if isinstance(node, ast.FunctionDef) and node.name == "install")
     names = {"get_sub_alpha", "time_spanned_alpha", "interpolate_mobject"}
     nodes = [node for node in installer.body if isinstance(node, ast.FunctionDef) and node.name in names]
     assert {node.name for node in nodes} == names
+    # ubs:ignore -- executes only definitions AST-parsed from this repository's animation semantics file.
     exec(compile(ast.Module(nodes, []), str(source), "exec"), g)
     for name in names:
         setattr(Animation, name, g[name])

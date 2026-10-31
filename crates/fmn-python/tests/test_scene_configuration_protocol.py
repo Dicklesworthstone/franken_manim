@@ -57,9 +57,16 @@ def native_boundary():
     def add(scene, frame):
         scene.mobjects = [frame]
 
+    def prepare_scene_clock(scene, fps):
+        if hasattr(scene, "frame") or getattr(scene, "mobjects", ()):
+            raise AssertionError("clock preparation must precede arena membership")
+        native.clock_preparations.append((scene, fps))
+
     native.Scene, native.CameraFrame = Scene, Frame
     native.Point = object
     native._SceneCore = SimpleNamespace(add=add)
+    native.clock_preparations = []
+    native._portal_prepare_scene_clock = prepare_scene_clock
     native._FMN_ROOT = native
     native.manim_config = {
         "camera": {"resolution": (120, 80), "fps": 30,
@@ -82,6 +89,7 @@ def native_boundary():
                  and node.name == "merge_dicts_recursively"]
     selected += [node for node in TREE.body if isinstance(node, ast.ClassDef)
                  and node.name == "SceneFileWriter"]
+    # ubs:ignore -- executes only definitions AST-parsed from this repository's fixed bootstrap file.
     exec(compile(ast.Module(body=selected, type_ignores=[]), str(BOOTSTRAP), "exec"), vars(native))
     install_scene_camera_configuration(native)
     return native
@@ -129,6 +137,7 @@ class SceneConfigurationProtocolTests(unittest.TestCase):
             self.assertEqual(scene.file_writer.video_tune, "animation")
             self.assertEqual(scene.file_writer.audio_bitrate, 192000)
             self.assertIs(scene.mobjects[0], scene.frame)
+            self.assertEqual(self.native.clock_preparations, [(scene, 24)])
             self.assertNotIn("_camera", vars(scene))
 
     def test_scope_installed_on_a_distinct_package_reaches_the_native_reader(self):

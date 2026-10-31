@@ -152,6 +152,7 @@ def environment():
     class SceneCore:
         def __init__(self):
             self.cores, self.roots, self.calls = [], [], []
+            self.family_projections = []
         def _adopt(self, obj):
             for member in obj.get_family():
                 if member._scene is not None and member._scene is not self:
@@ -164,6 +165,10 @@ def environment():
                     self.roots.append(obj)
         def remove(self, *objects):
             self.roots[:] = [obj for obj in self.roots if obj not in objects]
+        def _project_families(self, roots, factory, adopt):
+            # Observe the native boundary; this storage double does not
+            # manufacture native geometry or execute padding allocation.
+            self.family_projections.append((roots, factory, adopt))
         @property
         def mobjects(self):
             return self.roots
@@ -206,18 +211,23 @@ def environment():
     tree = ast.parse(BOOTSTRAP.read_text())
     names = {"AnimationGroup", "LaggedStart", "Succession", "_requires_python_animation",
              "_python_composition_members", "_composition_member_run_time", "_composition_timings",
-             "_composition_timeline_position", "_NativeCompositionLeaf", "_CompositionCallbackDriver"}
+             "_composition_timeline_position", "_NativeCompositionLeaf", "_CompositionCallbackDriver",
+             "_native_scene_shell_factory", "_adopt_padding_ghosts"}
     nodes = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in names]
     if {node.name for node in nodes} != names:
         raise RuntimeError("Production composition definitions are missing")
+    # ubs:ignore -- executes only definitions AST-parsed from this repository's fixed bootstrap file.
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(BOOTSTRAP), "exec"), g)
     scene_class = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Scene")
-    # play() records the roots it played (fm-v1aq); both run as production code.
+    # Keep both production post-play synchronization steps beside real play().
+    method_names = ("play", "_record_played_roots", "_project_unrooted")
     methods = [node for node in scene_class.body if isinstance(node, ast.FunctionDef)
-               and node.name in {"play", "_record_played_roots"}]
+               and node.name in method_names]
+    if {node.name for node in methods} != set(method_names):
+        raise RuntimeError("Production Scene playback definitions are missing")
+    # ubs:ignore -- executes only methods AST-parsed from this repository's fixed bootstrap file.
     exec(compile(ast.Module(body=methods, type_ignores=[]), str(BOOTSTRAP), "exec"), g)
-    Scene = type("Scene", (SceneCore,), {"play": g.pop("play"),
-                                         "_record_played_roots": g.pop("_record_played_roots")})
+    Scene = type("Scene", (SceneCore,), {name: g.pop(name) for name in method_names})
     g["Scene"] = Scene
     semantics._install_matching_parts(g)
     return g
@@ -421,6 +431,30 @@ class CompositionLifecycleTests(unittest.TestCase):
         leaf = self.Animation(self.Mob(), final_alpha_value=.3)
         self.Scene().play(self.authored()(leaf, final_alpha_value=.7))
         self.assertEqual(leaf.mobject.x, .3)
+    def test_removed_callback_subject_reaches_production_family_projection(self):
+        mob = self.Mob()
+        scene = self.Scene()
+        scene.play(self.Animation(mob, remover=True))
+        self.assertNotIn(mob, scene.roots)
+        self.assertIs(mob._scene, scene)
+        self.assertEqual(len(scene.family_projections), 1)
+        roots, factory, adopt = scene.family_projections[0]
+        self.assertEqual(roots, (mob,))
+        self.assertIs(factory, self.g["_native_scene_shell_factory"])
+        self.assertIs(adopt, self.g["_adopt_padding_ghosts"])
+    def test_nested_projection_excludes_rooted_unbound_and_foreign_objects(self):
+        scene, other = self.Scene(), self.Scene()
+        detached, rooted, unbound, foreign = [self.Mob() for _ in range(4)]
+        scene.add(detached, rooted)
+        scene.remove(detached)
+        other.add(foreign)
+        from types import SimpleNamespace
+        nested = SimpleNamespace(animations=[self.Animation(detached), self.Animation(rooted),
+                                             self.Animation(unbound), self.Animation(foreign)])
+        scene._project_unrooted([SimpleNamespace(animations=[nested])])
+        self.assertEqual([call[0] for call in scene.family_projections], [(detached,)])
+        self.assertEqual(scene.roots, [rooted])
+        self.assertEqual(other.roots, [foreign])
 
 
 if __name__ == "__main__":

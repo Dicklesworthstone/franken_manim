@@ -15,18 +15,28 @@ def frontend():
     native = environment(False)
     g = vars(native)
     path = ROOT / "python/manimlib_bootstrap.py"
-    scene = next(node for node in ast.parse(path.read_text()).body
+    tree = ast.parse(path.read_text())
+    helpers = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+               and node.name in {"_native_scene_shell_factory", "_adopt_padding_ghosts"}]
+    scene = next(node for node in tree.body
                  if isinstance(node, ast.ClassDef) and node.name == "Scene")
-    # play() records the roots it played (fm-v1aq); both run as production code.
+    method_names = ("play", "_record_played_roots", "_project_unrooted")
     methods = [node for node in scene.body if isinstance(node, ast.FunctionDef)
-               and node.name in {"play", "_record_played_roots"}]
+               and node.name in method_names]
+    if {node.name for node in methods} != set(method_names):
+        raise RuntimeError("Production Scene playback definitions are missing")
     # ubs:ignore -- executes this repository's own bootstrap definitions, parsed from the source tree.
-    exec(compile(ast.Module(methods, []), str(path), "exec"), g)
-    native.Scene.play, native.Scene._record_played_roots = g["play"], g["_record_played_roots"]
+    exec(compile(ast.Module(helpers + methods, []), str(path), "exec"), g)
+    for name in method_names:
+        setattr(native.Scene, name, g[name])
     native.Scene.mobjects = property(lambda scene: scene.roots)
     old_play = native.Scene.play
     native.Mobject._is_bound = lambda mob:getattr(mob,"_scene",None) is not None
     native.Scene._adopt = lambda scene,mob:setattr(mob,"_scene",scene)
+    def project_families(scene, roots, factory, adopt):
+        # The real helper selects roots; this double only observes its request.
+        vars(scene).setdefault("family_projections", []).append((roots, factory, adopt))
+    native.Scene._project_families = project_families
     old_add = native.Scene.add
     def add(scene,*mobs):
         for mob in mobs:
