@@ -27,6 +27,12 @@ SCHEMA_VERSION = 2
 MAX_SOURCE_BYTES = 8 * 1024 * 1024
 MAX_OUTPUT_BYTES = 256 * 1024
 BOOTSTRAP_PATH = Path("crates/fmn-python/python/manimlib_bootstrap.py")
+ARROW_PATH = Path("crates/fmn-python/python/fmn_python/arrow_geometry.py")
+INITIALIZATION_PATH = Path("crates/fmn-python/python/fmn_python/initialization.py")
+INSTALLED_CONSTRUCTOR_PATHS = tuple(
+    Path("crates/fmn-python/python/fmn_python") / f"{module}.py"
+    for module in ("arrow_geometry", "derived_curves", "derived_lines", "grouping")
+)
 BRIDGE_PATH = Path("crates/fmn-python/src/lib.rs")
 WHEEL_SMOKE_PATH = Path("crates/fmn-python/tests/wheel_smoke.py")
 WHEEL_MAPPING_NAME = "REFERENCE_CONSTRUCTOR_ALIASES"
@@ -143,6 +149,119 @@ def _direct_method(
 
 def _base_spelling(node: ast.ClassDef) -> str:
     return ", ".join(ast.unparse(base) for base in node.bases)
+
+
+def _installed_methods(root: Path):
+    """Follow the production installer's explicit bindings, without executing it.
+
+    These are source-routing checks, not evidence of native construction. Require
+    both the initializer registration and executable binding loops: a function
+    merely present beside a placeholder class cannot satisfy the audit.
+    """
+    path = root / ARROW_PATH
+    tree = _parse_python(_read_bounded(path), path)
+    initialization = root / INITIALIZATION_PATH
+    steps = _literal_assignment(
+        _parse_python(_read_bounded(initialization), initialization),
+        name="_STEPS", path=initialization,
+    )
+    if ("arrow_geometry", "install_arrow_geometry") not in steps:
+        raise _error("python-installer-missing", "arrow installer is not registered", path=initialization)
+
+    def function(body, name):
+        matches = [node for node in body if isinstance(node, ast.FunctionDef) and node.name == name]
+        if len(matches) != 1:
+            raise _error("python-installer-binding", f"expected one {name} definition", path=path)
+        return matches[0]
+
+    def require_statement(owner, spelling):
+        expected = ast.dump(ast.parse(spelling).body[0], include_attributes=False)
+        if not any(ast.dump(node, include_attributes=False) == expected for node in owner.body):
+            raise _error("python-installer-binding", f"{getattr(owner, 'name', 'binding loop')} lacks {spelling}", path=path)
+
+    def binding_loop(owner, target, iterable, binding):
+        expected_target = ast.dump(ast.parse(f"for {target} in (): pass").body[0].target)
+        expected_iterable = ast.dump(ast.parse(iterable, mode="eval").body)
+        loops = [node for node in owner.body if isinstance(node, ast.For)
+                 and ast.dump(node.target) == expected_target
+                 and ast.dump(node.iter) == expected_iterable]
+        if len(loops) != 1:
+            raise _error("python-installer-binding", f"{owner.name} lacks its constructor binding loop", path=path)
+        # Only immediate executable statements count; comments, nested functions
+        # and conditional decoys do not establish installation.
+        require_statement(loops[0], binding)
+
+    install = function(tree.body, "install_arrow_geometry")
+    require_statement(install, 'Arrow, np = g["Arrow"], g["_np"]')
+    _require_expected_call(install, "_install_curved_arrows(g)", path=path,
+                           helper="curved_arrow", owner="arrow installer", code="python-installer-binding")
+    binding_loop(install, "name, function",
+                 '(("__init__", arrow_init), ("init_points", init_points), ("set_points_by_ends", set_points_by_ends))',
+                 "setattr(Arrow, name, function)")
+    curved = function(tree.body, "_install_curved_arrows")
+    require_statement(curved, 'Between = g["ArcBetweenPoints"]')
+    require_statement(curved, 'Curved, Double = g["CurvedArrow"], g["CurvedDoubleArrow"]')
+    binding_loop(curved, "cls, function",
+                 "((Between, between_init), (Curved, curved_init), (Double, double_init))",
+                 "cls.__init__ = function")
+    result = {"Arrow": {name: function(install.body, source) for name, source in (
+        ("__init__", "arrow_init"), ("init_points", "init_points"), ("set_points_by_ends", "set_points_by_ends"),
+    )}}
+    for name, source, parent in (
+        ("ArcBetweenPoints", "between_init", "Between"),
+        ("CurvedArrow", "curved_init", "Curved"),
+        ("CurvedDoubleArrow", "double_init", "Double"),
+    ):
+        constructor = function(curved.body, source)
+        _require_expected_call(constructor, f"super({parent}, self).__init__(", path=path,
+                               helper="curved_arrow", owner=name, code="python-authority-missing")
+        result[name] = {"__init__": constructor}
+    paths = {name: path for name in result}
+    scopes = {name: {} for name in result}
+    for module, installer_name, alias, bindings, methods in (
+        ("derived_curves", "install_derived_curves",
+         'Curves, Dashed, VMobject = (g[name] for name in ("CurvesAsSubmobjects", "DashedVMobject", "VMobject"))',
+         (("cls, name, function", '((Curves, "__init__", curves), (Curves, "init_points", curve_points), (Dashed, "__init__", dashed), (Dashed, "init_points", dash_points), (Curves, "add_n_more_submobjects", padding(Curves)), (Dashed, "add_n_more_submobjects", padding(Dashed)))', "setattr(cls, name, function)"),),
+         {"CurvesAsSubmobjects": "curves", "DashedVMobject": "dashed"}),
+        ("derived_lines", "install_derived_lines",
+         'Dashed, Tangent, VMobject = (g[name] for name in ("DashedLine", "TangentLine", "VMobject"))',
+         (), {"TangentLine": "tangent_init"}),
+        ("grouping", "install_grouping",
+         'Group, VGroup, VMobject, Mobject = (g[name] for name in ("Group", "VGroup", "VMobject", "Mobject"))',
+         (("name, method", '(("__init__", group_init), ("__add__", add))', "setattr(VGroup, name, method)"),),
+         {"VGroup": "group_init"}),
+    ):
+        path = root / "crates/fmn-python/python/fmn_python" / f"{module}.py"
+        if (module, installer_name) not in steps:
+            raise _error("python-installer-missing", f"{module} installer is not registered", path=initialization)
+        owner = function(_parse_python(_read_bounded(path), path).body, installer_name)
+        require_statement(owner, alias)
+        for target, iterable, binding in bindings:
+            binding_loop(owner, target, iterable, binding)
+        if module == "derived_lines":
+            require_statement(owner, '_bind(Tangent, "__init__", tangent_init)')
+        if module == "grouping":
+            require_statement(owner, "VGroup.__bases__ = (Group, VMobject)")
+        scope = {node.name: node for node in owner.body if isinstance(node, ast.FunctionDef)}
+        for name, source in methods.items():
+            result[name] = {"__init__": function(owner.body, source)}
+            paths[name], scopes[name] = path, scope
+    return result, paths, scopes
+
+
+def _reachable_local_functions(constructor, scope):
+    """Only directly called local functions count, never unused sibling decoys."""
+    pending, seen, result = [constructor], set(), []
+    while pending:
+        current = pending.pop()
+        if current.name in seen:
+            continue
+        seen.add(current.name)
+        result.append(current)
+        for call in _executable_calls(current):
+            if isinstance(call.func, ast.Name) and call.func.id in scope:
+                pending.append(scope[call.func.id])
+    return result
 
 
 class _ExecutableCallCollector(ast.NodeVisitor):
@@ -554,6 +673,7 @@ def audit(root: Path = ROOT) -> dict[str, Any]:
     bridge_text = _read_bounded(bridge_path)
     wheel_text = _read_bounded(wheel_path)
     bootstrap_tree = _parse_python(bootstrap_text, bootstrap_path)
+    installed, installed_paths, installed_scopes = _installed_methods(root)
 
     rust_sources = {
         record.rust_source: _read_bounded(root / record.rust_source)
@@ -587,6 +707,9 @@ def audit(root: Path = ROOT) -> dict[str, Any]:
             helper=helper,
         )
         observed_base = _base_spelling(class_node)
+        if record.reference_class == "VGroup" and observed_base == "VMobject":
+            # The verified grouping installer establishes this public MRO.
+            observed_base = "Group, VMobject"
         if observed_base != record.python_base:
             raise _error(
                 "python-base-mismatch",
@@ -595,23 +718,27 @@ def audit(root: Path = ROOT) -> dict[str, Any]:
                 helper=helper,
                 path=bootstrap_path,
             )
-        constructor = _direct_method(
-            class_node,
-            name="__init__",
-            path=bootstrap_path,
-            helper=helper,
-        )
+        constructor = installed.get(record.reference_class, {}).get("__init__")
+        constructor_path = installed_paths.get(record.reference_class, bootstrap_path)
+        if constructor is None:
+            constructor = _direct_method(
+                class_node, name="__init__", path=bootstrap_path, helper=helper,
+            )
         lifecycle = _native_lifecycle_init_points(class_node, constructor)
-        if lifecycle is None or not _has_expected_call(
+        installed_route = record.reference_class in installed and any(
+            _has_expected_call(function, record.python_authority_token, path=constructor_path, helper=helper)
+            for function in _reachable_local_functions(constructor, installed_scopes[record.reference_class])
+        )
+        if not installed_route and (lifecycle is None or not _has_expected_call(
             lifecycle,
             record.python_authority_token,
             path=bootstrap_path,
             helper=helper,
-        ):
+        )):
             _require_expected_call(
                 constructor,
                 record.python_authority_token,
-                path=bootstrap_path,
+                path=constructor_path,
                 helper=helper,
                 owner=record.reference_class,
                 code="python-authority-missing",
@@ -627,18 +754,32 @@ def audit(root: Path = ROOT) -> dict[str, Any]:
                 path=bootstrap_path,
                 helper=helper,
             )
-            authority_constructor = _direct_method(
-                authority_node,
-                name="__init__",
-                path=bootstrap_path,
-                helper=helper,
-            )
+            if record.python_authority_class == "Arrow":
+                # Arrow cooperatively enters Line's native lifecycle, whose
+                # virtual init_points dispatches the installed endpoint writer.
+                arrow = installed["Arrow"]
+                arrow_path = root / ARROW_PATH
+                _require_expected_call(arrow["__init__"], "super(Arrow, self).__init__(",
+                                       path=arrow_path, helper=helper, owner="Arrow", code="python-native-builder-missing")
+                line = _top_level_class(bootstrap_tree, name="Line", path=bootstrap_path, helper=helper)
+                _require_expected_call(_direct_method(line, name="__init__", path=bootstrap_path, helper=helper),
+                                       "_init_native_vmobject(", path=bootstrap_path, helper=helper,
+                                       owner="Line", code="python-native-builder-missing")
+                _require_expected_call(arrow["init_points"], "self.set_points_by_ends(",
+                                       path=arrow_path, helper=helper, owner="Arrow.init_points", code="python-native-builder-missing")
+                _require_expected_call(arrow["set_points_by_ends"], f"candidate.{record.native_builder}(",
+                                       path=arrow_path, helper=helper, owner="Arrow.set_points_by_ends", code="python-native-builder-missing")
+                authority_constructor = None
+            else:
+                authority_constructor = _direct_method(
+                    authority_node, name="__init__", path=bootstrap_path, helper=helper,
+                )
             authority_lifecycle = _native_lifecycle_init_points(
                 authority_node, authority_constructor
-            )
-            if authority_lifecycle is None or not _routes_native_builder(
+            ) if authority_constructor is not None else None
+            if authority_constructor is not None and (authority_lifecycle is None or not _routes_native_builder(
                 authority_lifecycle, record.native_builder
-            ):
+            )):
                 _require_expected_call(
                     authority_constructor,
                     f"self.{record.native_builder}(",

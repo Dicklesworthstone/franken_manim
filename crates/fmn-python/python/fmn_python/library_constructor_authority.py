@@ -76,48 +76,49 @@ LIBRARY_CONSTRUCTOR_AUTHORITIES: Final = (
         rust_helper="curved_arrow",
         reference_module="manimlib.mobject.geometry",
         reference_class="CurvedArrow",
-        binding_kind="native_equivalent_builder",
+        binding_kind="native_algorithm_python_shell",
         python_base="ArcBetweenPoints",
-        python_authority_class="CurvedArrow",
-        python_authority_token="self._build_curved_arrow(",
-        native_builder="_build_curved_arrow",
+        python_authority_class="Arc",
+        python_authority_token="self.add_tip()",
+        native_builder="_build_arc",
         rust_source="crates/fmn-library/src/arc.rs",
         rust_function="curved_arrow",
         rust_authority_token="Ok(attach_tip(",
-        bridge_function="_build_curved_arrow",
-        bridge_authority_token="fmn_library::tip::attach_tip(",
+        bridge_function="_build_arc",
+        bridge_authority_token="fmn_library::Arc::new()",
         rationale=(
-            "The bridge uses the same ArcBetweenPoints and tip algebra as the "
-            "facade while preserving the Reference's explicit n_components knob."
+            "The installed constructor composes the native-backed Arc lifecycle "
+            "and public tip protocol, preserving authored hooks and live records. "
+            "The detached curved-arrow bridge is not its constructor authority."
         ),
     ),
     ConstructorAuthority(
         rust_helper="curved_double_arrow",
         reference_module="manimlib.mobject.geometry",
         reference_class="CurvedDoubleArrow",
-        binding_kind="native_equivalent_builder",
+        binding_kind="native_algorithm_python_shell",
         python_base="CurvedArrow",
-        python_authority_class="CurvedDoubleArrow",
-        python_authority_token="self._build_curved_arrow(",
-        native_builder="_build_curved_arrow",
+        python_authority_class="Arc",
+        python_authority_token="self.add_tip(at_start=True)",
+        native_builder="_build_arc",
         rust_source="crates/fmn-library/src/arc.rs",
         rust_function="curved_double_arrow",
         rust_authority_token="let once = curved_arrow(start, end, angle, style)?;",
-        bridge_function="_build_curved_arrow",
-        bridge_authority_token="if double {",
+        bridge_function="_build_arc",
+        bridge_authority_token="fmn_library::Arc::new()",
         rationale=(
-            "The shared bridge selects the second start tip explicitly so both "
-            "CurvedArrow classes retain one native shaft-and-tip authority."
+            "The installed constructor adds the start tip after cooperative "
+            "CurvedArrow construction; Arc remains the native shaft authority."
         ),
     ),
     ConstructorAuthority(
         rust_helper="curves_as_submobjects",
         reference_module="manimlib.mobject.types.vectorized_mobject",
         reference_class="CurvesAsSubmobjects",
-        binding_kind="direct_native_builder",
+        binding_kind="native_algorithm_python_shell",
         python_base="VGroup",
         python_authority_class="CurvesAsSubmobjects",
-        python_authority_token="self._build_curves_as_submobjects(",
+        python_authority_token="candidate._build_curves_as_submobjects(",
         native_builder="_build_curves_as_submobjects",
         rust_source="crates/fmn-library/src/vmobject.rs",
         rust_function="curves_as_submobjects",
@@ -127,8 +128,9 @@ LIBRARY_CONSTRUCTOR_AUTHORITIES: Final = (
             "fmn_library::vmobject::curves_as_submobjects(&source)"
         ),
         rationale=(
-            "Atlas splits the shared-anchor run; Python reapplies the live "
-            "source style after installing the native child shells."
+            "The installed lifecycle uses Atlas for stock source splitting and "
+            "preserves authored get_bezier_tuples/factory hooks for custom "
+            "sources, publishing every child through native VMobject records."
         ),
     ),
     ConstructorAuthority(
@@ -138,7 +140,7 @@ LIBRARY_CONSTRUCTOR_AUTHORITIES: Final = (
         binding_kind="native_algorithm_python_shell",
         python_base="VMobject",
         python_authority_class="DashedVMobject",
-        python_authority_token="vmobject._dash_curve_intervals(",
+        python_authority_token="target._dash_curve_intervals(",
         native_builder="_dash_curve_intervals",
         rust_source="crates/fmn-library/src/vmobject.rs",
         rust_function="dashed_vmobject",
@@ -278,19 +280,19 @@ LIBRARY_CONSTRUCTOR_AUTHORITIES: Final = (
         rust_helper="tangent_line",
         reference_module="manimlib.mobject.geometry",
         reference_class="TangentLine",
-        binding_kind="direct_native_builder",
+        binding_kind="native_algorithm_python_shell",
         python_base="Line",
-        python_authority_class="TangentLine",
-        python_authority_token="self._build_tangent_line(",
-        native_builder="_build_tangent_line",
+        python_authority_class="Line",
+        python_authority_token="vmob.pfp(",
+        native_builder="_build_line",
         rust_source="crates/fmn-library/src/line.rs",
         rust_function="tangent_line",
         rust_authority_token="let line = Line::new(p1, p2)",
-        bridge_function="_build_tangent_line",
-        bridge_authority_token="fmn_library::line::tangent_line(",
+        bridge_function="_build_line",
+        bridge_authority_token="fmn_library::line::Line::new(",
         rationale=(
-            "The live source point run crosses once into Atlas's true-arclength "
-            "tangent helper, then the native result is installed atomically."
+            "The installed constructor invokes the authored public sampler at "
+            "both tangent samples, then enters the native-backed Line lifecycle."
         ),
     ),
     ConstructorAuthority(
@@ -317,7 +319,7 @@ LIBRARY_CONSTRUCTOR_AUTHORITIES: Final = (
         reference_module="manimlib.mobject.types.vectorized_mobject",
         reference_class="VGroup",
         binding_kind="python_identity_container",
-        python_base="VMobject",
+        python_base="Group, VMobject",
         python_authority_class="VGroup",
         python_authority_token="self._ingest_args(*vmobjects)",
         native_builder=None,

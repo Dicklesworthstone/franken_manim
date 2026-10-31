@@ -19,6 +19,9 @@ class LibraryConstructorAuthorityTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         relative_paths = {
             audit.BOOTSTRAP_PATH,
+            audit.ARROW_PATH,
+            audit.INITIALIZATION_PATH,
+            *audit.INSTALLED_CONSTRUCTOR_PATHS,
             audit.BRIDGE_PATH,
             audit.WHEEL_SMOKE_PATH,
             *(
@@ -75,11 +78,11 @@ class LibraryConstructorAuthorityTests(unittest.TestCase):
         self.assertEqual(
             report["binding_kinds"],
             {
-                "direct_native_builder": 4,
+                "direct_native_builder": 2,
                 "hardened_native_builder": 1,
                 "inherited_native_builder": 4,
-                "native_algorithm_python_shell": 1,
-                "native_equivalent_builder": 3,
+                "native_algorithm_python_shell": 5,
+                "native_equivalent_builder": 1,
                 "python_identity_container": 2,
                 "python_reference_composition": 1,
             },
@@ -95,6 +98,70 @@ class LibraryConstructorAuthorityTests(unittest.TestCase):
             "rust-authority-missing",
             helper="small_dot",
         )
+
+    def test_removed_arrow_installer_registration_fails(self) -> None:
+        self.mutate(audit.INITIALIZATION_PATH,
+                    '("arrow_geometry", "install_arrow_geometry"),', '')
+        self.assert_audit_error("python-installer-missing")
+
+    def test_curved_constructor_binding_cannot_be_only_a_comment(self) -> None:
+        self.mutate(audit.ARROW_PATH, "        cls.__init__ = function",
+                    "        # cls.__init__ = function\n        pass")
+        self.assert_audit_error("python-installer-binding")
+
+    def test_arrow_constructor_binding_cannot_be_only_a_comment(self) -> None:
+        self.mutate(audit.ARROW_PATH, "        setattr(Arrow, name, function)",
+                    "        # setattr(Arrow, name, function)\n        pass")
+        self.assert_audit_error("python-installer-binding")
+
+    def test_curved_tip_route_cannot_be_only_a_comment(self) -> None:
+        self.mutate(audit.ARROW_PATH, "        self.add_tip()",
+                    "        pass  # self.add_tip()")
+        self.assert_audit_error("python-authority-missing", helper="curved_arrow")
+
+    def test_curved_cooperative_constructor_chain_is_required(self) -> None:
+        self.mutate(audit.ARROW_PATH,
+                    "super(Between, self).__init__(angle=angle, **kwargs)",
+                    "pass  # super(Between, self).__init__(angle=angle, **kwargs)")
+        self.assert_audit_error("python-authority-missing", helper="curved_arrow")
+
+    def test_arrow_virtual_lifecycle_must_reach_native_endpoint_writer(self) -> None:
+        self.mutate(audit.ARROW_PATH,
+                    "return self.set_points_by_ends(self.start, self.end, self.buff, self.path_arc)",
+                    "return self  # self.set_points_by_ends(self.start, self.end, self.buff, self.path_arc)")
+        self.assert_audit_error("python-native-builder-missing", helper="vector")
+
+    def test_arrow_endpoint_writer_cannot_use_the_wrong_native_builder(self) -> None:
+        self.mutate(audit.ARROW_PATH, "candidate._build_arrow(", "candidate._build_line(")
+        self.assert_audit_error("python-native-builder-missing", helper="vector")
+
+    def test_derived_constructor_must_reach_its_rebuild(self) -> None:
+        self.mutate("crates/fmn-python/python/fmn_python/derived_curves.py",
+                    "            rebuild(self)", "            pass  # rebuild(self)")
+        self.assert_audit_error("python-authority-missing", helper="curves_as_submobjects")
+
+    def test_derived_builder_comment_cannot_impersonate_executable_call(self) -> None:
+        self.mutate("crates/fmn-python/python/fmn_python/derived_curves.py",
+                    "candidate._build_curves_as_submobjects(", "candidate._build_line(")
+        self.append("crates/fmn-python/python/fmn_python/derived_curves.py",
+                    "\ndef unused_decoy(candidate):\n    candidate._build_curves_as_submobjects()\n")
+        self.assert_audit_error("python-authority-missing", helper="curves_as_submobjects")
+
+    def test_dashed_rebuild_must_reach_native_interval_builder(self) -> None:
+        self.mutate("crates/fmn-python/python/fmn_python/derived_curves.py",
+                    "target._dash_curve_intervals(*recipe)", "target.get_bezier_tuples()")
+        self.assert_audit_error("python-authority-missing", helper="dashed_vmobject")
+
+    def test_tangent_installer_must_bind_the_constructor(self) -> None:
+        self.mutate("crates/fmn-python/python/fmn_python/derived_lines.py",
+                    "    _bind(Tangent, '__init__', tangent_init)",
+                    "    # _bind(Tangent, '__init__', tangent_init)")
+        self.assert_audit_error("python-installer-binding")
+
+    def test_group_installer_must_establish_the_public_mro(self) -> None:
+        self.mutate("crates/fmn-python/python/fmn_python/grouping.py",
+                    "VGroup.__bases__ = (Group, VMobject)", "VGroup.__bases__ = (VMobject,)")
+        self.assert_audit_error("python-installer-binding")
 
     def test_rust_comment_cannot_impersonate_helper_authority(self) -> None:
         self.mutate(
