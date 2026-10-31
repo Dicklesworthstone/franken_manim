@@ -48,7 +48,7 @@ pub const CALIBRATION_WORKLOAD: &str = "layered-curves-v1";
 pub const MAX_CALIBRATION_PIXELS: u64 = 1920 * 1080;
 /// Pixel admission rule reported by doctor receipts. This uses the renderer's
 /// versioned maximum/RMS linear-channel limits, not a certified bit or SSIM
-/// equivalence claim. The fixed SDR probe admits only finite [0,1] channels.
+/// equivalence claim. The fixed SDR probe admits only finite `[0,1]` channels.
 pub const PIXEL_EQUIVALENCE_POLICY: &str = "linear-rgba16f-channel-v1: matching tight layout; finite channels in [0,1]; max absolute error <= 0.092; RMS error <= 0.00042";
 /// Largest admitted absolute linear-channel error, from the renderer's v1 budget.
 pub const PIXEL_EQUIVALENCE_MAX_CHANNEL_ERROR: f64 =
