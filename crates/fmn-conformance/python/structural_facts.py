@@ -61,7 +61,7 @@ GETTERS = {
     "CoordinateSystem": ("get_origin",),
 }
 
-# The fixed construction set: source text evaluated in the manimlib namespace
+# The fixed construction set: trusted programs run in the manimlib namespace
 # of whichever engine is running. Identifiers are stable; append-only.
 CONSTRUCTIONS = (
     ("square", "Square()"),
@@ -323,7 +323,12 @@ def class_sweep_constructions(sweep: dict):
 
 def extract_constructions(engine_id: str, points_mode: str = "digest", only=None,
                           constructions=CONSTRUCTIONS, api_names: bool = False):
-    """Yield one fact record per construction (the fixed set by default)."""
+    """Yield facts from trusted constructor programs (the fixed set by default).
+
+    Explicit caller-supplied constructions and sweep calls are executable
+    fixture programs, like scene files. An empty builtins mapping is namespace
+    hygiene, not a sandbox for untrusted Python.
+    """
     namespace = _engine_namespace()
     scope = {name: getattr(namespace, name) for name in dir(namespace) if not name.startswith("_")}
     identity = engine_identity(engine_id)
@@ -331,10 +336,11 @@ def extract_constructions(engine_id: str, points_mode: str = "digest", only=None
         if only is not None and subject not in only:
             continue
         try:
-            # Constructions are checked-in constant text. They are evaluated over the
-            # manimlib namespace only, with no builtins, so they can reach nothing else.
+            # Fixtures deliberately include constructor calls, method chains,
+            # lambdas and named expressions. Execute the selected trusted
+            # program; do not claim that removing builtins confines its effects.
             code = compile(source, f"<construction {subject}>", "eval")
-            mob = eval(code, {"__builtins__": {}, **scope})  # noqa: S307
+            mob = eval(code, {"__builtins__": {}, **scope})  # noqa: S307  # ubs:ignore - Explicit trusted fixture programs are executed here; this is not an untrusted-input sandbox.
             record = extract(subject, [mob], namespace=namespace, points_mode=points_mode)
             # A class's methods do not depend on its arguments: record them once,
             # on the default call (subject without "#").
