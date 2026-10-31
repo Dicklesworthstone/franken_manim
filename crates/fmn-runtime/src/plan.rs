@@ -355,7 +355,10 @@ impl AutotuneProfile {
         ];
         let mut bytes = [0; 56];
         bytes[..8].copy_from_slice(b"FMNATN01");
-        for (field, chunk) in fields.into_iter().zip(bytes[8..].chunks_exact_mut(8)) {
+        for (field, chunk) in fields
+            .into_iter()
+            .zip(bytes[8..].as_chunks_mut::<8>().0.iter_mut())
+        {
             chunk.copy_from_slice(&field.to_le_bytes());
         }
         Ok(bytes)
@@ -370,9 +373,8 @@ impl AutotuneProfile {
             return Err(PlanError::InvalidAutotune);
         }
         let mut fields = [0; 6];
-        for (field, chunk) in fields.iter_mut().zip(bytes[8..].chunks_exact(8)) {
-            let array = chunk.try_into().map_err(|_| PlanError::InvalidAutotune)?;
-            *field = u64::from_le_bytes(array);
+        for (field, chunk) in fields.iter_mut().zip(bytes[8..].as_chunks::<8>().0.iter()) {
+            *field = u64::from_le_bytes(*chunk);
         }
         let fingerprint = TopologyFingerprint::of(topology);
         if fields[0] != fingerprint.value() {

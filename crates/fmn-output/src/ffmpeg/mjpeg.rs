@@ -221,7 +221,7 @@ impl Boundary {
                 "invalid dimensions, RGBA length or byte budget",
             ));
         }
-        if rgba.chunks_exact(4).any(|pixel| pixel[3] != 255) {
+        if rgba.as_chunks::<4>().0.iter().any(|pixel| pixel[3] != 255) {
             return Err(MjpegPreviewError::InvalidFrame(
                 "JPEG cannot preserve transparency; use PNG",
             ));

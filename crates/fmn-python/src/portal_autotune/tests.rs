@@ -78,7 +78,7 @@ fn _assert_active_plan(
         let owner = scene.borrow();
         let slot = owner.render.lock().unwrap();
         let Some(crate::PortalRenderSession::Frames(session)) = slot.as_ref() else {
-            panic!("the witness must run inside the real file renderer");
+            panic!("the witness must run inside the real file renderer"); // ubs:ignore -- Test-only missing-renderer assertion.
         };
         let config = session.renderer.config();
         (
@@ -181,7 +181,7 @@ fn live_configuration_is_typed_bounded_and_bypassed_for_ineligible_cache_routes(
 
 #[test]
 fn real_portal_renders_consume_only_matching_planar_profiles_and_report_fallbacks() {
-    let nonce = std::time::SystemTime::now()
+    let nonce = std::time::SystemTime::now() // ubs:ignore -- Test directory suffix, not an auth token; create_dir refuses reuse.
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
@@ -252,7 +252,14 @@ fn real_portal_renders_consume_only_matching_planar_profiles_and_report_fallback
         let image = decode_png(&bytes, &PngLimits::default()).unwrap();
         assert_eq!((image.width, image.height), (32, 18));
         let background = &image.rgba[..4];
-        assert!(image.rgba.chunks_exact(4).any(|pixel| pixel != background));
+        assert!(
+            image
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel != background)
+        );
     }
     assert!(
         !root.join("missing-cache").exists(),

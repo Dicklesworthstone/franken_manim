@@ -467,8 +467,10 @@ fn pixels_equivalent(expected: Viewport, reference: &[u8], candidate: &FrameBuff
     }
     let mut squared_error = 0.0;
     for (reference, candidate) in reference
-        .chunks_exact(2)
-        .zip(candidate.as_bytes().chunks_exact(2))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .zip(candidate.as_bytes().as_chunks::<2>().0.iter())
     {
         let reference =
             fmn_frame::half::f16_to_f64(u16::from_le_bytes([reference[0], reference[1]]));
@@ -790,8 +792,8 @@ mod tests {
         let mut frame = FrameBuffer::new(
             FrameLayout::tight(PixelFormat::Rgba16F, viewport.width, viewport.height).unwrap(),
         );
-        for pixel in frame.as_bytes_mut().chunks_exact_mut(8) {
-            for (channel, bits) in pixel.chunks_exact_mut(2).zip(rgba) {
+        for pixel in frame.as_bytes_mut().as_chunks_mut::<8>().0 {
+            for (channel, bits) in pixel.as_chunks_mut::<2>().0.iter_mut().zip(rgba) {
                 channel.copy_from_slice(&bits.to_le_bytes());
             }
         }
@@ -890,7 +892,7 @@ mod tests {
         // 0.59375 - 0.5 = 0.09375 exceeds the maximum 0.092, although this
         // single changed channel's RMS is 0.09375 / 256 = 0.0003662109375.
         local_error.as_bytes_mut()[..2].copy_from_slice(&0x38c0u16.to_le_bytes());
-        assert!(0.09375 / 256.0 < PIXEL_EQUIVALENCE_RMS_CHANNEL_ERROR);
+        const { assert!(0.09375 / 256.0 < PIXEL_EQUIVALENCE_RMS_CHANNEL_ERROR) };
         assert!(!pixels_equivalent(
             viewport,
             reference.as_bytes(),
@@ -908,7 +910,7 @@ mod tests {
         let shifted = solid_probe_frame(viewport, [0x3802, 0x3802, 0x3802, 0x3c00]);
         // Two half steps per RGB channel remain far below the maximum, but
         // a uniform colour shift exceeds the RMS limit.
-        assert!(1.0 / 1024.0 < PIXEL_EQUIVALENCE_MAX_CHANNEL_ERROR);
+        const { assert!(1.0 / 1024.0 < PIXEL_EQUIVALENCE_MAX_CHANNEL_ERROR) };
         assert!(!pixels_equivalent(viewport, reference.as_bytes(), &shifted));
     }
 

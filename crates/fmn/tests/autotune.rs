@@ -160,7 +160,12 @@ fn assert_circle_png(fs: &VirtualFs, name: &str) -> Vec<u8> {
     assert_eq!((image.width, image.height), (32, 18));
     let background = &image.rgba[..4];
     assert!(
-        image.rgba.chunks_exact(4).any(|pixel| pixel != background),
+        image
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|pixel| pixel != background),
         "the real scene must produce visible geometry",
     );
     bytes

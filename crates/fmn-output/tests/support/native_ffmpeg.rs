@@ -162,7 +162,11 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
                 .ok_or("preview fixture pixel budget")?;
             let source_bytes = std::fs::read(source)?;
             if source_bytes.len() != expected
-                || source_bytes.chunks_exact(4).any(|pixel| pixel[3] != 255)
+                || source_bytes
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|pixel| pixel[3] != 255)
             {
                 return Err("MJPEG preview input is not the opaque RGBA snapshot".into());
             }

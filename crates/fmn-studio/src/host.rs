@@ -391,7 +391,7 @@ impl FrameHub {
         let Some(encoder) = &self.jpeg_encoder else {
             return Ok(None);
         };
-        if rgba.chunks_exact(4).any(|pixel| pixel[3] != 255) {
+        if rgba.as_chunks::<4>().0.iter().any(|pixel| pixel[3] != 255) {
             return Err(HostError::PreviewEncode(
                 "JPEG cannot preserve transparency; use --preview-codec png".into(),
             ));
