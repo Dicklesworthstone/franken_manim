@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex};
 
 use fmn_mobject::{Mob, ProgramKind, Stage};
-use fmn_render::{Camera, CameraConfig};
+use fmn_render::{Camera, CameraConfig, Tiling};
 
 use super::NativeFrameError;
 
@@ -32,6 +32,7 @@ struct Counts {
 #[derive(Clone)]
 pub struct NativeAdaptiveCamera {
     camera: Camera,
+    camera_tiling: Option<Tiling>,
     planar_map_matches: bool,
     light_mob: Option<Mob>,
     counts: Arc<Mutex<Counts>>,
@@ -44,10 +45,24 @@ impl NativeAdaptiveCamera {
     pub fn new(camera: Camera, planar_map_matches: bool, light_mob: Option<Mob>) -> Self {
         Self {
             camera,
+            camera_tiling: None,
             planar_map_matches,
             light_mob,
             counts: Arc::new(Mutex::new(Counts::default())),
         }
+    }
+
+    /// Keep camera captures on this tile geometry while planar captures use
+    /// the pipeline's tiles. Without an override both routes retain the
+    /// constructor's existing tile policy.
+    #[must_use]
+    pub fn with_camera_tiling(mut self, tiling: Tiling) -> Self {
+        self.camera_tiling = Some(tiling);
+        self
+    }
+
+    pub(super) const fn camera_tiling(&self) -> Option<Tiling> {
+        self.camera_tiling
     }
 
     /// Observe joined route counts. Earlier reads can see incomplete work.

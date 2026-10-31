@@ -271,6 +271,7 @@ fn begin_bundle(
             "bundle destination already exists",
         ));
     }
+    let config = portal_autotune::camera_snapshot(scene.py())?;
     portal_recording::check_available(scene)?;
     portal_video::check_scene_ownership(scene)?;
     let limits = BundleExportLimits {
@@ -298,6 +299,7 @@ fn begin_bundle(
         1,
         1, // The unused Studio history is empty; only recorder limits apply.
         1,
+        config,
     )?;
     // The capture camera's frame was resized to the export's pixel aspect, but
     // the Scene's CameraFrame keeps its configured shape. A planar bundle
@@ -572,6 +574,9 @@ mod tests {
             threads,
             1,
             1,
+            fmn_config::Config::resolve(&[], None)
+                .map_err(native_error)?
+                .config,
         )?;
         indices
             .into_iter()
@@ -608,6 +613,9 @@ mod tests {
             threads,
             1,
             1,
+            fmn_config::Config::resolve(&[], None)
+                .map_err(native_error)?
+                .config,
         )?;
         indices
             .into_iter()

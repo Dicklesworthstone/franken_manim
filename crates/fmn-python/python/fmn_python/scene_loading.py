@@ -90,10 +90,10 @@ def resolve_render_configuration(native, options, width, height, fps):
     configuration = json.loads(json.dumps(resolver(custom_text, explicit_text), allow_nan=False))
     values = configuration["values"]
     explicit_overrides = configuration["explicit_overrides"]
-    unsupported = set(explicit_overrides).intersection(_CONFIG_BOUND_AT_IMPORT)
-    # Only these two constructor defaults are scoped here. Other text/tex
-    # defaults remain bound at import and must not become accepted no-ops.
-    for section, supported in (("text", {"font"}), ("tex", {"template"})):
+    unsupported = set(explicit_overrides).intersection(_CONFIG_BOUND_AT_IMPORT) - {"render"}
+    # Scope only supported constructor defaults and raster AA. Other text/tex
+    # defaults and render engine/thread policy remain bound at import.
+    for section, supported in (("text", {"font"}), ("tex", {"template"}), ("render", {"aa"})):
         unsupported.update(
             section + "." + key
             for key in explicit_overrides.get(section, {})
@@ -103,7 +103,7 @@ def resolve_render_configuration(native, options, width, height, fps):
     if unsupported:
         raise RuntimeError("CAPABILITY: --config_file cannot rebind portal defaults for "
                            + ", ".join(unsupported)
-                           + "; camera, resolution_options, directories, file_writer, scene, text.font, tex.template and cache are supported")
+                           + "; camera, resolution_options, directories, file_writer, scene, text.font, tex.template, render.aa and cache are supported")
     camera = values["camera"]
     if not options.get("_resolution_explicit"):
         selected = options.get("_quality")
@@ -614,6 +614,8 @@ class SceneSource:
         _merge_configuration(live, {key: values[key] for key in (
             "camera", "resolution_options", "directories", "file_writer", "scene", "text", "tex", "cache", "log_level"
         ) if key in values})
+        if "render" in values and "aa" in values["render"]:
+            _merge_configuration(live, {"render": {"aa": values["render"]["aa"]}})
 
     def _restore_configuration(self):
         if self._previous_frame_resolution is not None:

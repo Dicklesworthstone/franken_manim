@@ -183,6 +183,9 @@ impl From<CachedRenderError> for RetainedFrameRendererError {
 #[derive(Debug)]
 pub struct RetainedFrameRenderer {
     config: RetainedFrameRendererConfig,
+    // Camera output may keep its baseline tiles while planar captures use
+    // standard-mode calibration. No additional renderer or surface is owned.
+    camera_tiling: Option<Tiling>,
     plan: RenderPlan,
     mono: MonoTable,
     binning: Binning,
@@ -227,6 +230,7 @@ impl RetainedFrameRenderer {
         let frame = FrameBuffer::new(config.frame.layout()?);
         Ok(Self {
             config,
+            camera_tiling: None,
             plan: RenderPlan::new(),
             mono: MonoTable::default(),
             binning: Binning::default(),
@@ -244,6 +248,32 @@ impl RetainedFrameRenderer {
             planar_pixels: None,
             last_frame_reused: false,
         })
+    }
+
+    /// Use separate tile geometry for camera-bound rendering.
+    ///
+    /// Planar rendering keeps the configuration's tiles. Composition roots
+    /// can therefore apply planar-only calibration without changing camera
+    /// output. Existing frozen camera captures retain their original geometry.
+    /// Repeating the effective value preserves projection and pixel reuse.
+    pub fn set_camera_tiling(&mut self, tiling: Tiling) {
+        let changed = self.camera_tiling() != tiling;
+        self.camera_tiling = Some(tiling);
+        if changed {
+            self.camera_projection = None;
+            self.camera_pixels = Weak::new();
+            self.last_camera_frame_reused = false;
+            self.last_frame_reused = false;
+        }
+    }
+
+    /// Effective camera tile geometry; the constructor's tiles are the default.
+    #[must_use]
+    pub const fn camera_tiling(&self) -> Tiling {
+        match self.camera_tiling {
+            Some(tiling) => tiling,
+            None => self.config.tiling,
+        }
     }
 
     /// Replace the planar route's background. Cached tiles hold composited
@@ -464,9 +494,11 @@ impl RetainedFrameRenderer {
             self.camera_plan = Some(Arc::new(self.plan.clone()));
         }
         let plan = Arc::clone(self.camera_plan.as_ref().expect("published camera plan"));
+        let tiling = self.camera_tiling();
         if let Some(previous) = &self.camera_projection
             && Arc::ptr_eq(&previous.scene, &scene)
             && Arc::ptr_eq(&previous.plan, &plan)
+            && previous.projection.tiling == tiling
             && same_projection_camera(&previous.projection.camera, camera)
         {
             return Ok(previous.clone());
@@ -477,7 +509,7 @@ impl RetainedFrameRenderer {
             scene,
             projection: Arc::new(CameraProjection {
                 camera: camera.clone(),
-                tiling: self.config.tiling,
+                tiling,
                 prepared: Mutex::new(None),
             }),
         };
@@ -1551,6 +1583,89 @@ mod tests {
             .unwrap()
             .as_bytes()
             .to_vec()
+    }
+
+    #[test]
+    fn camera_tile_override_retires_only_camera_pixels_and_keeps_frozen_captures() {
+        let camera = camera();
+        let mut stage = Stage::new();
+        for object in [vector(), surface((2, 2)), dot_cloud()] {
+            let mob = stage.add(object);
+            stage.add_to_scene(mob).unwrap();
+        }
+        let baseline = config(1).tiling;
+        let mut configured = config(1);
+        configured.engine = EngineIdentity::fast();
+        configured.tiling = Tiling {
+            macro_tile: 256,
+            fine_tile: 32,
+        };
+        let mut renderer = RetainedFrameRenderer::new(configured).unwrap();
+        let allocation = renderer.frame().as_bytes().as_ptr();
+        assert_eq!(renderer.camera_tiling(), configured.tiling);
+        let original = renderer.prepare_with_camera(&stage, &camera).unwrap();
+        renderer.render_with_camera(&stage, &camera).unwrap();
+        let original_pixels = renderer.frame().as_bytes().to_vec();
+        renderer.render_with_camera(&stage, &camera).unwrap();
+        assert!(renderer.last_camera_frame_reused());
+        assert!(renderer.last_frame_reused());
+
+        renderer.set_camera_tiling(baseline);
+        assert_eq!(renderer.camera_tiling(), baseline);
+        assert_eq!(renderer.config.tiling, configured.tiling);
+        assert!(renderer.camera_projection.is_none());
+        assert!(renderer.camera_pixels.upgrade().is_none());
+        assert!(!renderer.last_camera_frame_reused());
+        assert!(!renderer.last_frame_reused());
+        let changed = renderer.prepare_with_camera(&stage, &camera).unwrap();
+        assert_eq!(changed.projection.tiling, baseline);
+        assert_eq!(original.projection.tiling, configured.tiling);
+        assert!(!Arc::ptr_eq(&original.projection, &changed.projection));
+        assert!(Arc::ptr_eq(&original.scene, &changed.scene));
+        assert!(Arc::ptr_eq(&original.plan, &changed.plan));
+        renderer.render_with_camera(&stage, &camera).unwrap();
+        assert!(!renderer.last_camera_frame_reused());
+        assert_eq!(
+            renderer.frame().as_bytes(),
+            fresh_camera_bits(&stage, &camera)
+        );
+        assert_eq!(renderer.frame().as_bytes().as_ptr(), allocation);
+        assert_eq!(original.render(1).unwrap().as_bytes(), original_pixels);
+
+        renderer.render_with_camera(&stage, &camera).unwrap();
+        assert!(renderer.last_camera_frame_reused());
+        let completed = renderer.raster_team_stats().frames_completed;
+        renderer.set_camera_tiling(baseline);
+        let repeated = renderer.prepare_with_camera(&stage, &camera).unwrap();
+        assert!(Arc::ptr_eq(&changed.projection, &repeated.projection));
+        renderer.render_with_camera(&stage, &camera).unwrap();
+        assert!(renderer.last_camera_frame_reused());
+        assert_eq!(renderer.raster_team_stats().frames_completed, completed);
+    }
+
+    #[test]
+    fn camera_tile_override_preserves_planar_tiles_and_static_frame_reuse() {
+        let mut stage = Stage::new();
+        let mob = stage.add(vector());
+        stage.add_to_scene(mob).unwrap();
+        let mut configured = config(1);
+        configured.engine = EngineIdentity::fast();
+        configured.tiling = Tiling {
+            macro_tile: 256,
+            fine_tile: 32,
+        };
+        let mut renderer = RetainedFrameRenderer::new(configured).unwrap();
+        renderer.render(&stage, 0).unwrap();
+        let pixels = renderer.frame().as_bytes().to_vec();
+        let completed = renderer.raster_team_stats().frames_completed;
+        let allocation = renderer.frame().as_bytes().as_ptr();
+        renderer.set_camera_tiling(config(1).tiling);
+        renderer.render(&stage, 0).unwrap();
+        assert!(renderer.last_frame_reused());
+        assert_eq!(renderer.binning.tiling(), configured.tiling);
+        assert_eq!(renderer.raster_team_stats().frames_completed, completed);
+        assert_eq!(renderer.frame().as_bytes(), pixels);
+        assert_eq!(renderer.frame().as_bytes().as_ptr(), allocation);
     }
 
     #[test]

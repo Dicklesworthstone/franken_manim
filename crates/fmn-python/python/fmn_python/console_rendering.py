@@ -75,7 +75,7 @@ _REFERENCE_HELP = """Reference render flags:
 
 Quality presets preserve the configured frame rate (30 fps by default).
 Config files connect camera, resolution_options, directories, file_writer,
-scene, text.font, tex.template and cache; unsupported portal-default sections name a capability refusal.
+scene, text.font, tex.template, render.aa and cache; unsupported portal-default sections name a capability refusal.
 File layers are scoped before source import and restored after rendering.
 -c and --config_file require standard mode while their certified provenance
 contract remains open. Class/constructor camera defaults override global -c.

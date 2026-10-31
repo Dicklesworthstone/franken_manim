@@ -138,6 +138,7 @@ class RenderResult:
     # Observed owner-thread phase times and work counters. These diagnostics
     # are deliberately outside the certified artifact/input-closure digest.
     performance: dict[str, Any] | None = None
+    autotune: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         result = {
@@ -157,6 +158,8 @@ class RenderResult:
             result["ffmpeg_limits"] = copy.deepcopy(self.ffmpeg_limits)
         if self.performance is not None:
             result["performance"] = copy.deepcopy(self.performance)
+        if self.autotune is not None:
+            result["autotune"] = copy.deepcopy(self.autotune)
         if self.format == "wav":
             result.update(sample_rate=48000, channels=2)
         if self.manifest is not None:
@@ -423,6 +426,7 @@ class RenderSession:
                 audio_inputs=audio_inputs, image_inputs=image_inputs, ffmpeg_limits=ffmpeg_limits,
                 performance=(copy.deepcopy(getattr(self.scene, "_render_performance", None))
                              if self.format not in {"wav", "svg"} else None),
+                autotune=copy.deepcopy(getattr(self.scene, "_render_autotune", None)),
             )
             self.result = result
             self._state = "finished"

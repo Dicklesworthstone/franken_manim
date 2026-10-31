@@ -21870,6 +21870,7 @@ def _install_config_module():
                 "text": resolved["text"],
                 "tex": resolved["tex"],
                 "cache": resolved.get("cache", {}),
+                "render": {"aa": resolved["render"]["aa"]},
                 "log_level": resolved["log_level"],
             }
         )

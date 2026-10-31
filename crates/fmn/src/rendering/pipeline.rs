@@ -333,12 +333,17 @@ impl NativeFrameStages {
                 worker.compiled_camera =
                     Some(CameraCompiler::new(config).map_err(NativeFrameError::Renderer)?);
             }
-            let frame = worker
+            let compiler = worker
                 .compiled_camera
                 .as_mut()
                 .ok_or(NativeFrameError::WorkerState(
                     "missing compiled camera renderer",
-                ))?
+                ))?;
+            // A retained worker can receive different adaptive camera policies
+            // on successive jobs. Apply the effective tiles before checking
+            // projection/pixel reuse, including a return to the default policy.
+            compiler.renderer.set_camera_tiling(config.tiling);
+            let frame = compiler
                 .prepare_with_camera(stage, &camera)
                 .map_err(NativeFrameError::Renderer)?;
             worker.render_camera(&frame, team.threads(), output.frame_mut())?;
@@ -466,6 +471,11 @@ impl PipelineStages for NativeFrameStages {
                 let stage = job.try_materialize().map_err(NativeFrameError::Animation)?;
                 let (pose, refusal) = camera.for_stage(&stage)?;
                 config.frame.background = camera.background();
+                if pose.is_some()
+                    && let Some(tiling) = camera.camera_tiling()
+                {
+                    config.tiling = tiling;
+                }
                 self.rasterize_reconstructed(&stage, config, pose, team, &mut output)?;
                 camera.record(output.sequence(), refusal)?;
             }

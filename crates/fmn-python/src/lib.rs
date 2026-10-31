@@ -24,6 +24,7 @@ mod method_cache;
 pub mod perf_harness;
 mod portal_assignment;
 mod portal_audio;
+mod portal_autotune;
 #[cfg(any(test, feature = "gauntlet"))]
 mod portal_console;
 mod portal_network;
@@ -192,6 +193,7 @@ struct PortalArtifactReport {
     /// Frames rasterized on Lumen's retained planar route and on the camera
     /// route (fm-sq8.11).
     routes: PortalRoutes,
+    tuning: Option<portal_autotune::Report>,
 }
 
 /// Which Lumen route rasterized a render's frames (fm-sq8.11): counts for
@@ -253,6 +255,7 @@ impl From<NativeArtifactReport> for PortalArtifactReport {
             audio_inputs: Vec::new(),
             image_inputs: Vec::new(),
             routes: PortalRoutes::default(),
+            tuning: None,
         }
     }
 }
@@ -292,6 +295,7 @@ impl PortalRenderSession {
         video: Option<portal_video::PortalVideoConfig>,
         audio: Box<portal_audio::PortalAudio>,
         reproducible: bool,
+        config: fmn_config::Config,
     ) -> PyResult<(Self, RuntimeConfig)> {
         match format {
             PortalOutputFormat::Svg => {
@@ -310,6 +314,7 @@ impl PortalRenderSession {
                     video,
                     audio,
                     reproducible,
+                    config,
                 )?;
                 Ok((Self::Frames(Box::new(session)), config))
             }
@@ -319,9 +324,7 @@ impl PortalRenderSession {
                         "output resolution, fps, and thread limit must be nonzero",
                     ));
                 }
-                let mut config = fmn_config::Config::resolve(&[], None)
-                    .map_err(native_error)?
-                    .config;
+                let mut config = config;
                 config.camera.resolution = (width, height);
                 config.camera.fps = fps;
                 config.determinism.mode = if reproducible {
@@ -435,6 +438,7 @@ impl PortalRenderSession {
                         audio_inputs: std::mem::take(&mut audio.inputs),
                         image_inputs: Vec::new(),
                         routes: PortalRoutes::default(),
+                        tuning: None,
                     },
                     "native-sound-mixer".to_owned(),
                     threads,
@@ -451,6 +455,7 @@ impl PortalRenderSession {
 struct PortalFrameSession {
     renderer: RetainedFrameRenderer,
     plan: fmn_runtime::ExecutionPlan,
+    camera_tiling: Tiling,
     camera: Camera,
     emitter: Option<OrderedEmitter>,
     receipt: PortalReceipt,
@@ -482,6 +487,7 @@ impl PortalFrameSession {
         video: Option<portal_video::PortalVideoConfig>,
         audio: Box<portal_audio::PortalAudio>,
         reproducible: bool,
+        mut config: fmn_config::Config,
     ) -> PyResult<(Self, RuntimeConfig)> {
         if width == 0 || height == 0 {
             return Err(PyValueError::new_err(
@@ -495,9 +501,6 @@ impl PortalFrameSession {
             return Err(PyValueError::new_err("render thread limit must be nonzero"));
         }
 
-        let mut config = fmn_config::Config::resolve(&[], None)
-            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?
-            .config;
         config.camera.resolution = (width, height);
         config.camera.fps = fps;
         config.determinism.mode = if reproducible {
@@ -557,10 +560,24 @@ impl PortalFrameSession {
             )
             .with_max_cpu_threads(max_threads)
         };
-        let plan = fmn_runtime::ExecutionPlan::derive(
-            request,
-            &fmn_platform::topology::HardwareTopology::current(),
+        let topology = fmn_platform::topology::HardwareTopology::current();
+        // Camera/ThreeD has not been calibrated by the FastCpu planar probe.
+        // Keep exactly the same live limits while deriving its uncached tiles.
+        let camera_plan = fmn_runtime::ExecutionPlan::derive(
+            request.with_engine(fmn_runtime::ExecutionEngine::CertifiedCpu),
+            &topology,
             None,
+        )
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        let camera_tiling = Tiling {
+            macro_tile: camera_plan.macro_tile,
+            fine_tile: camera_plan.fine_tile,
+        };
+        let plan = fmn::autotune::derive_execution_plan(
+            &fmn_platform::fs::StdFs,
+            &config,
+            request,
+            &topology,
         )
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
         let engine = match plan.engine {
@@ -585,7 +602,7 @@ impl PortalFrameSession {
             background,
         )
         .with_aa_policy(config.render.aa);
-        let renderer = RetainedFrameRenderer::new(RetainedFrameRendererConfig {
+        let mut renderer = RetainedFrameRenderer::new(RetainedFrameRendererConfig {
             frame: frame_config,
             tiling: Tiling {
                 macro_tile: plan.macro_tile,
@@ -598,6 +615,7 @@ impl PortalFrameSession {
                 .map_or(1, fmn_runtime::TeamPlan::threads),
         })
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        renderer.set_camera_tiling(camera_tiling);
         let camera = Camera::new(CameraConfig {
             resolution: (width, height),
             fps,
@@ -848,6 +866,7 @@ impl PortalFrameSession {
                     ..PortalRoutes::default()
                 },
                 plan,
+                camera_tiling,
             },
             runtime_config,
         ))
@@ -1006,7 +1025,8 @@ impl PortalFrameSession {
             self.camera.clone(),
             self.planar_map_matches,
             self.light_mob,
-        );
+        )
+        .with_camera_tiling(self.camera_tiling);
         let segment = segment.clone();
         let first_sequence = self.next_sequence;
         let had_camera_reason = self.routes.first_camera_reason.is_some();
@@ -1103,6 +1123,7 @@ impl PortalFrameSession {
                     audio_inputs: Vec::new(),
                     image_inputs: Vec::new(),
                     routes: PortalRoutes::default(),
+                    tuning: None,
                 }
             }
         };
@@ -1118,6 +1139,13 @@ impl PortalFrameSession {
             .splice(0..0, self.image_inputs.invocations());
         report.image_inputs = std::mem::take(&mut self.image_inputs.inputs);
         report.routes = self.routes;
+        report.tuning = Some(
+            portal_autotune::Report::from_plan(&self.plan).with_file_routes(
+                self.routes.planar,
+                self.routes.camera,
+                self.camera_tiling,
+            ),
+        );
         Ok((report, renderer.engine.closure_string(), renderer.threads))
     }
 
@@ -1254,6 +1282,7 @@ struct PyScene {
     render_ffmpeg_limits: Option<fmn_output::FfmpegLimitsReport>,
     /// The last render's frame routes (fm-sq8.11).
     render_routes: PortalRoutes,
+    render_tuning: Option<portal_autotune::Report>,
 }
 
 /// Why a stage cannot take Lumen's retained planar route, or `None` when it
@@ -8699,6 +8728,12 @@ fn begin_portal_render(slf: &Bound<'_, PyScene>, request: PortalRenderRequest) -
     };
     let audio = portal_audio::PortalAudio::from_scene(slf, &format, video.as_ref())?;
     let ffmpeg_limits = audio.ffmpeg_limits.clone();
+    // Freeze the live typed raster context before the last ownership check.
+    // Non-raster and certified outputs do not inspect optional cache settings.
+    let config = portal_autotune::file_snapshot(
+        slf.py(),
+        reproducible || !matches!(&format, PortalOutputFormat::Frames(_)),
+    )?;
     portal_video::check_scene_ownership(slf)?;
     let (session, runtime_config) = PortalRenderSession::new(
         PathBuf::from(destination),
@@ -8710,6 +8745,7 @@ fn begin_portal_render(slf: &Bound<'_, PyScene>, request: PortalRenderRequest) -
         video,
         audio,
         reproducible,
+        config,
     )?;
     let replacement = match Scene::new(runtime_config, seed) {
         Ok(scene) => Rc::new(EngineState::new(scene)),
@@ -8740,6 +8776,7 @@ fn begin_portal_render(slf: &Bound<'_, PyScene>, request: PortalRenderRequest) -
     {
         let mut owner = slf.borrow_mut();
         owner.render_routes = PortalRoutes::default();
+        owner.render_tuning = None;
         owner.render_ffmpeg_limits = ffmpeg_limits;
     }
     *render = Some(session);
@@ -8765,6 +8802,7 @@ impl PyScene {
             image_checkpoints: RefCell::new(portal_raster::ImageCheckpoints::default()),
             render_ffmpeg_limits: None,
             render_routes: PortalRoutes::default(),
+            render_tuning: None,
         })
     }
 
@@ -8979,6 +9017,7 @@ impl PyScene {
             scene.render_audio_inputs = report.audio_inputs;
             scene.render_image_inputs = report.image_inputs;
             scene.render_routes = report.routes;
+            scene.render_tuning = report.tuning;
         }
         Ok((
             report.path.to_string_lossy().into_owned(),
@@ -9010,6 +9049,16 @@ impl PyScene {
             routes.team_threads,
             routes.frames_in_flight,
         )
+    }
+
+    /// The completed raster generation's planner source and optional fallback.
+    #[getter]
+    fn _render_autotune(slf: &Bound<'_, Self>) -> PyResult<Option<Py<PyDict>>> {
+        let report = slf.borrow().render_tuning.clone();
+        report
+            .as_ref()
+            .map(|report| report.to_python(slf.py()))
+            .transpose()
     }
 
     /// Performance evidence published when a frame generation finishes successfully.

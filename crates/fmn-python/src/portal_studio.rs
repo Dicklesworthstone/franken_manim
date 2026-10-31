@@ -18,6 +18,7 @@ pub(super) mod live;
 pub(super) struct Capture {
     bundle: Option<bundle::BundleCapture>,
     renderer: RetainedFrameRenderer,
+    tuning: portal_autotune::Report,
     camera: Camera,
     rgba: FrameBuffer,
     light: Option<Mob>,
@@ -41,6 +42,7 @@ impl Capture {
         threads: usize,
         max_frames: usize,
         max_bytes: usize,
+        mut config: fmn_config::Config,
     ) -> PyResult<(Self, RuntimeConfig)> {
         if width == 0
             || height == 0
@@ -60,9 +62,6 @@ impl Capture {
             max_bytes,
         )
         .map_err(native_error)?;
-        let mut config = fmn_config::Config::resolve(&[], None)
-            .map_err(native_error)?
-            .config;
         config.camera.resolution = (width, height);
         config.camera.fps = fps;
         config.determinism.mode = fmn_config::config::DeterminismMode::Standard;
@@ -71,11 +70,15 @@ impl Capture {
             fmn_runtime::SurfaceSpec::lumen(width, height),
             fmn_runtime::OutputPixelFormat::Rgba8,
         )
-        .with_max_cpu_threads(threads);
-        let plan = fmn_runtime::ExecutionPlan::derive(
+        .with_max_cpu_threads(threads)
+        // Camera/ThreeD executes this engine even in standard artifact mode.
+        // A FastCpu tile measurement must never be applied to that route.
+        .with_engine(fmn_runtime::ExecutionEngine::CertifiedCpu);
+        let plan = fmn::autotune::derive_execution_plan(
+            &fmn_platform::fs::StdFs,
+            &config,
             request,
             &fmn_platform::topology::HardwareTopology::current(),
-            None,
         )
         .map_err(native_error)?;
         let engine = match plan.engine {
@@ -133,6 +136,7 @@ impl Capture {
             Self {
                 bundle: None,
                 renderer,
+                tuning: portal_autotune::Report::from_plan(&plan),
                 camera,
                 rgba,
                 light: None,
@@ -298,6 +302,8 @@ pub(super) fn begin(
     max_bytes: usize,
 ) -> PyResult<()> {
     portal_video::check_scene_ownership(slf)?;
+    let config = portal_autotune::camera_snapshot(slf.py())?;
+    portal_video::check_scene_ownership(slf)?;
     let (capture, runtime) = Capture::new(
         name,
         ProtocolDigest::from_hex(build).map_err(native_error)?,
@@ -308,6 +314,7 @@ pub(super) fn begin(
         threads,
         max_frames,
         max_bytes,
+        config,
     )?;
     let replacement = Scene::new(runtime, seed).map_err(native_error)?;
     let slot = Arc::clone(&slf.borrow().render);
@@ -370,6 +377,7 @@ pub(super) fn finish(slf: &Bound<'_, PyScene>) -> PyResult<Recording> {
     }
     Ok(Recording {
         timeline: Some(capture.recorded),
+        tuning: capture.tuning,
     })
 }
 
@@ -377,10 +385,18 @@ pub(super) fn finish(slf: &Bound<'_, PyScene>) -> PyResult<Recording> {
 #[pyclass(name = "_StudioRecording", module = "manimlib")]
 pub(super) struct Recording {
     timeline: Option<fmn_studio::recorded::RecordedTimeline>,
+    tuning: portal_autotune::Report,
 }
 
 #[pymethods]
 impl Recording {
+    /// Planner evidence; standard camera capture remains an uncertified artifact.
+    #[getter]
+    fn autotune(slf: &Bound<'_, Self>) -> PyResult<Py<PyDict>> {
+        let report = slf.borrow().tuning.clone();
+        report.to_python(slf.py())
+    }
+
     #[getter]
     fn frame_count(&self) -> PyResult<usize> {
         Ok(self

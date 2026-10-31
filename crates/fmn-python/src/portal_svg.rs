@@ -109,6 +109,7 @@ impl SvgSession {
                 audio_inputs: Vec::new(),
                 image_inputs: Vec::new(),
                 routes: crate::PortalRoutes::default(),
+                tuning: None,
             },
             "native-svg".to_owned(),
             self.threads,

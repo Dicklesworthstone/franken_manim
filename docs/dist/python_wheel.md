@@ -237,6 +237,41 @@ authority; the portal is not a sandbox.
 `--robot` emits one compact, deterministic JSON record using schema
 `fmn-python.cli`, version 1.
 
+## Shared raster tuning
+
+Standard Python file rendering uses the shared raster-profile cache. At the
+start of a render generation, the portal freezes the live typed
+`directories.cache`, `cache.max_bytes`, and `render.aa` values before its
+final scene-ownership check. The same AA value configures the actual retained
+renderer and the cache identity. `SceneSource` scopes `render.aa` from an
+explicit configuration file and restores the prior value on exit; this narrow
+extension does not make `render.engine` or `render.threads` supported scoped
+Python overrides.
+
+Profiles produced by `fmn doctor --autotune` can be reused when the native
+binary and Python extension have matching engine version, compiled tier,
+hardware, cache root, resolution, AA policy, intent and explicit CPU limit.
+Use the corresponding `threads=N` setting in `render_scene` or `render_session`
+when calibrating with `--threads N`. A missing profile keeps the baseline.
+A corrupt or inaccessible optional cache entry keeps rendering on the baseline
+and reports the reason.
+
+The measured profile applies only to retained planar 2D rendering. Mixed file
+captures keep independently derived, uncached tile geometry for Camera/ThreeD
+in both the serial renderer and adaptive offload workers. Studio camera
+capture uses the certified CPU renderer in standard artifact mode and reports
+an explicit tuning bypass. That engine choice does not certify the Studio
+artifact. Certified file rendering skips optional cache-context lookup and
+does not consume profiles.
+
+`RenderResult.autotune` and its `as_dict()` form expose the source, engine,
+tile geometry, optional fallback diagnostic and bypass reason. Completed file
+receipts additionally identify the `retained-planar-2d` scope, planar/camera
+frame counts and the separate camera tile geometry. `StudioRecording.autotune`
+reports the camera renderer's bypass. These diagnostics are outside the
+certified artifact and input-closure digest; they do not claim an end-to-end
+throughput gain.
+
 ## Pinned build and smoke ritual
 
 From a clean checkout, with the pinned nightly and CPython 3.13 available:

@@ -106,7 +106,17 @@ fn pure_worker_routes_match_serial_pixels_when_a_transform_enters_and_leaves_3d(
                 (OutputPixelFormat::Rgba8, PixelFormat::Rgba8),
                 (OutputPixelFormat::Nv12, PixelFormat::Nv12),
             ] {
-                let plan = plan(certified, threads, wire);
+                let mut plan = plan(certified, threads, wire);
+                let camera_tiling = Tiling {
+                    macro_tile: plan.macro_tile,
+                    fine_tile: plan.fine_tile,
+                };
+                // Model a tile-only calibration while keeping the baseline
+                // scheduler's teams and queue depth unchanged.
+                if !certified {
+                    plan.fine_tile = 32;
+                    plan.macro_tile = 256;
+                }
                 let teams = plan.render_teams.len();
                 let camera = camera();
                 let config = renderer_config(&plan, &camera);
@@ -125,6 +135,7 @@ fn pure_worker_routes_match_serial_pixels_when_a_transform_enters_and_leaves_3d(
                     "fractional duration rounds up on Choreo's grid"
                 );
                 let mut serial = RetainedFrameRenderer::new(config).unwrap();
+                serial.set_camera_tiling(camera_tiling);
                 let mut expected = Vec::new();
                 advance_play(
                     &mut stage,
@@ -166,7 +177,8 @@ fn pure_worker_routes_match_serial_pixels_when_a_transform_enters_and_leaves_3d(
                 .unwrap();
                 let mut pipeline =
                     NativeFramePipeline::new(plan, config, None, emitter.handle()).unwrap();
-                let policy = NativeAdaptiveCamera::new(camera.clone(), true, None);
+                let policy = NativeAdaptiveCamera::new(camera.clone(), true, None)
+                    .with_camera_tiling(camera_tiling);
                 for frame in 1..=5 {
                     pipeline
                         .capture_pure_adaptive(
@@ -201,6 +213,94 @@ fn pure_worker_routes_match_serial_pixels_when_a_transform_enters_and_leaves_3d(
             }
         }
     }
+}
+
+#[test]
+fn adaptive_workers_replace_camera_tile_policy_without_changing_planar_config() {
+    let mut plan = plan(false, 1, OutputPixelFormat::Rgba8);
+    let baseline = Tiling {
+        macro_tile: plan.macro_tile,
+        fine_tile: plan.fine_tile,
+    };
+    plan.fine_tile = 32;
+    plan.macro_tile = 256;
+    let camera = camera();
+    let config = renderer_config(&plan, &camera);
+    let (mut stage, mut animations) = fixture();
+    let rng = RngRoot::from_seed(19);
+    let clock = RationalFrameClock::new(10).unwrap();
+    let open = open_play(&mut stage, &clock, &mut animations).unwrap();
+    let segment = PureSegment::freeze(&stage, &clock, &rng, &animations, &open).unwrap();
+    let compiler = super::super::NativeCompiler::Vector(Box::new(
+        fmn_render::VectorFrameCompiler::new(config).unwrap(),
+    ));
+    let stages = super::super::NativeFrameStages::new(1, compiler);
+    let emitter = OrderedEmitter::new(
+        EmitterConfig::new(
+            FrameLayout::tight(PixelFormat::Rgba8, 32, 18).unwrap(),
+            1,
+            0,
+        )
+        .unwrap(),
+        vec![SinkBinding::reliable("observed", |_, _: &FrameBuffer| {
+            Ok(SinkWrite::Consumed)
+        })],
+    )
+    .unwrap();
+    let output = emitter.handle();
+    for (sequence, tiling) in [
+        Some(baseline),
+        Some(Tiling {
+            macro_tile: 64,
+            fine_tile: 8,
+        }),
+        None,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        // Force this fixed capture through the camera. Repeating its scene
+        // makes a stale projection or pixel key visible in the raster count.
+        let mut policy = NativeAdaptiveCamera::new(camera.clone(), false, None);
+        if let Some(tiling) = tiling {
+            policy = policy.with_camera_tiling(tiling);
+        }
+        let prepared = super::super::PreparedFrameJob {
+            frame: super::super::NativeFrame::AdaptivePure {
+                job: segment.job(2).unwrap(),
+                config,
+                camera: policy,
+            },
+            output: output.reserve(sequence as u64).unwrap(),
+        };
+        let rendered =
+            fmn_runtime::PipelineStages::rasterize(&stages, prepared, &plan.render_teams[0])
+                .unwrap();
+        {
+            let worker = stages.workers[0].lock().unwrap();
+            assert_eq!(
+                worker
+                    .compiled_camera
+                    .as_ref()
+                    .unwrap()
+                    .renderer
+                    .camera_tiling(),
+                tiling.unwrap_or(config.tiling),
+            );
+            assert_eq!(
+                worker
+                    .raster_team
+                    .as_ref()
+                    .unwrap()
+                    .stats()
+                    .frames_completed,
+                sequence as u64 + 1,
+                "each effective camera tile change must rasterize a new projection",
+            );
+        }
+        rendered.publish().unwrap();
+    }
+    emitter.finish().unwrap();
 }
 
 #[test]

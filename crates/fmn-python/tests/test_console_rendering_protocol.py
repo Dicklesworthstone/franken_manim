@@ -659,6 +659,132 @@ class ConsoleRenderingProtocol(unittest.TestCase):
 
 
 
+class RasterConfigurationProtocol(unittest.TestCase):
+    """Real file-layer and source-scope owners with typed-reader protocol data."""
+
+    def setUp(self):
+        self.loading = importlib.import_module(PACKAGE + ".scene_loading")
+        self.root = Path(tempfile.mkdtemp(prefix="fmn-aa-config-protocol-"))
+        self.cwd = Path.cwd()
+        self.addCleanup(os.chdir, self.cwd)
+        os.chdir(self.root)
+        self.native = ModuleType("manimlib")
+        self.native.Scene = type("Scene", (), {})
+        self.native.manim_config = {
+            "camera": {"resolution": (64, 36), "fps": 8,
+                       "background_color": "#333333", "background_opacity": 1.0},
+        }
+        self.configuration = {
+            "values": {
+                **deepcopy(self.native.manim_config),
+                "resolution_options": {},
+                "directories": {"base": "", "subdirs": {}},
+                "file_writer": {}, "scene": {}, "text": {}, "tex": {}, "cache": {},
+                "render": {"aa": "ssaa2x", "engine": "cpu", "threads": 99},
+                "log_level": "INFO",
+            },
+            "overrides": {"render": {"aa": "ssaa2x", "engine": "cpu", "threads": 99}},
+            "explicit_overrides": {"render": {"aa": "ssaa2x"}},
+            "warnings": [],
+        }
+        self.native._resolved_portal_config = lambda *_documents: deepcopy(self.configuration)
+        config_module = ModuleType("manimlib.config")
+        config_module.manim_config = self.native.manim_config
+        modules = patch.dict(sys.modules, {"manimlib": self.native, "manimlib.config": config_module})
+        modules.start()
+        self.addCleanup(modules.stop)
+        self.config_path = self.root / "selected.yml"
+        self.config_path.write_text("render:\n  aa: ssaa2x\n", encoding="utf-8")
+        self.source = self.root / "scene.py"
+
+    def resolved(self):
+        configuration, width, height, fps = self.loading.resolve_render_configuration(
+            self.native, {"config_file": str(self.config_path)}, 64, 36, 8,
+        )
+        self.assertEqual((width, height, fps), (64, 36, 8))
+        return configuration
+
+    def test_file_aa_is_live_before_import_and_restores_nested_identity(self):
+        live = self.native.manim_config
+        render = live["render"] = {"aa": "adaptive", "engine": "live-engine", "threads": 7}
+        original = deepcopy(live)
+        self.source.write_text(
+            "from manimlib import Scene, manim_config\n"
+            "AA_AT_IMPORT = manim_config['render']['aa']\n"
+            "assert manim_config['render']['engine'] == 'live-engine'\n"
+            "assert manim_config['render']['threads'] == 7\n"
+            "class Configured(Scene): pass\n",
+            encoding="utf-8",
+        )
+        with self.loading.SceneSource(
+                self.source, self.native.Scene, configuration=self.resolved()) as source:
+            self.assertEqual(source.module.AA_AT_IMPORT, "ssaa2x")
+            self.assertIs(live["render"], render)
+            render["aa"] = "ssaa4x"
+        self.assertIs(self.native.manim_config, live)
+        self.assertIs(live["render"], render)
+        self.assertEqual(live, original)
+        self.assertNotIn("_portal_cli_configuration", vars(self.native))
+
+    def test_new_aa_section_is_removed_after_import_failure(self):
+        self.source.write_text(
+            "from manimlib import manim_config\n"
+            "assert manim_config['render']['aa'] == 'ssaa2x'\n"
+            "raise RuntimeError('AA import failure')\n",
+            encoding="utf-8",
+        )
+        original = deepcopy(self.native.manim_config)
+        with self.assertRaisesRegex(RuntimeError, "AA import failure"):
+            with self.loading.SceneSource(
+                    self.source, self.native.Scene, configuration=self.resolved()):
+                pass
+        self.assertEqual(self.native.manim_config, original)
+        self.assertNotIn("render", self.native.manim_config)
+        self.assertNotIn("_portal_cli_configuration", vars(self.native))
+
+    def test_engine_and_thread_file_settings_still_refuse_before_source_effects(self):
+        marker = self.root / "source-ran"
+        self.source.write_text(
+            "from pathlib import Path\n"
+            f"Path({str(marker)!r}).write_text('ran')\n"
+            "from manimlib import Scene\nclass Configured(Scene): pass\n",
+            encoding="utf-8",
+        )
+        for name, value in (("engine", "cuda"), ("threads", 8)):
+            with self.subTest(name=name):
+                self.configuration["explicit_overrides"] = {"render": {name: value}}
+                self.config_path.write_text(f"render:\n  {name}: {value}\n", encoding="utf-8")
+                with self.assertRaisesRegex(RuntimeError, "render[.]" + name):
+                    with self.loading.SceneSource(
+                            self.source, self.native.Scene, configuration=self.resolved()):
+                        pass
+                self.assertFalse(marker.exists())
+
+    def test_bootstrap_exposes_only_typed_aa_from_the_render_section(self):
+        filename = ROOT / "python/manimlib_bootstrap.py"
+        source = filename.read_text(encoding="utf-8")
+        start = source.index("def _install_config_module():")
+        end = source.index("\n_install_config_module()", start)
+        owner = ast.parse(source[start:end]).body[0]
+        nodes = [node for node in owner.body
+                 if (isinstance(node, ast.ClassDef) and node.name == "_ConfigDict")
+                 or (isinstance(node, ast.FunctionDef) and node.name == "initialize_manim_config")]
+        self.assertEqual(len(nodes), 2)
+        pinned = SimpleNamespace(
+            sizes=SimpleNamespace(), key_bindings=SimpleNamespace(),
+            vmobject=SimpleNamespace(), mobject=SimpleNamespace(), colors={},
+        )
+        namespace = {
+            "_FMN_ROOT": self.native,
+            "_pinned_manim_config": lambda: pinned,
+            "_cwd_custom_config": lambda: self.config_path.read_text(encoding="utf-8"),
+            "update_directory_config": lambda _config: None,
+        }
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(filename), "exec"), namespace)
+        configured = namespace["initialize_manim_config"]()
+        self.assertEqual(configured["render"], {"aa": "ssaa2x"})
+
+
 class TypographyConfigurationProtocol(unittest.TestCase):
     def test_character_cache_keys_include_scoped_typography_defaults(self):
         source = ROOT / "python/manimlib_bootstrap.py"
