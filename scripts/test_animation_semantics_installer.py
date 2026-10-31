@@ -1,4 +1,4 @@
-"""Test the shipped installer against real bootstrap classes without CPython FFI.
+"""Test shipped animation/composite installers on bootstrap classes without CPython FFI.
 
 The bootstrap's animation definitions and timing adapters are compiled unchanged.
 Rust storage is replaced by a small NumPy-backed fixture, and the interval builder
@@ -228,6 +228,13 @@ def make_native():
     installer = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(installer)
     installer.install(native)
+    # LaggedStartMap is a bootstrap placeholder. Its constructor belongs to
+    # this production installer, invoked after animation semantics at runtime.
+    spec = importlib.util.spec_from_file_location(
+        "fmn_composites_under_test", PYTHON / "fmn_python/composite_effects.py")
+    composites = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(composites)
+    composites.install_composite_effects(native)
     return native
 
 
@@ -269,6 +276,7 @@ class NativeCompositionContractTests(unittest.TestCase):
         n = self.native
         members = n.Mobject(n.Mobject(), n.Mobject())
         mapped = n.LaggedStartMap(n.Animation, members)
+        self.assertIs(mapped.mobject, members)
         self.assertEqual([child.mobject for child in mapped.animations], list(members))
         self.assertEqual(mapped.run_time, 2.0)
         self.assertEqual(mapped.lag_ratio, 0.05)
@@ -285,11 +293,21 @@ class NativeCompositionContractTests(unittest.TestCase):
 
     def test_targetless_transforms_do_not_invent_a_target(self):
         n = self.native
+        # These isolated bootstrap definitions precede playback's cyclic
+        # constructor. The inherited Transform constructor already stores its
+        # target argument; _target_attr=None must neither resolve nor replace it.
         for cls in (n.CyclicReplace, n.Swap):
             with self.subTest(cls=cls.__name__):
-                animation = cls(n.Mobject(), n.Mobject())
+                original = n.Mobject()
+                animation = cls(n.Mobject(), original)
+                self.assertIs(animation.target_mobject, original)
+
+                def forbidden_target():
+                    self.fail("a targetless native spec called create_target")
+
+                animation.create_target = forbidden_target
                 self.assertIsNone(animation._native_target())
-                self.assertFalse(hasattr(animation, "target_mobject"))
+                self.assertIs(animation.target_mobject, original)
 
     def test_ordinary_transforms_still_resolve_and_validate_targets(self):
         n = self.native
