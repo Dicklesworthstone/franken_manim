@@ -2,7 +2,71 @@
 
 **Status date:** 2026-11-01 (America/New_York). The assessment below separates the inspected source, the published artifacts, recorded measurements, and fresh execution. Earlier assessments and execution records remain historical evidence.
 
-## Current follow-through — 2026-11-01 08:50 UTC
+## Current follow-through — 2026-11-01 11:58 UTC
+
+**Both latest Linux gates are red.** Frozen `39be19d6` source policy exits
+101: 91 of 92 default-concurrency E2E tests pass, and the original Studio
+built-in input lifecycle times out on `POST /api/restart` headers at the
+unchanged 15-second deadline. The later fast-tier invocation passes and
+overwrites its shared NDJSON path; that later log does not replace the
+original failed Cargo transcript. Full native Python and later policy stages
+are not reached. All 4,406 source files remain unchanged in that run.
+
+Matching release artifact construction exits 0: wheel SHA-256
+`71686d72c673a539f2a53cdffc25558891c1f5249eafdcf008d2e14d72f1b893`,
+extension `d284c850d57464ad8284492a61cfb1de892007851d2eb9d3277759db977d2a64`,
+CLI `a3042f370ae9ddea6deac3dabd6297977f7ed694c417c41d8cac6fe5410c5bc6`.
+Its clean installed-wheel gate exits 1: one of 12 native parallel-output
+cases loses a partial clip result after cooperative timeout. Later discovery,
+runtime audit, witness and mutant stages are not reached. These results do
+not inherit the earlier `ead92cb4` installed-wheel pass below.
+
+Three predeclared unchanged four-second timeout reproductions publish the
+same valid GIF; one loses its receipt. Shutdown traces locate advisory native
+TeX cache maintenance before receipt return. Commit `cb745dfc` sends the
+existing immutable outcome before interrupted disposable-worker maintenance;
+ordinary synchronous maintenance, receipt validation and cancellation bounds
+remain. A second controlled failure proves workers also inherit ignored
+SIGINT from background hosts; the child now restores its default handler
+without changing the caller's handler. The same ignored-host probe fails
+before this repair and passes after. Final focused process discovery has 54
+passes and three existing native-wheel skips; all 12 original native output
+cases pass on the explicit source overlay over the actual `39be19d6`
+extension. Three predeclared original four-second timeout runs now all retain
+their valid GIF receipt. Full fresh-wheel qualification remains pending.
+
+The new process E2E includes stalled teardown and malformed/missing receipt
+controls. Its first embedded run fails. A readiness-based control removes a
+new test's startup assumption and exposes the inherited SIGINT policy; the
+original 1.5-second timeout and four-second native tests stay unchanged.
+The remote retry still compiles an earlier snapshot without the handler
+repair; it cannot qualify the final source. One admission refusal for actual
+worker memory pressure is retained; a normal health probe permits the retry,
+and other projects' builds are left alone.
+
+Studio commit `3534e923` avoids materializing an unused snapshot during cold
+reconstruction, retaining the envelope checksum, bounded execution and full
+comparison with independently captured state. Its clock-reader test and 59
+native recovery/camera cases pass. The final forgery fixture preserves the
+original nested snapshot and updater bytes while changing RNG state; that
+tightened fixture, the live incumbent comparison and full qualification are
+pending. All changed source files pass reviewed UBS scans with zero critical
+findings; formatting and Python compilation pass.
+
+Windows whole-workspace Cargo on the earlier frozen `39d86455` snapshot exits
+101. Five zero-test binaries lacked the declared CPython DLL search path;
+correct host wiring loads all five and passes all six native cleanup tests.
+Corrected native bridge, exact-rate and console controls also pass, but use
+mixed diagnostic sources. The original `fm-8foa` is reopened for the real
+Windows ffmpeg private-workdir capability regression, and `.22` blocks on it.
+Refusal-only coverage cannot satisfy that positive capability requirement.
+
+Commits `04d51ffa` and `33f875a0` record the Windows oracle corrections and
+Linux CI whole-job allocation of 90 minutes respectively. Test deadlines,
+commands and performance limits are unchanged. Hosted qualification and push
+remain pending. All 27 owned leaves remain in progress; none is closed.
+
+## Earlier follow-through — 2026-11-01 08:50 UTC
 
 Fresh `ead92cb4` release artifacts have completed with exit 0 and acknowledged
 remote completion. The actual CLI hashes to
