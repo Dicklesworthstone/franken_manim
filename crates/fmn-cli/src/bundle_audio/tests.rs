@@ -13,7 +13,7 @@ fn command(extra: &[&str]) -> RenderCommand {
     ];
     args.extend_from_slice(extra);
     let Invocation::Render(command) = fmn_cli::parse_args(args).unwrap() else {
-        panic!("render invocation");
+        panic!("render invocation"); // ubs:ignore -- cfg(test)-only fixture: the wrong parsed variant must fail the test.
     };
     command
 }
@@ -54,10 +54,12 @@ fn full_wav_uses_embedded_pcm_and_preserves_tail_without_process_capability() {
     assert_eq!(decoded.samples, [0.25, -0.5].repeat(14));
     assert!(output.stdout.contains("\"sample_frames\":14"));
     assert!(output.stdout.contains("\"certified\":false"));
+    let manifest = Path::new("/out/scene.wav.manifest").join("manifest.fmnp");
+    let escaped = manifest.to_str().unwrap().replace('\\', "\\\\");
     assert!(
         output
             .stdout
-            .contains("\"manifest\":{\"path\":\"/out/scene.wav.manifest/manifest.fmnp\"")
+            .contains(&format!("\"manifest\":{{\"path\":\"{escaped}\""))
     );
 }
 

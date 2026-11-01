@@ -15,6 +15,14 @@ use fmn_scene::studio_bridge::{Stage, Timeline};
 
 static RUN_SUFFIX: AtomicU64 = AtomicU64::new(0);
 
+const CERTIFIED_PLATFORM: bool = cfg!(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    all(target_os = "macos", target_arch = "aarch64")
+));
+
 fn run_clean(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_fmn"))
         .args(args)
@@ -1103,10 +1111,9 @@ fn batch_publishes_complete_fmnp_manifests_and_preflights_no_clobber() {
     ) -> (std::path::PathBuf, std::path::PathBuf, String) {
         let artifact_root = output_root(&format!("{label}-artifacts"));
         let manifest_root = output_root(&format!("{label}-manifests"));
-        let output = run_clean(&[
+        let mut args = vec![
             "batch",
             "--robot",
-            "--reproducible",
             "--manifest-dir",
             manifest_root.to_str().expect("manifest path is UTF-8"),
             "--format",
@@ -1124,7 +1131,13 @@ fn batch_publishes_complete_fmnp_manifests_and_preflights_no_clobber() {
             BUILTIN_SCENE_SOURCE,
             "circle_shift.v1",
             "rectangle_shift.v1",
-        ]);
+        ];
+        // This is a positive publication/control test on every target.
+        // Certification itself is admitted only on its declared platforms.
+        if CERTIFIED_PLATFORM {
+            args.push("--reproducible");
+        }
+        let output = run_clean(&args);
         let stdout = String::from_utf8(output.stdout).expect("robot output is UTF-8");
         assert_eq!(output.status.code(), Some(0), "{stdout}");
         assert!(output.stderr.is_empty());
@@ -1147,10 +1160,17 @@ fn batch_publishes_complete_fmnp_manifests_and_preflights_no_clobber() {
         assert!(generation.join("FMN_COMPLETE").is_file());
         let bytes = std::fs::read(generation.join("manifest.fmnp")).expect("read FMNP");
         let manifest = ProvenanceManifest::from_bytes(&bytes).expect("verify FMNP");
-        assert_eq!(manifest.mode, ManifestMode::Certified);
+        assert_eq!(
+            manifest.mode,
+            if CERTIFIED_PLATFORM {
+                ManifestMode::Certified
+            } else {
+                ManifestMode::Standard
+            }
+        );
         assert!((1..=10).all(|id| manifest.items.iter().any(|item| item.item_id == id)));
         assert_eq!(manifest.outputs.len(), 1);
-        assert!(manifest.outputs[0].certified);
+        assert_eq!(manifest.outputs[0].certified, CERTIFIED_PLATFORM);
         assert_eq!(
             manifest.outputs[0].digest.to_hex(),
             json_string_field(record, "artifact_digest").expect("artifact digest robot field")
@@ -1478,15 +1498,74 @@ fn compiled_fmtl_refuses_schedule_changes_and_malformed_input_before_publication
 }
 
 #[test]
+fn native_certification_admission_agrees_with_its_doctor() {
+    let doctor = run_clean(&["doctor", "--robot"]);
+    let doctor_stdout = String::from_utf8(doctor.stdout).expect("doctor JSON is UTF-8");
+    assert_eq!(doctor.status.code(), Some(0), "{doctor_stdout}");
+    assert!(doctor.stderr.is_empty());
+    let policy = doctor_stdout
+        .lines()
+        .find(|line| line.contains("\"kind\":\"certification\""))
+        .expect("doctor names platform certification");
+    assert!(policy.contains(&format!("\"supported\":{CERTIFIED_PLATFORM}")));
+    let formats: &[&str] = if CERTIFIED_PLATFORM {
+        &["png_sequence", "svg"]
+    } else {
+        &["png_sequence", "png", "svg", "y4m", "wav"]
+    };
+    for format in formats {
+        let root = output_root(&format!("native-certification-{format}"));
+        let cache = root.join("cache-must-not-open-on-refusal");
+        let result = run_clean(&[
+            "--robot",
+            "--reproducible",
+            "--format",
+            format,
+            "--resolution",
+            "96x54",
+            "--fps",
+            "8",
+            "--threads",
+            "1",
+            "--cache-dir",
+            cache.to_str().expect("UTF-8 cache"),
+            "--video_dir",
+            root.to_str().expect("UTF-8 output"),
+            BUILTIN_SCENE_SOURCE,
+            "circle_shift.v1",
+        ]);
+        let stdout = String::from_utf8(result.stdout).expect("admission JSON is UTF-8");
+        assert!(result.stderr.is_empty());
+        if CERTIFIED_PLATFORM {
+            assert_eq!(result.status.code(), Some(0), "{format}: {stdout}");
+            assert!(stdout.contains("\"kind\":\"render\""));
+            assert!(stdout.contains("\"manifest\":{"));
+        } else {
+            assert_eq!(result.status.code(), Some(4), "{format}: {stdout}");
+            assert_eq!(stdout.lines().count(), 1);
+            assert!(stdout.contains("\"exit_name\":\"capability\""));
+            assert!(stdout.contains("outside the Revision 4 certified matrix"));
+            assert!(stdout.contains("use standard mode"));
+            assert_eq!(
+                std::fs::read_dir(&root)
+                    .expect("list refused output")
+                    .count(),
+                0
+            );
+            assert!(!cache.exists());
+        }
+    }
+}
+
+#[test]
 fn reproducible_cli_render_is_byte_identical_across_fresh_publications() {
     let mut outputs = Vec::new();
     let mut closures = Vec::new();
     let mut artifact_digests = Vec::new();
     for label in ["certified-a", "certified-b"] {
         let root = output_root(label);
-        let output = run_clean(&[
+        let mut args = vec![
             "--robot",
-            "--reproducible",
             "--format",
             "png_sequence",
             "--resolution",
@@ -1499,28 +1578,52 @@ fn reproducible_cli_render_is_byte_identical_across_fresh_publications() {
             root.to_str().expect("output path is UTF-8"),
             BUILTIN_SCENE_SOURCE,
             "circle_shift.v1",
-        ]);
+        ];
+        if CERTIFIED_PLATFORM {
+            args.push("--reproducible");
+        }
+        let output = run_clean(&args);
         let stdout = String::from_utf8(output.stdout).expect("robot output is UTF-8");
         assert_eq!(output.status.code(), Some(0), "{stdout}");
         assert!(output.stderr.is_empty());
-        assert!(stdout.contains("\"engine\":\"certified-cpu:scalar:"));
+        assert!(stdout.contains(if CERTIFIED_PLATFORM {
+            "\"engine\":\"certified-cpu:scalar:"
+        } else {
+            "\"engine\":\"fast-cpu:"
+        }));
         assert!(stdout.contains("\"manifest\":{"));
         let sequence = root.join("circle_shift.v1");
         let manifest_generation = root.join("circle_shift.v1.manifest");
         assert!(manifest_generation.join("FMN_COMPLETE").is_file());
         let manifest_path = manifest_generation.join("manifest.fmnp");
-        assert_eq!(
-            json_string_field(&stdout, "path"),
-            Some(manifest_path.to_str().expect("manifest path is UTF-8"))
+        // Compare the serialized path inside the manifest object, including
+        // JSON escapes, rather than treating its bytes as an unquoted path.
+        let escaped_manifest_path = manifest_path
+            .to_str()
+            .expect("manifest path is UTF-8")
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        assert!(
+            stdout.contains(&format!(
+                "\"manifest\":{{\"path\":\"{escaped_manifest_path}\""
+            )),
+            "{stdout}"
         );
         let manifest = ProvenanceManifest::from_bytes(
             &std::fs::read(&manifest_path).expect("read certified render FMNP"),
         )
         .expect("verify certified render FMNP");
-        assert_eq!(manifest.mode, ManifestMode::Certified);
+        assert_eq!(
+            manifest.mode,
+            if CERTIFIED_PLATFORM {
+                ManifestMode::Certified
+            } else {
+                ManifestMode::Standard
+            }
+        );
         assert!((1..=10).all(|id| manifest.items.iter().any(|item| item.item_id == id)));
         assert_eq!(manifest.outputs.len(), 1);
-        assert!(manifest.outputs[0].certified);
+        assert_eq!(manifest.outputs[0].certified, CERTIFIED_PLATFORM);
         assert_eq!(
             manifest.outputs[0].digest.to_hex(),
             json_string_field(&stdout, "artifact_digest").expect("artifact digest robot field")
@@ -1531,7 +1634,11 @@ fn reproducible_cli_render_is_byte_identical_across_fresh_publications() {
         );
         let text = std::fs::read_to_string(manifest_generation.join("manifest.txt"))
             .expect("read certified human manifest");
-        assert!(text.contains("mode = \"certified\""));
+        assert!(text.contains(if CERTIFIED_PLATFORM {
+            "mode = \"certified\""
+        } else {
+            "mode = \"standard\""
+        }));
         closures.push(manifest.closure_digest);
         artifact_digests.push(manifest.outputs[0].digest);
         outputs.push(
@@ -1779,10 +1886,23 @@ fn svg_still_publishes_round_trippable_deterministic_certified_bytes() {
     let certified_root = output_root("svg-certified");
     let certified = run(&certified_root, &["--reproducible"]);
     let certified_stdout = String::from_utf8(certified.stdout).expect("robot output is UTF-8");
-    assert_eq!(certified.status.code(), Some(0), "{certified_stdout}");
-    let certified_bytes =
-        std::fs::read(certified_root.join("circle_shift.svg")).expect("read certified SVG");
-    assert_eq!(bytes, certified_bytes, "certified bytes match standard");
+    if CERTIFIED_PLATFORM {
+        assert_eq!(certified.status.code(), Some(0), "{certified_stdout}");
+        let certified_bytes =
+            std::fs::read(certified_root.join("circle_shift.svg")).expect("read certified SVG");
+        assert_eq!(bytes, certified_bytes, "certified bytes match standard");
+    } else {
+        assert_eq!(certified.status.code(), Some(4), "{certified_stdout}");
+        assert!(certified.stderr.is_empty());
+        assert!(certified_stdout.contains("outside the Revision 4 certified matrix"));
+        assert!(certified_stdout.contains("use standard mode"));
+        assert_eq!(
+            std::fs::read_dir(&certified_root)
+                .expect("list refused output")
+                .count(),
+            0
+        );
+    }
 
     // Publication limits stay named: a second generation into the same
     // directory refuses instead of clobbering.

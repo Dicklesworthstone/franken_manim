@@ -1982,6 +1982,18 @@ fn execution_plan_request(
             ));
         }
     };
+    if config.determinism.mode == fmn_config::config::DeterminismMode::Certified {
+        let certification = certification_report();
+        if !certification.supported {
+            return Err(CliError::new(
+                "capability",
+                format!(
+                    "--reproducible is unavailable on {}; {}; use standard mode",
+                    certification.platform, certification.detail
+                ),
+            ));
+        }
+    }
     request = request.with_engine(if camera {
         // ThreeDJob is the certified CPU kernel, including in standard mode.
         // Keep the requested artifact mode and compression policy unchanged.
@@ -2408,8 +2420,12 @@ pub fn check_simd_tier_support() -> Result<(), CliError> {
 }
 
 fn certification_report() -> CertificationReport {
-    let platform = platform_name(std::env::consts::OS, std::env::consts::ARCH);
-    let (supported, detail) = match (std::env::consts::OS, std::env::consts::ARCH) {
+    certification_report_for(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn certification_report_for(os: &str, arch: &str) -> CertificationReport {
+    let platform = platform_name(os, arch);
+    let (supported, detail) = match (os, arch) {
         ("linux", "x86_64" | "aarch64") => (
             true,
             "Revision 4 certified platform; full closure enforcement remains owned by G4b",
@@ -2418,10 +2434,7 @@ fn certification_report() -> CertificationReport {
             true,
             "Revision 4 certified platform; full closure enforcement remains owned by G4b",
         ),
-        ("windows", "x86_64") => (
-            false,
-            "windows-x86_64 is pending its declared certification decision",
-        ),
+        ("windows", "x86_64") => (false, "outside the Revision 4 certified matrix (ADR-0019)"),
         _ => (false, "target is outside the Revision 4 certified matrix"),
     };
     CertificationReport {
@@ -10625,6 +10638,64 @@ mod tests {
         assert!(!output_dir.join("circle_shift.mp4").exists());
         if output_dir.exists() {
             assert!(std::fs::read_dir(&output_dir).unwrap().next().is_none());
+        }
+    }
+
+    #[test]
+    fn certification_policy_names_the_declared_matrix() {
+        for (os, arch, supported) in [
+            ("linux", "x86_64", true),
+            ("linux", "aarch64", true),
+            ("macos", "aarch64", true),
+            ("windows", "x86_64", false),
+            ("windows", "aarch64", false),
+            ("macos", "x86_64", false),
+            ("linux", "riscv64", false),
+        ] {
+            let report = certification_report_for(os, arch);
+            assert_eq!(report.supported, supported, "{os}/{arch}");
+            if os == "windows" && arch == "x86_64" {
+                assert!(report.detail.contains("ADR-0019"));
+                assert!(!report.detail.contains("pending"));
+            }
+        }
+    }
+
+    #[test]
+    fn native_plan_admission_preserves_standard_mode_on_every_target() {
+        let mut config = fmn_config::Config::default();
+        let request = |config: &fmn_config::Config| {
+            execution_plan_request(
+                config,
+                fmn_runtime::RenderIntent::Offline,
+                fmn_runtime::OutputPixelFormat::Rgba8,
+                MetalSelection::Offline,
+                false,
+            )
+        };
+        let standard = request(&config).expect("standard CPU remains available");
+        assert_eq!(standard.engine, fmn_runtime::ExecutionEngine::FastCpu);
+        config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        if cfg!(any(
+            all(
+                target_os = "linux",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            ),
+            all(target_os = "macos", target_arch = "aarch64")
+        )) {
+            assert_eq!(
+                request(&config).unwrap().engine,
+                fmn_runtime::ExecutionEngine::CertifiedCpu
+            );
+        } else {
+            let error = request(&config).expect_err("this target is outside the declared matrix");
+            assert_eq!(error.exit_name(), "capability");
+            assert!(
+                error
+                    .message()
+                    .contains("outside the Revision 4 certified matrix")
+            );
+            assert!(error.message().contains("use standard mode"));
         }
     }
 

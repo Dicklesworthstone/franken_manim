@@ -22,6 +22,14 @@ const SHEET_FORMULAS: u64 = 20;
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
+const CERTIFIED_PLATFORM: bool = cfg!(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    all(target_os = "macos", target_arch = "aarch64")
+));
+
 struct Fixture {
     root: PathBuf,
 }
@@ -37,10 +45,11 @@ impl Fixture {
             match fs::create_dir(&root) {
                 Ok(()) => return Self { root },
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                // ubs:ignore -- Integration-test setup must fail if its private fixture cannot be created.
                 Err(error) => panic!("could not create typeset-cache fixture {root:?}: {error}"),
             }
         }
-        panic!("could not allocate a unique typeset-cache fixture");
+        panic!("could not allocate a unique typeset-cache fixture"); // ubs:ignore -- Integration-test setup must fail after bounded name exhaustion.
     }
 
     /// The fixture's home directory, spelled as the temp dir is. On macOS
@@ -103,12 +112,14 @@ impl Render {
         let start = self
             .record
             .find("\"typesetting\":{")
+            // ubs:ignore -- Integration-test assertion: a missing typesetting object must fail the render contract.
             .unwrap_or_else(|| panic!("render record has no typesetting object: {}", self.record));
         &self.record[start..]
     }
 
     fn count(&self, field: &str) -> u64 {
         number(self.typesetting(), field)
+            // ubs:ignore -- Integration-test assertion: absent counters must fail rather than default to zero.
             .unwrap_or_else(|| panic!("typesetting.{field} missing: {}", self.typesetting()))
     }
 
@@ -117,6 +128,7 @@ impl Render {
         let tail = self
             .typesetting()
             .split_once(&prefix)
+            // ubs:ignore -- Integration-test assertion: an absent flag must fail rather than supply a false result.
             .unwrap_or_else(|| panic!("typesetting.{field} missing"))
             .1;
         tail.starts_with("true")
@@ -139,7 +151,7 @@ fn number(record: &str, field: &str) -> Option<u64> {
     (digits != 0).then(|| tail[..digits].parse().ok()).flatten()
 }
 
-/// Render the formula sheet as a certified PNG sequence in a fresh process.
+/// Render the formula sheet in a fresh process, certified where supported.
 fn render(fixture: &Fixture, output: &str, threads: &str, extra: &[OsString]) -> Render {
     render_with_home(fixture, output, threads, extra, true)
 }
@@ -154,7 +166,6 @@ fn render_with_home(
     let video_dir = fixture.root.join(output);
     let mut args: Vec<OsString> = [
         "--robot",
-        "--reproducible",
         "--format",
         "png_sequence",
         "--resolution",
@@ -167,6 +178,11 @@ fn render_with_home(
     .into_iter()
     .map(OsString::from)
     .collect();
+    // Windows still exercises every cache/pixel check in explicit standard
+    // mode; unsupported certification has its own no-publication controls.
+    if CERTIFIED_PLATFORM {
+        args.push("--reproducible".into());
+    }
     args.extend(extra.iter().cloned());
     args.push("--video_dir".into());
     args.push(video_dir.clone().into_os_string());
@@ -182,6 +198,7 @@ fn render_with_home(
     let record = stdout
         .lines()
         .find(|line| line.contains("\"kind\":\"render\""))
+        // ubs:ignore -- Integration-test assertion: missing render output is a failed contract.
         .unwrap_or_else(|| panic!("no render record in {stdout}"))
         .to_owned();
     let sequence = video_dir.join("formula_sheet.v1");
@@ -446,11 +463,14 @@ fn clear_cache_empties_the_store_and_the_next_render_is_cold_with_the_same_bits(
 #[test]
 fn the_config_files_cache_directory_is_the_store_the_render_uses() {
     let fixture = Fixture::new();
-    let configured = fixture.root.join("configured-cache");
+    let configured = fixture.root.join("configured-cache's store");
     let config = fixture.root.join("fmn.yml");
     let text = format!(
-        "directories:\n  cache: \"{}\"\n",
-        configured.to_str().expect("UTF-8 fixture path")
+        "directories:\n  cache: '{}'\n",
+        configured
+            .to_str()
+            .expect("UTF-8 fixture path")
+            .replace('\'', "''")
     );
     fs::write(&config, text).expect("write config file");
     let args = vec!["--config_file".into(), config.into_os_string()];

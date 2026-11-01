@@ -2,6 +2,13 @@ use super::*;
 use fmn_scene::timeline_bundle::{BundleSoundtrack, attach_bundle_soundtrack};
 use fmn_studio::WorkerService;
 
+// VirtualFs follows the host's path grammar, just like the worker admission.
+const RECORDING_PATH: &str = if cfg!(windows) {
+    "C:/recording.fmtl"
+} else {
+    "/recording.fmtl"
+};
+
 fn recording() -> Vec<u8> {
     let mut stage = fmn::mobject::Stage::new();
     let mut records =
@@ -40,7 +47,7 @@ fn recording() -> Vec<u8> {
 fn command(extra: &[&str]) -> StudioCommand {
     let mut args = vec![
         "studio",
-        "/recording.fmtl",
+        RECORDING_PATH,
         "Lecture",
         "--no-browser",
         "--resolution",
@@ -58,7 +65,7 @@ fn command(extra: &[&str]) -> StudioCommand {
 fn prepared() -> (VirtualFs, TimelineBundle, StudioRecordedAudio, Launch) {
     let fs = VirtualFs::new();
     let bytes = recording();
-    fs.insert("/recording.fmtl", bytes.clone());
+    fs.insert(RECORDING_PATH, bytes.clone());
     let (bundle, audio) = StudioRecordedAudio::decode(SOURCE_ID, &bytes).unwrap();
     let audio = audio.unwrap();
     let launch = prepare_launch(
@@ -66,7 +73,7 @@ fn prepared() -> (VirtualFs, TimelineBundle, StudioRecordedAudio, Launch) {
         &bundle,
         &audio,
         &fs,
-        PathBuf::from("/recording.fmtl"),
+        PathBuf::from(RECORDING_PATH),
     )
     .unwrap();
     (fs, bundle, audio, launch)
@@ -81,7 +88,10 @@ fn launch_roundtrip_binds_exact_settings_not_ambient_configuration_or_source_loc
     assert_eq!(decoded.argv().unwrap(), argv);
     assert_eq!(decoded.build_id(), launch.build_id());
     let mut moved = launch.clone();
-    moved.source_path = PathBuf::from("/elsewhere/lecture.fmtl");
+    moved.source_path = launch
+        .source_path
+        .with_file_name("elsewhere")
+        .join("lecture.fmtl");
     assert_eq!(moved.build_id(), launch.build_id());
     for index in 0..5 {
         let mut changed = launch.clone();
@@ -102,7 +112,7 @@ fn source_replacement_is_refused_before_picture_audio_can_diverge() {
     let (pictures, loaded) = launch.read(&fs).unwrap();
     assert_eq!(pictures.fps(), 8);
     assert_eq!(loaded.info().source, audio.info().source);
-    fs.insert("/recording.fmtl", b"changed".to_vec());
+    fs.insert(RECORDING_PATH, b"changed".to_vec());
     assert!(
         launch
             .read(&fs)
@@ -214,7 +224,7 @@ fn explicit_clock_and_unsupported_modes_refuse_instead_of_silently_changing_repl
                 &bundle,
                 &audio,
                 &fs,
-                PathBuf::from("/recording.fmtl")
+                PathBuf::from(RECORDING_PATH)
             )
             .is_err(),
             "{extra:?}"
@@ -230,7 +240,7 @@ fn recorded_browser_accepts_an_explicit_mjpeg_request_without_changing_the_captu
         &bundle,
         &audio,
         &fs,
-        PathBuf::from("/recording.fmtl"),
+        PathBuf::from(RECORDING_PATH),
     )
     .unwrap();
     assert_eq!(jpeg.argv().unwrap(), png.argv().unwrap());

@@ -15471,7 +15471,9 @@ def verify_portal_console_scene():
     assert len(still["digest"]) == 64
     assert still["engine"].split(":")[0] == "fast-cpu"
     assert still["threads"] == 1
-    assert pathlib.Path(still["destination"]) == still_destination
+    reported_destination = pathlib.Path(still["destination"])
+    assert reported_destination.is_absolute() and ".." not in reported_destination.parts
+    assert reported_destination.samefile(still_destination)
     still_bytes = still_destination.read_bytes()
     assert still_bytes.startswith(b"\x89PNG\r\n\x1a\n")
     assert_red_orientation_witness_is_above_origin(still_destination)

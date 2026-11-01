@@ -98,8 +98,10 @@ with tempfile.TemporaryDirectory(prefix="fmn sound inputs ") as directory:
         result = render_scene(ChangingCwd, root / "cwd.wav", fps=16, threads=1)
     finally:
         os.chdir(previous_cwd)
-    # Receipts carry canonical paths (macOS /var -> /private/var).
-    assert result.audio_inputs[0]["path"] == str(native_asset.resolve())
+    # Canonical receipt paths may expand a Windows short name or namespace.
+    receipt_path = Path(result.audio_inputs[0]["path"])
+    assert receipt_path.is_absolute() and ".." not in receipt_path.parts
+    assert receipt_path.samefile(native_asset)
 
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:

@@ -2887,13 +2887,156 @@ fn failure_cli_certified_metal_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scena
         .with_counter("cli_certified_metal_refused", 1))
 }
 
+const CLI_CERTIFIED_PLATFORM: bool = cfg!(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    all(target_os = "macos", target_arch = "aarch64")
+));
+
+/// The production CLI composition root must agree with its doctor policy.
+/// Standard frames remain positive coverage on every functional target.
+fn cli_certification_admission_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let dir = scenario_dir("cli_certification_admission")?;
+    let invoke = |args: &[&str]| fmn_cli::run(args.iter().copied());
+    let doctor = invoke(&["doctor", "--robot"]);
+    let doctor_text = &doctor.stdout;
+    let record = doctor_text
+        .lines()
+        .find(|line| line.contains("\"kind\":\"certification\""))
+        .ok_or_else(|| fail(format!("doctor lacks certification record: {doctor_text}")))?;
+    if doctor.code != 0
+        || !doctor.stderr.is_empty()
+        || !record.contains(&format!("\"supported\":{}", CLI_CERTIFIED_PLATFORM))
+    {
+        return Err(fail(format!("native doctor policy disagrees: {doctor:?}")));
+    }
+    let mut standard_frames = 0;
+    for certified in [false, true] {
+        let out = dir.join(if certified { "certified" } else { "standard" });
+        let cache = dir.join(if certified {
+            "certified-cache"
+        } else {
+            "standard-cache"
+        });
+        let out_text = out
+            .to_str()
+            .ok_or_else(|| fail("probe output is not UTF-8"))?;
+        let cache_text = cache
+            .to_str()
+            .ok_or_else(|| fail("probe cache is not UTF-8"))?;
+        let mut args = vec![
+            "--robot",
+            "--format",
+            "png_sequence",
+            "--resolution",
+            "96x54",
+            "--fps",
+            "8",
+            "--threads",
+            "1",
+            "--cache-dir",
+            cache_text,
+            "--video_dir",
+            out_text,
+            fmn_cli::BUILTIN_SCENE_SOURCE,
+            "circle_shift.v1",
+        ];
+        if certified {
+            args.push("--reproducible");
+        }
+        let output = invoke(&args);
+        let stdout = &output.stdout;
+        if certified && !CLI_CERTIFIED_PLATFORM {
+            if output.code != 4
+                || !output.stderr.is_empty()
+                || stdout.lines().count() != 1
+                || !stdout.contains("\"exit_name\":\"capability\"")
+                || !stdout.contains("outside the Revision 4 certified matrix")
+                || !stdout.contains("use standard mode")
+                || out.exists()
+                || cache.exists()
+            {
+                return Err(fail(format!(
+                    "unsupported native certification had effects or wrong refusal: {output:?}"
+                )));
+            }
+            continue;
+        }
+        if output.code != 0 || !output.stderr.is_empty() {
+            return Err(fail(format!("supported native output failed: {output:?}")));
+        }
+        let manifest = ProvenanceManifest::from_bytes(
+            &std::fs::read(out.join("circle_shift.v1.manifest/manifest.fmnp"))
+                .map_err(|error| fail(format!("read native admission manifest: {error}")))?,
+        )
+        .map_err(|error| fail(format!("decode native admission manifest: {error}")))?;
+        let expected_mode = if certified {
+            fmn_output::ManifestMode::Certified
+        } else {
+            fmn_output::ManifestMode::Standard
+        };
+        if manifest.mode != expected_mode
+            || manifest.outputs.len() != 1
+            || manifest.outputs[0].certified != certified
+        {
+            return Err(fail("native admission mislabeled the published artifact"));
+        }
+        let sequence = out.join("circle_shift.v1");
+        if !sequence.join("FMN_COMPLETE").is_file() {
+            return Err(fail("native admission output is incomplete"));
+        }
+        let pngs = std::fs::read_dir(&sequence)
+            .map_err(|error| fail(error.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| fail(error.to_string()))?
+            .into_iter()
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "png"))
+            .count();
+        if pngs != 3 {
+            return Err(fail(format!(
+                "native admission expected 3 PNGs, got {pngs}"
+            )));
+        }
+        for frame in 0..3 {
+            let bytes = std::fs::read(sequence.join(format!("frame_{frame:06}.png")))
+                .map_err(|error| fail(error.to_string()))?;
+            let decoded = fmn_codec::decode_png(&bytes, &fmn_codec::PngLimits::default())
+                .map_err(|error| fail(error.to_string()))?;
+            if (decoded.width, decoded.height) != (96, 54)
+                || !decoded
+                    .rgba
+                    .as_chunks::<4>()
+                    .0
+                    .windows(2)
+                    .any(|pair| pair[0] != pair[1])
+            {
+                return Err(fail(
+                    "native admission produced an empty or wrong-sized frame",
+                ));
+            }
+        }
+        if !certified {
+            standard_frames = 3;
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.cli.certification_admission")
+            .field("certified_supported", truth(CLI_CERTIFIED_PLATFORM))
+            .field("standard_frames", "3")
+            .field("policy_agrees", "true"),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("native_standard_frames", standard_frames)
+        .with_counter("native_certification_contract", 1))
+}
+
 /// fm-certified-closure-integrity-4fei: the certified promise, checked from
 /// manifests alone. Two certified renders of one input at different thread
 /// counts share a semantic digest and agree on every certified output; a
 /// render of a different input (another resolution) is not comparable.
-fn determinism_certified_manifest_compare_run(
-    ctx: &mut RunCtx,
-) -> Result<RunOutcome, ScenarioError> {
+fn determinism_manifest_compare_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let dir = scenario_dir("certified_manifest_compare")?;
     let render = |name: &str, threads: &str, resolution: &str| {
         let out = dir.join(name);
@@ -2901,9 +3044,8 @@ fn determinism_certified_manifest_compare_run(
             .to_str()
             .ok_or_else(|| fail("certified compare path is not UTF-8"))?
             .to_owned();
-        let output = fmn_cli::run([
+        let mut args = vec![
             "--robot",
-            "--reproducible",
             "--format",
             "png_sequence",
             "--resolution",
@@ -2916,7 +3058,11 @@ fn determinism_certified_manifest_compare_run(
             out_text.as_str(),
             fmn_cli::BUILTIN_SCENE_SOURCE,
             "circle_shift.v1",
-        ]);
+        ];
+        if CLI_CERTIFIED_PLATFORM {
+            args.push("--reproducible");
+        }
+        let output = fmn_cli::run(args);
         if output.code != 0 {
             return Err(fail(format!(
                 "certified render {name} failed: code={} stdout={:?} stderr={:?}",
@@ -2961,9 +3107,28 @@ fn determinism_certified_manifest_compare_run(
     let build_named = !reported.is_empty()
         && one.identity.build_id == reported
         && fmn_output::certified_build_refusal(reported).is_none();
+    let agree = if CLI_CERTIFIED_PLATFORM {
+        same.certified_bits_agree()
+    } else {
+        same.semantic_equal
+            && !same.certified_both
+            && one.outputs == four.outputs
+            && one.outputs.iter().all(|output| !output.certified)
+    };
+    let distinguished = !different.semantic_equal
+        && !different.certified_bits_agree()
+        && one.outputs != other.outputs;
     ctx.event(
         LogEvent::new("e2e.determinism.manifest")
-            .field("same_input_agree", truth(same.certified_bits_agree()))
+            .field(
+                "mode",
+                if CLI_CERTIFIED_PLATFORM {
+                    "certified"
+                } else {
+                    "standard"
+                },
+            )
+            .field("same_input_agree", truth(agree))
             .field("same_input_semantic_equal", truth(same.semantic_equal))
             .field(
                 "other_input_semantic_equal",
@@ -2973,13 +3138,18 @@ fn determinism_certified_manifest_compare_run(
             .field("fonts_recorded", truth(fonts_recorded))
             .field("build_identity_named", truth(build_named)),
     );
-    let agree = same.certified_bits_agree();
-    let distinguished = !different.semantic_equal && !different.certified_bits_agree();
-    ctx.counter("certified_manifest_agree", u64::from(agree));
-    ctx.counter(
-        "certified_manifest_input_distinguished",
-        u64::from(distinguished),
-    );
+    let agree_counter = if CLI_CERTIFIED_PLATFORM {
+        "certified_manifest_agree"
+    } else {
+        "standard_manifest_agree"
+    };
+    let distinguished_counter = if CLI_CERTIFIED_PLATFORM {
+        "certified_manifest_input_distinguished"
+    } else {
+        "standard_manifest_input_distinguished"
+    };
+    ctx.counter(agree_counter, u64::from(agree));
+    ctx.counter(distinguished_counter, u64::from(distinguished));
     if !agree || !distinguished || !has_platform_record || !fonts_recorded || !build_named {
         return Err(fail(format!(
             "certified manifest comparison drifted: same={same:?} other={different:?} platform_record={has_platform_record} fonts_recorded={fonts_recorded} build_id={:?} reported={reported:?}",
@@ -2987,8 +3157,8 @@ fn determinism_certified_manifest_compare_run(
         )));
     }
     Ok(RunOutcome::ok()
-        .with_counter("certified_manifest_agree", 1)
-        .with_counter("certified_manifest_input_distinguished", 1))
+        .with_counter(agree_counter, 1)
+        .with_counter(distinguished_counter, 1))
 }
 
 /// fm-inr.1: caller-authored baseline qualification bits are not authority.
@@ -13177,18 +13347,63 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
-        "determinism.certified_manifest_compare.v1",
-        ScenarioClass::DeterminismDrill,
+        "lifecycle.cli_certification_admission.v1",
+        ScenarioClass::LifecycleDrill,
         Surface::CliInProcess,
-        Invocation::new(determinism_certified_manifest_compare_run),
+        Invocation::new(cli_certification_admission_run),
         vec![
             Assertion::ExitCode(0),
-            counter_eq("certified_manifest_agree", 1),
-            counter_eq("certified_manifest_input_distinguished", 1),
+            counter_eq("native_standard_frames", 3),
+            counter_eq("native_certification_contract", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.cli.certification_admission",
+            vec![
+                FieldPred::str_eq("certified_supported", truth(CLI_CERTIFIED_PLATFORM)),
+                FieldPred::str_eq("standard_frames", "3"),
+                FieldPred::str_eq("policy_agrees", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        if CLI_CERTIFIED_PLATFORM {
+            "determinism.certified_manifest_compare.v1"
+        } else {
+            "determinism.standard_manifest_compare.v1"
+        },
+        ScenarioClass::DeterminismDrill,
+        Surface::CliInProcess,
+        Invocation::new(determinism_manifest_compare_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq(
+                if CLI_CERTIFIED_PLATFORM {
+                    "certified_manifest_agree"
+                } else {
+                    "standard_manifest_agree"
+                },
+                1,
+            ),
+            counter_eq(
+                if CLI_CERTIFIED_PLATFORM {
+                    "certified_manifest_input_distinguished"
+                } else {
+                    "standard_manifest_input_distinguished"
+                },
+                1,
+            ),
         ],
         vec![LogExpect::span_present(
             "e2e.determinism.manifest",
             vec![
+                FieldPred::str_eq(
+                    "mode",
+                    if CLI_CERTIFIED_PLATFORM {
+                        "certified"
+                    } else {
+                        "standard"
+                    },
+                ),
                 FieldPred::str_eq("same_input_agree", "true"),
                 FieldPred::str_eq("other_input_semantic_equal", "false"),
                 FieldPred::str_eq("platform_record", "true"),
@@ -14643,6 +14858,16 @@ fn studio_native_builtin_input_lifecycle_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.studio_builtin_inputs.v1")
         .expect("native builtin input lifecycle scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn cli_certification_admission_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.cli_certification_admission.v1")
+        .expect("native certification admission scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

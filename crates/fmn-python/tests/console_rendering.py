@@ -461,7 +461,10 @@ def reference_configuration_and_css_color():
         assert m.manim_config['camera']['fps'] == 12
         assert m.manim_config['camera']['background_color'] == '#FF0000'
         assert m.manim_config['authored']['answer'] == 42
-        assert m.manim_config['directories']['raster_images'] == {str(configured / 'authored/art')!r}
+        from pathlib import Path
+        configured_raster = Path(m.manim_config['directories']['raster_images'])
+        assert configured_raster.is_absolute() and '..' not in configured_raster.parts
+        assert configured_raster.resolve() == Path({str(configured / 'authored/art')!r}).resolve()
         class Configured(m.Scene):
             def construct(self):
                 assert self.default_wait_time == 0.25

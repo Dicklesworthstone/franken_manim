@@ -333,6 +333,7 @@ mod tests {
         for extra in [
             vec![],
             vec!["-n", "1,3", "--subdivide"],
+            vec!["-n", "1,2"],
             vec!["--reproducible", "-n", "1,2"],
         ] {
             let cmd = command(&extra);
@@ -343,10 +344,6 @@ mod tests {
             let result = run(cmd.clone(), &bytes, bundle, fs.clone(), &|| {
                 panic!("WAV requested process capability")
             });
-            assert_eq!(result.code, 0, "{}", result.stdout);
-            assert!(result.stdout.contains(
-                "\"jobs\":1,\"succeeded\":1,\"failed\":0,\"cancelled\":0,\"max_scenes\":1"
-            ));
             let single = super::super::run(
                 cmd.render,
                 &bytes,
@@ -354,6 +351,37 @@ mod tests {
                 direct.clone(),
                 &|| None,
             );
+            if !cfg!(any(
+                all(
+                    target_os = "linux",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                ),
+                all(target_os = "macos", target_arch = "aarch64")
+            )) && extra.contains(&"--reproducible")
+            {
+                // ADR-0019 excludes Windows certification. Standard PCM and
+                // the identical range above still run all positive checks.
+                assert_terminal_failure(&result, "capability", "scene");
+                assert_eq!(single.code, code("capability"), "{}", single.stdout);
+                for output in [&result, &single] {
+                    assert!(output.stdout.contains(
+                        "certified narrated WAV requires a target in the existing certified matrix"
+                    ));
+                    assert!(output.stderr.is_empty());
+                }
+                for (artifact, _) in planned.outputs {
+                    let manifest = provenance::destination(&artifact).unwrap();
+                    for store in [&fs, &direct] {
+                        assert!(!store.exists(&artifact));
+                        assert!(!store.exists(&manifest));
+                    }
+                }
+                continue;
+            }
+            assert_eq!(result.code, 0, "{}", result.stdout);
+            assert!(result.stdout.contains(
+                "\"jobs\":1,\"succeeded\":1,\"failed\":0,\"cancelled\":0,\"max_scenes\":1"
+            ));
             assert_eq!(single.code, 0, "{}", single.stdout);
             for (artifact, _) in planned.outputs {
                 assert_eq!(fs.read(&artifact).unwrap(), direct.read(&artifact).unwrap());
