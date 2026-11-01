@@ -1,13 +1,54 @@
 # FrankenManim implementation status
 
-**Status date:** 2026-10-31 (America/New_York). The assessment below separates the inspected source, the published artifacts, recorded measurements, and fresh execution. Earlier assessments and execution records remain historical evidence.
+**Status date:** 2026-11-01 (America/New_York). The assessment below separates the inspected source, the published artifacts, recorded measurements, and fresh execution. Earlier assessments and execution records remain historical evidence.
 
-## Current follow-through — 2026-11-01 03:03 UTC
+## Current follow-through — 2026-11-01 04:55 UTC
+
+Fresh `ead92cb4` release artifacts have completed with exit 0 and acknowledged
+remote completion. The actual CLI hashes to
+`da11c2b1ec35920377a3209ab9e081acec7eb64decf93a27f0448ef2eba273ee`;
+the wheel hashes to
+`0deb43263dc996ea7f01d436b9381dfff302114a5fe8cd64f1870c65217096f4`,
+and its loaded extension to
+`000a96f1dea411a885521b39e154d6222dc994678f067289e86e2b595baff025`.
+All 4,406 source entries remain identical. The complete original installed
+gate is running against these exact artifacts; the full Linux source policy
+has passed both all-target checks and reached CLI smoke compilation. Neither
+whole gate has a terminal pass. All 25 owned leaves remain in progress.
+
+The new live comparison stops before timing: seven of eight exact Cargo
+fields match the retained baseline; raw `rustflags` differ because nested
+checkouts inherit two identical configuration arrays. The guard is unchanged.
+A revised plan rebuilds the same pinned `047985d9` source with the matching
+configuration, retaining the original three pairs, deadlines and decoded
+pixel/state checks. After an initial admission refusal, the build completes
+on another normally admitted worker with all 4,405 baseline files unchanged.
+Its actual CLI hashes to
+`98c812f8155184e686422ace178955438dc29554e73c4349ed03d7a8dbd64225`;
+all eight raw profile fields match and completion is acknowledged. Its
+identity is recorded before timing; no new timed run or speed claim exists.
+The older comparison below remains
+bound to its older artifacts and recorded profile evidence.
 
 The runtime fixes through `951da294` have a complete matching installed-artifact
-pass, but **the complete source policy remains red**. Its latest attempt reaches
-the cache torture suite and exits 101: 25 cases pass and the concurrent-clear
-case rejects a legitimate `GenerationChanged` refusal. All 4,405 tracked
+pass, but **the complete source policy remains red**. At frozen checkpoint
+`ead92cb4750ef4d125cb9929b5c4bccaad72e377`, the 26-case hash/profile probe
+and native CLI build pass. The complete policy then exits 1 at its
+measurement-age check: a shallow checkout lacks the historical measurement
+commits. Code gates and bare Cargo tests are not reached. All 4,406 tracked
+non-Beads entries match before and after, aggregate
+`8d5330c479c5e83b57a2e0b9ccbc2d8b07c17401faf8f0faa932b1ec5cfea9d4`.
+Restoring genuine Git ancestry makes the unchanged guard pass: scene age is
+16 commits, differential/offload age is 42, within their 50/200 limits. No
+measurement, header or threshold changes. The corrected invocation checks
+this before compilation. Its original worker is now below normal disk
+admission; retained compiler outputs are copied and checked in a separate
+protected workspace on a worker with verified capacity. No full-policy pass
+or closure follows from the successful CLI build or setup correction.
+
+The preceding `951da294` attempt reaches the cache torture suite and exits
+101: 25 cases pass and the concurrent-clear case rejects a legitimate
+`GenerationChanged` refusal. All 4,405 tracked
 non-Beads source entries match before and after, aggregate
 `bef84c174d1edf6240679a6f60b2168ad311019f68fd13e2f403712cc1f1b127`.
 The 42 CLI/doctor cases, 30 native Python production cases, WASM and fuzz-target
@@ -98,8 +139,14 @@ predeclared repetitions of the single concurrent clearer case pass; these
 are one case repeated, not 32 distinct cases. All 4,405 source entries match
 before and after, aggregate
 `8ce64f900ecf7a6caab1d55db4b2aace1711968ceb3e21eb2bb565651ca01fd7`.
-RCH exits 0 with terminal acknowledgment. The planted-negative and restored
-positive controls and complete policy remain required before closure.
+RCH exits 0 with terminal acknowledgment. In an isolated checkout, disabling
+exactly two early generation prechecks while retaining the final rotation
+guard makes the ordered control fail at the missing new-generation index:
+zero passes, one actual failure, 26 filtered, raw exit 101. Both checks are
+restored unchanged; complete cache suites and strict Clippy pass again, with
+all source entries identical. Expected-red and restored-positive jobs both
+have terminal acknowledgment. Production guards remain unchanged. The
+complete source policy remains required before closure.
 
 Two earlier `951da294` attempts fail during linking as storage exhausts.
 The stock-debug run preserves its exit 101 separately. The later line-table
@@ -116,9 +163,14 @@ After the cache gate failed, SBH retired the now-inactive RAM target at
 47,781,474,304 bytes. The build reuse is gone. It did not cause the earlier
 test failure. Separate cache cohorts and completed artifact receipts remain;
 the completed artifact archive is independently hashed on durable storage.
-SBH's normal protection command now protects five owned staging/artifact
-paths. It creates markers and adds those owned paths to its sacred-path
-registry; no RCH pressure rule, slot count or peer process was changed.
+SBH's normal protection command covers the owned staging/artifact paths and
+new RAM build targets. It creates markers and adds those owned paths to its
+sacred-path registry; no RCH pressure rule, slot count or peer process changes.
+Three inactive cache cohorts subsequently move intact into the existing
+protected RAM staging, retaining content checks and all path mappings. The
+final source target is copied to the replacement worker: all 6,746 files /
+1,879,396,795 bytes and their modes match; its root directory tightens from
+0755 to 0700, and it gains a protection marker.
 The six obsolete local binaries reviewed separately are now absent following
 the owner's `done` reply. The agent executed no removal command; protected
 current CLIs and wheel hashes were rechecked.
@@ -151,6 +203,31 @@ run, with no missing or different entry. Rustc reports dependency dep-info check
 omissions at escaped Program Files paths and continues; the diagnostics are
 retained. This is a Windows Clippy pass, not Windows runtime certification
 or qualification of the later test and CI metadata edits.
+The current `ead92cb4` Windows Clippy run also exits 0 after 79 minutes, with
+acknowledged completion. Its direct during- and after-run maps match all
+4,406 entries, with zero missing or different files. Two earlier current-source
+admission refusals execute no compiler. The wrapper initially hides its Windows
+target from admission; the direct explicit-target command is admitted.
+
+Hosted [CI at `d3557e6e`](https://github.com/Dicklesworthstone/franken_manim/actions/runs/41265095711)
+finishes with failure: Windows fmt/check/Clippy pass, then runtime tests fail;
+portable and v3 mandatory lanes are canceled. Five failing Windows targets
+report 199/15/2, 80/10/0, 4/2/1, 5/4/0 and 155/6/0
+passed/failed/ignored respectively. These are 37 failed cases, including
+cascades, rather than 37 established roots. Observed failures include Unix-style
+absolute fixture paths, certified requests on excluded Windows, Studio readiness
+identity, the explicit private ffmpeg workdir/DLL-search refusal, and weak-proxy
+cleanup. `fm-restore-green-ci-tqsr.22` retains their exact named probes and
+requires real Windows functional execution without weakening security or
+skipping supported behavior. It is open and unclaimed. The original PG-5 sweep
+succeeds with two actual selected
+tests: scene-corpus and certified-engine thread invariance at `{1,4,16}`.
+Exact-image capability jobs report success on Windows, macOS and
+Linux-aarch64-musl; these do not certify the full runtime matrix. Scheduled
+full-matrix, high-core, performance and fuzz jobs remain skipped and receive
+no execution credit. These are `d3557e6e` results, not final `ead92cb4`
+qualification.
+
 The green-CI parent also retains its independent W1 landing/check-split,
 hosted-run and named macOS product obligations. The older measured corpus
 floor, incomplete compatibility/3-D work, qualified performance rig, full
