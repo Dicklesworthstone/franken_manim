@@ -5118,6 +5118,19 @@ fn python_reference_corpus_regressions_run(ctx: &mut RunCtx) -> Result<RunOutcom
     Ok(RunOutcome::ok().with_counter("corpus_regression_cases", cases.len() as u64))
 }
 
+/// Integer key-map selectors claim native parts and render like explicit pairs.
+fn python_integer_matching_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let frames = manimlib::run_portal_gauntlet_integer_matching()
+        .map_err(|error| fail(format!("native integer matching selectors: {error}")))?;
+    ctx.event(
+        LogEvent::new("e2e.python.integer_matching")
+            .field("decoded_frames", frames)
+            .field("selector_routes", 3_u64)
+            .field("thread_counts", 3_u64),
+    );
+    Ok(RunOutcome::ok().with_counter("integer_matching_frames", frames))
+}
+
 /// The Parity Ledger's witness registry (fm-5wq.12): its unit suite plants one defect per
 /// failure class the gate's check must catch, and every planted defect must fail the check.
 fn python_witness_registry_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -11355,6 +11368,24 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         .tier(Tier::Fast),
     ];
     specs.push(spec(
+        "parity.integer_matching_selectors.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(python_integer_matching_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("integer_matching_frames", 30),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.integer_matching",
+            vec![
+                FieldPred::u64_eq("decoded_frames", 30),
+                FieldPred::u64_eq("selector_routes", 3),
+                FieldPred::u64_eq("thread_counts", 3),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.native_matching_workers.v1",
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
@@ -14320,6 +14351,16 @@ fn tracing_tail_lifecycle_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.tracing_tail_empty_until_update.v1")
         .expect("the tracing-tail lifecycle scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn integer_matching_selectors_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "parity.integer_matching_selectors.v1")
+        .expect("native integer matching selector scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

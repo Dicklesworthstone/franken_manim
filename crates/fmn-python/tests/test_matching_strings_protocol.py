@@ -47,6 +47,10 @@ def strings_environment():
             return self.text
         def _string_submobject(self, ordinal):
             return self.children[ordinal]
+        def __getitem__(self, selector):
+            # Explicit family-index boundary; production matching still maps
+            # these selected pieces through the real shared span planner.
+            return self.children[selector]
     class TransformMatchingStrings(g["NativeAnimation"]):
         _native_kind = "transform_matching_strings"
         _match_by_blocks = True
@@ -60,7 +64,7 @@ def strings_environment():
     cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "TransformMatchingStrings")
     helper = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "_native_span_keys")
     namespace = {"_TexError": ValueError}
-    exec(compile(ast.Module(body=[helper], type_ignores=[]), str(path), "exec"), namespace)
+    exec(compile(ast.Module(body=[helper], type_ignores=[]), str(path), "exec"), namespace)  # ubs:ignore — fixed repository AST helper; no user or scene input executes here.
     TransformMatchingStrings._native_span_keys = namespace["_native_span_keys"]
     g.update(StringMobject=StringMobject, TransformMatchingStrings=TransformMatchingStrings,
              TransformMatchingTex=TransformMatchingTex, _TexError=ValueError, _difflib=difflib,
@@ -262,8 +266,8 @@ class MatchingStringsProtocolTests(unittest.TestCase):
         self.assertEqual(len(scene.cores), 4)
 
     def test_invalid_key_types_and_empty_native_map_refuse(self):
-        with self.assertRaisesRegex(TypeError, "keys must be strings"):
-            self.Strings(self.text("a"), self.text("b"), key_map={1: "b"})
+        with self.assertRaisesRegex(TypeError, "selectors must be strings or integers"):
+            self.Strings(self.text("a"), self.text("b"), key_map={1.5: "b"})
         with self.assertRaisesRegex(ValueError, "non-empty native span maps"):
             self.Strings(self.text(""), self.text("b"))
 

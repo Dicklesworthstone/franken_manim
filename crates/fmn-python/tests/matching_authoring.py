@@ -379,7 +379,7 @@ def test_empty_matches_do_not_bypass_user_option_validation():
     from manimlib.exceptions import TexError
     source, target = ml.Text(''), ml.Text('')
     for options in ({'match_animation': None}, {'mismatch_animation': None},
-                    {'key_map': {'a': 3}}, {'matched_keys': [3]},
+                    {'key_map': {'a': 3.5}}, {'matched_keys': [3.5]},
                     {'matched_pairs': [(object(), object())]}):
         try:
             ml.TransformMatchingStrings(source, target, **options)
@@ -387,6 +387,56 @@ def test_empty_matches_do_not_bypass_user_option_validation():
             pass
         else:
             raise AssertionError('empty plan accepted invalid options: ' + repr(options))
+
+
+def test_integer_key_maps_render_the_same_native_parts_as_explicit_pairs():
+    from PIL import Image
+
+    def render(destination, mapping, threads):
+        calls = []
+        class Authored(ml.TransformMatchingTex):
+            def matching_blocks(self, source, target, matched_keys, key_map):
+                calls.append(dict(key_map))
+                return super().matching_blocks(source, target, matched_keys, key_map)
+        scene = ml.Scene()
+        with scene.render_session(destination, format='png_sequence', resolution=(96, 54),
+                                  fps=8, threads=threads) as session:
+            source, target = ml.Tex('x').shift(ml.LEFT), ml.Tex('y').shift(ml.RIGHT)
+            scene.add(source)
+            if mapping is None:
+                animation = ml.TransformMatchingTex(
+                    source, target, matched_pairs=[(source[0], target[0])],
+                    run_time=.25, rate_func=ml.linear)
+            else:
+                animation = Authored(source, target, key_map=mapping,
+                                     run_time=.25, rate_func=ml.linear)
+                assert calls == [mapping], 'authored hook must receive the original selectors once'
+                assert len(animation.animations) == 1, 'numeric selection must transform, not fade'
+                child = animation.animations[0]
+                assert child.mobject is source[0] and child.target_mobject is target[0]
+            scene.play(animation)
+            assert target in scene.mobjects and source not in scene.mobjects
+            scene.wait(.125)
+        assert session.result.frame_count == 3
+        frames = sorted(Path(destination).glob('*.png'))
+        assert len(frames) == 3
+        decoded = []
+        for path in frames:
+            with Image.open(path) as image:
+                assert image.size == (96, 54)
+                rgba = image.convert('RGBA')
+                assert any(low != high for low, high in rgba.getextrema()), 'numeric matching must render visible ink'
+                decoded.append(rgba.tobytes())
+        assert len(set(decoded)) > 1, 'requires real moving frames'
+        return [path.read_bytes() for path in frames]
+
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        control = render(root / 'explicit', None, 1)
+        for index, mapping in enumerate(({'x': 0}, {0: 'y'}, {-1: -1})):
+            for threads in (1, 4, 16):
+                assert render(root / f'map-{index}-{threads}', mapping, threads) == control
+    return 30  # Ten actual native renders, three decoded frames each.
 
 
 def test_empty_matching_frames_equal_independent_native_fades():
@@ -427,10 +477,13 @@ def test_empty_matching_frames_equal_independent_native_fades():
 
 
 assert getattr(ml, "__franken_manim__", False), "requires the real native FrankenManim portal"
-_cases = sorted((name, case) for name, case in globals().items()
-                if name.startswith("test_") and callable(case))
-assert len(_cases) == 18, "matching native authoring acceptance inventory changed"
-for _name, _case in _cases:
-    _case()
-    print("matching authoring acceptance passed:", _name)
-print("matching authoring native cases:", len(_cases))
+# The registered Gauntlet scenario invokes its own real render witness below.
+# Ordinary installed acceptance still executes every case without filtering.
+if not globals().get('_FMN_INTEGER_MATCHING_GAUNTLET', False):
+    _cases = sorted((name, case) for name, case in globals().items()
+                    if name.startswith("test_") and callable(case))
+    assert len(_cases) == 19, "matching native authoring acceptance inventory changed"
+    for _name, _case in _cases:
+        _case()
+        print("matching authoring acceptance passed:", _name)
+    print("matching authoring native cases:", len(_cases))

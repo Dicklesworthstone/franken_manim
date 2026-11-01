@@ -1135,8 +1135,8 @@ def _install_matching_strings(g):
             raise TypeError(type(self).__name__ + " matched_pairs must pair Mobjects")
         self.matched_pairs = explicit
         self.matched_keys, self.key_map = tuple(matched_keys), dict(key_map or {})
-        if not all(isinstance(key, str) for key in (*self.matched_keys, *self.key_map, *self.key_map.values())):
-            raise TypeError("Matching string keys must be strings")
+        if not all(isinstance(key, (str, int)) for key in (*self.matched_keys, *self.key_map, *self.key_map.values())):
+            raise TypeError("Matching selectors must be strings or integers")
         # Validate even an authored matcher: no override bypasses the native
         # UTF-8 provenance or explicit-family ownership checks.
         claimed_parts(self, self._native_span_keys(source), self._native_span_keys(target))
@@ -1184,6 +1184,23 @@ def _install_matching_strings(g):
 
         def occurrences(side, key):
             mobject = (source, target)[side]
+            if isinstance(key, int):
+                # Integer selectors address the public family, which need not
+                # have one direct child per native source span. Resolve the
+                # same selection as StringMobject.__getitem__, then claim its
+                # complete native parts without inventing substring identity.
+                selected = mobject[key]
+                if not isinstance(selected, Mobject):
+                    raise TypeError("Matching integer selectors must select a Mobject")
+                selected_ids = point_ids(selected)
+                if not selected_ids:
+                    return []
+                indices = [index for index, (part, _) in enumerate(keys[side])
+                           if point_ids(part) and point_ids(part) <= selected_ids]
+                covered = set().union(*(point_ids(keys[side][index][0]) for index in indices))
+                if covered != selected_ids:
+                    raise ValueError("Matching integer selector is not a complete native span-map selection")
+                return [indices] if not any(used[side][index] for index in indices) else []
             return g["_string_matching_occurrences"](
                 mobject.get_string(), mobject._string_sub_spans, key, used[side],
             )

@@ -29,6 +29,8 @@ def string_namespace():
             return self.text
         def _string_submobject(self, ordinal):
             return self.children[ordinal]
+        def __getitem__(self, selector):
+            return self.children[selector]
     class Group(g.Mobject):
         def __init__(self, *parts):
             super().__init__(None, parts)
@@ -61,7 +63,7 @@ def string_namespace():
     if len(nodes) != 1:
         raise AssertionError("expected exactly one shared string-matching installer")
     scope = {}
-    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec"), scope)
+    exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), "exec"), scope)  # ubs:ignore — fixed repository installer AST; no user or scene input executes here.
     scope["_install_matching_strings"](vars(g))
     matching.install_matching(g)
     matching.install_matching_strings(g)
@@ -112,6 +114,43 @@ class StringPlanningTests(unittest.TestCase):
         self.assertEqual(animation.matched_pairs, [])
         again = animation.matching_blocks(animation.source, animation.target, (), animation.key_map)
         self.assertEqual([(child_text(s), child_text(t)) for s, t in again], self.pairs(animation))
+
+    def test_integer_selectors_claim_public_family_parts_before_other_blocks(self):
+        for mapping in ({0: 'y'}, {'x': 0}, {-1: -1}):
+            with self.subTest(mapping=mapping):
+                animation = self.make('x', 'y', key_map=mapping)
+                self.assertEqual(self.pairs(animation), [('x', 'y')])
+                self.assertEqual(len(animation.animations), 1)
+                self.assertEqual(animation.key_map, mapping)
+        # A direct child can cover multiple characters: its index is not a
+        # byte offset or an ordinal into a flattened glyph list.
+        source = self.g.StringMobject('ab', grouped=True)
+        target = self.g.StringMobject('cd', grouped=True)
+        animation = self.g.TransformMatchingStrings(source, target, key_map={0: -1})
+        self.assertEqual(self.pairs(animation), [('ab', 'cd')])
+
+    def test_integer_selectors_cannot_claim_foreign_or_partial_native_parts(self):
+        class Foreign(self.g.StringMobject):
+            def __getitem__(self, selector):
+                return self.foreign
+        source, target = Foreign('a'), self.g.StringMobject('b')
+        source.foreign = self.g.Mobject('foreign')
+        with self.assertRaisesRegex(ValueError, 'complete native span-map selection'):
+            self.g.TransformMatchingStrings(source, target, key_map={0: 0})
+        # An authored selector returning only one child of an indivisible
+        # native part cannot bypass the substring split refusal.
+        source = Foreign('ab', grouped=True)
+        source.children[0].shape = None
+        source.children[0].children = [self.g.Mobject('a'), self.g.Mobject('b')]
+        source.foreign = source.children[0].children[0]
+        with self.assertRaisesRegex(ValueError, 'complete native span-map selection'):
+            self.g.TransformMatchingStrings(source, target, key_map={0: 0})
+
+    def test_out_of_range_integer_selection_refuses_and_matched_integer_keys_work(self):
+        with self.assertRaises(IndexError):
+            self.make('a', 'b', key_map={0: 1})
+        animation = self.make('a', 'b', matched_keys=(0,))
+        self.assertEqual(self.pairs(animation), [('a', 'b')])
 
     def test_reordered_blocks_are_not_lost(self):
         self.assertEqual(self.pairs(self.make("ab+cd", "cd+ab")), [("ab", "ab"), ("cd", "cd"), ("+", "+")])
@@ -192,7 +231,7 @@ class StringPlanningTests(unittest.TestCase):
             self.g.TransformMatchingStrings(source, target, key_map={"a": "c"})
 
     def test_invalid_keys_and_missing_provenance_refuse(self):
-        for options in ({"matched_keys": [1]}, {"key_map": {"a": 1}}, {"key_map": []}):
+        for options in ({"matched_keys": [1.5]}, {"key_map": {"a": 1.5}}, {"key_map": []}):
             with self.subTest(options=options), self.assertRaises(TypeError):
                 self.make("a", "a", **options)
         source = self.g.StringMobject("a")

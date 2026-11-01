@@ -293,10 +293,10 @@ def install_matching_strings(native: Any) -> None:
         explicit = _pairs(matched_pairs, Mobject, type(self).__name__ + " matched_pairs")
         keys = tuple(_bounded(matched_keys, "matched_keys"))
         if key_map is not None and not isinstance(key_map, Mapping):
-            raise TypeError("key_map must be a mapping of strings")
+            raise TypeError("key_map must be a mapping of string or integer selectors")
         mapping = {} if key_map is None else dict(_bounded(key_map.items(), "key_map"))
-        if not all(isinstance(key, str) for key in (*keys, *mapping, *mapping.values())):
-            raise TypeError("matching string keys must be strings")
+        if not all(isinstance(key, (str, int)) for key in (*keys, *mapping, *mapping.values())):
+            raise TypeError("matching selectors must be strings or integers")
         self.matched_pairs, self.matched_keys, self.key_map = explicit, keys, mapping
         sources, targets = span_pieces(self, source, target)
         _validate_owners((source, target))

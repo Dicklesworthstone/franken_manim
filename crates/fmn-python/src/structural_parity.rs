@@ -242,6 +242,33 @@ pub fn run_portal_gauntlet_tex_selection() -> Result<TexSelectionReport, String>
     })
 }
 
+/// Render integer matching selectors through real native parts (fm-5wq.69).
+/// The independent explicit-pair route must produce the same decoded frames
+/// and canonical PNG bytes at one, four and sixteen threads.
+///
+/// # Errors
+/// Returns the actual selection, ownership, publication or render failure.
+pub fn run_portal_gauntlet_integer_matching() -> Result<u64, String> {
+    crate::with_python_test_module("integer matching selectors", |py, _module, globals| {
+        globals
+            .set_item("_FMN_INTEGER_MATCHING_GAUNTLET", true)
+            .map_err(|error| error.to_string())?;
+        let code = std::ffi::CString::new(include_str!("../tests/matching_authoring.py"))
+            .map_err(|error| error.to_string())?;
+        py.run(code.as_c_str(), Some(globals), Some(globals))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        globals
+            .get_item("test_integer_key_maps_render_the_same_native_parts_as_explicit_pairs")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "integer matching render witness is absent".to_owned())?
+            .call0()
+            .inspect_err(|error| error.print(py))
+            .and_then(|value| value.extract::<u64>())
+            .map_err(|error| error.to_string())
+    })
+}
+
 /// What the envelope drill observed.
 #[derive(Debug)]
 pub struct EnvelopeDrillReport {
