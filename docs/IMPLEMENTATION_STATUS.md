@@ -2,7 +2,7 @@
 
 **Status date:** 2026-11-01 (America/New_York). The assessment below separates the inspected source, the published artifacts, recorded measurements, and fresh execution. Earlier assessments and execution records remain historical evidence.
 
-## Current follow-through — 2026-11-01 04:55 UTC
+## Current follow-through — 2026-11-01 08:50 UTC
 
 Fresh `ead92cb4` release artifacts have completed with exit 0 and acknowledged
 remote completion. The actual CLI hashes to
@@ -11,12 +11,38 @@ the wheel hashes to
 `0deb43263dc996ea7f01d436b9381dfff302114a5fe8cd64f1870c65217096f4`,
 and its loaded extension to
 `000a96f1dea411a885521b39e154d6222dc994678f067289e86e2b595baff025`.
-All 4,406 source entries remain identical. The complete original installed
-gate is running against these exact artifacts; the full Linux source policy
-has passed both all-target checks and reached CLI smoke compilation. Neither
-whole gate has a terminal pass. All 25 owned leaves remain in progress.
+The complete original installed gate exits 0. All 4,406 source entries and
+145 installed payload files remain identical. Discovery runs 3,180 cases:
+2,983 actual passes, 197 existing skips and zero errors. The 1,963-row audit
+and verifier pass. Witness execution reports 382 suites / 12,981 case
+executions, 1,671 semantic rows, 188 rendered rows, three refusal-only rows
+and no placeholder. Two suite-level tracing errors and three harness-only
+test groups remain in the log; the existing actual plain reruns reconcile
+them. All 25 applicable mutants are killed; 15 inapplicable mutants earn no
+execution credit.
 
-The new live comparison stops before timing: seven of eight exact Cargo
+The fresh witness summary records zero corpus metadata because the private
+checkout omits the ignored videos tree. This counter measures static source
+mentions, not executed scenes, and is not a behavioral admission condition.
+A separate run of the unchanged counter over all 417 tracked Python files
+in clean pinned videos commit `e317d6c5` finds 1,134 mentioned rows. The
+original zero is retained. Neither figure represents corpus scene execution.
+
+**Full source qualification fails with exit 101.** The corrected Linux run has
+passed both all-target checks, 42 CLI/doctor cases, 30 native production
+cases, WASM and fuzz compilation, all three strict Clippy variants and
+warning-denied Rustdoc. Its original default-concurrency 91-case e2e binary
+finishes with 89 passes and two failures in 1,186.71 seconds: both the
+standalone and fast-tier built-in Studio input runs time out awaiting
+`formula_sheet.v1` `POST /api/restart` headers at the unchanged 15-second
+deadline. Circle and TeX editing/undo/replay complete first. Full native
+Python tests and later policy stages are not reached. Remote completion is
+acknowledged; every one of the 4,406 source entries remains unchanged. There are now
+26 owned leaves in progress, including Windows diagnosis; none is closed.
+Qualification names the frozen `ead92cb4` source, separately from later
+report and tracker commits.
+
+The first comparison guard stops before timing: seven of eight exact Cargo
 fields match the retained baseline; raw `rustflags` differ because nested
 checkouts inherit two identical configuration arrays. The guard is unchanged.
 A revised plan rebuilds the same pinned `047985d9` source with the matching
@@ -26,12 +52,115 @@ on another normally admitted worker with all 4,405 baseline files unchanged.
 Its actual CLI hashes to
 `98c812f8155184e686422ace178955438dc29554e73c4349ed03d7a8dbd64225`;
 all eight raw profile fields match and completion is acknowledged. Its
-identity is recorded before timing; no new timed run or speed claim exists.
-The older comparison below remains
-bound to its older artifacts and recorded profile evidence.
+identity is recorded before timing. The three predeclared interleaved pairs
+then pass: six runs, 13 decoded PNG/RGBA publications each, exact state and
+edit/undo/redo/scrub/restart agreement, unchanged binary hashes and original
+15-second deadlines.
 
-The runtime fixes through `951da294` have a complete matching installed-artifact
-pass, but **the complete source policy remains red**. At frozen checkpoint
+| Current matched diagnostic | `047985d9` CLI | `ead92cb4` CLI |
+| --- | ---: | ---: |
+| Median request total | 4.660824 s | 4.561311 s |
+| Median restart | 0.789590 s | 0.720549 s |
+| Worst observed request | 0.841941 s | 0.732337 s |
+| Median edits | 2.734243 s | 2.731338 s |
+
+Result SHA-256 is
+`1c4776226e24462f45bc7506a13dbca6e5c4a415c927bcab38747f4a14d4be9c`.
+This is modest shared-host maintenance, with the existing extra journal
+buffer bound; it is not PG, Reference-speedup or tail-latency qualification.
+Older comparisons and their losses below remain separate and are not pooled.
+
+The Windows diagnosis now has an actual native development CLI from the
+completed MSVC Clippy job's binary artifact dependency. Its hash is
+`fe82f2981aee4724aef8ee78bb7f40c276309bfc4a362b95e798c1d1f9251995`,
+and its embedded source identity is `ead92cb4`. Clean-environment version
+execution passes. The original standard-mode `tex_span.v1` Studio launch
+exits 4 before readiness: no audited safe-std host entropy capability is
+registered. This explains that readiness failure; other Windows failure
+groups remain distinct. No capability URL is logged. Two attempted new
+builds were refused before compilation; this existing artifact avoids another
+build. It is diagnostic evidence, not a Windows release qualification.
+
+The pinned nightly already exposes safe `SystemRng`; its Windows backend
+uses `ProcessPrng`, whose [documented contract](https://learn.microsoft.com/en-us/windows/win32/seccng/processprng)
+fills the requested buffer and returns success. The primary working tree now
+wires this into `StdHostEntropy`, retaining the Unix backend, unsupported-target
+refusal and separate scene RNG. The native Windows entropy tests pass three
+cases, zero failures, 25 filtered; the actual OS backend runs. Client and worker
+exit 0, with an artifact-retrieval timeout retained separately. All 4,406 source
+files match the four-file snapshot after execution. The same work repairs POSIX
+profile/mount parsing and the PG7 virtual-cache fixture. A real native weak-proxy
+regression first fails with `TypeError`; the repaired cleanup then passes all six
+harness tests, including distinct owner threads and authored failures. That
+complete five-file snapshot remains unchanged. These focused results do not
+qualify the complete new working tree or Windows Studio.
+
+The exact failing development CLI (`651c78d2`) completes the original formula
+sequence locally, with a 6.35-second restart, but reproduces the timeout on the
+slower worker. Worker stack samples identify SHA-256 compression during restored
+state serialization and protocol validation; supervisor samples wait on the worker.
+A fully unrolled compression candidate loses and is reverted: development
+38.50→42.88 ms/MiB and release 3.54→3.58 ms, with larger code and stack frames.
+The next candidate changes only bounded loop bookkeeping. In the same executable
+invocation, the actual incumbent and candidate agree with independent Python
+digests for 1,032 input lengths, one-shot and incremental, under development and
+release profiles. Ten interleaved timed pairs after three excluded warmup pairs
+measure development 67.88→52.69 ms/MiB; release 6.46→6.40 ms is effectively unchanged
+on this shared host. Compression code and stack allocation shrink. This is
+bounded maintenance evidence, not PG or a completed Studio-timeout repair. The
+first sampling pass missed children created by other threads; both passes and
+their instrumentation cost remain recorded.
+
+The combined seven-file snapshot passes the hash crate's 27 unit and four
+integration tests, all 30 Linux platform tests, 21 selected host-profile tests
+and six PG7 calibration tests. One existing PG7 measurement test remains ignored;
+this is not qualified performance evidence. Its actual development CLI hashes to
+`c72a1e9ba5898372de65de7898bdffe197465c121dc3cae85c5194db9bc0a7aa`.
+All eight raw Cargo profile fields match the retained `651c78d2` incumbent.
+Three predeclared interleaved pairs pass all six live runs: 13 decoded PNG/RGBA
+publications per run, exact state/edit/undo/redo/scrub/restart agreement and the
+original 15-second deadline. Median request totals fall 41.764862→34.229819 seconds,
+median restart 6.206430→5.049624 seconds and worst observed request
+6.237088→5.120917 seconds. Result SHA-256 is
+`999ce39c5cb3ab23580950547ed30f4b02100039fc06e9c0b2c4c0957319f911`.
+This remains shared-host development-build maintenance, not PG or a full-source
+timeout repair.
+
+The new two-host capability-isolation scenario initially fails two test-authoring
+assumptions: the built-in capture has 13 frames rather than the separate fixture's
+nine, and authorization failures are bounded plain text rather than successful
+API JSON. Only the new test is corrected. The original 91 test bodies, deadlines
+and concurrency remain unchanged. The new test checks the precise 403 response,
+unchanged rejected state, no leaked capability, authenticated seeks and equal
+decoded scene frames. The corrected scenario passes on the remote Linux worker
+in 1.10 seconds; original five-family input acceptance passes in 86.08 seconds.
+Strict all-target Clippy also passes. All 4,406 files in this focused snapshot
+remain unchanged before and after execution. Full Windows functional Cargo is
+compiling through RCH's direct target route; all 4,406 files match the frozen
+`39d86455` snapshot during execution, before the two new-test corrections.
+Neither run substitutes for the mandatory whole-source gate. UBS scans all seven
+changed source files with verified matching assets: exit 0, zero criticals,
+898 warnings and 689 informational findings; its optional Cargo phases are not
+run by this targeted shadow scan. The edited new-test file is rescanned separately.
+
+Four source commits record this work: `0a2681ad` (bounded SHA loops),
+`a1288d39` (weak-proxy cleanup), `3c33fce7` (Windows entropy and portable
+profile handling), and `71be9eea` (Windows checkpoint metadata). The last
+repair follows a real CPython 3.13.1 regression: path and handle queries return
+different deprecated `ctime` values for an unchanged file, while device, inode,
+size, modification time and birth time agree. Only cross-interface comparisons
+use birth time on Windows; raw same-handle mutation checks remain intact.
+The unfixed new test fails. Repaired filesystem/protocol tests have 30 actual
+Windows passes and one existing POSIX-only skip; related Linux tests have
+57 passes. These tests use the existing protocol render fixture and do not
+claim native renderer coverage. Reviewed UBS passes with zero criticals and
+nine warnings; three public metadata comparisons have exact-site false-positive
+explanations. The complete Windows Cargo run still uses the earlier frozen
+source and is compiling. No whole-source pass or Bead closure follows from these
+commits; final full policy and matching artifact qualification remain required.
+
+The runtime fixes through `951da294` also have a historical complete matching
+installed-artifact pass. An earlier attempt at frozen checkpoint
 `ead92cb4750ef4d125cb9929b5c4bccaad72e377`, the 26-case hash/profile probe
 and native CLI build pass. The complete policy then exits 1 at its
 measurement-age check: a shallow checkout lacks the historical measurement
@@ -219,7 +348,8 @@ absolute fixture paths, certified requests on excluded Windows, Studio readiness
 identity, the explicit private ffmpeg workdir/DLL-search refusal, and weak-proxy
 cleanup. `fm-restore-green-ci-tqsr.22` retains their exact named probes and
 requires real Windows functional execution without weakening security or
-skipping supported behavior. It is open and unclaimed. The original PG-5 sweep
+skipping supported behavior. It is in progress, with the native entropy refusal
+diagnosed above. The original PG-5 sweep
 succeeds with two actual selected
 tests: scene-corpus and certified-engine thread invariance at `{1,4,16}`.
 Exact-image capability jobs report success on Windows, macOS and
