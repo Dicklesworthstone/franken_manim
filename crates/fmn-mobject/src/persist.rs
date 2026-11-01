@@ -1573,6 +1573,39 @@ pub struct DecodedSceneState {
     pub updaters: UpdaterManifest,
 }
 
+struct SceneStateEnvelope<'a> {
+    frames_elapsed: i64,
+    fps: u32,
+    play_count: u64,
+    rng_state: ([u64; 2], [u64; 2]),
+    snapshot_bytes: &'a [u8],
+}
+
+impl<'a> SceneStateEnvelope<'a> {
+    fn read(bytes: &'a [u8]) -> Result<Self, PersistError> {
+        let mut r = Reader::open(
+            bytes,
+            SCENE_STATE_SCHEMA,
+            Limits::DEFAULT,
+            UnknownPolicy::Strict,
+        )?;
+        let frames_elapsed = r.get_i64()?;
+        let fps = r.get_u32()?;
+        let play_count = r.get_u64()?;
+        let state = [r.get_u64()?, r.get_u64()?];
+        let inc = [r.get_u64()?, r.get_u64()?];
+        let snapshot_bytes = r.get_bytes()?;
+        r.finish()?;
+        Ok(Self {
+            frames_elapsed,
+            fps,
+            play_count,
+            rng_state: (state, inc),
+            snapshot_bytes,
+        })
+    }
+}
+
 impl DecodedSceneState {
     /// Rebuild the generator exactly where it was.
     #[must_use]
@@ -1627,31 +1660,34 @@ impl SceneState {
     /// # Errors
     /// As [`Snapshot::from_bytes`].
     pub fn from_bytes(bytes: &[u8], stage: &Stage) -> Result<DecodedSceneState, PersistError> {
-        let mut r = Reader::open(
-            bytes,
-            SCENE_STATE_SCHEMA,
-            Limits::DEFAULT,
-            UnknownPolicy::Strict,
-        )?;
-        let frames_elapsed = r.get_i64()?;
-        let fps = r.get_u32()?;
-        let play_count = r.get_u64()?;
-        let state = [r.get_u64()?, r.get_u64()?];
-        let inc = [r.get_u64()?, r.get_u64()?];
+        let envelope = SceneStateEnvelope::read(bytes)?;
         // The nested snapshot document is borrowed straight out of the
         // envelope — no transit clone (fm-vek.7); its own decode re-opens
         // it as a container and budgets what it materializes.
-        let snapshot_bytes = r.get_bytes()?;
-        r.finish()?;
-        let decoded = Snapshot::from_bytes(snapshot_bytes, stage)?;
+        let decoded = Snapshot::from_bytes(envelope.snapshot_bytes, stage)?;
         Ok(DecodedSceneState {
-            frames_elapsed,
-            fps,
-            play_count,
-            rng_state: (state, inc),
+            frames_elapsed: envelope.frames_elapsed,
+            fps: envelope.fps,
+            play_count: envelope.play_count,
+            rng_state: envelope.rng_state,
             snapshot: decoded.snapshot,
             updaters: decoded.updaters,
         })
+    }
+
+    /// Read the exact clock from a checksum-verified scene envelope without
+    /// materializing its nested arena or updater manifest.
+    ///
+    /// This validates the envelope only, **not** the nested snapshot. It is
+    /// useful for bounded cold reconstruction that subsequently compares the
+    /// entire input document with independently captured canonical state.
+    /// Installing decoded state still requires [`Self::from_bytes`].
+    ///
+    /// # Errors
+    /// [`PersistError`] for a malformed, oversized or corrupt envelope.
+    pub fn frame_clock_from_bytes(bytes: &[u8]) -> Result<(i64, u32), PersistError> {
+        let envelope = SceneStateEnvelope::read(bytes)?;
+        Ok((envelope.frames_elapsed, envelope.fps))
     }
 }
 
@@ -1659,6 +1695,35 @@ impl SceneState {
 mod tests {
     use super::*;
     use crate::Mobject;
+
+    #[test]
+    fn scene_clock_reader_checks_envelope_without_claiming_snapshot_validation() {
+        let stage = Stage::new();
+        let state = SceneState::capture(&stage, 17, 30, 4, &Pcg64Dxsm::from_seed(9));
+        let bytes = state.to_bytes().unwrap();
+        assert_eq!(
+            SceneState::frame_clock_from_bytes(&bytes).unwrap(),
+            (17, 30)
+        );
+        let decoded = SceneState::from_bytes(&bytes, &stage).unwrap();
+        assert_eq!((decoded.frames_elapsed, decoded.fps), (17, 30));
+
+        let mut writer = Writer::new(SCENE_STATE_SCHEMA);
+        writer.put_i64(17).put_u32(30).put_u64(4);
+        for word in [0, 0, 0, 1] {
+            writer.put_u64(word);
+        }
+        writer.put_bytes(b"not a snapshot document");
+        let mut malformed = writer.finish().unwrap();
+        assert_eq!(
+            SceneState::frame_clock_from_bytes(&malformed).unwrap(),
+            (17, 30)
+        );
+        assert!(SceneState::from_bytes(&malformed, &stage).is_err());
+        malformed[0] ^= 1;
+        assert!(SceneState::frame_clock_from_bytes(&malformed).is_err());
+        assert!(SceneState::frame_clock_from_bytes(&bytes[..bytes.len() - 1]).is_err());
+    }
 
     fn entry_mut(snapshot: &mut Snapshot, mob: Mob) -> &mut SnapshotEntry {
         let (index, generation) = mob.parts();

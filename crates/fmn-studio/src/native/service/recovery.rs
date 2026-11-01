@@ -6,7 +6,7 @@
 //! snapshots are never mistaken for executable animation or editor state.
 
 use fmn_scene::Journal;
-use fmn_scene::studio_bridge::{SceneState, Stage};
+use fmn_scene::studio_bridge::SceneState;
 
 use super::super::edits::decode_state;
 use super::{NativeSceneWorker, execution_error, refuse_owned};
@@ -228,15 +228,17 @@ impl NativeSceneWorker {
                 "edited checkpoint requires native committed input support",
             ));
         }
-        let decoded = SceneState::from_bytes(restored.state, &Stage::new())
+        let (frames_elapsed, fps) = SceneState::frame_clock_from_bytes(restored.state)
             .map_err(|error| refuse_owned(WorkerErrorCode::CheckpointRejected, error))?;
         let frame = self
-            .target(decoded.frames_elapsed)
+            .target(frames_elapsed)
             .map_err(|error| refuse_owned(WorkerErrorCode::CheckpointRejected, error))?;
-        if decoded.fps != self.config.fps {
+        if fps != self.config.fps {
             return Err(refuse("native checkpoint uses a different frame clock"));
         }
-        drop(decoded); // Never install decoded updater identities as executable state.
+        // Only the clock is used to plan bounded execution. The unmaterialized
+        // snapshot, RNG, updater identities and every envelope byte remain
+        // untrusted until this independent factory/input execution agrees.
         self.require_input_budget(&restored.edits, frame)
             .map_err(|error| refuse_owned(WorkerErrorCode::CheckpointRejected, error))?;
         let mut program = self.fresh_at(frame, &restored.edits)?;

@@ -528,6 +528,73 @@ fn bad_requests_and_forged_checkpoints_do_not_move_the_native_owner() {
 }
 
 #[test]
+fn rehashed_rng_and_malformed_nested_snapshots_cannot_replace_live_callback_state() {
+    use fmn_hash::{Limits, Reader, UnknownPolicy, Writer};
+    use fmn_mobject::{SCENE_STATE_SCHEMA, SceneState, Stage};
+
+    let mut original = worker();
+    let entry = commit(&mut original, 3);
+    let saved = checkpoint(&entry, 0);
+    let mut reader = Reader::open(
+        &saved.state,
+        SCENE_STATE_SCHEMA,
+        Limits::DEFAULT,
+        UnknownPolicy::Strict,
+    )
+    .unwrap();
+    let frames_elapsed = reader.get_i64().unwrap();
+    let fps = reader.get_u32().unwrap();
+    let play_count = reader.get_u64().unwrap();
+    let mut rng_state = (
+        [reader.get_u64().unwrap(), reader.get_u64().unwrap()],
+        [reader.get_u64().unwrap(), reader.get_u64().unwrap()],
+    );
+    let snapshot = reader.get_bytes().unwrap();
+    reader.finish().unwrap();
+    rng_state.0[0] ^= 1;
+    let encode = |snapshot: &[u8]| {
+        let mut writer = Writer::new(SCENE_STATE_SCHEMA);
+        writer
+            .put_i64(frames_elapsed)
+            .put_u32(fps)
+            .put_u64(play_count);
+        for word in [
+            rng_state.0[0],
+            rng_state.0[1],
+            rng_state.1[0],
+            rng_state.1[1],
+        ] {
+            writer.put_u64(word);
+        }
+        writer.put_bytes(snapshot);
+        writer.finish().unwrap()
+    };
+    // Keep the original nested document, including updater identities. A
+    // decoded arena cannot re-encode those until callbacks are rebound.
+    let forged_rng = encode(snapshot);
+    assert!(SceneState::from_bytes(&forged_rng, &Stage::new()).is_ok());
+    let malformed_snapshot = encode(b"invalid nested snapshot");
+    assert!(SceneState::from_bytes(&malformed_snapshot, &Stage::new()).is_err());
+
+    for state in [forged_rng, malformed_snapshot] {
+        assert_eq!(SceneState::frame_clock_from_bytes(&state).unwrap(), (3, 30));
+        let mut recovered = worker();
+        let before = seek(&mut recovered, 2);
+        let error = recovered
+            .handle(SupervisorRequest::RestoreCheckpoint(Checkpoint {
+                state_hash: protocol_digest(&state),
+                state,
+                ..saved.clone()
+            }))
+            .unwrap_err();
+        assert_eq!(error.code, WorkerErrorCode::CheckpointRejected);
+        assert_eq!(recovered.journal_position(), 0);
+        assert_eq!(recovered.program().unwrap().frame_index(), 2);
+        assert_eq!(png(&seek(&mut recovered, 2)), png(&before));
+    }
+}
+
+#[test]
 fn inspector_and_overlay_respect_wire_limits_without_claiming_truncated_success() {
     let mut policy = config();
     policy.limits.max_studio_data_bytes = 16;
