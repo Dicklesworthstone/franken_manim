@@ -1,6 +1,7 @@
 """Actual portal PNGs and state under exact declared-pure rate preparation."""
 from pathlib import Path
 import math
+import sys
 import tempfile
 
 import numpy as np
@@ -456,7 +457,12 @@ def embedded_certification_refuses_before_mutation(root):
                                   sources={"empty.py": b""}):
             raise AssertionError("unidentified embedded runtime was certified")
     except m._CapabilityError as error:
-        assert "portal runtime requires a file-backed native extension" in str(error), error
+        expected = (
+            "windows-x86-64 is excluded from certified reproducibility by ADR-0019"
+            if sys.platform == "win32"
+            else "portal runtime requires a file-backed native extension"
+        )
+        assert expected in str(error), error
     else:
         raise AssertionError("embedded certification did not fail closed")
     _assert_play_state(scene, before)

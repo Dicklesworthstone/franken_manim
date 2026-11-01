@@ -14823,15 +14823,18 @@ writer = writer_mod.SceneFileWriter(
 assert writer.scene is writer_scene
 assert writer.file_name == "demo"
 assert writer.get_output_file_name() == "demo"
-assert writer.get_output_file_rootname() == "/tmp/out/demo"
-assert writer.get_image_file_path() == "/tmp/out/demo.png"
-assert writer.get_movie_file_path() == "/tmp/out/demo.mp4"
-assert writer.get_insert_file_path(2) == "/tmp/out/demo_2.mp4"
+# The public writer uses the host's native path spelling, like Reference's
+# os.path.join. Keep the exact names and layout on every host.
+writer_root = pathlib.Path("/tmp/out") / "demo"
+assert writer.get_output_file_rootname() == str(writer_root)
+assert writer.get_image_file_path() == str(writer_root) + ".png"
+assert writer.get_movie_file_path() == str(writer_root) + ".mp4"
+assert writer.get_insert_file_path(2) == str(writer_root) + "_2.mp4"
 # Subdivided clips are DIRECTORY/SCENE/clips/segment-NNNNNN (BN-15); the
 # partial-movie helpers name that layout (fm-fxov).
-assert writer.init_partial_movie_directory() == "/tmp/out/demo/clips"
+assert writer.init_partial_movie_directory() == str(writer_root / "clips")
 assert writer.get_next_partial_movie_path() == (
-    "/tmp/out/demo/clips/segment-000000.mp4"
+    str(writer_root / "clips" / "segment-000000.mp4")
 )
 assert writer.should_open_file() is True
 assert writer.has_progress_display() is True
@@ -15223,7 +15226,12 @@ console_code, console_out, console_err = run_portal_console(
 assert console_code == 4
 assert console_out == ""
 assert "render-capability-unavailable" in console_err
-assert "input closure" in console_err
+expected_certification_refusal = (
+    "windows-x86-64 is excluded from certified reproducibility by ADR-0019"
+    if sys.platform == "win32"
+    else "input closure"
+)
+assert expected_certification_refusal in console_err, console_err
 
 def verify_portal_console_scene():
     source = pathlib.Path(__file__).with_name("console_scene.py")
@@ -19565,7 +19573,7 @@ named_writer_scene = Scene(
 assert named_writer_scene.file_writer_config["file_name"] == "clip"
 assert named_writer_scene.file_writer.scene is named_writer_scene
 assert named_writer_scene.file_writer.get_movie_file_path() == (
-    "/tmp/out/clip.mov"
+    str(pathlib.Path("/tmp/out") / "clip.mov")
 )
 assert named_writer_scene.file_writer.has_progress_display() is True
 
@@ -19581,7 +19589,7 @@ overlay_writer_scene = _ConfiguredWriterScene(
     file_writer_config=dict(movie_file_extension=".mov")
 )
 assert overlay_writer_scene.file_writer.get_movie_file_path() == (
-    "/tmp/out/base.mov"
+    str(pathlib.Path("/tmp/out") / "base.mov")
 )
 
 try:
@@ -21759,7 +21767,14 @@ for _key, _subdir in _dirs["subdirs"].items():
     assert _dirs[_key] == os.path.join(_dirs["base"], _subdir), _key
 assert _dirs_module.get_sound_dir() == _dirs["sounds"]
 assert _dirs_module.get_temp_dir() == (_dirs.get("temporary_storage") or tempfile.gettempdir())
-assert _dirs_module.get_cache_dir().endswith("manim")
+if os.name == "nt":
+    # Reference's appdirs default includes the author and Cache components.
+    assert _dirs_module.get_cache_dir() == (_dirs.get("cache") or os.path.join(
+        os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"),
+        "manim", "manim", "Cache",
+    ))
+else:
+    assert _dirs_module.get_cache_dir().endswith("manim")
 _cwd = os.getcwd()
 with tempfile.TemporaryDirectory() as _scratch:
     os.chdir(_scratch)
@@ -23491,20 +23506,18 @@ _named = manimlib.SceneFileWriter(
 )
 _check("output name honors explicit file name",
        _named.get_output_file_name() == "custom_name")
+_named_root = pathlib.Path("media/out") / "custom_name"
 _check("rootname joins directory",
-       str(_named.get_output_file_rootname()).endswith("media/out/custom_name")
-       or str(_named.get_output_file_rootname()).endswith(
-           "media" + str(pathlib.Path("/")) [0:0] + "out/custom_name"
-       ) or "custom_name" in str(_named.get_output_file_rootname()))
+       _named.get_output_file_rootname() == str(_named_root))
 _check("image path appends png suffix",
-       _named.get_image_file_path().endswith("custom_name.png"))
+       _named.get_image_file_path() == str(_named_root) + ".png")
 _check("movie path normalizes extension dot",
-       _named.get_movie_file_path().endswith("custom_name.mov"))
+       _named.get_movie_file_path() == str(_named_root) + ".mov")
 _check("insert path indexes per play",
-       _named.get_insert_file_path(3).endswith("custom_name_3.mov"))
+       _named.get_insert_file_path(3) == str(_named_root) + "_3.mov")
 _check("partial movie path names the next subdivided clip (BN-15)",
-       _named.get_next_partial_movie_path().endswith(
-           "custom_name/clips/segment-000000.mov"
+       _named.get_next_partial_movie_path() == str(
+           _named_root / "clips" / "segment-000000.mov"
        ))
 _check("flag queries reflect construction",
        _named.should_open_file() is False

@@ -440,7 +440,9 @@ def reference_flags_and_destinations():
         data = artifact.read_bytes()
         assert data.startswith(b'\x89PNG\r\n\x1a\n')
         assert struct.unpack('>II', data[16:24]) == dimensions
-        assert report['destination'] == str(artifact)
+        # Native publication may canonicalize Windows short names/prefixes;
+        # the receipt must identify this exact published file, not a copy.
+        assert Path(report['destination']).samefile(artifact), (report['destination'], str(artifact))
         assert report['fps'] == 24 and report['resolution'] == list(dimensions)
 
 
