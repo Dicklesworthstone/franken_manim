@@ -619,6 +619,45 @@ an earlier duplicate. ADR-0030 records the ruling. Coverage:
 `test_nested_add_preserves_each_duplicate_roots_relative_order` in
 `crates/fmn-python/tests/native_curved_lifecycle.py`.
 
+## C-46 — rescaling a horizontal partial path preserves its zero height
+
+At Reference `6199a00d`, a partial `Square(side_length=.98)` over the
+interval [.08, .18] is horizontal but can acquire a tiny positive bounding
+height. `Mobject.rescale_to_fit` (`mobject.py:1149–1156`) divides by that
+extent; `set_height(2.02)` then amplifies its width into millions of units.
+The exact noise magnitude depends on the numerical environment.
+
+**FrankenManim:** the partial path has zero height. Setting its height
+preserves its points and zero extent. The existing nonzero rescale path
+remains active: ordinary squares and side lengths down to 1e-12 still reach height 2.02.
+
+**Migration:** construct geometry with a nonzero height when a height change
+is intended. Remove workarounds that exploit the Reference's roundoff to
+magnify a horizontal path. ADR-0031 records the ruling. Coverage:
+`test_horizontal_partial_rescale_preserves_zero_extent` in
+`crates/fmn-python/tests/native_polygon_lifecycle.py`.
+
+## C-47 — a replacement shape fades without rebuilding its former Arrow
+
+The Reference's `FadeIn.create_starting_mobject` (`fading.py:39–43`) scales
+the starting copy by one. After an Arrow has become a four-sided
+`RegularPolygon`, `Arrow.scale` (`geometry.py:1202–1205`) calls
+`reset_points_around_ends` (`geometry.py:705–710`) and rebuilds an Arrow.
+That changes nine aligned points to fifteen after alignment; interpolation
+then raises a broadcasting error against the nine-point target.
+
+**FrankenManim:** `FadeIn` uses the object's current replacement geometry.
+The original Arrow-to-polygon example completes with the polygon's exact
+points and final pixels. Its changing fade frames agree at one and four
+threads. This ruling concerns fade preparation; explicit Arrow rebuilding
+keeps its own API contract.
+
+**Migration:** fade the replacement shape directly. Construct or explicitly
+regenerate an Arrow when arrow geometry is intended. ADR-0031 records the
+ruling. Coverage:
+`test_become_polygon_then_fade_in_preserves_geometry_and_pixels` in
+`crates/fmn-python/tests/native_arrow_lifecycle.py`.
+
 ## `shift` takes a scalar or one 3-vector (fm-mumk)
 
 The Reference's `Mobject.shift` adds its argument to the points with numpy

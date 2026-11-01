@@ -13,6 +13,54 @@ from manimlib.mobject.geometry import Arrow as QualifiedArrow
 
 
 class NativeArrowLifecycle(unittest.TestCase):
+    def test_become_polygon_then_fade_in_preserves_geometry_and_pixels(self):
+        from PIL import Image
+
+        root = Path(tempfile.mkdtemp(prefix="fmn-arrow-become-fade-"))
+        sequences = []
+        for threads in (1, 4):
+            scene = m.Scene()
+            polygon = m.RegularPolygon(n=4)
+            arrow = m.Arrow(np.array([.73, 1.17, 0]), np.array([.66, .43, 0]), buff=.17)
+            arrow.become(polygon)
+            expected = polygon.get_points().copy()
+            destination = root / str(threads)
+            with scene.render_session(destination, format="png_sequence", fps=4,
+                                      resolution=(96, 54), threads=threads):
+                scene.play(m.FadeIn(arrow))
+                scene.wait(.25)
+            np.testing.assert_array_equal(arrow.get_points(), expected)
+            self.assertTrue(any(obj is arrow for obj in scene.mobjects))
+            frames = [path.read_bytes() for path in sorted(destination.glob("*.png"))]
+            self.assertEqual(len(frames), 5)
+            self.assertGreater(len(set(frames)), 2)
+            decoded = []
+            for path in sorted(destination.glob("*.png")):
+                with Image.open(path) as frame:
+                    rgba = np.asarray(frame.convert("RGBA"))
+                self.assertEqual(rgba.shape, (54, 96, 4))
+                decoded.append(rgba)
+            self.assertGreater(len({rgba.tobytes() for rgba in decoded}), 2)
+            distances = [int(np.abs(rgba.astype(np.int16) -
+                                    decoded[-1].astype(np.int16)).sum())
+                         for rgba in decoded]
+            self.assertGreater(distances[0], 0)
+            self.assertEqual(distances[-1], 0)
+            self.assertEqual(distances, sorted(distances, reverse=True))
+            sequences.append(frames)
+        self.assertEqual(sequences[0], sequences[1])
+        expected_png = root / "polygon.png"
+        scene = m.Scene()
+        with scene.render_session(expected_png, format="png", fps=4,
+                                  resolution=(96, 54), threads=1):
+            scene.add(m.RegularPolygon(n=4))
+        self.assertEqual(sequences[0][-1], expected_png.read_bytes())
+        with Image.open(expected_png) as image:
+            pixels = np.asarray(image.convert("RGBA"))
+        self.assertEqual(pixels.shape, (54, 96, 4))
+        self.assertGreater(np.unique(pixels.reshape(-1, 4), axis=0).shape[0], 1)
+        print("retained replacement fade frames:", root)
+
     def assert_points(self, actual, expected):
         np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-5)
 

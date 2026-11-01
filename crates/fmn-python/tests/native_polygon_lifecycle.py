@@ -66,6 +66,22 @@ def png_pixels(path):
 
 
 class NativePolygonLifecycle(unittest.TestCase):
+    def test_horizontal_partial_rescale_preserves_zero_extent(self):
+        partial = m.Square(side_length=.98)
+        partial.pointwise_become_partial(partial.copy(), .08, .18)
+        before = partial.get_points().copy()
+        self.assertEqual(partial.get_height(), 0)
+        self.assertIs(partial.set_height(2.02), partial)
+        np.testing.assert_array_equal(partial.get_points(), before)
+        self.assertEqual(partial.get_height(), 0)
+        self.assertLess(partial.get_width(), .4)
+        for side in (.98, 1e-6, 1e-9, 1e-12):
+            with self.subTest(nonzero_side=side):
+                control = m.Square(side_length=side)
+                self.assertGreater(control.get_height(), 0)
+                control.set_height(2.02)
+                self.assertAlmostEqual(control.get_height(), 2.02, places=6)
+
     def test_native_families_dispatch_all_hooks_once(self):
         for base, args, kwargs in CASES:
             with self.subTest(base=base.__name__):
