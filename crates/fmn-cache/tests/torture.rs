@@ -195,7 +195,7 @@ fn concurrent_first_openers_leave_one_valid_owned_root() {
 }
 
 #[test]
-fn concurrent_clearers_have_one_linearized_clear_and_one_miss() {
+fn concurrent_clearers_preserve_the_root_and_refuse_stale_generations() {
     let root = scratch("concurrent_clear");
     let store = open(&root);
     let namespace = store
@@ -204,6 +204,7 @@ fn concurrent_clearers_have_one_linearized_clear_and_one_miss() {
     namespace.put(&key(3), &payload(3)).expect("seed cache");
     drop(namespace);
     drop(store);
+    let owner_before = std::fs::read(root.join("STORE_OWNER")).expect("original owner manifest");
 
     let first = CacheClearAuthorization::authorize(&root).expect("first authorization");
     let second = CacheClearAuthorization::authorize(&root).expect("second authorization");
@@ -217,20 +218,109 @@ fn concurrent_clearers_have_one_linearized_clear_and_one_miss() {
         }));
     }
     barrier.wait();
-    let mut outcomes = handles
-        .into_iter()
-        .map(|handle| handle.join().expect("clear thread").expect("clear result"))
-        .collect::<Vec<_>>();
-    outcomes.sort_by_key(|outcome| match outcome {
-        CacheClearOutcome::Cleared => 0,
-        CacheClearOutcome::AlreadyAbsent => 1,
-    });
-    assert_eq!(
-        outcomes,
-        [CacheClearOutcome::Cleared, CacheClearOutcome::AlreadyAbsent]
+    let (mut cleared, mut absent, mut stale) = (0, 0, 0);
+    for handle in handles {
+        match handle.join().expect("clear thread") {
+            Ok(CacheClearOutcome::Cleared) => cleared += 1,
+            Ok(CacheClearOutcome::AlreadyAbsent) => absent += 1,
+            Err(CacheError::RootRefused {
+                root: refused_root,
+                code: RootRefusalCode::GenerationChanged,
+                ..
+            }) => {
+                assert_eq!(refused_root, root);
+                stale += 1;
+            }
+            other => panic!("unexpected concurrent clear result: {other:?}"),
+        }
+    }
+    // An authorization is generation-bound. A delayed clearer must refuse
+    // after its peer rotates the owner; an overlapping miss can rotate the
+    // owner before the namespace winner reaches its own rotation check.
+    assert!(
+        matches!((cleared, absent, stale), (1, 1, 0) | (1, 0, 1) | (0, 1, 1)),
+        "unexpected clear/miss/stale counts: {cleared}/{absent}/{stale}"
+    );
+    assert!(
+        !root.join("ns").exists(),
+        "the seeded namespace must be cleared"
     );
     assert!(root.join("STORE_OWNER").is_file());
     assert!(root.join("STORE_FORMAT").is_file());
+    assert_ne!(
+        std::fs::read(root.join("STORE_OWNER")).expect("rotated owner manifest"),
+        owner_before
+    );
+    CacheClearAuthorization::authorize(&root).expect("the retained root remains valid and owned");
+}
+
+#[test]
+fn clear_authorizations_cannot_cross_a_completed_clear_generation() {
+    let root = scratch("clear_authorization_generation");
+    let store = open(&root);
+    let namespace = store
+        .namespace("shared", 1, NamespacePolicy::default())
+        .expect("original namespace");
+    namespace
+        .put(&key(52), &payload(52))
+        .expect("seed original cache");
+    drop(namespace);
+    drop(store);
+    let winner = CacheClearAuthorization::authorize(&root).expect("winning authorization");
+    let stale = CacheClearAuthorization::authorize(&root).expect("second old authorization");
+    assert_eq!(
+        winner.clear().expect("first clear"),
+        CacheClearOutcome::Cleared
+    );
+
+    let fresh_store = open(&root);
+    let fresh_namespace = fresh_store
+        .namespace("shared", 1, NamespacePolicy::default())
+        .expect("new-generation namespace");
+    fresh_namespace
+        .put(&key(53), &payload(53))
+        .expect("seed new-generation cache");
+    let owner_before = std::fs::read(root.join("STORE_OWNER")).expect("new owner manifest");
+    let index_path = root.join("ns/shared/v1/index");
+    let index_before = std::fs::read(&index_path).expect("new namespace index");
+    match stale.clear() {
+        Err(CacheError::RootRefused {
+            root: refused_root,
+            code: RootRefusalCode::GenerationChanged,
+            ..
+        }) => assert_eq!(refused_root, root),
+        other => panic!("expected stale-generation refusal, got {other:?}"),
+    }
+    assert_eq!(
+        std::fs::read(root.join("STORE_OWNER")).expect("owner survives"),
+        owner_before
+    );
+    assert_eq!(
+        std::fs::read(&index_path).expect("index survives"),
+        index_before
+    );
+    assert_eq!(
+        fresh_namespace
+            .get(&key(53))
+            .expect("new-generation payload survives"),
+        Some(payload(53))
+    );
+    drop(fresh_namespace);
+    drop(fresh_store);
+    assert_eq!(
+        CacheClearAuthorization::authorize(&root)
+            .expect("fresh authorization")
+            .clear()
+            .expect("fresh clear"),
+        CacheClearOutcome::Cleared
+    );
+    assert_eq!(
+        CacheClearAuthorization::authorize(&root)
+            .expect("fresh absent authorization")
+            .clear()
+            .expect("fresh absent clear"),
+        CacheClearOutcome::AlreadyAbsent
+    );
 }
 
 #[test]
