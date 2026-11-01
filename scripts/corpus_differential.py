@@ -183,6 +183,8 @@ def _tiers(ref, portal, exclusions):
         result = sf.diff_subject(ref, portal, exclusions, ignore=ignore)
         tiers[tier] = {"verdict": result["verdict"], "first_difference": result["first_difference"],
                        "difference_count": result["difference_count"], "excluded": result["excluded"]}
+        if "incomplete_captures" in result:
+            tiers[tier]["incomplete_captures"] = result["incomplete_captures"]
     tiers["geometry"]["envelope_violations"] = result["envelope_violations"]
     return tiers
 
@@ -391,7 +393,9 @@ def triage_lines(both, triage):
         labels[label.split(" ")[0]] = labels.get(label.split(" ")[0], 0) + 1
         rows.append(f"| `{scene}` | `{first}` | {label} | {ref} |")
     gone = sorted(scene for scene in triage if scene not in differing
-                  and any(f"{r['module']}:{r['scene']}" == scene for r in both))
+                  and any(f"{r['module']}:{r['scene']}" == scene
+                          and r["structure"]["verdict"] in ("equal", "equal-with-exclusions", "differs")
+                          for r in both))
     lines = ["", "## Structure differences, triaged per scene", "",
              "Labels come from `docs/ratchet/differential_triage.tsv`. A stale label must be re-triaged.", "",
              "| label | scenes |", "|---|---|"]
@@ -415,12 +419,22 @@ def write_dashboard(records, path, title, triage=None, measured_commit=None):
              f"| candidates | {len(records)} |",
              f"| ran in both engines | {len(both)} |"]
     for tier in ("structure", "geometry"):
-        for verdict in ("equal", "equal-with-exclusions", "differs"):
+        for verdict in ("equal", "equal-with-exclusions", "differs", "incomplete"):
             lines.append(f"| {tier}: {verdict} | {count(both, tier, verdict)} |")
     violating = [r for r in both if r["geometry"].get("envelope_violations")]
     lines.append(f"| geometry: violates an envelope | {len(violating)} |")
     for outcome in ("reference-only", "portal-only", "neither"):
         lines.append(f"| {outcome} | {sum(1 for r in records if r['outcome'] == outcome)} |")
+    incomplete = [r for r in both if r["structure"]["verdict"] == "incomplete"]
+    if incomplete:
+        lines += ["", "## Incomplete captures", "",
+                  "These scenes ran, but bounded prefixes cannot establish complete parity. "
+                  "Available differences remain in the raw records; incomplete inputs fail the comparison gate.", "",
+                  "| scene | provider | captured members | capture limit |", "|---|---|---|---|"]
+        for record in incomplete:
+            for side, capture in sorted(record["structure"]["incomplete_captures"].items()):
+                lines.append(f"| `{record['module']}:{record['scene']}` | {side} | "
+                             f"{capture['captured_members']} | {capture['truncated_at']} |")
     triaged = {}
     for r in records:
         if "triage" in r:
@@ -586,6 +600,8 @@ def minimize(args, module, scene, target=None, budget=60, envelope=False):
                                ignore=frozenset() if envelope else sf.GEOMETRY_FACTS)
 
     def keys(result):
+        if result["verdict"] == "incomplete":
+            return set()
         if envelope:
             return {(v["class"], v["row"]) for v in result["envelope_violations"]}
         return {(d["class"], d["fact"]) for d in result["differences"]}
@@ -593,6 +609,8 @@ def minimize(args, module, scene, target=None, budget=60, envelope=False):
     full = differences_for(list(range(len(statements))))
     if full is None:
         return {"module": module, "scene": scene, "error": "the full scene did not run in both engines"}
+    if full["verdict"] == "incomplete":
+        return {"module": module, "scene": scene, "error": "the full scene's structural capture is incomplete"}
     if not keys(full):
         what = "breaks no envelope" if envelope else "does not differ structurally"
         return {"module": module, "scene": scene, "error": f"the full scene {what}"}

@@ -546,7 +546,8 @@ def compare(ref: dict, portal: dict, exclusions) -> dict:
         result["differences"] = extra + result["differences"]
         result["first_difference"] = result["differences"][0]
         result["difference_count"] += len(extra)
-        result["verdict"] = "differs"
+        if result["verdict"] != "incomplete":
+            result["verdict"] = "differs"
     return result
 
 
@@ -554,7 +555,7 @@ def signature(result: dict):
     """What a minimization must preserve: the first difference's fact, and for an error
     its two exception classes."""
     first = result.get("first_difference")
-    if not first:
+    if not first or result["verdict"] == "incomplete":
         return None
     if first["fact"] == "error":
         return ("error", str(first["reference"]).split(":")[0], str(first["portal"]).split(":")[0])
@@ -605,7 +606,7 @@ def minimize_program(engines: Engines, program: dict, target, exclusions, work: 
         batch = [program_record(f"{program['id']}-m{k}", [program["statements"][i] for i in idx],
                                 program["roots"]) for k, idx in enumerate(candidates)]
         refs, portals = run_both(engines, batch, work / f"round{next(rounds)}")
-        return [signature(compare(r, p, exclusions)) == target for r, p in zip(refs, portals)]
+        return [signature(compare(r, p, exclusions)) == target for r, p in zip(refs, portals)]  # ubs:ignore — signature is the public fact/class/error-kind minimization key, never a credential or authenticator.
 
     keep = ddmin(range(len(program["statements"])), reproduces, budget)
     statements = [program["statements"][i] for i in keep]

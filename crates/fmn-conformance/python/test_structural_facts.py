@@ -9,9 +9,12 @@ import copy
 import json
 import math
 from pathlib import Path
+import subprocess
 import sys
+import tempfile
 import types
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import structural_facts as sf  # noqa: E402
@@ -273,6 +276,76 @@ class Diff(unittest.TestCase):
         self.assertEqual(sf.diff_subject(a, b)["verdict"], "equal")
         c = facts([Square(SQUARE)])
         self.assertEqual(sf.diff_subject(a, c)["verdict"], "differs")
+
+
+class Completeness(unittest.TestCase):
+    def test_capture_boundary_distinguishes_a_complete_tree_from_a_prefix(self):
+        root = Square(SQUARE)
+        with patch.object(sf, "MAX_MEMBERS", 3):
+            complete = facts([root] * 3)
+            partial = facts([root] * 4)
+        self.assertNotIn("truncated_at", complete)
+        self.assertEqual((partial["truncated_at"], len(partial["members"])), (3, 3))
+        self.assertEqual(sf.diff_subject(complete, complete)["verdict"], "equal")
+        self.assertEqual(sf.diff_subject(partial, partial)["verdict"], "incomplete")
+
+    def test_either_capture_limit_prevents_equality_in_both_tiers(self):
+        complete = facts([Square(SQUARE)])
+        for sides in (("reference",), ("portal",), ("reference", "portal")):
+            for ignore in (frozenset(), sf.GEOMETRY_FACTS):
+                with self.subTest(sides=sides, ignore=ignore):
+                    records = {side: copy.deepcopy(complete) for side in ("reference", "portal")}
+                    for side in sides:
+                        records[side]["truncated_at"] = 20000
+                    result = sf.diff_subject(records["reference"], records["portal"], ignore=ignore)
+                    self.assertEqual(result["verdict"], "incomplete")
+                    self.assertEqual(result["incomplete_captures"], {
+                        side: {"truncated_at": 20000, "captured_members": 1} for side in sides
+                    })
+                    self.assertEqual(result["difference_count"], 0)
+
+    def test_partial_captures_preserve_observed_differences(self):
+        ref, portal = facts([Square(SQUARE)]), facts([Polygon(SQUARE)])
+        complete = sf.diff_subject(ref, portal)
+        self.assertEqual(complete["first_difference"]["fact"], "class")
+        portal["truncated_at"] = 20000
+        partial = sf.diff_subject(ref, portal)
+        self.assertEqual(partial["verdict"], "incomplete")
+        for key in ("difference_count", "first_difference", "differences", "excluded", "envelope_violations"):
+            self.assertEqual(partial[key], complete[key], key)
+
+    def test_check_gate_rejects_matching_partial_prefixes(self):
+        partial = facts([Square(SQUARE)])
+        partial["truncated_at"] = 20000
+        with patch.object(sf, "extract_constructions", return_value=iter([partial])):
+            summary = sf.check_constructions(sf.canonical(partial), '{"exclusions": []}', "unit")
+        self.assertEqual(summary["summary"], {"incomplete": 1})
+        self.assertEqual(summary["compared"], 1)
+        self.assertEqual([row["verdict"] for row in summary["failing"]], ["incomplete"])
+
+    def test_diff_cli_fails_partial_captures_and_accepts_complete_ones(self):
+        complete = facts([Square(SQUARE)])
+        directory = Path(tempfile.mkdtemp(prefix="fmn-structural-completeness-"))
+        # Retain the tiny CLI inputs; the owner forbids manual file deletion.
+        for index, sides in enumerate(((), ("reference",), ("portal",), ("reference", "portal"))):
+            with self.subTest(sides=sides):
+                reference = directory / f"reference-{index}.ndjson"
+                portal = directory / f"portal-{index}.ndjson"
+                for side, path in (("reference", reference), ("portal", portal)):
+                    record = dict(complete)
+                    if side in sides:
+                        record["truncated_at"] = 20000
+                    path.write_text(sf.canonical(record) + "\n", encoding="utf-8")
+                result = subprocess.run(
+                    [sys.executable, sf.__file__, "diff", str(reference), str(portal)],
+                    capture_output=True, text=True, check=False, timeout=30,
+                )
+                self.assertEqual(result.stderr, "")
+                self.assertEqual(result.returncode, int(bool(sides)), result.stdout)
+                rows = sf.parse_ndjson(result.stdout)
+                verdict = "incomplete" if sides else "equal"
+                self.assertEqual(rows[0]["verdict"], verdict)
+                self.assertEqual(rows[-1]["summary"], {verdict: 1})
 
 
 class Exclusions(unittest.TestCase):
@@ -549,6 +622,17 @@ class Envelopes(unittest.TestCase):
         self.assertEqual(result["excluded"]["bug"], 1)
         twice = sf.diff_subject(ref, self.square(lambda x, y, z: (2.0 * x, y, z)), [self.note(), bug])
         self.assertEqual(twice["first_difference"]["envelope_violation"]["row"], "bn-e")
+
+    def test_incomplete_captures_keep_measured_envelope_violations(self):
+        ref = self.square(lambda x, y, z: (x, y, z))
+        portal = self.square(lambda x, y, z: (1.5 * x, y, z))
+        complete = sf.diff_subject(ref, portal, [self.note()])
+        self.assertEqual(complete["envelope_violations"][0]["size_rel"], 0.5)
+        portal["truncated_at"] = 20000
+        partial = sf.diff_subject(ref, portal, [self.note()])
+        self.assertEqual(partial["verdict"], "incomplete")
+        self.assertEqual(partial["envelope_violations"], complete["envelope_violations"])
+        self.assertEqual(partial["differences"], complete["differences"])
 
     def test_an_edge_placed_object_may_move_its_centre_by_half_its_size_change(self):
         ref, rows = self.square(lambda x, y, z: (x, y, z)), [self.note()]

@@ -69,8 +69,16 @@ a **version bump**.
   difference. Everything else is exact: class, MRO, counts, field names,
   strings, digests.
 - A subject that raised on both sides with the same exception class is equal.
-- Verdicts are `equal`, `equal-with-exclusions`, `differs` and `one-sided`.
+- Verdicts are `equal`, `equal-with-exclusions`, `differs`, `one-sided` and
+  `incomplete`.
   The first difference is reported with its path, fact, and both values.
+- Either input's `truncated_at` makes the verdict `incomplete`, including
+  matching partial prefixes. `incomplete_captures` names each affected provider
+  (`reference` or `portal`) with its `truncated_at` and `captured_members`.
+  Available differences, exclusions and envelope violations are retained as
+  observations; they do not establish complete parity. Both `check` and `diff`
+  exit nonzero for incomplete inputs. Corpus summaries count them separately,
+  and minimizers cannot use them as reproducing differences (fm-5wq.71).
 
 ## Exclusions (`crates/fmn-conformance/fixtures/structural_facts/exclusions.json`)
 

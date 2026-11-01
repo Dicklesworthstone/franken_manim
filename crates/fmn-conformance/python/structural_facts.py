@@ -774,8 +774,13 @@ def diff_subject(ref: dict, portal: dict, exclusions=(), limit: int = 50,
     """Compare one subject's facts. Differences are reported in depth-first path order.
 
     `ignore` names top-level facts to skip; `GEOMETRY_FACTS` gives the structure tier.
+    Truncated captures retain their observations but cannot establish a complete verdict.
     """
     subject = ref.get("subject", portal.get("subject"))
+    incomplete = {
+        side: {"truncated_at": record["truncated_at"], "captured_members": len(record.get("members", ()))}
+        for side, record in (("reference", ref), ("portal", portal)) if "truncated_at" in record
+    }
     differences, excluded = [], {}
     classes = {m["path"]: m["class"] for m in ref.get("members", ())}
     # Points over each member's whole family: a group root has no points of its
@@ -869,6 +874,8 @@ def diff_subject(ref: dict, portal: dict, exclusions=(), limit: int = 50,
                 note("", None, "time.bn02" if bn02 else key, a, b)
     shown = [d for d in differences if d is not None]
     verdict = "differs" if differences else ("equal-with-exclusions" if excluded else "equal")
+    if incomplete:
+        verdict = "incomplete"
     return {
         "schema": DIFF_SCHEMA,
         "version": VERSION,
@@ -879,6 +886,7 @@ def diff_subject(ref: dict, portal: dict, exclusions=(), limit: int = 50,
         "differences": shown,
         "excluded": dict(sorted(excluded.items())),
         "envelope_violations": violations,
+        **({"incomplete_captures": incomplete} if incomplete else {}),
     }
 
 
@@ -979,7 +987,7 @@ def check_constructions(reference_text: str, exclusions_text: str, engine_id: st
         scope = "classes"
     results, summary = diff_files(reference, portal, exclusions, scope=scope)
     compared = sum(1 for r in results if r["verdict"] != "one-sided")
-    failing = [r for r in results if r["verdict"] in ("differs", "one-sided")]
+    failing = [r for r in results if r["verdict"] not in ("equal", "equal-with-exclusions")]
     summary.update(compared=compared, failing=failing)
     if compared == 0:
         summary["failing"].append({"subject": "*", "verdict": "no-subjects-compared"})
@@ -1065,7 +1073,7 @@ def main(argv=None) -> int:
     for result in results:
         print(canonical(result))
     print(canonical(summary))
-    failing = any(r["verdict"] in ("differs", "one-sided") for r in results)
+    failing = any(r["verdict"] not in ("equal", "equal-with-exclusions") for r in results)
     return 1 if failing or summary["stale_open_bead_exclusions"] else 0
 
 

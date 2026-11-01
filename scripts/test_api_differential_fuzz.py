@@ -226,6 +226,18 @@ class CompareTests(unittest.TestCase):
         result = fuzz.compare(ref, portal, [])
         self.assertEqual(result["first_difference"]["fact"], "scene")
 
+    def test_truncated_observations_are_counted_but_never_minimized_as_a_complete_difference(self):
+        ref = {"subject": "p", "members": [], "scene": [0, 1], "absent_roots": []}
+        portal = {"subject": "p", "members": [], "scene": [1, 0], "absent_roots": [],
+                  "truncated_at": 20000}
+        result = fuzz.compare(ref, portal, [])
+        self.assertEqual(result["verdict"], "incomplete")
+        self.assertEqual(result["first_difference"]["fact"], "scene")
+        self.assertEqual(result["incomplete_captures"], {
+            "portal": {"truncated_at": 20000, "captured_members": 0}
+        })
+        self.assertIsNone(fuzz.signature(result))
+
     def test_a_program_an_engine_never_ran_is_not_equal(self):
         exited = {"subject": "p", "error": "EngineExit: reference exited 1 before this program"}
         both = fuzz.compare(exited, {**exited, "error": "EngineExit: portal exited 1"}, [])

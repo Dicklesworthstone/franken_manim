@@ -26,6 +26,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import corpus_differential as cd  # noqa: E402
@@ -138,6 +139,16 @@ class ClassifierTests(unittest.TestCase):
         self.assertEqual(record["engines"], "reference=R portal=P")
         self.assertIsNotNone(record["portal"]["facts_sha"])
         self.assertIsNotNone(record["reference"]["facts_sha"])
+
+    def test_both_tiers_expose_capture_limits_without_losing_observed_facts(self):
+        reference = facts("S", [member("0", "Circle", 4)])
+        portal = facts("S", [member("0", "Square", 4)], truncated_at=20000)
+        for tier in cd._tiers(reference, portal, ()).values():
+            self.assertEqual(tier["verdict"], "incomplete")
+            self.assertEqual(tier["incomplete_captures"], {
+                "portal": {"truncated_at": 20000, "captured_members": 1}
+            })
+            self.assertEqual(tier["first_difference"]["fact"], "class")
 
 
 class TriageTests(unittest.TestCase):
@@ -338,6 +349,18 @@ class MinimizeTests(unittest.TestCase):
         result = self.minimize(lambda side, name, before: (name, 0))
         self.assertEqual(result["error"], "the full scene does not differ structurally")
 
+    def test_an_incomplete_capture_is_refused_not_minimized(self):
+        read_facts = cd._facts
+
+        def partial_facts(path):
+            return {**read_facts(path), "truncated_at": 20000}
+
+        with patch.object(cd, "_facts", side_effect=partial_facts):
+            result = self.minimize(lambda side, name, before: (
+                "Group" if side == "portal" and name == "VGroup" else name, 0))
+        self.assertEqual(result["error"], "the full scene's structural capture is incomplete")
+        self.assertNotIn("minimized", result)
+
 
 def both(scene, verdict="equal", first=None, violations=()):
     tier = {"verdict": verdict, "first_difference": first, "difference_count": int(first is not None),
@@ -381,6 +404,24 @@ class DashboardTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, path.parent, True)
         cd.write_dashboard(records, path, "Test dashboard")
         return path.read_bytes()
+
+    def test_incomplete_comparisons_have_their_own_denominator_and_keep_old_triage(self):
+        partial = both("Partial", "incomplete")
+        for tier in ("structure", "geometry"):
+            partial[tier]["incomplete_captures"] = {
+                "portal": {"truncated_at": 20000, "captured_members": 20000}
+            }
+        text = self.render([both("Equal"), partial]).decode()
+        self.assertIn("| ran in both engines | 2 |", text)
+        for tier in ("structure", "geometry"):
+            self.assertIn(f"| {tier}: equal | 1 |", text)
+            self.assertIn(f"| {tier}: incomplete | 1 |", text)
+            self.assertIn(f"| {tier}: differs | 0 |", text)
+        self.assertIn("_2021/demo.py:Partial", text)
+        self.assertIn("portal", text)
+        self.assertIn("20000", text)
+        old = {"_2021/demo.py:Partial": {"first": "0 Circle.class", "label": "bug", "ref": "fm-old"}}
+        self.assertNotIn("no longer differs", "\n".join(cd.triage_lines([partial], old)))
 
     def test_the_page_depends_only_on_the_set_of_records(self):
         expected = self.render(self.RECORDS)
