@@ -8282,6 +8282,27 @@ class TexText(Tex):
     tex_environment = ""
 
 
+def _native_bullet_item_text(item):
+    # The manim-facing list accepts TeX hard breaks; Atlas and Scribe own
+    # plain-text layout. Keep the original item for public source identity.
+    parts = item.split(r"\\")
+    if len(parts) == 1:
+        return item
+    for index, part in enumerate(parts):
+        if index:
+            part = part.lstrip(" \t\r\n")
+            # The star controls page breaking, which has no meaning in the
+            # list's single native text layout.
+            if part.startswith("*"):
+                part = part[1:].lstrip(" \t\r\n")
+            if part.startswith("["):
+                raise ValueError("BulletedList hard-break spacing is unsupported; use native newline layout without a spacing option")
+        if index + 1 < len(parts):
+            part = part.rstrip(" \t\r\n")
+        parts[index] = part
+    return "\n".join(parts)
+
+
 class BulletedList(VGroup):
     """Atlas's native, bundled-font replacement for the Reference's
     implicit ``itemize``/``enumerate`` TeX composition."""
@@ -8301,6 +8322,7 @@ class BulletedList(VGroup):
             raise TypeError("BulletedList items must be strings")
         aligned_edge = _vec3(aligned_edge)
         buff = float(buff)
+        native_items = [_native_bullet_item_text(item) for item in items]
 
         _install_live_state(self)
         self.items = tuple(items)
@@ -8310,7 +8332,7 @@ class BulletedList(VGroup):
         self.font_size = font_size
         specs = self._build_bulleted_list(
             _native_shell_factory,
-            list(items),
+            native_items,
             buff,
             aligned_edge,
             self.numbered,

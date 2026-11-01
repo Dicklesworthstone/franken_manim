@@ -12623,7 +12623,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         Invocation::new(python_reference_corpus_regressions_run),
         vec![
             Assertion::ExitCode(0),
-            counter_eq("corpus_regression_cases", 23),
+            counter_eq("corpus_regression_cases", 24),
         ],
         vec![
             LogExpect::span_present(
@@ -12658,6 +12658,14 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 vec![
                     FieldPred::str_eq("bead", "fm-k00v"),
                     FieldPred::str_eq("observed", "2.0000"),
+                    FieldPred::str_eq("verdict", "pass"),
+                ],
+            ),
+            LogExpect::span_present(
+                "e2e.python.reference_corpus_regression",
+                vec![
+                    FieldPred::str_eq("bead", "fm-5wq.70"),
+                    FieldPred::str_eq("observed", "two lines; whitespace and star preserve layout"),
                     FieldPred::str_eq("verdict", "pass"),
                 ],
             ),

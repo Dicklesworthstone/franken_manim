@@ -14068,6 +14068,69 @@ numbered = special_tex.BulletedList(
 assert len(numbered) == 2
 assert numbered[0][0].get_width() > bulleted[0][0].get_width()
 
+
+def _bulleted_hard_break_acceptance():
+    import tempfile
+    from pathlib import Path
+    from PIL import Image
+
+    flat = manimlib.BulletedList("alphabeta", font_size=72)
+    multiline = manimlib.BulletedList("alpha\nbeta", font_size=72)
+    assert multiline.get_height() > 1.5 * flat.get_height()
+    assert multiline.get_width() < .8 * flat.get_width()
+    for numbered in (False, True):
+        for text in (r"alpha\\beta", r"alpha   \\  beta", r"alpha\\* beta"):
+            actual = manimlib.BulletedList(text, "plain", numbered=numbered, font_size=72)
+            expected = manimlib.BulletedList("alpha\nbeta", "plain", numbered=numbered, font_size=72)
+            assert actual.items == (text, "plain")
+            assert len(actual) == len(expected) == 2
+            family = actual.family_members_with_points()
+            control = expected.family_members_with_points()
+            assert len(family) == len(control)
+            for member, independent in zip(family, control):
+                np.testing.assert_array_equal(member.get_points(), independent.get_points())
+            copy = actual.copy()
+            assert copy.items == actual.items
+            first = actual[0]
+            actual.fade_all_but(1)
+            assert actual[0] is first
+            assert copy[0][0].get_height() > actual[0][0].get_height()
+
+    refused = manimlib.BulletedList.__new__(manimlib.BulletedList)
+    try:
+        manimlib.BulletedList.__init__(refused, r"alpha\\[1em]beta")
+    except ValueError as error:
+        assert "hard-break spacing is unsupported" in str(error)
+    else:
+        raise AssertionError("unsupported break spacing must not render literal syntax")
+    assert not hasattr(refused, "submobjects")
+
+    def render(destination, text, numbered, threads):
+        scene = manimlib.Scene()
+        with scene.render_session(destination, format="png_sequence", resolution=(160, 90),
+                                  fps=8, threads=threads) as session:
+            scene.add(manimlib.BulletedList(text, font_size=72, numbered=numbered))
+            scene.wait(.125)
+        assert session.result.frame_count == 1
+        frames = list(destination.glob("*.png"))
+        assert len(frames) == 1
+        with Image.open(frames[0]) as image:
+            assert image.size == (160, 90)
+            assert any(low != high for low, high in image.convert("RGBA").getextrema())
+        return frames[0].read_bytes()
+
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        for numbered in (False, True):
+            control = render(root / f"native-{numbered}", "alpha\nbeta", numbered, 1)
+            for threads in (1, 4, 16):
+                assert render(root / f"authored-{numbered}-{threads}", r"alpha\\beta",
+                              numbered, threads) == control
+    return 8  # Two independent newline controls and six authored native PNGs.
+
+
+assert _bulleted_hard_break_acceptance() == 8
+
 item_identities = [id(item) for item in bulleted]
 max_label_height = max(item[0].get_height() for item in bulleted)
 assert bulleted.fade_all_but(1, opacity=0.2, scale_factor=0.6) is None

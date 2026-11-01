@@ -166,10 +166,27 @@ def _root_order(make):
     return observed[0]
 
 
+def _bulleted_hard_break():
+    flat = m.BulletedList("alphabeta", font_size=72)
+    broken = m.BulletedList(r"alpha\\beta", font_size=72)
+    if not (broken.get_height() > 1.5 * flat.get_height()
+            and broken.get_width() < .8 * flat.get_width()):
+        return "literal break or single-line layout"
+    box = [broken.get_width(), broken.get_height()]
+    for source in (r"alpha   \\  beta", r"alpha\\* beta"):
+        item = m.BulletedList(source, font_size=72)
+        if not np.allclose([item.get_width(), item.get_height()], box, atol=1e-6, rtol=0):
+            return "hard-break whitespace or star changed layout"
+    return "two lines; whitespace and star preserve layout"
+
+
 # (bead, construct, observe, expected, provenance). Expected values were
 # measured on the pinned Reference; _2023/clt/wordy_scenes.py AverageDiceValues
 # shows a DecimalNumber of an empty average, which is nan.
 CASES = (
+    ("fm-5wq.70", r"BulletedList('alpha\\beta')",
+     _bulleted_hard_break, "two lines; whitespace and star preserve layout",
+     REFERENCE + ":manimlib/mobject/svg/special_tex.py:BulletedList (measured hard breaks)"),
     ("fm-5wq.30", "DecimalNumber(float('nan'))",
      lambda: _decimal_text(math.nan), "nan",
      REFERENCE + ":manimlib/mobject/numbers.py:get_num_string (measured)"),
