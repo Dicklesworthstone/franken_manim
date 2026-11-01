@@ -1,5 +1,6 @@
 """Fail-closed checkpoint I/O checks using the existing render protocol fixture."""
 import pathlib
+import time
 import unittest
 from unittest.mock import patch
 
@@ -13,6 +14,20 @@ class CheckpointIoTests(unittest.TestCase):
         self.fixture = fixtures.CheckpointTests()
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
+
+    def test_real_file_path_and_handle_reads_are_comparable(self):
+        path = self.fixture.journal
+        path.write_bytes(b'{"checkpoint":1}')
+        # Separate creation and modification on Windows, where early CPython
+        # 3.13 path/handle queries expose different deprecated ctime meanings.
+        time.sleep(0.02)
+        path.write_bytes(b'{"checkpoint":2}')
+        payload = path.read_bytes()
+        self.assertEqual(checkpoint_module._regular_file(path), {
+            "bytes": len(payload),
+            "sha256": fixtures.hashlib.sha256(payload).hexdigest(),
+        })
+        self.assertEqual(checkpoint_module._read_document(path), {"checkpoint": 2})
 
     def test_unreadable_sequence_subdirectory_cannot_be_ignored(self):
         self.fixture.run_batch(format="png_sequence")

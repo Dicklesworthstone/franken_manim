@@ -78,6 +78,16 @@ def _signature(info):
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
 
 
+def _path_signature(info):
+    # CPython 3.13.1 aliases Windows path ctime to birthtime, while fstat
+    # reports change time. Compare birthtime across those interfaces, but
+    # retain the full raw fstat signature for changes during a handle read.
+    signature = _signature(info)
+    if os.name == "nt":
+        return (*signature[:4], info.st_birthtime_ns)
+    return signature
+
+
 def _open_regular(path: Path):
     """Refuse special files and links before opening, without a FIFO race hang."""
     before = path.lstat()
@@ -88,7 +98,8 @@ def _open_regular(path: Path):
     descriptor = os.open(path, flags)
     try:
         opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode) or _signature(opened) != _signature(before):
+        # ubs:ignore -- equality compares public filesystem stat tuples, never secret credentials.
+        if not stat.S_ISREG(opened.st_mode) or _path_signature(opened) != _path_signature(before):
             raise ValueError(f"checkpoint input changed while opening: {path}")
         return os.fdopen(descriptor, "rb")
     except BaseException:
@@ -106,7 +117,8 @@ def _regular_file(path: Path) -> dict[str, Any]:
             size += len(chunk)
         after = os.fstat(stream.fileno())
     current = path.lstat()
-    if _signature(before) != _signature(after) or _signature(after) != _signature(current) or size != after.st_size:
+    # ubs:ignore -- equality compares public filesystem stat tuples, never secret credentials.
+    if _signature(before) != _signature(after) or _path_signature(after) != _path_signature(current) or size != after.st_size:
         raise ValueError(f"checkpoint artifact changed while hashing: {path}")
     return {"bytes": size, "sha256": digest.hexdigest()}
 
@@ -120,7 +132,8 @@ def _read_document(path: Path):
         after = os.fstat(stream.fileno())
     if len(raw) > _MAX_BYTES:
         raise ValueError("checkpoint exceeds its byte budget")
-    if _signature(before) != _signature(after) or _signature(after) != _signature(path.lstat()) or len(raw) != after.st_size:
+    # ubs:ignore -- equality compares public filesystem stat tuples, never secret credentials.
+    if _signature(before) != _signature(after) or _path_signature(after) != _path_signature(path.lstat()) or len(raw) != after.st_size:
         raise ValueError("checkpoint changed while reading")
     return json.loads(raw)
 
