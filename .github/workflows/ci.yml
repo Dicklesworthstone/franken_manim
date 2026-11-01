@@ -77,7 +77,9 @@ jobs:
     needs: fmt
     name: check (portable, linux-x86-64)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # The complete policy was still passing tests when the former 45-minute
+    # job budget canceled it; individual test and performance limits stay fixed.
+    timeout-minutes: 90
     env:
       CARGO_TARGET_DIR: target/portable
       PYO3_PYTHON: python
@@ -128,7 +130,7 @@ jobs:
     needs: fmt
     name: check (x86-64-v3)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     env:
       CARGO_TARGET_DIR: target/x86-64-v3
       PYO3_PYTHON: python
