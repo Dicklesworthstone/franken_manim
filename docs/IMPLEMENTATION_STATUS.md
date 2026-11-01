@@ -2,7 +2,128 @@
 
 **Status date:** 2026-11-01 (America/New_York). The assessment below separates the inspected source, the published artifacts, recorded measurements, and fresh execution. Earlier assessments and execution records remain historical evidence.
 
-## Current follow-through — 2026-11-01 20:18 UTC
+## Current follow-through — 2026-11-01, after ba0507e5
+
+The published integer matching-selector repair is `c34af929`
+(`fm-5wq.69`). It accepts verified integer source and target selectors through
+ordinary StringMobject indexing, then validates complete native span ownership.
+The freshly built release wheel is
+`46eceae6851035df5175c822e7a8de19547fc12ab360d35d7cfb4b57d15df4b5`;
+its actual standalone CLI is
+`e333483dcc63ea21ad69e5f5b0f103b1490b5ff0a7c2ab66cd0b35dd09fef055`.
+The original unmodified `IntegrateRealExponential` now completes in both that
+wheel and pinned Reference `6199a00d`, with both PNGs retained and inspected.
+The old integer-selector TypeError is gone. All 156 remaining structure
+differences, 2,172 geometry differences and ten envelope violations are
+retained. The first static-area VMobject class difference is documented by
+existing BN-20; that observation does not waive the other facts.
+
+The whole installed-wheel gate for `c34af929` exits 0. Unfiltered discovery
+runs 3,187 tests: 2,990 pass and 197 retain their existing skips. All 19 native
+matching-authoring cases pass, including the integer-selector render comparison.
+The authority audit and verifier pass; runtime witnesses report 382 suites,
+12,989 cases, 1,963 import checks, 1,671 semantic rows, 188 rendered rows and
+three refusal-only rows. All 25 applicable mutants are killed; 15 inapplicable
+controls receive no credit. Two traced harness-error groups and four
+harness-only groups remain explicitly reconciled by the unchanged completed
+plain-run checker. All 145 installed payload files remain unchanged.
+
+The whole source policy exits 101. Before the failure, all-target checks,
+all three strict Clippy variants, rustdoc, bare `cargo test` and the complete
+batch tests pass. Bare Cargo includes all 95 E2E scenarios and all 163 embedded
+Python cases, with none failed, ignored or filtered. The subsequent
+`fmn-output --features ffmpeg-test-fixture --all-targets` test command fails
+while compiling Asupersync: the kernel OOM killer terminates rustc with
+SIGKILL after its anonymous resident memory reaches 6,779,324 KiB. Later source
+policy stages are unreached. This is a failed whole gate, not a source-policy
+pass, and `.69` remains in progress.
+
+The immutable qualification checkout retains 4,406
+tracked non-Beads inputs with aggregate SHA-256
+`e34f2dde3cdef08e79b0b6f532eaca1f67c52fe0592053a07cf3600c0c47bd9b`.
+Later primary-checkout changes are outside that qualification snapshot.
+
+Fresh corpus inspection also confirmed `fm-5wq.70`: BulletedList printed
+authored TeX hard breaks as literal backslashes. The minimal reproduction is
+4.348 units wide and 0.724 high in the predecessor, versus 2.432 by 1.396 in
+the Reference. The source-unedited `CopernicusConclusions` pair shows the
+same collapsed lines and shifted downstream content. The primary-checkout
+candidate now adapts ordinary and starred hard breaks, including whitespace,
+to Scribe's existing native newline layout. Original item strings and the
+native Rust plain-text builder are preserved. Explicit per-break spacing is
+precisely refused and remains a support limitation.
+
+The new native acceptance fails on the actual predecessor. With an explicit
+candidate Python initializer overlay over the C34 extension, it passes eight
+decoded PNGs against independent newline controls at 1/4/16 threads, plus
+ownership, copy, fade and no-partial-install checks. All 24 existing-plus-new
+corpus regression cases pass in that diagnostic. The pinned Reference
+independently confirms whitespace and starred-break semantics through the
+original producer and private TeX cache. An earlier direct Reference command
+failed before import because its PYTHONPATH was missing; that failure is
+retained. None of these mixed-source diagnostics is a fresh candidate-wheel
+or whole-source pass. The full ordinary bridge also passes under that explicit
+overlay, with all installed payload files unchanged. The full five-file
+scanner returns 2, partial, despite a longer execution budget. Structured
+diagnostics reproduce the same hard-coded taint-dataflow work-limit failure
+on both the unchanged C34 initializer and the candidate. The other four
+changed files each complete their full scans with zero critical findings.
+The initializer scan is incomplete; no rule, category or finding is disabled.
+Formatting, Python compilation and diff checks pass after one formatting
+correction; all original failed logs remain. The candidate remains uncommitted
+and `.70` remains in progress.
+
+Recovery inspection finds the exact completed Asupersync variant in our earlier
+qualified worker cache. The compiler, clean pinned dependency source and all
+39 direct dependency fingerprints match the failed worker. Its five completed
+files are preserved in a verified 89,989,197-byte archive; none has yet been
+installed over the failed cache. Normal RCH admission still refuses the worker
+under critical memory pressure. This cache is a recovery input, not a gate
+result. Permission to remove one separately backed-up obsolete cache directory
+is pending; no file has been deleted and no admission policy is overridden.
+
+The corpus investigation also finds `fm-5wq.71`: the shared comparator ignores
+an explicit `truncated_at` marker. Both old and fresh PrimeRace captures stop
+at 20,000 members; different glyph nesting then produces an apparent missing
+member. Comparing the real partial capture with itself previously returned
+`equal` and CLI exit 0. The candidate now returns `incomplete` and exit 1,
+preserving all available differences and envelope observations. Check gates,
+both corpus tiers, dashboard counts and minimizers consume that verdict.
+All 26 complete-input CLI controls still pass. No capture limit, exclusion,
+tolerance or original measurement changes.
+
+The six-file harness repair is committed and pushed as
+`ba0507e5be7fe0ffd281740b20a59444b88037b7`. It passes 106 focused tests, including the existing
+live three-scene portal/Reference integration, with no skips. Its full UBS
+scan exits 0: zero critical findings, nine warnings and 408 informational
+findings. One existing comparison of a public minimization key has a precise
+non-credential justification; a separate credential comparison remains red
+with one critical finding. The actual-data proof checks all 845 originally
+two-provider scenes and finds one truncated pair, PrimeRace. It postprocesses
+retained captures and earns no new scene-execution or animation-capability
+credit. Whole-source qualification remains required before `.71` closes.
+
+The original 28-item acceptance review still has 25 closed issues and three
+Windows issues in progress. Corpus reconciliation `.68`, integer selectors
+`.69`, hard breaks `.70` and capture completeness `.71` add four active issues,
+for 25 closed of 32 owned items. This is not the whole project backlog. The `.68` inventory preserves
+all 2,814 original scene IDs, 150 structural differences, 497 geometry
+differences, 186 envelope-violation scenes and all failures. Its complete
+root-cause and stale-row reconciliation remains unfinished. The registry has
+111 rows, with 76 measured first-fact rows still missing and 29 stale keys.
+Eleven BasicBlockCount variants' original flash subtrees are traced to the
+documented frame-grid override rule, with one fresh representative pair.
+The bounded registry updates add no exclusions or looser envelopes.
+
+The Windows GNU attempt has ended with exit 143 and a normal recovery
+acknowledgment. Only the old baseline CLI completed; current CLI and native
+test executables did not. Both source snapshots remain byte-identical after
+interruption. This provides no current native Windows, MSVC, full-Windows,
+release, platform-matrix or performance qualification. The original secure
+ffmpeg blocker `fm-8foa` remains. All work uses DSR directly; the GitHub
+Actions service is not used or relied on.
+
+## Qualified checkpoint — 2026-11-01 20:18 UTC
 
 **Both complete Linux gates pass on committed source `6867e34b`.** DSR runs
 the original `scripts/check.sh` through normally admitted RCH and the original

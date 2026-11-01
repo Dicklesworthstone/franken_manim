@@ -277,3 +277,106 @@ A member's bbox fell outside the envelope of every exclusion row that matched it
 | LineBrace | bn08-brace-path-family | 1 | 1 | 1 | 0 | 0 | 0 | 0.123 | 0.032 | `_2025/grover/polarization.py:BeamSplitter` |
 
 Engine identities: reference=3b1b/manim@6199a00d4c1b1127ebe45cb629c3f22538b10e13 (pdfTeX 3.141592653-2.6-1.40.28 (TeX Live 2025/Debian); dvisvgm 3.6) portal=6ab48696 release wheel 317fe607.
+
+## Subsequent reconciliation — 2026-11-01, fm-5wq.68
+
+The census above remains the original 2,814 observations at `6ab48696`.
+Its measurement header, 150 structural discrepancies, 497 geometry
+discrepancies, 186 envelope-violation scenes and all failures are unchanged.
+The historical per-scene table retains its original triage rendering; the
+registry updates the following first-fact mappings on new evidence. No exclusion,
+envelope, tolerance or baseline changes in this reconciliation.
+
+Four actual scene pairs were rerun with the release wheel from `6867e34b`
+(`ece170eaf7b5e69968ca8459a5ea698a1718b538e9625b2d2f7b2436e3e6870a`)
+and the same pinned Reference. All four run in both providers.
+`ProsConsOfContext` now agrees structurally with existing exclusions; it
+still differs geometrically. `BinaryCounting`, `MovingAverageFast` and
+`IntegralExample` retain their named first structural facts. Three separate
+authored Transform controls reproduce those exact point-less root differences:
+BLACK versus retained grey fill, opacity 0.5 versus retained 0, and stroke
+width 0 versus retained 1. Choreo's existing C-29 interpolation explicitly
+carries a point-less member's style; BN-07 C-29/C-31 records the corresponding
+defaults/style doctrine. Their registry notes now name this mechanism. Other
+facts in those scenes remain subject to investigation; a first-fact mapping
+does not waive a scene's remaining differences.
+
+The former one-sided `IntegrateRealExponential` failure has a separate current
+minimal reproduction: `TransformMatchingTex(..., key_map={'x': 0})` renders in
+the Reference but the installed `6867e34b` portal rejects its integer selector.
+`fm-5wq.69` owns the confirmed initializer/planner restriction. The repair is
+committed as `c34af929`. A fresh pair using its actual release wheel
+`46eceae6851035df5175c822e7a8de19547fc12ab360d35d7cfb4b57d15df4b5`
+now completes the original unmodified `IntegrateRealExponential` in both
+providers and publishes both final PNGs. The recorded portal/Reference exits
+are 0/0. This resolves the old initializer refusal, with full current source
+source qualification still pending. Its complete installed-artifact gate now
+passes; the subsequent source policy fails compiling Asupersync after a
+kernel-confirmed OOM kill. Component test passes do not close that whole gate.
+
+The newly successful scene retains 156 structure differences, 2,172 geometry
+differences and ten envelope violations. Its first class difference at path 5
+is a static area VMobject versus the Reference's ParametricCurve. The existing
+BN-20 section "Integral regions follow the drawn graph" explicitly documents
+that detached VMobject result; `fmn_python/calculus.py` constructs it directly.
+The registry maps only that fact. Root-order differences and the remaining
+envelopes are unresolved; no exclusion is added. Both final 320×180 panels were
+inspected, but this is neither a full Look Gallery verdict nor output identity.
+The pair and its DSR receipt are retained under
+`/data/tmp/fmn-execute-20261101-matching69-original-scene` and the corresponding
+`dsr-matching69-original-scene` directory. This one-scene observation does not
+revise the original 2,814-scene counts. `PlaylistMention` remains the existing
+BN-17/D2 host-provided AssetFetcher boundary, not a missing native downloader.
+
+Two further scene pairs at that same C34 wheel confirm the existing native
+BulletedList item family differences: `WhatThisExplanationLacks` retains
+272 structure differences and three envelope violations;
+`CopernicusConclusions` retains 214 and eleven. Inspecting the latter pair
+reveals an additional runtime defect, now `fm-5wq.70`: authored hard breaks
+print as literal backslashes, collapsing the lines and shifting subsequent
+layout. An independent authored BulletedList reduction confirms this with
+both actual providers; its existing root envelope reports `size_rel=0.7878`.
+BN-08's family change does not justify that layout defect. The primary
+candidate adapts breaks to existing native multiline layout, but lacks fresh
+whole-source and installed-wheel qualification. These raw pairs remain under
+`/data/tmp/fmn-execute-20261101-triage68-family-sample` and
+`/data/tmp/fmn-execute-20261101-triage68-bullet-break`.
+
+Raw paired records, provider logs, facts and PNGs are retained under
+`/data/tmp/fmn-execute-20261101-triage68-corpus-sample`,
+`/data/tmp/fmn-execute-20261101-triage68-root-style` and
+`/data/tmp/fmn-execute-20261101-triage68-probes`, with DSR receipts in their
+corresponding `dsr-*` directories. The complete discrepancy inventory and
+remaining stale rows still keep `fm-5wq.68` in progress. These are bounded
+compatibility observations, not a new full census or performance claim.
+
+Three more original scene pairs run in both providers at the C34 wheel.
+BasicBlockCount retains four structural observations: a root flash group and
+its three Circles. The raw captured flash has zero stroke opacity. Its inherited
+`Blocks.update_frame` checks collisions on each positive-dt grid step, adding
+that ClackAnimation; BN-10 explicitly preserves frame-grid calls to authored
+overrides, whereas Reference skip calls once. All eleven original
+BasicBlockCount variants have this same captured subtree and inheritance.
+Only the base scene was freshly executed in this group. The registry maps
+those first member facts to that existing rule, without adding an exclusion.
+
+PrimeRace's old and fresh captures each declare `truncated_at=20000` on both
+sides. Different native and Reference numeric-glyph nesting consumes that
+budget at different paths. Its first apparent missing member is therefore
+incomplete evidence of a runtime difference. `fm-5wq.71` repairs the shared
+comparator and gates: an explicitly partial capture cannot report equality,
+including when compared with itself. Actual CLI controls change that false
+green from exit 0 to incomplete/exit 1; all 26 complete controls still pass.
+The retained PrimeRace differences and envelope observations are byte-for-byte
+preserved by the new comparator. This is a stricter harness, with zero newly
+admitted comparison inputs, and earns no animation capability credit.
+
+All 845 originally two-provider scenes were inspected for capture markers;
+PrimeRace is the only truncated pair. This postprocessing does not revise the
+original 2,814-scene census or its 150/497/186 counters. The fresh
+NaiveLinearScaling pair still has its line point-count difference and remains
+unresolved. The three new pairs are retained under
+`/data/tmp/fmn-execute-20261101-triage68-updater-sample`; the before/after
+comparator proof is under `/data/tmp/fmn-execute-20261101-capture71-actual-proof`.
+The current registry has 111 rows; 76 measured first-fact mappings and 29 stale
+keys remain unresolved. No whole-triage completion is claimed.
