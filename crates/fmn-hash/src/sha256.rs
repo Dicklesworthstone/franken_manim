@@ -229,25 +229,31 @@ impl Sha256 {
     /// The SHA-256 compression function over one 512-bit block.
     fn compress(&mut self, block: &[u8; 64]) {
         let mut w = [0u32; 64];
-        for (i, word) in w.iter_mut().enumerate().take(16) {
-            *word = u32::from_be_bytes([
+        // Fixed, bounded index loops keep development-build checksumming
+        // free of iterator-adapter calls without expanding the round body.
+        let mut i = 0;
+        while i < 16 {
+            w[i] = u32::from_be_bytes([
                 block[4 * i],
                 block[4 * i + 1],
                 block[4 * i + 2],
                 block[4 * i + 3],
             ]);
+            i += 1;
         }
-        for i in 16..64 {
+        while i < 64 {
             let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
             let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
             w[i] = w[i - 16]
                 .wrapping_add(s0)
                 .wrapping_add(w[i - 7])
                 .wrapping_add(s1);
+            i += 1;
         }
 
         let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = self.state;
-        for i in 0..64 {
+        i = 0;
+        while i < 64 {
             let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
             let ch = (e & f) ^ ((!e) & g);
             let t1 = h
@@ -266,6 +272,7 @@ impl Sha256 {
             c = b;
             b = a;
             a = t1.wrapping_add(t2);
+            i += 1;
         }
 
         self.state[0] = self.state[0].wrapping_add(a);
@@ -325,6 +332,69 @@ mod tests {
             h.finalize().to_hex(),
             "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
         );
+    }
+
+    #[test]
+    fn independent_pattern_vectors_cover_padding_and_block_boundaries() {
+        // Independent Python hashlib SHA-256 over byte[i] = i % 251.
+        // Keep these fixed values alongside the published FIPS vectors;
+        // neither incremental nor optimized code supplies its own oracle.
+        for (length, expected) in [
+            (
+                1,
+                "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+            ),
+            (
+                55,
+                "463eb28e72f82e0a96c0a4cc53690c571281131f672aa229e0d45ae59b598b59",
+            ),
+            (
+                56,
+                "da2ae4d6b36748f2a318f23e7ab1dfdf45acdc9d049bd80e59de82a60895f562",
+            ),
+            (
+                63,
+                "29af2686fd53374a36b0846694cc342177e428d1647515f078784d69cdb9e488",
+            ),
+            (
+                64,
+                "fdeab9acf3710362bd2658cdc9a29e8f9c757fcf9811603a8c447cd1d9151108",
+            ),
+            (
+                65,
+                "4bfd2c8b6f1eec7a2afeb48b934ee4b2694182027e6d0fc075074f2fabb31781",
+            ),
+            (
+                127,
+                "92ca0fa6651ee2f97b884b7246a562fa71250fedefe5ebf270d31c546bfea976",
+            ),
+            (
+                128,
+                "471fb943aa23c511f6f72f8d1652d9c880cfa392ad80503120547703e56a2be5",
+            ),
+            (
+                129,
+                "5099c6a56203f9687f7d33f4bfdf576d31dc91f6b695ecea38b2770c87631135",
+            ),
+            (
+                4096,
+                "d67c656e01756650d77717b0839985a056ec28ffe174601d690fc407a2ceffca",
+            ),
+        ] {
+            let bytes: Vec<u8> = (0..length).map(|index| (index % 251) as u8).collect();
+            assert_eq!(hex(&bytes), expected, "message length {length}");
+            for chunk in [1, 7, 55, 56, 63, 64, 65, 129] {
+                let mut hasher = Sha256::new();
+                for part in bytes.chunks(chunk) {
+                    hasher.update(part);
+                }
+                assert_eq!(
+                    hasher.finalize().to_hex(),
+                    expected,
+                    "length {length}, chunk {chunk}"
+                );
+            }
+        }
     }
 
     #[test]
