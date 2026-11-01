@@ -2,7 +2,87 @@
 
 **Status date:** 2026-11-01 (America/New_York). The assessment below separates the inspected source, the published artifacts, recorded measurements, and fresh execution. Earlier assessments and execution records remain historical evidence.
 
-## Current follow-through — 2026-11-01 18:55 UTC
+## Current follow-through — 2026-11-01 20:18 UTC
+
+**Both complete Linux gates pass on committed source `6867e34b`.** DSR runs
+the original `scripts/check.sh` through normally admitted RCH and the original
+`scripts/check_portal_runtime.sh` against a freshly installed matching wheel.
+The 4,406 tracked non-Beads inputs remain unchanged before and after both
+runs, aggregate SHA-256
+`91f911781d660ba6670066dd973e76c9b6ef8b48b3dcd62ba4141debe596a0c0`.
+These results qualify this source checkpoint; later report and tracker edits
+do not rename the artifact source.
+
+The source policy exits 0, including formatting, all-target checks, all three
+strict Clippy variants, Rustdoc, bare `cargo test`, batch and ffmpeg-feature
+tests, the final crate-DAG check and Node/WASM smoke. All 94 E2E scenarios pass
+at default concurrency, with no failed, ignored or filtered scenarios; all
+163 embedded Python cases pass. The fresh golden preflight passes all four
+cases. Existing missing-input Reference differential and trivial-body audit
+skips remain explicit and receive no coverage credit. The optional npm
+package gate was not requested. This is not a release or certified-platform
+matrix qualification.
+
+The actual release wheel is
+`ece170eaf7b5e69968ca8459a5ea698a1718b538e9625b2d2f7b2436e3e6870a`,
+native extension
+`abc0cc4f3e727793779d16e40a0c17fc996bd9b1c9608f70619fbe0be4815f5b`,
+and standalone CLI
+`0f2ba83fef5ecefd3f0fb06f6a038a468e7883d8a525f7bc249a8ed61c3a9287`.
+The extension embeds the exact current source identity. The release profile
+is retained as raw evidence; no performance gate result is inferred.
+
+The whole installed gate exits 0 on CPython 3.13.1 with the original 35 pins
+and all 145 installed payload files unchanged. Unfiltered discovery runs
+3,184 tests: 2,987 pass and 197 retain their existing skips. All 12 original
+native parallel-output cases pass, including the unchanged four-second
+partial-receipt case. The authority audit and verifier pass. Runtime witnesses
+report 382 suites, 12,986 cases, 1,963 import checks, 1,671 semantic rows and
+188 rendered rows; three refusal-only rows receive no positive-render credit.
+All 25 applicable mutants are killed; 15 inapplicable controls receive no
+credit. Tracing still records two harness-error groups and four harness-only
+groups, reconciled by the unchanged completed-plain-run checker. This is not
+complete tracing coverage. Corpus metadata is not scene execution.
+
+After a fresh solo review of every original acceptance description, 25 of
+the 28 owned issues are closed on cited evidence. This includes four earlier
+source-maintenance closures and 21 subsequent completed items. Counts of
+closures are not counts of new features. Concrete runtime changes include
+configured bare-scene timing, analytic arc centers and stable root insertion,
+detached pure-composition admission, effective live-recording configuration,
+Camera owner release, reduced redundant Studio reconstruction and verified
+partial clip receipts. Gate and fixture repairs are maintenance. The actual
+scene/differential/offload measurements retain their older named source,
+original failures and 1,073/2,814 floor; no current-source measurement or
+Reference speed win is claimed.
+
+Three owned issues remain in progress: `.17` requires current native Windows
+lint, `.22` retains its original full MSVC functional acceptance and secure
+ffmpeg blocker `fm-8foa`, and `.22.1` still requires the actual Windows native
+positive/refusal probe. The Linux native-certification admission tests pass,
+but do not supply Windows execution. The old MSVC run times out without a
+terminal Cargo result. Its 4,406 tracked inputs are unchanged; the post-run
+checkout has only untracked `.rch-tmp/`, so it is not called clean. Normal RCH
+recovery cannot reconcile its absent lease journal; there is no override.
+
+A separate Windows GNU diagnostic is normally admitted on worker 129. Earlier
+GNU link failures and pressure refusals are retained. The current attempt uses
+a private, byte-identical case alias for the Windows SDK's Kernel32 import
+library and an explicit diagnostic linker wrapper. Cross compilation alone
+cannot close native execution, MSVC or full Windows obligations. Named macOS,
+release, matrix, PG and Look Gallery obligations remain open. No independent
+review or all-CI-green claim is made. No new Actions run or reliance is used
+under the owner's DSR-only policy.
+
+The source/artifact DSR receipt is
+`/data/tmp/fmn-execute-20261101-dsr-6867e34b/quality-logs/franken_manim/20261101T134150-619634/receipt.json`;
+the matching installed-gate receipt is
+`/data/tmp/fmn-execute-20261101-dsr-portal-6867/quality-logs/franken_manim/20261101T135217-632970/receipt.json`.
+The granular execution list and original-acceptance review remain in
+`/data/tmp/fmn-execute-20261030-TODO.md` and
+`/data/tmp/fmn-execute-20261031-final-acceptance-review.json`.
+
+## Earlier follow-through — 2026-11-01 18:55 UTC
 
 Owner commit `426a7cb6` now requires DSR and prohibits GitHub Actions for all
 purposes. It is merged locally as `6867e34b`. Current verification uses DSR
