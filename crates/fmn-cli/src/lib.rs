@@ -10663,7 +10663,10 @@ mod tests {
 
     #[test]
     fn native_plan_admission_preserves_standard_mode_on_every_target() {
-        let mut config = fmn_config::Config::default();
+        let mut config = fmn_config::Config::resolve(&[], None)
+            .expect("built-in configuration is valid")
+            .config;
+        let topology = fmn_platform::topology::HardwareTopology::fallback(1);
         let request = |config: &fmn_config::Config| {
             execution_plan_request(
                 config,
@@ -10673,7 +10676,12 @@ mod tests {
                 false,
             )
         };
-        let standard = request(&config).expect("standard CPU remains available");
+        let standard = fmn_runtime::ExecutionPlan::derive(
+            request(&config).expect("standard CPU remains available"),
+            &topology,
+            None,
+        )
+        .expect("standard CPU plan is valid");
         assert_eq!(standard.engine, fmn_runtime::ExecutionEngine::FastCpu);
         config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
         if cfg!(any(
@@ -10684,7 +10692,9 @@ mod tests {
             all(target_os = "macos", target_arch = "aarch64")
         )) {
             assert_eq!(
-                request(&config).unwrap().engine,
+                fmn_runtime::ExecutionPlan::derive(request(&config).unwrap(), &topology, None)
+                    .expect("declared certified CPU plan is valid")
+                    .engine,
                 fmn_runtime::ExecutionEngine::CertifiedCpu
             );
         } else {
