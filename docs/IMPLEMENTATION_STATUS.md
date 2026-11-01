@@ -2,7 +2,118 @@
 
 **Status date:** 2026-11-01 (America/New_York). The assessment below separates the inspected source, the published artifacts, recorded measurements, and fresh execution. Earlier assessments and execution records remain historical evidence.
 
-## Current follow-through — 2026-11-01 11:58 UTC
+## Current follow-through — 2026-11-01 18:55 UTC
+
+Owner commit `426a7cb6` now requires DSR and prohibits GitHub Actions for all
+purposes. It is merged locally as `6867e34b`. Current verification uses DSR
+with strict RCH transport to owned hosts; the hosted records below are
+historical. The current clean source has 4,406 entries, aggregate
+`91f911781d660ba6670066dd973e76c9b6ef8b48b3dcd62ba4141debe596a0c0`.
+
+Current artifact construction passes, with all source entries unchanged. The
+new wheel is `ece170eaf7b5e69968ca8459a5ea698a1718b538e9625b2d2f7b2436e3e6870a`;
+the release CLI is `0f2ba83fef5ecefd3f0fb06f6a038a468e7883d8a525f7bc249a8ed61c3a9287`.
+The extension embeds the current commit. The original whole source policy and
+the original installed-wheel gate are running, using their original checks,
+inputs, assertions and deadlines. The installed gate has a separate healthy
+CPython 3.13.1 host and the same 35 pinned dependencies. Neither current whole
+gate has a terminal verdict yet.
+
+**The fresh installed-wheel gate passes; the complete owned source policy is
+still red.** Runtime checkpoint `bf6c23d234779a42bdcae428f7222242f1576b6f`
+has 4,406 unchanged source entries, aggregate SHA-256
+`f784b196e39a8465cf5fd83b4b08c090cf457881f46c3541d27e9551f24131c2`.
+Its actual release wheel is `e8e2fc8a54ee03e13a4dd40e5a3d29931aa3b153547adcec06a5029a08a0c36c`;
+the standalone CLI is `650746bc1dcd79efaeaf0081003768b7ea88fc1459f20b5e841b9cb734ade40a`.
+
+The original whole installed gate exits 0 on CPython 3.13.1, with every source
+entry and all 145 installed payload files unchanged before and after. All 12
+native parallel-output cases pass, including the original four-second timeout
+receipt case. Unfiltered discovery runs 3,184 tests: 2,987 pass and 197 retain
+their existing skips. Runtime audit and receipt verification pass. Witnesses
+cover 382 suites and 12,985 cases, with 25 of 25 applicable mutants killed;
+15 inapplicable controls receive no credit. Four traced script errors and
+four harness-only groups remain explicitly reconciled by the unchanged
+completed-plain-run checker. This is not complete tracing coverage, and the
+corpus-metadata check is not scene execution.
+
+On the first owned source run, bare `cargo test` exits 0, including all 93
+default E2E tests and all 163 embedded Python tests. The whole policy then
+exits 101 when the subsequent batch link fills its private 24 GiB build
+filesystem. A copy-only recovery on worker 126 makes that exact batch stage
+pass. Its full-policy retry passes all 93 E2E tests, then fails because a
+copied golden-test binary embeds an earlier diagnostic checkout's path.
+The correct committed 339-byte golden is present and unchanged. Timestamp
+invalidation has no effect under the project's content-based freshness
+checks; that preflight remains red. All 39 workspace cache directories are
+then retained at a separate location, with their original inodes and the
+old golden binary verified intact. The freshly rebuilt golden test passes.
+That retry passes the original golden, native CLI build and the early policy
+stages, then exhausts the private 24 GiB filesystem during bare-test compilation.
+A fresh 32 GiB filesystem on worker 1152480 starts with no compiled cache and
+the verified original host and inputs. That older-source run is stopped through
+normal RCH cancellation when current source is ready; exit 143, recovered logs
+and the unchanged 4,406-entry post-cancellation map are retained. The same
+checkout path and cache now serve current-source qualification. No red, partial
+or stopped whole run is reclassified as a pass. No Bead is closed on them.
+
+The three predeclared live incumbent/candidate Studio pairs pass with all
+eight actual profile fields equal, six real processes and 13 decoded
+publications per process. Median request time changes from 35.008431 to
+34.538443 seconds and median restart from 5.197271 to 4.963694 seconds.
+This is modest shared-host maintenance, with no Reference, PG or tail claim.
+
+The missing-IPython native-TeX CI failure is repaired by adding the existing
+9.14.0 pin at its two host installation sites. Workflow-only commit
+`3347d45e` passes every original hosted stage in run `41315902621`; an
+external publisher merges it as `26817b35`. Its 12 final numeric-authoring
+PNGs also decode independently, with nine distinct RGBA frames. This later
+workflow commit does not rename the bf6 runtime artifacts' source identity.
+
+Hosted bf6 portable Linux, x86-64-v3, per-commit PG-5 and the three native
+exact-image launch jobs pass. Hosted Windows functional testing still fails
+20 cases across six targets, including repeated cascades. Eight existing
+test files have narrowly scoped Windows path/JSON/YAML and narrated-WAV
+admission corrections. Their final bridge, console and compressed-audio bodies
+pass against the installed Linux bf6 wheel. Native Windows diagnostics pass the
+whole bridge and original console; corrected audio reaches a missing-ffmpeg
+host failure and corrected console reaches missing documentation inputs. Those
+diagnostics predate the final absolute-path assertions and do not qualify them.
+The owned full Windows run loses its connection after four hours, without a
+terminal Cargo result. Later process inspection finds no remaining Cargo or
+scene processes; its final source check is still unresolved.
+The hosted Windows ffmpeg private-workdir/DLL refusal remains a real missing
+positive capability under `fm-8foa`. Separately, native CLI PNG admission
+at bf6 accepts certified labels on Windows despite ADR-0019; that runtime
+gap is recorded under the open Windows repair.
+Local commits `522726c1` and `8c205139` now enforce the existing declared
+certification matrix at native execution-plan admission and name ADR-0019 in
+doctor. The new public-CLI E2E scenario retains real standard renders on every
+target, certified positives on the declared matrix, and precise no-effect
+refusals elsewhere. Real-binary, batch and cache checks retain their existing
+work. A focused compiler run exposes three mistakes in the new unit test;
+the latter commit repairs them using public configuration and plan APIs.
+Full workspace all-target compilation of clean `8c205139` passes. These commits
+remain local and await the current full checks; they do not inherit the bf6
+installed-wheel pass. Current native Windows validation is prepared, but normal
+RCH admission first refuses the host before compilation. Two later capability
+probes pass and normal re-enable leaves configuration unchanged, but a retained
+build with a missing lease journal still excludes the project. Normal recovery
+and cancellation cannot reconcile it. There is no admission override or native
+current-source pass. An independently admitted Linux worker is preparing
+Windows GNU diagnostic binaries for native runtime probes; that work cannot
+substitute for the outstanding MSVC/full Windows acceptance.
+The clean `8c205139` source has 4,406 entries, aggregate
+`242b6580e83f1993830551d39f83e7e04c00ec9ced6024f43dc2aa89636c71ee`.
+An earlier expected hash accidentally included this uncommitted report and is
+retained as a failed preflight, with no compiler or qualification credit.
+
+Windows functional, named macOS, release and wider matrix obligations remain
+open. The Windows parent is explicitly blocked on its certification child and
+the secure ffmpeg capability. All 28 owned issues remain in progress. No
+all-CI-green, release qualification or independent review is claimed.
+
+## Earlier follow-through — 2026-11-01 11:58 UTC
 
 **Both latest Linux gates are red.** Frozen `39be19d6` source policy exits
 101: 91 of 92 default-concurrency E2E tests pass, and the original Studio
