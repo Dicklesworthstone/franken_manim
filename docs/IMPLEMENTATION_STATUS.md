@@ -2,7 +2,162 @@
 
 **Status date:** 2026-10-31 (America/New_York). The assessment below separates the inspected source, the published artifacts, recorded measurements, and fresh execution. Earlier assessments and execution records remain historical evidence.
 
-## 2026-10-31 implementation follow-through — qualification in progress
+## Current follow-through — 2026-11-01 03:03 UTC
+
+The runtime fixes through `951da294` have a complete matching installed-artifact
+pass, but **the complete source policy remains red**. Its latest attempt reaches
+the cache torture suite and exits 101: 25 cases pass and the concurrent-clear
+case rejects a legitimate `GenerationChanged` refusal. All 4,405 tracked
+non-Beads source entries match before and after, aggregate
+`bef84c174d1edf6240679a6f60b2168ad311019f68fd13e2f403712cc1f1b127`.
+The 42 CLI/doctor cases, 30 native Python production cases, WASM and fuzz-target
+compilation, all three strict Clippy variants and Rustdoc pass first. The full
+91-case e2e target, 162-case native Python target and later policy stages are
+not reached. No owned issue is closed on these partial results.
+
+The cache test candidate is committed as `baec345c`, followed by the Beads-only
+`d3557e6e` checkpoint. Both commits were preserved and inspected; neither is an
+independent review or a completed qualification. There are now **25 owned open
+leaves**. The remaining Reference registration and further CI storage repair
+are being validated above that checkpoint.
+
+### Completed artifact and live-runtime evidence
+
+The unchanged `check_portal_runtime.sh` at `951da294` exits 0 on supported
+CPython 3.13.1 with the exact declared host dependencies. Its original six
+three-second Studio cases pass. Unfiltered discovery runs 3,180 cases:
+**2,983 actual passes, 197 existing skips, zero errors**. The 1,963-row audit and
+verifier pass. The final witness reports 382 suites / 12,979 cases, 1,671
+semantic rows, 188 rendered rows and three refusal-only rows, with no
+placeholder row. Four traced harness errors remain in the log and are
+reconciled by the existing actual plain reruns. All 25 applicable mutants are
+killed; 15 planned but inapplicable mutants receive no pass credit.
+
+Wheel SHA-256 is
+`5ea0c40e6b0f8ff78b14a6ebcf6d5442d8fd026972c6dfe492863c348cf47530`;
+the loaded extension is
+`ded7c9d07129b18a85a528613a600a07c51093410cfb7ae2f3ed2aa0805f0e26`.
+The actual standalone release CLI is
+`7f9c2f3b09e4f352bdafe1c9b649b0d8542c148d00f3c446669398183f653e44`.
+Its clean-environment version and dependency inspection pass without
+libpython. Artifact identity and every source entry remain unchanged after
+the installed gate. This qualifies those artifacts on that host; it does not
+qualify the later test/configuration edits, full source policy, platform
+matrix, Look Gallery, PG gates or release.
+
+Three predeclared interleaved release pairs execute the actual prior CLI and
+the `951da294` CLI in one invocation. Each of six runs verifies 13 actual
+decoded PNG/RGBA publications and exact inspected state and edit, undo, redo,
+scrub and restart behavior. These are publications, not 13 distinct frame
+indices. Original 15-second request deadlines and binary hashes remain.
+
+| Measured request statistic | Prior release CLI | `951da294` release CLI |
+| --- | ---: | ---: |
+| Median request total | 4.519534 s | 4.412880 s |
+| Median restart | 0.765929 s | 0.676816 s |
+| Worst observed request | 0.772976 s | 0.680644 s |
+| Median edits — loss retained | 2.649319 s | 2.650288 s |
+
+This is modest shared-host maintenance, with one additional journal buffer
+bounded by the existing payload ceiling. It is not a Reference speedup, PG
+win or qualified tail-latency result. Receipt SHA-256 is
+`028870bb4aeb93ee11eed0312b9a4e49ba1dc51aed341d4448dc5bec759b1d12`.
+The earlier stock-debug comparison loses every timing summary and has an
+unattested incumbent profile; those losses remain in the execution record.
+The earlier dirty-source comparison below also retains its edit/worst-request
+losses. Results are not pooled or selected by their timings.
+
+The release comparison's eight observed Cargo profile/compiler fields match
+exactly. An initial JS conversion rounded 64-bit IDs and falsely failed the
+guard; the driver also started before that guard status was checked. That
+early diagnostic is retained separately. Exact decimal comparison was fixed,
+and the main three pairs were declared before examining either timing result.
+A later candidate-fingerprint reread found no file, so its exact earlier tool
+observation is labeled as recorded evidence, not a fresh raw-file read.
+The incumbent's clean archive supplies 4,399 matching files and omits six
+distribution-only files; all compiled inputs match. Its explicit source tag
+names the declared Git baseline, not a complete transferred-tree digest.
+No distribution or formal RCH source-content certificate is inferred.
+
+### Current gate repairs and their limits
+
+`fm-restore-green-ci-tqsr.21` preserves production clear authorization checks.
+The existing API binds authorization to the owner generation and rotates it
+on clear. Two authorizations captured before a barrier can therefore produce
+a delayed stale refusal. The old requirement for exactly one clear and one
+successful miss conflicts with that contract. The revised real concurrent
+test admits only clear/miss, clear/stale or miss/stale pairs, with the exact
+root and `GenerationChanged` code, a removed seeded namespace, a rotated
+owner, a valid format and an authorizable retained root. Unrelated errors,
+two no-op misses and two stale refusals still fail. A deterministic ordered
+control requires an old authorization to leave a newly populated generation's
+owner, index and payload unchanged, then proves fresh clear and absence.
+At `d3557e6e`, the unfiltered cache suites pass 29, 7, 28 and 27 tests,
+plus one doc test. Strict all-target cache Clippy passes. Exactly 32
+predeclared repetitions of the single concurrent clearer case pass; these
+are one case repeated, not 32 distinct cases. All 4,405 source entries match
+before and after, aggregate
+`8ce64f900ecf7a6caab1d55db4b2aace1711968ceb3e21eb2bb565651ca01fd7`.
+RCH exits 0 with terminal acknowledgment. The planted-negative and restored
+positive controls and complete policy remain required before closure.
+
+Two earlier `951da294` attempts fail during linking as storage exhausts.
+The stock-debug run preserves its exit 101 separately. The later line-table
+run loses its SSH completion receipt and has an empty original after-map;
+normal RCH recovery retires it as failed with exit 1 and terminal
+acknowledgment. A separate fresh source observation matches all 4,405 files;
+it is not substituted for the empty original map. These attempts execute no
+tests in their bare-Cargo phase. The later cache assertion above is a separate
+functional failure, not attributed to those storage incidents.
+
+Private build outputs were preserved and checked while capacity was recovered.
+After the cache gate failed, SBH retired the now-inactive RAM target at
+02:11:49 UTC: its `artifact_delete` record names the exact target and
+47,781,474,304 bytes. The build reuse is gone. It did not cause the earlier
+test failure. Separate cache cohorts and completed artifact receipts remain;
+the completed artifact archive is independently hashed on durable storage.
+SBH's normal protection command now protects five owned staging/artifact
+paths. It creates markers and adds those owned paths to its sacred-path
+registry; no RCH pressure rule, slot count or peer process was changed.
+The six obsolete local binaries reviewed separately are now absent following
+the owner's `done` reply. The agent executed no removal command; protected
+current CLIs and wheel hashes were rechecked.
+
+Further CI metadata reduction has a bounded live probe at `d3557e6e`:
+the same 26 hash tests pass under both settings, unfiltered, with opt-level 0,
+assertions and overflow checks enabled. The test executable shrinks from
+7,555,752 bytes with line tables to 1,301,696 bytes with debug disabled and
+only debug sections stripped. Actual ELF inspection retains unwind and
+symbol sections. The cost is lost source-line/type debugging information in
+CI test binaries. The workflow now declares those dev/test metadata settings
+and invalidates its ten affected target-cache keys. Release-perf and
+registry-only fuzz caches are unchanged. This small probe is not a complete
+workspace-capacity result or a full-policy pass; those checks remain pending.
+
+ADR-0031, Appendix C-46/C-47 and BN-07 register two independently reproduced
+defects at the pinned Reference: noisy degenerate rescaling and Arrow
+replacement geometry regenerated during FadeIn preparation. Current
+versioned polygon and Arrow scripts pass 10 and 15 cases respectively against
+the qualified `951da294` wheel. Controls retain genuine nonzero dimensions
+down to `1e-12`, decode every fade frame, check progression toward independent
+final polygon pixels and exact one/four-thread agreement. The portal already
+handles these cases correctly; registration adds no runtime implementation
+or performance claim. Final committed-source/artifact qualification remains.
+
+Actual Windows MSVC all-target Clippy at isolated clean `951da294` exits 0
+with `-D warnings`, after 107 minutes, and RCH acknowledges the terminal
+result. Its 4,405 files match the expected source both during and after the
+run, with no missing or different entry. Rustc reports dependency dep-info checksum
+omissions at escaped Program Files paths and continues; the diagnostics are
+retained. This is a Windows Clippy pass, not Windows runtime certification
+or qualification of the later test and CI metadata edits.
+The green-CI parent also retains its independent W1 landing/check-split,
+hosted-run and named macOS product obligations. The older measured corpus
+floor, incomplete compatibility/3-D work, qualified performance rig, full
+certified matrix, owner Look Gallery review and browser/annex/release gates
+below are not closed by these repairs.
+
+## Earlier 2026-10-31 checkpoint — qualification in progress
 
 The October 30 assessment below remains bound to its named checkpoints.
 Runtime and qualification repairs through `56d7abde` and the tracker-only
