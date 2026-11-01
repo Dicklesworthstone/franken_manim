@@ -26,10 +26,12 @@ env:
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
-  # The portable runner ran out of disk linking default debug artifacts.
-  # Retain source locations; optimization and assertions stay intact.
-  CARGO_PROFILE_DEV_DEBUG: line-tables-only
-  CARGO_PROFILE_TEST_DEBUG: line-tables-only
+  # Test artifacts exhausted disk even with line tables. Keep unoptimized
+  # checks, assertions, unwind data and symbols; omit source debug sections.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_PROFILE_DEV_STRIP: debuginfo
+  CARGO_PROFILE_TEST_STRIP: debuginfo
 
 jobs:
   fmt:
@@ -101,7 +103,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/portable
-          key: cargo-lines-${{ runner.os }}-${{ runner.arch }}-portable-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          key: cargo-stripped-${{ runner.os }}-${{ runner.arch }}-portable-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
 
       # This is the gate's host, separate from the standalone runtime closure:
       # NumPy serves the bridge, Pillow the review-kit tests, IPython the shell.
@@ -160,7 +162,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/x86-64-v3
-          key: cargo-lines-${{ runner.os }}-${{ runner.arch }}-x86-64-v3-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          key: cargo-stripped-${{ runner.os }}-${{ runner.arch }}-x86-64-v3-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
 
       - name: Install the mandatory gate's Python host dependencies
         run: python3 -m pip install 'numpy==2.5.2' 'Pillow==12.3.0' 'IPython==9.14.0'
@@ -208,7 +210,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/x86-64-v4
-          key: cargo-lines-${{ runner.os }}-${{ runner.arch }}-x86-64-v4-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          key: cargo-stripped-${{ runner.os }}-${{ runner.arch }}-x86-64-v4-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
 
       - name: Install the mandatory gate's Python host dependencies
         run: python3 -m pip install 'numpy==2.5.2' 'Pillow==12.3.0' 'IPython==9.14.0'
@@ -254,7 +256,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/aarch64-neon
-          key: cargo-lines-${{ runner.os }}-${{ runner.arch }}-aarch64-neon-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          key: cargo-stripped-${{ runner.os }}-${{ runner.arch }}-aarch64-neon-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
 
       - name: Install the mandatory gate's Python host dependencies
         run: python3 -m pip install 'numpy==2.5.2' 'Pillow==12.3.0' 'IPython==9.14.0'
@@ -315,7 +317,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/exact-image-${{ matrix.label }}
-          key: cargo-lines-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          key: cargo-stripped-${{ runner.os }}-${{ runner.arch }}-${{ matrix.target }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
 
       - name: Run native exact-image capability suite
         run: cargo test --locked -p fmn-platform --test capabilities --target ${{ matrix.target }}
@@ -362,7 +364,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/windows-portable
-          key: cargo-lines-${{ runner.os }}-${{ runner.arch }}-windows-portable-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          key: cargo-stripped-${{ runner.os }}-${{ runner.arch }}-windows-portable-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
 
       - name: fmt
         run: cargo fmt --check
@@ -444,7 +446,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/certified-${{ matrix.label }}
-          key: cargo-lines-${{ runner.os }}-${{ runner.arch }}-certified-${{ matrix.label }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          key: cargo-stripped-${{ runner.os }}-${{ runner.arch }}-certified-${{ matrix.label }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
 
       - name: Install the mandatory gate's Python host dependencies
         run: python3 -m pip install 'numpy==2.5.2' 'Pillow==12.3.0' 'IPython==9.14.0'
@@ -488,7 +490,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/pg5
-          key: cargo-lines-${{ runner.os }}-${{ runner.arch }}-pg5-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          key: cargo-stripped-${{ runner.os }}-${{ runner.arch }}-pg5-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
 
       - name: Run the per-commit PG-5 sweep
         run: bash scripts/pg5_thread_determinism.sh
@@ -522,7 +524,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/pg5-high-core
-          key: cargo-lines-${{ runner.os }}-${{ runner.arch }}-pg5-high-core-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          key: cargo-stripped-${{ runner.os }}-${{ runner.arch }}-pg5-high-core-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
 
       - name: Run the weekly high-core PG-5 sweep
         run: bash scripts/pg5_thread_determinism.sh
@@ -613,7 +615,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/e2e-full
-          key: cargo-lines-${{ runner.os }}-${{ runner.arch }}-e2e-full-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          key: cargo-stripped-${{ runner.os }}-${{ runner.arch }}-e2e-full-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
 
       - name: Install the mandatory gate's Python host dependencies
         run: python3 -m pip install 'numpy==2.5.2' 'Pillow==12.3.0' 'IPython==9.14.0'
