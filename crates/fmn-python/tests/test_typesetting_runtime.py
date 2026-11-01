@@ -19,7 +19,10 @@ from unittest.mock import patch
 
 
 SOURCE = Path(__file__).resolve().parents[1] / "python/fmn_python/typesetting.py"
-spec = importlib.util.spec_from_file_location("fmn_typesetting_test_subject", SOURCE)
+# Load under the production package identity so lazy sibling imports retain
+# their ordinary semantics; this still requires no compiled extension.
+sys.path.insert(0, str(SOURCE.parents[1]))
+spec = importlib.util.spec_from_file_location("fmn_python.typesetting", SOURCE)
 runtime = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runtime)
 
@@ -280,6 +283,26 @@ class TypesettingRuntime(unittest.TestCase):
                         scene._run_lifecycle()
                     self.assertIs(caught.exception, error)
                 self.assertEqual(self.calls[-2:], [("lifecycle",), ("maintenance",)])
+
+    def test_interrupted_worker_defers_same_backend_without_replacing_exception(self):
+        from fmn_python._process_batch import _worker_teardown
+
+        self.native._fmn_set_static_tex_preflight(False)
+        for error in (KeyboardInterrupt(), SystemExit(0)):
+            with self.subTest(error=error):
+                scene = self.native.Scene()
+                scene.lifecycle_error = error
+                _worker_teardown.callbacks = []
+                try:
+                    with self.assertRaises(type(error)) as caught:
+                        scene._run_lifecycle()
+                    self.assertIs(caught.exception, error)
+                    self.assertEqual(self.calls[-1], ("lifecycle",))
+                    self.assertEqual(len(_worker_teardown.callbacks), 1)
+                    _worker_teardown.callbacks[0]()
+                    self.assertEqual(self.calls[-1], ("maintenance",))
+                finally:
+                    del _worker_teardown.callbacks
 
     def test_render_receipt_reports_per_run_maintenance_without_tripling_retained_bytes(self):
         self.native._fmn_set_static_tex_preflight(False)

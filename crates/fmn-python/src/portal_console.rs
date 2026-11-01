@@ -3,6 +3,44 @@
 use pyo3::prelude::*;
 use pyo3::types::PyDictMethods;
 
+/// Exercise actual spawned-worker receipt delivery and shutdown, including
+/// malformed/missing receipts. Native clip bytes have separate installed-wheel
+/// coverage; this witness checks the transport that must preserve their rows.
+///
+/// # Errors
+/// Returns the actual host-process test failure. Requires POSIX SIGINT.
+#[cfg(feature = "gauntlet")]
+pub fn run_portal_gauntlet_worker_receipt_shutdown() -> Result<u64, String> {
+    crate::with_python_test_module("worker receipt shutdown", |py, _module, globals| {
+        let tests = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+        globals
+            .set_item("_FMN_WORKER_TESTS", tests.to_string_lossy().as_ref())
+            .map_err(|error| error.to_string())?;
+        let source = std::ffi::CString::new(
+            r#"
+import sys
+import unittest
+if _FMN_WORKER_TESTS not in sys.path:
+    sys.path.insert(0, _FMN_WORKER_TESTS)
+from test_process_batch import ProcessBatchTests
+_worker_tests = unittest.TestSuite(ProcessBatchTests(name) for name in (
+    "test_cancellation_keeps_receipt_before_stalled_optional_teardown",
+    "test_non_json_receipt_is_failed_without_publication_claim",
+    "test_keep_going_and_abrupt_worker_exit",
+))
+_worker_result = unittest.TextTestRunner(verbosity=2).run(_worker_tests)
+assert _worker_result.testsRun == 3 and not _worker_result.skipped
+assert _worker_result.wasSuccessful(), "real worker receipt shutdown tests failed"
+"#,
+        )
+        .map_err(|error| error.to_string())?;
+        py.run(source.as_c_str(), Some(globals), Some(globals))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        Ok(3)
+    })
+}
+
 /// Exercise SceneState, callback identity, rational time and native readback.
 ///
 /// # Errors

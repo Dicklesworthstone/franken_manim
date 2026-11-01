@@ -10726,6 +10726,27 @@ fn python_parallel_batch_checkpoint_run(ctx: &mut RunCtx) -> Result<RunOutcome, 
     Ok(RunOutcome::ok().with_counter("parallel_batch_checks", total))
 }
 
+/// fm-restore-green-ci-tqsr.23: actual process transport, no fake clip recovery.
+fn python_worker_receipt_shutdown_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    ctx.record_asset(
+        "python/process-batch.py",
+        include_bytes!("../../fmn-python/python/fmn_python/_process_batch.py"),
+    );
+    ctx.record_asset(
+        "python/process-receipt.py",
+        include_bytes!("../../fmn-python/python/fmn_python/_process_receipt.py"),
+    );
+    ctx.record_asset(
+        "python/worker-receipt-tests.py",
+        include_bytes!("../../fmn-python/tests/test_process_batch.py"),
+    );
+    let checks = manimlib::run_portal_gauntlet_worker_receipt_shutdown()
+        .map_err(|error| fail(format!("Python worker receipt shutdown: {error}")))?;
+    ctx.event(LogEvent::new("e2e.python.worker_receipt_shutdown").field("checks", checks));
+    ctx.counter("worker_receipt_checks", checks);
+    Ok(RunOutcome::ok().with_counter("worker_receipt_checks", checks))
+}
+
 /// fm-sq8.5, fm-sq8.7, fm-soa-mirrors-dead-p0gc: Send+Sync FrozenRenderState
 /// compilation and zero-allocation RetainedFrameRenderer reuse.
 fn frozen_render_packet_pipeline_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -13712,6 +13733,22 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )
         .tier(Tier::Fast),
     );
+    if cfg!(unix) {
+        specs.push(spec(
+            "failure.python_worker_receipt_shutdown.v1",
+            ScenarioClass::FailurePath,
+            Surface::PythonInProcess,
+            Invocation::new(python_worker_receipt_shutdown_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("worker_receipt_checks", 3),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.python.worker_receipt_shutdown",
+                vec![FieldPred::u64_eq("checks", 3)],
+            )],
+        ));
+    }
     specs.push(
         spec(
             "lifecycle.python_parallel_batch_checkpoint.v1",
@@ -14967,6 +15004,17 @@ fn python_scene_console_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.python_scene_console.v1")
         .expect("Python scene console scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[cfg(unix)]
+#[test]
+fn python_worker_receipt_shutdown_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "failure.python_worker_receipt_shutdown.v1")
+        .expect("the real worker receipt shutdown scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

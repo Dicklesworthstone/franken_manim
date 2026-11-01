@@ -13,6 +13,7 @@ import operator
 import os
 import signal
 import sys
+from threading import local
 import time
 
 from .cancellation import BatchCancelled, _check_cancelled, _validate_cancellation
@@ -20,6 +21,22 @@ from ._process_receipt import (
     MAX_RECEIPT_BYTES as _MAX_RECEIPT_BYTES, receipt_channel, send_receipt,
     send_group_ready,
 )
+
+_worker_teardown = local()
+
+
+def _defer_until_receipted(callback):
+    """Defer optional worker teardown until its immutable outcome is sent.
+
+    Outside a disposable worker the caller retains ordinary synchronous
+    ownership. These callbacks never create or validate publication receipts;
+    the coordinator may stop them under the existing shutdown deadline.
+    """
+    callbacks = getattr(_worker_teardown, "callbacks", None)
+    if callbacks is None:
+        return False
+    callbacks.append(callback)
+    return True
 
 
 def positive_integer(value, name, maximum):
@@ -52,6 +69,7 @@ def failure(error, status="failed"):
 
 
 def _child(connection, worker, job):
+    _worker_teardown.callbacks = []
     try:
         try:
             # A disposable worker owns its ordinary descendants, never the
@@ -60,6 +78,10 @@ def _child(connection, worker, job):
             # against descendants deliberately creating another session/group.
             if os.name == "posix":
                 os.setsid()
+                # exec preserves SIG_IGN from daemon/background hosts. A fresh
+                # worker owns cooperative cancellation; leave the caller's
+                # handler untouched and let authored code override its own.
+                signal.signal(signal.SIGINT, signal.default_int_handler)
                 send_group_ready(connection)
             # The result travels over its private result channel. Keep fd-level output
             # from native libraries and authored os.write/subprocess calls off
@@ -83,6 +105,10 @@ def _child(connection, worker, job):
         send_receipt(connection, data)
     finally:
         connection.close()
+        callbacks = _worker_teardown.callbacks
+        del _worker_teardown.callbacks
+        for callback in callbacks:
+            callback()
 
 
 def _receive(connection, *, exited=False):

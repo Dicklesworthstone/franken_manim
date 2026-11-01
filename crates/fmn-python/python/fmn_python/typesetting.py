@@ -317,7 +317,17 @@ def install_typesetting(native: Any) -> None:
         finally:
             # Native maintenance records ordinary storage errors and respects
             # active pins and the nonblocking lock. It never changes scene ink.
-            maintain_backend()
+            # An interrupted disposable worker must report its already-owned
+            # partial clips before advisory pruning consumes the shutdown grace.
+            # Ordinary hosts, success and authored failures retain synchronous
+            # maintenance. Worker teardown uses the SAME backend and deadline.
+            deferred = False
+            if isinstance(sys.exception(), (KeyboardInterrupt, SystemExit)):
+                from ._process_batch import _defer_until_receipted
+
+                deferred = _defer_until_receipted(maintain_backend)
+            if not deferred:
+                maintain_backend()
 
     def set_static_preflight(enabled=True):
         if not isinstance(enabled, bool):

@@ -34,7 +34,7 @@ mod portal_rates;
 #[cfg(feature = "gauntlet")]
 pub use portal_console::{
     run_portal_gauntlet_console, run_portal_gauntlet_parallel_batch_checkpoint,
-    run_portal_gauntlet_reference_flags,
+    run_portal_gauntlet_reference_flags, run_portal_gauntlet_worker_receipt_shutdown,
 };
 #[cfg(feature = "gauntlet")]
 pub use portal_ode::run_portal_gauntlet_ode_solution;

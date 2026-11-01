@@ -1,13 +1,19 @@
 """Real spawned-process tests; no native extension or render stubs required."""
 import multiprocessing as mp
+from functools import partial
 import os
+import signal
 from pathlib import Path
 import sys
 import time
+import tempfile
+from threading import Event, Thread
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 from fmn_python._process_batch import run_process_jobs
+from fmn_python._process_batch import _defer_until_receipted
+from fmn_python.cancellation import BatchCancelled, CancellationToken
 
 _GENERATION = 0
 
@@ -31,6 +37,22 @@ def job(options):
 
 def malformed_job(options):
     return {"status": "succeeded", "result": float("nan")}
+
+
+def slow_teardown(path):
+    Path(path).write_text("teardown started")
+    time.sleep(60)
+
+
+def interrupted_job_with_teardown(options):
+    try:
+        Path(options["ready"]).write_text("worker entered")
+        time.sleep(60)
+    except KeyboardInterrupt:
+        if not _defer_until_receipted(partial(slow_teardown, options["marker"])):
+            raise RuntimeError("disposable worker has no receipt owner")
+        return {"status": "cancelled", "result": {"retained": "owned receipt"},
+                "error": {"type": "KeyboardInterrupt", "message": "", "notes": []}}
 
 
 class ProcessBatchTests(unittest.TestCase):
@@ -89,6 +111,46 @@ class ProcessBatchTests(unittest.TestCase):
         self.assertEqual(rows[0]["status"], "failed")
         self.assertEqual(rows[0]["error"]["type"], "TimeoutError")
         self.assertEqual(rows[1]["status"], "not_run")
+
+    @unittest.skipUnless(os.name == "posix", "requires cooperative SIGINT cancellation")
+    def test_cancellation_keeps_receipt_before_stalled_optional_teardown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker = Path(directory) / "teardown-started"
+            ready = Path(directory) / "worker-ready"
+            token, finished, errors = CancellationToken(), Event(), []
+            def cancel_entered_worker():
+                deadline = time.monotonic() + 5
+                while not ready.exists() and time.monotonic() < deadline:
+                    if finished.wait(0.01):
+                        return
+                if not ready.is_file():
+                    errors.append("worker did not enter before the readiness watchdog")
+                token.cancel()
+            observer = Thread(target=cancel_entered_worker)
+            observer.start()
+            try:
+                with self.assertRaises(BatchCancelled) as caught:
+                    run_process_jobs([{"marker": str(marker), "ready": str(ready)}],
+                                     interrupted_job_with_teardown, workers=1, cancellation=token)
+            finally:
+                finished.set()
+                observer.join()
+            self.assertEqual(errors, [])
+            rows = caught.exception.process_batch_outcomes
+            self.assertTrue(marker.is_file(), "the real deferred callback did not execute")
+            self.assertEqual(rows[0]["status"], "cancelled")
+            self.assertEqual(rows[0]["error"]["type"], "KeyboardInterrupt")
+            self.assertEqual(rows[0]["result"], {"retained": "owned receipt"})
+
+    @unittest.skipUnless(os.name == "posix", "requires cooperative SIGINT cancellation")
+    def test_worker_cancellation_restores_only_its_inherited_ignored_sigint(self):
+        previous = signal.getsignal(signal.SIGINT)
+        try:
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
+            self.test_cancellation_keeps_receipt_before_stalled_optional_teardown()
+            self.assertEqual(signal.getsignal(signal.SIGINT), signal.SIG_IGN)
+        finally:
+            signal.signal(signal.SIGINT, previous)
 
     def test_non_json_receipt_is_failed_without_publication_claim(self):
         rows = run_process_jobs([{}], malformed_job, workers=1)
