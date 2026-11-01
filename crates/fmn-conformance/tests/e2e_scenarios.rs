@@ -3989,6 +3989,96 @@ fn studio_builtin_inputs_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
     Ok(outcome.with_counter("studio_live_builtin_families", 5))
 }
 
+/// OS entropy must isolate real hosts without changing their scene output.
+fn studio_session_capability_isolation_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    ctx.set_fps((30, 1));
+    ctx.record_asset(
+        "studio/host-entropy.rs",
+        include_bytes!("../../fmn-platform/src/entropy.rs"),
+    );
+    let directory = scenario_dir("studio_session_capability_isolation")?;
+    let (mut first, first_endpoint) = StudioProcess::launch_named(&directory, "circle_shift.v1")?;
+    let (mut second, second_endpoint) = StudioProcess::launch_named(&directory, "circle_shift.v1")?;
+    if first_endpoint.capability == second_endpoint.capability {
+        return Err(fail("independent Studio hosts reused a session capability"));
+    }
+    let mut outcome = RunOutcome::ok();
+    let mut first_initial = None;
+    let mut first_edited = None;
+    for (label, endpoint, foreign) in [
+        ("session_a", &first_endpoint, &second_endpoint),
+        ("session_b", &second_endpoint, &first_endpoint),
+    ] {
+        let mut frames = endpoint.stream()?;
+        let initial_png = frames.frame(0, 0)?;
+        let initial = endpoint.request("GET", "/api/inspect", b"", 200)?;
+        studio_view_with_frame_count(&initial, 0, 13)?;
+        let wrong_session = StudioEndpoint {
+            address: endpoint.address,
+            capability: foreign.capability.clone(),
+        };
+        // Authorization failures use the host's bounded plain-text response;
+        // the successful API helper deliberately requires JSON instead.
+        let mut rejected = wrong_session.connect("POST", "/api/scrub", b"frame=1&commit=true")?;
+        let deadline = std::time::Instant::now() + STUDIO_IO_TIMEOUT;
+        let header = studio_read_header(&mut rejected, deadline)?;
+        if !header.starts_with("HTTP/1.1 403 Forbidden\r\n")
+            || studio_header_field(&header, "Content-Type")? != "text/plain; charset=utf-8"
+        {
+            return Err(fail("foreign session capability was not precisely refused"));
+        }
+        let count = studio_header_number(&header, "Content-Length")?;
+        let refused = studio_read_body(&mut rejected, count, deadline)?;
+        studio_contains(&refused, "invalid capability")?;
+        for capability in [&endpoint.capability, &foreign.capability] {
+            if refused
+                .windows(capability.len())
+                .any(|part| part == capability.as_bytes())
+            {
+                return Err(fail("Studio refusal disclosed a session capability"));
+            }
+        }
+        if endpoint.request("GET", "/api/inspect", b"", 200)? != initial {
+            return Err(fail(
+                "foreign session capability mutated native scene state",
+            ));
+        }
+        endpoint.request("POST", "/api/scrub", b"frame=1&commit=true", 200)?;
+        let edited_png = frames.frame(1, 1)?;
+        studio_view_with_frame_count(&endpoint.request("GET", "/api/inspect", b"", 200)?, 1, 13)?;
+        if edited_png == initial_png {
+            return Err(fail(
+                "authenticated native seek did not change preview pixels",
+            ));
+        }
+        if let (Some(initial), Some(edited)) = (&first_initial, &first_edited) {
+            if initial != &initial_png || edited != &edited_png {
+                return Err(fail("host session entropy changed native rendered frames"));
+            }
+        } else {
+            first_initial = Some(initial_png.clone());
+            first_edited = Some(edited_png.clone());
+        }
+        outcome = outcome
+            .with_artifact(&format!("{label}.initial.png"), initial_png)
+            .with_artifact(&format!("{label}.edited.png"), edited_png);
+        drop(frames);
+    }
+    first.finish()?;
+    second.finish()?;
+    ctx.event(
+        LogEvent::new("e2e.studio.session_isolation")
+            .field("sessions", 2u64)
+            .field("capabilities_distinct", "true")
+            .field("foreign_mutations_refused_atomically", "true")
+            .field("authenticated_seeks", 2u64)
+            .field("scene_frames_equal", "true"),
+    );
+    Ok(outcome
+        .with_counter("studio_isolated_sessions", 2)
+        .with_counter("studio_authenticated_seeks", 2))
+}
+
 fn studio_presenter_holds_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     ctx.set_fps((30, 1));
     let directory = scenario_dir("studio_presenter_holds")?;
@@ -11924,6 +12014,31 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         .collect(),
     ));
     specs.push(spec(
+        "lifecycle.studio_session_capability_isolation.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::StudioSubprocess,
+        Invocation::new(studio_session_capability_isolation_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "session_a.initial.png".to_owned(),
+                "session_a.edited.png".to_owned(),
+                "session_b.initial.png".to_owned(),
+                "session_b.edited.png".to_owned(),
+            ]),
+            counter_eq("studio_isolated_sessions", 2),
+            counter_eq("studio_authenticated_seeks", 2),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.studio.session_isolation",
+            vec![
+                FieldPred::str_eq("capabilities_distinct", "true"),
+                FieldPred::str_eq("foreign_mutations_refused_atomically", "true"),
+                FieldPred::str_eq("scene_frames_equal", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.studio_presenter_holds.v1",
         ScenarioClass::LifecycleDrill,
         Surface::StudioSubprocess,
@@ -14471,6 +14586,16 @@ fn studio_presenter_holds_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.studio_presenter_holds.v1")
         .expect("native Studio presenter scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn studio_session_capability_isolation_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.studio_session_capability_isolation.v1")
+        .expect("native session capability isolation scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

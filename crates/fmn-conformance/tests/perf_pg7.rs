@@ -76,7 +76,7 @@ fn fresh_store() -> Store {
     Store::open(
         Arc::new(VirtualFs::new()),
         Arc::new(FakeClock::new()),
-        "/cache",
+        if cfg!(windows) { "C:\\cache" } else { "/cache" },
         StoreConfig::default(),
     )
     .expect("virtual cache store")

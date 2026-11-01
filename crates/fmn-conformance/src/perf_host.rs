@@ -1001,11 +1001,10 @@ fn validate_absolute_path(name: &str, path: &Path) -> Result<(), HostError> {
         .to_str()
         .ok_or_else(|| HostError::Profile(format!("{name} is not UTF-8")))?;
     validate_scalar(name, text, MAX_PATH_BYTES)?;
-    if !path.is_absolute()
-        || path
-            .components()
-            .any(|component| matches!(component, std::path::Component::ParentDir))
-    {
+    // Profiles describe POSIX hosts even when parsed on Windows. Native
+    // Path::is_absolute/components would reinterpret those durable values
+    // using the parser's OS instead of the profile's path grammar.
+    if !text.starts_with('/') || text.split('/').any(|component| component == "..") {
         return Err(HostError::Profile(format!(
             "{name} must be an absolute traversal-free path"
         )));
@@ -1436,8 +1435,21 @@ struct MountRecord {
     source: String,
 }
 
+fn posix_path_components(path: &Path) -> impl Iterator<Item = &[u8]> {
+    path.as_os_str()
+        .as_encoded_bytes()
+        .split(|byte| *byte == b'/')
+        .filter(|component| !component.is_empty() && *component != b".")
+}
+
 fn find_mount(input: &str, artifact_path: &Path) -> Result<MountRecord, HostError> {
-    if !artifact_path.is_absolute() {
+    // mountinfo describes the Linux host, independently of the OS parsing
+    // this profile/fixture. Backslashes remain literal POSIX filename bytes.
+    if !artifact_path
+        .as_os_str()
+        .as_encoded_bytes()
+        .starts_with(b"/")
+    {
         return Err(HostError::Profile(
             "artifact path must be absolute for storage attestation".to_owned(),
         ));
@@ -1453,7 +1465,11 @@ fn find_mount(input: &str, artifact_path: &Path) -> Result<MountRecord, HostErro
             return Err(HostError::Probe("truncated mountinfo row".to_owned()));
         }
         let mount_point = PathBuf::from(decode_mount_field(fields[4])?);
-        if !artifact_path.starts_with(&mount_point) {
+        let mut artifact_components = posix_path_components(artifact_path);
+        if !mount_point.as_os_str().as_encoded_bytes().starts_with(b"/")
+            || !posix_path_components(&mount_point)
+                .all(|component| artifact_components.next() == Some(component))
+        {
             continue;
         }
         let candidate = MountRecord {
@@ -1462,7 +1478,8 @@ fn find_mount(input: &str, artifact_path: &Path) -> Result<MountRecord, HostErro
             source: decode_mount_field(tail[1])?,
         };
         if best.as_ref().is_none_or(|current| {
-            candidate.mount_point.components().count() > current.mount_point.components().count()
+            posix_path_components(&candidate.mount_point).count()
+                > posix_path_components(&current.mount_point).count()
         }) {
             best = Some(candidate);
         }
@@ -1596,6 +1613,29 @@ mod tests {
             digest("topology"),
             digest("/dev/nvme0n1p1"),
         )
+    }
+
+    #[test]
+    fn profile_paths_use_posix_grammar_on_every_parser_host() {
+        for path in ["/", "/data", "/data//./frames", "/data/back\\slash"] {
+            validate_absolute_path("storage_mount", Path::new(path))
+                .expect("absolute POSIX profile path");
+        }
+        for path in [
+            "data",
+            "../data",
+            "/data/../frames",
+            "C:\\data",
+            "\\\\host\\data",
+        ] {
+            assert!(
+                validate_absolute_path("storage_mount", Path::new(path)).is_err(),
+                "must refuse {path:?}"
+            );
+        }
+        let profile = HostProfile::from_tsv(&profile_text()).expect("Linux profile parses");
+        assert_eq!(profile.storage_mount.to_str(), Some("/data"));
+        assert_eq!(profile.to_tsv(), profile_text());
     }
 
     /// The canonical 8-core, single-node, SMT-free host.
@@ -2203,5 +2243,26 @@ mod tests {
         assert_eq!(mount.mount_point, Path::new("/data"));
         assert_eq!(mount.fs_type, "xfs");
         assert_eq!(mount.source, "/dev/nvme disk");
+    }
+
+    #[test]
+    fn mount_parser_preserves_posix_component_boundaries_on_every_host() {
+        let input = "1 0 8:1 / / rw - ext4 /dev/root rw\n\
+                     2 1 8:2 / /data rw - xfs /dev/data rw\n\
+                     3 1 8:3 / /data/back\\134slash rw - tmpfs tmpfs rw\n";
+        for (path, expected) in [
+            ("/database/raw.tsv", "/"),
+            ("//data//./raw.tsv", "/data"),
+            ("/data/back\\slash/raw.tsv", "/data/back\\slash"),
+            ("/data/back/slash/raw.tsv", "/data"),
+        ] {
+            let mount = find_mount(input, Path::new(path)).expect("POSIX mount");
+            assert_eq!(
+                mount.mount_point.as_os_str(),
+                std::ffi::OsStr::new(expected)
+            );
+        }
+        assert!(find_mount(input, Path::new("data/raw.tsv")).is_err());
+        assert!(find_mount(input, Path::new("C:\\data\\raw.tsv")).is_err());
     }
 }

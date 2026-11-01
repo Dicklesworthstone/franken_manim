@@ -44,6 +44,7 @@
 //! the doctrine — it reads sysfs *through* [`fs::FileSystem`], so synthetic
 //! machines are just fixtures.
 #![forbid(unsafe_code)]
+#![cfg_attr(windows, feature(random))]
 
 pub mod clock;
 pub mod entropy;

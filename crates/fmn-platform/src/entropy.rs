@@ -44,8 +44,9 @@ pub trait HostEntropy: Send + Sync {
 
 /// Audited safe-`std` host entropy.
 ///
-/// Unix systems expose the kernel CSPRNG through `/dev/urandom`. Other
-/// targets fail closed until they have an equally narrow safe implementation.
+/// Unix systems expose the kernel CSPRNG through `/dev/urandom`. Windows
+/// uses the pinned standard library's `SystemRng`, whose native backend calls
+/// `ProcessPrng`. Other targets fail closed until audited support exists.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct StdHostEntropy;
 
@@ -56,7 +57,15 @@ impl HostEntropy for StdHostEntropy {
             let mut source = std::fs::File::open("/dev/urandom").map_err(EntropyError::Io)?;
             source.read_exact(destination).map_err(EntropyError::Io)
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            // The exact SUITE.lock nightly implements this safe API with the
+            // OS CSPRNG (ProcessPrng on our MSVC target). It neither consumes
+            // scene RNG state nor introduces another runtime dependency.
+            std::random::Rng::fill_bytes(&mut std::random::SystemRng, destination);
+            Ok(())
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = destination;
             Err(EntropyError::Unavailable(
@@ -109,5 +118,22 @@ mod tests {
     fn empty_script_refuses_nonempty_requests() {
         let mut byte = [0_u8; 1];
         assert!(ScriptedEntropy::new(Vec::new()).fill(&mut byte).is_err());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn native_entropy_fills_full_requests_and_accepts_empty_requests() {
+        let mut first = [0_u8; 64];
+        let mut second = [0_u8; 64];
+        StdHostEntropy.fill(&mut []).expect("empty host request");
+        StdHostEntropy.fill(&mut first).expect("first host request");
+        StdHostEntropy
+            .fill(&mut second)
+            .expect("second host request");
+        // This is an integration smoke for a wired OS capability, not a
+        // statistical assessment or a substitute for auditing the backend.
+        assert_ne!(first, [0; 64]);
+        assert_ne!(second, [0; 64]);
+        assert_ne!(first, second);
     }
 }
