@@ -60,10 +60,10 @@ jobs:
       - name: Build and test the real installed native wheel
         run: |
           set -euo pipefail
-          python -m pip install 'numpy==2.5.2' 'maturin==1.14.1'
+          python -m pip install 'numpy==2.5.2' 'maturin==1.14.1' 'IPython==9.14.0'
           python -m maturin build --locked --interpreter python --profile dev --out target/tex-preamble-wheel 2>&1 | tee /tmp/tex-preamble-build.log
           python -m venv target/tex-preamble-venv
-          target/tex-preamble-venv/bin/python -m pip install 'numpy==2.5.2' target/tex-preamble-wheel/*.whl
+          target/tex-preamble-venv/bin/python -m pip install 'numpy==2.5.2' 'IPython==9.14.0' target/tex-preamble-wheel/*.whl
           for suite in tex_preamble tex_preamble_render portal_initialization live_tex live_tex_render matrix_authoring decimal_authoring complex_matrix; do
             target/tex-preamble-venv/bin/python -I crates/fmn-python/tests/$suite.py 2>&1 | tee /tmp/tex-preamble-$suite.log
           done
