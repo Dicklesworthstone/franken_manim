@@ -319,8 +319,11 @@ _fmn_sys.unraisablehook = _fmn_capture_unraisable
         // therefore survives both clearing globals and draining the cache.
         // Release only data roots on classes authored in this owned workload;
         // imported classes, methods, descriptors and finalizers stay intact.
+        // gc also tracks weakref proxies. isinstance follows their target's
+        // __class__, which admits unweakrefable proxies and dereferences dead
+        // targets. Concrete type ancestry keeps real subclasses/metaclasses.
         if let Err(error) = py.run(
-            c"import types\nproxies = [(weakref.ref(obj), type(obj).__name__) for obj in gc.get_objects() if isinstance(obj, Bridge)]\nowned_classes = [obj for obj in gc.get_objects() if isinstance(obj, type) and type.__getattribute__(obj, '__module__') == worker_namespace]\nprotected = {'__dict__', '__weakref__', '__slots__', '__module__', '__doc__', '__qualname__', '__name__', '__del__'}\ndescriptors = (types.FunctionType, types.BuiltinFunctionType, types.MemberDescriptorType, types.GetSetDescriptorType, classmethod, staticmethod, property)\nfor cls in owned_classes:\n    for name, value in tuple(type.__getattribute__(cls, '__dict__').items()):\n        if name not in protected and not isinstance(value, descriptors):\n            type.__delattr__(cls, name)\nowned_classes.clear()\nfor name in ('cls', 'name', 'value'):\n    globals().pop(name, None)\n",
+            c"import types\nproxies = [(weakref.ref(obj), type(obj).__name__) for obj in gc.get_objects() if issubclass(type(obj), Bridge)]\nowned_classes = [obj for obj in gc.get_objects() if issubclass(type(obj), type) and type.__getattribute__(obj, '__module__') == worker_namespace]\nprotected = {'__dict__', '__weakref__', '__slots__', '__module__', '__doc__', '__qualname__', '__name__', '__del__'}\ndescriptors = (types.FunctionType, types.BuiltinFunctionType, types.MemberDescriptorType, types.GetSetDescriptorType, classmethod, staticmethod, property)\nfor cls in owned_classes:\n    for name, value in tuple(type.__getattribute__(cls, '__dict__').items()):\n        if name not in protected and not isinstance(value, descriptors):\n            type.__delattr__(cls, name)\nowned_classes.clear()\nfor name in ('cls', 'name', 'value'):\n    globals().pop(name, None)\n",
             Some(&lifetime_globals),
             None,
         ) {
@@ -704,6 +707,39 @@ mod tests {
             })
             .join()
             .expect("failing workload owner thread");
+        }
+    }
+
+    #[test]
+    fn worker_teardown_handles_live_dead_and_callable_weak_proxies() {
+        for authored_failure in [false, true] {
+            std::thread::spawn(move || {
+                let outcome = with_owned_python_module(|py, _module, globals| {
+                    py.run(
+                        c"import gc, weakref\nfrom manimlib import Mobject\nclass AuthoredMeta(type(Mobject)):\n    pass\nclass Owned(Mobject, metaclass=AuthoredMeta):\n    pass\nlive = Owned()\nOwned.retained = live\nclass_proxy = weakref.proxy(Owned)\ninstance_proxy = weakref.proxy(live)\ndead = Owned()\ndead_proxy = weakref.proxy(dead)\ndel dead\ngc.collect()\nassert isinstance(class_proxy, type)\nassert isinstance(instance_proxy, Mobject)\nassert type(class_proxy) is weakref.CallableProxyType\nassert all(any(obj is proxy for obj in gc.get_objects()) for proxy in (class_proxy, instance_proxy, dead_proxy))\ntry:\n    bool(dead_proxy)\nexcept ReferenceError:\n    pass\nelse:\n    raise AssertionError('dead weak proxy must be dead before teardown')\n",
+                        Some(globals),
+                        Some(globals),
+                    )
+                    .map_err(|error| error.to_string())?;
+                    assert!(crate::method_cache::stats().entries > 0);
+                    if authored_failure {
+                        Err("authored weak-proxy workload failed".to_owned())
+                    } else {
+                        Ok(())
+                    }
+                });
+                if authored_failure {
+                    assert_eq!(
+                        outcome.expect_err("authored failure must survive clean teardown"),
+                        "authored weak-proxy workload failed"
+                    );
+                } else {
+                    outcome.expect("weak proxies must not break native owner teardown");
+                }
+                assert_eq!(crate::method_cache::stats().entries, 0);
+            })
+            .join()
+            .expect("weak-proxy workload owner thread");
         }
     }
 
