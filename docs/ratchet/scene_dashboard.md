@@ -1,30 +1,30 @@
-<!-- fmn-measurement {"inputs_digest": "sha256:c758365cab1ad92e over 2814 scene ids", "max_age_commits": 200, "measured_at": "2026-10-31", "measured_commit": "7fba660635e931da6e7de2b08ea97f63d3141a85", "producer": "python3 scripts/corpus_scene_sweep.py --report /data/tmp/fmn-execute-20261031-whole-census/records.ndjson --dashboard docs/ratchet/scene_dashboard.md --tsv docs/ratchet/scene_outcomes.tsv --title 3b1b corpus scene sweep (fmn-python) --note /data/tmp/fmn-execute-20261031-scene-note.md --measured-commit 7fba660635e931da6e7de2b08ea97f63d3141a85"} -->
+<!-- fmn-measurement {"inputs_digest": "sha256:c758365cab1ad92e over 2814 scene ids", "max_age_commits": 200, "measured_at": "2026-11-02", "measured_commit": "fe90a340c8fd88ad78836ff1cd07c96cb508a658", "producer": "python3 scripts/corpus_scene_sweep.py --report /data/tmp/fmn-execute-20261102-corpus68-whole-census-v1/scenes/records.ndjson --dashboard docs/ratchet/scene_dashboard.md --tsv docs/ratchet/scene_outcomes.tsv --title 3b1b corpus scene sweep (fmn-python) --note /data/tmp/fmn-execute-20261102-corpus68-scene-note.md --measured-commit fe90a340c8fd88ad78836ff1cd07c96cb508a658"} -->
 # 3b1b corpus scene sweep (fmn-python)
 
-Measured with the release wheel built from `7fba660635e931da6e7de2b08ea97f63d3141a85`, wheel SHA-256 `ffbf9c22f3128a0b037484b59018ea883eaf7f55ea3e81c4a089cebf744b4f9b`. Its 4,405 tracked non-tracker source entries matched both build workers (aggregate `e0c05295120aa997e4f82399a0855b941cd2918800c52829be04666f92698693`). This is repository byte binding, not a full RCH source-closure receipt. Every scene record carries installed payload digest `208605130e6ba56e00a0c03ce24f5f12db06be29529662e0be7f5db24f7efb1f`. Later uncommitted oracle, source-path and optional-shell changes are excluded from this measurement.
+Measured on 2026-11-02 with the clean release wheel built from `fe90a340c8fd88ad78836ff1cd07c96cb508a658`, wheel SHA-256 `00efb89cc68378809b96480194ec8fac908d5183be0a8747a736885097eeba9e`, native extension `6a9a2f458b0e62bebbb3bc29b62b8c1eef98fc20b302ce0da6fa2bf5af2bfcfa`, and matching standalone CLI `44cf2f92053a7b7ac67068886228c302f0137254c34a478fca07fa419c250b09`. All 4,406 tracked non-tracker source entries matched before and after the build and census (aggregate `5fde4187a527dbc8394e1edeaf172b0b95ab202cb3967db914d899ceb025eafe`); all 145 installed portal payload entries also remained unchanged. This is exact byte binding, not a full RCH source-closure receipt. Every scene record carries installed payload digest `3bd5eb9dc7429451a952ede9b4e05328a3e3846038edfb60cf6e2f2916c441f6`.
 
-All 2,814 original scene ids from pinned `3b1b/videos@e317d6c5eaa8370a2deb4d148c246b0d0e9fbe6f` were freshly attempted: final PNG at 320x180, 180 s timeout, 16 concurrent scenes. All 522 runtime errors received in-process attribution, and all 1,741 failed renders received construct-only checks. This is the complete census, not failed-only retries; every outcome remains in the denominator. Raw records: `/data/tmp/fmn-execute-20261031-whole-census/records.ndjson`, SHA-256 `208f84e50af781b3d5bd203c4c1869e3f39a4c1401fbb777019eb14b85ffeffc`. Original run log: `/data/tmp/fmn-execute-20261031-whole-census-writable.log`.
+All 2,814 original scene IDs from pinned `3b1b/videos@e317d6c5eaa8370a2deb4d148c246b0d0e9fbe6f` were freshly attempted: final PNG at 320x180, 180 s timeout, 16 concurrent scenes, years 2020–2026. Every one of the 521 runtime errors received in-process attribution, and all 1,740 failed renders received construct-only checks. Raw records: `/data/tmp/fmn-execute-20261102-corpus68-whole-census-v1/scenes/records.ndjson`, SHA-256 `067584f5fa982f8b92f8069514f83367c68cddc2ce89d7dfc4fb140120defed1`. Original producer log and guarded inputs are alongside that run. This is the complete census, with no exclusions or failed-only retries.
 
-The host uses CPython 3.13.1, NumPy 2.5.2 and IPython 9.14.0 with the same frozen 35-package optional scene environment as the earlier sweep (requirements SHA-256 `c249191900f77fc76347e9edee19fb3e2d7a81c0357d4d0fa4e71e05f941cd03`). Sympy 1.14.0 remains installed without dependency resolution alongside mpmath 1.4.1 despite its declared upper bound. Gensim, transformers, torch, requests, mido, opencv and private corpus assets remain absent. The corpus configuration changes only `directories.base` to empty (SHA-256 `9d79278259343e35d49d6b3d636a5a2d1d40db0af2aed8c5300b9a0153a15ca3`). Missing dependencies and assets remain visible outcomes.
+The host uses CPython 3.13.1, NumPy 2.5.2 and IPython 9.14.0 with 35 pinned scene packages (requirements SHA-256 `8c5ab6727f43d055a8547aa3bc36b47ce4d29e8427cc3870f41725c47c9d8f89`); `pip check` passes. **The host cohort changed:** the previous `c249191900f77fc76347e9edee19fb3e2d7a81c0357d4d0fa4e71e05f941cd03` environment retained a declared Sympy/mpmath incompatibility. This comparison changes both source and host dependencies, so outcome differences cannot be attributed solely to code. Gensim, transformers, torch, requests, mido, opencv and private corpus assets remain absent. The corpus configuration still changes only `directories.base` to empty (SHA-256 `9d79278259343e35d49d6b3d636a5a2d1d40db0af2aed8c5300b9a0153a15ca3`). Missing dependencies and assets remain visible outcomes.
 
-This whole run has 1,073 successful scenes, meeting the unchanged 1,073 ratchet. Against the preceding `6ab48696` whole run's 1,068, exactly five outcomes change, all timeout -> ok: `SimulationWithExpDistribution2Dice`, `SimulationWithExpDistribution5Dice`, `DirectMGFInterpretation`, `PrimeRace` and `SphereStrips`. Every other outcome is unchanged. This is an observation across source and host conditions, not a claim that code caused those five gains. The earlier 1,068 result, its 33 timeouts and its four gains/nine losses against `ea5d83f7` remain recorded in Git and the retained raw archive. Current timeouts are 28; `SpinMeasurements` still refuses a nonplanar depth-tested fill. No floor, timeout, exclusion or denominator was changed.
+This run has **1,074 successful scenes**, meeting the unchanged 1,073 ratchet. Against the previous complete `7fba6606` run, exactly one outcome changes: `_2025/laplace/integration.py:IntegrateRealExponential`, from `portal_exception` to `ok`. There are no successful-to-failed changes, and every other outcome is unchanged. The earlier 1,073 result and its raw records remain retained. Current timeouts are still 28. No floor, timeout, exclusion or denominator was changed.
 
-All 1,741 failed renders received construct-only probes: 691 `missing_asset`, 522 `runtime_error`, 428 `missing_dependency`, 68 `capability_refusal`, 28 `timeout`, and four `tex_unsupported`. These are separate diagnostic outcomes, not 522 newly established portal defects. Render attribution remains 34 `portal_exception` and 488 `scene_code_error`; exception location alone does not establish fault. Peak RSS median is 157.6 MiB and maximum 2,705.7 MiB across all 2,814 attempts, including failures.
+All 1,740 failed renders received construct-only probes: 691 `missing_asset`, 521 `runtime_error`, 428 `missing_dependency`, 68 `capability_refusal`, 28 `timeout`, and four `tex_unsupported`. Render attribution is 33 `portal_exception` and 488 `scene_code_error`; exception location alone does not establish fault. Peak RSS median is 137.0 MiB and maximum 2,681.2 MiB across all 2,814 attempts, including failures. These observations do not establish a memory improvement across the changed cohorts.
 
-This shared 64-logical-CPU host is **calibration-unqualified (ADR-0024)**. No qualified PG speed win, cross-platform certification or human Look Gallery verdict is established. Differential and full-frame/offload measurements remain separately bound to their earlier `6ab48696` artifact and denominators; this census does not refresh them.
+This shared 64-logical-CPU host is **calibration-unqualified (ADR-0024)**. No qualified PG speed win, cross-platform certification or human Look Gallery verdict is established. Differential and full-frame/offload measurements remain separately bound to their earlier `6ab48696` artifact and denominators; this census does not refresh them. Whole source-policy, complete installed-policy and release qualification remain separate gates.
 
-2814 scene classes; **1073 ok (38.1%)**. Module-weighted: 14 of 136 modules render every scene (10.3%).
+2814 scene classes; **1074 ok (38.2%)**. Module-weighted: 14 of 136 modules render every scene (10.3%).
 
 | outcome | scenes | share |
 |---|---:|---:|
-| ok | 1073 | 38.1% |
+| ok | 1074 | 38.2% |
 | capability_refusal | 68 | 2.4% |
 | portal_unbound | 0 | 0.0% |
 | tex_unsupported | 4 | 0.1% |
 | missing_dependency | 428 | 15.2% |
 | missing_asset | 691 | 24.6% |
 | scene_code_error | 488 | 17.3% |
-| portal_exception | 34 | 1.2% |
+| portal_exception | 33 | 1.2% |
 | runtime_error | 0 | 0.0% |
 | timeout | 28 | 1.0% |
 | crash | 0 | 0.0% |
@@ -36,7 +36,7 @@ This shared 64-logical-CPU host is **calibration-unqualified (ADR-0024)**. No qu
 | _2022 | 350 | 131 | 37.4% |
 | _2023 | 481 | 255 | 53.0% |
 | _2024 | 461 | 119 | 25.8% |
-| _2025 | 505 | 262 | 51.9% |
+| _2025 | 505 | 263 | 52.1% |
 | _2026 | 161 | 92 | 57.1% |
 
 ## portal_exception: top clusters

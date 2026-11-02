@@ -5,3 +5,5 @@
 # rewrites text files at checkout and breaks every byte-locked comparison, so
 # conversion is disabled for the whole tree.
 * -text
+# An empty final exception column is a meaningful trailing TSV delimiter.
+docs/ratchet/scene_outcomes.tsv whitespace=-blank-at-eol

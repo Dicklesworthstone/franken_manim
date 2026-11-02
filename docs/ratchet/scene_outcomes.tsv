@@ -2499,7 +2499,7 @@ _2025/laplace/exponentials.py	SPlane	timeout
 _2025/laplace/exponentials.py	Thumbnail	ok	
 _2025/laplace/exponentials.py	Thumbnail2	ok	
 _2025/laplace/integration.py	IntegrateConstant	ok	
-_2025/laplace/integration.py	IntegrateRealExponential	portal_exception	TypeError
+_2025/laplace/integration.py	IntegrateRealExponential	ok	
 _2025/laplace/integration.py	SimplePole	portal_exception	ValueError
 _2025/laplace/main_equations.py	AlternateBreakDown	ok	
 _2025/laplace/main_equations.py	BreakUpCosineTex	ok	
