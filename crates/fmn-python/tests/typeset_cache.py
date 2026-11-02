@@ -87,7 +87,8 @@ def run_cache_retention_boundaries(m):
 
     class Formula(m.Scene):
         def construct(self):
-            self.add(m.Tex(r"x^2 + y^2 = z^2"))
+            self.add(*(m.Tex(r"x^2 + y^2 = z^2", template=pack)
+                       for pack in ("default", "basic", "empty")))
 
     with tempfile.TemporaryDirectory(prefix="fmn-cache-retention-") as directory:
         root, images = Path(directory), []
@@ -103,8 +104,8 @@ def run_cache_retention_boundaries(m):
                 receipt = typesetting_receipt(scene)
                 assert receipt['persistent'] is enabled, receipt
                 assert receipt['persistent_ceiling_bytes'] == (ceiling if enabled else None), receipt
+                assert receipt['maintenance']['runs'] == int(enabled), receipt
                 if name == "retained":
-                    assert receipt['maintenance']['runs'] >= 1, receipt
                     assert any((cache / 'ns/typeset').rglob('objects/*/*'))
                 if name == "evicted":
                     assert receipt['maintenance']['evicted_entries'] > 0, receipt

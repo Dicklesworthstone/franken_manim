@@ -318,6 +318,24 @@ impl TexEngine {
                 what: error.to_string(),
             })?
             .map(Arc::new);
+        self.replace_cache(next);
+        Ok(())
+    }
+
+    /// Share another engine's current persistent namespace and retention
+    /// policy. The engines keep independent fonts, macros and memory fronts;
+    /// disk access order and active pins belong to the shared namespace.
+    /// Rebinding either engine later does not rebind the other.
+    pub fn share_cache_with(&self, other: &Self) {
+        let next = other
+            .cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        self.replace_cache(next);
+    }
+
+    fn replace_cache(&self, next: Option<Arc<fmn_cache::Namespace>>) {
         let previous = {
             let mut binding = self.cache.lock().unwrap_or_else(PoisonError::into_inner);
             std::mem::replace(&mut *binding, next)
@@ -329,7 +347,6 @@ impl TexEngine {
             .memory_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = MemoryCache::default();
-        Ok(())
     }
 
     /// Configure the optional native-host disk cache without replacing this

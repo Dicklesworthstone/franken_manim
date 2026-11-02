@@ -21,6 +21,67 @@ fn engine() -> TexEngine {
 }
 
 #[test]
+fn shared_template_binding_preserves_pins_retention_and_independent_layouts() {
+    let store = store();
+    let primary = engine();
+    primary.set_cache_with_ceiling(Some(&store), 0).unwrap();
+    let other = TexEngine::new("fmd-math/pack/basic", None).unwrap();
+    let mode = Mode::Math(Style::Display);
+    let source = r"\frac{x+1}{2}";
+    let expected = other.typeset(mode, source).unwrap().to_bytes().unwrap();
+    other.share_cache_with(&primary);
+    assert_eq!(other.persistent_cache_ceiling(), Some(0));
+    assert_eq!(
+        other.typeset(mode, source).unwrap().to_bytes().unwrap(),
+        expected
+    );
+    let namespace = store
+        .namespace(
+            "typeset",
+            TYPESET_FORMAT_VERSION,
+            NamespacePolicy::default(),
+        )
+        .unwrap();
+    let key = other.cache_key(mode, source).unwrap();
+    assert!(
+        namespace.get(&key).unwrap().is_some(),
+        "sharing must clear the old memory front so it populates disk"
+    );
+    primary.typeset(mode, "z+2").unwrap();
+    let pin = namespace.pin(&key);
+    primary.maintain_cache();
+    let report = primary.cache_maintenance();
+    assert_eq!(report.runs, 1);
+    assert_eq!(report.evicted_entries, 1);
+    assert_eq!(report.skipped_pinned, 1);
+    assert_eq!(report.errors, 0);
+    assert!(namespace.get(&key).unwrap().is_some());
+    let fresh = TexEngine::new("fmd-math/pack/basic", None).unwrap();
+    fresh.share_cache_with(&primary);
+    assert_eq!(
+        fresh.typeset(mode, source).unwrap().to_bytes().unwrap(),
+        expected
+    );
+    assert_eq!(fresh.layout_computations(), 0);
+    assert_eq!(fresh.persistent_cache_hits(), 1);
+    drop(pin);
+    primary.maintain_cache();
+    assert_eq!(namespace.usage().unwrap(), 0);
+    primary.set_cache(None).unwrap();
+    assert!(
+        other.persistent_cache_enabled(),
+        "a shared binding is a snapshot, not a future configuration link"
+    );
+    other.share_cache_with(&primary);
+    assert!(!other.persistent_cache_enabled());
+    assert_eq!(
+        other.typeset(mode, source).unwrap().to_bytes().unwrap(),
+        expected
+    );
+    assert_eq!(namespace.usage().unwrap(), 0);
+}
+
+#[test]
 fn disk_retention_respects_pins_and_recomputed_layouts_keep_their_bytes() {
     let store = store();
     let cached = engine();

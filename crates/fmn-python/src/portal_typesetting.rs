@@ -71,18 +71,24 @@ fn _configure_tex_cache<'py>(
     let max_bytes = max_bytes.unwrap_or(fmn_config::config::DEFAULT_TYPESET_CACHE_MAX_BYTES);
     result.set_item("max_bytes", max_bytes)?;
     let templates = PyDict::new(py);
-    for name in TEMPLATES {
-        let row = with_tex_template(name, |engine| {
-            let error = engine
-                .configure_host_cache_with_ceiling(directory, max_bytes)
-                .err()
-                .map(|error| error.to_string().chars().take(2048).collect::<String>());
-            let row = stats(py, engine)?;
-            row.set_item("error", error)?;
-            Ok(row)
-        })?;
-        templates.set_item(name, row)?;
-    }
+    with_tex_template("default", |primary| {
+        let error = primary
+            .configure_host_cache_with_ceiling(directory, max_bytes)
+            .err()
+            .map(|error| error.to_string().chars().take(2048).collect::<String>());
+        for name in TEMPLATES {
+            let row = with_tex_template(name, |engine| {
+                if name != "default" {
+                    engine.share_cache_with(primary);
+                }
+                let row = stats(py, engine)?;
+                row.set_item("error", error.as_deref())?;
+                Ok(row)
+            })?;
+            templates.set_item(name, row)?;
+        }
+        Ok(())
+    })?;
     result.set_item("templates", templates)?;
     Ok(result)
 }
@@ -100,13 +106,13 @@ fn _tex_cache_info(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
 /// scene lifecycle boundaries, never in a per-formula constructor hot path.
 #[pyfunction]
 fn _maintain_tex_cache() -> PyResult<()> {
-    for name in TEMPLATES {
-        with_tex_template(name, |engine| {
-            engine.maintain_cache();
-            Ok(())
-        })?;
-    }
-    Ok(())
+    // Configuration shares this exact namespace, access log and pin set with
+    // every pack. One pass enforces their common ceiling without rescanning
+    // every persisted formula three times before Studio can publish a frame.
+    with_tex_template("default", |engine| {
+        engine.maintain_cache();
+        Ok(())
+    })
 }
 
 const MAX_PREFLIGHT_ITEMS: usize = 4096;

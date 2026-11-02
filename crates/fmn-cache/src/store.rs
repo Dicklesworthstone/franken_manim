@@ -2628,10 +2628,10 @@ impl Namespace {
             }
         }
         log.rebase_sequences();
-        self.write_index(&log)
+        self.write_index(&log, false)
     }
 
-    fn write_index(&self, log: &AccessLog) -> Result<(), CacheError> {
+    fn write_index(&self, log: &AccessLog, only_if_changed: bool) -> Result<(), CacheError> {
         let mut w = Writer::new(INDEX_SCHEMA);
         w.put_u64(log.next_seq);
         w.put_u64(log.entries.len() as u64);
@@ -2641,6 +2641,27 @@ impl Namespace {
             w.put_u64(e.last_seq);
         }
         let doc = w.finish()?;
+        if only_if_changed {
+            self.inner
+                .root
+                .validate_generation(self.inner.fs.as_ref())?;
+            if read_only_managed_file(
+                self.inner.fs.as_ref(),
+                &self.inner.root.path,
+                &self.index_path,
+                doc.len(),
+            )
+            .is_ok_and(|stored| stored == doc)
+            {
+                // The complete scan and size reconciliation already ran.
+                // Recheck ownership after the bounded read before skipping a
+                // byte-identical advisory publication and its filesystem sync.
+                self.inner
+                    .root
+                    .validate_generation(self.inner.fs.as_ref())?;
+                return Ok(());
+            }
+        }
         self.inner.write_file(&self.index_path, &doc)?;
         Ok(())
     }
@@ -2819,7 +2840,7 @@ impl Namespace {
         }
         report.retained_bytes = total;
         log.rebase_sequences();
-        self.write_index(&log)?;
+        self.write_index(&log, true)?;
         Ok(report)
     }
 
@@ -2919,6 +2940,71 @@ impl Drop for Namespace {
 mod tests {
     use super::*;
 
+    #[derive(Default)]
+    struct IndexWriteProbe {
+        inner: fmn_platform::fs::VirtualFs,
+        root: PathBuf,
+        writes: AtomicU64,
+        read_limit: AtomicU64,
+        rotate_on_read: std::sync::atomic::AtomicBool,
+    }
+
+    impl FileSystem for IndexWriteProbe {
+        fn node_kind_no_follow(&self, path: &Path) -> Result<Option<FsNodeKind>, FsError> {
+            self.inner.node_kind_no_follow(path)
+        }
+        fn create_dir(&self, path: &Path) -> Result<bool, FsError> {
+            self.inner.create_dir(path)
+        }
+        fn read(&self, path: &Path) -> Result<Vec<u8>, FsError> {
+            self.inner.read(path)
+        }
+        fn file_len(&self, path: &Path) -> Result<u64, FsError> {
+            self.inner.file_len(path)
+        }
+        fn read_bounded(&self, path: &Path, max_bytes: usize) -> Result<Vec<u8>, FsError> {
+            let bytes = self.inner.read_bounded(path, max_bytes)?;
+            if path.file_name().is_some_and(|name| name == "index") {
+                self.read_limit.store(max_bytes as u64, Ordering::SeqCst);
+                if self.rotate_on_read.swap(false, Ordering::SeqCst) {
+                    self.inner.insert(
+                        self.root.join(OWNER_FILE),
+                        OwnerManifest {
+                            path: sha256(self.root.as_os_str().as_encoded_bytes()),
+                            generation: sha256(b"index-comparison-replacement-root"),
+                        }
+                        .encode(),
+                    );
+                }
+            }
+            Ok(bytes)
+        }
+        fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), FsError> {
+            if path.file_name().is_some_and(|name| name == "index") {
+                self.writes.fetch_add(1, Ordering::SeqCst);
+            }
+            self.inner.write_atomic(path, bytes)
+        }
+        fn create_new(&self, path: &Path, bytes: &[u8]) -> Result<bool, FsError> {
+            self.inner.create_new(path, bytes)
+        }
+        fn remove_file(&self, path: &Path) -> Result<(), FsError> {
+            self.inner.remove_file(path)
+        }
+        fn remove_dir_all(&self, path: &Path) -> Result<(), FsError> {
+            self.inner.remove_dir_all(path)
+        }
+        fn exists(&self, path: &Path) -> bool {
+            self.inner.exists(path)
+        }
+        fn list_dir(&self, path: &Path) -> Result<Vec<PathBuf>, FsError> {
+            self.inner.list_dir(path)
+        }
+        fn count_dir_entries_bounded(&self, path: &Path, limit: usize) -> Result<usize, FsError> {
+            self.inner.count_dir_entries_bounded(path, limit)
+        }
+    }
+
     fn test_absolute(name: &str) -> PathBuf {
         #[cfg(windows)]
         {
@@ -2928,6 +3014,104 @@ mod tests {
         {
             PathBuf::from(format!("/{name}"))
         }
+    }
+
+    #[test]
+    fn retention_preserves_identical_index_but_publishes_eviction_and_repairs_corruption() {
+        let fs = Arc::new(IndexWriteProbe {
+            root: test_absolute("retention-index"),
+            ..IndexWriteProbe::default()
+        });
+        let store = Store::open(
+            fs.clone(),
+            Arc::new(fmn_platform::clock::FakeClock::new()),
+            fs.root.clone(),
+            StoreConfig::default(),
+        )
+        .unwrap();
+        let retained = store
+            .namespace(
+                "typeset",
+                1,
+                NamespacePolicy {
+                    ceiling_bytes: Some(u64::MAX),
+                },
+            )
+            .unwrap();
+        let key = CacheKey::from_digest(sha256(b"retained-formula"));
+        retained.put(&key, b"actual cached bytes").unwrap();
+        let index = fs.root.join("ns/typeset/v1/index");
+        let before = fs.inner.read(&index).unwrap();
+        let writes = fs.writes.load(Ordering::SeqCst);
+        assert!(matches!(
+            retained.evict_to_ceiling().unwrap(),
+            EvictOutcome::Done(_)
+        ));
+        assert_eq!(fs.inner.read(&index).unwrap(), before);
+        assert_eq!(fs.writes.load(Ordering::SeqCst), writes);
+        assert_eq!(fs.read_limit.load(Ordering::SeqCst), before.len() as u64);
+        assert_eq!(
+            retained.get(&key).unwrap().as_deref(),
+            Some(b"actual cached bytes".as_slice())
+        );
+
+        let zero = store
+            .namespace(
+                "typeset",
+                1,
+                NamespacePolicy {
+                    ceiling_bytes: Some(0),
+                },
+            )
+            .unwrap();
+        let EvictOutcome::Done(report) = zero.evict_to_ceiling().unwrap() else {
+            panic!("single maintainer must acquire the lock");
+        };
+        assert_eq!(report.evicted, 1);
+        assert_eq!(report.retained_bytes, 0);
+        assert!(retained.get(&key).unwrap().is_none());
+        assert_eq!(fs.writes.load(Ordering::SeqCst), writes + 1);
+        assert!(zero.read_index_file().unwrap().entries.is_empty());
+        let empty = fs.inner.read(&index).unwrap();
+        fs.inner.insert(&index, vec![0; empty.len() + 1]);
+        zero.evict_to_ceiling().unwrap();
+        assert_eq!(fs.inner.read(&index).unwrap(), empty);
+        assert_eq!(fs.writes.load(Ordering::SeqCst), writes + 2);
+    }
+
+    #[test]
+    fn identical_index_comparison_rechecks_the_root_generation_after_reading() {
+        let fs = Arc::new(IndexWriteProbe {
+            root: test_absolute("rotated-retention-index"),
+            ..IndexWriteProbe::default()
+        });
+        let store = Store::open(
+            fs.clone(),
+            Arc::new(fmn_platform::clock::FakeClock::new()),
+            fs.root.clone(),
+            StoreConfig::default(),
+        )
+        .unwrap();
+        let namespace = store
+            .namespace(
+                "typeset",
+                1,
+                NamespacePolicy {
+                    ceiling_bytes: Some(u64::MAX),
+                },
+            )
+            .unwrap();
+        namespace
+            .put(&CacheKey::from_digest(sha256(b"formula")), b"layout")
+            .unwrap();
+        let writes = fs.writes.load(Ordering::SeqCst);
+        fs.rotate_on_read.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            namespace.evict_to_ceiling(),
+            Err(CacheError::RootRefused { .. })
+        ));
+        drop(namespace);
+        assert_eq!(fs.writes.load(Ordering::SeqCst), writes);
     }
 
     fn root_environment(platform: &'static str) -> CacheRootEnvironment {
