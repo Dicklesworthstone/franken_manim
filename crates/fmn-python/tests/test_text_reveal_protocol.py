@@ -216,6 +216,7 @@ class ExistingAnimationIntegrationTests(unittest.TestCase):
                  "AddTextWordByWord", "AddTextLetterByLetter"}
         nodes = [node for node in ast.parse(source.read_text()).body
                  if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name in names]
+        # ubs:ignore[py.security.eval-exec-usage,py.eval-exec] -- only the named definition ASTs from the fixed checked-in bootstrap; no external code.
         exec(compile(ast.Module(nodes, []), str(source), "exec"), native.__dict__)
         return native
 

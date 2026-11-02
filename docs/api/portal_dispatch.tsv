@@ -32,9 +32,9 @@ AnimationGroup.finish	AnimationGroup	semantics	1	semantics
 AnimationGroup.get_all_mobjects	AnimationGroup	semantics	1	semantics
 AnimationGroup.interpolate	AnimationGroup	semantics	1	semantics
 AnimationGroup.update_mobjects	AnimationGroup	semantics	1	semantics
-LaggedStart.__init__	AnimationGroup	semantics	2	semantics > bootstrap
+LaggedStart.__init__	LaggedStart	bootstrap	1	bootstrap
 LaggedStartMap.__init__	LaggedStartMap	fmn_python.composite_effects	1	fmn_python.composite_effects
-Succession.__init__	AnimationGroup	semantics	2	semantics > bootstrap
+Succession.__init__	Succession	bootstrap	1	bootstrap
 Succession.begin	AnimationGroup	semantics	1	semantics
 Succession.finish	AnimationGroup	semantics	1	semantics
 Succession.interpolate	AnimationGroup	semantics	1	semantics
@@ -55,7 +55,7 @@ ShowIncreasingSubsets.update_submobject_list	ShowIncreasingSubsets	fmn_python.su
 ShowPartial.__init__	ShowPartial	bootstrap	1	bootstrap
 ShowPartial.get_bounds	ShowPartial	bootstrap	1	bootstrap
 ShowPartial.interpolate_submobject	ShowPartial	semantics	1	semantics
-ShowSubmobjectsOneByOne.__init__	ShowIncreasingSubsets	fmn_python.subset_reveal	1	fmn_python.subset_reveal
+ShowSubmobjectsOneByOne.__init__	ShowSubmobjectsOneByOne	fmn_python.subset_reveal	1	fmn_python.subset_reveal
 ShowSubmobjectsOneByOne.update_submobject_list	ShowIncreasingSubsets	fmn_python.subset_reveal	1	fmn_python.subset_reveal
 Uncreate.__init__	Uncreate	semantics	1	semantics
 Write.__init__	Write	semantics	2	semantics > bootstrap

@@ -43,7 +43,7 @@ def host(*, animations=False):
         # The installer binds real function defaults before capturing its
         # signature. Lift only that checked-in helper; the host still doubles
         # glyphs and storage, never the production initializer or formatter.
-        bootstrap = SOURCE.parent.parent / "manimlib_bootstrap.py"
+        bootstrap = Path(__file__).resolve().parents[1] / "python/manimlib_bootstrap.py"
         helper = next(node for node in ast.parse(bootstrap.read_text()).body
                       if isinstance(node, ast.FunctionDef) and node.name == "_rebind_default")
         bindings = {}
