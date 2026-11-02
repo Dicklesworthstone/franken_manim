@@ -88,6 +88,47 @@ path.add_arc_to(RIGHT, TAU / 4)      # 9 points now, 5 in the Reference
 path.add_arc_to(UP, TAU / 4, n_components=2)   # 5 points, either engine
 ```
 
+## Curve counts after Transform alignment
+
+Constructor point counts do not promise identical point indices after a
+`Transform` aligns shapes with different curve counts. Alignment subdivides
+the shorter path, greedily choosing its longest anchor chord and keeping the
+first index when computed priorities are exactly equal. Subdivision preserves
+the traced quadratic path, but changes where its anchors and handles occur.
+
+The plan's §6.1 requires semantic geometry in f64. This includes chord
+differences, norms and subdivision priorities, even when the input came from
+f32 records. The pinned Reference's `get_norm` instead returns a float32 for
+float32 inputs under the measured NumPy 2.5.2 environment. Nearly equal polygon
+edges can therefore receive different priorities. The first-index tie rule
+agrees; the numerical values being compared do not.
+
+For example, aligning the Reference's nine-gon points to sixteen curves adds
+seven curves. Supplying those exact same f32 points to both public insertion
+methods gives these insertion counts by original edge:
+
+```text
+Reference:    1 1 1 1 1 0 1 0 1
+FrankenManim: 1 0 1 1 1 1 1 0 1
+```
+
+The native choices match the independently computed f64 chord priorities;
+the Reference choices match its float32 priorities. Checking every output
+control against its original straight edge bounds both complete quadratic
+paths within 2.6e-8 scene units; all projections remain inside their edges.
+This explains the point-distribution difference reached by
+`Transform(Circle(radius=1.4), RegularPolygon(n=9))`. The minimized
+Ellipse-to-Arrow transform also retains a point-array difference; the
+two-program reproduction is not a full seed-34 campaign qualification.
+
+**Migration:** read current aligned points rather than assuming the
+Reference's post-Transform point indices. Use explicit authored subdivision
+when particular correspondence is part of the scene's intent. Do not round
+native geometry down to float32 to reproduce the Reference's priority noise.
+Arc-specific getters on an object that has become a polygon require their own
+analysis; this point-distribution explanation does not waive their observed
+differences.
+
 ## Evidence
 
 - `crates/fmn-geom/src/bezier.rs` (`arc_n_components`, unit tests).
@@ -102,3 +143,11 @@ path.add_arc_to(UP, TAU / 4, n_components=2)   # 5 points, either engine
   `manimlib/mobject/types/vectorized_mobject.py` (`add_arc_to`),
   `manimlib/utils/bezier.py` (`quadratic_bezier_points_for_arc`), all at
   the pinned commit `6199a00d`.
+- `fmn-geom/src/quadpath.rs` (`insert_n_curves_to_point_list`, including
+  the first-maximum tournament fixture) and `fmn-mobject/src/align.rs`:
+  curve-count alignment and shape-preserving subdivision.
+- `fm-align-chord-tie-norms-uw95o`: actual fresh `face3be3` wheel versus
+  pinned Reference, two minimized programs and common-input insertion probe
+  under `/data/tmp/fmn-execute-20261101-align-chord-face`. The raw point
+  arrays, norm types, priorities and geometry distances are retained; no
+  comparator exclusion or tolerance is changed.

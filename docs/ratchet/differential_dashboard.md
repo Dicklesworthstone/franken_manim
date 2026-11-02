@@ -342,6 +342,18 @@ whole-source and installed-wheel qualification. These raw pairs remain under
 `/data/tmp/fmn-execute-20261101-triage68-family-sample` and
 `/data/tmp/fmn-execute-20261101-triage68-bullet-break`.
 
+The owner subsequently publishes that five-file repair as `face3be3`. Its fresh
+release wheel, SHA-256
+`1911f6473247e1d244734a85ebaa8acf9e8cb8a612718fc89572616c355e131b`,
+runs the source-unedited Copernicus scene and the authored multiline reduction
+in both providers. The reduction now agrees in both tiers with the existing
+exclusions and has no envelope violation. Both final panels show the intended
+two-line item. The original scene still has 208 structural and 233 geometry
+differences, plus twelve envelope violations; its residuals are retained under
+`/data/tmp/fmn-execute-20261101-bullet70-face-original`. This is a fresh artifact
+comparison, not a whole-source, whole-wheel or Look Gallery qualification.
+The unchanged full initializer scanner still stops at its analysis work limit.
+
 Raw paired records, provider logs, facts and PNGs are retained under
 `/data/tmp/fmn-execute-20261101-triage68-corpus-sample`,
 `/data/tmp/fmn-execute-20261101-triage68-root-style` and
@@ -374,9 +386,19 @@ admitted comparison inputs, and earns no animation capability credit.
 All 845 originally two-provider scenes were inspected for capture markers;
 PrimeRace is the only truncated pair. This postprocessing does not revise the
 original 2,814-scene census or its 150/497/186 counters. The fresh
-NaiveLinearScaling pair still has its line point-count difference and remains
-unresolved. The three new pairs are retained under
+NaiveLinearScaling pair retains 33 versus five points at `1.0 Line.n_points`,
+with equal first-member bounds. The scene explicitly turns that line into a
+`CubicBezier` through `become`; the Python class remains Line. BN-13 documents
+the adaptive, error-bounded cubic storage versus the Reference's fixed two
+quadratics. A separate actual two-provider `LineBecomesCubic` control at the
+fresh `face3be3` wheel reproduces that mechanism. Its geometry differences
+remain recorded, and the registry maps only the original scene's first
+point-count fact. An earlier control used invalid plain-list inputs in the
+Reference; that failed run is retained and earns no negative-control credit.
+The corrected control is under
+`/data/tmp/fmn-execute-20261101-triage68-cubic-face`.
+The three original-scene pairs are retained under
 `/data/tmp/fmn-execute-20261101-triage68-updater-sample`; the before/after
 comparator proof is under `/data/tmp/fmn-execute-20261101-capture71-actual-proof`.
-The current registry has 111 rows; 76 measured first-fact mappings and 29 stale
+The current registry has 112 rows; 75 measured first-fact mappings and 29 stale
 keys remain unresolved. No whole-triage completion is claimed.

@@ -2,7 +2,37 @@
 
 **Status date:** 2026-11-01 (America/New_York). The assessment below separates the inspected source, the published artifacts, recorded measurements, and fresh execution. Earlier assessments and execution records remain historical evidence.
 
-## Current follow-through — 2026-11-01, after ba0507e5
+## Current follow-through — 2026-11-01, qualifying face3be3
+
+The owner publishes the five-file multiline-list repair as
+`face3be3c9adf9e9ae3d1d81f99fb270f26745e6`, following the comparator repair
+`ba0507e5` and the C34 evidence checkpoint. A fresh DSR/RCH artifact build
+passes all five stages: wheel, standalone CLI, dynamic-library inspection,
+runtime dependency tree and clean-environment version. The resulting wheel
+SHA-256 is
+`1911f6473247e1d244734a85ebaa8acf9e8cb8a612718fc89572616c355e131b`;
+the extension is
+`adf2ffa4c1c1754c603585c439d39b30c22b53361887fa99854a54cb889f63c0`;
+the standalone CLI is
+`48d2f010df4a7a3e21ee33459cc41a1f3af61f9d769abcae150801db2aff9df2`.
+The raw release profile fields match the C34 build. No performance result is
+inferred from that identity.
+
+The fresh-wheel installation and dependency check pass. The entire original
+installed-runtime policy is running with this wheel and CLI, without an overlay.
+The entire source policy is running on a normally admitted worker115, using
+the same policy, profile, test concurrency and deadlines as the earlier green
+qualification. Its measurement/history, actual-profile, profile-test and fresh
+golden preflights pass. Neither whole gate has a terminal verdict yet.
+The frozen checkout contains 4,406 tracked non-Beads inputs, aggregate SHA-256
+`ea96ea0cfecb55104b44221ec46c222ccd8a4d8b825bb63a635581e2a81b8e06`.
+It is separate from the primary checkout's report and tracker edits.
+
+An initial artifact attempt disconnects before a completion receipt; normal
+RCH recovery retires it as failed with terminal acknowledgment. A second
+attempt uses staged, hash-verified driver data and completes normally. An
+initial source attempt on worker126 receives exit 103, no free slot, before
+compilation. No admission, lease or capacity setting is overridden.
 
 The published integer matching-selector repair is `c34af929`
 (`fm-5wq.69`). It accepts verified integer source and target selectors through
@@ -48,7 +78,7 @@ authored TeX hard breaks as literal backslashes. The minimal reproduction is
 4.348 units wide and 0.724 high in the predecessor, versus 2.432 by 1.396 in
 the Reference. The source-unedited `CopernicusConclusions` pair shows the
 same collapsed lines and shifted downstream content. The primary-checkout
-candidate now adapts ordinary and starred hard breaks, including whitespace,
+repair now adapts ordinary and starred hard breaks, including whitespace,
 to Scribe's existing native newline layout. Original item strings and the
 native Rust plain-text builder are preserved. Explicit per-break spacing is
 precisely refused and remains a support limitation.
@@ -70,17 +100,29 @@ on both the unchanged C34 initializer and the candidate. The other four
 changed files each complete their full scans with zero critical findings.
 The initializer scan is incomplete; no rule, category or finding is disabled.
 Formatting, Python compilation and diff checks pass after one formatting
-correction; all original failed logs remain. The candidate remains uncommitted
-and `.70` remains in progress.
+correction; all original failed logs remain. The owner subsequently commits
+the exact five tested files as `face3be3`; `.70` remains in progress.
+
+The actual fresh `face3be3` wheel now executes the original Copernicus scene
+and an independent multiline reduction against the pinned Reference, with
+both providers exiting 0. Both reduction tiers agree with the existing
+exclusions, with no envelope violation, and both panels show the two-line item.
+The full scene retains 208 structural and 233 geometry differences and twelve
+envelope violations. All new and predecessor observations remain available;
+the repair does not establish full scene parity or a Look Gallery verdict.
 
 Recovery inspection finds the exact completed Asupersync variant in our earlier
 qualified worker cache. The compiler, clean pinned dependency source and all
-39 direct dependency fingerprints match the failed worker. Its five completed
-files are preserved in a verified 89,989,197-byte archive; none has yet been
-installed over the failed cache. Normal RCH admission still refuses the worker
-under critical memory pressure. This cache is a recovery input, not a gate
-result. Permission to remove one separately backed-up obsolete cache directory
-is pending; no file has been deleted and no admission policy is overridden.
+39 direct dependency fingerprints initially match the failed worker. Its five
+completed files are preserved in a verified 89,989,197-byte archive. A later
+guard finds three dependency variants missing and refuses before installation;
+none of the five files is copied into the failed cache. The new source run uses
+worker115's own cache through ordinary Cargo. The user authorizes one obsolete
+cache directory removal, but exact-command confirmation remains pending. Fresh
+inspection finds only 553 of its original 8,008 entries still present, totaling
+396,401,161 regular-file bytes; all remaining contents match the separately
+verified backup. No deletion by this agent has occurred. No 5 GiB recovery
+claim or admission-policy override is made.
 
 The corpus investigation also finds `fm-5wq.71`: the shared comparator ignores
 an explicit `truncated_at` marker. Both old and fresh PrimeRace captures stop
@@ -106,14 +148,23 @@ credit. Whole-source qualification remains required before `.71` closes.
 The original 28-item acceptance review still has 25 closed issues and three
 Windows issues in progress. Corpus reconciliation `.68`, integer selectors
 `.69`, hard breaks `.70` and capture completeness `.71` add four active issues,
-for 25 closed of 32 owned items. This is not the whole project backlog. The `.68` inventory preserves
+for 25 closed of those 32 owned items. The current guarded planner subsequently
+selects `fm-align-chord-tie-norms-uw95o`; its verified claim adds one existing
+backlog item, making 25 closed of 33 owned, with eight active. Its two minimized
+programs are reproduced, and common-input probes confirm f32-versus-f64
+subdivision priorities. Original acceptance remains under investigation; no
+runtime fix or new closure is claimed. This is not the whole project backlog.
+The `.68` inventory preserves
 all 2,814 original scene IDs, 150 structural differences, 497 geometry
 differences, 186 envelope-violation scenes and all failures. Its complete
 root-cause and stale-row reconciliation remains unfinished. The registry has
-111 rows, with 76 measured first-fact rows still missing and 29 stale keys.
+112 rows, with 75 measured first-fact rows still missing and 29 stale keys.
 Eleven BasicBlockCount variants' original flash subtrees are traced to the
 documented frame-grid override rule, with one fresh representative pair.
-The bounded registry updates add no exclusions or looser envelopes.
+NaiveLinearScaling's first Line point-count observation is separately traced
+to its explicit `become(CubicBezier(...))` call and existing BN-13, with a live
+two-provider reduction. Its remaining differences stay open. The bounded
+registry updates add no exclusions or looser envelopes.
 
 The Windows GNU attempt has ended with exit 143 and a normal recovery
 acknowledgment. Only the old baseline CLI completed; current CLI and native
