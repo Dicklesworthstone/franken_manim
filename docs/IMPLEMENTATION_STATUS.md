@@ -2,7 +2,7 @@
 
 **Status date:** 2026-11-01 (America/New_York). The assessment below separates the inspected source, the published artifacts, recorded measurements, and fresh execution. Earlier assessments and execution records remain historical evidence.
 
-## Current follow-through — 2026-11-01, qualifying face3be3
+## Current follow-through — 2026-11-01, FACE policies passed
 
 The owner publishes the five-file multiline-list repair as
 `face3be3c9adf9e9ae3d1d81f99fb270f26745e6`, following the comparator repair
@@ -28,12 +28,17 @@ harness-only groups are reconciled by the unchanged completed-plain-run
 checker. This does not establish complete tracing. All 145 installed payload
 files and all source inputs remain unchanged.
 
-The entire source policy is running on a normally admitted worker115, using
-the same policy, profile, test concurrency and deadlines as the earlier green
-qualification. Its measurement/history, actual-profile, profile-test and fresh
-golden preflights, all-target checks, all three strict Clippy variants and
-Rustdoc pass. Unfiltered `cargo test` is active; the whole source policy has
-no terminal verdict yet. The separate bootstrap UBS failure remains open.
+The entire original source policy also exits 0, in 6,135,204 ms, through
+normally admitted RCH worker115. Measurement/history, actual-profile,
+profile-test and fresh-golden preflights, all-target checks, all three strict
+Clippy variants, Rustdoc, unfiltered `cargo test`, complete batch and
+ffmpeg-feature tests, final crate-DAG check and Node/WASM smoke pass. All 95
+E2E scenarios and all 163 embedded Python cases pass with none failed,
+ignored or filtered in those groups. The profile, default test concurrency
+and deadlines are unchanged. Existing missing Reference/gallery/TeX/ink and
+WASM-size inputs and opt-in performance/package checks receive no coverage
+credit. This is Linux policy qualification, not a release or platform matrix
+verdict. The separate bootstrap UBS failure remains open.
 The frozen checkout contains 4,406 tracked non-Beads inputs, aggregate SHA-256
 `ea96ea0cfecb55104b44221ec46c222ccd8a4d8b825bb63a635581e2a81b8e06`.
 It is separate from the primary checkout's report and tracker edits.
@@ -75,13 +80,14 @@ Python cases, with none failed, ignored or filtered. The subsequent
 `fmn-output --features ffmpeg-test-fixture --all-targets` test command fails
 while compiling Asupersync: the kernel OOM killer terminates rustc with
 SIGKILL after its anonymous resident memory reaches 6,779,324 KiB. Later source
-policy stages are unreached. This is a failed whole gate, not a source-policy
-pass, and `.69` remains in progress.
+policy stages are unreached. This older C34 run remains a failed whole gate;
+the subsequent FACE pass supplies the required source evidence for `.69`.
 
-The immutable qualification checkout retains 4,406
+The retained C34 before/after maps record 4,406
 tracked non-Beads inputs with aggregate SHA-256
 `e34f2dde3cdef08e79b0b6f532eaca1f67c52fe0592053a07cf3600c0c47bd9b`.
-Later primary-checkout changes are outside that qualification snapshot.
+After that run terminates, the owned checkout advances to FACE. The old maps,
+receipts, artifacts and source-history packs remain unchanged.
 
 Fresh corpus inspection also confirmed `fm-5wq.70`: BulletedList printed
 authored TeX hard breaks as literal backslashes. The minimal reproduction is
@@ -120,13 +126,15 @@ exclusions, with no envelope violation, and both panels show the two-line item.
 The full scene retains 208 structural and 233 geometry differences and twelve
 envelope violations. All new and predecessor observations remain available;
 the repair does not establish full scene parity or a Look Gallery verdict.
+Both complete functional policies now pass; the incomplete bootstrap scanner
+still prevents `.70` from closing.
 
 Recovery inspection finds the exact completed Asupersync variant in our earlier
 qualified worker cache. The compiler, clean pinned dependency source and all
 39 direct dependency fingerprints initially match the failed worker. Its five
 completed files are preserved in a verified 89,989,197-byte archive. A later
 guard finds three dependency variants missing and refuses before installation;
-none of the five files is copied into the failed cache. The new source run uses
+none of the five files is copied into the failed cache. The successful source run uses
 worker115's own cache through ordinary Cargo. The user authorizes one obsolete
 cache directory removal, but exact-command confirmation remains pending. Fresh
 inspection finds only 553 of its original 8,008 entries still present, totaling
@@ -153,17 +161,23 @@ non-credential justification; a separate credential comparison remains red
 with one critical finding. The actual-data proof checks all 845 originally
 two-provider scenes and finds one truncated pair, PrimeRace. It postprocesses
 retained captures and earns no new scene-execution or animation-capability
-credit. Whole-source qualification remains required before `.71` closes.
+credit. Both complete FACE policies and the current relevant-source UBS scan
+now pass. A fresh solo review against original acceptance closes `.69` and
+`.71`. The 14 scanned source paths have zero critical findings, 1,179 warnings
+and 1,716 informational findings; this is not a waiver of `.70`'s separate
+bootstrap analysis limit. No independent review is claimed.
 
 The original 28-item acceptance review still has 25 closed issues and three
-Windows issues in progress. Corpus reconciliation `.68`, integer selectors
-`.69`, hard breaks `.70` and capture completeness `.71` add four active issues,
-for 25 closed of those 32 owned items. The current guarded planner subsequently
-selects `fm-align-chord-tie-norms-uw95o`; its verified claim adds one existing
-backlog item, making 25 closed of 33 owned, with eight active. Its two minimized
+Windows issues in progress. Integer selectors `.69` and capture completeness
+`.71` add two qualified closures. Corpus reconciliation `.68`, hard breaks
+`.70` and `fm-align-chord-tie-norms-uw95o` remain active. The alignment issue's two minimized
 programs are reproduced, and common-input probes confirm f32-versus-f64
 subdivision priorities. Original acceptance remains under investigation; no
-runtime fix or new closure is claimed. This is not the whole project backlog.
+runtime fix or alignment closure is claimed. The fresh guarded planner next
+selects `.63`, now claimed to replace tests of dead tracker constructors with
+the actual installers and remove six dead definitions' import/metadata
+couplings. The current ledger is 27 closed of 34 owned, with seven active;
+this is not the whole project backlog.
 The `.68` inventory preserves
 all 2,814 original scene IDs, 150 structural differences, 497 geometry
 differences, 186 envelope-violation scenes and all failures. Its complete

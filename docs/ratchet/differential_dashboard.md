@@ -309,10 +309,12 @@ committed as `c34af929`. A fresh pair using its actual release wheel
 `46eceae6851035df5175c822e7a8de19547fc12ab360d35d7cfb4b57d15df4b5`
 now completes the original unmodified `IntegrateRealExponential` in both
 providers and publishes both final PNGs. The recorded portal/Reference exits
-are 0/0. This resolves the old initializer refusal, with full current source
-source qualification still pending. Its complete installed-artifact gate now
-passes; the subsequent source policy fails compiling Asupersync after a
-kernel-confirmed OOM kill. Component test passes do not close that whole gate.
+are 0/0. This resolves the old initializer refusal. C34's complete installed
+gate passes but its source policy fails after a kernel-confirmed Asupersync
+OOM kill. A subsequent fresh FACE wheel repeats the original scene with
+byte-identical per-provider PNGs, and both complete FACE policies pass.
+Original-acceptance review and the current relevant-source UBS pass now close
+`.69`; the older failed run is retained separately.
 
 The newly successful scene retains 156 structure differences, 2,172 geometry
 differences and ten envelope violations. Its first class difference at path 5
@@ -354,7 +356,9 @@ differences, plus twelve envelope violations; its residuals are retained under
 comparison, not a whole-source, whole-wheel or Look Gallery qualification.
 The unchanged full initializer scanner still stops at its analysis work limit.
 The separate complete FACE installed-wheel gate subsequently exits 0, with
-all 145 payload files unchanged; the whole source policy remains active.
+all 145 payload files unchanged. The entire FACE source policy also exits 0,
+with all 4,406 inputs unchanged. Bootstrap UBS remains incomplete, so `.70`
+stays open despite both functional-policy passes.
 
 Raw paired records, provider logs, facts and PNGs are retained under
 `/data/tmp/fmn-execute-20261101-triage68-corpus-sample`,
@@ -384,6 +388,8 @@ green from exit 0 to incomplete/exit 1; all 26 complete controls still pass.
 The retained PrimeRace differences and envelope observations are byte-for-byte
 preserved by the new comparator. This is a stricter harness, with zero newly
 admitted comparison inputs, and earns no animation capability credit.
+Both complete FACE policies and the current relevant-source scan subsequently
+pass; original-acceptance review closes `.71` as a harness integrity repair.
 
 All 845 originally two-provider scenes were inspected for capture markers;
 PrimeRace is the only truncated pair. This postprocessing does not revise the
