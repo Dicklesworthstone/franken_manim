@@ -3,10 +3,10 @@ import multiprocessing as mp
 from functools import partial
 import os
 import signal
+import socket
 from pathlib import Path
 import sys
 import time
-import tempfile
 from threading import Event, Thread
 import unittest
 
@@ -39,17 +39,21 @@ def malformed_job(options):
     return {"status": "succeeded", "result": float("nan")}
 
 
-def slow_teardown(path):
-    Path(path).write_text("teardown started")
+def slow_teardown(channel):
+    channel.sendall(b"teardown\n")
     time.sleep(60)
 
 
 def interrupted_job_with_teardown(options):
+    channel = socket.create_connection(tuple(options["address"]))
     try:
-        Path(options["ready"]).write_text("worker entered")
+        time.sleep(options.get("entry_delay", 0))
+        channel.sendall(b"ready\n")
         time.sleep(60)
     except KeyboardInterrupt:
-        if not _defer_until_receipted(partial(slow_teardown, options["marker"])):
+        if options.get("teardown_before_receipt"):
+            slow_teardown(channel)
+        if not _defer_until_receipted(partial(slow_teardown, channel)):
             raise RuntimeError("disposable worker has no receipt owner")
         return {"status": "cancelled", "result": {"retained": "owned receipt"},
                 "error": {"type": "KeyboardInterrupt", "message": "", "notes": []}}
@@ -114,30 +118,84 @@ class ProcessBatchTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "posix", "requires cooperative SIGINT cancellation")
     def test_cancellation_keeps_receipt_before_stalled_optional_teardown(self):
-        with tempfile.TemporaryDirectory() as directory:
-            marker = Path(directory) / "teardown-started"
-            ready = Path(directory) / "worker-ready"
+        self._assert_cancellation_receipt(entry_delay=0)
+
+    @unittest.skipUnless(os.name == "posix", "requires cooperative SIGINT cancellation")
+    def test_delayed_worker_entry_does_not_consume_receipt_shutdown_budget(self):
+        self._assert_cancellation_receipt(entry_delay=6)
+
+    @unittest.skipUnless(os.name == "posix", "requires cooperative SIGINT cancellation")
+    def test_receipt_oracle_rejects_teardown_before_receipt(self):
+        with self.assertRaisesRegex(AssertionError, "KeyboardInterrupt|owned receipt"):
+            self._assert_cancellation_receipt(entry_delay=0, teardown_before_receipt=True)
+
+    def _assert_cancellation_receipt(self, *, entry_delay, teardown_before_receipt=False):
+        # Test coordination belongs on an IPC channel: rendering in parallel
+        # must not delay creation of a filesystem sentinel past worker cleanup.
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            listener.settimeout(0.05)
             token, finished, errors = CancellationToken(), Event(), []
+            cancelled_at, events = [], []
             def cancel_entered_worker():
-                deadline = time.monotonic() + 5
-                while not ready.exists() and time.monotonic() < deadline:
-                    if finished.wait(0.01):
+                # Startup is a prerequisite for this receipt-after-cancellation
+                # test. Bound it separately from the shutdown being measured.
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline and not finished.is_set():
+                    try:
+                        channel, _ = listener.accept()
+                        break
+                    except TimeoutError:
+                        continue
+                else:
+                    if finished.is_set():
                         return
-                if not ready.is_file():
                     errors.append("worker did not enter before the readiness watchdog")
-                token.cancel()
+                    token.cancel()
+                    return
+                with channel:
+                    channel.settimeout(0.05)
+                    buffered = b""
+                    while time.monotonic() < deadline:
+                        try:
+                            data = channel.recv(64)
+                        except TimeoutError:
+                            if finished.is_set():
+                                break
+                            continue
+                        if not data:
+                            break
+                        buffered += data
+                        while b"\n" in buffered:
+                            event, buffered = buffered.split(b"\n", 1)
+                            events.append(event)
+                            if event == b"ready":
+                                cancelled_at.append(time.monotonic())
+                                token.cancel()
+                            elif event == b"teardown":
+                                return
+                    if b"ready" not in events:
+                        errors.append("worker did not enter before the readiness watchdog")
+                        token.cancel()
             observer = Thread(target=cancel_entered_worker)
             observer.start()
             try:
                 with self.assertRaises(BatchCancelled) as caught:
-                    run_process_jobs([{"marker": str(marker), "ready": str(ready)}],
+                    run_process_jobs([{"address": listener.getsockname(), "entry_delay": entry_delay,
+                                       "teardown_before_receipt": teardown_before_receipt}],
                                      interrupted_job_with_teardown, workers=1, cancellation=token)
+                returned_at = time.monotonic()
             finally:
                 finished.set()
                 observer.join()
             self.assertEqual(errors, [])
+            self.assertEqual(len(cancelled_at), 1)
+            self.assertLess(returned_at - cancelled_at[0], 5,
+                            "receipt shutdown exceeded its budget after worker readiness")
             rows = caught.exception.process_batch_outcomes
-            self.assertTrue(marker.is_file(), "the real deferred callback did not execute")
+            self.assertEqual(events, [b"ready", b"teardown"],
+                             "the real deferred callback did not execute")
             self.assertEqual(rows[0]["status"], "cancelled")
             self.assertEqual(rows[0]["error"]["type"], "KeyboardInterrupt")
             self.assertEqual(rows[0]["result"], {"retained": "owned receipt"})
