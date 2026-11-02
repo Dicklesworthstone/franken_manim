@@ -18,12 +18,22 @@ the standalone CLI is
 The raw release profile fields match the C34 build. No performance result is
 inferred from that identity.
 
-The fresh-wheel installation and dependency check pass. The entire original
-installed-runtime policy is running with this wheel and CLI, without an overlay.
+The entire original installed-runtime policy exits 0 in 4,131,037 ms with this
+wheel and CLI, without an overlay. Discovery runs 3,187 tests: 2,990 pass and
+197 retain their existing skips. Runtime witnesses report 382 suites, 12,990
+cases, 1,963 import checks, 1,671 semantic rows, 188 rendered rows and three
+refusal-only rows. All 25 applicable mutants are killed; 15 inapplicable
+controls receive no credit. Three traced harness-error groups and five
+harness-only groups are reconciled by the unchanged completed-plain-run
+checker. This does not establish complete tracing. All 145 installed payload
+files and all source inputs remain unchanged.
+
 The entire source policy is running on a normally admitted worker115, using
 the same policy, profile, test concurrency and deadlines as the earlier green
 qualification. Its measurement/history, actual-profile, profile-test and fresh
-golden preflights pass. Neither whole gate has a terminal verdict yet.
+golden preflights, all-target checks, all three strict Clippy variants and
+Rustdoc pass. Unfiltered `cargo test` is active; the whole source policy has
+no terminal verdict yet. The separate bootstrap UBS failure remains open.
 The frozen checkout contains 4,406 tracked non-Beads inputs, aggregate SHA-256
 `ea96ea0cfecb55104b44221ec46c222ccd8a4d8b825bb63a635581e2a81b8e06`.
 It is separate from the primary checkout's report and tracker edits.

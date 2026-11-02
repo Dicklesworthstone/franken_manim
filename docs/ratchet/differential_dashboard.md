@@ -353,6 +353,8 @@ differences, plus twelve envelope violations; its residuals are retained under
 `/data/tmp/fmn-execute-20261101-bullet70-face-original`. This is a fresh artifact
 comparison, not a whole-source, whole-wheel or Look Gallery qualification.
 The unchanged full initializer scanner still stops at its analysis work limit.
+The separate complete FACE installed-wheel gate subsequently exits 0, with
+all 145 payload files unchanged; the whole source policy remains active.
 
 Raw paired records, provider logs, facts and PNGs are retained under
 `/data/tmp/fmn-execute-20261101-triage68-corpus-sample`,
