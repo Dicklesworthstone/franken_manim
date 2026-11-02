@@ -2,9 +2,9 @@
 """Unit tests for scripts/corpus_speed_ratio.py (fm-5wq.35).
 
 The producer's statistics and ordering are deterministic and tested on
-constructed inputs. The planted negative injects a fixed sleep on the portal
-side of one scene, through in-process runners, and checks that scene's ratio
-moves by the expected amount.
+constructed inputs. The planted negative advances the existing test clock on
+the portal side of one scene and checks the exact resulting ratio. A separate
+real-clock control checks that measured elapsed time includes a runner's wait.
 """
 import pathlib
 import sys
@@ -308,25 +308,55 @@ class SpeedRatioTests(unittest.TestCase):
         self.assertEqual(calls, [], "no repetition after the logged reference failure")
 
     def test_planted_portal_sleep_moves_the_ratio_by_the_expected_amount(self):
-        base, planted = 0.05, 0.10
+        # Requested sleeps are lower bounds, not exact elapsed durations: the
+        # scheduler may delay either side. Use the same deterministic clock
+        # as the sequential-measurement tests for this numerical oracle.
+        clock = FakeClock()
+        base, planted = 1.0, 2.0
 
         def sleeper(extra):
             def call(scene, rep):
-                time.sleep(base + (extra if scene[1] == "Planted" else 0.0))
+                clock.now += base + (extra if scene[1] == "Planted" else 0.0)
                 return 0, ""
             return call
 
         collect = Collect()
         runners = {"portal": sleeper(planted), "reference": sleeper(0.0)}
-        for scene in (("m.py", "Control"), ("m.py", "Planted")):
-            csr.measure_scene(scene, 3, runners, collect, collect.done, collect.lock)
+        original = csr.time.monotonic
+        csr.time.monotonic = clock
+        try:
+            for scene in (("m.py", "Control"), ("m.py", "Planted")):
+                self.assertTrue(csr.measure_scene(scene, 3, runners, collect, collect.done,
+                                                 collect.lock))
+        finally:
+            csr.time.monotonic = original
         included, _ = csr.scene_ratios(collect.records)
         control = included[("m.py", "Control")]["ratio"]
         planted_ratio = included[("m.py", "Planted")]["ratio"]
         expected = (base + planted) / base  # 3.0
-        self.assertAlmostEqual(control, 1.0, delta=0.35)
-        self.assertAlmostEqual(planted_ratio, expected, delta=0.6)
+        self.assertEqual(control, 1.0)
+        self.assertEqual(planted_ratio, expected)
         self.assertGreater(planted_ratio - control, 1.4)
+
+    def test_real_clock_measurement_includes_the_runners_wait(self):
+        delay, observed = 0.02, []
+
+        def waiting(scene, rep):
+            started = time.monotonic()
+            time.sleep(delay)
+            observed.append(time.monotonic() - started)
+            return 0, ""
+
+        collect = Collect()
+        self.assertTrue(csr.measure_scene(("m.py", "Wait"), 1,
+                                         {engine: waiting for engine in csr.ENGINES},
+                                         collect, collect.done, collect.lock))
+        self.assertEqual(len(collect.records), 2)
+        self.assertEqual(len(observed), 2)
+        for record, elapsed in zip(collect.records, observed):
+            self.assertGreaterEqual(elapsed, delay)
+            # Production records round elapsed seconds to four decimals.
+            self.assertGreaterEqual(record["seconds"] + 0.0001, elapsed)
 
     def test_dashboard_states_label_median_and_exclusions(self):
         runs = [run("m.py", s, e, r, sec)
