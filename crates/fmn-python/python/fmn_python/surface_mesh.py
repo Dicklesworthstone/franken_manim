@@ -62,7 +62,7 @@ def install_surface_mesh(native):
             vars(wire)[_KEY] = key
 
     def init(self, uv_surface, resolution=(21, 11), stroke_width=1,
-             stroke_color=None, normal_nudge=.01, depth_test=True,
+             stroke_color=g["GREY_A"], normal_nudge=.01, depth_test=True,
              joint_type="no_joint", **kwargs):
         shape, nudge, _ = controls(uv_surface, resolution, normal_nudge)
         original_init(self, uv_surface, resolution=shape, stroke_width=stroke_width,

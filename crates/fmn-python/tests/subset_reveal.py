@@ -9,6 +9,7 @@ import math
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import manimlib as m
@@ -28,6 +29,21 @@ def assert_released(test, group, members):
 
 
 class NativeSubsetTests(unittest.TestCase):
+    def test_default_selectors_are_bound_before_numpy_reassignment(self):
+        rounded, ceiling = np.round, np.ceil
+        groups = (m.VGroup(*children()), m.VGroup(*children()))
+        members = [list(group) for group in groups]
+        with patch.multiple(np, round=np.floor, ceil=np.floor):
+            for cls, group, selector, expected in (
+                (m.ShowIncreasingSubsets, groups[0], rounded, members[0][:1]),
+                (m.ShowSubmobjectsOneByOne, groups[1], ceiling, [members[1][1]]),
+            ):
+                with self.subTest(cls=cls):
+                    animation = cls(group, rate_func=m.linear)
+                    self.assertIs(animation.int_func, selector)
+                    animation.interpolate(.3)
+                    self.assertEqual(list(group), expected)
+
     def test_public_qualified_identity_and_live_callback_selection(self):
         from manimlib.animation.creation import ShowIncreasingSubsets
         self.assertIs(ShowIncreasingSubsets, m.ShowIncreasingSubsets)

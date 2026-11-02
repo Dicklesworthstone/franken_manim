@@ -4,6 +4,7 @@ import io
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import manimlib as m
@@ -19,6 +20,16 @@ def records(mesh):
 
 
 class SurfaceMeshTests(unittest.TestCase):
+    def test_definition_time_stroke_color_seeds_empty_and_nonempty_meshes(self):
+        surface = plane()
+        with patch.object(m._native, 'GREY_A', m.YELLOW):
+            for shape in ((0, 0), (2, 2)):
+                with self.subTest(shape=shape):
+                    mesh = m.SurfaceMesh(surface, resolution=shape)
+                    self.assertEqual(mesh.get_stroke_color(), m.GREY_A)
+                    for wire in mesh:
+                        self.assertEqual(wire.get_stroke_color(), m.GREY_A)
+
     def assert_records(self, mesh, before):
         self.assertEqual(len(mesh.submobjects), len(before))
         for wire, expected in zip(mesh.submobjects, before):

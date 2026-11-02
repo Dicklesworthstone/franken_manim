@@ -24,6 +24,8 @@ def install_decimal_authoring(native):
         return
     Decimal, VMobject = g["DecimalNumber"], g["VMobject"]
     np = g["_np"]
+    g["_rebind_default"](Decimal, "color", g["DEFAULT_MOBJECT_COLOR"])
+    Decimal.interpolate.__defaults__ = (g["straight_path"],)
     previous_init = Decimal.__init__
     signature = inspect.signature(previous_init)
     stock_complex_formatter = Decimal.get_complex_formatter

@@ -234,6 +234,19 @@ def environment():
 
 
 class CompositionLifecycleTests(unittest.TestCase):
+    def test_distinct_lag_defaults_do_not_follow_later_class_attribute_changes(self):
+        g = environment()
+        semantics._install_composition_lifecycle(g)
+        for name, expected in (("AnimationGroup", 0.0), ("LaggedStart", .05), ("Succession", 1.0)):
+            with self.subTest(name=name):
+                cls = g[name]
+                cls._default_lag_ratio = 7.0
+                animation = cls(g["Animation"](g["Mobject"]()), g["Animation"](g["Mobject"]()))
+                self.assertEqual(animation.lag_ratio, expected)
+                self.assertEqual(animation.anims_with_timings[1][1], expected)
+                explicit = cls(g["Animation"](g["Mobject"]()), lag_ratio=.25)
+                self.assertEqual(explicit.lag_ratio, .25)
+
     def setUp(self):
         self.g = environment()
         self.Group = self.g["AnimationGroup"]

@@ -270,6 +270,22 @@ class DrawingsInteractiveWitnesses(unittest.TestCase):
         explicit = Lightbulb(file_name=os.path.join(assets, "lightbulb.svg"))
         self.assertEqual(self._facts(explicit), self._facts(bulb))
 
+    def test_video_series_default_width_follows_and_restores_frame_resolution(self):
+        import manimlib as m
+
+        self._vector_images()
+        initial_width = m.VideoSeries(num_videos=3).get_width()
+        previous = m._native._rebind_frame_resolution((640, 480))
+        try:
+            series = m.VideoSeries(num_videos=3)
+            self.assertAlmostEqual(series.get_width(), m.FRAME_WIDTH - m.MED_LARGE_BUFF, places=5)
+            self.assertNotAlmostEqual(series.get_width(), initial_width, places=5)
+            explicit = m.VideoSeries(num_videos=3, width=5)
+            self.assertAlmostEqual(explicit.get_width(), 5, places=5)
+        finally:
+            m._native._rebind_frame_resolution(previous)
+        self.assertAlmostEqual(m.VideoSeries(num_videos=3).get_width(), initial_width, places=5)
+
     def test_svg_body_bubbles_build_from_the_users_svg(self):
         self._vector_images()
         from manimlib import Bubble, OldSpeechBubble, OldThoughtBubble, RIGHT, Square

@@ -41,6 +41,15 @@ class PartialRevealTests(unittest.TestCase):
         self.assertEqual(uncreate.rate_func(1.), 0.)
         self.assertEqual(self.g["_RATE_FUNC_NAMES"][uncreate.rate_func], "smooth_reversed")
         self.assertFalse(self.g["_requires_python_animation"](uncreate))
+
+    def test_uncreate_default_observes_smooth_rebinding_on_the_callback_path(self):
+        animation = self.g["Uncreate"](self.curve())
+        original = self.g["smooth"]
+        self.g["smooth"] = lambda alpha: alpha * alpha
+        self.assertEqual(animation.rate_func(.25), .75 ** 2)
+        self.assertTrue(self.g["_requires_python_animation"](animation))
+        self.g["smooth"] = original
+        self.assertFalse(self.g["_requires_python_animation"](animation))
     def test_four_probe_negative_control(self):
         probes = self.Partial._BOUNDS_PROBES
         def rule(t):

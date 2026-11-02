@@ -5,6 +5,7 @@ VMobject/Text doubles record which values and glyph strings cross native
 boundaries. They are not native typography, renderer or scene-clock evidence.
 """
 from contextlib import contextmanager
+import ast
 import copy
 import importlib.util
 import inspect
@@ -38,6 +39,19 @@ def host(*, animations=False):
         owner = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(owner)
         events = []
+
+        # The installer binds real function defaults before capturing its
+        # signature. Lift only that checked-in helper; the host still doubles
+        # glyphs and storage, never the production initializer or formatter.
+        bootstrap = SOURCE.parent.parent / "manimlib_bootstrap.py"
+        helper = next(node for node in ast.parse(bootstrap.read_text()).body
+                      if isinstance(node, ast.FunctionDef) and node.name == "_rebind_default")
+        bindings = {}
+        # ubs:ignore[py.security.eval-exec-usage,py.eval-exec] -- only the named function AST from this repository's fixed bootstrap; no external code.
+        exec(compile(ast.Module(body=[helper], type_ignores=[]), str(bootstrap), "exec"), bindings)
+
+        def straight_path(start, end, alpha):
+            return (1 - alpha) * start + alpha * end
 
         class VMobject:
             def __init__(self, *children):
@@ -111,6 +125,9 @@ def host(*, animations=False):
                          font_size=48, text_config=None, **kwargs):
                 raise AssertionError("the production initializer must replace this signature fixture")
 
+            def interpolate(self, first, second, alpha, path_func=None):
+                raise AssertionError("point interpolation is outside this integer readout fixture")
+
             def _formatter_config(self):
                 p = self._decimal_params
                 return dict(num_decimal_places=p[0], min_total_width=p[1], include_sign=p[2], group_with_commas=p[3])
@@ -144,7 +161,8 @@ def host(*, animations=False):
                             _native_shell_factory=None, _hang_native_children=lambda row, children: row.set_submobjects(children),
                             _vec3=lambda value: tuple(value), RIGHT=np.array([1., 0., 0.]),
                             UP=np.array([0., 1., 0.]), DOWN=np.array([0., -1., 0.]),
-                            BLACK="black", WHITE="white",
+                            BLACK="black", WHITE="white", DEFAULT_MOBJECT_COLOR="white",
+                            straight_path=straight_path, _rebind_default=bindings["_rebind_default"],
                             _init_native_vmobject=lambda obj, options: VMobject.__init__(obj),
                             _apply_vmobject_style_kwargs=lambda obj, options: obj.set_style(**options))
         if animations:

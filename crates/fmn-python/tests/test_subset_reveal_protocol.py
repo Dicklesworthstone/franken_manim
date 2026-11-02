@@ -7,6 +7,7 @@ import ast
 import math
 import types
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -20,7 +21,7 @@ def environment():
     names = {"ShowIncreasingSubsets", "ShowSubmobjectsOneByOne"}
     nodes = [node for node in ast.parse(BOOTSTRAP.read_text()).body
              if isinstance(node, ast.ClassDef) and node.name in names]
-    exec(compile(ast.Module(nodes, []), str(BOOTSTRAP), "exec"), g)
+    exec(compile(ast.Module(nodes, []), str(BOOTSTRAP), "exec"), g)  # ubs:ignore[py.security.eval-exec-usage,py.eval-exec] -- only two named class ASTs from this repository's checked-in bootstrap fixture.
     class Namespace:
         @property
         def __dict__(self):
@@ -40,6 +41,14 @@ class SubsetTests(unittest.TestCase):
     def animation(self, **kwargs):
         kwargs.setdefault("rate_func", lambda t: t)
         return self.cls(self.root, **kwargs)
+
+    def test_distinct_constructor_defaults_survive_numpy_reassignment(self):
+        rounded, ceiling = np.round, np.ceil
+        with patch.multiple(np, round=np.floor, ceil=np.floor):
+            base = self.cls(self.root)
+            single = self.g["ShowSubmobjectsOneByOne"](self.root)
+        self.assertIs(base.int_func, rounded)
+        self.assertIs(single.int_func, ceiling)
 
     def assert_restored(self):
         self.assertEqual(list(self.root.submobjects), self.children)

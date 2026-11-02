@@ -6315,7 +6315,7 @@ class SampleSpace(Rectangle):
             self.fix_in_frame()
         self.default_label_scale_val = default_label_scale_val
 
-    def add_title(self, title="Sample space", buff=None):
+    def add_title(self, title="Sample space", buff=_MED_SMALL_BUFF):
         if buff is None:
             buff = _MED_SMALL_BUFF
         title_mob = TexText(title)
@@ -6373,7 +6373,7 @@ class SampleSpace(Rectangle):
         self.vertical_parts = self.get_vertical_division(*args, **kwargs)
         self.add(self.vertical_parts)
 
-    def get_subdivision_braces_and_labels(self, parts, labels, direction, buff=None):
+    def get_subdivision_braces_and_labels(self, parts, labels, direction, buff=_SMALL_BUFF):
         if buff is None:
             buff = _SMALL_BUFF
         label_mobs = VGroup()
@@ -6719,7 +6719,7 @@ class CoordinateSystem(_abc.ABC):
         axis,
         edge,
         direction,
-        buff=None,
+        buff=_MED_SMALL_BUFF,
         ensure_on_screen=False,
         **kwargs,
     ):
@@ -6742,8 +6742,8 @@ class CoordinateSystem(_abc.ABC):
         self,
         index,
         point,
-        line_func=None,
-        color=None,
+        line_func=DashedLine,
+        color=_GREY_A,
         stroke_width=2,
     ):
         if line_func is None:
@@ -6767,7 +6767,7 @@ class CoordinateSystem(_abc.ABC):
         label="f(x)",
         x=None,
         direction=None,
-        buff=None,
+        buff=_MED_SMALL_BUFF,
         color=None,
     ):
         if direction is None:
@@ -6814,7 +6814,7 @@ class CoordinateSystem(_abc.ABC):
     def slope_of_tangent(self, x, graph, **kwargs):
         return _np.tan(self.angle_of_tangent(x, graph, **kwargs))
 
-    def get_tangent_line(self, x, graph, length=5, line_func=None):
+    def get_tangent_line(self, x, graph, length=5, line_func=Line):
         if line_func is None:
             line_func = Line
         line = line_func(_LEFT, _RIGHT)
@@ -9831,7 +9831,7 @@ class VideoSeries(VGroup):
         self,
         num_videos=11,
         gradient_colors=(_BLUE_B, _BLUE_D),
-        width=None,
+        width=_FRAME_WIDTH - _MED_LARGE_BUFF,
         **kwargs,
     ):
         if width is None:
@@ -15620,7 +15620,7 @@ class AddTextWordByWord(Animation):
         string_mobject,
         time_per_word=0.2,
         run_time=-1.0,
-        rate_func=None,
+        rate_func=_linear_rate,
         **kwargs,
     ):
         # The Reference's exact refusal for a non-StringMobject target.
@@ -15886,11 +15886,10 @@ class ShowCreation(ShowPartial):
 
 
 class Uncreate(ShowCreation):
-    # creation.py:56's full signature (fm-5wq.4.94): rate_func=None keeps
-    # the native smooth(1 − t) default, remover is structurally True in
-    # the native uncreate kind (False refuses by name), and the inert
-    # should_match_start surface passes through to ShowPartial.
+    # The Reference's lambda is bound once and resolves smooth in this module.
+    # The shared installer keeps this same callable as the public default.
     _native_kind = "uncreate"
+    _default_rate_func = staticmethod(lambda t: smooth(1 - t))
 
     # The constructor is installed by the embedded animation semantics.
 
@@ -17462,10 +17461,16 @@ class LaggedStart(AnimationGroup):
     _native_kind = "lagged_start"
     _default_lag_ratio = 0.05
 
+    def __init__(self, *animations, lag_ratio=_default_lag_ratio, **kwargs):
+        super().__init__(*animations, lag_ratio=lag_ratio, **kwargs)
+
 
 class Succession(AnimationGroup):
     _native_kind = "succession"
     _default_lag_ratio = 1.0
+
+    def __init__(self, *animations, lag_ratio=_default_lag_ratio, **kwargs):
+        super().__init__(*animations, lag_ratio=lag_ratio, **kwargs)
 
 
 def _requires_python_animation(animation):
@@ -19784,7 +19789,7 @@ def _install_bezier_functions():
         result = _np.outer(1 - alpha, start) + _np.outer(alpha, end)
         return result.reshape((*_np.shape(alpha), *_np.shape(start)))
 
-    def set_array_by_interpolation(arr, arr1, arr2, alpha, interp_func=None):
+    def set_array_by_interpolation(arr, arr1, arr2, alpha, interp_func=interpolate):
         if interp_func is None:
             interp_func = interpolate
         arr[:] = interp_func(arr1, arr2, alpha)
@@ -21345,6 +21350,7 @@ def _frame_dependent_defaults():
         (ImplicitFunction, "x_range", (-_FRAME_X_RADIUS, _FRAME_X_RADIUS)),
         (ImplicitFunction, "y_range", (-_FRAME_Y_RADIUS, _FRAME_Y_RADIUS)),
         (Title, "underline_width", _FRAME_SHAPE[0] - 2),
+        (VideoSeries, "width", _FRAME_WIDTH - _MED_LARGE_BUFF),
         (CameraFrame, "frame_shape", _FRAME_SHAPE),
         (Camera, "resolution", _DEFAULT_RESOLUTION),
         (Camera, "max_allowable_norm", _FRAME_WIDTH),

@@ -28,7 +28,7 @@ def install_subset_reveal(native: Any) -> None:
                                   ("ShowIncreasingSubsets", "Animation", "Mobject"))
     np = g["_np"]
 
-    def initialize(self, group, int_func=None, suspend_mobject_updating=False, **kwargs):
+    def initialize(self, group, int_func=np.round, suspend_mobject_updating=False, **kwargs):
         if not isinstance(group, Mobject):
             raise TypeError(type(self).__name__ + " requires a Mobject family")
         if int_func is None:
@@ -44,6 +44,11 @@ def install_subset_reveal(native: Any) -> None:
         self._subset_active = False
         self._subset_states = []
         self._subset_original_children = ()
+
+    OneByOne = g["ShowSubmobjectsOneByOne"]
+
+    def one_by_one_init(self, group, int_func=np.ceil, **kwargs):
+        super(OneByOne, self).__init__(group, int_func=int_func, **kwargs)
 
     def native_params(self):
         # Compatibility for diagnostics of the two native fixed rules. An
@@ -168,4 +173,5 @@ def install_subset_reveal(native: Any) -> None:
                            ("update_mobjects", update_mobjects),
                            ("update_submobject_list", update_submobject_list)):
         _method(Subsets, name, function)
+    _method(OneByOne, "__init__", one_by_one_init)
     g["_FMN_SUBSET_REVEAL_INSTALLED"] = True

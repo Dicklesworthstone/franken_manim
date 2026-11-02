@@ -104,7 +104,7 @@ def install_solid_groups(native):
         module = sys.modules.get(Cube.__module__)
         return getattr(module, name, g[name])
 
-    def cube(self, color=None, opacity=1, shading=(0.1, 0.5, 0.1),
+    def cube(self, color=g["BLUE"], opacity=1, shading=(0.1, 0.5, 0.1),
              square_resolution=(2, 2), side_length=2, **kwargs):
         depth_test = bool(kwargs.pop("depth_test", True))
         z_index = int(kwargs.pop("z_index", 0))
@@ -128,8 +128,9 @@ def install_solid_groups(native):
             faces = _faces(g, self, symbol("square_to_cube_faces")(face), Surface)
             # SGroup initializes an empty native Surface root, then adds faces.
             # Run that same lifecycle, including any hook-owned decorations.
-            super(Cube, self).__init__(color=g["WHITE"] if color is None else color,
-                opacity=opacity, shading=shading, depth_test=depth_test, z_index=z_index)
+            # The Reference applies color/opacity/shading to the faces only;
+            # the point-free root retains Surface's own default style.
+            super(Cube, self).__init__(depth_test=depth_test, z_index=z_index)
             if self._is_bound():
                 raise RuntimeError("solid ownership changed during initialization")
             faces = _faces(g, self, faces, Surface)

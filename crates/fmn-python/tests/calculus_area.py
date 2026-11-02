@@ -50,6 +50,24 @@ class GraphAreaAcceptance(unittest.TestCase):
     def coordinates(self, axes, points):
         return np.array([axes.p2c(p) for p in points])
 
+    def test_omitted_colors_keep_definition_time_defaults(self):
+        axes = self.axes()
+        graph = self.line(axes, [(-1, -1), (1, 1)])
+        area = axes.get_area_under_graph(graph)
+        sampled_graph = axes.get_graph(lambda x: x, x_range=(-1, 1, .5))
+        rectangles = axes.get_riemann_rectangles(sampled_graph, (-1, 1, 1))
+        with patch.multiple(m._native, BLUE=m.YELLOW, GREEN=m.YELLOW,
+                            BLACK=m.YELLOW, RED=m.YELLOW):
+            rebound_area = axes.get_area_under_graph(graph)
+            rebound_rectangles = axes.get_riemann_rectangles(sampled_graph, (-1, 1, 1))
+            explicit_area = axes.get_area_under_graph(graph, fill_color=m.YELLOW)
+        np.testing.assert_array_equal(rebound_area.get_points(), area.get_points())
+        np.testing.assert_array_equal(rebound_area.get_fill_colors(), area.get_fill_colors())
+        for actual, expected in zip(rebound_rectangles, rectangles, strict=True):
+            np.testing.assert_array_equal(actual.data, expected.data)
+        np.testing.assert_allclose(m.color_to_rgb(explicit_area.get_fill_color()),
+                                   m.color_to_rgb(m.YELLOW))
+
     def test_nonuniform_samples_clip_by_x_not_curve_index(self):
         axes = self.axes()
         graph = self.line(axes, [(0, 1), (.1, 1), (2, 1)])
@@ -275,7 +293,7 @@ class GraphAreaAcceptance(unittest.TestCase):
 
 
 suite = unittest.defaultTestLoader.loadTestsFromTestCase(GraphAreaAcceptance)
-if suite.countTestCases() != 16:
+if suite.countTestCases() != 17:
     raise AssertionError('graph area acceptance inventory drift')
 result = unittest.TextTestRunner(verbosity=2).run(suite)
 if not result.wasSuccessful():

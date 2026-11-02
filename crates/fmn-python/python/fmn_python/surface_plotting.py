@@ -94,21 +94,20 @@ def install_surface_plotting(native):
 
     _bind_method(ParametricSurface, "__init__", initialize)
 
-    def get_parametric_surface(self, func, color=None, opacity=.9, **kwargs):
+    def get_parametric_surface(self, func, color=g["BLUE_E"], opacity=.9, **kwargs):
         if not callable(func):
             raise TypeError("surface function must be callable")
         kwargs = _sampling_options(kwargs)
         recipe = _ChartRecipe(self, func, np, default_c2p, default_coords)
         sample, verify = recipe.prepare()
-        surface = ParametricSurface(sample, color=g["BLUE_E"] if color is None else color,
-                                    opacity=opacity, **kwargs)
+        surface = ParametricSurface(sample, color=color, opacity=opacity, **kwargs)
         verify()
         # Keep the recipe, not this construction's frozen basis: a later
         # init_points() pass prepares the then-current chart exactly once.
         surface.passed_uv_func = recipe
         return surface
 
-    def get_graph(self, func, color=None, opacity=.9, u_range=None, v_range=None, **kwargs):
+    def get_graph(self, func, color=g["BLUE_E"], opacity=.9, u_range=None, v_range=None, **kwargs):
         if not callable(func):
             raise TypeError("surface graph function must be callable")
 

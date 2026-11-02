@@ -68,8 +68,9 @@ def install_traced_path(native: Any) -> None:
         return
     np = g["_np"]
 
-    def initialize(self, traced_point_func, time_traced=None, time_per_anchor=1.0 / 15,
-                   stroke_color=None, stroke_width=2.0, stroke_opacity=1.0, **kwargs):
+    def initialize(self, traced_point_func, time_traced=math.inf, time_per_anchor=1.0 / 15,
+                   stroke_color=g["DEFAULT_MOBJECT_COLOR"], stroke_width=2.0,
+                   stroke_opacity=1.0, **kwargs):
         if not callable(traced_point_func):
             raise TypeError(
                 "TracedPath requires a callable returning the traced "
@@ -165,7 +166,8 @@ def install_traced_path(native: Any) -> None:
     if Tail is not None:
         original_tail_init = getattr(Tail, "__init__", None)
 
-        def tail_init(self, mobject_or_func, time_traced=1.0, stroke_color=None,
+        def tail_init(self, mobject_or_func, time_traced=1.0,
+                      stroke_color=g["DEFAULT_MOBJECT_COLOR"],
                       stroke_width=(0, 3), stroke_opacity=(0, 1), time_per_anchor=1.0 / 15, **kwargs):
             if not isinstance(mobject_or_func, g["Mobject"]) and not callable(mobject_or_func):
                 raise TypeError(

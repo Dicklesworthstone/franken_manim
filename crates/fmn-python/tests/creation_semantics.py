@@ -192,6 +192,25 @@ from types import MethodType as _CreationMethod
 
 
 class CreationObjectHooks(_creation_unittest.TestCase):
+    def test_uncreate_default_rebinds_smooth_through_actual_scene_playback(self):
+        original = m._native.smooth
+        calls = []
+        def changed(alpha):
+            calls.append(alpha)
+            return alpha * alpha
+        m._native.smooth = changed
+        try:
+            curve = m.Line(m.LEFT, m.RIGHT)
+            animation = m.Uncreate(curve, remover=False)
+            self.assertAlmostEqual(animation.rate_func(.25), .75 ** 2)
+            self.assertTrue(m._requires_python_animation(animation))
+            calls.clear()
+            m.Scene().play(animation, run_time=.25)
+            self.assertGreater(len(calls), 1)
+            np.testing.assert_allclose(curve.get_end(), m.LEFT, atol=1e-6)
+        finally:
+            m._native.smooth = original
+
     def test_partial_lifecycle_hooks_are_dispatched_without_admission_effects(self):
         for animation_class in (m.ShowCreation, m.Uncreate, m.ShowPassingFlash):
             for name in ("copy", "get_family", "set_animating_status",

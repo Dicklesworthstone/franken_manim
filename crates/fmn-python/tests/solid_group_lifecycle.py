@@ -42,6 +42,17 @@ def png_frames(path, obj, threads):
 
 
 class SurfaceGroupLifecycleTests(unittest.TestCase):
+    def test_definition_time_face_color_keeps_the_surface_root_style(self):
+        with patch.object(m._native, 'BLUE', m.YELLOW):
+            obj = m.Cube()
+        for face in obj:
+            self.assertEqual(face.get_color(), m.BLUE)
+        for obj in (obj, m.Cube(color=m.GREEN, opacity=.4, shading=(.2, .3, .4))):
+            with self.subTest(obj=obj):
+                self.assertEqual(obj.get_color(), m.GREY)
+                self.assertEqual(obj.get_opacity(), 1)
+                np.testing.assert_allclose(obj.get_shading(), (.3, .2, .4))
+
     def test_each_group_runs_public_hooks_once_and_keeps_aliases(self):
         for base in (m.Cube, m.Prism):
             events = []
@@ -164,7 +175,7 @@ class SurfaceGroupLifecycleTests(unittest.TestCase):
 
     def test_copy_deepcopy_and_pickle_remap_generated_face_references(self):
         obj = m.Cube()
-        for copied in (obj.copy(), copy.deepcopy(obj), pickle.loads(pickle.dumps(obj))):
+        for copied in (obj.copy(), copy.deepcopy(obj), pickle.loads(pickle.dumps(obj))):  # ubs:ignore[py.security.pickle-usage,py.pickle-load] -- bytes from this test's own fixed native Cube; no external pickle data.
             with self.subTest(copy=copied):
                 self.assertEqual(list(copied._solid_faces), list(copied))
                 self.assertTrue(all(a is not b for a, b in zip(obj, copied)))

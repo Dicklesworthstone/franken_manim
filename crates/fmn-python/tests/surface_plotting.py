@@ -10,6 +10,7 @@ import pickle
 import tempfile
 import types
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import manimlib as m
@@ -31,6 +32,19 @@ def expected(chart, function, shape=(3, 4)):
 
 
 class SurfacePlottingTests(unittest.TestCase):
+    def test_omitted_colors_keep_definition_time_defaults(self):
+        chart = axes()
+        for method, function in (("get_graph", lambda u, v: u*v),
+                                 ("get_parametric_surface", lambda u, v: (u, v, u*v))):
+            with self.subTest(method=method):
+                original = getattr(chart, method)(function, **DOMAIN)
+                with patch.object(m._native, "BLUE_E", m.YELLOW):
+                    rebound = getattr(chart, method)(function, **DOMAIN)
+                    explicit = getattr(chart, method)(function, color=m.YELLOW, **DOMAIN)
+                np.testing.assert_array_equal(rebound.data, original.data)
+                np.testing.assert_allclose(explicit.data["rgba"][:, :3],
+                                           np.tile(m.color_to_rgb(m.YELLOW), (12, 1)))
+
     def test_parametric_surface_uses_rotated_live_axis_vectors(self):
         chart = axes().rotate(np.pi / 2).shift((1, 2, 3))
         plot = chart.get_parametric_surface(lambda u, v: (u, v, 0), **DOMAIN)
@@ -172,7 +186,7 @@ class SurfacePlottingTests(unittest.TestCase):
         function = m.Surface(resolution=(2, 2)).uv_func
         plot = chart.get_parametric_surface(function, **DOMAIN)
         before = plot.get_points().copy()
-        clone = pickle.loads(pickle.dumps(plot))
+        clone = pickle.loads(pickle.dumps(plot))  # ubs:ignore[py.security.pickle-usage,py.pickle-load] -- bytes from this test's own fixed native surface; no external pickle data.
         np.testing.assert_array_equal(clone.get_points(), before)
         clone.passed_uv_func.axes.shift((0, 0, 1))
         clone.init_points()

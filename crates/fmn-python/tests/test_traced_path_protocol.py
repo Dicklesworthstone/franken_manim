@@ -49,7 +49,8 @@ def environment(native_tail_initializer=None):
         TracingTail._init_native_tracer = lambda self: None
 
     native = SimpleNamespace(Mobject=Mobject, VMobject=VMobject, TracedPath=TracedPath,
-                             TracingTail=TracingTail, _np=np, _WHITE="white")
+                             TracingTail=TracingTail, _np=np, _WHITE="white",
+                             DEFAULT_MOBJECT_COLOR="white")
     module.install_traced_path(native)
     return native
 

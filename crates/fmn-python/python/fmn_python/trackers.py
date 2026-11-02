@@ -82,7 +82,7 @@ def install_tracker_interpolation(native: Any) -> None:
         return np.array(np.broadcast_to(value, shape), copy=True)
 
     @wraps(original)
-    def interpolate(self, mobject1, mobject2, alpha, path_func=None):
+    def interpolate(self, mobject1, mobject2, alpha, path_func=g["straight_path"]):
         if not isinstance(self, ValueTracker) or "value" in getattr(self, "locked_uniform_keys", ()):
             return original(self, mobject1, mobject2, alpha, path_func)
         # Uniform shape follows the endpoints. A scalar receiver can become

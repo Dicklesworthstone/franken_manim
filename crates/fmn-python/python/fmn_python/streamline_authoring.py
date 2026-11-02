@@ -145,6 +145,7 @@ def install_streamline_authoring(native):
     if g.get("_FMN_STREAMLINE_AUTHORING_INSTALLED", False):
         return
     Lines, np = g["StreamLines"], g["_np"]
+    g["_rebind_default"](Lines, "stroke_color", g["DEFAULT_MOBJECT_COLOR"])
     previous = Lines.__init__
     signature = inspect.signature(previous)
 

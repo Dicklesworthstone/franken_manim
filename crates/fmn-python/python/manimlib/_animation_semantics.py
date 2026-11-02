@@ -131,7 +131,7 @@ def install(native, subsystems=True):
             return value.tolist()
         return interpolate_value(start, end, alpha)
 
-    def mobject_interpolate(self, mobject1, mobject2, alpha, path_func=None):
+    def mobject_interpolate(self, mobject1, mobject2, alpha, path_func=shipped_straight_path):
         if path_func is None:
             path_func = g["straight_path"]
         alpha = float(alpha)
@@ -221,7 +221,7 @@ def install(native, subsystems=True):
         run_time=1.0,
         time_span=None,
         lag_ratio=0.0,
-        rate_func=None,
+        rate_func=g.get("smooth", smooth_rate),
         name="",
         remover=False,
         final_alpha_value=1.0,
@@ -1296,7 +1296,7 @@ def _install_composition_lifecycle(g):
     def timing_profile(animation):
         return tuple((id(member), start, end) for member, start, end in animation.anims_with_timings)
 
-    def group_init(self, *animations, run_time=-1, lag_ratio=None, group=None, group_type=None, **kwargs):
+    def group_init(self, *animations, run_time=-1, lag_ratio=0.0, group=None, group_type=None, **kwargs):
         if group is not None and not isinstance(group, Mobject):
             raise TypeError("AnimationGroup group must be a Mobject")
         if group is None and group_type is not None and not callable(group_type):
@@ -2205,8 +2205,7 @@ def _install_partial_reveals(g):
 
     shipped_smooth = g.get("smooth", g["_smooth_rate"])
 
-    def reverse_smooth(alpha):
-        return shipped_smooth(1.0 - alpha)
+    reverse_smooth = Uncreate._default_rate_func
 
     # This shipped callable is the native Uncreate default, not an authored
     # easing callback. Keep exact evaluation on Choreo's frame clock when it
@@ -2296,7 +2295,7 @@ def _install_partial_reveals(g):
         for submob, start in self.get_all_families_zipped():
             submob.pointwise_become_partial(start, 0.0, 1.0)
 
-    def uncreate_init(self, mobject, rate_func=None, remover=True,
+    def uncreate_init(self, mobject, rate_func=reverse_smooth, remover=True,
                       should_match_start=True, **kwargs):
         Creation.__init__(self, mobject,
                           rate_func=reverse_smooth if rate_func is None else rate_func,
@@ -2362,6 +2361,9 @@ def _install_partial_reveals(g):
     def requires_python(animation):
         if not isinstance(animation, Partial):
             return original_requires(animation)
+        if (isinstance(animation, Uncreate) and animation.rate_func is reverse_smooth
+                and g.get("smooth") is not shipped_smooth):
+            return True
         if not getattr(animation, "_native_kind", None):
             return True
         if isinstance(animation, (Uncreate, Passing)) and not animation.remover:
@@ -2549,7 +2551,7 @@ def _install_border_write(g):
             abort_preserving_error(self)
             raise
 
-    def write_init(self, vmobject, run_time=-1, lag_ratio=-1, rate_func=None,
+    def write_init(self, vmobject, run_time=-1, lag_ratio=-1, rate_func=g["linear"],
                    stroke_color=None, **kwargs):
         if not isinstance(vmobject, VMobject):
             raise TypeError("Write requires a VMobject")
@@ -2561,7 +2563,7 @@ def _install_border_write(g):
                             stroke_color=stroke_color, **kwargs)
         self._explicit_stroke_color = explicit_stroke_color
 
-    def border_init(self, vmobject, run_time=2.0, rate_func=None,
+    def border_init(self, vmobject, run_time=2.0, rate_func=g["double_smooth"],
                     stroke_width=2.0, stroke_color=None,
                     draw_border_animation_config=None, fill_animation_config=None,
                     **kwargs):

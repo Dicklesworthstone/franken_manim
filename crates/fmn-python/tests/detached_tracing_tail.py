@@ -3,6 +3,7 @@ import gc
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import manimlib as m
@@ -10,6 +11,21 @@ from manimlib.mobject.changing import TracingTail as QualifiedTail
 
 
 class DetachedTailTests(unittest.TestCase):
+    def test_trace_and_tail_keep_definition_time_color_defaults(self):
+        with patch.multiple(m._native, DEFAULT_MOBJECT_COLOR=m.RED, _WHITE=m.RED):
+            for cls in (m.TracedPath, m.TracingTail):
+                with self.subTest(cls=cls):
+                    source = m.Dot()
+                    trace = cls(source.get_center, time_per_anchor=.125)
+                    source.shift(m.RIGHT)
+                    trace.update(.125)
+                    np.testing.assert_allclose(m.color_to_rgb(trace.get_stroke_color()),
+                                               m.color_to_rgb(m.DEFAULT_MOBJECT_COLOR))
+                    explicit = cls(source.get_center, stroke_color=m.YELLOW)
+                    explicit.update(.125)
+                    np.testing.assert_allclose(m.color_to_rgb(explicit.get_stroke_color()),
+                                               m.color_to_rgb(m.YELLOW))
+
     def test_unadded_source_is_not_adopted_or_parented_at_construction(self):
         source = m.Dot(m.LEFT)
         tail = m.TracingTail(source, time_traced=.5, time_per_anchor=.125)
@@ -150,7 +166,7 @@ class DetachedTailTests(unittest.TestCase):
 
 
 suite = unittest.defaultTestLoader.loadTestsFromTestCase(DetachedTailTests)
-assert suite.countTestCases() == 9, "detached-tail acceptance inventory changed"
+assert suite.countTestCases() == 10, "detached-tail acceptance inventory changed"
 result = unittest.TextTestRunner(verbosity=2).run(suite)
 gc.collect()
 if not result.wasSuccessful():

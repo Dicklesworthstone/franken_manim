@@ -51,8 +51,9 @@ def install_graph_calculus(native):
 
     def get_riemann_rectangles(
         self, graph, x_range=None, dx=None, input_sample_type="left",
-        stroke_width=1, stroke_color=None, fill_opacity=1, colors=None,
-        negative_color=None, stroke_background=True, show_signed_area=True,
+        stroke_width=1, stroke_color=g["BLACK"], fill_opacity=1,
+        colors=(g["BLUE"], g["GREEN"]), negative_color=g["RED"],
+        stroke_background=True, show_signed_area=True,
     ):
         if input_sample_type not in ("left", "right", "center"):
             raise ValueError("input_sample_type must be 'left', 'right', or 'center'")
@@ -64,12 +65,10 @@ def install_graph_calculus(native):
             raise ValueError("Riemann stroke_width must be nonnegative and fill_opacity in [0,1]")
         # The pinned Reference's default gradient is (BLUE, GREEN).
         palette = tuple(itertools.islice(
-            iter((g["BLUE"], g["GREEN"]) if colors is None else colors),
+            iter(colors),
             _MAX_SAMPLES + 1))
         if not palette or len(palette) > _MAX_SAMPLES:
             raise ValueError("Riemann colors must be a nonempty bounded iterable")
-        stroke_color = g["BLACK"] if stroke_color is None else stroke_color
-        negative_color = g["RED"] if negative_color is None else negative_color
         # Validate colors before any graph callback; keep the actual palette
         # for the existing linear-light native style/gradient owner.
         for color in (*palette, stroke_color, negative_color):
@@ -153,7 +152,7 @@ def _install_graph_areas(g, point):
             raise ValueError("graph area boundary could not be resolved within float32 precision")
         return best
 
-    def get_area_under_graph(self, graph, x_range=None, fill_color=None, fill_opacity=.5):
+    def get_area_under_graph(self, graph, x_range=None, fill_color=g["BLUE"], fill_opacity=.5):
         if not isinstance(graph, VMobject):
             raise TypeError("get_area_under_graph requires a VMobject graph")
         bounds = None
@@ -167,7 +166,7 @@ def _install_graph_areas(g, point):
         opacity = _finite(fill_opacity, "graph area fill_opacity")
         if not 0 <= opacity <= 1:
             raise ValueError("graph area fill_opacity must be in [0,1]")
-        color = g["BLUE"] if fill_color is None else fill_color  # Reference fill_color=BLUE
+        color = fill_color
         if not np.isfinite(np.asarray(g["color_to_rgb"](color))).all():
             raise ValueError("graph area fill_color must be finite")
         size = graph.get_num_points()

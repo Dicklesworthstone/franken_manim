@@ -1002,7 +1002,7 @@ pub const SIGNATURE_RULINGS: &[&str] = &[
 /// `baseline` rulings recorded when the portal signature check landed
 /// (fm-schema-codegen-front-doors-r8-z206). Adjudicating one lowers this;
 /// nothing raises it.
-pub const MAX_BASELINE_SIGNATURE_RULINGS: usize = 30;
+pub const MAX_BASELINE_SIGNATURE_RULINGS: usize = 0;
 
 /// A C-16 constant-value ruling: one Reference module constant whose
 /// effective value is a governed override of its extracted spelling.

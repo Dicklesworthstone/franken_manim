@@ -22,6 +22,7 @@ def environment():
     storage.Mobject._is_bound = lambda self:getattr(self, "bound", False)
     native.ValueTracker, native.ComplexValueTracker = storage.ValueTracker, storage.ComplexValueTracker
     native.ExponentialValueTracker = storage.ExponentialValueTracker
+    native.straight_path = storage.straight_path
     native._np, native._OUT = np, (0., 0., 1.)
     class Restore(native.Animation):
         pass

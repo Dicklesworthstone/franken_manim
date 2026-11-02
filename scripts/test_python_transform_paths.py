@@ -212,6 +212,22 @@ def excursion(start, end, alpha):
 
 
 class TransformPathProtocolTests(unittest.TestCase):
+    def test_omitted_path_and_rate_keep_their_installed_bindings(self):
+        native = fixture()
+        start, end = native.Mobject(), native.Mobject((2, 4, 0))
+        original_path, original_rate = native.straight_path, native._smooth_rate
+        native.straight_path = excursion
+        native.smooth = lambda alpha: 0.0
+        actual = native.Mobject()
+        actual.interpolate(start, end, .5)
+        np.testing.assert_array_equal(actual.data["point"],
+                                      original_path(start.data["point"], end.data["point"], .5))
+        self.assertIs(native.Animation(actual).rate_func, original_rate)
+        explicit = native.Mobject()
+        explicit.interpolate(start, end, .5, path_func=excursion)
+        np.testing.assert_array_equal(explicit.data["point"],
+                                      excursion(start.data["point"], end.data["point"], .5))
+
     def setUp(self):
         self.n = fixture()
         self.source = self.n.Mobject()
@@ -259,7 +275,7 @@ class TransformPathProtocolTests(unittest.TestCase):
         helpers = [node for node in tree.body if isinstance(node, ast.FunctionDef)
                    and node.name in ("_arrays_match", "_array_is_constant")]
         scope = {"_np": np, "_listify": lambda value: value}
-        exec(compile(ast.Module(body=helpers + methods, type_ignores=[]), str(bootstrap), "exec"), scope)
+        exec(compile(ast.Module(body=helpers + methods, type_ignores=[]), str(bootstrap), "exec"), scope)  # ubs:ignore[py.security.eval-exec-usage,py.eval-exec] -- only named helper/method ASTs from this repository's checked-in bootstrap fixture.
         for method in methods:
             setattr(self.n.Mobject, method.name, scope[method.name])
         source, target = self.source, self.target

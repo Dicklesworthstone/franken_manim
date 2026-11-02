@@ -210,6 +210,7 @@ class ExistingAnimationIntegrationTests(unittest.TestCase):
                 self.mobject, self.run_time, self.rate_func = mobject, run_time, rate_func
         native.__dict__.update(Animation=Animation, StringMobject=Node, _np=np, _re=re,
                                _FMN_ROOT=types.SimpleNamespace(linear=lambda t: t))
+        native._linear_rate = native._FMN_ROOT.linear
         source = MODULE.parent.parent / "manimlib_bootstrap.py"
         names = {"_string_word_groups", "_string_glyph_reveal_plan", "_apply_glyph_reveal",
                  "AddTextWordByWord", "AddTextLetterByLetter"}
