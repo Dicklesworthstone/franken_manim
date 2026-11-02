@@ -11,6 +11,21 @@ def field(p):
     return np.array([1., 0., 0.])
 
 
+def pre_fix_phase_flow_environment():
+    native = environment(False)
+    def pre_fix_phase_flow_init(self, function, mobject, virtual_time=None,
+                                suspend_mobject_updating=False,
+                                rate_func=native._linear_rate, run_time=3.0, **kwargs):
+        """Old constructor: an explicit zero incorrectly falls back to run_time."""
+        self.function = function
+        self.virtual_time = virtual_time or run_time
+        super(native.PhaseFlow, self).__init__(
+            mobject, run_time=run_time, rate_func=rate_func,
+            suspend_mobject_updating=suspend_mobject_updating, **kwargs)
+    native.PhaseFlow.__init__ = pre_fix_phase_flow_init
+    return native
+
+
 class PhaseFlowProtocolTests(unittest.TestCase):
     def setUp(self):
         self.n = environment()
@@ -19,7 +34,7 @@ class PhaseFlowProtocolTests(unittest.TestCase):
         kwargs.setdefault("virtual_time", 1.)
         return self.n.PhaseFlow(field, self.mob, **kwargs)
     def test_negative_control_old_rebegin_steps_backwards(self):
-        n = environment(False)
+        n = pre_fix_phase_flow_environment()
         mob = point(n, 1.)
         animation = n.PhaseFlow(field, mob, virtual_time=1.)
         animation.begin()
@@ -44,7 +59,7 @@ class PhaseFlowProtocolTests(unittest.TestCase):
         self.assertEqual(animation.virtual_time, 0.)
         self.assertEqual(self.mob.points[0,0], 1.)
     def test_negative_control_old_constructor_loses_explicit_zero(self):
-        n = environment(False)
+        n = pre_fix_phase_flow_environment()
         self.assertEqual(n.PhaseFlow(field, point(n), virtual_time=0., run_time=2.).virtual_time, 2.)
     def test_default_virtual_time_binds_construction_runtime(self):
         animation = self.n.PhaseFlow(field, self.mob, run_time=2.)

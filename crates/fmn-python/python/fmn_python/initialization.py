@@ -129,12 +129,13 @@ def initialize(native: ModuleType) -> ModuleType:
             if not callable(installer):
                 raise ImportError(f"missing portal runtime installer: {module_name}.{attribute}")
             installers.append(installer)
+        for installer in installers:
+            installer(native)
+        native._complete_schema_methods()
         try:
             apply_schema_placeholder_provenance(native)
         except SchemaProvenanceError as error:
             raise ImportError(f"invalid manimlib schema provenance: {error}") from error
-        for installer in installers:
-            installer(native)
         # Dispatch compares authored hooks against the completed runtime, not
         # intermediate implementations replaced by later shipping adapters.
         # Consume this one-shot barrier before publishing the native module.

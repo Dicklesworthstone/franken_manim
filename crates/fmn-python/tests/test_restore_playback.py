@@ -4,11 +4,31 @@ import unittest
 from test_animation_builder_playback import environment, playback
 
 
+def pre_fix_restore_environment():
+    native = environment()
+    def pre_fix_restore_init(self, mobject, path_arc=0.0,
+                             path_arc_axis=native._OUT, path_func=None, **kwargs):
+        """Old constructor refuses arbitrary authored paths before playback."""
+        if getattr(mobject, "saved_state", None) is None:
+            raise Exception("Trying to restore without having saved")
+        if path_func is not None:
+            routed_arc = getattr(path_func, "_fmn_path_arc", None)
+            if routed_arc is None:
+                native._refuse_unrouted("Restore()", [("path_func", True)])
+            path_arc = float(routed_arc)
+            path_arc_axis = getattr(path_func, "_fmn_path_axis", path_arc_axis)
+        self.path_func = path_func
+        super(native.Restore, self).__init__(mobject, **kwargs)
+        self.path_arc = float(path_arc)
+        self.path_arc_axis = native._vec3(path_arc_axis)
+    native.Restore.__init__ = pre_fix_restore_init
+    return native
+
+
 class RestorePlaybackTests(unittest.TestCase):
     def setUp(self):
         self.native = environment()
         self.original = self.native.Restore
-        self.old_init = self.original.__init__
         self.alias = types.SimpleNamespace(Restore=self.original)
         self.transform_init = self.native.Transform.__init__
         playback.install_scene_playback(self.native)
@@ -152,7 +172,7 @@ class RestorePlaybackTests(unittest.TestCase):
         self.assertEqual(method.__qualname__, self.original.__qualname__ + ".__init__")
         self.assertEqual(method.__module__, self.original.__module__)
     def test_old_constructor_rejects_custom_path_negative_control(self):
-        native = environment()
+        native = pre_fix_restore_environment()
         mob = native.Mobject()
         mob.saved_state = native.Mobject()
         with self.assertRaisesRegex(NotImplementedError, "path_func"):

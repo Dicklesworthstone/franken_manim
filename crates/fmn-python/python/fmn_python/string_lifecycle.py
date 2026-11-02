@@ -219,9 +219,9 @@ def install_string_lifecycle(native):
             self.additional_preamble,
         )
 
-    def tex_init(self, *tex_strings, font_size=48, alignment="\\centering", template="",
-                 additional_preamble="", tex_to_color_map={}, t2c={}, isolate=[],
-                 use_labelled_svg=True, **kwargs):
+    def tex_init(self, *tex_strings: str, font_size: int=48, alignment: str="\\centering", template: str="",
+                 additional_preamble: str="", tex_to_color_map: dict={}, t2c: dict={}, isolate: Selector=[],
+                 use_labelled_svg: bool=True, **kwargs):
         should_center = kwargs.pop("should_center", True)
         self.base_color = kwargs.pop("base_color", "#FFFFFF")
         self.protect = kwargs.pop("protect", ())
@@ -259,7 +259,6 @@ def install_string_lifecycle(native):
     _bind(Tex, "init_points", tex_points)
     tex_path_count.__annotations__ = dict(Tex.substr_to_path_count.__annotations__)
     _bind(Tex, "substr_to_path_count", tex_path_count)
-    tex_init.__annotations__ = dict(Tex.__init__.__annotations__)
     _bind(Tex, "__init__", tex_init)
     # Distinct functions keep correct defining-class introspection on aliases.
     def text_colors(self):

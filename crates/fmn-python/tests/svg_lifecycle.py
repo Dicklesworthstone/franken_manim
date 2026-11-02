@@ -22,6 +22,20 @@ def pixels(obj):
 
 
 class SvgLifecycleTests(unittest.TestCase):
+    def test_string_classes_inherit_the_installed_svg_factory(self):
+        factory = m.SVGMobject.mobjects_from_svg_string
+        for cls in (m.StringMobject, m.Tex, m.Text):
+            with self.subTest(cls=cls.__name__):
+                self.assertIs(cls.mobjects_from_svg_string, factory)
+        # Exercise the inherited method through an actual initialized string,
+        # including its native factory, rather than checking names alone.
+        text = m.Text("source")
+        children = text.mobjects_from_svg_string(SOURCE)
+        self.assertEqual(len(children), 1)
+        self.assertIsInstance(children[0], m.VMobject)
+        self.assertGreater(children[0].get_num_points(), 0)
+        self.assertFalse(children[0]._is_bound())
+
     def test_small_and_large_svg_viewboxes_keep_the_cubic_bound_after_sizing(self):
         for size in (16.0, 1000.0):
             source = (
@@ -393,7 +407,7 @@ class SvgLifecycleTests(unittest.TestCase):
     def test_copy_and_pickle_keep_svg_family_independent(self):
         source = m.SVGMobject(svg_string=DASHED, stroke_width=None)
         before = pixels(source)
-        for clone in (source.copy(), copy.deepcopy(source), pickle.loads(pickle.dumps(source))):
+        for clone in (source.copy(), copy.deepcopy(source), pickle.loads(pickle.dumps(source))):  # ubs:ignore -- round trip of this test's own fixed-SVG mobject; no external pickle bytes.
             clone.svg_string = SOURCE
             old = list(clone.submobjects)
             clone.init_svg_mobject()

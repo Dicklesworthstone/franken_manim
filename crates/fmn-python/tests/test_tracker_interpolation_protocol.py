@@ -17,6 +17,9 @@ ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("tracker_interpolation_under_test", ROOT / "python/fmn_python/trackers.py")
 trackers = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(trackers)
+SPEC = importlib.util.spec_from_file_location("tracker_lifecycle_under_test", ROOT / "python/fmn_python/tracker_lifecycle.py")
+tracker_lifecycle = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(tracker_lifecycle)
 
 
 def environment(install=True):
@@ -36,6 +39,16 @@ def environment(install=True):
             self.setter_calls = []
             self.submobjects, self.anchor = [], (0.0, 0.0, 0.0)
         def init_uniforms(self):
+            pass
+        def init_data(self):
+            pass
+        def init_updaters(self):
+            pass
+        def init_event_listners(self):
+            pass
+        def init_points(self):
+            pass
+        def init_colors(self):
             pass
         def _style_data(self):
             return self.data if len(self.data) else self.style_record
@@ -70,17 +83,19 @@ def environment(install=True):
             self.dirty += 1
         def copy(self):
             return copy.deepcopy(self)
-    g.update(Mobject=Mobject, _np=np, np=np, _LiveUniforms=dict,
+    g.update(Mobject=Mobject, _np=np, np=np, _LiveUniforms=dict, _WHITE="#FFFFFF",
              _install_live_state=Mobject.__init__,
+             _portal_allocate_tracker=lambda obj, kind: obj._init_value_tracker(kind, 1. if kind == 1 else 0., 0.),
              interpolate_value=lambda a, b, t: (1 - t) * a + t * b,
              straight_path=lambda a, b, t: (1 - t) * a + t * b)
     g["g"] = g
     bootstrap = ROOT / "python/manimlib_bootstrap.py"
     tree = ast.parse(bootstrap.read_text())
-    names = {"ValueTracker", "ExponentialValueTracker", "ComplexValueTracker"}
+    names = {"ValueTracker", "ExponentialValueTracker", "ComplexValueTracker", "ControlMobject"}
     nodes = [node for node in tree.body if isinstance(node, ast.ClassDef) and node.name in names]
     assert {node.name for node in nodes} == names
     exec(compile(ast.Module(nodes, []), str(bootstrap), "exec"), g)  # ubs:ignore -- test-only named classes parsed from the fixed repository bootstrap path; no external input.
+    tracker_lifecycle.install_tracker_lifecycle(native)
     source = ROOT / "python/manimlib/_animation_semantics.py"
     installer = next(node for node in ast.parse(source.read_text()).body if isinstance(node, ast.FunctionDef) and node.name == "install")
     names = {"interpolate_uniform", "mobject_interpolate"}
@@ -110,6 +125,7 @@ class TrackerInterpolationTests(unittest.TestCase):
 
     def test_scalar_interpolation_updates_native_and_mirror(self):
         current, start, end = self.n.ValueTracker(0), self.n.ValueTracker(0), self.n.ValueTracker(10)
+        current.setter_calls.clear()  # Observe interpolation separately from the real initializer.
         self.assertIs(current.interpolate(start, end, .4), current)
         self.assertEqual(current.get_value(), 4)
         self.assertEqual(current.uniforms["value"][0], 4)
@@ -158,6 +174,7 @@ class TrackerInterpolationTests(unittest.TestCase):
 
     def test_value_lock_preserves_native_value_and_other_interpolation(self):
         current, start, end = self.n.ValueTracker(19), self.n.ValueTracker(0), self.n.ValueTracker(8)
+        current.setter_calls.clear()
         current.locked_uniform_keys.add("value")
         start.uniforms["opacity"], end.uniforms["opacity"] = 0., 1.
         current.interpolate(start, end, .25)
@@ -196,6 +213,7 @@ class TrackerInterpolationTests(unittest.TestCase):
 
     def test_endpoint_kind_mismatch_fails_before_any_write(self):
         current = self.n.ValueTracker(3)
+        current.setter_calls.clear()
         for start, end in ((self.n.Mobject(), self.n.ValueTracker(5)),
                            (self.n.ValueTracker(5), self.n.ExponentialValueTracker(2))):
             with self.assertRaisesRegex(TypeError, "matching tracker encodings"):
@@ -271,6 +289,7 @@ class TrackerInterpolationTests(unittest.TestCase):
 
     def test_exponential_nonrepresentable_extrapolation_refuses_before_write(self):
         current = self.n.ExponentialValueTracker(2)
+        current.setter_calls.clear()
         for start, end in ((1., 1e250), (1., 1e-250)):
             with self.assertRaisesRegex(ValueError, "nonrepresentable decoded value"):
                 current.interpolate(self.n.ExponentialValueTracker(start),
@@ -298,6 +317,7 @@ class TrackerInterpolationTests(unittest.TestCase):
 
     def test_exponential_unrepresentable_decoding_refuses_before_write(self):
         current, start, end = (self.n.ExponentialValueTracker(1) for _ in range(3))
+        current.setter_calls.clear()
         start.lanes[0] = -1000.
         for alpha in (0., .5, 1.):
             with self.assertRaisesRegex(ValueError, "positive finite decoded endpoints"):

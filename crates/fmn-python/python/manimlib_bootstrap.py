@@ -7391,17 +7391,6 @@ class SVGMobject(VMobject):
             self.svg_string,
         )
 
-    def mobjects_from_svg_string(self, svg_string):
-        # Reference mobjects_from_svg_string over Chisel's hardened
-        # document processor: one authored child per rendered shape in
-        # document order, detached from this instance's family.
-        specs = self._build_svg_mobject(_native_shell_factory, "", svg_string)
-        result = []
-        for shell, child_specs in specs:
-            _hang_native_children(shell, child_specs)
-            result.append(shell)
-        return result
-
     def file_name_to_svg_string(self, file_name):
         # Reference svg_mobject.py:158: find the file as get_full_vector_image_path
         # does (an existing path, else the vector_images directory with .svg, .xdv
@@ -8105,76 +8094,7 @@ class Tex(StringMobject):
     _native_group_single_part = False
     tex_environment = "align*"
 
-    def __init__(
-        self,
-        *tex_strings: str,
-        font_size: int = 48,
-        alignment: str = "\\centering",
-        template: str = "",
-        additional_preamble: str = "",
-        tex_to_color_map: dict = {},
-        t2c: dict = {},
-        isolate: Selector = [],
-        use_labelled_svg: bool = True,
-        **kwargs,
-    ):
-        should_center = kwargs.pop("should_center", True)
-        self.base_color = kwargs.pop("base_color", "#FFFFFF")
-        self.protect = kwargs.pop("protect", ())
-        _validate_tex_options(template, additional_preamble, bool(self._native_text_mode))
-        line_align = _tex_line_align(alignment, bool(self._native_text_mode))
-        color_map = dict(t2c or {})
-        color_map.update(tex_to_color_map or {})
-        isolate = [] if isolate is None else isolate
-        if len(tex_strings) > 1:
-            if isinstance(isolate, (str, _re.Pattern, tuple)):
-                isolate = [isolate]
-            isolate = [*(isolate or []), *tex_strings]
-        _install_live_state(self)
-        self.alignment = alignment
-        self.template = template
-        self.additional_preamble = additional_preamble
-        self.tex_to_color_map = color_map
-        self.use_labelled_svg = bool(use_labelled_svg)
-        self.isolate = isolate
-        separator = getattr(self, "_tex_arg_separator", " ")
-        self.tex_strings = [str(part) for part in tex_strings]
-        if self.tex_strings:
-            self.tex_strings[0] = self.tex_strings[0].lstrip()
-            self.tex_strings[-1] = self.tex_strings[-1].rstrip()
-        self.tex_string = separator.join(self.tex_strings).strip()
-        if not self.tex_string:
-            self.tex_strings = [r"\\"]
-            self.tex_string = r"\\"
-        self.string = self.tex_string
-        self.font_size = float(font_size)
-        # Multiple parts regroup glyph children per part via the typeset's
-        # native source spans — the Reference's SingleStringTex structure.
-        # `isolate=` partitions a single-part source the same way, and
-        # `tex_to_color_map` string keys ride the native t2c surface; both
-        # consume the span map, never a labelled second render.
-        build_parts, build_separator = self._isolate_segments(separator)
-        native_t2c = {
-            key: value for key, value in color_map.items() if isinstance(key, str)
-        }
-        specs = self._build_tex(
-            _native_shell_factory,
-            build_parts,
-            build_separator,
-            bool(self._native_text_mode),
-            self.font_size,
-            native_t2c or None,
-            bool(self._native_group_single_part),
-            template,
-            additional_preamble,
-            line_align,
-        )
-        _hang_native_children(self, specs)
-        self._validate_isolate_spans()
-        _apply_vmobject_style_kwargs(self, kwargs)
-        self.set_color_by_tex_to_color_map(color_map)
-        if should_center:
-            self.center()
+    # The constructor and its annotations live in fmn_python.string_lifecycle.
 
     def _isolate_segments(self, separator):
         """Partition a single-part source at `isolate=` occurrence
@@ -11851,40 +11771,7 @@ class ValueTracker(Mobject):
     value_type = _np.float64
     _tracker_kind = 0  # Plain
 
-    def __init__(self, value=0, **kwargs):
-        _install_live_state(self)
-        for key, val in kwargs.items():
-            setattr(self, key, val)
-        if isinstance(value, complex):
-            raise TypeError(
-                type(self).__name__
-                + " holds a scalar; use ComplexValueTracker for complex values"
-            )
-        # Reference: uniforms["value"] = np.array(listify(value)). One
-        # component is a scalar tracker in engine state; more make a vector
-        # tracker (colliding_blocks' 4-d state, clt's (a, b) bounds), whose
-        # value lives in that uniform as the Reference keeps it.
-        components = _np.array(value, dtype=self.value_type).reshape(-1)
-        if len(components) == 0:
-            raise ValueError(type(self).__name__ + " needs at least one value")
-        if len(components) > 1 and type(self)._tracker_kind != 0:
-            raise TypeError(
-                type(self).__name__ + " holds a scalar; a vector value needs ValueTracker"
-            )
-        self._init_value_tracker(type(self)._tracker_kind, float(components[0]), 0.0)
-        self.init_uniforms()
-        if len(components) > 1:
-            self.uniforms["value"] = components
-
-    def init_uniforms(self):
-        # Reference override (value_tracker.py:31): a typed "value"
-        # uniform beside the base's. Engine tracker state stays
-        # authoritative; this mirror refreshes on every write.
-        super().init_uniforms()
-        self.uniforms["value"] = _np.array(
-            [self.value_type(self._tracker_value())],
-            dtype=self.value_type,
-        )
+    # Construction and uniform initialization live in fmn_python.tracker_lifecycle.
 
     def _vector_value(self):
         # The live vector of a vector tracker, else None. As in the
@@ -16379,25 +16266,7 @@ class PhaseFlow(Animation):
     through the Python-callback slot; the overridden interpolate never
     consults rate_func or time_span (the linear default makes it moot)."""
 
-    def __init__(
-        self,
-        function,
-        mobject,
-        virtual_time=None,
-        suspend_mobject_updating=False,
-        rate_func=_linear_rate,
-        run_time=3.0,
-        **kwargs,
-    ):
-        self.function = function
-        self.virtual_time = virtual_time or run_time
-        super().__init__(
-            mobject,
-            run_time=run_time,
-            rate_func=rate_func,
-            suspend_mobject_updating=suspend_mobject_updating,
-            **kwargs,
-        )
+    # Construction and replay state live in fmn_python.movement.
 
     def interpolate_mobject(self, alpha):
         alpha = float(alpha)
@@ -16443,34 +16312,7 @@ class MoveAlongPath(_NativeAnimation):
 class Restore(_NativeAnimation):
     _native_kind = "restore"
 
-    def __init__(
-        self,
-        mobject,
-        path_arc=0.0,
-        path_arc_axis=_OUT,
-        path_func=None,
-        **kwargs,
-    ):
-        # The Reference's Restore consumes mobject.saved_state at
-        # construction; a never-saved mobject fails here with the exact
-        # Mobject.restore() exception rather than deep in the native
-        # segment (fm-5wq.4.70).
-        if getattr(mobject, "saved_state", None) is None:
-            raise Exception("Trying to restore without having saved")
-        # fm-5wq.4.102: the portal arc factories route onto the native
-        # restore path_arc surface exactly as Transform's do (fm-5wq.4.63);
-        # an arbitrary user path function stays a precise refusal — Choreo
-        # never samples Python mid-segment.
-        if path_func is not None:
-            routed_arc = getattr(path_func, "_fmn_path_arc", None)
-            if routed_arc is None:
-                _refuse_unrouted("Restore()", [("path_func", True)])
-            path_arc = float(routed_arc)
-            path_arc_axis = getattr(path_func, "_fmn_path_axis", path_arc_axis)
-        self.path_func = path_func
-        super().__init__(mobject, **kwargs)
-        self.path_arc = float(path_arc)
-        self.path_arc_axis = _vec3(path_arc_axis)
+    # Construction and Transform wiring live in fmn_python.playback.
 
     def _native_params(self):
         return {"path_arc": self.path_arc, "path_arc_axis": self.path_arc_axis}
@@ -19588,35 +19430,9 @@ def _install_schema_surface():
         )
         raise RuntimeError(f"unresolved API schema class bases: {unresolved}")
 
-    lifecycle = {
-        "__init__",
-        "init_data",
-        "init_points",
-        "init_uniforms",
-        "setup",
-        "construct",
-        "tear_down",
-        "begin",
-        "finish",
-        "interpolate",
-        "interpolate_mobject",
-    }
     for module_name, qualified, kind, _origin, _exported, _detail in rows:
         module = _ensure_module(module_name)
-        if kind == "method" and "." in qualified:
-            owner_name, method_name = qualified.rsplit(".", 1)
-            owner = getattr(module, owner_name, None)
-            if (
-                isinstance(owner, type)
-                and method_name not in lifecycle
-                and not hasattr(owner, method_name)
-            ):
-                setattr(
-                    owner,
-                    method_name,
-                    _placeholder_method(module_name, owner_name, method_name),
-                )
-        elif kind == "function" and "." not in qualified:
+        if kind == "function" and "." not in qualified:
             if not hasattr(module, qualified):
                 setattr(
                     module,
@@ -19751,6 +19567,24 @@ def _install_schema_surface():
     # The pinned Reference intentionally has no root __all__; wildcard import
     # therefore exposes every non-underscore name in the assembled namespace.
     root.__dict__.pop("__all__", None)
+
+
+def _complete_schema_methods():
+    """Fill missing methods after shipping installers establish inheritance."""
+    lifecycle = {
+        "__init__", "init_data", "init_points", "init_uniforms", "setup",
+        "construct", "tear_down", "begin", "finish", "interpolate",
+        "interpolate_mobject",
+    }
+    for module_name, qualified, kind, _origin, _exported, _detail in _schema_rows():
+        if kind != "method" or "." not in qualified:
+            continue
+        owner_name, method_name = qualified.rsplit(".", 1)
+        owner = getattr(_ensure_module(module_name), owner_name, None)
+        if (isinstance(owner, type) and method_name not in lifecycle
+                and not hasattr(owner, method_name)):
+            setattr(owner, method_name,
+                    _placeholder_method(module_name, owner_name, method_name))
 
 
 def _install_rate_functions():
