@@ -329,6 +329,7 @@ fn run() -> Result<()> {
         env: Vec::new(),
         cwd: None,
         build_id,
+        prepare_scene: None,
     });
     let mut supervisor = Supervisor::new(
         Box::new(StdWorkerLauncher::default()),

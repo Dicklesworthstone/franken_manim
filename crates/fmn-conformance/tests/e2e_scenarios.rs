@@ -434,13 +434,72 @@ fn convert_for_sink(
 fn scenario_dir(scenario: &str) -> Result<PathBuf, ScenarioError> {
     let base =
         std::env::var_os("CARGO_TARGET_TMPDIR").map_or_else(std::env::temp_dir, PathBuf::from);
-    let suffix = RUN_SUFFIX.fetch_add(1, Ordering::Relaxed);
-    let dir = base
-        .join("fmn_e2e")
-        .join(format!("{scenario}.{}.{}", std::process::id(), suffix));
-    std::fs::create_dir_all(&dir)
-        .map_err(|error| fail(format!("create {}: {error}", dir.display())))?;
-    Ok(dir)
+    scenario_dir_in(&base, scenario, &RUN_SUFFIX)
+}
+
+fn scenario_dir_in(
+    base: &std::path::Path,
+    scenario: &str,
+    sequence: &AtomicU64,
+) -> Result<PathBuf, ScenarioError> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+
+        builder.mode(0o700);
+    }
+    for _ in 0..1024 {
+        let suffix = sequence.fetch_add(1, Ordering::Relaxed);
+        let dir = base.join(format!(
+            "fmn_e2e_{scenario}.{}.{}",
+            std::process::id(),
+            suffix
+        ));
+        match builder.create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(fail(format!("create {}: {error}", dir.display())));
+            }
+        }
+    }
+    Err(fail("could not claim a fresh private scenario directory"))
+}
+
+#[test]
+fn scenario_directories_are_private_and_never_adopt_existing_paths() {
+    let base = scenario_dir("directory_ownership").expect("private test parent");
+    let first =
+        scenario_dir_in(&base, "collision", &AtomicU64::new(0)).expect("first exclusive directory");
+    let sentinel = first.join("retained-source");
+    std::fs::write(&sentinel, b"must remain unchanged").expect("retained ownership witness");
+    let second = scenario_dir_in(&base, "collision", &AtomicU64::new(0))
+        .expect("skip existing directory without adopting it");
+    assert_ne!(first, second);
+    assert_eq!(
+        std::fs::read(&sentinel).expect("existing data retained"),
+        b"must remain unchanged"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        for directory in [&base, &first, &second] {
+            let mode = std::fs::metadata(directory)
+                .expect("owned directory metadata")
+                .permissions()
+                .mode();
+            assert_eq!(
+                mode & 0o077,
+                0,
+                "private directory: {}",
+                directory.display()
+            );
+            assert_eq!(mode & 0o700, 0o700, "owner access retained");
+        }
+    }
 }
 
 fn sink_limits(frames: u64) -> Result<SinkLimits, ScenarioError> {
@@ -5230,6 +5289,8 @@ fn python_studio_capture_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
     let last = fmn_codec::decode_png(&report.last_png, &fmn_codec::PngLimits::default())
         .map_err(|error| fail(format!("decode last Studio frame: {error}")))?;
     if report.frames != 6
+        || report.captures != 1
+        || report.contexts_closed != 1
         || (first.width, first.height) != (96, 54)
         || (last.width, last.height) != (96, 54)
         || first.rgba == last.rgba
@@ -5241,11 +5302,16 @@ fn python_studio_capture_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
     ctx.event(
         LogEvent::new("e2e.python.studio_capture")
             .field("frames", report.frames)
+            .field("captures", report.captures)
+            .field("contexts_closed", report.contexts_closed)
+            .field("capture_deferred", true)
             .field("read_only", true)
             .field("native_inspector", true),
     );
     Ok(RunOutcome::ok()
         .with_counter("python_studio_frames", report.frames)
+        .with_counter("python_studio_captures", report.captures)
+        .with_counter("python_studio_contexts_closed", report.contexts_closed)
         .with_artifact("studio_first.png", report.first_png)
         .with_artifact("studio_last.png", report.last_png)
         .with_artifact("studio_inspector.json", report.last_inspector))
@@ -12347,11 +12413,16 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 "studio_inspector.json".to_owned(),
             ]),
             counter_eq("python_studio_frames", 6),
+            counter_eq("python_studio_captures", 1),
+            counter_eq("python_studio_contexts_closed", 1),
         ],
         vec![LogExpect::span_present(
             "e2e.python.studio_capture",
             vec![
                 FieldPred::u64_eq("frames", 6),
+                FieldPred::u64_eq("captures", 1),
+                FieldPred::u64_eq("contexts_closed", 1),
+                FieldPred::bool_eq("capture_deferred", true),
                 FieldPred::bool_eq("read_only", true),
                 FieldPred::bool_eq("native_inspector", true),
             ],

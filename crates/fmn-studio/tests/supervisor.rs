@@ -361,6 +361,7 @@ impl RebuildDriver for ScriptedBuilder {
                 "/workspace"
             })),
             build_id: sha256(format!("worker build {}", self.build).as_bytes()),
+            prepare_scene: None,
         })
     }
 }
@@ -1198,6 +1199,7 @@ fn stdio_worker_deadline_cancels_a_blocked_checkpoint_write() {
         env: Vec::new(),
         cwd: None,
         build_id: sha256(b"unresponsive test worker"),
+        prepare_scene: None,
     };
     let mut channel = launcher
         .launch(&artifact, limits)
@@ -2280,6 +2282,7 @@ impl WorkerLauncher for TcpLauncher {
         })?;
         let mut command = std::process::Command::new(&artifact.executable);
         command
+            .envs(artifact.env.iter().map(|(key, value)| (key, value)))
             .arg("--exact")
             .arg("subprocess_worker_entry")
             .arg("--nocapture")
@@ -2359,6 +2362,14 @@ impl TcpChannel {
     fn map(error: FramingError) -> ChannelError {
         let kind = match &error {
             FramingError::Closed => ChannelFailureKind::Closed,
+            FramingError::Io(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                ChannelFailureKind::Timeout
+            }
             FramingError::Io(_)
             | FramingError::FrameStorageAllocationFailed { .. }
             | FramingError::InvalidReadCount { .. } => ChannelFailureKind::Io,
@@ -2395,7 +2406,13 @@ impl WorkerChannel for TcpChannel {
                 stderr_tail: Vec::new(),
             })?;
         write_request(&mut self.stream, request, ProtocolLimits::default()).map_err(Self::map)?;
-        read_response(&mut self.stream, ProtocolLimits::default()).map_err(Self::map)
+        read_response(&mut self.stream, ProtocolLimits::default()).map_err(|error| {
+            let mut error = Self::map(error);
+            if error.kind == ChannelFailureKind::Timeout {
+                error.detail = format!("worker did not answer within {timeout:?}");
+            }
+            error
+        })
     }
 
     fn terminate(&mut self) {
@@ -2421,6 +2438,10 @@ impl Drop for TcpChannel {
 struct ChildService {
     build_id: Digest,
     crash: bool,
+    prepare_frame: bool,
+    prepare_delay: Duration,
+    refuse_preparation: bool,
+    hang_requests: bool,
 }
 
 impl WorkerService for ChildService {
@@ -2430,6 +2451,10 @@ impl WorkerService for ChildService {
 
     fn handle(&mut self, request: SupervisorRequest) -> Result<WorkerResponse, ServiceError> {
         match request {
+            SupervisorRequest::EnumerateScenes if self.hang_requests => {
+                std::thread::sleep(Duration::from_secs(30));
+                Ok(WorkerResponse::Scenes(vec!["Demo".to_owned()]))
+            }
             SupervisorRequest::EnumerateScenes => {
                 Ok(WorkerResponse::Scenes(vec!["Demo".to_owned()]))
             }
@@ -2437,6 +2462,34 @@ impl WorkerService for ChildService {
                 self.crash = false;
                 // ubs:ignore - deliberate subprocess crash fixture.
                 std::panic::panic_any("subprocess scene panic")
+            }
+            SupervisorRequest::Scrub { .. } if self.refuse_preparation => Err(ServiceError::new(
+                WorkerErrorCode::ExecutionFailed,
+                "deliberate first-frame refusal",
+            )),
+            SupervisorRequest::Scrub { .. } if self.prepare_frame => {
+                std::thread::sleep(self.prepare_delay);
+                // This is a protocol pixel fixture, not renderer acceptance.
+                let bytes = vec![0, 0, 0, 255];
+                Ok(WorkerResponse::Frame(FrameStream {
+                    scene: "Demo".to_owned(),
+                    frame_index: 0,
+                    width: 1,
+                    height: 1,
+                    stride: 4,
+                    encoding: FrameEncoding::Rgba8,
+                    payload: FramePayload::Pipe {
+                        digest: sha256(&bytes),
+                        bytes,
+                    },
+                    render_backends: vec![
+                        RenderBackendRecord::new(
+                            RenderBackendRole::FrameStream,
+                            b"startup protocol fixture".to_vec(),
+                        )
+                        .expect("bounded fixture backend"),
+                    ],
+                }))
             }
             SupervisorRequest::Play { .. }
             | SupervisorRequest::Seek { .. }
@@ -2502,10 +2555,29 @@ fn subprocess_worker_entry() {
         .expect("valid build id");
     let crash = std::env::var("FMN_STUDIO_CRASH").as_deref() == Ok("1");
     let stream = TcpStream::connect(address).expect("connect supervisor");
+    if std::env::var("FMN_STUDIO_TEST_EARLY_EXIT").as_deref() == Ok("1") {
+        return;
+    }
+    if let Ok(delay) = std::env::var("FMN_STUDIO_TEST_STARTUP_MS") {
+        std::thread::sleep(Duration::from_millis(delay.parse().expect("fixture delay")));
+    }
     let mut reader = stream.try_clone().expect("clone stream");
     let mut writer = stream;
     let outcome = serve_worker(
-        &mut ChildService { build_id, crash },
+        &mut ChildService {
+            build_id,
+            crash,
+            prepare_frame: std::env::var("FMN_STUDIO_TEST_PREPARE_FRAME").as_deref() == Ok("1"),
+            prepare_delay: Duration::from_millis(
+                std::env::var("FMN_STUDIO_TEST_PREPARE_MS")
+                    .unwrap_or_else(|_| "0".to_owned())
+                    .parse()
+                    .expect("fixture preparation delay"),
+            ),
+            refuse_preparation: std::env::var("FMN_STUDIO_TEST_REFUSE_PREPARE").as_deref()
+                == Ok("1"),
+            hang_requests: std::env::var("FMN_STUDIO_TEST_HANG_REQUESTS").as_deref() == Ok("1"),
+        },
         &mut reader,
         &mut writer,
         ProtocolLimits::default(),
@@ -2515,6 +2587,128 @@ fn subprocess_worker_entry() {
         // ubs:ignore - child exits after its deliberate structured crash.
         std::panic::panic_any("worker process exits after its structured crash report");
     }
+}
+
+struct TimedWorkerBuilder(WorkerArtifact);
+
+impl RebuildDriver for TimedWorkerBuilder {
+    fn rebuild(&mut self) -> Result<WorkerArtifact, BuildError> {
+        Ok(self.0.clone())
+    }
+}
+
+fn timed_worker_builder(environment: &[(&str, &str)]) -> TimedWorkerBuilder {
+    TimedWorkerBuilder(WorkerArtifact {
+        executable: std::env::current_exe().expect("current test executable"),
+        argv: Vec::new(),
+        env: environment
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect(),
+        cwd: None,
+        build_id: sha256(b"timed protocol fixture"),
+        prepare_scene: Some("Demo".to_owned()),
+    })
+}
+
+fn timed_worker_supervisor(startup_timeout: Duration, request_timeout: Duration) -> Supervisor {
+    let clock = Arc::new(FakeClock::new());
+    let mut supervisor = Supervisor::new(
+        Box::new(TcpLauncher {
+            launches: Arc::new(AtomicUsize::new(0)),
+            crash_first: false,
+        }),
+        clock.clone(),
+        cache(clock),
+        SupervisorConfig {
+            startup_timeout,
+            request_timeout,
+            auto_restart: false,
+            ..SupervisorConfig::default()
+        },
+    );
+    supervisor
+        .install_session("Demo", Journal::new())
+        .expect("timed worker session");
+    supervisor
+}
+
+#[test]
+fn real_worker_cold_start_has_a_separate_deadline_but_requests_still_time_out() {
+    let request_timeout = Duration::from_millis(100);
+    let environment = [
+        ("FMN_STUDIO_TEST_STARTUP_MS", "300"),
+        ("FMN_STUDIO_TEST_PREPARE_FRAME", "1"),
+        ("FMN_STUDIO_TEST_PREPARE_MS", "600"),
+        ("FMN_STUDIO_TEST_HANG_REQUESTS", "1"),
+    ];
+    // Reproduce the former shared-deadline policy against the same process.
+    let mut old_policy = timed_worker_supervisor(request_timeout, request_timeout);
+    let error = old_policy
+        .build_and_start(&mut timed_worker_builder(&environment))
+        .expect_err("a cold worker cannot meet the short operation deadline");
+    assert!(matches!(error, SupervisorError::Channel(ref error)
+        if error.kind == ChannelFailureKind::Timeout
+            && error.detail.contains("startup handshake")));
+    assert_eq!(old_policy.generation(), 0);
+
+    let mut supervisor = timed_worker_supervisor(Duration::from_secs(5), request_timeout);
+    supervisor
+        .build_and_start(&mut timed_worker_builder(&environment))
+        .expect("cold Hello and complete first frame are admitted separately");
+    assert_eq!(supervisor.generation(), 1);
+    let error = supervisor
+        .request(SupervisorRequest::EnumerateScenes, &|_| false)
+        .expect_err("a hung operation retains its short deadline");
+    assert!(matches!(error, SupervisorError::Channel(ref error)
+        if error.kind == ChannelFailureKind::Timeout && error.detail.contains("100ms")));
+    supervisor.shutdown_worker();
+}
+
+#[test]
+fn real_worker_first_frame_refusal_keeps_the_previous_worker_available() {
+    let mut supervisor = timed_worker_supervisor(Duration::from_secs(5), Duration::from_secs(1));
+    supervisor
+        .build_and_start(&mut timed_worker_builder(&[(
+            "FMN_STUDIO_TEST_PREPARE_FRAME",
+            "1",
+        )]))
+        .expect("first ready worker");
+    let generation = supervisor.generation();
+    let error = supervisor
+        .build_and_start(&mut timed_worker_builder(&[(
+            "FMN_STUDIO_TEST_REFUSE_PREPARE",
+            "1",
+        )]))
+        .expect_err("replacement refuses before publication");
+    assert!(matches!(
+        error,
+        SupervisorError::WorkerRefusal {
+            code: WorkerErrorCode::ExecutionFailed,
+            ..
+        }
+    ));
+    assert_eq!(supervisor.generation(), generation);
+    assert!(matches!(
+        supervisor.request(SupervisorRequest::EnumerateScenes, &|_| false),
+        Ok(SupervisorReply::Worker(WorkerResponse::Scenes(scenes))) if scenes == ["Demo"]
+    ));
+    supervisor.shutdown_worker();
+}
+
+#[test]
+fn real_worker_exit_before_hello_is_distinct_from_slow_startup() {
+    let mut supervisor = timed_worker_supervisor(Duration::from_secs(5), Duration::from_secs(1));
+    let error = supervisor
+        .build_and_start(&mut timed_worker_builder(&[(
+            "FMN_STUDIO_TEST_EARLY_EXIT",
+            "1",
+        )]))
+        .expect_err("dead worker refuses startup");
+    assert!(matches!(error, SupervisorError::Channel(ref error)
+        if matches!(error.kind, ChannelFailureKind::Closed | ChannelFailureKind::Io)
+            && error.detail.contains("startup handshake")));
+    assert_eq!(supervisor.generation(), 0);
 }
 
 #[test]

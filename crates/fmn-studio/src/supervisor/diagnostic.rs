@@ -23,6 +23,18 @@ pub(super) fn display(error: &ChannelError, f: &mut fmt::Formatter<'_>) -> fmt::
     Ok(())
 }
 
+pub(super) fn refusal(
+    code: &WorkerErrorCode,
+    message: &str,
+    f: &mut fmt::Formatter<'_>,
+) -> fmt::Result {
+    write!(f, "worker refused recovery ({code:?}): ")?;
+    if !visible(f, message, 4096)? {
+        f.write_str(" [truncated]")?;
+    }
+    Ok(())
+}
+
 // Bound emitted bytes as well as source bytes. A child cannot inflate a short
 // control-character stream into an unbounded formatted diagnostic, or execute
 // terminal escapes. Preserve ordinary line breaks for readable tracebacks.
@@ -54,6 +66,31 @@ fn visible(f: &mut fmt::Formatter<'_>, text: &str, budget: usize) -> Result<bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_refusal_display_bounds_controls_without_changing_the_original_cause() {
+        let cause = "ValueError: visible startup cause\x1b[2J\0\u{202e}\nnext line".to_owned();
+        let error = SupervisorError::WorkerRefusal {
+            code: WorkerErrorCode::ExecutionFailed,
+            message: cause.clone(),
+        };
+        let text = error.to_string();
+        assert!(text.contains("ValueError: visible startup cause"));
+        assert!(text.ends_with("\nnext line"));
+        assert!(!text.contains('\x1b') && !text.contains('\0') && !text.contains('\u{202e}'));
+        let SupervisorError::WorkerRefusal { message, .. } = error else {
+            panic!("original typed refusal must remain available");
+        };
+        assert_eq!(message, cause);
+        let oversized = SupervisorError::WorkerRefusal {
+            code: WorkerErrorCode::ExecutionFailed,
+            message: "\x1b".repeat(100_000),
+        }
+        .to_string();
+        assert!(oversized.len() < 8192);
+        assert!(oversized.ends_with(" [truncated]"));
+        assert!(!oversized.contains('\x1b'));
+    }
 
     #[test]
     fn closed_worker_diagnostic_includes_authored_cause_without_terminal_controls() {

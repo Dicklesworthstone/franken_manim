@@ -94,7 +94,7 @@ fn program() -> std::result::Result<NativeSceneProgram, ServiceError> {
             |event, _, _, _| {
                 if matches!(&event.payload, EventPayload::KeyPress { key, .. } if *key == CRASH_KEY)
                 {
-                    panic!("native live acceptance: deliberate worker callback panic");
+                    panic!("native live acceptance: deliberate worker callback panic"); // ubs:ignore[rust.ownership.panic-macro] -- isolated-child crash-recovery acceptance.
                 }
                 EventPropagation::Continue
             },
@@ -400,6 +400,7 @@ fn run() -> Result<()> {
         env: Vec::new(),
         cwd: None,
         build_id,
+        prepare_scene: None,
     });
     let mut supervisor = Supervisor::new(
         Box::new(StdWorkerLauncher::default()),

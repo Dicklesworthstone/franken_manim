@@ -15,8 +15,9 @@ from fmn_python.studio import Studio, _build_id, _integer, _source, try_studio_c
 
 
 class NativeHost:
-    def __init__(self, builder, scene, token, port, timeout):
+    def __init__(self, builder, scene, token, port, timeout, startup_timeout):
         self.builder = builder
+        self.timeout, self.startup_timeout = timeout, startup_timeout
         self.artifact = builder()
         self.url = f"http://127.0.0.1:{port}/?cap={token}"
         self.alive = True
@@ -61,6 +62,99 @@ class StudioPolicyTests(unittest.TestCase):
             self.assertEqual(len(host.url.split("?cap=")[1]), 64)
         self.assertFalse(host.alive)
 
+    def test_cold_start_and_operation_deadlines_are_independent(self):
+        with Studio(self.source, "Lesson", timeout=3, startup_timeout=40) as host:
+            self.assertEqual(host._host.timeout, 3)
+            self.assertEqual(host._host.startup_timeout, 40)
+            first = host._host.artifact[-1]
+            with patch("fmn_python.studio._reload_request", return_value={}) as reload_request:
+                host.reload()
+            self.assertEqual(reload_request.call_args.args[1], 91)
+            self.assertEqual(host._timeout, 8, "ordinary requests retain their short client deadline")
+        with Studio(self.source, "Lesson", timeout=3, startup_timeout=2) as host:
+            self.assertEqual(host._host.artifact[-1], first,
+                             "process deadlines do not change the captured scene identity")
+
+    def test_worker_waits_for_a_native_request_before_capturing_source(self):
+        from fmn_python import scene_console, studio
+        with Studio(self.source, "Lesson") as host:
+            encoded = host._host.artifact[1][-1]
+        observed = []
+        recording = object()
+        self.native._fmn_ensure_tex_cache = lambda: observed.append("runtime ready")
+
+        class DeferredBoundary:
+            @staticmethod
+            def serve_deferred(build, scene, capture):
+                capture_scene.assert_not_called()
+                self.assertEqual(observed, ["runtime ready"])
+                observed.append((build, scene))
+                with capture() as prepared:
+                    self.assertIs(prepared, recording)
+
+        def capture_once(request, native):
+            self.assertIs(native, self.native)
+            self.assertTrue(scene_console._STUDIO_WORKER.get())
+            return contextlib.nullcontext(recording)
+
+        self.native._StudioRecording = DeferredBoundary
+        with patch("fmn_python.studio._capture", side_effect=capture_once) as capture_scene:
+            self.assertEqual(studio._worker(encoded), 0)
+        capture_scene.assert_called_once()
+        self.assertEqual(observed, ["runtime ready", (json.loads(encoded)["build_id"], "Lesson")])
+        self.assertFalse(scene_console._STUDIO_WORKER.get())
+
+    def test_live_capture_prepares_one_service_and_retains_its_source_context(self):
+        from fmn_python import studio
+        with Studio(self.source, "Lesson", interactive=True) as host:
+            request = json.loads(host._host.artifact[1][-1])
+        events, instances = [], []
+        recording = object()
+        case = self
+
+        class Scene:
+            random_seed = 0
+            def __init__(self):
+                self.camera = SimpleNamespace(_core=SimpleNamespace(set_pixel_shape=lambda *args: None))
+                instances.append(self)
+            def _begin_studio_capture(self, *args):
+                events.append("begin")
+            def run(self):
+                events.append("construct")
+            def _prepare_studio_live(self):
+                case.assertTrue(self.__dict__["_fmn_studio_live_input"])
+                events.append("prepare")
+                return recording
+            def _serve_studio_live(self):
+                case.fail("capture must not open a second protocol loop")
+            def _abort_render(self):
+                events.append("abort")
+
+        class Source:
+            scenes = {"Lesson": Scene}
+            source_digests = {self.source: request["source_sha256"]}
+            def __enter__(self):
+                events.append("enter")
+                return self
+            def __exit__(self, *args):
+                events.append("exit")
+
+        self.native.Scene = Scene
+        self.native.EndScene = type("EndScene", (Exception,), {})
+        inputs = SimpleNamespace(files={}, fingerprint="12" * 32,
+                                 require_source=lambda *args: None, verify=lambda *args: None)
+        with patch("fmn_python.scene_loading.SceneSource", return_value=Source()), \
+             patch.object(studio.StudioInputs, "from_request", return_value=inputs):
+            context = studio._capture(request, self.native)
+            self.assertEqual(events, [])
+            with context as prepared:
+                self.assertIs(prepared, recording)
+                self.assertEqual(events, ["enter", "begin", "construct", "prepare"])
+                self.assertIn("_fmn_studio_validate_inputs", instances[0].__dict__)
+            self.assertEqual(events, ["enter", "begin", "construct", "prepare", "abort", "exit"])
+            self.assertNotIn("_fmn_studio_live_input", instances[0].__dict__)
+            self.assertNotIn("_fmn_studio_validate_inputs", instances[0].__dict__)
+
     def test_reload_observes_new_source_but_retains_host_environment(self):
         with Studio(self.source, "Lesson") as host:
             first = host._host.artifact
@@ -89,7 +183,9 @@ class StudioPolicyTests(unittest.TestCase):
     def test_invalid_resource_profiles_fail_before_launch(self):
         for options in ({"fps": True}, {"fps": 0}, {"threads": 97}, {"max_frames": 0},
                         {"max_bytes": 2**31}, {"resolution": (16384, 16384)},
-                        {"resolution": (20,)}, {"port": 65536}, {"timeout": 0}):
+                        {"resolution": (20,)}, {"port": 65536}, {"timeout": 0},
+                        {"startup_timeout": 0}, {"startup_timeout": 901},
+                        {"startup_timeout": True}, {"startup_timeout": 1.5}):
             with self.subTest(options=options), self.assertRaises(ValueError):
                 Studio(self.source, "Lesson", **options)
         for value in (True, 1.0, -1, 500):
@@ -106,7 +202,7 @@ class StudioPolicyTests(unittest.TestCase):
         with Studio(self.source, "Lesson") as host:
             with patch("fmn_python.studio._reload_request", return_value={"sha256": "a" * 64, "frame_index": 0}) as reload:
                 receipt = host.reload()
-                reload.assert_called_once_with(host.url, 125)
+                reload.assert_called_once_with(host.url, 485)
                 receipt["sha256"] = "mutated"
                 status = host.reload_status
                 self.assertEqual(status["completed"], 1)

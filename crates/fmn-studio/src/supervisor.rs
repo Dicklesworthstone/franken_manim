@@ -55,6 +55,10 @@ pub struct WorkerArtifact {
     pub cwd: Option<PathBuf>,
     /// Content/build identity returned by the worker handshake.
     pub build_id: Digest,
+    /// Require frame zero of this scene before replacing the current worker.
+    /// The first-frame probe adds a measured cold-start allowance to its
+    /// request budget; later requests keep the ordinary request deadline.
+    pub prepare_scene: Option<String>,
 }
 
 impl WorkerArtifact {
@@ -82,6 +86,11 @@ impl WorkerArtifact {
             env,
             cwd,
             build_id: self.build_id,
+            prepare_scene: self
+                .prepare_scene
+                .as_deref()
+                .map(|scene| try_clone_string(scene, "worker preparation scene bytes"))
+                .transpose()?,
         })
     }
 
@@ -94,6 +103,11 @@ impl WorkerArtifact {
         if self.cwd.as_ref().is_some_and(|path| !path.is_absolute()) {
             return Err(LaunchError::InvalidArtifact(
                 "worker working directory must be absolute",
+            ));
+        }
+        if self.prepare_scene.as_ref().is_some_and(String::is_empty) {
+            return Err(LaunchError::InvalidArtifact(
+                "worker preparation scene cannot be empty",
             ));
         }
         let mut keys = BTreeSet::new();
@@ -639,6 +653,8 @@ impl Drop for ChildPipeChannel {
 /// Supervisor recovery policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SupervisorConfig {
+    /// Deadline for a fresh worker's first Hello, before scene capture begins.
+    pub startup_timeout: Duration,
     /// Deadline for one worker request.
     pub request_timeout: Duration,
     /// PG-4 edit-to-frame budget.
@@ -658,6 +674,7 @@ pub struct SupervisorConfig {
 impl Default for SupervisorConfig {
     fn default() -> Self {
         Self {
+            startup_timeout: Duration::from_secs(30),
             request_timeout: Duration::from_secs(10),
             edit_to_frame_budget: Duration::from_secs(1),
             protocol_limits: ProtocolLimits::default(),
@@ -788,9 +805,7 @@ impl fmt::Display for SupervisorError {
                 expected.to_hex(),
                 found.to_hex()
             ),
-            Self::WorkerRefusal { code, message } => {
-                write!(f, "worker refused recovery ({code:?}): {message}")
-            }
+            Self::WorkerRefusal { code, message } => diagnostic::refusal(code, message, f),
             Self::UnexpectedResponse(message) => {
                 write!(f, "unexpected worker response: {message}")
             }
@@ -1400,14 +1415,33 @@ impl Supervisor {
                 max_frame_bytes,
             },
         };
+        let prepare_request = if let Some(scene) = artifact.prepare_scene.as_deref() {
+            if scene.len() > self.config.protocol_limits.max_field_bytes {
+                return Err(LaunchError::InvalidArtifact(
+                    "worker preparation scene exceeds protocol budget",
+                )
+                .into());
+            }
+            Some(RequestEnvelope {
+                request_id: self.take_request_id()?,
+                request: SupervisorRequest::Scrub {
+                    scene: try_clone_string(scene, "worker preparation request bytes")?,
+                    frame: 0,
+                },
+            })
+        } else {
+            None
+        };
+        let startup_started = Instant::now();
         let mut worker = self
             .launcher
             .launch(&artifact, self.config.protocol_limits)?;
         let response_is_validated = worker.responses_are_protocol_validated();
-        let response = match worker.exchange(&request, self.config.request_timeout) {
+        let response = match worker.exchange(&request, self.config.startup_timeout) {
             Ok(response) => response,
-            Err(error) => {
+            Err(mut error) => {
                 worker.terminate();
+                error.detail = format!("worker startup handshake: {}", error.detail);
                 return Err(error.into());
             }
         };
@@ -1459,9 +1493,70 @@ impl Supervisor {
             ));
         }
 
+        if let Some(request) = prepare_request {
+            // First-frame readiness includes cold runtime/cache work beyond
+            // Hello. Leave headroom for cold cache work and scheduling jitter:
+            // one observed startup was insufficient on a loaded host. Bound
+            // the allowance without extending any established-worker callback.
+            let startup_allowance = startup_started
+                .elapsed()
+                .saturating_mul(3)
+                .min(self.config.startup_timeout);
+            let preparation_timeout = self
+                .config
+                .request_timeout
+                .saturating_add(startup_allowance);
+            let response = match worker.exchange(&request, preparation_timeout) {
+                Ok(response) => response,
+                Err(mut error) => {
+                    worker.terminate();
+                    error.detail = format!(
+                        "worker scene preparation (request {:?} + startup allowance {:?}): {}",
+                        self.config.request_timeout, startup_allowance, error.detail
+                    );
+                    return Err(error.into());
+                }
+            };
+            if !response_is_validated
+                && let Err(error) = response.response.validate(self.config.protocol_limits)
+            {
+                worker.terminate();
+                return Err(channel_protocol_error(error).into());
+            }
+            // ubs:ignore - request IDs are public correlation integers, not secrets.
+            if response.request_id != request.request_id {
+                worker.terminate();
+                return Err(SupervisorError::Handshake(
+                    "preparation response correlation id did not match",
+                ));
+            }
+            match response.response {
+                WorkerResponse::Frame(frame)
+                    if artifact.prepare_scene.as_deref() == Some(frame.scene.as_str())
+                        && frame.frame_index == 0 => {}
+                WorkerResponse::Error { code, message } => {
+                    worker.terminate();
+                    return Err(SupervisorError::WorkerRefusal { code, message });
+                }
+                WorkerResponse::Crash(report) => {
+                    worker.terminate();
+                    self.retain_crash(report)?;
+                    return Err(SupervisorError::UnexpectedResponse(
+                        "worker crashed while preparing its first frame",
+                    ));
+                }
+                _ => {
+                    worker.terminate();
+                    return Err(SupervisorError::UnexpectedResponse(
+                        "worker preparation did not return the requested first frame",
+                    ));
+                }
+            }
+        }
+
         // The healthy old worker remains available until its replacement has
-        // passed the exact-version/build handshake. A failed build or bad
-        // candidate therefore cannot turn a working Studio session dark.
+        // passed the exact-version/build handshake and any first-frame probe.
+        // Failed capture cannot replace a healthy authoring worker.
         self.stop_worker(true);
         self.worker = Some(worker);
         self.artifact = Some(artifact);
@@ -2062,6 +2157,7 @@ mod supervisor_storage_tests {
             env: vec![("FMN_MODE".to_owned(), "test".to_owned())],
             cwd: Some(PathBuf::from("/workspace")),
             build_id: sha256(b"worker"),
+            prepare_scene: Some("Demo".to_owned()),
         };
         assert_eq!(
             artifact.try_clone().expect("artifact fields reserve"),
@@ -2240,6 +2336,7 @@ mod startup_tests {
             env: vec![(FIXTURE_ENV.to_owned(), "1".to_owned())],
             cwd: None,
             build_id: sha256(b"pipe thread startup fixture"),
+            prepare_scene: None,
         }
     }
 

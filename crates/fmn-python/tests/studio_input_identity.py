@@ -27,7 +27,8 @@ def request(path, extras=()):
 
 def refused(call, message):
     try:
-        call()
+        with call():
+            pass
     except RuntimeError as error:
         assert message in str(error), str(error)
     else:
@@ -52,16 +53,16 @@ class Lesson(Scene):
         self.wait(0.25)
 ''')
     first_request = request(source)
-    first = _capture(first_request, _native)
-    assert first.frame_count == 1
-    first_nodes = json.loads(first.inspect(0))["nodes"]
+    with _capture(first_request, _native) as first:
+        assert first.frame_count == 1
+        first_nodes = json.loads(first.inspect(0))["nodes"]
     helper.write_text("VALUE = 2\n")
     refused(lambda: _capture(first_request, _native), "between launch and capture")
     second_request = request(source)
     assert first_request["source_sha256"] == second_request["source_sha256"]
     assert first_request["build_id"] != second_request["build_id"]
-    second = _capture(second_request, _native)
-    assert json.loads(second.inspect(0))["nodes"] != first_nodes
+    with _capture(second_request, _native) as second:
+        assert json.loads(second.inspect(0))["nodes"] != first_nodes
     assert json.loads(first.inspect(0))["nodes"] == first_nodes, "prior healthy capture changed"
 
     # Actual native assets share the identity, generated PNG output does not.
@@ -81,7 +82,8 @@ class Lesson(Scene):
         from .. import helper
         self.add(Circle(radius=helper.VALUE))
 ''')
-    assert _capture(request(source), _native).frame_count == 1
+    with _capture(request(source), _native) as lazy:
+        assert lazy.frame_count == 1
 
     # Same-length temporary edit+revert: aggregate re-scan alone is insufficient.
     expected = request(source)

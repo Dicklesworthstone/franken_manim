@@ -203,8 +203,20 @@ separate modes with their existing behavior.
 ## Budgets and host access
 
 The defaults are 640×360, 30 FPS, 7,200 captured frames, a 256 MiB encoded capture
-budget, and a 120-second worker-request timeout. Set `--max_frames`,
-`--max_bytes`, or `--timeout` explicitly for longer scenes. The encoded budget
+budget, and separate 120-second startup and worker-request timeouts. Set
+`--startup_timeout` for cold imports, bundled font/template initialization and
+persistent-cache binding before Hello. The first-frame readiness probe gets
+`--timeout` plus three times the observed cold-start duration, with that allowance
+capped by `--startup_timeout` to bound cold cache work and scheduling jitter.
+Every later worker operation, including live callbacks, keeps `--timeout` alone.
+Cache retention still runs synchronously at the scene lifecycle boundary.
+The Python API accepts the same `startup_timeout` and `timeout` keywords.
+Initial construction remains bounded by that explicit readiness budget; a hung
+callback keeps its short operation deadline. A reload keeps the healthy worker
+until its replacement has answered
+Hello and produced a valid first frame; failed preparation leaves the old
+worker available. Set `--max_frames`, `--max_bytes`, or `--timeout` explicitly
+for longer scenes. The encoded budget
 accounts for PNGs, inspector documents and per-frame metadata; native inspector
 traversal/field limits and a 16M-pixel frame ceiling apply independently. It is
 not an operating-system memory quota on arbitrary authored Python. The maximum

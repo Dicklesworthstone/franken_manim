@@ -377,6 +377,7 @@ impl RebuildDriver for CargoRebuildDriver {
             argv: self.config.worker_argv.clone(),
             env: self.config.worker_env.clone(),
             cwd: self.config.worker_cwd.clone(),
+            prepare_scene: None,
         })
     }
 }

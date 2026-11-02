@@ -360,6 +360,7 @@ fn run(
         env: Vec::new(),
         cwd: None,
         build_id,
+        prepare_scene: None,
     };
     let mut builder = Box::new(RecordingBuilder { launch, artifact });
     let clock: Arc<dyn Clock> = Arc::new(StdClock::new());

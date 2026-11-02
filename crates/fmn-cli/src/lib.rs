@@ -8371,6 +8371,7 @@ impl fmn_studio::RebuildDriver for SelfWorkerBuilder {
             env: Vec::new(),
             cwd: Some(self.cwd.clone()),
             build_id: self.build_id,
+            prepare_scene: None,
         })
     }
 }

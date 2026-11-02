@@ -364,6 +364,7 @@ pub fn start_host(
     token: CapabilityToken,
     config: StudioHostConfig,
     request_timeout: Duration,
+    startup_timeout: Duration,
 ) -> Result<(StudioHost, Arc<StudioWorkerSession>, FrameHub), HostError> {
     use fmn_cache::{NamespacePolicy, Store, StoreConfig};
     use fmn_platform::clock::{Clock, StdClock};
@@ -391,6 +392,7 @@ pub fn start_host(
         cache,
         SupervisorConfig {
             request_timeout,
+            startup_timeout,
             auto_restart: false,
             ..SupervisorConfig::default()
         },

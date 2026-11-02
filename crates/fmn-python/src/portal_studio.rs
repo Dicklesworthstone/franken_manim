@@ -1,14 +1,15 @@
 //! Host-CPython Studio composition. No Python dependency enters the native CLI.
 //!
 //! Capture uses the normal stepped lifecycle and the shared Lumen renderer.
-//! The worker discards live Python/Stage ownership before serving a bounded,
-//! read-only native timeline; source reload is a new process, never replay of
-//! a purportedly serializable Python closure.
+//! Read-only playback releases the authored Scene. Interactive playback retains
+//! its Scene and import context in the same worker service and protocol loop.
+//! Source reload is a new process, never replay of a serialized Python closure.
 
 use super::*;
 use fmn_studio::{
     FrameEncoding, FramePayload, FrameStream, InspectorLimits, InspectorSnapshot, InspectorView,
-    ProtocolDigest, ProtocolLimits, SpanRegistry, WorkerService, protocol_digest,
+    ProtocolDigest, ProtocolLimits, ServiceError, SpanRegistry, SupervisorRequest, WorkerErrorCode,
+    WorkerResponse, WorkerService, protocol_digest,
 };
 use std::time::Duration;
 
@@ -376,20 +377,236 @@ pub(super) fn finish(slf: &Bound<'_, PyScene>) -> PyResult<Recording> {
         return Err(PyRuntimeError::new_err(error));
     }
     Ok(Recording {
-        timeline: Some(capture.recorded),
+        worker: Some(CapturedWorker::Recorded(Box::new(capture.recorded))),
         tuning: capture.tuning,
     })
 }
 
-/// Only owned PNGs, records and digests cross from authoring to serving.
+enum CapturedWorker {
+    Recorded(Box<fmn_studio::recorded::RecordedTimeline>),
+    Live(live::LiveWorker),
+}
+
+impl CapturedWorker {
+    fn frame_count(&self) -> PyResult<usize> {
+        match self {
+            Self::Recorded(worker) => Ok(worker.frame_count()),
+            Self::Live(worker) => worker.frame_count(),
+        }
+    }
+}
+
+impl WorkerService for CapturedWorker {
+    fn build_id(&self) -> ProtocolDigest {
+        match self {
+            Self::Recorded(worker) => worker.build_id(),
+            Self::Live(worker) => worker.build_id(),
+        }
+    }
+    fn active_scene(&self) -> Option<&str> {
+        match self {
+            Self::Recorded(worker) => worker.active_scene(),
+            Self::Live(worker) => worker.active_scene(),
+        }
+    }
+    fn last_state_hash(&self) -> Option<ProtocolDigest> {
+        match self {
+            Self::Recorded(worker) => worker.last_state_hash(),
+            Self::Live(worker) => worker.last_state_hash(),
+        }
+    }
+    fn begin_session(&mut self, build: ProtocolDigest, bytes: usize) -> Result<(), ServiceError> {
+        match self {
+            Self::Recorded(worker) => worker.begin_session(build, bytes),
+            Self::Live(worker) => worker.begin_session(build, bytes),
+        }
+    }
+    fn handle(&mut self, request: SupervisorRequest) -> Result<WorkerResponse, ServiceError> {
+        match self {
+            Self::Recorded(worker) => worker.handle(request),
+            Self::Live(worker) => worker.handle(request),
+        }
+    }
+}
+
+/// The prepared service is moved into the one deferred worker loop.
 #[pyclass(name = "_StudioRecording", module = "manimlib")]
 pub(super) struct Recording {
-    timeline: Option<fmn_studio::recorded::RecordedTimeline>,
+    worker: Option<CapturedWorker>,
     tuning: portal_autotune::Report,
+}
+
+struct CaptureContext(Option<Py<PyAny>>);
+
+impl CaptureContext {
+    fn close(&mut self) -> PyResult<()> {
+        if let Some(context) = self.0.take() {
+            Python::attach(|py| {
+                context
+                    .bind(py)
+                    .call_method1("__exit__", (py.None(), py.None(), py.None()))
+                    .map(|_| ())
+            })
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Drop for CaptureContext {
+    fn drop(&mut self) {
+        if let Err(error) = self.close() {
+            Python::attach(|py| error.print(py));
+        }
+    }
+}
+
+/// A fresh portal worker answers Hello before executing authored scene code.
+/// The supervisor adds the measured startup allowance to its first-frame
+/// budget and retains the previous worker until that frame has validated.
+struct DeferredRecording {
+    build_id: ProtocolDigest,
+    scene: String,
+    capture: Option<Py<PyAny>>,
+    worker: Option<CapturedWorker>,
+    // Field order releases the native live service before its source context.
+    context: Option<CaptureContext>,
+    session: Option<(ProtocolDigest, usize)>,
+}
+
+impl WorkerService for DeferredRecording {
+    fn build_id(&self) -> ProtocolDigest {
+        self.build_id
+    }
+
+    fn active_scene(&self) -> Option<&str> {
+        Some(&self.scene)
+    }
+
+    fn last_state_hash(&self) -> Option<ProtocolDigest> {
+        self.worker
+            .as_ref()
+            .and_then(WorkerService::last_state_hash)
+    }
+
+    fn begin_session(
+        &mut self,
+        supervisor_build: ProtocolDigest,
+        max_frame_bytes: usize,
+    ) -> Result<(), ServiceError> {
+        if let Some(worker) = self.worker.as_mut() {
+            worker.begin_session(supervisor_build, max_frame_bytes)?;
+        }
+        self.session = Some((supervisor_build, max_frame_bytes));
+        Ok(())
+    }
+
+    fn handle(&mut self, request: SupervisorRequest) -> Result<WorkerResponse, ServiceError> {
+        if self.worker.is_none() {
+            let (supervisor_build, max_frame_bytes) = self.session.ok_or_else(|| {
+                ServiceError::new(
+                    WorkerErrorCode::InvalidRequest,
+                    "Studio worker has no session",
+                )
+            })?;
+            // Consume before calling Python: a failed or hung scene must never
+            // execute again on another request in this worker generation.
+            let capture = self.capture.take().ok_or_else(|| {
+                ServiceError::new(
+                    WorkerErrorCode::ExecutionFailed,
+                    "Studio scene capture has already failed",
+                )
+            })?;
+            let (mut worker, context) = Python::attach(|py| -> PyResult<_> {
+                let context = capture.call0(py)?;
+                let value = context.bind(py).call_method0("__enter__")?;
+                let context = CaptureContext(Some(context));
+                let mut recording = value.extract::<PyRefMut<'_, Recording>>()?;
+                let worker = recording
+                    .worker
+                    .take()
+                    .ok_or_else(|| PyRuntimeError::new_err("Studio recording already served"))?;
+                Ok((worker, context))
+            })
+            .map_err(|error| {
+                ServiceError::new(WorkerErrorCode::ExecutionFailed, error.to_string())
+            })?;
+            self.context = Some(context);
+            if worker.build_id() != self.build_id
+                || worker.active_scene() != Some(self.scene.as_str())
+            {
+                return Err(ServiceError::new(
+                    WorkerErrorCode::ExecutionFailed,
+                    "Studio capture identity differs from its worker artifact",
+                ));
+            }
+            worker.begin_session(supervisor_build, max_frame_bytes)?;
+            self.worker = Some(worker);
+        }
+        self.worker
+            .as_mut()
+            .ok_or_else(|| {
+                ServiceError::new(
+                    WorkerErrorCode::ExecutionFailed,
+                    "Studio capture is unavailable",
+                )
+            })?
+            .handle(request)
+    }
+}
+
+impl DeferredRecording {
+    fn close_capture(&mut self) -> PyResult<()> {
+        drop(self.worker.take());
+        if let Some(mut context) = self.context.take() {
+            context.close()?;
+        }
+        Ok(())
+    }
 }
 
 #[pymethods]
 impl Recording {
+    #[staticmethod]
+    fn serve_deferred(
+        py: Python<'_>,
+        build: &str,
+        scene: String,
+        capture: Py<PyAny>,
+    ) -> PyResult<()> {
+        if !capture.bind(py).is_callable() {
+            return Err(PyTypeError::new_err("Studio capture must be callable"));
+        }
+        let build_id = ProtocolDigest::from_hex(build).map_err(native_error)?;
+        let mut worker = DeferredRecording {
+            build_id,
+            scene,
+            capture: Some(capture),
+            worker: None,
+            context: None,
+            session: None,
+        };
+        py.detach(move || {
+            let served = fmn_studio::serve_worker(
+                &mut worker,
+                &mut std::io::stdin().lock(),
+                &mut std::io::stdout().lock(),
+                ProtocolLimits::default(),
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string());
+            let closed = worker.close_capture().map_err(|error| error.to_string());
+            match (served, closed) {
+                (Err(error), Err(cleanup)) => {
+                    Err(format!("{error}; source cleanup failed: {cleanup}"))
+                }
+                (Err(error), _) => Err(error),
+                (Ok(()), closed) => closed,
+            }
+        })
+        .map_err(PyRuntimeError::new_err)
+    }
+
     /// Planner evidence; standard camera capture remains an uncertified artifact.
     #[getter]
     fn autotune(slf: &Bound<'_, Self>) -> PyResult<Py<PyDict>> {
@@ -399,44 +616,26 @@ impl Recording {
 
     #[getter]
     fn frame_count(&self) -> PyResult<usize> {
-        Ok(self
-            .timeline
+        self.worker
             .as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("recording already served"))?
-            .frame_count())
-    }
-    fn serve(&mut self, py: Python<'_>) -> PyResult<()> {
-        let mut timeline = self
-            .timeline
-            .take()
-            .ok_or_else(|| PyRuntimeError::new_err("recording already served"))?;
-        py.detach(move || {
-            fmn_studio::serve_worker(
-                &mut timeline,
-                &mut std::io::stdin().lock(),
-                &mut std::io::stdout().lock(),
-                ProtocolLimits::default(),
-            )
-            .map(|_| ())
-            .map_err(|e| e.to_string())
-        })
-        .map_err(PyRuntimeError::new_err)
+            .frame_count()
     }
     // The same native worker methods support in-process consumers and tests;
     // no second inspector JSON writer or frame decoder lives in the portal.
     fn inspect(&mut self, frame: i64) -> PyResult<String> {
-        let timeline = self
-            .timeline
+        let worker = self
+            .worker
             .as_mut()
             .ok_or_else(|| PyRuntimeError::new_err("recording already served"))?;
-        let scene = timeline.active_scene().unwrap_or_default().to_owned();
-        timeline
+        let scene = worker.active_scene().unwrap_or_default().to_owned();
+        worker
             .handle(fmn_studio::SupervisorRequest::Scrub {
                 scene: scene.clone(),
                 frame,
             })
             .map_err(native_error)?;
-        let fmn_studio::WorkerResponse::StudioData { bytes, .. } = timeline
+        let fmn_studio::WorkerResponse::StudioData { bytes, .. } = worker
             .handle(fmn_studio::SupervisorRequest::Inspect { scene })
             .map_err(native_error)?
         else {
@@ -450,6 +649,7 @@ impl Recording {
 
 struct PythonBuilder {
     callback: Py<PyAny>,
+    scene: String,
 }
 impl fmn_studio::RebuildDriver for PythonBuilder {
     fn rebuild(&mut self) -> Result<fmn_studio::WorkerArtifact, fmn_studio::BuildError> {
@@ -470,6 +670,7 @@ impl fmn_studio::RebuildDriver for PythonBuilder {
                 env,
                 cwd: Some(cwd.into()),
                 build_id,
+                prepare_scene: Some(self.scene.clone()),
             })
         })
     }
@@ -543,10 +744,16 @@ impl Host {
         token: &str,
         port: u16,
         timeout: u64,
+        startup_timeout: u64,
     ) -> PyResult<Self> {
         if !(1..=900).contains(&timeout) {
             return Err(PyValueError::new_err(
                 "Studio worker timeout must be 1..900 seconds",
+            ));
+        }
+        if !(1..=900).contains(&startup_timeout) {
+            return Err(PyValueError::new_err(
+                "Studio startup timeout must be 1..900 seconds",
             ));
         }
         if !builder.bind(py).is_callable() {
@@ -564,10 +771,14 @@ impl Host {
             .detach(move || {
                 fmn_studio::recorded::start_host(
                     &scene,
-                    Box::new(PythonBuilder { callback: builder }),
+                    Box::new(PythonBuilder {
+                        callback: builder,
+                        scene: scene.clone(),
+                    }),
                     token,
                     config,
                     Duration::from_secs(timeout),
+                    Duration::from_secs(startup_timeout),
                 )
                 .map_err(|e| e.to_string())
             })
@@ -676,6 +887,8 @@ pub struct PortalStudioGauntletReport {
     pub last_png: Vec<u8>,
     pub last_inspector: Vec<u8>,
     pub frames: u64,
+    pub captures: u64,
+    pub contexts_closed: u64,
 }
 
 /// Exercise the production capture and worker protocol without publishing an
@@ -685,54 +898,78 @@ pub fn run_portal_gauntlet_studio_capture() -> Result<PortalStudioGauntletReport
     crate::with_python_test_module("Studio native capture", |py, _module, globals| {
         let source = std::ffi::CString::new(
             r#"
+import contextlib
 import json
 import manimlib as m
-s = m.Scene()
-s._begin_studio_capture('Moving', '11' * 32, '22' * 32, 96, 54, 8, 1, 0, 16, 1024*1024)
-s.camera._core.set_pixel_shape(96, 54)
-s.camera.fps = 8
-box = m.Square(fill_opacity=1)
-s.add(box)
-s.play(box.animate.shift(m.RIGHT), run_time=0.5)
-s.wait(0.25)
-r = s._finish_studio_capture()
-assert r.frame_count == 6, r.frame_count
-first, last = json.loads(r.inspect(0)), json.loads(r.inspect(5))
-assert first['view']['frame_count'] == 6
-assert first['view']['input_events'] is False
-assert first['nodes'] and last['nodes']
-assert first['scene_time'] < last['scene_time']
-assert first['nodes'] != last['nodes']
-assert json.loads(r.inspect(0)) == first, 'scrub changed captured state'
-static = m.Scene()
-static._begin_studio_capture('Still', '33' * 32, '44' * 32, 96, 54, 8, 1, 0, 16, 1024*1024)
-static.camera._core.set_pixel_shape(96, 54)
-static.camera.fps = 8
-static.add(m.Circle())
-assert static._finish_studio_capture().frame_count == 1
+_captures = 0
+_contexts_closed = 0
+@contextlib.contextmanager
+def capture():
+    global _captures, _contexts_closed
+    _captures += 1
+    s = m.Scene()
+    s._begin_studio_capture('Moving', '11' * 32, '22' * 32, 96, 54, 8, 1, 0, 16, 1024*1024)
+    s.camera._core.set_pixel_shape(96, 54)
+    s.camera.fps = 8
+    box = m.Square(fill_opacity=1)
+    s.add(box)
+    s.play(box.animate.shift(m.RIGHT), run_time=0.5)
+    s.wait(0.25)
+    r = s._finish_studio_capture()
+    assert r.frame_count == 6, r.frame_count
+    first, last = json.loads(r.inspect(0)), json.loads(r.inspect(5))
+    assert first['view']['frame_count'] == 6
+    assert first['view']['input_events'] is False
+    assert first['nodes'] and last['nodes']
+    assert first['scene_time'] < last['scene_time']
+    assert first['nodes'] != last['nodes']
+    assert json.loads(r.inspect(0)) == first, 'scrub changed captured state'
+    static = m.Scene()
+    static._begin_studio_capture('Still', '33' * 32, '44' * 32, 96, 54, 8, 1, 0, 16, 1024*1024)
+    static.camera._core.set_pixel_shape(96, 54)
+    static.camera.fps = 8
+    static.add(m.Circle())
+    assert static._finish_studio_capture().frame_count == 1
+    try:
+        yield r
+    finally:
+        _contexts_closed += 1
 "#,
         )
         .unwrap();
         py.run(source.as_c_str(), Some(globals), Some(globals))
             .inspect_err(|e| e.print(py))
             .map_err(|e| e.to_string())?;
-        let object = globals
-            .get_item("r")
+        let capture = globals
+            .get_item("capture")
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| "Studio capture produced no recording".to_owned())?;
-        let mut recording = object
-            .extract::<PyRefMut<'_, Recording>>()
+            .ok_or_else(|| "Studio capture produced no callback".to_owned())?;
+        let mut worker = DeferredRecording {
+            build_id: ProtocolDigest::from_hex(&"11".repeat(32)).map_err(|e| e.to_string())?,
+            scene: "Moving".to_owned(),
+            capture: Some(capture.unbind()),
+            worker: None,
+            context: None,
+            session: None,
+        };
+        worker
+            .begin_session(protocol_digest(b"Gauntlet supervisor"), 1024 * 1024)
             .map_err(|e| e.to_string())?;
-        let timeline = recording
-            .timeline
-            .as_mut()
-            .ok_or_else(|| "Studio recording was already consumed".to_owned())?;
-        let scene = timeline.active_scene().unwrap_or_default().to_owned();
-        let frames = timeline.frame_count() as u64;
-        let png = |timeline: &mut fmn_studio::recorded::RecordedTimeline, index| {
-            let response = timeline
+        let captures = || -> Result<u64, String> {
+            globals
+                .get_item("_captures")
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "Studio capture produced no execution count".to_owned())?
+                .extract::<u64>()
+                .map_err(|e| e.to_string())
+        };
+        if captures()? != 0 || worker.worker.is_some() {
+            return Err("Studio executed authored code before its first frame request".to_owned());
+        }
+        let png = |worker: &mut DeferredRecording, index| {
+            let response = worker
                 .handle(fmn_studio::SupervisorRequest::Scrub {
-                    scene: scene.clone(),
+                    scene: "Moving".to_owned(),
                     frame: index,
                 })
                 .map_err(|e| e.to_string())?;
@@ -744,24 +981,49 @@ assert static._finish_studio_capture().frame_count == 1
                 _ => Err("Studio did not return an owned PNG".to_owned()),
             }
         };
-        let first_png = png(timeline, 0)?;
-        let last_png = png(timeline, 5)?;
+        let first_png = png(&mut worker, 0)?;
+        if png(&mut worker, 0)? != first_png {
+            return Err("Studio readiness publication changed its captured first frame".to_owned());
+        }
+        let last_png = png(&mut worker, 5)?;
         let fmn_studio::WorkerResponse::StudioData {
             bytes: last_inspector,
             ..
-        } = timeline
+        } = worker
             .handle(fmn_studio::SupervisorRequest::Inspect {
-                scene: scene.clone(),
+                scene: "Moving".to_owned(),
             })
             .map_err(|e| e.to_string())?
         else {
             return Err("Studio did not return its native inspector".to_owned());
         };
+        let captures = captures()?;
+        if captures != 1 {
+            return Err("Studio re-executed authored code while scrubbing".to_owned());
+        }
+        let frames = worker
+            .worker
+            .as_ref()
+            .ok_or_else(|| "Studio produced no captured timeline".to_owned())?
+            .frame_count()
+            .map_err(|e| e.to_string())? as u64;
+        worker.close_capture().map_err(|e| e.to_string())?;
+        let contexts_closed = globals
+            .get_item("_contexts_closed")
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Studio produced no context-close count".to_owned())?
+            .extract::<u64>()
+            .map_err(|e| e.to_string())?;
+        if contexts_closed != 1 {
+            return Err("Studio did not close its capture context exactly once".to_owned());
+        }
         Ok(PortalStudioGauntletReport {
             first_png,
             last_png,
             last_inspector,
             frames,
+            captures,
+            contexts_closed,
         })
     })
 }
@@ -811,6 +1073,8 @@ mod tests {
         let last =
             fmn_codec::decode_png(&report.last_png, &fmn_codec::PngLimits::default()).unwrap();
         assert_eq!(report.frames, 6);
+        assert_eq!(report.captures, 1);
+        assert_eq!(report.contexts_closed, 1);
         assert_eq!((first.width, first.height), (96, 54));
         assert_ne!(
             first.rgba, last.rgba,

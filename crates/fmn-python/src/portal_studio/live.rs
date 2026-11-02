@@ -135,7 +135,7 @@ fn advance(scene: &Bound<'_, PyScene>, frames: u32, validator: Option<&Py<PyAny>
     Ok(())
 }
 
-struct LiveWorker {
+pub(super) struct LiveWorker {
     scene: Py<PyScene>,
     input_validator: Option<Py<PyAny>>,
     name: String,
@@ -145,6 +145,13 @@ struct LiveWorker {
 }
 
 impl LiveWorker {
+    pub(super) fn frame_count(&self) -> PyResult<usize> {
+        Python::attach(|py| {
+            with_capture(self.scene.bind(py), |c| Ok(c.recorded.frame_count()))
+                .map_err(native_error)
+        })
+    }
+
     fn new(scene: &Bound<'_, PyScene>) -> PyResult<Self> {
         let input_validator = scene
             .getattr("__dict__")?
@@ -297,26 +304,13 @@ impl WorkerService for LiveWorker {
     }
 }
 
-pub(crate) fn serve(scene: &Bound<'_, PyScene>) -> PyResult<()> {
-    let mut worker = LiveWorker::new(scene)?;
-    let result = scene
-        .py()
-        .detach(move || {
-            fmn_studio::serve_worker(
-                &mut worker,
-                &mut std::io::stdin().lock(),
-                &mut std::io::stdout().lock(),
-                ProtocolLimits::default(),
-            )
-            .map(|_| ())
-            .map_err(|error| error.to_string())
-        })
-        .map_err(PyRuntimeError::new_err);
-    // Release the retained capture and live proxies on the original worker
-    // thread, also on malformed protocol / peer disconnect.
-    let aborted = scene.call_method0("_abort_render");
-    result?;
-    aborted.map(|_| ())
+pub(crate) fn prepare(scene: &Bound<'_, PyScene>) -> PyResult<Recording> {
+    let worker = LiveWorker::new(scene)?;
+    let tuning = with_capture(scene, |capture| Ok(capture.tuning.clone())).map_err(native_error)?;
+    Ok(Recording {
+        worker: Some(CapturedWorker::Live(worker)),
+        tuning,
+    })
 }
 
 // The portal already speaks these pinned pyglet-compatible integer tokens;

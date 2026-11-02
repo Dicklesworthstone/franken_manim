@@ -92,12 +92,15 @@ class Studio:
     edits. It watches local Python sources and any additional ``watch_paths``;
     files named explicitly may be non-Python assets. Worker failures leave the
     previous healthy capture available and are exposed through ``reload_status``.
+    ``startup_timeout`` bounds runtime initialization and the Hello handshake;
+    First-frame capture gets ``timeout`` plus three times the measured startup duration,
+    capped by ``startup_timeout``. Later operations keep ``timeout`` alone.
     """
     def __init__(
         self, source: os.PathLike[str] | str, scene: str, *,
         resolution: tuple[int, int] = (640, 360), fps: int = 30, threads: int = 1,
         max_frames: int = _DEFAULT_FRAMES, max_bytes: int = _DEFAULT_BYTES,
-        timeout: int = 120, port: int = 0,
+        timeout: int = 120, startup_timeout: int = 120, port: int = 0,
         autoreload: bool = False, watch_paths: tuple[os.PathLike[str] | str, ...] | list = (),
         debounce_ms: int = 200, interactive: bool = False,
     ) -> None:
@@ -135,6 +138,7 @@ class Studio:
             "interactive": interactive,
         }
         timeout = _integer(timeout, "timeout", 1, 900)
+        startup_timeout = _integer(startup_timeout, "startup_timeout", 1, 900)
         port = _integer(port, "port", 0, 65535)
         # abspath, NOT realpath: resolving a virtualenv interpreter symlink
         # would discard that environment's installed engine and dependencies.
@@ -169,10 +173,16 @@ class Studio:
         # that worker is rendering must be noticed on the first later poll.
         self._watch = _native._StudioHost.watch_sources(roots, debounce_ms) if autoreload else None
         self._timeout = timeout + 5
+        # Reload can include cold startup, the first-frame readiness probe,
+        # and publication of the requested frame. Initial readiness also gets
+        # the measured cold-start allowance, capped by startup_timeout.
+        self._reload_timeout = 2 * startup_timeout + 2 * timeout + 5
         self._autoreload = autoreload
         self._interactive = interactive
         self._reload_status = {"revision": 0, "completed": 0, "error": None, "result": None}
-        self._host = _native._StudioHost(rebuild, scene, secrets.token_hex(32), port, timeout)
+        self._host = _native._StudioHost(
+            rebuild, scene, secrets.token_hex(32), port, timeout, startup_timeout,
+        )
         try:
             if autoreload:
                 self._watch_thread = threading.Thread(
@@ -228,7 +238,7 @@ class Studio:
             if self._stop.is_set() or not self._host.alive:
                 raise RuntimeError("Studio is closed")
             try:
-                result = _reload_request(self._host.url, self._timeout)
+                result = _reload_request(self._host.url, self._reload_timeout)
             except Exception as error:
                 self._record_reload(error=str(error)[:4096])
                 raise
@@ -322,6 +332,7 @@ def _watch_loop(owner_ref, stop, watch) -> None:
             del owner
 
 
+@contextlib.contextmanager
 def _capture(request: dict[str, Any], native: Any):
     from .scene_loading import SceneSource
     from .rendering import _seed
@@ -363,22 +374,29 @@ def _capture(request: dict[str, Any], native: Any):
                 scene.__dict__["_fmn_studio_live_input"] = True
                 scene.__dict__["_fmn_studio_validate_inputs"] = lambda: inputs.verify(loaded)
                 try:
-                    scene._serve_studio_live()
+                    # Prepare the existing service; the outer native worker
+                    # owns Hello, requests and shutdown through one loop.
+                    yield scene._prepare_studio_live()
                 finally:
-                    scene.__dict__.pop("_fmn_studio_live_input", None)
-                    scene.__dict__.pop("_fmn_studio_validate_inputs", None)
-                return None
+                    try:
+                        scene._abort_render()
+                    finally:
+                        scene.__dict__.pop("_fmn_studio_live_input", None)
+                        scene.__dict__.pop("_fmn_studio_validate_inputs", None)
+                return
             recording = scene._finish_studio_capture()
             # Finishing an empty scene can capture a frame and invoke authored
             # camera/updater hooks. Validate after those effects, before serve.
             inputs.verify(loaded)
-            return recording
         except BaseException as error:
             try:
                 scene._abort_render()
             except BaseException as cleanup:
                 error.add_note("Studio capture cleanup also failed: " + type(cleanup).__name__)
             raise
+    # Read-only playback needs no authored Scene or import context.
+    del scene, loaded
+    yield recording
 
 
 def _worker(encoded: str) -> int:
@@ -402,20 +420,31 @@ def _worker(encoded: str) -> int:
                   "abi": sys.implementation.cache_tag}
         if request["runtime"] != actual:
             raise RuntimeError("Studio worker interpreter/engine differs from the selected host runtime")
-        from .scene_console import _STUDIO_WORKER
-        token = _STUDIO_WORKER.set(True)
-        try:
-            recording = _capture(request, _native)
-        finally:
-            _STUDIO_WORKER.reset(token)
-    if recording is not None:
-        recording.serve()
+        # The bundled font/template engines and persistent-cache binding are
+        # runtime initialization, not authored scene execution. Complete them
+        # before Hello so a short callback deadline does not also pay their
+        # cold-start cost. Scene construction still checks configuration, and
+        # lifecycle retention still runs synchronously after authored effects.
+        _native._fmn_ensure_tex_cache()
+        @contextlib.contextmanager
+        def capture():
+            from .scene_console import _STUDIO_WORKER
+            token = _STUDIO_WORKER.set(True)
+            try:
+                with _capture(request, _native) as recording:
+                    yield recording
+            finally:
+                _STUDIO_WORKER.reset(token)
+        _native._StudioRecording.serve_deferred(
+            request["build_id"], request["scene"], capture,
+        )
     return 0
 
 
 _HELP = """Read-only native Studio for Python scenes:
   fmn-python studio SOURCE.py SCENE [--resolution WxH] [--fps N] [--threads N]
-                    [--max_frames N] [--max_bytes N] [--timeout SECONDS] [--port N]
+                    [--max_frames N] [--max_bytes N] [--timeout SECONDS]
+                    [--startup_timeout SECONDS] [--port N]
                     [--autoreload] [--watch PATH ...] [--debounce_ms N] [--interactive]
 
 Executes once in a disposable host-CPython worker; scrub and inspect the captured
@@ -438,6 +467,7 @@ Select the final frame to Step live frame or Run live nominal updater ticks.
 Run is bounded and pauses on input, navigation, focus loss or worker changes.
 No sound playback, callback checkpoints, or certified render claim.
 Default: 640x360, 30 FPS, 7200 frames, 256 MiB encoded capture budget.
+Startup and scene/operation deadlines are separate; both default to 120 seconds.
 """
 
 
@@ -463,7 +493,8 @@ def try_studio_cli(native: Any, arguments: list[str]) -> int | None:
     parser.add_argument("--watch", dest="watch_paths", action="append", default=[])
     parser.add_argument("--debounce_ms", type=int, default=200)
     for flag, default in (("fps", 30), ("threads", 1), ("max_frames", _DEFAULT_FRAMES),
-                          ("max_bytes", _DEFAULT_BYTES), ("timeout", 120), ("port", 0)):
+                          ("max_bytes", _DEFAULT_BYTES), ("timeout", 120),
+                          ("startup_timeout", 120), ("port", 0)):
         parser.add_argument("--" + flag, type=int, default=default)
     phase = "arguments"
     try:
