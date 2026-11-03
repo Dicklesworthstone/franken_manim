@@ -124,8 +124,18 @@ from the Reference in the ways below.
   `\texttt` and `\textsf` work in `Tex` and `TexText`.
   - Nested switches do not compose: `\textbf{\textit{x}}` is italic, not bold italic.
   - `\textsf` is IBM Plex Sans, not cmss.
-- **`\hspace` reads `em` and `ex` from cmr10.** The Reference's text font is T1's ecrm, whose
-  quad (9.99755 pt) is 0.025% narrower. Fixed lengths (`1cm`, `6pt`) are exact.
+- **Upright TeX text uses T1 EC metrics at its declared size.** `TexText`'s
+  mainland and `\text{...}` islands use EC advances, boxes, interword glue,
+  `em` and `ex`, including the optical cuts selected by size declarations.
+  The bundled CM Unicode outlines provide the ink. Math islands and operator
+  words retain their math-font metrics.
+- **TeX text kerning follows the preamble pack's font control.** The default
+  pack matches the Reference's `\DisableLigatures`: pdfTeX disables both
+  ligatures and text pair kerns. Thus `AV` measures 1.499634 em there, versus
+  1.388550 em under the basic pack's ordinary EC kerns. The same control
+  applies to custom text faces; it does not disable mathematical kerns.
+  These measurements and size, script and Latin-1 cases are locked against
+  independent real TeX captures (fm-q364).
 - `\not`, `\lvert`/`\rvert`, `\boxed`, `\cfrac` and `\genfrac` match TeX's boxes.
 - `gather*`, `gathered` and `equation*` set display-style rows, centred.
 - `\TeX` and `\LaTeX` are the kernel's constructions in cmr10 and cmr7, and `\mathchoice`
