@@ -1,7 +1,7 @@
 # The Font + License Bundle (fm-aef)
 
 Every artifact class FrankenManim ships — binary, Python wheel, npm
-package — embeds the same ten font faces and must carry the same license
+package — embeds the same 44 font faces and must carry the same license
 inventory. `dist/FONT_BUNDLE.json` is the single manifest of that bundle:
 what the faces are, what they hash to, and which license text covers each
 one. This page is the format specification.
@@ -13,6 +13,7 @@ one. This page is the format specification.
 | 5 Computer Modern faces (roman, bold, italic, bold-italic, typewriter) | compiled into the binary (`fmd-font` `ALL_FACES`) | `licenses/fonts/computer-modern-OFL.txt` (OFL-1.1) |
 | 4 IBM Plex Sans faces (regular, bold, italic, bold-italic) | compiled into the binary | `licenses/fonts/ibm-plex-sans-OFL.txt` (OFL-1.1) |
 | Noto Sans Math symbol-fallback subset | compiled into the binary | `licenses/fonts/noto-sans-math-OFL.txt` (OFL-1.1) |
+| 34 authored Computer Modern, AMS and Euler math faces, including optical sizes | compiled into the binary | `licenses/fonts/cm-math-OFL.txt` (OFL-1.1) |
 | The engine itself | the binary / wheel / npm artifact | `licenses/LICENSE` (MIT with the OpenAI/Anthropic rider) |
 
 The faces are pinned by SUITE.lock (`franken_markdown` rev) and consumed
@@ -20,8 +21,8 @@ as `fmd_font::bundled::ALL_FACES`. The license texts are copied
 byte-identically from the pinned `fmd-font` checkout's `fonts/<set>/OFL.txt`
 and the repository's `LICENSE`.
 
-**License inventory: complete, no gaps.** All ten faces across the three
-families have their OFL-1.1 texts present upstream and shipped. The Noto
+**License inventory: complete, no gaps.** All 44 faces across the four
+license groups have their OFL-1.1 texts present upstream and shipped. The Noto
 Sans Math face is the project's curated symbol subset (its TTF name table
 is stripped by construction, so its manifest `version` is `null` — the
 manifest records facts, not inventions).
@@ -38,10 +39,10 @@ from the bundled bytes, not inferred from font names:
   which IBM Plex Sans and the fallback carry.
 - **θ U+03B8 in Computer Modern draws as ϑ.** In all three bundled CMU
   faces (`cmunrm`, `cmunbx`, `cmunti`) the `theta` glyph is
-  outline-identical to `theta1` (ϑ U+03D1), so CM text and `\theta` set the
-  script form (math-mode report fm-5wq.60). The closed θ needs another
-  glyph source: the CM math faces of ADR-0028
-  (fm-cm-math-faces-impl-n12u). IBM Plex Sans's θ is the closed form.
+  outline-identical to `theta1` (ϑ U+03D1), so CMU text sets the script
+  form (math-mode report fm-5wq.60). Math-mode `\theta` uses the authored
+  CM math faces of ADR-0028 (fm-cm-math-faces-impl-n12u), which supply the
+  closed θ. IBM Plex Sans's θ is also the closed form.
 
 ## Generation
 

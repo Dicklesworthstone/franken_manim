@@ -1783,12 +1783,14 @@ mod tests {
         // capitals in cmr7's and cmr5's designs), and e7b4309d
         // (fm-fmd-math-fuzz-budgets-k8fe: named resource budgets, physics
         // arguments parsed once; no layout changes, so only the revision moves
-        // the identity).
+        // the identity). bde70a76 (fm-jefi: declared math sizes and optical
+        // font cuts) moves the formula engine identity again; the canonical
+        // formula outputs and the complete text definition remain unchanged.
         assert_eq!(
             [cold.digest(), cached.digest(), text.digest()].map(|digest| digest.to_string()),
             [
-                "8cb215a54ebe579687b76b92d3bd641cd8de88085d70e3a04ab7286dfecb60c1",
-                "2b04443dd820349e0131afbaa11137548b339337058479b5c71fa31f229938da",
+                "7dc6bf180ec4b16f5af9ae7c3f6d27e18250e29737f0c1c8520995bf2bc927a9",
+                "5a49d4b287171e90c55acecf0f225d2f453648fb357682793925bc56441a0824",
                 "0fa22e64fe9e1901eea58a596899ec843bc0d6db46f1cd91607925a50fea3e6f",
             ]
         );

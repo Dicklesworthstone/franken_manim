@@ -224,6 +224,81 @@ pub const FACE_POLICY: &[FacePolicy] = &[
         license_slug: "cm-math",
         family: "FMD Euler Fraktur",
     },
+    FacePolicy {
+        name: "cm-math-italic-6",
+        license_slug: "cm-math",
+        family: "FMD CM Math Italic",
+    },
+    FacePolicy {
+        name: "cm-math-italic-8",
+        license_slug: "cm-math",
+        family: "FMD CM Math Italic",
+    },
+    FacePolicy {
+        name: "cm-math-italic-9",
+        license_slug: "cm-math",
+        family: "FMD CM Math Italic",
+    },
+    FacePolicy {
+        name: "cm-math-italic-12",
+        license_slug: "cm-math",
+        family: "FMD CM Math Italic",
+    },
+    FacePolicy {
+        name: "cm-math-symbols-6",
+        license_slug: "cm-math",
+        family: "FMD CM Math Symbols",
+    },
+    FacePolicy {
+        name: "cm-math-symbols-8",
+        license_slug: "cm-math",
+        family: "FMD CM Math Symbols",
+    },
+    FacePolicy {
+        name: "cm-math-symbols-9",
+        license_slug: "cm-math",
+        family: "FMD CM Math Symbols",
+    },
+    FacePolicy {
+        name: "cm-roman-6",
+        license_slug: "cm-math",
+        family: "FMD CM Roman",
+    },
+    FacePolicy {
+        name: "cm-roman-8",
+        license_slug: "cm-math",
+        family: "FMD CM Roman",
+    },
+    FacePolicy {
+        name: "cm-roman-9",
+        license_slug: "cm-math",
+        family: "FMD CM Roman",
+    },
+    FacePolicy {
+        name: "cm-roman-12",
+        license_slug: "cm-math",
+        family: "FMD CM Roman",
+    },
+    FacePolicy {
+        name: "cm-roman-17",
+        license_slug: "cm-math",
+        family: "FMD CM Roman",
+    },
+    FacePolicy {
+        name: "cm-math-extension-7",
+        license_slug: "cm-math",
+        family: "FMD CM Math Extension",
+    },
+    FacePolicy {
+        name: "cm-math-extension-8",
+        license_slug: "cm-math",
+        family: "FMD CM Math Extension",
+    },
+    FacePolicy {
+        name: "cm-math-extension-9",
+        license_slug: "cm-math",
+        family: "FMD CM Math Extension",
+    },
 ];
 
 /// Every license-set slug that must ship an OFL text, in canonical order.
