@@ -101,11 +101,12 @@ const CENSUS_WITHIN_10_PERCENT_FLOOR: usize = 4171;
 /// cc470d1a), covering 4666 of their 4689 occurrences. Of the 14 misses, six
 /// are C-27's tipa `\;` and `\!` (deliberately not replicated), two are the
 /// EC text fonts' kerning (fm-q364), and two are text-mode `\dots`
-/// (`\textellipsis`). Raise it when layout improves; never lower it to land
-/// a change.
-const TEXT_CENSUS_WITHIN_5_PERCENT_FLOOR: usize = 3733;
-/// The same at 10%: 3743 at cc470d1a.
-const TEXT_CENSUS_WITHIN_10_PERCENT_FLOOR: usize = 3743;
+/// (`\textellipsis`). With T1 EC text metrics and the actual default font
+/// control (d2450292, fm-q364), 3736 match within 5%, covering 4675
+/// occurrences. Raise it when layout improves; never lower it to land a change.
+const TEXT_CENSUS_WITHIN_5_PERCENT_FLOOR: usize = 3736;
+/// The same at 10%: 3743 at cc470d1a; 3744 at d2450292.
+const TEXT_CENSUS_WITHIN_10_PERCENT_FLOOR: usize = 3744;
 
 /// Paragraph census strings within 5% of TeX (the widest line, the first
 /// line's height and the depth to the last line), of the 925 text-mode corpus
@@ -115,11 +116,13 @@ const TEXT_CENSUS_WITHIN_10_PERCENT_FLOOR: usize = 3743;
 /// occurrences. Of the 10 misses, eight set display mathematics (`$$…$$`,
 /// `align*`) inside the paragraph, which TeX sets between display skips and
 /// fmd-math sets inline; one is `\Large`'s optical size and one the EC fonts'
-/// kerning (fm-q364). Raise it when layout improves; never lower it to land
-/// a change.
-const PARAGRAPH_CENSUS_WITHIN_5_PERCENT_FLOOR: usize = 915;
-/// The same at 10%: 916 at 450111a4.
-const PARAGRAPH_CENSUS_WITHIN_10_PERCENT_FLOOR: usize = 916;
+/// kerning (fm-q364). T1 EC text metrics at the declared optical size
+/// (d2450292, fm-q364) raise the counts to 917 at both thresholds, covering
+/// 948 occurrences within 5%. Raise it when layout improves; never lower it
+/// to land a change.
+const PARAGRAPH_CENSUS_WITHIN_5_PERCENT_FLOOR: usize = 917;
+/// The same at 10%: 916 at 450111a4; 917 at d2450292.
+const PARAGRAPH_CENSUS_WITHIN_10_PERCENT_FLOOR: usize = 917;
 
 fn rows() -> Vec<OracleRow> {
     parse_oracle_fixture(ORACLE_FIXTURE).expect("the oracle fixture parses")

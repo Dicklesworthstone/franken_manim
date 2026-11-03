@@ -1786,11 +1786,14 @@ mod tests {
         // the identity). bde70a76 (fm-jefi: declared math sizes and optical
         // font cuts) moves the formula engine identity again; the canonical
         // formula outputs and the complete text definition remain unchanged.
+        // d2450292 (fm-q364: EC text metrics and caller-specific font controls)
+        // changes that revision identity too. Both canonical output goldens,
+        // the text definition, all workload axes and budgets remain unchanged.
         assert_eq!(
             [cold.digest(), cached.digest(), text.digest()].map(|digest| digest.to_string()),
             [
-                "7dc6bf180ec4b16f5af9ae7c3f6d27e18250e29737f0c1c8520995bf2bc927a9",
-                "5a49d4b287171e90c55acecf0f225d2f453648fb357682793925bc56441a0824",
+                "d7878354f29e2b5fa3f8674a78a2f5b00cf7fc9cecb431eb2e77578b706af935",
+                "ece92796b48d21f40c5027db910223f8613009033392189b51ba3e7919ef28a6",
                 "0fa22e64fe9e1901eea58a596899ec843bc0d6db46f1cd91607925a50fea3e6f",
             ]
         );
