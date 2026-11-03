@@ -5,7 +5,7 @@ real 3b1b formula corpus typesets natively. The denominator is **frozen**
 (G0-4: `9269` distinct strings, `17711` occurrences, corpus hash
 `a8325e49e0ce78fcc735533952740e9adeaaa5cb10f9c13d73aaa3ba4bf883fc`, rules_version 1); the numbers may only rise.
 
-**Computed against franken_markdown `e7b4309de121`.**
+**Computed against franken_markdown `bde70a76492d`.**
 
 | Plane | Occurrence-weighted | Unique-string |
 |---|---|---|
@@ -14,7 +14,7 @@ real 3b1b formula corpus typesets natively. The denominator is **frozen**
 | **Layout within 5% of real TeX (oracle)** | 94.760 % | 95.091 % |
 | **Noto math or Plex Sans face usage** | 0.006 % | 0.011 % |
 
-"Typeset returned Ok" means fmd-math produced a layout without an error. It does not show that the layout is right. The corpus TeX box oracle (fm-tex-layout-oracle-bkbc) lays out every math-mode corpus string TeX can typeset alone (4175 strings, 11183 occurrences) and compares each box with real TeX's: 4166 are within 5% and 4171 within 10%, covering 11171 occurrences within 5%. The text-mode census (fm-texttext-box-oracle-r11-hkdv) lays out every text-mode corpus string the Reference sets on one line (3747 strings, 4689 occurrences) and compares each box with real TeX's: 3733 are within 5% and 3743 within 10%, covering 4666 occurrences within 5%. The paragraph census (fm-texttext-line-breaking-r11-bfdx) lays out every multi-line text-mode corpus string, and every one wider than the Reference's 345 pt line, as its centred paragraph (925 strings, 956 occurrences) and compares the widest line, the first line's height and the depth to the last line with real TeX's: 915 are within 5% and 916 within 10%, covering 946 occurrences within 5%. The oracle row counts only those verified strings against the whole corpus; fragments TeX cannot typeset alone count as unverified.
+"Typeset returned Ok" means fmd-math produced a layout without an error. It does not show that the layout is right. The corpus TeX box oracle (fm-tex-layout-oracle-bkbc) lays out every math-mode corpus string TeX can typeset alone (4175 strings, 11183 occurrences) and compares each box with real TeX's: 4166 are within 5% and 4171 within 10%, covering 11171 occurrences within 5%. The text-mode census (fm-texttext-box-oracle-r11-hkdv) lays out every text-mode corpus string the Reference sets on one line (3747 strings, 4689 occurrences) and compares each box with real TeX's: 3733 are within 5% and 3744 within 10%, covering 4666 occurrences within 5%. The paragraph census (fm-texttext-line-breaking-r11-bfdx) lays out every multi-line text-mode corpus string, and every one wider than the Reference's 345 pt line, as its centred paragraph (925 strings, 956 occurrences) and compares the widest line, the first line's height and the depth to the last line with real TeX's: 915 are within 5% and 916 within 10%, covering 946 occurrences within 5%. The oracle row counts only those verified strings against the whole corpus; fragments TeX cannot typeset alone count as unverified.
 
 ## Outside the denominator: dynamic Tex arguments
 
@@ -99,6 +99,7 @@ The denominator holds fully literal Tex-family arguments. The G0-4 harvest also 
 | `04d811db8dbf` | 99.994 | 99.989 | 99.994 | 99.989 |
 | `4f2bcc959b21` | 99.994 | 99.989 | 99.994 | 99.989 |
 | `e7b4309de121` | 99.994 | 99.989 | 99.994 | 99.989 |
+| `bde70a76492d` | 99.994 | 99.989 | 99.994 | 99.989 |
 
 ## How this is enforced
 
