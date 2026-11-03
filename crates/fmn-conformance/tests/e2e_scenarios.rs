@@ -6391,6 +6391,89 @@ fn tex_cancel_frak_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         .with_artifact("render_matrix.tex_cancel_frak.v1", png))
 }
 
+/// fm-jefi: real LaTeX size declarations select optical math families through
+/// TexText, including nested scripts and script-size delimiter variants.
+fn tex_declared_math_sizes_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let engine = &scene_goldens::corpus().tex;
+    // article[10pt] + amsmath/amssymb showbox measurements, in base ems.
+    // Declare sizes outside the math island: LaTeX ignores declarations
+    // issued after entering math. These are independent measured values.
+    let cases = [
+        (r"{\large $x^{a^b}$}", [1.547_803, 1.134_471, 0.0]),
+        (r"{\small $x^{a^b}$}", [1.345_901, 0.981_331, 0.0]),
+        (
+            r"$x^{\left(\frac{1}{3}\right)}$",
+            [1.979_59, 1.107_639, 0.0],
+        ),
+        (
+            r"{\small $x^{\left(\frac{1}{3}\right)}$}",
+            [1.874_026, 0.996_873, 0.0],
+        ),
+        (
+            r"{\large $x^{\left(\frac{1}{3}\right)}$}",
+            [2.238_243, 1.329_166, 0.0],
+        ),
+        (r"{\large ${ (a) }^2_3$}", [2.005_684, 1.098_889, 0.35]),
+    ];
+    let blank = render_certified_doc(&Stage::new());
+    for (index, (source, expected)) in cases.into_iter().enumerate() {
+        let built = fmn_library::TexText::new(source)
+            .build(engine)
+            .map_err(|error| fail(format!("{source}: TexText: {error}")))?;
+        let layout = &built.typeset.layout;
+        let measured = [layout.width, layout.height, layout.depth];
+        if measured
+            .into_iter()
+            .zip(expected)
+            .any(|(actual, want)| !actual.is_finite() || (actual - want).abs() >= 1e-5)
+        {
+            return Err(fail(format!(
+                "{source}: measured box {measured:?}, real TeX {expected:?}"
+            )));
+        }
+        if index < 2 {
+            let sizes = if index == 0 {
+                [1.2, 0.8, 0.6]
+            } else {
+                [0.9, 0.6, 0.5]
+            };
+            for (ch, expected_size) in ['x', 'a', 'b'].into_iter().zip(sizes) {
+                let glyph = layout
+                    .glyphs
+                    .iter()
+                    .find(|glyph| glyph.ch == ch)
+                    .ok_or_else(|| fail(format!("{source}: missing {ch}")))?;
+                if !glyph.size.is_finite() || (glyph.size - expected_size).abs() >= 1e-9 {
+                    return Err(fail(format!(
+                        "{source}: {ch} size {}, real TeX {expected_size}",
+                        glyph.size
+                    )));
+                }
+            }
+        }
+        if built.vmob.children().len() != built.typeset.subs.len()
+            || built.vmob.children().is_empty()
+        {
+            return Err(fail(format!("{source}: lost primitive family")));
+        }
+        let mut stage = Stage::new();
+        let formula = stage.add(built.vmob.moved_to([0.0; 3]));
+        stage
+            .add_to_scene(formula)
+            .map_err(|error| fail(format!("{source}: show formula: {error}")))?;
+        if render_certified_doc(&stage) == blank {
+            return Err(fail(format!("{source}: produced a blank certified frame")));
+        }
+        ctx.event(
+            LogEvent::new("e2e.parity.tex_declared_math_size")
+                .field("source", source)
+                .field("box_em", format!("{measured:?}"))
+                .field("visible", "true"),
+        );
+    }
+    Ok(RunOutcome::ok().with_counter("tex_declared_math_size_formulas", 6))
+}
+
 /// The paragraph `parity.textext_paragraph_lines.v1` sets. It is wider
 /// than the Reference's 345 pt line, and TeX breaks it after "of", the 63rd
 /// of its 128 glyphs. fmd-math's placement tests pin that break, the line
@@ -11589,6 +11672,20 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "parity.tex_declared_math_sizes.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(tex_declared_math_sizes_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tex_declared_math_size_formulas", 6),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.parity.tex_declared_math_size",
+            vec![FieldPred::str_eq("visible", "true")],
+        )],
+    ));
+    specs.push(spec(
         "parity.textext_paragraph_lines.v1",
         ScenarioClass::ParityDrill,
         Surface::RustApi,
@@ -14310,6 +14407,16 @@ fn tex_cancel_frak_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.tex_cancel_frak.v1")
         .expect("the Fraktur and cancel scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn tex_declared_math_sizes_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "parity.tex_declared_math_sizes.v1")
+        .expect("the declared math size scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }
