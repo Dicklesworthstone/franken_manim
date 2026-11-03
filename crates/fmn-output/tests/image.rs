@@ -275,6 +275,15 @@ mod boundary {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
+        // The boundary requires a private parent even under a shared umask.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt as _;
+            let mut builder = std::fs::DirBuilder::new();
+            builder.mode(0o700);
+            builder.create(&root).unwrap();
+        }
+        #[cfg(not(unix))]
         std::fs::create_dir(&root).unwrap();
         std::fs::write(root.join(".fmn-native-ffmpeg-mode"), mode).unwrap();
         let executable = PathBuf::from(env!("CARGO_BIN_EXE_fmn-ffmpeg-test-fixture"));
@@ -371,6 +380,15 @@ mod mjpeg_preview {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
+        // The boundary requires a private parent even under a shared umask.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt as _;
+            let mut builder = std::fs::DirBuilder::new();
+            builder.mode(0o700);
+            builder.create(&root).unwrap();
+        }
+        #[cfg(not(unix))]
         std::fs::create_dir(&root).unwrap();
         std::fs::write(root.join(".fmn-native-ffmpeg-mode"), mode).unwrap();
         let executable = StdFfmpegLocator::default()
