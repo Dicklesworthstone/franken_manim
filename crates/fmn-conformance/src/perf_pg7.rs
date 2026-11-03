@@ -1789,11 +1789,14 @@ mod tests {
         // d2450292 (fm-q364: EC text metrics and caller-specific font controls)
         // changes that revision identity too. Both canonical output goldens,
         // the text definition, all workload axes and budgets remain unchanged.
+        // cafe18b3 (fm-dbinom-in-scripts-r12-x6zi: forced fraction styles)
+        // changes only that revision identity for these formula workloads;
+        // the unchanged canonical output goldens pass on the new provider.
         assert_eq!(
             [cold.digest(), cached.digest(), text.digest()].map(|digest| digest.to_string()),
             [
-                "d7878354f29e2b5fa3f8674a78a2f5b00cf7fc9cecb431eb2e77578b706af935",
-                "ece92796b48d21f40c5027db910223f8613009033392189b51ba3e7919ef28a6",
+                "68664dc386f5a50787b13897c5e3de883ea5ac688fca3d7a1bb0b59286c7f0cf",
+                "58d9cc9a9617247dc9d7bad5d6900210f6603c9659a8995c7265ebb823e055d9",
                 "0fa22e64fe9e1901eea58a596899ec843bc0d6db46f1cd91607925a50fea3e6f",
             ]
         );
