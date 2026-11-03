@@ -3039,6 +3039,119 @@ pub enum FillKernel {
 }
 
 impl FillKernel {
+    /// Recover an exact rectangle from the current, immutable compiled outline.
+    ///
+    /// This does not consult a constructor's shape hint or its revisions. A
+    /// writable point view still forces the plan to observe its points on every
+    /// frame; only the resulting owned segment run is examined here. Four
+    /// distinct, contiguous sides must traverse one closed rectangle, with
+    /// every handle on and inside its side. Bowed curves, overshoots, holes,
+    /// open runs and shears all retain the general solver.
+    ///
+    /// Unlike the existing disc/rounded-rectangle hints this is not an
+    /// approximation: the measured boundary encloses exactly this box. Its
+    /// area product can nevertheless round differently from the general
+    /// solver's ordered sum, so the frame compiler only enables this recovery
+    /// on the standard CPU route. Certified hint admission stays unchanged.
+    #[must_use]
+    pub fn from_exact_rectangle(
+        shape: &crate::table::Shape,
+        segments: &[crate::table::Segment],
+        map: ScreenMap,
+        translate: [f64; 2],
+    ) -> FillKernel {
+        if shape.subpath_starts.as_slice() != [0]
+            || segments.len() != 4
+            || !map.scale.is_finite()
+            || map.scale <= 0.0
+            || !map.origin.iter().chain(&translate).all(|v| v.is_finite())
+        {
+            return FillKernel::General;
+        }
+        let mut bounds = [
+            f64::INFINITY,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NEG_INFINITY,
+        ];
+        for segment in segments {
+            for point in [segment.p0, segment.p1, segment.p2] {
+                if !point.iter().all(|v| v.is_finite()) || point[2] != 0.0 {
+                    return FillKernel::General;
+                }
+            }
+            bounds[0] = bounds[0].min(segment.p0[0]);
+            bounds[1] = bounds[1].min(segment.p0[1]);
+            bounds[2] = bounds[2].max(segment.p0[0]);
+            bounds[3] = bounds[3].max(segment.p0[1]);
+        }
+        let [left, bottom, right, top] = bounds;
+        if left >= right || bottom >= top {
+            return FillKernel::General;
+        }
+        let mut sides = 0u8;
+        for (index, segment) in segments.iter().enumerate() {
+            let (a, h, b) = (segment.p0, segment.p1, segment.p2);
+            if b != segments[(index + 1) % segments.len()].p0 {
+                return FillKernel::General;
+            }
+            let side = if a[1] == h[1]
+                && h[1] == b[1]
+                && a[0].min(b[0]) == left
+                && a[0].max(b[0]) == right
+                && (left..=right).contains(&h[0])
+            {
+                if a[1] == bottom {
+                    1
+                } else if a[1] == top {
+                    2
+                } else {
+                    return FillKernel::General;
+                }
+            } else if a[0] == h[0]
+                && h[0] == b[0]
+                && a[1].min(b[1]) == bottom
+                && a[1].max(b[1]) == top
+                && (bottom..=top).contains(&h[1])
+            {
+                if a[0] == left {
+                    4
+                } else if a[0] == right {
+                    8
+                } else {
+                    return FillKernel::General;
+                }
+            } else {
+                return FillKernel::General;
+            };
+            if sides & side != 0 {
+                return FillKernel::General;
+            }
+            sides |= side;
+        }
+        if sides != 15 {
+            return FillKernel::General;
+        }
+        // Map the actual endpoint coordinates, in the same order as the
+        // monotone table. Reconstructing center +/- half-width would introduce
+        // another rounding even before either coverage algorithm runs.
+        let a = map.to_pixel(left, bottom);
+        let b = map.to_pixel(right, top);
+        let a = [a[0] + translate[0], a[1] + translate[1]];
+        let b = [b[0] + translate[0], b[1] + translate[1]];
+        if !a.iter().chain(&b).all(|v| v.is_finite()) {
+            return FillKernel::General;
+        }
+        FillKernel::Rect {
+            rect: [
+                a[0].min(b[0]),
+                a[1].min(b[1]),
+                a[0].max(b[0]),
+                a[1].max(b[1]),
+            ],
+        }
+    }
+
     /// Choose a kernel for one occurrence of a compiled shape.
     ///
     /// `segments` is the shape's own slice of the IR's segment table, in object
@@ -5413,6 +5526,109 @@ mod tests {
             .map(|(u, v)| (u - v).abs())
             .fold(0.0f64, f64::max);
         assert!(worst < 1e-12, "rect hint vs general path: {worst}");
+    }
+
+    #[test]
+    fn rectangle_recovery_uses_current_geometry_in_either_winding() {
+        let corners = [[2.25, 3.5], [17.75, 3.5], [17.75, 12.125], [2.25, 12.125]];
+        for start in 0..4 {
+            let ordered: Vec<_> = (0..4).map(|i| corners[(start + i) % 4]).collect();
+            for reverse in [false, true] {
+                let mut path = polygon(&ordered);
+                if reverse {
+                    path.reverse_points();
+                }
+                // A stale or absent constructor hint is deliberately irrelevant.
+                let (shape, segments) = shaped(&path, Hint::General);
+                for y_up in [false, true] {
+                    let map = ScreenMap {
+                        scale: 2.5,
+                        origin: [1.25, 40.0],
+                        y_up,
+                    };
+                    let translate = [0.75, -0.5];
+                    let kernel =
+                        FillKernel::from_exact_rectangle(&shape, &segments, map, translate);
+                    let a = map.to_pixel(corners[0][0], corners[0][1]);
+                    let b = map.to_pixel(corners[2][0], corners[2][1]);
+                    assert_eq!(
+                        kernel,
+                        FillKernel::Rect {
+                            rect: [
+                                a[0].min(b[0]) + translate[0],
+                                a[1].min(b[1]) + translate[1],
+                                a[0].max(b[0]) + translate[0],
+                                a[1].max(b[1]) + translate[1],
+                            ],
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rectangle_recovery_refuses_curves_shears_gaps_holes_and_overshoots() {
+        let path = polygon(&[[1.0, 2.0], [7.0, 2.0], [7.0, 6.0], [1.0, 6.0]]);
+        let (shape, segments) = shaped(&path, Hint::General);
+        assert!(matches!(
+            FillKernel::from_exact_rectangle(&shape, &segments, unit(), [0.0; 2]),
+            FillKernel::Rect { .. }
+        ));
+
+        let mut curved = segments.clone();
+        curved[0].p1[1] += 0.000_001;
+        let mut overshoot = segments.clone();
+        overshoot[0].p1[0] = 8.0;
+        let mut gap = segments.clone();
+        gap[3].p2[0] += 0.25;
+        let mut shear = segments.clone();
+        for segment in &mut shear {
+            for point in [&mut segment.p0, &mut segment.p1, &mut segment.p2] {
+                point[0] += 0.25 * point[1];
+            }
+        }
+        let mut nonplanar = segments.clone();
+        nonplanar[0].p1[2] = 0.25;
+        let mut nonfinite = segments.clone();
+        nonfinite[0].p1[0] = f64::NAN;
+        let mut doubled = segments.clone();
+        // Three corners, with the same two edges traversed back and forth.
+        doubled[2].p0 = segments[1].p2;
+        doubled[2].p1 = segments[1].p1;
+        doubled[2].p2 = segments[1].p0;
+        doubled[3].p0 = segments[0].p2;
+        doubled[3].p1 = segments[0].p1;
+        doubled[3].p2 = segments[0].p0;
+        for (name, candidate) in [
+            ("curved", curved),
+            ("overshoot", overshoot),
+            ("gap", gap),
+            ("shear", shear),
+            ("nonplanar", nonplanar),
+            ("nonfinite", nonfinite),
+            ("repeated sides", doubled),
+        ] {
+            assert_eq!(
+                FillKernel::from_exact_rectangle(&shape, &candidate, unit(), [0.0; 2]),
+                FillKernel::General,
+                "{name} is not a proved rectangle"
+            );
+        }
+
+        let mut two_contours = shape.clone();
+        two_contours.subpath_starts = vec![0, 2];
+        assert_eq!(
+            FillKernel::from_exact_rectangle(&two_contours, &segments, unit(), [0.0; 2]),
+            FillKernel::General
+        );
+        let circle = circle_path(4.0, 4.0, 2.0, 4);
+        let (circle, circle_segments) = shaped(&circle, Hint::General);
+        assert_eq!(
+            FillKernel::from_exact_rectangle(&circle, &circle_segments, unit(), [0.0; 2]),
+            FillKernel::General,
+            "four curved sides do not become a bounding box"
+        );
     }
 
     #[test]

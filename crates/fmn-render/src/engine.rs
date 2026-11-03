@@ -1067,6 +1067,10 @@ pub(crate) struct Draw {
     pub(crate) style: Style,
     /// The hinted fill route, or [`FillKernel::General`].
     pub(crate) kernel: FillKernel,
+    /// Recovering a rectangle from current geometry keeps the previous general
+    /// native row and edge classifier. Only subcell integration uses the
+    /// recovered closed form: hinted edge probes count corners differently.
+    pub(crate) recovered_rectangle: bool,
     /// The joint overrides, as a range into the frame arena's wedge pool;
     /// empty for the round settings (ADR-0012).
     pub(crate) joins: PoolRange,
@@ -1757,11 +1761,24 @@ impl<'a> FrameJob<'a> {
             let flat = fill_is_flat(&style);
             let straight_segments =
                 !inst.hint_unsafe && matches!(shape.hint, Hint::Line | Hint::Polyline { .. });
-            let kernel = if inst.hint_unsafe || !inst.placement.is_translation() {
+            let mut kernel = if inst.hint_unsafe || !inst.placement.is_translation() {
                 FillKernel::General
             } else {
                 FillKernel::select(shape, segs, map, translate)
             };
+            let mut recovered_rectangle = false;
+            if kernel == FillKernel::General
+                && identity.engine == EngineKind::FastCpu
+                && inst.placement.is_translation()
+            {
+                // A stale constructor tag is not evidence, but the current
+                // owned outline can prove an exact rectangle. Live views still
+                // force a fresh plan observation and poison tile-cache reuse;
+                // no mutable records or hint payloads enter this proof. Keep
+                // certified's ordered coverage arithmetic unchanged.
+                kernel = FillKernel::from_exact_rectangle(shape, segs, map, translate);
+                recovered_rectangle = matches!(kernel, FillKernel::Rect { .. });
+            }
             let joins = {
                 let start = arena.joins.len();
                 stroke::join_wedges_into(
@@ -1868,6 +1885,7 @@ impl<'a> FrameJob<'a> {
                 straight_segments,
                 style: style.clone(),
                 kernel,
+                recovered_rectangle,
                 joins,
                 stroke,
                 field,
@@ -2523,15 +2541,16 @@ impl<'a> FrameJob<'a> {
             return;
         }
 
-        // Exactly one of three sources fills the row, and the order of the tests
-        // is the order of §10.4's own argument: a classified interior costs
-        // nothing, a hinted kernel costs a closed form, and the general machinery
-        // is the fallback rather than the toll road.
+        // Exactly one of three sources fills the row: a classified interior,
+        // a trusted primitive hint, or the general machinery. A rectangle
+        // recovered from current geometry deliberately keeps the general row's
+        // coverage and corner counts; its closed form accelerates the expensive
+        // subcell integrations without changing which pixels are supersampled.
         let pieces = self.pieces_of(rec);
         let mut general_classified = false;
         if interior {
             worker.cov[..w].copy_from_slice(worker.scratch.interior_row(x_lo, x_hi));
-        } else if !rec.kernel.row(py, x_lo, x_hi, &mut worker.cov[..w]) {
+        } else if rec.recovered_rectangle || !rec.kernel.row(py, x_lo, x_hi, &mut worker.cov[..w]) {
             if classify {
                 let (coverage, crossings) =
                     worker
@@ -5964,6 +5983,135 @@ mod tests {
             FillKernel::General
         );
         drop(view);
+    }
+
+    #[test]
+    fn rectangle_recovery_observes_foreign_writes_and_keeps_certified_admission() {
+        let mut stage = Stage::new();
+        let mob = stage.add(vmob(
+            &rect_points(20.25, 20.5, 60.75, 60.125),
+            [1.0, 0.0, 0.0, 1.0],
+            [0.0; 4],
+            0.0,
+        ));
+        stage.add_to_scene(mob).expect("root");
+        let view = stage
+            .get_mut(mob)
+            .expect("live")
+            .buffer
+            .export_field_view("point", true)
+            .expect("point view");
+        let cfg = config();
+        let (mut plan, _, _) = derive(&stage, cfg, default_tiling());
+
+        for changed in [false, true] {
+            if changed {
+                let revision = stage.get(mob).expect("live").buffer.field_revision("point");
+                assert!(view.write_foreign(1, "point", &[40.5, 23.0, 0.0]));
+                assert_eq!(
+                    stage.get(mob).expect("live").buffer.field_revision("point"),
+                    revision
+                );
+            }
+            // V5 snapshots copy the point cells but keep V4's dirty evidence.
+            let snapshot = stage.snapshot();
+            let frozen = snapshot.materialize();
+            let stats = plan.sync(&frozen, 0).expect("observe current points");
+            assert_eq!(stats.shapes_reused, 0);
+            assert!(plan.shapes().instances()[0].volatile);
+            assert!(plan.shapes().instances()[0].hint_unsafe);
+            let mono = MonoTable::build(&plan, cfg.map).expect("monotone table");
+            let bins =
+                Binning::build(&plan, cfg.viewport, default_tiling(), cfg.map).expect("bins");
+            for identity in [EngineIdentity::certified(), EngineIdentity::fast()] {
+                let job = FrameJob::with_identity(&plan, &mono, &bins, cfg, identity).expect("job");
+                let kernel = job.draws()[0].as_ref().expect("visible").kernel;
+                assert_eq!(
+                    matches!(kernel, FillKernel::Rect { .. }),
+                    !changed && identity.engine == EngineKind::FastCpu,
+                    "{identity:?}, changed={changed}: {kernel:?}"
+                );
+                job.render(1).expect("production raster");
+            }
+        }
+        drop(view);
+    }
+
+    /// Exercise the former general route in the same renderer, without a
+    /// product switch or a second implementation of the reference pixels.
+    fn without_rectangle_recovery(mut job: FrameJob<'_>) -> FrameJob<'_> {
+        let ArenaStorage::Owned(arena) = &mut job.arena else {
+            panic!("the general reference must own its preparation");
+        };
+        for draw in arena.draws.slice_mut(job.draws).iter_mut().flatten() {
+            if matches!(draw.kernel, FillKernel::Rect { .. }) {
+                draw.kernel = FillKernel::General;
+                draw.recovered_rectangle = false;
+            }
+        }
+        job
+    }
+
+    #[test]
+    fn recovered_rectangles_match_general_frames_and_sampling() {
+        let mut stage = Stage::new();
+        for row in 0..4 {
+            for column in 0..8 {
+                let x = 6.2 + f64::from(column) * 9.1;
+                let y = 8.35 + f64::from(row) * 15.7;
+                let width = if column % 3 == 0 { 0.17 } else { 12.3 };
+                let mut points = rect_points(x, y, x + width, y + 19.25);
+                if row % 2 == 0 {
+                    points.reverse();
+                }
+                let mob = stage.add(vmob(
+                    &points,
+                    [0.3 + 0.1 * column as f32, 0.7, 0.2, 0.55],
+                    [0.2, 0.4, 0.9, 0.5],
+                    if column % 2 == 0 { 80.0 } else { 0.0 },
+                ));
+                stage.add_to_scene(mob).expect("rectangle root");
+            }
+        }
+        let cfg = config();
+        let (plan, mono, bins) = derive(&stage, cfg, default_tiling());
+        for identity in [EngineIdentity::certified(), EngineIdentity::fast()] {
+            for aa in [AaPolicy::Adaptive, AaPolicy::Ssaa2x, AaPolicy::Ssaa4x] {
+                let cfg = cfg.with_aa_policy(aa);
+                let job = FrameJob::with_identity(&plan, &mono, &bins, cfg, identity).expect("job");
+                assert_eq!(
+                    job.draws()
+                        .iter()
+                        .flatten()
+                        .filter(|draw| matches!(draw.kernel, FillKernel::Rect { .. }))
+                        .count(),
+                    if identity.engine == EngineKind::FastCpu {
+                        32
+                    } else {
+                        0
+                    },
+                    "production recovery admission"
+                );
+                let reference = without_rectangle_recovery(
+                    FrameJob::with_identity(&plan, &mono, &bins, cfg, identity)
+                        .expect("general job"),
+                );
+                let (expected, expected_stats) =
+                    reference.render_with_stats(1).expect("general frame");
+                for threads in [1, 4, 16] {
+                    let (frame, stats) = job.render_with_stats(threads).expect("recovered frame");
+                    assert_frames_equal(
+                        &frame,
+                        &expected,
+                        &format!("rectangle recovery {identity:?}, {aa:?}, threads={threads}"),
+                    );
+                    assert_eq!(
+                        stats, expected_stats,
+                        "rectangle recovery changed adaptive sampling"
+                    );
+                }
+            }
+        }
     }
 
     /// Assert two frames are byte-identical, reporting the **first differing
