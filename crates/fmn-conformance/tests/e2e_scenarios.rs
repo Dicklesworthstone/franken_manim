@@ -11778,7 +11778,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         Invocation::new(tex_t1_text_metrics_run),
         vec![
             Assertion::ExitCode(0),
-            counter_eq("tex_t1_text_formulas", 14),
+            counter_eq("tex_t1_text_formulas", 17),
         ],
         vec![LogExpect::span_present(
             "e2e.parity.tex_t1_text_metrics",
