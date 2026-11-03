@@ -6560,6 +6560,107 @@ fn tex_t1_text_metrics_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
     Ok(RunOutcome::ok().with_counter("tex_t1_text_formulas", 17))
 }
 
+/// fm-dbinom-in-scripts-r12-x6zi: forced fraction styles reach the native
+/// library builder and certified renderer in scripts and cramped contexts.
+fn tex_forced_fraction_styles_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let engine = &scene_goldens::corpus().tex;
+    // Independent LaTeX/T1/amsmath showbox captures at 10 pt, in ems.
+    // The explicit style spellings must agree with the corresponding macros.
+    let cases = [
+        (
+            r"{\scriptstyle \dbinom{B}{A \sim 6 = \Omega}}",
+            [6.1111, 1.45001, 0.950012],
+        ),
+        (r"{1^{3}}^{\dbinom{m}{b}}", [3.348857, 2.507661, 0.0]),
+        (r"C_{\dbinom{7}{m = P}}", [5.22919, 0.683331, 2.05558]),
+        (
+            r"{\scriptstyle \dbinom{B}{A \sim 6 = Z}}",
+            [6.143044, 1.45001, 0.950012],
+        ),
+        (
+            r"{\scriptscriptstyle \dbinom{B}{A \sim 6 = Z}}",
+            [6.143044, 1.45001, 0.950012],
+        ),
+        (r"x_{\dbinom{a^2}{b}}", [3.070958, 0.430554, 2.09608]),
+        (r"\sqrt{\dbinom{a^2}{b}}", [3.449432, 1.904079, 1.135948]),
+        (r"x_{\dfrac{a^2}{b}}", [1.838728, 0.430554, 1.832019]),
+        (r"\sqrt{\dfrac{a^2}{b}}", [2.217203, 1.736107, 0.703914]),
+        (r"x_{\tbinom{a^2}{b}}", [2.362247, 0.430554, 1.073294]),
+        (r"\sqrt{\tbinom{a^2}{b}}", [2.740721, 1.392686, 0.447328]),
+        (r"x_{\tfrac{a^2}{b}}", [1.685574, 0.430554, 1.01813]),
+        (r"\sqrt{\tfrac{a^2}{b}}", [2.064049, 1.37027, 0.469745]),
+        (
+            r"x_{{\displaystyle\binom{a^2}{b}}}",
+            [3.070958, 0.430554, 2.09608],
+        ),
+        (
+            r"\sqrt{{\displaystyle\binom{a^2}{b}}}",
+            [3.449432, 1.904079, 1.135948],
+        ),
+        (
+            r"x_{{\displaystyle\frac{a^2}{b}}}",
+            [1.838728, 0.430554, 1.832019],
+        ),
+        (
+            r"\sqrt{{\displaystyle\frac{a^2}{b}}}",
+            [2.217203, 1.736107, 0.703914],
+        ),
+        (
+            r"x_{{\textstyle\binom{a^2}{b}}}",
+            [2.362247, 0.430554, 1.073294],
+        ),
+        (
+            r"\sqrt{{\textstyle\binom{a^2}{b}}}",
+            [2.740721, 1.392686, 0.447328],
+        ),
+        (
+            r"x_{{\textstyle\frac{a^2}{b}}}",
+            [1.685574, 0.430554, 1.01813],
+        ),
+        (
+            r"\sqrt{{\textstyle\frac{a^2}{b}}}",
+            [2.064049, 1.37027, 0.469745],
+        ),
+    ];
+    let blank = render_certified_doc(&Stage::new());
+    for (source, expected) in cases {
+        let built = fmn_library::Tex::new(source)
+            .build(engine)
+            .map_err(|error| fail(format!("{source}: Tex: {error}")))?;
+        let layout = &built.typeset.layout;
+        let measured = [layout.width, layout.height, layout.depth];
+        if measured
+            .into_iter()
+            .zip(expected)
+            .any(|(actual, want)| !actual.is_finite() || (actual - want).abs() >= 1e-4)
+        {
+            return Err(fail(format!(
+                "{source}: measured box {measured:?}, real TeX {expected:?}"
+            )));
+        }
+        if built.vmob.children().len() != built.typeset.subs.len()
+            || built.vmob.children().is_empty()
+        {
+            return Err(fail(format!("{source}: lost primitive family")));
+        }
+        let mut stage = Stage::new();
+        let formula = stage.add(built.vmob.moved_to([0.0; 3]));
+        stage
+            .add_to_scene(formula)
+            .map_err(|error| fail(format!("{source}: show formula: {error}")))?;
+        if render_certified_doc(&stage) == blank {
+            return Err(fail(format!("{source}: blank certified frame")));
+        }
+        ctx.event(
+            LogEvent::new("e2e.parity.tex_forced_fraction_style")
+                .field("source", source)
+                .field("box_em", format!("{measured:?}"))
+                .field("visible", "true"),
+        );
+    }
+    Ok(RunOutcome::ok().with_counter("tex_forced_fraction_formulas", 21))
+}
+
 /// The paragraph `parity.textext_paragraph_lines.v1` sets. It is wider
 /// than the Reference's 345 pt line, and TeX breaks it after "of", the 63rd
 /// of its 128 glyphs. fmd-math's placement tests pin that break, the line
@@ -11786,6 +11887,20 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "parity.tex_forced_fraction_styles.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(tex_forced_fraction_styles_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tex_forced_fraction_formulas", 21),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.parity.tex_forced_fraction_style",
+            vec![FieldPred::str_eq("visible", "true")],
+        )],
+    ));
+    specs.push(spec(
         "parity.textext_paragraph_lines.v1",
         ScenarioClass::ParityDrill,
         Surface::RustApi,
@@ -14527,6 +14642,16 @@ fn tex_t1_text_metrics_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "parity.tex_t1_text_metrics.v1")
         .expect("the T1 text metrics scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn tex_forced_fraction_styles_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "parity.tex_forced_fraction_styles.v1")
+        .expect("the forced fraction styles scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }
