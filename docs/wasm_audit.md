@@ -1,6 +1,42 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-run, 2026-10-31, against `Cargo.lock` `01a419e5` and `SUITE.lock`
+**Status:** re-run, 2026-11-03, against `Cargo.lock` `7f7994e5` and `SUITE.lock`
+`bac64bf5` (fm-jefi). The locked tree, target build and Node execution pass;
+the affected package/browser gate is blocked by missing pinned tools. This is
+not a current package, browser, shared-memory, size-budget or release pass.
+
+- **VERIFIED (mechanical):** the locked normal `fmn-wasm` tree has 134 lines
+  and excludes `fmd-font`, `fmd-math`, `franken_markdown`, PyO3 and the native
+  text, TeX, library and Python crates. The root lock delta from `b19d34da`
+  changes only three franken_markdown source identities, from `e7b4309d` to
+  `bde70a76`; package versions, dependencies, features and checksums are
+  unchanged. The auxiliary WASM lock is byte-identical.
+- **VERIFIED (build):** `cargo build --locked -p fmn-wasm --target
+  wasm32-unknown-unknown` exits 0 through normal RCH on `ovh-b`, using the
+  pinned `nightly-2026-08-31` and a fresh private compiler target.
+- **VERIFIED (execution):** the unchanged `bash wasm-smoke/run.sh` builds
+  its locked release probe and executes it in Node `v22.22.1`: digest
+  `1f248a71347b82aa`, `process=capability-absent`, `topology=1-cpu`,
+  `semantic_oracles=111111`, `mirrored=101000`. All three audit stages exit 0.
+- **BLOCKED (package/browser):** the unchanged
+  `bash scripts/check_wasm_package.sh` was attempted and exits 1 at tool
+  admission: `required WASM package-gate tool is unavailable: wasm-pack`.
+  `wasm-bindgen` and `wasm-opt` are also absent on this host. No package,
+  Chromium, shared-memory runtime or size result was produced. The updated
+  font manifest is packaged data, and shared Rust sources changed since the
+  October 31 audit, so those checks cannot be called unaffected. The
+  historical size failure and fm-8j70 remain open.
+- Evidence: `.rch-results/fmn-execute-20261103-jefi-wasm-audit-v10-ovhb/`
+  contains the tree, lock identities, native logs and source audit;
+  `.rch-results/fmn-execute-20261103-jefi-wasm-package-v11-ovhb/` retains the
+  failed package attempt. DSR receipts are respectively
+  `20261103T052848-4030534` and `20261103T053450-31171`. All 4,406 product
+  source files remain unchanged across both jobs, aggregate SHA-256
+  `571e73232ba3ac45c69a18138d3c91fce09f8382344fb29c618ad8589a4f0db7`.
+  The private checkout is `b19d34da` with reviewed overlays matching primary
+  `c753ea84`; it is not a clean-source release qualification.
+
+Earlier re-run, 2026-10-31, against `Cargo.lock` `01a419e5` and `SUITE.lock`
 `908c6e62` (fm-restore-green-ci-tqsr.14). Commit `0c1b3483` adds exactly one
 lock edge, `fmn -> fmn-cache`; it adds no package, version, checksum, feature or
 WASM-manifest change. The host facade `fmn` is absent from the shipped WASM
@@ -728,8 +764,8 @@ The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
-- `SUITE.lock` SHA-256: `908c6e6290b78a4339c39231dcb4d5ba5e1b87162c2568fe368fb3c245d9e636`
-- `Cargo.lock` SHA-256: `01a419e54adeded6cbd7f6b8d5025a127cf753faa305fa1e949b66563ca8a67f`
+- `SUITE.lock` SHA-256: `bac64bf5c9c279a209bae86b8644b12abee15909b780e8fb9b41ee3e8e89742c`
+- `Cargo.lock` SHA-256: `7f7994e5b53de3feef96f7fdc0d4820524bbc8ea46f95aa032beb2bedc4ea9bb`
 - Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `93a7c2dc6acf3dfef88a4a490efbfda7970bd963b4740aa7f879a08fff395061`
 
 The earlier 0.5.0 release bump re-bound the lock identities at that revision.
@@ -765,8 +801,8 @@ the exact `nightly-2026-08-31` toolchain.
 `fmn-core` consumes `fnp-random-core` 0.2.0 at
 `a15d5c32e9330b555b0a653058bcfcff22fcb4ec` for the governed RNG.
 fmn-geom enters with its doctrine-D4 solver gateway: the pinned
-frankenscipy crates `fsci-linalg` 0.2.0, `fsci-fft` 0.2.0, and `fsci-runtime`
-0.2.0 at `85edd7a99f2a6487ef35135e135b9959cc0010c1` (the last bringing its
+frankenscipy crates `fsci-linalg` 0.3.0, `fsci-fft` 0.3.0, and `fsci-runtime`
+0.3.0 at `ae52b65454841cd4976f6fbac907be0539508d9b` (the last bringing its
 audit-ledger blake3 hashing chain; fsci-linalg brings the rayon/crossbeam
 pool), plus their
 transitive numeric and serialization stacks (`nalgebra` 0.35.0 with the
