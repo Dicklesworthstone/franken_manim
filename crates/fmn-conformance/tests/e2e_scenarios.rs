@@ -2259,6 +2259,127 @@ fn native_final_png_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         .with_counter("native_final_png_published_frames", published_frames))
 }
 
+/// The public video route preserves every changing frame across vector and
+/// camera rendering. At 1058 rows conversion can use all sixteen requested
+/// workers, including a short final band. Both complete Y4M streams and decoded
+/// changing frames must agree across execution widths.
+fn native_y4m_conversion_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    struct Moving;
+    impl fmn::SceneConstruct for Moving {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let bar = stage.add(
+                fmn_library::Rectangle::new()
+                    .width(0.6)
+                    .height(66.0)
+                    .color(BLUE_C)
+                    .build()?,
+            )?;
+            stage.set_fill(bar, Some(BLUE_C), Some(0.8), None, true);
+            stage.set_stroke(bar, None, Some(0.0), None, None, true);
+            stage.shift(bar, [-0.25, 0.0, 0.0]);
+            stage.play(
+                bar.animate()
+                    .set_anim_args(AnimateArgs {
+                        run_time: Some(0.5),
+                        rate_func: Some(fmn::core::rate::linear),
+                        ..AnimateArgs::default()
+                    })?
+                    .shift([0.5, 0.0, 0.0])?,
+            )?;
+            Ok(())
+        }
+    }
+
+    ctx.set_fps((8, 1));
+    let mut outcome = RunOutcome::ok();
+    let mut renders = 0;
+    let mut decoded_frames = 0;
+    for (route, camera) in [("vector", false), ("camera", true)] {
+        let mut expected_bytes = None;
+        let mut expected_frames = None;
+        for threads in [1, 4, 16] {
+            let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+            let mut options = fmn::RenderOptions::with_format("/movie.y4m", fmn::RenderFormat::Y4m)
+                .map_err(|error| fail(format!("native Y4M options: {error}")))?;
+            options.config.camera.resolution = (32, 1058);
+            options.config.camera.fps = 8;
+            // Sixteen pixels per scene unit, with changing content in every
+            // conversion band rather than a tiny shape in an otherwise empty frame.
+            options.config.sizes.frame_height = 66.125;
+            options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+            options.config.determinism.seed = ctx.seed;
+            options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+            options.frames_in_flight = 1;
+            options.typeset_cache = false;
+            if camera {
+                options.camera = Some(
+                    options
+                        .camera_config()
+                        .map_err(|error| fail(format!("native Y4M camera: {error}")))?,
+                );
+            }
+            let report = fmn::render_with_fs(&mut Moving, options, fs.clone())
+                .map_err(|error| fail(format!("native Y4M {route}/{threads}: {error}")))?;
+            let pipeline = report
+                .frame_pipeline
+                .as_ref()
+                .ok_or_else(|| fail("native Y4M bypassed the frame pipeline"))?;
+            if report.artifact.frame_count != 4
+                || (
+                    pipeline.submitted,
+                    pipeline.rasterized,
+                    pipeline.converted,
+                    pipeline.emitted,
+                ) != (4, 4, 4, 4)
+                || pipeline.outstanding_slots != 0
+                || pipeline.max_in_flight > 1
+            {
+                return Err(fail("native Y4M lost bounded, ordered frame publication"));
+            }
+            let bytes = fs
+                .read(std::path::Path::new("/movie.y4m"))
+                .map_err(|error| fail(format!("native Y4M read: {error}")))?;
+            let movie = fmn_codec::decode_y4m(&bytes)
+                .map_err(|error| fail(format!("native Y4M decode: {error}")))?;
+            if (movie.width, movie.height, movie.fps) != (32, 1058, (8, 1))
+                || movie.colorspace != "C420mpeg2"
+                || movie.frames.len() != 4
+                || movie.frames.windows(2).any(|pair| pair[0] == pair[1])
+            {
+                return Err(fail(
+                    "native Y4M metadata or changing frame sequence was lost",
+                ));
+            }
+            if let Some(expected) = &expected_bytes {
+                if expected != &bytes || expected_frames.as_ref() != Some(&movie.frames) {
+                    return Err(fail(format!(
+                        "native Y4M {route} changed pixels or bytes at {threads} threads"
+                    )));
+                }
+            } else {
+                expected_frames = Some(movie.frames);
+                expected_bytes = Some(bytes);
+            }
+            renders += 1;
+            decoded_frames += 4;
+        }
+        outcome = outcome.with_artifact(
+            &format!("native-conversion-{route}.y4m"),
+            expected_bytes.ok_or_else(|| fail("native Y4M produced no artifact"))?,
+        );
+    }
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_y4m_conversion")
+            .field("routes", 2_u64)
+            .field("thread_counts", 3_u64)
+            .field("renders", renders)
+            .field("decoded_frames", decoded_frames),
+    );
+    Ok(outcome
+        .with_counter("native_y4m_conversion_renders", renders)
+        .with_counter("native_y4m_conversion_frames", decoded_frames))
+}
+
 /// A complete shape replacement crosses the native authoring facade, runs
 /// prepared frames on workers, and leaves only the untouched original target.
 fn native_shape_matching_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -4997,6 +5118,25 @@ fn python_camera_frame_points_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenar
         .map_err(|error| fail(format!("Python live camera frame points: {error}")))?;
     ctx.event(LogEvent::new("e2e.python.camera_frame_points").field("cases", cases));
     Ok(RunOutcome::ok().with_counter("camera_frame_point_cases", cases))
+}
+
+/// Standard CPU rectangle recovery observes live NumPy writes and frozen
+/// captures in the actual portal. This route carries no certified bit claim.
+fn python_rectangle_recovery_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let (candidates, frames, digest) = manimlib::run_portal_gauntlet_rectangle_recovery()
+        .map_err(|error| fail(format!("Python rectangle recovery: {error}")))?;
+    ctx.event(
+        LogEvent::new("e2e.python.rectangle_recovery")
+            .field("mode", "standard")
+            .field("engine", "fast_cpu")
+            .field("candidates", candidates)
+            .field("frames", frames)
+            .field("thread_counts", 3_u64)
+            .field("sha256", digest),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("rectangle_recovery_candidates", candidates)
+        .with_counter("rectangle_recovery_frames", frames))
 }
 
 /// Structural parity (fm-5wq.36): the fixed construction set, extracted in
@@ -10654,6 +10794,134 @@ fn lifecycle_family_reversal_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenari
     Ok(RunOutcome::ok().with_counter("family_reversal_pixels_equal", 1))
 }
 
+/// fm-j3ve: a native Prismify cap keeps disconnected contours disconnected,
+/// through the shipping PNG route, with an independently authored point oracle.
+fn prismify_compound_cap_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_geom::QuadPath;
+    use fmn_library::{Prismify, style::Style};
+
+    struct Cap(VMobject);
+    impl fmn::SceneConstruct for Cap {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            stage.add(self.0.clone())?;
+            Ok(())
+        }
+    }
+    let mut source = QuadPath::new();
+    let mut expected = QuadPath::new();
+    for x in [-2.0, 1.0] {
+        source.start_new_path([x, -0.75, 0.0]);
+        for point in [
+            [x + 1.0, -0.75, 0.0],
+            [x + 1.0, 0.75, 0.0],
+            [x, 0.75, 0.0],
+            [x, -0.75, 0.0],
+        ] {
+            source
+                .add_line_to(point, true)
+                .map_err(|e| fail(e.to_string()))?;
+        }
+    }
+    // Author the two reversed contours independently, without using either
+    // VMobject::reversed_points or QuadPath::reverse_points for the oracle.
+    for x in [1.0, -2.0] {
+        expected.start_new_path([x, -0.75, -1.0]);
+        for point in [
+            [x, 0.75, -1.0],
+            [x + 1.0, 0.75, -1.0],
+            [x + 1.0, -0.75, -1.0],
+            [x, -0.75, -1.0],
+        ] {
+            expected
+                .add_line_to(point, true)
+                .map_err(|e| fail(e.to_string()))?;
+        }
+    }
+    let style = Style::default().fill(WHITE, 1.0).stroke(WHITE, 12.0, 1.0);
+    let shell = Prismify::new(VMobject::from_path(&source).with_style(style)).build();
+    // Sidewalls have their own Reference behavior; this regression renders
+    // the actual far cap rather than allowing a sidewall to hide its seam.
+    let cap = shell
+        .children()
+        .last()
+        .ok_or_else(|| fail("missing Prismify far cap"))?;
+    let contours = cap
+        .path()
+        .map_err(|e| fail(e.to_string()))?
+        .subpaths()
+        .len();
+    let oracle = VMobject::from_path(&expected)
+        .with_style(style)
+        .with_uniforms(cap.uniforms());
+    let mut broken_points = source
+        .points()
+        .iter()
+        .map(|p| [p[0], p[1], -1.0])
+        .collect::<Vec<_>>();
+    broken_points.reverse();
+    let broken = cap.clone().with_points(broken_points);
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    let render = |name: &str, mob: VMobject, threads| -> Result<Vec<u8>, ScenarioError> {
+        let path = format!("/{name}.png");
+        let mut options = fmn::RenderOptions::with_format(&path, fmn::RenderFormat::Png)
+            .map_err(|e| fail(e.to_string()))?;
+        options.config.camera.resolution = (128, 64);
+        options.config.camera.background_opacity = 0.0;
+        options.config.sizes.frame_height = 4.0;
+        options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+        options.typeset_cache = false;
+        let mut camera = options.camera_config().map_err(|e| fail(e.to_string()))?;
+        camera
+            .frame
+            .set_center([0.0, 0.0, -1.0])
+            .map_err(|e| fail(e.to_string()))?;
+        options.camera = Some(camera);
+        fmn::render_with_fs(&mut Cap(mob), options, fs.clone())
+            .map_err(|e| fail(format!("compound cap render: {e}")))?;
+        fs.read(&PathBuf::from(path))
+            .map_err(|e| fail(e.to_string()))
+    };
+    let expected_png = render("cap-oracle", oracle, 1)?;
+    let broken_png = render("cap-raw-reversal", broken, 1)?;
+    for threads in [1, 4, 16] {
+        let actual = render(&format!("cap-{threads}"), cap.clone(), threads)?;
+        if contours != 2 || actual != expected_png || actual == broken_png {
+            return Err(fail(format!(
+                "compound cap lost a contour or disagrees with independent pixels at {threads} threads"
+            )));
+        }
+    }
+    let image = fmn_codec::decode_png(&expected_png, &fmn_codec::PngLimits::default())
+        .map_err(|e| fail(e.to_string()))?;
+    let planted = fmn_codec::decode_png(&broken_png, &fmn_codec::PngLimits::default())
+        .map_err(|e| fail(e.to_string()))?;
+    if (image.width, image.height) != (128, 64) || (planted.width, planted.height) != (128, 64) {
+        return Err(fail("compound cap PNG dimensions changed"));
+    }
+    let alpha = |x: usize, y: usize| image.rgba[(y * 128 + x) * 4 + 3];
+    if alpha(40, 32) != 255 || alpha(88, 32) != 255 || alpha(64, 44) != 0 {
+        return Err(fail(
+            "compound cap must show both islands with a transparent gap",
+        ));
+    }
+    if planted.rgba[(44 * 128 + 64) * 4 + 3] == 0 {
+        return Err(fail("planted raw reversal must visibly bridge the gap"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.prismify_compound_cap")
+            .field("contours", contours as u64)
+            .field("thread_counts", 3_u64)
+            .field("gap_alpha", u64::from(alpha(64, 44)))
+            .field("planted_pixels_differ", 1_u64)
+            .field("sha256", sha256(&expected_png).to_hex()),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("prismify_cap_thread_counts", 3)
+        .with_artifact("compound-cap.png", expected_png)
+        .with_artifact("compound-cap-raw-reversal.png", broken_png))
+}
+
 /// fm-0byq: authored AMS glyphs survive native Tex construction, source
 /// colouring and the shipping PNG renderer at every certified worker count.
 fn parity_tex_ams_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -11742,6 +12010,26 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 FieldPred::u64_eq("owner_captures", 0),
                 FieldPred::u64_eq("thread_counts", 3),
                 FieldPred::u64_eq("rendered_frames", 24),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.native_y4m_conversion.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_y4m_conversion_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("native_y4m_conversion_renders", 6),
+            counter_eq("native_y4m_conversion_frames", 24),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_y4m_conversion",
+            vec![
+                FieldPred::u64_eq("routes", 2),
+                FieldPred::u64_eq("thread_counts", 3),
+                FieldPred::u64_eq("renders", 6),
+                FieldPred::u64_eq("decoded_frames", 24),
             ],
         )],
     ));
@@ -12914,6 +13202,27 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         vec![LogExpect::span_present(
             "e2e.python.camera_frame_points",
             vec![FieldPred::u64_ge("cases", 26)],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.python_rectangle_recovery.standard.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_rectangle_recovery_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("rectangle_recovery_candidates", 61),
+            counter_eq("rectangle_recovery_frames", 13),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.rectangle_recovery",
+            vec![
+                FieldPred::str_eq("mode", "standard"),
+                FieldPred::str_eq("engine", "fast_cpu"),
+                FieldPred::u64_eq("candidates", 61),
+                FieldPred::u64_eq("frames", 13),
+                FieldPred::u64_eq("thread_counts", 3),
+            ],
         )],
     ));
     specs.push(spec(
@@ -14225,6 +14534,25 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.prismify_compound_cap.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(prismify_compound_cap_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("prismify_cap_thread_counts", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.prismify_compound_cap",
+            vec![
+                FieldPred::u64_eq("contours", 2),
+                FieldPred::u64_eq("thread_counts", 3),
+                FieldPred::u64_eq("gap_alpha", 0),
+                FieldPred::u64_eq("planted_pixels_differ", 1),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "parity.markdown_inline_math.v1",
         ScenarioClass::ParityDrill,
         Surface::RustApi,
@@ -14807,6 +15135,16 @@ fn metadata_only_capture_scenario_passes() {
 }
 
 #[test]
+fn native_y4m_conversion_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.native_y4m_conversion.v1")
+        .expect("native Y4M conversion scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
 fn native_final_png_scenario_passes() {
     let scenario = catalog()
         .into_iter()
@@ -14822,6 +15160,16 @@ fn native_shape_matching_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.native_shape_matching.v1")
         .expect("native shape matching scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn prismify_compound_cap_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.prismify_compound_cap.v1")
+        .expect("native compound cap scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }
@@ -15681,6 +16029,16 @@ fn python_camera_frame_points_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.python_camera_frame_points.v1")
         .expect("live camera frame geometry is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn python_rectangle_recovery_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.python_rectangle_recovery.standard.v1")
+        .expect("standard portal rectangle recovery is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

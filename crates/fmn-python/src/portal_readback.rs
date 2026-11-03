@@ -379,8 +379,155 @@ pub fn run_portal_gauntlet_camera_frame_points() -> Result<u64, String> {
     })
 }
 
+/// Exercise native portal rectangles after constructor hooks, scene adoption,
+/// styling, translation, live NumPy writes and immutable frame capture.
+/// Returns `(proved_rectangles, rendered_frames, final_raw_digest)`.
+///
+/// # Errors
+/// Reports a portal error, stale geometry admission, changed frozen pixels or
+/// thread-dependent rendering through the production retained frame pipeline.
+#[cfg(any(test, feature = "gauntlet"))]
+pub fn run_portal_gauntlet_rectangle_recovery() -> Result<(u64, u64, String), String> {
+    use fmn_render::fill::{FillKernel, instance_translation};
+    use pyo3::types::PyAnyMethods;
+
+    crate::with_python_test_module("portal rectangle recovery", |py, _module, globals| {
+        py.run(c"import numpy as np\nfrom manimlib import Scene, Rectangle, BLUE, WHITE\nscene = Scene()\nbricks = [Rectangle(width=0.28, height=0.08).set_fill(BLUE, 0.8).set_stroke(WHITE, 2).move_to((-2.5 + i * 0.35, 0.5, 0)) for i in range(16)]\nscene.add(*bricks)\npoint_views = [brick.get_points() for brick in bricks]\n", Some(globals), Some(globals))
+            .map_err(|error| error.to_string())?;
+        let scene = globals
+            .get_item("scene")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "portal rectangle scene is absent".to_owned())?;
+        let scene = scene
+            .cast::<crate::PyScene>()
+            .map_err(|error| error.to_string())?;
+        let frame = FrameConfig::new(
+            Viewport {
+                width: 96,
+                height: 54,
+            },
+            ScreenMap {
+                scale: 6.75,
+                origin: [48.0, 27.0],
+                y_up: true,
+            },
+            fmn_core::color::LinearRgba {
+                r: 0.04,
+                g: 0.04,
+                b: 0.06,
+                a: 1.0,
+            },
+        );
+        let mut first_frozen = None;
+        let mut first_pixels = Vec::new();
+        let mut previous_pixels = Vec::new();
+        let mut proved = 0u64;
+        let mut frames = 0u64;
+        for (mutation, expected) in [(0, 16), (1, 16), (2, 15), (3, 14)] {
+            let edit = match mutation {
+                0 => c"pass",
+                1 => c"for points in point_views:\n    points[:, 0] += np.float32(0.375)",
+                2 => c"point_views[0][1, 1] += np.float32(0.25)",
+                _ => c"replacement = point_views[1].copy()\nreplacement[:, 0] += np.float32(0.5) * replacement[:, 1]\nbricks[1].set_points(replacement)\npoint_views[1] = bricks[1].get_points()",
+            };
+            py.run(edit, Some(globals), Some(globals))
+                .map_err(|error| error.to_string())?;
+            let snapshot = {
+                let proxy = scene.borrow();
+                let native = proxy.engine.borrow();
+                native.stage().snapshot()
+            };
+            let frozen = snapshot.materialize();
+            let mut expected_pixels = Vec::new();
+            for threads in [1, 4, 16] {
+                let mut renderer = RetainedFrameRenderer::new(RetainedFrameRendererConfig {
+                    frame,
+                    tiling: Tiling::default(),
+                    engine: EngineIdentity::fast(),
+                    threads,
+                })
+                .map_err(|error| error.to_string())?;
+                renderer
+                    .render(&frozen, 0)
+                    .map_err(|error| error.to_string())?;
+                let plan = renderer.plan();
+                let mut admitted = 0;
+                for instance in plan.shapes().instances() {
+                    if !instance.volatile || !instance.hint_unsafe {
+                        return Err(
+                            "rectangle recovery weakened live point-view invalidation".into()
+                        );
+                    }
+                    let shape = &plan.shapes().shapes()[instance.shape as usize];
+                    let start = shape.first_segment as usize;
+                    let segments = &plan.segments()[start..start + shape.segment_count as usize];
+                    if instance.placement.is_translation()
+                        && matches!(
+                            FillKernel::from_exact_rectangle(
+                                shape,
+                                segments,
+                                frame.map,
+                                instance_translation(instance, frame.map)
+                            ),
+                            FillKernel::Rect { .. }
+                        )
+                    {
+                        admitted += 1;
+                    }
+                }
+                if admitted != expected {
+                    return Err(format!(
+                        "mutation {mutation}: expected {expected} current rectangles, found {admitted}"
+                    ));
+                }
+                let pixels = renderer.frame().as_bytes();
+                if threads == 1 {
+                    expected_pixels = pixels.to_vec();
+                    proved += admitted;
+                } else if pixels != expected_pixels {
+                    return Err(format!(
+                        "mutation {mutation}: rectangle pixels differ at {threads} threads"
+                    ));
+                }
+                frames += 1;
+            }
+            if mutation == 0 {
+                first_frozen = Some(frozen);
+                first_pixels = expected_pixels.clone();
+            } else if expected_pixels == previous_pixels {
+                return Err(format!(
+                    "live NumPy mutation {mutation} did not change the rendered frame"
+                ));
+            }
+            previous_pixels = expected_pixels;
+        }
+        let mut replay = RetainedFrameRenderer::new(RetainedFrameRendererConfig {
+            frame,
+            tiling: Tiling::default(),
+            engine: EngineIdentity::fast(),
+            threads: 1,
+        })
+        .map_err(|error| error.to_string())?;
+        replay
+            .render(first_frozen.as_ref().expect("first captured frame"), 0)
+            .map_err(|error| error.to_string())?;
+        if replay.frame().as_bytes() != first_pixels {
+            return Err("later live point writes changed an earlier immutable frame".into());
+        }
+        frames += 1;
+        Ok((proved, frames, fmn_hash::sha256(&previous_pixels).to_hex()))
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn production_rectangle_recovery_preserves_views_snapshots_and_pixels() {
+        let (rectangles, frames, _) = super::run_portal_gauntlet_rectangle_recovery()
+            .expect("portal rectangle recovery through native retained rendering");
+        assert_eq!((rectangles, frames), (61, 13));
+    }
+
     #[test]
     fn production_camera_frame_points_acceptance_suite() {
         let cases = super::run_portal_gauntlet_camera_frame_points()
