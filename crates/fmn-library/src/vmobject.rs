@@ -386,11 +386,18 @@ impl VMobject {
         self
     }
 
-    /// `reverse_points`: reverse the shared-anchor point run (anchors and
-    /// handles swap roles, winding flips), recursively over children.
+    /// `reverse_points`: reverse the trace direction, preserving subpath
+    /// breaks through [`QuadPath::reverse_points`], recursively over children.
+    /// Straight-segment end handles are normalized before reversal; a run
+    /// outside the shared-anchor layout keeps the raw point-reversal behavior.
     #[must_use]
     pub fn reversed_points(mut self) -> Self {
-        self.points.reverse();
+        if let Ok(mut path) = QuadPath::from_points(self.points.clone()) {
+            path.reverse_points();
+            self.points.copy_from_slice(path.points());
+        } else {
+            self.points.reverse();
+        }
         self.submobjects = self
             .submobjects
             .into_iter()
@@ -1361,6 +1368,96 @@ mod tests {
         ]));
         assert_eq!(stage.get(group).unwrap().submobjects().len(), 2);
         assert_eq!(stage.family(group).len(), 3);
+    }
+
+    fn separated_curves() -> VMobject {
+        VMobject::from_points(vec![
+            [0.0, 0.0, 0.0],
+            [0.5, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0], // Break handle belongs to the preceding anchor.
+            [3.0, 0.0, 0.0],
+            [3.5, -1.0, 0.0],
+            [4.0, 0.0, 0.0],
+        ])
+    }
+
+    #[test]
+    fn reversed_points_preserves_subpaths_and_reverses_twice() {
+        let source = separated_curves().with_color(RED);
+        let reversed = source.clone().reversed_points();
+        let path = reversed.path().unwrap();
+        let contours = path.subpaths();
+        assert_eq!(contours.len(), 2, "disjoint curves must not gain an edge");
+        assert_eq!(
+            contours[0],
+            &[[4.0, 0.0, 0.0], [3.5, -1.0, 0.0], [3.0, 0.0, 0.0]]
+        );
+        assert_eq!(
+            contours[1],
+            &[[1.0, 0.0, 0.0], [0.5, 1.0, 0.0], [0.0, 0.0, 0.0]]
+        );
+        assert_eq!(reversed.style(), source.style());
+        assert_eq!(reversed.reversed_points(), source);
+
+        let mut raw_reversal = source.points().to_vec();
+        raw_reversal.reverse();
+        assert_eq!(
+            QuadPath::from_points(raw_reversal)
+                .unwrap()
+                .subpaths()
+                .len(),
+            1,
+            "negative control: raw reversal joins the two contours"
+        );
+    }
+
+    #[test]
+    fn reversed_points_preserves_breaks_in_nested_children() {
+        let child = separated_curves().with_color(RED);
+        let family = VMobject::new().with_child(VMobject::new().with_child(child.clone()));
+        let reversed = family.clone().reversed_points();
+        let descendant = &reversed.children()[0].children()[0];
+        assert!(reversed.points().is_empty());
+        assert!(reversed.children()[0].points().is_empty());
+        assert_eq!(descendant.points()[0], child.points()[6]);
+        assert_eq!(descendant.path().unwrap().subpaths().len(), 2);
+        assert_eq!(descendant.style(), child.style());
+        assert_eq!(reversed.reversed_points(), family);
+    }
+
+    #[test]
+    fn reversed_points_normalizes_straight_end_handles() {
+        let source = VMobject::from_points(vec![[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [2.0, 0.0, 0.0]]);
+        let reversed = source.reversed_points();
+        assert_eq!(
+            reversed.points(),
+            &[[2.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+            "an end-coincident handle must not become a subpath break"
+        );
+        assert_eq!(reversed.path().unwrap().subpaths().len(), 1);
+    }
+
+    #[test]
+    fn reversed_points_keeps_empty_single_point_and_nonpath_runs() {
+        for points in [
+            vec![],
+            vec![[1.0, 2.0, 3.0]],
+            vec![[0.0, 0.0, 0.0], [2.0, 1.0, 0.0]],
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 2.0, 0.0],
+                [3.0, 0.0, 0.0],
+                [5.0, 4.0, 0.0],
+            ],
+        ] {
+            let mut expected = points.clone();
+            expected.reverse();
+            assert_eq!(
+                VMobject::from_points(points).reversed_points().points(),
+                expected
+            );
+        }
     }
 
     #[test]

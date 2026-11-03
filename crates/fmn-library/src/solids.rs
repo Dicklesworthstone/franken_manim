@@ -3361,6 +3361,42 @@ mod tests {
     }
 
     #[test]
+    fn prismify_far_cap_preserves_outer_contour_and_hole() {
+        let mut source = QuadPath::new();
+        for corners in [
+            [[0.0, 0.0], [4.0, 0.0], [4.0, 4.0], [0.0, 4.0]],
+            [[1.0, 1.0], [1.0, 3.0], [3.0, 3.0], [3.0, 1.0]],
+        ] {
+            source.start_new_path([corners[0][0], corners[0][1], 0.0]);
+            for corner in corners[1..].iter().chain(&corners[..1]) {
+                source
+                    .add_line_to([corner[0], corner[1], 0.0], true)
+                    .unwrap();
+            }
+        }
+        let shell = Prismify::new(VMobject::from_path(&source))
+            .depth(2.0)
+            .build();
+        let near_cap = shell.children().first().unwrap().path().unwrap();
+        let far_cap = shell.children().last().unwrap().path().unwrap();
+        let near_contours = near_cap.subpaths();
+        let far_contours = far_cap.subpaths();
+        assert_eq!(near_contours.len(), 2);
+        assert_eq!(far_contours.len(), 2, "the far cap must retain its hole");
+        assert_eq!(near_cap.points(), source.points());
+        // Reverse each original contour independently. The break itself is
+        // not geometry, and must never connect the outer ring to its hole.
+        for (before, after) in near_contours.iter().rev().zip(far_contours) {
+            let expected: Vec<Vec3> = before
+                .iter()
+                .rev()
+                .map(|point| [point[0], point[1], -2.0])
+                .collect();
+            assert_eq!(after, expected);
+        }
+    }
+
+    #[test]
     fn surface_mesh_counts_and_nudge() {
         // A (4, 3) surface: wireframe at (2, 2) → 2 + 2 = 4 paths; u
         // paths have 3 anchors (5 points smoothed), v paths 4 (7 points).
