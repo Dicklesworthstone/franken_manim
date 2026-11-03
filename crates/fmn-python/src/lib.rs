@@ -79,7 +79,9 @@ mod tex_preamble;
 pub use tex_preamble::run_portal_gauntlet_tex_preamble;
 
 #[cfg(feature = "gauntlet")]
-pub use portal_readback::run_portal_gauntlet_camera_frame_points;
+pub use portal_readback::{
+    run_portal_gauntlet_camera_frame_points, run_portal_gauntlet_rectangle_recovery,
+};
 #[cfg(feature = "gauntlet")]
 pub use portal_svg::{PortalSvgReport, run_portal_gauntlet_svg};
 
