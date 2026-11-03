@@ -90,6 +90,17 @@ pub enum FrameError {
         /// Workers successfully started before the refusal.
         spawned: usize,
     },
+    /// A persistent conversion team needs at least one execution thread.
+    InvalidConversionThreads,
+    /// A requested persistent conversion team could not be started in full.
+    ConversionWorkerSpawnFailed {
+        /// OS workers required for this frame's conversion bands.
+        requested: usize,
+        /// Workers available before the refusal; all have been joined.
+        spawned: usize,
+    },
+    /// A conversion worker panicked; the destination was not changed.
+    ConversionWorkerPanicked,
     /// A buffer without this pool's private ownership capability, or with a
     /// foreign layout, was released into the pool.
     ForeignBuffer,
@@ -151,6 +162,16 @@ impl std::fmt::Display for FrameError {
                 f,
                 "CPU render team requested {requested} workers, but only {spawned} could be started"
             ),
+            Self::InvalidConversionThreads => {
+                f.write_str("conversion team thread count must be nonzero")
+            }
+            Self::ConversionWorkerSpawnFailed { requested, spawned } => write!(
+                f,
+                "conversion team requested {requested} workers, but only {spawned} could be started"
+            ),
+            Self::ConversionWorkerPanicked => {
+                f.write_str("conversion worker panicked; output frame was not changed")
+            }
             Self::ForeignBuffer => {
                 write!(
                     f,

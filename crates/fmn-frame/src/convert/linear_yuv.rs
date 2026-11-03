@@ -199,6 +199,14 @@ fn put<const TEN: bool>(bytes: &mut [u8], at: usize, code: u16) {
 // conversion it would take over.
 const MIN_BAND_ROW_PAIRS: usize = 32;
 
+pub(super) fn worker_bands(height: usize, threads: usize) -> usize {
+    if cfg!(target_arch = "wasm32") {
+        1
+    } else {
+        threads.clamp(1, (height / 2 / MIN_BAND_ROW_PAIRS).max(1))
+    }
+}
+
 // A worker's share of the destination: its first row pair, its luma rows and
 // its interleaved chroma rows.
 type Band<'a> = (usize, &'a mut [u8], &'a mut [u8]);
@@ -222,11 +230,7 @@ fn convert<const TEN: bool>(
     debug_assert_eq!(dst.layout().plane_offset(0), 0);
     let (luma, chroma) = dst.as_bytes_mut().split_at_mut(c_offset);
     let row_pairs = height / 2;
-    let bands = if cfg!(target_arch = "wasm32") {
-        1
-    } else {
-        threads.clamp(1, (row_pairs / MIN_BAND_ROW_PAIRS).max(1))
-    };
+    let bands = worker_bands(height, threads);
     let run = |(first, luma, chroma): Band<'_>| {
         convert_band::<TEN>(
             src, first, luma, y_stride, chroma, c_stride, coef, siting, &rgb,
@@ -262,6 +266,46 @@ fn convert<const TEN: bool>(
 
 fn take_band<'a>(slot: &Mutex<Option<Band<'a>>>) -> Option<Band<'a>> {
     slot.lock().unwrap_or_else(PoisonError::into_inner).take()
+}
+
+// Persistent workers own tight row-pair bands, while the borrowed converters
+// above split caller storage. Both execute this same arithmetic kernel.
+pub(super) fn convert_owned_band<const TEN: bool>(
+    src: &FrameBuffer,
+    first_pair: usize,
+    luma: &mut [u8],
+    chroma: &mut [u8],
+    stride: usize,
+    range: ColorRange,
+    siting: ChromaSiting,
+) {
+    if TEN {
+        let table = srgb16_table();
+        convert_band::<true>(
+            src,
+            first_pair,
+            luma,
+            stride,
+            chroma,
+            stride,
+            Coef::for_range(range),
+            siting,
+            &|pixel| [0, 2, 4].map(|at| i64::from(table[usize::from(channel(pixel, at))])),
+        );
+    } else {
+        let table = tables();
+        convert_band::<false>(
+            src,
+            first_pair,
+            luma,
+            stride,
+            chroma,
+            stride,
+            Coef::for_range(range),
+            siting,
+            &|pixel| [0, 2, 4].map(|at| i64::from(table.srgb8_from_f16(channel(pixel, at)))),
+        );
+    }
 }
 
 // Monomorphized output depth and pixel reader keep the NV12 and P010 arithmetic

@@ -17,8 +17,10 @@
 //!   P010 transfers RGB at 16-bit precision before the final 10-bit rounding.
 //! - [`swap_rb8`] / [`rgba16f_to_bgra8`] — compatibility-channel order,
 //!   including direct linear-light output without an RGBA8 intermediate.
+//! - [`YuvConversionTeam`] — persistent workers for owned NV12/P010 streams,
+//!   reusing one tight output-band surface without copying the source frame.
 //!
-//! Every kernel honors per-plane strides (padding bytes are never
+//! Every pixel kernel honors per-plane strides (padding bytes are never
 //! touched), allocates nothing, and reads/writes in output orientation
 //! only (D-23: no vflip exists anywhere in the system).
 //!
@@ -57,6 +59,9 @@ pub use linear_yuv::{
     rgba16f_to_bgra8, rgba16f_to_nv12, rgba16f_to_nv12_threaded, rgba16f_to_p010,
     rgba16f_to_p010_threaded,
 };
+
+mod team;
+pub use team::{YuvConversionTeam, YuvConversionTeamStats};
 
 #[inline]
 fn convert_rgba16f_pixels(src: &[[u8; 8]], dst: &mut [[u8; 4]], tables: &TransferTables) {
