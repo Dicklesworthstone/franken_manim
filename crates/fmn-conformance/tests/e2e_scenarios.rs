@@ -6474,6 +6474,76 @@ fn tex_declared_math_sizes_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioE
     Ok(RunOutcome::ok().with_counter("tex_declared_math_size_formulas", 6))
 }
 
+/// fm-q364: T1 EC text metrics reach the library builder, primitive family
+/// and certified renderer. Dimensions are independent real LaTeX captures
+/// with the default template's ligature-disable font control.
+fn tex_t1_text_metrics_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let engine = &scene_goldens::corpus().tex;
+    let cases = [
+        ("AV", [1.499_634, 0.688_720, 0.0]),
+        ("Wave", [2.499_390, 0.688_720, 0.0]),
+        ("Yes", [1.588_501, 0.688_720, 0.0]),
+        (r"\text{AV}", [1.499_634, 0.688_720, 0.0]),
+        (r"\small AV", [1.386_880, 0.619_849, 0.0]),
+        (r"\scriptsize AV", [1.180_267, 0.482_104, 0.0]),
+        (r"\LARGE AV", [2.434_406, 1.189_987, 0.0]),
+        (r"\Huge AV", [3.406_796, 1.713_264, 0.0]),
+        (r"{\huge AV\normalsize AV}", [4.376_737, 1.428_217, 0.0]),
+        ("éßÆ", [1.846_771, 0.688_720, 0.0]),
+        ("ffi fl", [1.805_115, 0.688_720, 0.0]),
+        (r"$\operatorname{AV}$", [1.402_777, 0.683_331, 0.0]),
+        (r"$x^{\text{AV}}$", [1.801_794, 0.844_997, 0.0]),
+        (r"$x^{y^{\text{AV}}}$", [2.082_518, 1.009_032, 0.0]),
+    ];
+    let blank = render_certified_doc(&Stage::new());
+    for (source, expected) in cases {
+        let built = fmn_library::TexText::new(source)
+            .build(engine)
+            .map_err(|error| fail(format!("{source}: TexText: {error}")))?;
+        let layout = &built.typeset.layout;
+        let measured = [layout.width, layout.height, layout.depth];
+        if measured
+            .into_iter()
+            .zip(expected)
+            .any(|(actual, want)| !actual.is_finite() || (actual - want).abs() >= 1e-5)
+        {
+            return Err(fail(format!(
+                "{source}: text box {measured:?}, real T1 TeX {expected:?}"
+            )));
+        }
+        if source == "ffi fl"
+            && layout
+                .glyphs
+                .iter()
+                .map(|glyph| glyph.ch)
+                .collect::<String>()
+                != "ffifl"
+        {
+            return Err(fail("text ligatures replaced authored glyphs".to_owned()));
+        }
+        if built.vmob.children().len() != built.typeset.subs.len()
+            || built.vmob.children().is_empty()
+        {
+            return Err(fail(format!("{source}: lost primitive family")));
+        }
+        let mut stage = Stage::new();
+        let text = stage.add(built.vmob.moved_to([0.0; 3]));
+        stage
+            .add_to_scene(text)
+            .map_err(|error| fail(format!("{source}: show text: {error}")))?;
+        if render_certified_doc(&stage) == blank {
+            return Err(fail(format!("{source}: blank certified frame")));
+        }
+        ctx.event(
+            LogEvent::new("e2e.parity.tex_t1_text_metrics")
+                .field("source", source)
+                .field("box_em", format!("{measured:?}"))
+                .field("visible", "true"),
+        );
+    }
+    Ok(RunOutcome::ok().with_counter("tex_t1_text_formulas", 14))
+}
+
 /// The paragraph `parity.textext_paragraph_lines.v1` sets. It is wider
 /// than the Reference's 345 pt line, and TeX breaks it after "of", the 63rd
 /// of its 128 glyphs. fmd-math's placement tests pin that break, the line
@@ -11686,6 +11756,20 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "parity.tex_t1_text_metrics.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(tex_t1_text_metrics_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tex_t1_text_formulas", 14),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.parity.tex_t1_text_metrics",
+            vec![FieldPred::str_eq("visible", "true")],
+        )],
+    ));
+    specs.push(spec(
         "parity.textext_paragraph_lines.v1",
         ScenarioClass::ParityDrill,
         Surface::RustApi,
@@ -14417,6 +14501,16 @@ fn tex_declared_math_sizes_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "parity.tex_declared_math_sizes.v1")
         .expect("the declared math size scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn tex_t1_text_metrics_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "parity.tex_t1_text_metrics.v1")
+        .expect("the T1 text metrics scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }
