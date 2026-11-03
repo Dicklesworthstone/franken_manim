@@ -18,6 +18,7 @@ import json
 import os
 from pathlib import Path
 
+import numpy as np
 import manimlib as m
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -91,10 +92,35 @@ def run():
     assert not (texts and skipped), f"the corpus is present but {skipped} fixture digests are not in it"
     assert checked >= 10, f"only {checked} rows checked"
     assert not failures, "\n".join(failures)
+    forced_fraction_styles()
 
 
 def tex_width(source):
     return m.Tex(source).get_width()
+
+
+def forced_fraction_styles():
+    """Real native geometry honors forced styles, whatever the surroundings.
+
+    Independent LaTeX captures establish this invariance. Ordinary script
+    letters must still shrink, so ignoring style declarations cannot pass.
+    """
+    normal = m.Tex("N").get_height()
+    script = m.Tex(r"{\scriptstyle N}").get_height()
+    assert np.isfinite((normal, script)).all(), (normal, script)
+    assert 0 < script < normal, ("ordinary script style was ignored", normal, script)
+    for command in (r"\dbinom{a^2}{b}", r"\dfrac{a^2}{b}",
+                    r"\tbinom{a^2}{b}", r"\tfrac{a^2}{b}"):
+        expected = np.array(m.Tex(command).center().get_all_points(), copy=True)
+        assert expected.ndim == 2 and expected.shape[1] == 3 and expected.size > 0
+        assert np.isfinite(expected).all(), command
+        for style in (r"\displaystyle", r"\textstyle",
+                      r"\scriptstyle", r"\scriptscriptstyle"):
+            source = "{" + style + " " + command + "}"
+            actual = np.array(m.Tex(source).center().get_all_points(), copy=True)
+            np.testing.assert_allclose(actual, expected, rtol=0, atol=1e-9,
+                                       equal_nan=False, err_msg=source)
+    print("forced fraction styles (installed wheel): 16 native geometry cases checked")
 
 
 if __name__ in ("__main__", "<run_path>"):
