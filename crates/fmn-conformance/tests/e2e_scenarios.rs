@@ -6476,9 +6476,11 @@ fn tex_declared_math_sizes_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioE
 
 /// fm-q364: T1 EC text metrics reach the library builder, primitive family
 /// and certified renderer. Dimensions are independent real LaTeX captures
-/// with the default template's ligature-disable font control.
+/// with and without the default template's ligature-disable font control.
 fn tex_t1_text_metrics_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let engine = &scene_goldens::corpus().tex;
+    let basic = fmn_library::TexEngine::new("fmd-math/pack/basic", None)
+        .map_err(|error| fail(format!("the basic text engine: {error}")))?;
     let cases = [
         ("AV", [1.499_634, 0.688_720, 0.0]),
         ("Wave", [2.499_390, 0.688_720, 0.0]),
@@ -6495,8 +6497,21 @@ fn tex_t1_text_metrics_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
         (r"$x^{\text{AV}}$", [1.801_794, 0.844_997, 0.0]),
         (r"$x^{y^{\text{AV}}}$", [2.082_518, 1.009_032, 0.0]),
     ];
+    let basic_cases = [
+        ("AV", [1.388_550, 0.688_720, 0.0]),
+        ("Wave", [2.360_535, 0.688_720, 0.0]),
+        ("Yes", [1.505_188, 0.688_720, 0.0]),
+    ];
+    let cases = cases
+        .into_iter()
+        .map(|(source, expected)| ("default", engine, source, expected))
+        .chain(
+            basic_cases
+                .into_iter()
+                .map(|(source, expected)| ("basic", &basic, source, expected)),
+        );
     let blank = render_certified_doc(&Stage::new());
-    for (source, expected) in cases {
+    for (pack, engine, source, expected) in cases {
         let built = fmn_library::TexText::new(source)
             .build(engine)
             .map_err(|error| fail(format!("{source}: TexText: {error}")))?;
@@ -6536,12 +6551,13 @@ fn tex_t1_text_metrics_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
         }
         ctx.event(
             LogEvent::new("e2e.parity.tex_t1_text_metrics")
+                .field("pack", pack)
                 .field("source", source)
                 .field("box_em", format!("{measured:?}"))
                 .field("visible", "true"),
         );
     }
-    Ok(RunOutcome::ok().with_counter("tex_t1_text_formulas", 14))
+    Ok(RunOutcome::ok().with_counter("tex_t1_text_formulas", 17))
 }
 
 /// The paragraph `parity.textext_paragraph_lines.v1` sets. It is wider
