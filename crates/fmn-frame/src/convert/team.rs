@@ -184,9 +184,16 @@ struct Shared {
 
 /// Persistent workers for direct RGBA16F → NV12/P010 conversion.
 ///
+/// This is an explicit opt-in for stable worker lifetimes and predictable
+/// steady-state allocation behavior. Parallel conversion publishes private
+/// bands with an extra full-frame copy compared with the borrowed threaded
+/// converters ([`super::rgba16f_to_nv12_threaded`] and
+/// [`super::rgba16f_to_p010_threaded`]). Avoiding thread startup does not imply
+/// higher throughput; this API is not assumed to be faster for a given workload.
+///
 /// Arithmetic, transfer, range, siting, orientation and padding match the
 /// borrowed converters exactly. Workers start lazily only when the existing
-/// row-pair threshold admits useful parallelism. Fixed-size production streams
+/// row-pair threshold admits useful parallelism. Fixed-size streams
 /// reuse those workers, their shared payload, and their output bands without
 /// per-frame thread creation or frame-sized allocation. A larger later frame
 /// may grow the team up to its requested width; workers otherwise remain
@@ -598,6 +605,52 @@ mod tests {
                             );
                         }
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tight_and_independently_padded_planes_match_serial() {
+        let (width, height) = (18, 1058);
+        for format in [PixelFormat::Nv12, PixelFormat::P010] {
+            let stride = format.min_row_bytes(width, 0).unwrap();
+            for threads in [4, 16] {
+                let mut team = YuvConversionTeam::new(threads).unwrap();
+                let mut source = source(width, height);
+                // Exercise each tight/padded plane independently, then return
+                // to tight output with the same retained conversion bands.
+                for padding in [[0, 0], [0, 30], [14, 0], [0, 0]] {
+                    let layout = FrameLayout::with_strides(
+                        format,
+                        width,
+                        height,
+                        &[stride + padding[0], stride + padding[1]],
+                    )
+                    .unwrap();
+                    let mut actual = FrameBuffer::new(layout.clone());
+                    let mut expected = FrameBuffer::new(layout);
+                    actual.as_bytes_mut().fill(0xA5);
+                    expected.as_bytes_mut().fill(0xA5);
+                    serial(
+                        &source,
+                        &mut expected,
+                        ColorRange::Limited,
+                        ChromaSiting::Center,
+                    );
+                    source = team
+                        .convert(
+                            source,
+                            &mut actual,
+                            ColorRange::Limited,
+                            ChromaSiting::Center,
+                        )
+                        .unwrap();
+                    assert_eq!(
+                        actual.as_bytes(),
+                        expected.as_bytes(),
+                        "{format:?}, padding {padding:?}, {threads} threads"
+                    );
                 }
             }
         }

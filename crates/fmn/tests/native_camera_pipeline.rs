@@ -427,6 +427,122 @@ fn bad_options_do_not_run_factory_and_scene_unwind_joins_workers() {
 }
 
 #[test]
+fn camera_raster_band_budget_is_admitted_before_factory_or_publication() {
+    struct MovingCube;
+    impl SceneConstruct for MovingCube {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            let cube = stage.add(Cube::new(1.2).color(BLUE))?;
+            stage.play(
+                cube.animate()
+                    .set_anim_args(AnimateArgs {
+                        run_time: Some(0.5),
+                        rate_func: Some(fmn::core::rate::linear),
+                        ..AnimateArgs::default()
+                    })?
+                    .shift([0.5, 0.0, 0.0])?,
+            )?;
+            Ok(())
+        }
+    }
+
+    for threads in [1, 4, 16] {
+        let fs = Arc::new(VirtualFs::new());
+        // Exercise actual multithreaded plans on Linux even when the test
+        // runner itself is CPU-constrained. Other hosts use their native plan.
+        #[cfg(target_os = "linux")]
+        fs.insert("/sys/devices/system/cpu/online", b"0-15\n".to_vec());
+        let mut requested = options("/measured", 1);
+        requested.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+        requested.typeset_cache = false;
+        let base = requested.camera_config().unwrap();
+        requested.camera = Some(base.clone());
+        // A fixed camera plus a pure geometry animation reaches the per-team
+        // compiled-camera path, in addition to the preparation compiler.
+        let measured = render_with_fs(&mut MovingCube, requested.clone(), fs.clone()).unwrap();
+        assert_eq!(measured.artifact.frame_count, 4);
+        let plan = &measured.execution_plan;
+        assert_eq!(plan.frames_in_flight, 1);
+        assert_eq!(plan.render_teams.len(), 1);
+        let team_threads = plan.render_teams[0].threads();
+        #[cfg(target_os = "linux")]
+        assert_eq!(team_threads, threads as usize);
+        let expected = images(&fs, "/measured", 4);
+        assert_ne!(expected[0], expected[3], "the budget fixture must animate");
+
+        // Measure the real camera renderer's retained band allocation, rather
+        // than deriving the new charge from the admission formula under test.
+        let mut probe_config = config(plan, &base);
+        probe_config.threads = team_threads;
+        let mut probe = RetainedFrameRenderer::new(probe_config).unwrap();
+        let mut scene = Scene::default();
+        scene.add_mobject(Cube::new(1.2).color(BLUE)).unwrap();
+        probe
+            .render_with_camera(scene.stage(), &Camera::new(base.clone()).unwrap())
+            .unwrap();
+        let raw_bytes = probe.frame().as_bytes().len() as u64;
+        let stats = probe.raster_team_stats();
+        assert_eq!(stats.frames_completed, 1);
+        let band_bytes = stats.band_buffer_bytes as u64;
+        assert_eq!(
+            band_bytes,
+            if fmn_render::effective_threads(team_threads) > 1 {
+                raw_bytes
+            } else {
+                0
+            },
+            "camera raster bands must be observed, including the inline case"
+        );
+        drop(probe);
+        // One-slot plans need two retained preparation frames: the serial
+        // compiler and the sole pure/compiled-camera worker. The working
+        // raster and output slot are already included by the execution plan.
+        let required =
+            plan.estimated_in_flight_bytes as u64 + 2 * raw_bytes + band_bytes + 64 * 1024 * 1024;
+        let mut exact = requested.clone();
+        exact.output = "/exact".into();
+        exact.max_resident_bytes = required;
+        let admitted = render_with_fs(&mut MovingCube, exact, fs.clone()).unwrap();
+        assert_eq!(admitted.artifact.frame_count, 4);
+        assert_eq!(images(&fs, "/exact", 4), expected);
+
+        // Check the exact boundary and the previously accepted budget that
+        // omitted a whole camera band surface. Serial mode has no band charge.
+        for missing in [1, band_bytes].into_iter().filter(|missing| *missing > 0) {
+            let path = format!("/short-{missing}");
+            let mut short = requested.clone();
+            short.output = path.clone().into();
+            short.max_resident_bytes = required - missing;
+            let called = Cell::new(false);
+            let refused = render_camera_with_fs(
+                |scene, base| {
+                    called.set(true);
+                    factory(scene, base)
+                },
+                short,
+                fs.clone(),
+            );
+            assert!(
+                matches!(
+                    &refused,
+                    Err(RenderError::InvalidOptions(
+                        "render plan exceeds max_resident_bytes"
+                    ))
+                ),
+                "{threads} requested threads, missing {missing} bytes: {refused:?}"
+            );
+            assert!(
+                !called.get(),
+                "budget refusal must precede the camera factory"
+            );
+            assert!(
+                !fs.exists(Path::new(&path)),
+                "refusal must not publish output"
+            );
+        }
+    }
+}
+
+#[test]
 fn camera_animation_gif_and_y4m_are_window_independent() {
     for format in [RenderFormat::Gif, RenderFormat::Y4m] {
         let mut expected = None;

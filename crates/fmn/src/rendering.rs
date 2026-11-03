@@ -936,24 +936,27 @@ impl RenderSink {
         // surfaces. Each affine render team retains its own tile cache and
         // each multithreaded team owns disjoint raster bands. Camera
         // preparation retains one raw frame. Check before allocating anything.
+        let raster_band_frames = plan
+            .render_teams
+            .iter()
+            .filter(|team| team.threads() > 1)
+            .count();
         let retained_frames = if options.camera.is_some() {
             // Live-camera preparation plus the largest compiled-camera mode:
-            // one retained raw preparation frame on each active render team.
+            // one retained raw preparation frame on each active render team,
+            // alongside the same persistent raster bands as planar rendering.
+            // Worker output rasters are already in the in-flight allowance.
             plan.render_teams
                 .len()
                 .checked_add(1)
+                .and_then(|frames| frames.checked_add(raster_band_frames))
                 .ok_or(RenderError::InvalidOptions(
                     "retained frame count overflowed",
                 ))?
         } else {
             plan.render_teams
                 .len()
-                .checked_add(
-                    plan.render_teams
-                        .iter()
-                        .filter(|team| team.threads() > 1)
-                        .count(),
-                )
+                .checked_add(raster_band_frames)
                 .ok_or(RenderError::InvalidOptions(
                     "retained frame count overflowed",
                 ))?
