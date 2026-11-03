@@ -1,6 +1,31 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-run, 2026-11-03, against `Cargo.lock` `7f7994e5` and `SUITE.lock`
+**Status:** re-run, 2026-11-03, against `Cargo.lock` `4948c712` and `SUITE.lock`
+`94783488` (fm-q364). At clean source `eed97585ec5a950de67192837cf2c5e41fa713af`,
+the locked normal tree, WASM target build and unchanged release Node smoke
+each exit 0 through normal DSR/RCH on `vmi1152480`. The 134-line tree excludes
+the native typography and Python crates. Node `v22.22.1` reports digest
+`1f248a71347b82aa`, `process=capability-absent`, `topology=1-cpu`,
+`semantic_oracles=111111`, `mirrored=101000`.
+
+The unchanged affected package/browser gate was also attempted. It exits 1
+at admission: `required WASM package-gate tool is unavailable: wasm-pack`.
+It produces no package, browser, shared-memory or size result. The historical
+size failure and fm-8j70 remain open; this is not a release pass. The combined
+DSR run is therefore **failed**, not green.
+
+Evidence: `.rch-results/fmn-execute-20261103-q364-wasm-audit-v1-worker115/`
+inside the frozen `fmn-execute-20261103-q364-consumer-qualified-source-v1`
+checkout, DSR `20261103T165129-4017611`. All 4,408 product source files and
+the three lockfiles were unchanged across the run; source aggregate SHA-256
+`3ad0e10a0c76db85df74811cb6ad4d75d9b49b293cb7564654f6e16d7c784eeb`.
+The root lock delta changes only the three franken_markdown source revisions
+from `bde70a76` to `d2450292`; package versions, dependency edges, checksums
+and the auxiliary WASM lock are unchanged. The refreshed font manifest
+remains affected packaged data, so the missing package/browser checks stay
+blocked rather than being declared unaffected.
+
+Earlier re-run, 2026-11-03, against `Cargo.lock` `7f7994e5` and `SUITE.lock`
 `bac64bf5` (fm-jefi). The locked tree, target build and Node execution pass;
 the affected package/browser gate is blocked by missing pinned tools. This is
 not a current package, browser, shared-memory, size-budget or release pass.
@@ -764,8 +789,8 @@ The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
-- `SUITE.lock` SHA-256: `bac64bf5c9c279a209bae86b8644b12abee15909b780e8fb9b41ee3e8e89742c`
-- `Cargo.lock` SHA-256: `7f7994e5b53de3feef96f7fdc0d4820524bbc8ea46f95aa032beb2bedc4ea9bb`
+- `SUITE.lock` SHA-256: `9478348839e630fbd5808011e2aa492b334b344f913fd003e82117ff465540fd`
+- `Cargo.lock` SHA-256: `4948c712a0f7528859993377e04324d2eff067fe5d7a5910f6330abe1cd8b460`
 - Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `93a7c2dc6acf3dfef88a4a490efbfda7970bd963b4740aa7f879a08fff395061`
 
 The earlier 0.5.0 release bump re-bound the lock identities at that revision.
