@@ -594,17 +594,15 @@ impl Stage {
     /// approximation) is deliberately not the rule `MoveAlongPath` rides —
     /// that is the Behavior-Noted improvement.
     ///
+    /// Repeated queries share a bounded, revision-aware world-space path and
+    /// length table. Point writes, affine changes and buffer replacement
+    /// invalidate it; a writable point view forces a fresh observation.
+    ///
     /// # Errors
     /// [`StageError::StaleHandle`]; [`StageError::SchemaMismatch`] on a
     /// pointless mobject; [`StageError::Geometry`] on a malformed run.
     pub fn point_from_proportion(&self, mob: Mob, alpha: f64) -> Result<Vec3, StageError> {
-        let points = read_points(self, mob)?;
-        if points.is_empty() {
-            return Err(StageError::SchemaMismatch);
-        }
-        let path = QuadPath::from_points(points).map_err(StageError::Geometry)?;
-        path.point_from_proportion(alpha)
-            .ok_or(StageError::SchemaMismatch)
+        self.path_queries.borrow_mut().sample(self, mob, alpha)
     }
 
     /// Reference `make_approximately_smooth` over the family: every

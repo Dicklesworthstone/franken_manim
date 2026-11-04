@@ -644,3 +644,248 @@ fn vmobject_reverse_separates_the_repair_scope_from_the_base_family_reversal() {
         Some(vec![3.0, 2.0, 1.0])
     );
 }
+
+// ------------------------------------------------------- retained queries
+
+const QUERY_PATH: [[f64; 3]; 5] = [
+    [-3.0, -1.0, 0.0],
+    [-2.0, 3.0, 0.5],
+    [0.0, 0.0, 1.0],
+    [0.25, -2.0, 2.0],
+    [4.0, 1.0, -0.5],
+];
+
+fn fresh_path_sample(stage: &Stage, mob: Mob, alpha: f64) -> [u64; 3] {
+    fmn_geom::QuadPath::from_points(stage.get_points(mob).unwrap())
+        .unwrap()
+        .point_from_proportion(alpha)
+        .unwrap()
+        .map(f64::to_bits)
+}
+
+fn check_path_query(stage: &Stage, mob: Mob, alpha: f64) {
+    assert_eq!(
+        stage
+            .point_from_proportion(mob, alpha)
+            .unwrap()
+            .map(f64::to_bits),
+        fresh_path_sample(stage, mob, alpha),
+        "cached path must retain the original world-space arithmetic"
+    );
+}
+
+#[test]
+fn ordinary_path_queries_retain_multiple_paths_and_ignore_unrelated_style() {
+    let mut stage = Stage::new();
+    let a = base(&mut stage, &QUERY_PATH);
+    let b = base(
+        &mut stage,
+        &[
+            [0.0; 3],
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [4.5, 0.0, 0.0],
+            [7.0, 0.0, 0.0],
+        ],
+    );
+    let storage = stage.get(a).unwrap().buffer.storage_id();
+    for index in 0..257 {
+        let alpha = f64::from(index) / 256.0;
+        check_path_query(&stage, a, alpha);
+        let point = stage.point_from_proportion(b, alpha).unwrap();
+        assert!((point[0] - 7.0 * alpha).abs() < 1e-12);
+        assert_eq!(&point[1..], &[0.0, 0.0]);
+    }
+    assert_eq!(stage.path_query_stats().materializations, 2);
+    assert_eq!(stage.path_query_stats().retained_paths, 2);
+    assert_eq!(stage.path_query_stats().retained_points, 10);
+    assert_eq!(stage.get(a).unwrap().buffer.live_view_count(), 0);
+    stage.get_mut(a).unwrap().buffer.write(0, "rgba", &[0.4; 4]);
+    check_path_query(&stage, a, 0.37);
+    assert_eq!(stage.path_query_stats().materializations, 2);
+    assert_eq!(stage.get(a).unwrap().buffer.storage_id(), storage);
+}
+
+#[test]
+fn ordinary_path_queries_follow_affine_record_and_storage_edits() {
+    let mut stage = Stage::new();
+    let mob = base(&mut stage, &QUERY_PATH);
+    check_path_query(&stage, mob, 0.37);
+    stage
+        .set_placement(
+            mob,
+            fmn_mobject::Placement::new(
+                [[2.0, 0.5, 0.0], [0.0, -0.25, 0.0], [0.5, 0.0, 1.0]],
+                [1e5, -3.0, 2.0],
+            ),
+        )
+        .unwrap();
+    check_path_query(&stage, mob, 0.37);
+    assert_eq!(stage.path_query_stats().materializations, 2);
+    stage.get_mut(mob).unwrap().buffer.lock_data(["point"]);
+    stage
+        .get_mut(mob)
+        .unwrap()
+        .buffer
+        .write(1, "point", &[3.0, -4.0, 2.0]);
+    check_path_query(&stage, mob, 0.37);
+    assert_eq!(stage.path_query_stats().materializations, 3);
+    stage.set_points(mob, &QUERY_PATH[..3]).unwrap();
+    check_path_query(&stage, mob, 0.37);
+    assert_eq!(stage.path_query_stats().materializations, 4);
+    // Replacement can have the same length and revision as the last buffer.
+    let mut replacement = RecordBuffer::new(RecordSchema::mobject(), 3).unwrap();
+    replacement.write_range("point", 0, &[1.0, 1.0, 0.0, 2.0, 3.0, 0.0, 5.0, 0.0, 1.0]);
+    stage.get_mut(mob).unwrap().buffer = replacement;
+    check_path_query(&stage, mob, 0.37);
+    assert_eq!(stage.path_query_stats().materializations, 5);
+}
+
+#[test]
+fn ordinary_path_queries_observe_foreign_writes_and_the_last_view_edit() {
+    let mut stage = Stage::new();
+    let mob = base(&mut stage, &QUERY_PATH);
+    check_path_query(&stage, mob, 0.37);
+    let view = stage
+        .get_mut(mob)
+        .unwrap()
+        .buffer
+        .export_field_view("point", true)
+        .unwrap();
+    let revision = stage.get(mob).unwrap().buffer.field_revision("point");
+    assert!(view.write_foreign(1, "point", &[8.0, -4.0, 2.0]));
+    assert_eq!(
+        stage.get(mob).unwrap().buffer.field_revision("point"),
+        revision
+    );
+    check_path_query(&stage, mob, 0.37);
+    assert_eq!(stage.path_query_stats().retained_paths, 0);
+    // There is no observation between this foreign edit and releasing the view.
+    assert!(view.write_foreign(1, "point", &[-8.0, 4.0, -2.0]));
+    drop(view);
+    check_path_query(&stage, mob, 0.37);
+    check_path_query(&stage, mob, 0.71);
+    assert_eq!(stage.path_query_stats().materializations, 3);
+    let colors = stage
+        .get_mut(mob)
+        .unwrap()
+        .buffer
+        .export_field_view("rgba", true)
+        .unwrap();
+    let readonly = stage
+        .get_mut(mob)
+        .unwrap()
+        .buffer
+        .export_field_view("point", false)
+        .unwrap();
+    assert!(colors.write_foreign(0, "rgba", &[0.7; 4]));
+    check_path_query(&stage, mob, 0.37);
+    assert_eq!(stage.path_query_stats().materializations, 3);
+    drop((colors, readonly));
+}
+
+#[test]
+fn ordinary_path_queries_never_reuse_an_invalid_or_recycled_handle() {
+    let mut stage = Stage::new();
+    let mob = base(&mut stage, &QUERY_PATH);
+    check_path_query(&stage, mob, 0.37);
+    stage.set_points(mob, &QUERY_PATH[..2]).unwrap();
+    assert!(matches!(
+        stage.point_from_proportion(mob, 0.5),
+        Err(StageError::Geometry(_))
+    ));
+    assert_eq!(stage.path_query_stats().retained_paths, 0);
+    stage.set_points(mob, &[]).unwrap();
+    assert_eq!(
+        stage.point_from_proportion(mob, 0.5),
+        Err(StageError::SchemaMismatch)
+    );
+    stage.set_points(mob, &QUERY_PATH).unwrap();
+    check_path_query(&stage, mob, 0.37);
+    stage.delete(mob).unwrap();
+    assert_eq!(
+        stage.point_from_proportion(mob, 0.5),
+        Err(StageError::StaleHandle)
+    );
+    assert_eq!(stage.path_query_stats().retained_paths, 0);
+    let replacement = base(&mut stage, &QUERY_PATH[..1]);
+    assert_eq!(
+        stage.point_from_proportion(replacement, 0.5).unwrap(),
+        QUERY_PATH[0]
+    );
+    assert_eq!(
+        Stage::new().point_from_proportion(replacement, 0.5),
+        Err(StageError::StaleHandle)
+    );
+}
+
+#[test]
+fn ordinary_path_query_retention_is_lru_and_bounded_by_points() {
+    use fmn_mobject::path_sampling::{MAX_QUERY_PATH_POINTS, MAX_QUERY_PATHS};
+    let mut stage = Stage::new();
+    let mobs: Vec<_> = (0..MAX_QUERY_PATHS + 1)
+        .map(|_| base(&mut stage, &QUERY_PATH))
+        .collect();
+    for &mob in &mobs[..MAX_QUERY_PATHS] {
+        stage.point_from_proportion(mob, 0.5).unwrap();
+    }
+    stage.point_from_proportion(mobs[0], 0.5).unwrap();
+    stage
+        .point_from_proportion(mobs[MAX_QUERY_PATHS], 0.5)
+        .unwrap();
+    stage.point_from_proportion(mobs[0], 0.25).unwrap();
+    assert_eq!(
+        stage.path_query_stats().materializations,
+        (MAX_QUERY_PATHS + 1) as u64
+    );
+    assert_eq!(stage.path_query_stats().retained_paths, MAX_QUERY_PATHS);
+    // The second path was least recently used; it must be rebuilt.
+    stage.point_from_proportion(mobs[1], 0.5).unwrap();
+    assert_eq!(
+        stage.path_query_stats().materializations,
+        (MAX_QUERY_PATHS + 2) as u64
+    );
+
+    let long = vec![[1.0, 2.0, 3.0]; MAX_QUERY_PATH_POINTS / 2 + 1];
+    for _ in 0..3 {
+        let mob = base(&mut stage, &long);
+        assert_eq!(stage.point_from_proportion(mob, 0.5).unwrap(), long[0]);
+        assert!(stage.path_query_stats().retained_points <= MAX_QUERY_PATH_POINTS);
+    }
+    let before = stage.path_query_stats();
+    let oversized = base(
+        &mut stage,
+        &vec![[1.0, 2.0, 3.0]; MAX_QUERY_PATH_POINTS + 1],
+    );
+    for alpha in [0.25, 0.75] {
+        assert_eq!(
+            stage.point_from_proportion(oversized, alpha).unwrap(),
+            [1.0, 2.0, 3.0]
+        );
+    }
+    let after = stage.path_query_stats();
+    assert_eq!(after.materializations, before.materializations + 2);
+    assert_eq!(after.retained_paths, before.retained_paths);
+    assert_eq!(after.retained_points, before.retained_points);
+}
+
+#[test]
+fn ordinary_path_query_cache_stays_outside_snapshots_and_render_handoffs() {
+    let mut stage = Stage::new();
+    let mob = base(&mut stage, &QUERY_PATH);
+    let before = stage.snapshot_bytes().unwrap();
+    let saved = stage.snapshot();
+    check_path_query(&stage, mob, 0.37);
+    assert_eq!(stage.snapshot_bytes().unwrap(), before);
+    let independent = saved.materialize();
+    assert_eq!(independent.path_query_stats().retained_paths, 0);
+    let rendered = stage.freeze_render_state().materialize();
+    assert_eq!(rendered.path_query_stats().retained_paths, 0);
+    stage.shift(mob, [8.0, -2.0, 1.0]);
+    check_path_query(&stage, mob, 0.37);
+    stage.restore(&saved);
+    assert_eq!(stage.path_query_stats().retained_paths, 0);
+    assert_eq!(stage.path_query_stats().materializations, 0);
+    check_path_query(&stage, mob, 0.37);
+    assert_eq!(stage.snapshot_bytes().unwrap(), before);
+}

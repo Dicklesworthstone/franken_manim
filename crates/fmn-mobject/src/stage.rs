@@ -936,6 +936,7 @@ impl Snapshot {
             updater_failure: None,
             updater_callbacks: Rc::new(()),
             frame_shape: self.frame_shape,
+            path_queries: RefCell::default(),
         };
         stage.restore(self);
         stage
@@ -1030,6 +1031,9 @@ pub struct Stage {
     // (the Reference's FRAME_SHAPE, derived from the configured resolution).
     // Configuration, not scene content: snapshots neither save nor restore it.
     frame_shape: [f64; 2],
+    /// Derived bounded query observations, private to this physical Stage.
+    /// Never copied into snapshots, serialized, or sent to frame workers.
+    pub(crate) path_queries: RefCell<crate::path_sampling::PathQueryCache>,
 }
 
 impl Default for Stage {
@@ -1052,6 +1056,7 @@ impl Stage {
             updater_failure: None,
             updater_callbacks: Rc::new(()),
             frame_shape: [FRAME_WIDTH, FRAME_HEIGHT],
+            path_queries: RefCell::default(),
         }
     }
 
@@ -3107,6 +3112,7 @@ impl Stage {
              use Snapshot::materialize for an independent copy or durable \
              decode to rebind handles"
         );
+        *self.path_queries.get_mut() = crate::path_sampling::PathQueryCache::default();
         self.slots = snapshot
             .slots
             .iter()
