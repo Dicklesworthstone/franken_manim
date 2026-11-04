@@ -1,6 +1,34 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-run, 2026-11-03, against `Cargo.lock` `4948c712` and `SUITE.lock`
+**Status:** re-run, 2026-11-03, against `Cargo.lock` `6778419d` and `SUITE.lock`
+`a17fa45e` (fm-dbinom-in-scripts-r12-x6zi). The locked normal tree, WASM
+target build and unchanged release Node smoke each exit 0 through normal
+DSR/RCH on `vmi1152480`. This audit includes the concurrent renderer/frame
+changes on `ac26152d`, plus the owned provider-pin changes. All 4,408 source
+files matched the primary checkout when staged; the WIP source aggregate
+`9bc98b855ab2ec1d975e4b9cbae5ee315555d504c73535c28eb17780397d47b2`
+and all three locks remained unchanged throughout execution. This is not
+a clean-source or complete native source-gate qualification.
+
+Node `v22.22.1` again reports digest `1f248a71347b82aa`,
+`process=capability-absent`, `topology=1-cpu`, `semantic_oracles=111111`,
+`mirrored=101000`. The normal tree excludes native typography and Python.
+Only the three provider Git identities change in the root lock; versions,
+dependency edges and checksums remain fixed. The two direct fuzz pins now
+also select the same provider, without introducing duplicate packages.
+
+The original affected package/browser gate exits 1 at tool admission:
+`required WASM package-gate tool is unavailable: wasm-pack`. No package,
+browser, shared-memory or size result was produced. The font manifest is
+affected packaged data; the package gate, historical size failure and
+fm-8j70 remain open. The combined DSR run is therefore **failed**.
+
+Evidence: `.rch-results/fmn-execute-20261103-dbinom-wasm-audit-v2-worker115/`
+inside `fmn-execute-20261103-dbinom-final-source-v1`,
+DSR `20261103T184224-733014`. No assertion, gate, output golden or budget
+changed for this audit.
+
+Earlier re-run, 2026-11-03, against `Cargo.lock` `4948c712` and `SUITE.lock`
 `94783488` (fm-q364). At clean source `eed97585ec5a950de67192837cf2c5e41fa713af`,
 the locked normal tree, WASM target build and unchanged release Node smoke
 each exit 0 through normal DSR/RCH on `vmi1152480`. The 134-line tree excludes
@@ -789,8 +817,8 @@ The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
-- `SUITE.lock` SHA-256: `9478348839e630fbd5808011e2aa492b334b344f913fd003e82117ff465540fd`
-- `Cargo.lock` SHA-256: `4948c712a0f7528859993377e04324d2eff067fe5d7a5910f6330abe1cd8b460`
+- `SUITE.lock` SHA-256: `a17fa45ee81eee424022e2e72c21dc00814fc48105801a15c77fb69cc48eca2a`
+- `Cargo.lock` SHA-256: `6778419d3c1cfab6763e31c893edb1e3b2f866bcdf8dc970cb5d6d0bf87e9951`
 - Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `93a7c2dc6acf3dfef88a4a490efbfda7970bd963b4740aa7f879a08fff395061`
 
 The earlier 0.5.0 release bump re-bound the lock identities at that revision.
