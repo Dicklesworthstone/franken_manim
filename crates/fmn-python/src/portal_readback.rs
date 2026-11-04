@@ -389,7 +389,6 @@ pub fn run_portal_gauntlet_camera_frame_points() -> Result<u64, String> {
 #[cfg(any(test, feature = "gauntlet"))]
 pub fn run_portal_gauntlet_rectangle_recovery() -> Result<(u64, u64, String), String> {
     use fmn_render::fill::{FillKernel, instance_translation};
-    use pyo3::types::PyAnyMethods;
 
     crate::with_python_test_module("portal rectangle recovery", |py, _module, globals| {
         py.run(c"import numpy as np\nfrom manimlib import Scene, Rectangle, BLUE, WHITE\nscene = Scene()\nbricks = [Rectangle(width=0.28, height=0.08).set_fill(BLUE, 0.8).set_stroke(WHITE, 2).move_to((-2.5 + i * 0.35, 0.5, 0)) for i in range(16)]\nscene.add(*bricks)\npoint_views = [brick.get_points() for brick in bricks]\n", Some(globals), Some(globals))
