@@ -36,7 +36,7 @@ pub struct FrozenAnimation {
 // animation cross the owner boundary merely by claiming a pure signature.
 #[derive(Debug, Clone)]
 enum FrozenMechanism {
-    Transform(Transform),
+    Transform(Box<Transform>),
     Partial(ShowPartial),
     BorderFill(crate::DrawBorderThenFill),
     Subsets(crate::ShowIncreasingSubsets),
@@ -97,7 +97,7 @@ impl FrozenAnimation {
 
     pub(crate) fn transform(transform: Transform) -> Option<Self> {
         Some(Self {
-            mechanism: FrozenMechanism::Transform(Self::prepare(transform, 3)?),
+            mechanism: FrozenMechanism::Transform(Box::new(Self::prepare(transform, 3)?)),
         })
     }
 
@@ -218,7 +218,9 @@ impl FrozenAnimation {
             animation.interpolate(stage, alpha);
         }
         match &self.mechanism {
-            FrozenMechanism::Transform(animation) => evaluate(animation, stage, alpha),
+            // The box belongs to the frozen program. Clone only its prepared
+            // carrier, preserving the existing per-frame scratch behavior.
+            FrozenMechanism::Transform(animation) => evaluate(animation.as_ref(), stage, alpha),
             FrozenMechanism::Partial(animation) => evaluate(animation, stage, alpha),
             FrozenMechanism::BorderFill(animation) => evaluate(animation, stage, alpha),
             FrozenMechanism::Subsets(animation) => evaluate(animation, stage, alpha),
