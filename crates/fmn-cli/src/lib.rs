@@ -4041,7 +4041,7 @@ fn span_kind(kind: fmn_library::SpanKindU8) -> fmn_studio::SpanKind {
 }
 
 enum OfflineFrameRenderer {
-    Cpu(offline_cpu::CpuRenderer),
+    Cpu(Box<offline_cpu::CpuRenderer>),
     #[cfg(feature = "metal")]
     Metal {
         renderer: Box<MetalRenderer>,
@@ -4616,7 +4616,7 @@ impl RenderSink {
                             .ok_or_else(|| internal("missing CPU camera journal"))?
                             .extend_from_slice(descriptor);
                     }
-                    (OfflineFrameRenderer::Cpu(renderer), backend)
+                    (OfflineFrameRenderer::Cpu(Box::new(renderer)), backend)
                 }
                 fmn_runtime::ExecutionEngine::Metal => {
                     #[cfg(feature = "metal")]

@@ -66,7 +66,7 @@ fn project_local_configuration_is_used_without_changing_the_parent_working_direc
             .unwrap()
             .into(),
     ));
-    let runner = Arc::new(StdProcessRunner::default());
+    let runner = Arc::new(StdProcessRunner);
     let triple = CargoRebuildDriver::host_triple(&*runner, &cargo, &env).unwrap();
     let before = std::env::current_dir().unwrap();
     let manifest = root.0.join("Cargo.toml");

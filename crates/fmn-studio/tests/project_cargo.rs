@@ -129,7 +129,7 @@ fn actual_compiler_failure_preserves_executable_and_fixed_source_builds_new_gene
     .unwrap();
     let source = root.0.join("src/main.rs");
     fs::write(&source, "fn main(){println!(\"first\");}\n").unwrap();
-    let runner = Arc::new(StdProcessRunner::default());
+    let runner = Arc::new(StdProcessRunner);
     let (cargo, env) = toolchain();
     let config = configure(&root.0, cargo, env, &*runner);
     generate_lock(&config, &*runner);
@@ -263,7 +263,7 @@ fn real_project_rebuilds_replace_native_pixels_through_supervisor_and_http() {
     fs::write(root.0.join("Cargo.toml"), manifest).unwrap();
     let source = root.0.join("src/main.rs");
     fs::write(&source, worker_source(0.0)).unwrap();
-    let runner = Arc::new(StdProcessRunner::default());
+    let runner = Arc::new(StdProcessRunner);
     let (cargo, env) = toolchain();
     let config = configure(&root.0, cargo, env, &*runner);
     generate_lock(&config, &*runner);

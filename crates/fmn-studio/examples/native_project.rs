@@ -118,7 +118,7 @@ fn run() -> Result<()> {
         _ => return Err("target must be bin:NAME or example:NAME".into()),
     };
     let scene = args[4].clone();
-    let runner = Arc::new(StdProcessRunner::default());
+    let runner = Arc::new(StdProcessRunner);
     let environment = compiler_environment(&cargo)?;
     let triple = CargoRebuildDriver::host_triple(&*runner, &cargo, &environment)?;
     let target_dir = project.join("target/fmn-studio-build");
