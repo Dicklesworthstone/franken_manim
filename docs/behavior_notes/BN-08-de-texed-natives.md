@@ -96,6 +96,29 @@ authored glyph is not there to be had.
 Both marks are built in the same unit box, so they scale and align
 identically.
 
+### Inline pifont crosses
+
+The inline `\ding{55}` implementation under fm-j4tni uses the same
+twelve-corner cross outline as standalone `Exmark`, through fmd-math's
+native drawn-symbol path. It does not substitute a multiplication sign or
+add a dingbat font. Its advance, height and depth come from pifont's pzdr
+character 55 TFM metrics; source spans, inherited color and script scaling
+stay with the formula. The filled outline deliberately retains the native
+mark's proportions rather than reproducing pifont's brush-shaped ink.
+Inline `\ding{51}` keeps its existing bundled checkmark glyph; the
+standalone paired marks remain drawn.
+
+Use `\text{\ding{55}}` in existing Reference formulas. Real Reference
+captures with the ruled preamble show that bare math `\ding{55}` produces
+the digit “7,” because the pifont font selection does not select a math
+font. FrankenManim produces the intended cross in both math and text
+contexts. This fixes that Reference defect rather than preserving it.
+Other unsupported pifont codes still fail with their exact command name.
+
+This implementation is under qualification. The source tests and Reference
+measurements do not establish installed-wheel or complete-scene support;
+those remain acceptance requirements of fm-j4tni.
+
 ## Why the Matrix brackets are not a glyph stretch either
 
 The Reference typesets its brackets the same way it typesets everything

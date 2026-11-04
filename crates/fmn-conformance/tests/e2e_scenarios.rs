@@ -6801,6 +6801,76 @@ fn tex_forced_fraction_styles_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenar
     Ok(RunOutcome::ok().with_counter("tex_forced_fraction_formulas", 21))
 }
 
+/// fm-j4tni: an inline cross retains its path, source colour and primitive
+/// family through both native builders and a real certified raster frame.
+fn tex_pifont_cross_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let engine = &scene_goldens::corpus().tex;
+    let cases = [
+        (false, r"\ding{55}"),
+        (false, r"\text{\ding{55}}"),
+        (false, r"a^{\text{\ding{55}}}"),
+        (false, r"a_{\text{\ding{55}}}"),
+        (false, r"\small\text{\ding{55}}"),
+        (false, r"\large\text{\ding{55}}"),
+        (false, r"\text{\ding{51}\ding{55}}"),
+        (true, r"\ding{55}"),
+    ];
+    let blank = render_certified_doc(&Stage::new());
+    for (text_mode, source) in cases {
+        let colors = [(r"\ding{55}", RED_C)];
+        let built = if text_mode {
+            fmn_library::TexText::new(source).t2c(&colors).build(engine)
+        } else {
+            fmn_library::Tex::new(source).t2c(&colors).build(engine)
+        }
+        .map_err(|error| fail(format!("{source}: native pifont cross: {error}")))?;
+        let occurrences = built.occurrences(r"\ding{55}");
+        if occurrences.len() != 1 || occurrences[0].len() != 1 {
+            return Err(fail(format!("{source}: cross source span lost")));
+        }
+        let ordinal = occurrences[0][0];
+        if built.typeset.layout.paths.len() != 1
+            || !matches!(built.typeset.subs[ordinal].prim, Prim::Path(0))
+            || built.vmob.children().len() != built.typeset.subs.len()
+            || built.vmob.children()[ordinal].points().is_empty()
+            || built.vmob.children()[ordinal].style().fill_color != RED_C
+            || built
+                .typeset
+                .layout
+                .glyphs
+                .iter()
+                .any(|glyph| glyph.ch == '×' || glyph.ch == '7')
+        {
+            return Err(fail(format!("{source}: cross path or colour lost")));
+        }
+        if source.contains(r"\ding{51}")
+            && !built
+                .typeset
+                .layout
+                .glyphs
+                .iter()
+                .any(|glyph| glyph.ch == '✓')
+        {
+            return Err(fail("paired pifont checkmark lost"));
+        }
+        let mut stage = Stage::new();
+        let formula = stage.add(built.vmob.moved_to([0.0; 3]));
+        stage
+            .add_to_scene(formula)
+            .map_err(|error| fail(format!("{source}: show cross: {error}")))?;
+        if render_certified_doc(&stage) == blank {
+            return Err(fail(format!("{source}: blank certified frame")));
+        }
+        ctx.event(
+            LogEvent::new("e2e.parity.tex_pifont_cross")
+                .field("source", source)
+                .field("text_mode", text_mode)
+                .field("visible", "true"),
+        );
+    }
+    Ok(RunOutcome::ok().with_counter("tex_pifont_cross_formulas", 8))
+}
+
 /// The paragraph `parity.textext_paragraph_lines.v1` sets. It is wider
 /// than the Reference's 345 pt line, and TeX breaks it after "of", the 63rd
 /// of its 128 glyphs. fmd-math's placement tests pin that break, the line
@@ -12209,6 +12279,20 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "parity.tex_pifont_cross.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(tex_pifont_cross_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tex_pifont_cross_formulas", 8),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.parity.tex_pifont_cross",
+            vec![FieldPred::str_eq("visible", "true")],
+        )],
+    ));
+    specs.push(spec(
         "parity.textext_paragraph_lines.v1",
         ScenarioClass::ParityDrill,
         Surface::RustApi,
@@ -15002,6 +15086,16 @@ fn tex_forced_fraction_styles_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "parity.tex_forced_fraction_styles.v1")
         .expect("the forced fraction styles scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn tex_pifont_cross_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "parity.tex_pifont_cross.v1")
+        .expect("the inline pifont cross scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

@@ -285,22 +285,8 @@ pub fn checkmark(color: Srgb) -> VMobject {
 /// exactly [`EXMARK_SIZE`] centred on the origin.
 #[must_use]
 pub fn exmark(color: Srgb) -> VMobject {
-    let t = 0.12;
-    // One closed contour tracing the whole cross, corner to corner.
-    let outline: [[f64; 3]; 12] = [
-        [-0.5 + t, -0.5, 0.0],
-        [0.0, -t * 0.7, 0.0],
-        [0.5 - t, -0.5, 0.0],
-        [0.5, -0.5 + t, 0.0],
-        [t * 0.7, 0.0, 0.0],
-        [0.5, 0.5 - t, 0.0],
-        [0.5 - t, 0.5, 0.0],
-        [0.0, t * 0.7, 0.0],
-        [-0.5 + t, 0.5, 0.0],
-        [-0.5, 0.5 - t, 0.0],
-        [-t * 0.7, 0.0, 0.0],
-        [-0.5, -0.5 + t, 0.0],
-    ];
+    // The inline pifont cross and standalone Exmark share this shape.
+    let outline = fmn_tex::paths::BALLOT_CROSS_OUTLINE.map(|(x, y)| [x, y, 0.0]);
     drawn_mark(&outline, EXMARK_SIZE, color)
 }
 

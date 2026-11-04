@@ -1792,11 +1792,14 @@ mod tests {
         // cafe18b3 (fm-dbinom-in-scripts-r12-x6zi: forced fraction styles)
         // changes only that revision identity for these formula workloads;
         // the unchanged canonical output goldens pass on the new provider.
+        // 222c3d4a (fm-j4tni: native inline pifont crosses) changes only
+        // that revision identity here. Both canonical result goldens and
+        // the text definition pass unchanged before these identities move.
         assert_eq!(
             [cold.digest(), cached.digest(), text.digest()].map(|digest| digest.to_string()),
             [
-                "68664dc386f5a50787b13897c5e3de883ea5ac688fca3d7a1bb0b59286c7f0cf",
-                "58d9cc9a9617247dc9d7bad5d6900210f6603c9659a8995c7265ebb823e055d9",
+                "60e53d5ec42219f5c6c81ef6bf4f649c648cf3665a2a6f9ad2244f1e2fd47e56",
+                "e82b3782290c16bf11c61879d0d27a645408b6f7b22e994bee1269c59825bf67",
                 "0fa22e64fe9e1901eea58a596899ec843bc0d6db46f1cd91607925a50fea3e6f",
             ]
         );
