@@ -16281,7 +16281,7 @@ fn rebless_e2e_cli_builtins_panel() {
 /// (GOVERNANCE.md §4). Opt-in with `FMN_REBLESS_E2E_TEX_COLOR=1`, after the
 /// bless. A new entry puts its frame on both sides of the lock's artefact. A
 /// changed one names the panel that carried its old frame in
-/// `FMN_REBLESS_E2E_TEX_COLOR_BEFORE`, whose left half is that frame (the
+/// `FMN_REBLESS_E2E_TEX_COLOR_BEFORE`, whose right half is that frame (the
 /// panels are before | 4 px divider | after).
 #[test]
 fn rebless_e2e_tex_color_panel() {
@@ -16329,8 +16329,8 @@ fn rebless_e2e_tex_cancel_frak_panel() {
 
 /// Write a one-frame lock entry's re-bless panel, before | 4 px divider |
 /// after, as the e2e lock's artefact. A new entry (`before` unset) puts its
-/// frame on both sides; a changed one takes the left half of the panel that
-/// carried its old frame.
+/// frame on both sides; a changed one takes the accepted right half of the
+/// previous panel. Its left half belongs to the earlier adjudication.
 fn write_single_frame_rebless_panel(png: &[u8], before: Option<std::ffi::OsString>) {
     use fmn_conformance::golden::{REBLESS_ARTEFACT_DIR, rebless_artefact_name, side_by_side_png};
     let image = fmn_codec::decode_png(png, &fmn_codec::PngLimits::default())
@@ -16343,19 +16343,7 @@ fn write_single_frame_rebless_panel(png: &[u8], before: Option<std::ffi::OsStrin
                 &fmn_codec::PngLimits::default(),
             )
             .expect("the before panel decodes");
-            assert!(
-                old.width == 2 * image.width + 4 && old.height == image.height,
-                "the before panel is {}x{}, not a {}x{} pair",
-                old.width,
-                old.height,
-                image.width,
-                image.height
-            );
-            let (row, half) = (old.width as usize * 4, image.width as usize * 4);
-            old.rgba
-                .chunks_exact(row)
-                .flat_map(|line| line[..half].iter().copied())
-                .collect()
+            accepted_frame_from_rebless_panel(&old, image.width, image.height)
         }
     };
     let panel = side_by_side_png(image.width, image.height, &before, &image.rgba)
@@ -16368,6 +16356,41 @@ fn write_single_frame_rebless_panel(png: &[u8], before: Option<std::ffi::OsStrin
     let out = manifest.join("../..").join(REBLESS_ARTEFACT_DIR);
     std::fs::create_dir_all(&out).expect("re-bless artefact directory");
     std::fs::write(out.join(rebless_artefact_name(lock, &digest)), panel).expect("panel written");
+}
+
+fn accepted_frame_from_rebless_panel(
+    panel: &fmn_codec::DecodedPng,
+    width: u32,
+    height: u32,
+) -> Vec<u8> {
+    assert!(
+        panel.width == 2 * width + 4 && panel.height == height,
+        "the before panel is {}x{}, not a {}x{} pair",
+        panel.width,
+        panel.height,
+        width,
+        height
+    );
+    let row = panel.width as usize * 4;
+    let accepted_start = (width as usize + 4) * 4;
+    panel
+        .rgba
+        .chunks_exact(row)
+        .flat_map(|line| line[accepted_start..].iter().copied())
+        .collect()
+}
+
+#[test]
+fn rebless_before_is_the_previous_accepted_frame() {
+    use fmn_conformance::golden::side_by_side_png;
+    let earlier = [1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255];
+    let accepted = [
+        13, 14, 15, 255, 16, 17, 18, 255, 19, 20, 21, 255, 22, 23, 24, 255,
+    ];
+    let bytes = side_by_side_png(2, 2, &earlier, &accepted).expect("distinct prior frames");
+    let panel = fmn_codec::decode_png(&bytes, &fmn_codec::PngLimits::default())
+        .expect("the native review panel decodes");
+    assert_eq!(accepted_frame_from_rebless_panel(&panel, 2, 2), accepted);
 }
 
 #[test]

@@ -1019,11 +1019,12 @@ mod tests {
             // with cmex's brace pieces at franken_markdown 2f1e00c, then the
             // sixteen text and TeX scenes with every glyph contour turned
             // counter-clockwise in place, fm-hc78, then tex_overbrace with
-            // cmr10's interword space at franken_markdown 450111a4)
+            // cmr10's interword space at franken_markdown 450111a4, then
+            // tex_overbrace's reviewed T1 EC text label at eed97585)
             // and the journaled map orientation.
             assert_eq!(
                 definition.digest().to_string(),
-                "e3d96c7ac9d487be7ab09b2215465a60922de36058c63561725bee1996e9b161"
+                "7bd97c60ed63ded30bbdc2ab64dddc78db6ef79647654e7c10f04e4450df51f1"
             );
         }
     }

@@ -1223,7 +1223,7 @@ _2023/clt/dice_sims.py	SimulationWithExpDistribution	timeout
 _2023/clt/dice_sims.py	SimulationWithExpDistribution15Dice	timeout	
 _2023/clt/dice_sims.py	SimulationWithExpDistribution2	timeout	
 _2023/clt/dice_sims.py	SimulationWithExpDistribution2Dice	ok	
-_2023/clt/dice_sims.py	SimulationWithExpDistribution5Dice	timeout	
+_2023/clt/dice_sims.py	SimulationWithExpDistribution5Dice	ok	
 _2023/clt/dice_sims.py	SimulationWithRandomDistribution	timeout	
 _2023/clt/dice_sims.py	SimulationWithSteepUShapedDistribution	timeout	
 _2023/clt/dice_sims.py	SimulationWithUShapedDistribution	timeout	
@@ -1284,7 +1284,7 @@ _2023/clt_proof/main.py	ConnectingArrow	ok
 _2023/clt_proof/main.py	CumulantsOfScaledSum	ok	
 _2023/clt_proof/main.py	DefineCGF	ok	
 _2023/clt_proof/main.py	DefineMGF	ok	
-_2023/clt_proof/main.py	DirectMGFInterpretation	timeout	
+_2023/clt_proof/main.py	DirectMGFInterpretation	ok	
 _2023/clt_proof/main.py	ExpandCGF	ok	
 _2023/clt_proof/main.py	FirstFewTermsOfCGF	ok	
 _2023/clt_proof/main.py	ImagineProving	missing_asset	OSError

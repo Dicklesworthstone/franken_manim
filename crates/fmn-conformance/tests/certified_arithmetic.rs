@@ -59,10 +59,10 @@ const EXEMPT_CRATES: &[&str] = &["fmn-dmath", "fmn-python"];
 
 /// Maximum bytes read from one Rust source authority.
 ///
-/// Two MiB leaves ample headroom for ordinary source growth while keeping a
-/// replaced or malformed authority from being allocated without bound before
-/// the guard can inspect it.
-const MAX_RUST_SOURCE_BYTES: u64 = 2 * 1024 * 1024;
+/// The pinned T1 EC metrics authority is 2,314,022 bytes. Four MiB admits that
+/// complete source while retaining a finite limit-plus-one envelope. Every
+/// byte is inspected; generated tables receive no path or arithmetic exemption.
+const MAX_RUST_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
 
 /// The transcendental methods a certified crate may not call on a float.
 ///
@@ -794,6 +794,24 @@ let after_test_only_cfg = q.exp_m1();
         "the FMA needles missed a hand-written contraction"
     );
 
+    // A valid authority can extend beyond the former two-MiB envelope. A
+    // forbidden call after that boundary must be found, never prefix-scanned
+    // or treated as clean because the prefix contains only whitespace.
+    let mut padded = vec![b' '; 2 * 1024 * 1024 + 1];
+    padded.extend_from_slice(b"\npub fn tail(x: f64) -> f64 { x.powf(2.0) }\n");
+    std::fs::write(&file, padded).expect("large source control written");
+    let mut tail_offences = Vec::new();
+    scan(
+        &file,
+        "large",
+        &transcendental_needles(),
+        &mut tail_offences,
+    )
+    .expect("the complete large authority is readable");
+    assert_eq!(tail_offences.len(), 1);
+    assert_eq!(tail_offences[0].needle, "powf");
+    assert_eq!(tail_offences[0].line, 2);
+
     std::fs::remove_file(&file).ok();
     std::fs::remove_dir(&dir).ok();
 }
@@ -836,6 +854,29 @@ fn source_authority_failures_are_fatal_and_reads_are_bounded() {
         oversize.contains("exceeds the 8-byte limit"),
         "unexpected size diagnostic: {oversize}"
     );
+
+    let max = usize::try_from(MAX_RUST_SOURCE_BYTES).expect("source limit fits usize");
+    let mut boundary = vec![b' '; max];
+    assert_eq!(
+        read_utf8_bounded(
+            std::io::Cursor::new(&boundary),
+            "full.rs",
+            MAX_RUST_SOURCE_BYTES,
+        )
+        .expect("the full declared envelope is readable")
+        .len(),
+        max
+    );
+    // Oversize wins before UTF-8 decoding, including at the real default
+    // boundary rather than only the small eight-byte protocol fixture.
+    boundary.push(0xff);
+    let error = read_utf8_bounded(
+        std::io::Cursor::new(boundary),
+        "oversize-default.rs",
+        MAX_RUST_SOURCE_BYTES,
+    )
+    .expect_err("a byte beyond the declared envelope is refused");
+    assert!(error.contains("source exceeds"), "{error}");
 
     struct RefusingReader;
     impl Read for RefusingReader {
