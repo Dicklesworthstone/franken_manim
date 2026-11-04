@@ -650,3 +650,73 @@ fn point_less_box_interpolates_along_the_path() {
         "the arc leaves the straight line: {center:?}"
     );
 }
+
+#[test]
+fn interpolation_can_write_either_endpoint_through_a_live_view() {
+    for output_is_target in [false, true] {
+        let mut stage = Stage::new();
+        let source = vmob(
+            &mut stage,
+            &[[0.0, 2.0, 4.0], [2.0, 4.0, 6.0]],
+            [1.0, 0.0, 0.0, 0.25],
+        );
+        let target = vmob(
+            &mut stage,
+            &[[8.0, 6.0, 4.0], [6.0, 8.0, 10.0]],
+            [0.0, 0.0, 1.0, 0.75],
+        );
+        let output = if output_is_target { target } else { source };
+        let view = stage.get_mut(output).unwrap().buffer.export_view(true);
+        let storage = stage.get(output).unwrap().buffer.storage_id();
+        fmn_anim::interpolate_fields(&mut stage, output, source, target, 0.25, PathFunc::Straight);
+        assert_eq!(stage.get(output).unwrap().buffer.storage_id(), storage);
+        assert_eq!(view.read(0, "point").unwrap(), [2.0, 3.0, 4.0]);
+        assert_eq!(view.read(1, "point").unwrap(), [3.0, 5.0, 7.0]);
+        assert_eq!(view.read(0, "fill_rgba").unwrap(), [0.75, 0.0, 0.25, 0.375]);
+        assert_eq!(view.read(1, "fill_rgba").unwrap(), [0.75, 0.0, 0.25, 0.375]);
+    }
+}
+
+#[test]
+fn live_interpolation_refuses_partial_world_materialization_after_layout_changes() {
+    for remove_field in [false, true] {
+        let mut stage = Stage::new();
+        let schema = RecordSchema::new(
+            &[("point", 3), ("anchor", 3), ("rgba", 4)],
+            &["point"],
+            &["point", "anchor"],
+        )
+        .unwrap();
+        let mut buffer = RecordBuffer::new(schema, 2).unwrap();
+        buffer.write_range("point", 0, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        buffer.write_range("anchor", 0, &[0.0, 1.0, 0.0].repeat(2));
+        let source = stage.add(Mobject::from_buffer(buffer));
+        stage.shift(source, [2.0, 0.0, 0.0]);
+        let target = stage.copy_family(source).unwrap();
+        stage.shift(target, [8.0, 0.0, 0.0]);
+        let mut animation = Transform::new(source, target).with_config(AnimConfig {
+            rate_func: RateFunc::linear(),
+            ..AnimConfig::default()
+        });
+        animation.begin(&mut stage).unwrap();
+        let target = animation.target_copy().unwrap();
+        let view = stage.get_mut(source).unwrap().buffer.export_view(true);
+        let before = stage.get(source).unwrap().buffer.deep_clone();
+        let placement = stage.placement(source).unwrap();
+        let revision = stage.get(source).unwrap().buffer.revision();
+        if remove_field {
+            stage.get_mut(target).unwrap().buffer =
+                RecordBuffer::new(RecordSchema::mobject(), 2).unwrap();
+        } else {
+            stage.get_mut(target).unwrap().buffer.resize(1).unwrap();
+        }
+        animation.interpolate(&mut stage, 0.5);
+        let after = &stage.get(source).unwrap().buffer;
+        assert_eq!(stage.placement(source), Some(placement));
+        assert_eq!(after.revision(), revision);
+        for field in ["point", "anchor", "rgba"] {
+            assert!(after.column_eq(&before, field), "partial write to {field}");
+            assert_eq!(view.read(0, field), before.read(0, field));
+        }
+    }
+}
