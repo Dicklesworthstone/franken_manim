@@ -307,6 +307,77 @@ fn custom_dtype_end_to_end() {
 // -------------------------------------------------------------- lock state
 
 #[test]
+fn reusable_column_reads_observe_live_writes_without_reallocating() {
+    let schema = RecordSchema::new(
+        &[("point", 3), ("weight", 1), ("empty", 0)],
+        &["point"],
+        &["point"],
+    )
+    .unwrap();
+    let mut buffer = RecordBuffer::new(schema, 2).unwrap();
+    assert!(buffer.write_range("point", 0, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]));
+    assert!(buffer.write_range("weight", 0, &[0.25, 0.75]));
+    let retained_schema = buffer.shared_schema();
+    let view = buffer.export_field_view("point", true).unwrap();
+    let storage = buffer.storage_id();
+    let revision = buffer.revision();
+    assert!(view.write_foreign(1, "point", &[7.0, 8.0, 9.0]));
+    assert_eq!(buffer.revision(), revision, "foreign writes do not notify");
+
+    let mut column = vec![f32::NAN; 16];
+    let allocation = (column.as_ptr(), column.capacity());
+    assert!(buffer.read_column_into("point", &mut column));
+    assert_eq!(column, [1.0, 2.0, 3.0, 7.0, 8.0, 9.0]);
+    assert!(buffer.read_column_into("weight", &mut column));
+    assert_eq!(
+        column,
+        [0.25, 0.75],
+        "a narrower read replaces the old lanes"
+    );
+    assert!(!buffer.read_column_into("missing", &mut column));
+    assert_eq!(
+        column,
+        [0.25, 0.75],
+        "failure leaves the caller's storage alone"
+    );
+    assert!(buffer.read_column_into("empty", &mut column));
+    assert!(column.is_empty());
+    assert_eq!((column.as_ptr(), column.capacity()), allocation);
+
+    // Retaining a layout must not make ordinary writes detach a live view.
+    assert!(buffer.write(0, "point", &[10.0, 11.0, 12.0]));
+    assert_eq!(buffer.storage_id(), storage);
+    assert_eq!(view.read(0, "point").unwrap(), [10.0, 11.0, 12.0]);
+    assert_eq!(retained_schema.field_width("point"), Some(3));
+    buffer.resize(1).unwrap();
+    assert!(view.write_foreign(0, "point", &[-1.0; 3]));
+    assert!(buffer.read_column_into("point", &mut column));
+    assert_eq!(column, [10.0, 11.0, 12.0], "resize detaches the old view");
+    assert_eq!((column.as_ptr(), column.capacity()), allocation);
+}
+
+#[test]
+fn borrowed_phantom_fields_preserve_snapshot_isolation() {
+    let mut buffer = RecordBuffer::new(RecordSchema::mobject(), 0).unwrap();
+    assert_eq!(buffer.default_record_slice("rgba"), None);
+    buffer.write_default_record("rgba", &[1.0, 0.0, 0.0, 0.25]);
+    let snapshot = buffer.snapshot_clone();
+    let original = snapshot.default_record_slice("rgba").unwrap();
+    buffer.write_default_record("rgba", &[0.0, 0.0, 1.0, 0.75]);
+    assert_eq!(original, [1.0, 0.0, 0.0, 0.25]);
+    assert_eq!(buffer.default_record_slice("missing"), None);
+    assert_eq!(
+        buffer.default_record("rgba").as_deref(),
+        buffer.default_record_slice("rgba")
+    );
+    buffer.resize(2).unwrap();
+    assert_eq!(
+        buffer.read_column("rgba").unwrap(),
+        [0.0, 0.0, 1.0, 0.75].repeat(2)
+    );
+}
+
+#[test]
 fn data_locking_is_copy_elision_state() {
     let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), 4).unwrap();
     let same = buffer.deep_clone();

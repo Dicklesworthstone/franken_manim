@@ -2,8 +2,11 @@
 //! This cache is derived state; it never enters a Stage snapshot or FMTL.
 //!
 //! The mobject layer owns invalidation and consumes the existing Chisel kernel.
-//! Callers can keep one sampler per active path without adding geometry state
-//! to every Stage entry or changing the dependency graph of the animation layer.
+//! Callers can keep one sampler per active path. Ordinary Stage queries share
+//! a bounded cache, without adding geometry state to every arena entry or
+//! changing the dependency graph of the animation layer.
+
+use std::collections::VecDeque;
 
 use fmn_core::types::Vec3;
 use fmn_geom::{ArcLengthTable, QuadPath};
@@ -73,6 +76,12 @@ impl PathSampler {
         self.current = None;
     }
 
+    fn retained_points(&self) -> usize {
+        self.current
+            .as_ref()
+            .map_or(0, |entry| entry.path.points().len())
+    }
+
     /// Observe a point by true world-space arc length (BN-03).
     ///
     /// # Errors
@@ -123,5 +132,99 @@ impl PathSampler {
             .path
             .point_from_proportion_with(&current.table, alpha)
             .ok_or(StageError::SchemaMismatch)
+    }
+}
+
+/// Maximum paths retained by a Stage's ordinary `point_from_proportion` calls.
+/// Explicit [`PathSampler`] instances have independent lifetimes.
+pub const MAX_QUERY_PATHS: usize = 64;
+/// Maximum total point records retained by the Stage query cache. Larger
+/// paths still sample correctly, but their derived geometry is not retained.
+/// The points and two arc-length columns consume about four MiB at this limit.
+pub const MAX_QUERY_PATH_POINTS: usize = 131_072;
+
+/// Work and current storage of a Stage's derived path-query cache.
+/// These diagnostics are not scene state and never enter snapshots or FMTL.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PathQueryStats {
+    /// Successful world-space path/table builds since creation or restore.
+    pub materializations: u64,
+    /// Number of paths currently retained, at most [`MAX_QUERY_PATHS`].
+    pub retained_paths: usize,
+    /// Retained point records, at most [`MAX_QUERY_PATH_POINTS`].
+    pub retained_points: usize,
+}
+
+/// LRU observations owned by one physical Stage, not by its persistent arena.
+#[derive(Default)]
+pub(crate) struct PathQueryCache {
+    entries: VecDeque<(Mob, PathSampler)>,
+    points: usize,
+    materializations: u64,
+}
+
+impl PathQueryCache {
+    pub(crate) fn stats(&self) -> PathQueryStats {
+        PathQueryStats {
+            materializations: self.materializations,
+            retained_paths: self.entries.len(),
+            retained_points: self.points,
+        }
+    }
+
+    pub(crate) fn sample(
+        &mut self,
+        stage: &Stage,
+        mob: Mob,
+        alpha: f64,
+    ) -> Result<Vec3, StageError> {
+        // Removing an observation does not allocate. Keeping recently used
+        // paths at the front makes a single repeatedly sampled path O(1).
+        let mut sampler = self
+            .entries
+            .iter()
+            .position(|(cached, _)| *cached == mob)
+            .and_then(|index| self.entries.remove(index))
+            .map_or_else(PathSampler::default, |(_, sampler)| sampler);
+        self.points -= sampler.retained_points();
+        let before = sampler.materializations();
+        let result = sampler.sample(stage, mob, alpha);
+        self.materializations = self
+            .materializations
+            .saturating_add(sampler.materializations() - before);
+
+        // A failed or live-view observation must not retain geometry for later
+        // use. A foreign write does not necessarily move the record revision;
+        // after the last view drops, the next query must observe its final edit.
+        let cacheable = result.is_ok()
+            && stage
+                .get(mob)
+                .is_some_and(|entry| !entry.buffer.writable_view_affects("point"));
+        let points = sampler.retained_points();
+        if cacheable && points <= MAX_QUERY_PATH_POINTS {
+            while self.entries.len() >= MAX_QUERY_PATHS
+                || self.points + points > MAX_QUERY_PATH_POINTS
+            {
+                if let Some((_, old)) = self.entries.pop_back() {
+                    self.points -= old.retained_points();
+                } else {
+                    break;
+                }
+            }
+            self.points += points;
+            self.entries.push_front((mob, sampler));
+        }
+        result
+    }
+}
+
+impl Stage {
+    /// Observe work performed by ordinary true-arclength path queries.
+    /// Cache eviction or a restore may make a later query rebuild; neither
+    /// affects its answer. Restore resets these diagnostics along with the
+    /// cache. Explicit animation samplers count their own work.
+    #[must_use]
+    pub fn path_query_stats(&self) -> PathQueryStats {
+        self.path_queries.borrow().stats()
     }
 }

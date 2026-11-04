@@ -48,6 +48,8 @@
 //! whose `end <= start` raises `ZeroDivisionError`-or-NaN in the Reference;
 //! here it is [`AnimError::InvalidTimeSpan`] at `begin`.
 
+use std::sync::Arc;
+
 use fmn_core::rate;
 use fmn_mobject::animate::{AnimateArgs, AnimateError, IntoAnimate};
 use fmn_mobject::{
@@ -59,7 +61,8 @@ pub const DEFAULT_ANIMATION_RUN_TIME: f64 = 1.0;
 /// The Reference's `DEFAULT_ANIMATION_LAG_RATIO`.
 pub const DEFAULT_ANIMATION_LAG_RATIO: f64 = 0.0;
 
-/// Linear interpolation of one contiguous f32 record column.
+/// Linear interpolation of one contiguous f32 record column into reusable
+/// output storage.
 ///
 /// Record precision is f32 API surface, but the interpolation itself is f64
 /// (§6.1). Four independent values share one `f64x4`; there is no horizontal
@@ -81,14 +84,15 @@ pub const DEFAULT_ANIMATION_LAG_RATIO: f64 = 0.0;
     all(target_arch = "aarch64", target_feature = "neon")
 ))]
 #[allow(clippy::cast_possible_truncation)]
-pub(crate) fn interpolate_linear_column(a: &[f32], b: &[f32], alpha: f64) -> Vec<f32> {
+pub(crate) fn interpolate_linear_column_into(a: &[f32], b: &[f32], alpha: f64, out: &mut Vec<f32>) {
     use std::simd::f64x4;
 
     debug_assert_eq!(a.len(), b.len());
     let common = a.len().min(b.len());
     let (a_chunks, a_tail) = a[..common].as_chunks::<4>();
     let (b_chunks, b_tail) = b[..common].as_chunks::<4>();
-    let mut out = Vec::with_capacity(common);
+    out.clear();
+    out.reserve(common);
     let left = f64x4::splat(1.0 - alpha);
     let right = f64x4::splat(alpha);
     for (a, b) in a_chunks.iter().zip(b_chunks) {
@@ -112,7 +116,6 @@ pub(crate) fn interpolate_linear_column(a: &[f32], b: &[f32], alpha: f64) -> Vec
             .zip(b_tail)
             .map(|(&a, &b)| ((1.0 - alpha) * f64::from(a) + alpha * f64::from(b)) as f32),
     );
-    out
 }
 
 /// Portable-build fallback for a kernel whose explicit SIMD route only pays
@@ -134,11 +137,14 @@ pub(crate) fn interpolate_linear_column(a: &[f32], b: &[f32], alpha: f64) -> Vec
     all(target_arch = "aarch64", target_feature = "neon")
 )))]
 #[allow(clippy::cast_possible_truncation)]
-pub(crate) fn interpolate_linear_column(a: &[f32], b: &[f32], alpha: f64) -> Vec<f32> {
-    a.iter()
-        .zip(b)
-        .map(|(&a, &b)| ((1.0 - alpha) * f64::from(a) + alpha * f64::from(b)) as f32)
-        .collect()
+pub(crate) fn interpolate_linear_column_into(a: &[f32], b: &[f32], alpha: f64, out: &mut Vec<f32>) {
+    out.clear();
+    out.reserve(a.len().min(b.len()));
+    out.extend(
+        a.iter()
+            .zip(b)
+            .map(|(&a, &b)| ((1.0 - alpha) * f64::from(a) + alpha * f64::from(b)) as f32),
+    );
 }
 
 // ---------------------------------------------------------------- RateFunc
@@ -645,7 +651,9 @@ pub struct AnimState {
     /// plain attributes).
     pub config: AnimConfig,
     starting_mobject: Option<Mob>,
-    families: Vec<Vec<Mob>>,
+    // A begin-time table is immutable. Sampling retains it cheaply while a
+    // callback may inspect the current table or replace it through begin().
+    families: Arc<[Vec<Mob>]>,
     mobject_was_updating: bool,
 }
 
@@ -657,7 +665,7 @@ impl AnimState {
             mobject,
             config,
             starting_mobject: None,
-            families: Vec::new(),
+            families: Arc::from([]),
             mobject_was_updating: false,
         }
     }
@@ -930,7 +938,10 @@ pub trait Animation {
             return;
         }
         let state = self.state();
-        let families = state.families.clone();
+        // Preserve this sample's complete family snapshot even if a callback
+        // replaces the state or begins again. Retaining the table avoids a
+        // fresh allocation for every row on every sample.
+        let families = Arc::clone(&state.families);
         let run_time = state.config.run_time;
         let time_span = state.config.time_span;
         let lag_ratio = state.config.lag_ratio;
@@ -1208,7 +1219,7 @@ pub fn prepare_animations(
 
 #[cfg(test)]
 mod simd_tests {
-    use super::interpolate_linear_column;
+    use super::interpolate_linear_column_into;
 
     #[test]
     #[allow(clippy::cast_possible_truncation)]
@@ -1239,8 +1250,11 @@ mod simd_tests {
             -f32::MAX,
             f32::MAX,
         ];
+        let mut simd = vec![f32::NAN; a.len() + 7];
+        let allocation = simd.as_ptr();
         for alpha in [-0.25, 0.0, 0.314_159_265_358_979_3, 1.0, 1.5] {
-            let simd = interpolate_linear_column(&a, &b, alpha);
+            interpolate_linear_column_into(&a, &b, alpha, &mut simd);
+            assert_eq!(simd.as_ptr(), allocation, "reuse the output allocation");
             let scalar: Vec<f32> = a
                 .iter()
                 .zip(b)

@@ -10477,6 +10477,14 @@ fn parity_move_along_path_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioEr
         .add_to_scene(path)
         .map_err(|error| fail(format!("add to scene: {error}")))?;
 
+    // A fresh Chisel query supplies an independent uncached answer at each
+    // alpha; the public Stage path keeps its table across these observations.
+    let quad = fmn_geom::QuadPath::from_points(
+        stage
+            .get_points(path)
+            .ok_or_else(|| fail("the path lost its points"))?,
+    )
+    .map_err(|error| fail(format!("{error:?}")))?;
     // Metamorphic relation: uniform α steps visit equal arc lengths.
     const STEPS: u32 = 64;
     let mut prev = stage
@@ -10489,6 +10497,14 @@ fn parity_move_along_path_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioEr
         let point = stage
             .point_from_proportion(path, alpha)
             .map_err(|error| fail(format!("proportion({alpha}): {error}")))?;
+        let fresh = quad
+            .point_from_proportion(alpha)
+            .ok_or_else(|| fail("fresh true-arclength query failed"))?;
+        if point.map(f64::to_bits) != fresh.map(f64::to_bits) {
+            return Err(fail(format!(
+                "retained true-arclength query changed bits at alpha {alpha}"
+            )));
+        }
         chords.push(((point[0] - prev[0]).powi(2) + (point[1] - prev[1]).powi(2)).sqrt());
         prev = point;
     }
@@ -10531,11 +10547,6 @@ fn parity_move_along_path_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioEr
     // Direct discriminator against the labeled heuristic on the same
     // records: the shipped layer and `quick_point_from_proportion` must
     // disagree decisively at α = 0.5.
-    let records = stage
-        .get_points(path)
-        .ok_or_else(|| fail("the path lost its points"))?;
-    let quad =
-        fmn_geom::QuadPath::from_points(records).map_err(|error| fail(format!("{error:?}")))?;
     let quick = quad
         .quick_point_from_proportion(0.5)
         .ok_or_else(|| fail("quick proportion(0.5)"))?;
@@ -10575,13 +10586,22 @@ fn parity_move_along_path_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioEr
         animation_matches += 1;
     }
 
+    let materializations = stage.path_query_stats().materializations;
+    if materializations != 1 {
+        return Err(fail(format!(
+            "unchanged path rebuilt its world-space table {materializations} times"
+        )));
+    }
     ctx.event(
         LogEvent::new("e2e.parity.move_along_path_arclength")
             .field("equal_steps", truth(worst_deviation / mean_step <= 0.01))
-            .field("animation_matches", animation_matches),
+            .field("animation_matches", animation_matches)
+            .field("path_materializations", materializations),
     );
     ctx.counter("parity_arclength_animation_matches", animation_matches);
-    Ok(RunOutcome::ok().with_counter("parity_arclength_animation_matches", animation_matches))
+    Ok(RunOutcome::ok()
+        .with_counter("parity_arclength_animation_matches", animation_matches)
+        .with_counter("parity_arclength_path_materializations", materializations))
 }
 
 /// §11.3 span map — `tex_to_color_map` colors by SOURCE identity. The
@@ -14442,12 +14462,14 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         vec![
             Assertion::ExitCode(0),
             counter_eq("parity_arclength_animation_matches", 3),
+            counter_eq("parity_arclength_path_materializations", 1),
         ],
         vec![LogExpect::span_present(
             "e2e.parity.move_along_path_arclength",
             vec![
                 FieldPred::str_eq("equal_steps", "true"),
                 FieldPred::u64_eq("animation_matches", 3),
+                FieldPred::u64_eq("path_materializations", 1),
             ],
         )],
     ));

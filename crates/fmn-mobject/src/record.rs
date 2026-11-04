@@ -403,6 +403,14 @@ impl RecordBuffer {
         &self.schema
     }
 
+    /// Retain the immutable layout independently of a buffer borrow. This
+    /// shares only the schema, not record storage or live-view ownership, so
+    /// callers can iterate field names while updating the buffer in place.
+    #[must_use]
+    pub fn shared_schema(&self) -> Arc<RecordSchema> {
+        Arc::clone(&self.schema)
+    }
+
     /// Global storage revision (V4).
     #[must_use]
     pub fn revision(&self) -> u64 {
@@ -514,16 +522,29 @@ impl RecordBuffer {
     /// compare against.
     #[must_use]
     pub fn read_column(&self, field: &str) -> Option<Vec<f32>> {
-        let off = self.schema.offset(field)?;
-        let width = self.schema.field_width(field)?;
+        let mut out = Vec::new();
+        self.read_column_into(field, &mut out).then_some(out)
+    }
+
+    /// Extract a record-major column into reusable storage. An existing
+    /// allocation is retained when its capacity is sufficient. Like
+    /// [`RecordBuffer::read_column`], this reads the authoritative records on
+    /// every call, including foreign writes through a live view. A missing
+    /// field returns `false` without changing `out`.
+    pub fn read_column_into(&self, field: &str, out: &mut Vec<f32>) -> bool {
+        let (Some(off), Some(width)) = (self.schema.offset(field), self.schema.field_width(field))
+        else {
+            return false;
+        };
         let stride = self.schema.stride();
+        out.clear();
+        out.reserve(self.len * width);
         let cells = self.storage.cells.read().expect("storage lock poisoned");
-        let mut out = Vec::with_capacity(self.len * width);
         for record in 0..self.len {
             let start = record * stride + off;
             out.extend_from_slice(&cells[start..start + width]);
         }
-        Some(out)
+        true
     }
 
     /// Compare one record-major field with another buffer without allocating
@@ -634,10 +655,18 @@ impl RecordBuffer {
     /// before any points exist. `None` when the schema lacks the field.
     #[must_use]
     pub fn default_record(&self, field: &str) -> Option<Vec<f32>> {
+        self.default_record_slice(field).map(<[f32]>::to_vec)
+    }
+
+    /// Borrow a phantom-record field without allocating a column. The
+    /// immutable borrow preserves the same copy-on-write isolation as an
+    /// owned [`RecordBuffer::default_record`] observation.
+    #[must_use]
+    pub fn default_record_slice(&self, field: &str) -> Option<&[f32]> {
         let off = self.schema.offset(field)?;
         let width = self.schema.field_width(field)?;
         let row = self.defaults.as_ref()?;
-        Some(row[off..off + width].to_vec())
+        Some(&row[off..off + width])
     }
 
     /// Write `value` into the phantom record's lanes for `field`. The

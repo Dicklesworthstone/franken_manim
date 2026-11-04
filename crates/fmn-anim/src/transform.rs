@@ -27,10 +27,11 @@
 //! functional maps) lands in later fm-cye slices.
 
 use fmn_core::types::Vec3;
+use fmn_mobject::record::FieldSpec;
 use fmn_mobject::{Mob, Placement, Stage, Tracker};
 
 use crate::animation::{
-    AnimConfig, AnimError, AnimState, Animation, AnimationSignature, interpolate_linear_column,
+    AnimConfig, AnimError, AnimState, Animation, AnimationSignature, interpolate_linear_column_into,
 };
 
 #[path = "motion_path.rs"]
@@ -59,6 +60,29 @@ fn same_pointlike_geometry(stage: &Stage, from: Mob, to: Mob) -> bool {
 
 // ------------------------------------------------------------- lerp core
 
+/// One reusable column pair and output serve every field and family member.
+/// The records remain authoritative: endpoints are reread for each sample,
+/// including live-view writes and changes to a custom schema during playback.
+#[derive(Debug, Default)]
+struct FieldInterpolationScratch {
+    from: Vec<f32>,
+    to: Vec<f32>,
+    out: Vec<f32>,
+}
+
+impl Clone for FieldInterpolationScratch {
+    fn clone(&self) -> Self {
+        // Frozen-frame carriers need independent scratch, but no stored lane
+        // is animation state. Retain the prepared capacities without copying
+        // an irrelevant previous field or forcing growth on the first sample.
+        Self {
+            from: Vec::with_capacity(self.from.capacity()),
+            to: Vec::with_capacity(self.to.capacity()),
+            out: Vec::with_capacity(self.out.capacity()),
+        }
+    }
+}
+
 /// The Reference's `Mobject.interpolate` (mobject.py:1810) over one
 /// zipped submobject triple: pointlike fields route through `path`, every
 /// other field lerps linearly, locked fields are skipped, numeric
@@ -71,6 +95,27 @@ pub fn interpolate_fields(
     alpha: f64,
     path: PathFunc,
 ) {
+    interpolate_fields_with_scratch(
+        stage,
+        submob,
+        from,
+        to,
+        alpha,
+        path,
+        &mut FieldInterpolationScratch::default(),
+    );
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn interpolate_fields_with_scratch(
+    stage: &mut Stage,
+    submob: Mob,
+    from: Mob,
+    to: Mob,
+    alpha: f64,
+    path: PathFunc,
+    scratch: &mut FieldInterpolationScratch,
+) {
     let Some(entry) = stage.get(submob) else {
         return;
     };
@@ -82,104 +127,122 @@ pub fn interpolate_fields(
     else {
         return;
     };
-    let schema = entry.buffer.schema();
-    let pointlike: Vec<String> = schema
-        .fields()
-        .iter()
-        .filter(|field| {
-            field.width == 3
-                && (field.name == "point" || schema.pointlike_keys().contains(&field.name))
-        })
-        .map(|field| field.name.clone())
-        .collect();
+    let schema = entry.buffer.shared_schema();
+    let is_pointlike = |field: &FieldSpec| {
+        field.width == 3 && (field.name == "point" || schema.pointlike_keys().contains(&field.name))
+    };
     // A host read can bake all geometric fields into this buffer, including
     // while no view remains live. Return to the frozen endpoints rather than
     // compounding that intermediate representation on the next sample.
     let representation_drifted = stage.get(from).is_some_and(|starting| {
-        pointlike
+        schema
+            .fields()
             .iter()
-            .any(|key| !entry.buffer.column_eq(&starting.buffer, key))
+            .filter(|field| is_pointlike(field))
+            .any(|field| !entry.buffer.column_eq(&starting.buffer, &field.name))
     });
     let sync_world = !entry.buffer.is_empty()
-        && !pointlike.is_empty()
+        && schema.fields().iter().any(is_pointlike)
         && (entry.buffer.live_view_count() > 0 || representation_drifted);
     if sync_world {
         // Never drop placement after materializing only part of a surface. A
         // foreign resize/schema edit mid-play must not create mixed coordinates.
-        let valid = pointlike.iter().all(|key| {
-            let expected = entry.buffer.len().checked_mul(3);
-            [from, to].into_iter().all(|mob| {
-                stage
-                    .get(mob)
-                    .and_then(|endpoint| endpoint.buffer.read_column(key))
-                    .is_some_and(|column| Some(column.len()) == expected)
-            })
-        });
+        let valid = schema
+            .fields()
+            .iter()
+            .filter(|field| is_pointlike(field))
+            .all(|field| {
+                let expected = entry.buffer.len().checked_mul(3);
+                [from, to].into_iter().all(|mob| {
+                    stage
+                        .get(mob)
+                        .and_then(|endpoint| {
+                            endpoint
+                                .buffer
+                                .schema()
+                                .field_width(&field.name)
+                                .and_then(|width| endpoint.buffer.len().checked_mul(width))
+                        })
+                        .is_some_and(|len| Some(len) == expected)
+                })
+            });
         if !valid {
             return;
         }
     }
-    let fields: Vec<String> = schema
-        .fields()
-        .iter()
+    for field in schema.fields() {
+        let pointlike = is_pointlike(field);
         // Equal object-space normals are normally locked. They still need a
         // world-space write whenever vertices are materialized for a live view.
-        .filter(|field| {
-            (!defaults_only || !pointlike.contains(&field.name))
-                && ((sync_world && pointlike.contains(&field.name))
-                    || !entry.buffer.is_locked(&field.name))
-        })
-        .map(|field| field.name.clone())
-        .collect();
-    for field in fields {
-        let read = |mob| {
-            let buffer = &stage.get(mob)?.buffer;
-            if defaults_only {
-                buffer.is_empty().then(|| buffer.default_record(&field))?
-            } else {
-                buffer.read_column(&field)
-            }
-        };
-        let (Some(a), Some(b)) = (read(from), read(to)) else {
-            continue;
-        };
-        if a.len() != b.len() {
+        if (defaults_only && pointlike)
+            || (!(sync_world && pointlike)
+                && stage
+                    .get(submob)
+                    .is_none_or(|entry| entry.buffer.is_locked(&field.name)))
+        {
             continue;
         }
-        #[allow(clippy::cast_possible_truncation)]
-        let out: Vec<f32> = if pointlike.contains(&field) {
+        let read = |mob, out: &mut Vec<f32>| {
+            let Some(entry) = stage.get(mob) else {
+                return false;
+            };
+            let buffer = &entry.buffer;
+            if defaults_only {
+                if !buffer.is_empty() {
+                    return false;
+                }
+                let Some(values) = buffer.default_record_slice(&field.name) else {
+                    return false;
+                };
+                out.clear();
+                out.extend_from_slice(values);
+                true
+            } else {
+                buffer.read_column_into(&field.name, out)
+            }
+        };
+        let FieldInterpolationScratch {
+            from: a,
+            to: b,
+            out,
+        } = &mut *scratch;
+        // Read both endpoints completely before mutating the destination. The
+        // public interpolation entry point also supports submob == from/to.
+        if !read(from, a) || !read(to, b) || a.len() != b.len() {
+            continue;
+        }
+        if pointlike {
             let (pa, ra) = a.as_chunks::<3>();
             let (pb, rb) = b.as_chunks::<3>();
             if !ra.is_empty() || !rb.is_empty() {
                 continue;
             }
-            pa.iter()
-                .zip(pb)
-                .flat_map(|(ca, cb)| {
-                    let a = ca.map(f64::from);
-                    let b = cb.map(f64::from);
-                    let point = if sync_world {
-                        path.eval(
-                            from_placement.apply_point(a),
-                            to_placement.apply_point(b),
-                            alpha,
-                        )
-                    } else {
-                        path.eval(a, b, alpha)
-                    };
-                    point.map(|value| value as f32)
-                })
-                .collect()
+            out.clear();
+            out.reserve(a.len());
+            out.extend(pa.iter().zip(pb).flat_map(|(ca, cb)| {
+                let a = ca.map(f64::from);
+                let b = cb.map(f64::from);
+                let point = if sync_world {
+                    path.eval(
+                        from_placement.apply_point(a),
+                        to_placement.apply_point(b),
+                        alpha,
+                    )
+                } else {
+                    path.eval(a, b, alpha)
+                };
+                point.map(|value| value as f32)
+            }));
         } else {
-            interpolate_linear_column(&a, &b, alpha)
-        };
+            interpolate_linear_column_into(a, b, alpha, out);
+        }
         if let Some(entry) = stage.get_mut(submob) {
             if defaults_only {
-                if entry.buffer.default_record(&field).as_deref() != Some(out.as_slice()) {
-                    entry.buffer.write_default_record(&field, &out);
+                if entry.buffer.default_record_slice(&field.name) != Some(out.as_slice()) {
+                    entry.buffer.write_default_record(&field.name, out);
                 }
-            } else if !entry.buffer.column_slice_eq(&field, &out) {
-                entry.buffer.write_range(&field, 0, &out);
+            } else if !entry.buffer.column_slice_eq(&field.name, out) {
+                entry.buffer.write_range(&field.name, 0, out);
             }
         }
     }
@@ -413,6 +476,7 @@ pub struct Transform {
     replace_in_scene: bool,
     start_prep: Option<StartPrep>,
     target_prep: Option<TargetPrep>,
+    interpolation_scratch: FieldInterpolationScratch,
 }
 
 impl Transform {
@@ -431,6 +495,7 @@ impl Transform {
             replace_in_scene: false,
             start_prep: None,
             target_prep: None,
+            interpolation_scratch: FieldInterpolationScratch::default(),
         }
     }
 
@@ -627,7 +692,15 @@ impl Animation for Transform {
         let [submob, starting, target] = *mobs else {
             return; // rows are triples once begin has run
         };
-        interpolate_fields(stage, submob, starting, target, sub_alpha, self.path);
+        interpolate_fields_with_scratch(
+            stage,
+            submob,
+            starting,
+            target,
+            sub_alpha,
+            self.path,
+            &mut self.interpolation_scratch,
+        );
     }
 }
 
@@ -907,4 +980,110 @@ pub fn swap(stage: &mut Stage, a: Mob, b: Mob) -> Result<Vec<Transform>, AnimErr
         t.state.config.name = "Swap".to_owned();
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod scratch_tests {
+    use super::{FieldInterpolationScratch, Transform};
+    use crate::{AnimConfig, Animation, RateFunc};
+    use fmn_mobject::{Mobject, RecordBuffer, RecordSchema, Stage};
+
+    fn allocations(scratch: &FieldInterpolationScratch) -> [(*const f32, usize); 3] {
+        [
+            (scratch.from.as_ptr(), scratch.from.capacity()),
+            (scratch.to.as_ptr(), scratch.to.capacity()),
+            (scratch.out.as_ptr(), scratch.out.capacity()),
+        ]
+    }
+
+    #[test]
+    #[allow(clippy::cast_possible_truncation)]
+    fn transform_reuses_columns_across_family_fields_and_live_view_samples() {
+        let mut stage = Stage::new();
+        let source = stage.add(Mobject::new());
+        stage
+            .get_mut(source)
+            .unwrap()
+            .buffer
+            .write_default_record("rgba", &[1.0, 0.0, 0.0, 0.25]);
+        let schema = RecordSchema::new(
+            &[("point", 3), ("anchor", 3), ("weights", 5), ("tag", 1)],
+            &["point"],
+            &["point", "anchor"],
+        )
+        .unwrap();
+        let mut children = Vec::new();
+        for len in [2, 7, 1] {
+            let mut buffer = RecordBuffer::new(schema.clone(), len).unwrap();
+            buffer.write_range("anchor", 0, &[0.0, 0.0, 1.0].repeat(len));
+            buffer.write_range("weights", 0, &[1.0, 2.0, 3.0, 4.0, 5.0].repeat(len));
+            let child = stage.add(Mobject::from_buffer(buffer));
+            stage.attach(source, child).unwrap();
+            children.push((child, len));
+        }
+        let target = stage.copy_family(source).unwrap();
+        stage
+            .get_mut(target)
+            .unwrap()
+            .buffer
+            .write_default_record("rgba", &[0.0, 0.0, 1.0, 0.75]);
+        for child in stage.family(target).into_iter().skip(1) {
+            let buffer = &mut stage.get_mut(child).unwrap().buffer;
+            let len = buffer.len();
+            buffer.write_range("point", 0, &[4.0, 2.0, 0.0].repeat(len));
+            buffer.write_range("weights", 0, &[9.0, 10.0, 11.0, 12.0, 13.0].repeat(len));
+        }
+        let mut animation = Transform::new(source, target).with_config(AnimConfig {
+            rate_func: RateFunc::linear(),
+            ..AnimConfig::default()
+        });
+        animation.begin(&mut stage).unwrap();
+        let prepared = allocations(&animation.interpolation_scratch);
+        assert!(prepared.iter().all(|(_, capacity)| *capacity >= 35));
+        let view = stage
+            .get_mut(children[0].0)
+            .unwrap()
+            .buffer
+            .export_view(true);
+        let live_storage = stage.get(children[0].0).unwrap().buffer.storage_id();
+        assert!(view.write_foreign(0, "point", &[100.0; 3]));
+
+        for alpha in [0.25, 0.75, 0.125, 1.0, 0.5] {
+            animation.interpolate(&mut stage, alpha);
+            assert_eq!(allocations(&animation.interpolation_scratch), prepared);
+            for &(child, len) in &children {
+                let buffer = &stage.get(child).unwrap().buffer;
+                let weights = [1.0, 2.0, 3.0, 4.0, 5.0].map(|value| (value + 8.0 * alpha) as f32);
+                assert_eq!(buffer.read_column("weights").unwrap(), weights.repeat(len));
+                assert!(buffer.is_locked("anchor"));
+                assert_eq!(
+                    buffer.read_column("anchor").unwrap(),
+                    [0.0, 0.0, 1.0].repeat(len)
+                );
+            }
+            assert_eq!(
+                view.read(0, "point").unwrap(),
+                [(4.0 * alpha) as f32, (2.0 * alpha) as f32, 0.0],
+                "every sample starts from the frozen endpoints, even after a foreign edit"
+            );
+            assert_eq!(
+                stage.get(children[0].0).unwrap().buffer.storage_id(),
+                live_storage
+            );
+            assert_eq!(
+                stage
+                    .get(source)
+                    .unwrap()
+                    .buffer
+                    .default_record_slice("rgba")
+                    .unwrap(),
+                [
+                    (1.0 - alpha) as f32,
+                    0.0,
+                    alpha as f32,
+                    (0.25 + 0.5 * alpha) as f32
+                ]
+            );
+        }
+    }
 }
