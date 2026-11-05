@@ -536,6 +536,69 @@ fn locate_and_frame_at_time_agree_with_the_grid() {
 }
 
 #[test]
+fn frame_at_time_covers_exact_seconds_before_and_after_serialization() {
+    for (fps, split, seconds, at_boundary) in [
+        (24, 43, 43.0_f64 / 24.0, 44),
+        (30, 3, 0.1_f64, 4),
+        (8, 4, 0.5_f64, 4),
+    ] {
+        let mut timeline = Timeline::new(fps).unwrap();
+        timeline.wait_frames(split).unwrap();
+        timeline.wait_frames(1).unwrap();
+        let plan = timeline.compile().unwrap();
+        let decoded = TimelinePlan::from_bytes(&plan.to_bytes().unwrap()).unwrap();
+        for schedule in [&plan, &decoded] {
+            for (time, expected) in [
+                (seconds.next_down(), split as i64),
+                (seconds, at_boundary),
+                (seconds.next_up(), split as i64 + 1),
+            ] {
+                let frame = schedule.frame_at_time(time);
+                assert_eq!(frame, expected, "{time:?} seconds at {fps} fps");
+                assert_eq!(
+                    schedule.locate(frame),
+                    if expected <= split as i64 {
+                        Some((0, expected))
+                    } else {
+                        Some((1, 1))
+                    },
+                    "covering time must select the correct authored segment"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn frame_at_time_preserves_large_frames_and_total_clamping() {
+    let split = 1_u64 << 53;
+    let mut timeline = Timeline::new(3).unwrap();
+    timeline.wait_frames(split).unwrap();
+    timeline.wait_frames(i64::MAX as u64 - split).unwrap();
+    let plan = timeline.compile().unwrap();
+    let decoded = TimelinePlan::from_bytes(&plan.to_bytes().unwrap()).unwrap();
+    for schedule in [&plan, &decoded] {
+        // The seconds value is an exactly representable integer, but its
+        // product with 3 is 2^53 + 1, beyond f64's consecutive integers.
+        let frame = schedule.frame_at_time(3_002_399_751_580_331.0);
+        assert_eq!(frame, 9_007_199_254_740_993);
+        assert_eq!(schedule.locate(frame), Some((1, 1)));
+        for time in [f64::NAN, f64::NEG_INFINITY, -f64::MAX, -0.0, 0.0] {
+            assert_eq!(schedule.frame_at_time(time), 1);
+        }
+        assert_eq!(schedule.frame_at_time(f64::from_bits(1)), 1);
+        for time in [f64::INFINITY, f64::MAX, i64::MAX as f64] {
+            assert_eq!(schedule.frame_at_time(time), i64::MAX);
+        }
+    }
+
+    let empty = Timeline::new(24).unwrap().compile().unwrap();
+    for time in [f64::NAN, f64::NEG_INFINITY, 0.0, 43.0 / 24.0, f64::INFINITY] {
+        assert_eq!(empty.frame_at_time(time), 0);
+    }
+}
+
+#[test]
 fn a_public_planned_segment_reports_end_frame_overflow() {
     let ordinary = PlannedSegment {
         kind: SegmentKind::Wait,
