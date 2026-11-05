@@ -56,7 +56,6 @@ fn frame_probe(mobject: Mob, id: &'static str, frames: u64, log: &Log) -> Box<dy
 
 #[test]
 fn exact_succession_visits_the_next_member_at_its_frame_boundary() {
-    assert!((29.0_f64 / 67.0) * 67.0 < 29.0);
     for (outer_frames, nested, expected_boundary) in
         [(67, false, 29), (201, false, 87), (67, true, 29)]
     {
@@ -86,6 +85,10 @@ fn exact_succession_visits_the_next_member_at_its_frame_boundary() {
                 }
             ]
         );
+        // Confirm the rounding trap using the actual resolved intervals.
+        let first_end = timing.intervals()[0].end;
+        let max_end = timing.max_end();
+        assert!((first_end / max_end) * max_end < first_end);
         assert_eq!(timing.position_at_frame(expected_boundary as f64, 24), 29.0);
         let animation: Box<dyn Animation> = if nested {
             Box::new(AnimationGroup::new(&mut stage, vec![Box::new(succession)]).unwrap())

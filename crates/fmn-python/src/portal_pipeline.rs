@@ -3,6 +3,9 @@
 //! Only owned render data and Reel reservations enter these workers. They do
 //! not attach to CPython, traverse a Stage, evaluate an updater or read a live
 //! NumPy view. Publication remains a separate owner-thread finish operation.
+//!
+//! This retained module is not linked into the crate. Its production acceptance
+//! entry points live in the active `crate::tests` module.
 
 use fmn_frame::FrameBuffer;
 use fmn_output::{FrameReservation, OrderedEmitter};
@@ -129,47 +132,5 @@ mod tests {
         send::<Rasterized>();
         send::<Stream>();
         sync::<Stages>();
-    }
-
-    #[test]
-    fn production_frame_pipeline_acceptance() {
-        crate::with_python_test_module("native file frame pipeline", |py, _module, globals| {
-            use pyo3::types::PyDictMethods as _;
-            globals
-                .set_item(
-                    "__file__",
-                    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/frame_pipeline.py"),
-                )
-                .unwrap();
-            let source =
-                std::ffi::CString::new(include_str!("../tests/frame_pipeline.py")).unwrap();
-            py.run(source.as_c_str(), Some(globals), Some(globals))
-                .inspect_err(|error| error.print(py))
-                .expect("native pipeline pixel, clock, ownership and cancellation acceptance");
-        });
-    }
-
-    #[test]
-    fn production_exact_frame_duration_acceptance() {
-        crate::with_python_test_module("exact frame durations", |py, _module, globals| {
-            let source = std::ffi::CString::new(include_str!("../tests/exact_frame_durations.py"))
-                .expect("frame duration suite contains no NUL");
-            py.run(source.as_c_str(), Some(globals), Some(globals))
-                .inspect_err(|error| error.print(py))
-                .expect("exact frame portal, composition, rendering and encoding acceptance");
-        });
-    }
-
-    #[test]
-    fn production_exact_frame_composition_position_acceptance() {
-        crate::with_python_test_module("exact composition positions", |py, _module, globals| {
-            let source = std::ffi::CString::new(include_str!(
-                "../tests/exact_frame_composition_positions.py"
-            ))
-            .expect("composition position suite contains no NUL");
-            py.run(source.as_c_str(), Some(globals), Some(globals))
-                .inspect_err(|error| error.print(py))
-                .expect("exact native composition positions and callback dispatch acceptance");
-        });
     }
 }

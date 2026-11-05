@@ -150,7 +150,8 @@ def install_segment_census(native: Any) -> None:
         python = [type(callback).__name__ for callback in live if not rate_only(callback)]
         rate_tables = (len(python) < len(live) or _has_rate_table(specs)
                        or (len(args) > 2 and isinstance(args[2], list)))
-        run_time = args[1] if len(args) > 1 else None
+        duration = args[1] if len(args) > 1 else None
+        run_time = duration[0] if duration is not None else None
         return measured(self, "play", python, rate_tables, False, run_time,
                         lambda: play_animations(self, specs, callbacks, *args))
 

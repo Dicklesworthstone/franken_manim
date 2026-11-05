@@ -13993,7 +13993,9 @@ class Scene(_SceneCore):
                 specs,
                 callbacks,
                 camera_pair,
-                None if run_time is None else float(run_time),
+                None if run_time is None and run_time_frames is None else (
+                    None if run_time is None else float(run_time), run_time_frames
+                ),
                 # Camera specs use their own track. Preserve an active
                 # declaration solely for the native camera-preparation refusal;
                 # a real play-level override still takes precedence.
@@ -14002,7 +14004,6 @@ class Scene(_SceneCore):
                     "play", run_time or 1.0,
                 ),
                 None if lag_ratio is None else float(lag_ratio),
-                *(() if run_time_frames is None else (run_time_frames,)),
             )
         except BaseException:
             for callback in callbacks:

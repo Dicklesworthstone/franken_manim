@@ -9700,18 +9700,23 @@ impl PyScene {
     /// params)`, with composition members under `params["members"]`.
     /// Native groups derive the timing slots; ordered host callbacks run
     /// between Stage borrows. An optional camera track shares the segment.
-    #[pyo3(signature = (specs, callbacks, camera, run_time, rate_func, lag_ratio, run_time_frames = None))]
+    /// Duration is an optional `(seconds, frames)` override; exactly one
+    /// unit may be present, and integer frames never pass through seconds.
+    #[pyo3(signature = (specs, callbacks, camera, duration, rate_func, lag_ratio))]
     fn _play_animations(
         slf: &Bound<'_, Self>,
         specs: Vec<Bound<'_, PyAny>>,
         callbacks: Vec<Option<Py<PyAny>>>,
         camera: Option<(Bound<'_, PyCameraFrameCore>, Bound<'_, PyCameraFrameCore>)>,
-        run_time: Option<f64>,
+        duration: Option<(Option<f64>, Option<Bound<'_, PyAny>>)>,
         rate_func: Option<Bound<'_, PyAny>>,
         lag_ratio: Option<f64>,
-        run_time_frames: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Vec<f64>> {
-        let run_time_frames = run_time_frames.map(frame_count_from_py).transpose()?;
+        let (run_time, run_time_frames) = duration.unwrap_or_default();
+        let run_time_frames = run_time_frames
+            .as_ref()
+            .map(frame_count_from_py)
+            .transpose()?;
         if run_time.is_some() && run_time_frames.is_some() {
             return Err(PyValueError::new_err(
                 "run_time and run_time_frames are mutually exclusive",
@@ -13226,6 +13231,15 @@ impl PyFrameTiming {
     }
 }
 
+type FrameTimingDescriptor<'py> = (
+    Option<f64>,
+    Option<Bound<'py, PyAny>>,
+    Option<(f64, f64)>,
+    f64,
+    Option<Vec<Bound<'py, PyAny>>>,
+    f64,
+);
+
 fn frame_timing_model(
     stage: &mut fmn_mobject::Stage,
     mobject: Mob,
@@ -13237,20 +13251,14 @@ fn frame_timing_model(
             "frame timing composition nesting exceeds 128",
         ));
     }
-    let (seconds, frames, span, lag, members, scale): (
-        Option<f64>,
-        Option<Bound<'_, PyAny>>,
-        Option<(f64, f64)>,
-        f64,
-        Option<Vec<Bound<'_, PyAny>>>,
-        f64,
-    ) = if descriptor.len()? == 5 {
-        // Existing descriptors retain their unscaled composition semantics.
-        let (seconds, frames, span, lag, members) = descriptor.extract()?;
-        (seconds, frames, span, lag, members, 1.0)
-    } else {
-        descriptor.extract()?
-    };
+    let (seconds, frames, span, lag, members, scale): FrameTimingDescriptor<'_> =
+        if descriptor.len()? == 5 {
+            // Existing descriptors retain their unscaled composition semantics.
+            let (seconds, frames, span, lag, members) = descriptor.extract()?;
+            (seconds, frames, span, lag, members, 1.0)
+        } else {
+            descriptor.extract()?
+        };
     if !scale.is_finite() || scale < 0.0 {
         return Err(PyValueError::new_err(
             "composition duration scale must be finite and nonnegative",
@@ -15138,6 +15146,46 @@ mod tests {
             py.run(source.as_c_str(), Some(globals), Some(globals))
                 .inspect_err(|error| error.print(py))
                 .expect("decoded native GIF/y4m/WAV acceptance suite");
+        });
+    }
+
+    #[test]
+    fn production_frame_pipeline_acceptance() {
+        crate::with_python_test_module("native file frame pipeline", |py, _module, globals| {
+            globals
+                .set_item(
+                    "__file__",
+                    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/frame_pipeline.py"),
+                )
+                .unwrap();
+            let source = CString::new(include_str!("../tests/frame_pipeline.py")).unwrap();
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .expect("native pipeline pixel, clock, ownership and cancellation acceptance");
+        });
+    }
+
+    #[test]
+    fn production_exact_frame_duration_acceptance() {
+        crate::with_python_test_module("exact frame durations", |py, _module, globals| {
+            let source = CString::new(include_str!("../tests/exact_frame_durations.py"))
+                .expect("frame duration suite contains no NUL");
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .expect("exact frame portal, composition, rendering and encoding acceptance");
+        });
+    }
+
+    #[test]
+    fn production_exact_frame_composition_position_acceptance() {
+        crate::with_python_test_module("exact composition positions", |py, _module, globals| {
+            let source = CString::new(include_str!(
+                "../tests/exact_frame_composition_positions.py"
+            ))
+            .expect("composition position suite contains no NUL");
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .expect("exact native composition positions and callback dispatch acceptance");
         });
     }
 
