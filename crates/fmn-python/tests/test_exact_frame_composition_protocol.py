@@ -213,6 +213,165 @@ class ExactCompositionProtocolTests(unittest.TestCase):
         )
         return child
 
+    def mutable_frame_child(self, frames_at_begin=None):
+        from test_scene_hooks_protocol import progression_environment
+        native = progression_environment()
+        scene, events, preparations = native.Scene(24), self.events, []
+        frame_timing = native._frame_timing
+
+        def prepare(descriptor, fps):
+            preparations.append((descriptor, fps))
+            return frame_timing(descriptor, fps)
+
+        native._frame_timing = prepare
+
+        class Callback(native.Animation):
+            def begin(self):
+                events.append(("python", "begin"))
+                if frames_at_begin is not None:
+                    self.run_time_frames = frames_at_begin
+
+            def interpolate(self, alpha):
+                events.append(("python", "alpha", alpha))
+
+            def finish(self):
+                events.append(("python", "finish"))
+
+        child = Callback(native.Mobject(), run_time_frames=48)
+        native._fmn_bind_frame_timing(scene, [child])
+        preparations.clear()
+        return native, child, preparations
+
+    def test_child_frame_assignment_in_begin_refreshes_only_its_prepared_duration(self):
+        _, child, preparations = self.mutable_frame_child(frames_at_begin=96)
+        driver = self.driver([48, 1], children=[child, Leaf("next", 1, self.events)])
+        parent_timing = driver.group._fmn_frame_timing
+        driver.begin()
+        driver._fmn_interpolate_at_frame(24, 24)
+        self.assertIn(("python", "alpha", .25), self.events)
+        self.assertEqual(child.get_run_time(), 4.)
+        self.assertEqual(child._fmn_frame_timing.frame_count, 96)
+        self.assertEqual(len(preparations), 1)
+        self.assertIs(driver.group._fmn_frame_timing, parent_timing)
+        self.assertEqual(parent_timing.duration, 49)
+        driver._fmn_interpolate_at_frame(48, 24)
+        self.assertLess(self.events.index(("python", "finish")),
+                        self.events.index(("next", "begin")))
+        self.assertEqual(self.events.count(("python", "begin")), 1)
+
+    def test_shared_child_frame_edit_refreshes_once_for_both_prepared_parents(self):
+        _, child, preparations = self.mutable_frame_child()
+        first = self.driver([48], children=[child])
+        second = self.driver([48], children=[child])
+        parent_timings = (first.group._fmn_frame_timing, second.group._fmn_frame_timing)
+        first.begin()
+        second.begin()
+        child.run_time_frames = 96
+        binding = child._fmn_frame_timing
+        first._fmn_interpolate_at_frame(24, 24)
+        second._fmn_interpolate_at_frame(12, 24)
+        self.assertEqual(self.events[-2:], [("python", "alpha", .25),
+                                          ("python", "alpha", .125)])
+        self.assertEqual(len(preparations), 1)
+        self.assertIs(child._fmn_frame_timing, binding)
+        self.assertIs(first.group._fmn_frame_timing, parent_timings[0])
+        self.assertIs(second.group._fmn_frame_timing, parent_timings[1])
+        self.assertEqual(self.events.count(("python", "begin")), 2)
+
+    def test_live_group_frame_edit_preserves_prepared_child_windows_and_drops_scale(self):
+        native, _, preparations = self.mutable_frame_child()
+        children = [Leaf("first", 3, self.events), Leaf("second", 5, self.events)]
+        group = native.AnimationGroup(native.Mobject(), run_time=4 / 24,
+                                      rate_func=linear, lag_ratio=1.)
+        group._native_kind = "succession"
+        group.animations = children
+        group._fmn_frame_descriptor = (None, None, None, 1., [
+            (None, 3, None, 0., None), (None, 5, None, 0., None),
+        ], .5)
+        group._fmn_timing_fps = 24
+        group._fmn_frame_timing = TimingFixture([3, 5], run_frames=4)
+        group._fmn_derived_run_time = True
+        object.__setattr__(group, "run_time", 4 / 24)
+
+        def prepare(descriptor, fps):
+            preparations.append((descriptor, fps))
+            seconds, frames, span, lag, members = descriptor
+            self.assertIsNone(seconds)
+            self.assertIsNone(span)
+            self.assertEqual(lag, 1.)
+            timing = TimingFixture([member[1] for member in members], run_frames=frames, fps=fps)
+            timing.seconds = float(timing.duration / fps)
+            return timing
+
+        native._frame_timing = prepare
+        driver = self.Driver(group, children)
+        outer = self.driver([4, 1], children=[driver, Leaf("next", 1, self.events)])
+        outer_timing = outer.group._fmn_frame_timing
+        outer.begin()
+        group.run_time_frames = 16
+        driver._fmn_interpolate_at_frame(5, 24)
+        self.assertNotIn(("second", "begin"), self.events)
+        driver._fmn_interpolate_at_frame(6, 24)
+        self.assertEqual(self.events[-2:], [("second", "begin"), ("second", "alpha", 0.)])
+        self.assertEqual(driver._fmn_frame_timing.windows, [(0, 3), (3, 8)])
+        self.assertEqual(driver._fmn_frame_timing.duration, 16)
+        self.assertEqual(len(preparations), 1)
+        self.assertEqual(len(preparations[0][0]), 5)
+        self.assertFalse(group._fmn_derived_run_time)
+        self.assertIs(outer.group._fmn_frame_timing, outer_timing)
+        self.assertEqual(outer_timing.duration, 5)
+
+    def test_bound_frame_edits_keep_zero_large_and_invalid_counts_exact(self):
+        _, child, preparations = self.mutable_frame_child()
+        for frames in (0, 1, 96, 2**53 + 1):
+            with self.subTest(frames=frames):
+                child.run_time_frames = frames
+                self.assertEqual(child._fmn_frame_timing.frame_count, frames)
+                if frames:
+                    # An exact interior midpoint has alpha .5 on the native
+                    # raw-alpha path as well as this progression fixture.
+                    child._fmn_interpolate_at_frame(Fraction(frames, 2), 24)
+                    self.assertEqual(self.events[-1], ("python", "alpha", .5))
+        self.assertEqual(len(preparations), 4)
+        binding, count = child._fmn_frame_timing, child.run_time_frames
+        for invalid in (True, -1, 1.5, 2**63):
+            with self.subTest(invalid=invalid), self.assertRaises((TypeError, ValueError, OverflowError)):
+                child.run_time_frames = invalid
+            self.assertIs(child._fmn_frame_timing, binding)
+            self.assertEqual(child.run_time_frames, count)
+
+    def test_none_frame_assignment_retains_binding_until_the_next_preparation(self):
+        native, child, preparations = self.mutable_frame_child()
+        binding, descriptor = child._fmn_frame_timing, child._fmn_frame_descriptor
+        child.run_time_frames = None
+        self.assertIsNone(child.run_time_frames)
+        self.assertEqual(child.run_time, 2.)
+        self.assertIs(child._fmn_frame_timing, binding)
+        self.assertIs(child._fmn_frame_descriptor, descriptor)
+        self.assertEqual(preparations, [])
+        native._fmn_bind_frame_timing(native.Scene(24), [child])
+        self.assertFalse(hasattr(child, "_fmn_frame_timing"))
+        self.assertFalse(hasattr(child, "_fmn_frame_descriptor"))
+        self.assertEqual(child.get_run_time(), 2.)
+
+    def test_failed_live_frame_rebinding_preserves_the_previous_duration(self):
+        native, child, preparations = self.mutable_frame_child()
+        previous = dict(child.__dict__)
+        error = ValueError("native timing preparation refused")
+
+        def refuse(descriptor, fps):
+            preparations.append((descriptor, fps))
+            raise error
+
+        native._frame_timing = refuse
+        with self.assertRaises(ValueError) as raised:
+            child.run_time_frames = 96
+        self.assertIs(raised.exception, error)
+        self.assertEqual(child.__dict__, previous)
+        child._fmn_interpolate_at_frame(Fraction(24), 24)
+        self.assertEqual(self.events[-1], ("python", "alpha", .5))
+        self.assertEqual(len(preparations), 1)
+
     def test_child_seconds_assignment_in_begin_accepts_opaque_parent_position(self):
         child = self.python_child(seconds_at_begin=4.)
         timing = OpaqueChildTimingFixture([48, 1])

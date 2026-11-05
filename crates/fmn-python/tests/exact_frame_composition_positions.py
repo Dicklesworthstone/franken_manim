@@ -41,6 +41,60 @@ def real_mixed_playback():
             assert first.alphas[-1] == second.alphas[-1] == 1.
 
 
+def live_frame_runtime_edits():
+    class ResizedProbe(Probe):
+        def __init__(self, *args, **kwargs):
+            self.resized_samples = []
+            super().__init__(*args, **kwargs)
+
+        def begin(self):
+            super().begin()
+            self.run_time_frames = 96
+
+        def interpolate_mobject(self, alpha):
+            super().interpolate_mobject(alpha)
+            if self.run_time_frames == 96:
+                self.resized_samples.append((self.scene.get_frame_count(), float(alpha)))
+
+    class ResizedSuccession(m.Succession):
+        def begin(self):
+            super().begin()
+            self.run_time_frames = 16
+
+    for fps in (24, 30):
+        scene = m.Scene(camera_config={"fps": fps, "resolution": (48, 32)})
+        first = ResizedProbe(scene, run_time_frames=48)
+        following = Probe(scene, run_time_frames=1)
+        scene.play(m.Succession(first, following))
+        # A live child edit changes its interpolation duration while the
+        # enclosing segment keeps its already-prepared windows and extent.
+        assert scene.get_frame_count() == 49
+        sample = [alpha for frame, alpha in first.resized_samples if frame == 23]
+        assert sample == [.25], (fps, sample)
+        assert first._fmn_frame_timing.frame_count == 96
+        assert first.get_run_time() == 96 / fps
+        assert following.begins == [47]
+
+        scene = m.Scene(camera_config={"fps": fps, "resolution": (48, 32)})
+        first, second = Probe(scene, run_time_frames=3), Probe(scene, run_time_frames=5)
+        nested = ResizedSuccession(first, second)
+        following = Probe(scene, run_time_frames=1)
+        scene.play(m.Succession(nested, following))
+        assert scene.get_frame_count() == 9
+        assert second.begins == [5], (fps, second.begins)
+        assert following.begins == [7]
+        assert nested._fmn_frame_timing.frame_count == 16
+
+    # Query native timing directly for huge counts; never iterate the extent.
+    scene = m.Scene(camera_config={"fps": 24})
+    child = Probe(scene, run_time_frames=48)
+    m._fmn_bind_frame_timing(scene, [child])
+    for frames in (0, 2**53 + 1):
+        child.run_time_frames = frames
+        assert child._fmn_frame_timing.frame_count == frames
+        assert Fraction(*child._fmn_frame_timing.duration_ratio) == frames
+
+
 class Child:
     def __init__(self, name, duration, events):
         self.name, self.duration, self.events = name, duration, events
@@ -117,5 +171,6 @@ def native_ratio_and_large_positions():
 
 
 real_mixed_playback()
+live_frame_runtime_edits()
 native_ratio_and_large_positions()
-print("Exact mixed, nested, rational and large-frame composition positions passed")
+print("Exact mixed, nested, live-runtime, rational and large-frame composition positions passed")
