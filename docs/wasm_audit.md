@@ -1,6 +1,19 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-run, 2026-11-05, against `Cargo.lock` `0125bee5` and `SUITE.lock`
+**Status:** the latest timing/audio merge (`fd50648d`) was also attempted through
+the original four commands, DSR `20261105T152601-24491/1`. Its frozen 4,413-entry
+source is `b27d0bb7489b4aa53d8aca30f4b8279a0a2765f68901242f8d04bee3d0cfde23`;
+all source, 19,163 SDK/test inputs and audited tools stayed unchanged. Locked
+tree, WASM target and Node smoke exit 0; digest and semantic flags below remain
+unchanged. The package/browser command exits 1 for missing `wasm-pack`, so this
+whole gate remains failed. Its actual outputs are under
+`.rch-results/fmn-execute-20261105-underline-consumer-wasm-current-merge-v1-122/`
+in the same isolated checkout. Normal RCH recovery of
+`rchw-f0993c36-03cf-4439-9756-512d757524b9` retrieves the original output and
+acknowledges native exit 1; it does not replay or convert this to a pass.
+The three lock hashes at the foot of this audit are unchanged by that merge.
+
+Earlier re-run, 2026-11-05, against `Cargo.lock` `0125bee5` and `SUITE.lock`
 `463ee0b7` (underline candidate and merged timing repair). The original locked
 normal tree, WASM target build and release Node smoke exit 0 on `vmi1227854`.
 All 4,411 product entries remain unchanged at

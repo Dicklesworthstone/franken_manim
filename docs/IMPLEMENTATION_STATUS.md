@@ -32,11 +32,47 @@ line is unchanged. This is solo semantic review and candidate-source evidence,
 not upstream-main, consumer, installed-wheel or release qualification. The native
 consumer join and ten-case certified-render scenario are in progress.
 
-The complete existing Python protocol discovery also exposed 160 setup errors
+The complete existing Python protocol discovery exposed 160 setup errors
 among 2,020 executed tests: two shared AST fixtures omitted the new production
-`_DefaultRunTime` dependency. The fixtures now load the actual production
-helpers; all original cases and assertions are retained. Their complete rerun
-is pending. Protocol doubles provide orchestration coverage, not native pixels.
+`_DefaultRunTime` dependency. A subsequent run exposed 29 missing
+`_animation_run_time_options` dependencies in the movement fixture. Both now
+load the actual production helpers, retaining all original cases and assertions.
+The complete rerun passes all 2,020 tests in 487.891 seconds on the frozen
+`beb3526f` source (DSR `20261105T023900-3655903/0`). That run also executes the
+original ten-case native underline scenario and the 28-case script-metrics
+scenario successfully. Protocol doubles provide orchestration coverage, not
+native pixels.
+
+The later timing/audio merge (`fd50648d`) adds exact nested composition
+positions and restores an older private play signature. Fresh review restores
+the grouped duration argument and names its expanded timing descriptor without
+lint suppressions. The existing exact-position Python acceptance script is now
+registered in the active root Rust test module. The underline scenario also requires
+each of its 13 rules to change actual certified pixels when hidden individually;
+glyph ink alone cannot satisfy that assertion. These latest changes still need
+their own native run and bare Cargo gate; the earlier 2,020-test result does not
+qualify them.
+
+The latest native all-target build passes on the 4,413-file `097492df` snapshot.
+Strict all-feature Clippy then rejects a constant-folded floating-point assertion
+in a peer composition regression (DSR `20261105T154659-220980/1`). The same
+rounding check now reads the actual resolved intervals; its lifecycle and exact
+boundary assertions remain intact. The full rerun is pending. The failed run's
+source, SDK and tool checks all remained unchanged, and normal RCH recovery
+retrieved the original failure without replay.
+
+The following run passes the build, strict Clippy, 435 animation tests, nine
+audio-window tests, four native Studio animation tests, all 2,050 SDK-backed
+protocol tests, six font-policy tests, the strengthened underline scenario,
+20 native-render tests and seven real-ffmpeg video tests. It then correctly
+fails its zero-test guard: the requested exact-position filter selects zero of
+165 tests (DSR `20261105T161511-526166/1`). Inspection shows that
+`portal_pipeline.rs` is no longer linked into the crate. The earlier statement
+that its acceptance entry points had compiled was wrong. The three existing
+pipeline, exact-duration and exact-position script entry points have been moved
+to the active `lib.rs` test module; Cargo listing and real execution remain
+required. No compiled-portal pass follows from the empty run, and the complete
+scanner and bare Cargo gates have not yet executed for this candidate.
 
 The main vision gaps remain concrete and tracked:
 
