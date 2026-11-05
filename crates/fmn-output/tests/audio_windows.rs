@@ -147,3 +147,126 @@ fn oversized_overflowing_and_invalid_worker_windows_fail_before_allocation() {
         Err(SoundError::TooManyThreads { .. })
     ));
 }
+
+#[test]
+fn unrepresentable_finite_offsets_cannot_wrap_into_the_audible_timeline() {
+    // Include fractional significands: the lost high bits need not come from
+    // an exact power of two. Every value is finite but outside the i64 grid.
+    for (sample_rate, bits) in [
+        (48_000, (1023_u64 + 121) << 52),
+        (48_000, ((1023_u64 + 173) << 52) | 1),
+        (44_100, ((1023_u64 + 178) << 52) | 0x1234_5678_9abc),
+        (29, ((1023_u64 + 179) << 52) | 2),
+        (1, (1023_u64 + 128) << 52),
+        (1, ((1023_u64 + 179) << 52) | 0x2468_ace0),
+    ] {
+        let pcm = || WavAudio {
+            channels: 1,
+            sample_rate,
+            format: SampleFormat::F32,
+            samples: vec![0.5],
+        };
+        let mut mixer = SoundMixer::new(MixerConfig {
+            channels: 1,
+            sample_rate,
+            max_output_frames: 16,
+        })
+        .unwrap();
+        mixer.add(SoundCue::new(pcm(), 0, 24)).unwrap();
+        for sign in [1.0, -1.0] {
+            let mut cue = SoundCue::new(pcm(), 0, 24);
+            cue.time_offset = sign * f64::from_bits(bits);
+            assert!(
+                matches!(mixer.add(cue), Err(SoundError::PlacementOutOfRange)),
+                "rate {sample_rate}, offset bits {:#018x}",
+                (sign * f64::from_bits(bits)).to_bits(),
+            );
+            assert_eq!(mixer.len(), 1, "a rejected cue must not enter the timeline");
+            assert_eq!(mixer.mix(1).unwrap().audio.samples, [0.5]);
+        }
+    }
+}
+
+#[test]
+fn signed_sample_boundary_offsets_remain_exact_without_large_allocations() {
+    let limit = f64::from_bits((1023_u64 + 63) << 52);
+    let below = f64::from_bits(limit.to_bits() - 1);
+    let frame = i64::MAX - 1023;
+    let pcm = || WavAudio {
+        channels: 1,
+        sample_rate: 1,
+        format: SampleFormat::F32,
+        samples: vec![0.25, 0.75],
+    };
+    // Opposing exact frame positions keep the rendered windows tiny while
+    // proving that both nearby representable offsets preserve their value.
+    for (frame, offset) in [(-frame, below), (frame, -below)] {
+        let mut mixer = SoundMixer::new(MixerConfig {
+            channels: 1,
+            sample_rate: 1,
+            max_output_frames: 16,
+        })
+        .unwrap();
+        let mut cue = SoundCue::new(pcm(), frame, 1);
+        cue.time_offset = offset;
+        mixer.add(cue).unwrap();
+        assert_eq!(mixer.mix(1).unwrap().audio.samples, [0.25, 0.75]);
+    }
+    let mut mixer = SoundMixer::new(MixerConfig {
+        channels: 1,
+        sample_rate: 1,
+        max_output_frames: 16,
+    })
+    .unwrap();
+    let mut cue = SoundCue::new(pcm(), i64::MAX, 1);
+    cue.time_offset = -limit; // i64::MIN is representable; the start is -1.
+    mixer.add(cue).unwrap();
+    assert_eq!(mixer.mix(1).unwrap().audio.samples, [0.75]);
+    for offset in [limit, -f64::from_bits(limit.to_bits() + 1)] {
+        let mut cue = SoundCue::new(pcm(), 0, 1);
+        cue.time_offset = offset;
+        assert!(matches!(
+            mixer.add(cue),
+            Err(SoundError::PlacementOutOfRange)
+        ));
+        assert_eq!(mixer.len(), 1);
+    }
+}
+
+#[test]
+fn representable_offset_rounding_keeps_half_sample_and_subnormal_behavior() {
+    let below_half = f64::from_bits(0.5_f64.to_bits() - 1);
+    let above_half = f64::from_bits(0.5_f64.to_bits() + 1);
+    for (offset, start) in [
+        (below_half, 2),
+        (0.5, 3),
+        (above_half, 3),
+        (-below_half, 2),
+        (-0.5, 1),
+        (-above_half, 1),
+        (f64::from_bits(1), 2),
+        (-f64::from_bits(1), 2),
+    ] {
+        let mut mixer = SoundMixer::new(MixerConfig {
+            channels: 1,
+            sample_rate: 1,
+            max_output_frames: 16,
+        })
+        .unwrap();
+        let mut cue = SoundCue::new(
+            WavAudio {
+                channels: 1,
+                sample_rate: 1,
+                format: SampleFormat::F32,
+                samples: vec![0.5],
+            },
+            2,
+            1,
+        );
+        cue.time_offset = offset;
+        mixer.add(cue).unwrap();
+        let mut expected = vec![0.0; start + 1];
+        expected[start] = 0.5;
+        assert_eq!(mixer.mix(1).unwrap().audio.samples, expected);
+    }
+}
