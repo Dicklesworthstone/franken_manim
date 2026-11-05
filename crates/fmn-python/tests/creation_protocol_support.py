@@ -247,7 +247,7 @@ def environment():
              _FMN_ROOT=SimpleNamespace(_composition_intervals=intervals),
              prepare_animation=lambda animation: animation.build() if isinstance(animation, _AnimationBuilder) else animation)
     g["g"] = g
-    names = ("_NativeAnimation", "ShowPartial", "ShowCreation", "Uncreate", "DrawBorderThenFill", "Write",
+    names = ("_DefaultRunTime", "_animation_run_time_options", "_NativeAnimation", "ShowPartial", "ShowCreation", "Uncreate", "DrawBorderThenFill", "Write",
              "ShowPassingFlash", "ShowCreationThenDestruction", "_requires_python_animation",
              "_composition_member_run_time", "_composition_timings", "_composition_timeline_position",
              "_CompositionCallbackDriver")
@@ -255,6 +255,8 @@ def environment():
     nodes = {node.name: node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
     for name in names:
         exec(compile(ast.Module([nodes[name]], []), str(BOOTSTRAP), "exec"), g)
+    # Lift the shared validator together with the constructor body.
+    g["_validate_frame_count"] = semantics._validate_frame_count
     install = next(node for node in ast.parse(SOURCE.read_text()).body if isinstance(node, ast.FunctionDef) and node.name == "install")
     for node in install.body:
         # install()'s captures run first: the lifted functions close over them.

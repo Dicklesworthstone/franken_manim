@@ -55,19 +55,76 @@ use crate::animation::{
     AnimConfig, AnimError, AnimState, Animation, AnimationSignature, RateFunc, check_updater_error,
     clip, time_spanned_alpha, validate_begin_state,
 };
+use crate::clock::{Duration, FrameDuration};
 
 /// The Reference's `DEFAULT_LAGGED_START_LAG_RATIO`.
 pub const DEFAULT_LAGGED_START_LAG_RATIO: f64 = 0.05;
 
 // ---------------------------------------------------------------- intervals
 
-/// One member's window on a composition's internal timeline, in seconds.
+/// One member's window on a composition's internal timeline. Ordinary
+/// timing tables use seconds; frame-native sampling projections use frames.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Interval {
     /// When the member starts.
     pub start: f64,
     /// When the member reaches its own alpha 1.
     pub end: f64,
+}
+
+/// A prepared composition's interpolation windows and sampling law.
+///
+/// Host callback drivers use this projection to share Choreo's frame
+/// boundary arithmetic. It is produced after [`Animation::prepare_timing`].
+/// The windows are floating-point interpolation coordinates; exact frame
+/// allocation remains the responsibility of [`FrameDuration`].
+#[derive(Clone, Debug)]
+pub struct CompositionTiming {
+    intervals: Vec<Interval>,
+    max_end: f64,
+    frame_native: bool,
+    state: AnimState,
+}
+
+impl CompositionTiming {
+    /// Member windows in frame units when [`Self::is_frame_native`] is
+    /// true, and in seconds otherwise.
+    #[must_use]
+    pub fn intervals(&self) -> &[Interval] {
+        &self.intervals
+    }
+
+    /// The largest endpoint, in the same units as [`Self::intervals`].
+    #[must_use]
+    pub fn max_end(&self) -> f64 {
+        self.max_end
+    }
+
+    /// Whether the interpolation windows use frame coordinates.
+    #[must_use]
+    pub fn is_frame_native(&self) -> bool {
+        self.frame_native
+    }
+
+    /// Apply the native composition's complete timing pipeline at a
+    /// clock frame or a parent's local frame position.
+    #[must_use]
+    pub fn position_at_frame(&self, frame: f64, fps: u32) -> f64 {
+        timeline_frame_position(&self.state, frame, fps, self.max_end)
+    }
+
+    /// The exact native rate-function input at a frame position. A host
+    /// providing its own callable evaluates it at this alpha and multiplies
+    /// the result by [`Self::max_end`]. An identity rate with no time span
+    /// should use [`Self::position_at_frame`] to retain integer boundaries.
+    #[must_use]
+    pub fn rate_alpha_at_frame(&self, frame: f64, fps: u32) -> f64 {
+        time_spanned_alpha(
+            self.state.frame_alpha(frame, fps),
+            self.state.config.run_time,
+            self.state.config.time_span,
+        )
+    }
 }
 
 impl Interval {
@@ -88,6 +145,10 @@ impl Interval {
         } else {
             clip((time - self.start) / duration, 0.0, 1.0)
         }
+    }
+
+    pub(crate) fn interior_frame(&self, time: f64) -> Option<f64> {
+        (time > self.start && time < self.end).then_some(time - self.start)
     }
 }
 
@@ -114,6 +175,92 @@ pub fn build_timings(run_times: &[f64], lag_ratio: f64) -> Vec<Interval> {
 /// `default=0`).
 fn max_end_time(timings: &[Interval]) -> f64 {
     timings.iter().map(|i| i.end).fold(0.0, f64::max)
+}
+
+struct ResolvedTimings {
+    seconds: Vec<Interval>,
+    frames: Option<Vec<Interval>>,
+    duration: FrameDuration,
+}
+
+/// Preserve the Reference's float operation order for an all-seconds
+/// composition. A composition containing an exact-frame member instead
+/// builds its entire interval algebra in exact frame units, with one
+/// ceiling after the longest endpoint has been selected.
+fn resolve_timings(
+    animations: &[Box<dyn Animation>],
+    lag_ratio: f64,
+    fps: u32,
+) -> Result<ResolvedTimings, AnimError> {
+    let durations = animations
+        .iter()
+        .map(|animation| animation.duration_on_grid(fps))
+        .collect::<Result<Vec<_>, _>>()?;
+    if durations.iter().all(|duration| !duration.is_frame_native()) {
+        let seconds = build_timings(
+            &durations
+                .iter()
+                .map(FrameDuration::to_seconds)
+                .collect::<Vec<_>>(),
+            lag_ratio,
+        );
+        let duration = FrameDuration::new(max_end_time(&seconds), fps).map_err(AnimError::Clock)?;
+        return Ok(ResolvedTimings {
+            seconds,
+            frames: None,
+            duration,
+        });
+    }
+    let mut start = FrameDuration::new(Duration::Frames(0), fps).map_err(AnimError::Clock)?;
+    let mut duration = start.clone();
+    let mut seconds = Vec::with_capacity(durations.len());
+    let mut frames = Vec::with_capacity(durations.len());
+    for member in durations {
+        let end = start.checked_add(&member).map_err(AnimError::Clock)?;
+        if end.cmp_duration(&duration).is_gt() {
+            duration = end.clone();
+        }
+        seconds.push(Interval {
+            start: start.to_seconds(),
+            end: end.to_seconds(),
+        });
+        frames.push(Interval {
+            start: start.frame_units(),
+            end: end.frame_units(),
+        });
+        start = start
+            .checked_add(&member.checked_scale(lag_ratio).map_err(AnimError::Clock)?)
+            .map_err(AnimError::Clock)?;
+    }
+    duration.n_frames().map_err(AnimError::Clock)?;
+    Ok(ResolvedTimings {
+        seconds,
+        frames: Some(frames),
+        duration,
+    })
+}
+
+fn group_duration(
+    config: &AnimConfig,
+    derived: FrameDuration,
+    explicit_seconds: bool,
+    fps: u32,
+) -> Result<FrameDuration, AnimError> {
+    if config.run_time_frames.is_some() || explicit_seconds {
+        return config.duration_on_grid(fps);
+    }
+    let Some((_, end)) = config.time_span else {
+        return Ok(derived);
+    };
+    if !derived.is_frame_native() {
+        return FrameDuration::new(derived.to_seconds().max(end), fps).map_err(AnimError::Clock);
+    }
+    let span = FrameDuration::new(end, fps).map_err(AnimError::Clock)?;
+    Ok(if span.cmp_duration(&derived).is_gt() {
+        span.into_frame_native()
+    } else {
+        derived
+    })
 }
 
 /// The shared construction step: the timing table, the derived run time, and
@@ -173,6 +320,37 @@ pub(crate) fn timeline_position(config: &AnimConfig, alpha: f64, max_end_time: f
     config.rate_func.eval(spanned) * max_end_time
 }
 
+pub(crate) fn timeline_frame_position(
+    state: &AnimState,
+    frame: f64,
+    fps: u32,
+    max_end: f64,
+) -> f64 {
+    if let Some(duration) = state.frame_units()
+        && state.config.time_span.is_none()
+        && state.config.rate_func.is_linear()
+    {
+        // An unscaled composition keeps the incoming frame verbatim. For
+        // a scaled composition divide last, so integral products at a
+        // member boundary are not perturbed by a rounded scale factor.
+        if max_end == duration {
+            frame
+        } else {
+            let product = frame * max_end;
+            if product.is_finite() {
+                product / duration
+            } else {
+                // A finite seconds-based member may be compressed into a
+                // short frame-native group. Its internal extent can exceed
+                // f64::MAX / frame even though the normalized position fits.
+                (frame / duration) * max_end
+            }
+        }
+    } else {
+        timeline_position(&state.config, state.frame_alpha(frame, fps), max_end)
+    }
+}
+
 /// The constructor-surface defaults every composition shares: the derived
 /// run time and the identity rate curve (see the module note on BN-11).
 fn group_config(name: &str, run_time: f64, lag_ratio: f64) -> AnimConfig {
@@ -203,6 +381,11 @@ pub struct AnimationGroup {
     updater_error: Option<AnimError>,
     begun: usize,
     finished: usize,
+    layout_lag_ratio: f64,
+    timing_run_time: f64,
+    run_time_override: bool,
+    frame_timings: Option<Vec<Interval>>,
+    max_frame_end: Option<f64>,
 }
 
 impl AnimationGroup {
@@ -255,6 +438,11 @@ impl AnimationGroup {
             updater_error: None,
             begun: 0,
             finished: 0,
+            layout_lag_ratio: lag_ratio,
+            timing_run_time: max_end_time,
+            run_time_override: false,
+            frame_timings: None,
+            max_frame_end: None,
         })
     }
 
@@ -265,6 +453,15 @@ impl AnimationGroup {
     #[must_use]
     pub fn with_run_time(mut self, run_time: f64) -> Self {
         self.state.config.run_time = run_time;
+        self.state.config.run_time_frames = None;
+        self.run_time_override = true;
+        self
+    }
+
+    /// Override the derived duration with exactly this many scene frames.
+    #[must_use]
+    pub fn with_run_time_frames(mut self, frames: u64) -> Self {
+        self.state.config.run_time_frames = Some(frames);
         self
     }
 
@@ -300,6 +497,38 @@ impl AnimationGroup {
         self.max_end_time
     }
 
+    pub(crate) fn interpolation_timings(&self) -> &[Interval] {
+        self.frame_timings.as_deref().unwrap_or(&self.timings)
+    }
+
+    pub(crate) fn interpolation_max_end(&self) -> f64 {
+        self.max_frame_end.unwrap_or(self.max_end_time)
+    }
+
+    pub(crate) fn uses_frame_timings(&self) -> bool {
+        self.frame_timings.is_some()
+    }
+
+    fn interpolate_position(&mut self, stage: &mut Stage, time: f64, fps: Option<u32>) {
+        if retain_updater_error(stage, &mut self.updater_error) {
+            return;
+        }
+        let timings = self.frame_timings.as_deref().unwrap_or(&self.timings);
+        let frame_grid = fps.filter(|_| self.frame_timings.is_some());
+        for (animation, interval) in self.animations.iter_mut().zip(timings) {
+            if let Some(fps) = frame_grid
+                && let Some(frame) = interval.interior_frame(time)
+            {
+                animation.interpolate_at_frame(stage, frame, fps);
+            } else {
+                animation.interpolate(stage, interval.sub_alpha(time));
+            }
+            if retain_updater_error(stage, &mut self.updater_error) {
+                return;
+            }
+        }
+    }
+
     /// The container mobject the composition animates.
     #[must_use]
     pub fn group(&self) -> Mob {
@@ -317,6 +546,66 @@ macro_rules! composite_common {
 
         fn state_mut(&mut self) -> &mut AnimState {
             &mut self.state
+        }
+
+        fn duration_on_grid(&self, fps: u32) -> Result<FrameDuration, AnimError> {
+            let layout = resolve_timings(&self.animations, self.layout_lag_ratio, fps)?;
+            let explicit = self.run_time_override
+                || self.state.config.run_time.to_bits() != self.timing_run_time.to_bits();
+            group_duration(&self.state.config, layout.duration, explicit, fps)
+        }
+
+        fn prepare_timing(&mut self, fps: u32) -> Result<(), AnimError> {
+            let explicit = self.run_time_override
+                || self.state.config.run_time.to_bits() != self.timing_run_time.to_bits();
+            for animation in &mut self.animations {
+                animation.prepare_timing(fps)?;
+            }
+            let layout = resolve_timings(&self.animations, self.layout_lag_ratio, fps)?;
+            let duration =
+                group_duration(&self.state.config, layout.duration.clone(), explicit, fps)?;
+            self.max_end_time = layout.duration.to_seconds();
+            self.max_frame_end = layout
+                .frames
+                .as_ref()
+                .map(|_| layout.duration.frame_units());
+            self.timings = layout.seconds;
+            self.frame_timings = layout.frames;
+            if !explicit && self.state.config.run_time_frames.is_none() {
+                self.state.config.run_time = duration.to_seconds();
+            }
+            self.state.bind_duration(&duration);
+            self.timing_run_time = self.state.config.run_time;
+            self.run_time_override = explicit;
+            Ok(())
+        }
+
+        fn composition_timing(&self) -> Option<CompositionTiming> {
+            Some(CompositionTiming {
+                intervals: self.frame_timings.as_ref().unwrap_or(&self.timings).clone(),
+                max_end: self.max_frame_end.unwrap_or(self.max_end_time),
+                frame_native: self.frame_timings.is_some(),
+                state: self.state.clone(),
+            })
+        }
+
+        fn update_rate_info(
+            &mut self,
+            run_time: Option<f64>,
+            rate_func: Option<RateFunc>,
+            lag_ratio: Option<f64>,
+        ) {
+            if let Some(seconds) = run_time {
+                self.state.config.run_time = seconds;
+                self.state.config.run_time_frames = None;
+                self.run_time_override = true;
+            }
+            if let Some(rate) = rate_func {
+                self.state.config.rate_func = rate;
+            }
+            if let Some(lag) = lag_ratio {
+                self.state.config.lag_ratio = lag;
+            }
         }
 
         fn collect_resumed_updater_mobjects(&self, out: &mut Vec<Mob>) {
@@ -455,13 +744,16 @@ impl Animation for AnimationGroup {
         if retain_updater_error(stage, &mut self.updater_error) {
             return;
         }
-        let time = timeline_position(&self.state.config, alpha, self.max_end_time);
-        for (animation, interval) in self.animations.iter_mut().zip(&self.timings) {
-            animation.interpolate(stage, interval.sub_alpha(time));
-            if retain_updater_error(stage, &mut self.updater_error) {
-                return;
-            }
+        let time = timeline_position(&self.state.config, alpha, self.interpolation_max_end());
+        self.interpolate_position(stage, time, None);
+    }
+
+    fn interpolate_at_frame(&mut self, stage: &mut Stage, frame: f64, fps: u32) {
+        if retain_updater_error(stage, &mut self.updater_error) {
+            return;
         }
+        let time = timeline_frame_position(&self.state, frame, fps, self.interpolation_max_end());
+        self.interpolate_position(stage, time, Some(fps));
     }
 
     /// The Reference's `AnimationGroup.update_mobjects`: every member ticks
@@ -591,6 +883,11 @@ pub struct Succession {
     replayable: bool,
     replaying: bool,
     last_time: Option<f64>,
+    layout_lag_ratio: f64,
+    timing_run_time: f64,
+    run_time_override: bool,
+    frame_timings: Option<Vec<Interval>>,
+    max_frame_end: Option<f64>,
 }
 
 /// At most three content checkpoints per initialized member, independent of
@@ -656,6 +953,11 @@ impl Succession {
             replayable: false,
             replaying: false,
             last_time: None,
+            layout_lag_ratio: lag_ratio,
+            timing_run_time: max_end_time,
+            run_time_override: false,
+            frame_timings: None,
+            max_frame_end: None,
         })
     }
 
@@ -663,6 +965,15 @@ impl Succession {
     #[must_use]
     pub fn with_run_time(mut self, run_time: f64) -> Self {
         self.state.config.run_time = run_time;
+        self.state.config.run_time_frames = None;
+        self.run_time_override = true;
+        self
+    }
+
+    /// Override the derived duration with exactly this many scene frames.
+    #[must_use]
+    pub fn with_run_time_frames(mut self, frames: u64) -> Self {
+        self.state.config.run_time_frames = Some(frames);
         self
     }
 
@@ -709,7 +1020,13 @@ impl Succession {
     /// would also be inside.
     fn member_at(&self, time: f64) -> usize {
         let mut index = 0;
-        for (i, interval) in self.timings.iter().enumerate() {
+        for (i, interval) in self
+            .frame_timings
+            .as_deref()
+            .unwrap_or(&self.timings)
+            .iter()
+            .enumerate()
+        {
             if time >= interval.start {
                 index = i;
             }
@@ -825,6 +1142,49 @@ impl Succession {
             }
         }
     }
+
+    fn interpolate_position(&mut self, stage: &mut Stage, time: f64, fps: Option<u32>) {
+        if retain_updater_error(stage, &mut self.deferred)
+            || self.deferred.is_some()
+            || self.playback.is_empty()
+        {
+            return;
+        }
+        let time = clip(time, 0.0, self.max_frame_end.unwrap_or(self.max_end_time));
+        self.replayable &= self.replay_sources_are_static(stage);
+        if self.last_time.is_some_and(|last| time < last) {
+            if !self.replayable {
+                self.deferred = Some(AnimError::StatefulSuccessionRewind);
+                return;
+            }
+            self.replaying = true;
+        }
+        let target = self.member_at(time);
+        self.advance_to(stage, target);
+        if self.deferred.is_some() {
+            return;
+        }
+        if self.replayable && self.replaying {
+            if let Err(error) = self.restore_member(stage, target) {
+                self.deferred = Some(error);
+                return;
+            }
+            self.animations[target].prepare_interpolation_replay();
+        }
+        self.active = target;
+        let interval = self.frame_timings.as_deref().unwrap_or(&self.timings)[self.active];
+        if let Some(fps) = fps.filter(|_| self.frame_timings.is_some())
+            && let Some(frame) = interval.interior_frame(time)
+        {
+            self.animations[self.active].interpolate_at_frame(stage, frame, fps);
+        } else {
+            self.animations[self.active].interpolate(stage, interval.sub_alpha(time));
+        }
+        if retain_updater_error(stage, &mut self.deferred) {
+            return;
+        }
+        self.last_time = Some(time);
+    }
 }
 
 impl Animation for Succession {
@@ -865,41 +1225,18 @@ impl Animation for Succession {
         {
             return;
         }
-        // The rational clock may round the final raw alpha above one. Its
-        // clipped endpoint and finish(1) are the same timeline position, not
-        // a backwards traversal of stateful content.
-        let time = clip(
-            timeline_position(&self.state.config, alpha, self.max_end_time),
-            0.0,
-            self.max_end_time,
-        );
-        self.replayable &= self.replay_sources_are_static(stage);
-        if self.last_time.is_some_and(|last| time < last) {
-            if !self.replayable {
-                self.deferred = Some(AnimError::StatefulSuccessionRewind);
-                return;
-            }
-            self.replaying = true;
-        }
-        let target = self.member_at(time);
-        self.advance_to(stage, target);
-        if self.deferred.is_some() {
+        let max_end = self.max_frame_end.unwrap_or(self.max_end_time);
+        let time = timeline_position(&self.state.config, alpha, max_end);
+        self.interpolate_position(stage, time, None);
+    }
+
+    fn interpolate_at_frame(&mut self, stage: &mut Stage, frame: f64, fps: u32) {
+        if retain_updater_error(stage, &mut self.deferred) || self.deferred.is_some() {
             return;
         }
-        if self.replayable && self.replaying {
-            if let Err(error) = self.restore_member(stage, target) {
-                self.deferred = Some(error);
-                return;
-            }
-            self.animations[target].prepare_interpolation_replay();
-        }
-        self.active = target;
-        let sub_alpha = self.timings[self.active].sub_alpha(time);
-        self.animations[self.active].interpolate(stage, sub_alpha);
-        if retain_updater_error(stage, &mut self.deferred) {
-            return;
-        }
-        self.last_time = Some(time);
+        let max_end = self.max_frame_end.unwrap_or(self.max_end_time);
+        let time = timeline_frame_position(&self.state, frame, fps, max_end);
+        self.interpolate_position(stage, time, Some(fps));
     }
 
     /// The Reference's `Succession.update_mobjects`: only the active member

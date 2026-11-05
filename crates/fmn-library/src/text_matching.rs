@@ -860,6 +860,25 @@ macro_rules! matching_animation {
             fn state_mut(&mut self) -> &mut AnimState {
                 self.inner.group.state_mut()
             }
+            fn duration_on_grid(&self, fps: u32) -> Result<fmn_anim::FrameDuration, AnimError> {
+                self.inner.group.duration_on_grid(fps)
+            }
+            fn prepare_timing(&mut self, fps: u32) -> Result<(), AnimError> {
+                self.inner.group.prepare_timing(fps)
+            }
+            fn composition_timing(&self) -> Option<fmn_anim::CompositionTiming> {
+                self.inner.group.composition_timing()
+            }
+            fn update_rate_info(
+                &mut self,
+                run_time: Option<f64>,
+                rate_func: Option<RateFunc>,
+                lag_ratio: Option<f64>,
+            ) {
+                self.inner
+                    .group
+                    .update_rate_info(run_time, rate_func, lag_ratio);
+            }
             fn all_mobjects(&self) -> Vec<Mob> {
                 self.inner.inventory(self.inner.group.all_mobjects())
             }
@@ -894,6 +913,12 @@ macro_rules! matching_animation {
             fn interpolate(&mut self, stage: &mut Stage, alpha: f64) {
                 if !self.inner.retain_error(stage) {
                     self.inner.group.interpolate(stage, alpha);
+                    self.inner.retain_error(stage);
+                }
+            }
+            fn interpolate_at_frame(&mut self, stage: &mut Stage, frame: f64, fps: u32) {
+                if !self.inner.retain_error(stage) {
+                    self.inner.group.interpolate_at_frame(stage, frame, fps);
                     self.inner.retain_error(stage);
                 }
             }

@@ -27,8 +27,8 @@ mod parallel;
 pub use idle::IdleFrame;
 
 use fmn_anim::{
-    AnimError, Animation, AnimationBoundary, BeginState, FrameMetadata, FramePacket, ImpureEffect,
-    OpenSegment, OpenWait, Purity, RateFunc, RationalFrameClock, RationalTime,
+    AnimError, Animation, AnimationBoundary, BeginState, Duration, FrameMetadata, FramePacket,
+    ImpureEffect, OpenSegment, OpenWait, Purity, RateFunc, RationalFrameClock, RationalTime,
     SceneUpdaterBoundary, SegmentKind, SegmentReport, abort_open_play, abort_open_wait,
     complete_play_frame_with_capture, complete_wait_frame_with_capture, finish_open_play,
     finish_open_play_animations, finish_open_wait, open_play_with_mode, open_wait,
@@ -174,6 +174,9 @@ impl RuntimeConfig {
 pub struct PlayOverrides {
     /// Override every member's run time.
     pub run_time: Option<f64>,
+    /// Override every member's duration with an exact number of frames on
+    /// this scene's grid. Mutually exclusive with `run_time`.
+    pub run_time_frames: Option<u64>,
     /// Override every member's rate function.
     pub rate_func: Option<RateFunc>,
     /// Override every member's lag ratio.
@@ -184,6 +187,7 @@ impl fmt::Debug for PlayOverrides {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PlayOverrides")
             .field("run_time", &self.run_time)
+            .field("run_time_frames", &self.run_time_frames)
             .field("has_rate_func", &self.rate_func.is_some())
             .field("lag_ratio", &self.lag_ratio)
             .finish()
@@ -706,6 +710,7 @@ pub struct Scene {
     rng_root: RngRoot,
     scene_rng: Pcg64Dxsm,
     play_count: u64,
+    frame_duration_requested: bool,
     skipping: bool,
     original_skipping: bool,
     preflight_done: bool,
@@ -853,6 +858,7 @@ impl Scene {
             rng_root,
             scene_rng,
             play_count: 0,
+            frame_duration_requested: false,
             skipping,
             original_skipping,
             preflight_done: false,
@@ -892,6 +898,25 @@ impl Scene {
     #[must_use]
     pub fn play_count(&self) -> u64 {
         self.play_count
+    }
+
+    /// Whether this scene has admitted an explicitly frame-native segment.
+    ///
+    /// Output hosts use this to distinguish a requested zero-frame movie
+    /// from a static scene eligible for an implicit final still. This is
+    /// authoring history, not part of the restorable scene clock.
+    #[must_use]
+    pub fn has_frame_duration_requests(&self) -> bool {
+        self.frame_duration_requested
+    }
+
+    fn note_frame_play(&mut self, animations: &[Box<dyn Animation>]) -> Result<(), SceneError> {
+        for animation in animations {
+            if animation.duration_on_grid(self.fps())?.is_frame_native() {
+                self.frame_duration_requested = true;
+            }
+        }
+        Ok(())
     }
 
     /// Current effective skip status.
@@ -1194,6 +1219,11 @@ impl Scene {
         overrides: PlayOverrides,
         sink: &mut dyn SceneSink,
     ) -> Result<Option<SteppedPlay>, SceneError> {
+        if overrides.run_time.is_some() && overrides.run_time_frames.is_some() {
+            return Err(SceneError::InvalidConfig(
+                "run_time and run_time_frames are mutually exclusive",
+            ));
+        }
         if animations.is_empty() {
             return Ok(None);
         }
@@ -1203,8 +1233,12 @@ impl Scene {
                 overrides.rate_func.clone(),
                 overrides.lag_ratio,
             );
+            if let Some(frames) = overrides.run_time_frames {
+                animation.state_mut().config.run_time_frames = Some(frames);
+            }
         }
         validate_play(&self.stage, &self.clock, &animations)?;
+        self.note_frame_play(&animations)?;
         let animation_anchors: Vec<Mob> = animations
             .iter()
             .flat_map(|animation| animation.preflight_mobjects())
@@ -1386,6 +1420,11 @@ impl Scene {
         overrides: PlayOverrides,
         sink: &mut dyn SceneSink,
     ) -> Result<Option<SegmentReport>, SceneError> {
+        if overrides.run_time.is_some() && overrides.run_time_frames.is_some() {
+            return Err(SceneError::InvalidConfig(
+                "run_time and run_time_frames are mutually exclusive",
+            ));
+        }
         if animations.is_empty() {
             return Ok(None);
         }
@@ -1395,8 +1434,12 @@ impl Scene {
                 overrides.rate_func.clone(),
                 overrides.lag_ratio,
             );
+            if let Some(frames) = overrides.run_time_frames {
+                animation.state_mut().config.run_time_frames = Some(frames);
+            }
         }
         validate_play(&self.stage, &self.clock, &animations)?;
+        self.note_frame_play(&animations)?;
         let animation_anchors: Vec<Mob> = animations
             .iter()
             .flat_map(|animation| animation.preflight_mobjects())
@@ -1478,7 +1521,11 @@ impl Scene {
         duration: Option<f64>,
         sink: &mut dyn SceneSink,
     ) -> Result<SteppedWait, SceneError> {
-        self.begin_stepped_wait_with_updates(duration, sink, false)
+        self.begin_stepped_wait_with_updates(
+            Duration::Seconds(duration.unwrap_or(self.config.default_wait_time)),
+            sink,
+            false,
+        )
     }
 
     /// Begin after the unborrowed host completed the whole initial zero-dt
@@ -1488,22 +1535,41 @@ impl Scene {
         duration: Option<f64>,
         sink: &mut dyn SceneSink,
     ) -> Result<SteppedWait, SceneError> {
-        self.begin_stepped_wait_with_updates(duration, sink, true)
+        self.begin_stepped_wait_with_updates(
+            Duration::Seconds(duration.unwrap_or(self.config.default_wait_time)),
+            sink,
+            true,
+        )
+    }
+
+    /// Begin an exact-frame wait, yielding at the same updater boundaries
+    /// as [`Self::begin_stepped_wait`].
+    pub fn begin_stepped_wait_frames(
+        &mut self,
+        frames: u64,
+        sink: &mut dyn SceneSink,
+    ) -> Result<SteppedWait, SceneError> {
+        self.begin_stepped_wait_with_updates(Duration::Frames(frames), sink, false)
+    }
+
+    /// Begin an exact-frame wait after the host completed the initial
+    /// zero-dt updater pass. That pass is not repeated.
+    pub fn begin_stepped_wait_frames_after_updaters(
+        &mut self,
+        frames: u64,
+        sink: &mut dyn SceneSink,
+    ) -> Result<SteppedWait, SceneError> {
+        self.begin_stepped_wait_with_updates(Duration::Frames(frames), sink, true)
     }
 
     fn begin_stepped_wait_with_updates(
         &mut self,
-        duration: Option<f64>,
+        duration: Duration,
         sink: &mut dyn SceneSink,
         updaters_completed: bool,
     ) -> Result<SteppedWait, SceneError> {
-        let duration = duration.unwrap_or(self.config.default_wait_time);
-        if !duration.is_finite() || duration < 0.0 {
-            return Err(SceneError::InvalidConfig(
-                "wait duration must be finite and non-negative",
-            ));
-        }
-        self.clock.segment(duration).map_err(AnimError::Clock)?;
+        self.validate_wait_duration(duration)?;
+        self.frame_duration_requested |= matches!(duration, Duration::Frames(_));
         self.pre_play(SegmentKind::Wait, &[], sink)?;
         self.emit_event(sink, LifecyclePhase::DriveSegment, Some(SegmentKind::Wait))?;
         let open = if updaters_completed {
@@ -1619,7 +1685,23 @@ impl Scene {
         duration: Option<f64>,
         sink: &mut dyn SceneSink,
     ) -> Result<SegmentReport, SceneError> {
-        self.wait_impl(duration, None, false, sink)
+        self.wait_impl(
+            Duration::Seconds(duration.unwrap_or(self.config.default_wait_time)),
+            None,
+            false,
+            sink,
+        )
+    }
+
+    /// Wait for exactly `frames` on the active scene grid without converting
+    /// the count to seconds. A finite frame request bypasses presenter holds;
+    /// use [`Self::wait`] for a presenter-controlled pause.
+    pub fn wait_frames(
+        &mut self,
+        frames: u64,
+        sink: &mut dyn SceneSink,
+    ) -> Result<SegmentReport, SceneError> {
+        self.wait_impl(Duration::Frames(frames), None, true, sink)
     }
 
     /// Wait until `stop_condition` turns true, or `max_time` elapses.
@@ -1629,7 +1711,29 @@ impl Scene {
         stop_condition: &mut dyn FnMut(&Stage) -> bool,
         sink: &mut dyn SceneSink,
     ) -> Result<SegmentReport, SceneError> {
-        self.wait_impl(Some(max_time), Some(stop_condition), false, sink)
+        self.wait_impl(
+            Duration::Seconds(max_time),
+            Some(stop_condition),
+            false,
+            sink,
+        )
+    }
+
+    /// Wait until the predicate succeeds, bounded by an exact frame count.
+    /// The predicate observes each completed frame; a zero bound emits no
+    /// frames and never calls it.
+    pub fn wait_until_frames(
+        &mut self,
+        max_frames: u64,
+        stop_condition: &mut dyn FnMut(&Stage) -> bool,
+        sink: &mut dyn SceneSink,
+    ) -> Result<SegmentReport, SceneError> {
+        self.wait_impl(
+            Duration::Frames(max_frames),
+            Some(stop_condition),
+            true,
+            sink,
+        )
     }
 
     /// Wait while explicitly bypassing presenter mode.
@@ -1638,23 +1742,35 @@ impl Scene {
         duration: Option<f64>,
         sink: &mut dyn SceneSink,
     ) -> Result<SegmentReport, SceneError> {
-        self.wait_impl(duration, None, true, sink)
+        self.wait_impl(
+            Duration::Seconds(duration.unwrap_or(self.config.default_wait_time)),
+            None,
+            true,
+            sink,
+        )
     }
 
-    fn wait_impl(
-        &mut self,
-        duration: Option<f64>,
-        stop_condition: Option<&mut dyn FnMut(&Stage) -> bool>,
-        ignore_presenter: bool,
-        sink: &mut dyn SceneSink,
-    ) -> Result<SegmentReport, SceneError> {
-        let duration = duration.unwrap_or(self.config.default_wait_time);
-        if !duration.is_finite() || duration < 0.0 {
+    fn validate_wait_duration(&self, duration: Duration) -> Result<(), SceneError> {
+        if let Duration::Seconds(seconds) = duration
+            && (!seconds.is_finite() || seconds < 0.0)
+        {
             return Err(SceneError::InvalidConfig(
                 "wait duration must be finite and non-negative",
             ));
         }
         self.clock.segment(duration).map_err(AnimError::Clock)?;
+        Ok(())
+    }
+
+    fn wait_impl(
+        &mut self,
+        duration: Duration,
+        stop_condition: Option<&mut dyn FnMut(&Stage) -> bool>,
+        ignore_presenter: bool,
+        sink: &mut dyn SceneSink,
+    ) -> Result<SegmentReport, SceneError> {
+        self.validate_wait_duration(duration)?;
+        self.frame_duration_requested |= matches!(duration, Duration::Frames(_));
         self.pre_play(SegmentKind::Wait, &[], sink)?;
         self.emit_event(sink, LifecyclePhase::DriveSegment, Some(SegmentKind::Wait))?;
 

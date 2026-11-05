@@ -15,6 +15,18 @@ from typing import Any
 _MAX_PARTS = 65_536
 _MAX_COMPARISONS = 1_048_576
 
+class _DefaultRunTime(float):
+    """Retain the public default while allowing a frame-only duration."""
+
+
+def _timing_options(run_time, frames):
+    timing = {} if isinstance(run_time, _DefaultRunTime) and frames is not None else {
+        "run_time": float(run_time),
+    }
+    if frames is not None:
+        timing["run_time_frames"] = frames
+    return timing
+
 
 def _bounded(values, name):
     result = list(islice(iter(values), _MAX_PARTS + 1))
@@ -106,7 +118,7 @@ def install_matching(native: Any) -> None:
     Mobject, Animation, Transform = g["Mobject"], g["Animation"], g["Transform"]
 
     def matching_init(self, source, target, matched_pairs=(), match_animation=Transform,
-                      mismatch_animation=Transform, run_time=2, lag_ratio=0, **kwargs):
+                      mismatch_animation=Transform, run_time=_DefaultRunTime(2.0), lag_ratio=0, **kwargs):
         if not isinstance(source, Mobject) or not isinstance(target, Mobject):
             raise TypeError(type(self).__name__ + " expects two Mobject families")
         if not callable(match_animation) or not callable(mismatch_animation):
@@ -123,6 +135,7 @@ def install_matching(native: Any) -> None:
         self.target_mobject, self.matched_pairs = target, pairs
         self.match_animation, self.mismatch_animation = match_animation, mismatch_animation
         self.anim_config = dict(kwargs)
+        timing = _timing_options(run_time, self.anim_config.pop("run_time_frames", None))
         self.source_pieces, self.target_pieces = source_pieces, target_pieces
         self.anims = []
         # Explicit claims precede the public matcher. Materialize its result
@@ -142,7 +155,7 @@ def install_matching(native: Any) -> None:
         for piece in self.target_pieces:
             if id(piece) not in claimed:
                 self.anims.append(g["FadeInFromPoint"](piece, source.get_center(), **self.anim_config))
-        super(Parts, self).__init__(*self.anims, run_time=run_time, lag_ratio=lag_ratio,
+        super(Parts, self).__init__(*self.anims, lag_ratio=lag_ratio, **timing,
                                    rate_func=g["_linear_rate"])
         # Expose the real root before playback for nested groups and persistent
         # updaters. It contains the original operands, not geometry copies.
@@ -287,7 +300,7 @@ def install_matching_strings(native: Any) -> None:
         return result
 
     def strings_init(self, source, target, matched_keys=(), key_map=None, matched_pairs=(),
-                     run_time=2, lag_ratio=0, **kwargs):
+                     run_time=_DefaultRunTime(2.0), lag_ratio=0, **kwargs):
         if not isinstance(source, StringMobject) or not isinstance(target, StringMobject):
             raise TypeError(type(self).__name__ + " expects two StringMobject instances")
         explicit = _pairs(matched_pairs, Mobject, type(self).__name__ + " matched_pairs")
@@ -295,6 +308,7 @@ def install_matching_strings(native: Any) -> None:
         if key_map is not None and not isinstance(key_map, Mapping):
             raise TypeError("key_map must be a mapping of string or integer selectors")
         mapping = {} if key_map is None else dict(_bounded(key_map.items(), "key_map"))
+        timing = _timing_options(run_time, kwargs.pop("run_time_frames", None))
         if not all(isinstance(key, (str, int)) for key in (*keys, *mapping, *mapping.values())):
             raise TypeError("matching selectors must be strings or integers")
         self.matched_pairs, self.matched_keys, self.key_map = explicit, keys, mapping
@@ -320,13 +334,13 @@ def install_matching_strings(native: Any) -> None:
             self.mobject = source
             self.animations = []
             self._has_foreign = True
-            super(Parts, self).__init__(run_time=run_time, lag_ratio=lag_ratio, **kwargs)
+            super(Parts, self).__init__(lag_ratio=lag_ratio, **timing, **kwargs)
             self._matching_finished = self._matching_cleanup_started = False
             return
         blocks = _pairs(self.matching_blocks(source, target, keys, mapping), Mobject, "matching_blocks")
         _validate_members(blocks, sources, targets)
         super(Strings, self).__init__(source, target, matched_pairs=explicit + blocks,
-                                      run_time=run_time, lag_ratio=lag_ratio, **kwargs)
+                                      lag_ratio=lag_ratio, **timing, **kwargs)
         # Preserve the public explicit-pair inventory and old _native_params
         # inspection. Inferred groups are execution-plan children, not user
         # claims; conflating the two breaks native source_keys/target_keys.

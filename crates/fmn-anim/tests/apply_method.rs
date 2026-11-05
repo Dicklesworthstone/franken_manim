@@ -5,7 +5,8 @@ use std::rc::Rc;
 
 use fmn_anim::{
     AnimConfig, AnimError, Animation, AnimationSignature, ApplyMethod, PathFunc, RateFunc,
-    RationalFrameClock, Succession, Timeline, Transform, play_segment,
+    RationalFrameClock, Succession, Timeline, Transform, advance_play, finish_open_play, open_play,
+    play_segment,
 };
 use fmn_core::rng::RngRoot;
 use fmn_mobject::{Mob, Mobject, Stage};
@@ -29,6 +30,62 @@ fn assert_x(stage: &Stage, mob: Mob, expected: f64) {
         "{actual:?} != {expected}"
     );
     assert_eq!(&actual[1..], &[0.0, 0.0]);
+}
+
+#[test]
+fn deferred_method_preserves_frame_timing_when_begin_replaces_its_transform() {
+    for fps in [24, 25, 30, 60] {
+        let mut stage = Stage::new();
+        let source = point(&mut stage, 0.0);
+        stage.add_to_scene(source).unwrap();
+        let calls = Rc::new(Cell::new(0));
+        let method_calls = Rc::clone(&calls);
+        let animation = ApplyMethod::new(source, move |stage, target| {
+            method_calls.set(method_calls.get() + 1);
+            stage.shift(target, [43.0, 0.0, 0.0]);
+            Ok(())
+        })
+        .with_config(AnimConfig {
+            run_time_frames: Some(43),
+            ..config()
+        });
+        let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(animation)];
+        let mut clock = RationalFrameClock::new(fps).unwrap();
+        let mut open = open_play(&mut stage, &clock, &mut animations).unwrap();
+        assert_eq!(calls.get(), 1);
+        // A new Transform is installed by begin. Its sampling denominator
+        // must still be 43 frames, not a round trip through 43/fps seconds.
+        for frame in 1..=43 {
+            assert_eq!(
+                animations[0]
+                    .state()
+                    .frame_alpha(f64::from(frame), fps)
+                    .to_bits(),
+                (f64::from(frame) / 43.0).to_bits(),
+                "fps={fps}, frame={frame}"
+            );
+        }
+        let mut samples = 0;
+        advance_play(
+            &mut stage,
+            &mut clock,
+            &RngRoot::from_seed(17),
+            &mut animations,
+            &mut open,
+            43,
+            &mut |packet| {
+                samples += 1;
+                assert_x(&packet.materialize_stage(), source, f64::from(samples));
+            },
+        )
+        .unwrap();
+        let report = finish_open_play(&mut stage, &mut animations, open).unwrap();
+        assert_eq!(report.n_frames, 43);
+        assert_eq!(clock.now().frames(), 43);
+        assert_eq!(samples, 43);
+        assert_eq!(calls.get(), 1);
+        assert_x(&stage, source, 43.0);
+    }
 }
 
 #[test]

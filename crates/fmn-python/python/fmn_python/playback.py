@@ -42,7 +42,8 @@ def install_scene_playback(native: Any) -> None:
         return original_requires(animation)
 
     @wraps(original_play)
-    def play(self, *proto_animations, run_time=None, rate_func=None, lag_ratio=None):
+    def play(self, *proto_animations, run_time=None, rate_func=None, lag_ratio=None,
+             run_time_frames=None):
         # CPython evaluates all .animate chains before this call. Build in
         # argument order, at the same dynamic-target lookup point as
         # prepare_animation, and never reconstruct an authored product.
@@ -55,8 +56,9 @@ def install_scene_playback(native: Any) -> None:
                 animations.append(animation)
             else:
                 animations.append(proto)
+        timing = {} if run_time_frames is None else {"run_time_frames": run_time_frames}
         return original_play(self, *animations, run_time=run_time,
-                             rate_func=rate_func, lag_ratio=lag_ratio)
+                             rate_func=rate_func, lag_ratio=lag_ratio, **timing)
 
     g["_requires_python_animation"] = requires_python_animation
     Scene.play = play

@@ -47,6 +47,175 @@ fn shift_animation(stage: &mut Stage, mob: Mob, dx: f64, run_time: f64) -> Box<d
     prepare_animation(builder, stage).expect("prepares")
 }
 
+fn shift_frames(stage: &mut Stage, mob: Mob, dx: f64, frames: u64) -> Box<dyn Animation> {
+    let builder = mob
+        .animate()
+        .set_anim_args(AnimateArgs {
+            run_time_frames: Some(frames),
+            rate_func: Some(fmn_core::rate::linear),
+            ..AnimateArgs::default()
+        })
+        .and_then(|builder| builder.shift([dx, 0.0, 0.0]))
+        .unwrap();
+    prepare_animation(builder, stage).unwrap()
+}
+
+#[test]
+fn exact_frame_timeline_compiles_renders_seeks_and_round_trips_issue_10() {
+    let counts = [
+        43, 17, 61, 29, 101, 7, 55, 13, 89, 31, 47, 19, 73, 11, 37, 23, 67, 3, 97, 41,
+    ];
+    for fps in [24, 25, 30, 60] {
+        let mut stage = Stage::new();
+        let mob = square(&mut stage);
+        stage.add_to_scene(mob).unwrap();
+        let mut timeline = Timeline::new(fps).unwrap();
+        timeline.wait_frames(0).unwrap();
+        for (index, count) in counts.iter().enumerate() {
+            if index % 2 == 0 {
+                let animation = shift_frames(&mut stage, mob, 0.05, *count);
+                timeline.play(vec![animation]).unwrap();
+            } else {
+                timeline.wait_frames(*count).unwrap();
+            }
+        }
+        timeline.wait_frames(0).unwrap();
+        let plan = timeline.compile().unwrap();
+        assert_eq!(plan.total_frames(), 864);
+        assert_eq!(
+            plan.segments()[1..21]
+                .iter()
+                .map(|segment| segment.n_frames)
+                .collect::<Vec<_>>(),
+            counts.map(|count| count as i64)
+        );
+        assert!(
+            plan.segments()
+                .iter()
+                .all(|segment| segment.frame_duration.is_some())
+        );
+        let bytes = plan.to_bytes().unwrap();
+        assert_eq!(&bytes[8..10], &2_u16.to_le_bytes());
+        let decoded = TimelinePlan::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded, plan);
+        assert_eq!(decoded.to_bytes().unwrap(), bytes);
+        let mut packets = Vec::new();
+        let reports = timeline
+            .render(&mut stage, &rng(), &mut |packet| packets.push(packet))
+            .unwrap();
+        assert_eq!(packets.len(), 864);
+        assert_eq!(
+            reports.iter().map(|report| report.n_frames).sum::<i64>(),
+            864
+        );
+        let expected: Vec<_> = packets
+            .iter()
+            .map(|packet| point_bits(&packet.materialize_stage(), mob))
+            .collect();
+        for frame in [1, 43, 44, 60, 61, 121, 122, 400, 823, 824, 864, 17, 864] {
+            let packet = timeline.seek(&mut stage, &rng(), frame).unwrap();
+            assert_eq!(
+                point_bits(&packet.materialize_stage(), mob),
+                expected[frame as usize - 1],
+                "frame={frame}, fps={fps}"
+            );
+        }
+    }
+}
+
+#[test]
+fn exact_schedule_retains_large_counts_and_legacy_wire_bytes() {
+    let mut timeline = Timeline::new(24).unwrap();
+    let count = (1_u64 << 53) + 1;
+    timeline.wait_frames(count).unwrap();
+    timeline.label("after-large");
+    timeline.wait_frames(1).unwrap();
+    let plan = timeline.compile().unwrap();
+    assert_eq!(plan.total_frames(), count as i64 + 1);
+    assert_eq!(plan.frame_of_label("after-large"), Some(count as i64 + 1));
+    assert_eq!(
+        TimelinePlan::from_bytes(&plan.to_bytes().unwrap()).unwrap(),
+        plan
+    );
+
+    let mut legacy = Timeline::new(30).unwrap();
+    legacy.wait(0.1).unwrap();
+    assert_eq!(
+        legacy.compile().unwrap().to_bytes().unwrap(),
+        encoded_plan(30, &[(SegmentKind::Wait, 0.1, 0, 4)], &[])
+    );
+
+    let mut mixed = Timeline::new(30).unwrap();
+    mixed
+        .wait(0.1)
+        .unwrap()
+        .wait_frames(3)
+        .unwrap()
+        .wait(0.0)
+        .unwrap()
+        .wait_frames(0)
+        .unwrap();
+    let plan = mixed.compile().unwrap();
+    assert_eq!(plan.total_frames(), 7);
+    assert_eq!(
+        TimelinePlan::from_bytes(&plan.to_bytes().unwrap()).unwrap(),
+        plan
+    );
+}
+
+#[test]
+fn long_exact_schedule_has_no_round_trip_drift() {
+    let mut timeline = Timeline::new(25).unwrap();
+    for _ in 0..10_000 {
+        timeline.wait_frames(1).unwrap();
+    }
+    let plan = timeline.compile().unwrap();
+    assert_eq!(plan.total_frames(), 10_000);
+    assert!(
+        plan.segments()
+            .iter()
+            .enumerate()
+            .all(|(index, segment)| segment.base_frame == index as i64 && segment.n_frames == 1)
+    );
+    assert_eq!(
+        TimelinePlan::from_bytes(&plan.to_bytes().unwrap()).unwrap(),
+        plan
+    );
+}
+
+#[test]
+fn exact_wire_duration_is_validated_as_strictly_as_legacy_seconds() {
+    fn encoded_exact(n_frames: i64, exponent: i64, words: &[u64], seconds: f64) -> Vec<u8> {
+        let mut writer = Writer::new(fmn_anim::FRAME_TIMELINE_SCHEMA);
+        writer.put_u32(24);
+        writer.put_u32(1);
+        writer.put_u8(1);
+        writer.put_f64(seconds);
+        writer.put_i64(0);
+        writer.put_i64(n_frames);
+        writer.put_bool(true);
+        writer.put_i64(exponent);
+        writer.put_u32(words.len() as u32);
+        for word in words {
+            writer.put_u64(*word);
+        }
+        writer.put_u32(0);
+        writer.finish().unwrap()
+    }
+    let good = encoded_exact(43, 0, &[43], 43.0 / 24.0);
+    assert_eq!(TimelinePlan::from_bytes(&good).unwrap().total_frames(), 43);
+    for bytes in [
+        encoded_exact(44, 0, &[43], 43.0 / 24.0),
+        encoded_exact(43, -1, &[86], 43.0 / 24.0),
+        encoded_exact(43, 0, &[43], 44.0 / 24.0),
+        encoded_exact(0, 1, &[], 0.0),
+        encoded_exact(0, 0, &[0], 0.0),
+        encoded_exact(43, 0, &[43, 0], 43.0 / 24.0),
+    ] {
+        assert!(TimelinePlan::from_bytes(&bytes).is_err());
+    }
+}
+
 fn rng() -> RngRoot {
     RngRoot::from_seed(42)
 }
@@ -266,6 +435,7 @@ fn a_public_planned_segment_reports_end_frame_overflow() {
         run_time: 0.25,
         base_frame: 2,
         n_frames: 3,
+        frame_duration: None,
     };
     assert_eq!(ordinary.end_frame(), Some(5));
 
@@ -274,6 +444,7 @@ fn a_public_planned_segment_reports_end_frame_overflow() {
         run_time: 1.0,
         base_frame: i64::MAX,
         n_frames: 1,
+        frame_duration: None,
     };
     assert_eq!(overflowing.end_frame(), None);
 }

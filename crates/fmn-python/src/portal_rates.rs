@@ -236,6 +236,10 @@ impl Preparation {
                 overrides.rate_func.clone(),
                 overrides.lag_ratio,
             );
+            if let Some(frames) = overrides.run_time_frames {
+                animation.state_mut().config.run_time_frames = Some(frames);
+            }
+            animation.prepare_timing(fps).map_err(anim_error)?;
             if !matches!(animation.effect_signature(), AnimationSignature::Pure) {
                 return Err(Self::refusal());
             }
@@ -256,12 +260,16 @@ impl Preparation {
         clock
             .advance_frames(time.frames())
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
-        let duration = animations
-            .iter()
-            .map(|animation| animation.get_run_time())
-            .fold(f64::NEG_INFINITY, f64::max);
+        let mut duration = fmn_anim::FrameDuration::new(0.0, fps)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        for animation in &animations {
+            let candidate = animation.duration_on_grid(fps).map_err(anim_error)?;
+            if candidate.cmp_duration(&duration).is_gt() {
+                duration = candidate;
+            }
+        }
         let grid = clock
-            .segment(duration)
+            .segment_duration(&duration)
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
         if grid.n_frames() > MAX_PREPARATION_FRAMES {
             return Err(PyValueError::new_err(

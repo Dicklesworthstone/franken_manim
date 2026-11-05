@@ -347,6 +347,14 @@ fn family_bytes(stage: &Stage, root: Mob) -> Vec<u8> {
     bytes
 }
 
+fn rooted_bytes(stage: &Stage) -> Vec<(Mob, Vec<u8>)> {
+    stage
+        .roots()
+        .iter()
+        .map(|&root| (root, family_bytes(stage, root)))
+        .collect()
+}
+
 #[test]
 fn live_binding_keeps_labels_and_replays_layout_after_snapshot_restore() {
     let mut stage = Stage::new();
@@ -644,12 +652,12 @@ fn flow_validates_all_edges_and_weights_before_allocating_and_handles_large_weig
 }
 
 #[test]
-fn layout_and_traversal_native_workers_reproduce_serial_graph_frames() {
+fn graph_animation_workers_reproduce_seconds_and_exact_frame_sampling() {
     use fmn_anim::pure_frame::PureSegment;
     use fmn_anim::{RationalFrameClock, advance_play, finish_open_play, open_play};
     use fmn_core::rng::RngRoot;
 
-    for traversal in [false, true] {
+    for (kind, run_time_frames) in [(0, None), (1, None), (0, Some(43)), (1, Some(43))] {
         let mut stage = Stage::new();
         let graph = NetworkGraph::new(sample_graph())
             .laid_out(&GraphLayout::Circular)
@@ -657,25 +665,64 @@ fn layout_and_traversal_native_workers_reproduce_serial_graph_frames() {
             .add_to(&mut stage)
             .unwrap();
         stage.add_to_scene(graph.mobject()).unwrap();
-        let animation: Box<dyn Animation> = if traversal {
-            Box::new(
+        let mut animation: Box<dyn Animation> = match kind {
+            1 => Box::new(
                 TraverseGraph::new(&mut stage, &graph, "a", GraphTraversal::DepthFirst).unwrap(),
-            )
-        } else {
-            Box::new(
+            ),
+            _ => Box::new(
                 LayoutTransition::new(
                     &stage,
                     &graph,
                     &GraphLayout::BreadthFirst { root: "a".into() },
                 )
                 .unwrap(),
-            )
+            ),
         };
+        animation.state_mut().config.run_time_frames = run_time_frames;
         let mut animations = vec![animation];
-        let mut clock = RationalFrameClock::new(8).unwrap();
+        let fps = if run_time_frames.is_some() { 24 } else { 8 };
+        let mut clock = RationalFrameClock::new(fps).unwrap();
         let rng = RngRoot::from_seed(73);
         let mut open = open_play(&mut stage, &clock, &mut animations).unwrap();
         let pure = PureSegment::freeze(&stage, &clock, &rng, &animations, &open).unwrap();
+        if let Some(frames) = run_time_frames {
+            assert_eq!(pure.frame_count(), i64::try_from(frames).unwrap());
+            let duration = animations[0].duration_on_grid(fps).unwrap();
+            assert!(duration.is_frame_native());
+            assert_eq!(duration.n_frames().unwrap(), i64::try_from(frames).unwrap());
+            for frame in 1..=43 {
+                assert_eq!(
+                    animations[0]
+                        .state()
+                        .frame_alpha(f64::from(frame), fps)
+                        .to_bits(),
+                    (f64::from(frame) / 43.0).to_bits(),
+                    "kind={kind}, frame={frame}"
+                );
+            }
+            if kind != 0 {
+                let timing = animations[0]
+                    .composition_timing()
+                    .expect("graph wrappers retain their prepared composition timing");
+                // Only the outer duration was overridden. All children were
+                // authored in seconds, so their interpolation windows retain
+                // that coordinate system while the group consumes 43 frames.
+                assert!(!timing.is_frame_native());
+                assert_eq!(timing.intervals().len(), graph.nodes().len());
+                assert_eq!(timing.max_end(), 5.0);
+                for frame in 0..=43 {
+                    let frame = f64::from(frame);
+                    assert_eq!(
+                        timing.rate_alpha_at_frame(frame, fps).to_bits(),
+                        (frame / 43.0).to_bits()
+                    );
+                    assert_eq!(
+                        timing.position_at_frame(frame, fps).to_bits(),
+                        (frame * timing.max_end() / 43.0).to_bits()
+                    );
+                }
+            }
+        }
         let mut expected = Vec::new();
         advance_play(
             &mut stage,
@@ -685,25 +732,136 @@ fn layout_and_traversal_native_workers_reproduce_serial_graph_frames() {
             &mut open,
             pure.frame_count(),
             &mut |packet| {
-                expected.push(family_bytes(&packet.materialize_stage(), graph.mobject()));
+                expected.push(rooted_bytes(&packet.materialize_stage()));
             },
         )
         .unwrap();
+        assert_eq!(expected.len(), usize::try_from(pure.frame_count()).unwrap());
+        assert_eq!(clock.now().frames(), pure.frame_count());
         std::thread::scope(|scope| {
             for worker in 0..4 {
                 let pure = &pure;
                 let expected = &expected;
-                let root = graph.mobject();
                 scope.spawn(move || {
                     for index in (worker..expected.len()).step_by(4).rev() {
                         let materialized = pure.job(index as i64 + 1).unwrap().materialize();
-                        assert_eq!(family_bytes(&materialized, root), expected[index]);
+                        assert_eq!(rooted_bytes(&materialized), expected[index]);
                     }
                 });
             }
         });
         finish_open_play(&mut stage, &mut animations, open).unwrap();
         assert_eq!(stage.roots(), &[graph.mobject()]);
+    }
+}
+
+#[test]
+fn exact_frame_flow_preserves_serial_frames_when_pure_dispatch_falls_back() {
+    use fmn_anim::pure_frame::{PlayCapture, PureSegment, play_segment_with_pure_dispatch};
+    use fmn_anim::{FramePacket, RationalFrameClock};
+    use fmn_core::rng::RngRoot;
+
+    #[derive(Default)]
+    struct Capture {
+        packets: Vec<FramePacket>,
+        programs: usize,
+    }
+    impl PlayCapture for Capture {
+        fn capture(&mut self, packet: FramePacket) {
+            self.packets.push(packet);
+        }
+        fn accepts_pure_segments(&self) -> bool {
+            true
+        }
+        fn capture_pure_segment(&mut self, _segment: &PureSegment) -> bool {
+            self.programs += 1;
+            false
+        }
+    }
+
+    let mut initial = Stage::new();
+    let graph = NetworkGraph::new(sample_graph())
+        .laid_out(&GraphLayout::Circular)
+        .unwrap()
+        .add_to(&mut initial)
+        .unwrap();
+    initial.add_to_scene(graph.mobject()).unwrap();
+    let baseline = initial.snapshot();
+    let graph_before = family_bytes(&initial, graph.mobject());
+    let mut expected = None;
+    for allow_pure in [false, true] {
+        let mut stage = baseline.materialize();
+        let mut flow =
+            FlowAlongEdges::new(&mut stage, &graph, &[("a", "b", 29.0), ("b", "c", 38.0)]).unwrap();
+        flow.state_mut().config.run_time_frames = Some(43);
+        let overlay = flow.state().mobject();
+        let pulses: Vec<_> = flow.pulses().collect();
+        assert_eq!(pulses.len(), 2);
+        stage.add_to_scene(overlay).unwrap();
+        let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(flow)];
+        let mut clock = RationalFrameClock::new(24).unwrap();
+        clock.advance_frames(5).unwrap();
+        stage.set_time_from_clock(clock.now().to_f64());
+        let mut capture = Capture::default();
+        let report = play_segment_with_pure_dispatch(
+            &mut stage,
+            &mut clock,
+            &RngRoot::from_seed(73),
+            &mut animations,
+            false,
+            allow_pure,
+            &mut |_, _| {},
+            &mut capture,
+        )
+        .unwrap();
+        // Flash geometry and opacity share each pulse. The object-level
+        // overlap gate must keep their serial write order, even for a sink
+        // that accepts pure programs; refusal must still emit every frame.
+        assert_eq!(capture.programs, 0);
+        assert_eq!(capture.packets.len(), 43);
+        assert_eq!((report.base_frame, report.n_frames), (5, 43));
+        assert_eq!(report.run_time, 43.0 / 24.0);
+        assert_eq!(clock.now().frames(), 48);
+        let duration = animations[0].duration_on_grid(24).unwrap();
+        assert!(duration.is_frame_native());
+        assert_eq!(duration.n_frames().unwrap(), 43);
+        let timing = animations[0].composition_timing().unwrap();
+        assert!(!timing.is_frame_native());
+        assert_eq!(timing.intervals().len(), 2);
+        assert_eq!(timing.max_end(), 1.0);
+        let mut visible = [false; 2];
+        let mut observed = Vec::new();
+        for (index, packet) in capture.packets.iter().enumerate() {
+            let frame = u32::try_from(index + 1).unwrap();
+            let alpha = f64::from(frame) / 43.0;
+            assert_eq!(packet.segment_frame(), i64::from(frame));
+            assert_eq!(packet.frame_index(), 5 + i64::from(frame));
+            assert_eq!(packet.time().frames(), packet.frame_index());
+            assert_eq!(packet.time().fps(), 24);
+            assert_eq!(packet.alpha().to_bits(), alpha.to_bits());
+            assert_eq!(
+                timing.position_at_frame(f64::from(frame), 24).to_bits(),
+                alpha.to_bits()
+            );
+            let sampled = packet.materialize_stage();
+            assert_eq!(sampled.roots(), &[graph.mobject(), overlay]);
+            assert_eq!(family_bytes(&sampled, graph.mobject()), graph_before);
+            for (seen, &pulse) in visible.iter_mut().zip(&pulses) {
+                *seen |= opacity(&sampled, pulse) > 0.0;
+            }
+            observed.push(rooted_bytes(&sampled));
+        }
+        assert!(visible.into_iter().all(|seen| seen));
+        assert_ne!(observed.first(), observed.last());
+        assert_eq!(stage.roots(), &[graph.mobject()]);
+        assert_eq!(family_bytes(&stage, graph.mobject()), graph_before);
+        assert!(pulses.iter().all(|&pulse| opacity(&stage, pulse) == 0.0));
+        assert!(animations[0].deferred_error().is_none());
+        if let Some(expected) = &expected {
+            assert_eq!(&observed, expected);
+        } else {
+            expected = Some(observed);
+        }
     }
 }
 

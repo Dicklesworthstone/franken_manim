@@ -11,6 +11,18 @@ import math
 import operator
 from typing import Any
 
+class _DefaultRunTime(float):
+    """Retain the public default while allowing a frame-only duration."""
+
+
+def _timing_options(run_time, frames):
+    timing = {} if isinstance(run_time, _DefaultRunTime) and frames is not None else {
+        "run_time": float(run_time),
+    }
+    if frames is not None:
+        timing["run_time_frames"] = frames
+    return timing
+
 
 def _method(cls, name, function):
     function.__name__ = name
@@ -69,7 +81,7 @@ def _install_flash(g):
 
     def flash_init(self, point, color=g["_YELLOW"], line_length=0.2,
                    num_lines=12, flash_radius=0.3, line_stroke_width=3.0,
-                   run_time=1.0, **kwargs):
+                   run_time=_DefaultRunTime(1.0), **kwargs):
         self.point = _point(g, point, "Flash point")
         self.color = color
         self.line_length = _nonnegative(line_length, "Flash line_length")
@@ -82,7 +94,8 @@ def _install_flash(g):
         # Both factories are public authoring hooks. In particular, a moving
         # point must not replace their products with a hard-coded reveal.
         super(Flash, self).__init__(
-            *self.create_line_anims(), group=self.lines, run_time=run_time, **kwargs,
+            *self.create_line_anims(), group=self.lines,
+            **_timing_options(run_time, kwargs.pop("run_time_frames", None)), **kwargs,
         )
 
     def create_lines(self):
@@ -132,7 +145,7 @@ def _install_flash(g):
 def _install_lagged_map(g):
     Map = g["LaggedStartMap"]
 
-    def map_init(self, anim_func, group, run_time=2.0, lag_ratio=0.05, **kwargs):
+    def map_init(self, anim_func, group, run_time=_DefaultRunTime(2.0), lag_ratio=0.05, **kwargs):
         if not callable(anim_func):
             raise TypeError(
                 "LaggedStartMap requires an animation constructor to map; "
@@ -146,9 +159,10 @@ def _install_lagged_map(g):
         # Let the group's own iterator control membership, as in the pinned
         # Reference: a factory may intentionally mutate the group. kwargs
         # belong to each child; run_time/lag_ratio belong to the group.
+        timing = _timing_options(run_time, kwargs.pop("run_time_frames", None))
         animations = [anim_func(child, **kwargs) for child in group]
         super(Map, self).__init__(
-            *animations, run_time=run_time, lag_ratio=lag_ratio, group=group,
+            *animations, lag_ratio=lag_ratio, group=group, **timing,
         )
 
     _method(Map, "__init__", map_init)

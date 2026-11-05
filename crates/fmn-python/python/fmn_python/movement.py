@@ -12,6 +12,9 @@ import math
 import types
 from typing import Any
 
+class _DefaultRunTime(float):
+    """Keep the legacy numeric default distinct from explicit seconds."""
+
 
 def _method(cls, name, function):
     function.__name__ = name
@@ -253,19 +256,39 @@ def install_movement(native: Any) -> None:
 def _install_phase_flow(g, Flow):
     def flow_init(self, function, mobject, virtual_time=None,
                   suspend_mobject_updating=False, rate_func=g["_linear_rate"],
-                  run_time=3.0, **kwargs):
+                  run_time=_DefaultRunTime(3.0), **kwargs):
         if not callable(function):
             raise TypeError("PhaseFlow requires a callable vector field")
-        duration = float(run_time if virtual_time is None else virtual_time)
+        seconds = float(run_time)
+        duration = float(seconds if virtual_time is None else virtual_time)
         if not math.isfinite(duration):
             raise ValueError("PhaseFlow virtual_time must be finite")
         self.function, self.virtual_time = function, duration
+        timing = {} if isinstance(run_time, _DefaultRunTime) and kwargs.get("run_time_frames") is not None else {
+            "run_time": seconds,
+        }
         super(Flow, self).__init__(
-            mobject, run_time=run_time, rate_func=rate_func,
+            mobject, rate_func=rate_func, **timing,
             suspend_mobject_updating=suspend_mobject_updating, **kwargs,
+        )
+        # A play override changes playback duration, not the constructor's
+        # default virtual motion. Retain the authored count until its first
+        # scene supplies the frame grid, just as an explicit virtual_time
+        # remains independent of later run_time overrides.
+        self._phase_virtual_time_frames = (
+            getattr(self, "run_time_frames", None) if virtual_time is None else None
         )
 
     def prepare(self):
+        frames = getattr(self, "_phase_virtual_time_frames", None)
+        if frames is not None:
+            fps = getattr(self, "_fmn_timing_fps", None)
+            if fps is None:
+                scene = getattr(self.mobject, "_scene", None)
+                if scene is None:
+                    raise ValueError("PhaseFlow frame duration requires a scene frame grid")
+                fps = scene._frame_rate()
+            self.virtual_time = frames / fps
         if not callable(self.function):
             raise TypeError("PhaseFlow requires a callable vector field")
         if not math.isfinite(float(self.virtual_time)):

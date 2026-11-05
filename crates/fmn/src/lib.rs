@@ -1537,6 +1537,17 @@ impl Stage<'_> {
             .map_err(Error::from)
     }
 
+    /// Wait for exactly `frames` samples on the scene's active frame grid.
+    ///
+    /// Unlike `wait(frames as f64 / fps)`, this keeps the requested count
+    /// integral all the way through scheduling and capture. Zero frames
+    /// still performs the ordinary wait lifecycle without advancing time.
+    pub fn wait_frames(&mut self, frames: u64) -> Result<SegmentReport> {
+        self.scene
+            .wait_frames(frames, self.sink)
+            .map_err(Error::from)
+    }
+
     /// Wait for the configured default duration.
     pub fn wait_default(&mut self) -> Result<SegmentReport> {
         self.scene.wait(None, self.sink).map_err(Error::from)

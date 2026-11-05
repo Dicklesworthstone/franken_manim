@@ -50,6 +50,7 @@
 
 use std::sync::Arc;
 
+use crate::clock::{Duration, FrameDuration, RationalTime};
 use fmn_core::rate;
 use fmn_mobject::animate::{AnimateArgs, AnimateError, IntoAnimate};
 use fmn_mobject::{
@@ -221,6 +222,14 @@ impl RateFunc {
     #[must_use]
     pub fn linear() -> Self {
         Self::Catalog(rate::CatalogRate::Linear)
+    }
+
+    pub(crate) fn is_linear(&self) -> bool {
+        match self {
+            Self::Catalog(rate::CatalogRate::Linear) => true,
+            Self::Base(function) => std::ptr::fn_addr_eq(*function, rate::linear as fn(f64) -> f64),
+            _ => false,
+        }
     }
 
     /// Wrap in `squish_rate_func(self, a, b)`.
@@ -583,6 +592,9 @@ pub struct AnimConfig {
     /// Seconds the animation runs (`begin` widens this to at least
     /// `time_span.1`). Reference default `1.0`.
     pub run_time: f64,
+    /// Exact frames on the receiving scene's grid. When set, this replaces
+    /// `run_time`; seconds remain available for interpolation and reporting.
+    pub run_time_frames: Option<u64>,
     /// `(start, end)` — the window inside a group interval the animation
     /// actually runs in ([`time_spanned_alpha`]).
     pub time_span: Option<(f64, f64)>,
@@ -609,6 +621,7 @@ impl Default for AnimConfig {
     fn default() -> Self {
         Self {
             run_time: DEFAULT_ANIMATION_RUN_TIME,
+            run_time_frames: None,
             time_span: None,
             lag_ratio: DEFAULT_ANIMATION_LAG_RATIO,
             rate_func: RateFunc::default(),
@@ -629,12 +642,35 @@ impl AnimConfig {
     pub fn from_animate_args(args: &AnimateArgs) -> Self {
         Self {
             run_time: args.run_time.unwrap_or(DEFAULT_ANIMATION_RUN_TIME),
+            run_time_frames: args.run_time_frames,
             time_span: args.time_span,
             lag_ratio: args.lag_ratio.unwrap_or(DEFAULT_ANIMATION_LAG_RATIO),
             rate_func: args
                 .rate_func
                 .map_or_else(RateFunc::default, RateFunc::Base),
             ..Self::default()
+        }
+    }
+
+    /// Resolve the constructor duration on a scene's grid. `time_span`
+    /// retains its second-based widening semantics, compared exactly when
+    /// the requested duration is frame-native.
+    pub fn duration_on_grid(&self, fps: u32) -> Result<FrameDuration, AnimError> {
+        if let Some(frames) = self.run_time_frames {
+            let mut duration =
+                FrameDuration::new(Duration::Frames(frames), fps).map_err(AnimError::Clock)?;
+            if let Some((_, end)) = self.time_span {
+                let span = FrameDuration::new(end, fps).map_err(AnimError::Clock)?;
+                if span.cmp_duration(&duration).is_gt() {
+                    duration = span.into_frame_native();
+                }
+            }
+            Ok(duration)
+        } else {
+            let seconds = self
+                .time_span
+                .map_or(self.run_time, |(_, end)| self.run_time.max(end));
+            FrameDuration::new(seconds, fps).map_err(AnimError::Clock)
         }
     }
 }
@@ -655,6 +691,9 @@ pub struct AnimState {
     // callback may inspect the current table or replace it through begin().
     families: Arc<[Vec<Mob>]>,
     mobject_was_updating: bool,
+    // Resolved only at the play boundary. The count authority remains in
+    // the authored duration; this float is the interpolation denominator.
+    frame_units: Option<f64>,
 }
 
 impl AnimState {
@@ -667,6 +706,7 @@ impl AnimState {
             starting_mobject: None,
             families: Arc::from([]),
             mobject_was_updating: false,
+            frame_units: None,
         }
     }
 
@@ -695,6 +735,43 @@ impl AnimState {
     #[must_use]
     pub fn mobject_was_updating(&self) -> bool {
         self.mobject_was_updating
+    }
+
+    /// Raw sample alpha, using frame units for frame-native animation.
+    /// Conversion to a float happens only here, after the sample count is
+    /// fixed; no rounded seconds value is used to schedule frames.
+    #[must_use]
+    pub fn sample_alpha(&self, time: RationalTime) -> f64 {
+        self.frame_alpha(time.frames() as f64, time.fps())
+    }
+
+    /// Alpha at a frame-unit position, including the fractional local
+    /// positions produced by a parent composition.
+    #[must_use]
+    pub fn frame_alpha(&self, frame: f64, fps: u32) -> f64 {
+        self.frame_units.map_or_else(
+            || (frame / f64::from(fps)) / self.config.run_time,
+            |duration| frame / duration,
+        )
+    }
+
+    /// Preserve the prepared interpolation timing when a wrapper replaces
+    /// its internal animation at begin. The replacement must already carry
+    /// the same duration configuration as `prepared`; lifecycle snapshots
+    /// and updater state are deliberately left fresh.
+    pub fn copy_timing_from(&mut self, prepared: &Self) {
+        self.frame_units = prepared.frame_units;
+    }
+
+    pub(crate) fn frame_units(&self) -> Option<f64> {
+        self.frame_units
+    }
+
+    pub(crate) fn bind_duration(&mut self, duration: &FrameDuration) {
+        self.frame_units = duration.is_frame_native().then(|| duration.frame_units());
+        if duration.is_frame_native() {
+            self.config.run_time = duration.to_seconds();
+        }
     }
 }
 
@@ -729,6 +806,35 @@ pub trait Animation {
 
     /// Mutable runtime state.
     fn state_mut(&mut self) -> &mut AnimState;
+
+    /// Resolve duration without changing animation or scene state. The
+    /// timeline compiler and preflight use this same source of truth.
+    fn duration_on_grid(&self, fps: u32) -> Result<FrameDuration, AnimError> {
+        self.state().config.duration_on_grid(fps)
+    }
+
+    /// Bind the animation's interpolation timing to the receiving grid.
+    /// Compositions recursively bind members and rebuild their windows.
+    fn prepare_timing(&mut self, fps: u32) -> Result<(), AnimError> {
+        let duration = self.duration_on_grid(fps)?;
+        self.state_mut().bind_duration(&duration);
+        Ok(())
+    }
+
+    /// Read a composition's prepared interpolation windows and sampling
+    /// law for a host callback driver. Leaf animations return `None`.
+    fn composition_timing(&self) -> Option<crate::composition::CompositionTiming> {
+        None
+    }
+
+    /// Evaluate a clock sample or a parent's local frame position. Native
+    /// compositions override this to preserve an integer boundary through
+    /// nested windows, instead of dividing by a duration and multiplying
+    /// it back (which can put frame 29 just before boundary 29).
+    fn interpolate_at_frame(&mut self, stage: &mut Stage, frame: f64, fps: u32) {
+        let alpha = self.state().frame_alpha(frame, fps);
+        self.interpolate(stage, alpha);
+    }
 
     /// Append mobjects whose Python/host updater layer must receive the
     /// `resume_updating(call_updater=True)` zero-`dt` callback after this
@@ -1008,6 +1114,7 @@ pub trait Animation {
         let config = &mut self.state_mut().config;
         if let Some(rt) = run_time {
             config.run_time = rt;
+            config.run_time_frames = None;
         }
         if let Some(rf) = rate_func {
             config.rate_func = rf;

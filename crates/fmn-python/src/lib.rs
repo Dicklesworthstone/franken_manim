@@ -126,7 +126,7 @@ use pyo3::exceptions::{
 };
 use pyo3::ffi;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyByteArray, PyBytes, PyDict, PyList, PyModule, PyTuple};
+use pyo3::types::{PyAny, PyBool, PyByteArray, PyBytes, PyDict, PyList, PyModule, PyTuple};
 
 create_exception!(
     manimlib,
@@ -381,8 +381,9 @@ impl PortalRenderSession {
         }
     }
 
-    fn needs_final_capture(&self) -> bool {
-        matches!(self, Self::Frames(session) if session.frame_count() == 0)
+    fn needs_final_capture(&self, exact_timing: bool) -> bool {
+        matches!(self, Self::Frames(session) if session.frame_count() == 0
+            && (session.single_frame || !exact_timing))
             || matches!(self, Self::Preview(session) if session.is_empty())
             || matches!(self, Self::Vector(_))
     }
@@ -469,6 +470,7 @@ struct PortalFrameSession {
     conversion: portal_video::RetainedConversion,
     opaque_video: bool,
     next_sequence: u64,
+    single_frame: bool,
     timeline: OutputTimeline,
     /// The default camera frame. While the scene's frame equals it and the
     /// output aspect is the frame's, planar vector content takes the retained
@@ -848,6 +850,7 @@ impl PortalFrameSession {
                 conversion,
                 opaque_video,
                 next_sequence: 0,
+                single_frame,
                 timeline: OutputTimeline::new(single_frame),
                 planar_baseline,
                 planar_map_matches,
@@ -8997,11 +9000,12 @@ impl PyScene {
                 ));
             }
         }
+        let exact_timing = engine.borrow().has_frame_duration_requests();
         let needs_final_capture = render
             .lock()
             .map_err(|_| PyRuntimeError::new_err("portal render session lock was poisoned"))?
             .as_ref()
-            .is_some_and(PortalRenderSession::needs_final_capture);
+            .is_some_and(|session| session.needs_final_capture(exact_timing));
         if needs_final_capture {
             let mut sink = PortalSceneSink {
                 render: Arc::clone(&render),
@@ -9364,6 +9368,17 @@ impl PyScene {
         self.engine.borrow().stage().time()
     }
 
+    /// The receiving native grid, including a render-session fps override.
+    fn _frame_rate(&self) -> u32 {
+        self.engine.borrow().fps()
+    }
+
+    /// Elapsed frames on the native scene clock, including skipped segments.
+    /// Render reports independently count the frames actually emitted.
+    fn get_frame_count(&self) -> i64 {
+        self.engine.borrow().time().frames()
+    }
+
     /// The Reference advances `self.time += dt` itself; here the drift-free
     /// rational frame clock (BN-02) owns time, so assignment is refused.
     #[setter]
@@ -9635,7 +9650,10 @@ impl PyScene {
         if !rates.is_empty() {
             return Err(portal_rates::Preparation::refusal());
         }
-        let animation = build_native_animation(self.engine.borrow_mut().stage_mut(), spec)?;
+        let mut animation = build_native_animation(self.engine.borrow_mut().stage_mut(), spec)?;
+        animation
+            .prepare_timing(self.engine.borrow().fps())
+            .map_err(anim_error)?;
         Ok(PyNativeAnimationDriver {
             engine: Rc::clone(&self.engine),
             animation,
@@ -9649,7 +9667,7 @@ impl PyScene {
     /// params)`, with composition members under `params["members"]`.
     /// Native groups derive the timing slots; ordered host callbacks run
     /// between Stage borrows. An optional camera track shares the segment.
-    #[pyo3(signature = (specs, callbacks, camera, run_time, rate_func, lag_ratio))]
+    #[pyo3(signature = (specs, callbacks, camera, run_time, rate_func, lag_ratio, run_time_frames = None))]
     fn _play_animations(
         slf: &Bound<'_, Self>,
         specs: Vec<Bound<'_, PyAny>>,
@@ -9658,7 +9676,14 @@ impl PyScene {
         run_time: Option<f64>,
         rate_func: Option<Bound<'_, PyAny>>,
         lag_ratio: Option<f64>,
+        run_time_frames: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Vec<f64>> {
+        let run_time_frames = run_time_frames.map(frame_count_from_py).transpose()?;
+        if run_time.is_some() && run_time_frames.is_some() {
+            return Err(PyValueError::new_err(
+                "run_time and run_time_frames are mutually exclusive",
+            ));
+        }
         portal_playback::synchronize(slf)?;
         let engine = Rc::clone(&slf.borrow().engine);
         if callbacks.len() != specs.len() {
@@ -9681,7 +9706,11 @@ impl PyScene {
             .transpose()?;
         let mut resolved = Vec::with_capacity(specs.len());
         for spec in &specs {
-            resolved.push(parse_anim_spec(&engine, spec, &mut rates)?);
+            let mut spec = parse_anim_spec(&engine, spec, &mut rates)?;
+            if run_time.is_some() || run_time_frames.is_some() {
+                spec.frame_timing = None;
+            }
+            resolved.push(spec);
         }
 
         let mut pending = Vec::new();
@@ -9691,6 +9720,7 @@ impl PyScene {
         let render_observes_frames = portal_has_frame_render(slf)?;
         let mut overrides = fmn_scene::PlayOverrides {
             run_time,
+            run_time_frames,
             rate_func: play_rate,
             lag_ratio,
         };
@@ -9731,7 +9761,10 @@ impl PyScene {
             }
             (animations, start_time)
         };
-        let effective_run_time = run_time.unwrap_or(fmn_anim::DEFAULT_ANIMATION_RUN_TIME);
+        let effective_run_time = run_time_frames.map_or_else(
+            || run_time.unwrap_or(fmn_anim::DEFAULT_ANIMATION_RUN_TIME),
+            |frames| frames as f64 / f64::from(engine.borrow().fps()),
+        );
         let camera_lerp = camera
             .map(|(live, target)| -> PyResult<CameraLerp> {
                 Ok(CameraLerp {
@@ -9794,7 +9827,13 @@ impl PyScene {
                 };
                 let mut wait = {
                     let mut runtime = engine.borrow_mut();
-                    if public_initial {
+                    if let Some(frames) = run_time_frames {
+                        if public_initial {
+                            runtime.begin_stepped_wait_frames_after_updaters(frames, &mut sink)
+                        } else {
+                            runtime.begin_stepped_wait_frames(frames, &mut sink)
+                        }
+                    } else if public_initial {
                         runtime
                             .begin_stepped_wait_after_updaters(Some(effective_run_time), &mut sink)
                     } else {
@@ -9845,9 +9884,14 @@ impl PyScene {
                     .map(|_| ())
                     .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
             } else {
-                engine
-                    .borrow_mut()
-                    .wait(Some(effective_run_time), &mut sink)
+                let result = if let Some(frames) = run_time_frames {
+                    engine.borrow_mut().wait_frames(frames, &mut sink)
+                } else {
+                    engine
+                        .borrow_mut()
+                        .wait(Some(effective_run_time), &mut sink)
+                };
+                result
                     .map(|_| ())
                     .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
             }
@@ -9886,9 +9930,19 @@ impl PyScene {
                                     .bind(slf.py())
                                     .call_method1("update_mobjects", (animation.dt,))?;
                             }
-                            callback
-                                .bind(slf.py())
-                                .call_method1("interpolate", (animation.alpha,))?;
+                            let callback = callback.bind(slf.py());
+                            if callback.hasattr("_fmn_interpolate_at_frame")? {
+                                callback.call_method1(
+                                    "_fmn_interpolate_at_frame",
+                                    (
+                                        animation.sample.frame as f64,
+                                        animation.sample.time.fps(),
+                                        animation.alpha,
+                                    ),
+                                )?;
+                            } else {
+                                callback.call_method1("interpolate", (animation.alpha,))?;
+                            }
                         }
                     }
                     let release = engine
@@ -10096,13 +10150,20 @@ impl PyScene {
     /// over the native wait segment. An active portal render generation
     /// captures every immutable frame through Lumen + Reel; ordinary lifecycle
     /// probes keep the same sink with output disabled.
-    #[pyo3(signature = (duration = None, stop_condition = None, ignore_presenter_mode = false))]
+    #[pyo3(signature = (duration = None, stop_condition = None, ignore_presenter_mode = false, duration_frames = None))]
     fn _wait(
         slf: &Bound<'_, Self>,
         duration: Option<f64>,
         stop_condition: Option<&Bound<'_, PyAny>>,
         ignore_presenter_mode: bool,
+        duration_frames: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
+        let duration_frames = duration_frames.map(frame_count_from_py).transpose()?;
+        if duration.is_some() && duration_frames.is_some() {
+            return Err(PyValueError::new_err(
+                "duration and duration_frames are mutually exclusive",
+            ));
+        }
         let engine = Rc::clone(&slf.borrow().engine);
         portal_playback::synchronize(slf)?;
         let needs_host_updates =
@@ -10112,7 +10173,9 @@ impl PyScene {
                 render: Arc::clone(&slf.borrow().render),
                 ..PortalSceneSink::default()
             };
-            let result = if ignore_presenter_mode {
+            let result = if let Some(frames) = duration_frames {
+                engine.borrow_mut().wait_frames(frames, &mut sink)
+            } else if ignore_presenter_mode {
                 engine
                     .borrow_mut()
                     .wait_ignoring_presenter(duration, &mut sink)
@@ -10137,7 +10200,13 @@ impl PyScene {
         };
         let mut wait = {
             let mut runtime = engine.borrow_mut();
-            if initial_completed {
+            if let Some(frames) = duration_frames {
+                if initial_completed {
+                    runtime.begin_stepped_wait_frames_after_updaters(frames, &mut sink)
+                } else {
+                    runtime.begin_stepped_wait_frames(frames, &mut sink)
+                }
+            } else if initial_completed {
                 runtime.begin_stepped_wait_after_updaters(duration, &mut sink)
             } else {
                 runtime.begin_stepped_wait(duration, &mut sink)
@@ -10267,6 +10336,16 @@ impl PyNativeAnimationDriver {
         self.animation.get_run_time()
     }
 
+    fn _frame_timing(&self) -> PyResult<PyFrameTiming> {
+        let fps = self.engine.borrow().fps();
+        Ok(PyFrameTiming {
+            duration: self.animation.duration_on_grid(fps).map_err(anim_error)?,
+            fps,
+            state: self.animation.state().clone(),
+            composition: self.animation.composition_timing(),
+        })
+    }
+
     fn begin(&mut self) -> PyResult<()> {
         self.begun = true;
         self.finished = false;
@@ -10283,6 +10362,19 @@ impl PyNativeAnimationDriver {
     fn interpolate(&mut self, alpha: f64) -> PyResult<()> {
         self.animation
             .interpolate(self.engine.borrow_mut().stage_mut(), alpha);
+        self.animation
+            .deferred_error()
+            .map_or(Ok(()), |error| Err(anim_error(error)))
+    }
+
+    fn _fmn_interpolate_at_frame(&mut self, frame: f64, fps: u32) -> PyResult<()> {
+        if fps != self.engine.borrow().fps() {
+            return Err(PyValueError::new_err(
+                "frame timing belongs to another scene grid",
+            ));
+        }
+        self.animation
+            .interpolate_at_frame(self.engine.borrow_mut().stage_mut(), frame, fps);
         self.animation
             .deferred_error()
             .map_or(Ok(()), |error| Err(anim_error(error)))
@@ -10331,6 +10423,7 @@ impl PyNativeAnimationDriver {
 /// segment's authoritative timing.
 struct PythonAnimationSlot {
     state: fmn_anim::AnimState,
+    frame_timing: Option<PyFrameTiming>,
 }
 
 impl PythonAnimationSlot {
@@ -10342,11 +10435,24 @@ impl PythonAnimationSlot {
         config.remover = remover;
         Self {
             state: fmn_anim::AnimState::new(mobject, config),
+            frame_timing: None,
         }
     }
 }
 
 impl fmn_anim::Animation for PythonAnimationSlot {
+    fn duration_on_grid(&self, fps: u32) -> Result<fmn_anim::FrameDuration, fmn_anim::AnimError> {
+        if let Some(timing) = &self.frame_timing {
+            if timing.fps != fps {
+                return Err(fmn_anim::AnimError::InvalidFramePhase(
+                    "frame timing belongs to another scene grid",
+                ));
+            }
+            return Ok(timing.duration.clone());
+        }
+        self.state.config.duration_on_grid(fps)
+    }
+
     fn state(&self) -> &fmn_anim::AnimState {
         &self.state
     }
@@ -10364,6 +10470,28 @@ impl fmn_anim::Animation for PythonAnimationSlot {
     }
 }
 
+/// Python frame counts use the integer protocol, never float coercion.
+fn frame_count_from_py(value: &Bound<'_, PyAny>) -> PyResult<u64> {
+    if value.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err(
+            "frame count must be an integer, not bool",
+        ));
+    }
+    let index = PyModule::import(value.py(), "operator")?
+        .getattr("index")?
+        .call1((value,))?;
+    if index.lt(0)? {
+        return Err(PyValueError::new_err("frame count must be non-negative"));
+    }
+    let frames = index.extract::<u64>()?;
+    if frames > i64::MAX as u64 {
+        return Err(PyOverflowError::new_err(
+            "frame count exceeds the rational clock's i64 range",
+        ));
+    }
+    Ok(frames)
+}
+
 /// One parsed play spec: a leaf animation or a composition carrying
 /// nested members (fm-d3gt, the explicit-animation seam).
 #[derive(Clone)]
@@ -10372,6 +10500,8 @@ struct AnimSpec {
     mob: Option<Mob>,
     target: Option<Mob>,
     run_time: Option<f64>,
+    run_time_frames: Option<u64>,
+    frame_timing: Option<PyFrameTiming>,
     rate: Option<fmn_anim::RateFunc>,
     lag: Option<f64>,
     shift: [f64; 3],
@@ -10445,6 +10575,16 @@ fn parse_anim_spec(
         Option<f64>,
         Bound<'_, PyDict>,
     ) = spec.extract()?;
+    let run_time_frames = params
+        .get_item("run_time_frames")?
+        .as_ref()
+        .map(frame_count_from_py)
+        .transpose()?;
+    if run_time.is_some() && run_time_frames.is_some() {
+        return Err(PyValueError::new_err(
+            "run_time and run_time_frames are mutually exclusive",
+        ));
+    }
     let rate = rate.as_ref().map(|value| rates.parse(value)).transpose()?;
     let resolve = |proxy: &Bound<'_, BridgeMobject>| -> PyResult<Mob> {
         let (mob_engine, mob) = bound_parts(&proxy.borrow())?;
@@ -10524,6 +10664,15 @@ fn parse_anim_spec(
         mob,
         target: target.as_ref().map(&resolve).transpose()?,
         run_time,
+        run_time_frames,
+        frame_timing: params
+            .get_item("frame_timing")?
+            .map(|value| {
+                value
+                    .extract::<PyRef<'_, PyFrameTiming>>()
+                    .map(|timing| (*timing).clone())
+            })
+            .transpose()?,
         rate,
         lag,
         shift: get3("shift", [0.0; 3])?,
@@ -10663,7 +10812,9 @@ fn build_native_animation(
     );
     let mut animation: Box<dyn fmn_anim::Animation> = match spec.kind.as_str() {
         "python_callback" | "native_callback" => {
-            Box::new(PythonAnimationSlot::new(need_mob(spec.mob)?, spec.remover))
+            let mut slot = PythonAnimationSlot::new(need_mob(spec.mob)?, spec.remover);
+            slot.frame_timing = spec.frame_timing;
+            Box::new(slot)
         }
         "animation_group" | "lagged_start" => {
             let mut members = Vec::with_capacity(spec.members.len());
@@ -11050,11 +11201,12 @@ fn build_native_animation(
             )));
         }
     };
+    if let Some(value) = spec.run_time {
+        animation.update_rate_info(Some(value), None, None);
+    }
     {
         let config = &mut animation.state_mut().config;
-        if let Some(value) = spec.run_time {
-            config.run_time = value;
-        }
+        config.run_time_frames = spec.run_time_frames;
         if let Some(rate) = spec.rate {
             config.rate_func = rate;
         }
@@ -12726,6 +12878,163 @@ fn _composition_intervals(run_times: Vec<f64>, lag_ratio: f64) -> Vec<(f64, f64)
         .collect()
 }
 
+/// Exact duration for a Python lifecycle slot. Choreo's own composition
+/// constructors resolve this value; Python receives seconds only for its
+/// interpolation callbacks and returns the opaque value for scheduling.
+#[pyclass(frozen, unsendable, name = "_FrameTiming")]
+#[derive(Clone)]
+struct PyFrameTiming {
+    duration: fmn_anim::FrameDuration,
+    fps: u32,
+    state: fmn_anim::AnimState,
+    composition: Option<fmn_anim::CompositionTiming>,
+}
+
+impl PyFrameTiming {
+    fn require_grid(&self, fps: u32) -> PyResult<()> {
+        if fps != self.fps {
+            return Err(PyValueError::new_err(
+                "frame timing belongs to another scene grid",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[pymethods]
+impl PyFrameTiming {
+    #[getter]
+    fn seconds(&self) -> f64 {
+        self.duration.to_seconds()
+    }
+
+    #[getter]
+    fn frame_native(&self) -> bool {
+        self.duration.is_frame_native()
+    }
+
+    #[getter]
+    fn frame_intervals(&self) -> bool {
+        self.composition
+            .as_ref()
+            .is_some_and(fmn_anim::CompositionTiming::is_frame_native)
+    }
+
+    fn __copy__(&self) -> Self {
+        self.clone()
+    }
+
+    fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
+        self.clone()
+    }
+
+    #[getter]
+    fn frame_count(&self) -> PyResult<i64> {
+        self.duration
+            .n_frames()
+            .map_err(|error| PyOverflowError::new_err(error.to_string()))
+    }
+
+    #[getter]
+    fn intervals(&self) -> Option<Vec<(f64, f64)>> {
+        self.composition.as_ref().map(|timing| {
+            timing
+                .intervals()
+                .iter()
+                .map(|interval| (interval.start, interval.end))
+                .collect()
+        })
+    }
+
+    #[getter]
+    fn max_end(&self) -> Option<f64> {
+        self.composition
+            .as_ref()
+            .map(fmn_anim::CompositionTiming::max_end)
+    }
+
+    fn alpha_at_frame(&self, frame: f64, fps: u32) -> PyResult<f64> {
+        self.require_grid(fps)?;
+        Ok(self.state.frame_alpha(frame, fps))
+    }
+
+    fn position_at_frame(&self, frame: f64, fps: u32) -> PyResult<Option<f64>> {
+        self.require_grid(fps)?;
+        Ok(self
+            .composition
+            .as_ref()
+            .map(|timing| timing.position_at_frame(frame, fps)))
+    }
+
+    fn rate_alpha_at_frame(&self, frame: f64, fps: u32) -> PyResult<Option<f64>> {
+        self.require_grid(fps)?;
+        Ok(self
+            .composition
+            .as_ref()
+            .map(|timing| timing.rate_alpha_at_frame(frame, fps)))
+    }
+}
+
+fn frame_timing_model(
+    stage: &mut fmn_mobject::Stage,
+    mobject: Mob,
+    descriptor: &Bound<'_, PyAny>,
+    depth: usize,
+) -> PyResult<Box<dyn fmn_anim::Animation>> {
+    if depth > 128 {
+        return Err(PyValueError::new_err(
+            "frame timing composition nesting exceeds 128",
+        ));
+    }
+    let (seconds, frames, span, lag, members): (
+        Option<f64>,
+        Option<Bound<'_, PyAny>>,
+        Option<(f64, f64)>,
+        f64,
+        Option<Vec<Bound<'_, PyAny>>>,
+    ) = descriptor.extract()?;
+    let frames = frames.as_ref().map(frame_count_from_py).transpose()?;
+    if seconds.is_some() && frames.is_some() {
+        return Err(PyValueError::new_err(
+            "run_time and run_time_frames are mutually exclusive",
+        ));
+    }
+    let mut animation: Box<dyn fmn_anim::Animation> = if let Some(members) = members {
+        let members = members
+            .iter()
+            .map(|member| frame_timing_model(stage, mobject, member, depth + 1))
+            .collect::<PyResult<Vec<_>>>()?;
+        Box::new(
+            fmn_anim::AnimationGroup::in_group(stage, members, lag, Some(mobject))
+                .map_err(anim_error)?,
+        )
+    } else {
+        Box::new(PythonAnimationSlot::new(mobject, false))
+    };
+    if let Some(seconds) = seconds {
+        animation.update_rate_info(Some(seconds), None, None);
+    }
+    animation.state_mut().config.run_time_frames = frames;
+    animation.state_mut().config.time_span = span;
+    Ok(animation)
+}
+
+#[pyfunction]
+fn _frame_timing(descriptor: &Bound<'_, PyAny>, fps: u32) -> PyResult<PyFrameTiming> {
+    // A detached, temporary arena prevents timing inspection from adding
+    // groups or running any authored lifecycle in the live scene.
+    let mut stage = fmn_mobject::Stage::new();
+    let mobject = stage.add(fmn_mobject::Mobject::new());
+    let mut animation = frame_timing_model(&mut stage, mobject, descriptor, 0)?;
+    animation.prepare_timing(fps).map_err(anim_error)?;
+    Ok(PyFrameTiming {
+        duration: animation.duration_on_grid(fps).map_err(anim_error)?,
+        fps,
+        state: animation.state().clone(),
+        composition: animation.composition_timing(),
+    })
+}
+
 /// `manimlib.config` directories from the one typed native resolution: the
 /// bundled defaults, then an optional `custom_config.yml` document (the
 /// Reference's cwd layer). The bootstrap derives the per-subdir paths with
@@ -13028,6 +13337,7 @@ fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<(
     module.add_function(wrap_pyfunction!(_any_updaters, module)?)?;
     module.add_function(wrap_pyfunction!(_public_update_scan, module)?)?;
     module.add_function(wrap_pyfunction!(_composition_intervals, module)?)?;
+    module.add_function(wrap_pyfunction!(_frame_timing, module)?)?;
     module.add_function(wrap_pyfunction!(_resolved_directories, module)?)?;
     module.add_function(wrap_pyfunction!(_resolved_camera, module)?)?;
     module.add_function(wrap_pyfunction!(_resolved_portal_config, module)?)?;

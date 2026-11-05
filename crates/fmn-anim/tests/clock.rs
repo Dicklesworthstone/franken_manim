@@ -1,7 +1,135 @@
 //! fm-wuq acceptance: the RationalFrameClock against the Reference's
 //! emission formula, the drift guarantee, and the no-off-grid property.
 
-use fmn_anim::{ClockError, RationalFrameClock, RationalTime};
+use fmn_anim::{ClockError, Duration, FrameDuration, RationalFrameClock, RationalTime};
+
+#[test]
+fn issue_10_frames_stay_exact_while_seconds_keep_their_ceiling() {
+    let frames = [
+        43, 17, 61, 29, 101, 7, 55, 13, 89, 31, 47, 19, 73, 11, 37, 23, 67, 3, 97, 41,
+    ];
+    for fps in [1, 24, 25, 30, 60, 120, u32::MAX] {
+        let mut clock = RationalFrameClock::new(fps).unwrap();
+        for count in frames {
+            let segment = clock.segment(Duration::Frames(count)).unwrap();
+            assert_eq!(segment.n_frames(), count as i64);
+            assert_eq!(segment.sample(count as i64).unwrap().alpha, 1.0);
+            clock.advance_frames(segment.n_frames()).unwrap();
+        }
+        assert_eq!(clock.now().frames(), 864, "fps={fps}");
+    }
+    let clock = RationalFrameClock::new(24).unwrap();
+    let seconds_total: i64 = frames
+        .iter()
+        .map(|count| clock.segment(*count as f64 / 24.0).unwrap().n_frames())
+        .sum();
+    assert_eq!(
+        seconds_total, 872,
+        "the existing second-based contract is deliberately unchanged"
+    );
+    for fps in [24, 25, 30, 60] {
+        let clock = RationalFrameClock::new(fps).unwrap();
+        for count in 0..=7200 {
+            assert_eq!(
+                clock.segment_frames(count).unwrap().n_frames(),
+                count as i64
+            );
+        }
+    }
+}
+
+#[test]
+fn exact_counts_cover_zero_large_integers_and_counter_boundaries() {
+    let mut clock = RationalFrameClock::new(24).unwrap();
+    for count in [0, 1, (1_u64 << 53) + 1, i64::MAX as u64] {
+        let segment = clock.segment_frames(count).unwrap();
+        assert_eq!(segment.n_frames(), count as i64);
+        if count == 0 {
+            assert!(segment.sample(0).is_none());
+            assert_eq!(segment.samples().count(), 0);
+        } else {
+            let sample = segment.sample(count as i64).unwrap();
+            assert_eq!(sample.time.frames(), count as i64);
+            assert_eq!(sample.alpha, 1.0);
+        }
+    }
+    for count in [i64::MAX as u64 + 1, u64::MAX] {
+        assert_eq!(
+            clock.segment_frames(count).unwrap_err(),
+            ClockError::RunTimeTooLong
+        );
+    }
+    clock.advance_frames(i64::MAX - 2).unwrap();
+    assert_eq!(
+        clock.segment_frames(3).unwrap_err(),
+        ClockError::FrameCounterOverflow
+    );
+    let last = clock.segment_frames(2).unwrap();
+    clock.advance_frames(last.n_frames()).unwrap();
+    assert_eq!(clock.now().frames(), i64::MAX);
+    assert_eq!(clock.segment_frames(0).unwrap().n_frames(), 0);
+    assert_eq!(
+        clock.segment_frames(1).unwrap_err(),
+        ClockError::FrameCounterOverflow
+    );
+}
+
+#[test]
+fn mixed_exact_arithmetic_retains_tiny_tails_and_large_integer_carries() {
+    let one = FrameDuration::new(Duration::Frames(1), 30).unwrap();
+    let seconds = FrameDuration::new(0.1, 30).unwrap();
+    assert_eq!(one.checked_add(&seconds).unwrap().n_frames().unwrap(), 5);
+    let large = FrameDuration::new(Duration::Frames(1_u64 << 53), 30).unwrap();
+    assert_eq!(
+        large.checked_add(&one).unwrap().n_frames().unwrap(),
+        (1_i64 << 53) + 1
+    );
+    let tiny = FrameDuration::new(f64::from_bits(1), 30).unwrap();
+    assert_eq!(
+        large.checked_add(&tiny).unwrap().n_frames().unwrap(),
+        (1_i64 << 53) + 1
+    );
+    let half = one.checked_scale(0.5).unwrap();
+    assert_eq!(half.checked_add(&half).unwrap().n_frames().unwrap(), 1);
+    assert_eq!(one.checked_add(&half).unwrap().n_frames().unwrap(), 2);
+    assert_eq!(one.checked_add(&half).unwrap().to_seconds(), 1.5 / 30.0);
+    let max = FrameDuration::new(Duration::Frames(i64::MAX as u64), 30).unwrap();
+    assert_eq!(
+        max.checked_add(&tiny).unwrap().n_frames().unwrap_err(),
+        ClockError::RunTimeTooLong
+    );
+    for lag in [-0.1, f64::NAN, f64::INFINITY] {
+        assert_eq!(
+            one.checked_scale(lag).unwrap_err(),
+            ClockError::InvalidFrameLag
+        );
+    }
+    let other_grid = FrameDuration::new(0.1, 60).unwrap();
+    assert_eq!(
+        one.checked_add(&other_grid).unwrap_err(),
+        ClockError::FrameRateMismatch
+    );
+    assert_eq!(
+        RationalFrameClock::new(60)
+            .unwrap()
+            .segment_duration(&seconds)
+            .unwrap_err(),
+        ClockError::FrameRateMismatch
+    );
+}
+
+#[test]
+fn exact_duration_precision_is_bounded_without_rounding() {
+    let mut tiny = FrameDuration::new(Duration::Frames(1), 24).unwrap();
+    for _ in 0..15 {
+        tiny = tiny.checked_scale(f64::from_bits(1)).unwrap();
+        assert_eq!(tiny.n_frames().unwrap(), 1);
+    }
+    assert_eq!(
+        tiny.checked_scale(f64::from_bits(1)).unwrap_err(),
+        ClockError::DurationComplexity
+    );
+}
 
 /// Sample-count fixtures across awkward run_times. `expected` is
 /// `ceil(rational(run_time_f64) · fps)` computed exactly (cross-checked

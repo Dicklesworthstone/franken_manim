@@ -20,12 +20,20 @@ def install_live_rates(native: Any) -> None:
     previous_requires, previous_play = g["_requires_python_animation"], Scene.play
     previous_defaults = Transform._ensure_runtime_defaults
 
-    def update_rate_info(self, run_time=None, rate_func=None, lag_ratio=None):
+    def update_rate_info(self, run_time=None, rate_func=None, lag_ratio=None,
+                         run_time_frames=None):
         # BN-12: None is the only absent option. In particular, zero duration
         # and zero family lag must mean the same thing on Choreo's native and
         # callback paths. Never ask an authored rate object for its truth value.
         if run_time is not None:
+            if run_time_frames is not None:
+                raise ValueError("run_time and run_time_frames are mutually exclusive")
             self.run_time = run_time
+            self.run_time_frames = None
+            self._fmn_derived_run_time = False
+        if run_time_frames is not None:
+            self.run_time_frames = g["_fmn_validate_frame_count"](run_time_frames)
+            self._fmn_derived_run_time = False
         if rate_func is not None:
             self.rate_func = rate_func
         if lag_ratio is not None:
@@ -39,6 +47,10 @@ def install_live_rates(native: Any) -> None:
         # call _ensure_runtime_defaults here: an observation must not execute
         # authored setup, construct a target, or consume the native sentinel.
         duration = self.run_time
+        frames = getattr(self, "run_time_frames", None)
+        fps = getattr(self, "_fmn_timing_fps", None)
+        if frames is not None and fps is not None:
+            duration = frames / fps
         if duration is None:
             duration = self.max_end_time if isinstance(self, Group) else 1.0
         if self.time_span is not None:

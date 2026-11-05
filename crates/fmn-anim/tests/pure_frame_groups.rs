@@ -105,6 +105,83 @@ fn compare(mut stage: Stage, mut animations: Vec<Box<dyn Animation>>) {
 }
 
 #[test]
+fn native_frame_groups_match_serial_sampling_on_every_worker_count() {
+    let mut stage = Stage::new();
+    let mut members = vec![
+        transform(&mut stage, -4.0, 1.0),
+        transform(&mut stage, 0.0, 1.0),
+        transform(&mut stage, 4.0, 1.0),
+    ];
+    for (member, frames) in members.iter_mut().zip([29, 38, 0]) {
+        member.state_mut().config.run_time_frames = Some(frames);
+    }
+    let inner = AnimationGroup::with_lag_ratio(&mut stage, members, 1.0).unwrap();
+    let outer = AnimationGroup::new(&mut stage, vec![Box::new(inner)])
+        .unwrap()
+        .with_run_time_frames(67);
+    compare(stage, vec![Box::new(outer)]);
+}
+
+#[test]
+fn zero_frame_dispatch_runs_only_lifecycle_rate_samples() {
+    use fmn_anim::pure_frame::{PlayCapture, play_segment_with_pure_dispatch};
+
+    #[derive(Default)]
+    struct Capture {
+        packets: usize,
+        programs: usize,
+    }
+    impl PlayCapture for Capture {
+        fn capture(&mut self, _packet: fmn_anim::FramePacket) {
+            self.packets += 1;
+        }
+        fn accepts_pure_segments(&self) -> bool {
+            true
+        }
+        fn capture_pure_segment(&mut self, _segment: &PureSegment) -> bool {
+            self.programs += 1;
+            true
+        }
+    }
+
+    let sampler = fmn_anim::rate_table::RateSampler::new(2, Ok);
+    let preparing = RateFunc::Preparing(sampler.clone());
+    assert_eq!(preparing.eval(0.0), 0.0);
+    assert_eq!(preparing.eval(1.0), 1.0);
+    let exact = sampler.finish().unwrap();
+    for (skip, allow_pure) in [(false, false), (false, true), (true, false), (true, true)] {
+        let mut stage = Stage::new();
+        let mut animation = transform(&mut stage, 0.0, 1.0);
+        let mob = animation.state().mobject();
+        animation.state_mut().config.run_time_frames = Some(0);
+        animation.state_mut().config.rate_func = exact.clone();
+        let mut animations = vec![animation];
+        let mut clock = RationalFrameClock::new(24).unwrap();
+        let mut capture = Capture::default();
+        let mut boundaries = 0;
+        let report = play_segment_with_pure_dispatch(
+            &mut stage,
+            &mut clock,
+            &RngRoot::from_seed(10),
+            &mut animations,
+            skip,
+            allow_pure,
+            &mut |_, _| boundaries += 1,
+            &mut capture,
+        )
+        .unwrap();
+        assert_eq!(report.n_frames, 0);
+        assert_eq!(clock.now().frames(), 0);
+        assert_eq!((capture.packets, capture.programs, boundaries), (0, 0, 0));
+        assert!(animations[0].state().starting_mobject().is_some());
+        assert_eq!(stage.get_center(mob), [2.5, 1.5, 0.5]);
+        assert!(!stage.is_animating(mob));
+        assert!(!stage.is_updating_suspended(mob));
+        assert_eq!(animations[0].deferred_error(), None);
+    }
+}
+
+#[test]
 fn nested_lagged_groups_keep_unequal_durations_rates_and_time_spans() {
     for lag in [0.0, 0.3, 1.0] {
         let mut stage = Stage::new();

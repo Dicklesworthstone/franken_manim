@@ -216,8 +216,7 @@ pub fn reconstruct_pure_frame(
     // construction (pure ⇒ no updaters anywhere), and interpolation is
     // absolute in alpha — no per-frame accumulation exists to replay.
     for animation in animations.iter_mut() {
-        let alpha = sample.time.to_f64() / animation.state().config.run_time;
-        animation.interpolate(stage, alpha);
+        animation.interpolate_at_frame(stage, sample.frame as f64, sample.time.fps());
         check_updater_error(stage)?;
     }
     let mut clock =

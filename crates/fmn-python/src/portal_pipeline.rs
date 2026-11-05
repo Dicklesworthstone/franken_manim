@@ -45,47 +45,77 @@ impl PipelineStages for Stages {
     fn rasterize(&self, work: Work, team: &TeamPlan) -> Result<Rasterized, String> {
         let Work { frame, destination } = work;
         let layout = frame.layout().map_err(|error| format!("lumen: {error}"))?;
-        let mut raw = self.raw_pool.lock().map_err(|_| "raw frame pool poisoned")?
-            .pop().unwrap_or_else(|| FrameBuffer::new(layout.clone()));
+        let mut raw = self
+            .raw_pool
+            .lock()
+            .map_err(|_| "raw frame pool poisoned")?
+            .pop()
+            .unwrap_or_else(|| FrameBuffer::new(layout.clone()));
         if raw.layout() != &layout {
             return Err("lumen: frozen frame changed output geometry".into());
         }
-        frame.render_into(team.threads(), &mut raw)
+        frame
+            .render_into(team.threads(), &mut raw)
             .map_err(|error| format!("lumen: {error}"))?;
         Ok(Rasterized { raw, destination })
     }
 
     fn convert(&self, rasterized: Rasterized, _: &TeamPlan) -> Result<FrameReservation, String> {
-        let Rasterized { raw, mut destination } = rasterized;
-        let mut scratch = self.rgba8_scratch.lock().map_err(|_| "conversion scratch poisoned")?;
+        let Rasterized {
+            raw,
+            mut destination,
+        } = rasterized;
+        let mut scratch = self
+            .rgba8_scratch
+            .lock()
+            .map_err(|_| "conversion scratch poisoned")?;
         super::portal_video::convert_frame(&raw, destination.frame_mut(), scratch.as_mut())
             .map_err(|error| format!("reel conversion: {error}"))?;
         drop(scratch);
-        self.raw_pool.lock().map_err(|_| "raw frame pool poisoned")?.push(raw);
+        self.raw_pool
+            .lock()
+            .map_err(|_| "raw frame pool poisoned")?
+            .push(raw);
         Ok(destination)
     }
 }
 
-pub(super) fn reserve(stream: &mut Stream)
-    -> Result<fmn_runtime::FramePermit<'_, Work>, FrameStreamError<String>>
-{
+pub(super) fn reserve(
+    stream: &mut Stream,
+) -> Result<fmn_runtime::FramePermit<'_, Work>, FrameStreamError<String>> {
     stream.reserve()
 }
 
-pub(super) fn start(plan: ExecutionPlan, scratch: Option<FrameBuffer>)
-    -> Result<Stream, FrameStreamError<String>>
-{
-    FrameStream::new(plan, Stages {
-        rgba8_scratch: Mutex::new(scratch), raw_pool: Mutex::new(Vec::new()),
-    }, |_, reservation| reservation.publish().map_err(|error| format!("reel: {error}")))
+pub(super) fn start(
+    plan: ExecutionPlan,
+    scratch: Option<FrameBuffer>,
+) -> Result<Stream, FrameStreamError<String>> {
+    FrameStream::new(
+        plan,
+        Stages {
+            rgba8_scratch: Mutex::new(scratch),
+            raw_pool: Mutex::new(Vec::new()),
+        },
+        |_, reservation| {
+            reservation
+                .publish()
+                .map_err(|error| format!("reel: {error}"))
+        },
+    )
 }
 
 /// Cancel the sink first so a blocked reservation/emission cannot hold the
 /// pipeline join hostage. Finalizers are native and may run without the GIL.
 pub(super) fn cancel(stream: Option<Stream>, emitter: Option<OrderedEmitter>) {
-    if let Some(emitter) = &emitter { emitter.cancel(); }
-    if let Some(stream) = stream { let _ = stream.cancel(); }
-    if let Some(emitter) = emitter { let _ = emitter.finish(); }
+    if let Some(emitter) = &emitter {
+        emitter.cancel();
+    }
+    if let Some(stream) = stream {
+        let _ = stream.cancel();
+    }
+    if let Some(emitter) = emitter {
+        let _ = emitter.finish();
+    }
 }
 
 #[cfg(test)]
@@ -105,11 +135,28 @@ mod tests {
     fn production_frame_pipeline_acceptance() {
         crate::with_python_test_module("native file frame pipeline", |py, _module, globals| {
             use pyo3::types::PyDictMethods as _;
-            globals.set_item("__file__", concat!(env!("CARGO_MANIFEST_DIR"), "/tests/frame_pipeline.py")).unwrap();
-            let source = std::ffi::CString::new(include_str!("../tests/frame_pipeline.py")).unwrap();
+            globals
+                .set_item(
+                    "__file__",
+                    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/frame_pipeline.py"),
+                )
+                .unwrap();
+            let source =
+                std::ffi::CString::new(include_str!("../tests/frame_pipeline.py")).unwrap();
             py.run(source.as_c_str(), Some(globals), Some(globals))
                 .inspect_err(|error| error.print(py))
                 .expect("native pipeline pixel, clock, ownership and cancellation acceptance");
+        });
+    }
+
+    #[test]
+    fn production_exact_frame_duration_acceptance() {
+        crate::with_python_test_module("exact frame durations", |py, _module, globals| {
+            let source = std::ffi::CString::new(include_str!("../tests/exact_frame_durations.py"))
+                .expect("frame duration suite contains no NUL");
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .expect("exact frame portal, composition, rendering and encoding acceptance");
         });
     }
 }

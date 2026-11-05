@@ -231,8 +231,7 @@ impl SharedTimelineBundle {
             source,
             index,
             fps: self.fps(),
-            offset,
-            run_time: planned.run_time,
+            alpha: planned.sample_alpha(offset, self.fps()),
             camera: self.cameras.as_ref().map(|cameras| cameras[index as usize]),
         })
     }
@@ -245,8 +244,7 @@ pub struct TimelineFrameJob {
     source: Arc<Source>,
     index: u32,
     fps: u32,
-    offset: i64,
-    run_time: f64,
+    alpha: f64,
     camera: Option<fmn_render::camera::CameraSample>,
 }
 
@@ -375,13 +373,12 @@ impl TimelineFrameCache {
                 let cached = self.pure.as_ref().ok_or(BundleReadError::PlanInconsistent(
                     "missing decoded endpoints",
                 ))?;
-                // Keep the same grouping as TimelineBundle::stage_at: binary64
-                // duration boundaries and rate clamping are semantic, not hints.
-                let alpha = (job.offset as f64 / f64::from(job.fps)) / job.run_time;
+                // The authoritative schedule computes alpha before this job
+                // is shared, preserving its exact-frame or seconds law.
                 interpolate_between(
                     &cached.begin,
                     &cached.end,
-                    bundle_sub_alpha(alpha, &cached.rate),
+                    bundle_sub_alpha(job.alpha, &cached.rate),
                     cached.path,
                 )
             }

@@ -49,6 +49,76 @@ fn state(stage: &Stage) -> (Vec<u8>, u64) {
 }
 
 #[test]
+fn exact_frame_bundles_preserve_live_sampling_counts_and_shared_replay() {
+    fn authored(fps: u32) -> (Stage, Timeline, fmn_mobject::Mob) {
+        let mut stage = Stage::new();
+        let mob = stage.add(Mobject::from_points(&[[0.0, 0.0, 0.0]]));
+        stage.add_to_scene(mob).unwrap();
+        let mut timeline = Timeline::new(fps).unwrap();
+        let animation = prepare_animation(
+            mob.animate()
+                .set_anim_args(AnimateArgs {
+                    run_time_frames: Some(43),
+                    rate_func: Some(rate::linear),
+                    ..AnimateArgs::default()
+                })
+                .unwrap()
+                .shift([3.0, 0.0, 0.0])
+                .unwrap(),
+            &mut stage,
+        )
+        .unwrap();
+        timeline.wait_frames(0).unwrap();
+        timeline.play(vec![animation]).unwrap();
+        timeline.wait_frames(17).unwrap();
+        timeline.wait(0.25).unwrap();
+        timeline.wait_frames(0).unwrap();
+        (stage, timeline, mob)
+    }
+    for (fps, expected_frames) in [(24, 66), (25, 67), (30, 68), (60, 75)] {
+        let (mut live_stage, mut live, mob) = authored(fps);
+        let mut expected = Vec::new();
+        live.render(&mut live_stage, &RngRoot::from_seed(10), &mut |packet| {
+            let stage = packet.materialize_stage();
+            expected.push((stage.get_center(mob), stage.time().to_bits()));
+        })
+        .unwrap();
+        assert_eq!(expected.len(), expected_frames as usize);
+        let (mut stage, timeline, _) = authored(fps);
+        let bytes = export_timeline_bundle(timeline, &mut stage, &RngRoot::from_seed(10)).unwrap();
+        let eager = TimelineBundle::from_bytes(&bytes).unwrap();
+        let shared = SharedTimelineBundle::from_bytes(&bytes).unwrap();
+        assert_eq!(eager.frame_count(), expected_frames);
+        assert_eq!(shared.frame_count(), expected_frames);
+        let mut cache = TimelineFrameCache::default();
+        // Scrub in reverse order as well as reading the production order.
+        for index in (0..expected_frames).rev().chain(0..expected_frames) {
+            let eager_frame = eager.stage_at(index).unwrap();
+            let shared_frame = cache
+                .materialize(&shared.frame_job(index).unwrap())
+                .unwrap();
+            let expected = expected[index as usize];
+            assert_eq!(
+                (
+                    eager_frame.get_center(eager_frame.roots()[0]),
+                    eager_frame.time().to_bits()
+                ),
+                expected,
+                "eager frame {index} at {fps} fps",
+            );
+            assert_eq!(
+                (
+                    shared_frame.get_center(shared_frame.roots()[0]),
+                    shared_frame.time().to_bits()
+                ),
+                expected,
+                "shared frame {index} at {fps} fps",
+            );
+        }
+    }
+}
+
+#[test]
 fn owned_jobs_are_send_sync_and_outlive_the_reader_in_reverse_parallel_order() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<SharedTimelineBundle>();

@@ -209,6 +209,23 @@ impl Animation for TransformMatchingParts {
     fn state_mut(&mut self) -> &mut AnimState {
         self.group.state_mut()
     }
+    fn duration_on_grid(&self, fps: u32) -> Result<crate::FrameDuration, AnimError> {
+        self.group.duration_on_grid(fps)
+    }
+    fn prepare_timing(&mut self, fps: u32) -> Result<(), AnimError> {
+        self.group.prepare_timing(fps)
+    }
+    fn composition_timing(&self) -> Option<crate::composition::CompositionTiming> {
+        self.group.composition_timing()
+    }
+    fn update_rate_info(
+        &mut self,
+        run_time: Option<f64>,
+        rate_func: Option<RateFunc>,
+        lag_ratio: Option<f64>,
+    ) {
+        self.group.update_rate_info(run_time, rate_func, lag_ratio);
+    }
     fn all_mobjects(&self) -> Vec<Mob> {
         self.inventory(self.group.all_mobjects())
     }
@@ -233,6 +250,9 @@ impl Animation for TransformMatchingParts {
     fn interpolate_submobject(&mut self, _stage: &mut Stage, _mobs: &[Mob], _alpha: f64) {}
     fn interpolate(&mut self, stage: &mut Stage, alpha: f64) {
         self.group.interpolate(stage, alpha);
+    }
+    fn interpolate_at_frame(&mut self, stage: &mut Stage, frame: f64, fps: u32) {
+        self.group.interpolate_at_frame(stage, frame, fps);
     }
     fn update_mobjects(&mut self, stage: &mut Stage, dt: f64) {
         self.group.update_mobjects(stage, dt);
