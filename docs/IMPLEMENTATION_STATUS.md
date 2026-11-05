@@ -74,6 +74,20 @@ to the active `lib.rs` test module; Cargo listing and real execution remain
 required. No compiled-portal pass follows from the empty run, and the complete
 scanner and bare Cargo gates have not yet executed for this candidate.
 
+The active-module rerun lists 168 Rust tests, including all three restored
+entry points and both existing Studio tests. The exact-position test actually
+executes and passes, but its buffered Python success line is absent from the
+captured output, so the unchanged output postcondition rejects the whole run
+(DSR `20261105T170311-720089/1`, frozen source `0fb77927`). Both default and
+all-feature strict Clippy pass. The two exact-timing scripts now flush their
+result lines explicitly; their assertions remain unchanged.
+
+Primary `47f6ebd3` also merges newer peer changes in 15 paths: live duration
+edits, composition-root style and stale-member admission, complete clock
+ownership, authored tracing hooks, and transparent streamed GIF frames. Those
+production bytes differ from the preceding runs and require current native
+validation. Their focused peer checkpoints are not a full merged-source pass.
+
 The main vision gaps remain concrete and tracked:
 
 | Product promise | Current evidence and remaining gate |

@@ -1056,4 +1056,4 @@ def verify_exact_frame_durations():
 
 
 exact_frame_results = verify_exact_frame_durations()
-print("Exact-frame regression results:", json.dumps(exact_frame_results, sort_keys=True))
+print("Exact-frame regression results:", json.dumps(exact_frame_results, sort_keys=True), flush=True)
