@@ -88,6 +88,19 @@ ownership, authored tracing hooks, and transparent streamed GIF frames. Those
 production bytes differ from the preceding runs and require current native
 validation. Their focused peer checkpoints are not a full merged-source pass.
 
+The current-source run now executes the restored exact-position suite and
+validates its flushed live-runtime result (one Rust test passes, zero ignored).
+DSR `20261105T181251-1154088/1`, frozen source `5c6b77c1`, also passes formatting,
+all-target checking, both strict Clippy variants, test compilation and discovery.
+The newly reachable whole frame-pipeline test then fails: its first captured
+frame differs from file output at two edge pixels (six channel values, maximum
+error two). In-memory capture always uses camera projection while eligible file
+frames use the retained planar route. A shared route decision is now drafted
+for readback, serial output and pure workers; its runtime result is pending.
+The exact pixel assertion and all five pipeline cases remain unchanged. Normal
+RCH recovery acknowledged the original failed run and preserved its logs; full
+scanner, bare Cargo and later compiled acceptance stages were not reached.
+
 The main vision gaps remain concrete and tracked:
 
 | Product promise | Current evidence and remaining gate |
