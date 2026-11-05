@@ -1,6 +1,61 @@
 # FrankenManim implementation status
 
-**Status date:** 2026-11-01 (America/New_York). The assessment below separates the inspected source, the published artifacts, recorded measurements, and fresh execution. Earlier assessments and execution records remain historical evidence.
+**Status date:** 2026-11-05 (America/New_York). Source, published artifacts,
+measurements and fresh execution have separate qualification. Earlier sections
+remain historical evidence; their passing gates do not qualify later code.
+
+## Current follow-through — 2026-11-05, native integration in progress
+
+The project has substantial working native and portal paths, but is not at its
+four-front-door, certified-platform and performance target. In particular,
+current merged source `d33ad52f` failed the real all-target build: the exact-frame
+change omitted Studio's timing argument, returned a borrowing PyO3 extraction
+error and referenced a private error type from its E2E test. The first
+three-source repair passed that build (`23b3323f` input aggregate). Strict
+Clippy then exposed two additional integration issues;
+the private duration call and descriptor representation have been corrected
+without suppressions. Compiled portal, Studio, video and the final bare Cargo
+gate remain pending for the combined candidate (`fm-r9nrw`, blocking the existing
+green-gate and underline tasks).
+
+The underline implementation is qualified upstream at
+`3ca2ebac7e2d5e657f6e6d6877784fc051f19501`, published as the narrow source candidate
+`fmn-underline-candidate-20261105`. It removes one extra rule thickness from
+TeX's `make_under` depth. Independent real-TeX measurements, the rejecting old
+parent and a fresh native rerun establish the correction. All seven original
+upstream gates pass: 4,946 tests, zero failures and 12 existing ignored tests
+(DSR `20261105T020216-3188417`). The unchanged original 2,000-root/13,822-case
+differential records 73 subformula gains, zero losses and 25→0 minimized
+underline failures. One existing golden depth header was manually adjudicated
+against an independent measurement; every remaining glyph, rule, span and path
+line is unchanged. This is solo semantic review and candidate-source evidence,
+not upstream-main, consumer, installed-wheel or release qualification. The native
+consumer join and ten-case certified-render scenario are in progress.
+
+The complete existing Python protocol discovery also exposed 160 setup errors
+among 2,020 executed tests: two shared AST fixtures omitted the new production
+`_DefaultRunTime` dependency. The fixtures now load the actual production
+helpers; all original cases and assertions are retained. Their complete rerun
+is pending. Protocol doubles provide orchestration coverage, not native pixels.
+
+The main vision gaps remain concrete and tracked:
+
+| Product promise | Current evidence and remaining gate |
+|---|---|
+| Native library and CLI | Real render/output paths exist. The earlier 5,113-pass bare Cargo receipt qualifies its earlier source only; the merged timing/underline source needs its own full checks. |
+| Correct native typesetting | Independent TeX and original upstream gates qualify the underline candidate. Its consumer, installed portal, remaining unsupported constructs and human Look Gallery judgments remain separate. |
+| Source-unedited Python scenes | The latest complete historical census at `e8ce3762` has 1,074/2,814 successes and passes the unchanged 1,073 floor. It does not qualify subsequent changes or imply that the remaining scenes work (`fm-boe`). |
+| Live Studio | Worker/capture/editing paths exist. Current compiled integration, complete Studio/browser scenarios and the loaded-host first-answer defect remain open (`fm-r9nrw`, `fm-5wq.61`, `fm-o4q`). |
+| Certified platform bits | Prior thread-count tests are bounded evidence. Fresh native linux-aarch64/macos-aarch64 verification and the substrate arithmetic leaks remain open (`fm-5wq.16`, `fm-certified-libm-leak-3aja`, `fm-bp82`). |
+| Farm scaling and performance targets | No incumbent timing win is claimed here. Pinned-profile PG measurements and the intended fast engine remain open (`fm-inr`, `fm-fast-engine-real-xhy6`). |
+| One-binary distribution and optional wheel | Older matching artifacts exist; this source still needs its matching clean artifact/installed-policy checks. WASM package/browser, platform and release gates remain open (`fm-7wm`, `fm-jip`). |
+
+The original thirteen-stage source policy and its named audio decoder/PCM cohort
+remain unmet; focused native or default Cargo checks do not replace them. The
+existing graph covers these named gaps, but closing a set of implementation
+tasks cannot establish the missing platform, performance or human-review
+evidence. New failures remain on their original tasks until their acceptance is
+met. No GitHub Actions service or release waiver is used.
 
 ## Current follow-through — 2026-11-01, FACE policies passed
 

@@ -9667,18 +9667,23 @@ impl PyScene {
     /// params)`, with composition members under `params["members"]`.
     /// Native groups derive the timing slots; ordered host callbacks run
     /// between Stage borrows. An optional camera track shares the segment.
-    #[pyo3(signature = (specs, callbacks, camera, run_time, rate_func, lag_ratio, run_time_frames = None))]
+    /// Duration is an optional `(seconds, frames)` override; exactly one
+    /// unit may be present, and integer frames never pass through seconds.
+    #[pyo3(signature = (specs, callbacks, camera, duration, rate_func, lag_ratio))]
     fn _play_animations(
         slf: &Bound<'_, Self>,
         specs: Vec<Bound<'_, PyAny>>,
         callbacks: Vec<Option<Py<PyAny>>>,
         camera: Option<(Bound<'_, PyCameraFrameCore>, Bound<'_, PyCameraFrameCore>)>,
-        run_time: Option<f64>,
+        duration: Option<(Option<f64>, Option<Bound<'_, PyAny>>)>,
         rate_func: Option<Bound<'_, PyAny>>,
         lag_ratio: Option<f64>,
-        run_time_frames: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Vec<f64>> {
-        let run_time_frames = run_time_frames.map(frame_count_from_py).transpose()?;
+        let (run_time, run_time_frames) = duration.unwrap_or_default();
+        let run_time_frames = run_time_frames
+            .as_ref()
+            .map(frame_count_from_py)
+            .transpose()?;
         if run_time.is_some() && run_time_frames.is_some() {
             return Err(PyValueError::new_err(
                 "run_time and run_time_frames are mutually exclusive",
@@ -10667,10 +10672,9 @@ fn parse_anim_spec(
         run_time_frames,
         frame_timing: params
             .get_item("frame_timing")?
-            .map(|value| {
-                value
-                    .extract::<PyRef<'_, PyFrameTiming>>()
-                    .map(|timing| (*timing).clone())
+            .map(|value| -> PyResult<PyFrameTiming> {
+                let timing = value.extract::<PyRef<'_, PyFrameTiming>>()?;
+                Ok((*timing).clone())
             })
             .transpose()?,
         rate,
@@ -12881,7 +12885,7 @@ fn _composition_intervals(run_times: Vec<f64>, lag_ratio: f64) -> Vec<(f64, f64)
 /// Exact duration for a Python lifecycle slot. Choreo's own composition
 /// constructors resolve this value; Python receives seconds only for its
 /// interpolation callbacks and returns the opaque value for scheduling.
-#[pyclass(frozen, unsendable, name = "_FrameTiming")]
+#[pyclass(frozen, unsendable, from_py_object, name = "_FrameTiming")]
 #[derive(Clone)]
 struct PyFrameTiming {
     duration: fmn_anim::FrameDuration,
@@ -12975,6 +12979,14 @@ impl PyFrameTiming {
     }
 }
 
+type FrameTimingDescriptor<'py> = (
+    Option<f64>,
+    Option<Bound<'py, PyAny>>,
+    Option<(f64, f64)>,
+    f64,
+    Option<Vec<Bound<'py, PyAny>>>,
+);
+
 fn frame_timing_model(
     stage: &mut fmn_mobject::Stage,
     mobject: Mob,
@@ -12986,13 +12998,7 @@ fn frame_timing_model(
             "frame timing composition nesting exceeds 128",
         ));
     }
-    let (seconds, frames, span, lag, members): (
-        Option<f64>,
-        Option<Bound<'_, PyAny>>,
-        Option<(f64, f64)>,
-        f64,
-        Option<Vec<Bound<'_, PyAny>>>,
-    ) = descriptor.extract()?;
+    let (seconds, frames, span, lag, members): FrameTimingDescriptor<'_> = descriptor.extract()?;
     let frames = frames.as_ref().map(frame_count_from_py).transpose()?;
     if seconds.is_some() && frames.is_some() {
         return Err(PyValueError::new_err(

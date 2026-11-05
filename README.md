@@ -590,7 +590,7 @@ A few honest boundaries:
 
 **Will my existing manim scenes run?** That's the G4a gate: a pinned corpus of real 3b1b-era scenes runs **source-unedited** through `fmn-python` under documented shims (imports, asset paths, fonts), passing structural assertions and Look-Gallery review. Scenes using TeX constructs beyond the current fmd-math tier fail with the named missing construct, which feeds the public coverage ratchet.
 
-Where that stands today: every Scene class in the pinned 3b1b/videos tree (2020–2026, 2,814 classes) is swept through the portal, and 1,072 (38.1%, measured 2026-11-04 at `a215e9a2`) run to completion and write their final frame. Two prior successes timed out, leaving the unchanged 1,073-success floor unmet. The [scene dashboard](docs/ratchet/scene_dashboard.md) records the complete comparison and classifies the rest. The sweep does not judge those images; that is the Look Gallery's job:
+The latest complete measurement covers every Scene class in the pinned 3b1b/videos tree (2020–2026, 2,814 classes): 1,074 (38.2%, measured 2026-11-04 at `e8ce3762`) run to completion and write their final frame, passing the unchanged 1,073-success floor. That run restores the two timeouts in the retained failed `a215e9a2` census; it does not qualify subsequent source changes. The [scene dashboard](docs/ratchet/scene_dashboard.md) records both runs and classifies the remaining failures. The sweep does not judge those images; that is the Look Gallery's job:
 
 - 24.6% need the videos' private image and SVG assets;
 - 15.2% import packages the sweep did not install (gensim, transformers, torch) or corpus modules missing from the pinned tree;

@@ -345,11 +345,12 @@ pub(super) fn finish(slf: &Bound<'_, PyScene>) -> PyResult<Recording> {
     }
     portal_playback::synchronize(slf)?;
     synchronize_portal_camera(slf)?;
+    let exact_timing = slf.borrow().engine.borrow().has_frame_duration_requests();
     let empty = render
         .lock()
         .map_err(|_| PyRuntimeError::new_err("Studio generation lock poisoned"))?
         .as_ref()
-        .is_some_and(PortalRenderSession::needs_final_capture);
+        .is_some_and(|session| session.needs_final_capture(exact_timing));
     if empty {
         let engine = Rc::clone(&slf.borrow().engine);
         let mut sink = PortalSceneSink {

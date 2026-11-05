@@ -109,7 +109,8 @@ def environment(install=True):
         def _project_families(self, roots, factory, adopt):
             # Only record the native projection boundary, never fake geometry.
             self.family_projections.append((roots, factory, adopt))
-        def _play_animations(self, specs, callbacks, camera, run_time, rate, lag):
+        def _play_animations(self, specs, callbacks, camera, duration, rate, lag):
+            run_time = duration[0] if duration is not None else None
             self.executions.append((specs, callbacks, camera, run_time, rate, lag))
             if self.lower_only:
                 return self.executions[-1]

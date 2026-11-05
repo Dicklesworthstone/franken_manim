@@ -15,6 +15,10 @@ ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("movement_under_test", ROOT / "python/fmn_python/movement.py")
 movement = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(movement)
+SEMANTICS_SPEC = importlib.util.spec_from_file_location(
+    "movement_semantics", ROOT / "python/manimlib/_animation_semantics.py")
+semantics = importlib.util.module_from_spec(SEMANTICS_SPEC)
+SEMANTICS_SPEC.loader.exec_module(semantics)
 
 
 def environment(install=True):
@@ -174,7 +178,9 @@ def environment(install=True):
              refuse_unrouted=refuse_unrouted,
              _RATE_FUNC_NAMES={linear:"linear", smooth:"smooth"},
              _requires_python_animation=lambda a:not bool(getattr(a, "_native_kind", None)),
-             prepare_animation=lambda a:a.build() if isinstance(a, _AnimationBuilder) else a)
+             prepare_animation=lambda a:a.build() if isinstance(a, _AnimationBuilder) else a,
+             _DefaultRunTime=semantics._DefaultRunTime,
+             _validate_frame_count=semantics._validate_frame_count)
     g["g"] = g
     path = ROOT / "python/manimlib/_animation_semantics.py"
     installer = next(node for node in ast.parse(path.read_text()).body
@@ -197,8 +203,8 @@ def environment(install=True):
     exec(compile(ast.Module([definitions["native_animation_init"]], []), str(path), "exec"), g)
     _NativeAnimation.__init__ = g["native_animation_init"]
     path = ROOT / "python/manimlib_bootstrap.py"
-    names = {"Homotopy", "SmoothedVectorizedHomotopy", "ComplexHomotopy", "PhaseFlow", "MoveAlongPath"}
-    nodes = [node for node in ast.parse(path.read_text()).body if isinstance(node, ast.ClassDef) and node.name in names]
+    names = {"_animation_run_time_options", "Homotopy", "SmoothedVectorizedHomotopy", "ComplexHomotopy", "PhaseFlow", "MoveAlongPath"}
+    nodes = [node for node in ast.parse(path.read_text()).body if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name in names]
     assert {node.name for node in nodes} == names
     exec(compile(ast.Module(nodes, []), str(path), "exec"), g)
     native._old_homotopy_begin = native.Homotopy.begin

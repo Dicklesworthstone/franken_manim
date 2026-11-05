@@ -239,7 +239,8 @@ def environment():
         def play(self, *args, **kwargs):
             self.calls.append(("original", args, kwargs))
             return "original"
-        def _play_animations(self, specs, callbacks, camera, run_time, rate_func, lag_ratio):
+        def _play_animations(self, specs, callbacks, camera, duration, rate_func, lag_ratio):
+            run_time = duration[0] if duration is not None else None
             self.calls.append(("native_clock", specs, callbacks, camera, run_time, rate_func, lag_ratio))
             assert len(specs) == len(callbacks) == 1
             assert camera is None

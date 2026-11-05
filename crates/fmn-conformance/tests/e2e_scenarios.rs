@@ -2408,7 +2408,7 @@ fn native_exact_frame_duration_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scena
                     )?
                 };
                 if report.n_frames != frames as i64 || report.base_frame != base {
-                    return Err(fmn::SceneError::InvalidLifecycle(
+                    return Err(SceneError::InvalidLifecycle(
                         "exact-frame segment changed its integer frame range",
                     )
                     .into());
@@ -6969,6 +6969,152 @@ fn tex_script_metrics_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError>
         );
     }
     Ok(RunOutcome::ok().with_counter("tex_script_metric_formulas", 28))
+}
+
+/// fm-underline-depth-r12-gj19: exact underline boxes retain their rules
+/// through native Tex/TexText families and certified rasterization.
+fn tex_underline_metrics_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let engine = &scene_goldens::corpus().tex;
+    let mut visible_rules = 0;
+    // Independent ruled-Reference boxes at10pt. Text-mode constructors
+    // use the corresponding text-island oracle, including its EC metrics.
+    let cases = [
+        (
+            false,
+            r"\underline{B}",
+            [0.808_680, 0.683_331, 0.199_990],
+            1,
+        ),
+        (
+            false,
+            r"\underline{y}",
+            [0.526_160, 0.430_554, 0.394_434],
+            1,
+        ),
+        (
+            false,
+            r"\scriptstyle\underline{B}",
+            [0.638_300, 0.478_334, 0.169_990],
+            1,
+        ),
+        (
+            false,
+            r"\scriptscriptstyle\underline{y}",
+            [0.383_220, 0.215_277, 0.218_643],
+            1,
+        ),
+        (
+            false,
+            r"\underline{\underline{B}}",
+            [0.808_680, 0.683_331, 0.399_979],
+            2,
+        ),
+        (
+            false,
+            r"\frac{\underline{B}}{\underline{y}}",
+            [1.048_680, 1.359_839, 1.080_385],
+            3,
+        ),
+        (
+            false,
+            r"\text{\underline{B}}",
+            [0.708_160, 0.688_720, 0.199_990],
+            1,
+        ),
+        (
+            false,
+            r"\text{\underline{y}}",
+            [0.527_649, 0.430_450, 0.394_386],
+            1,
+        ),
+        (true, r"\underline{B}", [0.708_160, 0.688_720, 0.199_990], 1),
+        (true, r"\underline{y}", [0.527_649, 0.430_450, 0.394_386], 1),
+    ];
+    let blank = render_certified_doc(&Stage::new());
+    for (text_mode, source, expected, expected_rules) in cases {
+        let built = if text_mode {
+            fmn_library::TexText::new(source).build(engine)
+        } else {
+            fmn_library::Tex::new(source).build(engine)
+        }
+        .map_err(|error| fail(format!("{source}: underline builder: {error}")))?;
+        let layout = &built.typeset.layout;
+        let measured = [layout.width, layout.height, layout.depth];
+        if measured
+            .into_iter()
+            .zip(expected)
+            .any(|(actual, want)| !actual.is_finite() || (actual - want).abs() >= 1e-4)
+        {
+            return Err(fail(format!(
+                "{source}: underline box {measured:?}, real TeX {expected:?}"
+            )));
+        }
+        if layout.rules.len() != expected_rules
+            || built.vmob.children().len() != built.typeset.subs.len()
+        {
+            return Err(fail(format!("{source}: underline rules or family lost")));
+        }
+        for (ordinal, sub) in built.typeset.subs.iter().enumerate() {
+            if matches!(sub.prim, Prim::Rule(_))
+                && built.vmob.children()[ordinal].points().is_empty()
+            {
+                return Err(fail(format!("{source}: rule has no native geometry")));
+            }
+        }
+        let centered = built.vmob.moved_to([0.0; 3]);
+        let mut stage = Stage::new();
+        let formula = stage.add(centered.clone());
+        stage
+            .add_to_scene(formula)
+            .map_err(|error| fail(format!("{source}: show underline: {error}")))?;
+        let rendered = render_certified_doc(&stage);
+        if rendered == blank {
+            return Err(fail(format!("{source}: blank certified underline frame")));
+        }
+        // Hide one rule at a time without changing any points or centering.
+        // Glyph ink alone must not satisfy the underline visibility check.
+        for (ordinal, sub) in built.typeset.subs.iter().enumerate() {
+            if !matches!(sub.prim, Prim::Rule(_)) {
+                continue;
+            }
+            let mut child_index = 0;
+            let masked = centered.clone().map_children(|child| {
+                let hide = child_index == ordinal;
+                child_index += 1;
+                if hide {
+                    child.map_style_deep(|mut style| {
+                        style.fill_opacity = 0.0;
+                        style.stroke_opacity = 0.0;
+                        style
+                    })
+                } else {
+                    child
+                }
+            });
+            let mut without_rule = Stage::new();
+            let formula = without_rule.add(masked);
+            without_rule
+                .add_to_scene(formula)
+                .map_err(|error| fail(format!("{source}: show rule control: {error}")))?;
+            if render_certified_doc(&without_rule) == rendered {
+                return Err(fail(format!(
+                    "{source}: native rule {ordinal} contributes no certified pixels"
+                )));
+            }
+            visible_rules += 1;
+        }
+        ctx.event(
+            LogEvent::new("e2e.parity.tex_underline_metric")
+                .field("source", source)
+                .field("mode", if text_mode { "text" } else { "math" })
+                .field("box_em", format!("{measured:?}"))
+                .field("rules", expected_rules.to_string())
+                .field("visible", "true"),
+        );
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("tex_underline_formulas", 10)
+        .with_counter("tex_underline_visible_rules", visible_rules))
 }
 
 /// fm-j4tni: an inline cross retains its path, source colour and primitive
@@ -12484,6 +12630,21 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "parity.tex_underline_metrics.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(tex_underline_metrics_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tex_underline_formulas", 10),
+            counter_eq("tex_underline_visible_rules", 13),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.parity.tex_underline_metric",
+            vec![FieldPred::str_eq("visible", "true")],
+        )],
+    ));
+    specs.push(spec(
         "parity.tex_pifont_cross.v1",
         ScenarioClass::ParityDrill,
         Surface::RustApi,
@@ -15301,6 +15462,16 @@ fn tex_script_metrics_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "parity.tex_script_metrics.v1")
         .expect("the script and prime metrics scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn tex_underline_metrics_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "parity.tex_underline_metrics.v1")
+        .expect("the underline metrics scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

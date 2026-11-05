@@ -17,6 +17,10 @@ PATH = ROOT / "python/fmn_python/animation_updaters.py"
 SPEC = importlib.util.spec_from_file_location("fmn_python.animation_updaters", PATH)
 adapter = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(adapter)
+SEMANTICS_SPEC = importlib.util.spec_from_file_location(
+    "animation_updater_semantics", ROOT / "python/manimlib/_animation_semantics.py")
+semantics = importlib.util.module_from_spec(SEMANTICS_SPEC)
+SEMANTICS_SPEC.loader.exec_module(semantics)
 
 
 def environment():
@@ -84,7 +88,9 @@ def environment():
     old_turn.__module__ = "manimlib.mobject.mobject_update_utils"
     g.update(Mobject=Mobject, Animation=Animation, Transform=Transform, AnimationGroup=AnimationGroup,
              turn_animation_into_updater=old_turn, cycle_animation=lambda *a, **k: None,
-             smooth=lambda t:t, smooth_rate=lambda t:t, np=np)
+             smooth=lambda t:t, smooth_rate=lambda t:t, np=np,
+             _DefaultRunTime=semantics._DefaultRunTime,
+             _validate_frame_count=semantics._validate_frame_count)
     g["g"] = g
     source = ROOT / "python/manimlib/_animation_semantics.py"
     tree = ast.parse(source.read_text())
