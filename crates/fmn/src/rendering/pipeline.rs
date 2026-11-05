@@ -1,7 +1,9 @@
 //! Owned Lumen jobs between the serial scene owner and the existing runtime.
 
 mod adaptive;
-pub use adaptive::{NativeAdaptiveCamera, NativeAdaptiveRoutes, planar_stage_refusal};
+pub use adaptive::{
+    NativeAdaptiveCamera, NativeAdaptiveRoutes, planar_capture_refusal, planar_stage_refusal,
+};
 
 use std::cell::RefCell;
 use std::fmt;

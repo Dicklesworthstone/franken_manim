@@ -99,19 +99,7 @@ impl NativeAdaptiveCamera {
                 .set_light_source_position(stage.get_center(light))
                 .map_err(NativeFrameError::Camera)?;
         }
-        let frame = camera.frame();
-        let baseline = CameraConfig::default().frame;
-        let refusal = if !self.planar_map_matches {
-            Some("output aspect differs from the default frame")
-        } else if frame.center() != baseline.center()
-            || frame.shape() != baseline.shape()
-            || frame.orientation() != baseline.orientation()
-            || frame.field_of_view() != baseline.field_of_view()
-        {
-            Some("camera frame differs from the default frame")
-        } else {
-            planar_stage_refusal(stage)
-        };
+        let refusal = planar_capture_refusal(stage, &camera, self.planar_map_matches);
         Ok((refusal.map(|_| camera), refusal))
     }
 
@@ -137,6 +125,30 @@ impl NativeAdaptiveCamera {
             counts.routes.planar += 1;
         }
         Ok(())
+    }
+}
+
+/// Explain why a capture needs camera projection rather than the retained
+/// planar renderer. File output, in-memory readback and pure-segment workers
+/// share this decision so observing a scene selects the same raster route.
+#[must_use]
+pub fn planar_capture_refusal(
+    stage: &Stage,
+    camera: &Camera,
+    planar_map_matches: bool,
+) -> Option<&'static str> {
+    let frame = camera.frame();
+    let baseline = CameraConfig::default().frame;
+    if !planar_map_matches {
+        Some("output aspect differs from the default frame")
+    } else if frame.center() != baseline.center()
+        || frame.shape() != baseline.shape()
+        || frame.orientation() != baseline.orientation()
+        || frame.field_of_view() != baseline.field_of_view()
+    {
+        Some("camera frame differs from the default frame")
+    } else {
+        planar_stage_refusal(stage)
     }
 }
 

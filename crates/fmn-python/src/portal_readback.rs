@@ -222,11 +222,19 @@ impl CameraCapture {
             threads,
         })
         .map_err(native_error)?;
-        // Camera projection is essential even for 2D: this route owns the
-        // +Y-up scene to top-row-first framebuffer orientation.
-        renderer
-            .render_with_camera(&stage, &camera)
-            .map_err(native_error)?;
+        let baseline = fmn_render::CameraConfig::default().frame;
+        let [frame_width, frame_height] = baseline.shape();
+        let planar_map_matches =
+            (frame_width - frame_height * f64::from(width) / f64::from(height)).abs() < 1e-9;
+        // Match file output's retained +Y-up route when its map applies.
+        // Moved cameras, other aspects and nonplanar content still project.
+        if fmn::rendering::planar_capture_refusal(&stage, &camera, planar_map_matches).is_none() {
+            renderer.render(&stage, 0).map_err(native_error)?;
+        } else {
+            renderer
+                .render_with_camera(&stage, &camera)
+                .map_err(native_error)?;
+        }
         let mut rgba = FrameBuffer::new(
             FrameLayout::tight(PixelFormat::Rgba8, width, height).map_err(native_error)?,
         );

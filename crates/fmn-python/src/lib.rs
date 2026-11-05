@@ -475,7 +475,6 @@ struct PortalFrameSession {
     /// The default camera frame. While the scene's frame equals it and the
     /// output aspect is the frame's, planar vector content takes the retained
     /// 2D route (tile cache, adaptive AA) instead of the camera route.
-    planar_baseline: fmn_scene::studio_bridge::CameraFrame,
     planar_map_matches: bool,
     routes: PortalRoutes,
 }
@@ -852,7 +851,6 @@ impl PortalFrameSession {
                 next_sequence: 0,
                 single_frame,
                 timeline: OutputTimeline::new(single_frame),
-                planar_baseline,
                 planar_map_matches,
                 // Team zero retains the session renderer. Eligible pure plays
                 // use the other planned teams through NativeFramePipeline.
@@ -930,19 +928,8 @@ impl PortalFrameSession {
         // renders upright since fm-sq8.9. Anything else (a moved or rotated
         // frame, another output aspect, depth, lighting, clip planes, raster
         // primitives, non-planar points) keeps the camera route.
-        let frame = self.camera.frame();
-        let baseline = &self.planar_baseline;
-        let refusal = if !self.planar_map_matches {
-            Some("output aspect differs from the default frame")
-        } else if frame.center() != baseline.center()
-            || frame.shape() != baseline.shape()
-            || frame.orientation() != baseline.orientation()
-            || frame.field_of_view() != baseline.field_of_view()
-        {
-            Some("camera frame differs from the default frame")
-        } else {
-            planar_stage_refusal(stage)
-        };
+        let refusal =
+            fmn::rendering::planar_capture_refusal(stage, &self.camera, self.planar_map_matches);
         self.routes.performance.capture_prepare_ns += portal_elapsed_ns(preparation_start);
         let render_start = Instant::now();
         if let Some(reason) = refusal {
