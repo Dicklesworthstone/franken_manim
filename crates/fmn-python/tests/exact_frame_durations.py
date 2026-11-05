@@ -400,6 +400,97 @@ def phase_flow_preserves_its_virtual_time():
         np.testing.assert_allclose(square.get_center(), (12 / fps) * m.RIGHT + 2 * m.UP, atol=1e-6)
 
 
+def speed_profile_frame_durations():
+    from manimlib.animation.speed import ChangeSpeed
+
+    for fps in (24, 25, 49, 60):
+        for speed, frames, expected in ((2., 12, 6), (.5, 7, 14), (2., 3, 2)):
+            scene = scene_at(fps)
+            probe = Probe(scene, frames)
+            animation = ChangeSpeed(probe, {0: speed, 1: speed})
+            scene.play(animation)
+            assert scene.get_frame_count() == expected, (fps, speed, frames)
+            assert probe.alphas[-1] == 1.
+            assert animation._speed_child_duration == frames / fps
+
+        # Two 1.5-frame children form one 3-frame succession: no child ceil.
+        scene = scene_at(fps)
+        probes = (Probe(scene, 3), Probe(scene, 3))
+        scene.play(m.Succession(*(ChangeSpeed(probe, {0: 2.}, affects_speed_updaters=False)
+                                 for probe in probes)))
+        assert scene.get_frame_count() == 3
+        assert all(probe.alphas[-1] == 1. for probe in probes)
+
+        nested = scene_at(fps)
+        probe = Probe(nested, 29)
+        inner = ChangeSpeed(probe, {0: 2.}, affects_speed_updaters=False)
+        nested.play(ChangeSpeed(inner, {0: .5}, affects_speed_updaters=False))
+        assert nested.get_frame_count() == 29
+
+        # Constant profiles are normalized identity maps. They must carry
+        # the integer parent position through to the succession boundary,
+        # not reconstruct 29 as the smaller float (29 / 67) * 67.
+        for frames, speed in (((29, 38), 1.), ((58, 76), 2.)):
+            boundary = scene_at(fps)
+            first, second = (Probe(boundary, count) for count in frames)
+            boundary.play(ChangeSpeed(m.Succession(first, second), {0: speed}))
+            assert boundary.get_frame_count() == 67
+            assert second.begins == [28], (fps, frames, speed, second.begins)
+
+        # A seconds member retains its deliberate exact-binary64 duration
+        # while the enclosing mixed composition is scaled on the frame grid.
+        mixed = scene_at(fps)
+        child = m.Succession(Probe(mixed, 1), m.Delay(run_time=.125))
+        mixed.play(ChangeSpeed(child, {0: 2.}))
+        extent = (Fraction(1) + Fraction.from_float(.125) * fps) / 2
+        assert mixed.get_frame_count() == (extent.numerator + extent.denominator - 1) // extent.denominator
+
+        # A reciprocal such as 1/5 cannot be represented by the dyadic
+        # extent model. Refuse inference before begin; either explicit unit
+        # remains available and must override the non-dyadic profile.
+        refused = scene_at(fps)
+        probe = Probe(refused, 5)
+        error = raises(ValueError, lambda: refused.play(ChangeSpeed(probe, {0: 5.})))
+        assert "run_time_frames or run_time" in str(error)
+        assert refused.get_frame_count() == 0 and probe.begins == []
+
+        for options, expected in (({"run_time_frames": 1}, 1),
+                                  ({"run_time": 3.}, 3 * fps),
+                                  ({"run_time_frames": 0}, 0),
+                                  ({"run_time": 0.}, 0)):
+            scene = scene_at(fps)
+            probe = Probe(scene, 5)
+            scene.play(ChangeSpeed(probe, {0: 5.}, **options))
+            assert scene.get_frame_count() == expected, (fps, options)
+            assert probe.alphas[-1] == 1.
+
+        reused = scene_at(fps)
+        animation = ChangeSpeed(Probe(reused, 12), {0: 5.})
+        animation.set_run_time_frames(7)
+        reused.play(animation)
+        assert reused.get_frame_count() == 7
+        animation.set_run_time(.5)
+        reused.play(animation)
+        assert reused.get_frame_count() == 7 + seconds_frames(.5, fps)
+        reused.play(animation, run_time_frames=3)
+        assert reused.get_frame_count() == 10 + seconds_frames(.5, fps)
+
+        overridden = scene_at(fps)
+        overridden.play(ChangeSpeed(Probe(overridden, 5), {0: 5.}), run_time_frames=1)
+        assert overridden.get_frame_count() == 1
+
+        switched = scene_at(fps)
+        child = Probe(switched, 5)
+        animation = ChangeSpeed(child, {0: 2.}, run_time=1.)
+        switched.play(animation)
+        child.set_run_time(.25)
+        switched.play(animation)
+        assert switched.get_frame_count() == 2 * fps
+        assert animation._speed_child_duration == .25
+
+    raises(ValueError, lambda: ChangeSpeed(m.Delay(), {}, run_time=0., run_time_frames=0))
+
+
 def y4m_count(path):
     """Independent container reader: count complete encoded planar frames."""
     with path.open("rb") as stream:
@@ -624,6 +715,7 @@ def verify_exact_frame_durations():
     legacy_rate_override_hook()
     specialized_constructor_durations()
     phase_flow_preserves_its_virtual_time()
+    speed_profile_frame_durations()
     with tempfile.TemporaryDirectory(prefix="fmn-exact-frames-") as directory:
         root = Path(directory)
         rendered = native_rendered_counts(root)

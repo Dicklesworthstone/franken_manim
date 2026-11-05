@@ -17698,8 +17698,17 @@ class _CompositionCallbackDriver:
                      else (frame / fps) / self.get_run_time())
         if timing is None or not timing.frame_intervals or getattr(self, "_authored_timing_rows", False):
             return self.interpolate(alpha)
-        time = (timing.position_at_frame(frame, fps) if self._fmn_linear_rate
-                else self.rate_func(timing.rate_alpha_at_frame(frame, fps)) * self.max_end)
+        identity_rate = globals().get("_fmn_frame_identity_rate")
+        if self._fmn_linear_rate:
+            time = timing.position_at_frame(frame, fps)
+        elif identity_rate is not None and identity_rate(self.rate_func):
+            # ChangeSpeed's shipped constant profile has an identity map.
+            # Observe it once for speed-aware updater deltas, but retain the
+            # native position instead of reconstructing it as (29/67)*67.
+            self.rate_func(timing.rate_alpha_at_frame(frame, fps))
+            time = timing.position_at_frame(frame, fps)
+        else:
+            time = self.rate_func(timing.rate_alpha_at_frame(frame, fps)) * self.max_end
         self._interpolate_position(time, fps)
 
     def _interpolate_position(self, time, fps=None):

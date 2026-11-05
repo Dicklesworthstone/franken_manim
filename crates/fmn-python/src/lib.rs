@@ -12986,13 +12986,25 @@ fn frame_timing_model(
             "frame timing composition nesting exceeds 128",
         ));
     }
-    let (seconds, frames, span, lag, members): (
+    let (seconds, frames, span, lag, members, scale): (
         Option<f64>,
         Option<Bound<'_, PyAny>>,
         Option<(f64, f64)>,
         f64,
         Option<Vec<Bound<'_, PyAny>>>,
-    ) = descriptor.extract()?;
+        f64,
+    ) = if descriptor.len()? == 5 {
+        // Existing descriptors retain their unscaled composition semantics.
+        let (seconds, frames, span, lag, members) = descriptor.extract()?;
+        (seconds, frames, span, lag, members, 1.0)
+    } else {
+        descriptor.extract()?
+    };
+    if !scale.is_finite() || scale < 0.0 {
+        return Err(PyValueError::new_err(
+            "composition duration scale must be finite and nonnegative",
+        ));
+    }
     let frames = frames.as_ref().map(frame_count_from_py).transpose()?;
     if seconds.is_some() && frames.is_some() {
         return Err(PyValueError::new_err(
@@ -13006,9 +13018,15 @@ fn frame_timing_model(
             .collect::<PyResult<Vec<_>>>()?;
         Box::new(
             fmn_anim::AnimationGroup::in_group(stage, members, lag, Some(mobject))
-                .map_err(anim_error)?,
+                .map_err(anim_error)?
+                .with_duration_scale(scale),
         )
     } else {
+        if scale != 1.0 {
+            return Err(PyValueError::new_err(
+                "a duration scale requires a composition",
+            ));
+        }
         Box::new(PythonAnimationSlot::new(mobject, false))
     };
     if let Some(seconds) = seconds {

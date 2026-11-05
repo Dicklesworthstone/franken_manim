@@ -95,6 +95,9 @@ def install(native, subsystems=True):
             descriptor = (seconds, frames, getattr(animation, "time_span", None),
                           float(lag),
                           None if children is None else [child[0] for child in children])
+            scale = getattr(animation, "_fmn_duration_scale", None)
+            if derived and frames is None and scale is not None:
+                descriptor += (scale(any(child[1] for child in children)),)
             visiting.remove(marker)
             resolved[marker] = (animation, descriptor, uses_frames)
             return descriptor, uses_frames

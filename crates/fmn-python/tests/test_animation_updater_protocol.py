@@ -3,6 +3,7 @@ import ast
 import copy
 import importlib.util
 import math
+import operator
 from pathlib import Path
 import sys
 import types
@@ -88,6 +89,11 @@ def environment():
     g["g"] = g
     source = ROOT / "python/manimlib/_animation_semantics.py"
     tree = ast.parse(source.read_text())
+    helpers = [node for node in tree.body if isinstance(node, (ast.ClassDef, ast.FunctionDef))
+               and node.name in {"_DefaultRunTime", "_validate_frame_count"}]
+    g["_operator"] = operator
+    # ubs:ignore -- only fixed repository helper definitions are executed.
+    exec(compile(ast.Module(helpers, []), str(source), "exec"), g)
     install = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "install")
     functions = {node.name:node for node in install.body if isinstance(node, ast.FunctionDef)}
     mapping = {

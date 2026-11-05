@@ -111,6 +111,23 @@ retain their existing floating-point interval arithmetic and operation order.
 An explicit group duration scales its internal timeline as before, and
 `time_span` keeps its existing duration-widening semantics.
 
+`ChangeSpeed` accepts an explicit `run_time_frames` or `run_time` on the
+wrapper. These overrides set its duration while the speed profile still maps
+progress through its child. With a frame-timed child and no override, the
+profile's duration scale must be exactly representable as a finite binary64
+value. The native planner keeps the resulting frame extent exact. For example,
+twelve frames at constant speed two take six frames; fractional extents remain
+unrounded inside nested groups.
+
+Profiles whose exact scale cannot be represented are refused before playback
+and request an explicit duration. A rounded reciprocal must not silently add
+a frame: five frames at constant speed five can be requested as
+`ChangeSpeed(child, {0: 5}, run_time_frames=1)`. Seconds-only `ChangeSpeed`
+retains its existing floating-point profile calculation. In Rust,
+`AnimationGroup::with_duration_scale(factor)` scales a derived extent by the
+exact supplied binary64 factor; explicit seconds or frame overrides take
+precedence over that scale.
+
 Frame counts in segment and render reports remain authoritative integers.
 Their seconds fields are presentation values; passing such a value back to
 `wait(seconds)` requests a new second-based duration. Audio cue positions
