@@ -51,7 +51,9 @@ use fmn_core::rng::{Pcg64Dxsm, RngRoot};
 use fmn_mobject::{Mob, Snapshot, Stage};
 
 use crate::animation::{AnimError, Animation, check_updater_error};
-use crate::clock::{FrameSample, FrameSegment, RationalFrameClock, RationalTime};
+use crate::clock::{
+    Duration, FrameDuration, FrameSample, FrameSegment, RationalFrameClock, RationalTime,
+};
 use crate::pure_frame::PlayCapture;
 use crate::purity::{
     ImpureEffect, Purity, SegmentKind, SegmentReport, classify_play, classify_wait,
@@ -512,12 +514,39 @@ fn plan_play(
     for animation in animations {
         animation.validate_begin(stage)?;
     }
-    let run_time = animations
+    let duration = play_duration(animations, clock.fps())?;
+    let segment = clock
+        .segment_duration(&duration)
+        .map_err(AnimError::Clock)?;
+    Ok((segment, duration.to_seconds()))
+}
+
+/// Shared by imperative play and the declarative schedule compiler.
+pub(crate) fn play_duration(
+    animations: &[Box<dyn Animation>],
+    fps: u32,
+) -> Result<FrameDuration, AnimError> {
+    let durations = animations
         .iter()
-        .map(|animation| animation.get_run_time())
-        .fold(f64::NEG_INFINITY, f64::max);
-    let segment = clock.segment(run_time).map_err(AnimError::Clock)?;
-    Ok((segment, run_time))
+        .map(|animation| animation.duration_on_grid(fps))
+        .collect::<Result<Vec<_>, _>>()?;
+    if durations.iter().all(|duration| !duration.is_frame_native()) {
+        return FrameDuration::new(
+            durations
+                .iter()
+                .map(FrameDuration::to_seconds)
+                .fold(f64::NEG_INFINITY, f64::max),
+            fps,
+        )
+        .map_err(AnimError::Clock);
+    }
+    let mut longest = FrameDuration::new(Duration::Frames(0), fps).map_err(AnimError::Clock)?;
+    for duration in durations {
+        if duration.cmp_duration(&longest).is_gt() {
+            longest = duration.into_frame_native();
+        }
+    }
+    Ok(longest)
 }
 
 /// Whether an opened segment keeps its begin-state snapshot (§9.5's worker
@@ -549,6 +578,9 @@ fn play_prologue(
     begin: BeginState,
 ) -> Result<Prologue, AnimError> {
     let (segment, run_time) = plan_play(stage, clock, animations)?;
+    for animation in animations.iter_mut() {
+        animation.prepare_timing(clock.fps())?;
+    }
     begin_animations(stage, animations)?;
     let purity = classify_play(stage, animations);
     let base_frame = clock.now().frames();
@@ -762,8 +794,8 @@ pub fn prepare_play_animation(
     let animation = &mut animations[index];
     animation.update_mobjects(stage, dt);
     check_updater_error(stage)?;
-    let alpha = sample.time.to_f64() / animation.state().config.run_time;
-    animation.interpolate(stage, alpha);
+    let alpha = animation.state().sample_alpha(sample.time);
+    animation.interpolate_at_frame(stage, sample.frame as f64, sample.time.fps());
     check_updater_error(stage)?;
     open.next_animation += 1;
     Ok(Some(AnimationBoundary {
@@ -1032,11 +1064,11 @@ impl fmt::Debug for OpenWait {
 pub fn open_wait(
     stage: &mut Stage,
     clock: &RationalFrameClock,
-    duration: f64,
+    duration: impl Into<Duration>,
     begin: BeginState,
 ) -> Result<OpenWait, AnimError> {
     update_scene_mobjects(stage, 0.0)?;
-    plan_open_wait(stage, clock, duration, begin, false)
+    plan_open_wait(stage, clock, duration.into(), begin, false)
 }
 
 /// Open a wait after a host has completed BOTH halves of its initial zero-dt
@@ -1048,15 +1080,15 @@ pub fn open_wait(
 pub fn open_wait_after_updaters(
     stage: &mut Stage,
     clock: &RationalFrameClock,
-    duration: f64,
+    duration: impl Into<Duration>,
 ) -> Result<OpenWait, AnimError> {
-    plan_open_wait(stage, clock, duration, BeginState::Omit, true)
+    plan_open_wait(stage, clock, duration.into(), BeginState::Omit, true)
 }
 
 fn plan_open_wait(
     stage: &Stage,
     clock: &RationalFrameClock,
-    duration: f64,
+    duration: Duration,
     begin: BeginState,
     external_updaters: bool,
 ) -> Result<OpenWait, AnimError> {
@@ -1070,7 +1102,7 @@ fn plan_open_wait(
         begin_state: retain.then(|| Rc::new(stage.snapshot())),
         base_frame: clock.now().frames(),
         n_frames: segment.n_frames(),
-        run_time: duration,
+        run_time: segment.run_time(),
     };
     if external_updaters {
         note_external_updaters(&mut report);
@@ -1287,7 +1319,7 @@ pub fn wait_segment_upto(
     stage: &mut Stage,
     clock: &mut RationalFrameClock,
     rng: &RngRoot,
-    duration: f64,
+    duration: impl Into<Duration>,
     upto: i64,
     emit: &mut dyn FnMut(FramePacket),
 ) -> Result<SegmentReport, AnimError> {
@@ -1312,7 +1344,7 @@ pub fn wait_segment_upto(
         begin_state,
         base_frame,
         n_frames: segment.n_frames(),
-        run_time: duration,
+        run_time: segment.run_time(),
     })
 }
 
@@ -1441,7 +1473,7 @@ pub fn wait_segment(
     stage: &mut Stage,
     clock: &mut RationalFrameClock,
     rng: &RngRoot,
-    duration: f64,
+    duration: impl Into<Duration>,
     stop_condition: Option<&mut dyn FnMut(&Stage) -> bool>,
     skip: bool,
     emit: &mut dyn FnMut(FramePacket),
@@ -1469,7 +1501,7 @@ pub fn wait_segment_with_boundary(
     stage: &mut Stage,
     clock: &mut RationalFrameClock,
     rng: &RngRoot,
-    duration: f64,
+    duration: impl Into<Duration>,
     stop_condition: Option<&mut dyn FnMut(&Stage) -> bool>,
     skip: bool,
     boundary: &mut dyn FnMut(&mut Stage, RationalTime),
@@ -1499,7 +1531,7 @@ pub fn wait_segment_with_capture(
     stage: &mut Stage,
     clock: &mut RationalFrameClock,
     rng: &RngRoot,
-    duration: f64,
+    duration: impl Into<Duration>,
     mut stop_condition: Option<&mut dyn FnMut(&Stage) -> bool>,
     skip: bool,
     boundary: &mut dyn FnMut(&mut Stage, RationalTime),
@@ -1516,7 +1548,7 @@ pub fn wait_segment_with_capture(
         begin_state,
         base_frame,
         n_frames: segment.n_frames(),
-        run_time: duration,
+        run_time: segment.run_time(),
     };
     let dt = clock.dt().to_f64();
     let mut stepped = 0;

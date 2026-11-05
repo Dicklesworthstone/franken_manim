@@ -71,6 +71,261 @@ fn point() -> Mobject {
 }
 
 #[test]
+fn exact_frame_segments_keep_audio_cues_and_reports_on_the_requested_grid() {
+    // Issue #10's complete alternating play/wait example, including every
+    // duration whose n/24 representation lies above its intended boundary.
+    const FRAMES: [u64; 20] = [
+        43, 17, 61, 29, 101, 7, 55, 13, 89, 31, 47, 19, 73, 11, 37, 23, 67, 3, 97, 41,
+    ];
+    for fps in [1, 24, 25, 30, 60, 120] {
+        let mut scene = Scene::new(
+            RuntimeConfig {
+                fps,
+                ..RuntimeConfig::default()
+            },
+            10,
+        )
+        .unwrap();
+        let mob = scene.add_mobject(point()).unwrap();
+        let mut sink = RecordingSink::default();
+        let mut elapsed = 0_i64;
+        for (index, frames) in FRAMES.into_iter().enumerate() {
+            scene.add_sound("click.wav", 0.0, None, None).unwrap();
+            let report = if index % 2 == 0 {
+                let builder = mob.animate().shift([0.05, 0.0, 0.0]).unwrap();
+                let animation = prepare_animation(builder, scene.stage_mut()).unwrap();
+                scene
+                    .play(
+                        vec![animation],
+                        PlayOverrides {
+                            run_time_frames: Some(frames),
+                            ..PlayOverrides::default()
+                        },
+                        &mut sink,
+                    )
+                    .unwrap()
+                    .unwrap()
+            } else {
+                scene.wait_frames(frames, &mut sink).unwrap()
+            };
+            assert_eq!(report.base_frame, elapsed);
+            assert_eq!(report.n_frames, frames as i64);
+            assert_eq!(scene.sound_requests()[index].time.frames(), elapsed);
+            assert_eq!(scene.sound_requests()[index].time.fps(), fps);
+            elapsed += frames as i64;
+            assert_eq!(scene.time(), fmn_anim::RationalTime::zero(fps) + elapsed);
+        }
+        assert_eq!(elapsed, 864);
+        assert_eq!(scene.play_count(), 20);
+        assert_eq!(sink.captures.len(), 864);
+        assert!(sink.captures.iter().enumerate().all(|(index, capture)| {
+            capture.0 == CaptureReason::Segment && capture.1 == index as i64 + 1
+        }));
+        assert!((scene.stage().get_center(mob)[0] - 0.5).abs() < 1e-6);
+    }
+}
+
+#[test]
+fn frame_waits_mix_with_seconds_and_zero_segments_without_cumulative_rounding() {
+    let mut scene = Scene::new(
+        RuntimeConfig {
+            fps: 30,
+            ..RuntimeConfig::default()
+        },
+        0,
+    )
+    .unwrap();
+    let mob = scene.add_mobject(point()).unwrap();
+    let updates = Rc::new(RefCell::new(Vec::new()));
+    let observed = updates.clone();
+    scene
+        .stage_mut()
+        .add_dt_updater(
+            mob,
+            move |_, _, dt| {
+                if dt > 0.0 {
+                    observed.borrow_mut().push(dt);
+                }
+            },
+            false,
+        )
+        .unwrap();
+    let mut sink = RecordingSink::default();
+    // 0.1 remains four frames at 30 fps; exact three-frame requests do not
+    // change the established meaning of that second-based input.
+    assert_eq!(scene.wait(Some(0.1), &mut sink).unwrap().n_frames, 4);
+    assert_eq!(scene.wait_frames(0, &mut sink).unwrap().n_frames, 0);
+    for _ in 0..2_000 {
+        assert_eq!(scene.wait_frames(3, &mut sink).unwrap().n_frames, 3);
+        assert_eq!(scene.wait_frames(0, &mut sink).unwrap().n_frames, 0);
+    }
+    assert_eq!(scene.time().frames(), 6_004);
+    assert_eq!(sink.captures.len(), 6_004);
+    assert_eq!(updates.borrow().len(), 6_004);
+    assert!(updates.borrow().iter().all(|dt| *dt == 1.0 / 30.0));
+}
+
+#[test]
+fn exact_frame_stepped_and_skipped_routes_keep_each_updater_boundary() {
+    for skip in [false, true] {
+        let mut scene = Scene::new(
+            RuntimeConfig {
+                fps: 24,
+                skip_animations: skip,
+                preview_while_skipping: false,
+                ..RuntimeConfig::default()
+            },
+            0,
+        )
+        .unwrap();
+        let mob = scene.add_mobject(point()).unwrap();
+        let mut sink = RecordingSink::default();
+        let mut wait = scene.begin_stepped_wait_frames(17, &mut sink).unwrap();
+        let mut boundaries = 0;
+        while let Some(boundary) = scene.prepare_stepped_wait_frame(&mut wait).unwrap() {
+            boundaries += 1;
+            assert_eq!(boundary.time.frames(), boundaries);
+            scene.stage_mut().shift(mob, [0.25, 0.0, 0.0]);
+            scene
+                .complete_stepped_wait_frame(&mut wait, &mut sink)
+                .unwrap();
+        }
+        assert_eq!(
+            scene.finish_stepped_wait(wait, &mut sink).unwrap().n_frames,
+            17
+        );
+        let animation = prepare_animation(
+            mob.animate().shift([1.0, 0.0, 0.0]).unwrap(),
+            scene.stage_mut(),
+        )
+        .unwrap();
+        let mut play = scene
+            .begin_stepped_play(
+                vec![animation],
+                PlayOverrides {
+                    run_time_frames: Some(43),
+                    ..PlayOverrides::default()
+                },
+                &mut sink,
+            )
+            .unwrap()
+            .unwrap();
+        while scene
+            .prepare_stepped_play_frame(&mut play)
+            .unwrap()
+            .is_some()
+        {
+            boundaries += 1;
+            scene
+                .complete_stepped_play_frame(&mut play, &mut sink)
+                .unwrap();
+        }
+        assert_eq!(
+            scene.finish_stepped_play(play, &mut sink).unwrap().n_frames,
+            43
+        );
+        assert_eq!(boundaries, 60);
+        assert_eq!(scene.time().frames(), 60);
+        assert_eq!(sink.captures.len(), if skip { 0 } else { 60 });
+        assert_eq!(scene.stage().get_center(mob)[0], 5.25);
+    }
+}
+
+#[test]
+fn exact_frame_limits_and_ambiguous_overrides_fail_before_lifecycle() {
+    let mut scene = Scene::new(
+        RuntimeConfig {
+            fps: 24,
+            ..RuntimeConfig::default()
+        },
+        0,
+    )
+    .unwrap();
+    let mob = scene.add_mobject(point()).unwrap();
+    let mut sink = RecordingSink::default();
+    assert!(matches!(
+        scene.wait_frames(i64::MAX as u64 + 1, &mut sink),
+        Err(SceneError::Animation(AnimError::Clock(
+            ClockError::RunTimeTooLong
+        )))
+    ));
+    let animation = prepare_animation(
+        mob.animate().shift([1.0, 0.0, 0.0]).unwrap(),
+        scene.stage_mut(),
+    )
+    .unwrap();
+    assert!(matches!(
+        scene.play(
+            vec![animation],
+            PlayOverrides {
+                run_time: Some(1.0),
+                run_time_frames: Some(24),
+                ..PlayOverrides::default()
+            },
+            &mut sink
+        ),
+        Err(SceneError::InvalidConfig(
+            "run_time and run_time_frames are mutually exclusive"
+        ))
+    ));
+    assert!(sink.events.is_empty());
+    assert!(sink.captures.is_empty());
+    assert_eq!(scene.time().frames(), 0);
+    assert_eq!(scene.play_count(), 0);
+
+    let mut state = scene.state().unwrap();
+    state.frames_elapsed = i64::MAX - 1;
+    scene.restore_state(&state).unwrap();
+    assert!(matches!(
+        scene.wait_frames(2, &mut sink),
+        Err(SceneError::Animation(AnimError::Clock(
+            ClockError::FrameCounterOverflow
+        )))
+    ));
+    assert!(sink.events.is_empty());
+    scene.wait_frames(1, &mut sink).unwrap();
+    assert_eq!(scene.time().frames(), i64::MAX);
+    assert_eq!(scene.wait_frames(0, &mut sink).unwrap().n_frames, 0);
+    assert_eq!(scene.time().frames(), i64::MAX);
+}
+
+#[test]
+fn frame_waits_use_the_active_grid_and_explicit_stop_bounds() {
+    let mut scene = Scene::new(
+        RuntimeConfig {
+            fps: 24,
+            windowed: true,
+            presenter_mode: true,
+            ..RuntimeConfig::default()
+        },
+        0,
+    )
+    .unwrap();
+    // Exact finite waits do not turn into presenter-controlled holds.
+    let mut sink = RecordingSink::default();
+    assert_eq!(scene.wait_frames(17, &mut sink).unwrap().n_frames, 17);
+    assert_eq!(scene.time().fps(), 30);
+    assert_eq!(scene.time().frames(), 17);
+    let mut observed = 0;
+    let report = scene
+        .wait_until_frames(
+            10,
+            &mut |_| {
+                observed += 1;
+                observed == 3
+            },
+            &mut sink,
+        )
+        .unwrap();
+    assert_eq!(report.n_frames, 3);
+    assert_eq!(scene.time().frames(), 20);
+    scene
+        .wait_until_frames(0, &mut |_| panic!("no frame, no predicate"), &mut sink)
+        .unwrap();
+    assert_eq!(scene.time().frames(), 20);
+}
+
+#[test]
 fn the_scene_stage_aligns_on_the_configured_frame() {
     // The Reference derives FRAME_WIDTH from the configured resolution
     // (constants.py:17-20): a portrait 1080x1920 render has the frame

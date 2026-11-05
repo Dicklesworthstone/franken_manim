@@ -1,5 +1,25 @@
 """Install the pinned shared animation protocol onto the native module."""
 
+import operator as _operator
+
+class _DefaultRunTime(float):
+    """Preserve public numeric defaults while distinguishing omitted seconds."""
+
+
+def _validate_frame_count(value):
+    """Accept integer counts without truncation or a float round trip."""
+    if isinstance(value, bool):
+        raise TypeError("frame count must be an integer, not bool")
+    try:
+        count = _operator.index(value)
+    except TypeError as error:
+        raise TypeError("frame count must be an integer") from error
+    if count < 0:
+        raise ValueError("frame count must be non-negative")
+    if count > (1 << 63) - 1:
+        raise OverflowError("frame count exceeds the rational clock's i64 range")
+    return count
+
 
 def install(native, subsystems=True):
     """The shared protocol: the Animation/Transform core, then (unless
@@ -9,6 +29,7 @@ def install(native, subsystems=True):
     g = vars(native)
     if g.get("_FMN_ANIMATION_SEMANTICS_INSTALLED", False):
         return
+    g["_fmn_validate_frame_count"] = _validate_frame_count
     np = g["_np"]
     interpolate_value = g["_interpolate"]
     copy_module = g["_copy"]
@@ -25,6 +46,105 @@ def install(native, subsystems=True):
     FadeTransformPieces = g["FadeTransformPieces"]
     original_transform_init = Transform.__init__
     original_requires_python = g["_requires_python_animation"]
+
+    def bind_frame_timing(scene, animations):
+        """Bind authored frames through Choreo before Python lifecycle setup.
+
+        The opaque native timing accompanies callback slots. Seconds are a
+        projection for interpolation only and never reconstruct a frame count.
+        """
+        Group = g["AnimationGroup"]
+        pending, nodes, seen = list(animations), [], set()
+        while pending:
+            animation = pending.pop()
+            if id(animation) in seen:
+                continue
+            seen.add(id(animation))
+            nodes.append(animation)
+            if isinstance(animation, Group):
+                pending.extend(animation.animations)
+        if not any(getattr(animation, "run_time_frames", None) is not None for animation in nodes):
+            # Ordinary second-based plays keep their existing observation
+            # and callback order. Drop only a prior frame binding if the
+            # author has switched a reused animation back to seconds.
+            for animation in nodes:
+                for key in ("_fmn_frame_timing", "_fmn_frame_descriptor", "_fmn_timing_fps"):
+                    animation.__dict__.pop(key, None)
+            return
+        resolved, visiting = {}, set()
+        fps = scene._frame_rate()
+
+        def visit(animation):
+            marker = id(animation)
+            if marker in visiting:
+                raise ValueError("Animation composition contains a cycle")
+            if marker in resolved:
+                return resolved[marker][1:]
+            visiting.add(marker)
+            is_group = isinstance(animation, Group)
+            children = [visit(child) for child in animation.animations] if is_group else None
+            frames = getattr(animation, "run_time_frames", None)
+            if frames is not None:
+                frames = _validate_frame_count(frames)
+            uses_frames = frames is not None or (children is not None and any(child[1] for child in children))
+            derived = is_group and getattr(animation, "_fmn_derived_run_time", False)
+            seconds = None if frames is not None or derived else float(animation.get_run_time())
+            lag = getattr(animation, "lag_ratio", None)
+            if lag is None:
+                lag = type(animation)._default_lag_ratio if is_group else 0.
+            descriptor = (seconds, frames, getattr(animation, "time_span", None),
+                          float(lag),
+                          None if children is None else [child[0] for child in children])
+            visiting.remove(marker)
+            resolved[marker] = (animation, descriptor, uses_frames)
+            return descriptor, uses_frames
+
+        bound = {}
+
+        def bind(animation, inherited=False):
+            marker = id(animation)
+            _, descriptor, uses_frames = resolved[marker]
+            required = inherited or uses_frames
+            if marker in bound and (bound[marker] or not required):
+                return
+            bound[marker] = required
+            is_group = isinstance(animation, Group)
+            if is_group:
+                for child in animation.animations:
+                    bind(child, required)
+            if required:
+                timing = g["_frame_timing"](descriptor, fps)
+                animation._fmn_timing_fps = fps
+                animation._fmn_frame_timing = timing
+                animation._fmn_frame_descriptor = descriptor
+                if descriptor[1] is not None or (is_group and getattr(animation, "_fmn_derived_run_time", False)):
+                    animation.run_time = timing.seconds
+                if is_group:
+                    previous = tuple((id(member), start, end)
+                                     for member, start, end in animation.anims_with_timings)
+                    initial = getattr(animation, "_composition_initial_timings", previous)
+                    if previous != initial:
+                        raise ValueError("frame-native composition requires its native timing table")
+                    animation.build_animations_with_timings(animation.lag_ratio)
+                    animation.max_end_time = max((end for _, _, end in animation.anims_with_timings), default=0.)
+                    animation._composition_initial_timings = tuple(
+                        (id(member), start, end) for member, start, end in animation.anims_with_timings)
+            else:
+                animation.__dict__.pop("_fmn_frame_timing", None)
+                animation.__dict__.pop("_fmn_frame_descriptor", None)
+                animation.__dict__.pop("_fmn_timing_fps", None)
+
+        for animation in animations:
+            visit(animation)
+        for animation in animations:
+            bind(animation)
+        current_frame = g["_SceneCore"].get_frame_count(scene)
+        for animation in animations:
+            timing = getattr(animation, "_fmn_frame_timing", None)
+            if timing is not None and timing.frame_count > (1 << 63) - 1 - current_frame:
+                raise OverflowError("frame duration exceeds the remaining rational clock range")
+
+    g["_fmn_bind_frame_timing"] = bind_frame_timing
     # Captured before any authored code runs: a later reassignment of
     # g["straight_path"] is authored and keeps the per-call view re-read.
     shipped_straight_path = g.get("straight_path")
@@ -218,7 +338,7 @@ def install(native, subsystems=True):
     def animation_init(
         self,
         mobject,
-        run_time=1.0,
+        run_time=_DefaultRunTime(1.0),
         time_span=None,
         lag_ratio=0.0,
         rate_func=g.get("smooth", smooth_rate),
@@ -226,11 +346,17 @@ def install(native, subsystems=True):
         remover=False,
         final_alpha_value=1.0,
         suspend_mobject_updating=False,
+        run_time_frames=None,
         **kwargs,
     ):
+        if run_time_frames is not None:
+            if not isinstance(run_time, _DefaultRunTime):
+                raise ValueError("run_time and run_time_frames are mutually exclusive")
+            run_time_frames = _validate_frame_count(run_time_frames)
         self._validate_input_type(mobject)
         self.mobject = mobject
         self.run_time = float(run_time)
+        self.run_time_frames = run_time_frames
         self.time_span = time_span
         self.lag_ratio = float(lag_ratio)
         self.rate_func = (
@@ -328,6 +454,29 @@ def install(native, subsystems=True):
     def animation_interpolate(self, alpha):
         self.interpolate_mobject(float(alpha))
 
+    def interpolate_at_frame(self, frame, fps, alpha=None):
+        """Retain native frame positions while preserving authored hooks.
+
+        The public interpolate override still receives its usual alpha. A
+        stock composition consumes this context only when that override
+        forwards the same alpha, so authored alpha transformations keep
+        their existing meaning.
+        """
+        timing = getattr(self, "_fmn_frame_timing", None)
+        if alpha is None:
+            alpha = (timing.alpha_at_frame(frame, fps) if timing is not None
+                     else (frame / fps) / self.get_run_time())
+        absent = object()
+        previous = self.__dict__.get("_fmn_frame_sample", absent)
+        self._fmn_frame_sample = (frame, fps, alpha)
+        try:
+            return self.interpolate(alpha)
+        finally:
+            if previous is absent:
+                self.__dict__.pop("_fmn_frame_sample", None)
+            else:
+                self._fmn_frame_sample = previous
+
     def animation_update(self, alpha):
         self.interpolate(alpha)
 
@@ -362,6 +511,13 @@ def install(native, subsystems=True):
 
     def set_run_time(self, run_time):
         self.run_time = float(run_time)
+        self.run_time_frames = None
+        self._fmn_derived_run_time = False
+        return self
+
+    def set_run_time_frames(self, frames):
+        self.run_time_frames = _validate_frame_count(frames)
+        self._fmn_derived_run_time = False
         return self
 
     def get_run_time(self):
@@ -398,8 +554,13 @@ def install(native, subsystems=True):
         suspend_mobject_updating=False,
         name="",
         remover=False,
+        run_time_frames=None,
         **kwargs,
     ):
+        if run_time_frames is not None:
+            if run_time is not None:
+                raise ValueError("run_time and run_time_frames are mutually exclusive")
+            run_time_frames = _validate_frame_count(run_time_frames)
         # Native compositions derive their root from their members in Choreo.
         # None is an internal sentinel for that class family, not a generally
         # valid Animation target. Do not trust a spoofable _native_kind string.
@@ -411,6 +572,7 @@ def install(native, subsystems=True):
         )
         self.mobject = mobject
         self.run_time = run_time
+        self.run_time_frames = run_time_frames
         self.rate_func = rate_func if rate_func is not None else g.get("smooth", smooth_rate)
         self.lag_ratio = lag_ratio
         self.time_span = (
@@ -606,6 +768,8 @@ def install(native, subsystems=True):
     Animation.interpolate_submobject = interpolate_submobject
     Animation.get_sub_alpha = get_sub_alpha
     Animation.set_run_time = set_run_time
+    Animation.set_run_time_frames = set_run_time_frames
+    Animation._fmn_interpolate_at_frame = interpolate_at_frame
     Animation.get_run_time = get_run_time
     Animation.set_rate_func = set_rate_func
     Animation.get_rate_func = get_rate_func
@@ -882,6 +1046,9 @@ def _install_matching_parts(g):
         def interpolate(self, alpha):
             self.animation.interpolate(alpha)
 
+        def _fmn_interpolate_at_frame(self, frame, fps, alpha=None):
+            self.animation._fmn_interpolate_at_frame(frame, fps, alpha)
+
         def finish(self):
             self.animation.finish()
             self.finished = True
@@ -950,11 +1117,14 @@ def _install_matching_parts(g):
             if not extra._is_bound():
                 scene._adopt(extra)
         params = dict(animation._native_params())
+        frames = getattr(animation, "run_time_frames", None)
+        if frames is not None:
+            params["run_time_frames"] = _validate_frame_count(frames)
         params["suspend_mobject_updating"] = bool(animation.suspend_mobject_updating)
         if animation.time_span is not None:
             params["time_span"] = animation.time_span
         spec = (
-            animation._native_kind, mobject, target, animation.run_time,
+            animation._native_kind, mobject, target, None if frames is not None else animation.run_time,
             native_rate(animation), animation.lag_ratio, params,
         )
         return NativeLeaf(scene, scene._native_animation_driver(spec))
@@ -1016,7 +1186,11 @@ def _install_matching_parts(g):
         drive(self, "update_mobjects", dt)
 
     def interpolate(self, alpha):
-        drive(self, "interpolate", float(alpha))
+        sample = getattr(self, "_fmn_frame_sample", None)
+        if sample is not None and float(alpha) == sample[2]:
+            drive(self, "_fmn_interpolate_at_frame", *sample)
+        else:
+            drive(self, "interpolate", float(alpha))
 
     def finish(self):
         drive(self, "finish")
@@ -1059,7 +1233,8 @@ def _install_matching_parts(g):
 
     original_play = g["Scene"].play
 
-    def scene_play(self, *proto_animations, run_time=None, rate_func=None, lag_ratio=None):
+    def scene_play(self, *proto_animations, run_time=None, rate_func=None, lag_ratio=None,
+                   run_time_frames=None):
         matches, seen = [], set()
         def visit(animation):
             if id(animation) in seen:
@@ -1074,8 +1249,9 @@ def _install_matching_parts(g):
         for animation in proto_animations:
             visit(animation)
         try:
+            timing = {} if run_time_frames is None else {"run_time_frames": run_time_frames}
             return original_play(self, *proto_animations, run_time=run_time,
-                                 rate_func=rate_func, lag_ratio=lag_ratio)
+                                 rate_func=rate_func, lag_ratio=lag_ratio, **timing)
         except BaseException:
             # Errors in scene updaters or sibling animations must also unwind
             # the native leaves owned by a matching callback, even when the
@@ -1458,7 +1634,11 @@ def _install_composition_lifecycle(g):
         drive(self, "update_mobjects", dt)
 
     def interpolate(self, alpha):
-        drive(self, "interpolate", float(alpha))
+        sample = getattr(self, "_fmn_frame_sample", None)
+        if sample is not None and float(alpha) == sample[2]:
+            drive(self, "_fmn_interpolate_at_frame", *sample)
+        else:
+            drive(self, "interpolate", float(alpha))
 
     def finish(self):
         drive(self, "finish")
@@ -1581,7 +1761,8 @@ def _install_composition_lifecycle(g):
                     break
         return original_requires(animation)
 
-    def scene_play(self, *proto_animations, run_time=None, rate_func=None, lag_ratio=None):
+    def scene_play(self, *proto_animations, run_time=None, rate_func=None, lag_ratio=None,
+                   run_time_frames=None):
         groups, seen, visiting = [], set(), set()
 
         def visit(animation):
@@ -1606,8 +1787,9 @@ def _install_composition_lifecycle(g):
         try:
             for animation in proto_animations:
                 visit(animation)
+            timing = {} if run_time_frames is None else {"run_time_frames": run_time_frames}
             return original_play(self, *proto_animations, run_time=run_time,
-                                 rate_func=rate_func, lag_ratio=lag_ratio)
+                                 rate_func=rate_func, lag_ratio=lag_ratio, **timing)
         except BaseException:
             # An authored override may raise outside super(), or a sibling /
             # scene updater may fail after these native children have begun.
@@ -1903,6 +2085,9 @@ def _install_camera_choreography(g):
         def interpolate(self, alpha):
             self.animation.interpolate(alpha)
 
+        def _fmn_interpolate_at_frame(self, frame, fps, alpha=None):
+            self.animation._fmn_interpolate_at_frame(frame, fps, alpha)
+
         def finish(self):
             if self.begun and not self.finished:
                 self.animation.finish()
@@ -1982,6 +2167,7 @@ def _install_camera_choreography(g):
             if any(not math.isfinite(value) or value < 0 for value in self.run_times):
                 raise ValueError("Camera play runtimes must be finite and nonnegative")
             self.run_time = max(self.run_times, default=0.)
+            self._fmn_frame_timing = None
             self.dt = 0.
             self.completed = 0
 
@@ -2005,6 +2191,16 @@ def _install_camera_choreography(g):
             for child, duration in zip(self.children, self.run_times):
                 child.update_mobjects(self.dt)
                 child.interpolate(1. if duration == 0 else time / duration)
+
+        def _fmn_interpolate_at_frame(self, frame, fps, alpha=None):
+            if self._fmn_frame_timing is None:
+                return self.interpolate(alpha if alpha is not None else (frame / fps) / self.run_time)
+            for child, duration in zip(self.children, self.run_times):
+                child.update_mobjects(self.dt)
+                if duration == 0:
+                    child.interpolate(1.)
+                else:
+                    child._fmn_interpolate_at_frame(frame, fps)
 
         def finish(self):
             self.hide_slot()
@@ -2032,13 +2228,15 @@ def _install_camera_choreography(g):
 
     g["_fmn_camera_clock_driver_type"] = ClockDriver
 
-    def scene_play(self, *proto_animations, run_time=None, rate_func=None, lag_ratio=None):
+    def scene_play(self, *proto_animations, run_time=None, rate_func=None, lag_ratio=None,
+                   run_time_frames=None):
         if getattr(self, "_fmn_camera_play_active", False):
             raise RuntimeError("Reentrant Scene.play during camera choreography is not supported")
         has_camera = [contains_camera(animation, set()) for animation in proto_animations]
         if not any(has_camera):
+            timing = {} if run_time_frames is None else {"run_time_frames": run_time_frames}
             return original_play(self, *proto_animations, run_time=run_time,
-                                 rate_func=rate_func, lag_ratio=lag_ratio)
+                                 rate_func=rate_func, lag_ratio=lag_ratio, **timing)
         animations = [g["prepare_animation"](animation) for animation in proto_animations]
         nodes, seen, visiting = [], set(), set()
 
@@ -2078,6 +2276,13 @@ def _install_camera_choreography(g):
                 if not math.isfinite(value) or value < 0:
                     raise ValueError("Camera play run_time must be finite and nonnegative")
                 animation.run_time = value
+                animation.run_time_frames = None
+                animation._fmn_derived_run_time = False
+            if run_time_frames is not None:
+                if run_time is not None:
+                    raise ValueError("run_time and run_time_frames are mutually exclusive")
+                animation.run_time_frames = _validate_frame_count(run_time_frames)
+                animation._fmn_derived_run_time = False
             if rate_func is not None:
                 animation.rate_func = rate_func
             if lag_ratio is not None:
@@ -2085,6 +2290,7 @@ def _install_camera_choreography(g):
                 if not math.isfinite(value) or value < 0:
                     raise ValueError("Camera play lag_ratio must be finite and nonnegative")
                 animation.lag_ratio = value
+        g["_fmn_bind_frame_timing"](self, animations)
         for animation in nodes:
             normalize_rate(animation)
         contexts, children = [], []
@@ -2141,7 +2347,16 @@ def _install_camera_choreography(g):
                 children.append(make_driver(self, animation))
             self._adopt(slot)
             clock = ClockDriver(self, slot, children, animations)
-            spec = ("python_callback", slot, None, clock.run_time, None, 0., {"remover": True})
+            params = {"remover": True}
+            if any(hasattr(animation, "_fmn_frame_descriptor") for animation in animations):
+                descriptors = [getattr(animation, "_fmn_frame_descriptor", (
+                    float(animation.get_run_time()), None, None, 0., None,
+                )) for animation in animations]
+                timing = g["_frame_timing"]((None, None, None, 0., descriptors), self._frame_rate())
+                params["frame_timing"] = timing
+                clock.run_time = timing.seconds
+                clock._fmn_frame_timing = timing
+            spec = ("python_callback", slot, None, clock.run_time, None, 0., params)
             return self._play_animations([spec], [clock], None, None, None, None)
         except BaseException as primary:
             failed = True
@@ -2388,7 +2603,8 @@ def _install_partial_reveals(g):
                     break
         return False
 
-    def scene_play(self, *proto_animations, run_time=None, rate_func=None, lag_ratio=None):
+    def scene_play(self, *proto_animations, run_time=None, rate_func=None, lag_ratio=None,
+                   run_time_frames=None):
         # An override_animate builder already owns its resulting animation.
         # Resolve just that case once, leaving ordinary builder lowering alone.
         animations = tuple(g["prepare_animation"](anim)
@@ -2407,8 +2623,9 @@ def _install_partial_reveals(g):
             if isinstance(animation, g["AnimationGroup"]):
                 stack.extend(animation.animations)
         try:
+            timing = {} if run_time_frames is None else {"run_time_frames": run_time_frames}
             return original_play(self, *animations, run_time=run_time,
-                                 rate_func=rate_func, lag_ratio=lag_ratio)
+                                 rate_func=rate_func, lag_ratio=lag_ratio, **timing)
         except BaseException:
             # Includes failures outside an overridden super() call, in a
             # sibling, or in a scene updater. Never finish/publish on failure.
@@ -2563,11 +2780,12 @@ def _install_border_write(g):
                             stroke_color=stroke_color, **kwargs)
         self._explicit_stroke_color = explicit_stroke_color
 
-    def border_init(self, vmobject, run_time=2.0, rate_func=g["double_smooth"],
+    def border_init(self, vmobject, run_time=_DefaultRunTime(2.0), rate_func=g["double_smooth"],
                     stroke_width=2.0, stroke_color=None,
                     draw_border_animation_config=None, fill_animation_config=None,
                     **kwargs):
-        original_border_init(self, vmobject, run_time=run_time,
+        timing = {} if isinstance(run_time, _DefaultRunTime) else {"run_time": run_time}
+        original_border_init(self, vmobject, **timing,
                              rate_func=g["double_smooth"] if rate_func is None else rate_func,
                              stroke_width=stroke_width, stroke_color=stroke_color,
                              draw_border_animation_config=draw_border_animation_config,
@@ -2658,7 +2876,8 @@ def _install_border_write(g):
                     break
         return False
 
-    def scene_play(self, *proto_animations, run_time=None, rate_func=None, lag_ratio=None):
+    def scene_play(self, *proto_animations, run_time=None, rate_func=None, lag_ratio=None,
+                   run_time_frames=None):
         animations = tuple(g["prepare_animation"](anim)
                            if isinstance(anim, g["_AnimationBuilder"])
                            and getattr(anim, "overridden_animation", None) is not None
@@ -2675,8 +2894,9 @@ def _install_border_write(g):
             if isinstance(animation, g["AnimationGroup"]):
                 stack.extend(animation.animations)
         try:
+            timing = {} if run_time_frames is None else {"run_time_frames": run_time_frames}
             return original_play(self, *animations, run_time=run_time,
-                                 rate_func=rate_func, lag_ratio=lag_ratio)
+                                 rate_func=rate_func, lag_ratio=lag_ratio, **timing)
         except BaseException:
             for animation in drawings:
                 abort_preserving_error(animation)

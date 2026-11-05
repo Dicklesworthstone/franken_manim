@@ -64,14 +64,19 @@ use fmn_hash::{Digest, SerialError, sha256};
 use fmn_mobject::{Snapshot, Stage};
 
 use crate::animation::{AnimError, Animation};
-use crate::clock::{ClockError, FrameSample, RationalFrameClock};
+use crate::clock::{ClockError, Duration, FrameDuration, RationalFrameClock};
 use crate::frame::{
-    FramePacket, advance_play, open_play, play_segment, wait_segment, wait_segment_upto,
+    FramePacket, advance_play, open_play, play_duration, play_segment, wait_segment,
+    wait_segment_upto,
 };
 use crate::purity::{SegmentKind, SegmentReport, reconstruct_pure_frame};
 
 /// The canonical container schema for a serialized [`TimelinePlan`].
 pub const TIMELINE_SCHEMA: Schema = Schema::new(*b"FMNA", 5, 1, 0);
+
+/// Exact-frame schedules retain their dyadic frame extents in version 2.
+/// All-seconds schedules continue to encode byte-for-byte as version 1.
+pub const FRAME_TIMELINE_SCHEMA: Schema = Schema::new(*b"FMNA", 5, 2, 0);
 
 /// A timeline serialization failure.
 #[derive(Debug)]
@@ -118,6 +123,14 @@ pub enum Step {
     /// declarative timeline has no callbacks, and a segment whose length is
     /// decided at run time cannot be scheduled ahead of time.
     Wait(f64),
+    /// An exact-frame wait, bound to the timeline's grid. Keeping the grid
+    /// here lets the diagnostic `run_time()` report seconds accurately.
+    WaitFrames {
+        /// Exact number of frames requested.
+        frames: u64,
+        /// The authoring timeline's frame rate.
+        fps: u32,
+    },
 }
 
 impl Step {
@@ -126,7 +139,7 @@ impl Step {
     pub fn kind(&self) -> SegmentKind {
         match self {
             Self::Play(_) => SegmentKind::Play,
-            Self::Wait(_) => SegmentKind::Wait,
+            Self::Wait(_) | Self::WaitFrames { .. } => SegmentKind::Wait,
         }
     }
 
@@ -141,6 +154,24 @@ impl Step {
                 .map(|a| a.get_run_time())
                 .fold(f64::NEG_INFINITY, f64::max),
             Self::Wait(duration) => *duration,
+            Self::WaitFrames { frames, fps } => *frames as f64 / f64::from(*fps),
+        }
+    }
+
+    /// Resolve the step's duration on the timeline's grid before rounding.
+    pub fn duration_on_grid(&self, fps: u32) -> Result<FrameDuration, AnimError> {
+        match self {
+            Self::Play(animations) => play_duration(animations, fps),
+            Self::Wait(seconds) => FrameDuration::new(*seconds, fps).map_err(AnimError::Clock),
+            Self::WaitFrames {
+                frames,
+                fps: authored_fps,
+            } => {
+                if *authored_fps != fps {
+                    return Err(AnimError::Clock(ClockError::FrameRateMismatch));
+                }
+                FrameDuration::new(Duration::Frames(*frames), fps).map_err(AnimError::Clock)
+            }
         }
     }
 }
@@ -148,12 +179,15 @@ impl Step {
 // --------------------------------------------------------------- the plan
 
 /// One segment of a compiled schedule.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PlannedSegment {
     /// Play or wait.
     pub kind: SegmentKind,
     /// The segment's run time in seconds, as authored.
     pub run_time: f64,
+    /// Exact pre-ceiling frame extent for a frame-native or mixed play.
+    /// `None` preserves the legacy second-based duration and wire format.
+    pub frame_duration: Option<FrameDuration>,
     /// Frames elapsed before this segment starts (global frame *k* of the
     /// segment is `base_frame + k`, `k` being 1-based).
     pub base_frame: i64,
@@ -162,6 +196,17 @@ pub struct PlannedSegment {
 }
 
 impl PlannedSegment {
+    /// Raw sample alpha with the same unit boundary as Choreo's driver.
+    /// Seconds retain their original division order; frame-native samples
+    /// divide the integer frame index by the exact duration converted once.
+    #[must_use]
+    pub fn sample_alpha(&self, frame: i64, fps: u32) -> f64 {
+        self.frame_duration.as_ref().map_or_else(
+            || (frame as f64 / f64::from(fps)) / self.run_time,
+            |duration| frame as f64 / duration.frame_units(),
+        )
+    }
+
     /// The global frame index of this segment's last frame, or `None` when
     /// independently constructed public fields do not fit in the frame
     /// counter. Compiled and decoded plans validate this range up front.
@@ -205,6 +250,10 @@ fn decoded_clock_error(error: ClockError) -> TimelineError {
         ClockError::NegativeFrameAdvance | ClockError::FrameCounterOverflow => {
             TimelineError::Malformed("segment frame range")
         }
+        ClockError::InvalidFrameLag
+        | ClockError::DurationComplexity
+        | ClockError::NonCanonicalDuration
+        | ClockError::FrameRateMismatch => TimelineError::Malformed("segment exact duration"),
     }
 }
 
@@ -306,7 +355,15 @@ impl TimelinePlan {
         // disagrees with their payload.
         let segment_count = wire_count(self.segments.len())?;
         let label_count = wire_count(self.labels.len())?;
-        let mut writer = Writer::new(TIMELINE_SCHEMA);
+        let exact = self
+            .segments
+            .iter()
+            .any(|segment| segment.frame_duration.is_some());
+        let mut writer = Writer::new(if exact {
+            FRAME_TIMELINE_SCHEMA
+        } else {
+            TIMELINE_SCHEMA
+        });
         writer.put_u32(self.fps);
         writer.put_u32(segment_count);
         for segment in &self.segments {
@@ -317,6 +374,17 @@ impl TimelinePlan {
             writer.put_f64(segment.run_time);
             writer.put_i64(segment.base_frame);
             writer.put_i64(segment.n_frames);
+            if exact {
+                writer.put_bool(segment.frame_duration.is_some());
+                if let Some(duration) = &segment.frame_duration {
+                    let (exponent, words) = duration.exact_parts();
+                    writer.put_i64(i64::from(exponent));
+                    writer.put_u32(wire_count(words.len())?);
+                    for word in words {
+                        writer.put_u64(*word);
+                    }
+                }
+            }
         }
         writer.put_u32(label_count);
         for label in &self.labels {
@@ -339,9 +407,14 @@ impl TimelinePlan {
     /// [`TimelineError`] for any framing, version, integrity, field, or
     /// invariant failure.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, TimelineError> {
+        let exact = bytes.get(8..10) == Some(&FRAME_TIMELINE_SCHEMA.major.to_le_bytes());
         let mut reader = Reader::open(
             bytes,
-            TIMELINE_SCHEMA,
+            if exact {
+                FRAME_TIMELINE_SCHEMA
+            } else {
+                TIMELINE_SCHEMA
+            },
             Limits::DEFAULT,
             UnknownPolicy::Strict,
         )?;
@@ -361,13 +434,37 @@ impl TimelinePlan {
                 run_time: reader.get_f64()?,
                 base_frame: reader.get_i64()?,
                 n_frames: reader.get_i64()?,
+                frame_duration: if exact && reader.get_bool()? {
+                    let exponent = i32::try_from(reader.get_i64()?)
+                        .map_err(|_| TimelineError::Malformed("segment exact exponent"))?;
+                    let count = reader.get_u32()?;
+                    if count > 256 {
+                        return Err(TimelineError::Malformed("segment exact precision"));
+                    }
+                    let mut words = Vec::with_capacity(count as usize);
+                    for _ in 0..count {
+                        words.push(reader.get_u64()?);
+                    }
+                    Some(
+                        FrameDuration::from_exact_parts(fps, exponent, words)
+                            .map_err(decoded_clock_error)?,
+                    )
+                } else {
+                    None
+                },
             };
             if segment.base_frame != clock.now().frames() {
                 return Err(TimelineError::Malformed("segment base frame"));
             }
-            let expected = clock
-                .segment(segment.run_time)
-                .map_err(decoded_clock_error)?;
+            let expected = if let Some(duration) = &segment.frame_duration {
+                if duration.to_seconds() != segment.run_time {
+                    return Err(TimelineError::Malformed("segment exact run time"));
+                }
+                clock.segment_duration(duration)
+            } else {
+                clock.segment(segment.run_time)
+            }
+            .map_err(decoded_clock_error)?;
             if segment.n_frames != expected.n_frames() {
                 return Err(TimelineError::Malformed("segment frame count"));
             }
@@ -375,6 +472,15 @@ impl TimelinePlan {
                 .advance_frames(segment.n_frames)
                 .map_err(decoded_clock_error)?;
             segments.push(segment);
+        }
+        if exact
+            && segments
+                .iter()
+                .all(|segment| segment.frame_duration.is_none())
+        {
+            return Err(TimelineError::Malformed(
+                "exact schema without exact duration",
+            ));
         }
         let total_frames = clock.now().frames();
         let label_count = usize::try_from(reader.get_u32()?)
@@ -474,9 +580,15 @@ impl Timeline {
     /// # Errors
     /// [`AnimError::EmptyComposition`] — a play with no animations has no
     /// run time to schedule.
-    pub fn play(&mut self, animations: Vec<Box<dyn Animation>>) -> Result<&mut Self, AnimError> {
+    pub fn play(
+        &mut self,
+        mut animations: Vec<Box<dyn Animation>>,
+    ) -> Result<&mut Self, AnimError> {
         if animations.is_empty() {
             return Err(AnimError::EmptyComposition);
+        }
+        for animation in &mut animations {
+            animation.prepare_timing(self.fps)?;
         }
         self.invalidate();
         self.steps.push(Step::Play(animations));
@@ -497,6 +609,19 @@ impl Timeline {
         Ok(self)
     }
 
+    /// Author a wait lasting exactly `frames` samples on this timeline.
+    pub fn wait_frames(&mut self, frames: u64) -> Result<&mut Self, AnimError> {
+        RationalFrameClock::new(self.fps)
+            .and_then(|clock| clock.segment_frames(frames))
+            .map_err(AnimError::Clock)?;
+        self.invalidate();
+        self.steps.push(Step::WaitFrames {
+            frames,
+            fps: self.fps,
+        });
+        Ok(self)
+    }
+
     /// Name the position *about to be* authored — the start of the next
     /// step (or the timeline's end, if nothing follows).
     pub fn label(&mut self, name: &str) -> &mut Self {
@@ -512,9 +637,10 @@ impl Timeline {
         let mut clock = RationalFrameClock::new(self.fps).map_err(AnimError::Clock)?;
         let mut segments = Vec::with_capacity(self.steps.len());
         for step in &self.steps {
-            let run_time = step.run_time();
+            let duration = step.duration_on_grid(self.fps)?;
+            let run_time = duration.to_seconds();
             let n_frames = clock
-                .segment(run_time)
+                .segment_duration(&duration)
                 .map_err(AnimError::Clock)?
                 .n_frames();
             segments.push(PlannedSegment {
@@ -522,6 +648,7 @@ impl Timeline {
                 run_time,
                 base_frame: clock.now().frames(),
                 n_frames,
+                frame_duration: duration.is_frame_native().then_some(duration),
             });
             clock.advance_frames(n_frames).map_err(AnimError::Clock)?;
         }
@@ -674,6 +801,15 @@ fn run_step(
     match step {
         Step::Play(animations) => play_segment(stage, clock, rng, animations, false, emit),
         Step::Wait(duration) => wait_segment(stage, clock, rng, *duration, None, false, emit),
+        Step::WaitFrames { frames, .. } => wait_segment(
+            stage,
+            clock,
+            rng,
+            Duration::Frames(*frames),
+            None,
+            false,
+            emit,
+        ),
     }
 }
 
@@ -695,7 +831,13 @@ fn seek_within(
                 // §9.5's contract: frame *k* is a function of (begin
                 // snapshot, α(k), keyed RNG fork) — one interpolation, no
                 // replay, whatever k is.
-                let sample = nth_sample(clock, open.report().run_time, offset)?;
+                let sample = open
+                    .segment()
+                    .sample(offset)
+                    .ok_or(AnimError::SeekOutOfRange {
+                        frame: offset,
+                        total: open.segment().n_frames(),
+                    })?;
                 return reconstruct_pure_frame(stage, animations, open.report(), rng, &sample);
             }
             // Stateful: the frames *are* the state, so the replay is the
@@ -722,20 +864,21 @@ fn seek_within(
                 total: 0,
             })
         }
+        Step::WaitFrames { frames, .. } => {
+            wait_segment_upto(
+                stage,
+                clock,
+                rng,
+                Duration::Frames(*frames),
+                offset,
+                &mut capture,
+            )?;
+            last.ok_or(AnimError::SeekOutOfRange {
+                frame: offset,
+                total: 0,
+            })
+        }
     }
-}
-
-/// The `n`th (1-based) sample of a segment of `run_time` on this clock's
-/// grid.
-fn nth_sample(clock: &RationalFrameClock, run_time: f64, n: i64) -> Result<FrameSample, AnimError> {
-    let segment = clock.segment(run_time).map_err(AnimError::Clock)?;
-    segment
-        .samples()
-        .nth(usize::try_from(n - 1).unwrap_or(usize::MAX))
-        .ok_or(AnimError::SeekOutOfRange {
-            frame: n,
-            total: segment.n_frames(),
-        })
 }
 
 /// A collection length as this format's `u32` count field: a typed refusal

@@ -274,7 +274,13 @@ fn frame_facts(stage: &Stage) -> Vec<String> {
 
 #[test]
 fn mapped_worker_frames_match_serial_under_reordered_evaluation() {
-    for strings in [false, true] {
+    for (strings, run_time_frames) in [
+        (false, None),
+        (true, None),
+        (false, Some(43)),
+        (true, Some(43)),
+    ] {
+        let expected_count = run_time_frames.map_or(12, |frames| usize::try_from(frames).unwrap());
         let mut initial = Stage::new();
         let (other, _, _) = fixture(&mut initial, "keep", -10.0);
         let (source, sm, _) = fixture(&mut initial, "AB+Q?", 0.0);
@@ -296,6 +302,7 @@ fn mapped_worker_frames_match_serial_under_reordered_evaluation() {
                 &[("AB", "z"), ("Q", "RST")],
                 strings,
             );
+            animation.state_mut().config.run_time_frames = run_time_frames;
             animation.state_mut().config.time_span = Some((0.03125, 0.4375));
             animation.state_mut().config.final_alpha_value = 0.35;
             let mut animations = vec![animation];
@@ -350,8 +357,40 @@ fn mapped_worker_frames_match_serial_under_reordered_evaluation() {
                     .unwrap();
                 indexed.into_iter().map(|(_, facts)| facts).collect()
             };
-            assert_eq!(frames.len(), 12);
-            assert_eq!(clock.now().frames(), 17);
+            assert_eq!(frames.len(), expected_count);
+            assert_eq!(
+                clock.now().frames(),
+                5 + i64::try_from(expected_count).unwrap()
+            );
+            let duration = animations[0].duration_on_grid(24).unwrap();
+            assert_eq!(duration.is_frame_native(), run_time_frames.is_some());
+            assert_eq!(
+                duration.n_frames().unwrap(),
+                i64::try_from(expected_count).unwrap()
+            );
+            let timing = animations[0]
+                .composition_timing()
+                .expect("matching wrappers retain the prepared composition timing");
+            // The wrapper's exact outer duration does not change its
+            // seconds-authored children into frame-coordinate windows.
+            assert!(!timing.is_frame_native());
+            assert!(!timing.intervals().is_empty());
+            if run_time_frames.is_some() {
+                for frame in 0..=43 {
+                    let frame = f64::from(frame);
+                    let alpha = frame / 43.0;
+                    assert_eq!(
+                        animations[0].state().frame_alpha(frame, 24).to_bits(),
+                        alpha.to_bits()
+                    );
+                    let span_alpha =
+                        (alpha * (43.0 / 24.0) - 0.03125).clamp(0.0, 0.40625) / 0.40625;
+                    assert_eq!(
+                        timing.rate_alpha_at_frame(frame, 24).to_bits(),
+                        span_alpha.to_bits()
+                    );
+                }
+            }
             assert_eq!(stage.roots(), &[other, target]);
             assert!(!stage.is_animating(source));
             assert!(!stage.is_updating_suspended(source));
@@ -359,7 +398,10 @@ fn mapped_worker_frames_match_serial_under_reordered_evaluation() {
             assert!(animations[0].deferred_error().is_none());
             let observed = (frames, frame_facts(&stage));
             if let Some(expected) = &expected {
-                assert_eq!(&observed, expected, "strings={strings}, workers={workers}");
+                assert_eq!(
+                    &observed, expected,
+                    "strings={strings}, run_time_frames={run_time_frames:?}, workers={workers}"
+                );
             } else {
                 expected = Some(observed);
             }

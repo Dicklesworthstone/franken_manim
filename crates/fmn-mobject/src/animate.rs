@@ -59,6 +59,8 @@ use fmn_geom::Mat3;
 pub struct AnimateArgs {
     /// Seconds the transform runs; engine default when `None`.
     pub run_time: Option<f64>,
+    /// Exact frames at the scene's frame rate, instead of `run_time` seconds.
+    pub run_time_frames: Option<u64>,
     /// The rate function (an fmn-core `rate` fn); engine default when `None`.
     pub rate_func: Option<fn(f64) -> f64>,
     /// Per-submobject stagger.
@@ -76,6 +78,7 @@ impl PartialEq for AnimateArgs {
         // Manual impl: rate functions compare by address (`fn_addr_eq`, the
         // sanctioned form), everything else by value.
         self.run_time == other.run_time
+            && self.run_time_frames == other.run_time_frames
             && self.lag_ratio == other.lag_ratio
             && self.path_arc == other.path_arc
             && self.path_arc_axis == other.path_arc_axis

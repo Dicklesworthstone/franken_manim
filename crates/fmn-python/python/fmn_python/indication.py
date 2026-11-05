@@ -10,6 +10,9 @@ from functools import wraps
 import math
 from typing import Any
 
+class _DefaultRunTime(float):
+    """Retain the public default while allowing a frame-only duration."""
+
 from fmn_python.movement import (
     _cancel_preserving, _changed, _custom_rate, _install_lifecycle,
     _method, _protocols,
@@ -367,7 +370,7 @@ def _install_wave(g):
     Homotopy, Mobject, np = g["Homotopy"], g["Mobject"], g["_np"]
 
     def wave_init(self, mobject, direction=g["_UP"], amplitude=0.2,
-                  run_time=1.0, **kwargs):
+                  run_time=_DefaultRunTime(1.0), **kwargs):
         if not isinstance(mobject, Mobject):
             raise TypeError("ApplyWave requires a Mobject")
         left = _finite(mobject.get_left()[0], "ApplyWave left extent")
@@ -398,7 +401,10 @@ def _install_wave(g):
             return point + g["there_and_back"](float(phase)) * vector
 
         self.direction, self.amplitude = tuple(direction), amplitude
-        super(Wave, self).__init__(homotopy, mobject, run_time=run_time, **kwargs)
+        timing = {} if isinstance(run_time, _DefaultRunTime) and kwargs.get("run_time_frames") is not None else {
+            "run_time": float(run_time),
+        }
+        super(Wave, self).__init__(homotopy, mobject, **timing, **kwargs)
 
     # Keep every qualified alias and already-existing subclass attached to
     # the original class object. Homotopy delegates all geometry writes to

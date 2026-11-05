@@ -25,10 +25,16 @@ value is exactly `frames / fps`. Time *derives*; it never accumulates.
 A million frames at 30 fps is exactly `1_000_000/30` seconds, bit-equal
 to the closed form (locked by test).
 
-The segment frame count is `n = ceil(run_time · fps)`, computed on the
+For a duration supplied in **seconds**, the segment frame count is
+`n = ceil(run_time · fps)`, computed on the
 **exact rational value of the received f64 duration**:
 `(n−1)/fps < run_time ≤ n/fps`, exactly (locked by a 20 000-duration
 property test).
+
+An explicit **frame duration** instead supplies `n` directly. It never passes
+through `float(n / fps)` to decide the number of frames. The distinction is
+preserved through animation composition, scheduling, pure and serial frame
+capture, and compiled timeline serialization and replay.
 
 ## What deliberately did NOT change
 
@@ -39,7 +45,8 @@ The Reference's emission semantics are kept verbatim as API behavior:
 - upward duration rounding: the final sample may exceed `run_time`;
 - alpha = `t/run_time`, clamped to `[0, 1]` (the Reference's
   `interpolate` clip);
-- skipped playback advances the whole segment in one step.
+- skipped playback visits the same clock samples and updater boundaries,
+  while suppressing capture (BN-10).
 
 Adaptive or variable frame sampling remains **permanently refused**
 (D-18): `RationalTime` is only constructible as whole frames over fps —
@@ -57,10 +64,59 @@ intent:
 | `0.1` | 60 | 6 | 7 | same excess |
 | `1.0`, `1/3`, `2.9999`, `0.5`, whole numbers… | any | equal | equal | representable-boundary cases agree |
 
-If a scene needs the old count, request a grid-exact duration
-(`n/fps`). Everything downstream gains: `wait()` chains of any length
-hold A/V sync exactly, and a scene's timing is identical however its
-plays are chunked.
+Dividing a frame count by `fps` in Python or Rust does **not** reliably
+request that count: the quotient is a rounded binary float, and some
+quotients lie just above their intended frame boundary. Issue #10's twenty
+segments total 864 frames, but their `n / 24` second durations cover 872
+frames under the deliberate ceiling rule. There is no epsilon or
+near-integer exception to that rule.
+
+Use the frame-native forms when segment lengths come from an audio edit,
+storyboard, or other integer frame schedule:
+
+```python
+self.wait_frames(17)
+self.play(square.animate.shift(RIGHT), run_time_frames=43)
+self.play(square.animate(run_time_frames=43).shift(RIGHT))
+self.play(FadeIn(square, run_time_frames=43))
+```
+
+The native Rust equivalents are `Stage::wait_frames(u64)`,
+`AnimateArgs { run_time_frames: Some(n), ..Default::default() }`,
+`AnimConfig { run_time_frames: Some(n), ..Default::default() }`, and
+`PlayOverrides { run_time_frames: Some(n), ..Default::default() }`.
+`AnimationGroup` and `Succession` offer `with_run_time_frames(n)`;
+`Timeline::wait_frames(n)` retains the exact count in its compiled schedule.
+At the clock layer, use `segment_frames(n)` or `segment(Duration::Frames(n))`.
+
+Frames refer to the scene's **active** frame rate, including its windowed
+frame-rate setting. An exact finite wait bypasses presenter-controlled holds.
+Zero frames perform the normal segment lifecycle without a progression frame
+or elapsed time. A movie containing only zero-frame requests is refused as an
+empty stream instead of gaining an implicit static frame; explicitly exporting
+a final still remains a one-image operation. Counts and cumulative positions must fit the clock's
+nonnegative `i64` range; an oversized request fails before playback starts.
+Python frame values must be nonnegative integers (including integer objects
+supporting `__index__`); booleans and floating-point values are refused.
+Supplying both `run_time` and `run_time_frames` to one Python operation,
+animation builder, or play override is an error. A later seconds override
+clears an earlier frame override.
+
+Groups containing frame-native children derive their extent in exact frame
+units, including mixed seconds/frame children and nested groups. Members are
+not rounded separately before composition. Fractional lag ratios can create
+fractional-frame endpoints; those are still covered by an upward rounding at
+the final segment boundary. Groups containing only second-based durations
+retain their existing floating-point interval arithmetic and operation order.
+An explicit group duration scales its internal timeline as before, and
+`time_span` keeps its existing duration-widening semantics.
+
+Frame counts in segment and render reports remain authoritative integers.
+Their seconds fields are presentation values; passing such a value back to
+`wait(seconds)` requests a new second-based duration. Audio cue positions
+continue to use the exact scene frame and rate under BN-14. Frame-native
+segment chains therefore keep their authored frame total and audio positions
+without a per-operation `math.nextafter` workaround.
 
 ## Evidence
 

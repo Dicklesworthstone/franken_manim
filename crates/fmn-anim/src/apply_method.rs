@@ -185,6 +185,7 @@ impl Animation for ApplyMethod {
         let mut transform = Transform::new(source, target)
             .with_config(config)
             .with_path_func(self.path);
+        transform.state_mut().copy_timing_from(self.state());
         let result = (self.method)(stage, target).and_then(|()| transform.setup(stage));
         if let Err(error) = result {
             // Only our fresh copies are ours to reclaim. Do not delete a

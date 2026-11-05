@@ -57,6 +57,7 @@ struct FrozenGroup {
     animations: Vec<FrozenAnimation>,
     timings: Vec<crate::composition::Interval>,
     max_end_time: f64,
+    frame_timings: bool,
 }
 
 // Replace recognized Base rates with their data identity. A failed recognition
@@ -161,8 +162,9 @@ impl FrozenAnimation {
             mechanism: FrozenMechanism::Group(FrozenGroup {
                 state,
                 animations,
-                timings: group.timings().to_vec(),
-                max_end_time: group.max_end_time(),
+                timings: group.interpolation_timings().to_vec(),
+                max_end_time: group.interpolation_max_end(),
+                frame_timings: group.uses_frame_timings(),
             }),
         })
     }
@@ -205,8 +207,30 @@ impl FrozenAnimation {
         })
     }
 
-    fn interpolate(&self, stage: &mut Stage, time: f64) {
-        self.interpolate_alpha(stage, time / self.state().config.run_time);
+    fn interpolate(&self, stage: &mut Stage, time: RationalTime) {
+        self.interpolate_at_frame(stage, time.frames() as f64, time.fps());
+    }
+
+    fn interpolate_at_frame(&self, stage: &mut Stage, frame: f64, fps: u32) {
+        if let FrozenMechanism::Group(group) = &self.mechanism {
+            let time = crate::composition::timeline_frame_position(
+                &group.state,
+                frame,
+                fps,
+                group.max_end_time,
+            );
+            for (animation, interval) in group.animations.iter().zip(&group.timings) {
+                if group.frame_timings
+                    && let Some(frame) = interval.interior_frame(time)
+                {
+                    animation.interpolate_at_frame(stage, frame, fps);
+                } else {
+                    animation.interpolate_alpha(stage, interval.sub_alpha(time));
+                }
+            }
+        } else {
+            self.interpolate_alpha(stage, self.state().frame_alpha(frame, fps));
+        }
     }
 
     fn interpolate_alpha(&self, stage: &mut Stage, alpha: f64) {
@@ -542,11 +566,15 @@ impl PureSegment {
                 "pure play no longer at its begin boundary",
             ));
         }
-        let last = self.data.grid.end_time().to_f64();
-        for index in 0..animations.len() {
+        let last = self.data.grid.end_time();
+        let final_progression = if self.frame_count() == 0 {
+            0
+        } else {
+            animations.len()
+        };
+        for index in 0..final_progression {
             let animation = &mut animations[index];
-            let alpha = last / animation.state().config.run_time;
-            animation.interpolate(stage, alpha);
+            animation.interpolate_at_frame(stage, last.frames() as f64, last.fps());
             if let Err(error) = check_updater_error(stage) {
                 let _report = crate::frame::abort_open_play(stage, animations, open);
                 return Err(error);
@@ -619,7 +647,7 @@ impl PureFrameJob {
     pub fn try_materialize(&self) -> Result<Stage, AnimError> {
         let mut stage = self.data.begin.clone().materialize();
         for animation in &self.data.animations {
-            animation.interpolate(&mut stage, self.sample.time.to_f64());
+            animation.interpolate(&mut stage, self.sample.time);
             if let Some(error) = animation.rate_error() {
                 return Err(error);
             }
@@ -707,7 +735,7 @@ pub fn wait_segment_with_pure_dispatch(
     stage: &mut Stage,
     clock: &mut RationalFrameClock,
     rng: &RngRoot,
-    duration: f64,
+    duration: impl Into<crate::Duration>,
     skip: bool,
     allow_pure: bool,
     boundary: &mut dyn FnMut(&mut Stage, RationalTime),

@@ -205,6 +205,7 @@ def install_scene_execution(native: Any) -> None:
     Scene = g["Scene"]
     original_play, original_core = Scene.play, Scene._play_animations
     original_wait = Scene.wait
+    original_wait_frames = getattr(Scene, "wait_frames", None)
 
     def enter(scene):
         if vars(scene).get(_OWNER_KEY) is not None:
@@ -219,7 +220,8 @@ def install_scene_execution(native: Any) -> None:
             vars(scene).pop(_OWNER_KEY)
 
     @wraps(original_core)
-    def core(self, specs, callbacks, camera, run_time, rate_func, lag_ratio):
+    def core(self, specs, callbacks, camera, run_time, rate_func, lag_ratio,
+             run_time_frames=None):
         owner = vars(self).get(_OWNER_KEY)
         independent = owner is None
         if independent:
@@ -229,7 +231,8 @@ def install_scene_execution(native: Any) -> None:
         try:
             wrapped = owner.wrap(callbacks)
             owner.native_active = True
-            return original_core(self, specs, wrapped, camera, run_time, rate_func, lag_ratio)
+            timing = () if run_time_frames is None else (run_time_frames,)
+            return original_core(self, specs, wrapped, camera, run_time, rate_func, lag_ratio, *timing)
         except BaseException as error:
             owner.fail(error)
             if independent:
@@ -248,7 +251,7 @@ def install_scene_execution(native: Any) -> None:
             raise RuntimeError("cannot start another play/wait while this Scene is executing one")
         subdivision = vars(scene).get("_fmn_subdivision_session")
         capture = (nullcontext(None) if subdivision is None else
-                   subdivision._segment("wait" if operation is original_wait else "play"))
+                   subdivision._segment("wait" if operation in (original_wait, original_wait_frames) else "play"))
         with capture as segment:
             owner = enter(scene)
             try:
@@ -278,9 +281,13 @@ def install_scene_execution(native: Any) -> None:
                 leave(scene, owner)
 
     def prepare_play(scene, animations, kwargs):
-        unknown = set(kwargs) - {"run_time", "rate_func", "lag_ratio"}
+        unknown = set(kwargs) - {"run_time", "run_time_frames", "rate_func", "lag_ratio"}
         if unknown:
             raise TypeError("Scene.play unexpected keyword(s): " + ", ".join(sorted(unknown)))
+        if kwargs.get("run_time_frames") is not None:
+            if kwargs.get("run_time") is not None:
+                raise ValueError("run_time and run_time_frames are mutually exclusive")
+            kwargs["run_time_frames"] = g["_fmn_validate_frame_count"](kwargs["run_time_frames"])
         if not animations:
             return animations, kwargs, False
         # Builders produce real Animations now, not a restricted native spec.
@@ -311,8 +318,19 @@ def install_scene_execution(native: Any) -> None:
         rate = kwargs.get("rate_func")
         if rate is not None and not isinstance(rate, str) and not callable(rate):
             raise TypeError("rate_func must be a callable or a catalog name")
+        # Existing authored hooks retain their established keyword surface.
+        # Bind the additive frame option after the hook so old explicit
+        # signatures remain valid and cannot turn the count into seconds.
+        frames = kwargs.get("run_time_frames")
+        old_options = {key: value for key, value in kwargs.items() if key != "run_time_frames"}
         for animation in prepared:
-            animation.update_rate_info(**kwargs)
+            animation.update_rate_info(**old_options)
+            if frames is not None:
+                animation.run_time_frames = frames
+                animation._fmn_derived_run_time = False
+        bind_timing = g.get("_fmn_bind_frame_timing")
+        if bind_timing is not None:
+            bind_timing(scene, prepared)
         return prepared, kwargs, True
 
     @wraps(original_play)
@@ -337,6 +355,14 @@ def install_scene_execution(native: Any) -> None:
                 "note": note, "ignore_presenter_mode": ignore_presenter_mode,
             }, True
         return execute(self, original_wait, (), kwargs, prepare_wait)
+
+    def wait_frames(self, frame_count, stop_condition=None, note=None):
+        def prepare_wait_frames(scene, args, options):
+            count = g["_fmn_validate_frame_count"](frame_count)
+            if stop_condition is not None and not callable(stop_condition):
+                raise TypeError("Scene.wait_frames stop_condition must be callable or None")
+            return (count, stop_condition), {"note": note}, True
+        return execute(self, original_wait_frames, (), {}, prepare_wait_frames)
 
     # The stock writer's partial-movie hooks used to refuse unconditionally.
     # An acquired native subdivision now owns exactly those boundaries. Keep
@@ -363,4 +389,6 @@ def install_scene_execution(native: Any) -> None:
 
     Scene._play_animations = core
     Scene.play, Scene.wait = play, wait
+    if original_wait_frames is not None:
+        Scene.wait_frames = wait_frames
     g["_FMN_SCENE_EXECUTION_INSTALLED"] = True

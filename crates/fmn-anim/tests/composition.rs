@@ -48,6 +48,274 @@ fn assert_x(stage: &Stage, mob: Mob, expected: f64) {
     );
 }
 
+fn frame_probe(mobject: Mob, id: &'static str, frames: u64, log: &Log) -> Box<dyn Animation> {
+    let mut probe = Probe::new(mobject, id, 1.0, log);
+    probe.state.config.run_time_frames = Some(frames);
+    Box::new(probe)
+}
+
+#[test]
+fn exact_succession_visits_the_next_member_at_its_frame_boundary() {
+    assert!((29.0_f64 / 67.0) * 67.0 < 29.0);
+    for (outer_frames, nested, expected_boundary) in
+        [(67, false, 29), (201, false, 87), (67, true, 29)]
+    {
+        let mut stage = Stage::new();
+        let mob = square(&mut stage);
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let members = vec![
+            frame_probe(mob, "first", 29, &log),
+            frame_probe(mob, "second", 38, &log),
+        ];
+        let mut succession = Succession::new(&mut stage, members)
+            .unwrap()
+            .with_run_time_frames(outer_frames);
+        succession.prepare_timing(24).unwrap();
+        let timing = succession.composition_timing().unwrap();
+        assert!(timing.is_frame_native());
+        assert_eq!(
+            timing.intervals(),
+            &[
+                Interval {
+                    start: 0.0,
+                    end: 29.0
+                },
+                Interval {
+                    start: 29.0,
+                    end: 67.0
+                }
+            ]
+        );
+        assert_eq!(timing.position_at_frame(expected_boundary as f64, 24), 29.0);
+        let animation: Box<dyn Animation> = if nested {
+            Box::new(AnimationGroup::new(&mut stage, vec![Box::new(succession)]).unwrap())
+        } else {
+            Box::new(succession)
+        };
+        let mut animations = vec![animation];
+        let mut clock = RationalFrameClock::new(24).unwrap();
+        let mut second_begin = None;
+        play_segment(
+            &mut stage,
+            &mut clock,
+            &RngRoot::from_seed(10),
+            &mut animations,
+            false,
+            &mut |packet| {
+                if second_begin.is_none() && log.borrow().contains(&Event::Begin("second")) {
+                    second_begin = Some(packet.segment_frame());
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            second_begin,
+            Some(expected_boundary),
+            "outer={outer_frames}, nested={nested}"
+        );
+    }
+}
+
+#[test]
+fn explicit_seconds_override_can_still_compress_a_very_long_second_member() {
+    let mut stage = Stage::new();
+    let mob = square(&mut stage);
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let member = Probe::boxed(mob, "long", 1e20, &log);
+    let mut group = AnimationGroup::new(&mut stage, vec![member])
+        .unwrap()
+        .with_run_time(1.0);
+    let duration = group.duration_on_grid(24).unwrap();
+    assert!(!duration.is_frame_native());
+    assert_eq!(duration.n_frames().unwrap(), 24);
+    group.prepare_timing(24).unwrap();
+    assert_eq!(group.get_run_time(), 1.0);
+}
+
+#[test]
+fn frame_override_samples_a_finite_huge_second_member_without_overflow() {
+    let mut stage = Stage::new();
+    let mob = square(&mut stage);
+    stage.add_to_scene(mob).unwrap();
+    let member = move_to_x(&mut stage, mob, 43.0, f64::MAX);
+    let mut group = AnimationGroup::new(&mut stage, vec![member])
+        .unwrap()
+        .with_run_time_frames(43);
+    group.prepare_timing(24).unwrap();
+    let timing = group.composition_timing().unwrap();
+    let second = timing.position_at_frame(2.0, 24);
+    assert!(second.is_finite() && second > 0.0 && second < timing.max_end());
+    assert!((timing.intervals()[0].sub_alpha(second) - 2.0 / 43.0).abs() < 1e-15);
+    let mut clock = RationalFrameClock::new(24).unwrap();
+    let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(group)];
+    let mut captured = 0;
+    let report = play_segment(
+        &mut stage,
+        &mut clock,
+        &RngRoot::from_seed(19),
+        &mut animations,
+        false,
+        &mut |packet| {
+            captured += 1;
+            assert_x(&packet.materialize_stage(), mob, f64::from(captured));
+        },
+    )
+    .unwrap();
+    assert_eq!(report.n_frames, 43);
+    assert_eq!(captured, 43);
+    assert_eq!(clock.now().frames(), 43);
+    assert_x(&stage, mob, 43.0);
+}
+
+#[test]
+fn exact_frame_succession_replays_issue_10_without_accumulated_rounding() {
+    let counts = [
+        43, 17, 61, 29, 101, 7, 55, 13, 89, 31, 47, 19, 73, 11, 37, 23, 67, 3, 97, 41,
+    ];
+    for fps in [24, 25, 30, 60] {
+        let mut stage = Stage::new();
+        let mob = square(&mut stage);
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let members = counts
+            .iter()
+            .map(|frames| frame_probe(mob, "member", *frames, &log))
+            .collect();
+        let group = Succession::new(&mut stage, members).unwrap();
+        assert_eq!(
+            group.duration_on_grid(fps).unwrap().n_frames().unwrap(),
+            864
+        );
+        let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(group)];
+        let mut clock = RationalFrameClock::new(fps).unwrap();
+        let mut emitted = 0;
+        let report = play_segment(
+            &mut stage,
+            &mut clock,
+            &RngRoot::from_seed(10),
+            &mut animations,
+            false,
+            &mut |_| emitted += 1,
+        )
+        .unwrap();
+        assert_eq!(
+            (emitted, report.n_frames, clock.now().frames()),
+            (864, 864, 864)
+        );
+        assert_eq!(report.run_time, 864.0 / f64::from(fps));
+        assert_eq!(
+            log.borrow()
+                .iter()
+                .filter(|event| matches!(event, Event::Begin(_)))
+                .count(),
+            20
+        );
+        assert_eq!(
+            log.borrow()
+                .iter()
+                .filter(|event| matches!(event, Event::Finish(_)))
+                .count(),
+            20
+        );
+    }
+}
+
+#[test]
+fn nested_fractional_frame_groups_round_only_after_composition() {
+    let mut stage = Stage::new();
+    let mob = square(&mut stage);
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let mut halves: Vec<Box<dyn Animation>> = Vec::new();
+    for _ in 0..2 {
+        let children = vec![
+            frame_probe(mob, "a", 1, &log),
+            frame_probe(mob, "b", 1, &log),
+        ];
+        let group = AnimationGroup::with_lag_ratio(&mut stage, children, 0.5).unwrap();
+        assert_eq!(group.duration_on_grid(24).unwrap().n_frames().unwrap(), 2);
+        halves.push(Box::new(group));
+    }
+    let mut succession = Succession::new(&mut stage, halves).unwrap();
+    assert_eq!(
+        succession.duration_on_grid(24).unwrap().n_frames().unwrap(),
+        3,
+        "two exact 1.5-frame windows total 3, not two prematurely rounded 2-frame windows"
+    );
+    succession.prepare_timing(24).unwrap();
+    assert_eq!(succession.get_run_time(), 3.0 / 24.0);
+    let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(succession)];
+    let mut clock = RationalFrameClock::new(24).unwrap();
+    let mut emitted = 0;
+    let report = play_segment(
+        &mut stage,
+        &mut clock,
+        &RngRoot::from_seed(10),
+        &mut animations,
+        false,
+        &mut |_| emitted += 1,
+    )
+    .unwrap();
+    assert_eq!((emitted, report.n_frames), (3, 3));
+}
+
+#[test]
+fn frame_composition_keeps_integer_precision_and_mixed_second_tails() {
+    let mut stage = Stage::new();
+    let mob = square(&mut stage);
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let members = vec![
+        frame_probe(mob, "large", 1_u64 << 53, &log),
+        frame_probe(mob, "one", 1, &log),
+    ];
+    let group = Succession::new(&mut stage, members).unwrap();
+    assert_eq!(
+        group.duration_on_grid(24).unwrap().n_frames().unwrap(),
+        (1_i64 << 53) + 1
+    );
+
+    let members = vec![
+        frame_probe(mob, "frame", 1, &log),
+        Probe::boxed(mob, "seconds", 0.1, &log),
+    ];
+    let group = Succession::new(&mut stage, members).unwrap();
+    let duration = group.duration_on_grid(30).unwrap();
+    assert!(duration.is_frame_native());
+    assert_eq!(
+        duration.n_frames().unwrap(),
+        5,
+        "one frame plus f64(0.1)*30 is strictly above four"
+    );
+
+    let members = vec![
+        frame_probe(mob, "maximum", i64::MAX as u64, &log),
+        frame_probe(mob, "one", 1, &log),
+    ];
+    let group = Succession::new(&mut stage, members).unwrap();
+    assert!(matches!(
+        group.duration_on_grid(24),
+        Err(AnimError::Clock(fmn_anim::ClockError::RunTimeTooLong))
+    ));
+}
+
+#[test]
+fn explicit_frame_and_second_overrides_and_time_spans_remain_distinct() {
+    let mut stage = Stage::new();
+    let mob = square(&mut stage);
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let mut group =
+        AnimationGroup::new(&mut stage, vec![frame_probe(mob, "member", 43, &log)]).unwrap();
+    assert_eq!(group.duration_on_grid(24).unwrap().n_frames().unwrap(), 43);
+    group.update_rate_info(Some(43.0 / 24.0), None, None);
+    assert_eq!(group.duration_on_grid(24).unwrap().n_frames().unwrap(), 44);
+    let mut group = group.with_run_time_frames(43);
+    assert_eq!(group.duration_on_grid(24).unwrap().n_frames().unwrap(), 43);
+    group.state_mut().config.time_span = Some((0.0, 2.0));
+    assert_eq!(group.duration_on_grid(24).unwrap().n_frames().unwrap(), 48);
+    group.state_mut().config.time_span = None;
+    group.update_rate_info(Some(0.0), None, None);
+    assert_eq!(group.state().config.run_time_frames, None);
+    assert_eq!(group.duration_on_grid(24).unwrap().n_frames().unwrap(), 0);
+}
+
 // ------------------------------------------------------- a probe animation
 
 /// What a [`Probe`] records, in the order it happened.

@@ -758,7 +758,9 @@ pub fn render_with_fs<P: SceneConstruct + ?Sized>(
     );
     sink.surface_failure()?;
     let completed = completed.map_err(RenderError::Scene)?;
-    if sink.next_sequence == 0 {
+    if sink.next_sequence == 0
+        && (sink.format == RenderFormat::Png || !completed.scene().has_frame_duration_requests())
+    {
         sink.render_stage(completed.scene().stage())?;
     }
     let finished = sink.finish(Some(completed.scene()))?;

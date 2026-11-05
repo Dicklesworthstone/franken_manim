@@ -2380,6 +2380,101 @@ fn native_y4m_conversion_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
         .with_counter("native_y4m_conversion_frames", decoded_frames))
 }
 
+/// Issue #10's twenty audio-sized segments cross the public frame-native
+/// authoring API, pure-frame workers, and a decoded video artifact. The
+/// expected 864 is the reporter's integer sum, independent of scheduling.
+fn native_exact_frame_duration_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    struct ExactFrames;
+    impl fmn::SceneConstruct for ExactFrames {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let square = stage.add(fmn_library::Square::new().side_length(0.8).color(WHITE))?;
+            stage.set_fill(square, Some(WHITE), Some(1.0), None, true);
+            let frames = [
+                43, 17, 61, 29, 101, 7, 55, 13, 89, 31, 47, 19, 73, 11, 37, 23, 67, 3, 97, 41,
+            ];
+            let mut base = 0;
+            for (index, frames) in frames.into_iter().enumerate() {
+                let report = if index % 2 == 1 {
+                    stage.wait_frames(frames)?
+                } else {
+                    stage.play(
+                        square
+                            .animate()
+                            .set_anim_args(AnimateArgs {
+                                run_time_frames: Some(frames),
+                                ..AnimateArgs::default()
+                            })?
+                            .shift([0.05, 0.0, 0.0])?,
+                    )?
+                };
+                if report.n_frames != frames as i64 || report.base_frame != base {
+                    return Err(fmn::SceneError::InvalidLifecycle(
+                        "exact-frame segment changed its integer frame range",
+                    )
+                    .into());
+                }
+                base += frames as i64;
+            }
+            Ok(())
+        }
+    }
+
+    ctx.set_fps((24, 1));
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    let mut options = fmn::RenderOptions::with_format("/exact-frames.y4m", fmn::RenderFormat::Y4m)
+        .map_err(|error| fail(format!("exact-frame options: {error}")))?;
+    options.config.camera.resolution = (32, 24);
+    options.config.camera.fps = 24;
+    options.config.sizes.frame_height = 4.0;
+    options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+    options.config.determinism.seed = ctx.seed;
+    options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(4);
+    options.typeset_cache = false;
+    let report = fmn::render_with_fs(&mut ExactFrames, options, fs.clone())
+        .map_err(|error| fail(format!("exact-frame render: {error}")))?;
+    let bytes = fs
+        .read(std::path::Path::new("/exact-frames.y4m"))
+        .map_err(|error| fail(format!("exact-frame artifact: {error}")))?;
+    let decoded = fmn_codec::decode_y4m(&bytes)
+        .map_err(|error| fail(format!("exact-frame video decode: {error}")))?;
+    let pipeline = report
+        .frame_pipeline
+        .as_ref()
+        .ok_or_else(|| fail("exact-frame render did not use the frame pipeline"))?;
+    if decoded.frames.len() != 864
+        || decoded.fps != (24, 1)
+        || report.artifact.frame_count != 864
+        || report.scene.time.frames() != 864
+        || report.scene.play_count != 20
+        || report.emission.stats.emitted != 864
+        || (
+            pipeline.submitted,
+            pipeline.emitted,
+            pipeline.outstanding_slots,
+        ) != (864, 864, 0)
+    {
+        return Err(fail(
+            "the reporter's 864-frame scene changed length in rendering or reporting",
+        ));
+    }
+    if decoded.frames.first() == decoded.frames.last() {
+        return Err(fail(
+            "the exact-frame animations produced no visible motion",
+        ));
+    }
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_exact_frames")
+            .field("segments", report.scene.play_count)
+            .field("decoded_frames", decoded.frames.len() as u64)
+            .field("emitted_frames", pipeline.emitted),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("exact-frames.y4m", bytes)
+        .with_counter("exact_frame_segments", report.scene.play_count)
+        .with_counter("exact_frame_decoded_frames", decoded.frames.len() as u64)
+        .with_counter("exact_frame_emitted_frames", pipeline.emitted))
+}
+
 /// A complete shape replacement crosses the native authoring facade, runs
 /// prepared frames on workers, and leaves only the untouched original target.
 fn native_shape_matching_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -12179,6 +12274,27 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.native_exact_frames.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_exact_frame_duration_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec!["exact-frames.y4m".to_owned()]),
+            counter_eq("exact_frame_segments", 20),
+            counter_eq("exact_frame_decoded_frames", 864),
+            counter_eq("exact_frame_emitted_frames", 864),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_exact_frames",
+            vec![
+                FieldPred::u64_eq("segments", 20),
+                FieldPred::u64_eq("decoded_frames", 864),
+                FieldPred::u64_eq("emitted_frames", 864),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.native_y4m_conversion.v1",
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
@@ -15345,6 +15461,16 @@ fn metadata_only_capture_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.metadata_only_capture.v1")
         .expect("metadata-only capture scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn native_exact_frames_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.native_exact_frames.v1")
+        .expect("native exact-frame duration scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

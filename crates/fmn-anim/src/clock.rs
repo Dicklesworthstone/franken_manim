@@ -30,6 +30,413 @@
 //! greater than 1/10, and three frames genuinely do not cover it — where
 //! float `arange` happens to produce 3).
 
+/// An authored duration. Seconds keep BN-02's deliberate ceiling; frames
+/// bypass that conversion and are counted exactly on the receiving clock.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Duration {
+    /// An arbitrary floating-point number of seconds.
+    Seconds(f64),
+    /// An exact number of frames at the scene's frame rate.
+    Frames(u64),
+}
+
+impl From<f64> for Duration {
+    fn from(seconds: f64) -> Self {
+        Self::Seconds(seconds)
+    }
+}
+
+/// A duration resolved onto a frame grid, before upward rounding.
+///
+/// Composition needs more than an integer: a half-frame lag followed by an
+/// integer-frame animation must be added before the final ceiling. Both
+/// `f64` seconds multiplied by integer fps and integer frames are dyadic
+/// rationals. Keeping that exact value here avoids an intermediate float
+/// round-trip, including for frame counts above `2^53`.
+///
+/// Arithmetic is bounded to 16,384 significant binary places. Excessively
+/// deep, tiny-lag compositions return a named error instead of allocating
+/// without a limit or silently rounding a duration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FrameDuration {
+    value: Dyadic,
+    seconds: Option<f64>,
+    fps: u32,
+}
+
+const MAX_DURATION_WORDS: usize = 256;
+const MAX_DURATION_BITS: i32 = (MAX_DURATION_WORDS * 64) as i32;
+
+impl FrameDuration {
+    /// Resolve a duration without rounding its frame extent.
+    pub fn new(duration: impl Into<Duration>, fps: u32) -> Result<Self, ClockError> {
+        if fps == 0 {
+            return Err(ClockError::ZeroFps);
+        }
+        let (value, seconds) = match duration.into() {
+            Duration::Seconds(seconds) => {
+                if !seconds.is_finite() {
+                    return Err(ClockError::NonFiniteRunTime);
+                }
+                (
+                    Dyadic::from_f64(seconds.max(0.0))?.mul_u64(u64::from(fps))?,
+                    Some(seconds),
+                )
+            }
+            Duration::Frames(frames) => {
+                i64::try_from(frames).map_err(|_| ClockError::RunTimeTooLong)?;
+                (Dyadic::integer(frames), None)
+            }
+        };
+        Ok(Self {
+            value,
+            seconds,
+            fps,
+        })
+    }
+
+    /// Whether this duration was authored or composed in frame units.
+    #[must_use]
+    pub fn is_frame_native(&self) -> bool {
+        self.seconds.is_none()
+    }
+
+    /// Seconds for interpolation or reporting only. Never feed this value
+    /// back into the clock to recover a frame-native count.
+    #[must_use]
+    pub fn to_seconds(&self) -> f64 {
+        self.seconds
+            .unwrap_or_else(|| self.value.to_f64() / f64::from(self.fps))
+    }
+
+    /// The grid on which this duration was resolved.
+    #[must_use]
+    pub fn fps(&self) -> u32 {
+        self.fps
+    }
+
+    /// The exact upward-rounded frame count.
+    pub fn n_frames(&self) -> Result<i64, ClockError> {
+        self.value.ceil()
+    }
+
+    /// Exact addition in frame units, with no intermediate ceiling.
+    pub fn checked_add(&self, other: &Self) -> Result<Self, ClockError> {
+        if self.fps != other.fps {
+            return Err(ClockError::FrameRateMismatch);
+        }
+        Ok(Self {
+            value: self.value.add(&other.value)?,
+            seconds: None,
+            fps: self.fps,
+        })
+    }
+
+    /// Exact multiplication by a finite, nonnegative lag ratio.
+    pub fn checked_scale(&self, factor: f64) -> Result<Self, ClockError> {
+        if !factor.is_finite() || factor < 0.0 {
+            return Err(ClockError::InvalidFrameLag);
+        }
+        let (mantissa, exponent, _) = decompose(factor);
+        let mut value = self.value.mul_u64(mantissa)?;
+        if !value.words.is_empty() {
+            value.exponent = value
+                .exponent
+                .checked_add(exponent)
+                .filter(|exponent| exponent.abs() <= MAX_DURATION_BITS)
+                .ok_or(ClockError::DurationComplexity)?;
+        }
+        Ok(Self {
+            value,
+            seconds: None,
+            fps: self.fps,
+        })
+    }
+
+    /// Compare frame extents without converting either operand to seconds.
+    /// Both values must belong to the same grid; composition and the play
+    /// planner resolve every operand with their one receiving fps.
+    #[must_use]
+    pub fn cmp_duration(&self, other: &Self) -> std::cmp::Ordering {
+        self.value.cmp(&other.value)
+    }
+
+    pub(crate) fn into_frame_native(mut self) -> Self {
+        self.seconds = None;
+        self
+    }
+
+    pub(crate) fn frame_units(&self) -> f64 {
+        self.value.to_f64()
+    }
+
+    pub(crate) fn exact_parts(&self) -> (i32, &[u64]) {
+        (self.value.exponent, &self.value.words)
+    }
+
+    pub(crate) fn from_exact_parts(
+        fps: u32,
+        exponent: i32,
+        words: Vec<u64>,
+    ) -> Result<Self, ClockError> {
+        if fps == 0 {
+            return Err(ClockError::ZeroFps);
+        }
+        if words.len() > MAX_DURATION_WORDS
+            || !(-MAX_DURATION_BITS..=MAX_DURATION_BITS).contains(&exponent)
+        {
+            return Err(ClockError::DurationComplexity);
+        }
+        if (words.is_empty() && exponent != 0)
+            || words.last().is_some_and(|word| *word == 0)
+            || words.first().is_some_and(|word| word & 1 == 0)
+        {
+            return Err(ClockError::NonCanonicalDuration);
+        }
+        let duration = Self {
+            value: Dyadic { words, exponent },
+            seconds: None,
+            fps,
+        };
+        duration.n_frames()?;
+        Ok(duration)
+    }
+}
+
+/// Nonnegative `words * 2^exponent`, with an odd, little-endian mantissa.
+/// This narrowly scoped arithmetic is only used while planning durations;
+/// frame sampling remains allocation-free.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Dyadic {
+    words: Vec<u64>,
+    exponent: i32,
+}
+
+impl Dyadic {
+    fn integer(value: u64) -> Self {
+        let mut out = Self {
+            words: if value == 0 { Vec::new() } else { vec![value] },
+            exponent: 0,
+        };
+        out.normalize();
+        out
+    }
+
+    fn from_f64(value: f64) -> Result<Self, ClockError> {
+        if !value.is_finite() || value < 0.0 {
+            return Err(ClockError::NonFiniteRunTime);
+        }
+        let (mantissa, exponent, _) = decompose(value);
+        let mut out = Self::integer(mantissa);
+        if !out.words.is_empty() {
+            out.exponent += exponent;
+        }
+        Ok(out)
+    }
+
+    fn normalize(&mut self) {
+        while self.words.last() == Some(&0) {
+            self.words.pop();
+        }
+        if self.words.is_empty() {
+            self.exponent = 0;
+            return;
+        }
+        let whole = self.words.iter().take_while(|word| **word == 0).count();
+        self.words.drain(..whole);
+        let bits = self.words[0].trailing_zeros();
+        self.exponent += (whole * 64) as i32 + bits as i32;
+        if bits != 0 {
+            for index in 0..self.words.len() {
+                self.words[index] = (self.words[index] >> bits)
+                    | self
+                        .words
+                        .get(index + 1)
+                        .copied()
+                        .unwrap_or(0)
+                        .wrapping_shl(64 - bits);
+            }
+            if self.words.last() == Some(&0) {
+                self.words.pop();
+            }
+        }
+    }
+
+    fn bit_len(&self) -> i32 {
+        self.words.last().map_or(0, |word| {
+            ((self.words.len() - 1) * 64) as i32 + (64 - word.leading_zeros()) as i32
+        })
+    }
+
+    fn bit(&self, index: usize) -> bool {
+        self.words
+            .get(index / 64)
+            .is_some_and(|word| word & (1_u64 << (index % 64)) != 0)
+    }
+
+    fn shifted_word(&self, index: usize, shift: usize) -> u64 {
+        let whole = shift / 64;
+        let bits = shift % 64;
+        let Some(index) = index.checked_sub(whole) else {
+            return 0;
+        };
+        let low = self.words.get(index).copied().unwrap_or(0) << bits;
+        if bits == 0 {
+            low
+        } else {
+            low | index
+                .checked_sub(1)
+                .and_then(|i| self.words.get(i))
+                .copied()
+                .unwrap_or(0)
+                >> (64 - bits)
+        }
+    }
+
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        if self.words.is_empty() || other.words.is_empty() {
+            return self.words.len().cmp(&other.words.len());
+        }
+        let top = self.bit_len() + self.exponent;
+        let other_top = other.bit_len() + other.exponent;
+        if top != other_top {
+            return top.cmp(&other_top);
+        }
+        let base = self.exponent.min(other.exponent);
+        let len = ((top - base + 63) / 64) as usize;
+        for index in (0..len).rev() {
+            let order = self
+                .shifted_word(index, (self.exponent - base) as usize)
+                .cmp(&other.shifted_word(index, (other.exponent - base) as usize));
+            if !order.is_eq() {
+                return order;
+            }
+        }
+        std::cmp::Ordering::Equal
+    }
+
+    fn add(&self, other: &Self) -> Result<Self, ClockError> {
+        if self.words.is_empty() {
+            return Ok(other.clone());
+        }
+        if other.words.is_empty() {
+            return Ok(self.clone());
+        }
+        let exponent = self.exponent.min(other.exponent);
+        let top = (self.bit_len() + self.exponent).max(other.bit_len() + other.exponent);
+        let len = ((top - exponent + 63) / 64) as usize;
+        if len > MAX_DURATION_WORDS {
+            return Err(ClockError::DurationComplexity);
+        }
+        let mut words = Vec::with_capacity(len);
+        let mut carry = 0_u128;
+        for index in 0..len {
+            let sum = u128::from(self.shifted_word(index, (self.exponent - exponent) as usize))
+                + u128::from(other.shifted_word(index, (other.exponent - exponent) as usize))
+                + carry;
+            words.push(sum as u64);
+            carry = sum >> 64;
+        }
+        if carry != 0 {
+            if words.len() == MAX_DURATION_WORDS {
+                return Err(ClockError::DurationComplexity);
+            }
+            words.push(carry as u64);
+        }
+        let mut out = Self { words, exponent };
+        out.normalize();
+        Ok(out)
+    }
+
+    fn mul_u64(&self, factor: u64) -> Result<Self, ClockError> {
+        if factor == 0 {
+            return Ok(Self::integer(0));
+        }
+        let mut words = Vec::with_capacity(self.words.len());
+        let mut carry = 0_u128;
+        for word in &self.words {
+            let product = u128::from(*word) * u128::from(factor) + carry;
+            words.push(product as u64);
+            carry = product >> 64;
+        }
+        if carry != 0 {
+            words.push(carry as u64);
+        }
+        if words.len() > MAX_DURATION_WORDS {
+            return Err(ClockError::DurationComplexity);
+        }
+        let mut out = Self {
+            words,
+            exponent: self.exponent,
+        };
+        out.normalize();
+        Ok(out)
+    }
+
+    fn shr_u64(&self, shift: usize) -> u64 {
+        let index = shift / 64;
+        let bits = shift % 64;
+        let low = self.words.get(index).copied().unwrap_or(0) >> bits;
+        if bits == 0 {
+            low
+        } else {
+            low | self.words.get(index + 1).copied().unwrap_or(0) << (64 - bits)
+        }
+    }
+
+    fn rounded_shift(&self, shift: usize) -> u64 {
+        let whole = self.shr_u64(shift);
+        // The normalized mantissa is odd, so every discarded tail wider
+        // than one bit has a sticky low bit.
+        whole + u64::from(shift > 0 && self.bit(shift - 1) && (shift > 1 || whole & 1 != 0))
+    }
+
+    fn ceil(&self) -> Result<i64, ClockError> {
+        if self.words.is_empty() {
+            return Ok(0);
+        }
+        if self.bit_len() + self.exponent > 63 {
+            return Err(ClockError::RunTimeTooLong);
+        }
+        let value = if self.exponent >= 0 {
+            self.words[0] << self.exponent
+        } else {
+            self.shr_u64((-self.exponent) as usize) + 1
+        };
+        i64::try_from(value).map_err(|_| ClockError::RunTimeTooLong)
+    }
+
+    fn to_f64(&self) -> f64 {
+        let len = self.bit_len();
+        if len == 0 {
+            return 0.0;
+        }
+        let mut top = self.exponent + len - 1;
+        if top < -1022 {
+            let shift = -(self.exponent + 1074);
+            let bits = if shift >= 0 {
+                self.rounded_shift(shift as usize)
+            } else {
+                self.words[0] << (-shift)
+            };
+            return f64::from_bits(bits);
+        }
+        let mut mantissa = if len > 53 {
+            self.rounded_shift((len - 53) as usize)
+        } else {
+            self.words[0] << (53 - len)
+        };
+        if mantissa == 1_u64 << 53 {
+            mantissa >>= 1;
+            top += 1;
+        }
+        if top > 1023 {
+            return f64::INFINITY;
+        }
+        f64::from_bits(((top + 1023) as u64) << 52 | (mantissa & 0x000f_ffff_ffff_ffff))
+    }
+}
+
 /// Exact rational time: `frames / fps` seconds. The only time values the
 /// engine can express are on the frame grid — off-grid time is
 /// unrepresentable by construction.
@@ -170,6 +577,14 @@ pub enum ClockError {
     NegativeFrameAdvance,
     /// The current frame plus an otherwise valid advance exceeds `i64`.
     FrameCounterOverflow,
+    /// Frame-native composition requires a finite, nonnegative lag ratio.
+    InvalidFrameLag,
+    /// Exact duration arithmetic exceeded its bounded precision budget.
+    DurationComplexity,
+    /// An encoded exact duration was not in its unique normalized form.
+    NonCanonicalDuration,
+    /// A resolved duration belongs to another frame grid.
+    FrameRateMismatch,
 }
 
 impl std::fmt::Display for ClockError {
@@ -180,6 +595,16 @@ impl std::fmt::Display for ClockError {
             Self::RunTimeTooLong => write!(f, "run_time exceeds the frame counter's range"),
             Self::NegativeFrameAdvance => write!(f, "frame advance must be non-negative"),
             Self::FrameCounterOverflow => write!(f, "frame advance exceeds the counter's range"),
+            Self::InvalidFrameLag => {
+                write!(f, "frame-native lag_ratio must be finite and non-negative")
+            }
+            Self::DurationComplexity => {
+                write!(f, "exact duration exceeds the 16384-bit arithmetic budget")
+            }
+            Self::NonCanonicalDuration => write!(f, "exact duration is not canonically normalized"),
+            Self::FrameRateMismatch => {
+                write!(f, "resolved duration belongs to a different frame rate")
+            }
         }
     }
 }
@@ -234,6 +659,7 @@ pub struct FrameSegment {
     fps: u32,
     n_frames: i64,
     run_time: f64,
+    frame_units: Option<f64>,
 }
 
 impl FrameSegment {
@@ -275,7 +701,10 @@ impl FrameSegment {
             frames: frame,
             fps: self.fps,
         };
-        let raw = time.to_f64() / self.run_time;
+        let raw = self.frame_units.map_or_else(
+            || time.to_f64() / self.run_time,
+            |duration| frame as f64 / duration,
+        );
         Some(FrameSample {
             frame,
             time,
@@ -355,8 +784,48 @@ impl RationalFrameClock {
     }
 
     /// Plan a segment of `run_time` seconds on this clock's grid.
-    pub fn segment(&self, run_time: f64) -> Result<FrameSegment, ClockError> {
-        let n_frames = frames_covering(run_time, self.fps)?;
+    pub fn segment(&self, duration: impl Into<Duration>) -> Result<FrameSegment, ClockError> {
+        let (n_frames, run_time, frame_units) = match duration.into() {
+            Duration::Seconds(seconds) => (frames_covering(seconds, self.fps)?, seconds, None),
+            Duration::Frames(frames) => {
+                let n_frames = i64::try_from(frames).map_err(|_| ClockError::RunTimeTooLong)?;
+                (
+                    n_frames,
+                    frames as f64 / f64::from(self.fps),
+                    Some(frames as f64),
+                )
+            }
+        };
+        self.plan_count(n_frames, run_time, frame_units)
+    }
+
+    /// Plan exactly `frames` samples without converting the count to seconds.
+    pub fn segment_frames(&self, frames: u64) -> Result<FrameSegment, ClockError> {
+        self.segment(Duration::Frames(frames))
+    }
+
+    /// Plan a previously resolved duration, including a composition's exact
+    /// fractional frame extent. The only ceiling occurs here.
+    pub fn segment_duration(&self, duration: &FrameDuration) -> Result<FrameSegment, ClockError> {
+        if duration.fps() != self.fps {
+            return Err(ClockError::FrameRateMismatch);
+        }
+        if let Some(seconds) = duration.seconds {
+            return self.segment(seconds);
+        }
+        self.plan_count(
+            duration.n_frames()?,
+            duration.to_seconds(),
+            Some(duration.frame_units()),
+        )
+    }
+
+    fn plan_count(
+        &self,
+        n_frames: i64,
+        run_time: f64,
+        frame_units: Option<f64>,
+    ) -> Result<FrameSegment, ClockError> {
         self.frames_elapsed
             .checked_add(n_frames)
             .ok_or(ClockError::FrameCounterOverflow)?;
@@ -364,6 +833,7 @@ impl RationalFrameClock {
             fps: self.fps,
             n_frames,
             run_time,
+            frame_units,
         })
     }
 }

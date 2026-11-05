@@ -76,10 +76,13 @@ pub use bundle::{
     PATH_STRAIGHT_TAG, bundle_sub_alpha, interpolate_between, path_from_tag, path_tag,
     rate_from_tag, rate_tag,
 };
-pub use clock::{ClockError, FrameSample, FrameSegment, RationalFrameClock, RationalTime};
+pub use clock::{
+    ClockError, Duration, FrameDuration, FrameSample, FrameSegment, RationalFrameClock,
+    RationalTime,
+};
 pub use composition::{
-    AnimationGroup, DEFAULT_LAGGED_START_LAG_RATIO, Interval, Succession, build_timings,
-    lagged_start, lagged_start_map,
+    AnimationGroup, CompositionTiming, DEFAULT_LAGGED_START_LAG_RATIO, Interval, Succession,
+    build_timings, lagged_start, lagged_start_map,
 };
 pub use creation::{
     DrawBorderThenFill, IntRound, RevealBounds, ShowIncreasingSubsets, ShowPartial,
@@ -117,7 +120,8 @@ pub use purity::{
 };
 pub use rotation::{Rotating, clock_passes_time, rotate, rotate_default};
 pub use timeline::{
-    Label, PlannedSegment, Step, TIMELINE_SCHEMA, Timeline, TimelineError, TimelinePlan,
+    FRAME_TIMELINE_SCHEMA, Label, PlannedSegment, Step, TIMELINE_SCHEMA, Timeline, TimelineError,
+    TimelinePlan,
 };
 pub use transform::{
     PathFunc, STRAIGHT_PATH_THRESHOLD, StartPrep, Transform, apply_complex_function,

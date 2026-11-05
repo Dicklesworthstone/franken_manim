@@ -46,7 +46,7 @@
 use fmn_anim::bundle::{bundle_sub_alpha, interpolate_between, path_from_tag};
 use fmn_anim::frame::{FramePacket, play_segment, wait_segment};
 use fmn_anim::purity::SegmentReport;
-use fmn_anim::timeline::{Label, Step, Timeline, TimelinePlan};
+use fmn_anim::timeline::{Label, PlannedSegment, Step, Timeline, TimelinePlan};
 use fmn_anim::{AnimError, PathFunc, RateFunc, RationalFrameClock, rate_from_tag, rate_tag};
 use fmn_core::rng::RngRoot;
 use fmn_core::types::{canonicalize_f32, canonicalize_f64};
@@ -551,7 +551,7 @@ impl TimelineBundle {
                 path,
                 rate,
             } => {
-                let alpha = (offset as f64 / f64::from(fps)) / planned.run_time;
+                let alpha = planned.sample_alpha(offset, fps);
                 interpolate_between(begin, end, bundle_sub_alpha(alpha, rate), *path)
             }
             SegmentData::Stateful { frames } => {
@@ -745,7 +745,7 @@ fn nominate(step: &Step, report: &SegmentReport) -> Option<(PathFunc, u8)> {
     }
     match step {
         // Wait is linear by construction; FMTL/1 assigns it tag zero.
-        Step::Wait(_) => Some((PathFunc::Straight, 0)),
+        Step::Wait(_) | Step::WaitFrames { .. } => Some((PathFunc::Straight, 0)),
         Step::Play(animations) => {
             let mut tag: Option<u8> = None;
             for animation in animations.iter() {
@@ -894,7 +894,7 @@ fn prove_pure_segment(
     path: PathFunc,
     rate: &RateFunc,
     frame_bytes: &[Vec<u8>],
-    run_time: f64,
+    planned: &PlannedSegment,
     fps: u32,
 ) -> Result<bool, BundleError> {
     // Decode exactly as the player will: fresh binding arena, strict
@@ -909,9 +909,9 @@ fn prove_pure_segment(
         .snapshot;
     for (index, bytes) in frame_bytes.iter().enumerate() {
         let frame = i64::try_from(index + 1).unwrap_or(i64::MAX);
-        // The engine's divisor chain, exactly: segment-local rational time
-        // converted once, divided by the (nomination-verified) run time.
-        let alpha = (frame as f64 / f64::from(fps)) / run_time;
+        // Use the schedule's duration kind, just as live playback does.
+        // A frame-native duration must not acquire a seconds round trip.
+        let alpha = planned.sample_alpha(frame, fps);
         let reconstructed = interpolate_between(&begin, &end, bundle_sub_alpha(alpha, rate), path);
         let engine = Snapshot::from_bytes(bytes, &binding)
             .map_err(BundleError::Persist)?
@@ -956,7 +956,7 @@ fn classify_captured_segment(
     mut frames: Vec<Vec<u8>>,
     path: PathFunc,
     rate_tag: u8,
-    run_time: f64,
+    planned: &PlannedSegment,
     fps: u32,
     budget: &mut CaptureBudget,
 ) -> Result<SegmentEntry, BundleError> {
@@ -968,7 +968,7 @@ fn classify_captured_segment(
 
     if frames.is_empty() {
         let end = clone_snapshot_bytes(&begin, budget, "frameless pure end snapshot")?;
-        return if prove_pure_segment(&begin, &end, path, &rate, &frames, run_time, fps)? {
+        return if prove_pure_segment(&begin, &end, path, &rate, &frames, planned, fps)? {
             Ok(SegmentEntry::Pure {
                 begin,
                 end,
@@ -984,7 +984,7 @@ fn classify_captured_segment(
         let end = frames.last().ok_or(BundleError::PlanDrift(
             "captured segment lost its last frame",
         ))?;
-        prove_pure_segment(&begin, end, path, &rate, &frames, run_time, fps)?
+        prove_pure_segment(&begin, end, path, &rate, &frames, planned, fps)?
     };
     if proven {
         let end = frames.pop().ok_or(BundleError::PlanDrift(
@@ -1101,6 +1101,15 @@ pub fn export_timeline_bundle_with_limits(
                 Step::Wait(duration) => {
                     wait_segment(stage, &mut clock, rng, *duration, None, false, &mut capture)?
                 }
+                Step::WaitFrames { frames, .. } => wait_segment(
+                    stage,
+                    &mut clock,
+                    rng,
+                    fmn_anim::Duration::Frames(*frames),
+                    None,
+                    false,
+                    &mut capture,
+                )?,
             }
         };
         if let Some(error) = capture_error {
@@ -1131,7 +1140,7 @@ pub fn export_timeline_bundle_with_limits(
                         frames,
                         path,
                         rate_tag,
-                        planned.run_time,
+                        planned,
                         fps,
                         &mut budget,
                     )?,

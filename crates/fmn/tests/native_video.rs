@@ -327,6 +327,160 @@ fn mp4_and_mov_encode_through_the_boundary_with_a_muxed_soundtrack() {
 }
 
 #[test]
+fn exact_frame_reporter_sequence_has_864_encoded_frames_and_an_exact_soundtrack() {
+    const FRAMES: [u64; 20] = [
+        43, 17, 61, 29, 101, 7, 55, 13, 89, 31, 47, 19, 73, 11, 37, 23, 67, 3, 97, 41,
+    ];
+    const TEST: &str =
+        "exact_frame_reporter_sequence_has_864_encoded_frames_and_an_exact_soundtrack";
+    let Some(capability) = host_capability() else {
+        fmn_core::test_inputs::skip_or_fail(TEST, "an ffmpeg executable on PATH");
+        return;
+    };
+    // ffprobe is an independent test oracle, never an engine dependency or
+    // another executable admitted through the governed ffmpeg capability.
+    let probe = match std::process::Command::new("ffprobe")
+        .arg("-version")
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fmn_core::test_inputs::skip_or_fail(
+                TEST,
+                "ffprobe for independent encoded-frame counting",
+            );
+            return;
+        }
+        Err(error) => panic!("cannot launch the independent ffprobe oracle: {error}"),
+    };
+    assert!(probe.status.success(), "ffprobe -version failed");
+
+    struct NarratedFrames {
+        tone: PathBuf,
+        fps: u32,
+        seconds: bool,
+    }
+    impl SceneConstruct for NarratedFrames {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            let square = stage.add(Square::new().side_length(0.8).color(BLUE))?;
+            stage.set_fill(square, Some(BLUE), Some(1.0), None, true);
+            stage
+                .scene_mut()
+                .add_sound(self.tone.clone(), 0.0, None, None)?;
+            for (index, frames) in FRAMES.into_iter().enumerate() {
+                if index == FRAMES.len() - 1 {
+                    // This cue's placement depends on every preceding segment.
+                    stage
+                        .scene_mut()
+                        .add_sound(self.tone.clone(), 0.0, None, None)?;
+                }
+                if index % 2 == 1 {
+                    if self.seconds {
+                        stage.wait(frames as f64 / f64::from(self.fps))?;
+                    } else {
+                        stage.wait_frames(frames)?;
+                    }
+                } else {
+                    stage.play(
+                        square
+                            .animate()
+                            .set_anim_args(AnimateArgs {
+                                run_time: self
+                                    .seconds
+                                    .then_some(frames as f64 / f64::from(self.fps)),
+                                run_time_frames: (!self.seconds).then_some(frames),
+                                ..AnimateArgs::default()
+                            })?
+                            .shift([0.05, 0.0, 0.0])?,
+                    )?;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    let root = scratch("exact-frames");
+    let tone = root.join("tone.wav");
+    std::fs::write(&tone, tone_wav()).unwrap();
+    for (fps, seconds, expected) in [
+        (24, false, 864_u64),
+        (25, false, 864),
+        (30, false, 864),
+        (59, false, 864),
+        (60, false, 864),
+        (24, true, 872),
+    ] {
+        let kind = if seconds { "seconds" } else { "frames" };
+        let destination = root.join(format!("{kind}-{fps}.mp4"));
+        let mut request = options(&destination, RenderFormat::Mp4);
+        request.config.camera.fps = fps;
+        request.config.camera.resolution = (32, 24);
+        request.ffmpeg = Some(capability.clone());
+        request.typeset_cache = false;
+        let report = render_with_fs(
+            &mut NarratedFrames {
+                tone: tone.clone(),
+                fps,
+                seconds,
+            },
+            request,
+            Arc::new(StdFs),
+        )
+        .unwrap();
+        assert_eq!(report.scene.time.frames(), expected as i64);
+        assert_eq!(report.scene.play_count, 20);
+        assert_eq!(report.artifact.frame_count, expected);
+        assert_eq!(report.emission.stats.emitted, expected);
+        let soundtrack = report.artifact.soundtrack.as_ref().unwrap();
+        assert_eq!(soundtrack.cues_mixed, 2);
+        // An odd frame rate also exercises the existing exact-rational,
+        // nearest-sample (ties upward) audio endpoint rule.
+        let expected_samples =
+            (u64::from(soundtrack.sample_rate) * expected + u64::from(fps) / 2) / u64::from(fps);
+        assert_eq!(
+            soundtrack.sample_frames, expected_samples,
+            "native soundtrack duration differs from the frame timeline",
+        );
+        let output = std::process::Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-count_frames",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=nb_read_frames,avg_frame_rate",
+                "-of",
+                "default=noprint_wrappers=1",
+            ])
+            .arg(&destination)
+            .output()
+            .expect("ffprobe reads the encoded movie");
+        assert!(
+            output.status.success(),
+            "ffprobe failed for {kind}/{fps}: {}",
+            String::from_utf8_lossy(&output.stderr),
+        );
+        let fields = String::from_utf8(output.stdout).unwrap();
+        let decoded_count = fields
+            .lines()
+            .find_map(|line| line.strip_prefix("nb_read_frames="))
+            .expect("ffprobe reported a decoded frame count")
+            .parse::<u64>()
+            .unwrap();
+        assert_eq!(decoded_count, expected, "encoded {kind}/{fps}: {fields}");
+        assert!(
+            fields
+                .lines()
+                .any(|line| line == format!("avg_frame_rate={fps}/1")),
+            "encoded frame rate changed: {fields}",
+        );
+        let handlers = handler_types(&std::fs::read(&destination).unwrap());
+        assert!(handlers.contains(b"vide") && handlers.contains(b"soun"));
+    }
+}
+
+#[test]
 fn native_audio_quality_is_layered_and_refused_before_scene_or_process() {
     let mut request = options("/movie.mp4", RenderFormat::Mp4);
     assert_eq!(

@@ -265,6 +265,23 @@ macro_rules! delegate_animation {
         fn state_mut(&mut self) -> &mut AnimState {
             self.inner.state_mut()
         }
+        fn duration_on_grid(&self, fps: u32) -> Result<fmn_anim::FrameDuration, AnimError> {
+            self.inner.duration_on_grid(fps)
+        }
+        fn prepare_timing(&mut self, fps: u32) -> Result<(), AnimError> {
+            self.inner.prepare_timing(fps)
+        }
+        fn composition_timing(&self) -> Option<fmn_anim::CompositionTiming> {
+            self.inner.composition_timing()
+        }
+        fn update_rate_info(
+            &mut self,
+            run_time: Option<f64>,
+            rate_func: Option<RateFunc>,
+            lag_ratio: Option<f64>,
+        ) {
+            self.inner.update_rate_info(run_time, rate_func, lag_ratio);
+        }
         fn all_mobjects(&self) -> Vec<Mob> {
             self.inner.all_mobjects()
         }
@@ -273,6 +290,9 @@ macro_rules! delegate_animation {
         }
         fn interpolate(&mut self, stage: &mut Stage, alpha: f64) {
             self.inner.interpolate(stage, alpha);
+        }
+        fn interpolate_at_frame(&mut self, stage: &mut Stage, frame: f64, fps: u32) {
+            self.inner.interpolate_at_frame(stage, frame, fps);
         }
         fn update_mobjects(&mut self, stage: &mut Stage, dt: f64) {
             self.inner.update_mobjects(stage, dt);
@@ -416,8 +436,10 @@ impl Animation for LayoutTransition {
                 .collect();
             stage.set_points(edge, &points)?;
         }
-        self.inner =
+        let mut replacement =
             Transform::new(self.binding.root, target).with_config(self.state().config.clone());
+        replacement.state_mut().copy_timing_from(self.state());
+        self.inner = replacement;
         self.inner.begin(stage)
     }
 

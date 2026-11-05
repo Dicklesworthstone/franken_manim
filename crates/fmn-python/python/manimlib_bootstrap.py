@@ -34,6 +34,16 @@ import weakref as _weakref
 
 import numpy as _np
 
+class _DefaultRunTime(float):
+    """A numeric default whose omission stays distinguishable from seconds."""
+
+
+def _animation_run_time_options(value, default, kwargs):
+    """Keep an omitted constructor default distinct from explicit seconds."""
+    if isinstance(value, _DefaultRunTime):
+        return {} if kwargs.get("run_time_frames") is not None else {"run_time": default}
+    return {"run_time": value}
+
 # The module seam handle `_FMN_MODULE` is removed from the module dict once
 # the bootstrap finishes (execute_bootstrap's temporary self-reference), so
 # anything that must resolve the root module at RUNTIME — lazy class lookups
@@ -13611,11 +13621,16 @@ class Scene(_SceneCore):
 
     render = run
 
-    def play(self, *proto_animations, run_time=None, rate_func=None, lag_ratio=None):
+    def play(self, *proto_animations, run_time=None, rate_func=None, lag_ratio=None,
+             run_time_frames=None):
         # Mobject.animate builders and explicit native Animation classes drive
         # the engine's six-step contract. When live Python mobject updaters are
         # present, the Rust bridge uses Choreo's step-4 release window: no
         # Scene/Stage borrow survives the Python callback phase.
+        if run_time_frames is not None:
+            if run_time is not None:
+                raise ValueError("run_time and run_time_frames are mutually exclusive")
+            run_time_frames = _fmn_validate_frame_count(run_time_frames)
         if not proto_animations:
             return
         def rate_payload(value, where, run_time_hint, nested=True):
@@ -13654,7 +13669,7 @@ class Scene(_SceneCore):
                 spec_args = {}
                 spec_params = {}
                 for key, value in proto.anim_args.items():
-                    if key in ("run_time", "rate_func", "lag_ratio"):
+                    if key in ("run_time", "run_time_frames", "rate_func", "lag_ratio"):
                         spec_args[key] = value
                     elif key == "path_arc":
                         # fm-5wq.4.99: the builder's Transform rides the
@@ -13683,6 +13698,11 @@ class Scene(_SceneCore):
                 target = mobject.target
                 if not target._is_bound():
                     self._adopt(target)
+                if spec_args.get("run_time_frames") is not None:
+                    if spec_args.get("run_time") is not None:
+                        raise ValueError("run_time and run_time_frames are mutually exclusive")
+                    spec_params["run_time_frames"] = _fmn_validate_frame_count(
+                        spec_args["run_time_frames"])
                 return (
                     "transform",
                     mobject,
@@ -13703,6 +13723,9 @@ class Scene(_SceneCore):
                 and not _requires_python_animation(proto)
             ):
                 params = dict(proto._native_params())
+                frames = getattr(proto, "run_time_frames", None)
+                if frames is not None:
+                    params["run_time_frames"] = _fmn_validate_frame_count(frames)
                 params["suspend_mobject_updating"] = bool(
                     proto.suspend_mobject_updating
                 )
@@ -13730,7 +13753,8 @@ class Scene(_SceneCore):
                         proto._native_kind,
                         group_root,
                         None,
-                        None if proto.run_time is None else float(proto.run_time),
+                        None if frames is not None or getattr(proto, "_fmn_derived_run_time", False)
+                        or proto.run_time is None else float(proto.run_time),
                         rate_payload(
                             proto.rate_func,
                             type(proto).__name__,
@@ -13772,7 +13796,7 @@ class Scene(_SceneCore):
                     proto._native_kind,
                     mobject,
                     target,
-                    None if proto.run_time is None else float(proto.run_time),
+                    None if frames is not None or proto.run_time is None else float(proto.run_time),
                     rate_payload(
                         proto.rate_func,
                         type(proto).__name__,
@@ -13810,13 +13834,19 @@ class Scene(_SceneCore):
                 # placeholder remover would run after that cleanup and
                 # remove shared target children a second time.
                 params = {"remover": False}
+                timing = getattr(proto, "_fmn_frame_timing", None)
+                if timing is not None:
+                    params["frame_timing"] = timing
+                frames = getattr(proto, "run_time_frames", None)
+                if frames is not None:
+                    params["run_time_frames"] = _fmn_validate_frame_count(frames)
                 if getattr(proto, "time_span", None) is not None:
                     params["time_span"] = proto.time_span
                 return (
                     "python_callback",
                     mobject,
                     None,
-                    float(proto.run_time),
+                    None if frames is not None else float(proto.run_time),
                     # Ordinary easing belongs to the Python lifecycle. Keep
                     # an explicit declaration visible to native admission so
                     # a callback-selected animation cannot silently bypass
@@ -13841,8 +13871,15 @@ class Scene(_SceneCore):
                 else:
                     core = self._native_animation_driver(build_spec(member, True))
                     child = _NativeCompositionLeaf(self, core)
-                    spec = ("native_callback", None, None, core.get_run_time(),
-                            None, None, {"driver": core})
+                    frames = getattr(member, "run_time_frames", None)
+                    params = {"driver": core}
+                    if frames is not None or getattr(member, "_fmn_frame_timing", None) is not None:
+                        params["frame_timing"] = core._frame_timing()
+                    if frames is not None:
+                        params["run_time_frames"] = frames
+                    spec = ("native_callback", None, None,
+                            None if frames is not None else core.get_run_time(),
+                            None, None, params)
                 children.append(child)
                 members.append(spec)
             driver = _CompositionCallbackDriver(
@@ -13906,6 +13943,11 @@ class Scene(_SceneCore):
                 proto._ensure_runtime_defaults()
                 if run_time is not None:
                     proto.run_time = float(run_time)
+                    proto.run_time_frames = None
+                    proto._fmn_derived_run_time = False
+                if run_time_frames is not None:
+                    proto.run_time_frames = run_time_frames
+                    proto.run_time = run_time_frames / self._frame_rate()
                 if rate_func is not None:
                     proto.rate_func = rate_func
                 if lag_ratio is not None:
@@ -13960,6 +14002,7 @@ class Scene(_SceneCore):
                     "play", run_time or 1.0,
                 ),
                 None if lag_ratio is None else float(lag_ratio),
+                *(() if run_time_frames is None else (run_time_frames,)),
             )
         except BaseException:
             for callback in callbacks:
@@ -14043,6 +14086,18 @@ class Scene(_SceneCore):
 
     def wait_until(self, stop_condition, max_time=60):
         self.wait(max_time, stop_condition=stop_condition)
+
+    def wait_frames(self, frame_count, stop_condition=None, note=None):
+        """Wait for an integer number of frames on this scene's frame grid.
+
+        A stop condition can end the wait early. Finite frame-native waits
+        ignore presenter holds by default so their requested length is exact.
+        """
+        del note
+        frame_count = _fmn_validate_frame_count(frame_count)
+        if stop_condition is not None and not callable(stop_condition):
+            raise TypeError("Scene.wait_frames stop_condition must be callable or None")
+        self._wait(None, stop_condition, True, frame_count)
 
     def add_sound(
         self,
@@ -15175,11 +15230,7 @@ def compute_total_frames(scene_class, scene_config):
     kwargs["skip_animations"] = True
     scene = _scene_from_class(scene_class, kwargs, {})
     scene.run()
-    fps = 30.0
-    camera = getattr(scene, "camera", None)
-    if camera is not None:
-        fps = float(getattr(camera, "frame_rate", fps) or fps)
-    return int(scene.get_time() * fps)
+    return scene.get_frame_count()
 
 
 _get_module = get_module
@@ -15444,14 +15495,15 @@ class Delay(Animation):
     Succession/LaggedStart galleries under the wider ecosystem's spelling.
     """
 
-    def __init__(self, run_time=1.0, **kwargs):
-        run_time = float(run_time)
-        if not (run_time >= 0.0 and _math.isfinite(run_time)):
+    def __init__(self, run_time=_DefaultRunTime(1.0), **kwargs):
+        timing = _animation_run_time_options(run_time, 1.0, kwargs)
+        seconds = timing.get("run_time")
+        if seconds is not None and not (float(seconds) >= 0.0 and _math.isfinite(float(seconds))):
             raise ValueError(
                 "Delay run_time must be a finite non-negative duration; "
-                "got " + repr(run_time)
+                "got " + repr(seconds)
             )
-        super().__init__(Mobject(), run_time=run_time, **kwargs)
+        super().__init__(Mobject(), **timing, **kwargs)
 
     def interpolate_mobject(self, alpha):
         del alpha  # a hold mutates nothing
@@ -15652,11 +15704,12 @@ class AddTextWordByWord(Animation):
             for group in groups[:-1]:
                 self._boundaries.append(group[-1] + 1)
             self._boundaries.append(len(self._all_submobs))
-        if run_time < 0:
-            run_time = time_per_word * len(groups)
+        timing = {}
+        if run_time >= 0 or kwargs.get("run_time_frames") is None:
+            timing["run_time"] = time_per_word * len(groups) if run_time < 0 else run_time
         super().__init__(
             string_mobject,
-            run_time=run_time,
+            **timing,
             rate_func=(
                 rate_func
                 if rate_func is not None
@@ -15728,11 +15781,12 @@ class AddTextLetterByLetter(Animation):
             self._boundaries = list(range(letters)) + [
                 len(self._all_submobs)
             ]
-        if run_time < 0:
-            run_time = time_per_char * letters
+        timing = {}
+        if run_time >= 0 or kwargs.get("run_time_frames") is None:
+            timing["run_time"] = time_per_char * letters if run_time < 0 else run_time
         super().__init__(
             string_mobject,
-            run_time=run_time,
+            **timing,
             rate_func=(
                 rate_func
                 if rate_func is not None
@@ -15912,7 +15966,7 @@ class DrawBorderThenFill(_NativeAnimation):
     def __init__(
         self,
         vmobject,
-        run_time=2.0,
+        run_time=_DefaultRunTime(2.0),
         rate_func=None,
         stroke_width=2.0,
         stroke_color=None,
@@ -15927,7 +15981,8 @@ class DrawBorderThenFill(_NativeAnimation):
                 + " has no border/fill planes (creation.py:88)"
             )
         super().__init__(
-            vmobject, run_time=run_time, rate_func=rate_func, **kwargs
+            vmobject, rate_func=rate_func,
+            **_animation_run_time_options(run_time, 2.0, kwargs), **kwargs
         )
         self.stroke_width = float(stroke_width)
         self.stroke_color = stroke_color
@@ -16130,14 +16185,14 @@ class Rotating(Animation):
         axis=_OUT,
         about_point=None,
         about_edge=None,
-        run_time=5.0,
+        run_time=_DefaultRunTime(5.0),
         rate_func=_linear_rate,
         suspend_mobject_updating=False,
         **kwargs,
     ):
         super().__init__(
             mobject,
-            run_time=run_time,
+            **_animation_run_time_options(run_time, 5.0, kwargs),
             rate_func=rate_func,
             suspend_mobject_updating=suspend_mobject_updating,
             **kwargs,
@@ -16194,7 +16249,7 @@ class Rotate(Rotating):
         mobject,
         angle=_math.pi,
         axis=_OUT,
-        run_time=1,
+        run_time=_DefaultRunTime(1.0),
         rate_func=_smooth_rate,
         about_edge=_ORIGIN,
         **kwargs,
@@ -16203,7 +16258,7 @@ class Rotate(Rotating):
             mobject,
             angle=angle,
             axis=axis,
-            run_time=run_time,
+            **_animation_run_time_options(run_time, 1.0, kwargs),
             rate_func=rate_func,
             about_edge=about_edge,
             **kwargs,
@@ -16218,9 +16273,9 @@ class Homotopy(Animation):
 
     apply_function_config = dict()
 
-    def __init__(self, homotopy, mobject, run_time=3.0, **kwargs):
+    def __init__(self, homotopy, mobject, run_time=_DefaultRunTime(3.0), **kwargs):
         self.homotopy = homotopy
-        super().__init__(mobject, run_time=run_time, **kwargs)
+        super().__init__(mobject, **_animation_run_time_options(run_time, 3.0, kwargs), **kwargs)
 
     def begin(self):
         if self.time_span is not None:
@@ -16594,7 +16649,7 @@ class FocusOn(Transform):
         focus_point,
         opacity=0.2,
         color=_GREY_C,
-        run_time=2,
+        run_time=_DefaultRunTime(2.0),
         remover=True,
         **kwargs,
     ):
@@ -16623,7 +16678,7 @@ class FocusOn(Transform):
         super().__init__(
             self.create_starting_mobject(),
             self.create_target(),
-            run_time=run_time,
+            **_animation_run_time_options(run_time, 2.0, kwargs),
             remover=remover,
             **kwargs,
         )
@@ -16786,10 +16841,10 @@ class WiggleOutThenIn(Animation):
         n_wiggles=6,
         scale_about_point=None,
         rotate_about_point=None,
-        run_time=2,
+        run_time=_DefaultRunTime(2.0),
         **kwargs,
     ):
-        super().__init__(mobject, run_time=run_time, **kwargs)
+        super().__init__(mobject, **_animation_run_time_options(run_time, 2.0, kwargs), **kwargs)
         self.scale_value = float(scale_value)
         self.rotation_angle = float(rotation_angle)
         self.n_wiggles = float(n_wiggles)
@@ -16950,13 +17005,14 @@ class ApplyMethod(Transform):
 
 
 class ApplyPointwiseFunction(ApplyMethod):
-    def __init__(self, function, mobject, run_time=3.0, **kwargs):
+    def __init__(self, function, mobject, run_time=_DefaultRunTime(3.0), **kwargs):
         if not callable(function):
             raise TypeError(
                 "ApplyPointwiseFunction function must be callable; got "
                 + type(function).__name__
             )
-        super().__init__(mobject.apply_function, function, run_time=run_time, **kwargs)
+        super().__init__(mobject.apply_function, function,
+                         **_animation_run_time_options(run_time, 3.0, kwargs), **kwargs)
 
 
 class ApplyPointwiseFunctionToCenter(Transform):
@@ -17417,6 +17473,7 @@ class AnimationGroup(_NativeAnimation):
             lag_ratio=type(self)._default_lag_ratio if lag_ratio is None else lag_ratio,
             **kwargs,
         )
+        self._fmn_derived_run_time = run_time == -1 and getattr(self, "run_time_frames", None) is None
         self.animations = [prepare_animation(animation) for animation in animations]
         self.build_animations_with_timings(self.lag_ratio)
         self.calculate_max_end_time()
@@ -17436,7 +17493,7 @@ class ClockPassesTime(AnimationGroup):
     def __init__(
         self,
         clock,
-        run_time=5.0,
+        run_time=_DefaultRunTime(5.0),
         hours_passed=12.0,
         rate_func=_linear_rate,
         **kwargs,
@@ -17448,7 +17505,7 @@ class ClockPassesTime(AnimationGroup):
         super().__init__(
             Rotating(clock.hour_hand, angle=hour_radians, **rotation),
             Rotating(clock.minute_hand, angle=12.0 * hour_radians, **rotation),
-            run_time=float(run_time),
+            **_animation_run_time_options(run_time, 5.0, kwargs),
             rate_func=rate_func,
             **kwargs,
         )
@@ -17562,6 +17619,9 @@ class _NativeCompositionLeaf:
     def interpolate(self, alpha):
         self.core.interpolate(alpha)
 
+    def _fmn_interpolate_at_frame(self, frame, fps, alpha=None):
+        self.core._fmn_interpolate_at_frame(frame, fps)
+
     def finish(self):
         self.core.finish(self.scene)
 
@@ -17594,6 +17654,15 @@ class _CompositionCallbackDriver:
                 raise ValueError("unknown rate function: " + name)
         self.children = children
         self.timings, self.max_end = _composition_timings(group, children)
+        self._fmn_frame_timing = getattr(group, "_fmn_frame_timing", None)
+        if self._fmn_frame_timing is not None:
+            intervals = self._fmn_frame_timing.intervals
+            if intervals is not None:
+                self.timings = [(child, start, end)
+                                for child, (start, end) in zip(children, intervals)]
+                self.max_end = self._fmn_frame_timing.max_end
+        self._fmn_linear_rate = any(self.rate_func is function and name == "linear"
+                                    for function, name in _RATE_FUNC_NAMES.items())
         self.successive = group._native_kind in {"succession", "show_creation_then_fade_out"}
         self.active = 0
 
@@ -17620,6 +17689,20 @@ class _CompositionCallbackDriver:
         time = _composition_timeline_position(
             self.group, float(alpha), self.max_end, self.get_run_time(), self.rate_func,
         )
+        self._interpolate_position(time)
+
+    def _fmn_interpolate_at_frame(self, frame, fps, alpha=None):
+        timing = self._fmn_frame_timing
+        if alpha is None:
+            alpha = (timing.alpha_at_frame(frame, fps) if timing is not None
+                     else (frame / fps) / self.get_run_time())
+        if timing is None or not timing.frame_intervals or getattr(self, "_authored_timing_rows", False):
+            return self.interpolate(alpha)
+        time = (timing.position_at_frame(frame, fps) if self._fmn_linear_rate
+                else self.rate_func(timing.rate_alpha_at_frame(frame, fps)) * self.max_end)
+        self._interpolate_position(time, fps)
+
+    def _interpolate_position(self, time, fps=None):
         if self.successive:
             target = 0
             for index, (_, start, _) in enumerate(self.timings):
@@ -17645,7 +17728,10 @@ class _CompositionCallbackDriver:
                 _, start, end = self.timings[index]
                 duration = end - start
                 sub = 0.0 if duration == 0 else min(max((time - start) / duration, 0.0), 1.0)
-                child.interpolate(sub)
+                if fps is not None and start < time < end:
+                    child._fmn_interpolate_at_frame(time - start, fps)
+                else:
+                    child.interpolate(sub)
 
     def finish(self):
         if self.successive:
@@ -17752,7 +17838,7 @@ class Broadcast(LaggedStart):
         n_circles=5,
         start_stroke_width=8.0,
         color=_WHITE,
-        run_time=3.0,
+        run_time=_DefaultRunTime(3.0),
         lag_ratio=0.2,
         remover=True,
         **kwargs,
@@ -17803,7 +17889,7 @@ class Broadcast(LaggedStart):
                 _BroadcastRestore(circle, remover=remover)
                 for circle in self.circles
             ),
-            run_time=run_time,
+            **_animation_run_time_options(run_time, 3.0, kwargs),
             lag_ratio=lag_ratio,
             remover=remover,
             **kwargs,
