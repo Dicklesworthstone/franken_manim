@@ -871,8 +871,8 @@ The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
-- `SUITE.lock` SHA-256: `e98d676b493155541fdc13955c21fc44cf5a1428c52fc6f0425bd5054b2776b5`
-- `Cargo.lock` SHA-256: `8608f1877319286170ed6c4691b6851d7154ec0bc35fef74b37b668834fb3d19`
+- `SUITE.lock` SHA-256: `2783427a393bdc89ca670dc5332bfd4158f1c2c59eaa85773753582d731cf1ff`
+- `Cargo.lock` SHA-256: `0b8d890ad5bf87a2cfdcb7aa63248002f84880232c0f6c90c95e2d24f3078487`
 - Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `93a7c2dc6acf3dfef88a4a490efbfda7970bd963b4740aa7f879a08fff395061`
 
 The earlier 0.5.0 release bump re-bound the lock identities at that revision.
