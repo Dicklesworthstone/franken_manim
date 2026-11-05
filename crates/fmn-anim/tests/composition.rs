@@ -17,7 +17,7 @@ use fmn_anim::{
 };
 use fmn_core::rate;
 use fmn_core::rng::RngRoot;
-use fmn_mobject::{Mob, Mobject, Stage};
+use fmn_mobject::{Mob, Mobject, Stage, StageError};
 
 const TOL: f64 = 1e-12;
 
@@ -2318,6 +2318,7 @@ fn an_empty_group_has_zero_timing_and_a_real_container_lifecycle() {
     let mut stage = Stage::new();
     let mut group = AnimationGroup::new(&mut stage, Vec::new()).expect("empty group builds");
     let root = group.group();
+    assert_vgroup_container_style(&stage, root);
     assert!(group.animations().is_empty());
     assert!(group.timings().is_empty());
     assert_eq!(group.max_end_time(), 0.0);
@@ -2351,6 +2352,7 @@ fn an_empty_group_has_zero_timing_and_a_real_container_lifecycle() {
 fn empty_lagged_selections_keep_their_duration_and_authored_root() {
     let mut stage = Stage::new();
     let empty = lagged_start(&mut stage, Vec::new()).expect("empty lagged start builds");
+    assert_vgroup_container_style(&stage, empty.group());
     assert!(empty.timings().is_empty());
     assert_eq!(empty.get_run_time(), 0.0);
     assert_eq!(
@@ -2673,6 +2675,200 @@ fn a_hollow_group_time_span_is_refused_at_begin() {
     );
 }
 
+fn assert_vgroup_container_style(stage: &Stage, root: Mob) {
+    // Reference VMobject constructor facts (fm-ns8q), independent of the
+    // implementation constants: #888888/0 fill, #DDDDDD/1 stroke, width 4.
+    let buffer = &stage.get(root).expect("live container").buffer;
+    let fill = 136.0_f32 / 255.0;
+    let stroke = 221.0_f32 / 255.0;
+    assert!(buffer.is_empty());
+    assert_eq!(
+        buffer.default_record_slice("fill_rgba"),
+        Some([fill, fill, fill, 0.0].as_slice())
+    );
+    assert_eq!(
+        buffer.default_record_slice("stroke_rgba"),
+        Some([stroke, stroke, stroke, 1.0].as_slice())
+    );
+    assert_eq!(
+        buffer.default_record_slice("stroke_width"),
+        Some([4.0].as_slice())
+    );
+    assert_eq!(
+        buffer.default_record_slice("fill_border_width"),
+        Some([0.0].as_slice())
+    );
+}
+
+#[test]
+fn fresh_vector_compositions_keep_member_style_and_aliases() {
+    let mut stage = Stage::new();
+    let log: Log = Rc::new(RefCell::new(Vec::new()));
+    let mut styled = Mobject::vector_from_points(&[[0.0, 0.0, 0.0]]);
+    styled
+        .buffer
+        .write_color_lanes("fill_rgba", Some([0.25, 0.5, 0.75]), Some(0.5));
+    styled.buffer.write_scalar_lanes("stroke_width", 9.0);
+    let a = stage.add(styled);
+    let b = stage.add(Mobject::vector_from_points(&[[1.0, 0.0, 0.0]]));
+    let members = || {
+        vec![
+            Probe::boxed(a, "a", 1.0, &log),
+            Probe::boxed(b, "b", 1.0, &log),
+            Probe::boxed(a, "alias", 1.0, &log),
+        ]
+    };
+    let groups: [Box<dyn Animation>; 3] = [
+        Box::new(AnimationGroup::new(&mut stage, members()).unwrap()),
+        Box::new(lagged_start(&mut stage, members()).unwrap()),
+        Box::new(Succession::new(&mut stage, members()).unwrap()),
+    ];
+    for group in groups {
+        let root = group.state().mobject();
+        assert_vgroup_container_style(&stage, root);
+        assert_eq!(stage.get(root).unwrap().submobjects(), &[a, b]);
+        assert_eq!(
+            stage.get(a).unwrap().buffer.read(0, "fill_rgba"),
+            Some(vec![0.25, 0.5, 0.75, 0.5])
+        );
+        assert_eq!(
+            stage.get(a).unwrap().buffer.read(0, "stroke_width"),
+            Some(vec![9.0])
+        );
+        assert_eq!(
+            stage.get(b).unwrap().buffer.read(0, "fill_rgba"),
+            Some(vec![0.0; 4])
+        );
+        assert_eq!(
+            stage.get(b).unwrap().buffer.read(0, "stroke_width"),
+            Some(vec![0.0])
+        );
+        let copy = stage.copy_family(root).unwrap();
+        assert_vgroup_container_style(&stage, copy);
+        let snapshot = stage.snapshot();
+        let buffer = &mut stage.get_mut(copy).unwrap().buffer;
+        buffer.resize(1).unwrap();
+        let frozen = snapshot.materialize();
+        assert_vgroup_container_style(&frozen, copy);
+        for field in [
+            "fill_rgba",
+            "stroke_rgba",
+            "stroke_width",
+            "fill_border_width",
+        ] {
+            assert_eq!(
+                buffer.read(0, field),
+                frozen.get(root).unwrap().buffer.default_record(field),
+                "growing a copied root must retain its constructor style"
+            );
+        }
+        assert_vgroup_container_style(&stage, root);
+    }
+}
+
+#[test]
+fn explicit_vector_compositions_preserve_authored_root_style() {
+    let mut stage = Stage::new();
+    let log: Log = Rc::new(RefCell::new(Vec::new()));
+    let mut root = Mobject::vector_from_points(&[]);
+    root.buffer
+        .write_default_record("fill_rgba", &[0.25, 0.5, 0.75, 0.625]);
+    root.buffer
+        .write_default_record("stroke_rgba", &[1.0, 0.25, 0.5, 0.75]);
+    root.buffer.write_scalar_lanes("stroke_width", 7.0);
+    root.buffer.write_scalar_lanes("fill_border_width", 1.5);
+    let root = stage.add(root);
+    let style = stage
+        .get(root)
+        .unwrap()
+        .buffer
+        .defaults_row()
+        .unwrap()
+        .to_vec();
+    let member = stage.add(Mobject::vector_from_points(&[[0.0, 0.0, 0.0]]));
+    let decoration = stage.add(Mobject::vector_from_points(&[[1.0, 0.0, 0.0]]));
+    let children = [decoration, member];
+    for child in children {
+        stage.attach(root, child).unwrap();
+    }
+    stage.add_to_scene(root).unwrap();
+    let members = || vec![Probe::boxed(member, "member", 1.0, &log)];
+    let groups: [Box<dyn Animation>; 3] = [
+        Box::new(AnimationGroup::in_group(&mut stage, members(), 0.25, Some(root)).unwrap()),
+        Box::new(Succession::in_group(&mut stage, members(), 1.0, Some(root)).unwrap()),
+        Box::new(
+            lagged_start_map(&mut stage, root, |_stage, mob| {
+                Ok(Probe::boxed(mob, "mapped", 1.0, &log))
+            })
+            .unwrap(),
+        ),
+    ];
+    for mut group in groups {
+        assert_eq!(group.state().mobject(), root);
+        assert_eq!(
+            stage.get(root).unwrap().buffer.defaults_row(),
+            Some(style.as_slice())
+        );
+        group.begin(&mut stage).unwrap();
+        group.interpolate(&mut stage, 0.5);
+        group.finish(&mut stage);
+        group.clean_up_from_scene(&mut stage);
+        assert!(group.deferred_error().is_none());
+        assert_eq!(
+            stage.get(root).unwrap().buffer.defaults_row(),
+            Some(style.as_slice())
+        );
+        assert_eq!(stage.get(root).unwrap().submobjects(), children);
+        assert_eq!(stage.roots(), &[root]);
+    }
+}
+
+#[test]
+fn a_later_invalid_member_leaves_no_partial_composition() {
+    for constructor in ["AnimationGroup", "LaggedStart", "Succession"] {
+        for foreign in [false, true] {
+            let mut stage = Stage::new();
+            let mut other_stage = Stage::new();
+            let log: Log = Rc::new(RefCell::new(Vec::new()));
+            let parent = stage.add(Mobject::new());
+            let first = stage.add(Mobject::vector_from_points(&[[0.0, 0.0, 0.0]]));
+            stage.attach(parent, first).unwrap();
+            stage.add_to_scene(parent).unwrap();
+            let invalid = if foreign {
+                other_stage.add(Mobject::new())
+            } else {
+                let removed = stage.add(Mobject::new());
+                stage.delete(removed).unwrap();
+                removed
+            };
+            let parents = stage.get(first).unwrap().parents().to_vec();
+            let roots = stage.roots().to_vec();
+            // Also cover unrooted slots and generations, not only visible roots.
+            let snapshot = stage.snapshot_bytes().unwrap();
+            let members = vec![
+                Probe::boxed(first, "first", 1.0, &log),
+                Probe::boxed(invalid, "invalid", 1.0, &log),
+            ];
+            let result = match constructor {
+                "AnimationGroup" => AnimationGroup::new(&mut stage, members).map(|_| ()),
+                "LaggedStart" => lagged_start(&mut stage, members).map(|_| ()),
+                "Succession" => Succession::new(&mut stage, members).map(|_| ()),
+                _ => unreachable!("fixed constructor fixtures"),
+            };
+            assert_eq!(
+                result,
+                Err(AnimError::Stage(StageError::StaleHandle)),
+                "{constructor}, foreign={foreign}"
+            );
+            assert_eq!(stage.get(first).unwrap().parents(), parents.as_slice());
+            assert_eq!(stage.get(parent).unwrap().submobjects(), &[first]);
+            assert_eq!(stage.roots(), roots.as_slice());
+            assert_eq!(stage.snapshot_bytes().unwrap(), snapshot);
+            assert!(log.borrow().is_empty());
+        }
+    }
+}
+
 #[test]
 fn the_container_is_a_vgroup_over_vmobjects_and_a_group_otherwise() {
     // composition.py:44-51: `VGroup(*mobs)` when every animated mobject is a
@@ -2711,6 +2907,15 @@ fn the_container_is_a_vgroup_over_vmobjects_and_a_group_otherwise() {
     ];
     let mixed = AnimationGroup::with_lag_ratio(&mut stage, mixed, 0.0).expect("mixed group");
     assert!(!is_vector(&stage, mixed.state().mobject()));
+    assert!(
+        stage
+            .get(mixed.state().mobject())
+            .unwrap()
+            .buffer
+            .defaults_row()
+            .is_none(),
+        "a plain Group keeps its unstyled base-Mobject record"
+    );
 }
 
 // ------------------------------------------------ native updater failures
