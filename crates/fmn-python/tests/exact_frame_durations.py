@@ -193,6 +193,324 @@ def planning_and_reporting_boundaries():
     assert compute_total_frames(TwentyNine, {"camera_config": {"fps": 25}}) == 29
 
 
+def public_frame_progressions():
+    # Public planning helpers must bind an unplayed frame-authored animation
+    # and must not infer its length again from the bound seconds projection.
+    for fps in (1, 7, 24, 25, 30, 60, 120):
+        scene = scene_at(fps)
+        animation = m.Animation(m.Mobject(), run_time_frames=43)
+        for _ in range(2):
+            samples = scene.get_animation_time_progression([animation])
+            assert len(samples) == 43
+            np.testing.assert_array_equal(samples, [frame / fps for frame in range(1, 44)])
+            assert scene.get_frame_count() == 0
+        assert len(scene.get_time_progression(run_time_frames=43)) == 43
+        assert len(scene.get_wait_time_progression(run_time_frames=43)) == 43
+        animation.set_run_time_frames(0)
+        assert len(scene.get_animation_time_progression([animation])) == 0
+
+    scene = scene_at()
+    assert len(scene.get_time_progression(1.)) == 24
+    assert len(scene.get_time_progression(43 / 24)) == 44
+    scene = scene_at(30)
+    exact = m.Animation(m.Mobject(), run_time_frames=3)
+    seconds = m.Animation(m.Mobject(), run_time=.1)
+    assert len(scene.get_animation_time_progression([exact, seconds])) == 4
+    scene.skip_animations = True
+    assert scene.get_wait_time_progression(run_time_frames=3) == [.1]
+    assert scene.get_wait_time_progression(run_time_frames=0) == []
+    assert len(scene.get_wait_time_progression(run_time_frames=3, stop_condition=lambda: True)) == 3
+
+    # Rebinding to a different scene does not freeze a frame request into the
+    # first scene's seconds, including time_span's duration-widening behavior.
+    widened = m.Animation(m.Mobject(), run_time_frames=12, time_span=(0., .75))
+    for fps, expected in ((24, 18), (12, 12), (60, 45)):
+        assert len(scene_at(fps).get_animation_time_progression([widened])) == expected
+
+
+def public_runtime_assignment_selects_seconds():
+    scene = scene_at(30, skip=True)
+    square = m.Square()
+    scene.add(square)
+    animation = m.Transform(square, square.copy().shift(m.RIGHT), run_time_frames=3)
+    scene.play(animation)
+    assert scene.get_frame_count() == 3
+    assert animation.run_time == .1
+    animation.run_time = .1
+    assert animation.run_time_frames is None
+    scene.play(animation)
+    assert scene.get_frame_count() == 7  # literal .1 seconds covers four ticks
+    group = m.Succession(m.Delay(run_time_frames=3), m.Delay(run_time_frames=7))
+    group.run_time = .1
+    assert not group._fmn_derived_run_time
+    scene.play(group)
+    assert scene.get_frame_count() == 11
+
+
+def derived_speed_frame_durations():
+    def speed(frames=43, factor=2., **kwargs):
+        child = m.Animation(m.Mobject(), run_time_frames=frames)
+        return m.ChangeSpeed(child, {0: factor}, affects_speed_updaters=False, **kwargs)
+
+    for fps in (7, 24, 25, 30, 60):
+        scene = scene_at(fps, skip=True)
+        animation = speed()
+        scene.play(animation)
+        assert scene.get_frame_count() == 22
+        assert animation._fmn_frame_timing.duration_ratio == (43, 2)
+        assert animation._speed_child_duration == 43 / fps
+        halves = m.Succession(speed(), speed())
+        scene.play(halves)
+        assert scene.get_frame_count() == 65  #22 + (21.5 +21.5)
+
+    def quarter():
+        return m.ChangeSpeed(speed(), {0: 2.}, affects_speed_updaters=False)
+    scene = scene_at(skip=True)
+    scene.play(m.Succession(quarter(), quarter(), quarter(), quarter()))
+    assert scene.get_frame_count() == 43
+
+    # Reuse the unbound authoring graph across grids; widening happens after
+    # slowing the12-frame child to24 frames, never before that multiplication.
+    widened = speed(12, factor=.5, time_span=(0., .75))
+    for fps, expected in ((24, 24), (12, 24), (60, 45)):
+        assert len(scene_at(fps).get_animation_time_progression([widened])) == expected
+    rendered = scene_at(60, skip=True)
+    rendered.play(widened)
+    assert rendered.get_frame_count() == 45
+
+    overrides = scene_at(30, skip=True)
+    explicit_frames = speed(run_time_frames=7)
+    overrides.play(explicit_frames)
+    explicit_seconds = speed(run_time=.1)
+    overrides.play(explicit_seconds)
+    assert overrides.get_frame_count() == 11
+    for animation in (explicit_frames, explicit_seconds):
+        assert not animation._fmn_derived_run_time
+        assert len(animation._fmn_frame_descriptor) == 5
+    changed = speed()
+    overrides.play(changed, run_time_frames=5)
+    overrides.play(changed, run_time=.1)
+    assert overrides.get_frame_count() == 20
+
+    planned = speed((1 << 63) - 1)
+    assert len(scene_at(skip=True).get_animation_time_progression([planned])) == 1
+    assert planned._fmn_frame_timing.frame_count == 1 << 62
+    assert planned._fmn_frame_timing.duration_ratio == ((1 << 63) - 1, 2)
+    zero = scene_at(skip=True)
+    zero.play(speed(0))
+    assert zero.get_frame_count() == 0
+
+
+def native_frame_step_context():
+    getter = m._SceneCore._frame_step_context
+
+    class HelperAnimation(m.Animation):
+        def __init__(self, scene, mob):
+            self.scene = scene
+            self.contexts = []
+            self.interpolation_contexts = []
+            self._sample_dt = None
+            super().__init__(mob, run_time_frames=2)
+
+        def update_mobjects(self, dt):
+            if dt > 0:
+                context = getter(self.scene)
+                assert type(dt) is float and context is not None and context[0] is dt
+                assert context[1:] == (1, self.scene._frame_rate())
+                self.contexts.append(context[1:])
+                self._sample_dt = dt
+            return super().update_mobjects(dt)
+
+        def interpolate(self, alpha):
+            dt, self._sample_dt = self._sample_dt, None
+            if dt is not None:
+                context = getter(self.scene)
+                assert context is not None and context[0] is dt
+                self.interpolation_contexts.append(context[1:])
+            return super().interpolate(alpha)
+
+    class PublicFrameScene(m.Scene):
+        def __init__(self, **kwargs):
+            self.frame_contexts = []
+            super().__init__(**kwargs)
+
+        def update_frame(self, dt=0, force_draw=False):
+            if dt > 0:
+                context = getter(self)
+                assert type(dt) is float
+                assert context is not None and context[0] is dt
+                assert context[1:] == (1, self._frame_rate())
+                self.frame_contexts.append(context[1:])
+            return super().update_frame(dt, force_draw)
+
+    for scene_type in (m.Scene, PublicFrameScene):
+        scene = scene_at(24, skip=True, scene_type=scene_type)
+        probe, moving = m.Mobject(), m.Square()
+        scene.add(probe, moving)
+        records = []
+        def observe(mob, dt):
+            del mob
+            context = getter(scene)
+            assert type(dt) is float
+            if dt > 0:
+                records.append(context is not None and context[0] is dt)
+                if context is not None:
+                    assert context[1:] == (1, 24)
+        probe.add_updater(observe, call=False)
+        scene.wait_frames(2)
+        scene.play(moving.animate.shift(m.RIGHT), run_time_frames=3)
+        helper = HelperAnimation(scene, moving)
+        scene.play(helper)
+        assert helper.contexts == [(1, 24)] * 2
+        assert helper.interpolation_contexts == [(1, 24)] * 2
+        assert records == [True] * 7
+        assert getter(scene) is None
+        scene.update(.125)
+        assert records[-1] is False
+        assert getter(scene) is None
+        if isinstance(scene, PublicFrameScene):
+            assert scene.frame_contexts == [(1, 24)] * 7
+
+    # ClockDriver stores dt during its update hook, then performs the real
+    # child helper updates in interpolation order. Both hooks need one scope.
+    camera_scene = scene_at(24, skip=True)
+    moving = m.Square()
+    camera_scene.add(moving)
+    helper = HelperAnimation(camera_scene, moving)
+    camera_scene.play(helper, camera_scene.frame.animate.shift(m.RIGHT), run_time_frames=2)
+    assert helper.contexts == [(1, 24)] * 2
+    assert helper.interpolation_contexts == [(1, 24)] * 2
+    assert getter(camera_scene) is None
+
+    interpolation_failure = RuntimeError("animation frame context cleanup witness")
+
+    class FailingInterpolation(HelperAnimation):
+        def _fmn_interpolate_at_frame(self, frame, fps, alpha=None):
+            del frame, fps, alpha
+            assert getter(self.scene)[0] is self._sample_dt
+            self._sample_dt = None
+            raise interpolation_failure
+
+    failing = FailingInterpolation(camera_scene, moving)
+    assert raises(RuntimeError, lambda: camera_scene.play(failing)) is interpolation_failure
+    assert getter(camera_scene) is None
+
+    outer, inner = scene_at(24, skip=True), scene_at(30, skip=True)
+    outer_probe, inner_probe = m.Mobject(), m.Mobject()
+    outer.add(outer_probe)
+    inner.add(inner_probe)
+    nested = []
+    def nested_inner(mob, dt):
+        del mob
+        if dt > 0:
+            assert getter(inner)[0] is dt
+            assert getter(inner)[1:] == (1, 30)
+            nested.append("inner")
+    def nested_outer(mob, dt):
+        del mob
+        if dt > 0:
+            before = getter(outer)
+            assert before[0] is dt
+            inner.wait_frames(1)
+            after = getter(outer)
+            assert after[0] is dt and after[1:] == before[1:]
+            assert getter(inner) is None
+            nested.append("outer")
+    inner_probe.add_updater(nested_inner, call=False)
+    outer_probe.add_updater(nested_outer, call=False)
+    outer.wait_frames(1)
+    assert nested == ["inner", "outer"]
+    assert getter(outer) is None
+    outer_probe.remove_updater(nested_outer)
+    failure = RuntimeError("frame context cleanup witness")
+    def fail(mob, dt):
+        del mob
+        if dt > 0:
+            assert getter(outer)[0] is dt
+            raise failure
+    outer_probe.add_updater(fail, call=False)
+    assert raises(RuntimeError, lambda: outer.wait_frames(1)) is failure
+    assert getter(outer) is None
+    outer_probe.remove_updater(fail)
+
+
+def persistent_frame_durations():
+    for fps in (7, 24, 25, 30, 60):
+        scene = scene_at(fps, skip=True)
+        animation = Probe(scene, 43)
+        scene.add(animation.mobject)
+        m.turn_animation_into_updater(animation)
+        scene.wait_frames(43)
+        assert animation.total_time == 43 / fps
+        assert animation.finishes == [43]
+        assert not animation.mobject.updaters
+        assert animation.alphas[-1] == 1.
+
+    pending_scene = scene_at(25, skip=True)
+    pending = Probe(pending_scene, 43)
+    m.turn_animation_into_updater(pending)
+    assert pending.begins == []
+    pending_scene.add(pending.mobject)
+    pending_scene.wait_frames(43)
+    assert pending.total_time == 43 / 25
+    assert pending.finishes == [43]
+
+    scene = scene_at(skip=True)
+    animation = Probe(scene, 43)
+    scene.add(animation.mobject)
+    m.cycle_animation(animation)
+    scene.wait_frames(860)
+    assert animation.total_time == 860 / 24
+    assert animation.alphas[-1] == 0.
+    assert animation.finishes == []
+    animation.mobject.clear_updaters()
+
+    manual = Probe(scene, 43)
+    scene.add(manual.mobject)
+    m.turn_animation_into_updater(manual)
+    for _ in range(43):
+        manual.mobject.update(1 / 24)
+    manual.mobject.update(0.)
+    assert manual.finishes == []  # binary64 1/24 is less than a rational tick
+    manual.mobject.update(1e-12).update(0.)
+    assert len(manual.finishes) == 1
+
+    zero = Probe(scene, 0)
+    scene.add(zero.mobject)
+    m.turn_animation_into_updater(zero)
+    assert zero.total_time == 0.
+    assert len(zero.finishes) == 1 and not zero.mobject.updaters
+    invalid_cycle = Probe(scene, 0)
+    scene.add(invalid_cycle.mobject)
+    raises(ValueError, lambda: m.cycle_animation(invalid_cycle))
+    assert invalid_cycle.begins == []
+
+    native = scene_at(skip=True)
+    left, right = m.Square().shift(m.LEFT), m.Square().shift(m.RIGHT)
+    native.add(left, right)
+    swapping = m.Swap(left, right, path_arc=0, rate_func=m.linear, run_time_frames=43)
+    anchor = m.turn_animation_into_updater(swapping)
+    native.add(anchor)
+    native.wait_frames(43)
+    np.testing.assert_allclose(left.get_center(), m.RIGHT, atol=1e-5)
+    np.testing.assert_allclose(right.get_center(), m.LEFT, atol=1e-5)
+    assert swapping.total_time == 43 / 24 and not anchor.updaters
+
+    mixed = scene_at(skip=True)
+    first, second = Probe(mixed, 1), Probe(mixed, 1)
+    first.set_run_time(43 / 24)
+    mixed.add(first.mobject, second.mobject)
+    succession = m.Succession(first, second, rate_func=m.linear)
+    anchor = m.turn_animation_into_updater(succession)
+    mixed.add(anchor)
+    mixed.wait_frames(45)
+    # Persistent helpers sample before adding their delta, at the scene's
+    # post-advance updater phase: elapsed44 first reaches43+2^-49 here.
+    assert second.begins == [45], second.begins
+    assert second.finishes == [45]
+    assert not anchor.updaters
+
+
 def mixed_zero_long_and_boundaries():
     scene = scene_at(skip=True)
     square = m.Square()
@@ -242,6 +560,7 @@ class Probe(m.Animation):
     def __init__(self, scene, frames):
         self.scene = scene
         self.begins = []
+        self.finishes = []
         self.alphas = []
         super().__init__(m.Mobject(), run_time_frames=frames, rate_func=m.linear)
 
@@ -251,6 +570,10 @@ class Probe(m.Animation):
 
     def interpolate_mobject(self, alpha):
         self.alphas.append(float(alpha))
+
+    def finish(self):
+        self.finishes.append(self.scene.get_frame_count())
+        super().finish()
 
 
 def composition_and_callback_boundaries():
@@ -363,6 +686,7 @@ def specialized_constructor_durations():
         lambda mob, timing: m.ApplyPointwiseFunction(lambda p: p + m.RIGHT, mob, **timing),
         lambda mob, timing: m.ApplyWave(mob, **timing),
         lambda mob, timing: m.PhaseFlow(lambda p: m.RIGHT, mob, **timing),
+        lambda mob, timing: m.ChangeSpeed(m.Animation(mob), {0: 2}, **timing),
         lambda mob, timing: m.FocusOn(mob, **timing),
         lambda mob, timing: m.WiggleOutThenIn(mob, **timing),
         lambda mob, timing: m.Flash(mob, num_lines=3, **timing),
@@ -710,6 +1034,11 @@ def verify_exact_frame_durations():
     rates = reporter_and_rate_matrix()
     authoring_and_validation()
     planning_and_reporting_boundaries()
+    public_frame_progressions()
+    public_runtime_assignment_selects_seconds()
+    derived_speed_frame_durations()
+    native_frame_step_context()
+    persistent_frame_durations()
     mixed_zero_long_and_boundaries()
     composition_and_callback_boundaries()
     legacy_rate_override_hook()

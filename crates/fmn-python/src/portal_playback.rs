@@ -59,9 +59,17 @@ pub(super) fn requires_public_scene_update(scene: &Bound<'_, PyScene>) -> PyResu
 /// host has completed BOTH Python callbacks and native slots, so Choreo must
 /// resume at event delivery/capture instead of repeating the native pass.
 pub(super) fn run_scene_update_phase(scene: &Bound<'_, PyScene>, dt: f64) -> PyResult<(u64, bool)> {
+    let delta = dt.into_pyobject(scene.py())?.into_any();
+    run_scene_update_phase_with_delta(scene, &delta)
+}
+
+fn run_scene_update_phase_with_delta(
+    scene: &Bound<'_, PyScene>,
+    delta: &Bound<'_, PyAny>,
+) -> PyResult<(u64, bool)> {
     let start = Instant::now();
     let completed = scene
-        .call_method1("_fmn_dispatch_public_scene_update", (dt,))?
+        .call_method1("_fmn_dispatch_public_scene_update", (delta,))?
         .extract::<bool>()?;
     if completed {
         Ok((
@@ -69,8 +77,76 @@ pub(super) fn run_scene_update_phase(scene: &Bound<'_, PyScene>, dt: f64) -> PyR
             true,
         ))
     } else {
-        run_python_updaters(scene, dt).map(|elapsed| (elapsed, false))
+        run_python_updaters_with_delta(scene, delta).map(|elapsed| (elapsed, false))
     }
+}
+
+/// Scope the authoritative one-frame delta around a released updater phase.
+/// No Scene borrow crosses a Python callback. Nested phases restore their
+/// caller's token, including when an authored callback raises an exception.
+fn with_frame_step<T>(
+    scene: &Bound<'_, PyScene>,
+    dt: f64,
+    fps: u32,
+    run: impl FnOnce(&Bound<'_, PyAny>) -> PyResult<T>,
+) -> PyResult<T> {
+    let delta = dt.into_pyobject(scene.py())?.into_any();
+    let previous = scene
+        .borrow_mut()
+        .frame_step_context
+        .replace(FrameStepContext {
+            delta: delta.clone().unbind(),
+            frames: 1,
+            fps,
+        });
+    let result = run(&delta);
+    scene.borrow_mut().frame_step_context = previous;
+    result
+}
+
+pub(super) fn run_scene_frame_update_phase(
+    scene: &Bound<'_, PyScene>,
+    dt: f64,
+    fps: u32,
+) -> PyResult<(u64, bool)> {
+    with_frame_step(scene, dt, fps, |delta| {
+        run_scene_update_phase_with_delta(scene, delta)
+    })
+}
+
+pub(super) fn run_python_frame_updaters(
+    scene: &Bound<'_, PyScene>,
+    dt: f64,
+    fps: u32,
+) -> PyResult<u64> {
+    with_frame_step(scene, dt, fps, |delta| {
+        run_python_updaters_with_delta(scene, delta)
+    })
+}
+
+pub(super) fn run_animation_frame_phase(
+    scene: &Bound<'_, PyScene>,
+    animation: &Bound<'_, PyAny>,
+    boundary: &fmn_anim::AnimationBoundary,
+) -> PyResult<()> {
+    let fps = boundary.sample.time.fps();
+    with_frame_step(scene, boundary.dt, fps, |delta| {
+        if animation.hasattr("update_mobjects")? {
+            animation.call_method1("update_mobjects", (delta,))?;
+        }
+        // Camera choreography defers each child's helper update until its
+        // interpolation turn. Keep this same delta token alive through the
+        // whole ordered pair so those updates retain their native provenance.
+        if animation.hasattr("_fmn_interpolate_at_frame")? {
+            animation.call_method1(
+                "_fmn_interpolate_at_frame",
+                (boundary.sample.frame, fps, boundary.alpha),
+            )?;
+        } else {
+            animation.call_method1("interpolate", (boundary.alpha,))?;
+        }
+        Ok(())
+    })
 }
 
 #[derive(Default)]
@@ -213,6 +289,19 @@ pub(super) fn synchronize(scene: &Bound<'_, PyScene>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_authored_camera_progress_uses_local_integer_time() {
+        let start = 1_i64 << 60;
+        assert_eq!(start as f64, (start + 1) as f64);
+        assert_eq!(camera_frame_alpha(start, start, 43), 0.0);
+        assert_eq!(camera_frame_alpha(start + 21, start, 43), 21.0 / 43.0);
+        assert!(camera_frame_alpha(start + 42, start, 43) < 1.0);
+        assert_eq!(camera_frame_alpha(start + 43, start, 43), 1.0);
+        assert!(camera_frame_alpha(i64::MAX - 1, 0, i64::MAX as u64) < 1.0);
+        assert_eq!(camera_frame_alpha(i64::MAX, 0, i64::MAX as u64), 1.0);
+        assert_eq!(camera_frame_alpha(start, start, 0), 1.0);
+    }
 
     #[test]
     fn public_scene_update_dispatch() {

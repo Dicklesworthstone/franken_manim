@@ -7,6 +7,7 @@ or clock. Persistent effects never perform scene-removal/publication cleanup.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from fractions import Fraction
 from functools import wraps
 import inspect
 import math
@@ -149,9 +150,16 @@ class _PersistentAnimation:
         self.cycle = bool(cycle)
         self.driver = animation
         self.driver_factory = driver_factory
-        self.needs_scene = driver_factory is not None or isinstance(animation, g["AnimationGroup"])
+        self._nested_frames = any(node is not animation and getattr(node, "run_time_frames", None) is not None
+                                  for node in _animation_tree(g, animation))
+        self.needs_scene = (driver_factory is not None or isinstance(animation, g["AnimationGroup"])
+                            or self._nested_frames or getattr(animation, "run_time_frames", None) is not None)
         self.scene = None
         self.nodes = self.groups = ()
+        self._frame_timing = self._frame_fps = self._timing_key = None
+        self._exact_tracking = False
+        self._elapsed = Fraction(0)
+        self._reported_total_time = None
         self.closed = self.busy = self.begun = False
         self.cleanup_pending = False
         self.execution = _Execution(g)
@@ -232,6 +240,46 @@ class _PersistentAnimation:
         self.scene = _scene_for(self.g, self.animation, self.anchor,
                                 self.nodes, self.scene)
 
+    def _root_timing_key(self):
+        animation = self.animation
+        span = getattr(animation, "time_span", None)
+        return (animation.run_time, getattr(animation, "run_time_frames", None),
+                None if span is None else tuple(span),
+                getattr(animation, "_fmn_derived_run_time", False), self.scene._frame_rate())
+
+    def _bind_frame_timing(self):
+        self.g["_fmn_bind_frame_timing"](self.scene, (self.animation,))
+        self._frame_timing = getattr(self.animation, "_fmn_frame_timing", None)
+        self._frame_fps = (getattr(self.animation, "_fmn_timing_fps", None)
+                           if self._frame_timing is not None else None)
+        self._exact_tracking |= self._frame_timing is not None
+        self._timing_key = self._root_timing_key()
+
+    def _refresh_frame_timing(self):
+        # Native-only drivers freeze their specification at begin. Callback
+        # animations retain their public live run_time behavior; bind again
+        # only when their root duration or consuming grid actually changes.
+        if self.driver_factory is not None:
+            return
+        if (self._frame_timing is None and not self._nested_frames
+                and getattr(self.animation, "run_time_frames", None) is None):
+            return
+        if self.scene is None:
+            raise RuntimeError("frame-based animation updater requires Scene adoption before advancing")
+        if self._root_timing_key() != self._timing_key:
+            self._bind_frame_timing()
+
+    def _exact_delta(self, delta):
+        core = self.g.get("_SceneCore")
+        context_getter = getattr(core, "_frame_step_context", None)
+        context = (context_getter(self.scene)
+                   if self.scene is not None and context_getter is not None else None)
+        if context is not None and context[0] is delta:
+            return Fraction(context[1], context[2])
+        # A manual seconds delta remains its exact binary64 value. Equality
+        # with the native step's rounded float is not evidence of frame units.
+        return Fraction.from_float(delta)
+
     def activate(self):
         nodes = tuple(_animation_tree(self.g, self.animation))
         scene = _scene_for(self.g, self.animation, self.anchor, nodes)
@@ -246,12 +294,15 @@ class _PersistentAnimation:
         if self.needs_scene and not self.anchor._is_bound():
             self.scene._adopt(self.anchor)
         self.animation._ensure_runtime_defaults()
+        if self._nested_frames or getattr(self.animation, "run_time_frames", None) is not None:
+            self._bind_frame_timing()
         if self.driver_factory is not None:
             self.driver = self.driver_factory(self.scene)
         if self.closed:
             self.driver = None
             return False
-        duration = _duration(self.driver)
+        duration = (Fraction(*self._frame_timing.duration_ratio) / self._frame_fps
+                    if self._frame_timing is not None else _duration(self.driver))
         if self.cycle and duration == 0:
             raise ValueError("a cycling animation updater requires positive run_time")
         # Snapshot actual public roots before begin, including ancestors and
@@ -267,11 +318,13 @@ class _PersistentAnimation:
         return not self.closed
 
     def start(self):
-        duration = _duration(self.animation)
-        if self.cycle and duration == 0:
-            raise ValueError("a cycling animation updater requires positive run_time")
+        if not self._nested_frames and getattr(self.animation, "run_time_frames", None) is None:
+            duration = _duration(self.animation)
+            if self.cycle and duration == 0:
+                raise ValueError("a cycling animation updater requires positive run_time")
         self.animation.suspend_mobject_updating = False
         self.animation.total_time = 0.0
+        self._reported_total_time = self.animation.total_time
         try:
             self.activate()
             if not self.closed:
@@ -305,10 +358,20 @@ class _PersistentAnimation:
             # Check before interpolation, helper updates AND endpoint finish.
             # Detached participants may have been adopted since registration.
             self.check_scene()
-            elapsed = float(self.animation.total_time)
+            self._refresh_frame_timing()
+            authored_elapsed = self.animation.total_time
+            elapsed = float(authored_elapsed)
             if not math.isfinite(elapsed):
                 raise ValueError("animation updater dt and total_time must be finite")
-            duration = _duration(self.driver)
+            timing = self._frame_timing
+            if self._exact_tracking:
+                if self._elapsed is None or authored_elapsed is not self._reported_total_time:
+                    self._elapsed = Fraction.from_float(elapsed)
+                elapsed = self._elapsed
+                duration = (Fraction(*timing.duration_ratio) / self._frame_fps if timing is not None
+                            else Fraction.from_float(_duration(self.driver)))
+            else:
+                duration = _duration(self.driver)
             if self.cycle and duration == 0:
                 raise ValueError("a cycling animation updater requires positive run_time")
             if not self.cycle and (duration == 0 or elapsed >= duration):
@@ -329,17 +392,35 @@ class _PersistentAnimation:
                     self.execution.release()
                     self.nodes = self.groups = ()
                 return
-            following = elapsed + delta
-            if not math.isfinite(following):
+            following = elapsed + (self._exact_delta(delta) if self._exact_tracking else delta)
+            try:
+                projected_time = float(following)
+            except OverflowError as error:
+                raise ValueError("animation updater accumulated time is not finite") from error
+            if not math.isfinite(projected_time):
                 raise ValueError("animation updater accumulated time is not finite")
-            alpha = (elapsed / duration) % 1.0 if self.cycle else max(0.0, elapsed / duration)
             # The helper's pinned contract is interpolate THEN helper update.
-            self.call("interpolate", alpha)
+            if timing is not None:
+                position = (elapsed % duration if self.cycle else max(Fraction(0), elapsed)) * self._frame_fps
+                interpolate_frame = getattr(self.driver, "_fmn_interpolate_at_frame", None)
+                if interpolate_frame is not None:
+                    self.call("_fmn_interpolate_at_frame", timing.position_from_ratio(
+                        position.numerator, position.denominator, self._frame_fps), self._frame_fps)
+                else:
+                    self.call("interpolate", float(position / (duration * self._frame_fps)))
+            else:
+                if self._exact_tracking:
+                    alpha = float((elapsed / duration) % 1 if self.cycle else max(Fraction(0), elapsed / duration))
+                else:
+                    alpha = (elapsed / duration) % 1.0 if self.cycle else max(0.0, elapsed / duration)
+                self.call("interpolate", alpha)
             if self.closed:
                 return
             self.call("update_mobjects", delta, checked=True)
             if not self.closed:
-                self.animation.total_time = following
+                self.animation.total_time = projected_time
+                self._reported_total_time = self.animation.total_time
+                self._elapsed = following if self._exact_tracking else None
         except BaseException as error:
             if not awaiting_adoption:
                 if self.closed and self.driver is not None:

@@ -278,6 +278,261 @@ fn promoted_seconds_override_preserves_its_widened_time_span() {
 }
 
 #[test]
+fn mixed_seconds_boundary_remains_exact_through_succession_retiming_and_nesting() {
+    for (outer_frames, nested, expected_boundary) in [
+        (None, false, 44),
+        (None, true, 44),
+        (Some(90), false, 88),
+        (Some(90), true, 88),
+    ] {
+        for rate in [RateFunc::linear(), RateFunc::Base(rate::linear)] {
+            let mut stage = Stage::new();
+            let mob = square(&mut stage);
+            let log = Rc::new(RefCell::new(Vec::new()));
+            let mut succession = Succession::new(
+                &mut stage,
+                vec![
+                    Probe::boxed(mob, "first", 43.0 / 24.0, &log),
+                    frame_probe(mob, "second", 1, &log),
+                ],
+            )
+            .unwrap()
+            .with_rate_func(rate);
+            if let Some(frames) = outer_frames {
+                succession = succession.with_run_time_frames(frames);
+            }
+            let animation: Box<dyn Animation> = if nested {
+                Box::new(AnimationGroup::new(&mut stage, vec![Box::new(succession)]).unwrap())
+            } else {
+                Box::new(succession)
+            };
+            let mut animations = vec![animation];
+            let mut clock = RationalFrameClock::new(24).unwrap();
+            let mut second_begin = None;
+            let report = play_segment(
+                &mut stage,
+                &mut clock,
+                &RngRoot::from_seed(10),
+                &mut animations,
+                false,
+                &mut |packet| {
+                    if second_begin.is_none() && log.borrow().contains(&Event::Begin("second")) {
+                        second_begin = Some(packet.segment_frame());
+                    }
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                report.n_frames,
+                outer_frames.map_or(45, |frames| frames as i64)
+            );
+            assert_eq!(second_begin, Some(expected_boundary));
+        }
+    }
+}
+
+#[test]
+fn large_exact_frame_boundary_survives_integer_clock_entry_without_iteration() {
+    let mut stage = Stage::new();
+    let mob = square(&mut stage);
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let boundary = (1_i64 << 53) + 1;
+    let mut succession = Succession::new(
+        &mut stage,
+        vec![
+            frame_probe(mob, "first", boundary as u64, &log),
+            frame_probe(mob, "second", 1, &log),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        succession.duration_on_grid(24).unwrap().n_frames().unwrap(),
+        boundary + 1
+    );
+    succession.prepare_timing(24).unwrap();
+    succession.begin(&mut stage).unwrap();
+    succession
+        .interpolate_at_time(
+            &mut stage,
+            fmn_anim::RationalTime::zero(24) + (boundary - 1),
+        )
+        .unwrap();
+    assert_eq!(succession.active_index(), 0);
+    assert!(!log.borrow().contains(&Event::Begin("second")));
+    succession
+        .interpolate_at_time(&mut stage, fmn_anim::RationalTime::zero(24) + boundary)
+        .unwrap();
+    assert_eq!(succession.active_index(), 1);
+    assert!(log.borrow().contains(&Event::Begin("second")));
+    succession.finish(&mut stage);
+    assert!(succession.deferred_error().is_none());
+}
+
+#[test]
+fn host_composition_projection_keeps_exact_member_and_interior_decisions() {
+    use fmn_anim::FramePosition;
+
+    let mut stage = Stage::new();
+    let mob = square(&mut stage);
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let mut group = AnimationGroup::with_lag_ratio(
+        &mut stage,
+        vec![
+            Probe::boxed(mob, "first", 43.0 / 24.0, &log),
+            frame_probe(mob, "second", 1, &log),
+        ],
+        1.0,
+    )
+    .unwrap();
+    group.prepare_timing(24).unwrap();
+    let timing = group.composition_timing().unwrap();
+    assert!(timing.uses_exact_positions());
+    let before = timing
+        .position_at_position(&FramePosition::from_frame(43), 24)
+        .unwrap();
+    assert_eq!(timing.member_at_position(&before).unwrap(), Some(0));
+    assert!(timing.sub_alpha_at_position(0, &before).unwrap() < 1.0);
+    assert!(
+        timing
+            .interior_frame_at_position(0, &before)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        timing
+            .interior_frame_at_position(1, &before)
+            .unwrap()
+            .is_none()
+    );
+    let after = timing
+        .position_at_position(&FramePosition::from_frame(44), 24)
+        .unwrap();
+    assert_eq!(timing.member_at_position(&after).unwrap(), Some(1));
+    assert!(timing.sub_alpha_at_position(1, &after).unwrap() < 1.0);
+    let backwards = timing.position_from_rate_alpha(-0.5).unwrap();
+    assert_eq!(timing.sub_alpha_at_position(0, &backwards).unwrap(), 0.0);
+    assert_eq!(timing.member_at_position(&backwards).unwrap(), Some(0));
+    assert!(matches!(
+        timing.position_at_position(&FramePosition::from_frame(43), 25),
+        Err(AnimError::Clock(fmn_anim::ClockError::FrameRateMismatch))
+    ));
+
+    let mut group = group.with_duration_scale(0.5);
+    group.prepare_timing(24).unwrap();
+    assert_eq!(group.duration_on_grid(24).unwrap().n_frames().unwrap(), 23);
+    let retimed = group.composition_timing().unwrap();
+    assert_eq!(retimed.intervals(), timing.intervals());
+    let position = retimed
+        .position_at_position(&FramePosition::from_frame(22), 24)
+        .unwrap();
+    assert!(
+        position
+            .checked_cmp(&FramePosition::from_frame(44))
+            .unwrap()
+            .is_eq()
+    );
+    assert_eq!(retimed.member_at_position(&position).unwrap(), Some(1));
+}
+
+#[test]
+fn deep_unscaled_mixed_groups_do_not_consume_rational_precision_at_each_level() {
+    // This intentionally stresses hundreds of recursive group lifecycles.
+    // Give that fixture room independently of the test harness's small stack;
+    // the assertion below concerns exact arithmetic, not call-stack capacity.
+    std::thread::Builder::new()
+        .name("deep_exact_composition".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(deep_unscaled_mixed_group_fixture)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn deep_unscaled_mixed_group_fixture() {
+    let mut stage = Stage::new();
+    let mob = square(&mut stage);
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let mut nested: Box<dyn Animation> = Box::new(
+        AnimationGroup::with_lag_ratio(
+            &mut stage,
+            vec![
+                Probe::boxed(mob, "first", 43.0 / 24.0, &log),
+                frame_probe(mob, "second", 1, &log),
+            ],
+            1.0,
+        )
+        .unwrap(),
+    );
+    for _ in 0..320 {
+        nested = Box::new(AnimationGroup::new(&mut stage, vec![nested]).unwrap());
+    }
+    let mut outer = AnimationGroup::new(&mut stage, vec![nested])
+        .unwrap()
+        .with_run_time_frames(90);
+    assert_eq!(outer.duration_on_grid(24).unwrap().n_frames().unwrap(), 90);
+    outer.prepare_timing(24).unwrap();
+    outer.begin(&mut stage).unwrap();
+    outer
+        .interpolate_at_time(&mut stage, fmn_anim::RationalTime::zero(24) + 43)
+        .unwrap();
+    assert!(outer.deferred_error().is_none());
+    let alphas = alphas_of(&log, "first");
+    assert!((alphas.last().unwrap() - 22.0 / 45.0).abs() < 1e-15);
+    outer.finish(&mut stage);
+}
+
+#[test]
+fn zero_duration_succession_runs_every_child_lifecycle_without_capturing_frames() {
+    for exact_override in [false, true] {
+        let mut stage = Stage::new();
+        let mob = square(&mut stage);
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let succession = Succession::new(
+            &mut stage,
+            vec![
+                frame_probe(mob, "first", 3, &log),
+                frame_probe(mob, "second", 4, &log),
+            ],
+        )
+        .unwrap();
+        let succession = if exact_override {
+            succession.with_run_time_frames(0)
+        } else {
+            succession.with_run_time(0.0)
+        };
+        let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(succession)];
+        let mut clock = RationalFrameClock::new(24).unwrap();
+        let mut captures = 0;
+        let report = play_segment(
+            &mut stage,
+            &mut clock,
+            &RngRoot::from_seed(10),
+            &mut animations,
+            false,
+            &mut |_| captures += 1,
+        )
+        .unwrap();
+        assert_eq!((report.n_frames, captures, clock.now().frames()), (0, 0, 0));
+        for child in ["first", "second"] {
+            assert_eq!(
+                log.borrow()
+                    .iter()
+                    .filter(|event| **event == Event::Begin(child))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                log.borrow()
+                    .iter()
+                    .filter(|event| **event == Event::Finish(child))
+                    .count(),
+                1
+            );
+        }
+    }
+}
+
+#[test]
 fn explicit_seconds_override_can_still_compress_a_very_long_second_member() {
     let mut stage = Stage::new();
     let mob = square(&mut stage);
@@ -808,6 +1063,92 @@ fn explicit_frame_and_second_overrides_and_time_spans_remain_distinct() {
     group.update_rate_info(Some(0.0), None, None);
     assert_eq!(group.state().config.run_time_frames, None);
     assert_eq!(group.duration_on_grid(24).unwrap().n_frames().unwrap(), 0);
+}
+
+#[test]
+fn derived_frame_time_span_survives_begin_finish_and_grid_rebinding() {
+    use fmn_anim::{Duration, FrameDuration};
+
+    let span_end = 0.173;
+    assert!((span_end * 24.0) / 24.0 < span_end);
+    for successive in [false, true] {
+        let mut stage = Stage::new();
+        let mob = square(&mut stage);
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let members = vec![frame_probe(mob, "member", 3, &log)];
+        let mut composition: Box<dyn Animation> = if successive {
+            Box::new(Succession::new(&mut stage, members).unwrap())
+        } else {
+            Box::new(AnimationGroup::new(&mut stage, members).unwrap())
+        };
+        composition.state_mut().config.time_span = Some((0.0, span_end));
+
+        for fps in [24, 8, 60, 24] {
+            let member = FrameDuration::new(Duration::Frames(3), fps).unwrap();
+            let span = FrameDuration::new(span_end, fps).unwrap();
+            let expected = member.n_frames().unwrap().max(span.n_frames().unwrap());
+            let before = composition.duration_on_grid(fps).unwrap();
+            assert!(before.is_frame_native());
+            assert_eq!(before.n_frames().unwrap(), expected);
+
+            composition.prepare_timing(fps).unwrap();
+            let prepared = composition.get_run_time();
+            assert!(prepared >= span_end);
+            composition.begin(&mut stage).unwrap();
+            composition.finish(&mut stage);
+            assert!(composition.deferred_error().is_none());
+            assert_eq!(composition.get_run_time().to_bits(), prepared.to_bits());
+            let after = composition.duration_on_grid(fps).unwrap();
+            assert!(after.is_frame_native());
+            assert_eq!(after.n_frames().unwrap(), expected);
+        }
+
+        composition.state_mut().config.time_span = None;
+        assert_eq!(
+            composition.duration_on_grid(8).unwrap().n_frames().unwrap(),
+            3
+        );
+    }
+}
+
+#[test]
+fn seconds_time_span_keeps_existing_ceiling_across_grid_rebinding() {
+    use fmn_anim::FrameDuration;
+
+    for successive in [false, true] {
+        let mut stage = Stage::new();
+        let mob = square(&mut stage);
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let members = vec![Probe::boxed(mob, "member", 0.1, &log)];
+        let mut composition: Box<dyn Animation> = if successive {
+            Box::new(Succession::new(&mut stage, members).unwrap())
+        } else {
+            Box::new(AnimationGroup::new(&mut stage, members).unwrap())
+        };
+        composition.state_mut().config.time_span = Some((0.0, 0.173));
+
+        for fps in [24, 8, 60, 24] {
+            let expected = FrameDuration::new(0.173, fps).unwrap().n_frames().unwrap();
+            composition.prepare_timing(fps).unwrap();
+            composition.begin(&mut stage).unwrap();
+            composition.finish(&mut stage);
+            assert!(composition.deferred_error().is_none());
+            let duration = composition.duration_on_grid(fps).unwrap();
+            assert!(!duration.is_frame_native());
+            assert_eq!(duration.n_frames().unwrap(), expected);
+        }
+
+        composition.state_mut().config.time_span = None;
+        assert_eq!(
+            composition
+                .duration_on_grid(30)
+                .unwrap()
+                .n_frames()
+                .unwrap(),
+            4,
+            "the original f64 seconds ceiling still applies after removing the span"
+        );
+    }
 }
 
 // ------------------------------------------------------- a probe animation

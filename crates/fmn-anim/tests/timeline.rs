@@ -61,6 +61,55 @@ fn shift_frames(stage: &mut Stage, mob: Mob, dx: f64, frames: u64) -> Box<dyn An
 }
 
 #[test]
+fn exact_plan_samples_and_pure_seek_preserve_large_and_mixed_endpoints() {
+    use fmn_anim::rate_table::RateSampler;
+    use fmn_anim::{AnimConfig, RateFunc, Transform};
+
+    for large in [false, true] {
+        let mut stage = Stage::new();
+        let source = square(&mut stage);
+        stage.add_to_scene(source).unwrap();
+        let target = stage.copy_family(source).unwrap();
+        stage.shift(target, [2.0, 0.0, 0.0]);
+        let sampler = RateSampler::new(3, |alpha| Ok(if alpha == 1.0 { 1.0 } else { 0.0 }));
+        let preparing = RateFunc::Preparing(sampler.clone());
+        for alpha in [0.0, 1.0_f64.next_down(), 1.0] {
+            let _ = preparing.eval(alpha);
+        }
+        let last = if large { (1_i64 << 53) + 1 } else { 44 };
+        let transform = Transform::new(source, target).with_config(AnimConfig {
+            run_time: 43.0 / 24.0,
+            run_time_frames: large.then_some(last as u64),
+            rate_func: sampler.finish().unwrap(),
+            ..AnimConfig::default()
+        });
+        let empty = square(&mut stage);
+        let zero = shift_frames(&mut stage, empty, 0.0, 0);
+        let group = AnimationGroup::new(&mut stage, vec![Box::new(transform), zero]).unwrap();
+        let mut timeline = Timeline::new(24).unwrap();
+        timeline.play(vec![Box::new(group)]).unwrap();
+        let plan = timeline.compile().unwrap();
+        let decoded = TimelinePlan::from_bytes(&plan.to_bytes().unwrap()).unwrap();
+        for schedule in [&plan, &decoded] {
+            let segment = &schedule.segments()[0];
+            assert_eq!(segment.n_frames, last);
+            assert_eq!(segment.sample_alpha(last - 1, 24), 1.0_f64.next_down());
+            assert!(segment.sample_alpha(last, 24) >= 1.0);
+        }
+
+        // Pure seek performs one interpolation at each requested position;
+        // the large case does not replay the preceding 2^53 frames. A step
+        // rate makes an early endpoint visible in the actual object state.
+        let before = timeline.seek(&mut stage, &rng(), last - 1).unwrap();
+        assert!(before.alpha() < 1.0);
+        assert_eq!(before.materialize_stage().get_center(source)[0], 0.0);
+        let endpoint = timeline.seek(&mut stage, &rng(), last).unwrap();
+        assert_eq!(endpoint.alpha(), 1.0);
+        assert_eq!(endpoint.materialize_stage().get_center(source)[0], 2.0);
+    }
+}
+
+#[test]
 fn exact_frame_timeline_compiles_renders_seeks_and_round_trips_issue_10() {
     let counts = [
         43, 17, 61, 29, 101, 7, 55, 13, 89, 31, 47, 19, 73, 11, 37, 23, 67, 3, 97, 41,

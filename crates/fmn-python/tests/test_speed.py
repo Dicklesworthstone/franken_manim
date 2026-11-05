@@ -537,10 +537,12 @@ class FrameClockSamplingTests(unittest.TestCase):
         self.Driver = namespace["_CompositionCallbackDriver"]
         self.samples = []
         self.timing = types.SimpleNamespace(
-            intervals=[(0., 67.)], max_end=67., frame_intervals=True,
+            intervals=[(0., 67.)], max_end=67., exact_positions=True, fps=24,
             alpha_at_frame=lambda frame, fps: frame / 67,
             rate_alpha_at_frame=lambda frame, fps: frame / 67,
-            position_at_frame=lambda frame, fps: float(frame),
+            exact_position_at_frame=lambda frame, fps: frame,
+            position_from_rate_alpha=lambda alpha: alpha * 67,
+            child_sample_at_position=lambda index, position: (position / 67, position),
         )
 
     def driver(self, profile):

@@ -795,7 +795,7 @@ pub fn prepare_play_animation(
     animation.update_mobjects(stage, dt);
     check_updater_error(stage)?;
     let alpha = animation.state().sample_alpha(sample.time);
-    animation.interpolate_at_frame(stage, sample.frame as f64, sample.time.fps());
+    animation.interpolate_at_time(stage, sample.time)?;
     check_updater_error(stage)?;
     open.next_animation += 1;
     Ok(Some(AnimationBoundary {
@@ -1570,4 +1570,83 @@ pub fn wait_segment_with_capture(
     }
     report.n_frames = stepped;
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AnimConfig, Transform};
+    use fmn_mobject::Mobject;
+
+    #[test]
+    fn stepped_animation_boundary_preserves_exact_endpoints_and_seconds_compatibility() {
+        let large_frame = 1_i64 << 53;
+        for (duration, frame, expected_alpha) in [
+            (
+                Duration::Frames((large_frame + 1) as u64),
+                large_frame,
+                1.0_f64.next_down(),
+            ),
+            (
+                Duration::Frames(i64::MAX as u64),
+                i64::MAX - 1,
+                1.0_f64.next_down(),
+            ),
+            // The existing seconds sampler intentionally reaches alpha one
+            // at 43/24 even though the exact ceiling schedules 44 frames.
+            (Duration::Seconds(43.0 / 24.0), 43, 1.0),
+        ] {
+            let mut stage = Stage::new();
+            let mob = stage.add(Mobject::from_points(&[[0.0, 0.0, 0.0]]));
+            let target = stage.copy_family(mob).unwrap();
+            stage.shift(target, [1.0, 0.0, 0.0]);
+            let config = match duration {
+                Duration::Frames(frames) => AnimConfig {
+                    run_time_frames: Some(frames),
+                    ..AnimConfig::default()
+                },
+                Duration::Seconds(seconds) => AnimConfig {
+                    run_time: seconds,
+                    ..AnimConfig::default()
+                },
+            };
+            let mut animations: Vec<Box<dyn Animation>> =
+                vec![Box::new(Transform::new(mob, target).with_config(config))];
+            let mut clock = RationalFrameClock::new(24).unwrap();
+            let mut open = open_play(&mut stage, &clock, &mut animations).unwrap();
+            // Seed a restored driver checkpoint in O(1). The production
+            // public boundary function still selects and samples the frame;
+            // this fixture never iterates through 2^53 preceding frames.
+            open.stepped = frame - 1;
+            clock.advance_frames(open.stepped).unwrap();
+            let boundary = prepare_play_animation(&mut stage, &clock, &mut animations, &mut open)
+                .unwrap()
+                .unwrap();
+            assert_eq!(boundary.sample.frame, frame);
+            assert_eq!(boundary.alpha, expected_alpha, "duration={duration:?}");
+            assert_eq!(boundary.animation_index, 0);
+            assert!(
+                prepare_play_frame(&mut stage, &mut clock, &mut animations, &mut open)
+                    .unwrap()
+                    .is_some()
+            );
+            complete_play_frame(
+                &mut stage,
+                &clock,
+                &RngRoot::from_seed(10),
+                &mut open,
+                false,
+                &mut |_, _| {},
+                &mut |_| panic!("capture is disabled"),
+            )
+            .unwrap();
+            let terminal = prepare_play_animation(&mut stage, &clock, &mut animations, &mut open)
+                .unwrap()
+                .unwrap();
+            assert_eq!(terminal.sample.frame, frame + 1);
+            if matches!(duration, Duration::Frames(_)) {
+                assert_eq!(terminal.alpha, 1.0);
+            }
+        }
+    }
 }

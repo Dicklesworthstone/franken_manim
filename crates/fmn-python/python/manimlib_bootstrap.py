@@ -13947,7 +13947,7 @@ class Scene(_SceneCore):
                     proto._fmn_derived_run_time = False
                 if run_time_frames is not None:
                     proto.run_time_frames = run_time_frames
-                    proto.run_time = run_time_frames / self._frame_rate()
+                    object.__setattr__(proto, "run_time", run_time_frames / self._frame_rate())
                 if rate_func is not None:
                     proto.rate_func = rate_func
                 if lag_ratio is not None:
@@ -14415,12 +14415,26 @@ class Scene(_SceneCore):
 
     def get_time_progression(
         self,
-        run_time,
+        run_time=None,
         n_iterations=None,
         desc="",
         override_skip_animations=False,
+        *,
+        run_time_frames=None,
     ):
+        """Return sample seconds from a seconds duration or an exact frame count."""
         del n_iterations, desc
+        if run_time_frames is not None:
+            if run_time is not None:
+                raise ValueError("run_time and run_time_frames are mutually exclusive")
+            frames = _fmn_validate_frame_count(run_time_frames)
+            fps = self._frame_rate()
+            if self.skip_animations and not override_skip_animations:
+                return [] if frames == 0 else [frames / fps]
+            # Size the progression in integer frame units before projecting
+            # its samples to seconds. arange(0, frames / fps, 1 / fps) can
+            # produce an extra sample at an inexact division boundary.
+            return (_np.arange(frames, dtype=_np.int64) + 1) / fps
         run_time = float(run_time)
         if self.skip_animations and not override_skip_animations:
             return [run_time]
@@ -14434,17 +14448,40 @@ class Scene(_SceneCore):
 
     def get_animation_time_progression(self, animations):
         animations = list(animations)
-        run_time = self.get_run_time(animations)
+        _fmn_bind_frame_timing(self, animations)
+        timings = [getattr(animation, "_fmn_frame_timing", None)
+                   for animation in animations]
+        frames = None
+        if any(timing is not None for timing in timings):
+            fps = self._frame_rate()
+            # A mixed play covers every member. Seconds-only siblings still
+            # use the native exact-binary64 ceiling; frame members already
+            # carry their authoritative integer extent from composition.
+            frames = max(
+                timing.frame_count if timing is not None else _frame_timing(
+                    (float(animation.get_run_time()), None, None, 0., None), fps,
+                ).frame_count
+                for animation, timing in zip(animations, timings)
+            )
+        else:
+            run_time = self.get_run_time(animations)
         description = f"{self.num_plays} {animations[0]}"
         if len(animations) > 1:
             description += ", etc."
+        if frames is not None:
+            return self.get_time_progression(run_time_frames=frames, desc=description)
         return self.get_time_progression(run_time, desc=description)
 
-    def get_wait_time_progression(self, duration, stop_condition=None):
+    def get_wait_time_progression(self, duration=None, stop_condition=None, *,
+                                  run_time_frames=None):
+        """Plan a wait in seconds, or supply only ``run_time_frames`` for exact ticks."""
         keywords = {"desc": f"{self.num_plays} Waiting"}
         if stop_condition is not None:
             keywords["n_iterations"] = -1
             keywords["override_skip_animations"] = True
+        if run_time_frames is not None:
+            return self.get_time_progression(duration, run_time_frames=run_time_frames,
+                                             **keywords)
         return self.get_time_progression(float(duration), **keywords)
 
     def pre_play(self):
@@ -16018,7 +16055,7 @@ class Write(DrawBorderThenFill):
             **kwargs,
         )
         family_size = len(vmobject.family_members_with_points())
-        self.run_time = self.compute_run_time(family_size, run_time)
+        object.__setattr__(self, "run_time", self.compute_run_time(family_size, run_time))
         self.lag_ratio = self.compute_lag_ratio(family_size, lag_ratio)
 
     def compute_run_time(self, family_size, run_time):
@@ -16204,7 +16241,7 @@ class Rotating(Animation):
 
     def begin(self):
         if self.time_span is not None:
-            self.run_time = max(float(self.time_span[1]), self.run_time)
+            object.__setattr__(self, "run_time", max(float(self.time_span[1]), self.run_time))
         self.starting_mobject = self.mobject.copy()
         if self.suspend_mobject_updating:
             self.mobject_was_updating = not self.mobject._is_updating_suspended()
@@ -16279,7 +16316,7 @@ class Homotopy(Animation):
 
     def begin(self):
         if self.time_span is not None:
-            self.run_time = max(float(self.time_span[1]), self.run_time)
+            object.__setattr__(self, "run_time", max(float(self.time_span[1]), self.run_time))
         self.starting_mobject = self.mobject.copy()
         self.interpolate(0.0)
 
@@ -17484,7 +17521,7 @@ class AnimationGroup(_NativeAnimation):
     def calculate_max_end_time(self):
         self.max_end_time = max((end for _, _, end in self.anims_with_timings), default=0.0)
         if self.run_time is None or self.run_time < 0:
-            self.run_time = self.max_end_time
+            object.__setattr__(self, "run_time", self.max_end_time)
 
 
 class ClockPassesTime(AnimationGroup):
@@ -17685,31 +17722,87 @@ class _CompositionCallbackDriver:
             if child is not None:
                 child.update_mobjects(dt)
 
+    def _current_frame_timing(self):
+        timing = getattr(self.group, "_fmn_frame_timing", None)
+        if timing is not self._fmn_frame_timing:
+            self._fmn_frame_timing = timing
+            if not getattr(self, "_authored_timing_rows", False):
+                self.timings, self.max_end = _composition_timings(self.group, self.children)
+                if timing is not None and timing.intervals is not None:
+                    self.timings = [(child, start, end)
+                                    for child, (start, end) in zip(self.children, timing.intervals)]
+                    self.max_end = timing.max_end
+        return timing
+
     def interpolate(self, alpha):
+        timing = self._current_frame_timing()
+        if (timing is not None and timing.exact_positions
+                and not getattr(self, "_authored_timing_rows", False)):
+            rate_alpha = _composition_timeline_position(
+                self.group, float(alpha), 1.0, self.get_run_time(), self.rate_func,
+            )
+            position = timing.position_from_rate_alpha(rate_alpha)
+            return self._interpolate_exact_position(position, timing)
         time = _composition_timeline_position(
             self.group, float(alpha), self.max_end, self.get_run_time(), self.rate_func,
         )
         self._interpolate_position(time)
 
     def _fmn_interpolate_at_frame(self, frame, fps, alpha=None):
-        timing = self._fmn_frame_timing
+        timing = self._current_frame_timing()
         if alpha is None:
-            alpha = (timing.alpha_at_frame(frame, fps) if timing is not None
-                     else (frame / fps) / self.get_run_time())
-        if timing is None or not timing.frame_intervals or getattr(self, "_authored_timing_rows", False):
+            if timing is not None:
+                alpha = timing.alpha_at_frame(frame, fps)
+            else:
+                seconds = float(frame) / fps
+                duration = self.get_run_time()
+                alpha = ((1.0 if seconds > 0.0 else 0.0) if duration == 0.0
+                         else seconds / duration)
+        if timing is None or not timing.exact_positions or getattr(self, "_authored_timing_rows", False):
             return self.interpolate(alpha)
         identity_rate = globals().get("_fmn_frame_identity_rate")
         if self._fmn_linear_rate:
-            time = timing.position_at_frame(frame, fps)
+            position = timing.exact_position_at_frame(frame, fps)
         elif identity_rate is not None and identity_rate(self.rate_func):
             # ChangeSpeed's shipped constant profile has an identity map.
             # Observe it once for speed-aware updater deltas, but retain the
             # native position instead of reconstructing it as (29/67)*67.
             self.rate_func(timing.rate_alpha_at_frame(frame, fps))
-            time = timing.position_at_frame(frame, fps)
+            position = timing.exact_position_at_frame(frame, fps)
         else:
-            time = self.rate_func(timing.rate_alpha_at_frame(frame, fps)) * self.max_end
-        self._interpolate_position(time, fps)
+            position = timing.position_from_rate_alpha(
+                self.rate_func(timing.rate_alpha_at_frame(frame, fps)))
+        self._interpolate_exact_position(position, timing)
+
+    def _advance_to(self, target):
+        # Finish every crossed member before the next one snapshots its
+        # starting state, including members crossed by one coarse sample.
+        while self.active < target:
+            previous = self.children[self.active]
+            if previous is not None:
+                previous.finish()
+            self.active += 1
+            following = self.children[self.active]
+            if following is not None:
+                following.begin()
+
+    def _interpolate_exact_position(self, position, timing):
+        if not self.children:
+            return
+        if self.successive:
+            target = timing.member_at_position(position)
+            self._advance_to(0 if target is None else target)
+            indices = range(self.active, self.active + 1)
+        else:
+            indices = range(len(self.children))
+        for index in indices:
+            child = self.children[index]
+            if child is not None:
+                sub, local = timing.child_sample_at_position(index, position)
+                if local is None:
+                    child.interpolate(sub)
+                else:
+                    child._fmn_interpolate_at_frame(local, timing.fps)
 
     def _interpolate_position(self, time, fps=None):
         if self.successive:
@@ -17717,17 +17810,7 @@ class _CompositionCallbackDriver:
             for index, (_, start, _) in enumerate(self.timings):
                 if time >= start:
                     target = index
-            # Choreo's advance_to: run every crossed member, even when a
-            # coarse frame skips its entire interval. Future helpers must
-            # snapshot the state left by the member just finished.
-            while self.active < target:
-                previous = self.children[self.active]
-                if previous is not None:
-                    previous.finish()
-                self.active += 1
-                following = self.children[self.active]
-                if following is not None:
-                    following.begin()
+            self._advance_to(target)
             indices = range(self.active, self.active + 1)
         else:
             indices = range(len(self.children))

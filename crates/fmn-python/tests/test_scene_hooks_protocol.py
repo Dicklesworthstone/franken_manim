@@ -5,8 +5,187 @@ acceptance separately exercises the bootstrap's real hooks and native state.
 """
 from __future__ import annotations
 
+import ast
+from fractions import Fraction
+from pathlib import Path
+from types import SimpleNamespace
 import unittest
+
+import numpy as np
+
+from test_animation_updater_protocol import environment as animation_environment
 from test_scene_execution_protocol import environment, execution
+
+
+def progression_environment(fps=24):
+    """Lift the public helpers and frame binder; native timing is an explicit fixture."""
+    native = animation_environment()
+    g = vars(native)
+    root = Path(__file__).resolve().parents[1] / "python"
+    trees = {}
+
+    def install_function(path, parent_name, name):
+        if path not in trees:
+            trees[path] = ast.parse(path.read_text())
+        tree = trees[path]
+        parent = next(node for node in tree.body
+                      if isinstance(node, (ast.ClassDef, ast.FunctionDef))
+                      and node.name == parent_name)
+        node = next(node for node in parent.body
+                    if isinstance(node, ast.FunctionDef) and node.name == name)
+        exec(compile(ast.Module([node], []), str(path), "exec"), g)
+        return g[name]
+
+    class Scene:
+        def __init__(self, frame_rate=fps):
+            self._fps = frame_rate
+            self.camera = SimpleNamespace(fps=frame_rate)
+            self.skip_animations = False
+            self.num_plays = 0
+            self._step_context = None
+
+        def _frame_rate(self):
+            return self._fps
+
+        def _adopt(self, mobject):
+            for member in mobject.get_family():
+                member._scene = self
+
+    def frame_timing(descriptor, rate):
+        seconds, frames, span, lag, children = descriptor
+        del lag
+        if children is not None:
+            raise AssertionError("this timing fixture only covers leaf progressions")
+        count = (Fraction(frames) if frames is not None
+                 else Fraction.from_float(seconds) * rate)
+        if span is not None:
+            count = max(count, Fraction.from_float(float(span[1])) * rate)
+        return SimpleNamespace(seconds=float(count / rate),
+                               frame_count=-(-count.numerator // count.denominator),
+                               duration_ratio=(count.numerator, count.denominator),
+                               position_from_ratio=lambda numerator, denominator, fps: Fraction(numerator, denominator),
+                               alpha_at_frame=lambda frame, fps: float(min(Fraction(1), max(Fraction(0), frame / count)))
+                               if count else 1.)
+
+    g.update(_np=np, Group=native.AnimationGroup, _frame_timing=frame_timing,
+             _fmn_validate_frame_count=g["_validate_frame_count"],
+             _SceneCore=SimpleNamespace(get_frame_count=lambda scene: 0,
+                                       _frame_step_context=lambda scene: scene._step_context))
+    native.Animation.get_run_time = install_function(
+        root / "fmn_python/live_rates.py", "install_live_rates", "get_run_time")
+    g["_fmn_bind_frame_timing"] = install_function(
+        root / "manimlib/_animation_semantics.py", "install", "bind_frame_timing")
+    for name in ("get_time_progression", "get_run_time", "get_animation_time_progression",
+                 "get_wait_time_progression"):
+        setattr(Scene, name, install_function(root / "manimlib_bootstrap.py", "Scene", name))
+    native.Scene = Scene
+    return native
+
+
+class FrameProgressionTests(unittest.TestCase):
+    """Production Python routing only; exact_frame_durations.py covers native timing."""
+
+    def test_unbound_and_bound_frames_do_not_round_trip_seconds(self):
+        native = progression_environment()
+        scene = native.Scene()
+        animation = native.Animation(native.Mobject(), run_time_frames=43)
+        self.assertEqual(animation.run_time, 1.)
+        animation.begin = lambda: self.fail("progression lookup must not begin animation")
+        for _ in range(2):
+            samples = scene.get_animation_time_progression([animation])
+            self.assertEqual(len(samples), 43)
+            np.testing.assert_array_equal(samples, [frame / 24 for frame in range(1, 44)])
+            self.assertEqual(animation._fmn_frame_timing.frame_count, 43)
+
+    def test_seconds_compatibility_keeps_existing_arange_samples(self):
+        native = progression_environment()
+        scene = native.Scene()
+        for seconds, count in ((1., 24), (43 / 24, 44), (0., 0)):
+            animation = native.Animation(native.Mobject(), run_time=seconds)
+            expected = np.arange(0., seconds, 1 / 24) + 1 / 24
+            for samples in (scene.get_time_progression(seconds),
+                            scene.get_wait_time_progression(seconds),
+                            scene.get_animation_time_progression([animation])):
+                self.assertEqual(len(samples), count)
+                np.testing.assert_array_equal(samples, expected)
+
+    def test_frame_rates_zero_and_active_clock_projection(self):
+        native = progression_environment()
+        for fps in (1, 7, 24, 25, 30, 60, 120):
+            scene = native.Scene(fps)
+            scene.camera.fps = fps + 1  # The native clock owns frame units.
+            for frames in (0, 1, 29, 43):
+                animation = native.Animation(native.Mobject(), run_time_frames=frames)
+                samples = scene.get_animation_time_progression([animation])
+                self.assertEqual(len(samples), frames)
+                np.testing.assert_array_equal(samples, [index / fps for index in range(1, frames + 1)])
+
+    def test_mixed_root_animations_cover_literal_seconds_exactly(self):
+        native = progression_environment(30)
+        scene = native.Scene()
+        exact = native.Animation(native.Mobject(), run_time_frames=3)
+        seconds = native.Animation(native.Mobject(), run_time=.1)
+        self.assertEqual(len(scene.get_animation_time_progression([exact])), 3)
+        self.assertEqual(len(scene.get_animation_time_progression([seconds])), 3)
+        # .1 as binary64 is greater than three exact frames at 30 fps.
+        self.assertEqual(len(scene.get_animation_time_progression([exact, seconds])), 4)
+        exact.run_time_frames = 7
+        self.assertEqual(len(scene.get_animation_time_progression([seconds, exact])), 7)
+
+    def test_rebinding_frame_duration_recomputes_time_span_on_each_grid(self):
+        native = progression_environment()
+        animation = native.Animation(native.Mobject(), run_time_frames=12, time_span=(0., .75))
+        for fps, expected in ((24, 18), (12, 12), (60, 45)):
+            self.assertEqual(len(native.Scene(fps).get_animation_time_progression([animation])), expected)
+            self.assertEqual(animation.run_time_frames, 12)
+
+    def test_frame_wait_skip_condition_and_zero(self):
+        native = progression_environment()
+        scene = native.Scene()
+        scene.skip_animations = True
+        self.assertEqual(scene.get_wait_time_progression(run_time_frames=43), [43 / 24])
+        self.assertEqual(scene.get_wait_time_progression(run_time_frames=0), [])
+        self.assertEqual(scene.get_time_progression(run_time_frames=0), [])
+        zero = native.Animation(native.Mobject(), run_time_frames=0)
+        self.assertEqual(scene.get_animation_time_progression([zero]), [])
+        self.assertEqual(scene.get_time_progression(0.), [0.])
+        samples = scene.get_wait_time_progression(run_time_frames=43, stop_condition=lambda: True)
+        self.assertEqual(len(samples), 43)
+        self.assertEqual(len(scene.get_wait_time_progression(
+            run_time_frames=0, stop_condition=lambda: True)), 0)
+        self.assertEqual(len(scene.get_time_progression(run_time_frames=(1 << 53) + 1)), 1)
+
+    def test_frame_options_share_validation_and_reject_seconds_ambiguity(self):
+        native = progression_environment()
+        scene = native.Scene()
+        for method in (scene.get_time_progression, scene.get_wait_time_progression):
+            for frames, error in ((True, TypeError), (3., TypeError), (-1, ValueError),
+                                  (1 << 63, OverflowError)):
+                with self.subTest(method=method.__name__, frames=frames), self.assertRaises(error):
+                    method(run_time_frames=frames)
+            with self.assertRaises(ValueError):
+                method(.1, run_time_frames=3)
+            self.assertEqual(len(method(run_time_frames=np.int64(3))), 3)
+
+    def test_seconds_override_drops_prior_frame_binding(self):
+        native = progression_environment(30)
+        scene = native.Scene()
+        animation = native.Animation(native.Mobject(), run_time_frames=3)
+        scene.get_animation_time_progression([animation])
+        animation.run_time, animation.run_time_frames = .1, None
+        self.assertEqual(len(scene.get_animation_time_progression([animation])), 3)
+        self.assertFalse(hasattr(animation, "_fmn_frame_timing"))
+
+    def test_direct_seconds_assignment_clears_even_an_equal_frame_projection(self):
+        native = progression_environment(30)
+        scene = native.Scene()
+        animation = native.Animation(native.Mobject(), run_time_frames=3)
+        scene.get_animation_time_progression([animation])
+        self.assertEqual(animation.run_time, .1)
+        animation.run_time = .1
+        self.assertIsNone(animation.run_time_frames)
+        self.assertFalse(hasattr(animation, "_fmn_frame_timing"))
+        self.assertFalse(animation._fmn_derived_run_time)
 
 
 class HookTests(unittest.TestCase):

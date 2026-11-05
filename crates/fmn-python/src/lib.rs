@@ -126,7 +126,7 @@ use pyo3::exceptions::{
 };
 use pyo3::ffi;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBool, PyByteArray, PyBytes, PyDict, PyList, PyModule, PyTuple};
+use pyo3::types::{PyAny, PyBool, PyByteArray, PyBytes, PyDict, PyInt, PyList, PyModule, PyTuple};
 
 create_exception!(
     manimlib,
@@ -1271,6 +1271,10 @@ struct BridgeMobject {
 #[pyclass(subclass, weakref, dict, unsendable, name = "_SceneCore")]
 struct PyScene {
     engine: Engine,
+    /// The exact native step currently released to Python. The float token
+    /// retains the public updater protocol while distinguishing that step
+    /// from an independently authored seconds delta.
+    frame_step_context: Option<FrameStepContext>,
     /// Handle → weakref(proxy), preserving one Python identity per live entry.
     proxies: RefCell<HashMap<Mob, Py<PyAny>, ByAddress>>,
     /// Bumped by every `register_proxy`, so a reseated handle→proxy mapping
@@ -1289,6 +1293,12 @@ struct PyScene {
     /// The last render's frame routes (fm-sq8.11).
     render_routes: PortalRoutes,
     render_tuning: Option<portal_autotune::Report>,
+}
+
+struct FrameStepContext {
+    delta: Py<PyAny>,
+    frames: i64,
+    fps: u32,
 }
 
 /// Why a stage cannot take Lumen's retained planar route, or `None` when it
@@ -8430,6 +8440,14 @@ fn update_targets(scene: &Bound<'_, PyScene>) -> Vec<Mob> {
 }
 
 fn run_proxy_updaters(proxy: &Bound<'_, PyAny>, dt: f64) -> PyResult<()> {
+    let delta = dt.into_pyobject(proxy.py())?.into_any();
+    run_proxy_updaters_with_delta(proxy, &delta)
+}
+
+fn run_proxy_updaters_with_delta(
+    proxy: &Bound<'_, PyAny>,
+    delta: &Bound<'_, PyAny>,
+) -> PyResult<()> {
     let py = proxy.py();
     crossing::record(CrossingClass::Other);
     let updaters = proxy.getattr("updaters")?;
@@ -8439,10 +8457,7 @@ fn run_proxy_updaters(proxy: &Bound<'_, PyAny>, dt: f64) -> PyResult<()> {
         .collect::<PyResult<_>>()?;
     for updater in snapshot {
         crossing::record(CrossingClass::UpdaterCall);
-        let args = PyTuple::new(
-            py,
-            [updater.bind(py).clone(), dt.into_pyobject(py)?.into_any()],
-        )?;
+        let args = PyTuple::new(py, [updater.bind(py).clone(), delta.clone()])?;
         method_cache::call_cached1(proxy, "_dispatch_updater", &args)?;
     }
     Ok(())
@@ -8456,6 +8471,14 @@ fn run_proxy_updaters(proxy: &Bound<'_, PyAny>, dt: f64) -> PyResult<()> {
 /// is listed, as in the Reference's `Scene.mobjects`, and not updated once
 /// `clear()`/`remove()` has dropped it.
 fn run_python_updaters(scene: &Bound<'_, PyScene>, dt: f64) -> PyResult<u64> {
+    let delta = dt.into_pyobject(scene.py())?.into_any();
+    run_python_updaters_with_delta(scene, &delta)
+}
+
+fn run_python_updaters_with_delta(
+    scene: &Bound<'_, PyScene>,
+    delta: &Bound<'_, PyAny>,
+) -> PyResult<u64> {
     let targets = update_targets(scene);
     let py = scene.py();
     let python_start = Instant::now();
@@ -8463,7 +8486,7 @@ fn run_python_updaters(scene: &Bound<'_, PyScene>, dt: f64) -> PyResult<u64> {
         let Some(proxy) = live_proxy(py, scene, target) else {
             continue;
         };
-        run_proxy_updaters(&proxy, dt)?;
+        run_proxy_updaters_with_delta(&proxy, delta)?;
     }
     Ok(u64::try_from(python_start.elapsed().as_nanos()).unwrap_or(u64::MAX))
 }
@@ -8803,6 +8826,7 @@ impl PyScene {
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
         Ok(Self {
             engine: Rc::new(EngineState::new(runtime)),
+            frame_step_context: None,
             proxies: RefCell::new(HashMap::default()),
             proxy_generation: Cell::new(0),
             roots_projection: RefCell::new(None),
@@ -9373,6 +9397,15 @@ impl PyScene {
         self.engine.borrow().fps()
     }
 
+    /// Internal provenance for the active native updater delta. Callers
+    /// compare the float token by identity; ordinary authored seconds do
+    /// not acquire frame semantics merely because their values are equal.
+    fn _frame_step_context(&self, py: Python<'_>) -> Option<(Py<PyAny>, i64, u32)> {
+        self.frame_step_context
+            .as_ref()
+            .map(|context| (context.delta.clone_ref(py), context.frames, context.fps))
+    }
+
     /// Elapsed frames on the native scene clock, including skipped segments.
     /// Render reports independently count the frames actually emitted.
     fn get_frame_count(&self) -> i64 {
@@ -9751,15 +9784,16 @@ impl PyScene {
             crossing::record(CrossingClass::MethodDispatch);
             callback.bind(slf.py()).call_method0("begin")?;
         }
-        let (animations, start_time) = {
+        let (animations, start_time, start_frame) = {
             let mut scene = engine.borrow_mut();
             let start_time = scene.stage().time();
+            let start_frame = scene.time().frames();
             let mut animations: Vec<Box<dyn fmn_anim::Animation>> =
                 Vec::with_capacity(resolved.len());
             for spec in resolved {
                 animations.push(build_native_animation(scene.stage_mut(), spec)?);
             }
-            (animations, start_time)
+            (animations, start_time, start_frame)
         };
         let effective_run_time = run_time_frames.map_or_else(
             || run_time.unwrap_or(fmn_anim::DEFAULT_ANIMATION_RUN_TIME),
@@ -9774,7 +9808,9 @@ impl PyScene {
                     end_points: target.borrow().points(slf.py())?,
                     core: live.unbind(),
                     start_time,
+                    start_frame,
                     run_time: effective_run_time,
+                    run_time_frames,
                     rate: overrides.rate_func.clone().unwrap_or_default(),
                 })
             })
@@ -9850,9 +9886,12 @@ impl PyScene {
                         let Some(release) = release else {
                             break;
                         };
-                        sink.apply_camera_before_updaters(slf.py(), release.time.to_f64())?;
-                        let (python_ns, completed) =
-                            portal_playback::run_scene_update_phase(slf, release.dt)?;
+                        sink.apply_camera_before_updaters(slf.py(), release.time)?;
+                        let (python_ns, completed) = portal_playback::run_scene_frame_update_phase(
+                            slf,
+                            release.dt,
+                            release.time.fps(),
+                        )?;
                         if completed {
                             wait.mark_scene_updaters_complete().map_err(scene_error)?;
                         }
@@ -9925,24 +9964,11 @@ impl PyScene {
                                 continue;
                             };
                             crossing::record(CrossingClass::MethodDispatch);
-                            if callback.bind(slf.py()).hasattr("update_mobjects")? {
-                                callback
-                                    .bind(slf.py())
-                                    .call_method1("update_mobjects", (animation.dt,))?;
-                            }
-                            let callback = callback.bind(slf.py());
-                            if callback.hasattr("_fmn_interpolate_at_frame")? {
-                                callback.call_method1(
-                                    "_fmn_interpolate_at_frame",
-                                    (
-                                        animation.sample.frame as f64,
-                                        animation.sample.time.fps(),
-                                        animation.alpha,
-                                    ),
-                                )?;
-                            } else {
-                                callback.call_method1("interpolate", (animation.alpha,))?;
-                            }
+                            portal_playback::run_animation_frame_phase(
+                                slf,
+                                callback.bind(slf.py()),
+                                &animation,
+                            )?;
                         }
                     }
                     let release = engine
@@ -9952,9 +9978,12 @@ impl PyScene {
                     let Some(release) = release else {
                         break;
                     };
-                    sink.apply_camera_before_updaters(slf.py(), release.time.to_f64())?;
-                    let (python_ns, completed) =
-                        portal_playback::run_scene_update_phase(slf, release.dt)?;
+                    sink.apply_camera_before_updaters(slf.py(), release.time)?;
+                    let (python_ns, completed) = portal_playback::run_scene_frame_update_phase(
+                        slf,
+                        release.dt,
+                        release.time.fps(),
+                    )?;
                     if completed {
                         play.mark_scene_updaters_complete()
                             .map_err(&map_play_error)?;
@@ -10224,8 +10253,11 @@ impl PyScene {
                 };
                 // Reinspect at every release: a stop condition, callback or
                 // captured-frame observer can install a new update protocol.
-                let (python_ns, completed) =
-                    portal_playback::run_scene_update_phase(slf, release.dt)?;
+                let (python_ns, completed) = portal_playback::run_scene_frame_update_phase(
+                    slf,
+                    release.dt,
+                    release.time.fps(),
+                )?;
                 if completed {
                     wait.mark_scene_updaters_complete().map_err(scene_error)?;
                 }
@@ -10367,14 +10399,16 @@ impl PyNativeAnimationDriver {
             .map_or(Ok(()), |error| Err(anim_error(error)))
     }
 
-    fn _fmn_interpolate_at_frame(&mut self, frame: f64, fps: u32) -> PyResult<()> {
+    fn _fmn_interpolate_at_frame(&mut self, frame: &Bound<'_, PyAny>, fps: u32) -> PyResult<()> {
         if fps != self.engine.borrow().fps() {
             return Err(PyValueError::new_err(
                 "frame timing belongs to another scene grid",
             ));
         }
+        let position = frame_position_from_py(frame, fps)?;
         self.animation
-            .interpolate_at_frame(self.engine.borrow_mut().stage_mut(), frame, fps);
+            .interpolate_at_position(self.engine.borrow_mut().stage_mut(), &position, fps)
+            .map_err(anim_error)?;
         self.animation
             .deferred_error()
             .map_or(Ok(()), |error| Err(anim_error(error)))
@@ -11305,8 +11339,24 @@ struct CameraLerp {
     start_points: [[f64; 3]; 5],
     end_points: [[f64; 3]; 5],
     start_time: f64,
+    start_frame: i64,
     run_time: f64,
+    run_time_frames: Option<u64>,
     rate: fmn_anim::RateFunc,
+}
+
+/// Frame-authored camera tracks use local integer differences even after a
+/// very long scene. Absolute float seconds can no longer distinguish those
+/// samples once the clock has advanced past the f64 integer precision range.
+fn camera_frame_alpha(frame: i64, start: i64, frames: u64) -> f64 {
+    let elapsed = i128::from(frame) - i128::from(start);
+    if frames == 0 || elapsed >= i128::from(frames) {
+        1.0
+    } else if elapsed <= 0 {
+        0.0
+    } else {
+        (elapsed as f64 / frames as f64).min(1.0_f64.next_down())
+    }
 }
 
 impl CameraLerp {
@@ -11377,26 +11427,32 @@ impl PortalSceneSink {
             // A construct-only run observes the same exact nominal samples
             // without cloning an arena whose geometry nobody consumes.
             Python::attach(|py| {
-                if let Err(error) = self.apply_camera_at_time(py, metadata.time().to_f64()) {
+                if let Err(error) = self.apply_camera_at_time(py, metadata.time()) {
                     self.camera_error = Some(error);
                 }
             });
         }
     }
 
-    fn apply_camera_at_time(&self, py: Python<'_>, time: f64) -> PyResult<()> {
+    fn apply_camera_at_time(&self, py: Python<'_>, time: fmn_anim::RationalTime) -> PyResult<()> {
         let Some(camera) = &self.camera else {
             return Ok(());
         };
-        let raw = if camera.run_time > 0.0 {
-            (time - camera.start_time) / camera.run_time
+        let raw = if let Some(frames) = camera.run_time_frames {
+            camera_frame_alpha(time.frames(), camera.start_frame, frames)
+        } else if camera.run_time > 0.0 {
+            (time.to_f64() - camera.start_time) / camera.run_time
         } else {
             1.0
         };
         camera.apply(py, raw)
     }
 
-    fn apply_camera_before_updaters(&mut self, py: Python<'_>, time: f64) -> PyResult<()> {
+    fn apply_camera_before_updaters(
+        &mut self,
+        py: Python<'_>,
+        time: fmn_anim::RationalTime,
+    ) -> PyResult<()> {
         self.apply_camera_at_time(py, time)?;
         self.camera_preapplied = true;
         Ok(())
@@ -12878,10 +12934,80 @@ fn _composition_intervals(run_times: Vec<f64>, lag_ratio: f64) -> Vec<(f64, f64)
         .collect()
 }
 
+/// An opaque exact position on one scene's frame grid. Host callbacks keep
+/// this token between nested compositions and convert only visual alphas.
+#[pyclass(frozen, unsendable, skip_from_py_object, name = "_FramePosition")]
+#[derive(Clone)]
+struct PyFramePosition {
+    position: fmn_anim::FramePosition,
+    fps: u32,
+}
+
+#[pymethods]
+impl PyFramePosition {
+    fn __float__(&self) -> f64 {
+        self.position.to_f64()
+    }
+
+    fn __copy__(&self) -> Self {
+        self.clone()
+    }
+
+    fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
+        self.clone()
+    }
+}
+
+fn frame_position_from_py(frame: &Bound<'_, PyAny>, fps: u32) -> PyResult<fmn_anim::FramePosition> {
+    if let Ok(position) = frame.extract::<PyRef<'_, PyFramePosition>>() {
+        if position.fps != fps {
+            return Err(PyValueError::new_err(
+                "frame position belongs to another scene grid",
+            ));
+        }
+        return Ok(position.position.clone());
+    }
+    if frame.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err(
+            "frame position must be numeric, not bool",
+        ));
+    }
+    if frame.is_instance_of::<PyInt>() {
+        return frame
+            .extract::<i64>()
+            .map(fmn_anim::FramePosition::from_frame);
+    }
+    fmn_anim::FramePosition::from_f64(frame.extract()?)
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+fn frame_ratio_integer(value: &Bound<'_, PyAny>) -> PyResult<(Vec<u8>, bool)> {
+    if value.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err(
+            "frame ratio requires integers, not bool",
+        ));
+    }
+    let value = value.call_method0("__index__")?;
+    let negative = value.lt(0)?;
+    let magnitude = if negative {
+        value.call_method0("__abs__")?
+    } else {
+        value
+    };
+    let bits = magnitude.call_method0("bit_length")?.extract::<usize>()?;
+    if bits > fmn_anim::FramePosition::MAX_RATIO_BYTES * 8 {
+        return Err(PyOverflowError::new_err(
+            "frame position exceeds the exact arithmetic budget",
+        ));
+    }
+    let bytes = magnitude.call_method1("to_bytes", (bits.div_ceil(8).max(1), "little"))?;
+    Ok((bytes.cast::<PyBytes>()?.as_bytes().to_vec(), negative))
+}
+
 /// Exact duration for a Python lifecycle slot. Choreo's own composition
 /// constructors resolve this value; Python receives seconds only for its
 /// interpolation callbacks and returns the opaque value for scheduling.
-#[pyclass(frozen, unsendable, name = "_FrameTiming")]
+#[pyclass(frozen, unsendable, skip_from_py_object, name = "_FrameTiming")]
 #[derive(Clone)]
 struct PyFrameTiming {
     duration: fmn_anim::FrameDuration,
@@ -12904,6 +13030,11 @@ impl PyFrameTiming {
 #[pymethods]
 impl PyFrameTiming {
     #[getter]
+    fn fps(&self) -> u32 {
+        self.fps
+    }
+
+    #[getter]
     fn seconds(&self) -> f64 {
         self.duration.to_seconds()
     }
@@ -12920,6 +13051,13 @@ impl PyFrameTiming {
             .is_some_and(fmn_anim::CompositionTiming::is_frame_native)
     }
 
+    #[getter]
+    fn exact_positions(&self) -> bool {
+        self.composition
+            .as_ref()
+            .is_some_and(fmn_anim::CompositionTiming::uses_exact_positions)
+    }
+
     fn __copy__(&self) -> Self {
         self.clone()
     }
@@ -12933,6 +13071,40 @@ impl PyFrameTiming {
         self.duration
             .n_frames()
             .map_err(|error| PyOverflowError::new_err(error.to_string()))
+    }
+
+    #[getter]
+    fn duration_ratio(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
+        let (numerator, denominator) = self.duration.ratio_parts();
+        let integer = py.get_type::<PyInt>();
+        Ok((
+            integer
+                .call_method1("from_bytes", (PyBytes::new(py, &numerator), "little"))?
+                .unbind(),
+            integer
+                .call_method1("from_bytes", (PyBytes::new(py, &denominator), "little"))?
+                .unbind(),
+        ))
+    }
+
+    fn position_from_ratio(
+        &self,
+        numerator: &Bound<'_, PyAny>,
+        denominator: &Bound<'_, PyAny>,
+        fps: u32,
+    ) -> PyResult<PyFramePosition> {
+        self.require_grid(fps)?;
+        let (numerator, negative) = frame_ratio_integer(numerator)?;
+        let (denominator, denominator_negative) = frame_ratio_integer(denominator)?;
+        if denominator_negative || denominator.iter().all(|byte| *byte == 0) {
+            return Err(PyValueError::new_err(
+                "frame ratio denominator must be positive",
+            ));
+        }
+        let position =
+            fmn_anim::FramePosition::from_ratio_bytes(&numerator, &denominator, negative)
+                .map_err(|error| PyOverflowError::new_err(error.to_string()))?;
+        Ok(PyFramePosition { position, fps })
     }
 
     #[getter]
@@ -12953,9 +13125,12 @@ impl PyFrameTiming {
             .map(fmn_anim::CompositionTiming::max_end)
     }
 
-    fn alpha_at_frame(&self, frame: f64, fps: u32) -> PyResult<f64> {
+    fn alpha_at_frame(&self, frame: &Bound<'_, PyAny>, fps: u32) -> PyResult<f64> {
         self.require_grid(fps)?;
-        Ok(self.state.frame_alpha(frame, fps))
+        let position = frame_position_from_py(frame, fps)?;
+        self.state
+            .frame_alpha_at_position(&position, fps)
+            .map_err(|error| PyOverflowError::new_err(error.to_string()))
     }
 
     fn position_at_frame(&self, frame: f64, fps: u32) -> PyResult<Option<f64>> {
@@ -12966,12 +13141,89 @@ impl PyFrameTiming {
             .map(|timing| timing.position_at_frame(frame, fps)))
     }
 
-    fn rate_alpha_at_frame(&self, frame: f64, fps: u32) -> PyResult<Option<f64>> {
+    fn rate_alpha_at_frame(&self, frame: &Bound<'_, PyAny>, fps: u32) -> PyResult<Option<f64>> {
         self.require_grid(fps)?;
-        Ok(self
+        let position = frame_position_from_py(frame, fps)?;
+        self.composition
+            .as_ref()
+            .map(|timing| {
+                if timing.uses_exact_positions() {
+                    timing
+                        .rate_alpha_at_position(&position, fps)
+                        .map_err(anim_error)
+                } else {
+                    Ok(timing.rate_alpha_at_frame(position.to_f64(), fps))
+                }
+            })
+            .transpose()
+    }
+
+    fn exact_position_at_frame(
+        &self,
+        frame: &Bound<'_, PyAny>,
+        fps: u32,
+    ) -> PyResult<PyFramePosition> {
+        self.require_grid(fps)?;
+        let position = frame_position_from_py(frame, fps)?;
+        let composition = self
             .composition
             .as_ref()
-            .map(|timing| timing.rate_alpha_at_frame(frame, fps)))
+            .ok_or_else(|| PyValueError::new_err("animation has no composition timing"))?;
+        Ok(PyFramePosition {
+            position: composition
+                .position_at_position(&position, fps)
+                .map_err(anim_error)?,
+            fps,
+        })
+    }
+
+    fn position_from_rate_alpha(&self, alpha: f64) -> PyResult<PyFramePosition> {
+        let composition = self
+            .composition
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("animation has no composition timing"))?;
+        Ok(PyFramePosition {
+            position: composition
+                .position_from_rate_alpha(alpha)
+                .map_err(anim_error)?,
+            fps: self.fps,
+        })
+    }
+
+    fn member_at_position(&self, position: &Bound<'_, PyAny>) -> PyResult<Option<usize>> {
+        let position = frame_position_from_py(position, self.fps)?;
+        let composition = self
+            .composition
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("animation has no composition timing"))?;
+        composition
+            .member_at_position(&position)
+            .map_err(anim_error)
+    }
+
+    fn child_sample_at_position(
+        &self,
+        index: usize,
+        position: &Bound<'_, PyAny>,
+    ) -> PyResult<(f64, Option<PyFramePosition>)> {
+        let position = frame_position_from_py(position, self.fps)?;
+        let composition = self
+            .composition
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("animation has no composition timing"))?;
+        let alpha = composition
+            .sub_alpha_at_position(index, &position)
+            .map_err(anim_error)?;
+        let local = composition
+            .interior_frame_at_position(index, &position)
+            .map_err(anim_error)?;
+        Ok((
+            alpha,
+            local.map(|position| PyFramePosition {
+                position,
+                fps: self.fps,
+            }),
+        ))
     }
 }
 

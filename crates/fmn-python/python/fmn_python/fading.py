@@ -105,7 +105,7 @@ def install_fading(native: Any) -> None:
         self._ensure_runtime_defaults()
         self.init_path_func()
         if self.time_span is not None:
-            self.run_time = max(self.run_time, float(self.time_span[1]))
+            object.__setattr__(self, "run_time", max(self.run_time, float(self.time_span[1])))
         self._fade_active, self._fade_finished, self._fade_cleaned = True, False, False
         self.mobject_was_updating = False
         try:

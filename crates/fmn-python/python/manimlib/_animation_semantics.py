@@ -121,7 +121,7 @@ def install(native, subsystems=True):
                 animation._fmn_frame_timing = timing
                 animation._fmn_frame_descriptor = descriptor
                 if descriptor[1] is not None or (is_group and getattr(animation, "_fmn_derived_run_time", False)):
-                    animation.run_time = timing.seconds
+                    object.__setattr__(animation, "run_time", timing.seconds)
                 if is_group:
                     previous = tuple((id(member), start, end)
                                      for member, start, end in animation.anims_with_timings)
@@ -338,6 +338,20 @@ def install(native, subsystems=True):
         if not isinstance(mobject, Mobject):
             raise TypeError("Animation only works for Mobjects.")
 
+    def animation_setattr(self, name, value):
+        if name == "run_time":
+            # Public assignment has always authored seconds. In particular,
+            # assigning the same numeric value as a prior frame projection
+            # must still choose seconds; value comparison cannot detect it.
+            object.__setattr__(self, "run_time_frames", None)
+            object.__setattr__(self, "_fmn_derived_run_time", False)
+            own = object.__getattribute__(self, "__dict__")
+            for key in ("_fmn_frame_timing", "_fmn_frame_descriptor", "_fmn_timing_fps"):
+                own.pop(key, None)
+        elif name == "run_time_frames" and value is not None:
+            object.__setattr__(self, "_fmn_derived_run_time", False)
+        object.__setattr__(self, name, value)
+
     def animation_init(
         self,
         mobject,
@@ -375,7 +389,7 @@ def install(native, subsystems=True):
 
     def ensure_runtime_defaults(self):
         if self.run_time is None:
-            self.run_time = 1.0
+            object.__setattr__(self, "run_time", 1.0)
         if self.rate_func is None:
             self.rate_func = g.get("smooth", smooth_rate)
         if self.lag_ratio is None:
@@ -424,7 +438,7 @@ def install(native, subsystems=True):
     def animation_begin(self):
         self._ensure_runtime_defaults()
         if self.time_span is not None:
-            self.run_time = max(float(self.time_span[1]), self.run_time)
+            object.__setattr__(self, "run_time", max(float(self.time_span[1]), self.run_time))
         self.mobject.set_animating_status(True)
         self.starting_mobject = self.create_starting_mobject()
         # Duck-typed animations driven through this begin need not carry
@@ -449,9 +463,12 @@ def install(native, subsystems=True):
         return copy_module.deepcopy(self)
 
     def update_rate_info(self, run_time=None, rate_func=None, lag_ratio=None):
-        self.run_time = run_time or self.run_time
-        self.rate_func = rate_func or self.rate_func
-        self.lag_ratio = lag_ratio or self.lag_ratio
+        if run_time is not None:
+            self.run_time = run_time
+        if rate_func is not None:
+            self.rate_func = rate_func
+        if lag_ratio is not None:
+            self.lag_ratio = lag_ratio
         return self
 
     def animation_interpolate(self, alpha):
@@ -467,8 +484,13 @@ def install(native, subsystems=True):
         """
         timing = getattr(self, "_fmn_frame_timing", None)
         if alpha is None:
-            alpha = (timing.alpha_at_frame(frame, fps) if timing is not None
-                     else (frame / fps) / self.get_run_time())
+            if timing is not None:
+                alpha = timing.alpha_at_frame(frame, fps)
+            else:
+                seconds = float(frame) / fps
+                duration = self.get_run_time()
+                alpha = ((1.0 if seconds > 0.0 else 0.0) if duration == 0.0
+                         else seconds / duration)
         absent = object()
         previous = self.__dict__.get("_fmn_frame_sample", absent)
         self._fmn_frame_sample = (frame, fps, alpha)
@@ -750,6 +772,7 @@ def install(native, subsystems=True):
 
     Mobject.__str__ = mobject_str
     Mobject.interpolate = mobject_interpolate
+    Animation.__setattr__ = animation_setattr
     Animation.__init__ = animation_init
     Animation._validate_input_type = validate_input_type
     Animation._ensure_runtime_defaults = ensure_runtime_defaults

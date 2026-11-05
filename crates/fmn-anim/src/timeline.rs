@@ -198,12 +198,12 @@ pub struct PlannedSegment {
 impl PlannedSegment {
     /// Raw sample alpha with the same unit boundary as Choreo's driver.
     /// Seconds retain their original division order; frame-native samples
-    /// divide the integer frame index by the exact duration converted once.
+    /// compare against the exact duration before projecting their ratio.
     #[must_use]
     pub fn sample_alpha(&self, frame: i64, fps: u32) -> f64 {
         self.frame_duration.as_ref().map_or_else(
             || (frame as f64 / f64::from(fps)) / self.run_time,
-            |duration| frame as f64 / duration.frame_units(),
+            |duration| duration.sample_alpha(frame),
         )
     }
 
@@ -253,7 +253,8 @@ fn decoded_clock_error(error: ClockError) -> TimelineError {
         ClockError::InvalidFrameLag
         | ClockError::DurationComplexity
         | ClockError::NonCanonicalDuration
-        | ClockError::FrameRateMismatch => TimelineError::Malformed("segment exact duration"),
+        | ClockError::FrameRateMismatch
+        | ClockError::ZeroPositionDenominator => TimelineError::Malformed("segment exact duration"),
     }
 }
 

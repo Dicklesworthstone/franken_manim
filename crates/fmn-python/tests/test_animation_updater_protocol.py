@@ -4,6 +4,7 @@ import copy
 import importlib.util
 import math
 import operator
+from fractions import Fraction
 from pathlib import Path
 import sys
 import types
@@ -61,6 +62,8 @@ def environment():
             return self
         def _is_updating_suspended(self):
             return self.suspended
+        def _is_bound(self):
+            return self._scene is not None
         def suspend_updating(self, recurse=True):
             for member in self.get_family() if recurse else [self]:
                 member.suspended = True
@@ -97,7 +100,7 @@ def environment():
     install = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "install")
     functions = {node.name:node for node in install.body if isinstance(node, ast.FunctionDef)}
     mapping = {
-        "__init__":"animation_init", "_validate_input_type":"validate_input_type",
+        "__setattr__":"animation_setattr", "__init__":"animation_init", "_validate_input_type":"validate_input_type",
         "_ensure_runtime_defaults":"ensure_runtime_defaults", "begin":"animation_begin",
         "finish":"animation_finish", "create_starting_mobject":"create_starting_mobject",
         "get_all_mobjects":"get_all_mobjects", "get_all_families_zipped":"get_all_families_zipped",
@@ -105,6 +108,7 @@ def environment():
         "interpolate":"animation_interpolate", "interpolate_mobject":"interpolate_mobject",
         "interpolate_submobject":"interpolate_submobject", "time_spanned_alpha":"time_spanned_alpha",
         "get_sub_alpha":"get_sub_alpha", "get_run_time":"get_run_time", "update_rate_info":"update_rate_info",
+        "_fmn_interpolate_at_frame":"interpolate_at_frame",
     }
     for name, function in mapping.items():
         exec(compile(ast.Module([functions[function]], []), str(source), "exec"), g)
@@ -338,6 +342,193 @@ class PersistentProtocolTests(unittest.TestCase):
             native.turn_animation_into_updater = replacement
             adapter.install_animation_updaters(native)
             self.assertIs(native.turn_animation_into_updater, replacement)
+
+
+class ExactFramePersistentProtocolTests(unittest.TestCase):
+    """Exercise the production controller with explicit native timing/context fixtures."""
+
+    def setUp(self):
+        from test_scene_hooks_protocol import progression_environment
+        self.native = progression_environment()
+        adapter.install_animation_updaters(self.native)
+        self.scene = self.native.Scene()
+        self.mob = self.native.Mobject()
+        self.scene._adopt(self.mob)
+
+    def attach(self, frames=43, *, cycle=False, **kwargs):
+        animation = self.native.PerMember(self.mob, run_time_frames=frames, **kwargs)
+        self.native.turn_animation_into_updater(animation, cycle=cycle)
+        return animation
+
+    def step(self, *, frames=1):
+        dt = float(Fraction(frames, self.scene._frame_rate()))
+        previous = self.scene._step_context
+        self.scene._step_context = (dt, frames, self.scene._frame_rate())
+        try:
+            self.mob.update(dt)
+        finally:
+            self.scene._step_context = previous
+
+    def test_exact_frames_keep_sample_before_delta_and_finish_on_zero_boundary(self):
+        animation = self.attach()
+        animation.events.clear()
+        self.step()
+        self.assertEqual(self.mob.value, 0.)
+        self.assertEqual(animation.total_time, 1 / 24)
+        for _ in range(42):
+            self.step()
+        self.assertNotIn(("finish",), animation.events)
+        self.assertEqual(animation.total_time, 43 / 24)
+        self.mob.update(0.)
+        self.assertEqual(animation.events.count(("finish",)), 1)
+        self.assertEqual(self.mob.value, 1.)
+        self.assertEqual(self.mob.updaters, [])
+
+    def test_consuming_frame_rates_do_not_change_the_authored_count(self):
+        for fps in (7, 24, 25, 30, 60):
+            self.scene = self.native.Scene(fps)
+            self.mob = self.native.Mobject()
+            self.scene._adopt(self.mob)
+            animation = self.attach()
+            for _ in range(43):
+                self.step()
+            self.mob.update(0.)
+            self.assertEqual(animation.total_time, 43 / fps)
+            self.assertEqual(animation.events.count(("finish",)), 1)
+
+    def test_equal_float_manual_deltas_are_not_misclassified_as_frame_steps(self):
+        animation = self.attach()
+        native_dt = float(Fraction(1, 24))
+        manual_dt = float(str(native_dt))
+        self.assertEqual(manual_dt, native_dt)
+        self.assertIsNot(manual_dt, native_dt)
+        self.scene._step_context = (native_dt, 1, 24)
+        for _ in range(43):
+            self.mob.update(manual_dt)
+        self.scene._step_context = None
+        self.mob.update(0.)
+        # The literal binary64 1/24 is below the rational frame step.
+        self.assertLess(Fraction.from_float(manual_dt) * 43, Fraction(43, 24))
+        self.assertNotIn(("finish",), animation.events)
+        self.mob.update(1e-12).update(0.)
+        self.assertEqual(animation.events.count(("finish",)), 1)
+
+    def test_camera_clock_deferred_helpers_keep_exact_frame_steps(self):
+        source = ROOT / "python/manimlib/_animation_semantics.py"
+        tree = ast.parse(source.read_text())
+        clock = next(node for node in ast.walk(tree)
+                     if isinstance(node, ast.ClassDef) and node.name == "ClockDriver")
+        scope = {"math": math, "g": {"_SceneCore": types.SimpleNamespace(remove=lambda *args: None)}}
+        # Execute only the fixed repository class in this source-protocol fixture.
+        exec(compile(ast.Module([clock], []), str(source), "exec"), scope)
+        animation = self.attach()
+        anchor = self.mob
+
+        class Child:
+            def get_run_time(self):
+                return animation.get_run_time()
+
+            def update_mobjects(self, dt):
+                anchor.update(dt)
+
+            def _fmn_interpolate_at_frame(self, frame, fps):
+                pass
+
+        child = Child()
+        driver = scope["ClockDriver"](self.scene, None, [child], [animation])
+        driver._fmn_frame_timing = object()
+        for frame in range(1, 44):
+            dt = float(Fraction(1, 24))
+            previous = self.scene._step_context
+            self.scene._step_context = (dt, 1, 24)
+            try:
+                driver.update_mobjects(dt)
+                # The real child update occurs during interpolation, after
+                # ClockDriver.update_mobjects has only stored this same dt.
+                driver._fmn_interpolate_at_frame(frame, 24, frame / 43)
+            finally:
+                self.scene._step_context = previous
+        self.assertEqual(animation.total_time, 43 / 24)
+        self.assertNotIn(("finish",), animation.events)
+        self.mob.update(0.)
+        self.assertEqual(animation.events.count(("finish",)), 1)
+        self.assertEqual(self.mob.value, 1.)
+
+    def test_irregular_manual_and_negative_seconds_keep_their_values(self):
+        animation = self.attach()
+        elapsed = Fraction(0)
+        for dt in (.1, 0., -.025, .3):
+            self.mob.update(dt)
+            elapsed += Fraction.from_float(dt)
+        self.mob.update(0.)
+        self.assertEqual(animation.total_time, float(elapsed))
+        self.assertEqual(self.mob.value, float(elapsed / Fraction(43, 24)))
+
+    def test_cycling_uses_exact_modulo_at_long_sequence_boundaries(self):
+        animation = self.attach(cycle=True)
+        for _ in range(43 * 20):
+            self.step()
+        self.mob.update(0.)
+        self.assertEqual(animation.total_time, 860 / 24)
+        self.assertEqual(self.mob.value, 0.)
+        self.assertNotIn(("finish",), animation.events)
+
+    def test_zero_frames_and_widening_keep_their_lifecycles(self):
+        zero = self.attach(frames=0)
+        self.assertEqual(zero.events.count(("finish",)), 1)
+        self.assertEqual(zero.total_time, 0.)
+        self.assertEqual(self.mob.updaters, [])
+        with self.assertRaisesRegex(ValueError, "positive"):
+            self.attach(frames=0, cycle=True)
+        widened = self.attach(frames=0, time_span=(0., .5))
+        for _ in range(12):
+            self.step()
+        self.mob.update(0.)
+        self.assertEqual(widened.events.count(("finish",)), 1)
+        self.assertEqual(widened.total_time, .5)
+
+    def test_unowned_frame_animation_waits_for_its_consuming_scene(self):
+        self.mob = self.native.Mobject()
+        animation = self.attach()
+        self.assertEqual(animation.events, [])
+        self.mob.update(0.)
+        with self.assertRaisesRegex(RuntimeError, "Scene adoption"):
+            self.mob.update(.1)
+        self.assertEqual(len(self.mob.updaters), 1)
+        self.scene = self.native.Scene(25)
+        self.scene._adopt(self.mob)
+        self.step()
+        self.assertEqual(animation.run_time, 43 / 25)
+        self.assertEqual(animation.total_time, 1 / 25)
+
+    def test_live_frame_runtime_edit_rebinds_without_losing_elapsed_time(self):
+        animation = self.attach(frames=3)
+        for _ in range(3):
+            self.step()
+        animation.run_time_frames = 5
+        self.mob.update(0.)
+        self.assertEqual(self.mob.value, .6)
+        for _ in range(2):
+            self.step()
+        self.mob.update(0.)
+        self.assertEqual(animation.events.count(("finish",)), 1)
+        self.assertEqual(animation.total_time, 5 / 24)
+
+    def test_equal_seconds_assignment_changes_units_during_a_frame_animation(self):
+        self.scene = self.native.Scene(30)
+        self.scene._adopt(self.mob)
+        animation = self.attach(frames=3)
+        for _ in range(3):
+            self.step()
+        self.assertEqual(animation.run_time, .1)
+        animation.run_time = .1
+        self.mob.update(0.)
+        self.assertIsNone(animation.run_time_frames)
+        self.assertNotIn(("finish",), animation.events)
+        self.step()
+        self.mob.update(0.)
+        self.assertEqual(animation.events.count(("finish",)), 1)
+        self.assertEqual(animation.total_time, 4 / 30)
 
 
 if __name__ == "__main__":

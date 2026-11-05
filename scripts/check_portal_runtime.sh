@@ -58,6 +58,10 @@ print(f"installed-wheel acceptance passed: {suite.name}")
 PY
 done
 
+# Exact frame allocation, mixed timing, native output counts and audio cues.
+python3 crates/fmn-python/tests/exact_frame_durations.py
+python3 crates/fmn-python/tests/exact_frame_composition_positions.py
+
 # These suites start their tests only under `if __name__ == "__main__"`, so
 # they run directly; the loop above refuses such a suite.
 python3 crates/fmn-python/tests/surface_alignment.py

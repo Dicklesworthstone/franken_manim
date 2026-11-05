@@ -89,6 +89,19 @@ The native Rust equivalents are `Stage::wait_frames(u64)`,
 `Timeline::wait_frames(n)` retains the exact count in its compiled schedule.
 At the clock layer, use `segment_frames(n)` or `segment(Duration::Frames(n))`.
 
+Resumable Studio programs use `NativeSegment::WaitFrames { frames: n }`.
+They retain the frame count through pausing and forward seeks, using the same
+stepped driver as ordinary scene waits. `NativeSegment::Play` accepts
+`PlayOverrides::run_time_frames` for animation durations.
+
+Python's public progression helpers also accept explicit frame counts:
+`get_time_progression(run_time_frames=n)` and
+`get_wait_time_progression(run_time_frames=n)`. The animation progression
+helper binds frame-authored animations to the consuming scene's rate and
+uses their integer frame counts. Its sample positions derive from integer
+indices; dividing a frame-authored runtime into float seconds and passing it
+to `arange` would reintroduce the original boundary error.
+
 Frames refer to the scene's **active** frame rate, including its windowed
 frame-rate setting. An exact finite wait bypasses presenter-controlled holds.
 Zero frames perform the normal segment lifecycle without a progression frame
@@ -100,7 +113,10 @@ Python frame values must be nonnegative integers (including integer objects
 supporting `__index__`); booleans and floating-point values are refused.
 Supplying both `run_time` and `run_time_frames` to one Python operation,
 animation builder, or play override is an error. A later seconds override
-clears an earlier frame override.
+clears an earlier frame override. Direct assignment to Python `animation.run_time`
+also authors seconds, including assignment of the same numeric value as a
+previous frame-to-seconds projection. Internal duration projections preserve
+the original authored units.
 
 Groups containing frame-native children derive their extent in exact frame
 units, including mixed seconds/frame children and nested groups. Members are
@@ -111,13 +127,25 @@ retain their existing floating-point interval arithmetic and operation order.
 An explicit group duration scales its internal timeline as before, and
 `time_span` keeps its existing duration-widening semantics.
 
+Frame-native composition retains exact rational positions through child
+selection, nested retiming, native and Python callbacks, and frozen rendering.
+For example, a `43 / 24` second child followed by a one-frame child at 24 FPS
+has its first endpoint at `43 + 2^-49` frame units. The second child begins
+at sample 44, although the endpoint's float projection is `43.0`. Integer
+positions above `2^53` also remain distinguishable. Float interval tables are
+inspection values; only interpolation alphas and authored rate-function
+inputs/outputs use floats. Exact arithmetic has a bounded precision budget
+and reports a named error instead of silently rounding a scheduling boundary.
+
 `ChangeSpeed` accepts an explicit `run_time_frames` or `run_time` on the
 wrapper. These overrides set its duration while the speed profile still maps
 progress through its child. With a frame-timed child and no override, the
 profile's duration scale must be exactly representable as a finite binary64
 value. The native planner keeps the resulting frame extent exact. For example,
-twelve frames at constant speed two take six frames; fractional extents remain
-unrounded inside nested groups.
+twelve frames at constant speed two take six frames. A 43-frame child at speed
+two occupies 21.5 unrounded frames: it covers 22 frames alone, while two such
+wrappers in a succession cover 43 frames together. A wrapper's `time_span`
+widens the result after scaling.
 
 Profiles whose exact scale cannot be represented are refused before playback
 and request an explicit duration. A rounded reciprocal must not silently add
@@ -127,6 +155,15 @@ retains its existing floating-point profile calculation. In Rust,
 `AnimationGroup::with_duration_scale(factor)` scales a derived extent by the
 exact supplied binary64 factor; explicit seconds or frame overrides take
 precedence over that scale.
+
+Persistent animation helpers bind frame-authored animations to their owning
+scene before activation. Native updater steps contribute exact frame ticks
+while the public `dt` argument remains a normal Python float. A separately
+supplied seconds delta retains its binary floating-point meaning, even if it
+compares equal to a native step. The existing sample-before-delta lifecycle
+and seconds-only updater behavior remain intact. Frame-authored camera tracks
+likewise compute progress from local integer frame differences, so a large
+absolute scene time cannot erase small camera steps.
 
 Frame counts in segment and render reports remain authoritative integers.
 Their seconds fields are presentation values; passing such a value back to
@@ -140,6 +177,15 @@ without a per-operation `math.nextafter` workaround.
 - `crates/fmn-anim/src/clock.rs`; `crates/fmn-anim/tests/clock.rs`
   (count fixtures cross-checked against Python `fractions.Fraction` and
   the Reference's `arange` output, drift test, coverage property).
+- `crates/fmn-anim/tests/composition.rs` and `pure_frame_groups.rs`
+  cover mixed and large child boundaries, exact nested retiming, frozen
+  sampling, time-span widening and reuse on another frame grid.
+- `crates/fmn-python/tests/exact_frame_durations.py` and
+  `exact_frame_composition_positions.py` exercise the installed portal,
+  persistent helpers, native output counts, audio cues and exact callback
+  positions; both are registered in `scripts/check_portal_runtime.sh`.
+- `crates/fmn-studio/tests/native_animation.rs` compares ordinary playback
+  with pausing and forward seeking through frame-typed waits and plays.
 - Reference: `manimlib/scene/scene.py::get_time_progression` at the
   pinned commit.
 - The corpus differential counts each Reference segment by this rule

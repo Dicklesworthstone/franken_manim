@@ -230,7 +230,9 @@ def install_speed(native: Any) -> None:
         self._speed_child_duration = duration
         self._speed_child_frame_bound = False
         if requested_frames is None:
-            self.run_time = duration * profile.total_time if requested is None else requested
+            # This is a derived projection, not a public seconds assignment.
+            # Preserve the shared constructor's authored duration intent.
+            object.__setattr__(self, "run_time", duration * profile.total_time if requested is None else requested)
             if not math.isfinite(self.run_time) or (duration > 0.0 and requested is None and self.run_time == 0.0):
                 raise ValueError("ChangeSpeed produces an unrepresentable finite run_time")
         self._speed_phase = "new"

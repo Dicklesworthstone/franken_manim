@@ -34,6 +34,11 @@ pub enum NativeSegment {
         /// Duration in seconds; sampling stays on the Scene's rational grid.
         duration: Option<f64>,
     },
+    /// Wait for an exact number of frames on the consuming Scene's grid.
+    WaitFrames {
+        /// Authoritative frame count; no conversion through seconds occurs.
+        frames: u64,
+    },
     /// Run one-shot native construction after preceding segment epilogues.
     /// Prefer `defer`, `edit`, or `play_with` for ergonomic construction.
     Build {
@@ -457,6 +462,12 @@ impl NativeSceneProgram {
                         self.preview
                             .scene_mut()
                             .begin_stepped_wait(duration, &mut NullSceneSink)
+                            .map_err(execution_error)?,
+                    )),
+                    NativeSegment::WaitFrames { frames } => Some(ActiveSegment::Wait(
+                        self.preview
+                            .scene_mut()
+                            .begin_stepped_wait_frames(frames, &mut NullSceneSink)
                             .map_err(execution_error)?,
                     )),
                     NativeSegment::Build { build } => {

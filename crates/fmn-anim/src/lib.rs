@@ -77,8 +77,8 @@ pub use bundle::{
     rate_from_tag, rate_tag,
 };
 pub use clock::{
-    ClockError, Duration, FrameDuration, FrameSample, FrameSegment, RationalFrameClock,
-    RationalTime,
+    ClockError, Duration, FrameDuration, FramePosition, FrameSample, FrameSegment,
+    RationalFrameClock, RationalTime,
 };
 pub use composition::{
     AnimationGroup, CompositionTiming, DEFAULT_LAGGED_START_LAG_RATIO, Interval, Succession,

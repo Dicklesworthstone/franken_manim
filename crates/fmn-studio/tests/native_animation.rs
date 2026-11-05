@@ -138,6 +138,83 @@ fn rotation_then_wait_matches_every_ordinary_capture_and_final_runtime_state() {
 }
 
 #[test]
+fn frame_typed_native_programs_preserve_counts_across_pauses_and_forward_seeks() {
+    for fps in [24, 30] {
+        let overrides = PlayOverrides {
+            run_time_frames: Some(17),
+            ..PlayOverrides::default()
+        };
+        let (mut expected, root, expected_calls) = source(fps);
+        let mut captures = Captures::default();
+        expected.wait_frames(43, &mut captures).unwrap();
+        expected
+            .play(
+                vec![Box::new(rotate(root, PI))],
+                overrides.clone(),
+                &mut captures,
+            )
+            .unwrap();
+        expected.wait(Some(0.1), &mut captures).unwrap();
+        expected.wait_frames(0, &mut captures).unwrap();
+        let count = if fps == 24 { 63 } else { 64 };
+        assert_eq!(captures.0.len(), count);
+
+        for seek in [false, true] {
+            let (scene, root, calls) = source(fps);
+            let mut program = NativeSceneProgram::new(
+                scene,
+                vec![
+                    NativeSegment::WaitFrames { frames: 43 },
+                    NativeSegment::Play {
+                        animations: vec![Box::new(rotate(root, PI))],
+                        overrides: overrides.clone(),
+                    },
+                    NativeSegment::Wait {
+                        duration: Some(0.1),
+                    },
+                    NativeSegment::WaitFrames { frames: 0 },
+                ],
+                100,
+            )
+            .unwrap();
+            for (index, expected_packet) in captures.0.iter().enumerate() {
+                if seek && index % 3 != 0 {
+                    program.advance_to(index as u64 + 1).unwrap();
+                } else {
+                    let actual = program.next_frame().unwrap().unwrap();
+                    assert_eq!(actual.time(), expected_packet.time());
+                    assert_eq!(actual.alpha(), expected_packet.alpha());
+                    assert_eq!(actual.segment_frame(), expected_packet.segment_frame());
+                    assert_eq!(
+                        actual.materialize_stage().snapshot().to_bytes().unwrap(),
+                        expected_packet
+                            .materialize_stage()
+                            .snapshot()
+                            .to_bytes()
+                            .unwrap()
+                    );
+                }
+                if index + 1 == 43 {
+                    assert!(program.at_segment_boundary());
+                    let before = program.state_bytes().unwrap();
+                    program.advance_to(43).unwrap();
+                    assert_eq!(program.state_bytes().unwrap(), before);
+                }
+            }
+            assert!(program.next_frame().unwrap().is_none());
+            assert_eq!(program.frame_index(), count as u64);
+            assert_eq!(program.preview().scene().time().frames(), count as i64);
+            assert_eq!(program.preview().scene().play_count(), 4);
+            assert_eq!(calls.get(), expected_calls.get());
+            assert_eq!(
+                program.state_bytes().unwrap(),
+                expected.state_bytes().unwrap()
+            );
+        }
+    }
+}
+
+#[test]
 fn pausing_on_the_last_animation_capture_does_not_finalize_early() {
     let (scene, root, calls) = source(8);
     let mut program = NativeSceneProgram::new(
