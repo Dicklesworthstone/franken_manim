@@ -1,6 +1,30 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-run, 2026-11-05, against `Cargo.lock` `0b8d890a` and `SUITE.lock`
+**Status:** re-run, 2026-11-05, against `Cargo.lock` `0125bee5` and `SUITE.lock`
+`463ee0b7` (underline candidate and merged timing repair). The original locked
+normal tree, WASM target build and release Node smoke exit 0 on `vmi1227854`.
+All 4,411 product entries remain unchanged at
+`de20026c37c0027fb50354c309ec8147ea7f2806ab5f7313ba67a30bc78a4504`, as do
+19,163 SDK/test inputs and all audited scanner inputs. Execution is at
+`d33ad52f` plus the reviewed patch; native Git archive independently matches
+all those product bytes to subsequently observed commit `7096eeba`.
+
+Node `v22.22.1` retains digest `1f248a71347b82aa`,
+`process=capability-absent`, `topology=1-cpu`, `semantic_oracles=111111`,
+`mirrored=101000`. The normal tree still excludes native typography and Python.
+The fourth, unchanged package/browser command actually exits 1 because
+`wasm-pack` is unavailable. No package, browser, shared-memory or size result
+exists for this run. The whole four-command gate remains **failed**.
+
+Evidence: `.rch-results/fmn-execute-20261105-underline-consumer-wasm-v1-122/`
+in `/data/projects/franken_manim-underline-consumer-20261105`, DSR
+`20261105T151426-3973835/1`. Initial RCH retrieval stopped at its staging identity
+guard; normal recovery of `rchw-c9728a0b-392d-4293-b789-5d178cf36855` retrieved
+the original outputs and acknowledged terminal native exit 1 without replay.
+The earlier frontend-only phase-guard failure is retained separately.
+No assertion, golden, workload, budget or release gate was relaxed.
+
+Earlier re-run, 2026-11-05, against `Cargo.lock` `0b8d890a` and `SUITE.lock`
 `2783427a` (fm-sup-accented-nucleus-r12-a529 and fm-7ojgl). The locked
 normal tree, WASM target build and unchanged release Node smoke each exit 0
 through ordinary DSR/RCH on `vmi1153651`. All 4,410 product source files,
@@ -871,8 +895,8 @@ The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
-- `SUITE.lock` SHA-256: `2783427a393bdc89ca670dc5332bfd4158f1c2c59eaa85773753582d731cf1ff`
-- `Cargo.lock` SHA-256: `0b8d890ad5bf87a2cfdcb7aa63248002f84880232c0f6c90c95e2d24f3078487`
+- `SUITE.lock` SHA-256: `463ee0b730a1ceaa7acad9e0fe4b6636704e1409ae35353f61b3164aef2fec4f`
+- `Cargo.lock` SHA-256: `0125bee5c868cc181a620ae7cc754fef6cb7ee06880171f7c312a00ab3e3548e`
 - Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `93a7c2dc6acf3dfef88a4a490efbfda7970bd963b4740aa7f879a08fff395061`
 
 The earlier 0.5.0 release bump re-bound the lock identities at that revision.
