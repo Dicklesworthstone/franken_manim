@@ -444,6 +444,274 @@ fn adjacent_float_durations_straddle_the_exact_frame_boundary() {
     }
 }
 
+// Issue #10: these twenty alternating play/wait requests total 864 frames.
+// At 24 fps, expressing them as f64 seconds deliberately covers 872 frames.
+const ISSUE_10_FRAMES: [u64; 20] = [
+    43, 17, 61, 29, 101, 7, 55, 13, 89, 31, 47, 19, 73, 11, 37, 23, 67, 3, 97, 41,
+];
+
+struct FrameSequence<'a> {
+    frames: &'a [u64],
+    repeats: usize,
+    fps: u32,
+    seconds: bool,
+    serial: bool,
+}
+
+impl SceneConstruct for FrameSequence<'_> {
+    fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+        let square = stage.add(Square::new().side_length(0.8).color(WHITE))?;
+        stage.set_fill(square, Some(WHITE), Some(1.0), None, true);
+        if self.serial {
+            // The no-op dt updater requires the serial front-end path without
+            // changing any pixels relative to the pure worker reconstruction.
+            stage
+                .arena_mut()
+                .add_dt_updater(square, |_, _, _| {}, false)?;
+        }
+        let mut base_frame = 0;
+        for _ in 0..self.repeats {
+            for (index, &frames) in self.frames.iter().enumerate() {
+                let report = if index % 2 == 1 {
+                    if self.seconds {
+                        stage.wait(frames as f64 / f64::from(self.fps))?
+                    } else {
+                        stage.wait_frames(frames)?
+                    }
+                } else {
+                    stage.play(
+                        square
+                            .animate()
+                            .set_anim_args(AnimateArgs {
+                                run_time: self
+                                    .seconds
+                                    .then_some(frames as f64 / f64::from(self.fps)),
+                                run_time_frames: (!self.seconds).then_some(frames),
+                                rate_func: Some(fmn::core::rate::linear),
+                                ..AnimateArgs::default()
+                            })?
+                            .shift([if index % 4 == 0 { 0.05 } else { -0.05 }, 0.0, 0.0])?,
+                    )?
+                };
+                assert_eq!(report.base_frame, base_frame);
+                assert_eq!(report.purity.is_pure(), !self.serial);
+                if !self.seconds {
+                    assert_eq!(report.n_frames, i64::try_from(frames).unwrap());
+                }
+                base_frame += report.n_frames;
+                assert_eq!(stage.scene().time().frames(), base_frame);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn frame_options(path: &str, fps: u32, threads: u32) -> RenderOptions {
+    let mut options = options(path, RenderFormat::Y4m, threads);
+    options.config.camera.resolution = (32, 24);
+    options.config.camera.fps = fps;
+    options.typeset_cache = false;
+    options
+}
+
+fn assert_frame_counts(report: &RenderReport, bytes: &[u8], fps: u32, frames: u64) {
+    let decoded = decode_y4m(bytes).expect("published Y4M decodes");
+    assert_eq!(decoded.fps, (fps, 1));
+    assert_eq!(decoded.frames.len() as u64, frames);
+    assert_eq!(report.scene.time.frames(), i64::try_from(frames).unwrap());
+    assert_eq!(report.artifact.frame_count, frames);
+    assert_eq!(report.emission.stats.emitted, frames);
+    let pipeline = report.frame_pipeline.as_ref().unwrap();
+    assert_eq!(
+        (
+            pipeline.submitted,
+            pipeline.rasterized,
+            pipeline.converted,
+            pipeline.emitted
+        ),
+        (frames, frames, frames, frames),
+    );
+    assert_eq!(pipeline.outstanding_slots, 0);
+}
+
+#[test]
+fn exact_frame_reporter_sequence_renders_864_at_every_rate_on_pure_and_serial_paths() {
+    for fps in [24, 25, 30, 60] {
+        let mut pure_bytes = None;
+        for (serial, threads) in [(false, 4), (true, 1)] {
+            let fs = Arc::new(VirtualFs::new());
+            let mut scene = FrameSequence {
+                frames: &ISSUE_10_FRAMES,
+                repeats: 1,
+                fps,
+                seconds: false,
+                serial,
+            };
+            let report = render_with_fs(
+                &mut scene,
+                frame_options("/exact.y4m", fps, threads),
+                fs.clone(),
+            )
+            .unwrap();
+            let bytes = fs.read(Path::new("/exact.y4m")).unwrap();
+            assert_frame_counts(&report, &bytes, fps, 864);
+            assert_eq!(report.scene.play_count, 20);
+            if let Some(expected) = &pure_bytes {
+                assert_eq!(&bytes, expected, "serial/pure frames differ at {fps} fps");
+            } else {
+                pure_bytes = Some(bytes);
+            }
+        }
+    }
+}
+
+#[test]
+fn reporter_seconds_sequence_keeps_the_deliberate_872_frame_ceiling() {
+    let fs = Arc::new(VirtualFs::new());
+    let mut scene = FrameSequence {
+        frames: &ISSUE_10_FRAMES,
+        repeats: 1,
+        fps: 24,
+        seconds: true,
+        serial: false,
+    };
+    let report =
+        render_with_fs(&mut scene, frame_options("/seconds.y4m", 24, 4), fs.clone()).unwrap();
+    assert_frame_counts(
+        &report,
+        &fs.read(Path::new("/seconds.y4m")).unwrap(),
+        24,
+        872,
+    );
+}
+
+#[test]
+fn mixed_frame_seconds_and_zero_duration_segments_preserve_each_kind() {
+    struct Mixed;
+    impl SceneConstruct for Mixed {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            let circle = stage.add(Circle::new().radius(0.4).color(WHITE))?;
+            assert_eq!(stage.wait_frames(0)?.n_frames, 0);
+            let instant = circle
+                .animate()
+                .set_anim_args(AnimateArgs {
+                    run_time_frames: Some(0),
+                    ..AnimateArgs::default()
+                })?
+                .shift([0.1, 0.0, 0.0])?;
+            assert_eq!(stage.play(instant)?.n_frames, 0);
+            assert_eq!(stage.wait_frames(3)?.n_frames, 3);
+            stage.play(
+                circle
+                    .animate()
+                    .set_anim_args(AnimateArgs {
+                        run_time: Some(0.125),
+                        ..AnimateArgs::default()
+                    })?
+                    .shift([0.1, 0.0, 0.0])?,
+            )?;
+            let prepared = stage.prepare(
+                circle
+                    .animate()
+                    .set_anim_args(AnimateArgs {
+                        run_time: Some(0.1),
+                        ..AnimateArgs::default()
+                    })?
+                    .shift([0.1, 0.0, 0.0])?,
+            )?;
+            let report = stage
+                .play_prepared_with(
+                    vec![prepared],
+                    PlayOverrides {
+                        run_time_frames: Some(5),
+                        ..PlayOverrides::default()
+                    },
+                )?
+                .unwrap();
+            assert_eq!(report.n_frames, 5);
+            // 0.1 has its unchanged f64 meaning: e.g. 4 frames at 30 fps.
+            stage.wait(0.1)?;
+            assert_eq!(stage.wait_frames(0)?.n_frames, 0);
+            assert_eq!(
+                stage
+                    .play(
+                        circle
+                            .animate()
+                            .set_anim_args(AnimateArgs {
+                                run_time_frames: Some(0),
+                                ..AnimateArgs::default()
+                            })?
+                            .shift([0.1, 0.0, 0.0])?,
+                    )?
+                    .n_frames,
+                0,
+            );
+            Ok(())
+        }
+    }
+    for (fps, expected) in [(24, 14), (25, 15), (30, 16), (60, 23)] {
+        let fs = Arc::new(VirtualFs::new());
+        let report =
+            render_with_fs(&mut Mixed, frame_options("/mixed.y4m", fps, 4), fs.clone()).unwrap();
+        assert_frame_counts(
+            &report,
+            &fs.read(Path::new("/mixed.y4m")).unwrap(),
+            fps,
+            expected,
+        );
+        assert_eq!(report.scene.play_count, 8);
+    }
+}
+
+#[test]
+fn long_exact_frame_sequence_keeps_zero_length_segments_out_of_the_artifact() {
+    for serial in [false, true] {
+        let fs = Arc::new(VirtualFs::new());
+        let mut scene = FrameSequence {
+            frames: &[1, 0, 0, 1],
+            repeats: 512,
+            fps: 60,
+            seconds: false,
+            serial,
+        };
+        let report =
+            render_with_fs(&mut scene, frame_options("/long.y4m", 60, 4), fs.clone()).unwrap();
+        assert_frame_counts(&report, &fs.read(Path::new("/long.y4m")).unwrap(), 60, 1024);
+        assert_eq!(report.scene.play_count, 2048);
+    }
+}
+
+#[test]
+fn an_explicit_zero_frame_movie_does_not_gain_a_static_fallback_frame() {
+    struct ZeroFrames;
+    impl SceneConstruct for ZeroFrames {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            stage.add(Circle::new())?;
+            stage.wait_frames(0)?;
+            Ok(())
+        }
+    }
+    let fs = Arc::new(VirtualFs::new());
+    let result = render_with_fs(
+        &mut ZeroFrames,
+        frame_options("/zero.y4m", 24, 1),
+        fs.clone(),
+    );
+    let error = result.expect_err("a movie sink cannot publish zero frames");
+    assert!(error.to_string().contains("empty"), "{error}");
+    assert!(!fs.exists(Path::new("/zero.y4m")));
+
+    // An explicitly requested final still retains its usual separate meaning.
+    let report = render_with_fs(
+        &mut ZeroFrames,
+        options("/zero.png", RenderFormat::Png, 1),
+        fs.clone(),
+    )
+    .unwrap();
+    assert_eq!(report.scene.time.frames(), 0);
+    assert_eq!(report.artifact.frame_count, 1);
+}
+
 /// A native calculus scene written the way a user writes one: every library
 /// constructor (`Axes`, graphs, labels, Riemann rectangles) propagates with a
 /// plain `?` into `fmn::Result`.
