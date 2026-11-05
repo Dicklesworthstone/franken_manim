@@ -159,4 +159,17 @@ mod tests {
                 .expect("exact frame portal, composition, rendering and encoding acceptance");
         });
     }
+
+    #[test]
+    fn production_exact_frame_composition_position_acceptance() {
+        crate::with_python_test_module("exact composition positions", |py, _module, globals| {
+            let source = std::ffi::CString::new(include_str!(
+                "../tests/exact_frame_composition_positions.py"
+            ))
+            .expect("composition position suite contains no NUL");
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .expect("exact native composition positions and callback dispatch acceptance");
+        });
+    }
 }
