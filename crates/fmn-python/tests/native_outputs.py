@@ -18,7 +18,7 @@ import numpy as np
 import manimlib
 
 
-def read_gif(path):
+def read_gif(path, *, rgba=False):
     data = pathlib.Path(path).read_bytes()
     assert data[:6] == b"GIF89a"
     width, height, flags = struct.unpack_from("<HHB", data, 6)
@@ -42,8 +42,14 @@ def read_gif(path):
         return result
 
     global_palette = palette(2 << (flags & 7)) if flags & 128 else None
+    background = np.zeros(4, dtype=np.uint8)
+    background[3] = 255
+    if global_palette is not None:
+        background[:3] = global_palette[data[11]]
+    canvas = None
     frames, delays = [], []
     delay = None
+    transparent, disposal = None, 0
     while data[offset] != 0x3B:
         marker = data[offset]
         offset += 1
@@ -54,6 +60,8 @@ def read_gif(path):
             if label == 0xF9:
                 assert len(extension) == 4
                 delay = int.from_bytes(extension[1:3], "little")
+                transparent = extension[3] if extension[0] & 1 else None
+                disposal = (extension[0] >> 2) & 7
             continue
         assert marker == 0x2C
         left, top, frame_width, frame_height, flags = struct.unpack_from("<HHHHB", data, offset)
@@ -89,8 +97,22 @@ def read_gif(path):
                     size += 1
             previous = word
         assert len(decoded) == width * height
-        frames.append(colors[np.frombuffer(decoded, dtype=np.uint8)].reshape(height, width, 3))
+        indices = np.frombuffer(decoded, dtype=np.uint8).reshape(height, width)
+        if canvas is None:
+            canvas = np.empty((height, width, 4), dtype=np.uint8)
+            canvas[:] = background if transparent is None else 0
+        previous = canvas.copy()
+        opaque = np.ones((height, width), dtype=bool) if transparent is None else indices != transparent
+        canvas[opaque, :3] = colors[indices[opaque]]
+        canvas[opaque, 3] = 255
+        frames.append(canvas.copy() if rgba else canvas[:, :, :3].copy())
         delays.append(delay)
+        assert disposal in (0, 1, 2, 3), "reserved GIF disposal method"
+        if disposal == 2:
+            canvas[:] = background if transparent is None else 0
+        elif disposal == 3:
+            canvas = previous
+        delay, transparent, disposal = None, None, 0
     assert offset == len(data) - 1
     return frames, delays
 
@@ -175,6 +197,16 @@ class BackgroundChanges(Scene):
         for color in ("#FF0000", "#00FF00", "#0000FF"):
             self.set_background_color(color)
             self.wait(1 / 8)
+class TransparentTransitions(Scene):
+    def construct(self):
+        self.set_background_color("#FF0000")
+        self.wait(1 / 8)
+        self.camera.background_rgba[:] = (0, 0, 0, 0)
+        square = Square(side_length=2, fill_color="#00FF00", fill_opacity=1, stroke_width=0)
+        self.add(square)
+        self.wait(1 / 8)
+        self.remove(square)
+        self.wait(1 / 8)
 class CameraUpdater(Scene):
     def construct(self):
         self.add(Square(side_length=1, fill_color=WHITE, fill_opacity=1, stroke_width=0))
@@ -488,6 +520,18 @@ background_frames, _ = read_gif(background_destination)
 assert len(background_frames) == 3
 for background_frame, rgb in zip(background_frames, ([255, 0, 0], [0, 255, 0], [0, 0, 255])):
     assert np.array_equal(background_frame, np.broadcast_to(rgb, (54, 96, 3)))
+
+transparent_destination = output_root / "transparent-transitions.gif"
+code, transparent_report = console(str(source), "TransparentTransitions", "--format", "gif",
+                                    "--resolution", "96x54", "--fps", "8", "--threads", "1",
+                                    "--output", str(transparent_destination))
+assert code == 0 and transparent_report["frame_count"] == 3, transparent_report
+transparent_frames, transparent_delays = read_gif(transparent_destination, rgba=True)
+assert len(transparent_frames) == 3 and transparent_delays == [13, 12, 13]
+assert np.array_equal(transparent_frames[0], np.broadcast_to([255, 0, 0, 255], (54, 96, 4)))
+assert np.array_equal(transparent_frames[1][0, 0], [0, 0, 0, 0]), "opaque background left a ghost"
+assert np.array_equal(transparent_frames[1][27, 48], [0, 255, 0, 255]), "green square disappeared"
+assert np.all(transparent_frames[2] == 0), "removed square or background remained in the GIF"
 
 light_samples = []
 for light_scene, light_name in (("LightChanges", "light-changes.gif"),

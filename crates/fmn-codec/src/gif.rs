@@ -59,8 +59,10 @@ const MAX_COLORS: usize = 256;
 ///
 /// Each frame carries a deterministic local palette. That keeps resident
 /// memory bounded by one RGBA frame plus its encoded chunk and avoids a
-/// whole-render palette pass. Palette identity has no visual semantics in
-/// GIF; local tables also give every frame the full color budget.
+/// whole-render palette pass. Every frame reserves index zero for transparency
+/// and uses at most 255 opaque colors, including frames that are fully opaque:
+/// a later frame may expose the background. Full-canvas frames restore that
+/// transparent background after display, so removed objects leave no trails.
 #[derive(Debug)]
 pub struct GifStreamEncoder {
     width: u32,
@@ -106,8 +108,11 @@ impl GifStreamEncoder {
         out.extend_from_slice(b"GIF89a");
         out.extend_from_slice(&(self.width as u16).to_le_bytes());
         out.extend_from_slice(&(self.height as u16).to_le_bytes());
-        // No global color table. Every frame declares its local table.
-        out.extend_from_slice(&[0x70, 0, 0]);
+        // A minimal global table makes background index zero well-defined.
+        // Every frame declares zero transparent and supplies its own opaque
+        // colors in a local table; disposal never depends on a changing index.
+        out.extend_from_slice(&[0xf0, 0, 0]);
+        out.extend_from_slice(&[0; 6]);
         if self.loop_forever {
             out.extend_from_slice(&[0x21, 0xff, 0x0b]);
             out.extend_from_slice(b"NETSCAPE2.0");
@@ -137,24 +142,17 @@ impl GifStreamEncoder {
         }
 
         let mut histogram = BTreeMap::new();
-        let mut any_transparent = false;
         for pixel in rgba.as_chunks::<4>().0 {
-            if pixel[3] < TRANSPARENT_THRESHOLD {
-                any_transparent = true;
-            } else {
+            if pixel[3] >= TRANSPARENT_THRESHOLD {
                 *histogram
                     .entry(pack(pixel[0], pixel[1], pixel[2]))
                     .or_insert(0) += 1;
             }
         }
-        let color_budget = if any_transparent {
-            MAX_COLORS - 1
-        } else {
-            MAX_COLORS
-        };
-        let palette = median_cut(&histogram, color_budget);
-        let transparent_index = any_transparent.then_some(palette.len());
-        let total_entries = palette.len() + usize::from(any_transparent);
+        // The stream cannot know whether future frames contain transparency.
+        // Reserve the same slot from frame zero, even for opaque input.
+        let palette = median_cut(&histogram, MAX_COLORS - 1);
+        let total_entries = palette.len() + 1;
         let mut table_bits = 1u8;
         while (1usize << table_bits) < total_entries.max(2) {
             table_bits += 1;
@@ -172,13 +170,9 @@ impl GifStreamEncoder {
 
         let mut out = Vec::new();
         out.extend_from_slice(&[0x21, 0xf9, 0x04]);
-        out.push(if transparent_index.is_some() {
-            0x09
-        } else {
-            0x04
-        });
+        out.push(0x09); // restore to transparent background after display
         out.extend_from_slice(&delay.to_le_bytes());
-        out.push(transparent_index.unwrap_or(0) as u8);
+        out.push(0); // transparent index, identical to the logical background
         out.push(0);
         out.push(0x2c);
         out.extend_from_slice(&0u16.to_le_bytes());
@@ -186,13 +180,14 @@ impl GifStreamEncoder {
         out.extend_from_slice(&(self.width as u16).to_le_bytes());
         out.extend_from_slice(&(self.height as u16).to_le_bytes());
         out.push(0x80 | (table_bits - 1));
+        out.extend_from_slice(&[0, 0, 0]); // transparent slot, excluded from dither
         for &[r, g, b] in &palette {
             out.extend_from_slice(&[r, g, b]);
         }
-        for _ in palette.len()..table_len {
+        for _ in total_entries..table_len {
             out.extend_from_slice(&[0, 0, 0]);
         }
-        let indices = dither(rgba, width, height, &palette, transparent_index);
+        let indices = dither(rgba, width, height, &palette, Some(0), 1);
         out.push(min_code_size);
         let compressed = lzw_compress(&indices, min_code_size);
         for block in compressed.chunks(255) {
@@ -335,13 +330,15 @@ fn nearest(palette: &[[u8; 3]], r: i32, g: i32, b: i32) -> usize {
 /// Floyd–Steinberg dither one frame to palette indices. Fixed
 /// left→right, top→bottom order; integer error arithmetic (>> 4 with
 /// the standard 7/3/5/1 weights); transparent pixels take
-/// `transparent_index` and diffuse no error.
+/// `transparent_index` and diffuse no error. `palette` contains only opaque
+/// colors; `palette_offset` locates them in the encoded color table.
 fn dither(
     rgba: &[u8],
     width: usize,
     height: usize,
     palette: &[[u8; 3]],
     transparent_index: Option<usize>,
+    palette_offset: usize,
 ) -> Vec<u8> {
     let mut indices = vec![0u8; width * height];
     // Error rows: (r, g, b) per pixel, current and next.
@@ -361,7 +358,7 @@ fn dither(
             let g = (i32::from(rgba[at + 1]) + e[1]).clamp(0, 255);
             let b = (i32::from(rgba[at + 2]) + e[2]).clamp(0, 255);
             let pick = nearest(palette, r, g, b);
-            indices[y * width + x] = pick as u8;
+            indices[y * width + x] = (pick + palette_offset) as u8;
             let [pr, pg, pb] = palette[pick];
             let err = [r - i32::from(pr), g - i32::from(pg), b - i32::from(pb)];
             for ch in 0..3 {
@@ -565,7 +562,7 @@ pub fn encode_gif(
         out.extend_from_slice(&(height as u16).to_le_bytes());
         out.push(0);
         // Pixel data.
-        let indices = dither(frame, w, h, &palette, transparent_index);
+        let indices = dither(frame, w, h, &palette, transparent_index, 0);
         out.push(min_code_size);
         let compressed = lzw_compress(&indices, min_code_size);
         for block in compressed.chunks(255) {
