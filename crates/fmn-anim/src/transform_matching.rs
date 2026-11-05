@@ -254,6 +254,21 @@ impl Animation for TransformMatchingParts {
     fn interpolate_at_frame(&mut self, stage: &mut Stage, frame: f64, fps: u32) {
         self.group.interpolate_at_frame(stage, frame, fps);
     }
+    fn interpolate_at_position(
+        &mut self,
+        stage: &mut Stage,
+        position: &crate::FramePosition,
+        fps: u32,
+    ) -> Result<(), AnimError> {
+        self.group.interpolate_at_position(stage, position, fps)
+    }
+    fn interpolate_at_time(
+        &mut self,
+        stage: &mut Stage,
+        time: crate::RationalTime,
+    ) -> Result<(), AnimError> {
+        self.group.interpolate_at_time(stage, time)
+    }
     fn update_mobjects(&mut self, stage: &mut Stage, dt: f64) {
         self.group.update_mobjects(stage, dt);
     }

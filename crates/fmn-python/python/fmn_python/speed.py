@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from bisect import bisect_right
 from collections.abc import Mapping
+from fractions import Fraction
 import inspect
 import math
 from numbers import Real
@@ -21,6 +22,7 @@ from typing import Any
 
 
 _MAX_KNOTS = 4096
+_MAX_FRAME_SCALE_BITS = 16384
 _MISSING = object()
 
 
@@ -78,6 +80,39 @@ class _SpeedProfile:
             self.ends.append(end)
             elapsed = end
         self.total_time = elapsed
+        self._frame_scale = None
+        self._constant_speed = (self.nodes[0][1] > 0.0
+                                and all(speed == self.nodes[0][1] for _, speed in self.nodes))
+
+    def frame_scale(self):
+        """Return an exact dyadic scale or require an explicit duration.
+
+        The ordinary seconds path retains its established floating-point
+        arithmetic. Frame composition cannot round a reciprocal first:
+        five frames at speed five would otherwise become ceil(5 * 0.2)=2.
+        Sum the authored binary64 knots as rationals before checking whether
+        Choreo's dyadic frame arithmetic can represent the resulting scale.
+        """
+        if self._frame_scale is not None:
+            return self._frame_scale
+        total = Fraction(0)
+        for (left, initial), (right, final) in zip(self.nodes, self.nodes[1:]):
+            width = Fraction.from_float(right) - Fraction.from_float(left)
+            speeds = Fraction.from_float(initial) + Fraction.from_float(final)
+            total += 2 * width / speeds
+            if max(total.numerator.bit_length(), total.denominator.bit_length()) > _MAX_FRAME_SCALE_BITS:
+                raise ValueError("ChangeSpeed exact frame scale exceeds its precision budget; "
+                                 "specify run_time_frames or run_time")
+        try:
+            factor = float(total)
+        except OverflowError as error:
+            raise ValueError("ChangeSpeed exact frame scale is not finite; "
+                             "specify run_time_frames or run_time") from error
+        if not math.isfinite(factor) or Fraction.from_float(factor) != total:
+            raise ValueError("ChangeSpeed profile has no exactly representable frame scale; "
+                             "specify run_time_frames or run_time")
+        self._frame_scale = factor
+        return factor
 
     def map(self, alpha):
         alpha = _number(alpha, "ChangeSpeed alpha")
@@ -129,6 +164,23 @@ def install_speed(native: Any) -> None:
     if ChangeSpeed is None:
         raise KeyError("ChangeSpeed")
     Group = g["AnimationGroup"]
+    linear_rate = g["_linear_rate"]
+    clock_call = _ClockCurve.__call__
+    profile_map = _SpeedProfile.map
+
+    def frame_identity_rate(rate):
+        # A constant speed changes duration but its normalized clock map is
+        # identity. Preserve exact frame positions only for the shipped map
+        # and captured catalog easing, never an authored call/map override.
+        # Easing can change during playback, so inspect these identities at
+        # the actual sample; the constructor cached the O(knots) test.
+        if (type(rate) is not _ClockCurve or vars(_ClockCurve).get("__call__") is not clock_call
+                or type(rate.profile) is not _SpeedProfile or rate.easing is not linear_rate
+                or not rate.profile._constant_speed):
+            return False
+        return "map" not in vars(rate.profile) and vars(_SpeedProfile).get("map") is profile_map
+
+    g["_fmn_frame_identity_rate"] = frame_identity_rate
 
     def restore(self):
         previous = self.__dict__.pop("_speed_previous_rate", _MISSING)
@@ -160,25 +212,37 @@ def install_speed(native: Any) -> None:
         self._speed_curve = _ClockCurve(profile, g["_linear_rate"])
         self._speed_child_rate = None if rate_func is None else _rate(g, rate_func)
         requested = kwargs.pop("run_time", None)
+        requested_frames = kwargs.get("run_time_frames")
         if requested is not None:
+            if requested_frames is not None:
+                raise ValueError("run_time and run_time_frames are mutually exclusive")
             requested = _number(requested, "ChangeSpeed run_time")
             if requested < 0.0:
                 raise ValueError("ChangeSpeed run_time must be nonnegative")
         # The shared constructor prepares .animate builders exactly once and
         # computes native child intervals, including nested groups/time spans.
-        super(ChangeSpeed, self).__init__(anim, run_time=-1, rate_func=None, **kwargs)
+        super(ChangeSpeed, self).__init__(
+            anim, run_time=-1 if requested is None else requested, rate_func=None, **kwargs)
         self.anim = self.animations[0]
         duration = float(g["_composition_member_run_time"](self.anim))
         if not math.isfinite(duration) or duration < 0.0:
             raise ValueError("ChangeSpeed child run_time must be finite and nonnegative")
         self._speed_child_duration = duration
-        self.run_time = duration * profile.total_time if requested is None else requested
-        if not math.isfinite(self.run_time) or (duration > 0.0 and requested is None and self.run_time == 0.0):
-            raise ValueError("ChangeSpeed produces an unrepresentable finite run_time")
+        self._speed_child_frame_bound = False
+        if requested_frames is None:
+            # This is a derived projection, not a public seconds assignment.
+            # Preserve the shared constructor's authored duration intent.
+            object.__setattr__(self, "run_time", duration * profile.total_time if requested is None else requested)
+            if not math.isfinite(self.run_time) or (duration > 0.0 and requested is None and self.run_time == 0.0):
+                raise ValueError("ChangeSpeed produces an unrepresentable finite run_time")
         self._speed_phase = "new"
 
     def get_scaled_total_time(self):
         return self._speed_curve.profile.total_time
+
+    def frame_duration_scale(self, frame_children):
+        profile = self._speed_curve.profile
+        return profile.frame_scale() if frame_children else profile.total_time
 
     def begin(self):
         if getattr(self, "_composition_driver", None) is not None:
@@ -186,6 +250,19 @@ def install_speed(native: Any) -> None:
         self._speed_phase = "active"
         self._speed_curve.last_value = None
         try:
+            # Frame children only acquire their seconds projection on the
+            # owning Scene's grid. Speed-aware updaters must use that bound
+            # duration rather than the constructor's temporary default.
+            timing = getattr(self.anim, "_fmn_frame_timing", None)
+            if timing is not None:
+                self._speed_child_duration = timing.seconds
+                self._speed_child_frame_bound = True
+            elif self._speed_child_frame_bound:
+                duration = float(g["_composition_member_run_time"](self.anim))
+                if not math.isfinite(duration) or duration < 0.0:
+                    raise ValueError("ChangeSpeed child run_time must be finite and nonnegative")
+                self._speed_child_duration = duration
+                self._speed_child_frame_bound = False
             if self._speed_child_rate is not None:
                 attrs = self.anim.__dict__
                 descriptor = inspect.getattr_static(type(self.anim), "rate_func", None)
@@ -273,6 +350,7 @@ def install_speed(native: Any) -> None:
     ChangeSpeed.__doc__ = "Retime a child animation on the shared native composition clock."
     methods = {
         "__init__": speed_init, "get_scaled_total_time": get_scaled_total_time,
+        "_fmn_duration_scale": frame_duration_scale,
         "begin": begin, "update_mobjects": update_mobjects, "interpolate": interpolate,
         "finish": finish, "abort": abort, "clean_up_from_scene": clean_up_from_scene,
     }

@@ -16,7 +16,7 @@ SPEC = importlib.util.spec_from_file_location("movement_under_test", ROOT / "pyt
 movement = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(movement)
 SEMANTICS_SPEC = importlib.util.spec_from_file_location(
-    "movement_semantics", ROOT / "python/manimlib/_animation_semantics.py")
+    "movement_semantics_under_test", ROOT / "python/manimlib/_animation_semantics.py")
 semantics = importlib.util.module_from_spec(SEMANTICS_SPEC)
 SEMANTICS_SPEC.loader.exec_module(semantics)
 
@@ -176,18 +176,18 @@ def environment(install=True):
              _AnimationBuilder=_AnimationBuilder, Scene=Scene, np=np, _np=np,
              _linear_rate=linear, smooth_rate=smooth, smooth=smooth,
              refuse_unrouted=refuse_unrouted,
+             _DefaultRunTime=semantics._DefaultRunTime,
+             _validate_frame_count=semantics._validate_frame_count,
              _RATE_FUNC_NAMES={linear:"linear", smooth:"smooth"},
              _requires_python_animation=lambda a:not bool(getattr(a, "_native_kind", None)),
-             prepare_animation=lambda a:a.build() if isinstance(a, _AnimationBuilder) else a,
-             _DefaultRunTime=semantics._DefaultRunTime,
-             _validate_frame_count=semantics._validate_frame_count)
+             prepare_animation=lambda a:a.build() if isinstance(a, _AnimationBuilder) else a)
     g["g"] = g
     path = ROOT / "python/manimlib/_animation_semantics.py"
     installer = next(node for node in ast.parse(path.read_text()).body
                      if isinstance(node, ast.FunctionDef) and node.name == "install")
     definitions = {node.name:node for node in installer.body if isinstance(node, ast.FunctionDef)}
     methods = {
-        "__init__":"animation_init", "_validate_input_type":"validate_input_type",
+        "__setattr__":"animation_setattr", "__init__":"animation_init", "_validate_input_type":"validate_input_type",
         "_ensure_runtime_defaults":"ensure_runtime_defaults", "begin":"animation_begin",
         "finish":"animation_finish", "create_starting_mobject":"create_starting_mobject",
         "get_all_mobjects":"get_all_mobjects", "get_all_families_zipped":"get_all_families_zipped",
@@ -204,7 +204,8 @@ def environment(install=True):
     _NativeAnimation.__init__ = g["native_animation_init"]
     path = ROOT / "python/manimlib_bootstrap.py"
     names = {"_animation_run_time_options", "Homotopy", "SmoothedVectorizedHomotopy", "ComplexHomotopy", "PhaseFlow", "MoveAlongPath"}
-    nodes = [node for node in ast.parse(path.read_text()).body if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name in names]
+    nodes = [node for node in ast.parse(path.read_text()).body
+             if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name in names]
     assert {node.name for node in nodes} == names
     exec(compile(ast.Module(nodes, []), str(path), "exec"), g)
     native._old_homotopy_begin = native.Homotopy.begin

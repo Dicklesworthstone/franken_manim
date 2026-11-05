@@ -1230,9 +1230,13 @@ fn seconds_to_samples(seconds: f64, sample_rate: u32) -> Result<i64, SoundError>
     }
     let magnitude = u128::from(mantissa) * u128::from(sample_rate);
     let rounded = if exponent >= 0 {
-        magnitude
-            .checked_shl(exponent as u32)
-            .ok_or(SoundError::PlacementOutOfRange)?
+        let shift = exponent as u32;
+        // checked_shl only validates the shift count: discarded high bits can
+        // otherwise turn a finite, unrepresentable offset into sample zero.
+        if shift >= u128::BITS || magnitude > (u128::MAX >> shift) {
+            return Err(SoundError::PlacementOutOfRange);
+        }
+        magnitude << shift
     } else {
         let shift = exponent.unsigned_abs();
         if shift >= 128 {

@@ -61,6 +61,55 @@ fn shift_frames(stage: &mut Stage, mob: Mob, dx: f64, frames: u64) -> Box<dyn An
 }
 
 #[test]
+fn exact_plan_samples_and_pure_seek_preserve_large_and_mixed_endpoints() {
+    use fmn_anim::rate_table::RateSampler;
+    use fmn_anim::{AnimConfig, RateFunc, Transform};
+
+    for large in [false, true] {
+        let mut stage = Stage::new();
+        let source = square(&mut stage);
+        stage.add_to_scene(source).unwrap();
+        let target = stage.copy_family(source).unwrap();
+        stage.shift(target, [2.0, 0.0, 0.0]);
+        let sampler = RateSampler::new(3, |alpha| Ok(if alpha == 1.0 { 1.0 } else { 0.0 }));
+        let preparing = RateFunc::Preparing(sampler.clone());
+        for alpha in [0.0, 1.0_f64.next_down(), 1.0] {
+            let _ = preparing.eval(alpha);
+        }
+        let last = if large { (1_i64 << 53) + 1 } else { 44 };
+        let transform = Transform::new(source, target).with_config(AnimConfig {
+            run_time: 43.0 / 24.0,
+            run_time_frames: large.then_some(last as u64),
+            rate_func: sampler.finish().unwrap(),
+            ..AnimConfig::default()
+        });
+        let empty = square(&mut stage);
+        let zero = shift_frames(&mut stage, empty, 0.0, 0);
+        let group = AnimationGroup::new(&mut stage, vec![Box::new(transform), zero]).unwrap();
+        let mut timeline = Timeline::new(24).unwrap();
+        timeline.play(vec![Box::new(group)]).unwrap();
+        let plan = timeline.compile().unwrap();
+        let decoded = TimelinePlan::from_bytes(&plan.to_bytes().unwrap()).unwrap();
+        for schedule in [&plan, &decoded] {
+            let segment = &schedule.segments()[0];
+            assert_eq!(segment.n_frames, last);
+            assert_eq!(segment.sample_alpha(last - 1, 24), 1.0_f64.next_down());
+            assert!(segment.sample_alpha(last, 24) >= 1.0);
+        }
+
+        // Pure seek performs one interpolation at each requested position;
+        // the large case does not replay the preceding 2^53 frames. A step
+        // rate makes an early endpoint visible in the actual object state.
+        let before = timeline.seek(&mut stage, &rng(), last - 1).unwrap();
+        assert!(before.alpha() < 1.0);
+        assert_eq!(before.materialize_stage().get_center(source)[0], 0.0);
+        let endpoint = timeline.seek(&mut stage, &rng(), last).unwrap();
+        assert_eq!(endpoint.alpha(), 1.0);
+        assert_eq!(endpoint.materialize_stage().get_center(source)[0], 2.0);
+    }
+}
+
+#[test]
 fn exact_frame_timeline_compiles_renders_seeks_and_round_trips_issue_10() {
     let counts = [
         43, 17, 61, 29, 101, 7, 55, 13, 89, 31, 47, 19, 73, 11, 37, 23, 67, 3, 97, 41,
@@ -120,6 +169,64 @@ fn exact_frame_timeline_compiles_renders_seeks_and_round_trips_issue_10() {
                 "frame={frame}, fps={fps}"
             );
         }
+    }
+}
+
+#[test]
+fn promoted_seconds_override_round_trips_and_replays_its_exact_extent() {
+    let seconds = f64::from_bits((43.0_f64 / 24.0).to_bits() - 1);
+    let mut stage = Stage::new();
+    let mob = square(&mut stage);
+    stage.add_to_scene(mob).unwrap();
+    let child = shift_frames(&mut stage, mob, 43.0, 43);
+    let group = AnimationGroup::new(&mut stage, vec![child])
+        .unwrap()
+        .with_run_time(seconds);
+    let mut timeline = Timeline::new(24).unwrap();
+    timeline.play(vec![Box::new(group)]).unwrap();
+    timeline.label("after-override");
+    timeline.wait_frames(1).unwrap();
+
+    let plan = timeline.compile().unwrap();
+    assert_eq!(plan.segments()[0].n_frames, 43);
+    assert!(plan.segments()[0].frame_duration.is_some());
+    assert_eq!(plan.total_frames(), 44);
+    assert_eq!(plan.frame_of_label("after-override"), Some(44));
+    // The report's projected seconds would cover 44 frames on their own.
+    // The serialized exact extent, not that projection, owns scheduling.
+    assert_eq!(
+        RationalFrameClock::new(24)
+            .unwrap()
+            .segment(plan.segments()[0].run_time)
+            .unwrap()
+            .n_frames(),
+        44
+    );
+    let bytes = plan.to_bytes().unwrap();
+    let decoded = TimelinePlan::from_bytes(&bytes).unwrap();
+    assert_eq!(decoded, plan);
+    assert_eq!(decoded.to_bytes().unwrap(), bytes);
+    assert_eq!(timeline.compile().unwrap().to_bytes().unwrap(), bytes);
+
+    let mut packets = Vec::new();
+    let reports = timeline
+        .render(&mut stage, &rng(), &mut |packet| packets.push(packet))
+        .unwrap();
+    assert_eq!(packets.len(), 44);
+    assert_eq!(reports[0].n_frames, 43);
+    assert_eq!(reports[1].n_frames, 1);
+    assert_eq!(timeline.compile().unwrap().to_bytes().unwrap(), bytes);
+    let expected: Vec<_> = packets
+        .iter()
+        .map(|packet| point_bits(&packet.materialize_stage(), mob))
+        .collect();
+    for frame in [1, 29, 43, 44, 17, 44] {
+        let packet = timeline.seek(&mut stage, &rng(), frame).unwrap();
+        assert_eq!(
+            point_bits(&packet.materialize_stage(), mob),
+            expected[frame as usize - 1],
+            "frame={frame}"
+        );
     }
 }
 
@@ -426,6 +533,69 @@ fn locate_and_frame_at_time_agree_with_the_grid() {
     assert_eq!(plan.frame_at_time(1.0), 8);
     assert_eq!(plan.frame_at_time(99.0), 8, "clamped into the schedule");
     assert_eq!(plan.frame_at_time(f64::NAN), 1, "total, never a panic");
+}
+
+#[test]
+fn frame_at_time_covers_exact_seconds_before_and_after_serialization() {
+    for (fps, split, seconds, at_boundary) in [
+        (24, 43, 43.0_f64 / 24.0, 44),
+        (30, 3, 0.1_f64, 4),
+        (8, 4, 0.5_f64, 4),
+    ] {
+        let mut timeline = Timeline::new(fps).unwrap();
+        timeline.wait_frames(split).unwrap();
+        timeline.wait_frames(1).unwrap();
+        let plan = timeline.compile().unwrap();
+        let decoded = TimelinePlan::from_bytes(&plan.to_bytes().unwrap()).unwrap();
+        for schedule in [&plan, &decoded] {
+            for (time, expected) in [
+                (seconds.next_down(), split as i64),
+                (seconds, at_boundary),
+                (seconds.next_up(), split as i64 + 1),
+            ] {
+                let frame = schedule.frame_at_time(time);
+                assert_eq!(frame, expected, "{time:?} seconds at {fps} fps");
+                assert_eq!(
+                    schedule.locate(frame),
+                    if expected <= split as i64 {
+                        Some((0, expected))
+                    } else {
+                        Some((1, 1))
+                    },
+                    "covering time must select the correct authored segment"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn frame_at_time_preserves_large_frames_and_total_clamping() {
+    let split = 1_u64 << 53;
+    let mut timeline = Timeline::new(3).unwrap();
+    timeline.wait_frames(split).unwrap();
+    timeline.wait_frames(i64::MAX as u64 - split).unwrap();
+    let plan = timeline.compile().unwrap();
+    let decoded = TimelinePlan::from_bytes(&plan.to_bytes().unwrap()).unwrap();
+    for schedule in [&plan, &decoded] {
+        // The seconds value is an exactly representable integer, but its
+        // product with 3 is 2^53 + 1, beyond f64's consecutive integers.
+        let frame = schedule.frame_at_time(3_002_399_751_580_331.0);
+        assert_eq!(frame, 9_007_199_254_740_993);
+        assert_eq!(schedule.locate(frame), Some((1, 1)));
+        for time in [f64::NAN, f64::NEG_INFINITY, -f64::MAX, -0.0, 0.0] {
+            assert_eq!(schedule.frame_at_time(time), 1);
+        }
+        assert_eq!(schedule.frame_at_time(f64::from_bits(1)), 1);
+        for time in [f64::INFINITY, f64::MAX, i64::MAX as f64] {
+            assert_eq!(schedule.frame_at_time(time), i64::MAX);
+        }
+    }
+
+    let empty = Timeline::new(24).unwrap().compile().unwrap();
+    for time in [f64::NAN, f64::NEG_INFINITY, 0.0, 43.0 / 24.0, f64::INFINITY] {
+        assert_eq!(empty.frame_at_time(time), 0);
+    }
 }
 
 #[test]

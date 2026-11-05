@@ -263,7 +263,7 @@ def environment():
         if isinstance(node, ast.FunctionDef) or is_install_capture(node):
             exec(compile(ast.Module([node], []), str(SOURCE), "exec"), g)
     mappings = {
-        "__init__":"animation_init", "_validate_input_type":"validate_input_type",
+        "__setattr__":"animation_setattr", "__init__":"animation_init", "_validate_input_type":"validate_input_type",
         "_ensure_runtime_defaults":"ensure_runtime_defaults", "begin":"animation_begin",
         "finish":"animation_finish", "create_starting_mobject":"create_starting_mobject",
         "get_all_mobjects":"get_all_mobjects", "get_all_families_zipped":"get_all_families_zipped",

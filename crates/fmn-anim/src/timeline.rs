@@ -198,12 +198,12 @@ pub struct PlannedSegment {
 impl PlannedSegment {
     /// Raw sample alpha with the same unit boundary as Choreo's driver.
     /// Seconds retain their original division order; frame-native samples
-    /// divide the integer frame index by the exact duration converted once.
+    /// compare against the exact duration before projecting their ratio.
     #[must_use]
     pub fn sample_alpha(&self, frame: i64, fps: u32) -> f64 {
         self.frame_duration.as_ref().map_or_else(
             || (frame as f64 / f64::from(fps)) / self.run_time,
-            |duration| frame as f64 / duration.frame_units(),
+            |duration| duration.sample_alpha(frame),
         )
     }
 
@@ -253,7 +253,8 @@ fn decoded_clock_error(error: ClockError) -> TimelineError {
         ClockError::InvalidFrameLag
         | ClockError::DurationComplexity
         | ClockError::NonCanonicalDuration
-        | ClockError::FrameRateMismatch => TimelineError::Malformed("segment exact duration"),
+        | ClockError::FrameRateMismatch
+        | ClockError::ZeroPositionDenominator => TimelineError::Malformed("segment exact duration"),
     }
 }
 
@@ -318,19 +319,25 @@ impl TimelinePlan {
     /// clamped into the timeline. Time `0` maps to the first frame; a
     /// non-finite request clamps rather than panicking (the mapping stays
     /// total, as the alpha pipeline does).
+    ///
+    /// Like the clock, this covers the exact binary value of `seconds`,
+    /// without rounding the product with fps first. For a known frame
+    /// index, use [`Self::locate`] directly instead of converting to seconds.
     #[must_use]
     pub fn frame_at_time(&self, seconds: f64) -> i64 {
         let total = self.total_frames();
         if total == 0 {
             return 0;
         }
-        let raw = (seconds * f64::from(self.fps)).ceil();
-        if raw.is_nan() {
+        if seconds.is_nan() || seconds <= 0.0 {
             return 1;
         }
-        // `as` saturates at the integer bounds for finite and infinite
-        // inputs alike, and the clamp brings it into the schedule.
-        (raw as i64).clamp(1, total)
+        // Plans validate fps and the frame counter when compiled or decoded.
+        // A positive request the clock cannot cover is past the schedule,
+        // including positive infinity and durations beyond the i64 grid.
+        RationalFrameClock::new(self.fps)
+            .and_then(|clock| clock.segment(seconds))
+            .map_or(total, |segment| segment.n_frames().clamp(1, total))
     }
 
     /// The frame a label resolves to.

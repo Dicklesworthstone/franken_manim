@@ -15,9 +15,9 @@ use fmn_mobject::{FrozenRenderState, Mob, Stage};
 
 use crate::animation::check_updater_error;
 use crate::{
-    AnimError, AnimState, Animation, FrameSample, FrameSegment, OpenSegment, OpenWait, RateFunc,
-    RationalFrameClock, RationalTime, Rotating, SegmentKind, SegmentReport, ShowPartial, Transform,
-    VFade, finish_open_play,
+    AnimError, AnimState, Animation, FramePosition, FrameSample, FrameSegment, OpenSegment,
+    OpenWait, RateFunc, RationalFrameClock, RationalTime, Rotating, SegmentKind, SegmentReport,
+    ShowPartial, Transform, VFade, finish_open_play,
 };
 
 /// A closed, prepared interpolation mechanism. Fields and constructors are
@@ -58,6 +58,26 @@ struct FrozenGroup {
     timings: Vec<crate::composition::Interval>,
     max_end_time: f64,
     frame_timings: bool,
+    exact_timings: Option<Arc<crate::composition::ExactTimings>>,
+}
+
+impl FrozenGroup {
+    fn interpolate_exact_position(
+        &self,
+        stage: &mut Stage,
+        position: &FramePosition,
+        timings: &crate::composition::ExactTimings,
+        fps: u32,
+    ) -> Result<(), AnimError> {
+        for (index, animation) in self.animations.iter().enumerate() {
+            if let Some(local) = timings.interior_frame(index, position)? {
+                animation.interpolate_at_position(stage, &local, fps)?;
+            } else {
+                animation.interpolate_alpha(stage, timings.sub_alpha(index, position)?)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 // Replace recognized Base rates with their data identity. A failed recognition
@@ -165,6 +185,7 @@ impl FrozenAnimation {
                 timings: group.interpolation_timings().to_vec(),
                 max_end_time: group.interpolation_max_end(),
                 frame_timings: group.uses_frame_timings(),
+                exact_timings: group.exact_timings().cloned(),
             }),
         })
     }
@@ -207,12 +228,52 @@ impl FrozenAnimation {
         })
     }
 
-    fn interpolate(&self, stage: &mut Stage, time: RationalTime) {
-        self.interpolate_at_frame(stage, time.frames() as f64, time.fps());
+    fn interpolate(&self, stage: &mut Stage, time: RationalTime) -> Result<(), AnimError> {
+        if !matches!(&self.mechanism, FrozenMechanism::Group(_))
+            && self.state().frame_units().is_none()
+        {
+            return self.interpolate_at_frame(stage, time.frames() as f64, time.fps());
+        }
+        self.interpolate_at_position(stage, &FramePosition::from_frame(time.frames()), time.fps())
     }
 
-    fn interpolate_at_frame(&self, stage: &mut Stage, frame: f64, fps: u32) {
+    fn interpolate_at_position(
+        &self,
+        stage: &mut Stage,
+        position: &FramePosition,
+        fps: u32,
+    ) -> Result<(), AnimError> {
         if let FrozenMechanism::Group(group) = &self.mechanism {
+            if let Some(timings) = &group.exact_timings {
+                let position = timings.position(&group.state, position, fps)?;
+                group.interpolate_exact_position(stage, &position, timings, fps)
+            } else {
+                self.interpolate_at_frame(stage, position.to_f64(), fps)
+            }
+        } else {
+            self.interpolate_alpha(
+                stage,
+                self.state()
+                    .frame_alpha_at_position(position, fps)
+                    .map_err(AnimError::Clock)?,
+            )
+        }
+    }
+
+    fn interpolate_at_frame(
+        &self,
+        stage: &mut Stage,
+        frame: f64,
+        fps: u32,
+    ) -> Result<(), AnimError> {
+        if let FrozenMechanism::Group(group) = &self.mechanism {
+            if group.exact_timings.is_some() {
+                return self.interpolate_at_position(
+                    stage,
+                    &FramePosition::from_f64(frame).map_err(AnimError::Clock)?,
+                    fps,
+                );
+            }
             let time = crate::composition::timeline_frame_position(
                 &group.state,
                 frame,
@@ -223,17 +284,18 @@ impl FrozenAnimation {
                 if group.frame_timings
                     && let Some(frame) = interval.interior_frame(time)
                 {
-                    animation.interpolate_at_frame(stage, frame, fps);
+                    animation.interpolate_at_frame(stage, frame, fps)?;
                 } else {
-                    animation.interpolate_alpha(stage, interval.sub_alpha(time));
+                    animation.interpolate_alpha(stage, interval.sub_alpha(time))?;
                 }
             }
         } else {
-            self.interpolate_alpha(stage, self.state().frame_alpha(frame, fps));
+            self.interpolate_alpha(stage, self.state().frame_alpha(frame, fps))?;
         }
+        Ok(())
     }
 
-    fn interpolate_alpha(&self, stage: &mut Stage, alpha: f64) {
+    fn interpolate_alpha(&self, stage: &mut Stage, alpha: f64) -> Result<(), AnimError> {
         // Clone only the prepared native carrier; never construct or begin it.
         // This intentionally calls the ordinary interpolation implementation,
         // including lag, time_span, locks, placements, uniforms and trackers.
@@ -254,16 +316,25 @@ impl FrozenAnimation {
             FrozenMechanism::VectorFade(animation) => evaluate(animation, stage, alpha),
             FrozenMechanism::Rotation(animation) => evaluate(animation, stage, alpha),
             FrozenMechanism::Group(group) => {
+                if let Some(timings) = &group.exact_timings {
+                    let (position, fps) = crate::composition::exact_position_from_alpha(
+                        &group.state,
+                        alpha,
+                        timings,
+                    )?;
+                    return group.interpolate_exact_position(stage, &position, timings, fps);
+                }
                 let time = crate::composition::timeline_position(
                     &group.state.config,
                     alpha,
                     group.max_end_time,
                 );
                 for (animation, interval) in group.animations.iter().zip(&group.timings) {
-                    animation.interpolate_alpha(stage, interval.sub_alpha(time));
+                    animation.interpolate_alpha(stage, interval.sub_alpha(time))?;
                 }
             }
         }
+        Ok(())
     }
 }
 
@@ -574,8 +645,10 @@ impl PureSegment {
         };
         for index in 0..final_progression {
             let animation = &mut animations[index];
-            animation.interpolate_at_frame(stage, last.frames() as f64, last.fps());
-            if let Err(error) = check_updater_error(stage) {
+            if let Err(error) = animation
+                .interpolate_at_time(stage, last)
+                .and_then(|()| check_updater_error(stage))
+            {
                 let _report = crate::frame::abort_open_play(stage, animations, open);
                 return Err(error);
             }
@@ -647,7 +720,7 @@ impl PureFrameJob {
     pub fn try_materialize(&self) -> Result<Stage, AnimError> {
         let mut stage = self.data.begin.clone().materialize();
         for animation in &self.data.animations {
-            animation.interpolate(&mut stage, self.sample.time);
+            animation.interpolate(&mut stage, self.sample.time)?;
             if let Some(error) = animation.rate_error() {
                 return Err(error);
             }

@@ -123,6 +123,64 @@ fn native_frame_groups_match_serial_sampling_on_every_worker_count() {
 }
 
 #[test]
+fn mixed_and_large_exact_group_endpoints_match_serial_and_frozen_dispatch() {
+    use fmn_anim::rate_table::RateSampler;
+
+    for large in [false, true] {
+        for group_rate in [RateFunc::linear(), RateFunc::Base(fmn_core::rate::linear)] {
+            let mut stage = Stage::new();
+            let source = object(&mut stage, 0.0);
+            let target = stage.copy_family(source).unwrap();
+            stage.shift(target, [2.0, 0.0, 0.0]);
+            let sampler = RateSampler::new(3, |alpha| Ok(if alpha == 1.0 { 1.0 } else { 0.0 }));
+            let preparing = RateFunc::Preparing(sampler.clone());
+            for alpha in [0.0, 1.0_f64.next_down(), 1.0] {
+                let _ = preparing.eval(alpha);
+            }
+            let boundary = if large { (1_i64 << 53) + 1 } else { 44 };
+            let first = Transform::new(source, target).with_config(AnimConfig {
+                run_time: 43.0 / 24.0,
+                run_time_frames: large.then_some(boundary as u64),
+                rate_func: sampler.finish().unwrap(),
+                ..AnimConfig::default()
+            });
+            let mut second = transform(&mut stage, 4.0, 1.0);
+            second.state_mut().config.run_time_frames = Some(1);
+            let inner =
+                AnimationGroup::with_lag_ratio(&mut stage, vec![Box::new(first), second], 1.0)
+                    .unwrap()
+                    .with_rate_func(group_rate);
+            let outer = AnimationGroup::new(&mut stage, vec![Box::new(inner)]).unwrap();
+            let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(outer)];
+            let clock = RationalFrameClock::new(24).unwrap();
+            let rng = RngRoot::from_seed(61);
+            let open = open_play(&mut stage, &clock, &mut animations).unwrap();
+            let program = PureSegment::freeze(&stage, &clock, &rng, &animations, &open).unwrap();
+
+            // Direct jobs and snapshot reconstruction make both large-index
+            // samples O(1); the test never loops over the intervening frames.
+            for (frame, expected_x) in [(boundary - 1, 0.5), (boundary, 2.5)] {
+                let job = program.job(frame).unwrap();
+                let packet = fmn_anim::reconstruct_pure_frame(
+                    &mut stage,
+                    &mut animations,
+                    open.report(),
+                    &rng,
+                    &job.sample(),
+                )
+                .unwrap();
+                let serial = packet.materialize_stage();
+                let frozen = job.try_materialize().unwrap();
+                assert_eq!(serial.get_center(source)[0], expected_x);
+                assert_eq!(frozen.get_center(source)[0], expected_x);
+                assert_eq!(facts(&frozen), facts(&serial));
+            }
+            finish_open_play(&mut stage, &mut animations, open).unwrap();
+        }
+    }
+}
+
+#[test]
 fn zero_frame_dispatch_runs_only_lifecycle_rate_samples() {
     use fmn_anim::pure_frame::{PlayCapture, play_segment_with_pure_dispatch};
 

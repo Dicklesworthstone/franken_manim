@@ -1,7 +1,145 @@
 //! fm-wuq acceptance: the RationalFrameClock against the Reference's
 //! emission formula, the drift guarantee, and the no-off-grid property.
 
-use fmn_anim::{ClockError, Duration, FrameDuration, RationalFrameClock, RationalTime};
+use fmn_anim::{
+    ClockError, Duration, FrameDuration, FramePosition, RationalFrameClock, RationalTime,
+};
+
+#[test]
+fn public_frame_samplers_keep_exact_interior_points_and_raw_alpha_semantics() {
+    let clock = RationalFrameClock::new(24).unwrap();
+    for frames in [1, 43, (1_u64 << 53) + 1, i64::MAX as u64] {
+        let duration = FrameDuration::new(Duration::Frames(frames), 24).unwrap();
+        let segment = clock.segment_duration(&duration).unwrap();
+        let end = frames as i64;
+        if end > 1 {
+            let raw = duration.sample_alpha(end - 1);
+            assert!(raw > 0.0 && raw < 1.0, "frames={frames}");
+            assert!(segment.sample(end - 1).unwrap().alpha < 1.0);
+        }
+        assert_eq!(duration.sample_alpha(end), 1.0);
+        assert_eq!(segment.sample(end).unwrap().alpha, 1.0);
+        assert!(duration.sample_alpha(-1) < 0.0);
+    }
+
+    let mixed = FrameDuration::new(43.0 / 24.0, 24)
+        .unwrap()
+        .checked_add(&FrameDuration::new(Duration::Frames(0), 24).unwrap())
+        .unwrap();
+    assert_eq!(mixed.n_frames().unwrap(), 44);
+    assert_eq!(mixed.sample_alpha(43), 1.0_f64.next_down());
+    assert!(mixed.sample_alpha(44) > 1.0, "raw alpha remains unclamped");
+    let segment = clock.segment_duration(&mixed).unwrap();
+    assert!(segment.sample(43).unwrap().alpha < 1.0);
+    assert_eq!(segment.sample(44).unwrap().alpha, 1.0);
+
+    let legacy = clock.segment(43.0 / 24.0).unwrap();
+    assert_eq!(legacy.n_frames(), 44);
+    assert_eq!(legacy.sample(43).unwrap().alpha, 1.0);
+    let zero = FrameDuration::new(Duration::Frames(0), 24).unwrap();
+    assert!(zero.sample_alpha(0).is_nan());
+    assert_eq!(zero.sample_alpha(1), f64::INFINITY);
+    assert_eq!(zero.sample_alpha(-1), f64::NEG_INFINITY);
+}
+
+#[test]
+fn exact_position_preserves_fractional_and_large_integer_boundaries() {
+    let seconds = FrameDuration::new(43.0 / 24.0, 24).unwrap();
+    let endpoint = seconds.as_position();
+    let frame = FramePosition::from_frame(43);
+    assert_eq!(endpoint.to_f64(), frame.to_f64());
+    assert!(endpoint.checked_cmp(&frame).unwrap().is_gt());
+    assert_eq!(
+        endpoint.checked_subtract(&frame).unwrap().to_f64(),
+        2.0_f64.powi(-49)
+    );
+
+    let large = FramePosition::from_frame((1_i64 << 53) + 1);
+    let prior = FramePosition::from_frame(1_i64 << 53);
+    assert_eq!(large.to_f64(), prior.to_f64());
+    assert!(large.checked_cmp(&prior).unwrap().is_gt());
+    assert_eq!(large.checked_subtract(&prior).unwrap().to_f64(), 1.0);
+    let retimed = frame
+        .checked_divide(&endpoint)
+        .unwrap()
+        .checked_multiply(&endpoint)
+        .unwrap();
+    assert!(retimed.checked_cmp(&frame).unwrap().is_eq());
+}
+
+#[test]
+fn exact_position_host_fraction_transport_round_trips_unrounded_durations() {
+    for fps in [1, 24, 25, 30, 60, 120, 1001, u32::MAX] {
+        for value in [
+            Duration::Frames(0),
+            Duration::Frames((1_u64 << 53) + 1),
+            Duration::Frames(i64::MAX as u64),
+            Duration::Seconds(0.1),
+            Duration::Seconds(43.0 / 24.0),
+            Duration::Seconds(f64::from_bits(1)),
+            Duration::Seconds(f64::MAX),
+        ] {
+            let duration = FrameDuration::new(value, fps).unwrap();
+            let (numerator, denominator) = duration.ratio_parts();
+            let restored =
+                FramePosition::from_ratio_bytes(&numerator, &denominator, false).unwrap();
+            assert!(
+                restored
+                    .checked_cmp(&duration.as_position())
+                    .unwrap()
+                    .is_eq()
+            );
+        }
+    }
+    let mut tiny = FrameDuration::new(Duration::Frames(1), 24).unwrap();
+    for _ in 0..15 {
+        tiny = tiny.checked_scale(f64::from_bits(1)).unwrap();
+    }
+    let (numerator, denominator) = tiny.ratio_parts();
+    let restored = FramePosition::from_ratio_bytes(&numerator, &denominator, false).unwrap();
+    assert!(restored.checked_cmp(&tiny.as_position()).unwrap().is_eq());
+}
+
+#[test]
+fn exact_position_signs_zero_and_transport_limits_are_explicit() {
+    let third = FramePosition::from_ratio_bytes(&[1], &[3], false).unwrap();
+    let negative = FramePosition::from_ratio_bytes(&[1], &[3], true).unwrap();
+    assert!(negative.checked_cmp(&third).unwrap().is_lt());
+    assert_eq!(third.checked_add(&negative).unwrap().to_f64(), 0.0);
+    assert_eq!(third.checked_divide(&negative).unwrap().to_f64(), -1.0);
+    assert_eq!(
+        FramePosition::from_frame(i64::MIN).to_f64(),
+        i64::MIN as f64
+    );
+    assert!(matches!(
+        FramePosition::from_ratio_bytes(&[1], &[0], false),
+        Err(ClockError::ZeroPositionDenominator)
+    ));
+    assert!(matches!(
+        third.checked_divide(&FramePosition::from_frame(0)),
+        Err(ClockError::ZeroPositionDenominator)
+    ));
+    assert!(matches!(
+        FramePosition::from_ratio_bytes(&vec![0; FramePosition::MAX_RATIO_BYTES + 1], &[1], false),
+        Err(ClockError::DurationComplexity)
+    ));
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(FramePosition::from_f64(value).is_err());
+    }
+}
+
+#[test]
+fn frame_native_seconds_descriptor_does_not_overflow_before_dividing_by_fps() {
+    for fps in [1, 24, 30, 60, u32::MAX] {
+        let duration = FrameDuration::new(f64::MAX, fps)
+            .unwrap()
+            .checked_add(&FrameDuration::new(Duration::Frames(0), fps).unwrap())
+            .unwrap();
+        let seconds = duration.to_seconds();
+        assert!(seconds.is_finite(), "fps={fps}");
+        assert!(seconds.to_bits().abs_diff(f64::MAX.to_bits()) <= 2);
+    }
+}
 
 #[test]
 fn issue_10_frames_stay_exact_while_seconds_keep_their_ceiling() {

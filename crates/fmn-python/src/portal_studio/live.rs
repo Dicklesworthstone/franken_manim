@@ -100,7 +100,7 @@ fn advance(scene: &Bound<'_, PyScene>, frames: u32, validator: Option<&Py<PyAny>
             .borrow_mut()
             .prepare_idle_frame(&mut sink)
             .map_err(native_error)?;
-        run_python_updaters(scene, frame.dt())?;
+        portal_playback::run_python_frame_updaters(scene, frame.dt(), frame.time().fps())?;
         synchronize_portal_camera(scene)?;
         if !Rc::ptr_eq(&engine, &scene.try_borrow()?.engine) {
             return Err(PyRuntimeError::new_err(

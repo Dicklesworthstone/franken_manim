@@ -49,13 +49,15 @@
 //! its original state — and a group that overrode it would break every
 //! remover it contains.
 
+use std::sync::Arc;
+
 use fmn_mobject::{FamilyCheckpoint, Mob, Mobject, Stage};
 
 use crate::animation::{
     AnimConfig, AnimError, AnimState, Animation, AnimationSignature, RateFunc, check_updater_error,
     clip, time_spanned_alpha, validate_begin_state,
 };
-use crate::clock::{Duration, FrameDuration};
+use crate::clock::{ClockError, Duration, FrameDuration, FramePosition};
 
 /// The Reference's `DEFAULT_LAGGED_START_LAG_RATIO`.
 pub const DEFAULT_LAGGED_START_LAG_RATIO: f64 = 0.05;
@@ -76,14 +78,15 @@ pub struct Interval {
 ///
 /// Host callback drivers use this projection to share Choreo's frame
 /// boundary arithmetic. It is produced after [`Animation::prepare_timing`].
-/// The windows are floating-point interpolation coordinates; exact frame
-/// allocation remains the responsibility of [`FrameDuration`].
+/// Floating-point windows remain available for compatibility and reporting.
+/// Exact-position methods retain every fractional boundary for host callbacks.
 #[derive(Clone, Debug)]
 pub struct CompositionTiming {
     intervals: Vec<Interval>,
     max_end: f64,
     frame_native: bool,
     state: AnimState,
+    exact: Option<Arc<ExactTimings>>,
 }
 
 impl CompositionTiming {
@@ -106,6 +109,14 @@ impl CompositionTiming {
         self.frame_native
     }
 
+    /// Whether exact frame positions are available for scheduling. An explicit
+    /// frame override over seconds-only members also prepares exact positions,
+    /// while retaining the historical seconds-valued float projection above.
+    #[must_use]
+    pub fn uses_exact_positions(&self) -> bool {
+        self.exact.is_some()
+    }
+
     /// Apply the native composition's complete timing pipeline at a
     /// clock frame or a parent's local frame position.
     #[must_use]
@@ -124,6 +135,283 @@ impl CompositionTiming {
             self.state.config.run_time,
             self.state.config.time_span,
         )
+    }
+
+    fn exact_timings(&self) -> Result<&ExactTimings, AnimError> {
+        self.exact.as_deref().ok_or(AnimError::InvalidFramePhase(
+            "composition has no prepared exact frame coordinates",
+        ))
+    }
+
+    /// Map an exact local clock position through the group's time span and
+    /// native rate function. Requires [`Self::uses_exact_positions`].
+    pub fn position_at_position(
+        &self,
+        position: &FramePosition,
+        fps: u32,
+    ) -> Result<FramePosition, AnimError> {
+        self.exact_timings()?.position(&self.state, position, fps)
+    }
+
+    /// The input for an external rate callback. Exact linear callbacks can
+    /// use [`Self::position_at_position`] directly; arbitrary callbacks consume
+    /// this f64 and return their output to [`Self::position_from_rate_alpha`].
+    pub fn rate_alpha_at_position(
+        &self,
+        position: &FramePosition,
+        fps: u32,
+    ) -> Result<f64, AnimError> {
+        self.exact_timings()?
+            .progress(&self.state, position, fps)?
+            .interpolation_alpha()
+            .map_err(AnimError::Clock)
+    }
+
+    /// Lift the exact binary value returned by a host rate callback and scale
+    /// it by the unrounded internal extent. Negative outputs remain signed.
+    pub fn position_from_rate_alpha(&self, alpha: f64) -> Result<FramePosition, AnimError> {
+        self.exact_timings()?.position_from_rate_alpha(alpha)
+    }
+
+    /// The last member whose exact start has been reached. Empty groups have
+    /// no member; a negative position selects the first nonempty group member.
+    pub fn member_at_position(&self, position: &FramePosition) -> Result<Option<usize>, AnimError> {
+        self.exact_timings()?.member_at(position)
+    }
+
+    /// A child's clipped interpolation alpha, with exact endpoint decisions.
+    pub fn sub_alpha_at_position(
+        &self,
+        index: usize,
+        position: &FramePosition,
+    ) -> Result<f64, AnimError> {
+        self.exact_timings()?.sub_alpha(index, position)
+    }
+
+    /// A child's exact local frame position strictly inside its window.
+    /// Endpoints use the corresponding zero/one alpha; zero-duration windows
+    /// retain their established zero-alpha behavior.
+    pub fn interior_frame_at_position(
+        &self,
+        index: usize,
+        position: &FramePosition,
+    ) -> Result<Option<FramePosition>, AnimError> {
+        self.exact_timings()?.interior_frame(index, position)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ExactInterval {
+    start: FramePosition,
+    end: FramePosition,
+}
+
+/// Prepared once and shared by serial, frozen and host-callback dispatch.
+#[derive(Clone, Debug)]
+pub(crate) struct ExactTimings {
+    intervals: Vec<ExactInterval>,
+    max_end: FramePosition,
+    fps: u32,
+}
+
+impl ExactTimings {
+    fn interval(&self, index: usize) -> Result<&ExactInterval, AnimError> {
+        self.intervals
+            .get(index)
+            .ok_or(AnimError::InvalidFramePhase(
+                "composition member is outside its prepared exact timing table",
+            ))
+    }
+
+    fn progress(
+        &self,
+        state: &AnimState,
+        position: &FramePosition,
+        fps: u32,
+    ) -> Result<FramePosition, AnimError> {
+        if fps != self.fps {
+            return Err(AnimError::Clock(crate::ClockError::FrameRateMismatch));
+        }
+        if let Some((start, end)) = state.config.time_span {
+            if end <= start {
+                return Err(AnimError::InvalidTimeSpan { start, end });
+            }
+            let scale = FramePosition::from_frame(i64::from(fps));
+            let start = FramePosition::from_f64(start)
+                .and_then(|start| start.checked_multiply(&scale))
+                .map_err(AnimError::Clock)?;
+            let end = FramePosition::from_f64(end)
+                .and_then(|end| end.checked_multiply(&scale))
+                .map_err(AnimError::Clock)?;
+            return position
+                .checked_subtract(&start)
+                .and_then(|local| local.checked_divide(&end.checked_subtract(&start)?))
+                .and_then(|alpha| alpha.clamp_unit())
+                .map_err(AnimError::Clock);
+        }
+        let duration = state
+            .prepared_duration()
+            .ok_or(AnimError::InvalidFramePhase(
+                "exact composition was not bound to a frame grid",
+            ))?;
+        if duration.fps() != fps {
+            return Err(AnimError::Clock(crate::ClockError::FrameRateMismatch));
+        }
+        let duration = duration.as_position();
+        if duration
+            .checked_cmp(&FramePosition::from_frame(0))
+            .map_err(AnimError::Clock)?
+            .is_eq()
+        {
+            return Ok(FramePosition::from_frame(0));
+        }
+        position.checked_divide(&duration).map_err(AnimError::Clock)
+    }
+
+    pub(crate) fn position(
+        &self,
+        state: &AnimState,
+        position: &FramePosition,
+        fps: u32,
+    ) -> Result<FramePosition, AnimError> {
+        if state.config.time_span.is_none() && state.config.rate_func.is_linear() {
+            let duration = state
+                .prepared_duration()
+                .ok_or(AnimError::InvalidFramePhase(
+                    "exact composition was not bound to a frame grid",
+                ))?;
+            if fps != self.fps || duration.fps() != fps {
+                return Err(AnimError::Clock(crate::ClockError::FrameRateMismatch));
+            }
+            let extent = duration.as_position();
+            if extent
+                .checked_cmp(&self.max_end)
+                .map_err(AnimError::Clock)?
+                .is_eq()
+            {
+                // An unscaled group is the identity even when its parent
+                // supplies a fractional position. Avoid growing redundant
+                // numerator/denominator factors at every nested level.
+                return Ok(
+                    if extent
+                        .checked_cmp(&FramePosition::from_frame(0))
+                        .map_err(AnimError::Clock)?
+                        .is_eq()
+                    {
+                        FramePosition::from_frame(0)
+                    } else {
+                        position.clone()
+                    },
+                );
+            }
+        }
+        let progress = self.progress(state, position, fps)?;
+        if state.config.rate_func.is_linear() {
+            progress
+                .checked_multiply(&self.max_end)
+                .map_err(AnimError::Clock)
+        } else {
+            let alpha = progress.interpolation_alpha().map_err(AnimError::Clock)?;
+            self.position_from_rate_alpha(state.config.rate_func.eval(alpha))
+        }
+    }
+
+    fn position_from_rate_alpha(&self, alpha: f64) -> Result<FramePosition, AnimError> {
+        FramePosition::from_f64(alpha)
+            .and_then(|alpha| alpha.checked_multiply(&self.max_end))
+            .map_err(AnimError::Clock)
+    }
+
+    fn clamp_position(&self, position: &FramePosition) -> Result<FramePosition, AnimError> {
+        let zero = FramePosition::from_frame(0);
+        if position
+            .checked_cmp(&zero)
+            .map_err(AnimError::Clock)?
+            .is_lt()
+        {
+            Ok(zero)
+        } else if position
+            .checked_cmp(&self.max_end)
+            .map_err(AnimError::Clock)?
+            .is_gt()
+        {
+            Ok(self.max_end.clone())
+        } else {
+            Ok(position.clone())
+        }
+    }
+
+    fn member_at(&self, position: &FramePosition) -> Result<Option<usize>, AnimError> {
+        let mut active = (!self.intervals.is_empty()).then_some(0);
+        for (index, interval) in self.intervals.iter().enumerate() {
+            if !position
+                .checked_cmp(&interval.start)
+                .map_err(AnimError::Clock)?
+                .is_lt()
+            {
+                active = Some(index);
+            }
+        }
+        Ok(active)
+    }
+
+    pub(crate) fn sub_alpha(
+        &self,
+        index: usize,
+        position: &FramePosition,
+    ) -> Result<f64, AnimError> {
+        let interval = self.interval(index)?;
+        if interval
+            .end
+            .checked_cmp(&interval.start)
+            .map_err(AnimError::Clock)?
+            .is_eq()
+            || !position
+                .checked_cmp(&interval.start)
+                .map_err(AnimError::Clock)?
+                .is_gt()
+        {
+            return Ok(0.0);
+        }
+        if !position
+            .checked_cmp(&interval.end)
+            .map_err(AnimError::Clock)?
+            .is_lt()
+        {
+            return Ok(1.0);
+        }
+        position
+            .checked_subtract(&interval.start)
+            .and_then(|local| {
+                local.checked_divide(&interval.end.checked_subtract(&interval.start)?)
+            })
+            .and_then(|alpha| alpha.interpolation_alpha())
+            .map_err(AnimError::Clock)
+    }
+
+    pub(crate) fn interior_frame(
+        &self,
+        index: usize,
+        position: &FramePosition,
+    ) -> Result<Option<FramePosition>, AnimError> {
+        let interval = self.interval(index)?;
+        if position
+            .checked_cmp(&interval.start)
+            .map_err(AnimError::Clock)?
+            .is_gt()
+            && position
+                .checked_cmp(&interval.end)
+                .map_err(AnimError::Clock)?
+                .is_lt()
+        {
+            Ok(Some(
+                position
+                    .checked_subtract(&interval.start)
+                    .map_err(AnimError::Clock)?,
+            ))
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -181,6 +469,7 @@ struct ResolvedTimings {
     seconds: Vec<Interval>,
     frames: Option<Vec<Interval>>,
     duration: FrameDuration,
+    exact: Option<Arc<ExactTimings>>,
 }
 
 /// Preserve the Reference's float operation order for an all-seconds
@@ -191,12 +480,14 @@ fn resolve_timings(
     animations: &[Box<dyn Animation>],
     lag_ratio: f64,
     fps: u32,
+    force_frames: bool,
 ) -> Result<ResolvedTimings, AnimError> {
     let durations = animations
         .iter()
         .map(|animation| animation.duration_on_grid(fps))
         .collect::<Result<Vec<_>, _>>()?;
-    if durations.iter().all(|duration| !duration.is_frame_native()) {
+    let frame_native_members = durations.iter().any(FrameDuration::is_frame_native);
+    if !force_frames && !frame_native_members {
         let seconds = build_timings(
             &durations
                 .iter()
@@ -209,12 +500,23 @@ fn resolve_timings(
             seconds,
             frames: None,
             duration,
+            exact: None,
         });
     }
     let mut start = FrameDuration::new(Duration::Frames(0), fps).map_err(AnimError::Clock)?;
+    let legacy_seconds = (!frame_native_members).then(|| {
+        build_timings(
+            &durations
+                .iter()
+                .map(FrameDuration::to_seconds)
+                .collect::<Vec<_>>(),
+            lag_ratio,
+        )
+    });
     let mut duration = start.clone();
     let mut seconds = Vec::with_capacity(durations.len());
     let mut frames = Vec::with_capacity(durations.len());
+    let mut exact = Vec::with_capacity(durations.len());
     for member in durations {
         let end = start.checked_add(&member).map_err(AnimError::Clock)?;
         if end.cmp_duration(&duration).is_gt() {
@@ -228,14 +530,31 @@ fn resolve_timings(
             start: start.frame_units(),
             end: end.frame_units(),
         });
+        exact.push(ExactInterval {
+            start: start.as_position(),
+            end: end.as_position(),
+        });
         start = start
             .checked_add(&member.checked_scale(lag_ratio).map_err(AnimError::Clock)?)
             .map_err(AnimError::Clock)?;
     }
-    duration.n_frames().map_err(AnimError::Clock)?;
+    // Internal windows are interpolation coordinates, not clock segments.
+    // A parent override or duration scale may compress them into a valid
+    // segment, so enforce the i64 limit only when the final clock is planned.
+    // Native members retain the established finite frame-projection bound.
+    // Explicit frame overrides over seconds-only members retain their legacy
+    // seconds projection; their new exact positions need no float conversion.
+    if frame_native_members && !duration.frame_units().is_finite() {
+        return Err(AnimError::Clock(ClockError::NonFiniteRunTime));
+    }
     Ok(ResolvedTimings {
-        seconds,
-        frames: Some(frames),
+        seconds: legacy_seconds.unwrap_or(seconds),
+        frames: frame_native_members.then_some(frames),
+        exact: Some(Arc::new(ExactTimings {
+            intervals: exact,
+            max_end: duration.as_position(),
+            fps,
+        })),
         duration,
     })
 }
@@ -244,11 +563,35 @@ fn group_duration(
     config: &AnimConfig,
     derived: FrameDuration,
     explicit_seconds: bool,
+    duration_scale: f64,
     fps: u32,
 ) -> Result<FrameDuration, AnimError> {
     if config.run_time_frames.is_some() || explicit_seconds {
-        return config.duration_on_grid(fps);
+        let duration = config.duration_on_grid(fps)?;
+        // A seconds override changes the group's extent, not the native
+        // timing of its descendants. Keep that provenance so an enclosing
+        // composition still passes frame positions through this group.
+        return Ok(if derived.is_frame_native() {
+            duration.into_frame_native()
+        } else {
+            duration
+        });
     }
+    let derived = if duration_scale == 1.0 {
+        derived
+    } else {
+        if !duration_scale.is_finite() || duration_scale < 0.0 {
+            return Err(AnimError::Clock(ClockError::InvalidFrameLag));
+        }
+        if derived.is_frame_native() {
+            derived
+                .checked_scale(duration_scale)
+                .map_err(AnimError::Clock)?
+        } else {
+            FrameDuration::new(derived.to_seconds() * duration_scale, fps)
+                .map_err(AnimError::Clock)?
+        }
+    };
     let Some((_, end)) = config.time_span else {
         return Ok(derived);
     };
@@ -351,6 +694,19 @@ pub(crate) fn timeline_frame_position(
     }
 }
 
+pub(crate) fn exact_position_from_alpha(
+    state: &AnimState,
+    alpha: f64,
+    timings: &ExactTimings,
+) -> Result<(FramePosition, u32), AnimError> {
+    // Explicit normalized-alpha calls (including finish) already carry the
+    // endpoint intent. Do not divide through the outer duration: zero-frame
+    // compositions must still walk their children at the final alpha.
+    let spanned = time_spanned_alpha(alpha, state.config.run_time, state.config.time_span);
+    let position = timings.position_from_rate_alpha(state.config.rate_func.eval(spanned))?;
+    Ok((position, timings.fps))
+}
+
 /// The constructor-surface defaults every composition shares: the derived
 /// run time and the identity rate curve (see the module note on BN-11).
 fn group_config(name: &str, run_time: f64, lag_ratio: f64) -> AnimConfig {
@@ -382,10 +738,12 @@ pub struct AnimationGroup {
     begun: usize,
     finished: usize,
     layout_lag_ratio: f64,
+    duration_scale: f64,
     timing_run_time: f64,
     run_time_override: bool,
     frame_timings: Option<Vec<Interval>>,
     max_frame_end: Option<f64>,
+    exact_timings: Option<Arc<ExactTimings>>,
 }
 
 impl AnimationGroup {
@@ -439,10 +797,12 @@ impl AnimationGroup {
             begun: 0,
             finished: 0,
             layout_lag_ratio: lag_ratio,
+            duration_scale: 1.0,
             timing_run_time: max_end_time,
             run_time_override: false,
             frame_timings: None,
             max_frame_end: None,
+            exact_timings: None,
         })
     }
 
@@ -456,6 +816,23 @@ impl AnimationGroup {
         self.state.config.run_time_frames = None;
         self.run_time_override = true;
         self
+    }
+
+    /// Scale the duration derived from the members, before `time_span`
+    /// widening. Explicit seconds or frame overrides take precedence.
+    ///
+    /// Frame-native extents use the exact binary value of `scale`, without
+    /// rounding each member to a whole frame. Seconds-only groups retain
+    /// their existing floating-point multiplication. Non-finite or negative
+    /// factors are refused when the timing is resolved.
+    #[must_use]
+    pub fn with_duration_scale(mut self, scale: f64) -> Self {
+        self.duration_scale = scale;
+        self
+    }
+
+    fn duration_scale(&self) -> f64 {
+        self.duration_scale
     }
 
     /// Override the derived duration with exactly this many scene frames.
@@ -509,6 +886,30 @@ impl AnimationGroup {
         self.frame_timings.is_some()
     }
 
+    pub(crate) fn exact_timings(&self) -> Option<&Arc<ExactTimings>> {
+        self.exact_timings.as_ref()
+    }
+
+    fn interpolate_exact_position(
+        &mut self,
+        stage: &mut Stage,
+        position: &FramePosition,
+        fps: u32,
+        timings: &ExactTimings,
+    ) -> Result<(), AnimError> {
+        for (index, animation) in self.animations.iter_mut().enumerate() {
+            if let Some(local) = timings.interior_frame(index, position)? {
+                animation.interpolate_at_position(stage, &local, fps)?;
+            } else {
+                animation.interpolate(stage, timings.sub_alpha(index, position)?);
+            }
+            if retain_updater_error(stage, &mut self.updater_error) {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     fn interpolate_position(&mut self, stage: &mut Stage, time: f64, fps: Option<u32>) {
         if retain_updater_error(stage, &mut self.updater_error) {
             return;
@@ -549,32 +950,73 @@ macro_rules! composite_common {
         }
 
         fn duration_on_grid(&self, fps: u32) -> Result<FrameDuration, AnimError> {
-            let layout = resolve_timings(&self.animations, self.layout_lag_ratio, fps)?;
+            let layout = resolve_timings(
+                &self.animations,
+                self.layout_lag_ratio,
+                fps,
+                self.state.config.run_time_frames.is_some(),
+            )?;
             let explicit = self.run_time_override
                 || self.state.config.run_time.to_bits() != self.timing_run_time.to_bits();
-            group_duration(&self.state.config, layout.duration, explicit, fps)
+            group_duration(
+                &self.state.config,
+                layout.duration,
+                explicit,
+                self.duration_scale(),
+                fps,
+            )
         }
 
         fn prepare_timing(&mut self, fps: u32) -> Result<(), AnimError> {
             let explicit = self.run_time_override
                 || self.state.config.run_time.to_bits() != self.timing_run_time.to_bits();
+            let authored_seconds = (explicit && self.state.config.run_time_frames.is_none())
+                .then_some(self.state.config.run_time);
             for animation in &mut self.animations {
                 animation.prepare_timing(fps)?;
             }
-            let layout = resolve_timings(&self.animations, self.layout_lag_ratio, fps)?;
-            let duration =
-                group_duration(&self.state.config, layout.duration.clone(), explicit, fps)?;
-            self.max_end_time = layout.duration.to_seconds();
+            let layout = resolve_timings(
+                &self.animations,
+                self.layout_lag_ratio,
+                fps,
+                self.state.config.run_time_frames.is_some(),
+            )?;
+            let duration = group_duration(
+                &self.state.config,
+                layout.duration.clone(),
+                explicit,
+                self.duration_scale(),
+                fps,
+            )?;
+            self.max_end_time = if layout.frames.is_some() {
+                layout.duration.to_seconds()
+            } else {
+                max_end_time(&layout.seconds)
+            };
             self.max_frame_end = layout
                 .frames
                 .as_ref()
                 .map(|_| layout.duration.frame_units());
             self.timings = layout.seconds;
             self.frame_timings = layout.frames;
+            self.exact_timings = layout.exact;
             if !explicit && self.state.config.run_time_frames.is_none() {
                 self.state.config.run_time = duration.to_seconds();
             }
             self.state.bind_duration(&duration);
+            if let Some(seconds) = authored_seconds {
+                if self.state.config.time_span.is_some() {
+                    // The seconds alpha pipeline multiplies by this authored
+                    // run_time when applying a span. Its denominator must not
+                    // become the widened duration used by the frame clock.
+                    let sampling = FrameDuration::new(seconds, fps).map_err(AnimError::Clock)?;
+                    self.state.bind_duration(&sampling);
+                }
+                // Native timing's projected seconds are only presentation.
+                // Reusing them as an explicit override can add a frame when
+                // this animation is prepared again or at a different fps.
+                self.state.config.run_time = seconds;
+            }
             self.timing_run_time = self.state.config.run_time;
             self.run_time_override = explicit;
             Ok(())
@@ -586,7 +1028,20 @@ macro_rules! composite_common {
                 max_end: self.max_frame_end.unwrap_or(self.max_end_time),
                 frame_native: self.frame_timings.is_some(),
                 state: self.state.clone(),
+                exact: self.exact_timings.clone(),
             })
+        }
+
+        fn interpolate_at_time(
+            &mut self,
+            stage: &mut Stage,
+            time: crate::RationalTime,
+        ) -> Result<(), AnimError> {
+            self.interpolate_at_position(
+                stage,
+                &FramePosition::from_frame(time.frames()),
+                time.fps(),
+            )
         }
 
         fn update_rate_info(
@@ -744,6 +1199,15 @@ impl Animation for AnimationGroup {
         if retain_updater_error(stage, &mut self.updater_error) {
             return;
         }
+        if let Some(timings) = self.exact_timings.clone() {
+            let result = exact_position_from_alpha(&self.state, alpha, &timings).and_then(
+                |(position, fps)| self.interpolate_exact_position(stage, &position, fps, &timings),
+            );
+            if let Err(error) = result {
+                self.updater_error.get_or_insert(error);
+            }
+            return;
+        }
         let time = timeline_position(&self.state.config, alpha, self.interpolation_max_end());
         self.interpolate_position(stage, time, None);
     }
@@ -752,8 +1216,34 @@ impl Animation for AnimationGroup {
         if retain_updater_error(stage, &mut self.updater_error) {
             return;
         }
+        if self.exact_timings.is_some() {
+            let result = FramePosition::from_f64(frame)
+                .map_err(AnimError::Clock)
+                .and_then(|position| self.interpolate_at_position(stage, &position, fps));
+            if let Err(error) = result {
+                self.updater_error.get_or_insert(error);
+            }
+            return;
+        }
         let time = timeline_frame_position(&self.state, frame, fps, self.interpolation_max_end());
         self.interpolate_position(stage, time, Some(fps));
+    }
+
+    fn interpolate_at_position(
+        &mut self,
+        stage: &mut Stage,
+        position: &FramePosition,
+        fps: u32,
+    ) -> Result<(), AnimError> {
+        if retain_updater_error(stage, &mut self.updater_error) || self.updater_error.is_some() {
+            return Ok(());
+        }
+        let Some(timings) = self.exact_timings.clone() else {
+            self.interpolate_at_frame(stage, position.to_f64(), fps);
+            return Ok(());
+        };
+        let position = timings.position(&self.state, position, fps)?;
+        self.interpolate_exact_position(stage, &position, fps, &timings)
     }
 
     /// The Reference's `AnimationGroup.update_mobjects`: every member ticks
@@ -883,11 +1373,13 @@ pub struct Succession {
     replayable: bool,
     replaying: bool,
     last_time: Option<f64>,
+    last_exact_position: Option<FramePosition>,
     layout_lag_ratio: f64,
     timing_run_time: f64,
     run_time_override: bool,
     frame_timings: Option<Vec<Interval>>,
     max_frame_end: Option<f64>,
+    exact_timings: Option<Arc<ExactTimings>>,
 }
 
 /// At most three content checkpoints per initialized member, independent of
@@ -901,6 +1393,10 @@ struct MemberPlayback {
 }
 
 impl Succession {
+    fn duration_scale(&self) -> f64 {
+        1.0
+    }
+
     /// `Succession(*animations)` — `lag_ratio = 1`.
     ///
     /// # Errors
@@ -953,11 +1449,13 @@ impl Succession {
             replayable: false,
             replaying: false,
             last_time: None,
+            last_exact_position: None,
             layout_lag_ratio: lag_ratio,
             timing_run_time: max_end_time,
             run_time_override: false,
             frame_timings: None,
             max_frame_end: None,
+            exact_timings: None,
         })
     }
 
@@ -1184,6 +1682,62 @@ impl Succession {
             return;
         }
         self.last_time = Some(time);
+        self.last_exact_position = None;
+    }
+
+    fn interpolate_exact_position(
+        &mut self,
+        stage: &mut Stage,
+        position: &FramePosition,
+        fps: u32,
+        timings: &ExactTimings,
+    ) -> Result<(), AnimError> {
+        if retain_updater_error(stage, &mut self.deferred)
+            || self.deferred.is_some()
+            || self.playback.is_empty()
+        {
+            return Ok(());
+        }
+        let position = timings.clamp_position(position)?;
+        self.replayable &= self.replay_sources_are_static(stage);
+        if let Some(last) = &self.last_exact_position
+            && position
+                .checked_cmp(last)
+                .map_err(AnimError::Clock)?
+                .is_lt()
+        {
+            if !self.replayable {
+                self.deferred = Some(AnimError::StatefulSuccessionRewind);
+                return Ok(());
+            }
+            self.replaying = true;
+        }
+        let target = timings
+            .member_at(&position)?
+            .ok_or(AnimError::EmptyComposition)?;
+        self.advance_to(stage, target);
+        if self.deferred.is_some() {
+            return Ok(());
+        }
+        if self.replayable && self.replaying {
+            if let Err(error) = self.restore_member(stage, target) {
+                self.deferred = Some(error);
+                return Ok(());
+            }
+            self.animations[target].prepare_interpolation_replay();
+        }
+        self.active = target;
+        if let Some(local) = timings.interior_frame(target, &position)? {
+            self.animations[target].interpolate_at_position(stage, &local, fps)?;
+        } else {
+            self.animations[target].interpolate(stage, timings.sub_alpha(target, &position)?);
+        }
+        if retain_updater_error(stage, &mut self.deferred) {
+            return Ok(());
+        }
+        self.last_time = Some(position.to_f64());
+        self.last_exact_position = Some(position);
+        Ok(())
     }
 }
 
@@ -1211,6 +1765,7 @@ impl Animation for Succession {
         self.playback.clear();
         self.replaying = false;
         self.last_time = None;
+        self.last_exact_position = None;
         self.replayable = self.replay_sources_are_static(stage);
         self.begin_member(stage, 0)
     }
@@ -1225,6 +1780,15 @@ impl Animation for Succession {
         {
             return;
         }
+        if let Some(timings) = self.exact_timings.clone() {
+            let result = exact_position_from_alpha(&self.state, alpha, &timings).and_then(
+                |(position, fps)| self.interpolate_exact_position(stage, &position, fps, &timings),
+            );
+            if let Err(error) = result {
+                self.deferred.get_or_insert(error);
+            }
+            return;
+        }
         let max_end = self.max_frame_end.unwrap_or(self.max_end_time);
         let time = timeline_position(&self.state.config, alpha, max_end);
         self.interpolate_position(stage, time, None);
@@ -1234,9 +1798,32 @@ impl Animation for Succession {
         if retain_updater_error(stage, &mut self.deferred) || self.deferred.is_some() {
             return;
         }
+        if self.exact_timings.is_some() {
+            let result = FramePosition::from_f64(frame)
+                .map_err(AnimError::Clock)
+                .and_then(|position| self.interpolate_at_position(stage, &position, fps));
+            if let Err(error) = result {
+                self.deferred.get_or_insert(error);
+            }
+            return;
+        }
         let max_end = self.max_frame_end.unwrap_or(self.max_end_time);
         let time = timeline_frame_position(&self.state, frame, fps, max_end);
         self.interpolate_position(stage, time, Some(fps));
+    }
+
+    fn interpolate_at_position(
+        &mut self,
+        stage: &mut Stage,
+        position: &FramePosition,
+        fps: u32,
+    ) -> Result<(), AnimError> {
+        let Some(timings) = self.exact_timings.clone() else {
+            self.interpolate_at_frame(stage, position.to_f64(), fps);
+            return Ok(());
+        };
+        let position = timings.position(&self.state, position, fps)?;
+        self.interpolate_exact_position(stage, &position, fps, &timings)
     }
 
     /// The Reference's `Succession.update_mobjects`: only the active member

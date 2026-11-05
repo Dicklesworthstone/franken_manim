@@ -694,6 +694,7 @@ pub struct AnimState {
     // Resolved only at the play boundary. The count authority remains in
     // the authored duration; this float is the interpolation denominator.
     frame_units: Option<f64>,
+    prepared_duration: Option<crate::clock::FrameDuration>,
 }
 
 impl AnimState {
@@ -707,6 +708,7 @@ impl AnimState {
             families: Arc::from([]),
             mobject_was_updating: false,
             frame_units: None,
+            prepared_duration: None,
         }
     }
 
@@ -742,7 +744,47 @@ impl AnimState {
     /// fixed; no rounded seconds value is used to schedule frames.
     #[must_use]
     pub fn sample_alpha(&self, time: RationalTime) -> f64 {
-        self.frame_alpha(time.frames() as f64, time.fps())
+        self.prepared_duration
+            .as_ref()
+            .filter(|duration| duration.is_frame_native())
+            .map_or_else(
+                || self.frame_alpha(time.frames() as f64, time.fps()),
+                |duration| duration.sample_alpha(time.frames()),
+            )
+    }
+
+    /// Interpolation alpha at an explicitly exact position. A containing
+    /// frame-native group uses this path for both frame and seconds members;
+    /// ordinary seconds-only clock sampling keeps its established float path.
+    pub fn frame_alpha_at_position(
+        &self,
+        position: &crate::clock::FramePosition,
+        fps: u32,
+    ) -> Result<f64, crate::clock::ClockError> {
+        let Some(duration) = self.prepared_duration.as_ref() else {
+            let frame = position.to_f64();
+            if frame.is_finite() {
+                return Ok(self.frame_alpha(frame, fps));
+            }
+            // A huge but finite seconds member can be compressed into a
+            // short frame-native group. Its local frame coordinate may
+            // exceed f64::MAX while its seconds and alpha remain finite.
+            let seconds = position
+                .checked_divide(&crate::clock::FramePosition::from_frame(i64::from(fps)))?
+                .to_f64();
+            return Ok(seconds / self.config.run_time);
+        };
+        if duration.fps() != fps {
+            return Err(crate::clock::ClockError::FrameRateMismatch);
+        }
+        let extent = duration.as_position();
+        if extent
+            .checked_cmp(&crate::clock::FramePosition::from_frame(0))?
+            .is_eq()
+        {
+            return Ok(0.0);
+        }
+        position.checked_divide(&extent)?.interpolation_alpha()
     }
 
     /// Alpha at a frame-unit position, including the fractional local
@@ -761,16 +803,30 @@ impl AnimState {
     /// and updater state are deliberately left fresh.
     pub fn copy_timing_from(&mut self, prepared: &Self) {
         self.frame_units = prepared.frame_units;
+        self.prepared_duration = prepared.prepared_duration.clone();
     }
 
     pub(crate) fn frame_units(&self) -> Option<f64> {
         self.frame_units
     }
 
+    pub(crate) fn prepared_duration(&self) -> Option<&crate::clock::FrameDuration> {
+        self.prepared_duration.as_ref()
+    }
+
     pub(crate) fn bind_duration(&mut self, duration: &FrameDuration) {
+        self.prepared_duration = Some(duration.clone());
         self.frame_units = duration.is_frame_native().then(|| duration.frame_units());
         if duration.is_frame_native() {
-            self.config.run_time = duration.to_seconds();
+            let seconds = duration.to_seconds();
+            // The descriptive conversion can round just below a time_span
+            // endpoint. Apply begin's widening here too, before a composition
+            // records this value as its derived runtime; otherwise begin can
+            // make the next grid bind mistake it for an authored seconds override.
+            self.config.run_time = self
+                .config
+                .time_span
+                .map_or(seconds, |(_, end)| seconds.max(end));
         }
     }
 }
@@ -834,6 +890,42 @@ pub trait Animation {
     fn interpolate_at_frame(&mut self, stage: &mut Stage, frame: f64, fps: u32) {
         let alpha = self.state().frame_alpha(frame, fps);
         self.interpolate(stage, alpha);
+    }
+
+    /// Evaluate an exact local frame position from the clock or a containing
+    /// composition. Native compositions retain the rational position through
+    /// child selection; leaves convert only their interpolation alpha.
+    fn interpolate_at_position(
+        &mut self,
+        stage: &mut Stage,
+        position: &crate::clock::FramePosition,
+        fps: u32,
+    ) -> Result<(), AnimError> {
+        let alpha = self
+            .state()
+            .frame_alpha_at_position(position, fps)
+            .map_err(AnimError::Clock)?;
+        self.interpolate(stage, alpha);
+        Ok(())
+    }
+
+    /// Enter frame-native sampling directly from an integer clock sample.
+    /// Ordinary seconds leaves retain their established float operation order;
+    /// compositions override this to preserve exact mixed-duration windows.
+    fn interpolate_at_time(
+        &mut self,
+        stage: &mut Stage,
+        time: RationalTime,
+    ) -> Result<(), AnimError> {
+        if self.state().frame_units().is_none() {
+            self.interpolate_at_frame(stage, time.frames() as f64, time.fps());
+            return Ok(());
+        }
+        self.interpolate_at_position(
+            stage,
+            &crate::clock::FramePosition::from_frame(time.frames()),
+            time.fps(),
+        )
     }
 
     /// Append mobjects whose Python/host updater layer must receive the
