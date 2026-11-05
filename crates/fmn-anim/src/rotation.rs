@@ -166,8 +166,9 @@ pub fn rotate_default(mobject: Mob) -> Rotating {
 /// the wiring.
 ///
 /// # Errors
-/// [`AnimError::StaleHandle`] for any dead handle, or the Stage errors
-/// reported while assembling the member container.
+/// [`AnimError::StaleHandle`] for a dead or foreign `clock`, or
+/// [`AnimError::Stage`] for a dead or foreign hand. Refusal leaves the
+/// stage unchanged.
 pub fn clock_passes_time(
     stage: &mut Stage,
     clock: Mob,
@@ -176,6 +177,11 @@ pub fn clock_passes_time(
     run_time: f64,
     hours_passed: f64,
 ) -> Result<AnimationGroup, AnimError> {
+    if !stage.contains(clock) {
+        return Err(AnimError::StaleHandle(clock));
+    }
+    stage.try_get(hour_hand)?;
+    stage.try_get(minute_hand)?;
     let center = stage.get_center(clock);
     let hour_radians = -hours_passed * 2.0 * PI / 12.0;
     let hour_rot = Box::new(
@@ -190,8 +196,8 @@ pub fn clock_passes_time(
             .with_axis(OUT)
             .with_about_point(center),
     );
-    let mut group =
-        AnimationGroup::new(stage, vec![hour_rot, minute_rot])?.with_name("ClockPassesTime");
+    let mut group = AnimationGroup::in_group(stage, vec![hour_rot, minute_rot], 0.0, Some(clock))?
+        .with_name("ClockPassesTime");
     group.state_mut().config.run_time = run_time;
     group.state_mut().config.rate_func = RateFunc::Catalog(rate::CatalogRate::Linear);
     Ok(group)
