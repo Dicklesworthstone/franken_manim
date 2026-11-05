@@ -173,4 +173,4 @@ def native_ratio_and_large_positions():
 real_mixed_playback()
 live_frame_runtime_edits()
 native_ratio_and_large_positions()
-print("Exact mixed, nested, live-runtime, rational and large-frame composition positions passed")
+print("Exact mixed, nested, live-runtime, rational and large-frame composition positions passed", flush=True)
