@@ -10701,10 +10701,9 @@ fn parse_anim_spec(
         run_time_frames,
         frame_timing: params
             .get_item("frame_timing")?
-            .map(|value| {
-                value
-                    .extract::<PyRef<'_, PyFrameTiming>>()
-                    .map(|timing| (*timing).clone())
+            .map(|value| -> PyResult<PyFrameTiming> {
+                let timing = value.extract::<PyRef<'_, PyFrameTiming>>()?;
+                Ok((*timing).clone())
             })
             .transpose()?,
         rate,
