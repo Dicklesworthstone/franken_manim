@@ -4,9 +4,9 @@
 //! {1, 4, 16} threads (bit-identical bytes — the PG-5 property).
 
 use fmn_codec::{
-    CompressionLevel, PngLimits, SampleFormat, WavError, WavLimits, Y4mColorspace, Y4mWriter,
-    decode_png, decode_wav, decode_y4m, encode_gif, encode_png_sequence, encode_rgba8_segmented,
-    encode_wav,
+    CompressionLevel, GifStreamEncoder, PngLimits, SampleFormat, WavError, WavLimits,
+    Y4mColorspace, Y4mWriter, decode_png, decode_wav, decode_y4m, encode_gif, encode_png_sequence,
+    encode_rgba8_segmented, encode_wav,
 };
 use fmn_frame::{FrameBuffer, FrameLayout, PixelFormat};
 
@@ -180,20 +180,33 @@ fn y4m_round_trip_and_header_conformance() {
 
 // ---- GIF ------------------------------------------------------------
 
-/// A minimal GIF block-walker + LZW decoder: the in-test oracle.
+/// A GIF block-walker, LZW decoder, and full-canvas compositor independent of
+/// the encoder. Local palettes and disposal matter just as much as the indices.
 struct ParsedGif {
+    frames: Vec<ParsedGifFrame>,
+}
+
+struct ParsedGifFrame {
+    delay_cs: u16,
+    transparent: Option<u8>,
+    disposal: u8,
     palette: Vec<[u8; 3]>,
-    /// (delay_cs, transparent_index, indices) per frame.
-    frames: Vec<(u16, Option<u8>, Vec<u8>)>,
+    indices: Vec<u8>,
+    rgba: Vec<[u8; 4]>,
 }
 
 fn parse_gif(bytes: &[u8]) -> ParsedGif {
     assert_eq!(&bytes[..6], b"GIF89a");
+    let width = u16::from_le_bytes([bytes[6], bytes[7]]) as usize;
+    let height = u16::from_le_bytes([bytes[8], bytes[9]]) as usize;
     let flags = bytes[10];
-    assert!(flags & 0x80 != 0, "no global color table");
-    let gct_len = 1usize << ((flags & 0x07) + 1);
+    let gct_len = if flags & 0x80 != 0 {
+        1usize << ((flags & 0x07) + 1)
+    } else {
+        0
+    };
     let mut at = 13;
-    let palette: Vec<[u8; 3]> = bytes[at..at + gct_len * 3]
+    let global_palette: Vec<[u8; 3]> = bytes[at..at + gct_len * 3]
         .as_chunks::<3>()
         .0
         .iter()
@@ -202,19 +215,29 @@ fn parse_gif(bytes: &[u8]) -> ParsedGif {
     at += gct_len * 3;
 
     let mut frames = Vec::new();
-    let mut pending: (u16, Option<u8>) = (0, None);
+    let mut pending: (u16, Option<u8>, u8) = (0, None, 0);
+    let [r, g, b] = global_palette
+        .get(usize::from(bytes[11]))
+        .copied()
+        .unwrap_or([0, 0, 0]);
+    let background = [r, g, b, 255];
+    let mut canvas = vec![background; width * height];
     loop {
         match bytes[at] {
-            0x3b => break,
+            0x3b => {
+                assert_eq!(at + 1, bytes.len(), "trailing GIF bytes");
+                break;
+            }
             0x21 => {
                 let label = bytes[at + 1];
                 at += 2;
                 if label == 0xf9 {
                     let size = bytes[at] as usize;
+                    assert_eq!(size, 4, "graphic control extension size");
                     let body = &bytes[at + 1..at + 1 + size];
                     let delay = u16::from_le_bytes([body[1], body[2]]);
                     let transparent = (body[0] & 1 == 1).then_some(body[3]);
-                    pending = (delay, transparent);
+                    pending = (delay, transparent, (body[0] >> 2) & 7);
                 }
                 // Skip sub-blocks.
                 loop {
@@ -226,10 +249,26 @@ fn parse_gif(bytes: &[u8]) -> ParsedGif {
                 }
             }
             0x2c => {
+                let left = u16::from_le_bytes([bytes[at + 1], bytes[at + 2]]);
+                let top = u16::from_le_bytes([bytes[at + 3], bytes[at + 4]]);
                 let w = u16::from_le_bytes([bytes[at + 5], bytes[at + 6]]) as usize;
                 let h = u16::from_le_bytes([bytes[at + 7], bytes[at + 8]]) as usize;
-                assert_eq!(bytes[at + 9] & 0x80, 0, "unexpected local palette");
+                assert_eq!((left, top, w, h), (0, 0, width, height));
+                let image_flags = bytes[at + 9];
+                assert_eq!(image_flags & 0x40, 0, "unexpected interlaced frame");
                 at += 10;
+                let palette = if image_flags & 0x80 != 0 {
+                    let count = 1usize << ((image_flags & 7) + 1);
+                    let colors = bytes[at..at + count * 3].as_chunks::<3>().0.to_vec();
+                    at += count * 3;
+                    colors
+                } else {
+                    global_palette.clone()
+                };
+                assert!(!palette.is_empty(), "frame has no color table");
+                if let Some(transparent) = pending.1 {
+                    assert!(usize::from(transparent) < palette.len());
+                }
                 let min_code_size = bytes[at];
                 at += 1;
                 let mut data = Vec::new();
@@ -244,13 +283,40 @@ fn parse_gif(bytes: &[u8]) -> ParsedGif {
                 }
                 let indices = lzw_decode(&data, min_code_size);
                 assert_eq!(indices.len(), w * h, "index count");
-                frames.push((pending.0, pending.1, indices));
-                pending = (0, None);
+                if frames.is_empty() && pending.1.is_some() {
+                    canvas.fill([0, 0, 0, 0]);
+                }
+                let previous = canvas.clone();
+                for (pixel, &index) in canvas.iter_mut().zip(&indices) {
+                    let [r, g, b] = palette[usize::from(index)];
+                    if Some(index) != pending.1 {
+                        *pixel = [r, g, b, 255];
+                    }
+                }
+                frames.push(ParsedGifFrame {
+                    delay_cs: pending.0,
+                    transparent: pending.1,
+                    disposal: pending.2,
+                    palette,
+                    indices,
+                    rgba: canvas.clone(),
+                });
+                match pending.2 {
+                    0 | 1 => {}
+                    2 => canvas.fill(if pending.1.is_some() {
+                        [0, 0, 0, 0]
+                    } else {
+                        background
+                    }),
+                    3 => canvas = previous,
+                    other => panic!("reserved GIF disposal method {other}"),
+                }
+                pending = (0, None, 0);
             }
             other => panic!("unexpected gif block {other:#x} at {at}"),
         }
     }
-    ParsedGif { palette, frames }
+    ParsedGif { frames }
 }
 
 /// GIF-variant LZW decode (the oracle for the encoder).
@@ -337,16 +403,16 @@ fn gif_flat_colors_round_trip_exactly() {
     let parsed = parse_gif(&gif);
     assert_eq!(parsed.frames.len(), 4);
     for (frame, color) in parsed.frames.iter().zip(&colors) {
-        let indices = &frame.2;
+        let indices = &frame.indices;
         let index = indices[0] as usize;
         assert!(
             indices.iter().all(|&i| i as usize == index),
             "flat frame dithered"
         );
-        assert_eq!(parsed.palette[index], [color[0], color[1], color[2]]);
+        assert_eq!(frame.palette[index], [color[0], color[1], color[2]]);
     }
     // Drift-free delays at 3 fps: 33+34+33 per 100 cs.
-    let delays: Vec<u16> = parsed.frames.iter().map(|f| f.0).collect();
+    let delays: Vec<u16> = parsed.frames.iter().map(|f| f.delay_cs).collect();
     assert_eq!(delays, vec![33, 34, 33, 33]);
     // The loop extension is present.
     assert!(gif.windows(11).any(|w| w == b"NETSCAPE2.0"));
@@ -372,12 +438,136 @@ fn gif_transparency_and_determinism() {
     assert_eq!(gif1, gif2, "gif encode is not deterministic");
 
     let parsed = parse_gif(&gif1);
-    let (_, transparent, indices) = &parsed.frames[0];
-    let t = transparent.expect("transparency flag missing");
+    let frame = &parsed.frames[0];
+    let t = frame.transparent.expect("transparency flag missing");
     // The hole took the transparent index; opaque pixels did not.
-    assert_eq!(indices[(3 * 8 + 3) as usize], t);
-    assert_ne!(indices[0], t);
+    assert_eq!(frame.indices[(3 * 8 + 3) as usize], t);
+    assert_ne!(frame.indices[0], t);
     assert!(!gif1.windows(11).any(|w| w == b"NETSCAPE2.0"));
+}
+
+fn stream_gif(width: u32, height: u32, frames: &[&[u8]], loop_forever: bool) -> Vec<u8> {
+    let mut encoder = GifStreamEncoder::new(width, height, (30_000, 1_001), loop_forever)
+        .expect("stream configuration");
+    let mut bytes = encoder.header();
+    for frame in frames {
+        bytes.extend_from_slice(&encoder.encode_frame(frame).expect("stream frame"));
+    }
+    assert_eq!(encoder.frame_count(), frames.len() as u64);
+    bytes.extend_from_slice(&GifStreamEncoder::trailer());
+    bytes
+}
+
+#[test]
+fn gif_stream_transparent_frames_replace_the_previous_canvas() {
+    let opaque = [255, 0, 0, 255].repeat(8);
+    let mut partial = [0, 0, 0, 0].repeat(8);
+    partial[..4].copy_from_slice(&[0, 255, 0, 255]);
+    let mut more_colors = partial.clone();
+    more_colors[4..16].copy_from_slice(&[0, 0, 255, 255, 255, 255, 0, 255, 0, 0, 0, 128]);
+    // Transparent RGB values must not enter the palette or the displayed canvas.
+    let clear = [231, 45, 67, 127].repeat(8);
+    let opaque_again = [0, 0, 255, 255].repeat(8);
+    let frames = [
+        opaque.as_slice(),
+        partial.as_slice(),
+        more_colors.as_slice(),
+        clear.as_slice(),
+        opaque_again.as_slice(),
+        clear.as_slice(),
+    ];
+    let batch = parse_gif(&encode_gif(4, 2, &frames, (30_000, 1_001), true).unwrap());
+    for loop_forever in [false, true] {
+        let bytes = stream_gif(4, 2, &frames, loop_forever);
+        assert_eq!(bytes, stream_gif(4, 2, &frames, loop_forever));
+        assert_eq!(
+            bytes.windows(11).any(|window| window == b"NETSCAPE2.0"),
+            loop_forever
+        );
+        let streamed = parse_gif(&bytes);
+        assert_eq!(streamed.frames.len(), frames.len());
+        for (index, ((actual, batch), input)) in streamed
+            .frames
+            .iter()
+            .zip(&batch.frames)
+            .zip(&frames)
+            .enumerate()
+        {
+            let expected: Vec<_> = input
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|&[r, g, b, a]| {
+                    if a < 128 {
+                        [0, 0, 0, 0]
+                    } else {
+                        [r, g, b, 255]
+                    }
+                })
+                .collect();
+            assert_eq!(actual.rgba, expected, "stream frame {index}");
+            assert_eq!(actual.rgba, batch.rgba, "batch/stream frame {index}");
+            assert_eq!(actual.delay_cs, batch.delay_cs);
+        }
+        for frame in &streamed.frames {
+            assert_eq!(frame.transparent, Some(0));
+            assert_eq!(frame.disposal, 2);
+        }
+        // Palette changes, including its size, must never change transparency.
+        assert_ne!(streamed.frames[0].palette, streamed.frames[1].palette);
+        assert_ne!(
+            streamed.frames[1].palette.len(),
+            streamed.frames[2].palette.len()
+        );
+
+        // Negative control: retaining the first opaque image reproduces the
+        // original bug. The compositor must detect red ghosts behind green.
+        let mut retained = bytes;
+        let first_control = retained
+            .windows(3)
+            .position(|w| w == [0x21, 0xf9, 4])
+            .unwrap();
+        retained[first_control + 3] = 0x04;
+        let broken = parse_gif(&retained);
+        assert_eq!(broken.frames[1].rgba[1], [255, 0, 0, 255]);
+        assert_ne!(broken.frames[1].rgba, streamed.frames[1].rgba);
+    }
+}
+
+#[test]
+fn gif_stream_palette_boundary_never_makes_opaque_colors_transparent() {
+    for color_count in [255usize, 256] {
+        // Includes opaque black, identical in RGB to the transparent sentinel.
+        // At 256 distinct colors quantization/dithering is required, but every
+        // opaque input must remain opaque and every transparent input must clear.
+        let opaque: Vec<u8> = (0..color_count)
+            .flat_map(|value| [value as u8, value as u8, value as u8, 255])
+            .collect();
+        let mut partial = opaque.clone();
+        partial[3] = 127;
+        partial[7] = 128;
+        let clear = [0, 0, 0, 0].repeat(color_count);
+        let frames = [opaque.as_slice(), partial.as_slice(), clear.as_slice()];
+        let bytes = stream_gif(color_count as u32, 1, &frames, false);
+        assert_eq!(bytes, stream_gif(color_count as u32, 1, &frames, false));
+        let parsed = parse_gif(&bytes);
+        assert_eq!(parsed.frames[0].palette.len(), 256);
+        for (actual, input) in parsed.frames.iter().zip(frames) {
+            assert!(actual.palette.len() <= 256);
+            for ((pixel, &index), source) in actual
+                .rgba
+                .iter()
+                .zip(&actual.indices)
+                .zip(input.as_chunks::<4>().0)
+            {
+                assert_eq!(pixel[3], if source[3] < 128 { 0 } else { 255 });
+                assert_eq!(Some(index) == actual.transparent, source[3] < 128);
+            }
+        }
+        if color_count == 255 {
+            assert_eq!(parsed.frames[0].rgba, opaque.as_chunks::<4>().0);
+        }
+    }
 }
 
 #[test]

@@ -1,4 +1,4 @@
-"""Detached source tails on real native geometry and the shared Scene clock."""
+"""Source/tail callback dispatch on native geometry and the shared Scene clock."""
 import gc
 from pathlib import Path
 import tempfile
@@ -121,20 +121,103 @@ class DetachedTailTests(unittest.TestCase):
                 if self.fail:
                     raise failure
                 return super().get_center()
-        source = Source()
+        for bound in (False, True):
+            with self.subTest(bound=bound):
+                source = Source()
+                if bound:
+                    scene = m.Scene()
+                    scene.add(source)
+                tail = m.TracingTail(source, time_traced=.5, time_per_anchor=.125)
+                before, history, clock = tail.data.copy(), tail._trace_anchors, tail.time
+                source.fail = True
+                with self.assertRaises(LookupError) as caught:
+                    tail.update(.125)
+                self.assertIs(caught.exception, failure)
+                np.testing.assert_array_equal(tail.data, before)
+                self.assertEqual(tail._trace_anchors, history)
+                self.assertEqual(tail.time, clock)
+                source.fail = False
+                source.shift(m.UP)
+                tail.update(.125)
+                np.testing.assert_allclose(tail.get_end(), m.UP)
+
+    def test_authored_center_is_independent_of_scene_add_order(self):
+        class Source(m.Dot):
+            def get_center(self):
+                return super().get_center() + getattr(self, "trace_offset", 0.)
+        expected_frames = None
+        for bound in (False, True):
+            for instance_override in (False, True):
+                with self.subTest(bound=bound, instance_override=instance_override):
+                    scene = m.Scene()
+                    source = m.Dot(m.LEFT) if instance_override else Source(m.LEFT)
+                    if instance_override:
+                        center = source.get_center
+                        source.get_center = lambda: center() + .5 * m.UP
+                    else:
+                        source.trace_offset = .5 * m.UP
+                    if bound:
+                        scene.add(source)
+                    tail = m.TracingTail(source, time_traced=.5, time_per_anchor=.125)
+                    callback = m.TracingTail(source.get_center, time_traced=.5, time_per_anchor=.125)
+                    self.assertFalse(tail._is_bound(), "authored center was lowered to a Stage center")
+                    scene.add(source, tail, callback)
+                    frames = []
+                    for delta in (.125, .25, .125, .375):
+                        source.shift(delta * m.RIGHT)
+                        scene.update_frame(delta)
+                        np.testing.assert_allclose(tail.get_end(), source.get_center(), atol=1e-6)
+                        np.testing.assert_array_equal(tail.data, callback.data)
+                        self.assertEqual(tail._trace_anchors, callback._trace_anchors)
+                        frames.append(tail.data.copy())
+                    if expected_frames is None:
+                        expected_frames = frames
+                    else:
+                        for actual, expected in zip(frames, expected_frames):
+                            np.testing.assert_array_equal(actual, expected)
+
+    def test_bound_source_preserves_tail_initialization_and_update_hooks(self):
+        calls = []
+        class Tail(m.TracingTail):
+            def init_points(self):
+                calls.append("init_points")
+                return super().init_points()
+            def update_path(self, dt):
+                calls.append(("update", dt))
+                return super().update_path(dt)
+            def set_points_smoothly(self, points, *args, **kwargs):
+                calls.append("geometry")
+                return super().set_points_smoothly(points, *args, **kwargs)
+            def set_stroke(self, *args, **kwargs):
+                calls.append("style")
+                return super().set_stroke(*args, **kwargs)
+        scene, source = m.Scene(), m.Dot()
+        scene.add(source)
+        tail = Tail(source, time_traced=.5, time_per_anchor=.125)
+        self.assertEqual(calls.count("init_points"), 1)
+        self.assertEqual(tail.get_num_points(), 0)
+        scene.add(tail)
+        calls.clear()
+        source.shift(m.RIGHT)
+        scene.update_frame(.125)
+        self.assertEqual(calls, [("update", .125), "geometry", "style"])
+        np.testing.assert_allclose(tail.get_end(), source.get_center(), atol=1e-6)
+
+    def test_bound_group_preserves_child_bounding_box_override(self):
+        class Extent(m.Dot):
+            def compute_bounding_box(self):
+                return super().compute_bounding_box() + getattr(self, "trace_offset", 0.)
+        source = m.Group(Extent())
+        source[0].trace_offset = .5 * m.UP
+        scene = m.Scene()
+        scene.add(source)
         tail = m.TracingTail(source, time_traced=.5, time_per_anchor=.125)
-        before, history, clock = tail.data.copy(), tail._trace_anchors, tail.time
-        source.fail = True
-        with self.assertRaises(LookupError) as caught:
-            tail.update(.125)
-        self.assertIs(caught.exception, failure)
-        np.testing.assert_array_equal(tail.data, before)
-        self.assertEqual(tail._trace_anchors, history)
-        self.assertEqual(tail.time, clock)
-        source.fail = False
-        source.shift(m.UP)
-        tail.update(.125)
-        np.testing.assert_allclose(tail.get_end(), m.UP)
+        callback = m.TracingTail(source.get_center, time_traced=.5, time_per_anchor=.125)
+        scene.add(tail, callback)
+        source.shift(m.RIGHT)
+        scene.update_frame(.125)
+        np.testing.assert_allclose(tail.get_end(), m.RIGHT + .5 * m.UP, atol=1e-6)
+        np.testing.assert_array_equal(tail.data, callback.data)
 
     def test_invalid_window_fails_without_binding_the_source(self):
         source = m.Dot()
@@ -164,9 +247,33 @@ class DetachedTailTests(unittest.TestCase):
             self.assertEqual(frames, render(root / "callback", True, 1))
             self.assertEqual(frames, render(root / "four", False, 4))
 
+    def test_rendered_bound_authored_center_matches_public_callback(self):
+        class Source(m.Dot):
+            def get_center(self):
+                return super().get_center() + getattr(self, "trace_offset", 0.)
+        def render(path, callback, threads):
+            scene, source = m.Scene(), Source(2 * m.LEFT)
+            source.trace_offset = .75 * m.UP
+            scene.add(source)
+            tail = m.TracingTail(source.get_center if callback else source,
+                                 time_traced=.5, time_per_anchor=.125,
+                                 stroke_color=m.WHITE, stroke_width=(0, 20))
+            source.add_updater(lambda current, dt: current.shift(4 * dt * m.RIGHT), call=False)
+            with scene.render_session(path, format="png_sequence", resolution=(96, 64), fps=8, threads=threads):
+                scene.add(tail)
+                scene.wait(.75)
+            return [file.read_bytes() for file in sorted(Path(path).glob("*.png"))]
+        with tempfile.TemporaryDirectory(prefix="fmn-bound-authored-tail-") as directory:
+            root = Path(directory)
+            expected = render(root / "callback", True, 1)
+            self.assertEqual(len(expected), 6)
+            self.assertEqual(len(set(expected)), 6)
+            for threads in (1, 4, 16):
+                self.assertEqual(expected, render(root / str(threads), False, threads))
+
 
 suite = unittest.defaultTestLoader.loadTestsFromTestCase(DetachedTailTests)
-assert suite.countTestCases() == 10, "detached-tail acceptance inventory changed"
+assert suite.countTestCases() == 14, "detached-tail acceptance inventory changed"
 result = unittest.TextTestRunner(verbosity=2).run(suite)
 gc.collect()
 if not result.wasSuccessful():

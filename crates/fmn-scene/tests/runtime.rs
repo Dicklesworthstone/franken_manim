@@ -6,8 +6,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use fmn_anim::{
-    AnimError, ClockError, SegmentKind, Succession, fade_transform, prepare_animation,
-    replacement_transform,
+    AnimError, ClockError, SegmentKind, Succession, clock_passes_time, fade_transform,
+    prepare_animation, replacement_transform,
 };
 use fmn_core::rng::Pcg64Dxsm;
 use fmn_mobject::animate::AnimateArgs;
@@ -68,6 +68,92 @@ impl SceneSink for PacketSink {
 
 fn point() -> Mobject {
     Mobject::from_points(&[[0.0, 0.0, 0.0]])
+}
+
+#[test]
+fn clock_passes_time_preserves_the_clock_root_and_its_updater_lifecycle() {
+    for initially_rooted in [false, true] {
+        for skip in [false, true] {
+            let mut scene = Scene::new(
+                RuntimeConfig {
+                    fps: 12,
+                    skip_animations: skip,
+                    preview_while_skipping: false,
+                    ..RuntimeConfig::default()
+                },
+                7,
+            )
+            .unwrap();
+            // The Reference Clock's child order is face, hour, minute, ticks.
+            let clock = scene.stage_mut().add(Mobject::group(vec![
+                Mobject::from_points(&[[-1.0, -1.0, 0.0], [1.0, 1.0, 0.0]]),
+                Mobject::from_points(&[[0.0, 0.0, 0.0], [0.0, 0.3, 0.0]]),
+                Mobject::from_points(&[[0.0, 0.0, 0.0], [0.0, 0.6, 0.0]]),
+                Mobject::from_points(&[[-0.9, 0.0, 0.0], [0.9, 0.0, 0.0]]),
+            ]));
+            if initially_rooted {
+                scene.add(&[clock]).unwrap();
+            }
+            let children = scene.stage().get(clock).unwrap().submobjects().to_vec();
+            let updates = Rc::new(RefCell::new(Vec::new()));
+            let observed = Rc::clone(&updates);
+            scene
+                .stage_mut()
+                .add_dt_updater(
+                    clock,
+                    move |stage, me, dt| {
+                        if dt > 0.0 {
+                            observed.borrow_mut().push((me, stage.is_animating(me), dt));
+                        }
+                    },
+                    false,
+                )
+                .unwrap();
+            let animation =
+                clock_passes_time(scene.stage_mut(), clock, children[1], children[2], 0.5, 3.0)
+                    .unwrap();
+            let mut sink = PacketSink::default();
+            let report = scene
+                .play(
+                    vec![Box::new(animation)],
+                    PlayOverrides::default(),
+                    &mut sink,
+                )
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(report.n_frames, 6);
+            assert_eq!(scene.time().frames(), 6);
+            assert_eq!(scene.play_count(), 1);
+            assert_eq!(scene.mobjects(), &[clock]);
+            assert_eq!(scene.stage().get(clock).unwrap().submobjects(), children);
+            assert_eq!(updates.borrow().as_slice(), &[(clock, true, 1.0 / 12.0); 6]);
+            for member in scene.stage().family(clock) {
+                assert!(!scene.stage().is_animating(member));
+            }
+            for (hand, expected) in [
+                (children[1], [0.15, 0.0, 0.0]),
+                (children[2], [0.0, 0.3, 0.0]),
+            ] {
+                let actual = scene.stage().get_center(hand);
+                assert!(
+                    actual
+                        .iter()
+                        .zip(expected)
+                        .all(|(a, b)| (a - b).abs() < 1e-6)
+                );
+            }
+            assert_eq!(scene.stage().get_center(children[0]), [0.0; 3]);
+            assert_eq!(scene.stage().get_center(children[3]), [0.0; 3]);
+            if skip {
+                assert!(sink.packet.is_none());
+            } else {
+                let captured = sink.packet.expect("last clock frame").materialize_stage();
+                assert_eq!(captured.roots(), &[clock]);
+                assert_eq!(captured.get(clock).unwrap().submobjects(), children);
+            }
+        }
+    }
 }
 
 #[test]

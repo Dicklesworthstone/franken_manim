@@ -349,6 +349,23 @@ def install(native, subsystems=True):
             for key in ("_fmn_frame_timing", "_fmn_frame_descriptor", "_fmn_timing_fps"):
                 own.pop(key, None)
         elif name == "run_time_frames" and value is not None:
+            value = _validate_frame_count(value)
+            own = object.__getattribute__(self, "__dict__")
+            descriptor = own.get("_fmn_frame_descriptor")
+            fps = own.get("_fmn_timing_fps")
+            if descriptor is not None and fps is not None:
+                # A callback may edit its duration after begin. Retiming its
+                # prepared descriptor keeps enclosing parents' windows and
+                # this group's child windows intact, including shared nodes.
+                # Explicit frames replace any derived ChangeSpeed scale.
+                descriptor = (None, value, *descriptor[2:5])
+                timing = g["_frame_timing"](descriptor, fps)
+                seconds = timing.seconds
+                # Prepare before changing public units or cached bindings:
+                # validation/native failures leave the old duration usable.
+                object.__setattr__(self, "run_time", seconds)
+                own["_fmn_frame_descriptor"] = descriptor
+                own["_fmn_frame_timing"] = timing
             object.__setattr__(self, "_fmn_derived_run_time", False)
         object.__setattr__(self, name, value)
 

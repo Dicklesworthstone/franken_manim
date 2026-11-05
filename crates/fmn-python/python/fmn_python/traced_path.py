@@ -164,7 +164,46 @@ def install_traced_path(native: Any) -> None:
     method(Trace, "update_path", update_path)
     Tail = g.get("TracingTail")
     if Tail is not None:
+        from fmn_python.movement import _changed, _implementation, _plain_instance_dict
+
         original_tail_init = getattr(Tail, "__init__", None)
+        Mobject = g["Mobject"]
+        center_hooks = ("get_center", "get_bounding_box", "compute_bounding_box",
+                        "get_family", "get_points", "has_points", "_bbox_rows",
+                        "__getattribute__", "__getattr__")
+        center_protocols = {Mobject: {name: _implementation(Mobject, name)
+                                     for name in center_hooks}}
+        children_descriptor = _implementation(Mobject, "submobjects")
+        plain_lists = (list, g.get("_LiveSubmobjects", list))
+        tail_protocols = {}
+
+        def native_center(source):
+            # Stage::get_center cannot dispatch Python center/bounds overrides,
+            # including a child's custom extent in a Group. Inspect the live
+            # projection without calling authored getters during admission.
+            pending, seen, memo = [source], set(), {}
+            while pending:
+                member = pending.pop()
+                if id(member) in seen:
+                    continue
+                seen.add(id(member))
+                if (not isinstance(member, Mobject)
+                        or _changed(member, center_protocols, memo)
+                        or not _plain_instance_dict(type(member))
+                        or _implementation(type(member), "submobjects") is not children_descriptor):
+                    return False
+                namespace = object.__getattribute__(member, "__dict__")
+                children = dict.get(namespace, "submobjects", ())
+                if type(children) in plain_lists:
+                    if any(_implementation(type(children), name) is not _implementation(list, name)
+                           for name in ("__iter__", "__len__", "__bool__")):
+                        return False
+                    pending.extend(children)
+                elif type(children) is tuple:
+                    pending.extend(children)
+                else:
+                    return False
+            return True
 
         def tail_init(self, mobject_or_func, time_traced=1.0,
                       stroke_color=g["DEFAULT_MOBJECT_COLOR"],
@@ -187,6 +226,9 @@ def install_traced_path(native: Any) -> None:
                 and hasattr(self, "_init_native_tracer")
                 and mobject_or_func._is_bound()
                 and original_tail_init is not None
+                and type(self) is Tail
+                and not _changed(self, tail_protocols)
+                and native_center(mobject_or_func)
             ):
                 return original_tail_init(
                     self,
@@ -198,9 +240,9 @@ def install_traced_path(native: Any) -> None:
                     time_per_anchor=anchor_dt,
                     **kwargs,
                 )
-            # A detached source has no Stage handle for the optimized native
-            # tracer. Normalize it to the already-supported live point callback;
-            # do not adopt it early or capture a frozen construction-time center.
+            # Detached sources and authored source/tail protocols use the same
+            # live callback. Scene adoption must not change the traced center
+            # or bypass public construction, update and geometry hooks.
             source = mobject_or_func.get_center if isinstance(mobject_or_func, g["Mobject"]) else mobject_or_func
             super(Tail, self).__init__(source, time_traced=window, time_per_anchor=anchor_dt, stroke_color=stroke_color,
                                       stroke_width=stroke_width, stroke_opacity=stroke_opacity, **kwargs)
@@ -216,4 +258,10 @@ def install_traced_path(native: Any) -> None:
         if not issubclass(Tail, Trace):
             Tail.__bases__ = (Trace,)
         method(Tail, "__init__", tail_init)
+        tail_hooks = ("__init__", "init_data", "init_points", "init_uniforms", "init_colors",
+                      "init_updaters", "update_path", "set_points_smoothly", "set_stroke",
+                      "set_points", "set_anchors_and_handles", "make_smooth", "add_updater",
+                      "update", "__getattribute__", "__getattr__")
+        tail_protocols.update({base: {name: _implementation(base, name) for name in tail_hooks}
+                               for base in Tail.__mro__ if issubclass(base, Mobject)})
     g["_FMN_TRACED_PATH_INSTALLED"] = True

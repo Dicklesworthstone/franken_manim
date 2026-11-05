@@ -51,7 +51,10 @@
 
 use std::sync::Arc;
 
-use fmn_mobject::{FamilyCheckpoint, Mob, Mobject, Stage};
+use fmn_core::constants::{
+    DEFAULT_STROKE_WIDTH, DEFAULT_VMOBJECT_FILL_COLOR, DEFAULT_VMOBJECT_STROKE_COLOR,
+};
+use fmn_mobject::{FamilyCheckpoint, Mob, Mobject, Stage, StageError};
 
 use crate::animation::{
     AnimConfig, AnimError, AnimState, Animation, AnimationSignature, RateFunc, check_updater_error,
@@ -625,6 +628,14 @@ fn assemble(
             existing
         }
         None => {
+            // Validate every member before allocating the root or installing
+            // parent edges. A later stale member must leave no partial group.
+            if animations
+                .iter()
+                .any(|animation| !stage.contains(animation.state().mobject()))
+            {
+                return Err(StageError::StaleHandle.into());
+            }
             // The Reference's `VGroup(*remove_list_redundancies(mobs))` when
             // every animated mobject is a VMobject, `Group(...)` otherwise
             // (composition.py:44-51): one fresh container over the distinct
@@ -636,7 +647,26 @@ fn assemble(
                     .is_some_and(|entry| entry.buffer.schema().offset("fill_rgba").is_some())
             });
             let container = stage.add(if all_vector {
-                Mobject::vector_from_points(&[])
+                // A point-free VGroup owns its constructor style. Seed only
+                // this root's phantom row before attaching the members.
+                let mut vector = Mobject::vector_from_points(&[]);
+                let fill = DEFAULT_VMOBJECT_FILL_COLOR;
+                let stroke = DEFAULT_VMOBJECT_STROKE_COLOR;
+                vector.buffer.write_color_lanes(
+                    "fill_rgba",
+                    Some([fill.r, fill.g, fill.b]),
+                    Some(0.0),
+                );
+                vector.buffer.write_color_lanes(
+                    "stroke_rgba",
+                    Some([stroke.r, stroke.g, stroke.b]),
+                    Some(1.0),
+                );
+                vector
+                    .buffer
+                    .write_scalar_lanes("stroke_width", DEFAULT_STROKE_WIDTH);
+                vector.buffer.write_scalar_lanes("fill_border_width", 0.0);
+                vector
             } else {
                 Mobject::new()
             });
