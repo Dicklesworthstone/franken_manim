@@ -124,6 +124,64 @@ fn exact_frame_timeline_compiles_renders_seeks_and_round_trips_issue_10() {
 }
 
 #[test]
+fn promoted_seconds_override_round_trips_and_replays_its_exact_extent() {
+    let seconds = f64::from_bits((43.0_f64 / 24.0).to_bits() - 1);
+    let mut stage = Stage::new();
+    let mob = square(&mut stage);
+    stage.add_to_scene(mob).unwrap();
+    let child = shift_frames(&mut stage, mob, 43.0, 43);
+    let group = AnimationGroup::new(&mut stage, vec![child])
+        .unwrap()
+        .with_run_time(seconds);
+    let mut timeline = Timeline::new(24).unwrap();
+    timeline.play(vec![Box::new(group)]).unwrap();
+    timeline.label("after-override");
+    timeline.wait_frames(1).unwrap();
+
+    let plan = timeline.compile().unwrap();
+    assert_eq!(plan.segments()[0].n_frames, 43);
+    assert!(plan.segments()[0].frame_duration.is_some());
+    assert_eq!(plan.total_frames(), 44);
+    assert_eq!(plan.frame_of_label("after-override"), Some(44));
+    // The report's projected seconds would cover 44 frames on their own.
+    // The serialized exact extent, not that projection, owns scheduling.
+    assert_eq!(
+        RationalFrameClock::new(24)
+            .unwrap()
+            .segment(plan.segments()[0].run_time)
+            .unwrap()
+            .n_frames(),
+        44
+    );
+    let bytes = plan.to_bytes().unwrap();
+    let decoded = TimelinePlan::from_bytes(&bytes).unwrap();
+    assert_eq!(decoded, plan);
+    assert_eq!(decoded.to_bytes().unwrap(), bytes);
+    assert_eq!(timeline.compile().unwrap().to_bytes().unwrap(), bytes);
+
+    let mut packets = Vec::new();
+    let reports = timeline
+        .render(&mut stage, &rng(), &mut |packet| packets.push(packet))
+        .unwrap();
+    assert_eq!(packets.len(), 44);
+    assert_eq!(reports[0].n_frames, 43);
+    assert_eq!(reports[1].n_frames, 1);
+    assert_eq!(timeline.compile().unwrap().to_bytes().unwrap(), bytes);
+    let expected: Vec<_> = packets
+        .iter()
+        .map(|packet| point_bits(&packet.materialize_stage(), mob))
+        .collect();
+    for frame in [1, 29, 43, 44, 17, 44] {
+        let packet = timeline.seek(&mut stage, &rng(), frame).unwrap();
+        assert_eq!(
+            point_bits(&packet.materialize_stage(), mob),
+            expected[frame as usize - 1],
+            "frame={frame}"
+        );
+    }
+}
+
+#[test]
 fn exact_schedule_retains_large_counts_and_legacy_wire_bytes() {
     let mut timeline = Timeline::new(24).unwrap();
     let count = (1_u64 << 53) + 1;

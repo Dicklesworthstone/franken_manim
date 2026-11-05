@@ -55,7 +55,7 @@ use crate::animation::{
     AnimConfig, AnimError, AnimState, Animation, AnimationSignature, RateFunc, check_updater_error,
     clip, time_spanned_alpha, validate_begin_state,
 };
-use crate::clock::{Duration, FrameDuration};
+use crate::clock::{ClockError, Duration, FrameDuration};
 
 /// The Reference's `DEFAULT_LAGGED_START_LAG_RATIO`.
 pub const DEFAULT_LAGGED_START_LAG_RATIO: f64 = 0.05;
@@ -232,7 +232,13 @@ fn resolve_timings(
             .checked_add(&member.checked_scale(lag_ratio).map_err(AnimError::Clock)?)
             .map_err(AnimError::Clock)?;
     }
-    duration.n_frames().map_err(AnimError::Clock)?;
+    // Internal windows are interpolation coordinates, not clock segments.
+    // A parent override or duration scale may compress them into a valid
+    // segment, so enforce the i64 limit only when the final clock is planned.
+    // The projection itself must stay finite for interpolation to be defined.
+    if !duration.frame_units().is_finite() {
+        return Err(AnimError::Clock(ClockError::NonFiniteRunTime));
+    }
     Ok(ResolvedTimings {
         seconds,
         frames: Some(frames),
@@ -244,11 +250,35 @@ fn group_duration(
     config: &AnimConfig,
     derived: FrameDuration,
     explicit_seconds: bool,
+    duration_scale: f64,
     fps: u32,
 ) -> Result<FrameDuration, AnimError> {
     if config.run_time_frames.is_some() || explicit_seconds {
-        return config.duration_on_grid(fps);
+        let duration = config.duration_on_grid(fps)?;
+        // A seconds override changes the group's extent, not the native
+        // timing of its descendants. Keep that provenance so an enclosing
+        // composition still passes frame positions through this group.
+        return Ok(if derived.is_frame_native() {
+            duration.into_frame_native()
+        } else {
+            duration
+        });
     }
+    let derived = if duration_scale == 1.0 {
+        derived
+    } else {
+        if !duration_scale.is_finite() || duration_scale < 0.0 {
+            return Err(AnimError::Clock(ClockError::InvalidFrameLag));
+        }
+        if derived.is_frame_native() {
+            derived
+                .checked_scale(duration_scale)
+                .map_err(AnimError::Clock)?
+        } else {
+            FrameDuration::new(derived.to_seconds() * duration_scale, fps)
+                .map_err(AnimError::Clock)?
+        }
+    };
     let Some((_, end)) = config.time_span else {
         return Ok(derived);
     };
@@ -382,6 +412,7 @@ pub struct AnimationGroup {
     begun: usize,
     finished: usize,
     layout_lag_ratio: f64,
+    duration_scale: f64,
     timing_run_time: f64,
     run_time_override: bool,
     frame_timings: Option<Vec<Interval>>,
@@ -439,6 +470,7 @@ impl AnimationGroup {
             begun: 0,
             finished: 0,
             layout_lag_ratio: lag_ratio,
+            duration_scale: 1.0,
             timing_run_time: max_end_time,
             run_time_override: false,
             frame_timings: None,
@@ -456,6 +488,23 @@ impl AnimationGroup {
         self.state.config.run_time_frames = None;
         self.run_time_override = true;
         self
+    }
+
+    /// Scale the duration derived from the members, before `time_span`
+    /// widening. Explicit seconds or frame overrides take precedence.
+    ///
+    /// Frame-native extents use the exact binary value of `scale`, without
+    /// rounding each member to a whole frame. Seconds-only groups retain
+    /// their existing floating-point multiplication. Non-finite or negative
+    /// factors are refused when the timing is resolved.
+    #[must_use]
+    pub fn with_duration_scale(mut self, scale: f64) -> Self {
+        self.duration_scale = scale;
+        self
+    }
+
+    fn duration_scale(&self) -> f64 {
+        self.duration_scale
     }
 
     /// Override the derived duration with exactly this many scene frames.
@@ -552,18 +601,31 @@ macro_rules! composite_common {
             let layout = resolve_timings(&self.animations, self.layout_lag_ratio, fps)?;
             let explicit = self.run_time_override
                 || self.state.config.run_time.to_bits() != self.timing_run_time.to_bits();
-            group_duration(&self.state.config, layout.duration, explicit, fps)
+            group_duration(
+                &self.state.config,
+                layout.duration,
+                explicit,
+                self.duration_scale(),
+                fps,
+            )
         }
 
         fn prepare_timing(&mut self, fps: u32) -> Result<(), AnimError> {
             let explicit = self.run_time_override
                 || self.state.config.run_time.to_bits() != self.timing_run_time.to_bits();
+            let authored_seconds = (explicit && self.state.config.run_time_frames.is_none())
+                .then_some(self.state.config.run_time);
             for animation in &mut self.animations {
                 animation.prepare_timing(fps)?;
             }
             let layout = resolve_timings(&self.animations, self.layout_lag_ratio, fps)?;
-            let duration =
-                group_duration(&self.state.config, layout.duration.clone(), explicit, fps)?;
+            let duration = group_duration(
+                &self.state.config,
+                layout.duration.clone(),
+                explicit,
+                self.duration_scale(),
+                fps,
+            )?;
             self.max_end_time = layout.duration.to_seconds();
             self.max_frame_end = layout
                 .frames
@@ -575,6 +637,19 @@ macro_rules! composite_common {
                 self.state.config.run_time = duration.to_seconds();
             }
             self.state.bind_duration(&duration);
+            if let Some(seconds) = authored_seconds {
+                if self.state.config.time_span.is_some() {
+                    // The seconds alpha pipeline multiplies by this authored
+                    // run_time when applying a span. Its denominator must not
+                    // become the widened duration used by the frame clock.
+                    let sampling = FrameDuration::new(seconds, fps).map_err(AnimError::Clock)?;
+                    self.state.bind_duration(&sampling);
+                }
+                // Native timing's projected seconds are only presentation.
+                // Reusing them as an explicit override can add a frame when
+                // this animation is prepared again or at a different fps.
+                self.state.config.run_time = seconds;
+            }
             self.timing_run_time = self.state.config.run_time;
             self.run_time_override = explicit;
             Ok(())
@@ -901,6 +976,10 @@ struct MemberPlayback {
 }
 
 impl Succession {
+    fn duration_scale(&self) -> f64 {
+        1.0
+    }
+
     /// `Succession(*animations)` — `lag_ratio = 1`.
     ///
     /// # Errors
