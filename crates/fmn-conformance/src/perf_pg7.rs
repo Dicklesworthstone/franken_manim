@@ -1795,11 +1795,14 @@ mod tests {
         // 222c3d4a (fm-j4tni: native inline pifont crosses) changes only
         // that revision identity here. Both canonical result goldens and
         // the text definition pass unchanged before these identities move.
+        // 5aa9e44f (accent scripts and exact prime metrics) changes the
+        // provider identity and the engine's double-prime fingerprint probe.
+        // The canonical q^7+z/text outputs, workload and budgets pass unchanged.
         assert_eq!(
             [cold.digest(), cached.digest(), text.digest()].map(|digest| digest.to_string()),
             [
-                "60e53d5ec42219f5c6c81ef6bf4f649c648cf3665a2a6f9ad2244f1e2fd47e56",
-                "e82b3782290c16bf11c61879d0d27a645408b6f7b22e994bee1269c59825bf67",
+                "6268c75b0773572f20726a6a80599b40a4a76c6ac212e87ce2e8fa00eb8e2ce1",
+                "2ff22f58d95049186a8f83f2c81e89e4470aa249cd6814d5f00b4bbcf3d0a681",
                 "0fa22e64fe9e1901eea58a596899ec843bc0d6db46f1cd91607925a50fea3e6f",
             ]
         );

@@ -1,6 +1,34 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** re-run, 2026-11-04, against `Cargo.lock` `8608f187` and `SUITE.lock`
+**Status:** re-run, 2026-11-05, against `Cargo.lock` `0b8d890a` and `SUITE.lock`
+`2783427a` (fm-sup-accented-nucleus-r12-a529 and fm-7ojgl). The locked
+normal tree, WASM target build and unchanged release Node smoke each exit 0
+through ordinary DSR/RCH on `vmi1153651`. All 4,410 product source files,
+19,163 SDK/test inputs and audited scanner tools stayed unchanged. Source
+aggregate: `b8610c30c855ce7adaaa354f925c130c774ad353cd61fecaa30b97df603488db`.
+The tested checkout is main `39139cf1` with the reviewed consumer overlays;
+this is not a clean-source or complete native source-policy qualification.
+
+Node `v22.22.1` reports digest `1f248a71347b82aa`,
+`process=capability-absent`, `topology=1-cpu`, `semantic_oracles=111111`,
+`mirrored=101000`. The 134-line normal tree excludes native typography and
+Python. Each of the three changed locks retains its package versions,
+checksums and dependency edges; only three provider Git identities change.
+The font manifest changes only its provider revision, with all font and
+license bytes fixed. The auxiliary WASM lock remains byte-identical.
+
+The original affected package/browser gate was attempted and exits 1 at
+admission: `required WASM package-gate tool is unavailable: wasm-pack`.
+No package, browser, shared-memory or size result was produced. The font
+manifest remains affected packaged data; that gate, the historical size
+failure and fm-8j70 remain open. The combined DSR run is **failed**.
+
+Evidence: `.rch-results/fmn-execute-20261105-script-metrics-consumer-wasm-v1-135/`
+in `/data/projects/franken_manim-a529-consumer-20261105`,
+DSR `20261104T212850-1149580`. No assertion, output golden, workload or budget
+changed for this audit.
+
+Earlier re-run, 2026-11-04, against `Cargo.lock` `8608f187` and `SUITE.lock`
 `e98d676b` (fm-j4tni). The locked normal tree, WASM target build and unchanged
 release Node smoke each exit 0 through ordinary DSR/RCH on `vmi1227854`.
 All 4,410 source files and the three audited locks stayed unchanged throughout

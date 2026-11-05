@@ -5,7 +5,7 @@ real 3b1b formula corpus typesets natively. The denominator is **frozen**
 (G0-4: `9269` distinct strings, `17711` occurrences, corpus hash
 `a8325e49e0ce78fcc735533952740e9adeaaa5cb10f9c13d73aaa3ba4bf883fc`, rules_version 1); the numbers may only rise.
 
-**Computed against franken_markdown `222c3d4a8c29`.**
+**Computed against franken_markdown `5aa9e44f09e4`.**
 
 | Plane | Occurrence-weighted | Unique-string |
 |---|---|---|
@@ -103,6 +103,7 @@ The denominator holds fully literal Tex-family arguments. The G0-4 harvest also 
 | `d24502925b8c` | 99.994 | 99.989 | 99.994 | 99.989 |
 | `cafe18b329cc` | 99.994 | 99.989 | 99.994 | 99.989 |
 | `222c3d4a8c29` | 99.994 | 99.989 | 99.994 | 99.989 |
+| `5aa9e44f09e4` | 99.994 | 99.989 | 99.994 | 99.989 |
 
 ## How this is enforced
 
