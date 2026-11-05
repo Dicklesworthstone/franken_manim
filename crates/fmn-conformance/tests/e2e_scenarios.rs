@@ -6801,6 +6801,81 @@ fn tex_forced_fraction_styles_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenar
     Ok(RunOutcome::ok().with_counter("tex_forced_fraction_formulas", 21))
 }
 
+/// fm-sup-accented-nucleus-r12-a529 and fm-7ojgl: script attachment and
+/// exact prime boxes reach the native builder and certified raster.
+fn tex_script_metrics_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let engine = &scene_goldens::corpus().tex;
+    // Fresh ruled-Reference TeX boxes at10pt, in ems. The compound
+    // controls retain the ordinary box-based script drops.
+    let cases = [
+        (r"{\bar{\phi}}^{y}", [1.076_509, 0.831_667, 0.194_444]),
+        (r"{\hat{x}}^{2}", [1.020_140, 0.864_003, 0.0]),
+        (r"{\bar{A}}_{1}^{2}", [1.198_615, 0.864_003, 0.247_217]),
+        (r"\bar{\phi}^{y}", [1.076_509, 0.831_667, 0.194_444]),
+        (r"\hat{x}^{2}", [1.020_140, 0.864_003, 0.0]),
+        (r"\bar{A}_{1}^{2}", [1.198_615, 0.864_003, 0.247_217]),
+        (r"\phi^{y}", [1.076_509, 0.714_280, 0.194_444]),
+        (r"{\phi}^{y}", [1.076_509, 0.714_280, 0.194_444]),
+        (r"{\hat{xy}}^2", [1.546_300, 0.898_335, 0.194_444]),
+        (r"{\bar{xy}}_1^2", [1.546_300, 0.864_003, 0.247_217]),
+        (r"\prime", [0.274_998, 0.555_557, 0.0]),
+        (r"\scriptstyle\prime", [0.230_556, 0.388_890, 0.0]),
+        (r"\scriptscriptstyle\prime", [0.220_488, 0.277_779, 0.0]),
+        ("{}'", [0.280_556, 0.801_782, 0.0]),
+        ("{}''", [0.511_111, 0.801_782, 0.0]),
+        ("x'", [0.852_083, 0.801_782, 0.0]),
+        ("f'", [0.877_782, 0.801_782, 0.194_444]),
+        ("x''", [1.082_639, 0.801_782, 0.0]),
+        ("x'''", [1.313_194, 0.801_782, 0.0]),
+        (r"f^{\prime}", [0.877_782, 0.801_782, 0.194_444]),
+        (r"{\hat{x}}'", [0.852_083, 0.801_782, 0.0]),
+        (r"{\bar{f}}'", [0.877_782, 0.831_667, 0.194_444]),
+        (r"x^{y'}", [1.322_690, 0.992_450, 0.0]),
+        (r"\scriptstyle x'", [0.723_961, 0.579_558, 0.0]),
+        (r"\scriptscriptstyle x'", [0.666_324, 0.479_555, 0.0]),
+        (r"\text{\tiny $\prime$}", [0.220_488, 0.277_779, 0.0]),
+        (r"\text{\small $\prime$}", [0.251_389, 0.500_002, 0.0]),
+        (r"\text{\Large $\prime$}", [0.395_999, 0.800_002, 0.0]),
+    ];
+    let blank = render_certified_doc(&Stage::new());
+    for (source, expected) in cases {
+        let built = fmn_library::Tex::new(source)
+            .build(engine)
+            .map_err(|error| fail(format!("{source}: Tex: {error}")))?;
+        let layout = &built.typeset.layout;
+        let measured = [layout.width, layout.height, layout.depth];
+        if measured
+            .into_iter()
+            .zip(expected)
+            .any(|(actual, want)| !actual.is_finite() || (actual - want).abs() >= 1e-4)
+        {
+            return Err(fail(format!(
+                "{source}: measured box {measured:?}, real TeX {expected:?}"
+            )));
+        }
+        if built.vmob.children().is_empty()
+            || built.vmob.children().len() != built.typeset.subs.len()
+        {
+            return Err(fail(format!("{source}: lost primitive family")));
+        }
+        let mut stage = Stage::new();
+        let formula = stage.add(built.vmob.moved_to([0.0; 3]));
+        stage
+            .add_to_scene(formula)
+            .map_err(|error| fail(format!("{source}: show formula: {error}")))?;
+        if render_certified_doc(&stage) == blank {
+            return Err(fail(format!("{source}: blank certified frame")));
+        }
+        ctx.event(
+            LogEvent::new("e2e.parity.tex_script_metric")
+                .field("source", source)
+                .field("box_em", format!("{measured:?}"))
+                .field("visible", "true"),
+        );
+    }
+    Ok(RunOutcome::ok().with_counter("tex_script_metric_formulas", 28))
+}
+
 /// fm-j4tni: an inline cross retains its path, source colour and primitive
 /// family through both native builders and a real certified raster frame.
 fn tex_pifont_cross_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -12279,6 +12354,20 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "parity.tex_script_metrics.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(tex_script_metrics_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tex_script_metric_formulas", 28),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.parity.tex_script_metric",
+            vec![FieldPred::str_eq("visible", "true")],
+        )],
+    ));
+    specs.push(spec(
         "parity.tex_pifont_cross.v1",
         ScenarioClass::ParityDrill,
         Surface::RustApi,
@@ -15086,6 +15175,16 @@ fn tex_forced_fraction_styles_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "parity.tex_forced_fraction_styles.v1")
         .expect("the forced fraction styles scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn tex_script_metrics_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "parity.tex_script_metrics.v1")
+        .expect("the script and prime metrics scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }
