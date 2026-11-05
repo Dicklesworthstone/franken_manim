@@ -4,12 +4,16 @@ from __future__ import annotations
 import copy
 import importlib.util
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 import unittest
 
 import numpy as np
 
 SOURCE = Path(__file__).resolve().parents[1] / "python/fmn_python/traced_path.py"
+python_dir = str(SOURCE.parents[1])
+if python_dir not in sys.path:
+    sys.path.insert(0, python_dir)
 spec = importlib.util.spec_from_file_location("traced_path_under_test", SOURCE)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
@@ -19,10 +23,13 @@ def environment(native_tail_initializer=None):
     class Mobject:
         def __init__(self, **kwargs):
             self.updaters, self.kwargs = [], kwargs
+            self.submobjects = []
             self.points = np.empty((0, 3))
             self.position = np.zeros(3)
         def get_center(self):
             return self.position
+        def _is_bound(self):
+            return False
         def add_updater(self, function):
             self.updaters.append(function)
             self.update(0)
@@ -250,6 +257,92 @@ class TemporalTracingTests(unittest.TestCase):
         self.assertEqual(len(calls), 1, "valid bound source lost the native route")
         self.assertEqual(calls[0]["time_traced"], .5)
         self.assertEqual(calls[0]["time_per_anchor"], .125)
+    def test_bound_source_center_override_uses_live_callback(self):
+        for instance_override in (False, True):
+            with self.subTest(instance_override=instance_override):
+                calls, samples = [], []
+                native = environment(native_tail_initializer=lambda *args, **kwargs: calls.append("native"))
+                def center(source):
+                    samples.append(source.position.copy())
+                    return source.position + [0., 2., 0.]
+                if instance_override:
+                    source = native.Mobject()
+                    source.get_center = lambda: center(source)
+                else:
+                    class Source(native.Mobject):
+                        get_center = center
+                    source = Source()
+                source._is_bound = lambda: True
+                tail = native.TracingTail(source, time_traced=.5, time_per_anchor=.125)
+                self.assertEqual(calls, [], "authored center selected the native tracer")
+                source.position[:] = [1., 0., 0.]
+                tail.update(.125)
+                self.assertEqual(calls, [])
+                self.assertEqual(len(samples), 2, "admission executed the authored center")
+                np.testing.assert_allclose(tail.points[-1], [1., 2., 0.])
+    def test_bound_source_center_descriptor_runs_only_for_sampling(self):
+        calls = []
+        native = environment(native_tail_initializer=lambda *args, **kwargs: calls.append("native"))
+        class Source(native.Mobject):
+            @property
+            def get_center(self):
+                calls.append("descriptor")
+                return lambda: self.position + [0., 2., 0.]
+            def _is_bound(self):
+                return True
+        source = Source()
+        tail = native.TracingTail(source, time_traced=.5, time_per_anchor=.125)
+        self.assertEqual(calls, ["descriptor"])
+        tail.update(.125)
+        self.assertEqual(calls, ["descriptor"])
+        np.testing.assert_allclose(tail.points[-1], [0., 2., 0.])
+    def test_bound_source_observes_late_base_center_edit(self):
+        calls = []
+        native = environment(native_tail_initializer=lambda *args, **kwargs: calls.append("native"))
+        native.Mobject.get_center = lambda self: self.position + [0., 3., 0.]
+        source = native.Mobject()
+        source._is_bound = lambda: True
+        tail = native.TracingTail(source, time_traced=.5, time_per_anchor=.125)
+        self.assertEqual(calls, [], "base center replacement selected the native tracer")
+        tail.update(.125)
+        self.assertEqual(calls, [])
+        np.testing.assert_allclose(tail.points[-1], [0., 3., 0.])
+    def test_bound_source_cannot_bypass_authored_tail_publication(self):
+        calls = []
+        native = environment(native_tail_initializer=lambda *args, **kwargs: calls.append("native"))
+        class Tail(native.TracingTail):
+            def update_path(self, dt):
+                calls.append(("update", dt))
+                return super().update_path(dt)
+            def set_points_smoothly(self, points):
+                calls.append("geometry")
+                return super().set_points_smoothly(points)
+            def set_stroke(self, **kwargs):
+                calls.append("style")
+                return super().set_stroke(**kwargs)
+        source = native.Mobject()
+        source._is_bound = lambda: True
+        tail = Tail(source, time_traced=.5, time_per_anchor=.125)
+        self.assertEqual(calls, [("update", 0)])
+        calls.clear()
+        source.position[:] = [1., 0., 0.]
+        tail.update(.125)
+        self.assertEqual(calls, [("update", .125), "geometry", "style"])
+        np.testing.assert_allclose(tail.points[-1], source.position)
+    def test_bound_source_custom_child_bounds_choose_callback(self):
+        calls = []
+        native = environment(native_tail_initializer=lambda *args, **kwargs: calls.append("native"))
+        class Child(native.Mobject):
+            def compute_bounding_box(self):
+                raise AssertionError("admission must not call the child bounds hook")
+        source = native.Mobject()
+        source._is_bound = lambda: True
+        source.submobjects.append(Child())
+        tail = native.TracingTail(source, time_traced=.5, time_per_anchor=.125)
+        self.assertEqual(calls, [], "custom child extent selected the native tracer")
+        tail.update(.125)
+        self.assertEqual(calls, [])
+        np.testing.assert_allclose(tail.points[-1], source.position)
     def test_trace_geometry_and_style_overrides_remain_virtual(self):
         parent = self.native.TracedPath
         calls = []
