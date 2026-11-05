@@ -1798,11 +1798,13 @@ mod tests {
         // 5aa9e44f (accent scripts and exact prime metrics) changes the
         // provider identity and the engine's double-prime fingerprint probe.
         // The canonical q^7+z/text outputs, workload and budgets pass unchanged.
+        // 3ca2ebac (TeX underline depth) moves the provider identity; the
+        // unchanged canonical output test passed before this identity refresh.
         assert_eq!(
             [cold.digest(), cached.digest(), text.digest()].map(|digest| digest.to_string()),
             [
-                "6268c75b0773572f20726a6a80599b40a4a76c6ac212e87ce2e8fa00eb8e2ce1",
-                "2ff22f58d95049186a8f83f2c81e89e4470aa249cd6814d5f00b4bbcf3d0a681",
+                "122e55a19cf14b1c289f4e8d1634407e9b4f9d8a51af6734b9cdd9b5c0e3c647",
+                "234b5c586cee167d2ce54ea5d38b11e4d1afe0ce1aacd9a57e96e906ad80b508",
                 "0fa22e64fe9e1901eea58a596899ec843bc0d6db46f1cd91607925a50fea3e6f",
             ]
         );
