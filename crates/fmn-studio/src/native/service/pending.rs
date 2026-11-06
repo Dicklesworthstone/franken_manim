@@ -106,7 +106,7 @@ impl NativeSceneWorker {
             journal
                 .record(Entry {
                     command: command.clone(),
-                    effect: self.effect(),
+                    effect: self.effect(&program),
                     reads: self.reads.clone(),
                     subprocesses: Vec::new(),
                     checkpoint: None,
@@ -127,7 +127,7 @@ impl NativeSceneWorker {
         journal
             .record(Entry {
                 command,
-                effect: self.effect(),
+                effect: self.effect(&program),
                 reads: self.reads.clone(),
                 subprocesses: Vec::new(),
                 checkpoint: Some(state),

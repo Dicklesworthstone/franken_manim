@@ -14,5 +14,5 @@ mod service;
 
 pub use build::{NativeBuild, NativeBuildContext};
 pub use camera::camera_capture_backend;
-pub use program::{MAX_NATIVE_SEGMENTS, NativeSceneProgram, NativeSegment};
+pub use program::{MAX_NATIVE_SEGMENTS, NativeSceneProgram, NativeSeekWork, NativeSegment};
 pub use service::{NativeReplayPolicy, NativeSceneWorker, NativeWorkerConfig};

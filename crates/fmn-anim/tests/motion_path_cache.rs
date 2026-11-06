@@ -363,7 +363,7 @@ fn exact_rate_lookup_failure_never_moves_to_its_finite_placeholder() {
     use fmn_anim::rate_table::RateSampler;
 
     let (mut stage, _path, moving, mut animation) = setup();
-    let sampler = RateSampler::new(2, |alpha| Ok(alpha));
+    let sampler = RateSampler::new(2, Ok);
     let preparing = RateFunc::Preparing(sampler.clone());
     assert_eq!(preparing.eval(0.0), 0.0);
     assert_eq!(preparing.eval(1.0), 1.0);

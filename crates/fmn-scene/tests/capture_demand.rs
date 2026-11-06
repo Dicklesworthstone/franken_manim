@@ -7,8 +7,9 @@ use std::rc::Rc;
 use fmn_anim::{AnimConfig, FrameMetadata, FramePacket, RateFunc, RationalTime, Transform};
 use fmn_mobject::{Mob, Mobject, Stage};
 use fmn_scene::{
-    CaptureReason, HoldDecision, HoldKind, IntegrationError, LifecycleEvent, LifecyclePhase,
-    NullSceneSink, PlayOverrides, RuntimeConfig, Scene, SceneSink,
+    CaptureReason, EventListener, EventPayload, EventPropagation, EventTarget, EventType,
+    HoldDecision, HoldKind, IntegrationError, InteractiveScene, LifecycleEvent, LifecyclePhase,
+    Modifiers, MouseButton, NullSceneSink, PlayOverrides, RuntimeConfig, Scene, SceneSink,
 };
 
 #[derive(Default)]
@@ -246,6 +247,242 @@ fn stepped_host_path_observes_the_same_metadata_as_native_playback() {
         ));
     }
     assert_eq!(results[0], results[1]);
+}
+
+#[test]
+fn seekable_owners_match_serial_state_and_resume_with_dormant_editor_listeners() {
+    let mut outcomes = Vec::new();
+    for jumping in [false, true] {
+        let mut interactive = InteractiveScene::new(scene()).unwrap();
+        let scene = interactive.scene_mut();
+        assert_eq!(scene.event_dispatcher().listener_count(), 7);
+        assert!(!scene.allows_pure_segments());
+        let mob = scene
+            .add_mobject(Mobject::from_points(&[[0.0; 3]]))
+            .unwrap();
+        let animation = transform(scene, mob);
+        let mut sink = Sink {
+            metadata_only: true,
+            ..Sink::default()
+        };
+        let mut play = scene
+            .begin_seekable_play(
+                vec![Box::new(animation)],
+                PlayOverrides {
+                    run_time_frames: Some(9),
+                    ..PlayOverrides::default()
+                },
+                &mut sink,
+            )
+            .unwrap()
+            .unwrap();
+        let mut observed = Vec::new();
+        for (index, frame) in [3, 4, 9].into_iter().enumerate() {
+            let metadata = if jumping && index != 1 {
+                let count = (frame - scene.time().frames()).cast_unsigned();
+                scene
+                    .try_advance_pure_play(&mut play, count)
+                    .unwrap()
+                    .unwrap()
+            } else {
+                while scene.time().frames() < frame {
+                    scene
+                        .prepare_stepped_play_frame(&mut play)
+                        .unwrap()
+                        .unwrap();
+                    scene
+                        .complete_stepped_play_frame(&mut play, &mut sink)
+                        .unwrap();
+                }
+                sink.samples.last().unwrap().1
+            };
+            assert_eq!(scene.play_count(), 0);
+            assert!(scene.stage().is_animating(mob));
+            observed.push((scene.state_bytes().unwrap(), metadata));
+        }
+        assert!(play.frames_complete());
+        assert!(scene.try_advance_pure_play(&mut play, 1).unwrap().is_none());
+        let report = scene.finish_stepped_play(play, &mut sink).unwrap();
+        assert_eq!(report.n_frames, 9);
+        assert!(!scene.stage().is_animating(mob));
+        assert_eq!(scene.play_count(), 1);
+        let play_state = scene.state_bytes().unwrap();
+
+        let mut wait = scene.begin_seekable_wait_frames(11, &mut sink).unwrap();
+        for (index, frame) in [13, 14, 20].into_iter().enumerate() {
+            let metadata = if jumping && index != 1 {
+                let count = (frame - scene.time().frames()).cast_unsigned();
+                scene
+                    .try_advance_pure_wait(&mut wait, count)
+                    .unwrap()
+                    .unwrap()
+            } else {
+                while scene.time().frames() < frame {
+                    scene
+                        .prepare_stepped_wait_frame(&mut wait)
+                        .unwrap()
+                        .unwrap();
+                    scene
+                        .complete_stepped_wait_frame(&mut wait, &mut sink)
+                        .unwrap();
+                }
+                sink.samples.last().unwrap().1
+            };
+            assert_eq!(scene.play_count(), 1);
+            observed.push((scene.state_bytes().unwrap(), metadata));
+        }
+        assert!(wait.frames_complete());
+        assert!(scene.try_advance_pure_wait(&mut wait, 1).unwrap().is_none());
+        let report = scene.finish_stepped_wait(wait, &mut sink).unwrap();
+        assert_eq!(report.n_frames, 11);
+        assert_eq!(scene.play_count(), 2);
+
+        // Seconds-based overshoot keeps its original nominal sampling grid;
+        // max_frames is only a cap and cannot advance beyond the wait.
+        let mut wait = scene.begin_seekable_wait(Some(0.3), &mut sink).unwrap();
+        let metadata = if jumping {
+            scene
+                .try_advance_pure_wait(&mut wait, u64::MAX)
+                .unwrap()
+                .unwrap()
+        } else {
+            while scene
+                .prepare_stepped_wait_frame(&mut wait)
+                .unwrap()
+                .is_some()
+            {
+                scene
+                    .complete_stepped_wait_frame(&mut wait, &mut sink)
+                    .unwrap();
+            }
+            sink.samples.last().unwrap().1
+        };
+        assert_eq!(metadata.segment_frame(), 3);
+        assert_eq!(metadata.frame_index(), 23);
+        observed.push((scene.state_bytes().unwrap(), metadata));
+        scene.finish_stepped_wait(wait, &mut sink).unwrap();
+        assert_eq!(sink.samples.len(), if jumping { 2 } else { 23 });
+        outcomes.push((
+            observed,
+            play_state,
+            scene.state_bytes().unwrap(),
+            sink.events,
+        ));
+    }
+    assert_eq!(outcomes[0], outcomes[1]);
+}
+
+#[test]
+fn seekable_owners_recheck_late_event_ingress_live_views_and_updaters() {
+    for waiting in [false, true] {
+        for effect in 0..4 {
+            let mut scene = scene();
+            let mob = scene
+                .add_mobject(Mobject::from_points(&[[0.0; 3]]))
+                .unwrap();
+            let updated = scene
+                .add_mobject(Mobject::from_points(&[[5.0, 0.0, 0.0]]))
+                .unwrap();
+            let event_time = Rc::new(Cell::new(None));
+            let seen = Rc::clone(&event_time);
+            scene
+                .event_dispatcher_mut()
+                .add_listener(EventListener::new(
+                    EventType::MousePress,
+                    EventTarget::Global,
+                    move |_, _, _, stage| {
+                        seen.set(Some(stage.time().to_bits()));
+                        EventPropagation::Continue
+                    },
+                ))
+                .unwrap();
+            let mut sink = Sink {
+                metadata_only: true,
+                ..Sink::default()
+            };
+            let mut wait = waiting.then(|| scene.begin_seekable_wait_frames(4, &mut sink).unwrap());
+            let mut play = if waiting {
+                None
+            } else {
+                let animation = transform(&mut scene, mob);
+                scene
+                    .begin_seekable_play(
+                        vec![Box::new(animation)],
+                        PlayOverrides::default(),
+                        &mut sink,
+                    )
+                    .unwrap()
+            };
+            let mut inbox = None;
+            let mut view = None;
+            let updates = Rc::new(Cell::new(0));
+            match effect {
+                0 => inbox = Some(scene.event_inbox()),
+                1 => {
+                    scene
+                        .queue_event(EventPayload::MousePress {
+                            point: [0.0; 3],
+                            button: MouseButton::Left,
+                            modifiers: Modifiers::NONE,
+                        })
+                        .unwrap();
+                }
+                2 => {
+                    view = Some(
+                        scene
+                            .stage_mut()
+                            .get_mut(mob)
+                            .unwrap()
+                            .buffer
+                            .export_view(false),
+                    )
+                }
+                _ => {
+                    let seen = Rc::clone(&updates);
+                    scene
+                        .stage_mut()
+                        .add_dt_updater(
+                            updated,
+                            move |stage, mob, dt| {
+                                seen.set(seen.get() + 1);
+                                stage.shift(mob, [dt, 0.0, 0.0]);
+                            },
+                            false,
+                        )
+                        .unwrap();
+                }
+            }
+            let before = scene.state_bytes().unwrap();
+            let refused = if let Some(wait) = &mut wait {
+                scene.try_advance_pure_wait(wait, 3).unwrap()
+            } else {
+                scene
+                    .try_advance_pure_play(play.as_mut().unwrap(), 3)
+                    .unwrap()
+            };
+            assert!(refused.is_none(), "waiting {waiting}, observer {effect}");
+            assert_eq!(scene.state_bytes().unwrap(), before);
+            assert_eq!(event_time.get(), None);
+            assert_eq!(updates.get(), 0);
+            assert!(sink.samples.is_empty());
+            if let Some(wait) = &mut wait {
+                scene.prepare_stepped_wait_frame(wait).unwrap().unwrap();
+                scene.complete_stepped_wait_frame(wait, &mut sink).unwrap();
+            } else {
+                let play = play.as_mut().unwrap();
+                scene.prepare_stepped_play_frame(play).unwrap().unwrap();
+                scene.complete_stepped_play_frame(play, &mut sink).unwrap();
+            }
+            assert_eq!(sink.samples[0].1.frame_index(), 1);
+            assert_eq!(
+                event_time.get(),
+                (effect == 1).then_some(0.125_f64.to_bits())
+            );
+            assert_eq!(updates.get(), usize::from(effect == 3));
+            drop(view);
+            drop(inbox);
+        }
+    }
 }
 
 #[test]

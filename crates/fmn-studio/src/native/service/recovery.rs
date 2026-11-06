@@ -71,7 +71,7 @@ impl NativeSceneWorker {
             .map_err(execution_error)?;
         for (offset, entry) in entries.iter().enumerate() {
             if entry.reads != self.reads
-                || entry.effect != self.effect()
+                || entry.effect.is_replay_barrier()
                 || !entry.subprocesses.is_empty()
             {
                 return Err(refuse(
@@ -155,6 +155,15 @@ impl NativeSceneWorker {
             let program = candidate
                 .as_mut()
                 .ok_or_else(|| refuse("native replay candidate is absent"))?;
+            // Effects are evidence from actual execution, not a caller's
+            // declaration or a constant factory-wide preflight label. A
+            // forward candidate retains the same cumulative prefix inventory
+            // as record_command's independent reconstruction from frame zero.
+            if self.effect(program) != entry.effect {
+                return Err(refuse(
+                    "native replay effects diverged; no partial replay was installed",
+                ));
+            }
             let state = self.state_bytes(program, &edits, position + 1)?;
             let hash = protocol_digest(&state);
             if hash != entry.state_hash {

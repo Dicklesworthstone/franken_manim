@@ -4,10 +4,7 @@ mod pending;
 mod recovery;
 
 use fmn_render::{CameraConfig, RetainedFrameRendererConfig};
-use fmn_scene::{
-    AssetRead, CommandKind, CommandRecord, EffectClass, Entry, EventPayload, ImpureEffectTag,
-    Journal,
-};
+use fmn_scene::{AssetRead, CommandKind, CommandRecord, EffectClass, Entry, EventPayload, Journal};
 
 use crate::protocol::{StudioInput, studio_input_command, studio_input_payload, studio_seek_frame};
 use crate::{
@@ -135,6 +132,10 @@ impl NativeWorkerConfig {
             AssetRead {
                 path: "native/input-track-semantics".into(),
                 digest: protocol_digest(b"frame-stamped-native-input-track-v2"),
+            },
+            AssetRead {
+                path: "native/effect-inventory-semantics".into(),
+                digest: protocol_digest(b"cumulative-native-prefix-effects-v1"),
             },
         ];
         if self.presenter_mode {
@@ -374,12 +375,10 @@ impl NativeSceneWorker {
         Ok(())
     }
 
-    fn effect(&self) -> EffectClass {
+    fn effect(&self, program: &NativeSceneProgram) -> EffectClass {
         match self.config.replay {
             NativeReplayPolicy::Disabled => EffectClass::Opaque,
-            NativeReplayPolicy::ColdVerified => {
-                EffectClass::Stateful(vec![ImpureEffectTag::UnclassifiedAnimation])
-            }
+            NativeReplayPolicy::ColdVerified => program.effect_class(),
         }
     }
 
@@ -524,7 +523,7 @@ impl NativeSceneWorker {
                 .is_none_or(|last| last.abs_diff(frame) >= self.config.checkpoint_frames);
         let entry = Entry {
             command,
-            effect: self.effect(),
+            effect: self.effect(&program),
             reads: self.reads.clone(),
             subprocesses: Vec::new(),
             checkpoint: checkpoint.then_some(state),

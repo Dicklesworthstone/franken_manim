@@ -77,4 +77,18 @@ impl super::Scene {
             && self.queued_events.is_empty()
             && self.event_error.is_none()
     }
+
+    // Unlike a generic pure sink, an explicit owner seek has no per-frame
+    // capture callback. With an exclusively owned empty inbox and no queued
+    // events, even registered editor listeners have nothing to observe and no
+    // producer can appear during this mutable Scene borrow. Do not relax the
+    // separate generic sink proof above: it owns different observer contracts.
+    pub(super) fn allows_unobserved_advance(&self) -> bool {
+        !self.skipping
+            && !self.config.windowed
+            && !self.config.presenter_mode
+            && self.event_inbox.is_exclusive_empty()
+            && self.queued_events.is_empty()
+            && self.event_error.is_none()
+    }
 }

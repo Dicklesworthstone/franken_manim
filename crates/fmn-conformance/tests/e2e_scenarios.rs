@@ -65,6 +65,8 @@
 mod semantic_routes;
 #[path = "support/studio_mjpeg.rs"]
 mod studio_mjpeg;
+#[path = "support/studio_pure_seek.rs"]
+mod studio_pure_seek;
 
 // fm-longform-native-e2e-hoeffding-l59d: the Hoeffding's D explainer
 // (crates/fmn/examples/hoeffding_d), compiled here from its own sources so
@@ -13711,6 +13713,31 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.studio_checkpoint_restore.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::StudioInProcess,
+        Invocation::new(studio_pure_seek::run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "native_checkpoint.bin".into(),
+                "native_checkpoint_next.png".into(),
+            ]),
+            counter_eq("studio_pure_seek_samples", 1),
+            counter_eq("studio_pure_checkpoint_continuations", 8),
+            counter_eq("studio_effect_classes", 2),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.studio.pure_checkpoint",
+            vec![
+                FieldPred::u64_eq("target_frame", 600),
+                FieldPred::u64_eq("samples_evaluated", 1),
+                FieldPred::str_eq("state_equal", "true"),
+                FieldPred::str_eq("pure_and_stateful", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.studio_mjpeg_preview.v1",
         ScenarioClass::LifecycleDrill,
         Surface::RustApi,
@@ -16625,6 +16652,16 @@ fn studio_camera_preview_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.studio_camera_preview.v1")
         .expect("the live Studio camera scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn studio_pure_checkpoint_restore_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.studio_checkpoint_restore.v1")
+        .expect("native pure checkpoint scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }
