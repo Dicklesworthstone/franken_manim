@@ -17177,6 +17177,7 @@ class _MethodAnimation(MoveToTarget):
         for key in sorted(kwargs):
             if key not in (
                 "run_time",
+                "run_time_frames",
                 "rate_func",
                 "lag_ratio",
                 "path_arc",
