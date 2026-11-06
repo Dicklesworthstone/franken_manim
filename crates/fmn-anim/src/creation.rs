@@ -213,17 +213,29 @@ impl Animation for ShowPartial {
             {
                 if let Some((_resolution, expected_len)) = surface {
                     let schema = entry.buffer.schema();
-                    let fields = schema.fields();
-                    let ordinary_surface_schema = fields.len() == 3
+                    let fields: Vec<_> = schema
+                        .fields()
+                        .iter()
+                        .filter(|field| field.name != fmn_mobject::stage::SURFACE_VALIDITY_FIELD)
+                        .collect();
+                    let ordinary_surface_schema = fields.len() >= 3
                         && fields[0].name == "point"
                         && fields[0].width == 3
                         && fields[1].name == "d_normal_point"
                         && fields[1].width == 3
-                        && fields[2].name == "rgba"
-                        && fields[2].width == 4;
+                        && ((fields.len() == 3
+                            && fields[2].name == "rgba"
+                            && fields[2].width == 4)
+                            || (fields.len() == 4
+                                && fields[2].name == "im_coords"
+                                && fields[2].width == 2
+                                && fields[3].name == "opacity"
+                                && fields[3].width == 1));
                     if expected_len != Some(entry.buffer.len()) || !ordinary_surface_schema {
                         return Err(AnimError::Stage(StageError::SchemaMismatch));
                     }
+                    fmn_mobject::stage::surface_validity(&entry.buffer)
+                        .map_err(AnimError::Stage)?;
                 } else if entry.buffer.schema().offset("joint_angle").is_none() {
                     // The Reference's ShowPartial asserts VMobject for this
                     // branch; Surface selects the typed branch above.

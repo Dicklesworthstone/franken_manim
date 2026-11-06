@@ -464,17 +464,26 @@ impl Stage {
             .buffer
             .read_column("d_normal_point")
             .ok_or(StageError::SchemaMismatch)?;
+        let mut source_validity = crate::stage::surface_validity(&source_entry.buffer)?;
 
         let (nu, nv) = resolution;
         let axis_len = if axis == 0 { nu } else { nv };
-        let fields = source_schema.fields();
-        let ordinary_surface_schema = fields.len() == 3
+        let fields: Vec<_> = source_schema
+            .fields()
+            .iter()
+            .filter(|field| field.name != crate::stage::SURFACE_VALIDITY_FIELD)
+            .collect();
+        let ordinary_surface_schema = fields.len() >= 3
             && fields[0].name == "point"
             && fields[0].width == 3
             && fields[1].name == "d_normal_point"
             && fields[1].width == 3
-            && fields[2].name == "rgba"
-            && fields[2].width == 4;
+            && ((fields.len() == 3 && fields[2].name == "rgba" && fields[2].width == 4)
+                || (fields.len() == 4
+                    && fields[2].name == "im_coords"
+                    && fields[2].width == 2
+                    && fields[3].name == "opacity"
+                    && fields[3].width == 1));
         if axis > 1
             || resolution.0.checked_mul(resolution.1) != Some(source_len)
             || (source_len != 0 && axis_len < 2)
@@ -483,14 +492,40 @@ impl Stage {
             return Err(StageError::SchemaMismatch);
         }
         let destination = self.try_get(mob)?;
-        if destination.buffer.schema() != &source_schema {
+        if !crate::stage::compatible_surface_schemas(destination.buffer.schema(), &source_schema) {
             return Err(StageError::SchemaMismatch);
+        }
+        let promote = if source_validity.is_some()
+            && destination
+                .buffer
+                .schema()
+                .field_width(crate::stage::SURFACE_VALIDITY_FIELD)
+                .is_none()
+        {
+            Some(crate::stage::with_surface_validity(
+                &destination.buffer,
+                &vec![1.0; destination.buffer.len()],
+            )?)
+        } else {
+            None
+        };
+        if source_validity.is_none()
+            && destination
+                .buffer
+                .schema()
+                .field_width(crate::stage::SURFACE_VALIDITY_FIELD)
+                .is_some()
+        {
+            source_validity = Some(vec![1.0; source_len]);
         }
         if source_len == 0 {
             return Ok(());
         }
         {
             let entry = self.get_mut(mob).ok_or(StageError::StaleHandle)?;
+            if let Some(buffer) = promote {
+                entry.buffer = buffer;
+            }
             entry.set_placement(source_placement);
             if entry.buffer.len() != source_len {
                 entry
@@ -505,6 +540,11 @@ impl Stage {
             entry
                 .buffer
                 .write_range("d_normal_point", 0, &source_normals);
+            if let Some(validity) = &source_validity {
+                entry
+                    .buffer
+                    .write_range(crate::stage::SURFACE_VALIDITY_FIELD, 0, validity);
+            }
             return Ok(());
         }
 
@@ -527,6 +567,40 @@ impl Stage {
         };
         let lower_index = usize::try_from(lower_index).map_err(|_| StageError::SchemaMismatch)?;
         let upper_index = usize::try_from(upper_index).map_err(|_| StageError::SchemaMismatch)?;
+        let mut validity = source_validity.clone();
+        let valid_at = |first, second, residue| {
+            (residue == 1.0
+                || crate::stage::surface_sample_is_present(source_validity.as_deref(), first))
+                && (residue == 0.0
+                    || crate::stage::surface_sample_is_present(source_validity.as_deref(), second))
+        };
+        if let Some(values) = &mut validity {
+            for u in 0..nu {
+                for v in 0..nv {
+                    let index = if axis == 0 { u } else { v };
+                    let boundary = if index < lower_index {
+                        Some((lower_index, lower_residue))
+                    } else if index > upper_index {
+                        Some((upper_index, upper_residue))
+                    } else {
+                        None
+                    };
+                    if let Some((base, residue)) = boundary {
+                        let first = if axis == 0 {
+                            base * nv + v
+                        } else {
+                            u * nv + base
+                        };
+                        let second = first + if axis == 0 { nv } else { 1 };
+                        values[u * nv + v] = if valid_at(first, second, residue) {
+                            1.0
+                        } else {
+                            0.0
+                        };
+                    }
+                }
+            }
+        }
         let lerp = |p: Vec3, q: Vec3, alpha: f64| {
             [
                 (1.0 - alpha) * p[0] + alpha * q[0],
@@ -580,10 +654,13 @@ impl Stage {
             .iter()
             .flat_map(|point| point.iter().map(|value| *value as f32))
             .collect();
-        self.get_mut(mob)
-            .ok_or(StageError::StaleHandle)?
-            .buffer
-            .write_range("point", 0, &flat);
+        let entry = self.get_mut(mob).ok_or(StageError::StaleHandle)?;
+        entry.buffer.write_range("point", 0, &flat);
+        if let Some(validity) = validity {
+            entry
+                .buffer
+                .write_range(crate::stage::SURFACE_VALIDITY_FIELD, 0, &validity);
+        }
         Ok(())
     }
 

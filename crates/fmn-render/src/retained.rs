@@ -1192,6 +1192,12 @@ fn surface_mesh(
         })?;
     let records = entry.buffer.len();
     let placement = entry.placement();
+    let validity = fmn_mobject::stage::surface_validity(&entry.buffer).map_err(|_| {
+        RetainedFrameRendererError::InvalidPrimitive {
+            mob,
+            reason: "surface validity records must be finite scalars in [0, 1]",
+        }
+    })?;
     let mut vertices = Vec::new();
     vertices.try_reserve_exact(records).map_err(|_| {
         RetainedFrameRendererError::InvalidPrimitive {
@@ -1202,6 +1208,21 @@ fn surface_mesh(
     for record in 0..records {
         let point = record_vec3(stage, mob, record, "point")?;
         let d_normal = record_vec3(stage, mob, record, "d_normal_point")?;
+        if !fmn_mobject::stage::surface_sample_is_present(validity.as_deref(), record) {
+            // Missing rows are not geometry: never transform their inert
+            // storage or derive normals from it, even after a foreign edit.
+            vertices.push(SurfaceVertex::colored(
+                [0.0; 3],
+                [0.0; 3],
+                LinearRgba {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.0,
+                },
+            ));
+            continue;
+        }
         let normal = normalized_or_zero(placement.apply_vector([
             d_normal[0] - point[0],
             d_normal[1] - point[1],
@@ -1263,8 +1284,16 @@ fn surface_mesh(
                     mob,
                     reason: "surface v resolution exceeds u32",
                 })?;
-            SurfaceMesh::from_uv_grid(vertices, (nu, nv))
-                .map_err(RetainedFrameRendererError::ThreeD)
+            let mut mesh = SurfaceMesh::from_uv_grid(vertices, (nu, nv))
+                .map_err(RetainedFrameRendererError::ThreeD)?;
+            if let Some(validity) = validity {
+                mesh.retain_triangles(|triangle| {
+                    triangle
+                        .iter()
+                        .all(|&index| validity[index as usize] == 1.0)
+                });
+            }
+            Ok(mesh)
         }
         None => {
             if !records.is_multiple_of(3) {
@@ -1279,8 +1308,16 @@ fn surface_mesh(
                     reason: "triangle mesh vertex count exceeds u32",
                 }
             })?;
-            SurfaceMesh::new(vertices, (0..count).collect())
-                .map_err(RetainedFrameRendererError::ThreeD)
+            let mut mesh = SurfaceMesh::new(vertices, (0..count).collect())
+                .map_err(RetainedFrameRendererError::ThreeD)?;
+            if let Some(validity) = validity {
+                mesh.retain_triangles(|triangle| {
+                    triangle
+                        .iter()
+                        .all(|&index| validity[index as usize] == 1.0)
+                });
+            }
+            Ok(mesh)
         }
     }
 }
@@ -1583,6 +1620,70 @@ mod tests {
             .unwrap()
             .as_bytes()
             .to_vec()
+    }
+
+    #[test]
+    fn surface_holes_render_exactly_the_surviving_triangles() {
+        let mut masked = surface((2, 2));
+        masked.buffer =
+            fmn_mobject::stage::with_surface_validity(&masked.buffer, &[0.0, 1.0, 1.0, 1.0])
+                .unwrap();
+        // Deliberately move the inert row far away: neither topology nor ink
+        // may be influenced by its finite storage placeholder.
+        masked.buffer.write(0, "point", &[1000.0, -1000.0, 1000.0]);
+        let mut expected_buffer = RecordBuffer::new(masked.buffer.schema().clone(), 3).unwrap();
+        for field in masked.buffer.schema().fields() {
+            for (row, source) in [1, 2, 3].into_iter().enumerate() {
+                expected_buffer.write(
+                    row,
+                    &field.name,
+                    &masked.buffer.read(source, &field.name).unwrap(),
+                );
+            }
+        }
+        let expected = Mobject::from_buffer(expected_buffer)
+            .with_render_primitive(RenderPrimitive::TriangleMesh);
+        let mut stage = Stage::new();
+        let mob = stage.add(masked);
+        stage.add_to_scene(mob).unwrap();
+        let mesh = surface_mesh(&stage, mob, Some((2, 2))).unwrap();
+        assert_eq!(mesh.indices(), &[1, 2, 3]);
+        let mut reference = Stage::new();
+        let expected = reference.add(expected);
+        reference.add_to_scene(expected).unwrap();
+        let camera = camera();
+        for threads in [1, 3] {
+            let mut renderer = RetainedFrameRenderer::new(config(threads)).unwrap();
+            renderer.render_with_camera(&stage, &camera).unwrap();
+            let actual = renderer.frame().as_bytes().to_vec();
+            assert_eq!(actual, fresh_camera_bits(&reference, &camera));
+            assert_ne!(actual, fresh_camera_bits(&Stage::new(), &camera));
+            stage.get_mut(mob).unwrap().buffer.write_range(
+                fmn_mobject::stage::SURFACE_VALIDITY_FIELD,
+                0,
+                &[0.0; 4],
+            );
+            renderer.render_with_camera(&stage, &camera).unwrap();
+            let absent = renderer.frame().as_bytes().to_vec();
+            assert_eq!(absent, fresh_camera_bits(&Stage::new(), &camera));
+            stage.get_mut(mob).unwrap().buffer.write_range(
+                fmn_mobject::stage::SURFACE_VALIDITY_FIELD,
+                0,
+                &[0.0, 1.0, 1.0, 1.0],
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_complete_surface_mask_preserves_finite_frame_bits() {
+        let mut stage = Stage::new();
+        let mob = stage.add(surface((2, 2)));
+        stage.add_to_scene(mob).unwrap();
+        let camera = camera();
+        let expected = fresh_camera_bits(&stage, &camera);
+        let entry = stage.get_mut(mob).unwrap();
+        entry.buffer = fmn_mobject::stage::with_surface_validity(&entry.buffer, &[1.0; 4]).unwrap();
+        assert_eq!(fresh_camera_bits(&stage, &camera), expected);
     }
 
     #[test]

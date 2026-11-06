@@ -1989,25 +1989,54 @@ impl Stage {
             return Err(StageError::FamilyShapeMismatch);
         }
         // Precheck the whole zip so a failure never leaves a half-become.
+        let mut promoted_sources = Vec::with_capacity(family1.len());
         for (&a, &b) in family1.iter().zip(family2.iter()) {
             let e1 = self.try_get(a)?;
             let e2 = self.try_get(b)?;
             if e1.submobjects.len() != e2.submobjects.len() {
                 return Err(StageError::FamilyShapeMismatch);
             }
-            if e1.buffer.schema() != e2.buffer.schema() {
+            let surface_pair = matches!(e1.render_primitive, RenderPrimitive::SurfaceGrid { .. })
+                || matches!(e2.render_primitive, RenderPrimitive::SurfaceGrid { .. });
+            if e1.buffer.schema() != e2.buffer.schema()
+                && !(surface_pair
+                    && surface_grid::compatible_surface_schemas(
+                        e1.buffer.schema(),
+                        e2.buffer.schema(),
+                    ))
+            {
                 return Err(StageError::SchemaMismatch);
             }
+            if surface_pair {
+                surface_grid::surface_validity(&e1.buffer)?;
+                surface_grid::surface_validity(&e2.buffer)?;
+            }
+            promoted_sources.push(
+                if e1.buffer.schema() != e2.buffer.schema()
+                    && e1
+                        .buffer
+                        .schema()
+                        .field_width(surface_grid::SURFACE_VALIDITY_FIELD)
+                        .is_some()
+                {
+                    Some(surface_grid::with_surface_validity(
+                        &e2.buffer,
+                        &vec![1.0; e2.buffer.len()],
+                    )?)
+                } else {
+                    None
+                },
+            );
         }
         let mut viewed = Vec::new();
-        for (&a, &b) in family1.iter().zip(family2.iter()) {
+        for ((&a, &b), promoted) in family1.iter().zip(family2.iter()).zip(promoted_sources) {
             if a == b {
                 continue;
             }
             let (src, placement, uniforms, z_index, tracker, render_primitive, image) = {
                 let e2 = self.get(b).expect("prechecked");
                 (
-                    e2.buffer.snapshot_clone(),
+                    promoted.unwrap_or_else(|| e2.buffer.snapshot_clone()),
                     e2.placement,
                     e2.uniforms,
                     e2.z_index,
@@ -2018,7 +2047,9 @@ impl Stage {
             };
             let e1 = self.get_mut(a).expect("prechecked");
             if !e1.buffer.set_data(&src) {
-                return Err(StageError::SchemaMismatch); // unreachable: prechecked
+                // The only admitted schema change adds explicit surface holes.
+                // Existing exported views keep their old, unmasked generation.
+                e1.buffer = src;
             }
             e1.set_placement(placement);
             e1.uniforms = uniforms;
@@ -3280,7 +3311,9 @@ impl Stage {
 #[path = "surface_grid.rs"]
 mod surface_grid;
 pub use surface_grid::{
-    MAX_SURFACE_GRID_POINTS, SurfaceGridUpdate, prepare_surface_grid_alignment,
+    MAX_SURFACE_GRID_POINTS, SURFACE_VALIDITY_FIELD, SurfaceGridUpdate, compatible_surface_schemas,
+    prepare_surface_grid_alignment, surface_sample_is_present, surface_validity,
+    with_surface_validity,
 };
 
 #[cfg(test)]

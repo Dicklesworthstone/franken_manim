@@ -233,6 +233,18 @@ fn interpolate_fields_with_scratch(
                 };
                 point.map(|value| value as f32)
             }));
+        } else if field.name == fmn_mobject::stage::SURFACE_VALIDITY_FIELD {
+            out.clear();
+            out.extend(a.iter().zip(b.iter()).map(|(&a, &b)| {
+                let present = if alpha == 0.0 {
+                    a == 1.0
+                } else if alpha == 1.0 {
+                    b == 1.0
+                } else {
+                    a == 1.0 && b == 1.0
+                };
+                if present { 1.0 } else { 0.0 }
+            }));
         } else {
             interpolate_linear_column_into(a, b, alpha, out);
         }

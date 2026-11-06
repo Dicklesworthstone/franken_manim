@@ -9302,6 +9302,100 @@ fn lifecycle_bundle_render_state_run(ctx: &mut RunCtx) -> Result<RunOutcome, Sce
         .with_counter("bundle_render_state_matches", matches))
 }
 
+/// Native pole sampling reaches the renderer as absent triangles, including
+/// through a morph to a complete surface. The oracle contains only the one
+/// surviving triangle and is built from an independently sampled finite grid.
+fn native_surface_holes_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let spec = fmn_library::SurfaceSpec {
+        u_range: (-1.0, 1.0),
+        v_range: (-1.0, 1.0),
+        resolution: (2, 2),
+        shading: [0.0; 3],
+        ..fmn_library::SurfaceSpec::default()
+    };
+    let surface = spec
+        .try_sample_with_holes(|u, v| {
+            Ok::<_, std::convert::Infallible>([
+                u,
+                v,
+                if u == -1.0 && v == -1.0 {
+                    f64::INFINITY
+                } else {
+                    0.0
+                },
+            ])
+        })
+        .map_err(|error| fail(format!("native surface pole: {error}")))?;
+    if surface.sample_validity() != [false, true, true, true]
+        || surface.triangle_indices() != [1, 2, 3]
+    {
+        return Err(fail(
+            "native pole did not remove exactly its incident triangle",
+        ));
+    }
+    let complete = fmn_mobject::Mobject::from(spec.sample(|u, v| [u, v, 0.0]));
+    let mut triangle = fmn_mobject::RecordBuffer::new(complete.buffer.schema().clone(), 3)
+        .map_err(|error| fail(format!("native triangle oracle: {error}")))?;
+    for field in complete.buffer.schema().fields() {
+        for (row, source) in [1, 2, 3].into_iter().enumerate() {
+            let values = complete
+                .buffer
+                .read(source, &field.name)
+                .ok_or_else(|| fail("finite triangle oracle lost a record field"))?;
+            triangle.write(row, &field.name, &values);
+        }
+    }
+    let mut oracle = Stage::new();
+    let one_face = oracle.add(
+        fmn_mobject::Mobject::from_buffer(triangle)
+            .with_uniforms(complete.uniforms)
+            .with_render_primitive(fmn_mobject::RenderPrimitive::TriangleMesh),
+    );
+    oracle
+        .add_to_scene(one_face)
+        .map_err(|error| fail(error.to_string()))?;
+    let mut stage = Stage::new();
+    let source = stage.add(surface);
+    stage
+        .add_to_scene(source)
+        .map_err(|error| fail(error.to_string()))?;
+    let hole_frame = render_certified_camera_doc(&stage);
+    let empty = render_certified_camera_doc(&Stage::new());
+    let matches_triangle = hole_frame == render_certified_camera_doc(&oracle);
+    let visible = hole_frame != empty;
+    let target = stage.add(complete.clone());
+    let mut morph = fmn_anim::Transform::new(source, target).with_config(fmn_anim::AnimConfig {
+        rate_func: RateFunc::linear(),
+        ..fmn_anim::AnimConfig::default()
+    });
+    morph
+        .begin(&mut stage)
+        .map_err(|error| fail(error.to_string()))?;
+    morph.interpolate(&mut stage, 0.5);
+    let interior_absent = render_certified_camera_doc(&stage) == hole_frame;
+    morph.finish(&mut stage);
+    let filled = render_certified_camera_doc(&stage);
+    let mut finite = Stage::new();
+    let whole = finite.add(complete);
+    finite
+        .add_to_scene(whole)
+        .map_err(|error| fail(error.to_string()))?;
+    let endpoint_exact = filled == render_certified_camera_doc(&finite) && filled != hole_frame;
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_surface_holes")
+            .field("matches_triangle", truth(matches_triangle))
+            .field("visible", truth(visible))
+            .field("interior_absent", truth(interior_absent))
+            .field("endpoint_exact", truth(endpoint_exact))
+            .field("sha256", sha256(&hole_frame).to_hex()),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("native_surface_hole_triangle", u64::from(matches_triangle))
+        .with_counter("native_surface_hole_visible", u64::from(visible))
+        .with_counter("native_surface_hole_morph", u64::from(interior_absent))
+        .with_counter("native_surface_hole_endpoint", u64::from(endpoint_exact)))
+}
+
 /// Live 3D helpers feed ordinary native surface and curve primitives through
 /// the same renderer as independently translated owning-chart constructions.
 fn live_coordinate_surface_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -13195,6 +13289,26 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.native_surface_holes.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_surface_holes_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("native_surface_hole_triangle", 1),
+            counter_eq("native_surface_hole_visible", 1),
+            counter_eq("native_surface_hole_morph", 1),
+            counter_eq("native_surface_hole_endpoint", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_surface_holes",
+            vec![
+                FieldPred::str_eq("matches_triangle", "true"),
+                FieldPred::str_eq("endpoint_exact", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.live_coordinate_surface.v1",
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
@@ -16024,6 +16138,16 @@ fn tex_constructs_t2_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.tex_constructs_t2.v1")
         .expect("the outside-corpus TeX constructs scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn native_surface_holes_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.native_surface_holes.v1")
+        .expect("the native surface hole scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }
