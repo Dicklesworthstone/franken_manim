@@ -8150,6 +8150,98 @@ fn render_certified_camera_doc(stage: &Stage) -> Vec<u8> {
     encode_frame(renderer.frame()).expect("the camera frame encodes into its canonical document")
 }
 
+/// fm-90d4: portrait defaults and subsequent frame changes pass through Atlas,
+/// the live Marionette family, and the certified renderer.
+fn control_panel_frame_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let mut stage = Stage::new();
+    stage
+        .set_frame_shape([4.5, 8.0])
+        .map_err(|error| fail(format!("portrait panel frame: {error}")))?;
+    let book = fmn_library::FontBook::bundled()
+        .map_err(|error| fail(format!("panel font book: {error}")))?;
+    let builder = fmn_library::ControlPanel::new([fmn_library::Checkbox::new(true).composition()]);
+    let mut panel = builder
+        .build_in(&stage, &book)
+        .map_err(|error| fail(format!("portrait control panel: {error}")))?;
+    let near = |actual: f64, expected: f64| (actual - expected).abs() < 1e-5;
+    if !near(panel.panel().length_over_dim(0), 1.125)
+        || !near(panel.opener_rect().length_over_dim(0), 0.5625)
+    {
+        return Err(fail("control panel retained landscape default dimensions"));
+    }
+    panel.open_panel();
+    let root = stage.add(panel.composition());
+    stage
+        .add_to_scene(root)
+        .map_err(|error| fail(format!("show control panel: {error}")))?;
+    let family = stage.family(root);
+    let children = stage
+        .get(root)
+        .expect("live panel root")
+        .submobjects()
+        .to_vec();
+    let rect = children[0];
+    let opener = children[1];
+    let controls = children[2];
+    let opener_x = stage.get_bounding_box(opener).mid[0];
+    let controls_x = stage.get_bounding_box(controls).mid[0];
+    if !near(stage.get_bounding_box(rect).min[0], -2.25)
+        || !near(stage.get_bounding_box(opener).min[1], -4.0)
+    {
+        return Err(fail(
+            "portrait control panel lies beyond its configured frame",
+        ));
+    }
+    let opened = render_certified_doc(&stage);
+
+    panel.close_panel();
+    let closed_source = stage.add(panel.composition());
+    stage
+        .become_mobject(root, closed_source, false)
+        .map_err(|error| fail(format!("close live panel family: {error}")))?;
+    let closed = render_certified_doc(&stage);
+    if !near(stage.get_bounding_box(opener).max[1], 4.0) || opened == closed {
+        return Err(fail("closing the panel did not move its visible geometry"));
+    }
+
+    stage
+        .set_frame_shape([10.0, 6.0])
+        .map_err(|error| fail(format!("reconfigured panel frame: {error}")))?;
+    panel.open_panel_in(&stage);
+    let reopened_source = stage.add(panel.composition());
+    stage
+        .become_mobject(root, reopened_source, false)
+        .map_err(|error| fail(format!("reopen live panel family: {error}")))?;
+    if stage.family(root) != family
+        || !near(stage.get_width(rect), 1.125)
+        || !near(stage.get_height(rect), 8.25)
+        || !near(stage.get_bounding_box(opener).min[1], -3.0)
+        || !near(stage.get_bounding_box(opener).mid[0], opener_x)
+        || !near(stage.get_bounding_box(controls).mid[0], controls_x)
+    {
+        return Err(fail(
+            "frame reconfiguration changed panel identity or authored geometry",
+        ));
+    }
+    let fresh = builder
+        .build_in(&stage, &book)
+        .map_err(|error| fail(format!("panel in the new frame: {error}")))?;
+    if !near(fresh.panel().length_over_dim(0), 2.5) {
+        return Err(fail("new panel failed to read the reconfigured frame"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.control_panel.frame")
+            .field("states", 3_u64)
+            .field("frame_shapes", 2_u64)
+            .field("family_preserved", "true"),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("control-panel-open.frame", opened)
+        .with_artifact("control-panel-closed.frame", closed)
+        .with_counter("control_panel_states", 3)
+        .with_counter("control_panel_frame_shapes", 2))
+}
+
 /// A dot can disappear at radius zero and grow again through the production
 /// scene/output pipeline. Removing and re-adding an independent dot supplies
 /// the expected PNG sequence; no frame hash is regenerated for this change.
@@ -13108,6 +13200,24 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.control_panel_frame.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(control_panel_frame_lifecycle_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("control_panel_states", 3),
+            counter_eq("control_panel_frame_shapes", 2),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.control_panel.frame",
+            vec![
+                FieldPred::u64_eq("states", 3),
+                FieldPred::str_eq("family_preserved", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.zero_radius_dot.v1",
         ScenarioClass::LifecycleDrill,
         Surface::RustApi,
@@ -17037,6 +17147,16 @@ fn documented_config_effects_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.documented_config_effects.v1")
         .expect("documented configuration effects scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn control_panel_frame_lifecycle_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.control_panel_frame.v1")
+        .expect("current-frame control panel lifecycle is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

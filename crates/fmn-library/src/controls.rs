@@ -93,8 +93,7 @@ use fmn_core::color::Srgb;
 use fmn_core::constants::{
     DEFAULT_MOBJECT_COLOR, DEFAULT_MOBJECT_TO_MOBJECT_BUFF, DEFAULT_STROKE_WIDTH,
     DEFAULT_VMOBJECT_FILL_COLOR, DEFAULT_VMOBJECT_STROKE_COLOR, DOWN, FRAME_HEIGHT, FRAME_WIDTH,
-    FRAME_X_RADIUS, FRAME_Y_RADIUS, GREEN, GREY_A, GREY_C, LEFT, MED_SMALL_BUFF, ORIGIN, RED,
-    RIGHT, SMALL_BUFF, UP, WHITE,
+    GREEN, GREY_A, GREY_C, LEFT, MED_SMALL_BUFF, ORIGIN, RED, RIGHT, SMALL_BUFF, UP, WHITE,
 };
 use fmn_core::types::Vec3;
 use fmn_geom::GeomError;
@@ -1836,14 +1835,14 @@ pub struct ControlPanel {
     opener_text: String,
     opener_font_size: f64,
     opener_text_color: Srgb,
-    panel_width: f64,
-    panel_height: f64,
+    panel_width: Option<f64>,
+    panel_height: Option<f64>,
     panel_fill: Srgb,
     panel_fill_opacity: f64,
     panel_stroke: Srgb,
     panel_stroke_width: f64,
     panel_stroke_opacity: f64,
-    opener_width: f64,
+    opener_width: Option<f64>,
     opener_height: f64,
     opener_fill: Srgb,
     opener_fill_opacity: f64,
@@ -1863,14 +1862,14 @@ impl ControlPanel {
             opener_text: "Control Panel".to_string(),
             opener_font_size: 20.0,
             opener_text_color: DEFAULT_MOBJECT_COLOR,
-            panel_width: FRAME_WIDTH / 4.0,
-            panel_height: MED_SMALL_BUFF + FRAME_HEIGHT,
+            panel_width: None,
+            panel_height: None,
             panel_fill: GREY_C,
             panel_fill_opacity: 1.0,
             panel_stroke: DEFAULT_VMOBJECT_STROKE_COLOR,
             panel_stroke_width: 0.0,
             panel_stroke_opacity: 1.0,
-            opener_width: FRAME_WIDTH / 8.0,
+            opener_width: None,
             opener_height: 0.5,
             opener_fill: GREY_C,
             opener_fill_opacity: 1.0,
@@ -1905,14 +1904,14 @@ impl ControlPanel {
     /// Panel width (`panel_kwargs["width"]`).
     #[must_use]
     pub fn panel_width(mut self, width: f64) -> Self {
-        self.panel_width = width;
+        self.panel_width = Some(width);
         self
     }
 
     /// Panel height (`panel_kwargs["height"]`).
     #[must_use]
     pub fn panel_height(mut self, height: f64) -> Self {
-        self.panel_height = height;
+        self.panel_height = Some(height);
         self
     }
 
@@ -1944,7 +1943,7 @@ impl ControlPanel {
     /// Opener tab width (`opener_kwargs["width"]`).
     #[must_use]
     pub fn opener_width(mut self, width: f64) -> Self {
-        self.opener_width = width;
+        self.opener_width = Some(width);
         self
     }
 
@@ -1973,14 +1972,37 @@ impl ControlPanel {
         self
     }
 
-    /// Build the panel.
+    /// Build the panel against the default 16:9 frame.
+    /// For a configured scene frame, use [`Self::build_in`].
     ///
     /// # Errors
     /// [`TextMobjectError`] if the opener text fails to typeset.
     pub fn build(&self, book: &FontBook) -> Result<ControlPanelMobject, TextMobjectError> {
-        let panel_height = self.panel_height;
+        self.build_with_frame_shape([FRAME_WIDTH, FRAME_HEIGHT], book)
+    }
+
+    /// Build against the stage's current frame. Unspecified panel dimensions
+    /// and opener width follow [`Stage::frame_shape`]; explicit dimensions and
+    /// styles are preserved. Reusing the builder reads the frame again.
+    ///
+    /// # Errors
+    /// [`TextMobjectError`] if the opener text fails to typeset.
+    pub fn build_in(
+        &self,
+        stage: &Stage,
+        book: &FontBook,
+    ) -> Result<ControlPanelMobject, TextMobjectError> {
+        self.build_with_frame_shape(stage.frame_shape(), book)
+    }
+
+    fn build_with_frame_shape(
+        &self,
+        frame_shape: [f64; 2],
+        book: &FontBook,
+    ) -> Result<ControlPanelMobject, TextMobjectError> {
+        let panel_height = self.panel_height.unwrap_or(MED_SMALL_BUFF + frame_shape[1]);
         let panel = Rectangle::new()
-            .width(self.panel_width)
+            .width(self.panel_width.unwrap_or(frame_shape[0] / 4.0))
             .height(panel_height)
             .style(
                 Style::default()
@@ -1994,10 +2016,14 @@ impl ControlPanel {
             .build()
             .expect("an unrounded control panel cannot request arc components");
         // to_corner(UP + LEFT, buff=0), then shift up by the panel height.
-        let panel = to_corner(panel, [LEFT[0], UP[1], 0.0], 0.0).shifted([0.0, panel_height, 0.0]);
+        let panel = to_corner(panel, [LEFT[0], UP[1], 0.0], 0.0, frame_shape).shifted([
+            0.0,
+            panel_height,
+            0.0,
+        ]);
 
         let opener_rect = Rectangle::new()
-            .width(self.opener_width)
+            .width(self.opener_width.unwrap_or(frame_shape[0] / 8.0))
             .height(self.opener_height)
             .style(
                 Style::default()
@@ -2038,6 +2064,7 @@ impl ControlPanel {
         .moved_to(panel.center_point());
 
         let mut built = ControlPanelMobject {
+            frame_shape,
             panel,
             opener_rect,
             info_text,
@@ -2052,6 +2079,7 @@ impl ControlPanel {
 /// column, with the open/close/add/remove mutators.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ControlPanelMobject {
+    frame_shape: [f64; 2],
     panel: VMobject,
     opener_rect: VMobject,
     info_text: VMobject,
@@ -2116,8 +2144,16 @@ impl ControlPanelMobject {
     /// `panel_opener.to_corner(corner, buff=0)` keeping the opener's x.
     #[must_use]
     pub fn opener_to_corner(opener: VMobject, corner: Vec3) -> VMobject {
+        Self::opener_to_corner_with_frame_shape(opener, corner, [FRAME_WIDTH, FRAME_HEIGHT])
+    }
+
+    fn opener_to_corner_with_frame_shape(
+        opener: VMobject,
+        corner: Vec3,
+        frame_shape: [f64; 2],
+    ) -> VMobject {
         let x = opener.center_point()[0];
-        let opener = to_corner(opener, corner, 0.0);
+        let opener = to_corner(opener, corner, 0.0, frame_shape);
         let new_x = opener.center_point()[0];
         opener.shifted([x - new_x, 0.0, 0.0])
     }
@@ -2156,12 +2192,26 @@ impl ControlPanelMobject {
         self
     }
 
+    /// Open against the stage's current frame after a configuration change.
+    /// Existing dimensions, styles, and the opener's x position are retained.
+    pub fn open_panel_in(&mut self, stage: &Stage) -> &mut Self {
+        self.frame_shape = stage.frame_shape();
+        self.open_panel()
+    }
+
     /// `close_panel`: opener tab to the top-left frame corner (keeping
     /// its x), panel and controls riding above it.
     pub fn close_panel(&mut self) -> &mut Self {
         self.move_opener_to_corner([UP[0] + LEFT[0], UP[1] + LEFT[1], 0.0]);
         self.move_panel_and_controls_to_panel_opener();
         self
+    }
+
+    /// Close against the stage's current frame after a configuration change.
+    /// Subsequent open/close calls also use this frame.
+    pub fn close_panel_in(&mut self, stage: &Stage) -> &mut Self {
+        self.frame_shape = stage.frame_shape();
+        self.close_panel()
     }
 
     /// The Reference's `move_panel_and_controls_to_panel_opener`: the
@@ -2180,7 +2230,8 @@ impl ControlPanelMobject {
     /// `panel_opener.to_corner(corner, buff=0)` keeping the opener's x,
     /// moving rect and info text as one group.
     fn move_opener_to_corner(&mut self, corner: Vec3) {
-        let opener = Self::opener_to_corner(self.opener(), corner);
+        let opener =
+            Self::opener_to_corner_with_frame_shape(self.opener(), corner, self.frame_shape);
         let mut children = opener.children().to_vec();
         self.info_text = children.remove(1);
         self.opener_rect = children.remove(0);
@@ -2195,10 +2246,10 @@ impl From<ControlPanelMobject> for Mobject {
 
 /// `to_corner(corner, buff)`: move the mobject's `corner` bbox point to the
 /// frame's matching corner, inset by `buff`.
-fn to_corner(mob: VMobject, corner: Vec3, buff: f64) -> VMobject {
+fn to_corner(mob: VMobject, corner: Vec3, buff: f64, frame_shape: [f64; 2]) -> VMobject {
     let target = [
-        corner[0].signum() * (FRAME_X_RADIUS - buff),
-        corner[1].signum() * (FRAME_Y_RADIUS - buff),
+        corner[0].signum() * (frame_shape[0] / 2.0 - buff),
+        corner[1].signum() * (frame_shape[1] / 2.0 - buff),
         0.0,
     ];
     mob.moved_to_aligned(target, corner)
@@ -2211,6 +2262,7 @@ fn to_corner(mob: VMobject, corner: Vec3, buff: f64) -> VMobject {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fmn_core::constants::FRAME_Y_RADIUS;
 
     fn book() -> FontBook {
         FontBook::bundled().expect("bundled faces parse")
@@ -3089,6 +3141,84 @@ mod tests {
             cmin[1],
             omax[1] + MED_SMALL_BUFF
         );
+    }
+
+    #[test]
+    fn control_panel_defaults_follow_each_stage_frame() {
+        let book = book();
+        let mut stage = Stage::new();
+        let builder = ControlPanel::new([Checkbox::new(true).composition()]);
+        assert_eq!(
+            builder.build(&book).expect("default panel"),
+            builder
+                .build_in(&stage, &book)
+                .expect("default stage panel"),
+            "the default 16:9 layout stays unchanged"
+        );
+
+        for shape in [[4.5, 8.0], [10.0, 6.0], [FRAME_WIDTH, FRAME_HEIGHT]] {
+            stage.set_frame_shape(shape).expect("valid frame");
+            let mut panel = builder.build_in(&stage, &book).expect("configured panel");
+            assert!((panel.panel().length_over_dim(0) - shape[0] / 4.0).abs() < 1e-9);
+            assert!((panel.panel().length_over_dim(1) - (shape[1] + MED_SMALL_BUFF)).abs() < 1e-9);
+            assert!((panel.opener_rect().length_over_dim(0) - shape[0] / 8.0).abs() < 1e-9);
+            let opener_x = panel.opener_rect().center_point()[0];
+
+            panel.open_panel();
+            let (minimum, _) = panel.opener().extent().expect("opener extent");
+            assert!((minimum[1] + shape[1] / 2.0).abs() < 1e-9);
+            panel.close_panel();
+            let (_, maximum) = panel.opener().extent().expect("opener extent");
+            assert!((maximum[1] - shape[1] / 2.0).abs() < 1e-9);
+            assert!((panel.opener_rect().center_point()[0] - opener_x).abs() < 1e-9);
+            let (minimum, _) = panel.panel().extent().expect("panel extent");
+            assert!((minimum[0] + shape[0] / 2.0).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn control_panel_frame_reconfiguration_preserves_authored_geometry() {
+        let book = book();
+        let mut stage = Stage::new();
+        stage.set_frame_shape([4.5, 8.0]).expect("portrait frame");
+        let mut panel = ControlPanel::new([Checkbox::new(true).composition()])
+            .panel_width(1.7)
+            .panel_height(3.0)
+            .panel_fill(RED, 0.4)
+            .opener_width(0.8)
+            .opener_height(0.6)
+            .opener_fill(GREEN, 0.8)
+            .build_in(&stage, &book)
+            .expect("configured panel");
+        let opener_x = panel.opener_rect().center_point()[0];
+        let controls_x = panel.controls().center_point()[0];
+
+        stage.set_frame_shape([10.0, 12.0]).expect("tall frame");
+        panel.open_panel_in(&stage);
+        let (minimum, _) = panel.opener().extent().expect("opener extent");
+        assert!((minimum[1] + 6.0).abs() < 1e-9);
+        panel.close_panel();
+        let (_, maximum) = panel.opener().extent().expect("opener extent");
+        assert!((maximum[1] - 6.0).abs() < 1e-9);
+
+        stage.set_frame_shape([6.0, 4.0]).expect("short frame");
+        panel.close_panel_in(&stage);
+        let (_, maximum) = panel.opener().extent().expect("opener extent");
+        assert!((maximum[1] - 2.0).abs() < 1e-9);
+        panel.open_panel();
+        let (minimum, _) = panel.opener().extent().expect("opener extent");
+        assert!((minimum[1] + 2.0).abs() < 1e-9);
+
+        assert!((panel.panel().length_over_dim(0) - 1.7).abs() < 1e-9);
+        assert!((panel.panel().length_over_dim(1) - 3.0).abs() < 1e-9);
+        assert!((panel.opener_rect().length_over_dim(0) - 0.8).abs() < 1e-9);
+        assert!((panel.opener_rect().length_over_dim(1) - 0.6).abs() < 1e-9);
+        assert!((panel.opener_rect().center_point()[0] - opener_x).abs() < 1e-9);
+        assert!((panel.controls().center_point()[0] - controls_x).abs() < 1e-9);
+        assert_eq!(panel.panel().style().fill_color, RED);
+        assert_eq!(panel.panel().style().fill_opacity, 0.4);
+        assert_eq!(panel.opener_rect().style().fill_color, GREEN);
+        assert_eq!(panel.opener_rect().style().fill_opacity, 0.8);
     }
 
     #[test]
