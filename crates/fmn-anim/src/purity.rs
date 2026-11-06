@@ -142,6 +142,7 @@ fn scan_family(stage: &Stage, mob: Mob, effects: &mut Vec<ImpureEffect>) {
 pub fn classify_play(stage: &Stage, animations: &[Box<dyn Animation>]) -> Purity {
     let mut effects = Vec::new();
     for animation in animations {
+        // ubs:ignore -- AnimationSignature is a public effect enum, not a secret.
         if animation.effect_signature() != AnimationSignature::Pure
             || animation.has_preparing_rate()
         {

@@ -7118,6 +7118,144 @@ fn tex_underline_metrics_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
         .with_counter("tex_underline_visible_rules", visible_rules))
 }
 
+/// fm-widehat-height-r12-v3jj: independently measured wide-hat boxes and
+/// every accent path survive native builders and certified rasterization.
+fn tex_widehat_metrics_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let engine = &scene_goldens::corpus().tex;
+    // The ruled-Reference 10pt oracle also used by the upstream regression.
+    // Cover the CMEX and AMS variants, optical sizes, nesting, an empty
+    // nucleus, a fraction and the TexText math-island front door.
+    let cases = [
+        (false, r"\widehat{P}", [0.780_904, 0.975_000, 0.0], 1),
+        (false, r"\widehat{8}", [0.500_002, 0.936_113, 0.0], 1),
+        (false, r"\widehat{AB}", [1.558_682, 1.002_777, 0.0], 1),
+        (false, r"\widehat{ABC}", [2.344_931, 1.045_372, 0.0], 1),
+        (false, r"\widehat{ABCD}", [3.200_626, 1.045_372, 0.0], 1),
+        (false, r"\widehat{}", [0.0, 0.722_223, 0.0], 1),
+        (
+            false,
+            r"\widehat{\frac{a}{b}}",
+            [0.768_588, 1.398_730, 0.685_951],
+            1,
+        ),
+        (
+            false,
+            r"\widehat{\widehat{x}}",
+            [0.571_527, 1.013_892, 0.0],
+            2,
+        ),
+        (
+            false,
+            r"\scriptstyle\widehat{P}",
+            [0.616_771, 0.682_500, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\scriptscriptstyle\widehat{8}",
+            [0.340_283, 0.468_054, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\scriptscriptstyle\widehat{ABCD}",
+            [2.164_229, 0.524_794, 0.0],
+            1,
+        ),
+        (true, r"$\widehat{P}$", [0.780_904, 0.975_000, 0.0], 1),
+    ];
+    let blank = render_certified_doc(&Stage::new());
+    let mut visible_paths = 0;
+    let mut formulas = 0;
+    for (text_mode, source, expected, expected_paths) in cases {
+        let built = if text_mode {
+            fmn_library::TexText::new(source).build(engine)
+        } else {
+            fmn_library::Tex::new(source).build(engine)
+        }
+        .map_err(|error| fail(format!("{source}: wide-hat builder: {error}")))?;
+        let layout = &built.typeset.layout;
+        let measured = [layout.width, layout.height, layout.depth];
+        if measured
+            .into_iter()
+            .zip(expected)
+            .any(|(actual, want)| !actual.is_finite() || (actual - want).abs() >= 1e-4)
+        {
+            return Err(fail(format!(
+                "{source}: wide-hat box {measured:?}, real TeX {expected:?}"
+            )));
+        }
+        if layout.paths.len() != expected_paths
+            || built.vmob.children().len() != built.typeset.subs.len()
+        {
+            return Err(fail(format!("{source}: wide-hat paths or family lost")));
+        }
+        let centered = built.vmob.moved_to([0.0; 3]);
+        let mut stage = Stage::new();
+        let formula = stage.add(centered.clone());
+        stage
+            .add_to_scene(formula)
+            .map_err(|error| fail(format!("{source}: show wide hat: {error}")))?;
+        let rendered = render_certified_doc(&stage);
+        if rendered == blank {
+            return Err(fail(format!("{source}: blank certified wide-hat frame")));
+        }
+        let mut case_paths = 0;
+        // Preserve all geometry and centering while hiding each accent in
+        // isolation. Neither glyph ink nor another nested hat can stand in
+        // for the individual path's actual pixel contribution.
+        for (ordinal, sub) in built.typeset.subs.iter().enumerate() {
+            if !matches!(sub.prim, Prim::Path(_)) {
+                continue;
+            }
+            if centered.children()[ordinal].points().is_empty() {
+                return Err(fail(format!("{source}: accent {ordinal} has no geometry")));
+            }
+            let mut child_index = 0;
+            let masked = centered.clone().map_children(|child| {
+                let hide = child_index == ordinal;
+                child_index += 1;
+                if hide {
+                    child.map_style_deep(|mut style| {
+                        style.fill_opacity = 0.0;
+                        style.stroke_opacity = 0.0;
+                        style
+                    })
+                } else {
+                    child
+                }
+            });
+            let mut without_path = Stage::new();
+            let formula = without_path.add(masked);
+            without_path
+                .add_to_scene(formula)
+                .map_err(|error| fail(format!("{source}: show accent control: {error}")))?;
+            if render_certified_doc(&without_path) == rendered {
+                return Err(fail(format!(
+                    "{source}: accent {ordinal} contributes no certified pixels"
+                )));
+            }
+            case_paths += 1;
+        }
+        if case_paths != expected_paths {
+            return Err(fail(format!("{source}: accent primitive mapping lost")));
+        }
+        visible_paths += case_paths as u64;
+        formulas += 1;
+        ctx.event(
+            LogEvent::new("e2e.parity.tex_widehat_metric")
+                .field("source", source)
+                .field("mode", if text_mode { "text" } else { "math" })
+                .field("box_em", format!("{measured:?}"))
+                .field("paths", case_paths.to_string())
+                .field("visible", "true"),
+        );
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("tex_widehat_formulas", formulas)
+        .with_counter("tex_widehat_visible_paths", visible_paths))
+}
+
 /// fm-j4tni: an inline cross retains its path, source colour and primitive
 /// family through both native builders and a real certified raster frame.
 fn tex_pifont_cross_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -12646,6 +12784,21 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "parity.tex_widehat_metrics.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(tex_widehat_metrics_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tex_widehat_formulas", 12),
+            counter_eq("tex_widehat_visible_paths", 13),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.parity.tex_widehat_metric",
+            vec![FieldPred::str_eq("visible", "true")],
+        )],
+    ));
+    specs.push(spec(
         "parity.tex_pifont_cross.v1",
         ScenarioClass::ParityDrill,
         Surface::RustApi,
@@ -15474,6 +15627,16 @@ fn tex_underline_metrics_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "parity.tex_underline_metrics.v1")
         .expect("the underline metrics scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn tex_widehat_metrics_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "parity.tex_widehat_metrics.v1")
+        .expect("the wide-hat metrics scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

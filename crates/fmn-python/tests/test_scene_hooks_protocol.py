@@ -33,6 +33,7 @@ def progression_environment(fps=24):
                       and node.name == parent_name)
         node = next(node for node in parent.body
                     if isinstance(node, ast.FunctionDef) and node.name == name)
+        # ubs:ignore -- All callers select literal helpers under the fixed repository python root, not authored input.
         exec(compile(ast.Module([node], []), str(path), "exec"), g)
         return g[name]
 

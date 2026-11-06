@@ -198,8 +198,10 @@ def environment(install=True):
         "is_remover":"is_remover", "clean_up_from_scene":"clean_up_from_scene",
     }
     for name, definition in methods.items():
+        # ubs:ignore -- Only named functions from the fixed repository installer are executed in this fixture.
         exec(compile(ast.Module([definitions[definition]], []), str(path), "exec"), g)
         setattr(Animation, name, g[definition])
+    # ubs:ignore -- The constructor is selected by a literal name from the same fixed repository installer.
     exec(compile(ast.Module([definitions["native_animation_init"]], []), str(path), "exec"), g)
     _NativeAnimation.__init__ = g["native_animation_init"]
     path = ROOT / "python/manimlib_bootstrap.py"
@@ -207,6 +209,7 @@ def environment(install=True):
     nodes = [node for node in ast.parse(path.read_text()).body
              if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name in names]
     assert {node.name for node in nodes} == names
+    # ubs:ignore -- Only allowlisted definitions from the fixed repository bootstrap enter the fixture.
     exec(compile(ast.Module(nodes, []), str(path), "exec"), g)
     native._old_homotopy_begin = native.Homotopy.begin
     native._old_homotopy_interpolate = native.Homotopy.interpolate_mobject

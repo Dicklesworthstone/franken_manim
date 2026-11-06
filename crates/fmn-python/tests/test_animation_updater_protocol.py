@@ -117,6 +117,7 @@ def environment():
         "_fmn_interpolate_at_frame":"interpolate_at_frame",
     }
     for name, function in mapping.items():
+        # ubs:ignore -- Only literal-mapped functions from the fixed repository installer enter the fixture.
         exec(compile(ast.Module([functions[function]], []), str(source), "exec"), g)
         setattr(Animation, name, g[function])
     class PerMember(Animation):
@@ -425,7 +426,7 @@ class ExactFramePersistentProtocolTests(unittest.TestCase):
         clock = next(node for node in ast.walk(tree)
                      if isinstance(node, ast.ClassDef) and node.name == "ClockDriver")
         scope = {"math": math, "g": {"_SceneCore": types.SimpleNamespace(remove=lambda *args: None)}}
-        # Execute only the fixed repository class in this source-protocol fixture.
+        # ubs:ignore -- Execute only the fixed repository ClockDriver class in this source-protocol fixture.
         exec(compile(ast.Module([clock], []), str(source), "exec"), scope)
         animation = self.attach()
         anchor = self.mob

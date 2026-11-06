@@ -254,6 +254,7 @@ def environment():
     tree = ast.parse(BOOTSTRAP.read_text())
     nodes = {node.name: node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
     for name in names:
+        # ubs:ignore -- Execute named definitions from the fixed repository BOOTSTRAP, not authored input.
         exec(compile(ast.Module([nodes[name]], []), str(BOOTSTRAP), "exec"), g)
     # Lift the shared validator together with the constructor body.
     g["_validate_frame_count"] = semantics._validate_frame_count
@@ -261,6 +262,7 @@ def environment():
     for node in install.body:
         # install()'s captures run first: the lifted functions close over them.
         if isinstance(node, ast.FunctionDef) or is_install_capture(node):
+            # ubs:ignore -- SOURCE is the fixed repository installer; only definitions and allowlisted captures enter this fixture.
             exec(compile(ast.Module([node], []), str(SOURCE), "exec"), g)
     mappings = {
         "__setattr__":"animation_setattr", "__init__":"animation_init", "_validate_input_type":"validate_input_type",
