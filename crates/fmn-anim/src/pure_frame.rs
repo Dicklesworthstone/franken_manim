@@ -15,9 +15,9 @@ use fmn_mobject::{FrozenRenderState, Mob, Stage};
 
 use crate::animation::check_updater_error;
 use crate::{
-    AnimError, AnimState, Animation, FramePosition, FrameSample, FrameSegment, OpenSegment,
-    OpenWait, RateFunc, RationalFrameClock, RationalTime, Rotating, SegmentKind, SegmentReport,
-    ShowPartial, Transform, VFade, finish_open_play,
+    AnimError, AnimState, Animation, FrameMetadata, FramePosition, FrameSample, FrameSegment,
+    OpenSegment, OpenWait, RateFunc, RationalFrameClock, RationalTime, Rotating, SegmentKind,
+    SegmentReport, ShowPartial, Transform, VFade, finish_open_play,
 };
 
 /// A closed, prepared interpolation mechanism. Fields and constructors are
@@ -101,6 +101,23 @@ fn freeze_rate(rate: &RateFunc) -> Option<RateFunc> {
             proportion: *proportion,
         },
     })
+}
+
+// A frozen exact table can still fail at an omitted intermediate sample.
+// Catch-up must not hide that error by evaluating only a later valid sample.
+// The ordinary frame-program route remains available for those tables.
+fn rate_allows_owner_advance(rate: &RateFunc) -> bool {
+    match rate {
+        RateFunc::Catalog(_) => true,
+        RateFunc::Base(_) | RateFunc::Preparing(_) | RateFunc::Exact(_) => false,
+        RateFunc::Sampled(samples) => samples.iter().all(|sample| sample.is_finite()),
+        RateFunc::Squish { inner, a, b } => {
+            a.is_finite() && b.is_finite() && rate_allows_owner_advance(inner)
+        }
+        RateFunc::Scaled { inner, proportion } => {
+            proportion.is_finite() && rate_allows_owner_advance(inner)
+        }
+    }
 }
 
 impl FrozenAnimation {
@@ -226,6 +243,20 @@ impl FrozenAnimation {
                 None
             }
         })
+    }
+
+    fn allows_owner_advance(&self) -> bool {
+        rate_allows_owner_advance(&self.state().config.rate_func)
+            && match &self.mechanism {
+                // Exact composed frame arithmetic has sample-specific typed
+                // failures. Keep its ordinary driver until a whole-interval
+                // admission proof is available, just as for exact rate tables.
+                FrozenMechanism::Group(group) => {
+                    group.exact_timings.is_none()
+                        && group.animations.iter().all(Self::allows_owner_advance)
+                }
+                _ => true,
+            }
     }
 
     fn interpolate(&self, stage: &mut Stage, time: RationalTime) -> Result<(), AnimError> {
@@ -373,6 +404,54 @@ impl std::fmt::Display for PureFrameRefusal {
 
 impl std::error::Error for PureFrameRefusal {}
 
+fn freeze_animations(
+    stage: &Stage,
+    animations: &[Box<dyn Animation>],
+) -> Result<Vec<FrozenAnimation>, PureFrameRefusal> {
+    let mut frozen = Vec::with_capacity(animations.len());
+    let mut writes = HashSet::new();
+    let mut reads = Vec::new();
+    let mut observed: Vec<Mob> = stage.roots().to_vec();
+    for (index, animation) in animations.iter().enumerate() {
+        let carrier = animation
+            .freeze_interpolation()
+            .ok_or(PureFrameRefusal::UnsupportedAnimation(index))?;
+        for row in carrier
+            .leaf_states()
+            .into_iter()
+            .flat_map(AnimState::families)
+        {
+            // Prepared rows remain interpolation inputs even if authoring
+            // has since detached a member from its original family root.
+            observed.extend(row.iter().copied());
+            let Some((output, endpoints)) = row.split_first() else {
+                return Err(PureFrameRefusal::UnsupportedAnimation(index));
+            };
+            if !writes.insert(*output) {
+                return Err(PureFrameRefusal::OverlappingOutput(*output));
+            }
+            reads.extend(endpoints.iter().copied());
+        }
+        observed.extend(animation.all_mobjects());
+        observed.extend(animation.preflight_mobjects());
+        frozen.push(carrier);
+    }
+    for endpoint in reads {
+        if writes.contains(&endpoint) {
+            return Err(PureFrameRefusal::MutableEndpoint(endpoint));
+        }
+    }
+    for root in observed {
+        for mob in stage.family(root) {
+            let entry = stage.get(mob).ok_or(PureFrameRefusal::DifferentBegin)?;
+            if entry.buffer.live_view_count() != 0 {
+                return Err(PureFrameRefusal::LiveView(mob));
+            }
+        }
+    }
+    Ok(frozen)
+}
+
 struct SegmentData {
     kind: SegmentKind,
     begin: FrozenRenderState,
@@ -442,44 +521,7 @@ impl PureSegment {
         {
             return Err(PureFrameRefusal::DifferentBegin);
         }
-        let mut frozen = Vec::with_capacity(animations.len());
-        let mut writes = HashSet::new();
-        let mut reads = Vec::new();
-        let mut observed: Vec<Mob> = stage.roots().to_vec();
-        for (index, animation) in animations.iter().enumerate() {
-            let carrier = animation
-                .freeze_interpolation()
-                .ok_or(PureFrameRefusal::UnsupportedAnimation(index))?;
-            for row in carrier
-                .leaf_states()
-                .into_iter()
-                .flat_map(AnimState::families)
-            {
-                let Some((output, endpoints)) = row.split_first() else {
-                    return Err(PureFrameRefusal::UnsupportedAnimation(index));
-                };
-                if !writes.insert(*output) {
-                    return Err(PureFrameRefusal::OverlappingOutput(*output));
-                }
-                reads.extend(endpoints.iter().copied());
-            }
-            observed.extend(animation.all_mobjects());
-            observed.extend(animation.preflight_mobjects());
-            frozen.push(carrier);
-        }
-        for endpoint in reads {
-            if writes.contains(&endpoint) {
-                return Err(PureFrameRefusal::MutableEndpoint(endpoint));
-            }
-        }
-        for root in observed {
-            for mob in stage.family(root) {
-                let entry = stage.get(mob).ok_or(PureFrameRefusal::DifferentBegin)?;
-                if entry.buffer.live_view_count() != 0 {
-                    return Err(PureFrameRefusal::LiveView(mob));
-                }
-            }
-        }
+        let frozen = freeze_animations(stage, animations)?;
         Ok(Self {
             data: Arc::new(SegmentData {
                 kind: SegmentKind::Play,
@@ -540,6 +582,193 @@ impl PureSegment {
                 rng_seed: rng.seed(),
             }),
         })
+    }
+
+    /// Advance an admitted play's original owner over unobserved pure frames.
+    ///
+    /// Apply the last requested nominal sample once, leave the animation
+    /// epilogue pending, and retain the cursor for either another pure advance
+    /// or ordinary stepped continuation. This never restores a worker Stage
+    /// over live owner registrations. The caller must independently exclude
+    /// per-frame observers, queued events and concurrent event producers.
+    ///
+    /// `None` leaves the owner unchanged: the count is zero, the segment is
+    /// complete, or current callbacks/views/dependencies require serial work.
+    /// Exact rate tables and exact composed frame arithmetic remain serial so
+    /// an error at an intermediate sample cannot be hidden by a later sample.
+    ///
+    /// # Errors
+    /// A mismatched owner/cursor/clock, an incomplete frame phase, or a native
+    /// interpolation failure. As in stepped playback, an interpolation failure
+    /// can leave partial geometry and requires the caller's ordinary abort path.
+    pub fn try_advance_on_owner(
+        &self,
+        stage: &mut Stage,
+        clock: &mut RationalFrameClock,
+        rng: &RngRoot,
+        animations: &mut [Box<dyn Animation>],
+        open: &mut OpenSegment,
+        max_frames: u64,
+    ) -> Result<Option<FrameMetadata>, AnimError> {
+        check_updater_error(stage)?;
+        if self.data.kind != SegmentKind::Play
+            || animations.len() != self.data.animations.len()
+            || open.segment() != self.data.grid
+            || !open.is_at_frame_boundary()
+        {
+            return Err(AnimError::InvalidFramePhase(
+                "pure advance requires the original play at a completed frame boundary",
+            ));
+        }
+        if let Some(error) = animations
+            .iter()
+            .find_map(|animation| animation.deferred_error())
+        {
+            return Err(error);
+        }
+        let Some((sample, advanced_clock)) = self.owner_advance_sample(
+            stage,
+            clock,
+            rng,
+            open.report(),
+            open.stepped(),
+            max_frames,
+        )?
+        else {
+            return Ok(None);
+        };
+        if !crate::classify_play(stage, animations).is_pure() {
+            return Ok(None);
+        }
+        // A caller may have attached a view/updater or changed a rate since
+        // freezing. Recheck the current native carriers, including aliases
+        // across nested eager compositions, before touching owner state.
+        let Ok(frozen) = freeze_animations(stage, animations) else {
+            return Ok(None);
+        };
+        if !frozen.iter().all(FrozenAnimation::allows_owner_advance) {
+            return Ok(None);
+        }
+        for animation in animations.iter_mut() {
+            animation.interpolate_at_time(stage, sample.time)?;
+            check_updater_error(stage)?;
+        }
+        if let Some(error) = animations
+            .iter()
+            .find_map(|animation| animation.deferred_error())
+        {
+            return Err(error);
+        }
+        *clock = advanced_clock;
+        stage.set_time_from_clock(clock.now().to_f64());
+        open.advance_pure_cursor(sample.frame);
+        Ok(Some(FrameMetadata::capture(clock, rng, &sample)))
+    }
+
+    /// Advance an admitted static wait without inventing an updater pass.
+    /// The initial zero-dt pass already ran when the wait opened; current
+    /// purity and live-view checks prove the omitted per-frame passes inert.
+    /// The wait remains open, including at its final nominal sample.
+    ///
+    /// # Errors
+    /// A mismatched owner/cursor/clock, an incomplete frame phase, or a retained
+    /// updater error. A refused admission returns `None` without mutation.
+    pub fn try_advance_wait_on_owner(
+        &self,
+        stage: &mut Stage,
+        clock: &mut RationalFrameClock,
+        rng: &RngRoot,
+        open: &mut OpenWait,
+        max_frames: u64,
+    ) -> Result<Option<FrameMetadata>, AnimError> {
+        check_updater_error(stage)?;
+        if self.data.kind != SegmentKind::Wait
+            || open.segment() != self.data.grid
+            || !open.is_at_frame_boundary()
+        {
+            return Err(AnimError::InvalidFramePhase(
+                "pure advance requires the original wait at a completed frame boundary",
+            ));
+        }
+        let Some((sample, advanced_clock)) = self.owner_advance_sample(
+            stage,
+            clock,
+            rng,
+            open.report(),
+            open.stepped(),
+            max_frames,
+        )?
+        else {
+            return Ok(None);
+        };
+        if !crate::classify_wait(stage, false).is_pure()
+            || stage.roots().iter().any(|&root| {
+                stage.family(root).into_iter().any(|mob| {
+                    stage
+                        .get(mob)
+                        .is_none_or(|entry| entry.buffer.live_view_count() != 0)
+                })
+            })
+        {
+            return Ok(None);
+        }
+        *clock = advanced_clock;
+        stage.set_time_from_clock(clock.now().to_f64());
+        open.advance_pure_cursor(sample.frame);
+        Ok(Some(FrameMetadata::capture(clock, rng, &sample)))
+    }
+
+    fn owner_advance_sample(
+        &self,
+        stage: &Stage,
+        clock: &RationalFrameClock,
+        rng: &RngRoot,
+        report: &SegmentReport,
+        stepped: i64,
+        max_frames: u64,
+    ) -> Result<Option<(FrameSample, RationalFrameClock)>, AnimError> {
+        // A completed external-updater boundary deliberately drops the begin
+        // snapshot and demotes the report. That is a serial fallback, not a
+        // malformed owner whose clock should be repaired or rejected here.
+        if !report.purity.is_pure() {
+            return Ok(None);
+        }
+        let expected_frame = self.data.base_frame.checked_add(stepped);
+        if report.base_frame != self.data.base_frame
+            || report.n_frames != self.frame_count()
+            || expected_frame != Some(clock.now().frames())
+            || clock.fps() != self.data.grid.end_time().fps()
+            || rng.seed() != self.data.rng_seed
+            || report
+                .begin_state
+                .as_ref()
+                .is_none_or(|begin| !stage.can_restore(begin))
+            || stepped < 0
+            || stepped > self.frame_count()
+        {
+            return Err(AnimError::InvalidFramePhase(
+                "pure advance owner, clock or sampling plan changed",
+            ));
+        }
+        let count = max_frames.min((self.frame_count() - stepped).cast_unsigned());
+        if count == 0 {
+            return Ok(None);
+        }
+        let frame = stepped + count.cast_signed();
+        let sample = self
+            .data
+            .grid
+            .sample(frame)
+            .ok_or(AnimError::SeekOutOfRange {
+                frame,
+                total: self.frame_count(),
+            })?;
+        // Check the whole clock advance before interpolation mutates geometry.
+        let mut advanced_clock = *clock;
+        advanced_clock
+            .advance_frames(count.cast_signed())
+            .map_err(AnimError::Clock)?;
+        Ok(Some((sample, advanced_clock)))
     }
 
     /// Advance the original wait owner once after consuming its immutable jobs.
