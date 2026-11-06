@@ -444,9 +444,16 @@ def persistent_frame_durations():
         m.turn_animation_into_updater(animation)
         scene.wait_frames(43)
         assert animation.total_time == 43 / fps
+        # BN-02 preserves sample-before-dt. Reference Scene.wait has no
+        # final zero-dt pass, so observe the reached boundary explicitly;
+        # the helper must not finish during its preceding 43rd sample.
+        assert animation.finishes == []
+        assert animation.mobject.updaters
+        animation.mobject.update(0.)
         assert animation.finishes == [43]
         assert not animation.mobject.updaters
         assert animation.alphas[-1] == 1.
+        assert scene.get_frame_count() == 43
 
     pending_scene = scene_at(25, skip=True)
     pending = Probe(pending_scene, 43)
@@ -455,7 +462,10 @@ def persistent_frame_durations():
     pending_scene.add(pending.mobject)
     pending_scene.wait_frames(43)
     assert pending.total_time == 43 / 25
+    assert pending.finishes == []
+    pending.mobject.update(0.)
     assert pending.finishes == [43]
+    assert pending_scene.get_frame_count() == 43
 
     scene = scene_at(skip=True)
     animation = Probe(scene, 43)
@@ -463,8 +473,10 @@ def persistent_frame_durations():
     m.cycle_animation(animation)
     scene.wait_frames(860)
     assert animation.total_time == 860 / 24
+    animation.mobject.update(0.)
     assert animation.alphas[-1] == 0.
     assert animation.finishes == []
+    assert scene.get_frame_count() == 860
     animation.mobject.clear_updaters()
 
     manual = Probe(scene, 43)
@@ -494,9 +506,12 @@ def persistent_frame_durations():
     anchor = m.turn_animation_into_updater(swapping)
     native.add(anchor)
     native.wait_frames(43)
+    assert anchor.updaters
+    anchor.update(0.)
     np.testing.assert_allclose(left.get_center(), m.RIGHT, atol=1e-5)
     np.testing.assert_allclose(right.get_center(), m.LEFT, atol=1e-5)
     assert swapping.total_time == 43 / 24 and not anchor.updaters
+    assert native.get_frame_count() == 43
 
     mixed = scene_at(skip=True)
     first, second = Probe(mixed, 1), Probe(mixed, 1)
@@ -509,8 +524,11 @@ def persistent_frame_durations():
     # Persistent helpers sample before adding their delta, at the scene's
     # post-advance updater phase: elapsed44 first reaches43+2^-49 here.
     assert second.begins == [45], second.begins
+    assert second.finishes == []
+    anchor.update(0.)
     assert second.finishes == [45]
     assert not anchor.updaters
+    assert mixed.get_frame_count() == 45
 
 
 def mixed_zero_long_and_boundaries():
