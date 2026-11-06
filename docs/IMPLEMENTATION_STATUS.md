@@ -1,14 +1,53 @@
 # FrankenManim implementation status
 
-**Status date:** 2026-11-05 (America/New_York). Source, published artifacts,
+**Status date:** 2026-11-06 (America/New_York). Source, published artifacts,
 measurements and fresh execution have separate qualification. Earlier sections
 remain historical evidence; their passing gates do not qualify later code.
+
+## Current follow-through — 2026-11-06, wide-hat consumer join awaiting execution
+
+The consumer now selects wide-hat source candidate
+`26b268f601a915bf407263223bd1706540fee3c2`, published through annotated tag
+`fmn-widehat-candidate-20261106`. Its 1,802 source entries exactly match the
+provider snapshot that passed all seven original checks (4,949 tests, zero
+failures, 12 existing ignored). Those checks ran before the commit; an attempted
+postcommit rerun was refused. The original 2,000-root/13,822-case differential
+records 115 subformula gains, zero losses and 33→0 minimized wide-hat failures.
+A separate solo replay agrees; this is not independent review or a release.
+
+Root and fuzz declarations and all three lockfiles select that same revision.
+Only the three FrankenMarkdown package source identities change; versions,
+checksums, dependency lists and other packages stay fixed. The font manifest's
+provider revision is updated after verifying that the entire upstream font and
+license trees are unchanged. This is an explicit metadata edit, not a newly
+executed manifest-generator check. Native metadata checks and any affected PG
+definitions or coverage results still require execution.
+
+The new registered `parity.tex_widehat_metrics.v1` scenario requires 12 real
+builder cases and 13 individually visible accent paths, with independent TeX
+box measurements at the unchanged 1e-4 tolerance. Completed cases are counted;
+glyph ink alone cannot satisfy the per-path pixel checks. Its parent and
+candidate runtime results remain unverified. Ordinary DSR/RCH attempts stopped
+before Cargo: first an explicit Cargo-home assignment was rejected, then disk
+admission refused the corrected runner because of active reservations. No
+budget, floor, slot or source-custody rule was overridden.
+
+The last complete run of the preceding `3ca` consumer (`300f5658` input
+aggregate, DSR `20261105T230021-3603338/1`) passed its first 40 stages, including
+the native pipeline, Studio, exact-duration, output and 2,061 protocol tests.
+The full default scanner then returned 17 critical findings; bare Cargo was
+not reached. Nine reasoned false-positive comments are now present, but their
+scanner rerun and planted-red controls are unverified. That old run does not
+qualify the new provider pin. The original source policy, shared-memory/audio
+cohort, fresh matching artifacts and installed gate remain open. All four owned
+Beads remain in progress; primary publication is held until the original source
+policy passes.
 
 ## Current follow-through — 2026-11-05, native integration in progress
 
 The project has substantial working native and portal paths, but is not at its
 four-front-door, certified-platform and performance target. In particular,
-current merged source `d33ad52f` failed the real all-target build: the exact-frame
+the original merged source `d33ad52f` failed the real all-target build: the exact-frame
 change omitted Studio's timing argument, returned a borrowing PyO3 extraction
 error and referenced a private error type from its E2E test. The first
 three-source repair passed that build (`23b3323f` input aggregate). Strict
