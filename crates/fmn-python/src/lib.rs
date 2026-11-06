@@ -880,10 +880,18 @@ impl PortalFrameSession {
         &mut self,
         packet: fmn_scene::studio_bridge::FramePacket,
     ) -> Result<(), fmn_scene::IntegrationError> {
-        let reservation = self.reserve_output()?;
+        let reservation = Python::attach(|py| py.detach(|| self.reserve_output()))?;
         let preparation_start = Instant::now();
-        let stage = packet.materialize_stage();
-        self.capture_stage(&stage, preparation_start, reservation)
+        // Release callback references on the scene owner before detaching.
+        // Only the immutable render projection and native output resources
+        // enter rasterization; serial waits release the GIL as pure plays do.
+        let state = packet.into_render_state();
+        Python::attach(|py| {
+            py.detach(move || {
+                let stage = state.materialize();
+                self.capture_stage(&stage, preparation_start, reservation)
+            })
+        })
     }
 
     fn reserve_output(
