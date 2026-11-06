@@ -125,9 +125,32 @@ the original exact-duration acceptance, actually fails: `.animate` forwards
 it before the existing duration implementation can run (DSR
 `20261105T203756-2682683/1`). Source, SDK and scanner-tool checks remain unchanged;
 RCH acknowledges the failed run normally. The allowlist now forwards that
-argument to the existing validating constructor. This one-line repair has not
-yet executed; no test, numeric tolerance, golden or duration rule changes.
-The later native output suites, full scanner and bare Cargo remain pending.
+argument to the existing validating constructor. No numeric tolerance, golden
+or duration rule changes.
+
+Its first native after-control gets past the builder call, then exposes an
+invalid fixture import: `manimlib.Delay` is absent by design (DSR
+`20261105T214147-2952485/1`, source `61ac365c`). `Delay` and `ChangeSpeed` are
+existing extension classes in their qualified animation modules, excluded from
+the pinned 663-name root surface. An audit of every public `m.<name>` in the
+duration fixture finds only those two unsupported root spellings. The fixture
+now imports their existing public module bindings, preserving every case,
+input and assertion; a normalized AST comparison checks that boundary. Root
+exports remain governed by the unchanged schema. RCH acknowledges the failed
+after-control normally. The complete duration rerun, later native output
+suites, full scanner and bare Cargo remain pending.
+
+The qualified-import rerun (`73daab81`, DSR `20261105T215941-3054489/1`)
+passes those constructor and frame-context checks, then rejects a fixture's
+assumption that a finite wait finishes persistent animations immediately.
+The pinned Reference's `Scene.wait` has no final zero-dt updater pass;
+`turn_animation_into_updater` samples before adding `dt`, as BN-02 and the
+existing protocol tests require. The fixture now observes each reached
+boundary explicitly with `update(0)`. All 191 prior assertions remain, with
+ten added checks including rejection of premature finish and checks that no
+scene frame advances. Production wait and updater lifecycle code is unchanged.
+The existing 39 updater protocol tests pass; the corrected complete native
+duration acceptance and mandatory whole gates remain pending.
 
 The main vision gaps remain concrete and tracked:
 
