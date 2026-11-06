@@ -257,6 +257,7 @@ pub struct MoveAlongPath {
     state: AnimState,
     path: Mob,
     path_cache: path_cache::PathCache,
+    error: Option<AnimError>,
 }
 
 impl MoveAlongPath {
@@ -271,6 +272,7 @@ impl MoveAlongPath {
             state: AnimState::new(mobject, config),
             path,
             path_cache: path_cache::PathCache::default(),
+            error: None,
         }
     }
 
@@ -293,6 +295,28 @@ impl MoveAlongPath {
         self.state.config = config;
         self
     }
+
+    fn sample_path(&mut self, stage: &Stage, alpha: f64) -> Result<Vec3, AnimError> {
+        let Some(path) = stage.get(self.path) else {
+            self.path_cache.clear();
+            return Err(AnimError::StaleHandle(self.path));
+        };
+        if path.buffer.is_empty() {
+            self.path_cache.clear();
+            return Err(AnimError::EmptyMobject);
+        }
+        let point = self
+            .path_cache
+            .sample(stage, self.path, alpha)
+            .map_err(AnimError::Stage)?;
+        if point.iter().any(|coordinate| !coordinate.is_finite()) {
+            self.path_cache.clear();
+            return Err(AnimError::InvalidPath(
+                "MoveAlongPath sampled a non-finite path point",
+            ));
+        }
+        Ok(point)
+    }
 }
 
 impl Animation for MoveAlongPath {
@@ -307,18 +331,13 @@ impl Animation for MoveAlongPath {
     /// A pointless path is the typed refusal (the Reference indexes into
     /// an empty array at the first frame).
     fn setup(&mut self, stage: &mut Stage) -> Result<(), AnimError> {
+        self.error = None;
         let mobject = self.state.mobject();
         if !stage.contains(mobject) {
             self.path_cache.clear();
             return Err(AnimError::StaleHandle(mobject));
         }
-        if !stage.contains(self.path) {
-            self.path_cache.clear();
-            return Err(AnimError::StaleHandle(self.path));
-        }
-        if self.path_cache.sample(stage, self.path, 0.0).is_err() {
-            return Err(AnimError::EmptyMobject);
-        }
+        self.sample_path(stage, 0.0)?;
         Ok(())
     }
 
@@ -330,10 +349,42 @@ impl Animation for MoveAlongPath {
     /// applies to the raw alpha (the Reference's override bypasses lag and
     /// time-span), and the sample point is taken by true arc length.
     fn interpolate(&mut self, stage: &mut Stage, alpha: f64) {
-        let rated = self.state.config.rate_func.eval(alpha);
-        if let Ok(point) = self.path_cache.sample(stage, self.path, rated) {
-            stage.move_to(self.state.mobject(), point, [0.0, 0.0, 0.0]);
+        if self.error.is_some() || stage.updater_error().is_some() {
+            return;
         }
+        let mobject = self.state.mobject();
+        if !stage.contains(mobject) {
+            self.error = Some(AnimError::StaleHandle(mobject));
+            return;
+        }
+        let rated = self.state.config.rate_func.eval(alpha);
+        // An exact-rate lookup records its own failure while returning a
+        // finite placeholder. Never let that placeholder move the object.
+        if let Some(error) = self.state.config.rate_func.error() {
+            self.error = Some(error);
+            return;
+        }
+        if !rated.is_finite() {
+            self.error = Some(AnimError::InvalidPath(
+                "MoveAlongPath rate function returned a non-finite proportion",
+            ));
+            return;
+        }
+        match self.sample_path(stage, rated) {
+            Ok(point) => {
+                stage.move_to(mobject, point, [0.0, 0.0, 0.0]);
+            }
+            Err(error) => self.error = Some(error),
+        }
+    }
+
+    /// A malformed, removed or non-finite live path refuses the frame. Keep
+    /// its first error until the next begin instead of publishing the last
+    /// valid position as though the animation had completed successfully.
+    fn deferred_error(&self) -> Option<AnimError> {
+        self.error
+            .clone()
+            .or_else(|| self.state.config.rate_func.error())
     }
 
     fn teardown(&mut self, _stage: &mut Stage) {
