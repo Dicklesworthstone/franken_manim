@@ -9,8 +9,8 @@
 //! expectations encode the documented rounding (not chopping) policy.
 
 use fmn_codec::checksum::crc32;
-use fmn_codec::png::ColorIntent;
-use fmn_codec::{CompressionLevel, PngError, PngLimits, decode_png, encode_rgba8};
+use fmn_codec::png::{ColorIntent, encode_rgba8_segmented_parallel};
+use fmn_codec::{CompressionLevel, PngEncoder, PngError, PngLimits, decode_png, encode_rgba8};
 
 macro_rules! fixture {
     ($name:literal) => {
@@ -128,6 +128,61 @@ fn encode_is_deterministic() {
         encode_rgba8(40, 25, &rgba, CompressionLevel::Default),
         encode_rgba8(40, 25, &rgba, CompressionLevel::Default)
     );
+}
+
+#[test]
+fn reused_encoder_is_independent_of_prior_frames_levels_and_workers() {
+    let mut encoder = PngEncoder::new();
+    // Grow and shrink the filter rows, match chains and segment outputs;
+    // alternate ordinary and segmented PNGs using the same encoder. The
+    // larger frames cross the fixed segment boundary and split unevenly
+    // among three workers, exercising every retained segment output.
+    for (seed, (width, height, workers)) in [
+        (1, 1, 1),
+        (400, 180, 4),
+        (17, 3, 16),
+        (320, 640, 3),
+        (13, 7, 1),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let rgba = lcg_rgba(width, height, seed as u32 + 1);
+        for level in [
+            CompressionLevel::Best,
+            CompressionLevel::Fast,
+            CompressionLevel::Default,
+        ] {
+            let plain = encoder.encode_rgba8(width, height, &rgba, level);
+            assert_eq!(plain, encode_rgba8(width, height, &rgba, level));
+            assert_eq!(
+                decode_png(&plain, &PngLimits::default()).unwrap().rgba,
+                rgba
+            );
+
+            let segmented =
+                encoder.encode_rgba8_segmented_parallel(width, height, &rgba, level, workers);
+            assert_eq!(
+                segmented,
+                encode_rgba8_segmented_parallel(width, height, &rgba, level, 1),
+                "prior frames leaked into {width}x{height}, {level:?}, {workers} workers"
+            );
+            assert_eq!(
+                decode_png(&segmented, &PngLimits::default()).unwrap().rgba,
+                rgba
+            );
+
+            // Consecutive parallel calls keep every worker alive. Unlike
+            // the ordinary call above, this must reset the second and
+            // subsequent workers' dictionaries and block state as well.
+            let next_rgba = lcg_rgba(width, height, seed as u32 + 91);
+            assert_eq!(
+                encoder.encode_rgba8_segmented_parallel(width, height, &next_rgba, level, workers,),
+                encode_rgba8_segmented_parallel(width, height, &next_rgba, level, 1),
+                "worker state leaked into the next {width}x{height} frame"
+            );
+        }
+    }
 }
 
 /// Build a chunk with a valid CRC (for crafting hostile inputs).
