@@ -1676,9 +1676,14 @@ where
             return None;
         }
     }
-    // Triangle baselines already reject tiles outside the owning draw. The
-    // local grid measures only visits the existing raster path actually makes.
-    if total >= cells.checked_mul(items as u64)? {
+    // Counting and inserting memberships, prefix scans, and allocation must
+    // earn a substantial reduction in the repeated raster walks. Require at
+    // least half the full-scan visits to disappear before allocating an index.
+    // Triangle baselines already reject tiles outside the owning draw, so
+    // their local grid counts only visits the existing path actually makes.
+    // Divide the baseline to avoid overflow and handle odd totals exactly.
+    let full_scan_visits = cells.checked_mul(items as u64)?;
+    if total > full_scan_visits / 2 {
         return None;
     }
     let bytes = cells
@@ -5165,6 +5170,176 @@ mod tests {
     }
 
     #[test]
+    fn tile_bins_require_half_scan_reduction_with_exact_budget_headroom() {
+        // Exercise the command wrapper's full grid and the common builder's
+        // translated local grid. Odd baselines must round toward refusal:
+        // 49 of 99 visits is useful; 50 of 99 is less than a twofold reduction.
+        for (count, columns, memberships) in [
+            (32usize, 2u32, 31usize),
+            (32, 2, 32),
+            (32, 2, 33),
+            (33, 3, 49),
+            (33, 3, 50),
+        ] {
+            for origin in [[0, 0], [2, 3]] {
+                let local = origin != [0, 0];
+                let viewport = if local { (48, 40) } else { (columns * 8, 8) };
+                let x = f64::from(origin[0] * 8 + 1);
+                let y = f64::from(origin[1] * 8 + 1);
+                let draws: Vec<_> = (0..count)
+                    .map(|index| {
+                        let bounds = (index < memberships.min(count)).then_some([
+                            x,
+                            y,
+                            x + if index < memberships.saturating_sub(count) {
+                                8.0
+                            } else {
+                                1.0
+                            },
+                            y + 1.0,
+                        ]);
+                        bounds_only_draw(bounds)
+                    })
+                    .collect();
+                let ownership_bytes = projection_owner_bytes(&draws).unwrap();
+                let index_bytes = (u64::from(columns) + 1 + memberships as u64) * 4
+                    + std::mem::size_of::<(TileBoundsBins, [usize; 2])>() as u64;
+                let sparse_enough = memberships as u64 <= u64::from(columns) * count as u64 / 2;
+                for shortfall in [0, 1] {
+                    let mut budget = PreparationBudget::new(ThreeDPreparationLimits {
+                        max_working_bytes: 123 + index_bytes + ownership_bytes - shortfall,
+                        ..ThreeDPreparationLimits::default()
+                    });
+                    budget.working_bytes = 123;
+                    let bins = if local {
+                        build_tile_bounds_bins(
+                            draws.iter().map(|draw| draw.bounds),
+                            viewport,
+                            8,
+                            [origin[0], origin[1], origin[0] + columns - 1, origin[1]],
+                            ownership_bytes,
+                            &mut budget,
+                        )
+                    } else {
+                        build_tile_draw_bins(&draws, viewport, 8, &mut budget)
+                    };
+                    let admitted = sparse_enough && shortfall == 0;
+                    assert_eq!(bins.is_some(), admitted, "{count}/{columns}/{memberships}");
+                    assert_eq!(
+                        budget.working_bytes,
+                        123 + if admitted { index_bytes } else { 0 },
+                        "density and byte-budget refusals leave the caller unchanged"
+                    );
+                    if let Some(bins) = bins {
+                        assert_eq!(bins.origin, origin);
+                        assert_eq!(bins.entries.len(), memberships);
+                        for row in 0..viewport.1.div_ceil(8) {
+                            for column in 0..viewport.0.div_ceil(8) {
+                                let rectangle = [column * 8, row * 8, column * 8 + 8, row * 8 + 8];
+                                let expected: Vec<_> = draws
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(_, draw)| bounds_intersect(draw.bounds, rectangle))
+                                    .map(|(index, _)| index as u32)
+                                    .collect();
+                                assert_eq!(bins.indices(column, row), expected);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn triangle_density_refusal_preserves_later_indexes_and_exact_budget() {
+        let attributes = Attributes {
+            world: [0.0; 3],
+            normal: [0.0, 0.0, 1.0],
+            color: [1.0; 4],
+            uv: [0.0; 2],
+            opacity: 0.5,
+        };
+        let vertex = |screen| RasterVertex {
+            attributes,
+            screen,
+            inverse_w: 1.0,
+            ndc_z: 0.0,
+        };
+        let make_draw = |crosses_tile: bool| {
+            let triangles: Vec<_> = (0..TRIANGLE_BIN_MIN_TRIANGLES)
+                .map(|index| {
+                    let x = if index % 2 == 0 { 17.0 } else { 25.0 };
+                    let right = if crosses_tile && index == 0 {
+                        25.0
+                    } else {
+                        x + 1.0
+                    };
+                    RasterTriangle {
+                        vertices: [vertex([x, 25.0]), vertex([right, 25.0]), vertex([x, 26.0])],
+                        bounds: [x, 25.0, right, 26.0],
+                    }
+                })
+                .collect();
+            ProjectedDraw::<()> {
+                primitive: ProjectedPrimitive::Triangles {
+                    triangles: triangles.into(),
+                    shader: ProjectedShader::Gouraud,
+                },
+                depth_test: false,
+                bounds: Some([17.0, 25.0, 26.0, 26.0]),
+            }
+        };
+        // Both draws occupy the same two-tile local grid. The first needs 33
+        // candidate visits and is refused; the second needs exactly 32 of 64.
+        let draws = [make_draw(true), make_draw(false)];
+        let mut unchanged = PreparationBudget::new(ThreeDPreparationLimits::default());
+        unchanged.working_bytes = 123;
+        assert!(build_triangle_tile_bins(&draws[..1], (48, 40), 8, &mut unchanged).is_none());
+        assert_eq!(unchanged.working_bytes, 123);
+
+        let ownership_bytes = projection_owner_bytes(&draws).unwrap();
+        let index_bytes = (3 + TRIANGLE_BIN_MIN_TRIANGLES as u64) * 4
+            + std::mem::size_of::<(TileBoundsBins, [usize; 2])>() as u64;
+        // The sparse table reserves a row for each eligible draw, even when
+        // density admission later refuses one. Keep that reservation charged.
+        let table_bytes = 2 * std::mem::size_of::<DrawTriangleBins>() as u64
+            + std::mem::size_of::<(TriangleTileBins, [usize; 2])>() as u64;
+        for shortfall in [0, 1] {
+            let mut budget = PreparationBudget::new(ThreeDPreparationLimits {
+                max_working_bytes: 123 + table_bytes + index_bytes + ownership_bytes - shortfall,
+                ..ThreeDPreparationLimits::default()
+            });
+            budget.working_bytes = 123;
+            let bins = build_triangle_tile_bins(&draws, (48, 40), 8, &mut budget);
+            assert_eq!(bins.is_some(), shortfall == 0);
+            assert_eq!(
+                budget.working_bytes,
+                123 + if shortfall == 0 {
+                    table_bytes + index_bytes
+                } else {
+                    0
+                }
+            );
+            if let Some(bins) = bins {
+                assert_eq!(bins.draws.len(), 1);
+                assert!(bins.for_draw(0).is_none());
+                let admitted = bins.for_draw(1).unwrap();
+                assert_eq!(admitted.origin, [2, 3]);
+                assert_eq!(admitted.entries.len(), TRIANGLE_BIN_MIN_TRIANGLES);
+                assert_eq!(
+                    admitted.indices(2, 3),
+                    (0..32).step_by(2).collect::<Vec<_>>()
+                );
+                assert_eq!(
+                    admitted.indices(3, 3),
+                    (1..32).step_by(2).collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn tile_draw_bins_preserve_mixed_camera_pixels_and_owned_material_indices() {
         let texture = Texture::from_rgba8(
             2,
@@ -5416,24 +5591,49 @@ mod tests {
             full_scan_ms / indexed_ms,
         );
 
-        // Isolate scheduling cost for small and nearly dense command lists.
+        // Isolate scheduling cost for small and differently dense command lists.
         // This deliberately excludes shading: the same pixels would be shaded
-        // by either schedule, and a near-dense index saves few bounds checks.
+        // by either schedule. Time the actual admitted Binned-or-All schedule
+        // against a direct slice walk; report index construction separately.
         let rectangles: Vec<_> = (0..18)
             .flat_map(|row| {
                 (0..32).map(move |column| [column * 16, row * 16, column * 16 + 16, row * 16 + 16])
             })
             .collect();
-        for (name, count) in [("small", 16), ("near_dense", 32)] {
+        for (name, count, minimum_x) in [
+            ("small", 16, 17.0),
+            ("near_dense", 32, 17.0),
+            ("above_half_density", 32, 241.0),
+            ("half_density", 32, 257.0),
+        ] {
             let draws: Vec<_> = (0..count)
-                .map(|_| bounds_only_draw(Some([17.0, 0.0, 511.0, 287.0])))
+                .map(|_| bounds_only_draw(Some([minimum_x, 0.0, 511.0, 287.0])))
                 .collect();
+            let selected_bins = build_tile_draw_bins(
+                &draws,
+                (512, 288),
+                16,
+                &mut PreparationBudget::new(ThreeDPreparationLimits::default()),
+            );
+            let index_admitted = selected_bins.is_some();
+            let full_scan_visits = rectangles.len() * count;
+            let selected_visits = selected_bins
+                .as_ref()
+                .map_or(full_scan_visits, |bins| bins.entries.len());
+            let candidate_visits: usize = rectangles
+                .iter()
+                .map(|&rectangle| {
+                    draws
+                        .iter()
+                        .filter(|draw| bounds_intersect(draw.bounds, rectangle))
+                        .count()
+                })
+                .sum();
             let mut direct_ms = [0.0; 7];
-            let mut fallback_ms = [0.0; 7];
+            let mut selected_ms = [0.0; 7];
             let mut construction_ms = [0.0; 7];
-            let mut indexed_visits = None;
             for round in 0..7 {
-                for fallback in if round % 2 == 0 {
+                for selected in if round % 2 == 0 {
                     [true, false]
                 } else {
                     [false, true]
@@ -5443,8 +5643,14 @@ mod tests {
                     for _ in 0..64 {
                         for &rectangle in black_box(&rectangles) {
                             let source = black_box(&draws);
-                            if fallback {
-                                for index in black_box(TileDrawIndices::All(0..source.len())) {
+                            if selected {
+                                let indices = match black_box(selected_bins.as_ref()) {
+                                    Some(bins) => TileDrawIndices::Binned(
+                                        bins.indices(rectangle[0] / 16, rectangle[1] / 16).iter(),
+                                    ),
+                                    None => TileDrawIndices::All(0..source.len()),
+                                };
+                                for index in black_box(indices) {
                                     hits += usize::from(bounds_intersect(
                                         source[index].bounds,
                                         rectangle,
@@ -5459,8 +5665,9 @@ mod tests {
                     }
                     black_box(hits);
                     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0 / 64.0;
-                    if fallback {
-                        fallback_ms[round] = elapsed_ms;
+                    assert_eq!(hits, candidate_visits * 64);
+                    if selected {
+                        selected_ms[round] = elapsed_ms;
                     } else {
                         direct_ms[round] = elapsed_ms;
                     }
@@ -5468,17 +5675,17 @@ mod tests {
                 let started = Instant::now();
                 for _ in 0..64 {
                     let mut budget = PreparationBudget::new(ThreeDPreparationLimits::default());
-                    indexed_visits =
+                    black_box(
                         build_tile_draw_bins(black_box(&draws), (512, 288), 16, &mut budget)
-                            .map(|bins| black_box(bins.entries.len()));
+                            .map(|bins| bins.entries.len()),
+                    );
                 }
                 construction_ms[round] = started.elapsed().as_secs_f64() * 1000.0 / 64.0;
             }
             eprintln!(
-                "camera_tile_index {name}: draws={count} full_scan_visits={} indexed_visits={indexed_visits:?} direct_scan_median_ms={:.6} fallback_scan_median_ms={:.6} index_build_median_ms={:.6}",
-                rectangles.len() * count,
+                "camera_tile_index {name}: draws={count} full_scan_visits={full_scan_visits} candidate_visits={candidate_visits} index_admitted={index_admitted} selected_visits={selected_visits} direct_scan_median_ms={:.6} selected_schedule_median_ms={:.6} index_build_median_ms={:.6} hits_equal=true",
                 median(&mut direct_ms),
-                median(&mut fallback_ms),
+                median(&mut selected_ms),
                 median(&mut construction_ms),
             );
         }
