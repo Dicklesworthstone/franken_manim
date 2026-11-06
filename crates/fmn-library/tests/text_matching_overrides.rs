@@ -2,7 +2,10 @@
 use std::sync::Arc;
 
 use fmn_anim::pure_frame::PureSegment;
-use fmn_anim::{Animation, RateFunc, RationalFrameClock, open_play, play_segment};
+use fmn_anim::{
+    AnimError, Animation, ClockError, FramePosition, RateFunc, RationalFrameClock, open_play,
+    play_segment,
+};
 use fmn_core::rng::RngRoot;
 use fmn_library::{
     SpanKindU8, SpanMapData, SpanMapEntry, Tex, TexEngine, TextMatchingConfig, TextMatchingError,
@@ -405,6 +408,60 @@ fn mapped_worker_frames_match_serial_under_reordered_evaluation() {
             } else {
                 expected = Some(observed);
             }
+        }
+    }
+}
+
+#[test]
+fn exact_sampling_failures_remain_attached_until_rebegin() {
+    for strings in [false, true] {
+        for use_time in [false, true] {
+            let mut stage = Stage::new();
+            let (source, sm, _) = fixture(&mut stage, "A", 0.0);
+            let (target, tm, _) = fixture(&mut stage, "B", 10.0);
+            stage.add_to_scene(source).unwrap();
+            let mut animation =
+                mapped(&mut stage, source, target, &sm, &tm, &[("A", "B")], strings);
+            animation.state_mut().config.run_time_frames = Some(43);
+            animation.prepare_timing(24).unwrap();
+            animation.begin(&mut stage).unwrap();
+            let before = frame_facts(&stage);
+            let result = if use_time {
+                animation.interpolate_at_time(&mut stage, RationalFrameClock::new(30).unwrap().dt())
+            } else {
+                animation.interpolate_at_position(
+                    &mut stage,
+                    &FramePosition::from_f64(1.5).unwrap(),
+                    30,
+                )
+            };
+            assert!(matches!(
+                result,
+                Err(AnimError::Clock(ClockError::FrameRateMismatch))
+            ));
+            assert_eq!(frame_facts(&stage), before);
+            assert!(matches!(
+                animation.deferred_error(),
+                Some(AnimError::Clock(ClockError::FrameRateMismatch))
+            ));
+
+            // Correcting the grid cannot hide an earlier failure or publish a
+            // target from the failed run. A validated begin starts a new run.
+            let time = RationalFrameClock::new(24).unwrap().dt();
+            assert!(animation.interpolate_at_time(&mut stage, time).is_err());
+            assert_eq!(frame_facts(&stage), before);
+            animation.finish(&mut stage);
+            animation.clean_up_from_scene(&mut stage);
+            assert_eq!(stage.roots(), &[source]);
+            assert!(!stage.is_animating(source));
+            assert!(!stage.is_updating_suspended(source));
+
+            animation.begin(&mut stage).unwrap();
+            animation.interpolate_at_time(&mut stage, time).unwrap();
+            animation.finish(&mut stage);
+            animation.clean_up_from_scene(&mut stage);
+            assert_eq!(stage.roots(), &[target]);
+            assert!(animation.deferred_error().is_none());
         }
     }
 }

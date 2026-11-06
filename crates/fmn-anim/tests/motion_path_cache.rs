@@ -1,9 +1,13 @@
 //! Repeated path-following uses the same Chisel law, not a sampled approximation.
 #![forbid(unsafe_code)]
 
-use fmn_anim::{AnimError, Animation, MoveAlongPath, RateFunc};
+use fmn_anim::{
+    AnimError, Animation, MoveAlongPath, RateFunc, RationalFrameClock, play_segment,
+    play_segment_with_boundary,
+};
+use fmn_core::rng::RngRoot;
 use fmn_mobject::record::{RecordBuffer, RecordSchema};
-use fmn_mobject::{Mob, Mobject, Placement, Stage};
+use fmn_mobject::{Mob, Mobject, Placement, Stage, StageError};
 
 const POINTS: [[f64; 3]; 7] = [
     [-3.0, -0.5, 0.0],
@@ -252,14 +256,25 @@ fn malformed_or_deleted_live_path_never_uses_its_cached_points() {
     stage.get_mut(path).unwrap().buffer.resize(2).unwrap();
     animation.interpolate(&mut stage, 0.5);
     assert_eq!(positions(&stage, moving), before);
+    let failure = animation
+        .deferred_error()
+        .expect("malformed path refuses its frame");
+    assert!(matches!(failure, AnimError::Stage(StageError::Geometry(_))));
     assert!(matches!(
         animation.setup(&mut stage),
-        Err(AnimError::EmptyMobject)
+        Err(AnimError::Stage(StageError::Geometry(_)))
     ));
     stage.set_points(path, &[]).unwrap();
     animation.interpolate(&mut stage, 0.8);
     assert_eq!(positions(&stage, moving), before);
+    assert_eq!(animation.deferred_error(), Some(AnimError::EmptyMobject));
     stage.set_points(path, &POINTS).unwrap();
+    animation.interpolate(&mut stage, 0.5);
+    assert_eq!(positions(&stage, moving), before);
+    assert_eq!(animation.deferred_error(), Some(AnimError::EmptyMobject));
+    animation.abort(&mut stage);
+    animation.begin(&mut stage).unwrap();
+    assert!(animation.deferred_error().is_none());
     check(&mut stage, path, moving, &mut animation, 0.5);
     let before = positions(&stage, moving);
     stage.delete(path).unwrap();
@@ -267,7 +282,165 @@ fn malformed_or_deleted_live_path_never_uses_its_cached_points() {
     assert_ne!(replacement, path);
     animation.interpolate(&mut stage, 0.9);
     assert_eq!(positions(&stage, moving), before);
+    assert_eq!(
+        animation.deferred_error(),
+        Some(AnimError::StaleHandle(path))
+    );
     assert!(matches!(animation.setup(&mut stage), Err(AnimError::StaleHandle(m)) if m == path));
+}
+
+#[test]
+fn path_failure_stops_play_before_another_clock_advance_or_capture_in_both_modes() {
+    for skip in [false, true] {
+        let mut stage = Stage::new();
+        let path = stage.add(Mobject::from_points(&POINTS));
+        let moving = stage.add(Mobject::from_points(&[[0.0; 3]]));
+        let mut animation = MoveAlongPath::new(moving, path);
+        animation.state_mut().config.rate_func = RateFunc::linear();
+        animation.state_mut().config.suspend_mobject_updating = true;
+        let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(animation)];
+        let mut clock = RationalFrameClock::new(4).unwrap();
+        let rng = RngRoot::from_seed(123);
+        let mut captures = 0;
+        let mut first_position = None;
+        let result = play_segment_with_boundary(
+            &mut stage,
+            &mut clock,
+            &rng,
+            &mut animations,
+            skip,
+            &mut |stage, time| {
+                assert_eq!(time.frames(), 1);
+                assert!(stage.is_updating_suspended(moving));
+                first_position = Some(positions(stage, moving));
+                stage.delete(path).unwrap();
+            },
+            &mut |_| captures += 1,
+        );
+        assert!(matches!(result, Err(AnimError::StaleHandle(mob)) if mob == path));
+        assert_eq!(clock.now().frames(), 1);
+        assert_eq!(captures, usize::from(!skip));
+        assert_eq!(positions(&stage, moving), first_position.unwrap());
+        assert!(!stage.is_updating_suspended(moving));
+        assert_eq!(
+            animations[0].deferred_error(),
+            Some(AnimError::StaleHandle(path))
+        );
+    }
+}
+
+#[test]
+fn nonfinite_rates_and_points_refuse_without_poisoning_the_last_valid_position() {
+    for nonfinite in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let (mut stage, path, moving, mut animation) = setup();
+        let before = positions(&stage, moving);
+        animation.state_mut().config.rate_func = RateFunc::linear();
+        animation.interpolate(&mut stage, nonfinite);
+        assert!(matches!(
+            animation.deferred_error(),
+            Some(AnimError::InvalidPath(_))
+        ));
+        assert_eq!(positions(&stage, moving), before);
+        animation.interpolate(&mut stage, 0.75);
+        assert_eq!(positions(&stage, moving), before);
+        animation.abort(&mut stage);
+        animation.begin(&mut stage).unwrap();
+        assert!(animation.deferred_error().is_none());
+
+        let before = positions(&stage, moving);
+        stage.set_points(path, &[[nonfinite, 0.0, 0.0]]).unwrap();
+        animation.interpolate(&mut stage, 0.5);
+        assert!(matches!(
+            animation.deferred_error(),
+            Some(AnimError::InvalidPath(_))
+        ));
+        assert_eq!(positions(&stage, moving), before);
+    }
+}
+
+#[test]
+fn exact_rate_lookup_failure_never_moves_to_its_finite_placeholder() {
+    use fmn_anim::rate_table::RateSampler;
+
+    let (mut stage, _path, moving, mut animation) = setup();
+    let sampler = RateSampler::new(2, Ok);
+    let preparing = RateFunc::Preparing(sampler.clone());
+    assert_eq!(preparing.eval(0.0), 0.0);
+    assert_eq!(preparing.eval(1.0), 1.0);
+    animation.state_mut().config.rate_func = sampler.finish().unwrap();
+    animation.interpolate(&mut stage, 1.0);
+    let before = positions(&stage, moving);
+    animation.interpolate(&mut stage, 0.5);
+    let failure = animation.deferred_error().unwrap();
+    assert!(failure.to_string().contains("unprepared rate input"));
+    assert_eq!(positions(&stage, moving), before);
+    animation.interpolate(&mut stage, 0.0);
+    assert_eq!(animation.deferred_error(), Some(failure));
+    assert_eq!(positions(&stage, moving), before);
+}
+
+#[test]
+fn begin_and_finish_rate_failures_reach_the_driver_without_fabricating_frames() {
+    fn fail_at_begin(alpha: f64) -> f64 {
+        if alpha == 0.0 { f64::NAN } else { alpha }
+    }
+    fn fail_at_finish(alpha: f64) -> f64 {
+        if alpha == 0.75 { f64::NAN } else { alpha }
+    }
+
+    for (rate, failed_at_begin) in [
+        (fail_at_begin as fn(f64) -> f64, true),
+        (fail_at_finish as fn(f64) -> f64, false),
+    ] {
+        for skip in [false, true] {
+            let mut stage = Stage::new();
+            let path = stage.add(Mobject::from_points(&POINTS));
+            let moving = stage.add(Mobject::from_points(&[[0.0; 3]]));
+            let mut animation = MoveAlongPath::new(moving, path);
+            animation.state_mut().config.rate_func = RateFunc::Base(rate);
+            animation.state_mut().config.final_alpha_value = 0.75;
+            animation.state_mut().config.suspend_mobject_updating = true;
+            let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(animation)];
+            let mut clock = RationalFrameClock::new(2).unwrap();
+            let rng = RngRoot::from_seed(123);
+            let mut captures = 0;
+            let result = play_segment(
+                &mut stage,
+                &mut clock,
+                &rng,
+                &mut animations,
+                skip,
+                &mut |_| captures += 1,
+            );
+            assert!(matches!(result, Err(AnimError::InvalidPath(_))));
+            let frames = if failed_at_begin { 0 } else { 2 };
+            assert_eq!(clock.now().frames(), frames);
+            assert_eq!(captures, if skip { 0 } else { frames });
+            assert!(!stage.is_updating_suspended(moving));
+            if failed_at_begin {
+                assert_eq!(positions(&stage, moving), vec![[0.0_f64.to_bits(); 3]]);
+            } else {
+                // The finish error cannot replace the last valid endpoint
+                // with the failed rate's NaN or a previous cached position.
+                let point = stage.get_points(moving).unwrap()[0];
+                let endpoint = stage.point_from_proportion(path, 1.0).unwrap();
+                for axis in 0..3 {
+                    assert!((point[axis] - endpoint[axis]).abs() < 1e-12);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn deleted_animated_object_reports_its_own_handle() {
+    let (mut stage, _path, moving, mut animation) = setup();
+    stage.delete(moving).unwrap();
+    animation.interpolate(&mut stage, 0.5);
+    assert_eq!(
+        animation.deferred_error(),
+        Some(AnimError::StaleHandle(moving))
+    );
 }
 
 #[test]

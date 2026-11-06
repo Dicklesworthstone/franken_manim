@@ -922,6 +922,37 @@ macro_rules! matching_animation {
                     self.inner.retain_error(stage);
                 }
             }
+            fn interpolate_at_position(
+                &mut self,
+                stage: &mut Stage,
+                position: &fmn_anim::FramePosition,
+                fps: u32,
+            ) -> Result<(), AnimError> {
+                // Matching is a composition: preserve its exact position until
+                // the group selects and samples its children, as workers do.
+                if !self.inner.retain_error(stage) {
+                    if let Err(error) = self
+                        .inner
+                        .group
+                        .interpolate_at_position(stage, position, fps)
+                    {
+                        self.inner.error = Some(error);
+                    }
+                    self.inner.retain_error(stage);
+                }
+                self.inner.error.clone().map_or(Ok(()), Err)
+            }
+            fn interpolate_at_time(
+                &mut self,
+                stage: &mut Stage,
+                time: fmn_anim::RationalTime,
+            ) -> Result<(), AnimError> {
+                self.interpolate_at_position(
+                    stage,
+                    &fmn_anim::FramePosition::from_frame(time.frames()),
+                    time.fps(),
+                )
+            }
             fn update_mobjects(&mut self, stage: &mut Stage, dt: f64) {
                 if !self.inner.retain_error(stage) {
                     self.inner.group.update_mobjects(stage, dt);

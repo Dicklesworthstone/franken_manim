@@ -83,7 +83,7 @@ fn owner_rate_collectors_demote_and_incomplete_exact_tables_fail_before_renderin
     let mut stage = Stage::new();
     let source = square(&mut stage, 0.0);
     let target = square(&mut stage, 1.0);
-    let clock = RationalFrameClock::new(10).unwrap();
+    let mut clock = RationalFrameClock::new(10).unwrap();
     let rng = RngRoot::from_seed(5);
     let sampler = RateSampler::new(10, |alpha| Ok(alpha * alpha * alpha));
     let mut preparing = Transform::new(source, target);
@@ -98,8 +98,26 @@ fn owner_rate_collectors_demote_and_incomplete_exact_tables_fail_before_renderin
     let mut animation = Transform::new(source, target);
     animation.state_mut().config.rate_func = rate;
     let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(animation)];
-    let open = open_play(&mut stage, &clock, &mut animations).unwrap();
+    let mut open = open_play(&mut stage, &clock, &mut animations).unwrap();
     let frozen = PureSegment::freeze(&stage, &clock, &rng, &animations, &open).unwrap();
+    let before = stage.snapshot().to_bytes().unwrap();
+    // Alpha one exists, but jumping directly to it must not conceal the
+    // missing first sample that ordinary playback would report.
+    assert!(
+        frozen
+            .try_advance_on_owner(
+                &mut stage,
+                &mut clock,
+                &rng,
+                &mut animations,
+                &mut open,
+                u64::MAX,
+            )
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(stage.snapshot().to_bytes().unwrap(), before);
+    assert_eq!((clock.now().frames(), open.stepped()), (0, 0));
     let failure = frozen
         .job(1)
         .unwrap()
@@ -107,6 +125,114 @@ fn owner_rate_collectors_demote_and_incomplete_exact_tables_fail_before_renderin
         .err()
         .expect("missing sample must fail");
     assert!(failure.to_string().contains("unprepared rate input"));
+    let failure = advance_play(
+        &mut stage,
+        &mut clock,
+        &rng,
+        &mut animations,
+        &mut open,
+        1,
+        &mut |_| {},
+    )
+    .unwrap_err();
+    assert!(failure.to_string().contains("unprepared rate input"));
+}
+
+#[test]
+fn partial_owner_advances_keep_native_mechanisms_serial_bits_and_late_cleanup() {
+    for kind in 0..12 {
+        let mut initial = Stage::new();
+        let root = initial.add(Mobject::new());
+        for x in [-1.0, 1.0] {
+            let child = vector_curve(&mut initial, x);
+            initial.attach(root, child).unwrap();
+        }
+        initial.add_to_scene(root).unwrap();
+        let target = initial.copy_family(root).unwrap();
+        initial.shift(target, [3.0, 1.0, 0.0]);
+        let begin = initial.snapshot();
+        let mut outcomes = Vec::new();
+        for jumping in [false, true] {
+            let mut stage = begin.materialize();
+            let mut animation: Box<dyn Animation> = match kind {
+                0..=5 => extra_mechanism(kind, root),
+                6 => Box::new(Transform::new(root, target)),
+                7 => Box::new(fmn_anim::DrawBorderThenFill::new(root)),
+                8 => Box::new(fmn_anim::show_increasing_subsets(&stage, root).unwrap()),
+                9 => Box::new(fmn_anim::fade_transform(&mut stage, root, target).unwrap()),
+                10 => Box::new(fmn_anim::WiggleOutThenIn::new(root)),
+                _ => Box::new(fmn_anim::VShowPassingFlash::new(root)),
+            };
+            animation.state_mut().config.run_time_frames = Some(12);
+            animation.state_mut().config.final_alpha_value = 0.375;
+            animation.state_mut().config.rate_func =
+                RateFunc::Sampled(Arc::from([0.0, 0.9, 0.1, 0.65, 1.0]));
+            let mut animations = vec![animation];
+            let mut clock = RationalFrameClock::new(8).unwrap();
+            clock.advance_frames(11).unwrap();
+            stage.set_time_from_clock(clock.now().to_f64());
+            let rng = RngRoot::from_seed(729);
+            let mut open = open_play(&mut stage, &clock, &mut animations).unwrap();
+            let program = PureSegment::freeze(&stage, &clock, &rng, &animations, &open).unwrap();
+            let mut samples = Vec::new();
+            for (index, frame) in [3, 4, 7, 8, 12].into_iter().enumerate() {
+                let metadata = if jumping && index % 2 == 0 {
+                    let count = (frame - open.stepped()).cast_unsigned();
+                    program
+                        .try_advance_on_owner(
+                            &mut stage,
+                            &mut clock,
+                            &rng,
+                            &mut animations,
+                            &mut open,
+                            count,
+                        )
+                        .unwrap()
+                        .expect("native mechanism admits a partial advance")
+                } else {
+                    let mut metadata = None;
+                    advance_play(
+                        &mut stage,
+                        &mut clock,
+                        &rng,
+                        &mut animations,
+                        &mut open,
+                        frame,
+                        &mut |packet| metadata = Some(packet.metadata()),
+                    )
+                    .unwrap();
+                    metadata.unwrap()
+                };
+                assert_eq!(open.stepped(), frame);
+                assert_eq!(clock.now().frames(), 11 + frame);
+                assert!(stage.is_animating(root), "cleanup must remain pending");
+                samples.push((
+                    stage.snapshot().to_bytes().unwrap(),
+                    metadata,
+                    metadata.rng_fork("continuation").next_u64(),
+                ));
+            }
+            assert!(open.frames_complete());
+            assert!(
+                program
+                    .try_advance_on_owner(
+                        &mut stage,
+                        &mut clock,
+                        &rng,
+                        &mut animations,
+                        &mut open,
+                        u64::MAX,
+                    )
+                    .unwrap()
+                    .is_none()
+            );
+            let report = finish_open_play(&mut stage, &mut animations, open).unwrap();
+            assert_eq!(report.n_frames, 12);
+            assert!(!stage.is_animating(root));
+            outcomes.push((samples, stage.snapshot().to_bytes().unwrap()));
+        }
+        assert_eq!(outcomes[0], outcomes[1], "native mechanism {kind}");
+    }
 }
 
 type StageFacts = (Vec<Vec<Mob>>, Vec<u64>, Vec<String>);
@@ -476,11 +602,20 @@ fn partly_prepared_or_finished_segments_cannot_be_frozen() {
     let target = stage.copy_family(mob).unwrap();
     stage.shift(target, [2.0, 0.0, 0.0]);
     let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(Transform::new(mob, target))];
-    let clock = RationalFrameClock::new(30).unwrap();
+    let mut clock = RationalFrameClock::new(30).unwrap();
     let rng = RngRoot::from_seed(7);
     let mut open = open_play(&mut stage, &clock, &mut animations).unwrap();
+    let program = PureSegment::freeze(&stage, &clock, &rng, &animations, &open).unwrap();
     fmn_anim::prepare_play_animation(&mut stage, &clock, &mut animations, &mut open).unwrap();
     assert_eq!(open.stepped(), 0);
+    let before = stage.snapshot().to_bytes().unwrap();
+    assert!(
+        program
+            .try_advance_on_owner(&mut stage, &mut clock, &rng, &mut animations, &mut open, 10,)
+            .is_err()
+    );
+    assert_eq!(stage.snapshot().to_bytes().unwrap(), before);
+    assert_eq!((clock.now().frames(), open.stepped()), (0, 0));
     assert_eq!(
         PureSegment::freeze(&stage, &clock, &rng, &animations, &open).unwrap_err(),
         PureFrameRefusal::NotAtPureBegin
@@ -493,6 +628,41 @@ fn partly_prepared_or_finished_segments_cannot_be_frozen() {
         PureSegment::freeze(&stage, &clock, &rng, &animations, &open).unwrap_err(),
         PureFrameRefusal::NotAtPureBegin
     );
+}
+
+#[test]
+fn owner_advance_rejects_same_frame_count_with_a_different_sampling_grid() {
+    let mut stage = Stage::new();
+    let mob = square(&mut stage, 0.0);
+    let target = stage.copy_family(mob).unwrap();
+    stage.shift(target, [3.0, 0.0, 0.0]);
+    let mut clock = RationalFrameClock::new(10).unwrap();
+    let rng = RngRoot::from_seed(7);
+    let make_animation = |duration| -> Vec<Box<dyn Animation>> {
+        vec![Box::new(Transform::new(mob, target).with_config(
+            AnimConfig {
+                run_time: duration,
+                rate_func: RateFunc::linear(),
+                ..AnimConfig::default()
+            },
+        ))]
+    };
+    let mut animations = make_animation(0.21);
+    let open = open_play(&mut stage, &clock, &mut animations).unwrap();
+    let program = PureSegment::freeze(&stage, &clock, &rng, &animations, &open).unwrap();
+    assert_eq!(program.frame_count(), 3);
+    finish_open_play(&mut stage, &mut animations, open).unwrap();
+    let mut animations = make_animation(0.29);
+    let mut open = open_play(&mut stage, &clock, &mut animations).unwrap();
+    assert_eq!(open.report().n_frames, program.frame_count());
+    let before = stage.snapshot().to_bytes().unwrap();
+    assert!(
+        program
+            .try_advance_on_owner(&mut stage, &mut clock, &rng, &mut animations, &mut open, 2,)
+            .is_err()
+    );
+    assert_eq!(stage.snapshot().to_bytes().unwrap(), before);
+    assert_eq!((clock.now().frames(), open.stepped()), (0, 0));
 }
 
 #[test]

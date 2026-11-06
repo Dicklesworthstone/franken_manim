@@ -294,6 +294,21 @@ macro_rules! delegate_animation {
         fn interpolate_at_frame(&mut self, stage: &mut Stage, frame: f64, fps: u32) {
             self.inner.interpolate_at_frame(stage, frame, fps);
         }
+        fn interpolate_at_position(
+            &mut self,
+            stage: &mut Stage,
+            position: &fmn_anim::FramePosition,
+            fps: u32,
+        ) -> Result<(), AnimError> {
+            self.inner.interpolate_at_position(stage, position, fps)
+        }
+        fn interpolate_at_time(
+            &mut self,
+            stage: &mut Stage,
+            time: fmn_anim::RationalTime,
+        ) -> Result<(), AnimError> {
+            self.inner.interpolate_at_time(stage, time)
+        }
         fn update_mobjects(&mut self, stage: &mut Stage, dt: f64) {
             self.inner.update_mobjects(stage, dt);
         }

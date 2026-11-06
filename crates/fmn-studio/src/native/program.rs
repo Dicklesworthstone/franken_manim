@@ -3,10 +3,13 @@
 use std::collections::VecDeque;
 
 use fmn_render::CameraConfig;
-use fmn_scene::studio_bridge::{Animation, FrameMetadata, FramePacket};
+use fmn_scene::studio_bridge::{
+    Animation, FrameMetadata, FramePacket, Purity, classify_play, classify_wait,
+};
 use fmn_scene::{
-    CameraRig, CaptureReason, EventPayload, IntegrationError, InteractiveScene, NullSceneSink,
-    PlayOverrides, Scene, SceneError, SceneSink, SteppedPlay, SteppedWait,
+    CameraRig, CaptureReason, EffectClass, EventPayload, ImpureEffectTag, IntegrationError,
+    InteractiveScene, NullSceneSink, PlayOverrides, Scene, SceneError, SceneSink, SteppedPlay,
+    SteppedWait,
 };
 
 use crate::{InteractiveDispatch, InteractivePreview, ServiceError, SpanRegistry, WorkerErrorCode};
@@ -16,6 +19,72 @@ use super::{NativeBuild, NativeBuildContext};
 /// Maximum cumulative segments admitted by one native program, including
 /// deferred construction and every segment it generates, not just queue length.
 pub const MAX_NATIVE_SEGMENTS: usize = 65_536;
+
+/// Work performed by a forward native seek, independent of rendering cost.
+///
+/// Every ordinary frame is evaluated. A proven pure interval evaluates only
+/// its last requested sample while preserving the executable continuation.
+/// Segment prologues, epilogues and deferred construction still run normally.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NativeSeekWork {
+    /// Number of nominal frames advanced on the Scene's rational clock.
+    pub frames_advanced: u64,
+    /// Number of nominal samples actually evaluated during the seek.
+    pub frames_evaluated: u64,
+}
+
+// A cumulative prefix, not a per-request delta: journal replay can continue a
+// live candidate while recording reconstructs the same prefix from frame zero.
+// Keep the existing journal vocabulary and a canonical order for strict replay
+// comparison, regardless of which segment first revealed each reason.
+#[derive(Default)]
+struct EffectInventory {
+    reasons: u8,
+}
+
+impl EffectInventory {
+    fn note(&mut self, purity: &Purity) {
+        if let EffectClass::Stateful(reasons) = EffectClass::from_purity(purity) {
+            for reason in reasons {
+                self.reasons |= Self::bit(reason);
+            }
+        }
+    }
+
+    fn note_callback(&mut self) {
+        // The four existing classifier tags have no narrower identity for a
+        // deferred authoring or input callback. Its executable behavior remains
+        // unclassified; ColdVerified supplies the separate factory contract.
+        self.reasons |= Self::bit(ImpureEffectTag::UnclassifiedAnimation);
+    }
+
+    const fn bit(reason: ImpureEffectTag) -> u8 {
+        match reason {
+            ImpureEffectTag::DtUpdater => 1,
+            ImpureEffectTag::SceneUpdater => 2,
+            ImpureEffectTag::UnclassifiedAnimation => 4,
+            ImpureEffectTag::StopCondition => 8,
+        }
+    }
+
+    fn effect(&self) -> EffectClass {
+        if self.reasons == 0 {
+            EffectClass::Pure
+        } else {
+            EffectClass::Stateful(
+                [
+                    ImpureEffectTag::DtUpdater,
+                    ImpureEffectTag::SceneUpdater,
+                    ImpureEffectTag::UnclassifiedAnimation,
+                    ImpureEffectTag::StopCondition,
+                ]
+                .into_iter()
+                .filter(|&reason| self.reasons & Self::bit(reason) != 0)
+                .collect(),
+            )
+        }
+    }
+}
 
 /// A native animation, wait, or deferred authoring step.
 ///
@@ -78,16 +147,30 @@ impl ActiveSegment {
         Ok(true)
     }
 
-    fn finish(self, scene: &mut Scene) -> Result<(), SceneError> {
+    fn try_advance_pure(
+        &mut self,
+        scene: &mut Scene,
+        max_frames: u64,
+    ) -> Result<Option<FrameMetadata>, SceneError> {
         match self {
-            Self::Play(play) => {
-                scene.finish_stepped_play(play, &mut NullSceneSink)?;
-            }
-            Self::Wait(wait) => {
-                scene.finish_stepped_wait(wait, &mut NullSceneSink)?;
-            }
+            Self::Play(play) => scene.try_advance_pure_play(play, max_frames),
+            Self::Wait(wait) => scene.try_advance_pure_wait(wait, max_frames),
         }
-        Ok(())
+    }
+
+    fn purity(&self, scene: &Scene) -> Purity {
+        match self {
+            Self::Play(play) => scene.stepped_play_purity(play),
+            Self::Wait(_) => classify_wait(scene.stage(), false),
+        }
+    }
+
+    fn finish(self, scene: &mut Scene) -> Result<Purity, SceneError> {
+        let report = match self {
+            Self::Play(play) => scene.finish_stepped_play(play, &mut NullSceneSink)?,
+            Self::Wait(wait) => scene.finish_stepped_wait(wait, &mut NullSceneSink)?,
+        };
+        Ok(report.purity)
     }
 
     fn abort(self, scene: &mut Scene) {
@@ -167,6 +250,8 @@ pub struct NativeSceneProgram {
     preview: InteractivePreview,
     segments: VecDeque<NativeSegment>,
     active: Option<ActiveSegment>,
+    active_seekable: bool,
+    effects: EffectInventory,
     frame: u64,
     frame_limit: u64,
     failed: bool,
@@ -217,10 +302,12 @@ impl NativeSceneProgram {
         }
         let preview = InteractivePreview::from_interactive(scene).map_err(execution_error)?;
         let admitted_segments = segments.len();
-        Ok(Self {
+        let mut program = Self {
             preview,
             segments: segments.into(),
             active: None,
+            active_seekable: false,
+            effects: EffectInventory::default(),
             frame: 0,
             frame_limit,
             failed: false,
@@ -229,7 +316,9 @@ impl NativeSceneProgram {
             admitted_segments,
             started_segments: 0,
             segment_limit: MAX_NATIVE_SEGMENTS,
-        })
+        };
+        program.observe_scene_effects();
+        Ok(program)
     }
 
     /// Tighten cumulative schedule admission before execution. Every deferred
@@ -300,6 +389,16 @@ impl NativeSceneProgram {
         self.frame
     }
 
+    /// Conservative effects accumulated through this program's executed prefix,
+    /// including initial updater registrations, deferred construction and input.
+    /// A fresh reconstruction of the same prefix produces the same ordered tags.
+    /// This does not grant callback replay permission: the worker's separate
+    /// factory policy still turns every command opaque when replay is disabled.
+    #[must_use]
+    pub fn effect_class(&self) -> EffectClass {
+        self.effects.effect()
+    }
+
     /// A presenter may pause at this capture before starting the next segment.
     /// Frame zero is also a boundary. This read does not run finish callbacks,
     /// consume deferred authoring, or advance the scene's rational clock.
@@ -343,6 +442,11 @@ impl NativeSceneProgram {
         event
             .validate()
             .map_err(|error| invalid(error.to_string()))?;
+        // Input may edit an animation's outputs, endpoints or registrations.
+        // The remainder of that open segment uses ordinary execution; a later
+        // segment can establish a new pure proof from its edited begin state.
+        self.active_seekable = false;
+        self.effects.note_callback();
         self.failed = true;
         let result = self
             .preview
@@ -353,6 +457,9 @@ impl NativeSceneProgram {
                 Ok(receipt)
             });
         self.failed = result.is_err();
+        if result.is_ok() {
+            self.observe_scene_effects();
+        }
         result
     }
 
@@ -377,37 +484,85 @@ impl NativeSceneProgram {
     }
 
     fn advance_one(&mut self, state_required: bool) -> Result<Option<CaptureOne>, ServiceError> {
+        self.advance_by(state_required, 1)
+    }
+
+    fn advance_by(
+        &mut self,
+        state_required: bool,
+        max_frames: u64,
+    ) -> Result<Option<CaptureOne>, ServiceError> {
         self.require_healthy()?;
         if self.frame >= self.frame_limit {
             return Err(invalid("native execution reached its frame budget"));
         }
+        let max_frames = max_frames.min(self.frame_limit - self.frame);
+        if max_frames == 0 {
+            return Err(invalid(
+                "native execution requires a positive frame advance",
+            ));
+        }
         self.failed = true;
-        let result = self.advance_one_inner(state_required).and_then(|capture| {
-            self.validate_camera()?;
-            Ok(capture)
-        });
+        let result = self
+            .advance_one_inner(state_required, max_frames)
+            .and_then(|capture| {
+                self.validate_camera()?;
+                Ok(capture)
+            });
         self.failed = result.is_err();
         result
     }
 
-    /// Advance by real execution only. Every animation, updater, input and
-    /// deferred-construction boundary still runs, while intermediate captures
-    /// retain only timing metadata instead of freezing discarded scene state.
-    /// Backward movement requires a fresh factory instance; changing the clock
-    /// alone is never treated as replay.
+    /// Advance through the ordinary executable lifecycle, sampling proven pure
+    /// intervals directly and stepping callback-bearing intervals frame by frame.
+    /// Input and deferred construction remain ordered boundaries. Intermediate
+    /// captures retain timing metadata instead of freezing discarded scene state.
+    /// Backward movement still requires a fresh factory instance.
     pub fn advance_to(&mut self, target: u64) -> Result<(), ServiceError> {
+        self.advance_to_with_work(target).map(|_| ())
+    }
+
+    /// Seek as [`Self::advance_to`] and report how many samples were evaluated.
+    ///
+    /// A camera rig retains per-frame validation, and an input dispatch disables
+    /// pure sampling for the remainder of its active segment. Unsupported pure
+    /// carriers, updaters and event ingress likewise retain ordinary stepping.
+    pub fn advance_to_with_work(&mut self, target: u64) -> Result<NativeSeekWork, ServiceError> {
         self.require_healthy()?;
         if target < self.frame || target > self.frame_limit {
             return Err(invalid(
                 "native seek requires a forward target within the frame limit",
             ));
         }
+        let mut work = NativeSeekWork {
+            frames_advanced: target - self.frame,
+            frames_evaluated: 0,
+        };
         while self.frame < target {
-            if self.advance_one(false)?.is_none() {
+            if self.advance_by(false, target - self.frame)?.is_none() {
                 return Err(invalid("native program ended before the requested frame"));
             }
+            work.frames_evaluated += 1;
         }
-        Ok(())
+        Ok(work)
+    }
+
+    fn observe_scene_effects(&mut self) {
+        self.effects
+            .note(&classify_wait(self.preview.stage(), false));
+        self.observe_input_effects();
+    }
+
+    fn observe_input_effects(&mut self) {
+        let scene = self.preview.scene();
+        if scene.has_external_event_ingress() || !scene.recorded_events().is_empty() {
+            self.effects.note_callback();
+        }
+    }
+
+    fn observe_active_effects(&mut self, active: &ActiveSegment) {
+        self.effects.note(&active.purity(self.preview.scene()));
+        self.observe_input_effects();
     }
 
     fn require_healthy(&self) -> Result<(), ServiceError> {
@@ -441,6 +596,7 @@ impl NativeSceneProgram {
     fn advance_one_inner(
         &mut self,
         state_required: bool,
+        max_frames: u64,
     ) -> Result<Option<CaptureOne>, ServiceError> {
         loop {
             if self.active.is_none() {
@@ -448,29 +604,50 @@ impl NativeSceneProgram {
                     return Ok(None);
                 };
                 self.started_segments += 1;
+                // Opening a wait executes a zero-dt pass. Capture its existing
+                // updater evidence before a callback can remove its own slot.
+                self.observe_scene_effects();
+                // Dynamic camera validation is an observer at every nominal
+                // frame. Do not skip an invalid intermediate rig value just
+                // because the requested final sample would be valid again.
+                self.active_seekable = self.camera_rig.is_none();
                 self.active = match segment {
                     NativeSegment::Play {
                         animations,
                         overrides,
-                    } => self
-                        .preview
-                        .scene_mut()
-                        .begin_stepped_play(animations, overrides, &mut NullSceneSink)
-                        .map_err(execution_error)?
-                        .map(ActiveSegment::Play),
-                    NativeSegment::Wait { duration } => Some(ActiveSegment::Wait(
-                        self.preview
-                            .scene_mut()
-                            .begin_stepped_wait(duration, &mut NullSceneSink)
-                            .map_err(execution_error)?,
-                    )),
-                    NativeSegment::WaitFrames { frames } => Some(ActiveSegment::Wait(
-                        self.preview
-                            .scene_mut()
-                            .begin_stepped_wait_frames(frames, &mut NullSceneSink)
-                            .map_err(execution_error)?,
-                    )),
+                    } => {
+                        // Animation-owned endpoints can carry updaters while
+                        // absent from the Scene's roots, even before begin.
+                        self.effects
+                            .note(&classify_play(self.preview.stage(), &animations));
+                        let scene = self.preview.scene_mut();
+                        let play = if self.active_seekable {
+                            scene.begin_seekable_play(animations, overrides, &mut NullSceneSink)
+                        } else {
+                            scene.begin_stepped_play(animations, overrides, &mut NullSceneSink)
+                        };
+                        play.map_err(execution_error)?.map(ActiveSegment::Play)
+                    }
+                    NativeSegment::Wait { duration } => {
+                        let scene = self.preview.scene_mut();
+                        let wait = if self.active_seekable {
+                            scene.begin_seekable_wait(duration, &mut NullSceneSink)
+                        } else {
+                            scene.begin_stepped_wait(duration, &mut NullSceneSink)
+                        };
+                        Some(ActiveSegment::Wait(wait.map_err(execution_error)?))
+                    }
+                    NativeSegment::WaitFrames { frames } => {
+                        let scene = self.preview.scene_mut();
+                        let wait = if self.active_seekable {
+                            scene.begin_seekable_wait_frames(frames, &mut NullSceneSink)
+                        } else {
+                            scene.begin_stepped_wait_frames(frames, &mut NullSceneSink)
+                        };
+                        Some(ActiveSegment::Wait(wait.map_err(execution_error)?))
+                    }
                     NativeSegment::Build { build } => {
+                        self.effects.note_callback();
                         let generated = build(&mut NativeBuildContext {
                             scene: self.preview.scene_mut(),
                             spans: &mut self.spans,
@@ -481,19 +658,56 @@ impl NativeSceneProgram {
                         None
                     }
                 };
+                self.observe_scene_effects();
+                if let Some(active) = &self.active {
+                    self.effects.note(&active.purity(self.preview.scene()));
+                }
                 continue;
             }
             let Some(mut active) = self.active.take() else {
                 return Err(execution_error("native segment cursor disappeared"));
             };
+            self.observe_active_effects(&active);
             let mut capture = CaptureOne::new(state_required);
-            match active.advance(self.preview.scene_mut(), &mut capture) {
-                Ok(false) => active
-                    .finish(self.preview.scene_mut())
-                    .map_err(execution_error)?,
-                Ok(true) => {
+            let advance = (|| {
+                if !state_required && self.active_seekable && max_frames > 1 {
+                    let metadata = active
+                        .try_advance_pure(self.preview.scene_mut(), max_frames)
+                        .map_err(execution_error)?;
+                    if let Some(metadata) = metadata {
+                        let frame =
+                            u64::try_from(metadata.frame_index()).map_err(execution_error)?;
+                        let advanced = frame
+                            .checked_sub(self.frame)
+                            .filter(|&count| count > 0 && count <= max_frames)
+                            .ok_or_else(|| {
+                                execution_error("native pure seek exceeded its frame range")
+                            })?;
+                        capture
+                            .record(CaptureReason::Segment, metadata)
+                            .map_err(execution_error)?;
+                        return Ok(Some(advanced));
+                    }
+                }
+                active
+                    .advance(self.preview.scene_mut(), &mut capture)
+                    .map(|advanced| advanced.then_some(1))
+                    .map_err(execution_error)
+            })();
+            if advance.is_ok() {
+                self.observe_active_effects(&active);
+            }
+            match advance {
+                Ok(None) => {
+                    let purity = active
+                        .finish(self.preview.scene_mut())
+                        .map_err(execution_error)?;
+                    self.effects.note(&purity);
+                    self.observe_scene_effects();
+                }
+                Ok(Some(advanced)) => {
                     self.active = Some(active);
-                    let expected = self.frame + 1;
+                    let expected = self.frame + advanced;
                     let metadata = capture
                         .metadata
                         .ok_or_else(|| execution_error("native step omitted its capture"))?;
@@ -511,7 +725,7 @@ impl NativeSceneProgram {
                 }
                 Err(error) => {
                     active.abort(self.preview.scene_mut());
-                    return Err(execution_error(error));
+                    return Err(error);
                 }
             }
         }

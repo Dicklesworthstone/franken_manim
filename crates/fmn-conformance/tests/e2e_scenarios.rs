@@ -65,6 +65,8 @@
 mod semantic_routes;
 #[path = "support/studio_mjpeg.rs"]
 mod studio_mjpeg;
+#[path = "support/studio_pure_seek.rs"]
+mod studio_pure_seek;
 
 // fm-longform-native-e2e-hoeffding-l59d: the Hoeffding's D explainer
 // (crates/fmn/examples/hoeffding_d), compiled here from its own sources so
@@ -11328,6 +11330,81 @@ fn parity_move_along_path_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioEr
         .with_counter("parity_arclength_path_materializations", materializations))
 }
 
+/// A real Scene updater removes an active motion path after the first frame.
+/// Both playback and skip must return the path's error before the next frame
+/// advances or reaches the sink; a cached last position is not success.
+fn failure_move_along_path_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    ctx.set_fps((4, 1));
+    let mut emitted_frames = 0_u64;
+    for skip in [false, true] {
+        let mut scene = Scene::new(
+            RuntimeConfig {
+                fps: 4,
+                skip_animations: skip,
+                preview_while_skipping: false,
+                ..RuntimeConfig::default()
+            },
+            123,
+        )
+        .map_err(|error| fail(format!("motion failure scene: {error}")))?;
+        let path = parity_vmob(
+            scene.stage_mut(),
+            &[[-2.0, 0.0, 0.0], [0.0, 2.0, 0.0], [2.0, 0.0, 0.0]],
+        );
+        let moving = parity_vmob(scene.stage_mut(), &[[0.0; 3]]);
+        let controller = scene.stage_mut().add(Mobject::new());
+        scene
+            .add(&[moving, controller])
+            .map_err(|error| fail(format!("add motion actors: {error}")))?;
+        scene
+            .stage_mut()
+            .add_updater(
+                controller,
+                move |stage, _| {
+                    if stage.time() > 0.0 && stage.contains(path) {
+                        assert!(stage.is_updating_suspended(moving));
+                        stage.delete(path).expect("the updater owns its live path");
+                    }
+                },
+                false,
+            )
+            .map_err(|error| fail(format!("attach path removal: {error}")))?;
+        let mut motion = MoveAlongPath::new(moving, path);
+        motion.state_mut().config.rate_func = RateFunc::linear();
+        motion.state_mut().config.suspend_mobject_updating = true;
+        let mut sink = PacketSink::default();
+        let result = scene.play(vec![Box::new(motion)], PlayOverrides::default(), &mut sink);
+        if !matches!(
+            result,
+            Err(SceneError::Animation(fmn_anim::AnimError::StaleHandle(mob))) if mob == path
+        ) {
+            return Err(fail(format!(
+                "removed MoveAlongPath input did not reach Scene.play (skip={skip}): {result:?}"
+            )));
+        }
+        if scene.time().frames() != 1 || sink.packets.len() != usize::from(!skip) {
+            return Err(fail(format!(
+                "failed motion advanced or emitted another frame (skip={skip}, time={}, captures={})",
+                scene.time().frames(),
+                sink.packets.len()
+            )));
+        }
+        if scene.stage().is_updating_suspended(moving) {
+            return Err(fail("failed motion left the animated object suspended"));
+        }
+        emitted_frames += sink.packets.len() as u64;
+    }
+    ctx.event(
+        LogEvent::new("e2e.failure.move_along_path")
+            .field("modes_checked", 2_u64)
+            .field("emitted_frames", emitted_frames)
+            .field("refused_before_advance", "true"),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("motion_failure_modes", 2)
+        .with_counter("motion_failure_emitted_frames", emitted_frames))
+}
+
 /// §11.3 span map — `tex_to_color_map` colors by SOURCE identity. The
 /// constructor map rides `Typeset::occurrences`: two source occurrences of
 /// one substring get independent fates, the longer overlapping entry wins
@@ -13636,6 +13713,31 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.studio_checkpoint_restore.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::StudioInProcess,
+        Invocation::new(studio_pure_seek::run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "native_checkpoint.bin".into(),
+                "native_checkpoint_next.png".into(),
+            ]),
+            counter_eq("studio_pure_seek_samples", 1),
+            counter_eq("studio_pure_checkpoint_continuations", 8),
+            counter_eq("studio_effect_classes", 2),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.studio.pure_checkpoint",
+            vec![
+                FieldPred::u64_eq("target_frame", 600),
+                FieldPred::u64_eq("samples_evaluated", 1),
+                FieldPred::str_eq("state_equal", "true"),
+                FieldPred::str_eq("pure_and_stateful", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.studio_mjpeg_preview.v1",
         ScenarioClass::LifecycleDrill,
         Surface::RustApi,
@@ -14778,6 +14880,25 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             vec![
                 FieldPred::str_eq("cache_corrupt_miss", "true"),
                 FieldPred::str_eq("cache_corrupt_evicted", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "failure_path.move_along_path_live_input.v1",
+        ScenarioClass::FailurePath,
+        Surface::RustApi,
+        Invocation::new(failure_move_along_path_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("motion_failure_modes", 2),
+            counter_eq("motion_failure_emitted_frames", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.failure.move_along_path",
+            vec![
+                FieldPred::u64_eq("modes_checked", 2),
+                FieldPred::u64_eq("emitted_frames", 1),
+                FieldPred::str_eq("refused_before_advance", "true"),
             ],
         )],
     ));
@@ -16514,6 +16635,16 @@ fn python_portal_png_still_scenario_passes() {
     assert!(report.is_pass(), "{}", report.summary());
 }
 
+#[test]
+fn move_along_path_live_input_failure_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "failure_path.move_along_path_live_input.v1")
+        .expect("motion-path failure scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
 /// Focused entry for the same mandatory fast-tier production lifecycle row.
 #[test]
 fn studio_camera_preview_scenario_passes() {
@@ -16521,6 +16652,16 @@ fn studio_camera_preview_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.studio_camera_preview.v1")
         .expect("the live Studio camera scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn studio_pure_checkpoint_restore_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.studio_checkpoint_restore.v1")
+        .expect("native pure checkpoint scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

@@ -1164,7 +1164,7 @@ pub struct FrameSample {
 }
 
 /// The sampling plan for one `play()`/`wait()` segment.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FrameSegment {
     fps: u32,
     n_frames: i64,

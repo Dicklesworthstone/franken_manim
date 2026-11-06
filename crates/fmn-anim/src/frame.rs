@@ -661,12 +661,23 @@ impl OpenSegment {
     }
 
     pub(crate) fn is_at_begin(&self) -> bool {
-        self.stepped == 0
-            && self.current_sample.is_none()
+        self.stepped == 0 && self.is_at_frame_boundary()
+    }
+
+    pub(crate) fn is_at_frame_boundary(&self) -> bool {
+        self.current_sample.is_none()
             && self.prepared.is_none()
             && self.next_animation == 0
             && !self.animations_finished
             && !self.final_updaters_completed
+    }
+
+    /// Only the admitted pure owner path may replace completed, unobserved
+    /// frames with their final nominal sample. Lifecycle cleanup stays pending.
+    pub(crate) fn advance_pure_cursor(&mut self, frame: i64) {
+        debug_assert!(self.is_at_frame_boundary());
+        debug_assert!(frame > self.stepped && frame <= self.segment.n_frames());
+        self.stepped = frame;
     }
 
     /// Mark the prepared frame's whole scene-updater phase as completed by
@@ -1016,7 +1027,21 @@ impl OpenWait {
     }
 
     pub(crate) fn is_at_begin(&self) -> bool {
-        self.stepped == 0 && self.prepared.is_none()
+        self.stepped == 0 && self.is_at_frame_boundary()
+    }
+
+    pub(crate) fn is_at_frame_boundary(&self) -> bool {
+        self.prepared.is_none()
+    }
+
+    pub(crate) fn stepped(&self) -> i64 {
+        self.stepped
+    }
+
+    pub(crate) fn advance_pure_cursor(&mut self, frame: i64) {
+        debug_assert!(self.is_at_frame_boundary());
+        debug_assert!(frame > self.stepped && frame <= self.segment.n_frames());
+        self.stepped = frame;
     }
 
     pub(crate) fn finish_pure(mut self) -> Result<SegmentReport, AnimError> {

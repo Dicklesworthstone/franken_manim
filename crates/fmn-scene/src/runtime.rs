@@ -26,6 +26,7 @@ mod idle;
 mod parallel;
 pub use idle::IdleFrame;
 
+use fmn_anim::pure_frame::PureSegment;
 use fmn_anim::{
     AnimError, Animation, AnimationBoundary, BeginState, Duration, FrameMetadata, FramePacket,
     ImpureEffect, OpenSegment, OpenWait, Purity, RateFunc, RationalFrameClock, RationalTime,
@@ -737,6 +738,7 @@ pub struct Scene {
 pub struct SteppedPlay {
     animations: Vec<Box<dyn Animation>>,
     open: OpenSegment,
+    pure_seek: Option<PureSegment>,
     sink_error: Option<IntegrationError>,
 }
 
@@ -744,12 +746,14 @@ pub struct SteppedPlay {
 /// [`SteppedPlay`].
 pub struct SteppedWait {
     open: OpenWait,
+    pure_seek: Option<PureSegment>,
     sink_error: Option<IntegrationError>,
 }
 
 impl SteppedPlay {
-    /// Whether every nominal frame has been captured. The animation epilogue
-    /// remains pending until `finish_stepped_play` is explicitly called.
+    /// Whether every nominal frame has been captured or explicitly skipped by
+    /// pure catch-up. The animation epilogue remains pending until
+    /// `finish_stepped_play` is explicitly called.
     #[must_use]
     pub fn frames_complete(&self) -> bool {
         self.open.frames_complete()
@@ -776,7 +780,8 @@ impl SteppedPlay {
 }
 
 impl SteppedWait {
-    /// Whether every nominal wait frame has been captured, without ending it.
+    /// Whether every nominal wait frame has been captured or explicitly skipped
+    /// by pure catch-up, without ending the wait.
     #[must_use]
     pub fn frames_complete(&self) -> bool {
         self.open.frames_complete()
@@ -962,6 +967,16 @@ impl Scene {
     #[must_use]
     pub fn event_inbox(&self) -> EventInbox {
         self.event_inbox.clone()
+    }
+
+    /// Whether queued input or another inbox owner can produce an event at a
+    /// frame boundary. Dormant listeners alone are not event ingress. Native
+    /// effect inventories use this proof without cloning the inbox themselves.
+    #[must_use]
+    pub fn has_external_event_ingress(&self) -> bool {
+        !self.event_inbox.is_exclusive_empty()
+            || !self.queued_events.is_empty()
+            || self.event_error.is_some()
     }
 
     /// Queue one already-available live event for the next serial boundary.
@@ -1215,9 +1230,35 @@ impl Scene {
     /// represented as `Ok(None)`.
     pub fn begin_stepped_play(
         &mut self,
+        animations: Vec<Box<dyn Animation>>,
+        overrides: PlayOverrides,
+        sink: &mut dyn SceneSink,
+    ) -> Result<Option<SteppedPlay>, SceneError> {
+        self.begin_stepped_play_impl(animations, overrides, sink, false)
+    }
+
+    /// Begin a stepped play that may later skip unobserved, provably pure
+    /// frames through [`Self::try_advance_pure_play`]. Ordinary stepped calls
+    /// remain valid on the same handle; animation cleanup is never run early.
+    ///
+    /// This opt-in retains the pure begin state only when event ingress is
+    /// closed. Unknown callbacks, aliases and live views still use ordinary
+    /// stepping. The original `begin_stepped_play` keeps its no-snapshot path.
+    pub fn begin_seekable_play(
+        &mut self,
+        animations: Vec<Box<dyn Animation>>,
+        overrides: PlayOverrides,
+        sink: &mut dyn SceneSink,
+    ) -> Result<Option<SteppedPlay>, SceneError> {
+        self.begin_stepped_play_impl(animations, overrides, sink, true)
+    }
+
+    fn begin_stepped_play_impl(
+        &mut self,
         mut animations: Vec<Box<dyn Animation>>,
         overrides: PlayOverrides,
         sink: &mut dyn SceneSink,
+        seekable: bool,
     ) -> Result<Option<SteppedPlay>, SceneError> {
         if overrides.run_time.is_some() && overrides.run_time_frames.is_some() {
             return Err(SceneError::InvalidConfig(
@@ -1245,19 +1286,81 @@ impl Scene {
             .collect();
         self.pre_play(SegmentKind::Play, &animation_anchors, sink)?;
         self.emit_event(sink, LifecyclePhase::DriveSegment, Some(SegmentKind::Play))?;
-        // A stepped play is host-driven frame by frame and never becomes a
-        // pure program, so nothing would read its begin snapshot.
+        let allow_seek = seekable && self.allows_unobserved_advance();
         let open = open_play_with_mode(
             &mut self.stage,
             &self.clock,
             &mut animations,
-            BeginState::Omit,
+            BeginState::retained(allow_seek),
         )?;
+        let pure_seek = (allow_seek && self.allows_unobserved_advance())
+            .then(|| {
+                PureSegment::freeze(&self.stage, &self.clock, &self.rng_root, &animations, &open)
+                    .ok()
+            })
+            .flatten();
         Ok(Some(SteppedPlay {
             animations,
             open,
+            pure_seek,
             sink_error: None,
         }))
+    }
+
+    /// Advance at most `max_frames` within a seekable pure play, returning the
+    /// final nominal sample without emitting intermediate captures. The caller
+    /// explicitly declares those captures unobserved; recording/output sinks
+    /// that require every frame must continue ordinary stepped playback.
+    ///
+    /// Current inputs, updaters, live views, unsupported native mechanisms or
+    /// sample-dependent errors refuse the optimization with `Ok(None)` and no
+    /// mutation. Dormant event listeners are safe only while the event queue
+    /// and its exclusively owned inbox remain empty. The segment epilogue is
+    /// still the caller's explicit `finish_stepped_play` operation.
+    pub fn try_advance_pure_play(
+        &mut self,
+        play: &mut SteppedPlay,
+        max_frames: u64,
+    ) -> Result<Option<FrameMetadata>, SceneError> {
+        self.ensure_ready()?;
+        self.ensure_updaters_ready()?;
+        if !self.allows_unobserved_advance() || play.sink_error.is_some() {
+            return Ok(None);
+        }
+        let Some(program) = &play.pure_seek else {
+            return Ok(None);
+        };
+        program
+            .try_advance_on_owner(
+                &mut self.stage,
+                &mut self.clock,
+                &self.rng_root,
+                &mut play.animations,
+                &mut play.open,
+                max_frames,
+            )
+            .map_err(Into::into)
+    }
+
+    /// Classify the actual owned animations and their current families using
+    /// Choreo's existing purity classifier. Retain any evidence from the opened
+    /// segment, including an external updater phase whose callback is no longer
+    /// represented by a live native updater slot.
+    #[must_use]
+    pub fn stepped_play_purity(&self, play: &SteppedPlay) -> Purity {
+        let current = fmn_anim::classify_play(&self.stage, &play.animations);
+        let Purity::Stateful(prior) = &play.open.report().purity else {
+            return current;
+        };
+        let mut reasons = prior.clone();
+        if let Purity::Stateful(current) = current {
+            for reason in current {
+                if !reasons.contains(&reason) {
+                    reasons.push(reason);
+                }
+            }
+        }
+        Purity::Stateful(reasons)
     }
 
     /// Advance a stepped play through animation interpolation and rational
@@ -1525,6 +1628,23 @@ impl Scene {
             Duration::Seconds(duration.unwrap_or(self.config.default_wait_time)),
             sink,
             false,
+            false,
+        )
+    }
+
+    /// Begin a stepped wait that may later advance across unobserved static
+    /// frames through [`Self::try_advance_pure_wait`]. Its ordinary initial
+    /// zero-dt updater pass still runs exactly once.
+    pub fn begin_seekable_wait(
+        &mut self,
+        duration: Option<f64>,
+        sink: &mut dyn SceneSink,
+    ) -> Result<SteppedWait, SceneError> {
+        self.begin_stepped_wait_with_updates(
+            Duration::Seconds(duration.unwrap_or(self.config.default_wait_time)),
+            sink,
+            false,
+            true,
         )
     }
 
@@ -1539,6 +1659,7 @@ impl Scene {
             Duration::Seconds(duration.unwrap_or(self.config.default_wait_time)),
             sink,
             true,
+            false,
         )
     }
 
@@ -1549,7 +1670,17 @@ impl Scene {
         frames: u64,
         sink: &mut dyn SceneSink,
     ) -> Result<SteppedWait, SceneError> {
-        self.begin_stepped_wait_with_updates(Duration::Frames(frames), sink, false)
+        self.begin_stepped_wait_with_updates(Duration::Frames(frames), sink, false, false)
+    }
+
+    /// Begin an exact-frame wait with the same pure-seek opt-in as
+    /// [`Self::begin_seekable_wait`], without converting frames through seconds.
+    pub fn begin_seekable_wait_frames(
+        &mut self,
+        frames: u64,
+        sink: &mut dyn SceneSink,
+    ) -> Result<SteppedWait, SceneError> {
+        self.begin_stepped_wait_with_updates(Duration::Frames(frames), sink, false, true)
     }
 
     /// Begin an exact-frame wait after the host completed the initial
@@ -1559,7 +1690,7 @@ impl Scene {
         frames: u64,
         sink: &mut dyn SceneSink,
     ) -> Result<SteppedWait, SceneError> {
-        self.begin_stepped_wait_with_updates(Duration::Frames(frames), sink, true)
+        self.begin_stepped_wait_with_updates(Duration::Frames(frames), sink, true, false)
     }
 
     fn begin_stepped_wait_with_updates(
@@ -1567,21 +1698,60 @@ impl Scene {
         duration: Duration,
         sink: &mut dyn SceneSink,
         updaters_completed: bool,
+        seekable: bool,
     ) -> Result<SteppedWait, SceneError> {
         self.validate_wait_duration(duration)?;
         self.frame_duration_requested |= matches!(duration, Duration::Frames(_));
         self.pre_play(SegmentKind::Wait, &[], sink)?;
         self.emit_event(sink, LifecyclePhase::DriveSegment, Some(SegmentKind::Wait))?;
+        let allow_seek = seekable && self.allows_unobserved_advance();
         let open = if updaters_completed {
             open_wait_after_updaters(&mut self.stage, &self.clock, duration)?
         } else {
-            // As a stepped play: no pure program reads a begin snapshot.
-            open_wait(&mut self.stage, &self.clock, duration, BeginState::Omit)?
+            open_wait(
+                &mut self.stage,
+                &self.clock,
+                duration,
+                BeginState::retained(allow_seek),
+            )?
         };
+        let pure_seek = (allow_seek && self.allows_unobserved_advance())
+            .then(|| PureSegment::freeze_wait(&self.stage, &self.clock, &self.rng_root, &open).ok())
+            .flatten();
         Ok(SteppedWait {
             open,
+            pure_seek,
             sink_error: None,
         })
+    }
+
+    /// Advance at most `max_frames` of an admitted static wait while its
+    /// intermediate captures are explicitly unobserved. The returned metadata
+    /// is the final nominal sample, and the wait remains open for continuation
+    /// or its ordinary finish operation. Event ingress, updaters and live views
+    /// are rechecked; `Ok(None)` leaves the scene and wait unchanged.
+    pub fn try_advance_pure_wait(
+        &mut self,
+        wait: &mut SteppedWait,
+        max_frames: u64,
+    ) -> Result<Option<FrameMetadata>, SceneError> {
+        self.ensure_ready()?;
+        self.ensure_updaters_ready()?;
+        if !self.allows_unobserved_advance() || wait.sink_error.is_some() {
+            return Ok(None);
+        }
+        let Some(program) = &wait.pure_seek else {
+            return Ok(None);
+        };
+        program
+            .try_advance_wait_on_owner(
+                &mut self.stage,
+                &mut self.clock,
+                &self.rng_root,
+                &mut wait.open,
+                max_frames,
+            )
+            .map_err(Into::into)
     }
 
     /// Advance a stepped wait's rational clock, yielding before scene
