@@ -62,6 +62,100 @@ fn deflate_is_deterministic() {
 }
 
 #[test]
+fn compressed_bytes_match_the_pre_dag_encoder() {
+    // Captured from the unmodified encoder at 8717dc8b, before replacing
+    // expanded package lists. These pin encoded bytes, not merely successful
+    // round-trips; changing Huffman tie order must never re-bless this table.
+    let alphabet: Vec<u8> = (0..256).map(|symbol| symbol as u8).collect();
+    let skewed: Vec<u8> = (0..100_000)
+        .map(|i| {
+            let x = (i * 37 + i / 251) % 257;
+            if x < 192 { b'a' } else { (x - 192) as u8 }
+        })
+        .collect();
+    let cases = [
+        (
+            "empty",
+            Vec::new(),
+            1,
+            ["9b4fb24edd6d1d8830e272398263cdbf026b97392cc35387b991dc0248a628f9"; 3],
+        ),
+        (
+            "fixed",
+            b"hello, hello, hello world".to_vec(),
+            1,
+            ["c0d356bb7819b6f40089703a23e02581921f2d1cf58ba587e59b62e5a88f1985"; 3],
+        ),
+        (
+            "dense",
+            alphabet.repeat(64),
+            2,
+            ["71f7a1a8eb26164bbfba8b3cdba80be62dd4b0d7d5bd64bd3a51382872d59732"; 3],
+        ),
+        (
+            "skewed",
+            skewed,
+            2,
+            [
+                "c22df5132675bec14d5550fb1eb26e2d613ad7f5485209a8333edcc19f27e7b8",
+                "62de1025d499e709f06c4a6a97a4a089b7ecccf15ee6ce216772283a1791bcb2",
+                "61bcf8216059942014eddf097802d01779db320fc8a8425012bebed9adf37da3",
+            ],
+        ),
+        (
+            "stored",
+            lcg_bytes(70_000, 0xdead_beef),
+            0,
+            ["744bc83b7bad9b7b3d1bc1bcbfc0b17de8d6838b9667b6b29b963b20ef83330a"; 3],
+        ),
+        (
+            "long_run",
+            vec![0; 1 << 20],
+            2,
+            ["987cc3a8b6175ec96b6ec48955ce98d08e2bf5748af18a91c71ae1806b799646"; 3],
+        ),
+    ];
+    for (name, input, first_block_type, expected) in cases {
+        for (level, digest) in LEVELS.into_iter().zip(expected) {
+            let compressed = deflate_bytes(&input, level);
+            assert_eq!((compressed[0] >> 1) & 3, first_block_type, "{name}");
+            assert_eq!(
+                fmn_hash::sha256(&compressed).to_hex(),
+                digest,
+                "case={name}, level={level:?}",
+            );
+        }
+    }
+}
+
+#[test]
+fn dictionary_segments_match_the_pre_dag_encoder() {
+    let mut input = lcg_bytes(180_000, 42);
+    input[30_000..60_000].fill(b'x');
+    input.copy_within(25_000..65_000, 100_000);
+    // Also captured from 8717dc8b. The middle segment begins inside a run,
+    // requiring the previous plaintext dictionary and a nonfinal sync flush.
+    const EXPECTED: &str = "3aafbabf1d1fafb9f608db4a3444b135f8b690d06f5f2d5b48a57d4236548736";
+    for level in LEVELS {
+        let mut compressed = Vec::new();
+        for span in [0usize, 40_000, 100_000, input.len()].windows(2) {
+            compressed.extend_from_slice(&deflate_segment(
+                &input[..span[0]],
+                &input[span[0]..span[1]],
+                level,
+                span[1] == input.len(),
+            ));
+        }
+        assert_eq!(
+            fmn_hash::sha256(&compressed).to_hex(),
+            EXPECTED,
+            "{level:?}"
+        );
+        assert_eq!(inflate_bytes(&compressed, input.len()).unwrap(), input);
+    }
+}
+
+#[test]
 fn compression_actually_compresses() {
     let data = b"ab".repeat(10_000);
     let packed = deflate_bytes(&data, CompressionLevel::Default);

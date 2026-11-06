@@ -802,8 +802,8 @@ pub fn zlib_compress(data: &[u8], level: CompressionLevel) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CompressionLevel, DeflateWorkspace, HuffmanWorkspace, common_prefix, deflate_segment,
-        huffman_lengths,
+        CompressionLevel, DeflateWorkspace, HuffmanWorkspace, Token, WINDOW, common_prefix,
+        deflate_segment, huffman_lengths,
     };
 
     // The original package-merge representation is retained only as a byte
@@ -827,7 +827,9 @@ mod tests {
         let mut current = leaves.clone();
         for _ in 1..max_len {
             let paired: Vec<_> = current
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|pair| {
                     let mut symbols = pair[0].1.clone();
                     symbols.extend_from_slice(&pair[1].1);
@@ -921,6 +923,256 @@ mod tests {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    const LEVELS: [CompressionLevel; 3] = [
+        CompressionLevel::Fast,
+        CompressionLevel::Default,
+        CompressionLevel::Best,
+    ];
+
+    fn fixture_bytes(len: usize, mut state: u32) -> Vec<u8> {
+        (0..len)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 24) as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn workspace_reuse_resets_dictionary_size_level_and_final_state() {
+        let dictionary = fixture_bytes(2 * WINDOW + 19, 37);
+        let noise = fixture_bytes(80_000, 91);
+        let run = vec![b'a'; 100_000];
+        let cases: [(&[u8], &[u8]); 8] = [
+            (&[], &[]),
+            (b"ab", b"a"),
+            (&dictionary, &dictionary[dictionary.len() - 4096..]),
+            (&[], &noise),
+            (b"a", &run),
+            (&dictionary, &[]),
+            (&[], b"hello, hello, hello world"),
+            (&dictionary[..2], b"\xff\0\xff\0\xff"),
+        ];
+        let mut workspace = DeflateWorkspace::default();
+        for round in 0..3 {
+            for offset in 0..cases.len() {
+                let index = (offset + round * 3) % cases.len();
+                let (dict, data) = cases[index];
+                let level = LEVELS[(round + offset) % LEVELS.len()];
+                let last = (round + offset) % 2 == 0;
+                let expected = deflate_segment(dict, data, level, last);
+                let actual = workspace.encode_segment(dict, data, level, last);
+                assert_eq!(actual, expected, "round={round}, case={index}, {level:?}");
+
+                // Independently decode a complete stream containing this
+                // dictionary-bearing segment, including nonfinal/empty cases.
+                let mut stream = if dict.is_empty() {
+                    Vec::new()
+                } else {
+                    deflate_segment(&[], dict, level, false)
+                };
+                stream.extend_from_slice(actual);
+                if !last {
+                    stream.extend_from_slice(&deflate_segment(&[], &[], level, true));
+                }
+                let mut plaintext = dict.to_vec();
+                plaintext.extend_from_slice(data);
+                assert_eq!(
+                    crate::inflate::inflate(&stream, plaintext.len().max(1)).unwrap(),
+                    plaintext,
+                );
+                assert_eq!((workspace.writer.bits, workspace.writer.count), (0, 0));
+            }
+        }
+    }
+
+    #[test]
+    fn workspace_retains_large_backing_buffers_across_smaller_segments() {
+        let storage = |workspace: &DeflateWorkspace| {
+            [
+                (
+                    workspace.combined.as_ptr() as usize,
+                    workspace.combined.capacity(),
+                ),
+                (workspace.head.as_ptr() as usize, workspace.head.capacity()),
+                (workspace.prev.as_ptr() as usize, workspace.prev.capacity()),
+                (
+                    workspace.tokens.as_ptr() as usize,
+                    workspace.tokens.capacity(),
+                ),
+                (
+                    workspace.writer.out.as_ptr() as usize,
+                    workspace.writer.out.capacity(),
+                ),
+            ]
+        };
+        let mut workspace = DeflateWorkspace::default();
+        assert!(
+            storage(&workspace)
+                .iter()
+                .all(|&(_, capacity)| capacity == 0)
+        );
+        let noise = fixture_bytes(120_000, 0xdead_beef);
+        workspace.encode_segment(&noise[..WINDOW], &noise, CompressionLevel::Best, true);
+        let retained = storage(&workspace);
+        for level in LEVELS {
+            for size in [0, 1, 2, 4096, 70_000, 17, 120_000] {
+                workspace.encode_segment(&noise[..13], &noise[..size], level, false);
+                assert_eq!(storage(&workspace), retained, "size={size}, {level:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn workspace_reset_discards_an_abandoned_partial_segment() {
+        let mut workspace = DeflateWorkspace::default();
+        let input = fixture_bytes(8192, 23);
+        for level in LEVELS {
+            workspace.encode_segment(&input[..512], &input, CompressionLevel::Best, false);
+            // Model a worker unwinding with live chains/tokens and an
+            // unfinished byte. The next job must be independent of all of it.
+            workspace.writer.bits = 0b101;
+            workspace.writer.count = 3;
+            workspace.writer.out.extend_from_slice(b"partial block");
+            workspace.tokens.push(Token::Literal(b'z'));
+            let expected = deflate_segment(&[], b"small", level, true);
+            assert_eq!(
+                workspace.encode_segment(&[], b"small", level, true),
+                expected
+            );
+            assert_eq!((workspace.writer.bits, workspace.writer.count), (0, 0));
+        }
+    }
+
+    fn assert_package_merge(
+        freqs: &[u32],
+        max_len: usize,
+        workspace: &mut HuffmanWorkspace,
+    ) -> Vec<u8> {
+        // Padding proves that sparse/high-numbered symbols are mapped back to
+        // symbol order, without writing lengths into unused output slots.
+        let out_len = freqs.len() + 3;
+        let mut actual = vec![u8::MAX; out_len];
+        huffman_lengths(freqs, max_len, &mut actual, workspace);
+        let mut expected = expanded_huffman_lengths(freqs, max_len);
+        expected.resize(out_len, 0);
+        assert_eq!(actual, expected, "max_len={max_len}, frequencies={freqs:?}",);
+        let mut active = 0;
+        let mut kraft = 0usize;
+        for (&frequency, &length) in freqs.iter().zip(&actual) {
+            if frequency == 0 {
+                assert_eq!(length, 0, "an absent symbol acquired a code");
+            } else {
+                let length = usize::from(length);
+                assert!((1..=max_len).contains(&length));
+                active += 1;
+                kraft += 1usize << (max_len - length);
+            }
+        }
+        assert!(actual[freqs.len()..].iter().all(|&length| length == 0));
+        // Independent prefix-code invariant. DEFLATE's singleton convention
+        // reserves one bit; every multi-symbol table must be complete.
+        let expected_kraft = match active {
+            0 => 0,
+            1 => 1usize << (max_len - 1),
+            _ => 1usize << max_len,
+        };
+        assert_eq!(kraft, expected_kraft, "frequencies={freqs:?}");
+        actual
+    }
+
+    #[test]
+    fn package_merge_preserves_every_small_tied_and_sparse_table() {
+        let mut workspace = HuffmanWorkspace::default();
+        // All 4^6 tables cover empty/singleton alphabets, odd list lengths,
+        // leaf/package ties, package/package ties, and absent middle symbols.
+        for table in 0..4usize.pow(6) {
+            let mut digits = table;
+            let mut frequencies = [0u32; 6];
+            for frequency in &mut frequencies {
+                *frequency = (digits % 4) as u32;
+                digits /= 4;
+            }
+            let active = frequencies
+                .iter()
+                .filter(|&&frequency| frequency != 0)
+                .count();
+            let shortest_limit =
+                ((usize::BITS - active.saturating_sub(1).leading_zeros()) as usize).max(1);
+            // Both the tightest feasible length limit and the production
+            // literal/distance limit must retain the old symbol tie ordering.
+            assert_package_merge(&frequencies, shortest_limit, &mut workspace);
+            assert_package_merge(&frequencies, 15, &mut workspace);
+        }
+    }
+
+    #[test]
+    fn package_merge_preserves_all_deflate_alphabets_and_weight_extremes() {
+        let mut workspace = HuffmanWorkspace::default();
+        for (symbols, max_len) in [(286, 15), (30, 15), (19, 7)] {
+            assert_package_merge(&vec![0; symbols], max_len, &mut workspace);
+            assert_package_merge(&vec![1; symbols], max_len, &mut workspace);
+            assert_package_merge(&vec![u32::MAX; symbols], max_len, &mut workspace);
+
+            let mut sparse = vec![0; symbols];
+            sparse[symbols - 1] = u32::MAX;
+            assert_package_merge(&sparse, max_len, &mut workspace);
+            sparse[0] = 1;
+            assert_package_merge(&sparse, max_len, &mut workspace);
+
+            let mut skewed = vec![1; symbols];
+            skewed[symbols - 1] = u32::MAX;
+            assert_package_merge(&skewed, max_len, &mut workspace);
+            skewed.reverse();
+            assert_package_merge(&skewed, max_len, &mut workspace);
+
+            // Fibonacci weights require deeper codes without a length bound;
+            // this exercises package selection at both actual DEFLATE limits.
+            let mut limited = vec![0; symbols];
+            let (mut a, mut b) = (1u32, 1u32);
+            for frequency in limited.iter_mut().take(max_len + 3) {
+                *frequency = a;
+                (a, b) = (b, a + b);
+            }
+            let lengths = assert_package_merge(&limited, max_len, &mut workspace);
+            assert_eq!(lengths.iter().copied().max(), Some(max_len as u8));
+            limited.reverse();
+            assert_package_merge(&limited, max_len, &mut workspace);
+
+            for seed in 1..=64u32 {
+                let mut state = seed.wrapping_mul(0x9e37_79b9);
+                let frequencies: Vec<_> = (0..symbols)
+                    .map(|_| {
+                        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                        match seed % 5 {
+                            0 => state & 3,
+                            1 if state & 7 != 0 => 0,
+                            1 => state,
+                            2 => 1u32 << (state >> 27),
+                            3 => u32::MAX - (state & 3),
+                            _ => state,
+                        }
+                    })
+                    .collect();
+                assert_package_merge(&frequencies, max_len, &mut workspace);
+            }
+        }
+    }
+
+    #[test]
+    fn package_merge_preserves_sparse_high_numbered_symbols() {
+        let mut workspace = HuffmanWorkspace::default();
+        for active in [15, 16, 17, 63, 64, 65] {
+            // Keep the highest symbol present across several sparse alphabet
+            // sizes, with tied frequencies and an entirely absent prefix.
+            for frequency in [1, u32::MAX] {
+                let mut frequencies = vec![0; 286];
+                frequencies[286 - active..].fill(frequency);
+                assert_package_merge(&frequencies, 15, &mut workspace);
             }
         }
     }

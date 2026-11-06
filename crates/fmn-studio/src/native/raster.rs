@@ -21,6 +21,7 @@ use super::program::{execution_error, invalid};
 pub(super) struct NativeRaster {
     renderer: RetainedFrameRenderer,
     rgba: FrameBuffer,
+    png: fmn_codec::PngEncoder,
     camera: Option<CameraCapture>,
     base_camera: Option<CameraConfig>,
     rig_backend: Option<RenderBackendRecord>,
@@ -44,6 +45,7 @@ impl NativeRaster {
         Ok(Self {
             renderer: RetainedFrameRenderer::new(config).map_err(execution_error)?,
             rgba: FrameBuffer::new(layout),
+            png: fmn_codec::PngEncoder::new(),
             camera,
             base_camera,
             rig_backend: None,
@@ -125,7 +127,7 @@ impl NativeRaster {
         let config = self.renderer.config();
         let width = config.frame.viewport.width;
         let height = config.frame.viewport.height;
-        let bytes = fmn_codec::encode_rgba8(
+        let bytes = self.png.encode_rgba8(
             width,
             height,
             self.rgba.as_bytes(),
