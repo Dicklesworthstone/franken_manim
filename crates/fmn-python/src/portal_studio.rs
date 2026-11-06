@@ -165,8 +165,12 @@ impl Capture {
         light: [f64; 3],
         background: Option<fmn_core::color::LinearRgba>,
         light_mob: Option<Mob>,
+        samples: Option<u8>,
     ) -> PyResult<()> {
         *self.camera.frame_mut() = frame;
+        if let Some(samples) = samples {
+            self.camera.set_samples(samples);
+        }
         self.camera
             .set_light_source_position(light)
             .map_err(camera_error)?;

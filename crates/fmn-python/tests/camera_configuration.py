@@ -547,8 +547,8 @@ class CameraConfigurationTests(unittest.TestCase):
         self.assertNotEqual(actual, wrong, "a discarded configured pose must visibly fail")
 
     def test_configured_frame_animation_matches_manual_pose_at_one_four_threads(self):
-        def render(path, threads, configured, wrong=False):
-            options = dict(resolution=(96, 54), fps=4, samples=1)
+        def render(path, threads, configured, wrong=False, samples=1):
+            options = dict(resolution=(96, 54), fps=4, samples=samples)
             if configured:
                 options['frame_config'] = dict(frame_shape=(5., 3.), center_point=(2., 1., 0.), fovy=.8)
             scene = m.Scene(camera_config=options)
@@ -571,6 +571,16 @@ class CameraConfigurationTests(unittest.TestCase):
             self.assertEqual(actual, render(root/'four', 4, True))
             self.assertEqual(actual, render(root/'manual', 1, False))
             self.assertNotEqual(actual, render(root/'wrong', 1, False, True))
+            # The configured pose selects camera projection. Its edge ceiling
+            # must reach file capture, as it already reaches direct readback;
+            # dropping every request to the default makes these frames equal.
+            for samples in (2, 4):
+                with self.subTest(samples=samples):
+                    sampled = render(root/f'samples-{samples}', 1, True, samples=samples)
+                    self.assertEqual(len(sampled), 3)
+                    self.assertNotEqual(actual, sampled)
+                    self.assertEqual(sampled, render(
+                        root/f'samples-{samples}-four', 4, True, samples=samples))
 
 
     def test_lazy_camera_does_not_evaluate_frame_recipe_twice(self):

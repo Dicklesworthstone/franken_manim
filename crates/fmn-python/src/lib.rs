@@ -368,13 +368,14 @@ impl PortalRenderSession {
         light_position: [f64; 3],
         background: Option<fmn_core::color::LinearRgba>,
         light_mob: Option<Mob>,
+        samples: Option<u8>,
     ) -> PyResult<()> {
         match self {
             Self::Preview(session) => {
-                session.bind_camera(frame, light_position, background, light_mob)
+                session.bind_camera(frame, light_position, background, light_mob, samples)
             }
             Self::Frames(session) => {
-                session.bind_camera(frame, light_position, background, light_mob)
+                session.bind_camera(frame, light_position, background, light_mob, samples)
             }
             Self::Soundtrack { .. } => Ok(()),
             Self::Vector(session) => session.bind_camera(frame, background),
@@ -987,8 +988,12 @@ impl PortalFrameSession {
         light_position: [f64; 3],
         background: Option<fmn_core::color::LinearRgba>,
         light_mob: Option<Mob>,
+        samples: Option<u8>,
     ) -> PyResult<()> {
         *self.camera.frame_mut() = frame;
+        if let Some(samples) = samples {
+            self.camera.set_samples(samples);
+        }
         self.camera
             .set_light_source_position(light_position)
             .map_err(camera_error)?;
@@ -8670,6 +8675,13 @@ fn synchronize_portal_camera(scene: &Bound<'_, PyScene>) -> PyResult<()> {
         return Ok(());
     }
     let camera = scene.getattr("camera")?;
+    // Use the same validated capture policy as Camera.capture_snapshot.
+    // File and Studio sessions start before the scene camera is synchronized.
+    let samples = camera
+        .getattr("_core")?
+        .extract::<PyRef<'_, PyCameraCore>>()?
+        .camera
+        .samples();
     let core = camera.getattr("frame")?.getattr("_core")?;
     let frame = core
         .extract::<PyRef<'_, PyCameraFrameCore>>()?
@@ -8715,7 +8727,13 @@ fn synchronize_portal_camera(scene: &Bound<'_, PyScene>) -> PyResult<()> {
         .lock()
         .map_err(|_| PyRuntimeError::new_err("portal render session lock was poisoned"))?;
     if let Some(session) = render.as_mut() {
-        session.bind_camera(frame, light_position, Some(background), light_mob)?;
+        session.bind_camera(
+            frame,
+            light_position,
+            Some(background),
+            light_mob,
+            Some(samples),
+        )?;
     }
     Ok(())
 }
@@ -9011,7 +9029,7 @@ impl PyScene {
                 .map_err(|_| PyRuntimeError::new_err("portal render session lock was poisoned"))?
                 .as_mut()
                 .ok_or_else(|| PyRuntimeError::new_err("no portal render generation is active"))?
-                .bind_camera(camera.snapshot(slf.py())?, light_position, None, None)?,
+                .bind_camera(camera.snapshot(slf.py())?, light_position, None, None, None)?,
             (None, None) => {}
             _ => {
                 return Err(PyValueError::new_err(
@@ -15141,6 +15159,24 @@ mod tests {
             py.run(source.as_c_str(), Some(globals), Some(globals))
                 .inspect_err(|error| error.print(py))
                 .expect("decoded native GIF/y4m/WAV acceptance suite");
+        });
+    }
+
+    #[test]
+    fn configured_camera_frame_and_samples_reach_native_outputs() {
+        crate::with_python_test_module("configured camera capture", |py, _module, globals| {
+            let source = CString::new(concat!(
+                include_str!("../tests/camera_configuration.py"),
+                "\n_suite = unittest.TestSuite([CameraConfigurationTests(",
+                "'test_configured_frame_animation_matches_manual_pose_at_one_four_threads')])\n",
+                "_result = unittest.TextTestRunner(verbosity=2).run(_suite)\n",
+                "assert _result.testsRun == 1 and _result.wasSuccessful(), ",
+                "'configured camera capture acceptance failed'\n",
+            ))
+            .expect("camera configuration suite contains no NUL");
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .expect("configured camera frame and samples affect native output");
         });
     }
 

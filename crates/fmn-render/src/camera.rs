@@ -731,6 +731,14 @@ impl Camera {
         self.samples
     }
 
+    /// Change the compatibility sample request and invalidate projected captures.
+    pub fn set_samples(&mut self, samples: u8) {
+        if self.samples != samples {
+            self.samples = samples;
+            self.revision = self.revision.wrapping_add(1);
+        }
+    }
+
     /// Samples are a quality hint, never a semantic full-frame-MSAA switch.
     #[must_use]
     pub const fn aa_policy(&self) -> AaPolicy {
@@ -1537,6 +1545,25 @@ mod tests {
         assert_eq!(camera.frame().height(), FRAME_HEIGHT);
         assert!(close(camera.frame().width(), FRAME_HEIGHT * 4.0 / 3.0));
         assert!(close(camera.frame().aspect_ratio(), 4.0 / 3.0));
+    }
+
+    #[test]
+    fn sample_updates_invalidate_capture_policy_without_changing_the_frame() {
+        let mut camera = Camera::default();
+        let frame = camera.frame().clone();
+        let revision = camera.revision();
+        camera.set_samples(2);
+        assert_eq!(camera.edge_sample_limit(), EdgeSampleLimit::TwoByTwo);
+        assert!(camera.revision() > revision);
+        assert_eq!(camera.frame(), &frame);
+        let revision = camera.revision();
+        camera.set_samples(2);
+        assert_eq!(camera.revision(), revision);
+        camera.set_samples(4);
+        assert_eq!(camera.edge_sample_limit(), EdgeSampleLimit::FourByFour);
+        assert!(camera.revision() > revision);
+        camera.set_samples(0);
+        assert_eq!(camera.edge_sample_limit(), EdgeSampleLimit::Native);
     }
 
     #[test]
