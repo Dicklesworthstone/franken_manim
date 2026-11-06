@@ -119,6 +119,10 @@ pub enum StageError {
     /// [`Stage::set_frame_shape`] with a side that is not finite and
     /// positive. The frame is unchanged.
     InvalidFrameShape,
+    /// [`Stage::wag`] has non-finite inputs, an undefined projection or power,
+    /// or a result that cannot be represented by finite point records.
+    /// The whole family is unchanged.
+    InvalidWag(&'static str),
     /// A record sizing proof refused the operation (fm-vek.2) — the
     /// target record count and schema stride cannot be addressed. The
     /// buffer is untouched.
@@ -172,6 +176,7 @@ impl std::fmt::Display for StageError {
             Self::InvalidFrameShape => {
                 write!(f, "frame width and height must be finite and positive")
             }
+            Self::InvalidWag(reason) => write!(f, "wag deformation refused: {reason}"),
             Self::Record(err) => {
                 write!(f, "record sizing refused: {err}")
             }

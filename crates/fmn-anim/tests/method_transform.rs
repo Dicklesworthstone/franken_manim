@@ -53,6 +53,40 @@ fn explicit_axis_curves_the_native_builder_in_the_xz_plane() {
 }
 
 #[test]
+fn native_wag_interpolates_from_frozen_start_to_deformed_target() {
+    let mut stage = Stage::new();
+    let original = [[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 2.0, 0.0]];
+    let mob = stage.add(Mobject::vector_from_points(&original));
+    let builder = mob
+        .animate()
+        .set_anim_args(AnimateArgs {
+            rate_func: Some(rate::linear),
+            ..AnimateArgs::default()
+        })
+        .unwrap()
+        .wag([4.0, 0.0, 0.0], [0.0, 3.0, 0.0], 2.0)
+        .unwrap();
+    let mut animation = prepare_animation(builder, &mut stage).unwrap();
+    animation.begin(&mut stage).unwrap();
+    assert_eq!(stage.get_points(mob).unwrap(), original);
+    // Seeking backwards must reconstruct from the start, not compound wag.
+    for alpha in [1.0, 0.25, 0.5, 0.0] {
+        animation.interpolate(&mut stage, alpha);
+        let expected = [[0.0, 0.0, 0.0], [alpha, 1.0, 0.0], [4.0 * alpha, 2.0, 0.0]];
+        let actual = stage.get_points(mob).unwrap();
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.into_iter().zip(expected) {
+            close(actual, expected);
+        }
+    }
+    animation.finish(&mut stage);
+    assert_eq!(
+        stage.get_points(mob).unwrap(),
+        [[0.0, 0.0, 0.0], [1.0, 1.0, 0.0], [4.0, 2.0, 0.0],]
+    );
+}
+
+#[test]
 fn a_released_host_view_does_not_compound_an_intermediate_placement() {
     let mut stage = Stage::new();
     let mob = square(&mut stage);

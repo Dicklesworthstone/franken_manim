@@ -659,3 +659,188 @@ fn replace_and_surround_keep_identity_geometry_and_reference_buffer_semantics() 
     assert!(stage.get_width(source) > 0.0);
     assert!((stage.get_width(source) / width - 1e-8).abs() < 1e-15);
 }
+
+#[test]
+fn wag_normalizes_each_members_world_space_projection() {
+    let mut stage = Stage::new();
+    let group = stage.add(Mobject::group(vec![
+        Mobject::from_points(&[[0.0, 2.0, 0.0], [0.0, 3.0, 0.0], [0.0, 6.0, 0.0]]),
+        Mobject::from_points(&[[0.0, 10.0, 0.0], [0.0, 12.0, 0.0], [0.0, 14.0, 0.0]]),
+    ]));
+    let children = stage.get(group).unwrap().submobjects().to_vec();
+    stage.shift(group, [5.0, -2.0, 1.0]);
+    let _ = stage.get_bounding_box(group);
+    stage
+        .wag(group, [4.0, 0.0, 0.0], [0.0, 3.0, 0.0], 2.0)
+        .unwrap();
+    // The first member's middle point is at 1/4 of its own extent; the
+    // second's is at 1/2. Their absolute positions do not share a denominator.
+    assert_eq!(
+        stage.get_points(children[0]).unwrap(),
+        [[5.0, 0.0, 1.0], [5.25, 1.0, 1.0], [9.0, 4.0, 1.0],]
+    );
+    assert_eq!(
+        stage.get_points(children[1]).unwrap(),
+        [[5.0, 8.0, 1.0], [6.0, 10.0, 1.0], [9.0, 12.0, 1.0],]
+    );
+    assert_eq!(stage.get_bounding_box(group).min, [5.0, 0.0, 1.0]);
+    assert_eq!(stage.get_bounding_box(group).max, [9.0, 12.0, 1.0]);
+    for child in children {
+        assert_eq!(
+            stage.placement(child),
+            Some(fmn_mobject::Placement::IDENTITY)
+        );
+    }
+}
+
+#[test]
+fn wag_reversed_axis_fractional_and_zero_powers_keep_reference_formula() {
+    let mut stage = Stage::new();
+    let mob = stage.add(Mobject::from_points(&[
+        [0.0, 0.0, 0.0],
+        [0.0, 3.0, 0.0],
+        [0.0, 4.0, 0.0],
+    ]));
+    stage
+        .wag(mob, [2.0, 0.0, 0.0], [0.0, -7.0, 0.0], 0.5)
+        .unwrap();
+    assert_eq!(
+        stage.get_points(mob).unwrap(),
+        [[2.0, 0.0, 0.0], [1.0, 3.0, 0.0], [0.0, 4.0, 0.0],]
+    );
+    stage.wag(mob, [0.0, 1.0, -2.0], UP, 0.0).unwrap();
+    assert_eq!(
+        stage.get_points(mob).unwrap(),
+        [[2.0, 1.0, -2.0], [1.0, 4.0, -2.0], [0.0, 5.0, -2.0],]
+    );
+
+    let empty = stage.add(Mobject::group(vec![Mobject::new()]));
+    stage.shift(empty, [2.0, 3.0, 4.0]);
+    let before = stage.snapshot_bytes().unwrap();
+    stage.wag(empty, RIGHT, DOWN, 1.0).unwrap();
+    assert_eq!(stage.snapshot_bytes().unwrap(), before);
+}
+
+#[test]
+fn wag_visits_shared_descendants_once_and_keeps_live_point_views_attached() {
+    let mut stage = Stage::new();
+    let group = stage.add(Mobject::new());
+    let nested = stage.add(Mobject::new());
+    let leaf = stage.add(Mobject::from_points(&[
+        [0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 2.0, 0.0],
+    ]));
+    stage.attach(group, leaf).unwrap();
+    stage.attach(group, nested).unwrap();
+    stage.attach(nested, leaf).unwrap();
+    stage.shift(group, [3.0, 2.0, 0.0]);
+    let view = stage
+        .get_mut(leaf)
+        .unwrap()
+        .buffer
+        .export_field_view("point", true)
+        .unwrap();
+    let rgba = stage.get(leaf).unwrap().buffer.read_column("rgba");
+    stage.wag(group, RIGHT, UP, 1.0).unwrap();
+    assert_eq!(
+        stage.get_points(leaf).unwrap(),
+        [[3.0, 2.0, 0.0], [3.5, 3.0, 0.0], [4.0, 4.0, 0.0],]
+    );
+    assert!(view.is_attached_to(&stage.get(leaf).unwrap().buffer));
+    assert_eq!(view.read(1, "point").unwrap(), [3.5, 3.0, 0.0]);
+    assert_eq!(stage.get(leaf).unwrap().buffer.read_column("rgba"), rgba);
+}
+
+#[test]
+fn wag_refuses_invalid_inputs_and_late_family_failures_before_mutation() {
+    use fmn_mobject::StageError;
+    let mut stage = Stage::new();
+    let group = stage.add(Mobject::group(vec![
+        Mobject::from_points(&[[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
+        Mobject::from_points(&[[0.0, 0.0, 0.0], [0.0, 4.0, 0.0]]),
+    ]));
+    let before = stage.snapshot_bytes().unwrap();
+    let topology = stage.topology_epoch();
+    for (direction, axis, power) in [
+        ([f64::NAN, 0.0, 0.0], UP, 1.0),
+        (RIGHT, [0.0, f64::INFINITY, 0.0], 1.0),
+        (RIGHT, UP, f64::NAN),
+        (RIGHT, UP, f64::INFINITY),
+        (RIGHT, ORIGIN, 1.0),
+        (RIGHT, UP, -1.0),
+        ([f64::MAX, 0.0, 0.0], UP, 1.0),
+        (RIGHT, [0.0, f64::MAX, 0.0], 1.0),
+    ] {
+        assert!(matches!(
+            stage.wag(group, direction, axis, power),
+            Err(StageError::InvalidWag(_))
+        ));
+        assert_eq!(stage.snapshot_bytes().unwrap(), before);
+        assert_eq!(stage.topology_epoch(), topology);
+    }
+    let late = stage.get(group).unwrap().submobjects()[1];
+    stage
+        .set_points(late, &[[0.0, 4.0, 0.0], [2.0, 4.0, 0.0]])
+        .unwrap();
+    let before = stage.snapshot_bytes().unwrap();
+    let error = stage.wag(group, RIGHT, UP, 1.0).err().unwrap();
+    assert!(error.to_string().contains("nonzero axis projection extent"));
+    assert_eq!(
+        stage.snapshot_bytes().unwrap(),
+        before,
+        "earlier valid members remain unchanged"
+    );
+
+    let foreign = Stage::new().add(Mobject::new());
+    assert!(matches!(
+        stage.wag(foreign, RIGHT, UP, 1.0),
+        Err(StageError::StaleHandle)
+    ));
+}
+
+#[test]
+fn off_screen_uses_whole_family_and_treats_frame_contact_as_visible() {
+    let mut stage = Stage::new();
+    stage.set_frame_shape([20.0, 10.0]).unwrap();
+    let mob = stage.add(Mobject::from_points(&[[-1.0, -1.0, 0.0], [1.0, 1.0, 0.0]]));
+    for (contact, outside) in [
+        ([11.0, 0.0, 0.0], [0.25, 0.0, 0.0]),
+        ([-11.0, 0.0, 0.0], [-0.25, 0.0, 0.0]),
+        ([0.0, 6.0, 0.0], [0.0, 0.25, 0.0]),
+        ([0.0, -6.0, 0.0], [0.0, -0.25, 0.0]),
+    ] {
+        stage.move_to(mob, contact, ORIGIN);
+        assert!(!stage.is_off_screen(mob));
+        stage.shift(mob, outside);
+        assert!(stage.is_off_screen(mob));
+    }
+    let group = stage.add(Mobject::group(vec![Mobject::from_points(&[ORIGIN])]));
+    stage.attach(group, mob).unwrap();
+    assert!(
+        !stage.is_off_screen(group),
+        "a visible child keeps the family visible"
+    );
+}
+
+#[test]
+fn fixed_in_frame_aliases_respect_recursion_and_snapshot_restore() {
+    let mut stage = Stage::new();
+    let parent = stage.add(Mobject::group(vec![Mobject::from_points(&[ORIGIN])]));
+    let child = stage.get(parent).unwrap().submobjects()[0];
+    stage.fix_in_frame(parent, false);
+    assert!(stage.is_fixed_in_frame(parent));
+    assert!(!stage.is_fixed_in_frame(child));
+    stage.fix_in_frame(parent, true);
+    let fixed = stage.snapshot();
+    stage.unfix_from_frame(parent, false);
+    assert!(!stage.is_fixed_in_frame(parent));
+    assert!(stage.is_fixed_in_frame(child));
+    stage.unfix_from_frame(parent, true);
+    assert!(!stage.is_fixed_in_frame(child));
+    stage.restore(&fixed);
+    assert!(stage.is_fixed_in_frame(parent));
+    assert!(stage.is_fixed_in_frame(child));
+    stage.set_fixed_in_frame(child, 0.25, false);
+    assert!(stage.is_fixed_in_frame(child));
+}
