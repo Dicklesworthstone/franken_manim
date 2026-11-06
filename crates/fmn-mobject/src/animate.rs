@@ -8,9 +8,10 @@
 //! `align_to`, `to_edge`, `to_corner`, `center`, `set_x/y/z`, `match_*`,
 //! `arrange`, `arrange_to_fit_*`, `space_out_submobjects`, `replace`,
 //! `surround`), transforms (`scale`, `stretch`, `rotate` about a point or axis,
-//! `flip`, `apply_matrix`), size (`set_width/height/depth`, `set_shape`,
+//! `flip`, `apply_matrix`, `wag`), size (`set_width/height/depth`, `set_shape`,
 //! `set_min/max_*`), style
-//! (`set_color`, `set_fill`, `set_stroke`, `set_opacity`, `fade`), and value
+//! (`set_color`, `set_fill`, `set_stroke`, `set_opacity`, `fade`,
+//! `fix_in_frame`, `unfix_from_frame`), and value
 //! trackers. Arbitrary callables (`apply_function`, `become`) are not
 //! recordable as `Copy` commands; they are ordinary animations instead.
 //!
@@ -43,6 +44,7 @@
 //!   unrepresentable at the type level. fmn-anim's `Animation` joins the
 //!   same contract at fm-67a (§9.1 shares it).
 
+use crate::StageError;
 use crate::placement::Placement;
 use crate::positional::PosTarget;
 use crate::stage::{Mob, Stage};
@@ -149,6 +151,10 @@ pub enum AnimateCommand {
     Flip(Vec3),
     /// `apply_matrix(matrix)` about the origin, the Reference's default.
     ApplyMatrix(Mat3),
+    /// Member-local normalized-axis deformation: `(direction, axis, exponent)`.
+    Wag(Vec3, Vec3, f64),
+    /// Camera-relative placement: `(fixed_in_frame_mix, recurse)`.
+    SetFixedInFrame(f64, bool),
     /// `set_x` / `set_y` / `set_z` of the box center: `(dim, value)`.
     SetCoord(usize, f64),
     /// `match_x` / `match_y` / `match_z`: `(other, dim)`, read at build.
@@ -194,6 +200,9 @@ pub enum AnimateError {
     /// A new layout command has an invalid dimension or undefined divisor.
     /// Rejected before allocating or changing a target copy.
     InvalidLayoutArgument(&'static str),
+    /// A wag deformation is undefined for the target geometry. The live
+    /// stage, including its target allocations, is unchanged.
+    Wag(StageError),
     /// A live source lacks the tracker encoding required by a command.
     TrackerKindMismatch {
         /// The live, but incompatible, source.
@@ -219,6 +228,7 @@ impl std::fmt::Display for AnimateError {
             Self::InvalidLayoutArgument(message) => {
                 write!(f, "invalid animation layout: {message}")
             }
+            Self::Wag(error) => write!(f, "animation wag failed: {error}"),
             Self::TrackerKindMismatch { expected, .. } => {
                 write!(f, "animate command requires a {expected} value tracker")
             }
@@ -640,6 +650,32 @@ impl AnimBuilder {
         self.push(AnimateCommand::ApplyMatrix(matrix))
     }
 
+    /// Record [`Stage::wag`], using the geometry produced by earlier commands
+    /// in this chain. Invalid projections or non-finite results fail at build
+    /// without changing the live stage.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn wag(self, direction: Vec3, axis: Vec3, wag_factor: f64) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::Wag(direction, axis, wag_factor))
+    }
+
+    /// Record [`Stage::fix_in_frame`], optionally across the family.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn fix_in_frame(self, recurse: bool) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::SetFixedInFrame(1.0, recurse))
+    }
+
+    /// Record [`Stage::unfix_from_frame`], optionally across the family.
+    ///
+    /// # Errors
+    /// [`AnimateError::OverrideNotChainable`] after an override.
+    pub fn unfix_from_frame(self, recurse: bool) -> Result<Self, AnimateError> {
+        self.push(AnimateCommand::SetFixedInFrame(0.0, recurse))
+    }
+
     /// Record `set_x`.
     ///
     /// # Errors
@@ -848,6 +884,7 @@ impl AnimBuilder {
     /// inside a command; [`AnimateError::TrackerKindMismatch`] for a scalar
     /// command on a non-scalar source or a complex command on a non-complex one.
     /// [`AnimateError::InvalidLayoutArgument`] for an undefined layout.
+    /// [`AnimateError::Wag`] for undefined deformation geometry.
     pub fn build(self, stage: &mut Stage) -> Result<BuiltAnimate, AnimateError> {
         // Validate every Mob reference before mutating anything.
         if !stage.contains(self.source) {
@@ -920,12 +957,24 @@ impl AnimBuilder {
                 _ => {}
             }
         }
-        let target = stage
-            .copy_family(self.source)
-            .map_err(|_| AnimateError::StaleHandle(self.source))?;
-        for command in &self.commands {
-            apply(stage, target, *command)?;
-        }
+        let target = if self
+            .commands
+            .iter()
+            .any(|command| matches!(command, AnimateCommand::Wag(..)))
+        {
+            // A preceding command can create or collapse the projection that
+            // wag normalizes. Realize this chain in an independent CoW arena:
+            // checking only the original source would reject valid chains,
+            // while applying to a live target would leave allocations behind
+            // on failure. External Mob arguments retain their handle domain.
+            let mut prepared = stage.snapshot().materialize();
+            let target = build_target(&mut prepared, self.source, &self.commands)?;
+            prepared
+                .copy_into(target, stage)
+                .map_err(|_| AnimateError::StaleHandle(self.source))?
+        } else {
+            build_target(stage, self.source, &self.commands)?
+        };
         Ok(BuiltAnimate {
             source: self.source,
             target,
@@ -933,6 +982,20 @@ impl AnimBuilder {
             overridden: self.overridden,
         })
     }
+}
+
+fn build_target(
+    stage: &mut Stage,
+    source: Mob,
+    commands: &[AnimateCommand],
+) -> Result<Mob, AnimateError> {
+    let target = stage
+        .copy_family(source)
+        .map_err(|_| AnimateError::StaleHandle(source))?;
+    for command in commands {
+        apply(stage, target, *command)?;
+    }
+    Ok(target)
 }
 
 fn apply(stage: &mut Stage, target: Mob, command: AnimateCommand) -> Result<(), AnimateError> {
@@ -1027,6 +1090,14 @@ fn apply(stage: &mut Stage, target: Mob, command: AnimateCommand) -> Result<(), 
         }
         AnimateCommand::ApplyMatrix(matrix) => {
             stage.apply_affine(target, Placement::new(matrix, [0.0; 3]));
+        }
+        AnimateCommand::Wag(direction, axis, wag_factor) => {
+            stage
+                .wag(target, direction, axis, wag_factor)
+                .map_err(AnimateError::Wag)?;
+        }
+        AnimateCommand::SetFixedInFrame(value, recurse) => {
+            stage.set_fixed_in_frame(target, value, recurse);
         }
         AnimateCommand::SetCoord(dim, value) => {
             stage.set_coord(target, value, dim, fmn_core::constants::ORIGIN);

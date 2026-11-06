@@ -31,8 +31,8 @@ pub use gif::{GifError, GifStreamEncoder, encode_gif};
 pub use inflate::{InflateError, inflate as inflate_bytes, zlib_decompress};
 pub use jpeg::{DecodedJpeg, JpegError, JpegLimits, decode as decode_jpeg};
 pub use png::{
-    DecodedPng, PngError, PngLimits, decode as decode_png, encode_png_sequence, encode_rgba8,
-    encode_rgba8_segmented,
+    DecodedPng, PngEncoder, PngError, PngLimits, decode as decode_png, encode_png_sequence,
+    encode_rgba8, encode_rgba8_segmented,
 };
 pub use wav::{SampleFormat, WavAudio, WavError, WavLimits, decode_wav, encode_wav};
 pub use y4m::{

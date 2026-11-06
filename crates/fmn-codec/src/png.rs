@@ -35,8 +35,8 @@
 //! (`IHDR`, `sRGB`, `gAMA`, `IDAT`, `IEND`) — the same image and level
 //! produce the same file on every platform (self-goldens depend on it).
 
-use crate::checksum::crc32;
-use crate::deflate::{CompressionLevel, zlib_compress};
+use crate::checksum::{Crc32, crc32};
+use crate::deflate::{CompressionLevel, DeflateWorkspace};
 use crate::inflate::{InflateError, zlib_decompress};
 use std::simd::cmp::SimdPartialOrd;
 use std::simd::num::{SimdInt, SimdUint};
@@ -957,10 +957,70 @@ fn write_chunk(out: &mut Vec<u8>, name: &[u8; 4], body: &[u8]) {
     out.extend_from_slice(&(body.len() as u32).to_be_bytes());
     out.extend_from_slice(name);
     out.extend_from_slice(body);
-    let mut tagged = Vec::with_capacity(4 + body.len());
-    tagged.extend_from_slice(name);
-    tagged.extend_from_slice(body);
-    out.extend_from_slice(&crc32(&tagged).to_be_bytes());
+    let mut crc = Crc32::new();
+    crc.update(name);
+    crc.update(body);
+    out.extend_from_slice(&crc.value().to_be_bytes());
+}
+
+/// Reusable canonical PNG encoder for a frame stream.
+///
+/// Filter rows, filtered input, compression dictionaries, Huffman workspaces
+/// and parallel segment outputs retain their capacity across frames. Only the
+/// returned PNG changes ownership. Every call resets all content-dependent
+/// state, so bytes are identical to the one-shot encoders regardless of prior
+/// dimensions, pixels, compression levels or worker counts.
+#[derive(Default)]
+pub struct PngEncoder {
+    filtered: Vec<u8>,
+    best: Vec<u8>,
+    candidate: Vec<u8>,
+    idat: Vec<u8>,
+    deflaters: Vec<DeflateWorkspace>,
+    segments: Vec<Vec<u8>>,
+}
+
+impl PngEncoder {
+    /// Start an encoder with no allocated scratch storage.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn filter(&mut self, width: u32, height: u32, rgba: &[u8]) {
+        filtered_stream(
+            width,
+            height,
+            rgba,
+            &mut self.filtered,
+            &mut self.best,
+            &mut self.candidate,
+        );
+    }
+
+    /// Encode the ordinary (unsegmented) canonical PNG form.
+    ///
+    /// # Panics
+    /// As [`encode_rgba8`].
+    #[must_use]
+    pub fn encode_rgba8(
+        &mut self,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+        level: CompressionLevel,
+    ) -> Vec<u8> {
+        self.filter(width, height, rgba);
+        self.deflaters.resize_with(1, DeflateWorkspace::default);
+        self.idat.clear();
+        self.idat
+            .extend_from_slice(&crate::deflate::zlib_header(level));
+        self.idat
+            .extend_from_slice(self.deflaters[0].encode_segment(&[], &self.filtered, level, true));
+        self.idat
+            .extend_from_slice(&crate::checksum::adler32(&self.filtered).to_be_bytes());
+        assemble_png(width, height, &self.idat)
+    }
 }
 
 /// Encode canonical RGBA8 (`width × height × 4` bytes, tight rows,
@@ -972,21 +1032,28 @@ fn write_chunk(out: &mut Vec<u8>, name: &[u8; 4], body: &[u8]) {
 /// bug, not an input condition.
 #[must_use]
 pub fn encode_rgba8(width: u32, height: u32, rgba: &[u8], level: CompressionLevel) -> Vec<u8> {
-    let filtered = filtered_stream(width, height, rgba);
-    assemble_png(width, height, &zlib_compress(&filtered, level))
+    PngEncoder::new().encode_rgba8(width, height, rgba, level)
 }
 
 /// Min-SAD per-row filter selection into the filtered byte stream.
-fn filtered_stream(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
+fn filtered_stream(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    filtered: &mut Vec<u8>,
+    best: &mut Vec<u8>,
+    candidate: &mut Vec<u8>,
+) {
     assert_eq!(
         rgba.len(),
         width as usize * height as usize * 4,
         "rgba buffer does not match dimensions"
     );
     let line = width as usize * 4;
-    let mut filtered = Vec::with_capacity((line + 1) * height as usize);
-    let mut best = vec![0u8; line];
-    let mut candidate = vec![0u8; line];
+    filtered.clear();
+    filtered.reserve((line + 1) * height as usize);
+    best.resize(line, 0);
+    candidate.resize(line, 0);
     for y in 0..height as usize {
         let row = &rgba[y * line..(y + 1) * line];
         let prev = if y == 0 {
@@ -998,7 +1065,7 @@ fn filtered_stream(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
         let mut best_filter = 0u8;
         let mut best_score = u64::MAX;
         for filter in 0..=4u8 {
-            apply_filter(filter, row, prev, 4, &mut candidate);
+            apply_filter(filter, row, prev, 4, candidate);
             let score: u64 = candidate
                 .iter()
                 .map(|&b| u64::from((b as i8).unsigned_abs()))
@@ -1006,22 +1073,21 @@ fn filtered_stream(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
             if score < best_score {
                 best_score = score;
                 best_filter = filter;
-                std::mem::swap(&mut best, &mut candidate);
+                std::mem::swap(best, candidate);
             }
         }
         filtered.push(best_filter);
-        filtered.extend_from_slice(&best);
+        filtered.extend_from_slice(best);
     }
-    filtered
 }
 
 fn assemble_png(width: u32, height: u32, idat: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(idat.len() + 86);
     out.extend_from_slice(&SIGNATURE);
-    let mut ihdr = Vec::with_capacity(13);
-    ihdr.extend_from_slice(&width.to_be_bytes());
-    ihdr.extend_from_slice(&height.to_be_bytes());
-    ihdr.extend_from_slice(&[8, 6, 0, 0, 0]); // 8-bit RGBA, no interlace
+    let mut ihdr = [0; 13];
+    ihdr[..4].copy_from_slice(&width.to_be_bytes());
+    ihdr[4..8].copy_from_slice(&height.to_be_bytes());
+    ihdr[8..].copy_from_slice(&[8, 6, 0, 0, 0]); // 8-bit RGBA, no interlace
     write_chunk(&mut out, b"IHDR", &ihdr);
     write_chunk(&mut out, b"sRGB", &[0]); // perceptual
     write_chunk(&mut out, b"gAMA", &45455u32.to_be_bytes());
@@ -1086,59 +1152,83 @@ pub fn encode_rgba8_segmented_parallel(
     level: CompressionLevel,
     threads: usize,
 ) -> Vec<u8> {
-    let filtered = filtered_stream(width, height, rgba);
-    let mut idat = crate::deflate::zlib_header(level).to_vec();
-    let count = filtered.len().div_ceil(SEQUENCE_SEGMENT_BYTES).max(1);
-    let workers = effective_workers(threads).max(1).min(count);
-    if workers == 1 {
-        for i in 0..count {
-            let start = i * SEQUENCE_SEGMENT_BYTES;
-            let end = (start + SEQUENCE_SEGMENT_BYTES).min(filtered.len());
-            idat.extend_from_slice(&crate::deflate::deflate_segment(
-                &filtered[..start],
-                &filtered[start..end],
-                level,
-                i + 1 == count,
-            ));
-        }
-    } else {
-        let mut segments = vec![Vec::new(); count];
-        std::thread::scope(|scope| {
-            let mut handles = Vec::with_capacity(workers);
-            for worker in 0..workers {
-                let filtered = &filtered;
-                handles.push(scope.spawn(move || {
-                    let mut produced = Vec::new();
-                    let mut index = worker;
-                    while index < count {
-                        let start = index * SEQUENCE_SEGMENT_BYTES;
-                        let end = (start + SEQUENCE_SEGMENT_BYTES).min(filtered.len());
-                        produced.push((
-                            index,
-                            crate::deflate::deflate_segment(
+    PngEncoder::new().encode_rgba8_segmented_parallel(width, height, rgba, level, threads)
+}
+
+impl PngEncoder {
+    /// Encode one canonical segmented frame with reusable per-worker scratch.
+    /// Segment boundaries and output bytes are independent of `threads`.
+    ///
+    /// # Panics
+    /// As [`encode_rgba8`].
+    #[must_use]
+    pub fn encode_rgba8_segmented_parallel(
+        &mut self,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+        level: CompressionLevel,
+        threads: usize,
+    ) -> Vec<u8> {
+        self.filter(width, height, rgba);
+        let Self {
+            filtered,
+            idat,
+            deflaters,
+            segments,
+            ..
+        } = self;
+        idat.clear();
+        idat.extend_from_slice(&crate::deflate::zlib_header(level));
+        let count = filtered.len().div_ceil(SEQUENCE_SEGMENT_BYTES).max(1);
+        let workers = effective_workers(threads).max(1).min(count);
+        deflaters.resize_with(workers, DeflateWorkspace::default);
+        if workers == 1 {
+            for i in 0..count {
+                let start = i * SEQUENCE_SEGMENT_BYTES;
+                let end = (start + SEQUENCE_SEGMENT_BYTES).min(filtered.len());
+                idat.extend_from_slice(deflaters[0].encode_segment(
+                    &filtered[..start],
+                    &filtered[start..end],
+                    level,
+                    i + 1 == count,
+                ));
+            }
+        } else {
+            segments.resize_with(count, Vec::new);
+            let filtered = filtered.as_slice();
+            std::thread::scope(|scope| {
+                let mut remaining = segments.as_mut_slice();
+                let mut first = 0;
+                for (worker, workspace) in deflaters.iter_mut().enumerate() {
+                    let len = count / workers + usize::from(worker < count % workers);
+                    let (outputs, tail) = remaining.split_at_mut(len);
+                    remaining = tail;
+                    let begin = first;
+                    first += len;
+                    scope.spawn(move || {
+                        for (offset, output) in outputs.iter_mut().enumerate() {
+                            let index = begin + offset;
+                            let start = index * SEQUENCE_SEGMENT_BYTES;
+                            let end = (start + SEQUENCE_SEGMENT_BYTES).min(filtered.len());
+                            output.clear();
+                            output.extend_from_slice(workspace.encode_segment(
                                 &filtered[..start],
                                 &filtered[start..end],
                                 level,
                                 index + 1 == count,
-                            ),
-                        ));
-                        index += workers;
-                    }
-                    produced
-                }));
-            }
-            for handle in handles {
-                for (index, bytes) in handle.join().expect("png segment worker panicked") {
-                    segments[index] = bytes;
+                            ));
+                        }
+                    });
                 }
+            });
+            for segment in segments.iter() {
+                idat.extend_from_slice(segment);
             }
-        });
-        for segment in segments {
-            idat.extend_from_slice(&segment);
         }
+        idat.extend_from_slice(&crate::checksum::adler32(filtered).to_be_bytes());
+        assemble_png(width, height, idat)
     }
-    idat.extend_from_slice(&crate::checksum::adler32(&filtered).to_be_bytes());
-    assemble_png(width, height, &idat)
 }
 
 /// Encode a frame sequence in the canonical segmented form, frames
@@ -1157,9 +1247,10 @@ pub fn encode_png_sequence(
 ) -> Vec<Vec<u8>> {
     let workers = effective_workers(threads).max(1).min(frames.len().max(1));
     if workers <= 1 {
+        let mut encoder = PngEncoder::new();
         return frames
             .iter()
-            .map(|frame| encode_rgba8_segmented(width, height, frame, level))
+            .map(|frame| encoder.encode_rgba8_segmented_parallel(width, height, frame, level, 1))
             .collect();
     }
     let mut out: Vec<Vec<u8>> = vec![Vec::new(); frames.len()];
@@ -1167,12 +1258,19 @@ pub fn encode_png_sequence(
         let mut handles = Vec::with_capacity(workers);
         for worker in 0..workers {
             handles.push(scope.spawn(move || {
+                let mut encoder = PngEncoder::new();
                 let mut produced = Vec::new();
                 let mut index = worker;
                 while index < frames.len() {
                     produced.push((
                         index,
-                        encode_rgba8_segmented(width, height, frames[index], level),
+                        encoder.encode_rgba8_segmented_parallel(
+                            width,
+                            height,
+                            frames[index],
+                            level,
+                            1,
+                        ),
                     ));
                     index += workers;
                 }

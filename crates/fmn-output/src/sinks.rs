@@ -18,7 +18,7 @@ use crate::{
     FrameSink, JobLimits, MixReport, PreparedFfmpegArtifact, SinkBinding, SinkFailure, SinkWrite,
     StreamingEncode, VideoJob,
 };
-use fmn_codec::png::encode_rgba8_segmented_parallel;
+use fmn_codec::png::PngEncoder;
 use fmn_codec::y4m::{append_y4m_frame_nv12, y4m_header};
 use fmn_codec::{CompressionLevel, GifStreamEncoder, SampleFormat, Y4mColorspace};
 use fmn_frame::{FrameBuffer, FrameLayout, PixelFormat};
@@ -639,6 +639,7 @@ pub struct PngSink {
     expected_layout: FrameLayout,
     state: FrameState,
     scratch: Vec<u8>,
+    encoder: PngEncoder,
     single_encoded: Option<Vec<u8>>,
     directory_writer: Option<Box<dyn AtomicDirectoryWriter>>,
     prepared_file: Option<Box<dyn PreparedAtomicFile>>,
@@ -686,6 +687,7 @@ impl PngSink {
             expected_layout,
             state,
             scratch: Vec::with_capacity(scratch_bytes),
+            encoder: PngEncoder::new(),
             single_encoded: None,
             directory_writer: None,
             prepared_file: None,
@@ -755,7 +757,7 @@ impl PngSink {
                 .profile
                 .as_ref()
                 .and_then(|profile| profile.span(Some(sequence), ProfilePhase::Encode));
-            encode_rgba8_segmented_parallel(
+            self.encoder.encode_rgba8_segmented_parallel(
                 self.config.width,
                 self.config.height,
                 &self.scratch,
@@ -1119,6 +1121,7 @@ impl PngEncodePool {
             let spawned = std::thread::Builder::new()
                 .name(format!("fmn-png-encode-{worker}"))
                 .spawn(move || {
+                    let mut encoder = PngEncoder::new();
                     loop {
                         let job = job_rx.lock().unwrap_or_else(PoisonError::into_inner).recv();
                         let Ok(PngEncodeJob { sequence, rgba }) = job else {
@@ -1129,7 +1132,7 @@ impl PngEncodePool {
                                 .as_ref()
                                 .and_then(|profile| profile.encode_span(sequence, lane));
                             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                encode_rgba8_segmented_parallel(
+                                encoder.encode_rgba8_segmented_parallel(
                                     width,
                                     height,
                                     &rgba,

@@ -897,6 +897,113 @@ impl Stage {
         self.refresh_bounding_box(mob, true, true)
     }
 
+    /// Reference `wag`: displace each point by `direction` times its
+    /// normalized projection onto `axis`, raised to `wag_factor`.
+    ///
+    /// Normalization uses each point-bearing family member's own projection
+    /// range, not the whole family's box. The magnitude of `axis` cancels;
+    /// reversing it reverses the deformation. `direction` retains its full
+    /// magnitude. Like the Reference's `set_points` implementation, this
+    /// changes primary points, bakes retained placement and refreshes path
+    /// joints and bounding boxes. Shared descendants are visited once.
+    ///
+    /// All members are checked before any point is written. A point-free
+    /// family is unchanged. Unlike the Reference's NaN-producing division,
+    /// a point-bearing member with zero projection extent is a named error.
+    /// Negative powers are likewise refused when the normalized zero endpoint
+    /// would yield an infinite displacement. Exponent zero is supported for a
+    /// nondegenerate projection and displaces every point by `direction`.
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`] for a dead or foreign root;
+    /// [`StageError::InvalidWag`] for non-finite arguments, undefined
+    /// normalization/powers or points outside finite f32 storage;
+    /// [`StageError::Geometry`] for malformed vector paths. No family member
+    /// changes on any of these errors.
+    pub fn wag(
+        &mut self,
+        mob: Mob,
+        direction: Vec3,
+        axis: Vec3,
+        wag_factor: f64,
+    ) -> Result<&mut Self, StageError> {
+        if !direction.into_iter().all(f64::is_finite)
+            || !axis.into_iter().all(f64::is_finite)
+            || !wag_factor.is_finite()
+        {
+            return Err(StageError::InvalidWag(
+                "direction, axis and exponent must be finite",
+            ));
+        }
+        self.try_get(mob)?;
+        let mut prepared = Vec::new();
+        for member in self.family(mob) {
+            let Some(mut points) = self.get_points(member).filter(|points| !points.is_empty())
+            else {
+                continue;
+            };
+            let mut projections = Vec::with_capacity(points.len());
+            let mut min = f64::INFINITY;
+            let mut max = f64::NEG_INFINITY;
+            for point in &points {
+                let projection = space_ops::dot(*point, axis);
+                if !point.iter().all(|value| value.is_finite()) || !projection.is_finite() {
+                    return Err(StageError::InvalidWag(
+                        "points and their axis projections must be finite",
+                    ));
+                }
+                min = min.min(projection);
+                max = max.max(projection);
+                projections.push(projection);
+            }
+            let extent = max - min;
+            if extent == 0.0 || !extent.is_finite() {
+                return Err(StageError::InvalidWag(
+                    "each point-bearing member needs a finite nonzero axis projection extent",
+                ));
+            }
+            for (point, projection) in points.iter_mut().zip(projections) {
+                let alpha = fmn_dmath::pow((projection - min) / extent, wag_factor);
+                if !alpha.is_finite() {
+                    return Err(StageError::InvalidWag(
+                        "normalized projection raised to the exponent must be finite",
+                    ));
+                }
+                *point = add(*point, scaled(direction, alpha));
+                if !point
+                    .iter()
+                    .all(|value| value.is_finite() && value.abs() <= f64::from(f32::MAX))
+                {
+                    return Err(StageError::InvalidWag(
+                        "deformed points must fit finite f32 records",
+                    ));
+                }
+            }
+            // write_points validates this before changing a single entry; do
+            // the same for the whole family before publishing any of it.
+            if self.is_vmobject_schema(member)? {
+                QuadPath::from_points(points.clone()).map_err(StageError::Geometry)?;
+            }
+            // set_points preserves auxiliary pointlike fields in world space
+            // when baking placement. Refuse overflow there before any writes.
+            let entry = self.try_get(member)?;
+            if !entry.placement().is_identity()
+                && mapped_auxiliary_points(&entry.buffer, entry.placement(), |point| point)
+                    .iter()
+                    .any(|(_, values)| values.iter().any(|value| !value.is_finite()))
+            {
+                return Err(StageError::InvalidWag(
+                    "placed auxiliary points must fit finite f32 records",
+                ));
+            }
+            prepared.push((member, points));
+        }
+        for (member, points) in prepared {
+            self.set_points(member, &points)?;
+        }
+        Ok(self)
+    }
+
     /// Reference `rotate` (mobject.py): rotate the family about `axis` by
     /// `angle`, pivoting on `about_point` (or the box point at
     /// `about_edge`; both `None` defaults to the box center, the
@@ -1141,6 +1248,19 @@ impl Stage {
             }
         }
         self
+    }
+
+    /// Whether the family's bounding box lies wholly outside one edge of the
+    /// stage's frame. As in the Reference, touching an edge is still on-screen;
+    /// depth and partial overlap do not make a family off-screen.
+    #[must_use]
+    pub fn is_off_screen(&self, mob: Mob) -> bool {
+        let [width, height] = self.frame_shape();
+        let bounds = self.get_bounding_box(mob);
+        bounds.min[0] > width / 2.0
+            || bounds.max[0] < -width / 2.0
+            || bounds.min[1] > height / 2.0
+            || bounds.max[1] < -height / 2.0
     }
 
     /// Position `mob` next to a target, on the `direction` side, `buff` away,
@@ -1662,6 +1782,21 @@ impl Stage {
     /// Set the `is_fixed_in_frame` float mix (kept camera model).
     pub fn set_fixed_in_frame(&mut self, mob: Mob, value: f64, recurse: bool) -> &mut Self {
         self.edit_uniforms(mob, recurse, |u| u.is_fixed_in_frame = value)
+    }
+    /// Reference `fix_in_frame`: fully opt out of camera motion, optionally
+    /// across the family. The typed uniform also participates in snapshots.
+    pub fn fix_in_frame(&mut self, mob: Mob, recurse: bool) -> &mut Self {
+        self.set_fixed_in_frame(mob, 1.0, recurse)
+    }
+    /// Reference `unfix_from_frame`: restore camera-relative placement.
+    pub fn unfix_from_frame(&mut self, mob: Mob, recurse: bool) -> &mut Self {
+        self.set_fixed_in_frame(mob, 0.0, recurse)
+    }
+    /// Reference `is_fixed_in_frame`: any nonzero camera mix is truthy.
+    #[must_use]
+    pub fn is_fixed_in_frame(&self, mob: Mob) -> bool {
+        self.uniforms(mob)
+            .is_some_and(|uniforms| uniforms.is_fixed_in_frame != 0.0)
     }
     /// C-7: accepted no-op. Records the flag across the family but changes no
     /// rendered bits.

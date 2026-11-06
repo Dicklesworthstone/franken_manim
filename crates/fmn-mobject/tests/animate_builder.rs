@@ -677,3 +677,225 @@ fn layout_commands_keep_the_override_no_chaining_rule() {
         Err(AnimateError::OverrideNotChainable)
     );
 }
+
+#[test]
+fn wag_builds_from_current_geometry_after_prior_commands_without_changing_source() {
+    let mut stage = Stage::new();
+    let mob = stage.add(Mobject::from_points(&[
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [2.0, 0.0, 0.0],
+    ]));
+    // Initially the y projection is degenerate. The earlier matrix command
+    // makes it valid, so preflighting only the original source would be wrong.
+    let builder = mob
+        .animate()
+        .apply_matrix([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+        .unwrap()
+        .wag([4.0, 0.0, 0.0], UP, 2.0)
+        .unwrap();
+    stage.scale(mob, 2.0);
+    let original = stage.get_points(mob).unwrap();
+    let built = builder.build(&mut stage).unwrap();
+    assert_eq!(stage.get_points(mob).unwrap(), original);
+    assert_eq!(
+        stage.get_points(built.target).unwrap(),
+        [[0.0, -1.0, 0.0], [1.0, 1.0, 0.0], [4.0, 3.0, 0.0],]
+    );
+}
+
+#[test]
+fn wag_recordings_keep_external_targets_and_fixed_frame_family_flags() {
+    let mut stage = Stage::new();
+    let mob = stage.add(Mobject::group(vec![Mobject::from_points(&[
+        [0.0, 0.0, 0.0],
+        [0.0, 2.0, 0.0],
+    ])]));
+    let other = stage.add(Mobject::from_points(&[[5.0, 3.0, 0.0]]));
+    let builder = mob
+        .animate()
+        .move_to(other, ORIGIN)
+        .unwrap()
+        .fix_in_frame(true)
+        .unwrap()
+        .wag([2.0, 0.0, 0.0], UP, 1.0)
+        .unwrap()
+        .unfix_from_frame(false)
+        .unwrap();
+    stage.shift(other, RIGHT);
+    let built = builder.build(&mut stage).unwrap();
+    let child = stage.get(built.target).unwrap().submobjects()[0];
+    assert_eq!(
+        stage.get_points(child).unwrap(),
+        [[6.0, 2.0, 0.0], [8.0, 4.0, 0.0]]
+    );
+    assert!(!stage.is_fixed_in_frame(built.target));
+    assert!(stage.is_fixed_in_frame(child));
+    assert!(!stage.is_fixed_in_frame(stage.get(mob).unwrap().submobjects()[0]));
+    assert_eq!(stage.get_center(other), [6.0, 3.0, 0.0]);
+}
+
+#[test]
+fn invalid_wag_chains_leave_no_live_target_or_partial_mutation() {
+    let mut stage = Stage::new();
+    let mob = square(&mut stage);
+    let recordings = [
+        mob.animate()
+            .shift(RIGHT)
+            .unwrap()
+            .wag(RIGHT, UP, f64::NAN)
+            .unwrap(),
+        mob.animate().wag(RIGHT, UP, -1.0).unwrap(),
+        mob.animate().wag([f64::MAX, 0.0, 0.0], UP, 1.0).unwrap(),
+        mob.animate()
+            .stretch(0.0, 1)
+            .unwrap()
+            .wag(RIGHT, UP, 1.0)
+            .unwrap(),
+        mob.animate()
+            .wag(RIGHT, UP, 1.0)
+            .unwrap()
+            .stretch(0.0, 1)
+            .unwrap()
+            .wag(RIGHT, UP, 2.0)
+            .unwrap(),
+    ];
+    let before = stage.snapshot_bytes().unwrap();
+    let topology = stage.topology_epoch();
+    for recording in recordings {
+        assert!(matches!(
+            recording.build(&mut stage),
+            Err(AnimateError::Wag(_))
+        ));
+        assert_eq!(stage.snapshot_bytes().unwrap(), before);
+        assert_eq!(stage.topology_epoch(), topology);
+    }
+}
+
+#[test]
+fn wag_and_fixed_frame_commands_keep_the_override_no_chaining_rule() {
+    let mut stage = Stage::new();
+    let mob = square(&mut stage);
+    let override_animation = OverrideAnimation {
+        name: "wag_override",
+    };
+    let overridden = mob.animate().with_override(override_animation).unwrap();
+    assert_eq!(
+        overridden.clone().wag(RIGHT, UP, 1.0),
+        Err(AnimateError::OverrideNotChainable)
+    );
+    assert_eq!(
+        overridden.clone().fix_in_frame(true),
+        Err(AnimateError::OverrideNotChainable)
+    );
+    assert_eq!(
+        overridden.unfix_from_frame(false),
+        Err(AnimateError::OverrideNotChainable)
+    );
+    assert_eq!(
+        mob.animate()
+            .wag(RIGHT, UP, 1.0)
+            .unwrap()
+            .with_override(override_animation),
+        Err(AnimateError::OverrideNotChainable)
+    );
+}
+
+#[test]
+fn wag_target_keeps_diamond_sharing_and_remaps_native_updater_attributes() {
+    use fmn_mobject::{CopyMap, Mob};
+    use std::{cell::Cell, rc::Rc};
+
+    #[derive(Clone)]
+    struct Attributes {
+        child: Mob,
+        external: Mob,
+        ticks: u64,
+    }
+    fn remap(attributes: &mut Attributes, map: &CopyMap) {
+        attributes.child = map.get(attributes.child).unwrap_or(attributes.child);
+        attributes.external = map.get(attributes.external).unwrap_or(attributes.external);
+    }
+
+    let mut stage = Stage::new();
+    let outside = stage.add(Mobject::new());
+    let source = stage.add(Mobject::new());
+    let leaf = stage.add(Mobject::from_points(&[[0.0, 0.0, 0.0], [0.0, 2.0, 0.0]]));
+    let nested = stage.add(Mobject::new());
+    stage.attach(outside, source).unwrap();
+    stage.attach(source, leaf).unwrap();
+    stage.attach(source, nested).unwrap();
+    stage.attach(nested, leaf).unwrap();
+    let calls = Rc::new(Cell::new(0));
+    let shared_calls = Rc::clone(&calls);
+    let updater = stage
+        .add_dt_updater_with_state(
+            source,
+            Attributes {
+                child: leaf,
+                external: outside,
+                ticks: 0,
+            },
+            remap,
+            move |stage, me, id, dt| {
+                shared_calls.set(shared_calls.get() + 1);
+                let attributes = stage.updater_state_mut::<Attributes>(me, id).unwrap();
+                attributes.ticks += 1;
+                let child = attributes.child;
+                stage.shift(child, [dt, 0.0, 0.0]);
+            },
+            false,
+        )
+        .unwrap();
+    let built = source
+        .animate()
+        .wag(RIGHT, UP, 1.0)
+        .unwrap()
+        .build(&mut stage)
+        .unwrap();
+    let copied_children = stage.get(built.target).unwrap().submobjects().to_vec();
+    let copied_leaf = copied_children[0];
+    assert_eq!(stage.family(built.target).len(), 3);
+    assert_eq!(
+        stage.get(copied_children[1]).unwrap().submobjects(),
+        &[copied_leaf]
+    );
+    assert!(stage.get(built.target).unwrap().parents().is_empty());
+    assert_eq!(stage.updater_ids(built.target), vec![updater]);
+    let attributes = stage
+        .updater_state::<Attributes>(built.target, updater)
+        .unwrap();
+    assert_eq!(attributes.child, copied_leaf);
+    assert_eq!(attributes.external, outside);
+    assert_eq!(
+        calls.get(),
+        0,
+        "building a target never invokes its updater"
+    );
+
+    stage.update_mobject(built.target, 0.5);
+    stage.update_mobject(source, 0.25);
+    assert_eq!(calls.get(), 2, "both objects share the original callable");
+    assert_eq!(
+        stage
+            .updater_state::<Attributes>(source, updater)
+            .unwrap()
+            .ticks,
+        1
+    );
+    assert_eq!(
+        stage
+            .updater_state::<Attributes>(built.target, updater)
+            .unwrap()
+            .ticks,
+        1
+    );
+    assert_eq!(
+        stage.get_points(leaf).unwrap(),
+        [[0.25, 0.0, 0.0], [0.25, 2.0, 0.0]]
+    );
+    assert_eq!(
+        stage.get_points(copied_leaf).unwrap(),
+        [[0.5, 0.0, 0.0], [1.5, 2.0, 0.0]]
+    );
+}

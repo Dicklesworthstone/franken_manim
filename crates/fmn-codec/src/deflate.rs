@@ -75,6 +75,7 @@ const HASH_SIZE: usize = 1 << HASH_BITS;
 const MAX_BLOCK_TOKENS: usize = 1 << 16;
 
 /// LSB-first bit writer (RFC 1951 packing).
+#[derive(Default)]
 struct BitWriter {
     out: Vec<u8>,
     bits: u64,
@@ -82,12 +83,10 @@ struct BitWriter {
 }
 
 impl BitWriter {
-    const fn new() -> Self {
-        Self {
-            out: Vec::new(),
-            bits: 0,
-            count: 0,
-        }
+    fn clear(&mut self) {
+        self.out.clear();
+        self.bits = 0;
+        self.count = 0;
     }
 
     fn put(&mut self, value: u32, n: u32) {
@@ -120,73 +119,122 @@ fn reverse_bits(code: u16, len: u8) -> u16 {
     r
 }
 
+struct Package {
+    weight: u64,
+    children: [usize; 2],
+}
+
+/// Reused by all three alphabets, every block and every encoded frame.
+#[derive(Default)]
+struct HuffmanWorkspace {
+    leaves: Vec<(u64, u16)>,
+    packages: Vec<Package>,
+    current: Vec<usize>,
+    paired: Vec<usize>,
+    merged: Vec<usize>,
+    uses: Vec<u8>,
+}
+
 /// Length-limited Huffman code lengths via boundary package-merge —
 /// optimal, and deterministic through a total order on ties
 /// (frequency, then leaf-before-package, then symbol).
-fn huffman_lengths(freqs: &[u32], max_len: usize, out_len: usize) -> Vec<u8> {
-    let mut lengths = vec![0u8; out_len];
-    let mut leaves: Vec<(u64, u16)> = freqs
-        .iter()
-        .enumerate()
-        .filter(|&(_, &f)| f > 0)
-        .map(|(sym, &f)| (u64::from(f), sym as u16))
-        .collect();
+fn huffman_lengths(
+    freqs: &[u32],
+    max_len: usize,
+    lengths: &mut [u8],
+    workspace: &mut HuffmanWorkspace,
+) {
+    let HuffmanWorkspace {
+        leaves,
+        packages,
+        current,
+        paired,
+        merged,
+        uses,
+    } = workspace;
+    lengths.fill(0);
+    leaves.clear();
+    leaves.extend(
+        freqs
+            .iter()
+            .enumerate()
+            .filter(|&(_, &f)| f > 0)
+            .map(|(sym, &f)| (u64::from(f), sym as u16)),
+    );
     match leaves.len() {
-        0 => return lengths,
+        0 => return,
         1 => {
             lengths[usize::from(leaves[0].1)] = 1;
-            return lengths;
+            return;
         }
         _ => {}
     }
     leaves.sort_unstable();
 
-    // A package is (weight, constituent leaf symbols). Coin-collector:
-    // start at the deepest level and merge upward max_len − 1 times.
-    type Package = (u64, Vec<u16>);
-    let singletons: Vec<Package> = leaves.iter().map(|&(f, s)| (f, vec![s])).collect();
-    let mut current = singletons.clone();
+    // Coin-collector: start at the deepest level and merge upward
+    // max_len − 1 times. A package stores its two children instead of a
+    // freshly allocated copy of every constituent symbol. The first n nodes
+    // are the sorted leaves; all other nodes point strictly backwards.
+    // This retains the original ordering, including leaf-before-package
+    // ties, without thousands of small allocations per dynamic block.
+    let n = leaves.len();
+    packages.clear();
+    packages.reserve(n * max_len);
+    packages.extend(leaves.iter().map(|&(weight, _)| Package {
+        weight,
+        children: [0; 2],
+    }));
+    current.clear();
+    current.extend(0..n);
     for _ in 1..max_len {
-        let paired: Vec<Package> = current
-            .chunks(2)
-            .filter(|c| c.len() == 2)
-            .map(|c| {
-                let mut syms = c[0].1.clone();
-                syms.extend_from_slice(&c[1].1);
-                (c[0].0 + c[1].0, syms)
-            })
-            .collect();
+        paired.clear();
+        for &[left, right] in current.as_chunks::<2>().0 {
+            paired.push(packages.len());
+            packages.push(Package {
+                weight: packages[left].weight + packages[right].weight,
+                children: [left, right],
+            });
+        }
         // Stable merge: on equal weight, singletons (leaves) first.
-        let mut merged = Vec::with_capacity(singletons.len() + paired.len());
+        merged.clear();
         let (mut i, mut j) = (0, 0);
-        while i < singletons.len() || j < paired.len() {
-            let take_leaf = match (singletons.get(i), paired.get(j)) {
-                (Some(a), Some(b)) => a.0 <= b.0,
+        while i < n || j < paired.len() {
+            let take_leaf = match (leaves.get(i), paired.get(j)) {
+                (Some(a), Some(&b)) => a.0 <= packages[b].weight,
                 (Some(_), None) => true,
                 _ => false,
             };
             if take_leaf {
-                merged.push(singletons[i].clone());
+                merged.push(i);
                 i += 1;
             } else {
-                merged.push(paired[j].clone());
+                merged.push(paired[j]);
                 j += 1;
             }
         }
-        current = merged;
+        std::mem::swap(current, merged);
     }
     // The first 2n − 2 packages define the code: each appearance of a
-    // leaf adds one to its depth.
-    for package in current.iter().take(2 * leaves.len() - 2) {
-        for &sym in &package.1 {
-            lengths[usize::from(sym)] += 1;
+    // leaf adds one to its depth. Accumulate multiplicities backwards through
+    // the arena so shared packages are visited once, without a traversal stack
+    // or rebuilding their constituent lists.
+    uses.clear();
+    uses.resize(packages.len(), 0);
+    for &index in current.iter().take(2 * n - 2) {
+        uses[index] += 1;
+    }
+    for index in (n..packages.len()).rev() {
+        for child in packages[index].children {
+            uses[child] += uses[index];
         }
     }
-    lengths
+    for (index, &(_, symbol)) in leaves.iter().enumerate() {
+        lengths[usize::from(symbol)] = uses[index];
+    }
 }
 
 /// Canonical codes from lengths, pre-reversed for the LSB-first writer.
-fn canonical_codes(lengths: &[u8]) -> Vec<u16> {
+fn canonical_codes<const N: usize>(lengths: &[u8; N]) -> [u16; N] {
     let mut count = [0u16; 16];
     for &len in lengths {
         count[usize::from(len)] += 1;
@@ -198,7 +246,7 @@ fn canonical_codes(lengths: &[u8]) -> Vec<u16> {
         code = (code + count[len - 1]) << 1;
         next[len] = code;
     }
-    let mut codes = vec![0u16; lengths.len()];
+    let mut codes = [0u16; N];
     for (sym, &len) in lengths.iter().enumerate() {
         if len != 0 {
             codes[sym] = reverse_bits(next[usize::from(len)], len);
@@ -209,8 +257,8 @@ fn canonical_codes(lengths: &[u8]) -> Vec<u16> {
 }
 
 /// The fixed-Huffman litlen lengths (RFC 1951 §3.2.6).
-fn fixed_litlen_lengths() -> Vec<u8> {
-    let mut lengths = vec![8u8; 288];
+fn fixed_litlen_lengths() -> [u8; 288] {
+    let mut lengths = [8u8; 288];
     lengths[144..256].fill(9);
     lengths[256..280].fill(7);
     lengths
@@ -260,8 +308,8 @@ enum Token {
 /// candidate first), first-longest wins, bounded walk.
 struct Matcher<'a> {
     data: &'a [u8],
-    head: Vec<u32>,
-    prev: Vec<u32>,
+    head: &'a mut [u32],
+    prev: &'a mut [u32],
     /// Positions `< inserted` are in the chains.
     inserted: usize,
     params: MatchParams,
@@ -270,11 +318,22 @@ struct Matcher<'a> {
 const NIL: u32 = u32::MAX;
 
 impl<'a> Matcher<'a> {
-    fn new(data: &'a [u8], params: MatchParams) -> Self {
+    fn new(
+        data: &'a [u8],
+        params: MatchParams,
+        head: &'a mut Vec<u32>,
+        prev: &'a mut Vec<u32>,
+    ) -> Self {
+        head.resize(HASH_SIZE, NIL);
+        head.fill(NIL);
+        prev.resize(data.len(), NIL);
+        // Every reachable chain link is overwritten by insert_to before it
+        // can be read. Clearing the heads and resetting inserted is sufficient
+        // even when a smaller frame follows a larger one.
         Self {
             data,
-            head: vec![NIL; HASH_SIZE],
-            prev: vec![NIL; data.len()],
+            head,
+            prev,
             inserted: 0,
             params,
         }
@@ -356,7 +415,13 @@ fn common_prefix(data: &[u8], a: usize, b: usize, max_len: usize) -> usize {
 
 /// Emit one block, choosing stored / fixed / dynamic by exact bit cost
 /// (ties resolve stored ≺ fixed ≺ dynamic — the simpler encoding wins).
-fn emit_block(writer: &mut BitWriter, tokens: &[Token], raw: &[u8], bfinal: bool) {
+fn emit_block(
+    writer: &mut BitWriter,
+    tokens: &[Token],
+    raw: &[u8],
+    bfinal: bool,
+    workspace: &mut BlockWorkspace,
+) {
     // Symbol statistics.
     let mut lit_freq = [0u32; 286];
     let mut dist_freq = [0u32; 30];
@@ -376,8 +441,10 @@ fn emit_block(writer: &mut BitWriter, tokens: &[Token], raw: &[u8], bfinal: bool
     lit_freq[256] += 1; // end-of-block
 
     // Dynamic tables.
-    let lit_lengths = huffman_lengths(&lit_freq, 15, 286);
-    let mut dist_lengths = huffman_lengths(&dist_freq, 15, 30);
+    let mut lit_lengths = [0; 286];
+    let mut dist_lengths = [0; 30];
+    huffman_lengths(&lit_freq, 15, &mut lit_lengths, &mut workspace.huffman);
+    huffman_lengths(&dist_freq, 15, &mut dist_lengths, &mut workspace.huffman);
     if dist_lengths.iter().all(|&l| l == 0) {
         // RFC permits signalling "no distance codes", but one code of
         // length 1 is simpler and universally accepted.
@@ -392,15 +459,17 @@ fn emit_block(writer: &mut BitWriter, tokens: &[Token], raw: &[u8], bfinal: bool
     let hdist = dist_lengths.iter().rposition(|&l| l != 0).unwrap_or(0) + 1;
 
     // Code-length (CL) RLE over the concatenated length sequence.
-    let mut sequence: Vec<u8> = Vec::with_capacity(hlit + hdist);
-    sequence.extend_from_slice(&lit_lengths[..hlit]);
-    sequence.extend_from_slice(&dist_lengths[..hdist]);
-    let cl_tokens = rle_code_lengths(&sequence);
+    let mut sequence = [0; 286 + 30];
+    sequence[..hlit].copy_from_slice(&lit_lengths[..hlit]);
+    sequence[hlit..hlit + hdist].copy_from_slice(&dist_lengths[..hdist]);
+    let cl_tokens = &mut workspace.cl_tokens;
+    rle_code_lengths(&sequence[..hlit + hdist], cl_tokens);
     let mut cl_freq = [0u32; 19];
-    for &(sym, _, _) in &cl_tokens {
+    for &(sym, _, _) in cl_tokens.iter() {
         cl_freq[usize::from(sym)] += 1;
     }
-    let cl_lengths = huffman_lengths(&cl_freq, 7, 19);
+    let mut cl_lengths = [0; 19];
+    huffman_lengths(&cl_freq, 7, &mut cl_lengths, &mut workspace.huffman);
     let hclen = CLCODE_ORDER
         .iter()
         .rposition(|&slot| cl_lengths[slot] != 0)
@@ -464,7 +533,7 @@ fn emit_block(writer: &mut BitWriter, tokens: &[Token], raw: &[u8], bfinal: bool
             writer.put(u32::from(cl_lengths[slot]), 3);
         }
         let cl_codes = canonical_codes(&cl_lengths);
-        for &(sym, bits, value) in &cl_tokens {
+        for &(sym, bits, value) in cl_tokens.iter() {
             writer.put(
                 u32::from(cl_codes[usize::from(sym)]),
                 u32::from(cl_lengths[usize::from(sym)]),
@@ -488,13 +557,11 @@ fn emit_block(writer: &mut BitWriter, tokens: &[Token], raw: &[u8], bfinal: bool
 
 /// Stored block(s) for `raw`, chunked at the 65535-byte format limit.
 fn emit_stored(writer: &mut BitWriter, raw: &[u8], bfinal: bool) {
-    let chunks: Vec<&[u8]> = if raw.is_empty() {
-        vec![&[][..]]
-    } else {
-        raw.chunks(65535).collect()
-    };
-    for (i, chunk) in chunks.iter().enumerate() {
-        let last = bfinal && i + 1 == chunks.len();
+    let count = raw.len().div_ceil(65535).max(1);
+    for i in 0..count {
+        let start = i * 65535;
+        let chunk = &raw[start..(start + 65535).min(raw.len())];
+        let last = bfinal && i + 1 == count;
         writer.put(u32::from(last), 1);
         writer.put(0, 2);
         writer.align();
@@ -503,7 +570,7 @@ fn emit_stored(writer: &mut BitWriter, raw: &[u8], bfinal: bool) {
         writer.put(u32::from(len >> 8), 8);
         writer.put(u32::from(!len & 0xff), 8);
         writer.put(u32::from(!len >> 8), 8);
-        for &byte in *chunk {
+        for &byte in chunk {
             writer.put(u32::from(byte), 8);
         }
     }
@@ -542,8 +609,8 @@ fn emit_tokens(
 
 /// RLE-encode a code-length sequence into (CL symbol, extra-bit count,
 /// extra value) triples (RFC 1951 §3.2.7).
-fn rle_code_lengths(sequence: &[u8]) -> Vec<(u16, u32, u32)> {
-    let mut out = Vec::new();
+fn rle_code_lengths(sequence: &[u8], out: &mut Vec<(u16, u32, u32)>) {
+    out.clear();
     let mut i = 0;
     while i < sequence.len() {
         let value = sequence[i];
@@ -579,7 +646,24 @@ fn rle_code_lengths(sequence: &[u8]) -> Vec<(u16, u32, u32)> {
         }
         i += run;
     }
-    out
+}
+
+#[derive(Default)]
+struct BlockWorkspace {
+    huffman: HuffmanWorkspace,
+    cl_tokens: Vec<(u16, u32, u32)>,
+}
+
+/// Per-encoder scratch. Contents are reset for each independent segment;
+/// retained capacities never become part of the compression dictionary.
+#[derive(Default)]
+pub(crate) struct DeflateWorkspace {
+    combined: Vec<u8>,
+    head: Vec<u32>,
+    prev: Vec<u32>,
+    tokens: Vec<Token>,
+    writer: BitWriter,
+    block: BlockWorkspace,
 }
 
 /// Compress one segment to a byte-aligned DEFLATE member (see the
@@ -591,74 +675,96 @@ fn rle_code_lengths(sequence: &[u8]) -> Vec<(u16, u32, u32)> {
 /// non-final segments end with a sync flush.
 #[must_use]
 pub fn deflate_segment(dict: &[u8], data: &[u8], level: CompressionLevel, last: bool) -> Vec<u8> {
-    let dict_tail = &dict[dict.len().saturating_sub(WINDOW)..];
-    let mut combined = Vec::with_capacity(dict_tail.len() + data.len());
-    combined.extend_from_slice(dict_tail);
-    combined.extend_from_slice(data);
-    let start = dict_tail.len();
+    let mut workspace = DeflateWorkspace::default();
+    workspace.encode_segment(dict, data, level, last);
+    workspace.writer.out
+}
 
-    let params = level.params();
-    let lazy = params.lazy;
-    let nice = params.nice_len;
-    let mut matcher = Matcher::new(&combined, params);
-    let mut writer = BitWriter::new();
+impl DeflateWorkspace {
+    pub(crate) fn encode_segment(
+        &mut self,
+        dict: &[u8],
+        data: &[u8],
+        level: CompressionLevel,
+        last: bool,
+    ) -> &[u8] {
+        let Self {
+            combined,
+            head,
+            prev,
+            tokens,
+            writer,
+            block,
+        } = self;
+        let dict_tail = &dict[dict.len().saturating_sub(WINDOW)..];
+        combined.clear();
+        combined.extend_from_slice(dict_tail);
+        combined.extend_from_slice(data);
+        let start = dict_tail.len();
 
-    let mut tokens: Vec<Token> = Vec::new();
-    let mut block_start = start;
-    let mut pos = start;
-    let mut final_emitted = false;
-    while pos < combined.len() {
-        let found = matcher.best_match(pos);
-        let action = match found {
-            Some((len, dist)) if lazy && len < nice && pos + 1 < combined.len() => {
-                // Lazy: prefer a strictly longer match one byte later.
-                match matcher.best_match(pos + 1) {
-                    Some((next_len, _)) if next_len > len => None,
-                    _ => Some((len, dist)),
+        let params = level.params();
+        let lazy = params.lazy;
+        let nice = params.nice_len;
+        let mut matcher = Matcher::new(combined, params, head, prev);
+        writer.clear();
+
+        tokens.clear();
+        let mut block_start = start;
+        let mut pos = start;
+        let mut final_emitted = false;
+        while pos < combined.len() {
+            let found = matcher.best_match(pos);
+            let action = match found {
+                Some((len, dist)) if lazy && len < nice && pos + 1 < combined.len() => {
+                    // Lazy: prefer a strictly longer match one byte later.
+                    match matcher.best_match(pos + 1) {
+                        Some((next_len, _)) if next_len > len => None,
+                        _ => Some((len, dist)),
+                    }
+                }
+                other => other,
+            };
+            match action {
+                Some((len, dist)) => {
+                    tokens.push(Token::Match {
+                        len: len as u16,
+                        dist: dist as u16,
+                    });
+                    pos += len;
+                }
+                None => {
+                    tokens.push(Token::Literal(combined[pos]));
+                    pos += 1;
                 }
             }
-            other => other,
-        };
-        match action {
-            Some((len, dist)) => {
-                tokens.push(Token::Match {
-                    len: len as u16,
-                    dist: dist as u16,
-                });
-                pos += len;
-            }
-            None => {
-                tokens.push(Token::Literal(combined[pos]));
-                pos += 1;
+            if tokens.len() >= MAX_BLOCK_TOKENS {
+                let is_final = last && pos == combined.len();
+                emit_block(writer, tokens, &combined[block_start..pos], is_final, block);
+                final_emitted |= is_final;
+                tokens.clear();
+                block_start = pos;
             }
         }
-        if tokens.len() >= MAX_BLOCK_TOKENS {
-            let is_final = last && pos == combined.len();
-            emit_block(&mut writer, &tokens, &combined[block_start..pos], is_final);
-            final_emitted |= is_final;
-            tokens.clear();
-            block_start = pos;
+        if !tokens.is_empty() || block_start == start {
+            // Data blocks carry BFINAL only on the final segment (an empty
+            // final segment emits an empty block for the BFINAL bit).
+            emit_block(writer, tokens, &combined[block_start..pos], last, block);
+            final_emitted |= last;
         }
+        if last && !final_emitted {
+            emit_block(writer, &[], &[], true, block);
+        }
+        if last {
+            writer.align();
+        } else {
+            // Sync flush: empty stored block, leaves the stream byte-aligned.
+            writer.put(0, 1);
+            writer.put(0, 2);
+            writer.align();
+            writer.out.extend_from_slice(&[0x00, 0x00, 0xff, 0xff]);
+        }
+        &writer.out
     }
-    if !tokens.is_empty() || block_start == start {
-        // Data blocks carry BFINAL only on the final segment (an empty
-        // final segment emits an empty block for the BFINAL bit).
-        emit_block(&mut writer, &tokens, &combined[block_start..pos], last);
-        final_emitted |= last;
-    }
-    if last && !final_emitted {
-        emit_block(&mut writer, &[], &[], true);
-    }
-    if last {
-        writer.align();
-    } else {
-        // Sync flush: empty stored block, leaves the stream byte-aligned.
-        writer.put(0, 1);
-        writer.put(0, 2);
-        writer.align();
-        writer.out.extend_from_slice(&[0x00, 0x00, 0xff, 0xff]);
-    }
-    writer.out
 }
 
 /// Compress `data` as one complete DEFLATE stream.
@@ -695,7 +801,381 @@ pub fn zlib_compress(data: &[u8], level: CompressionLevel) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::common_prefix;
+    use super::{
+        CompressionLevel, DeflateWorkspace, HuffmanWorkspace, Token, WINDOW, common_prefix,
+        deflate_segment, huffman_lengths,
+    };
+
+    // The original package-merge representation is retained only as a byte
+    // compatibility oracle. It expands every package into its symbols, unlike
+    // the production arena's reverse multiplicity pass.
+    fn expanded_huffman_lengths(freqs: &[u32], max_len: usize) -> Vec<u8> {
+        let mut lengths = vec![0; freqs.len()];
+        let mut leaves: Vec<_> = freqs
+            .iter()
+            .enumerate()
+            .filter(|&(_, &frequency)| frequency != 0)
+            .map(|(symbol, &frequency)| (u64::from(frequency), vec![symbol]))
+            .collect();
+        if leaves.len() < 2 {
+            if let Some((_, symbols)) = leaves.first() {
+                lengths[symbols[0]] = 1;
+            }
+            return lengths;
+        }
+        leaves.sort_unstable();
+        let mut current = leaves.clone();
+        for _ in 1..max_len {
+            let paired: Vec<_> = current
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| {
+                    let mut symbols = pair[0].1.clone();
+                    symbols.extend_from_slice(&pair[1].1);
+                    (pair[0].0 + pair[1].0, symbols)
+                })
+                .collect();
+            let mut merged = Vec::new();
+            let (mut i, mut j) = (0, 0);
+            while i < leaves.len() || j < paired.len() {
+                if i < leaves.len() && (j == paired.len() || leaves[i].0 <= paired[j].0) {
+                    merged.push(leaves[i].clone());
+                    i += 1;
+                } else {
+                    merged.push(paired[j].clone());
+                    j += 1;
+                }
+            }
+            current = merged;
+        }
+        for (_, symbols) in current.iter().take(2 * leaves.len() - 2) {
+            for &symbol in symbols {
+                lengths[symbol] += 1;
+            }
+        }
+        lengths
+    }
+
+    #[test]
+    fn indexed_packages_preserve_every_code_length_and_tie() {
+        // The actual DEFLATE alphabets, including sparse tables, all equal
+        // weights, ties between a leaf and a package, and a skew large enough
+        // to exercise the length limit. Changing any code length changes the
+        // certified stream, even when both streams round-trip correctly.
+        let mut workspace = HuffmanWorkspace::default();
+        for (alphabet, max_len) in [(286, 15), (30, 15), (19, 7)] {
+            let mut cases = vec![vec![0; alphabet], vec![1; alphabet]];
+            let mut single = vec![0; alphabet];
+            single[alphabet - 1] = u32::MAX;
+            cases.push(single);
+            cases.push((0..alphabet).map(|i| 1 << i.min(30)).collect());
+            for seed in 0..64u32 {
+                let mut state = seed;
+                cases.push(
+                    (0..alphabet)
+                        .map(|_| {
+                            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                            (state >> 24) % (seed + 2)
+                        })
+                        .collect(),
+                );
+            }
+            for frequencies in cases {
+                let mut actual = vec![0; alphabet];
+                huffman_lengths(&frequencies, max_len, &mut actual, &mut workspace);
+                assert_eq!(actual, expanded_huffman_lengths(&frequencies, max_len));
+                assert!(actual.iter().all(|&length| usize::from(length) <= max_len));
+                for (&frequency, &length) in frequencies.iter().zip(&actual) {
+                    assert_eq!(frequency == 0, length == 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reused_segments_reset_dictionary_tokens_bits_and_huffman_state() {
+        let mut workspace = DeflateWorkspace::default();
+        let dictionary = b"the dictionary is explicit, never the previous frame\n".repeat(1000);
+        let inputs = [
+            dictionary.clone(),
+            Vec::new(),
+            vec![0; 70_000],
+            (0..100_000u32)
+                .map(|i| (i.wrapping_mul(79) >> 3) as u8)
+                .collect(),
+            b"short tail".to_vec(),
+        ];
+        for level in [
+            CompressionLevel::Best,
+            CompressionLevel::Fast,
+            CompressionLevel::Default,
+        ] {
+            for input in &inputs {
+                for dict in [dictionary.as_slice(), &[]] {
+                    for last in [false, true] {
+                        assert_eq!(
+                            workspace.encode_segment(dict, input, level, last),
+                            deflate_segment(dict, input, level, last),
+                            "length={}, dictionary={}, {level:?}, last={last}",
+                            input.len(),
+                            dict.len()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    const LEVELS: [CompressionLevel; 3] = [
+        CompressionLevel::Fast,
+        CompressionLevel::Default,
+        CompressionLevel::Best,
+    ];
+
+    fn fixture_bytes(len: usize, mut state: u32) -> Vec<u8> {
+        (0..len)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 24) as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn workspace_reuse_resets_dictionary_size_level_and_final_state() {
+        let dictionary = fixture_bytes(2 * WINDOW + 19, 37);
+        let noise = fixture_bytes(80_000, 91);
+        let run = vec![b'a'; 100_000];
+        let cases: [(&[u8], &[u8]); 8] = [
+            (&[], &[]),
+            (b"ab", b"a"),
+            (&dictionary, &dictionary[dictionary.len() - 4096..]),
+            (&[], &noise),
+            (b"a", &run),
+            (&dictionary, &[]),
+            (&[], b"hello, hello, hello world"),
+            (&dictionary[..2], b"\xff\0\xff\0\xff"),
+        ];
+        let mut workspace = DeflateWorkspace::default();
+        for round in 0..3 {
+            for offset in 0..cases.len() {
+                let index = (offset + round * 3) % cases.len();
+                let (dict, data) = cases[index];
+                let level = LEVELS[(round + offset) % LEVELS.len()];
+                let last = (round + offset) % 2 == 0;
+                let expected = deflate_segment(dict, data, level, last);
+                let actual = workspace.encode_segment(dict, data, level, last);
+                assert_eq!(actual, expected, "round={round}, case={index}, {level:?}");
+
+                // Independently decode a complete stream containing this
+                // dictionary-bearing segment, including nonfinal/empty cases.
+                let mut stream = if dict.is_empty() {
+                    Vec::new()
+                } else {
+                    deflate_segment(&[], dict, level, false)
+                };
+                stream.extend_from_slice(actual);
+                if !last {
+                    stream.extend_from_slice(&deflate_segment(&[], &[], level, true));
+                }
+                let mut plaintext = dict.to_vec();
+                plaintext.extend_from_slice(data);
+                assert_eq!(
+                    crate::inflate::inflate(&stream, plaintext.len().max(1)).unwrap(),
+                    plaintext,
+                );
+                assert_eq!((workspace.writer.bits, workspace.writer.count), (0, 0));
+            }
+        }
+    }
+
+    #[test]
+    fn workspace_retains_large_backing_buffers_across_smaller_segments() {
+        let storage = |workspace: &DeflateWorkspace| {
+            [
+                (
+                    workspace.combined.as_ptr() as usize,
+                    workspace.combined.capacity(),
+                ),
+                (workspace.head.as_ptr() as usize, workspace.head.capacity()),
+                (workspace.prev.as_ptr() as usize, workspace.prev.capacity()),
+                (
+                    workspace.tokens.as_ptr() as usize,
+                    workspace.tokens.capacity(),
+                ),
+                (
+                    workspace.writer.out.as_ptr() as usize,
+                    workspace.writer.out.capacity(),
+                ),
+            ]
+        };
+        let mut workspace = DeflateWorkspace::default();
+        assert!(
+            storage(&workspace)
+                .iter()
+                .all(|&(_, capacity)| capacity == 0)
+        );
+        let noise = fixture_bytes(120_000, 0xdead_beef);
+        workspace.encode_segment(&noise[..WINDOW], &noise, CompressionLevel::Best, true);
+        let retained = storage(&workspace);
+        for level in LEVELS {
+            for size in [0, 1, 2, 4096, 70_000, 17, 120_000] {
+                workspace.encode_segment(&noise[..13], &noise[..size], level, false);
+                assert_eq!(storage(&workspace), retained, "size={size}, {level:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn workspace_reset_discards_an_abandoned_partial_segment() {
+        let mut workspace = DeflateWorkspace::default();
+        let input = fixture_bytes(8192, 23);
+        for level in LEVELS {
+            workspace.encode_segment(&input[..512], &input, CompressionLevel::Best, false);
+            // Model a worker unwinding with live chains/tokens and an
+            // unfinished byte. The next job must be independent of all of it.
+            workspace.writer.bits = 0b101;
+            workspace.writer.count = 3;
+            workspace.writer.out.extend_from_slice(b"partial block");
+            workspace.tokens.push(Token::Literal(b'z'));
+            let expected = deflate_segment(&[], b"small", level, true);
+            assert_eq!(
+                workspace.encode_segment(&[], b"small", level, true),
+                expected
+            );
+            assert_eq!((workspace.writer.bits, workspace.writer.count), (0, 0));
+        }
+    }
+
+    fn assert_package_merge(
+        freqs: &[u32],
+        max_len: usize,
+        workspace: &mut HuffmanWorkspace,
+    ) -> Vec<u8> {
+        // Padding proves that sparse/high-numbered symbols are mapped back to
+        // symbol order, without writing lengths into unused output slots.
+        let out_len = freqs.len() + 3;
+        let mut actual = vec![u8::MAX; out_len];
+        huffman_lengths(freqs, max_len, &mut actual, workspace);
+        let mut expected = expanded_huffman_lengths(freqs, max_len);
+        expected.resize(out_len, 0);
+        assert_eq!(actual, expected, "max_len={max_len}, frequencies={freqs:?}",);
+        let mut active = 0;
+        let mut kraft = 0usize;
+        for (&frequency, &length) in freqs.iter().zip(&actual) {
+            if frequency == 0 {
+                assert_eq!(length, 0, "an absent symbol acquired a code");
+            } else {
+                let length = usize::from(length);
+                assert!((1..=max_len).contains(&length));
+                active += 1;
+                kraft += 1usize << (max_len - length);
+            }
+        }
+        assert!(actual[freqs.len()..].iter().all(|&length| length == 0));
+        // Independent prefix-code invariant. DEFLATE's singleton convention
+        // reserves one bit; every multi-symbol table must be complete.
+        let expected_kraft = match active {
+            0 => 0,
+            1 => 1usize << (max_len - 1),
+            _ => 1usize << max_len,
+        };
+        assert_eq!(kraft, expected_kraft, "frequencies={freqs:?}");
+        actual
+    }
+
+    #[test]
+    fn package_merge_preserves_every_small_tied_and_sparse_table() {
+        let mut workspace = HuffmanWorkspace::default();
+        // All 4^6 tables cover empty/singleton alphabets, odd list lengths,
+        // leaf/package ties, package/package ties, and absent middle symbols.
+        for table in 0..4usize.pow(6) {
+            let mut digits = table;
+            let mut frequencies = [0u32; 6];
+            for frequency in &mut frequencies {
+                *frequency = (digits % 4) as u32;
+                digits /= 4;
+            }
+            let active = frequencies
+                .iter()
+                .filter(|&&frequency| frequency != 0)
+                .count();
+            let shortest_limit =
+                ((usize::BITS - active.saturating_sub(1).leading_zeros()) as usize).max(1);
+            // Both the tightest feasible length limit and the production
+            // literal/distance limit must retain the old symbol tie ordering.
+            assert_package_merge(&frequencies, shortest_limit, &mut workspace);
+            assert_package_merge(&frequencies, 15, &mut workspace);
+        }
+    }
+
+    #[test]
+    fn package_merge_preserves_all_deflate_alphabets_and_weight_extremes() {
+        let mut workspace = HuffmanWorkspace::default();
+        for (symbols, max_len) in [(286, 15), (30, 15), (19, 7)] {
+            assert_package_merge(&vec![0; symbols], max_len, &mut workspace);
+            assert_package_merge(&vec![1; symbols], max_len, &mut workspace);
+            assert_package_merge(&vec![u32::MAX; symbols], max_len, &mut workspace);
+
+            let mut sparse = vec![0; symbols];
+            sparse[symbols - 1] = u32::MAX;
+            assert_package_merge(&sparse, max_len, &mut workspace);
+            sparse[0] = 1;
+            assert_package_merge(&sparse, max_len, &mut workspace);
+
+            let mut skewed = vec![1; symbols];
+            skewed[symbols - 1] = u32::MAX;
+            assert_package_merge(&skewed, max_len, &mut workspace);
+            skewed.reverse();
+            assert_package_merge(&skewed, max_len, &mut workspace);
+
+            // Fibonacci weights require deeper codes without a length bound;
+            // this exercises package selection at both actual DEFLATE limits.
+            let mut limited = vec![0; symbols];
+            let (mut a, mut b) = (1u32, 1u32);
+            for frequency in limited.iter_mut().take(max_len + 3) {
+                *frequency = a;
+                (a, b) = (b, a + b);
+            }
+            let lengths = assert_package_merge(&limited, max_len, &mut workspace);
+            assert_eq!(lengths.iter().copied().max(), Some(max_len as u8));
+            limited.reverse();
+            assert_package_merge(&limited, max_len, &mut workspace);
+
+            for seed in 1..=64u32 {
+                let mut state = seed.wrapping_mul(0x9e37_79b9);
+                let frequencies: Vec<_> = (0..symbols)
+                    .map(|_| {
+                        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                        match seed % 5 {
+                            0 => state & 3,
+                            1 if state & 7 != 0 => 0,
+                            1 => state,
+                            2 => 1u32 << (state >> 27),
+                            3 => u32::MAX - (state & 3),
+                            _ => state,
+                        }
+                    })
+                    .collect();
+                assert_package_merge(&frequencies, max_len, &mut workspace);
+            }
+        }
+    }
+
+    #[test]
+    fn package_merge_preserves_sparse_high_numbered_symbols() {
+        let mut workspace = HuffmanWorkspace::default();
+        for active in [15, 16, 17, 63, 64, 65] {
+            // Keep the highest symbol present across several sparse alphabet
+            // sizes, with tied frequencies and an entirely absent prefix.
+            for frequency in [1, u32::MAX] {
+                let mut frequencies = vec![0; 286];
+                frequencies[286 - active..].fill(frequency);
+                assert_package_merge(&frequencies, 15, &mut workspace);
+            }
+        }
+    }
 
     #[test]
     fn word_prefix_matches_the_bytewise_count() {

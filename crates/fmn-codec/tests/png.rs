@@ -9,8 +9,8 @@
 //! expectations encode the documented rounding (not chopping) policy.
 
 use fmn_codec::checksum::crc32;
-use fmn_codec::png::ColorIntent;
-use fmn_codec::{CompressionLevel, PngError, PngLimits, decode_png, encode_rgba8};
+use fmn_codec::png::{ColorIntent, encode_rgba8_segmented_parallel};
+use fmn_codec::{CompressionLevel, PngEncoder, PngError, PngLimits, decode_png, encode_rgba8};
 
 macro_rules! fixture {
     ($name:literal) => {
@@ -128,6 +128,186 @@ fn encode_is_deterministic() {
         encode_rgba8(40, 25, &rgba, CompressionLevel::Default),
         encode_rgba8(40, 25, &rgba, CompressionLevel::Default)
     );
+}
+
+#[test]
+fn reused_encoder_is_independent_of_prior_frames_levels_and_workers() {
+    let mut encoder = PngEncoder::new();
+    // Grow and shrink the filter rows, match chains and segment outputs;
+    // alternate ordinary and segmented PNGs using the same encoder. The
+    // larger frames cross the fixed segment boundary and split unevenly
+    // among three workers, exercising every retained segment output.
+    for (seed, (width, height, workers)) in [
+        (1, 1, 1),
+        (400, 180, 4),
+        (17, 3, 16),
+        (320, 640, 3),
+        (13, 7, 1),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let rgba = lcg_rgba(width, height, seed as u32 + 1);
+        for level in [
+            CompressionLevel::Best,
+            CompressionLevel::Fast,
+            CompressionLevel::Default,
+        ] {
+            let plain = encoder.encode_rgba8(width, height, &rgba, level);
+            assert_eq!(plain, encode_rgba8(width, height, &rgba, level));
+            assert_eq!(
+                decode_png(&plain, &PngLimits::default()).unwrap().rgba,
+                rgba
+            );
+
+            let segmented =
+                encoder.encode_rgba8_segmented_parallel(width, height, &rgba, level, workers);
+            assert_eq!(
+                segmented,
+                encode_rgba8_segmented_parallel(width, height, &rgba, level, 1),
+                "prior frames leaked into {width}x{height}, {level:?}, {workers} workers"
+            );
+            assert_eq!(
+                decode_png(&segmented, &PngLimits::default()).unwrap().rgba,
+                rgba
+            );
+
+            // Consecutive parallel calls keep every worker alive. Unlike
+            // the ordinary call above, this must reset the second and
+            // subsequent workers' dictionaries and block state as well.
+            let next_rgba = lcg_rgba(width, height, seed as u32 + 91);
+            assert_eq!(
+                encoder.encode_rgba8_segmented_parallel(width, height, &next_rgba, level, workers,),
+                encode_rgba8_segmented_parallel(width, height, &next_rgba, level, 1),
+                "worker state leaked into the next {width}x{height} frame"
+            );
+        }
+    }
+}
+
+fn workspace_pixels(width: u32, height: u32, mut seed: u32) -> Vec<u8> {
+    (0..width as usize * height as usize * 4)
+        .map(|index| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            if index % 7 == 0 {
+                (seed >> 24) as u8
+            } else {
+                (index % 31) as u8
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn reused_png_encoder_preserves_pre_workspace_byte_locks() {
+    // Captured from unmodified main 3799540, before introducing reusable
+    // encoder state. Each pair locks the still and segmented forms separately;
+    // the large image crosses the canonical 256 KiB segment boundary.
+    let cases = [
+        (
+            (1, 1, 11),
+            [
+                [
+                    "25dc9ed7cfa0cafc44155182fff155c1ae1d426ba4bb77b1ae8e704bfbed3d6a",
+                    "25dc9ed7cfa0cafc44155182fff155c1ae1d426ba4bb77b1ae8e704bfbed3d6a",
+                ],
+                [
+                    "31fbc38b7ba1c155ec4f6a91b139ef4b6bd4895772501d85cbf7ff572353989c",
+                    "31fbc38b7ba1c155ec4f6a91b139ef4b6bd4895772501d85cbf7ff572353989c",
+                ],
+                [
+                    "05d59e34aeb96e42a82e8a5b834144d2f2aed35e25d3904c68d7762d5c1383e5",
+                    "05d59e34aeb96e42a82e8a5b834144d2f2aed35e25d3904c68d7762d5c1383e5",
+                ],
+            ],
+        ),
+        (
+            (13, 7, 23),
+            [
+                [
+                    "763b0c5e05a8113fd5915276adb182f7def03e31e12e9ab5e7a081e8fc619f32",
+                    "763b0c5e05a8113fd5915276adb182f7def03e31e12e9ab5e7a081e8fc619f32",
+                ],
+                [
+                    "3c4a9aef8e0152d25a933ad48b00709a3e9fd8933c7ab9a4e969f5a3711a1210",
+                    "3c4a9aef8e0152d25a933ad48b00709a3e9fd8933c7ab9a4e969f5a3711a1210",
+                ],
+                [
+                    "6ec4a7afef5bf375de9023edfe9510bc7638e32a8d12938e7b5ebf33c6899cb7",
+                    "6ec4a7afef5bf375de9023edfe9510bc7638e32a8d12938e7b5ebf33c6899cb7",
+                ],
+            ],
+        ),
+        (
+            (257, 300, 37),
+            [
+                [
+                    "c5b5be3d8e16e50db0a27f5bd789f501a72fa6f0a08d3690a3fe05a3ebaba17e",
+                    "c9821ff1d7905924999cfe84469933e36b227320619db532b0446d13c126cd4f",
+                ],
+                [
+                    "b73847b7b0b5a5ce2e17d2d312516e88efb9b264b220bfd9e9ce9e54b357b0a1",
+                    "3dc91eca99389f572712f0322887b97e94e57ca2dce114fdd647604a5eafb641",
+                ],
+                [
+                    "23e64d245a9abd97527608cb1b90298044275a89f03bfad2411260e32559b28d",
+                    "de815981c7a94ef05c9eb42ca0c327e2f5fdd1364f2d11c7c9a8913f72f9b261",
+                ],
+            ],
+        ),
+    ];
+    let levels = [
+        CompressionLevel::Fast,
+        CompressionLevel::Default,
+        CompressionLevel::Best,
+    ];
+    let mut encoder = PngEncoder::new();
+    // The same workspace grows and then shrinks while effort and fan-out
+    // change. A fresh encoder per assertion would miss stale-state defects.
+    for index in [0, 1, 2, 2, 1, 0] {
+        let ((width, height, seed), expected) = cases[index];
+        let rgba = workspace_pixels(width, height, seed);
+        for (level_index, level) in levels.into_iter().enumerate() {
+            let still = encoder.encode_rgba8(width, height, &rgba, level);
+            assert_eq!(fmn_hash::sha256(&still).to_hex(), expected[level_index][0]);
+            let sequence = encoder.encode_rgba8_segmented_parallel(
+                width,
+                height,
+                &rgba,
+                level,
+                [1, 4, 16][level_index],
+            );
+            assert_eq!(
+                fmn_hash::sha256(&sequence).to_hex(),
+                expected[level_index][1],
+                "{width}x{height} {level:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn reused_png_workers_preserve_uneven_segment_order() {
+    // Five canonical segments: four workers must reuse one workspace for a
+    // second segment, while sixteen workers are clamped to five. This hash
+    // was captured from unmodified 3799540's one-worker encoder.
+    const EXPECTED: &str = "1891ab8eca943bd2a502ea1942f81ff9caa19623ec5757165bdc4d71c349fc43";
+    let rgba = workspace_pixels(1024, 257, 53);
+    let mut encoder = PngEncoder::new();
+    for threads in [1, 4, 16, 4, 1] {
+        let png = encoder.encode_rgba8_segmented_parallel(
+            1024,
+            257,
+            &rgba,
+            CompressionLevel::Fast,
+            threads,
+        );
+        assert_eq!(
+            fmn_hash::sha256(&png).to_hex(),
+            EXPECTED,
+            "{threads} workers"
+        );
+    }
 }
 
 /// Build a chunk with a valid CRC (for crafting hostile inputs).

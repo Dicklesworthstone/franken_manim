@@ -1418,6 +1418,13 @@ impl<T> From<Vec<T>> for ProjectedRows<T> {
 }
 
 impl<T> ProjectedRows<T> {
+    fn shared_owner_bytes(&self) -> u64 {
+        match self {
+            Self::Owned(_) => std::mem::size_of::<(Vec<T>, [usize; 2])>() as u64,
+            Self::Shared(_) => 0,
+        }
+    }
+
     fn into_shared(self, budget: &mut PreparationBudget) -> Result<Self, ThreeDError> {
         match self {
             Self::Owned(rows) => {
@@ -1462,6 +1469,13 @@ pub(crate) struct ProjectedDraw<M> {
 pub(crate) type CompiledDraw<'a> = ProjectedDraw<TextureMaterial<'a>>;
 
 impl<M> ProjectedDraw<M> {
+    fn shared_owner_bytes(&self) -> u64 {
+        match &self.primitive {
+            ProjectedPrimitive::Triangles { triangles, .. } => triangles.shared_owner_bytes(),
+            ProjectedPrimitive::Vector(vector) => vector.0.shared_owner_bytes(),
+        }
+    }
+
     fn share_rows(mut self, budget: &mut PreparationBudget) -> Result<Self, ThreeDError> {
         self.primitive = match self.primitive {
             ProjectedPrimitive::Triangles { triangles, shader } => ProjectedPrimitive::Triangles {
@@ -1514,6 +1528,304 @@ pub(crate) enum ProjectedPrimitive<M> {
 
 pub(crate) type CompiledPrimitive<'a> = ProjectedPrimitive<TextureMaterial<'a>>;
 
+/// Small scenes are cheaper to scan; large scenes visit only the commands
+/// whose already-conservative screen bounds meet the current fine tile.
+const DRAW_BIN_MIN_DRAWS: usize = 32;
+/// Keep the direct slice loop for dots, images, and other tiny triangle lists.
+const TRIANGLE_BIN_MIN_TRIANGLES: usize = 32;
+const DRAW_BIN_MAX_CELLS: u64 = 1 << 22;
+const DRAW_BIN_MAX_ENTRIES: u64 = 1 << 24;
+
+/// Immutable CSR lists in original source order. Commands cover the viewport;
+/// triangle lists cover only their owning draw's tile rectangle. Both the AA
+/// boundary and color/depth passes consume the same original indices.
+#[derive(Debug)]
+struct TileBoundsBins {
+    origin: [u32; 2],
+    columns: u32,
+    rows: u32,
+    starts: Vec<u32>,
+    entries: Vec<u32>,
+}
+
+impl TileBoundsBins {
+    fn indices(&self, column: u32, row: u32) -> &[u32] {
+        let Some(column) = column.checked_sub(self.origin[0]) else {
+            return &[];
+        };
+        let Some(row) = row.checked_sub(self.origin[1]) else {
+            return &[];
+        };
+        if column >= self.columns || row >= self.rows {
+            return &[];
+        }
+        let cell = row as usize * self.columns as usize + column as usize;
+        &self.entries[self.starts[cell] as usize..self.starts[cell + 1] as usize]
+    }
+}
+
+#[derive(Clone)]
+enum TileDrawIndices<'a> {
+    Binned(std::slice::Iter<'a, u32>),
+    All(std::ops::Range<usize>),
+}
+
+impl Iterator for TileDrawIndices<'_> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Binned(indices) => indices.next().map(|&index| index as usize),
+            Self::All(indices) => indices.next(),
+        }
+    }
+}
+
+/// Optional acceleration cannot turn an otherwise admitted scene into an
+/// error. All sizes are checked before allocating or charging the budget;
+/// dense scenes, enormous schedules, allocation refusal, or insufficient
+/// headroom retain the exact full-scan kernel.
+fn build_tile_draw_bins<M>(
+    draws: &[ProjectedDraw<M>],
+    viewport: (u32, u32),
+    tile: u32,
+    budget: &mut PreparationBudget,
+) -> Option<Arc<TileBoundsBins>> {
+    if draws.len() < DRAW_BIN_MIN_DRAWS || viewport.0 == 0 || viewport.1 == 0 {
+        return None;
+    }
+    let tile = tile.max(1);
+    build_tile_bounds_bins(
+        draws.iter().map(|draw| draw.bounds),
+        viewport,
+        tile,
+        [
+            0,
+            0,
+            viewport.0.div_ceil(tile) - 1,
+            viewport.1.div_ceil(tile) - 1,
+        ],
+        projection_owner_bytes(draws)?,
+        budget,
+    )
+}
+
+/// Mandatory overhead of turning a borrowed job into an owned projection.
+/// Optional indexes always leave this headroom available.
+fn projection_owner_bytes<M>(draws: &[ProjectedDraw<M>]) -> Option<u64> {
+    draws.iter().try_fold(
+        (draws.len() as u64).checked_mul(std::mem::size_of::<ProjectedDraw<()>>() as u64)?,
+        |total, draw| total.checked_add(draw.shared_owner_bytes()),
+    )
+}
+
+/// Build a stable CSR list from either draw or triangle screen bounds. The
+/// same inclusive tile range and admission limits govern both granularities.
+fn build_tile_bounds_bins<I>(
+    bounds: I,
+    viewport: (u32, u32),
+    tile: u32,
+    tile_bounds: [u32; 4],
+    ownership_bytes: u64,
+    budget: &mut PreparationBudget,
+) -> Option<Arc<TileBoundsBins>>
+where
+    I: ExactSizeIterator<Item = Option<[f64; 4]>> + Clone,
+{
+    let items = bounds.len();
+    if items == 0 || u32::try_from(items).is_err() || viewport.0 == 0 || viewport.1 == 0 {
+        return None;
+    }
+    let tile = tile.max(1);
+    let columns = tile_bounds[2].checked_sub(tile_bounds[0])?.checked_add(1)?;
+    let rows = tile_bounds[3].checked_sub(tile_bounds[1])?.checked_add(1)?;
+    let cells = u64::from(columns) * u64::from(rows);
+    if cells > DRAW_BIN_MAX_CELLS {
+        return None;
+    }
+    let span = |bound| -> Option<[u32; 4]> {
+        let [x0, y0, x1, y1] = tile_span(bound, viewport, tile)?;
+        let x0 = x0.max(tile_bounds[0]);
+        let y0 = y0.max(tile_bounds[1]);
+        let x1 = x1.min(tile_bounds[2]);
+        let y1 = y1.min(tile_bounds[3]);
+        if x0 > x1 || y0 > y1 {
+            return None;
+        }
+        Some([
+            x0 - tile_bounds[0],
+            y0 - tile_bounds[1],
+            x1 - tile_bounds[0],
+            y1 - tile_bounds[1],
+        ])
+    };
+    let mut total = 0u64;
+    for bound in bounds.clone() {
+        if let Some(bounds) = bound
+            && (!bounds.iter().all(|value| value.is_finite())
+                || bounds[0] > bounds[2]
+                || bounds[1] > bounds[3])
+        {
+            return None;
+        }
+        let members = span(bound).map_or(0, |[x0, y0, x1, y1]| {
+            u64::from(x1 - x0 + 1) * u64::from(y1 - y0 + 1)
+        });
+        total = total.checked_add(members)?;
+        if total > DRAW_BIN_MAX_ENTRIES {
+            return None;
+        }
+    }
+    // Counting and inserting memberships, prefix scans, and allocation must
+    // earn a substantial reduction in the repeated raster walks. Require at
+    // least half the full-scan visits to disappear before allocating an index.
+    // Triangle baselines already reject tiles outside the owning draw, so
+    // their local grid counts only visits the existing path actually makes.
+    // Divide the baseline to avoid overflow and handle odd totals exactly.
+    let full_scan_visits = cells.checked_mul(items as u64)?;
+    if total > full_scan_visits / 2 {
+        return None;
+    }
+    let bytes = cells
+        .checked_add(1)?
+        .checked_add(total)?
+        .checked_mul(std::mem::size_of::<u32>() as u64)?
+        .checked_add(std::mem::size_of::<(TileBoundsBins, [usize; 2])>() as u64)?;
+    let working_bytes = budget.working_bytes.checked_add(bytes)?;
+    if working_bytes.checked_add(ownership_bytes)? > budget.limits.max_working_bytes {
+        return None;
+    }
+    let cells = usize::try_from(cells).ok()?;
+    let total = usize::try_from(total).ok()?;
+    let mut starts = Vec::new();
+    let mut entries = Vec::new();
+    starts.try_reserve_exact(cells + 1).ok()?;
+    entries.try_reserve_exact(total).ok()?;
+    starts.resize(cells + 1, 0u32);
+    entries.resize(total, 0u32);
+    for bound in bounds.clone() {
+        if let Some([x0, y0, x1, y1]) = span(bound) {
+            for row in y0..=y1 {
+                for column in x0..=x1 {
+                    starts[row as usize * columns as usize + column as usize + 1] += 1;
+                }
+            }
+        }
+    }
+    for cell in 0..cells {
+        starts[cell + 1] += starts[cell];
+    }
+    // Ascending source indices preserve both painter and depth-test order.
+    // Use starts as insertion cursors, then restore their original positions.
+    for (index, bound) in bounds.enumerate() {
+        if let Some([x0, y0, x1, y1]) = span(bound) {
+            for row in y0..=y1 {
+                for column in x0..=x1 {
+                    let cursor = &mut starts[row as usize * columns as usize + column as usize];
+                    entries[*cursor as usize] = index as u32;
+                    *cursor += 1;
+                }
+            }
+        }
+    }
+    starts.copy_within(0..cells, 1);
+    starts[0] = 0;
+    budget.working_bytes = working_bytes;
+    Some(Arc::new(TileBoundsBins {
+        origin: [tile_bounds[0], tile_bounds[1]],
+        columns,
+        rows,
+        starts,
+        entries,
+    }))
+}
+
+#[derive(Debug)]
+struct DrawTriangleBins {
+    draw: usize,
+    tiles: Arc<TileBoundsBins>,
+}
+
+/// Only large, successfully indexed triangle lists get a row here. Keeping
+/// this sparse side table outside ProjectedDraw leaves the ordinary draw and
+/// triangle IR unchanged, including the Metal executor's view of those rows.
+#[derive(Debug)]
+struct TriangleTileBins {
+    draws: Vec<DrawTriangleBins>,
+}
+
+impl TriangleTileBins {
+    fn for_draw(&self, draw: usize) -> Option<&TileBoundsBins> {
+        self.draws
+            .binary_search_by_key(&draw, |row| row.draw)
+            .ok()
+            .map(|index| self.draws[index].tiles.as_ref())
+    }
+}
+
+fn build_triangle_tile_bins<M>(
+    draws: &[ProjectedDraw<M>],
+    viewport: (u32, u32),
+    tile: u32,
+    budget: &mut PreparationBudget,
+) -> Option<Arc<TriangleTileBins>> {
+    if viewport.0 == 0 || viewport.1 == 0 {
+        return None;
+    }
+    let eligible = draws
+        .iter()
+        .filter(|draw| {
+            matches!(&draw.primitive, ProjectedPrimitive::Triangles { triangles, .. }
+                if triangles.len() >= TRIANGLE_BIN_MIN_TRIANGLES
+                    && tile_span_count(draw.bounds, viewport, tile) > 1)
+        })
+        .count();
+    if eligible == 0 {
+        return None;
+    }
+    let ownership_bytes = projection_owner_bytes(draws)?;
+    let table_bytes = (eligible as u64)
+        .checked_mul(std::mem::size_of::<DrawTriangleBins>() as u64)?
+        .checked_add(std::mem::size_of::<(TriangleTileBins, [usize; 2])>() as u64)?;
+    let working_bytes = budget.working_bytes.checked_add(table_bytes)?;
+    if working_bytes.checked_add(ownership_bytes)? > budget.limits.max_working_bytes {
+        return None;
+    }
+    let mut indexed = Vec::new();
+    indexed.try_reserve_exact(eligible).ok()?;
+    let mut index_budget = PreparationBudget::new(budget.limits);
+    index_budget.working_bytes = working_bytes;
+    for (draw, source) in draws.iter().enumerate() {
+        let ProjectedPrimitive::Triangles { triangles, .. } = &source.primitive else {
+            continue;
+        };
+        if triangles.len() < TRIANGLE_BIN_MIN_TRIANGLES {
+            continue;
+        }
+        let Some(tile_bounds) = tile_span(source.bounds, viewport, tile) else {
+            continue;
+        };
+        if tile_bounds[0] == tile_bounds[2] && tile_bounds[1] == tile_bounds[3] {
+            continue;
+        }
+        if let Some(tiles) = build_tile_bounds_bins(
+            triangles.iter().map(|triangle| Some(triangle.bounds)),
+            viewport,
+            tile,
+            tile_bounds,
+            ownership_bytes,
+            &mut index_budget,
+        ) {
+            indexed.push(DrawTriangleBins { draw, tiles });
+        }
+    }
+    if indexed.is_empty() {
+        return None;
+    }
+    budget.working_bytes = index_budget.working_bytes;
+    Some(Arc::new(TriangleTileBins { draws: indexed }))
+}
+
 /// Texture-independent, owned projection of one immutable scene capture.
 ///
 /// Texture references are bound only for the duration of a raster call. The
@@ -1525,6 +1837,8 @@ pub(crate) type CompiledPrimitive<'a> = ProjectedPrimitive<TextureMaterial<'a>>;
 pub(crate) struct PreparedThreeDProjection {
     camera: Camera,
     draws: Vec<ProjectedDraw<()>>,
+    draw_bins: Option<Arc<TileBoundsBins>>,
+    triangle_bins: Option<Arc<TriangleTileBins>>,
     tiling: Tiling,
     sample_grid: u32,
     preparation_bytes: u64,
@@ -1586,6 +1900,8 @@ impl PreparedThreeDProjection {
         let raster = RasterPass {
             camera: &self.camera,
             draws: &self.draws,
+            draw_bins: self.draw_bins.as_deref(),
+            triangle_bins: self.triangle_bins.as_deref(),
             tiling: self.tiling,
             sample_grid: self.sample_grid,
         };
@@ -1669,6 +1985,8 @@ impl PreparedThreeDProjection {
         Ok(ThreeDJob {
             camera,
             draws: compiled,
+            draw_bins: self.draw_bins.clone(),
+            triangle_bins: self.triangle_bins.clone(),
             tiling: self.tiling,
             sample_grid: self.sample_grid,
             camera_revision: camera.revision(),
@@ -1698,6 +2016,8 @@ pub(crate) fn same_projection_camera(before: &Camera, after: &Camera) -> bool {
 pub struct ThreeDJob<'a> {
     camera: &'a Camera,
     draws: Vec<CompiledDraw<'a>>,
+    draw_bins: Option<Arc<TileBoundsBins>>,
+    triangle_bins: Option<Arc<TriangleTileBins>>,
     tiling: Tiling,
     sample_grid: u32,
     camera_revision: u64,
@@ -1743,9 +2063,23 @@ impl<'a> ThreeDJob<'a> {
             EdgeSampleLimit::TwoByTwo => 2,
             EdgeSampleLimit::FourByFour => 4,
         };
+        let draw_bins = build_tile_draw_bins(
+            &compiled,
+            camera.pixel_shape(),
+            tiling.fine_tile,
+            &mut budget,
+        );
+        let triangle_bins = build_triangle_tile_bins(
+            &compiled,
+            camera.pixel_shape(),
+            tiling.fine_tile,
+            &mut budget,
+        );
         Ok(Self {
             camera,
             draws: compiled,
+            draw_bins,
+            triangle_bins,
             tiling,
             sample_grid,
             camera_revision: camera.revision(),
@@ -1767,6 +2101,8 @@ impl<'a> ThreeDJob<'a> {
         Ok(PreparedThreeDProjection {
             camera: self.camera.clone(),
             draws,
+            draw_bins: self.draw_bins,
+            triangle_bins: self.triangle_bins,
             tiling: self.tiling,
             sample_grid: self.sample_grid,
             preparation_bytes: budget.working_bytes,
@@ -1790,6 +2126,9 @@ impl<'a> ThreeDJob<'a> {
     /// timing noise, while rendering still pays no counter-maintenance cost.
     #[must_use]
     pub fn scheduled_tile_draw_count(&self) -> u64 {
+        if let Some(bins) = &self.draw_bins {
+            return bins.entries.len() as u64;
+        }
         let tile = self.tiling.fine_tile.max(1);
         self.draws.iter().fold(0u64, |count, draw| {
             count.saturating_add(tile_span_count(
@@ -1798,6 +2137,18 @@ impl<'a> ThreeDJob<'a> {
                 tile,
             ))
         })
+    }
+
+    /// Keep identical compiled geometry while comparing the indexed raster
+    /// schedule with its full-scan fallback in same-invocation tests.
+    #[cfg(test)]
+    pub(crate) fn disable_tile_draw_bins_for_test(&mut self) -> bool {
+        self.draw_bins.take().is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn disable_tile_triangle_bins_for_test(&mut self) -> bool {
+        self.triangle_bins.take().is_some()
     }
 
     /// Conservative logical bytes admitted while preparing this job.
@@ -1939,6 +2290,8 @@ impl<'a> ThreeDJob<'a> {
         RasterPass {
             camera: self.camera,
             draws: &self.draws,
+            draw_bins: self.draw_bins.as_deref(),
+            triangle_bins: self.triangle_bins.as_deref(),
             tiling: self.tiling,
             sample_grid: self.sample_grid,
         }
@@ -1951,11 +2304,24 @@ impl<'a> ThreeDJob<'a> {
 struct RasterPass<'a, M> {
     camera: &'a Camera,
     draws: &'a [ProjectedDraw<M>],
+    draw_bins: Option<&'a TileBoundsBins>,
+    triangle_bins: Option<&'a TriangleTileBins>,
     tiling: Tiling,
     sample_grid: u32,
 }
 
 impl<M: Copy> RasterPass<'_, M> {
+    fn triangle_candidates(&self, draw: usize, triangles: usize, tile: [u32; 2]) -> Option<&[u32]> {
+        // True dots and images retain the direct slice loop: no side-table
+        // search or index-iterator overhead for their two raster triangles.
+        if triangles < TRIANGLE_BIN_MIN_TRIANGLES {
+            return None;
+        }
+        self.triangle_bins?
+            .for_draw(draw)
+            .map(|bins| bins.indices(tile[0], tile[1]))
+    }
+
     fn render_band<'texture>(
         &self,
         scratch: &mut TileScratch,
@@ -1992,16 +2358,30 @@ impl<M: Copy> RasterPass<'_, M> {
             return;
         }
         scratch.clear(width, height, self.camera.background());
+        let tile = self.tiling.fine_tile.max(1);
+        let tile_position = [x0 / tile, y0 / tile];
+        let indices = match self.draw_bins {
+            Some(bins) => {
+                TileDrawIndices::Binned(bins.indices(tile_position[0], tile_position[1]).iter())
+            }
+            None => TileDrawIndices::All(0..self.draws.len()),
+        };
         if self.sample_grid > 1 {
-            for draw in self.draws {
+            for index in indices.clone() {
+                let draw = &self.draws[index];
                 if !bounds_intersect(draw.bounds, rectangle) {
                     continue;
                 }
                 match &draw.primitive {
                     ProjectedPrimitive::Triangles { triangles, .. } => {
-                        for triangle in triangles {
-                            scratch.mark_triangle_boundary(triangle, rectangle, width, height);
-                        }
+                        visit_triangle_candidates(
+                            triangles,
+                            self.triangle_candidates(index, triangles.len(), tile_position),
+                            rectangle,
+                            |triangle| {
+                                scratch.mark_triangle_boundary(triangle, rectangle, width, height)
+                            },
+                        );
                     }
                     ProjectedPrimitive::Vector(vector) => {
                         scratch.mark_vector_boundaries(
@@ -2016,23 +2396,29 @@ impl<M: Copy> RasterPass<'_, M> {
             }
         }
 
-        for (index, draw) in self.draws.iter().enumerate() {
+        for index in indices {
+            let draw = &self.draws[index];
             if !bounds_intersect(draw.bounds, rectangle) {
                 continue;
             }
             match &draw.primitive {
                 ProjectedPrimitive::Triangles { triangles, shader } => {
                     let shader = shader.map_material(|value| material(index, value));
-                    for triangle in triangles {
-                        scratch.raster_triangle(
-                            triangle,
-                            shader,
-                            draw.depth_test,
-                            rectangle,
-                            width,
-                            height,
-                        );
-                    }
+                    visit_triangle_candidates(
+                        triangles,
+                        self.triangle_candidates(index, triangles.len(), tile_position),
+                        rectangle,
+                        |triangle| {
+                            scratch.raster_triangle(
+                                triangle,
+                                shader,
+                                draw.depth_test,
+                                rectangle,
+                                width,
+                                height,
+                            );
+                        },
+                    );
                 }
                 ProjectedPrimitive::Vector(vector) => {
                     scratch.raster_vector(
@@ -2053,6 +2439,33 @@ impl<M: Copy> RasterPass<'_, M> {
                 let pixel = scratch.resolve(local_x, local_y, width);
                 let offset = (x0 as usize + local_x) * 8;
                 write_pixel(pixel, &mut row[offset..offset + 8]);
+            }
+        }
+    }
+}
+
+/// The unindexed branch keeps the original direct slice iteration. Indexed
+/// candidates still use the conservative rectangle rejection and the same
+/// triangle kernels, whose floor/ceil bounds determine all AA and sample work.
+#[inline]
+fn visit_triangle_candidates(
+    triangles: &[RasterTriangle],
+    candidates: Option<&[u32]>,
+    rectangle: [u32; 4],
+    mut visit: impl FnMut(&RasterTriangle),
+) {
+    match candidates {
+        Some(candidates) => {
+            for &index in candidates {
+                let triangle = &triangles[index as usize];
+                if bounds_intersect(Some(triangle.bounds), rectangle) {
+                    visit(triangle);
+                }
+            }
+        }
+        None => {
+            for triangle in triangles {
+                visit(triangle);
             }
         }
     }
@@ -3291,20 +3704,28 @@ fn bounds_intersect(bounds: Option<[f64; 4]>, rectangle: [u32; 4]) -> bool {
 }
 
 fn tile_span_count(bounds: Option<[f64; 4]>, viewport: (u32, u32), tile: u32) -> u64 {
-    let Some([min_x, min_y, max_x, max_y]) = bounds else {
+    let Some([x0, y0, x1, y1]) = tile_span(bounds, viewport, tile) else {
         return 0;
     };
+    u64::from(x1 - x0 + 1) * u64::from(y1 - y0 + 1)
+}
+
+/// Inclusive tile coordinates matching bounds_intersect's closed rectangle
+/// convention. A bound exactly on an interior tile edge belongs to both
+/// neighboring tiles; viewport-edge contact belongs to its final tile.
+fn tile_span(bounds: Option<[f64; 4]>, viewport: (u32, u32), tile: u32) -> Option<[u32; 4]> {
+    let [min_x, min_y, max_x, max_y] = bounds?;
     if ![min_x, min_y, max_x, max_y]
         .iter()
         .all(|value| value.is_finite())
         || viewport.0 == 0
         || viewport.1 == 0
     {
-        return 0;
+        return None;
     }
-    let axis_span = |min: f64, max: f64, extent: u32| -> u64 {
-        if max < 0.0 || min > f64::from(extent) {
-            return 0;
+    let axis_span = |min: f64, max: f64, extent: u32| -> Option<(u32, u32)> {
+        if max < 0.0 || min > f64::from(extent) || min > max {
+            return None;
         }
         let tile = tile.max(1);
         let tiles = extent.div_ceil(tile);
@@ -3320,9 +3741,11 @@ fn tile_span_count(bounds: Option<[f64; 4]>, viewport: (u32, u32), tile: u32) ->
             (max / f64::from(tile)).floor() as u32
         }
         .min(tiles - 1);
-        u64::from(last.saturating_sub(first).saturating_add(1))
+        Some((first, last))
     };
-    axis_span(min_x, max_x, viewport.0).saturating_mul(axis_span(min_y, max_y, viewport.1))
+    let (x0, x1) = axis_span(min_x, max_x, viewport.0)?;
+    let (y0, y1) = axis_span(min_y, max_y, viewport.1)?;
+    Some([x0, y0, x1, y1])
 }
 
 fn orient(a: [f64; 2], b: [f64; 2], point: [f64; 2]) -> f64 {
@@ -4620,6 +5043,1087 @@ mod tests {
         std::array::from_fn(|index| {
             f16_to_f64(u16::from_le_bytes([bytes[index * 2], bytes[index * 2 + 1]]))
         })
+    }
+
+    fn bounds_only_draw(bounds: Option<[f64; 4]>) -> ProjectedDraw<()> {
+        ProjectedDraw {
+            primitive: ProjectedPrimitive::Triangles {
+                triangles: Vec::new().into(),
+                shader: ProjectedShader::Gouraud,
+            },
+            depth_test: false,
+            bounds,
+        }
+    }
+
+    #[test]
+    fn tile_draw_bins_match_closed_bounds_at_edges_and_offscreen() {
+        let bounds = [
+            None,
+            Some([-100.0, -100.0, -1.0, -1.0]),
+            Some([100.0, 100.0, 110.0, 110.0]),
+            Some([0.0, 0.0, 0.0, 0.0]),
+            Some([-0.0, -0.0, 1.0, 1.0]),
+            Some([8.0, 8.0, 8.0, 8.0]),
+            Some([8.0 - f64::EPSILON * 8.0, 0.0, 8.0, 16.0]),
+            Some([8.0, 8.0, 8.0 + f64::EPSILON * 8.0, 16.0]),
+            Some([0.0, 0.0, 19.0, 13.0]),
+            Some([19.0, 13.0, 19.0, 13.0]),
+            Some([19.0, 0.0, 20.0, 13.0]),
+            Some([-f64::MAX, -f64::MAX, 0.0, 0.0]),
+        ];
+        let draws: Vec<_> = bounds
+            .into_iter()
+            .cycle()
+            .take(DRAW_BIN_MIN_DRAWS * 2)
+            .map(bounds_only_draw)
+            .collect();
+        for (viewport, tile) in [((19, 13), 8), ((19, 13), 1), ((1, 1), u32::MAX)] {
+            let mut budget = PreparationBudget::new(ThreeDPreparationLimits::default());
+            let bins = build_tile_draw_bins(&draws, viewport, tile, &mut budget)
+                .expect("sparse finite bounds have an index");
+            let mut total = 0u64;
+            for row in 0..viewport.1.div_ceil(tile) {
+                for column in 0..viewport.0.div_ceil(tile) {
+                    let x0 = column * tile;
+                    let y0 = row * tile;
+                    let rectangle = [
+                        x0,
+                        y0,
+                        x0.saturating_add(tile).min(viewport.0),
+                        y0.saturating_add(tile).min(viewport.1),
+                    ];
+                    let expected: Vec<_> = draws
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, draw)| bounds_intersect(draw.bounds, rectangle))
+                        .map(|(index, _)| index as u32)
+                        .collect();
+                    assert_eq!(bins.indices(column, row), expected, "{rectangle:?}");
+                    total += expected.len() as u64;
+                }
+            }
+            assert_eq!(bins.entries.len() as u64, total);
+        }
+
+        let empty: Vec<_> = (0..DRAW_BIN_MIN_DRAWS)
+            .map(|_| bounds_only_draw(None))
+            .collect();
+        let mut budget = PreparationBudget::new(ThreeDPreparationLimits::default());
+        let bins = build_tile_draw_bins(&empty, (19, 13), 8, &mut budget)
+            .expect("clipped-empty commands skip every tile");
+        assert!(bins.entries.is_empty());
+        assert_eq!(bins.starts, [0; 7]);
+        assert!(build_tile_draw_bins::<()>(&[], (19, 13), 8, &mut budget).is_none());
+    }
+
+    #[test]
+    fn optional_tile_draw_bins_obey_budget_and_leave_owned_capture_headroom() {
+        let draws: Vec<_> = (0..DRAW_BIN_MIN_DRAWS)
+            .map(|_| bounds_only_draw(Some([1.0, 1.0, 2.0, 2.0])))
+            .collect();
+        let limits = ThreeDPreparationLimits::default();
+        let mut budget = PreparationBudget::new(limits);
+        budget.working_bytes = 123;
+        let bins = build_tile_draw_bins(&draws, (64, 64), 8, &mut budget).unwrap();
+        let admitted_bytes = budget.working_bytes;
+        let ownership_bytes = draws.len() as u64
+            * (std::mem::size_of::<ProjectedDraw<()>>() as u64
+                + std::mem::size_of::<(Vec<RasterTriangle>, [usize; 2])>() as u64);
+        assert_eq!(bins.entries.len(), draws.len());
+
+        for shortfall in [0, 1] {
+            let mut budget = PreparationBudget::new(ThreeDPreparationLimits {
+                max_working_bytes: admitted_bytes + ownership_bytes - shortfall,
+                ..limits
+            });
+            budget.working_bytes = 123;
+            let bins = build_tile_draw_bins(&draws, (64, 64), 8, &mut budget);
+            assert_eq!(bins.is_some(), shortfall == 0);
+            assert_eq!(
+                budget.working_bytes,
+                if shortfall == 0 { admitted_bytes } else { 123 },
+                "an optional refusal must not consume budget"
+            );
+        }
+
+        let mut budget = PreparationBudget::new(limits);
+        assert!(build_tile_draw_bins(&draws, (u32::MAX, u32::MAX), 1, &mut budget).is_none());
+        assert!(build_tile_draw_bins(&draws, (0, 64), 8, &mut budget).is_none());
+        for bounds in [
+            [0.0, 0.0, 64.0, 64.0], // No scan reduction for a dense list.
+            [0.0, 0.0, f64::INFINITY, 64.0],
+            [f64::NAN, 0.0, 1.0, 1.0],
+            [2.0, 0.0, 1.0, 1.0],
+        ] {
+            let draws: Vec<_> = (0..DRAW_BIN_MIN_DRAWS)
+                .map(|_| bounds_only_draw(Some(bounds)))
+                .collect();
+            assert!(build_tile_draw_bins(&draws, (64, 64), 8, &mut budget).is_none());
+            assert_eq!(budget.working_bytes, 0);
+        }
+        let many_memberships: Vec<_> = (0..DRAW_BIN_MIN_DRAWS)
+            .map(|_| bounds_only_draw(Some([0.0, 0.0, 1023.0, 1023.0])))
+            .collect();
+        assert!(build_tile_draw_bins(&many_memberships, (1024, 1024), 1, &mut budget).is_none());
+        assert_eq!(budget.working_bytes, 0);
+    }
+
+    #[test]
+    fn tile_bins_require_half_scan_reduction_with_exact_budget_headroom() {
+        // Exercise the command wrapper's full grid and the common builder's
+        // translated local grid. Odd baselines must round toward refusal:
+        // 49 of 99 visits is useful; 50 of 99 is less than a twofold reduction.
+        for (count, columns, memberships) in [
+            (32usize, 2u32, 31usize),
+            (32, 2, 32),
+            (32, 2, 33),
+            (33, 3, 49),
+            (33, 3, 50),
+        ] {
+            for origin in [[0, 0], [2, 3]] {
+                let local = origin != [0, 0];
+                let viewport = if local { (48, 40) } else { (columns * 8, 8) };
+                let x = f64::from(origin[0] * 8 + 1);
+                let y = f64::from(origin[1] * 8 + 1);
+                let draws: Vec<_> = (0..count)
+                    .map(|index| {
+                        let bounds = (index < memberships.min(count)).then_some([
+                            x,
+                            y,
+                            x + if index < memberships.saturating_sub(count) {
+                                8.0
+                            } else {
+                                1.0
+                            },
+                            y + 1.0,
+                        ]);
+                        bounds_only_draw(bounds)
+                    })
+                    .collect();
+                let ownership_bytes = projection_owner_bytes(&draws).unwrap();
+                let index_bytes = (u64::from(columns) + 1 + memberships as u64) * 4
+                    + std::mem::size_of::<(TileBoundsBins, [usize; 2])>() as u64;
+                let sparse_enough = memberships as u64 <= u64::from(columns) * count as u64 / 2;
+                for shortfall in [0, 1] {
+                    let mut budget = PreparationBudget::new(ThreeDPreparationLimits {
+                        max_working_bytes: 123 + index_bytes + ownership_bytes - shortfall,
+                        ..ThreeDPreparationLimits::default()
+                    });
+                    budget.working_bytes = 123;
+                    let bins = if local {
+                        build_tile_bounds_bins(
+                            draws.iter().map(|draw| draw.bounds),
+                            viewport,
+                            8,
+                            [origin[0], origin[1], origin[0] + columns - 1, origin[1]],
+                            ownership_bytes,
+                            &mut budget,
+                        )
+                    } else {
+                        build_tile_draw_bins(&draws, viewport, 8, &mut budget)
+                    };
+                    let admitted = sparse_enough && shortfall == 0;
+                    assert_eq!(bins.is_some(), admitted, "{count}/{columns}/{memberships}");
+                    assert_eq!(
+                        budget.working_bytes,
+                        123 + if admitted { index_bytes } else { 0 },
+                        "density and byte-budget refusals leave the caller unchanged"
+                    );
+                    if let Some(bins) = bins {
+                        assert_eq!(bins.origin, origin);
+                        assert_eq!(bins.entries.len(), memberships);
+                        for row in 0..viewport.1.div_ceil(8) {
+                            for column in 0..viewport.0.div_ceil(8) {
+                                let rectangle = [column * 8, row * 8, column * 8 + 8, row * 8 + 8];
+                                let expected: Vec<_> = draws
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(_, draw)| bounds_intersect(draw.bounds, rectangle))
+                                    .map(|(index, _)| index as u32)
+                                    .collect();
+                                assert_eq!(bins.indices(column, row), expected);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn triangle_density_refusal_preserves_later_indexes_and_exact_budget() {
+        let attributes = Attributes {
+            world: [0.0; 3],
+            normal: [0.0, 0.0, 1.0],
+            color: [1.0; 4],
+            uv: [0.0; 2],
+            opacity: 0.5,
+        };
+        let vertex = |screen| RasterVertex {
+            attributes,
+            screen,
+            inverse_w: 1.0,
+            ndc_z: 0.0,
+        };
+        let make_draw = |crosses_tile: bool| {
+            let triangles: Vec<_> = (0..TRIANGLE_BIN_MIN_TRIANGLES)
+                .map(|index| {
+                    let x = if index % 2 == 0 { 17.0 } else { 25.0 };
+                    let right = if crosses_tile && index == 0 {
+                        25.0
+                    } else {
+                        x + 1.0
+                    };
+                    RasterTriangle {
+                        vertices: [vertex([x, 25.0]), vertex([right, 25.0]), vertex([x, 26.0])],
+                        bounds: [x, 25.0, right, 26.0],
+                    }
+                })
+                .collect();
+            ProjectedDraw::<()> {
+                primitive: ProjectedPrimitive::Triangles {
+                    triangles: triangles.into(),
+                    shader: ProjectedShader::Gouraud,
+                },
+                depth_test: false,
+                bounds: Some([17.0, 25.0, 26.0, 26.0]),
+            }
+        };
+        // Both draws occupy the same two-tile local grid. The first needs 33
+        // candidate visits and is refused; the second needs exactly 32 of 64.
+        let draws = [make_draw(true), make_draw(false)];
+        let mut unchanged = PreparationBudget::new(ThreeDPreparationLimits::default());
+        unchanged.working_bytes = 123;
+        assert!(build_triangle_tile_bins(&draws[..1], (48, 40), 8, &mut unchanged).is_none());
+        assert_eq!(unchanged.working_bytes, 123);
+
+        let ownership_bytes = projection_owner_bytes(&draws).unwrap();
+        let index_bytes = (3 + TRIANGLE_BIN_MIN_TRIANGLES as u64) * 4
+            + std::mem::size_of::<(TileBoundsBins, [usize; 2])>() as u64;
+        // The sparse table reserves a row for each eligible draw, even when
+        // density admission later refuses one. Keep that reservation charged.
+        let table_bytes = 2 * std::mem::size_of::<DrawTriangleBins>() as u64
+            + std::mem::size_of::<(TriangleTileBins, [usize; 2])>() as u64;
+        for shortfall in [0, 1] {
+            let mut budget = PreparationBudget::new(ThreeDPreparationLimits {
+                max_working_bytes: 123 + table_bytes + index_bytes + ownership_bytes - shortfall,
+                ..ThreeDPreparationLimits::default()
+            });
+            budget.working_bytes = 123;
+            let bins = build_triangle_tile_bins(&draws, (48, 40), 8, &mut budget);
+            assert_eq!(bins.is_some(), shortfall == 0);
+            assert_eq!(
+                budget.working_bytes,
+                123 + if shortfall == 0 {
+                    table_bytes + index_bytes
+                } else {
+                    0
+                }
+            );
+            if let Some(bins) = bins {
+                assert_eq!(bins.draws.len(), 1);
+                assert!(bins.for_draw(0).is_none());
+                let admitted = bins.for_draw(1).unwrap();
+                assert_eq!(admitted.origin, [2, 3]);
+                assert_eq!(admitted.entries.len(), TRIANGLE_BIN_MIN_TRIANGLES);
+                assert_eq!(
+                    admitted.indices(2, 3),
+                    (0..32).step_by(2).collect::<Vec<_>>()
+                );
+                assert_eq!(
+                    admitted.indices(3, 3),
+                    (1..32).step_by(2).collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tile_draw_bins_preserve_mixed_camera_pixels_and_owned_material_indices() {
+        let texture = Texture::from_rgba8(
+            2,
+            2,
+            &[
+                255, 0, 0, 160, 0, 255, 0, 0, 0, 0, 255, 220, 255, 255, 0, 90,
+            ],
+            crate::texture::TextureEncoding::Linear,
+        )
+        .unwrap();
+        let dark = Texture::from_rgba8(
+            1,
+            1,
+            &[20, 60, 130, 210],
+            crate::texture::TextureEncoding::Linear,
+        )
+        .unwrap();
+        let mesh = SurfaceMesh::new(
+            vec![
+                SurfaceVertex::textured([-2.5, -1.5, -0.2], [0.0, 0.0, 1.0], [0.0, 1.0], 0.8),
+                SurfaceVertex::textured([2.5, -1.5, 0.3], [0.0, 0.0, 1.0], [1.0, 1.0], 0.8),
+                SurfaceVertex::textured([2.5, 1.5, 0.3], [0.0, 0.0, 1.0], [1.0, 0.0], 0.8),
+                SurfaceVertex::textured([-2.5, 1.5, -0.2], [0.0, 0.0, 1.0], [0.0, 0.0], 0.8),
+            ],
+            vec![0, 1, 2, 0, 2, 3],
+        )
+        .unwrap();
+        let background_mesh = full_triangle(-2.0, color("#604080", 0.3));
+
+        for (samples, fine_tile) in [(1, 8), (2, 11), (4, 8)] {
+            let camera = Camera::new(crate::camera::CameraConfig {
+                resolution: (63, 47),
+                samples,
+                background: color("#102030", 0.4),
+                ..crate::camera::CameraConfig::default()
+            })
+            .unwrap();
+            let plan = vector_plan(
+                &path_points(
+                    &[[-3.0, -1.5, 0.5], [0.0, 2.5, 0.5], [3.0, -1.5, 0.5]],
+                    true,
+                ),
+                [0.2, 0.7, 0.3, 0.5],
+                [0.9, 0.7, 0.1, 0.8],
+                1.6,
+                camera.revision(),
+                |uniforms| {
+                    uniforms.depth_test = true;
+                    uniforms.clip_planes[0] = [1.0, 0.0, 0.0, 1.0];
+                },
+            );
+            let mut surface = SurfaceDraw::new(&background_mesh);
+            surface.shading = [0.0; 3];
+            let mut image = SurfaceDraw::image(&mesh, &texture);
+            image.clip_planes[0] = [1.0, 0.0, 0.0, 0.5];
+            let mut draws = vec![ThreeDDraw::Surface(surface), ThreeDDraw::Surface(image)];
+            for index in 0..40 {
+                let mut dot = TrueDotDraw::new(
+                    [
+                        (index % 8) as f64 * 1.2 - 4.2,
+                        (index / 8) as f64 * 1.1 - 2.2,
+                        (index % 3) as f64 * 0.6 - 0.3,
+                    ],
+                    0.25,
+                    color(if index % 2 == 0 { "#E04070" } else { "#40C0F0" }, 0.65),
+                );
+                dot.depth_test = index % 2 == 0;
+                dot.glow_factor = if index % 3 == 0 { GLOW_DOT_FACTOR } else { 0.0 };
+                if index == 4 {
+                    draws.push(ThreeDDraw::Vector(VectorDraw::new(&plan, 0)));
+                }
+                if index == 5 {
+                    dot.clip_planes[0] = [1.0, 0.0, 0.0, -1000.0];
+                } else if index == 6 {
+                    dot.center = [1000.0, 1000.0, 0.0];
+                } else if index == 7 {
+                    dot.radius = 0.0;
+                }
+                draws.push(ThreeDDraw::TrueDot(dot));
+            }
+            let mut textured = SurfaceDraw::new(&mesh);
+            textured.material =
+                SurfaceMaterial::Texture(TextureMaterial::surface(&dark, Some(&texture)));
+            textured.clip_planes[0] = [-1.0, 0.0, 0.0, 0.2];
+            draws.push(ThreeDDraw::Surface(textured));
+            let tiling = Tiling {
+                macro_tile: 32,
+                fine_tile,
+            };
+            let mut job = ThreeDJob::new(&camera, &draws, tiling).unwrap();
+            let bins = Arc::clone(job.draw_bins.as_ref().expect("mixed scene is tile indexed"));
+            assert!(job.disable_tile_draw_bins_for_test());
+            let expected = job.render(1).unwrap();
+            let index_bytes = (bins.starts.len() + bins.entries.len()) as u64
+                * std::mem::size_of::<u32>() as u64
+                + std::mem::size_of::<(TileBoundsBins, [usize; 2])>() as u64;
+            let exact_geometry_limit = ThreeDPreparationLimits {
+                max_working_bytes: job.preparation_bytes() - index_bytes,
+                ..ThreeDPreparationLimits::default()
+            };
+            let budget_fallback =
+                ThreeDJob::new_with_limits(&camera, &draws, tiling, exact_geometry_limit).unwrap();
+            assert!(budget_fallback.draw_bins.is_none());
+            assert_eq!(
+                budget_fallback.render(4).unwrap().as_bytes(),
+                expected.as_bytes()
+            );
+            let full_scan_count = u64::from(camera.pixel_width().div_ceil(fine_tile))
+                * u64::from(camera.pixel_height().div_ceil(fine_tile))
+                * draws.len() as u64;
+            assert!(bins.entries.len() as u64 * 2 < full_scan_count);
+            job.draw_bins = Some(Arc::clone(&bins));
+            assert_eq!(job.scheduled_tile_draw_count(), bins.entries.len() as u64);
+            for threads in [1, 4, 16] {
+                assert_eq!(job.render(threads).unwrap().as_bytes(), expected.as_bytes());
+            }
+
+            let projection = job.into_projection().unwrap();
+            assert!(Arc::ptr_eq(projection.draw_bins.as_ref().unwrap(), &bins));
+            let bound = projection.bind(&camera, &draws).unwrap();
+            assert!(Arc::ptr_eq(bound.draw_bins.as_ref().unwrap(), &bins));
+            assert_eq!(bound.render(4).unwrap().as_bytes(), expected.as_bytes());
+
+            let layout = projection.prepare_owned_bands(4, &expected).unwrap();
+            let bands: Vec<_> = (0..layout.height.div_ceil(layout.band_rows))
+                .map(|band| {
+                    let rows = layout
+                        .band_rows
+                        .min(layout.height - band * layout.band_rows);
+                    Mutex::new(vec![0u8; rows * layout.stride])
+                })
+                .collect();
+            let next = AtomicUsize::new(0);
+            std::thread::scope(|scope| {
+                for _ in 0..4 {
+                    scope.spawn(|| {
+                        projection.render_owned_bands(&bands, &next, layout.stride, |index| {
+                            match draws[index] {
+                                ThreeDDraw::Surface(SurfaceDraw {
+                                    material: SurfaceMaterial::Texture(material),
+                                    ..
+                                }) => material,
+                                _ => panic!("texture lookup used the wrong source command"),
+                            }
+                        });
+                    });
+                }
+            });
+            let actual: Vec<_> = bands
+                .into_iter()
+                .flat_map(|band| band.into_inner().unwrap())
+                .collect();
+            assert_eq!(actual, expected.as_bytes());
+        }
+    }
+
+    /// Same prepared geometry, scratch, destination, and raster arithmetic;
+    /// only the command schedule changes. Keep timing out of the normal gate.
+    #[test]
+    #[ignore = "same-invocation camera tile index throughput probe"]
+    fn sparse_camera_tile_index_benchmark() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        fn median(samples: &mut [f64]) -> f64 {
+            samples.sort_by(f64::total_cmp);
+            samples[samples.len() / 2]
+        }
+
+        let camera = Camera::new(crate::camera::CameraConfig {
+            resolution: (512, 288),
+            samples: 2,
+            background: color("#102030", 1.0),
+            ..crate::camera::CameraConfig::default()
+        })
+        .unwrap();
+        let draws: Vec<_> = (0..4096)
+            .map(|index| {
+                ThreeDDraw::TrueDot(TrueDotDraw::new(
+                    [
+                        (index % 128) as f64 * 0.1 - 6.35,
+                        (index / 128) as f64 * 0.22 - 3.41,
+                        0.0,
+                    ],
+                    0.018,
+                    color("#40C0F0", 0.8),
+                ))
+            })
+            .collect();
+        let started = Instant::now();
+        let mut job = ThreeDJob::new(&camera, &draws, Tiling::default()).unwrap();
+        let prepare_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let bins = Arc::clone(job.draw_bins.as_ref().expect("sparse scene is indexed"));
+        let index_bytes = (bins.starts.len() + bins.entries.len()) as u64 * 4
+            + std::mem::size_of::<(TileBoundsBins, [usize; 2])>() as u64;
+        let full_visits = (bins.starts.len() - 1) * draws.len();
+        let mut destination = job.render(1).unwrap();
+        let expected = destination.as_bytes().to_vec();
+        assert!(job.disable_tile_draw_bins_for_test());
+        job.render_into(1, &mut destination).unwrap();
+        assert_eq!(destination.as_bytes(), expected);
+
+        let mut indexed_ms = [0.0; 7];
+        let mut full_scan_ms = [0.0; 7];
+        let mut build_ms = [0.0; 7];
+        for round in 0..7 {
+            for indexed in if round % 2 == 0 {
+                [true, false]
+            } else {
+                [false, true]
+            } {
+                job.draw_bins = Some(Arc::clone(&bins));
+                if !indexed {
+                    assert!(job.disable_tile_draw_bins_for_test());
+                }
+                let started = Instant::now();
+                job.render_into(1, &mut destination).unwrap();
+                let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+                assert_eq!(destination.as_bytes(), expected);
+                if indexed {
+                    indexed_ms[round] = elapsed_ms;
+                } else {
+                    full_scan_ms[round] = elapsed_ms;
+                }
+            }
+            let mut budget = PreparationBudget::new(job.preparation_limits);
+            budget.working_bytes = job.preparation_bytes - index_bytes;
+            let started = Instant::now();
+            let rebuilt = build_tile_draw_bins(
+                black_box(&job.draws),
+                camera.pixel_shape(),
+                job.tiling.fine_tile,
+                &mut budget,
+            )
+            .unwrap();
+            build_ms[round] = started.elapsed().as_secs_f64() * 1000.0;
+            assert_eq!(rebuilt.entries, bins.entries);
+        }
+        let indexed_ms = median(&mut indexed_ms);
+        let full_scan_ms = median(&mut full_scan_ms);
+        eprintln!(
+            "camera_tile_index sparse: draws={} tiles={} candidates={} full_scan_visits={} index_bytes={} prepare_ms={prepare_ms:.3} index_build_median_ms={:.3} indexed_median_ms={indexed_ms:.3} full_scan_median_ms={full_scan_ms:.3} speedup={:.3}x pixels_equal=true",
+            draws.len(),
+            bins.starts.len() - 1,
+            bins.entries.len(),
+            full_visits,
+            index_bytes,
+            median(&mut build_ms),
+            full_scan_ms / indexed_ms,
+        );
+
+        // Isolate scheduling cost for small and differently dense command lists.
+        // This deliberately excludes shading: the same pixels would be shaded
+        // by either schedule. Time the actual admitted Binned-or-All schedule
+        // against a direct slice walk; report index construction separately.
+        let rectangles: Vec<_> = (0..18)
+            .flat_map(|row| {
+                (0..32).map(move |column| [column * 16, row * 16, column * 16 + 16, row * 16 + 16])
+            })
+            .collect();
+        for (name, count, minimum_x) in [
+            ("small", 16, 17.0),
+            ("near_dense", 32, 17.0),
+            ("above_half_density", 32, 241.0),
+            ("half_density", 32, 257.0),
+        ] {
+            let draws: Vec<_> = (0..count)
+                .map(|_| bounds_only_draw(Some([minimum_x, 0.0, 511.0, 287.0])))
+                .collect();
+            let selected_bins = build_tile_draw_bins(
+                &draws,
+                (512, 288),
+                16,
+                &mut PreparationBudget::new(ThreeDPreparationLimits::default()),
+            );
+            let index_admitted = selected_bins.is_some();
+            let full_scan_visits = rectangles.len() * count;
+            let selected_visits = selected_bins
+                .as_ref()
+                .map_or(full_scan_visits, |bins| bins.entries.len());
+            let candidate_visits: usize = rectangles
+                .iter()
+                .map(|&rectangle| {
+                    draws
+                        .iter()
+                        .filter(|draw| bounds_intersect(draw.bounds, rectangle))
+                        .count()
+                })
+                .sum();
+            let mut direct_ms = [0.0; 7];
+            let mut selected_ms = [0.0; 7];
+            let mut construction_ms = [0.0; 7];
+            for round in 0..7 {
+                for selected in if round % 2 == 0 {
+                    [true, false]
+                } else {
+                    [false, true]
+                } {
+                    let started = Instant::now();
+                    let mut hits = 0usize;
+                    for _ in 0..64 {
+                        for &rectangle in black_box(&rectangles) {
+                            let source = black_box(&draws);
+                            if selected {
+                                let indices = match black_box(selected_bins.as_ref()) {
+                                    Some(bins) => TileDrawIndices::Binned(
+                                        bins.indices(rectangle[0] / 16, rectangle[1] / 16).iter(),
+                                    ),
+                                    None => TileDrawIndices::All(0..source.len()),
+                                };
+                                for index in black_box(indices) {
+                                    hits += usize::from(bounds_intersect(
+                                        source[index].bounds,
+                                        rectangle,
+                                    ));
+                                }
+                            } else {
+                                for draw in source {
+                                    hits += usize::from(bounds_intersect(draw.bounds, rectangle));
+                                }
+                            }
+                        }
+                    }
+                    black_box(hits);
+                    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0 / 64.0;
+                    assert_eq!(hits, candidate_visits * 64);
+                    if selected {
+                        selected_ms[round] = elapsed_ms;
+                    } else {
+                        direct_ms[round] = elapsed_ms;
+                    }
+                }
+                let started = Instant::now();
+                for _ in 0..64 {
+                    let mut budget = PreparationBudget::new(ThreeDPreparationLimits::default());
+                    black_box(
+                        build_tile_draw_bins(black_box(&draws), (512, 288), 16, &mut budget)
+                            .map(|bins| bins.entries.len()),
+                    );
+                }
+                construction_ms[round] = started.elapsed().as_secs_f64() * 1000.0 / 64.0;
+            }
+            eprintln!(
+                "camera_tile_index {name}: draws={count} full_scan_visits={full_scan_visits} candidate_visits={candidate_visits} index_admitted={index_admitted} selected_visits={selected_visits} direct_scan_median_ms={:.6} selected_schedule_median_ms={:.6} index_build_median_ms={:.6} hits_equal=true",
+                median(&mut direct_ms),
+                median(&mut selected_ms),
+                median(&mut construction_ms),
+            );
+        }
+    }
+
+    fn grid_surface_mesh(nu: u32, nv: u32) -> SurfaceMesh {
+        let vertices = (0..nu)
+            .flat_map(|u| {
+                (0..nv).map(move |v| {
+                    let x = f64::from(u) / f64::from(nu - 1);
+                    let y = f64::from(v) / f64::from(nv - 1);
+                    SurfaceVertex {
+                        point: [(x - 0.5) * 12.0, (y - 0.5) * 7.0, f64::from(u % 3) * 0.08],
+                        normal: [0.0, 0.0, 1.0],
+                        color: LinearRgba {
+                            r: x,
+                            g: y,
+                            b: 1.0 - x,
+                            a: 0.7,
+                        },
+                        uv: [x, y],
+                        opacity: 0.8,
+                    }
+                })
+            })
+            .collect();
+        SurfaceMesh::from_uv_grid(vertices, (nu, nv)).unwrap()
+    }
+
+    fn overlapping_surface_mesh() -> SurfaceMesh {
+        let source = grid_surface_mesh(12, 10);
+        let offset = source.vertices.len() as u32;
+        let mut vertices = source.vertices.clone();
+        vertices.extend(source.vertices.iter().map(|vertex| SurfaceVertex {
+            point: [
+                vertex.point[0] + 0.15,
+                vertex.point[1] - 0.25,
+                vertex.point[2] + 0.4,
+            ],
+            color: LinearRgba {
+                r: vertex.color.b,
+                g: 1.0 - vertex.color.g,
+                b: vertex.color.r,
+                a: 0.45,
+            },
+            uv: [1.0 - vertex.uv[0], 1.0 - vertex.uv[1]],
+            ..*vertex
+        }));
+        let mut indices = Vec::new();
+        for triangle in source.indices.as_chunks::<3>().0 {
+            indices.extend_from_slice(triangle);
+            indices.extend(triangle.iter().map(|index| index + offset));
+        }
+        SurfaceMesh::new(vertices, indices).unwrap()
+    }
+
+    // These fixtures admit every eligible mesh, so retained rows equal the
+    // table reservation. A partial-admission table also charges unused slots.
+    fn triangle_index_bytes(bins: &TriangleTileBins) -> u64 {
+        std::mem::size_of::<(TriangleTileBins, [usize; 2])>() as u64
+            + bins.draws.len() as u64 * std::mem::size_of::<DrawTriangleBins>() as u64
+            + bins
+                .draws
+                .iter()
+                .map(|row| {
+                    (row.tiles.starts.len() + row.tiles.entries.len()) as u64 * 4
+                        + std::mem::size_of::<(TileBoundsBins, [usize; 2])>() as u64
+                })
+                .sum::<u64>()
+    }
+
+    fn owned_projection_pixels(
+        projection: &PreparedThreeDProjection,
+        draws: &[ThreeDDraw<'_>],
+        threads: usize,
+        destination: &FrameBuffer,
+    ) -> Vec<u8> {
+        let layout = projection
+            .prepare_owned_bands(threads, destination)
+            .unwrap();
+        let bands: Vec<_> = (0..layout.height.div_ceil(layout.band_rows))
+            .map(|band| {
+                let rows = layout
+                    .band_rows
+                    .min(layout.height - band * layout.band_rows);
+                Mutex::new(vec![0u8; rows * layout.stride])
+            })
+            .collect();
+        let next = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..threads {
+                scope.spawn(|| {
+                    projection.render_owned_bands(
+                        &bands,
+                        &next,
+                        layout.stride,
+                        |index| match draws[index] {
+                            ThreeDDraw::Surface(SurfaceDraw {
+                                material: SurfaceMaterial::Texture(material),
+                                ..
+                            }) => material,
+                            _ => panic!("texture lookup lost the original draw index"),
+                        },
+                    );
+                });
+            }
+        });
+        bands
+            .into_iter()
+            .flat_map(|band| band.into_inner().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn triangle_tile_bins_preserve_clipped_mesh_pixels_and_shared_captures() {
+        let mesh = overlapping_surface_mesh();
+        let image_mesh = grid_surface_mesh(2, 2);
+        let texture = Texture::from_rgba8(
+            2,
+            2,
+            &[
+                255, 0, 0, 160, 0, 255, 0, 0, 0, 0, 255, 220, 255, 255, 0, 90,
+            ],
+            crate::texture::TextureEncoding::Linear,
+        )
+        .unwrap();
+        let overlay = Texture::from_rgba8(
+            1,
+            1,
+            &[20, 90, 160, 100],
+            crate::texture::TextureEncoding::Linear,
+        )
+        .unwrap();
+        for (samples, depth_test, textured, fine_tile) in [
+            (1, false, false, 8),
+            (2, true, false, 11),
+            (4, false, true, 8),
+            (4, true, true, 11),
+        ] {
+            let camera = Camera::new(crate::camera::CameraConfig {
+                resolution: (67, 49),
+                samples,
+                background: color("#102030", 0.4),
+                ..crate::camera::CameraConfig::default()
+            })
+            .unwrap();
+            let mut surface = SurfaceDraw::new(&mesh);
+            surface.depth_test = depth_test;
+            surface.shading = [0.0; 3];
+            surface.clip_planes[0] = [1.0, 0.0, 0.0, 0.5];
+            surface.clip_planes[1] = [0.0, -1.0, 0.0, 0.9];
+            if textured {
+                surface.material =
+                    SurfaceMaterial::Texture(TextureMaterial::surface(&texture, Some(&overlay)));
+            }
+            let draws = [
+                ThreeDDraw::TrueDot(TrueDotDraw::new(
+                    [0.0, 0.0, -0.5],
+                    0.5,
+                    color("#FFFFFF", 0.8),
+                )),
+                ThreeDDraw::Surface(surface),
+                ThreeDDraw::Surface(SurfaceDraw::image(&image_mesh, &overlay)),
+                ThreeDDraw::TrueDot(TrueDotDraw::glow(
+                    [1.0, 0.5, 0.8],
+                    0.4,
+                    color("#E05070", 0.7),
+                )),
+            ];
+            let tiling = Tiling {
+                macro_tile: 32,
+                fine_tile,
+            };
+            let mut job = ThreeDJob::new(&camera, &draws, tiling).unwrap();
+            assert!(
+                job.draw_bins.is_none(),
+                "this exercises triangle indexing independently"
+            );
+            let bins = Arc::clone(job.triangle_bins.as_ref().unwrap());
+            assert_eq!(bins.draws.len(), 1);
+            assert_eq!(bins.draws[0].draw, 1);
+            assert!(bins.draws[0].tiles.origin[0] > 0 && bins.draws[0].tiles.origin[1] > 0);
+            assert!(bins.for_draw(0).is_none());
+            assert!(
+                bins.for_draw(2).is_none(),
+                "two-triangle image keeps its direct slice loop"
+            );
+            let ProjectedPrimitive::Triangles { triangles, .. } = &job.draws[1].primitive else {
+                unreachable!()
+            };
+            for row in 0..camera.pixel_height().div_ceil(fine_tile) {
+                for column in 0..camera.pixel_width().div_ceil(fine_tile) {
+                    let rectangle = [
+                        column * fine_tile,
+                        row * fine_tile,
+                        ((column + 1) * fine_tile).min(camera.pixel_width()),
+                        ((row + 1) * fine_tile).min(camera.pixel_height()),
+                    ];
+                    let expected: Vec<_> = triangles
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, triangle)| bounds_intersect(Some(triangle.bounds), rectangle))
+                        .map(|(index, _)| index as u32)
+                        .collect();
+                    assert_eq!(bins.draws[0].tiles.indices(column, row), expected);
+                }
+            }
+            assert!(job.disable_tile_triangle_bins_for_test());
+            let expected = job.render(1).unwrap();
+            job.triangle_bins = Some(Arc::clone(&bins));
+            for threads in [1, 4, 16] {
+                assert_eq!(job.render(threads).unwrap().as_bytes(), expected.as_bytes());
+            }
+            let projection = job.into_projection().unwrap();
+            assert!(Arc::ptr_eq(
+                projection.triangle_bins.as_ref().unwrap(),
+                &bins
+            ));
+            let bound = projection.bind(&camera, &draws).unwrap();
+            assert!(Arc::ptr_eq(bound.triangle_bins.as_ref().unwrap(), &bins));
+            assert_eq!(bound.render(4).unwrap().as_bytes(), expected.as_bytes());
+            for threads in [1, 4, 16] {
+                assert_eq!(
+                    owned_projection_pixels(&projection, &draws, threads, &expected),
+                    expected.as_bytes()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn triangle_tile_bins_fall_back_per_draw_and_preserve_owned_admission() {
+        let camera = Camera::new(crate::camera::CameraConfig {
+            resolution: (64, 48),
+            samples: 2,
+            ..crate::camera::CameraConfig::default()
+        })
+        .unwrap();
+        let mesh = grid_surface_mesh(10, 8);
+        let mut surface = SurfaceDraw::new(&mesh);
+        surface.shading = [0.0; 3];
+        surface.depth_test = false;
+        let mut localized = grid_surface_mesh(8, 8);
+        for vertex in &mut localized.vertices {
+            vertex.point = [
+                4.0 + vertex.point[0] * 0.003,
+                2.0 + vertex.point[1] * 0.003,
+                vertex.point[2] * 0.003,
+            ];
+        }
+        let draws = [
+            ThreeDDraw::Surface(surface),
+            ThreeDDraw::Surface(SurfaceDraw::new(&localized)),
+            ThreeDDraw::Surface(surface),
+        ];
+        let mut job = ThreeDJob::new(&camera, &draws, Tiling::default()).unwrap();
+        let bins = Arc::clone(job.triangle_bins.as_ref().unwrap());
+        assert_eq!(bins.draws.len(), 2);
+        assert!(bins.for_draw(0).is_some());
+        assert!(
+            bins.for_draw(1).is_none(),
+            "a mesh wholly inside one tile saves no triangle visits"
+        );
+        assert!(
+            bins.for_draw(2).is_some(),
+            "a refused mesh cannot shift later source draw IDs"
+        );
+        assert_eq!(
+            tile_span_count(
+                job.draws[1].bounds,
+                camera.pixel_shape(),
+                job.tiling.fine_tile
+            ),
+            1
+        );
+        let mut unchanged = PreparationBudget::new(ThreeDPreparationLimits::default());
+        unchanged.working_bytes = 123;
+        assert!(
+            build_triangle_tile_bins(
+                &job.draws[1..2],
+                camera.pixel_shape(),
+                job.tiling.fine_tile,
+                &mut unchanged
+            )
+            .is_none()
+        );
+        assert_eq!(unchanged.working_bytes, 123);
+        let base_bytes = job.preparation_bytes() - triangle_index_bytes(&bins);
+        let owner_bytes = projection_owner_bytes(&job.draws).unwrap();
+        assert!(job.disable_tile_triangle_bins_for_test());
+        let expected = job.render(1).unwrap();
+        let limits = ThreeDPreparationLimits {
+            max_working_bytes: base_bytes + owner_bytes,
+            ..ThreeDPreparationLimits::default()
+        };
+        let tight = ThreeDJob::new_with_limits(&camera, &draws, Tiling::default(), limits).unwrap();
+        assert!(tight.triangle_bins.is_none());
+        assert_eq!(tight.preparation_bytes(), base_bytes);
+        let projection = tight
+            .into_projection()
+            .expect("optional indexes cannot consume owned admission");
+        assert_eq!(projection.preparation_bytes, limits.max_working_bytes);
+        assert_eq!(
+            projection
+                .bind(&camera, &draws)
+                .unwrap()
+                .render(4)
+                .unwrap()
+                .as_bytes(),
+            expected.as_bytes()
+        );
+
+        let first = &bins.draws[0].tiles;
+        let first_bytes = (first.starts.len() + first.entries.len()) as u64 * 4
+            + std::mem::size_of::<(TileBoundsBins, [usize; 2])>() as u64;
+        let table_bytes = std::mem::size_of::<(TriangleTileBins, [usize; 2])>() as u64
+            + 2 * std::mem::size_of::<DrawTriangleBins>() as u64;
+        let partial = ThreeDJob::new_with_limits(
+            &camera,
+            &draws,
+            Tiling::default(),
+            ThreeDPreparationLimits {
+                max_working_bytes: base_bytes + owner_bytes + table_bytes + first_bytes,
+                ..limits
+            },
+        )
+        .unwrap();
+        let partial_bins = partial.triangle_bins.as_ref().unwrap();
+        assert_eq!(partial_bins.draws.len(), 1);
+        assert!(partial_bins.for_draw(0).is_some());
+        assert!(partial_bins.for_draw(1).is_none());
+        assert!(
+            partial_bins.for_draw(2).is_none(),
+            "aggregate budget leaves only the first mesh indexed"
+        );
+        assert_eq!(partial.render(4).unwrap().as_bytes(), expected.as_bytes());
+        assert_eq!(
+            partial
+                .into_projection()
+                .unwrap()
+                .bind(&camera, &draws)
+                .unwrap()
+                .render(4)
+                .unwrap()
+                .as_bytes(),
+            expected.as_bytes()
+        );
+    }
+
+    #[test]
+    #[ignore = "same-invocation single-mesh triangle index throughput probe"]
+    fn single_mesh_triangle_index_benchmark() {
+        use std::time::Instant;
+        let camera = Camera::new(crate::camera::CameraConfig {
+            resolution: (512, 288),
+            samples: 2,
+            ..crate::camera::CameraConfig::default()
+        })
+        .unwrap();
+        let mesh = grid_surface_mesh(97, 55);
+        let mut surface = SurfaceDraw::new(&mesh);
+        surface.shading = [0.0; 3];
+        let mut draws = vec![ThreeDDraw::Surface(surface)];
+        for index in 0..31 {
+            draws.push(ThreeDDraw::TrueDot(TrueDotDraw::new(
+                [(index % 8) as f64 - 3.5, (index / 8) as f64 - 1.5, 0.3],
+                0.018,
+                color("#40C0F0", 0.8),
+            )));
+        }
+        let started = Instant::now();
+        let mut job = ThreeDJob::new(&camera, &draws, Tiling::default()).unwrap();
+        let prepare_ms = started.elapsed().as_secs_f64() * 1000.0;
+        assert!(
+            job.draw_bins.is_some(),
+            "both benchmark arms retain the command index already on main"
+        );
+        let bins = Arc::clone(job.triangle_bins.as_ref().unwrap());
+        let tiles = &bins.draws[0].tiles;
+        let ProjectedPrimitive::Triangles { triangles, .. } = &job.draws[0].primitive else {
+            unreachable!()
+        };
+        let triangle_count = triangles.len();
+        let full_visits = triangle_count * (tiles.starts.len() - 1);
+        let index_bytes = triangle_index_bytes(&bins);
+        let mut destination = job.render(1).unwrap();
+        let expected = destination.as_bytes().to_vec();
+        assert!(job.disable_tile_triangle_bins_for_test());
+        job.render_into(1, &mut destination).unwrap();
+        assert_eq!(destination.as_bytes(), expected);
+        let mut indexed_ms = [0.0; 7];
+        let mut scan_ms = [0.0; 7];
+        let mut build_ms = [0.0; 7];
+        for round in 0..7 {
+            for indexed in if round % 2 == 0 {
+                [true, false]
+            } else {
+                [false, true]
+            } {
+                job.triangle_bins = Some(Arc::clone(&bins));
+                if !indexed {
+                    assert!(job.disable_tile_triangle_bins_for_test());
+                }
+                let started = Instant::now();
+                job.render_into(1, &mut destination).unwrap();
+                let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+                assert_eq!(destination.as_bytes(), expected);
+                if indexed {
+                    indexed_ms[round] = elapsed;
+                } else {
+                    scan_ms[round] = elapsed;
+                }
+            }
+            let mut budget = PreparationBudget::new(job.preparation_limits);
+            budget.working_bytes = job.preparation_bytes - index_bytes;
+            let started = Instant::now();
+            let rebuilt = build_triangle_tile_bins(
+                &job.draws,
+                camera.pixel_shape(),
+                job.tiling.fine_tile,
+                &mut budget,
+            )
+            .unwrap();
+            build_ms[round] = started.elapsed().as_secs_f64() * 1000.0;
+            assert_eq!(rebuilt.draws[0].tiles.entries, tiles.entries);
+        }
+        indexed_ms.sort_by(f64::total_cmp);
+        scan_ms.sort_by(f64::total_cmp);
+        build_ms.sort_by(f64::total_cmp);
+        eprintln!(
+            "camera_triangle_index single_mesh: triangles={triangle_count} dot_markers=31 command_index=true tiles={} candidates={} full_scan_visits={full_visits} index_bytes={index_bytes} prepare_ms={prepare_ms:.3} index_build_median_ms={:.3} indexed_median_ms={:.3} full_scan_median_ms={:.3} speedup={:.3}x pixels_equal=true",
+            tiles.starts.len() - 1,
+            tiles.entries.len(),
+            build_ms[3],
+            indexed_ms[3],
+            scan_ms[3],
+            scan_ms[3] / indexed_ms[3]
+        );
     }
 
     fn compiled_vector<'a>(job: &'a ThreeDJob<'_>) -> &'a CompiledVector {

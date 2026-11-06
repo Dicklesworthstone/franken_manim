@@ -154,6 +154,24 @@ The former staging refusals `PathArcUnsupported` and `UnalignedFamilies` remain
 as enum variants for source compatibility, but the method carrier no longer
 emits them. A diverged target is aligned privately rather than mutated.
 
+### Native `wag` rejects undefined deformation inputs
+
+The Rust APIs `Stage::wag(mob, direction, axis, wag_factor)` and
+`mob.animate().wag(direction, axis, wag_factor)` use the Reference's
+member-local normalized axis projection, with deterministic exponentiation.
+They validate the entire family before publishing point changes. Non-finite
+arguments or projections, zero projection extent, negative powers at the
+normalized zero endpoint, and results outside finite f32 storage return
+`StageError::InvalidWag`; the builder carries this as `AnimateError::Wag`
+without allocating a target in the live stage. Empty families remain
+unchanged, and exponent zero translates every point of a nondegenerate
+member by `direction`. **Migration:** choose an axis with nonzero extent for
+every point-bearing member, omit degenerate members explicitly, or handle the
+typed refusal. These admission rules apply to the Rust API only; the Python
+portal's `Mobject.wag` behavior is unchanged. Evidence:
+`fmn-mobject/tests/positional.rs`, `fmn-mobject/tests/animate_builder.rs`, and
+`fmn-anim/tests/method_transform.rs`.
+
 ## Complete one-by-one reveals and balanced hidden lifetimes
 
 `ShowSubmobjectsOneByOne` now selects child `ceil(alpha * n) - 1` for
