@@ -891,6 +891,7 @@ dependencies = [
  "fmn-geom",
  "fmn-hash",
  "fmn-mobject",
+ "fmn-render",
  "fmn-tex",
  "fmn-text",
  "fnx-classes",

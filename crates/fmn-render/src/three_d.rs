@@ -796,6 +796,25 @@ impl SurfaceMesh {
         })
     }
 
+    /// Remove triangles without changing their order, vertex records or UV
+    /// parameterization. This operates after the ordinary mesh admission, so
+    /// sparse grids retain the same dimension and index-capacity checks.
+    pub fn retain_triangles(&mut self, mut keep: impl FnMut([u32; 3]) -> bool) {
+        let mut written = 0;
+        for read in (0..self.indices.len()).step_by(3) {
+            let triangle = [
+                self.indices[read],
+                self.indices[read + 1],
+                self.indices[read + 2],
+            ];
+            if keep(triangle) {
+                self.indices[written..written + 3].copy_from_slice(&triangle);
+                written += 3;
+            }
+        }
+        self.indices.truncate(written);
+    }
+
     /// Vertices in UV-grid order.
     #[must_use]
     pub fn vertices(&self) -> &[SurfaceVertex] {

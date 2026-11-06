@@ -7,7 +7,137 @@
 //! publish a buffer and its durable topology together without replacing identity.
 
 use super::{Entry, Mob, Placement, Stage};
-use crate::{RecordBuffer, RenderPrimitive, StageError};
+use crate::{RecordBuffer, RecordSchema, RenderPrimitive, StageError};
+
+/// Optional finite record lane for sampled surfaces with undefined vertices.
+/// A missing lane means the complete grid is present. Exactly `1` denotes a
+/// present vertex; other values in `[0, 1]` denote holes (including a morph's
+/// intermediate validity). Geometry in a hole's row is inert storage, never a
+/// sample of the authored surface.
+pub const SURFACE_VALIDITY_FIELD: &str = "surface_validity";
+
+/// Read and validate a surface's optional presence column.
+///
+/// # Errors
+/// The optional lane must be scalar, finite and within `[0, 1]`.
+pub fn surface_validity(buffer: &RecordBuffer) -> Result<Option<Vec<f32>>, StageError> {
+    match buffer.schema().field_width(SURFACE_VALIDITY_FIELD) {
+        None => Ok(None),
+        Some(1) => {
+            let values = buffer
+                .read_column(SURFACE_VALIDITY_FIELD)
+                .unwrap_or_default();
+            if values.len() != buffer.len()
+                || values
+                    .iter()
+                    .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+            {
+                return Err(StageError::SurfaceGrid("invalid surface validity records"));
+            }
+            Ok(Some(values))
+        }
+        Some(_) => Err(StageError::SurfaceGrid(
+            "surface validity must be a scalar field",
+        )),
+    }
+}
+
+/// Whether one row represents an authored sample, rather than a hole.
+#[must_use]
+pub fn surface_sample_is_present(validity: Option<&[f32]>, index: usize) -> bool {
+    validity.is_none_or(|values| values.get(index) == Some(&1.0))
+}
+
+/// Add or replace only the optional surface presence lane. Existing record
+/// fields, defaults and locks are preserved; adding the lane creates a new
+/// storage generation, so exported views retain their original schema.
+///
+/// # Errors
+/// Refuses malformed validity or an unrepresentable record allocation.
+pub fn with_surface_validity(
+    buffer: &RecordBuffer,
+    validity: &[f32],
+) -> Result<RecordBuffer, StageError> {
+    if validity.len() != buffer.len()
+        || validity
+            .iter()
+            .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+    {
+        return Err(StageError::SurfaceGrid("invalid surface validity records"));
+    }
+    if buffer
+        .schema()
+        .field_width(SURFACE_VALIDITY_FIELD)
+        .is_some()
+    {
+        surface_validity(buffer)?;
+        let mut result = buffer.snapshot_clone();
+        result.write_range(SURFACE_VALIDITY_FIELD, 0, validity);
+        return Ok(result);
+    }
+    let schema = buffer.schema();
+    let mut fields: Vec<_> = schema
+        .fields()
+        .iter()
+        .map(|field| (field.name.as_str(), field.width))
+        .collect();
+    fields.push((SURFACE_VALIDITY_FIELD, 1));
+    let aligned: Vec<_> = schema.aligned_keys().iter().map(String::as_str).collect();
+    let pointlike: Vec<_> = schema.pointlike_keys().iter().map(String::as_str).collect();
+    let schema = RecordSchema::new(&fields, &aligned, &pointlike).map_err(StageError::Record)?;
+    let mut result = RecordBuffer::new(schema, buffer.len()).map_err(StageError::Record)?;
+    for field in buffer.schema().fields() {
+        result.write_range(
+            &field.name,
+            0,
+            &buffer.read_column(&field.name).unwrap_or_default(),
+        );
+        if let Some(value) = buffer.default_record_slice(&field.name) {
+            result.write_default_record(&field.name, value);
+        }
+    }
+    result.write_default_record(SURFACE_VALIDITY_FIELD, &[1.0]);
+    result.write_range(SURFACE_VALIDITY_FIELD, 0, validity);
+    result.lock_data(buffer.locked_keys());
+    Ok(result)
+}
+
+/// Surface schemas may differ only by the optional validity lane. This is a
+/// narrow compatibility rule, not a change to generic RecordBuffer equality.
+#[must_use]
+pub fn compatible_surface_schemas(left: &RecordSchema, right: &RecordSchema) -> bool {
+    if left.field_width(SURFACE_VALIDITY_FIELD).is_some()
+        && right.field_width(SURFACE_VALIDITY_FIELD).is_some()
+        && left != right
+    {
+        return false;
+    }
+    let valid = |schema: &RecordSchema| {
+        schema
+            .field_width(SURFACE_VALIDITY_FIELD)
+            .is_none_or(|width| width == 1)
+            && !schema
+                .aligned_keys()
+                .iter()
+                .any(|key| key == SURFACE_VALIDITY_FIELD)
+            && !schema
+                .pointlike_keys()
+                .iter()
+                .any(|key| key == SURFACE_VALIDITY_FIELD)
+    };
+    valid(left)
+        && valid(right)
+        && left.aligned_keys() == right.aligned_keys()
+        && left.pointlike_keys() == right.pointlike_keys()
+        && left
+            .fields()
+            .iter()
+            .filter(|field| field.name != SURFACE_VALIDITY_FIELD)
+            .eq(right
+                .fields()
+                .iter()
+                .filter(|field| field.name != SURFACE_VALIDITY_FIELD))
+}
 
 /// Maximum number of records in an aligned UV surface.
 ///
@@ -92,11 +222,28 @@ fn lerp(a: f64, b: f64, alpha: f64) -> f64 {
 }
 
 fn prepare(entry: &Entry, shape: (usize, usize)) -> Result<Option<SurfaceGridUpdate>, StageError> {
+    prepare_with_validity(entry, shape, false)
+}
+
+fn prepare_with_validity(
+    entry: &Entry,
+    shape: (usize, usize),
+    require_validity: bool,
+) -> Result<Option<SurfaceGridUpdate>, StageError> {
     let old = resolution(entry)?;
     let count = grid_count(shape)?;
+    let old_validity = surface_validity(&entry.buffer)?;
+    let promoted = if require_validity && old_validity.is_none() {
+        Some(with_surface_validity(
+            &entry.buffer,
+            &vec![1.0; entry.buffer.len()],
+        )?)
+    } else {
+        None
+    };
+    let source = promoted.as_ref().unwrap_or(&entry.buffer);
     // Validate even equal-topology pairs, before the peer can be changed.
-    let columns: Vec<_> = entry
-        .buffer
+    let columns: Vec<_> = source
         .schema()
         .fields()
         .iter()
@@ -104,7 +251,7 @@ fn prepare(entry: &Entry, shape: (usize, usize)) -> Result<Option<SurfaceGridUpd
             (
                 field.name.clone(),
                 field.width,
-                entry.buffer.read_column(&field.name).unwrap_or_default(),
+                source.read_column(&field.name).unwrap_or_default(),
             )
         })
         .collect();
@@ -117,17 +264,45 @@ fn prepare(entry: &Entry, shape: (usize, usize)) -> Result<Option<SurfaceGridUpd
         ));
     }
     if shape == old {
-        return Ok(None);
+        return Ok(promoted.map(|buffer| SurfaceGridUpdate {
+            before: entry.buffer.snapshot_clone(),
+            before_placement: entry.placement(),
+            old_resolution: old,
+            resolution: shape,
+            buffer,
+            placement: entry.placement(),
+        }));
     }
     let mut buffer =
-        RecordBuffer::new(entry.buffer.schema().clone(), count).map_err(StageError::Record)?;
+        RecordBuffer::new(source.schema().clone(), count).map_err(StageError::Record)?;
+    let present = |u0, u1, fu, v0, v1, fv| {
+        [
+            (u0, v0, (1.0 - fu) * (1.0 - fv)),
+            (u0, v1, (1.0 - fu) * fv),
+            (u1, v0, fu * (1.0 - fv)),
+            (u1, v1, fu * fv),
+        ]
+        .into_iter()
+        .all(|(u, v, weight)| {
+            weight == 0.0 || surface_sample_is_present(old_validity.as_deref(), u * old.1 + v)
+        })
+    };
     for (name, width, data) in columns {
         let mut values = Vec::with_capacity(count * width);
         for u in 0..shape.0 {
             let (u0, u1, fu) = station(u, old.0, shape.0);
             for v in 0..shape.1 {
                 let (v0, v1, fv) = station(v, old.1, shape.1);
+                let valid = present(u0, u1, fu, v0, v1, fv);
                 for lane in 0..width {
+                    if name == SURFACE_VALIDITY_FIELD {
+                        values.push(if valid { 1.0 } else { 0.0 });
+                        continue;
+                    }
+                    if !valid && source.schema().pointlike_keys().contains(&name) {
+                        values.push(0.0);
+                        continue;
+                    }
                     let sample = |ui, vi| f64::from(data[(ui * old.1 + vi) * width + lane]);
                     let a = lerp(sample(u0, v0), sample(u0, v1), fv);
                     let b = lerp(sample(u1, v0), sample(u1, v1), fv);
@@ -143,6 +318,18 @@ fn prepare(entry: &Entry, shape: (usize, usize)) -> Result<Option<SurfaceGridUpd
             }
         }
         buffer.write_range(&name, 0, &values);
+    }
+    if source
+        .schema()
+        .field_width(SURFACE_VALIDITY_FIELD)
+        .is_some()
+    {
+        for field in source.schema().fields() {
+            if let Some(value) = source.default_record_slice(&field.name) {
+                buffer.write_default_record(&field.name, value);
+            }
+        }
+        buffer.lock_data(source.locked_keys());
     }
     Ok(Some(SurfaceGridUpdate {
         before: entry.buffer.snapshot_clone(),
@@ -171,6 +358,7 @@ fn prepare_surface_grid_geometry(
     shape: (usize, usize),
     points: &[f32],
     normal_points: &[f32],
+    validity: Option<&[f32]>,
 ) -> Result<SurfaceGridUpdate, StageError> {
     let count = grid_count(shape)?;
     if points.len() != 3 * count || normal_points.len() != 3 * count {
@@ -233,6 +421,18 @@ fn prepare_surface_grid_geometry(
     update
         .buffer
         .write_range("d_normal_point", 0, normal_points);
+    if let Some(validity) = validity {
+        update.buffer = with_surface_validity(&update.buffer, validity)?;
+    } else if update
+        .buffer
+        .schema()
+        .field_width(SURFACE_VALIDITY_FIELD)
+        .is_some()
+    {
+        update
+            .buffer
+            .write_range(SURFACE_VALIDITY_FIELD, 0, &vec![1.0; count]);
+    }
     update.placement = Placement::IDENTITY;
     Ok(update)
 }
@@ -251,7 +451,23 @@ impl SurfaceGridUpdate {
         points: &[f32],
         normal_points: &[f32],
     ) -> Result<Self, StageError> {
-        prepare_surface_grid_geometry(entry, shape, points, normal_points)
+        prepare_surface_grid_geometry(entry, shape, points, normal_points, None)
+    }
+
+    /// Replace a sampled geometry and its explicit hole mask atomically.
+    /// An absent mask means every new sample is present, including when the
+    /// destination previously contained holes.
+    ///
+    /// # Errors
+    /// The same admission checks as [`Self::for_geometry`], plus validity.
+    pub fn for_geometry_with_validity(
+        entry: &Entry,
+        shape: (usize, usize),
+        points: &[f32],
+        normal_points: &[f32],
+        validity: Option<&[f32]>,
+    ) -> Result<Self, StageError> {
+        prepare_surface_grid_geometry(entry, shape, points, normal_points, validity)
     }
 }
 
@@ -264,12 +480,25 @@ pub fn prepare_surface_grid_alignment(
 ) -> Result<(Option<SurfaceGridUpdate>, Option<SurfaceGridUpdate>), StageError> {
     let a = resolution(left)?;
     let b = resolution(right)?;
-    if left.buffer.schema() != right.buffer.schema() {
+    if !compatible_surface_schemas(left.buffer.schema(), right.buffer.schema()) {
         return Err(StageError::SchemaMismatch);
     }
     let shape = (a.0.max(b.0), a.1.max(b.1));
     grid_count(shape)?;
-    Ok((prepare(left, shape)?, prepare(right, shape)?))
+    let require_validity = left
+        .buffer
+        .schema()
+        .field_width(SURFACE_VALIDITY_FIELD)
+        .is_some()
+        || right
+            .buffer
+            .schema()
+            .field_width(SURFACE_VALIDITY_FIELD)
+            .is_some();
+    Ok((
+        prepare_with_validity(left, shape, require_validity)?,
+        prepare_with_validity(right, shape, require_validity)?,
+    ))
 }
 
 impl Stage {
@@ -299,7 +528,10 @@ impl Stage {
         // An equal-size regrid edits in place, so live views stay attached;
         // a different size swaps in a fresh generation and detaches them.
         if !entry.buffer.set_data(&update.buffer) {
-            return Err(StageError::SchemaMismatch);
+            if !compatible_surface_schemas(entry.buffer.schema(), update.buffer.schema()) {
+                return Err(StageError::SchemaMismatch);
+            }
+            entry.buffer = update.buffer;
         }
         entry.render_primitive = RenderPrimitive::SurfaceGrid {
             resolution: update.resolution,

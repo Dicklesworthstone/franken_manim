@@ -407,8 +407,34 @@ impl SurfaceSpec {
     /// The same refusals as [`Self::try_sample`], under `budget`.
     pub fn try_sample_with_budget<E>(
         &self,
+        uv_func: impl FnMut(f64, f64) -> Result<Vec3, E>,
+        budget: SamplingBudget,
+    ) -> Result<Surface, SurfaceSampleError<E>> {
+        self.sample_with_policy(uv_func, budget, false)
+    }
+
+    /// Sample a surface with explicit holes at undefined point or derivative
+    /// samples. Triangles incident to those vertices are absent. No NaN or
+    /// infinity enters the stored records, and finite coordinates outside f32
+    /// range remain an error. Callback errors are returned unchanged.
+    ///
+    /// The strict [`Self::try_sample`] contract is unchanged. See BN-27.
+    ///
+    /// # Errors
+    /// Invalid controls, allocation/budget refusal, finite coordinate overflow,
+    /// or the first callback error.
+    pub fn try_sample_with_holes<E>(
+        &self,
+        uv_func: impl FnMut(f64, f64) -> Result<Vec3, E>,
+    ) -> Result<Surface, SurfaceSampleError<E>> {
+        self.sample_with_policy(uv_func, SURFACE_SAMPLING_BUDGET, true)
+    }
+
+    fn sample_with_policy<E>(
+        &self,
         mut uv_func: impl FnMut(f64, f64) -> Result<Vec3, E>,
         budget: SamplingBudget,
+        holes: bool,
     ) -> Result<Surface, SurfaceSampleError<E>> {
         let (nu, nv) = self.resolution;
         budget.ensure_total("surface u axis", nu)?;
@@ -472,6 +498,7 @@ impl SurfaceSpec {
         let mut d_normal_point = surface_storage(n)?;
         let mut rgba = surface_storage(n)?;
         let mut triangle_indices = surface_storage(index_count)?;
+        let mut validity = surface_storage(n)?;
         // Every allocation for the sampled value has succeeded before user code.
         for i in 0..nu {
             let u = surface_station(self.u_range, nu, i);
@@ -480,14 +507,27 @@ impl SurfaceSpec {
                 let index = i * nv + j;
                 let mut evaluate = |u, v, probe| {
                     let p = uv_func(u, v).map_err(SurfaceSampleError::Callback)?;
-                    if !surface_record(p) {
+                    if p.iter()
+                        .any(|value| value.is_finite() && value.abs() > f64::from(f32::MAX))
+                        || (!holes && !surface_record(p))
+                    {
                         return Err(SurfaceSampleError::InvalidSample { index, probe });
                     }
-                    Ok(p)
+                    Ok(p.iter().all(|value| value.is_finite()).then_some(p))
                 };
                 let p = evaluate(u, v, "point")?;
-                let du = sub(evaluate(u + self.epsilon, v, "u derivative")?, p);
-                let dv = sub(evaluate(u, v + self.epsilon, "v derivative")?, p);
+                let pu = evaluate(u + self.epsilon, v, "u derivative")?;
+                let pv = evaluate(u, v + self.epsilon, "v derivative")?;
+                let (Some(p), Some(pu), Some(pv)) = (p, pu, pv) else {
+                    // The full UV row remains addressable, but is explicitly
+                    // absent. Zero is inert storage, not a clamped sample.
+                    points.push(ORIGIN);
+                    d_normal_point.push(ORIGIN);
+                    validity.push(false);
+                    continue;
+                };
+                let du = sub(pu, p);
+                let dv = sub(pv, p);
                 let normal = normalize_or_zero(space_ops::cross(du, dv));
                 let normal_point = add(p, mul(normal, self.normal_nudge));
                 if !surface_record(normal_point) {
@@ -498,6 +538,7 @@ impl SurfaceSpec {
                 }
                 d_normal_point.push(normal_point);
                 points.push(p);
+                validity.push(true);
             }
         }
         rgba.resize(n, rgba_value);
@@ -505,7 +546,11 @@ impl SurfaceSpec {
             for j in 0..nv.saturating_sub(1) {
                 let tl = (i * nv + j) as u32;
                 let bl = ((i + 1) * nv + j) as u32;
-                triangle_indices.extend_from_slice(&[tl, bl, tl + 1, tl + 1, bl, bl + 1]);
+                for triangle in [[tl, bl, tl + 1], [tl + 1, bl, bl + 1]] {
+                    if triangle.iter().all(|&index| validity[index as usize]) {
+                        triangle_indices.extend_from_slice(&triangle);
+                    }
+                }
             }
         }
         let uniforms = Uniforms {
@@ -525,6 +570,7 @@ impl SurfaceSpec {
             normal_nudge: self.normal_nudge,
             preferred_creation_axis: self.preferred_creation_axis,
             triangle_indices,
+            validity,
             uniforms,
             z_index: 0,
         })
@@ -628,6 +674,7 @@ pub struct Surface {
     normal_nudge: f64,
     preferred_creation_axis: usize,
     triangle_indices: Vec<u32>,
+    validity: Vec<bool>,
     uniforms: Uniforms,
     z_index: i32,
 }
@@ -637,6 +684,13 @@ impl Surface {
     #[must_use]
     pub fn points(&self) -> &[Vec3] {
         &self.points
+    }
+
+    /// Presence of each u-major sample. Missing rows contain only inert finite
+    /// storage; use this mask before interpreting their point or normal values.
+    #[must_use]
+    pub fn sample_validity(&self) -> &[bool] {
+        &self.validity
     }
 
     /// The Reference's `d_normal_point` column.
@@ -652,7 +706,14 @@ impl Surface {
         self.points
             .iter()
             .zip(&self.d_normal_point)
-            .map(|(&p, &d)| normalize_or_zero(sub(d, p)))
+            .zip(&self.validity)
+            .map(|((&p, &d), &valid)| {
+                if valid {
+                    normalize_or_zero(sub(d, p))
+                } else {
+                    ORIGIN
+                }
+            })
             .collect()
     }
 
@@ -762,11 +823,15 @@ impl Surface {
     /// preserved because the difference transforms with the points.
     #[must_use]
     pub fn map_points(mut self, f: impl Fn(Vec3) -> Vec3 + Copy) -> Self {
-        for p in &mut self.points {
-            *p = f(*p);
+        for (p, &valid) in self.points.iter_mut().zip(&self.validity) {
+            if valid {
+                *p = f(*p);
+            }
         }
-        for d in &mut self.d_normal_point {
-            *d = f(*d);
+        for (d, &valid) in self.d_normal_point.iter_mut().zip(&self.validity) {
+            if valid {
+                *d = f(*d);
+            }
         }
         self
     }
@@ -826,7 +891,10 @@ impl Surface {
         let mut min = [f64::INFINITY; 3];
         let mut max = [f64::NEG_INFINITY; 3];
         let mut any = false;
-        for p in &self.points {
+        for (p, &valid) in self.points.iter().zip(&self.validity) {
+            if !valid {
+                continue;
+            }
             any = true;
             for d in 0..3 {
                 min[d] = min[d].min(p[d]);
@@ -880,11 +948,23 @@ impl Surface {
 
     /// `uv_to_point(u, v)`: clipped bilinear interpolation over the sampled
     /// grid — the Reference's exact index arithmetic.
+    ///
+    /// # Panics
+    /// The query touches an absent sample. Use [`Self::try_uv_to_point`] for
+    /// surfaces built with explicit holes.
     #[must_use]
     pub fn uv_to_point(&self, u: f64, v: f64) -> Vec3 {
+        self.try_uv_to_point(u, v)
+            .expect("UV query touches an undefined surface sample")
+    }
+
+    /// A UV lookup that reports missing interpolation support explicitly.
+    /// Zero-weight neighbors do not make an exact finite knot undefined.
+    #[must_use]
+    pub fn try_uv_to_point(&self, u: f64, v: f64) -> Option<Vec3> {
         let (nu, nv) = self.resolution;
         if self.points.is_empty() || nu == 0 || nv == 0 {
-            return ORIGIN;
+            return Some(ORIGIN);
         }
         let clip01 = |x: f64| x.clamp(0.0, 1.0);
         let inverse = |lo: f64, hi: f64, x: f64| (x - lo) / (hi - lo);
@@ -902,7 +982,17 @@ impl Surface {
         let d = self.points[u_plus * nv + v_plus];
         let u_res = scaled_u % 1.0;
         let v_res = scaled_v % 1.0;
-        lerp(lerp(a, b, v_res), lerp(c, d, v_res), u_res)
+        for (index, weight) in [
+            (u_int * nv + v_int, (1.0 - u_res) * (1.0 - v_res)),
+            (u_int * nv + v_plus, (1.0 - u_res) * v_res),
+            (u_plus * nv + v_int, u_res * (1.0 - v_res)),
+            (u_plus * nv + v_plus, u_res * v_res),
+        ] {
+            if weight != 0.0 && !self.validity[index] {
+                return None;
+            }
+        }
+        Some(lerp(lerp(a, b, v_res), lerp(c, d, v_res), u_res))
     }
 
     /// Overwrite the `d_normal_point` column (Sphere's bespoke radial
@@ -927,6 +1017,15 @@ impl From<Surface> for Mobject {
             .flat_map(|c| c.iter().map(|v| *v as f32))
             .collect();
         buffer.write_range("rgba", 0, &rgba);
+        if s.validity.iter().any(|&valid| !valid) {
+            let validity: Vec<_> = s
+                .validity
+                .iter()
+                .map(|&valid| if valid { 1.0 } else { 0.0 })
+                .collect();
+            buffer = fmn_mobject::stage::with_surface_validity(&buffer, &validity)
+                .expect("validated finite surface holes");
+        }
         Mobject {
             buffer,
             uniforms: s.uniforms,
@@ -977,6 +1076,15 @@ impl ParametricSurface {
     #[must_use]
     pub fn build(self) -> Surface {
         self.spec.sample(self.uv_func)
+    }
+
+    /// Sample this recipe with explicit holes at non-finite samples.
+    ///
+    /// # Errors
+    /// Invalid controls, budget refusal or finite f32 coordinate overflow.
+    pub fn build_with_holes(self) -> Result<Surface, SurfaceSampleError<std::convert::Infallible>> {
+        self.spec
+            .try_sample_with_holes(|u, v| Ok((self.uv_func)(u, v)))
     }
 }
 
@@ -2288,6 +2396,7 @@ impl From<Prismify> for Mobject {
 pub struct SurfaceMesh {
     points: Vec<Vec3>,
     unit_normals: Vec<Vec3>,
+    validity: Vec<bool>,
     source_resolution: (usize, usize),
     resolution: (usize, usize),
     normal_nudge: f64,
@@ -2332,7 +2441,9 @@ impl SurfaceMesh {
     #[must_use]
     pub fn new(uv_surface: Surface) -> Self {
         let unit_normals = uv_surface.unit_normals();
-        Self::from_parts(uv_surface.points, unit_normals, uv_surface.resolution)
+        let mut mesh = Self::from_parts(uv_surface.points, unit_normals, uv_surface.resolution);
+        mesh.validity = uv_surface.validity;
+        mesh
     }
 
     fn from_parts(
@@ -2340,9 +2451,11 @@ impl SurfaceMesh {
         unit_normals: Vec<Vec3>,
         source_resolution: (usize, usize),
     ) -> Self {
+        let validity = vec![true; points.len()];
         Self {
             points,
             unit_normals,
+            validity,
             source_resolution,
             resolution: MESH_RESOLUTION,
             normal_nudge: MESH_NORMAL_NUDGE,
@@ -2372,6 +2485,19 @@ impl SurfaceMesh {
         Ok(mesh)
     }
 
+    /// Carry explicit missing samples from an existing UV surface. Wire paths
+    /// split at missing interpolation support instead of crossing a pole.
+    ///
+    /// # Errors
+    /// The mask must have one value per source grid vertex.
+    pub fn with_sample_validity(mut self, validity: Vec<bool>) -> Result<Self, SurfaceMeshError> {
+        if validity.len() != self.points.len() {
+            return Err(SurfaceMeshError::InvalidGrid);
+        }
+        self.validity = validity;
+        Ok(self)
+    }
+
     fn validate_grid(&self) -> Result<(), SurfaceMeshError> {
         let budget = SURFACE_SAMPLING_BUDGET.max_samples();
         let (nu, nv) = self.source_resolution;
@@ -2379,7 +2505,10 @@ impl SurfaceMesh {
         if count > budget || nu > budget || nv > budget {
             return Err(SurfaceMeshError::SampleLimit);
         }
-        if self.points.len() != count || self.unit_normals.len() != count {
+        if self.points.len() != count
+            || self.unit_normals.len() != count
+            || self.validity.len() != count
+        {
             return Err(SurfaceMeshError::InvalidGrid);
         }
         if self
@@ -2497,11 +2626,30 @@ impl SurfaceMesh {
         let u_indices = linspace(0.0, full_nu.saturating_sub(1) as f64, part_nu);
         let v_indices = linspace(0.0, full_nv.saturating_sub(1) as f64, part_nv);
 
-        let smooth_path = |samples: &[Vec3]| {
+        let smooth_path = |samples: &[Vec3], validity: &[bool]| {
             let mut path = QuadPath::new();
             // On a smoothing failure the corner path remains — the
             // `let _ =` convention of `Polygon::build`.
-            let _ = path.set_points_smoothly(samples, true);
+            if validity.iter().all(|&valid| valid) {
+                let _ = path.set_points_smoothly(samples, true);
+            } else {
+                let mut first = 0;
+                while first < samples.len() {
+                    while first < samples.len() && !validity[first] {
+                        first += 1;
+                    }
+                    let mut end = first;
+                    while end < samples.len() && validity[end] {
+                        end += 1;
+                    }
+                    if end - first >= 2 {
+                        let mut segment = QuadPath::new();
+                        let _ = segment.set_points_smoothly(&samples[first..end], true);
+                        let _ = path.add_subpath(segment.points());
+                    }
+                    first = end;
+                }
+            }
             VMobject::from_path(&path).map_uniforms(|mut u| {
                 u.depth_test = self.depth_test;
                 u.joint_type = self.joint_type;
@@ -2518,7 +2666,10 @@ impl SurfaceMesh {
             let row: Vec<Vec3> = (0..full_nv)
                 .map(|j| lerp(nudged[low + j], nudged[high + j], t))
                 .collect();
-            children.push(smooth_path(&row));
+            let validity: Vec<_> = (0..full_nv)
+                .map(|j| self.validity[low + j] && (t == 0.0 || self.validity[high + j]))
+                .collect();
+            children.push(smooth_path(&row, &validity));
         }
         for vi in v_indices {
             let vi = vi.clamp(0.0, full_nv.saturating_sub(1) as f64);
@@ -2528,7 +2679,13 @@ impl SurfaceMesh {
             let col: Vec<Vec3> = (0..full_nu)
                 .map(|k| lerp(nudged[low + k * full_nv], nudged[high + k * full_nv], t))
                 .collect();
-            children.push(smooth_path(&col));
+            let validity: Vec<_> = (0..full_nu)
+                .map(|k| {
+                    self.validity[low + k * full_nv]
+                        && (t == 0.0 || self.validity[high + k * full_nv])
+                })
+                .collect();
+            children.push(smooth_path(&col, &validity));
         }
 
         let mut group = v_group(children)
@@ -2570,6 +2727,7 @@ pub struct TexturedSurface {
     d_normal_point: Vec<Vec3>,
     im_coords: Vec<[f64; 2]>,
     opacity: Vec<f64>,
+    validity: Vec<bool>,
     resolution: (usize, usize),
     u_range: (f64, f64),
     v_range: (f64, f64),
@@ -2624,6 +2782,7 @@ impl TexturedSurface {
             d_normal_point: uv_surface.d_normal_points().to_vec(),
             im_coords,
             opacity,
+            validity: uv_surface.validity.clone(),
             resolution: uv_surface.resolution(),
             u_range: uv_surface.u_range(),
             v_range: uv_surface.v_range(),
@@ -2695,6 +2854,19 @@ impl TexturedSurface {
     #[must_use]
     pub fn triangle_indices(&self) -> Vec<u32> {
         compute_triangle_indices(self.resolution)
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .filter(|triangle| triangle.iter().all(|&index| self.validity[index as usize]))
+            .flatten()
+            .copied()
+            .collect()
+    }
+
+    /// Presence of each copied UV sample.
+    #[must_use]
+    pub fn sample_validity(&self) -> &[bool] {
+        &self.validity
     }
 
     /// The light texture path.
@@ -2738,6 +2910,15 @@ impl From<TexturedSurface> for Mobject {
         #[allow(clippy::cast_possible_truncation)]
         let opacity: Vec<f32> = t.opacity.iter().map(|v| *v as f32).collect();
         buffer.write_range("opacity", 0, &opacity);
+        if t.validity.iter().any(|&valid| !valid) {
+            let validity: Vec<_> = t
+                .validity
+                .iter()
+                .map(|&valid| if valid { 1.0 } else { 0.0 })
+                .collect();
+            buffer = fmn_mobject::stage::with_surface_validity(&buffer, &validity)
+                .expect("validated finite textured surface holes");
+        }
         Mobject {
             buffer,
             uniforms: t.uniforms,

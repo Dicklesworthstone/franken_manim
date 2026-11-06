@@ -37,7 +37,7 @@ use fmn_geom::{Mat3, QuadPath, space_ops};
 
 use crate::StageError;
 use crate::bbox::{BoundingBox, BoxAccum};
-use crate::stage::{Mob, Stage};
+use crate::stage::{Mob, SURFACE_VALIDITY_FIELD, Stage, surface_sample_is_present};
 use crate::uniforms::Uniforms;
 use crate::{Placement, RecordBuffer, RenderPrimitive};
 
@@ -75,6 +75,7 @@ fn mapped_auxiliary_points(
     map: impl Fn(Vec3) -> Vec3,
 ) -> Vec<(String, Vec<f32>)> {
     let mut columns: Vec<(String, Vec<f32>)> = Vec::new();
+    let validity = buffer.read_column(SURFACE_VALIDITY_FIELD);
     for key in buffer.schema().pointlike_keys() {
         if key == "point" || columns.iter().any(|(name, _)| name == key) {
             continue;
@@ -93,7 +94,11 @@ fn mapped_auxiliary_points(
                 .as_chunks::<3>()
                 .0
                 .iter()
-                .flat_map(|point| {
+                .enumerate()
+                .flat_map(|(index, point)| {
+                    if !surface_sample_is_present(validity.as_deref(), index) {
+                        return [0.0; 3];
+                    }
                     map(placement.apply_point([
                         f64::from(point[0]),
                         f64::from(point[1]),
@@ -176,6 +181,10 @@ impl Stage {
                 mix(m.bits());
                 if let Some(e) = self.get(m) {
                     mix(e.buffer.field_revision("point").unwrap_or(0));
+                    if let Some(revision) = e.buffer.field_revision(SURFACE_VALIDITY_FIELD) {
+                        mix(1);
+                        mix(revision);
+                    }
                     mix(e.placement_revision());
                     mix(e.buffer.len() as u64);
                 }
@@ -197,8 +206,12 @@ impl Stage {
                     && let Some(col) = e.buffer.read_column("point")
                 {
                     let placement = e.placement();
+                    let validity = e.buffer.read_column(SURFACE_VALIDITY_FIELD);
                     let (tris, _rem) = col.as_chunks::<3>();
-                    for tri in tris {
+                    for (index, tri) in tris.iter().enumerate() {
+                        if !surface_sample_is_present(validity.as_deref(), index) {
+                            continue;
+                        }
                         has_points = true;
                         acc.push(placement.apply_point([
                             f64::from(tri[0]),
@@ -218,8 +231,10 @@ impl Stage {
     fn bbox_has_writable_point_view(&self, mob: Mob) -> bool {
         self.with_family_slice(mob, |family| {
             family.iter().any(|&member| {
-                self.get(member)
-                    .is_some_and(|entry| entry.buffer.writable_view_affects("point"))
+                self.get(member).is_some_and(|entry| {
+                    entry.buffer.writable_view_affects("point")
+                        || entry.buffer.writable_view_affects(SURFACE_VALIDITY_FIELD)
+                })
             })
         })
     }
@@ -449,10 +464,18 @@ impl Stage {
     pub fn get_points(&self, mob: Mob) -> Option<Vec<Vec3>> {
         let entry = self.get(mob)?;
         let placement = entry.placement();
+        let validity = entry.buffer.read_column(SURFACE_VALIDITY_FIELD);
         self.get_object_points(mob).map(|points| {
             points
                 .into_iter()
-                .map(|point| placement.apply_point(point))
+                .enumerate()
+                .map(|(index, point)| {
+                    if surface_sample_is_present(validity.as_deref(), index) {
+                        placement.apply_point(point)
+                    } else {
+                        ORIGIN
+                    }
+                })
                 .collect()
         })
     }
@@ -689,9 +712,22 @@ impl Stage {
         mob: Mob,
         map: impl Fn(Vec3) -> Vec3,
     ) -> Result<(), StageError> {
-        let points = self
-            .get_points(mob)
-            .map(|points| points.into_iter().map(&map).collect::<Vec<_>>());
+        let validity = self
+            .get(mob)
+            .and_then(|entry| entry.buffer.read_column(SURFACE_VALIDITY_FIELD));
+        let points = self.get_points(mob).map(|points| {
+            points
+                .into_iter()
+                .enumerate()
+                .map(|(index, point)| {
+                    if surface_sample_is_present(validity.as_deref(), index) {
+                        map(point)
+                    } else {
+                        ORIGIN
+                    }
+                })
+                .collect::<Vec<_>>()
+        });
         let entry = self.get(mob).ok_or(StageError::StaleHandle)?;
         let columns = mapped_auxiliary_points(&entry.buffer, entry.placement(), &map);
         if let Some(points) = points {
