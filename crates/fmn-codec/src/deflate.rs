@@ -141,46 +141,68 @@ fn huffman_lengths(freqs: &[u32], max_len: usize, out_len: usize) -> Vec<u8> {
     }
     leaves.sort_unstable();
 
-    // A package is (weight, constituent leaf symbols). Coin-collector:
-    // start at the deepest level and merge upward max_len − 1 times.
-    type Package = (u64, Vec<u16>);
-    let singletons: Vec<Package> = leaves.iter().map(|&(f, s)| (f, vec![s])).collect();
-    let mut current = singletons.clone();
+    // Coin-collector: start at the deepest level and merge upward
+    // max_len − 1 times. A package stores its two children instead of a
+    // freshly allocated copy of every constituent symbol. The first n nodes
+    // are the sorted leaves; all other nodes point strictly backwards.
+    // This retains the original ordering, including leaf-before-package
+    // ties, without thousands of small allocations per dynamic block.
+    struct Package {
+        weight: u64,
+        children: [usize; 2],
+    }
+    let n = leaves.len();
+    let mut packages = Vec::with_capacity(n * max_len);
+    packages.extend(leaves.iter().map(|&(weight, _)| Package {
+        weight,
+        children: [0; 2],
+    }));
+    let mut current: Vec<usize> = (0..n).collect();
+    let mut paired = Vec::with_capacity(n);
+    let mut merged = Vec::with_capacity(2 * n);
     for _ in 1..max_len {
-        let paired: Vec<Package> = current
-            .chunks(2)
-            .filter(|c| c.len() == 2)
-            .map(|c| {
-                let mut syms = c[0].1.clone();
-                syms.extend_from_slice(&c[1].1);
-                (c[0].0 + c[1].0, syms)
-            })
-            .collect();
+        paired.clear();
+        for &[left, right] in current.as_chunks::<2>().0 {
+            paired.push(packages.len());
+            packages.push(Package {
+                weight: packages[left].weight + packages[right].weight,
+                children: [left, right],
+            });
+        }
         // Stable merge: on equal weight, singletons (leaves) first.
-        let mut merged = Vec::with_capacity(singletons.len() + paired.len());
+        merged.clear();
         let (mut i, mut j) = (0, 0);
-        while i < singletons.len() || j < paired.len() {
-            let take_leaf = match (singletons.get(i), paired.get(j)) {
-                (Some(a), Some(b)) => a.0 <= b.0,
+        while i < n || j < paired.len() {
+            let take_leaf = match (leaves.get(i), paired.get(j)) {
+                (Some(a), Some(&b)) => a.0 <= packages[b].weight,
                 (Some(_), None) => true,
                 _ => false,
             };
             if take_leaf {
-                merged.push(singletons[i].clone());
+                merged.push(i);
                 i += 1;
             } else {
-                merged.push(paired[j].clone());
+                merged.push(paired[j]);
                 j += 1;
             }
         }
-        current = merged;
+        std::mem::swap(&mut current, &mut merged);
     }
     // The first 2n − 2 packages define the code: each appearance of a
-    // leaf adds one to its depth.
-    for package in current.iter().take(2 * leaves.len() - 2) {
-        for &sym in &package.1 {
-            lengths[usize::from(sym)] += 1;
+    // leaf adds one to its depth. Accumulate multiplicities backwards through
+    // the arena so shared packages are visited once, without a traversal stack
+    // or rebuilding their constituent lists.
+    let mut uses = vec![0u8; packages.len()];
+    for &index in current.iter().take(2 * n - 2) {
+        uses[index] += 1;
+    }
+    for index in (n..packages.len()).rev() {
+        for child in packages[index].children {
+            uses[child] += uses[index];
         }
+    }
+    for (index, &(_, symbol)) in leaves.iter().enumerate() {
+        lengths[usize::from(symbol)] = uses[index];
     }
     lengths
 }
@@ -695,7 +717,90 @@ pub fn zlib_compress(data: &[u8], level: CompressionLevel) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::common_prefix;
+    use super::{common_prefix, huffman_lengths};
+
+    // The original package-merge representation is retained only as a byte
+    // compatibility oracle. It expands every package into its symbols, unlike
+    // the production arena's reverse multiplicity pass.
+    fn expanded_huffman_lengths(freqs: &[u32], max_len: usize) -> Vec<u8> {
+        let mut lengths = vec![0; freqs.len()];
+        let mut leaves: Vec<_> = freqs
+            .iter()
+            .enumerate()
+            .filter(|&(_, &frequency)| frequency != 0)
+            .map(|(symbol, &frequency)| (u64::from(frequency), vec![symbol]))
+            .collect();
+        if leaves.len() < 2 {
+            if let Some((_, symbols)) = leaves.first() {
+                lengths[symbols[0]] = 1;
+            }
+            return lengths;
+        }
+        leaves.sort_unstable();
+        let mut current = leaves.clone();
+        for _ in 1..max_len {
+            let paired: Vec<_> = current
+                .chunks_exact(2)
+                .map(|pair| {
+                    let mut symbols = pair[0].1.clone();
+                    symbols.extend_from_slice(&pair[1].1);
+                    (pair[0].0 + pair[1].0, symbols)
+                })
+                .collect();
+            let mut merged = Vec::new();
+            let (mut i, mut j) = (0, 0);
+            while i < leaves.len() || j < paired.len() {
+                if i < leaves.len() && (j == paired.len() || leaves[i].0 <= paired[j].0) {
+                    merged.push(leaves[i].clone());
+                    i += 1;
+                } else {
+                    merged.push(paired[j].clone());
+                    j += 1;
+                }
+            }
+            current = merged;
+        }
+        for (_, symbols) in current.iter().take(2 * leaves.len() - 2) {
+            for &symbol in symbols {
+                lengths[symbol] += 1;
+            }
+        }
+        lengths
+    }
+
+    #[test]
+    fn indexed_packages_preserve_every_code_length_and_tie() {
+        // The actual DEFLATE alphabets, including sparse tables, all equal
+        // weights, ties between a leaf and a package, and a skew large enough
+        // to exercise the length limit. Changing any code length changes the
+        // certified stream, even when both streams round-trip correctly.
+        for (alphabet, max_len) in [(286, 15), (30, 15), (19, 7)] {
+            let mut cases = vec![vec![0; alphabet], vec![1; alphabet]];
+            let mut single = vec![0; alphabet];
+            single[alphabet - 1] = u32::MAX;
+            cases.push(single);
+            cases.push((0..alphabet).map(|i| 1 << i.min(30)).collect());
+            for seed in 0..64u32 {
+                let mut state = seed;
+                cases.push(
+                    (0..alphabet)
+                        .map(|_| {
+                            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                            (state >> 24) % (seed + 2)
+                        })
+                        .collect(),
+                );
+            }
+            for frequencies in cases {
+                let actual = huffman_lengths(&frequencies, max_len, alphabet);
+                assert_eq!(actual, expanded_huffman_lengths(&frequencies, max_len));
+                assert!(actual.iter().all(|&length| usize::from(length) <= max_len));
+                for (&frequency, &length) in frequencies.iter().zip(&actual) {
+                    assert_eq!(frequency == 0, length == 0);
+                }
+            }
+        }
+    }
 
     #[test]
     fn word_prefix_matches_the_bytewise_count() {
