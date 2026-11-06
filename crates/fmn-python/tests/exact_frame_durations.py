@@ -19,6 +19,8 @@ import wave
 
 import numpy as np
 import manimlib as m
+from manimlib.animation.specialized import Delay
+from manimlib.animation.speed import ChangeSpeed
 
 
 REPORTER_FRAMES = (43, 17, 61, 29, 101, 7, 55, 13, 89, 31,
@@ -151,7 +153,7 @@ def authoring_and_validation():
         lambda: scene.play(animation, run_time=1., run_time_frames=24),
         lambda: m.Transform(square, square.copy(), run_time=1., run_time_frames=24),
         lambda: m.Animation(square, run_time=1., run_time_frames=24),
-        lambda: m.Delay(run_time=1., run_time_frames=24),
+        lambda: Delay(run_time=1., run_time_frames=24),
         lambda: m.AnimationGroup(animation, run_time=1., run_time_frames=24),
     ):
         raises(ValueError, operation)
@@ -240,7 +242,7 @@ def public_runtime_assignment_selects_seconds():
     assert animation.run_time_frames is None
     scene.play(animation)
     assert scene.get_frame_count() == 7  # literal .1 seconds covers four ticks
-    group = m.Succession(m.Delay(run_time_frames=3), m.Delay(run_time_frames=7))
+    group = m.Succession(Delay(run_time_frames=3), Delay(run_time_frames=7))
     group.run_time = .1
     assert not group._fmn_derived_run_time
     scene.play(group)
@@ -250,7 +252,7 @@ def public_runtime_assignment_selects_seconds():
 def derived_speed_frame_durations():
     def speed(frames=43, factor=2., **kwargs):
         child = m.Animation(m.Mobject(), run_time_frames=frames)
-        return m.ChangeSpeed(child, {0: factor}, affects_speed_updaters=False, **kwargs)
+        return ChangeSpeed(child, {0: factor}, affects_speed_updaters=False, **kwargs)
 
     for fps in (7, 24, 25, 30, 60):
         scene = scene_at(fps, skip=True)
@@ -264,7 +266,7 @@ def derived_speed_frame_durations():
         assert scene.get_frame_count() == 65  #22 + (21.5 +21.5)
 
     def quarter():
-        return m.ChangeSpeed(speed(), {0: 2.}, affects_speed_updaters=False)
+        return ChangeSpeed(speed(), {0: 2.}, affects_speed_updaters=False)
     scene = scene_at(skip=True)
     scene.play(m.Succession(quarter(), quarter(), quarter(), quarter()))
     assert scene.get_frame_count() == 43
@@ -586,8 +588,8 @@ def composition_and_callback_boundaries():
         first, second = Probe(scene, 29), Probe(scene, 38)
         members = (first, second)
         if zeros:
-            members = (m.Delay(run_time_frames=0), first, m.Delay(run_time_frames=0),
-                       second, m.Delay(run_time_frames=0))
+            members = (Delay(run_time_frames=0), first, Delay(run_time_frames=0),
+                       second, Delay(run_time_frames=0))
         animation = m.Succession(*members)
         if nested:
             animation = m.AnimationGroup(m.AnimationGroup(animation))
@@ -612,15 +614,15 @@ def composition_and_callback_boundaries():
             m.Transform(a, a.copy().shift(m.RIGHT), run_time_frames=3),
             m.Transform(b, b.copy().shift(m.UP), run_time_frames=3), lag_ratio=.5))
         assert scene.get_frame_count() == 5
-        scene.play(m.Succession(m.Delay(run_time_frames=5), m.Delay(run_time=.125)))
+        scene.play(m.Succession(Delay(run_time_frames=5), Delay(run_time=.125)))
         assert scene.get_frame_count() == 10 + math.ceil(.125 * fps)
-        scene.play(m.AnimationGroup(m.Delay(run_time_frames=7), m.Delay(run_time_frames=13)),
+        scene.play(m.AnimationGroup(Delay(run_time_frames=7), Delay(run_time_frames=13)),
                    run_time_frames=11)
         assert scene.get_frame_count() == 21 + math.ceil(.125 * fps)
         # The outer succession must add the two unrounded 1.5-frame
         # intervals, not two independently rounded 2-frame segments.
         def half_overlap():
-            return m.AnimationGroup(m.Delay(run_time_frames=1), m.Delay(run_time_frames=1),
+            return m.AnimationGroup(Delay(run_time_frames=1), Delay(run_time_frames=1),
                                     lag_ratio=.5)
         scene.play(m.Succession(half_overlap(), half_overlap()))
         assert scene.get_frame_count() == 24 + math.ceil(.125 * fps)
@@ -678,7 +680,7 @@ def legacy_rate_override_hook():
 
 def specialized_constructor_durations():
     factories = (
-        lambda mob, timing: m.Delay(**timing),
+        lambda mob, timing: Delay(**timing),
         lambda mob, timing: m.DrawBorderThenFill(mob, **timing),
         lambda mob, timing: m.Rotating(mob, **timing),
         lambda mob, timing: m.Rotate(mob, **timing),
@@ -686,7 +688,7 @@ def specialized_constructor_durations():
         lambda mob, timing: m.ApplyPointwiseFunction(lambda p: p + m.RIGHT, mob, **timing),
         lambda mob, timing: m.ApplyWave(mob, **timing),
         lambda mob, timing: m.PhaseFlow(lambda p: m.RIGHT, mob, **timing),
-        lambda mob, timing: m.ChangeSpeed(m.Animation(mob), {0: 2}, **timing),
+        lambda mob, timing: ChangeSpeed(m.Animation(mob), {0: 2}, **timing),
         lambda mob, timing: m.FocusOn(mob, **timing),
         lambda mob, timing: m.WiggleOutThenIn(mob, **timing),
         lambda mob, timing: m.Flash(mob, num_lines=3, **timing),
@@ -764,7 +766,7 @@ def speed_profile_frame_durations():
         # A seconds member retains its deliberate exact-binary64 duration
         # while the enclosing mixed composition is scaled on the frame grid.
         mixed = scene_at(fps)
-        child = m.Succession(Probe(mixed, 1), m.Delay(run_time=.125))
+        child = m.Succession(Probe(mixed, 1), Delay(run_time=.125))
         mixed.play(ChangeSpeed(child, {0: 2.}))
         extent = (Fraction(1) + Fraction.from_float(.125) * fps) / 2
         assert mixed.get_frame_count() == (extent.numerator + extent.denominator - 1) // extent.denominator
@@ -812,7 +814,7 @@ def speed_profile_frame_durations():
         assert switched.get_frame_count() == 2 * fps
         assert animation._speed_child_duration == .25
 
-    raises(ValueError, lambda: ChangeSpeed(m.Delay(), {}, run_time=0., run_time_frames=0))
+    raises(ValueError, lambda: ChangeSpeed(Delay(), {}, run_time=0., run_time_frames=0))
 
 
 def y4m_count(path):
