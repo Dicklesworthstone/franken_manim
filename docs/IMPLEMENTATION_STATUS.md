@@ -95,11 +95,25 @@ all-target checking, both strict Clippy variants, test compilation and discovery
 The newly reachable whole frame-pipeline test then fails: its first captured
 frame differs from file output at two edge pixels (six channel values, maximum
 error two). In-memory capture always uses camera projection while eligible file
-frames use the retained planar route. A shared route decision is now drafted
-for readback, serial output and pure workers; its runtime result is pending.
+frames use the retained planar route. A shared route decision is now implemented
+for readback, serial output and pure workers.
 The exact pixel assertion and all five pipeline cases remain unchanged. Normal
 RCH recovery acknowledged the original failed run and preserved its logs; full
 scanner, bare Cargo and later compiled acceptance stages were not reached.
+
+The unchanged whole pipeline suite now passes its capture-time pixel case at
+1, 4 and 16 threads on source `78363054` (DSR `20261105T200855-2576195`).
+It then fails its next case: the real serial render retains the GIL across
+native waits. A primary-only repair releases it for output reservation and
+rendering, using the existing callback-free frozen render projection; callback
+references remain on the scene owner. That repair has not compiled or executed.
+The original five cases and exact assertions remain intact. All source, SDK
+and scanner-tool checks remain unchanged around the failed baseline. Its first
+two normal RCH recoveries time out; a third retrieves all eight result files and
+acknowledges the original failure before any validation-source edit. An earlier
+managed build was interrupted by RCH's
+output-scan monitor (exit 137), and no full scanner or bare Cargo pass follows
+from either run. The full 42-stage qualification is still required.
 
 The main vision gaps remain concrete and tracked:
 
