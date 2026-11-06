@@ -2,6 +2,8 @@
 //! digests per layout kernel, analytic ground truth for the circular
 //! rule, partition/BFS refusals, and one bit-locked self-golden.
 
+use std::sync::Arc;
+
 use fmn_anim::{AnimConfig, AnimError, Animation, RateFunc};
 use fmn_core::color::Srgb;
 use fmn_core::types::Vec3;
@@ -337,6 +339,28 @@ fn family_bytes(stage: &Stage, root: Mob) -> Vec<u8> {
         for value in entry.placement().coefficients() {
             bytes.extend_from_slice(&value.to_bits().to_le_bytes());
         }
+        let uniforms = entry.uniforms();
+        for value in [
+            uniforms.is_fixed_in_frame,
+            uniforms.anti_alias_width,
+            uniforms.joint_type.to_code(),
+        ]
+        .into_iter()
+        .chain(uniforms.shading)
+        .chain(uniforms.clip_planes.into_iter().flatten())
+        {
+            bytes.extend_from_slice(&value.to_bits().to_le_bytes());
+        }
+        bytes.extend(
+            [
+                uniforms.flat_stroke,
+                uniforms.scale_stroke_with_zoom,
+                uniforms.stroke_behind,
+                uniforms.depth_test,
+                uniforms.use_winding_fill,
+            ]
+            .map(u8::from),
+        );
         for field in entry.buffer.schema().fields() {
             bytes.extend_from_slice(field.name.as_bytes());
             for value in entry.buffer.read_column(&field.name).unwrap() {
@@ -657,7 +681,14 @@ fn graph_animation_workers_reproduce_seconds_and_exact_frame_sampling() {
     use fmn_anim::{RationalFrameClock, advance_play, finish_open_play, open_play};
     use fmn_core::rng::RngRoot;
 
-    for (kind, run_time_frames) in [(0, None), (1, None), (0, Some(43)), (1, Some(43))] {
+    for (kind, run_time_frames, shaped) in [
+        (0, None, false),
+        (1, None, false),
+        (0, Some(43), false),
+        (1, Some(43), false),
+        (1, None, true),
+        (1, Some(43), true),
+    ] {
         let mut stage = Stage::new();
         let graph = NetworkGraph::new(sample_graph())
             .laid_out(&GraphLayout::Circular)
@@ -679,6 +710,11 @@ fn graph_animation_workers_reproduce_seconds_and_exact_frame_sampling() {
             ),
         };
         animation.state_mut().config.run_time_frames = run_time_frames;
+        if shaped {
+            animation.state_mut().config.rate_func =
+                RateFunc::Sampled(Arc::from([0.0, 0.9, 0.1, 0.8, 1.0]));
+            animation.state_mut().config.time_span = Some((0.03125, 0.4375));
+        }
         let mut animations = vec![animation];
         let fps = if run_time_frames.is_some() { 24 } else { 8 };
         let mut clock = RationalFrameClock::new(fps).unwrap();
@@ -710,16 +746,18 @@ fn graph_animation_workers_reproduce_seconds_and_exact_frame_sampling() {
                 assert!(!timing.is_frame_native());
                 assert_eq!(timing.intervals().len(), graph.nodes().len());
                 assert_eq!(timing.max_end(), 5.0);
-                for frame in 0..=43 {
-                    let frame = f64::from(frame);
-                    assert_eq!(
-                        timing.rate_alpha_at_frame(frame, fps).to_bits(),
-                        (frame / 43.0).to_bits()
-                    );
-                    assert_eq!(
-                        timing.position_at_frame(frame, fps).to_bits(),
-                        (frame * timing.max_end() / 43.0).to_bits()
-                    );
+                if !shaped {
+                    for frame in 0..=43 {
+                        let frame = f64::from(frame);
+                        assert_eq!(
+                            timing.rate_alpha_at_frame(frame, fps).to_bits(),
+                            (frame / 43.0).to_bits()
+                        );
+                        assert_eq!(
+                            timing.position_at_frame(frame, fps).to_bits(),
+                            (frame * timing.max_end() / 43.0).to_bits()
+                        );
+                    }
                 }
             }
         }
@@ -745,7 +783,11 @@ fn graph_animation_workers_reproduce_seconds_and_exact_frame_sampling() {
                 scope.spawn(move || {
                     for index in (worker..expected.len()).step_by(4).rev() {
                         let materialized = pure.job(index as i64 + 1).unwrap().materialize();
-                        assert_eq!(rooted_bytes(&materialized), expected[index]);
+                        assert_eq!(
+                            rooted_bytes(&materialized),
+                            expected[index],
+                            "kind={kind}, frames={run_time_frames:?}, shaped={shaped}, frame={index}"
+                        );
                     }
                 });
             }
