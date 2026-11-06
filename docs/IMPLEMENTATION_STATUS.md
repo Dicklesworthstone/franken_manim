@@ -104,16 +104,30 @@ scanner, bare Cargo and later compiled acceptance stages were not reached.
 The unchanged whole pipeline suite now passes its capture-time pixel case at
 1, 4 and 16 threads on source `78363054` (DSR `20261105T200855-2576195`).
 It then fails its next case: the real serial render retains the GIL across
-native waits. A primary-only repair releases it for output reservation and
-rendering, using the existing callback-free frozen render projection; callback
-references remain on the scene owner. That repair has not compiled or executed.
+native waits. The repair releases it for output reservation and rendering,
+using the existing callback-free frozen render projection; callback references
+remain on the scene owner.
 The original five cases and exact assertions remain intact. All source, SDK
 and scanner-tool checks remain unchanged around the failed baseline. Its first
 two normal RCH recoveries time out; a third retrieves all eight result files and
 acknowledges the original failure before any validation-source edit. An earlier
 managed build was interrupted by RCH's
 output-scan monitor (exit 137), and no full scanner or bare Cargo pass follows
-from either run. The full 42-stage qualification is still required.
+from either run.
+
+The GIL repair now passes the unchanged whole five-case pipeline acceptance
+and all four existing adaptive-policy tests on the `8e1b8428` source snapshot
+(DSR `20261105T203032-2653894/0`). The following full run passes its first twelve
+stages, including both strict Clippy variants, all-target test compilation,
+live exact positions and both Studio integration tests. Its thirteenth stage,
+the original exact-duration acceptance, actually fails: `.animate` forwards
+`run_time_frames` to `_MethodAnimation`, whose old argument allowlist rejects
+it before the existing duration implementation can run (DSR
+`20261105T203756-2682683/1`). Source, SDK and scanner-tool checks remain unchanged;
+RCH acknowledges the failed run normally. The allowlist now forwards that
+argument to the existing validating constructor. This one-line repair has not
+yet executed; no test, numeric tolerance, golden or duration rule changes.
+The later native output suites, full scanner and bare Cargo remain pending.
 
 The main vision gaps remain concrete and tracked:
 
