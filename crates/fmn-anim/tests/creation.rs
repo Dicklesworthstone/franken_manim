@@ -40,6 +40,22 @@ fn line5(stage: &mut Stage) -> Mob {
     )
 }
 
+/// Two horizontal contours separated by a non-drawable move slot.
+fn disconnected_lines(stage: &mut Stage) -> Mob {
+    vmob(
+        stage,
+        &[
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [10.0, 4.0, 0.0],
+            [11.0, 4.0, 0.0],
+            [12.0, 4.0, 0.0],
+        ],
+    )
+}
+
 fn xs_of(stage: &Stage, mob: Mob) -> Vec<f32> {
     #[allow(clippy::cast_possible_truncation)]
     stage
@@ -141,6 +157,100 @@ fn passing_flash_windows_then_restores_on_teardown() {
     anim.finish(&mut stage);
     assert_eq!(xs_of(&stage, mob), original);
     assert!(anim.is_remover());
+}
+
+#[test]
+fn creation_preserves_move_anchors_while_revealing_disconnected_contours() {
+    let mut stage = Stage::new();
+    let mob = disconnected_lines(&mut stage);
+    let original = stage.get_points(mob).unwrap();
+    let mut anim = show_creation(mob);
+    anim.state_mut().config.rate_func = RateFunc::linear();
+    anim.begin(&mut stage).unwrap();
+    let left = [2.0, 0.0, 0.0];
+    let right = [10.0, 4.0, 0.0];
+    for (alpha, expected) in [
+        (
+            0.5,
+            [original[0], original[1], left, left, right, right, right],
+        ),
+        (
+            0.75,
+            [
+                original[0],
+                original[1],
+                left,
+                left,
+                right,
+                [10.25, 4.0, 0.0],
+                [10.5, 4.0, 0.0],
+            ],
+        ),
+        (
+            0.5,
+            [original[0], original[1], left, left, right, right, right],
+        ),
+    ] {
+        // Halfway lies inside the middle move slot. It cannot introduce a
+        // point on the diagonal between the two real contours. Seeking back
+        // to it must use the unchanged begin snapshot.
+        anim.interpolate(&mut stage, alpha);
+        let points = stage.get_points(mob).unwrap();
+        assert_eq!(points, expected, "alpha={alpha}");
+        assert_eq!(points[2], points[3], "the move handle stays on its anchor");
+        assert_ne!(points[3], points[4], "the next contour stays disconnected");
+    }
+    anim.finish(&mut stage);
+    assert_eq!(stage.get_points(mob).unwrap(), original);
+    assert!(anim.deferred_error().is_none());
+}
+
+#[test]
+fn passing_flash_keeps_move_windows_disconnected_and_restores_the_full_path() {
+    let mut stage = Stage::new();
+    let mob = disconnected_lines(&mut stage);
+    stage.add_to_scene(mob).unwrap();
+    let original = stage.get_points(mob).unwrap();
+    let mut anim = show_passing_flash(mob, 0.25);
+    anim.state_mut().config.rate_func = RateFunc::linear();
+    anim.begin(&mut stage).unwrap();
+    let left = [2.0, 0.0, 0.0];
+    let right = [10.0, 4.0, 0.0];
+    for (alpha, expected) in [
+        (0.5, [left, left, left, left, right, right, right]),
+        (
+            0.625,
+            [
+                left,
+                left,
+                left,
+                left,
+                right,
+                [10.34375, 4.0, 0.0],
+                [10.6875, 4.0, 0.0],
+            ],
+        ),
+        (0.5, [left, left, left, left, right, right, right]),
+    ] {
+        // At 1/2 the window [3/8, 5/8] covers only the move. At 5/8 it
+        // starts inside that move and reveals 11/32 of the second contour.
+        anim.interpolate(&mut stage, alpha);
+        let points = stage.get_points(mob).unwrap();
+        assert_eq!(points, expected, "alpha={alpha}");
+        assert_eq!(points[2], points[3], "the move handle stays on its anchor");
+        assert_ne!(points[3], points[4], "the next contour stays disconnected");
+        if alpha == 0.5 {
+            for contour in [&points[..3], &points[4..]] {
+                assert!(contour.iter().all(|point| *point == contour[0]));
+            }
+        }
+    }
+    anim.finish(&mut stage);
+    assert_eq!(stage.get_points(mob).unwrap(), original);
+    assert!(anim.deferred_error().is_none());
+    assert!(anim.is_remover());
+    anim.clean_up_from_scene(&mut stage);
+    assert!(stage.roots().is_empty());
 }
 
 #[test]

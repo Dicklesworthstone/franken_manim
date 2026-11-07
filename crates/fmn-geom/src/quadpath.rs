@@ -1139,8 +1139,11 @@ impl QuadPath {
     ///
     /// The partial run keeps the original point count: points before the
     /// window collapse onto the window's first point, points after onto its
-    /// last, and the boundary curves are [`bezier::partial_quadratic`]
-    /// restrictions. Returns `(new_points, i1, i4)` where `[..i1]` and
+    /// last, and drawable boundary curves are [`bezier::partial_quadratic`]
+    /// restrictions. Subpath breaks retain their original move triple even
+    /// at a clipped boundary: interpolating a move would invent a visible
+    /// connector between contours (BN-12). Moves still occupy their original
+    /// curve-index intervals. Returns `(new_points, i1, i4)` where `[..i1]` and
     /// `[i4..]` are the collapsed flanks (the Reference zeroes
     /// `joint_angle` there); `None` when the run has no curves (the
     /// Reference mutates a discarded copy — a deliberate no-op).
@@ -1164,9 +1167,22 @@ impl QuadPath {
         let i3 = 2 * upper_index;
         let i4 = 2 * upper_index + 3;
 
+        let restrict = |curve: &[Vec3; 3], start: f64, end: f64| {
+            // Use the same exact-handle and distinct-anchor rule as
+            // subpath_end_indices. Near-stationary drawable curves and null
+            // curves must retain the ordinary restriction arithmetic.
+            let [anchor, handle, next_anchor] = *curve;
+            if anchor == handle
+                && (0..3).any(|axis| (handle[axis] - next_anchor[axis]).abs() > SUBPATH_END_ATOL)
+            {
+                *curve
+            } else {
+                bezier::partial_quadratic(curve, start, end)
+            }
+        };
         let mut new_points = points.to_vec();
         if lower_index == upper_index {
-            let tup = bezier::partial_quadratic(
+            let tup = restrict(
                 &[points[i1], points[i1 + 1], points[i1 + 2]],
                 lower_residue,
                 upper_residue,
@@ -1179,12 +1195,12 @@ impl QuadPath {
                 *p = tup[2];
             }
         } else {
-            let low_tup = bezier::partial_quadratic(
+            let low_tup = restrict(
                 &[points[i1], points[i1 + 1], points[i1 + 2]],
                 lower_residue,
                 1.0,
             );
-            let high_tup = bezier::partial_quadratic(
+            let high_tup = restrict(
                 &[points[i3], points[i3 + 1], points[i3 + 2]],
                 0.0,
                 upper_residue,
@@ -1515,6 +1531,126 @@ mod tests {
         } else {
             value.next_down()
         })
+    }
+
+    fn disconnected_lines() -> [Vec3; 7] {
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0], // Move to the second contour, never a curve.
+            [10.0, 4.0, 0.0],
+            [11.0, 4.0, 0.0],
+            [12.0, 4.0, 0.0],
+        ]
+    }
+
+    #[test]
+    fn partial_reveal_inside_a_move_keeps_only_null_contours() {
+        let points = disconnected_lines();
+        let left = [2.0, 0.0, 0.0];
+        let right = [10.0, 4.0, 0.0];
+        // Both windows lie wholly inside the move's middle curve slot.
+        // The zero-width window must not manufacture a point on its chord.
+        for (a, b) in [(0.375, 0.625), (0.5, 0.5)] {
+            let (clipped, i1, i4) = QuadPath::partial_points(&points, a, b).unwrap();
+            assert_eq!((i1, i4), (2, 5), "curve-index timing stays unchanged");
+            assert_eq!(clipped, [left, left, left, left, right, right, right]);
+            let path = QuadPath::from_points(clipped).unwrap();
+            assert_eq!(path.num_curves(), 3, "move slots remain in the layout");
+            assert_eq!(path.subpath_end_indices(), vec![2, 6]);
+            for contour in path.subpaths() {
+                assert!(contour.iter().all(|point| *point == contour[0]));
+            }
+        }
+    }
+
+    #[test]
+    fn partial_reveal_keeps_move_anchors_at_either_window_boundary() {
+        let points = disconnected_lines();
+        let left = [2.0, 0.0, 0.0];
+        let right = [10.0, 4.0, 0.0];
+        for (a, b, expected, flanks) in [
+            (
+                0.0,
+                0.5,
+                [points[0], points[1], left, left, right, right, right],
+                (0, 5),
+            ),
+            (
+                0.5,
+                1.0,
+                [left, left, left, left, right, points[5], points[6]],
+                (2, 7),
+            ),
+            (
+                0.25,
+                0.75,
+                [
+                    [1.5, 0.0, 0.0],
+                    [1.75, 0.0, 0.0],
+                    left,
+                    left,
+                    right,
+                    [10.25, 4.0, 0.0],
+                    [10.5, 4.0, 0.0],
+                ],
+                (0, 7),
+            ),
+            (0.0, 1.0, points, (0, 7)),
+        ] {
+            let (clipped, i1, i4) = QuadPath::partial_points(&points, a, b).unwrap();
+            assert_eq!((i1, i4), flanks);
+            assert_eq!(clipped, expected, "window [{a}, {b}]");
+            let path = QuadPath::from_points(clipped).unwrap();
+            assert_eq!(path.subpath_end_indices(), vec![2, 6]);
+            assert_eq!(path.num_curves(), 3);
+        }
+    }
+
+    #[test]
+    fn partial_reveal_preserves_drawable_curve_bits() {
+        // Exact dyadic oracles from the quadratic Bernstein polynomial at
+        // t=1/4 and t=3/4, with the restricted tangent fixing the handle.
+        // Cover a curved trace, an end-stationary line, a tiny but nonzero
+        // initial tangent, a short stationary-start curve, and a null curve.
+        let tiny = 1.0 / 1_048_576.0;
+        let short = 1.0 / 16_384.0;
+        for (points, expected) in [
+            (
+                [[0.0, 0.0, 0.0], [2.0, 4.0, 1.0], [4.0, 0.0, 2.0]],
+                [[1.0, 1.5, 0.5], [2.0, 2.5, 1.0], [3.0, 1.5, 1.5]],
+            ),
+            (
+                [[0.0; 3], [8.0, 0.0, 0.0], [8.0, 0.0, 0.0]],
+                [[3.5, 0.0, 0.0], [6.5, 0.0, 0.0], [7.5, 0.0, 0.0]],
+            ),
+            (
+                [[0.0; 3], [tiny, 0.0, 0.0], [2.0, 0.0, 0.0]],
+                [
+                    [0.125 + 0.375 * tiny, 0.0, 0.0],
+                    [0.375 + 0.625 * tiny, 0.0, 0.0],
+                    [1.125 + 0.375 * tiny, 0.0, 0.0],
+                ],
+            ),
+            (
+                [[0.0; 3], [0.0; 3], [short, 0.0, 0.0]],
+                [
+                    [short / 16.0, 0.0, 0.0],
+                    [3.0 * short / 16.0, 0.0, 0.0],
+                    [9.0 * short / 16.0, 0.0, 0.0],
+                ],
+            ),
+            ([[3.0, 4.0, 0.0]; 3], [[3.0, 4.0, 0.0]; 3]),
+        ] {
+            let (clipped, i1, i4) = QuadPath::partial_points(&points, 0.25, 0.75).unwrap();
+            assert_eq!((i1, i4), (0, 3));
+            let bits: Vec<_> = clipped
+                .iter()
+                .map(|point| point.map(f64::to_bits))
+                .collect();
+            assert_eq!(bits, expected.map(|point| point.map(f64::to_bits)));
+        }
     }
 
     #[test]

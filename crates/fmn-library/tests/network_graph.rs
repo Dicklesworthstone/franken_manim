@@ -176,14 +176,16 @@ fn self_loop_is_a_visible_closed_circle_tangent_to_its_vertex() {
     let network = NetworkGraph::from_edge_list(&["a"], &[("a", "a")])
         .laid_out(&GraphLayout::BreadthFirst { root: "a".into() })
         .unwrap();
+    let position = network.position("a").unwrap();
+    let relative = |point: Vec3| std::array::from_fn(|axis| point[axis] + position[axis]);
     let family = network.build().unwrap();
     assert_eq!(family.children().len(), 2, "one edge, then one vertex");
     let self_loop = &family.children()[0];
     let vertex = &family.children()[1];
 
     let (min, max) = self_loop.extent().unwrap();
-    assert_point_close(min, [-0.27, 0.09, 0.0]);
-    assert_point_close(max, [0.27, 0.63, 0.0]);
+    assert_point_close(min, relative([-0.27, 0.09, 0.0]));
+    assert_point_close(max, relative([0.27, 0.63, 0.0]));
     let (_, vertex_max) = vertex.extent().unwrap();
     assert!((min[1] - vertex_max[1]).abs() < 1e-12);
 
@@ -191,15 +193,19 @@ fn self_loop_is_a_visible_closed_circle_tangent_to_its_vertex() {
     assert_eq!(path.subpaths().len(), 1);
     assert!(path.is_closed());
     let first = self_loop.points()[0];
-    assert_point_close(first, [0.0, 0.09, 0.0]);
+    assert_point_close(first, relative([0.0, 0.09, 0.0]));
     assert_point_close(*self_loop.points().last().unwrap(), first);
     let handle = self_loop.points()[1];
-    assert!(handle[0] > first[0], "the pulse leaves the node to the right");
+    assert!(
+        handle[0] > first[0],
+        "the pulse leaves the node to the right"
+    );
     assert!((handle[1] - first[1]).abs() < 1e-12, "horizontal tangent");
     for anchor in self_loop.points().iter().step_by(2) {
-        let radius_squared = anchor[0] * anchor[0] + (anchor[1] - 0.36).powi(2);
+        let radius_squared =
+            (anchor[0] - position[0]).powi(2) + (anchor[1] - position[1] - 0.36).powi(2);
         assert!((radius_squared - 0.27 * 0.27).abs() < 1e-12);
-        assert_eq!(anchor[2], 0.0);
+        assert_eq!(anchor[2], position[2]);
     }
 
     assert_eq!(self_loop.style().stroke_color, fmn_core::constants::GREY_B);
@@ -250,7 +256,10 @@ fn self_loops_keep_edge_identity_and_deterministic_geometry_in_every_layout() {
                 assert!(edge.path().unwrap().is_closed());
             } else {
                 assert_point_close(edge.points()[0], position);
-                assert_point_close(*edge.points().last().unwrap(), network.position(to).unwrap());
+                assert_point_close(
+                    *edge.points().last().unwrap(),
+                    network.position(to).unwrap(),
+                );
             }
         }
         for (label, vertex) in network.nodes().iter().zip(&family.children()[edge_count..]) {
@@ -903,7 +912,10 @@ fn graph_flow_preserves_contours_and_normalizes_reversed_end_handles() {
         assert_eq!(contours.len(), 2);
         assert_eq!(contours[0], &expected[..3]);
         assert_eq!(contours[1], &expected[4..]);
-        assert_eq!(stage.get_points(edge).unwrap().as_slice(), source.as_slice());
+        assert_eq!(
+            stage.get_points(edge).unwrap().as_slice(),
+            source.as_slice()
+        );
         assert_eq!(family_bytes(&stage, graph.mobject()), unchanged);
 
         flow.finish(&mut stage);

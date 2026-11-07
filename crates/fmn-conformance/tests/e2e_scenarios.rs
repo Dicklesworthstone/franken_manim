@@ -10128,13 +10128,7 @@ fn graph_animations_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
             let graph = NetworkGraph::from_edge_list(
                 &["a", "b", "c", "d"],
-                &[
-                    ("a", "b"),
-                    ("a", "c"),
-                    ("b", "d"),
-                    ("c", "d"),
-                    ("d", "d"),
-                ],
+                &[("a", "b"), ("a", "c"), ("b", "d"), ("c", "d"), ("d", "d")],
             )
             .laid_out(&GraphLayout::Circular)?;
             let raw = stage.scene_mut().stage_mut();
@@ -10226,7 +10220,9 @@ fn graph_animations_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
             ));
         }
         if frames[14] == frames[17] || frames[16] == frames[19] {
-            return Err(fail("self-loop flow did not travel around the visible loop"));
+            return Err(fail(
+                "self-loop flow did not travel around the visible loop",
+            ));
         }
         if frames[11] != frames[19] || frames[19] != frames[20] || frames[20] != frames[21] {
             return Err(fail(
@@ -10256,6 +10252,99 @@ fn graph_animations_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         .with_artifact("graph-loop-flow.png", frames[16].clone())
         .with_counter("graph_animation_thread_counts", 3)
         .with_counter("graph_animation_frames", rendered_frames))
+}
+
+/// Partial reveals must never rasterize the move between separate contours.
+fn partial_reveal_contours_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_library::style::Style;
+
+    let style = Style::default().stroke(WHITE, 8.0, 1.0);
+    let source = [
+        [-1.5, -0.5, 0.0],
+        [-1.0, -0.5, 0.0],
+        [-0.5, -0.5, 0.0],
+        [-0.5, -0.5, 0.0],
+        [0.5, 0.5, 0.0],
+        [1.0, 0.5, 0.0],
+        [1.5, 0.5, 0.0],
+    ];
+    let mut stage = Stage::new();
+    let mob = stage.add(VMobject::from_points(source.to_vec()).with_style(style));
+    stage.add_to_scene(mob).map_err(|e| fail(e.to_string()))?;
+    let mut flash = fmn_anim::show_passing_flash(mob, 0.25);
+    flash.state_mut().config.rate_func = RateFunc::linear();
+    flash.begin(&mut stage).map_err(|e| fail(e.to_string()))?;
+
+    let render = |stage: &Stage, threads| -> Result<Vec<u8>, ScenarioError> {
+        let config = scene_goldens::frame_config();
+        let mut plan = RenderPlan::new();
+        plan.sync(stage, 0).map_err(|e| fail(e.to_string()))?;
+        let mono = MonoTable::build(&plan, config.map).map_err(|e| fail(e.to_string()))?;
+        let binning = Binning::build(&plan, config.viewport, TILING, config.map)
+            .map_err(|e| fail(e.to_string()))?;
+        let frame =
+            FrameJob::with_identity(&plan, &mono, &binning, config, EngineIdentity::certified())
+                .map_err(|e| fail(e.to_string()))?
+                .render(threads)
+                .map_err(|e| fail(e.to_string()))?;
+        encode_frame(&frame).map_err(|e| fail(e.to_string()))
+    };
+    let blank = render(&Stage::new(), 1)?;
+    // At alpha=5/8, the window starts inside the move and reveals 11/32
+    // of the right-hand straight contour. The oracle is authored directly,
+    // without calling any partial-path operation.
+    let mut oracle = Stage::new();
+    let expected = oracle.add(
+        VMobject::from_points(vec![
+            [0.5, 0.5, 0.0],
+            [0.671875, 0.5, 0.0],
+            [0.84375, 0.5, 0.0],
+        ])
+        .with_style(style),
+    );
+    oracle
+        .add_to_scene(expected)
+        .map_err(|e| fail(e.to_string()))?;
+    let visible = render(&oracle, 1)?;
+    if visible == blank {
+        return Err(fail("the partial-reveal oracle must draw visible ink"));
+    }
+    let mut cases = 0;
+    for alpha in [0.5, 0.625, 0.5] {
+        flash.interpolate(&mut stage, alpha);
+        if let Some(error) = flash.deferred_error() {
+            return Err(fail(format!("partial-reveal interpolation: {error}")));
+        }
+        let expected = if alpha == 0.5 { &blank } else { &visible };
+        for threads in [1, 4, 16] {
+            let actual = render(&stage, threads)?;
+            if &actual != expected {
+                return Err(fail(format!(
+                    "partial reveal bridged a contour or changed pixels at alpha={alpha}, threads={threads}"
+                )));
+            }
+            cases += 1;
+        }
+    }
+    flash.finish(&mut stage);
+    if stage.get_points(mob).as_deref() != Some(source.as_slice()) {
+        return Err(fail(
+            "partial flash failed to restore the full compound path",
+        ));
+    }
+    flash.clean_up_from_scene(&mut stage);
+    if !stage.roots().is_empty() {
+        return Err(fail("partial flash leaked its scene root"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.partial_reveal_contours")
+            .field("thread_counts", 3_u64)
+            .field("frame_comparisons", cases),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("partial_reveal_frame_comparisons", cases)
+        .with_artifact("partial-reveal-visible.frame", visible)
+        .with_artifact("partial-reveal-gap.frame", blank))
 }
 
 /// NeuralNetworkMobject end-to-end drill (fm-74z): introspects an MLP with
@@ -15769,6 +15858,26 @@ pub fn catalog() -> Vec<ScenarioSpec> {
     );
     specs.push(
         spec(
+            "lifecycle.partial_reveal_contours.v1",
+            ScenarioClass::LifecycleDrill,
+            Surface::RustApi,
+            Invocation::new(partial_reveal_contours_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("partial_reveal_frame_comparisons", 9),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.lifecycle.partial_reveal_contours",
+                vec![
+                    FieldPred::u64_eq("thread_counts", 3),
+                    FieldPred::u64_eq("frame_comparisons", 9),
+                ],
+            )],
+        )
+        .tier(Tier::Fast),
+    );
+    specs.push(
+        spec(
             "neural_network.live_training_and_purity.v1",
             ScenarioClass::LifecycleDrill,
             Surface::RustApi,
@@ -16900,6 +17009,16 @@ fn graph_animations_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.graph_animations.v1")
         .expect("native graph animation lifecycle is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn partial_reveal_contours_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.partial_reveal_contours.v1")
+        .expect("partial-reveal contour lifecycle is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }
