@@ -264,6 +264,7 @@ impl Payload {
             }
             return Ok(CachedRenderStats {
                 cache: crate::CacheStats::default(),
+                prefix: crate::PrefixCacheStats::default(),
                 raster,
             });
         }
@@ -305,6 +306,7 @@ impl Payload {
         self.cache.complete_render();
         Ok(CachedRenderStats {
             cache: self.cache.stats(),
+            prefix: self.cache.prefix_stats(),
             raster,
         })
     }
@@ -629,7 +631,7 @@ mod tests {
     };
     use fmn_core::color::LinearRgba;
     use fmn_frame::{FrameLayout, PixelFormat};
-    use fmn_mobject::{Mobject, RecordBuffer, RecordSchema, Stage};
+    use fmn_mobject::{Mob, Mobject, RecordBuffer, RecordSchema, Stage};
 
     fn config() -> RetainedFrameRendererConfig {
         RetainedFrameRendererConfig {
@@ -672,6 +674,252 @@ mod tests {
         buffer.write_range("stroke_rgba", 0, &[1.0, 0.3, 0.1, 0.9].repeat(5));
         buffer.write_range("stroke_width", 0, &[3.0; 5]);
         Mobject::from_buffer(buffer)
+    }
+
+
+    fn prefix_fixture() -> (Stage, [Mob; 3]) {
+        let mut background = RecordBuffer::new(RecordSchema::vmobject(), 9).unwrap();
+        background.write_range(
+            "point",
+            0,
+            &[
+                -4.0, -3.0, 0.0, 0.0, -3.0, 0.0, 4.0, -3.0, 0.0, 4.0, 0.0, 0.0, 4.0, 3.0,
+                0.0, 0.0, 3.0, 0.0, -4.0, 3.0, 0.0, -4.0, 0.0, 0.0, -4.0, -3.0, 0.0,
+            ],
+        );
+        background.write_range("fill_rgba", 0, &[0.2, 0.15, 0.05, 0.35].repeat(9));
+        background.write_range("stroke_rgba", 0, &[0.0; 36]);
+        background.write_range("stroke_width", 0, &[0.0; 9]);
+        let mut stage = Stage::new();
+        let handles = [
+            stage.add(Mobject::from_buffer(background)),
+            stage.add(vector()),
+            stage.add(vector()),
+        ];
+        stage.set_color_lanes(
+            handles[1],
+            "fill_rgba",
+            Some([0.8, 0.1, 0.3]),
+            Some(0.45),
+            false,
+        );
+        stage.set_color_lanes(
+            handles[2],
+            "fill_rgba",
+            Some([0.1, 0.8, 0.2]),
+            Some(0.6),
+            false,
+        );
+        stage.shift(handles[1], [-0.2, 0.1, 0.0]);
+        stage.shift(handles[2], [0.3, 0.2, 0.0]);
+        for handle in handles {
+            stage.add_to_scene(handle).unwrap();
+        }
+        (stage, handles)
+    }
+
+    fn uncached_prefix_oracle(stage: &Stage) -> Vec<u8> {
+        let config = config();
+        let mut plan = RenderPlan::new();
+        plan.sync(stage, 0).unwrap();
+        let mono = MonoTable::build(&plan, config.frame.map).unwrap();
+        let mut binning = Binning::build(
+            &plan,
+            config.frame.viewport,
+            config.tiling,
+            config.frame.map,
+        )
+        .unwrap();
+        binning.prune_occluded(&plan).unwrap();
+        FrameJob::with_identity(&plan, &mono, &binning, config.frame, config.engine)
+            .unwrap()
+            .render(1)
+            .unwrap()
+            .as_bytes()
+            .to_vec()
+    }
+
+    #[test]
+    fn persistent_prefix_reuse_matches_uncached_pixels_after_layer_edits_and_seeks() {
+        let (mut stage, handles) = prefix_fixture();
+        let mut compiler = VectorFrameCompiler::new(config()).unwrap();
+        let mut frames = Vec::new();
+        let mut expected = Vec::new();
+        for step in 0..8 {
+            match step {
+                0 => {}
+                3 => {
+                    stage.shift(handles[1], [0.0, 0.125, 0.0]);
+                }
+                5 => stage.set_color_lanes(
+                    handles[0],
+                    "fill_rgba",
+                    Some([0.7, 0.05, 0.2]),
+                    None,
+                    false,
+                ),
+                _ => {
+                    stage.shift(handles[2], [0.125, 0.0625, 0.0]);
+                }
+            }
+            expected.push(uncached_prefix_oracle(&stage));
+            frames.push(compiler.capture(&stage, 0).unwrap());
+        }
+        assert_ne!(expected[1], expected[2], "the animated tail changes pixels");
+        assert_ne!(expected[2], expected[3], "the middle layer changes pixels");
+        assert_ne!(expected[4], expected[5], "the leading layer changes pixels");
+
+        for threads in [1, 4, 16] {
+            for prefix_bytes in [0, 1024 * 1024] {
+                let mut team = RasterTeam::new(threads).unwrap();
+                let mut arena = FrameArena::new();
+                let mut cache = PixelTileCache::with_budgets(1024 * 1024, prefix_bytes);
+                let mut pixels = FrameBuffer::new(config().frame.layout().unwrap());
+                let mut resume = None;
+                for (position, index) in [0, 1, 2, 3, 4, 5, 6, 7, 7, 2].into_iter().enumerate() {
+                    let observed = frames[index]
+                        .render_cached_into_with_team(
+                            &mut team,
+                            &mut arena,
+                            &mut cache,
+                            &mut pixels,
+                            resume,
+                        )
+                        .unwrap();
+                    assert_eq!(
+                        pixels.as_bytes(),
+                        expected[index],
+                        "threads={threads}, prefix_bytes={prefix_bytes}, position={position}"
+                    );
+                    let prefix = cache.prefix_stats();
+                    assert_eq!(observed.prefix.hits, prefix.hits);
+                    assert_eq!(observed.prefix.captures, prefix.captures);
+                    assert_eq!(observed.prefix.commands_skipped, prefix.commands_skipped);
+                    if prefix_bytes == 0 || position == 0 || position == 8 {
+                        assert_eq!(prefix.hits, 0);
+                        assert_eq!(prefix.captures, 0);
+                        assert_eq!(prefix.commands_skipped, 0);
+                    } else if matches!(position, 2 | 4 | 7) {
+                        assert!(prefix.hits > 0, "dirty tiles must resume a saved prefix");
+                        assert!(prefix.commands_skipped > 0, "reuse must bypass commands");
+                    } else if matches!(position, 1 | 3 | 6) {
+                        assert!(prefix.captures > 0, "a stable leading run must be retained");
+                    }
+                    if position == 5 {
+                        assert_eq!(
+                            prefix.hits, 0,
+                            "editing the first layer invalidates prefixes"
+                        );
+                        assert_eq!(prefix.commands_skipped, 0);
+                    }
+                    if position == 8 {
+                        assert_eq!(
+                            observed.cache.misses, 0,
+                            "identical frames reuse whole tiles"
+                        );
+                    }
+                    resume = Some(cache.serial());
+                    if position == 3 {
+                        pixels.plane_mut(0).fill(0x91);
+                        resume = None;
+                    }
+                }
+                assert_eq!(team.stats().frames_completed, 10);
+            }
+        }
+    }
+
+    #[test]
+    fn failed_prefix_capture_is_not_published_and_the_team_recovers() {
+        let (mut stage, handles) = prefix_fixture();
+        let mut compiler = VectorFrameCompiler::new(config()).unwrap();
+        let mut team = RasterTeam::new(4).unwrap();
+        let mut arena = FrameArena::new();
+        let mut cache = PixelTileCache::with_budgets(1024 * 1024, 1024 * 1024);
+        let mut pixels = FrameBuffer::new(config().frame.layout().unwrap());
+        let mut resume = None;
+        for step in 0..3 {
+            if step != 0 {
+                stage.shift(handles[2], [0.125, 0.0625, 0.0]);
+            }
+            compiler
+                .capture(&stage, 0)
+                .unwrap()
+                .render_cached_into_with_team(
+                    &mut team,
+                    &mut arena,
+                    &mut cache,
+                    &mut pixels,
+                    resume,
+                )
+                .unwrap();
+            assert_eq!(pixels.as_bytes(), uncached_prefix_oracle(&stage));
+            resume = Some(cache.serial());
+        }
+        assert!(
+            cache.prefix_stats().hits > 0,
+            "exercise an already retained prefix"
+        );
+        let before = pixels.as_bytes().to_vec();
+        let previous_token = resume;
+
+        let poisoned = catch_unwind(AssertUnwindSafe(|| {
+            let mut band = team.payload.bands[0].lock().unwrap();
+            band.fill(0x9b);
+            panic!("injected partial-band unwind before prefix recapture");
+        }));
+        assert!(poisoned.is_err());
+        stage.shift(handles[1], [0.0, 0.125, 0.0]);
+        let changed = compiler.capture(&stage, 0).unwrap();
+        team.payload.panic_next.store(true, Ordering::Relaxed);
+        assert!(matches!(
+            changed.render_cached_into_with_team(
+                &mut team,
+                &mut arena,
+                &mut cache,
+                &mut pixels,
+                previous_token,
+            ),
+            Err(RetainedFrameRendererError::RasterWorkerPanicked)
+        ));
+        assert_eq!(pixels.as_bytes(), before);
+        assert_ne!(Some(cache.serial()), previous_token);
+        assert_eq!(
+            cache.prefix_stats().captures, 0,
+            "failed frames publish no checkpoint"
+        );
+        assert_eq!(team.stats().frames_completed, 3);
+
+        pixels.plane_mut(0).fill(0x67);
+        changed
+            .render_cached_into_with_team(
+                &mut team,
+                &mut arena,
+                &mut cache,
+                &mut pixels,
+                previous_token,
+            )
+            .unwrap();
+        assert_eq!(pixels.as_bytes(), uncached_prefix_oracle(&stage));
+        for _ in 0..2 {
+            stage.shift(handles[2], [0.125, 0.0625, 0.0]);
+            let resume = Some(cache.serial());
+            compiler
+                .capture(&stage, 0)
+                .unwrap()
+                .render_cached_into_with_team(
+                    &mut team,
+                    &mut arena,
+                    &mut cache,
+                    &mut pixels,
+                    resume,
+                )
+                .unwrap();
+            assert_eq!(pixels.as_bytes(), uncached_prefix_oracle(&stage));
+        }
+        assert!(cache.prefix_stats().hits > 0);
+        assert!(cache.prefix_stats().commands_skipped > 0);
+        assert_eq!(team.stats().frames_completed, 6);
     }
 
     #[test]

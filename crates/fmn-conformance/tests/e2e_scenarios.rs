@@ -8681,6 +8681,138 @@ fn retained_camera_frames_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioEr
     Ok(RunOutcome::ok().with_counter("retained_camera_replays", 12))
 }
 
+/// Dirty foreground tiles reuse exact static-prefix accumulators through the
+/// production persistent renderer; a fresh renderer supplies every pixel oracle.
+fn retained_static_prefix_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_render::{RetainedFrameRenderer, RetainedFrameRendererConfig, Tiling};
+
+    let rectangle = |width: f64, height: f64| {
+        let x = width / 2.0;
+        let y = height / 2.0;
+        Mobject::vector_from_points(&[
+            [-x, -y, 0.0],
+            [0.0, -y, 0.0],
+            [x, -y, 0.0],
+            [x, 0.0, 0.0],
+            [x, y, 0.0],
+            [0.0, y, 0.0],
+            [-x, y, 0.0],
+            [-x, 0.0, 0.0],
+            [-x, -y, 0.0],
+        ])
+    };
+    let mut stage = Stage::new();
+    let mut background = Vec::new();
+    for index in 0..4 {
+        let inset = f64::from(index) * 0.125;
+        let mob = stage.add(rectangle(6.0 - inset, 4.0 - inset));
+        stage.set_fill(mob, Some(BLUE_C), Some(0.25), Some(0.0), true);
+        stage.set_stroke(mob, None, Some(0.0), None, None, true);
+        background.push(mob);
+    }
+    let mover = stage.add(rectangle(1.5, 1.25));
+    stage.set_fill(mover, Some(RED_C), Some(0.6), Some(0.0), true);
+    stage.set_stroke(mover, None, Some(0.0), None, None, true);
+    stage
+        .add_many_to_scene(&background)
+        .and_then(|()| stage.add_to_scene(mover))
+        .map_err(|error| fail(format!("admit static-prefix scene: {error}")))?;
+
+    let config = RetainedFrameRendererConfig {
+        frame: FrameConfig::new(
+            Viewport {
+                width: 64,
+                height: 48,
+            },
+            ScreenMap {
+                scale: 8.0,
+                origin: [32.0, 24.0],
+                y_up: true,
+            },
+            fmn_core::color::LinearRgba {
+                r: 0.02,
+                g: 0.03,
+                b: 0.04,
+                a: 0.8,
+            },
+        ),
+        tiling: Tiling {
+            macro_tile: 32,
+            fine_tile: 8,
+        },
+        engine: EngineIdentity::certified(),
+        threads: 1,
+    };
+    let mut captures = Vec::new();
+    for index in 0..6 {
+        if index != 0 {
+            stage.shift(mover, [0.125, 0.0, 0.0]);
+        }
+        if index == 4 {
+            stage.set_fill(background[0], Some(YELLOW), Some(0.375), None, true);
+        }
+        let mut fresh = RetainedFrameRenderer::new(config)
+            .map_err(|error| fail(format!("fresh prefix control renderer: {error}")))?;
+        fresh
+            .render(&stage, 0)
+            .map_err(|error| fail(format!("fresh prefix control frame: {error}")))?;
+        captures.push((stage.snapshot(), fresh.frame().as_bytes().to_vec()));
+    }
+    if captures.windows(2).any(|pair| pair[0].1 == pair[1].1) {
+        return Err(fail(
+            "static-prefix scene did not visibly change every frame",
+        ));
+    }
+
+    let mut hits = 0_u64;
+    let mut skipped = 0_u64;
+    let mut artifact = Vec::new();
+    for threads in [1, 4, 16] {
+        let mut renderer = RetainedFrameRenderer::new(RetainedFrameRendererConfig {
+            threads,
+            ..config
+        })
+        .map_err(|error| fail(format!("persistent prefix renderer: {error}")))?;
+        let mut schedule_hits = 0_u64;
+        let mut schedule_skipped = 0_u64;
+        for (snapshot, expected) in &captures {
+            let stats = renderer
+                .render(&snapshot.materialize(), 0)
+                .map_err(|error| fail(format!("persistent prefix frame: {error}")))?;
+            if renderer.frame().as_bytes() != expected {
+                return Err(fail(format!(
+                    "static-prefix reuse changed certified pixels at {threads} threads"
+                )));
+            }
+            schedule_hits += stats.prefix.hits as u64;
+            schedule_skipped += stats.prefix.commands_skipped as u64;
+        }
+        if schedule_hits == 0 || schedule_skipped == 0 {
+            return Err(fail(format!(
+                "static-prefix raster work was not bypassed at {threads} threads"
+            )));
+        }
+        hits += schedule_hits;
+        skipped += schedule_skipped;
+        if threads == 1 {
+            artifact = encode_frame(renderer.frame())
+                .map_err(|error| fail(format!("encode static-prefix frame: {error}")))?;
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.render.static_prefix")
+            .field("frames", 18_u64)
+            .field("prefix_hits", hits)
+            .field("commands_skipped", skipped)
+            .field("fresh_pixels_match", "true"),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("retained-static-prefix.frame", artifact)
+        .with_counter("static_prefix_frames", 18)
+        .with_counter("static_prefix_hits", hits)
+        .with_counter("static_prefix_commands_skipped", skipped))
+}
+
 /// A graph generated after native plane placement must occupy that plane's
 /// chart. The independent drawing oracle translates the original geometry;
 /// the negative witness leaves the graph at the old origin.
@@ -13789,6 +13921,25 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.retained_static_prefix.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(retained_static_prefix_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("static_prefix_frames", 18),
+            counter_ge("static_prefix_hits", 3),
+            counter_ge("static_prefix_commands_skipped", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render.static_prefix",
+            vec![
+                FieldPred::u64_eq("frames", 18),
+                FieldPred::str_eq("fresh_pixels_match", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.retained_camera_frames.v1",
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
@@ -16532,6 +16683,16 @@ fn native_y4m_conversion_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.native_y4m_conversion.v1")
         .expect("native Y4M conversion scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn retained_static_prefix_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.retained_static_prefix.v1")
+        .expect("retained static-prefix scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

@@ -37,6 +37,16 @@
 //! bypasses coverage, stroke, compositing and writeback rather than recomputing
 //! pixels and comparing them after the fact.
 //!
+//! ## Static leading commands keep their exact accumulator
+//!
+//! Certified CPU additionally retains bounded f64 premultiplied checkpoints for
+//! unchanged leading commands inside dirty tiles. A changed frame discovers
+//! the common prefix; a later changed frame can resume it without repeating its
+//! coverage or compositing. Prefix matching uses the same exact key inputs as
+//! whole-tile reuse. No decoded RGBA16F pixels or regrouped suffix composites
+//! enter the accumulator, and pending captures publish only after a successful
+//! frame. Adaptive/forced-sampling engines keep their ordinary raster path.
+//!
 //! ## Live views are never traded for reuse
 //!
 //! §8.2: "while a *writable* live view exists, the affected object … is
@@ -45,6 +55,8 @@
 //! called and therefore no revision bumped, so it cannot be folded into the
 //! revision part of the key. It **poisons** the tile instead:
 //! [`TileKey::build`] returns `None`, and a tile with no key can never hit.
+//! A prefix may end before the first volatile command; that command and every
+//! following one still rasterize from current records on every frame.
 
 use crate::bin::{Binning, ScreenMap, Tiling, Viewport};
 use crate::plan::RenderPlan;
@@ -53,6 +65,10 @@ use crate::table::Instance;
 use fmn_frame::{FrameBuffer, PixelFormat};
 use fmn_hash::Digest;
 use std::collections::HashMap;
+
+mod prefix;
+pub use prefix::PrefixCacheStats;
+use prefix::{PrefixCache, PrefixInputs};
 
 /// Everything about the output that can change a tile's bytes without changing
 /// the scene.
@@ -164,6 +180,19 @@ impl TileKey {
         camera: u64,
         output: OutputTransform,
     ) -> Option<TileKey> {
+        let commands = binning.tile(tile)?.len();
+        Self::build_prefix_reusing(previous, binning, plan, tile, camera, output, commands)
+    }
+
+    fn build_prefix_reusing(
+        previous: Option<TileKey>,
+        binning: &Binning,
+        plan: &RenderPlan,
+        tile: usize,
+        camera: u64,
+        output: OutputTransform,
+        commands: usize,
+    ) -> Option<TileKey> {
         if tile >= binning.tile_count()
             || !binning.matches_plan(plan)
             || binning.viewport() != output.viewport
@@ -171,8 +200,8 @@ impl TileKey {
         {
             return None;
         }
-        let draws = binning.tile(tile)?;
-        let flags = binning.tile_flags(tile)?;
+        let draws = binning.tile(tile)?.get(..commands)?;
+        let flags = binning.tile_flags(tile)?.get(..commands)?;
         let instances = plan.shapes().instances();
         let mut key = previous.unwrap_or_else(|| TileKey {
             commands: 0,
@@ -224,6 +253,23 @@ impl TileKey {
         camera: u64,
         output: OutputTransform,
     ) -> bool {
+        binning.tile(tile).is_some_and(|draws| {
+            draws.len() == self.command_words.len()
+                && self.common_prefix_len(binning, plan, tile, camera, output) == Some(draws.len())
+        })
+    }
+
+    /// Exact unchanged leading commands, or no common rendering closure.
+    /// Live views stop the prefix at their first occurrence; a volatile tail
+    /// cannot make the preceding immutable accumulator unsafe to retain.
+    fn common_prefix_len(
+        &self,
+        binning: &Binning,
+        plan: &RenderPlan,
+        tile: usize,
+        camera: u64,
+        output: OutputTransform,
+    ) -> Option<usize> {
         if tile >= binning.tile_count()
             || !binning.matches_plan(plan)
             || binning.viewport() != output.viewport
@@ -232,24 +278,29 @@ impl TileKey {
             || self.output_words != output.words()
             || self.epoch != plan.epoch().get()
         {
-            return false;
+            return None;
         }
         let (Some(draws), Some(flags)) = (binning.tile(tile), binning.tile_flags(tile)) else {
-            return false;
+            return None;
         };
-        if draws.len() != self.command_words.len() || draws.len() != self.revision_axes.len() {
-            return false;
+        if flags.len() != draws.len() || self.command_words.len() != self.revision_axes.len() {
+            return None;
         }
         let instances = plan.shapes().instances();
-        draws.iter().enumerate().all(|(index, &draw)| {
-            let (Some(instance), Some(&flags)) = (instances.get(draw as usize), flags.get(index))
-            else {
-                return false;
-            };
-            !instance.volatile
-                && self.command_words[index] == command_words(instance, flags)
-                && self.revision_axes[index] == instance.revisions
-        })
+        Some(
+            draws
+                .iter()
+                .take(self.command_words.len())
+                .enumerate()
+                .take_while(|&(index, &draw)| {
+                    instances.get(draw as usize).is_some_and(|instance| {
+                        !instance.volatile
+                            && self.command_words[index] == command_words(instance, flags[index])
+                            && self.revision_axes[index] == instance.revisions
+                    })
+                })
+                .count(),
+        )
     }
 
     /// Which input part differs from `other`, even when its fingerprints collide.
@@ -393,6 +444,7 @@ impl<T> TileCache<T> {
         output: OutputTransform,
     ) -> Result<TileWork, TilePlanError> {
         self.plan_tile_with_key_budget(binning, plan, tile, camera, output, usize::MAX)
+            .map(|(work, _)| work)
     }
 
     fn plan_tile_with_key_budget(
@@ -403,7 +455,7 @@ impl<T> TileCache<T> {
         camera: u64,
         output: OutputTransform,
         max_key_bytes: usize,
-    ) -> Result<TileWork, TilePlanError> {
+    ) -> Result<(TileWork, Option<usize>), TilePlanError> {
         let tile_count = binning.tile_count();
         if tile >= tile_count {
             return Err(TilePlanError { tile, tile_count });
@@ -414,7 +466,7 @@ impl<T> TileCache<T> {
         if draws.is_empty() {
             self.entries.remove(&tile);
             self.stats.empty += 1;
-            return Ok(TileWork::Empty);
+            return Ok((TileWork::Empty, None));
         }
         let required = draws
             .len()
@@ -422,7 +474,7 @@ impl<T> TileCache<T> {
         if required.is_none_or(|bytes| bytes > max_key_bytes) {
             self.entries.remove(&tile);
             self.stats.poisoned += 1;
-            return Ok(TileWork::RasterizeUncached);
+            return Ok((TileWork::RasterizeUncached, None));
         }
         if self.entries.get(&tile).is_some_and(|(cached, _)| {
             cached.as_ref().is_some_and(|key| {
@@ -431,7 +483,7 @@ impl<T> TileCache<T> {
             })
         }) {
             self.stats.hits += 1;
-            return Ok(TileWork::Reuse);
+            return Ok((TileWork::Reuse, None));
         }
 
         let previous = self
@@ -439,15 +491,18 @@ impl<T> TileCache<T> {
             .get_mut(&tile)
             .and_then(|(key, _)| key.take())
             .filter(|key| key.retained_bytes() <= max_key_bytes);
+        let unchanged_prefix = previous
+            .as_ref()
+            .and_then(|key| key.common_prefix_len(binning, plan, tile, camera, output));
         let Some(key) = TileKey::build_reusing(previous, binning, plan, tile, camera, output)
             .filter(|key| key.retained_bytes() <= max_key_bytes)
         else {
             self.entries.remove(&tile);
             self.stats.poisoned += 1;
-            return Ok(TileWork::RasterizeUncached);
+            return Ok((TileWork::RasterizeUncached, unchanged_prefix));
         };
         self.stats.misses += 1;
-        Ok(TileWork::Rasterize(key))
+        Ok((TileWork::Rasterize(key), unchanged_prefix))
     }
 
     /// Store a freshly rasterized tile under the key [`plan_tile`] returned.
@@ -569,6 +624,7 @@ impl From<TilePlanError> for PixelTileCacheError {
 #[derive(Debug)]
 pub struct PixelTileCache {
     tiles: TileCache<Vec<u8>>,
+    prefixes: PrefixCache,
     work: Vec<TileWork>,
     render_state: Option<Digest>,
     /// Identity, config, and tiling that produced `render_state`. Unchanged
@@ -586,19 +642,41 @@ pub struct PixelTileCache {
 
 impl Default for PixelTileCache {
     fn default() -> Self {
-        Self::with_key_budget_bytes(64 * 1024 * 1024)
+        Self::with_key_budget_bytes(Self::DEFAULT_KEY_BUDGET_BYTES)
     }
 }
 
 impl PixelTileCache {
+    /// Default exact command/revision-key storage for completed whole tiles.
+    pub const DEFAULT_KEY_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+
+    /// Default accounted storage for exact static-prefix checkpoints per cache.
+    /// Native frame-pipeline admission includes this per-render-team budget.
+    pub const DEFAULT_PREFIX_BUDGET_BYTES: usize = 32 * 1024 * 1024;
+
     /// An empty cache with a bound on retained exact command/revision storage.
     ///
     /// This does not bound pixel payloads or instantaneous allocation peaks
-    /// while replacing old keys. A zero budget disables non-empty tile reuse.
+    /// while replacing old keys. A zero budget disables whole-tile reuse;
+    /// the independent prefix budget remains 32 MiB.
     #[must_use]
     pub fn with_key_budget_bytes(max_key_bytes: usize) -> Self {
+        Self::with_budgets(max_key_bytes, Self::DEFAULT_PREFIX_BUDGET_BYTES)
+    }
+
+    /// Bound whole-tile keys and exact static-prefix checkpoints independently.
+    ///
+    /// Prefix storage includes exact command/revision keys, f64 premultiplied
+    /// pixels and per-entry storage, excluding hash-table spare buckets and
+    /// allocator overhead. A zero prefix budget disables checkpoint
+    /// reuse. Allocation refusal falls back to ordinary rasterization. Only
+    /// certified CPU's canonical analytic path admits checkpoints; adaptive and
+    /// forced-supersampling paths require different intermediate state.
+    #[must_use]
+    pub fn with_budgets(max_key_bytes: usize, max_prefix_bytes: usize) -> Self {
         Self {
             tiles: TileCache::new(),
+            prefixes: PrefixCache::new(max_prefix_bytes),
             work: Vec::new(),
             render_state: None,
             last_journal_inputs: None,
@@ -636,6 +714,20 @@ impl PixelTileCache {
         self.tiles.stats()
     }
 
+    /// Prefix work from the most recent successful render; zero after a failed
+    /// or incomplete render starts. Whole-tile hits are reported by [`Self::stats`].
+    #[must_use]
+    pub fn prefix_stats(&self) -> PrefixCacheStats {
+        self.prefixes.stats()
+    }
+
+    /// Accounted key/accumulator capacities and per-entry storage in the prefix cache.
+    /// Hash-table spare buckets and allocator overhead are not included.
+    #[must_use]
+    pub fn retained_prefix_bytes(&self) -> usize {
+        self.prefixes.retained_bytes()
+    }
+
     /// Number of retained non-empty tiles.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -651,6 +743,7 @@ impl PixelTileCache {
     /// Forget all pixels and renderer identity.
     pub fn clear(&mut self) {
         self.tiles.clear();
+        self.prefixes.clear();
         self.work.clear();
         self.render_state = None;
         self.last_journal_inputs = None;
@@ -675,6 +768,7 @@ impl PixelTileCache {
     }
 
     pub(crate) fn complete_render(&mut self) {
+        self.prefixes.complete_frame();
         self.serial = self.serial.wrapping_add(1);
     }
 
@@ -711,8 +805,15 @@ impl PixelTileCache {
         // closure; changing any part invalidates every retained payload.
         if self.render_state != Some(render_state) {
             self.tiles.clear();
+            self.prefixes.clear();
             self.render_state = Some(render_state);
         }
+
+        self.prefixes.begin_frame(
+            binning.tile_count(),
+            self.last_journal_inputs
+                .is_some_and(|(identity, _, _)| identity.engine.certifiable()),
+        );
 
         self.tiles.begin_frame();
         self.work.clear();
@@ -728,7 +829,7 @@ impl PixelTileCache {
         };
         let mut remaining_key_bytes = self.max_key_bytes;
         for tile in 0..binning.tile_count() {
-            let work = self.tiles.plan_tile_with_key_budget(
+            let (work, unchanged_prefix) = self.tiles.plan_tile_with_key_budget(
                 binning,
                 plan,
                 tile,
@@ -747,6 +848,17 @@ impl PixelTileCache {
                 TileWork::Empty | TileWork::RasterizeUncached => 0,
             };
             remaining_key_bytes = remaining_key_bytes.saturating_sub(key_bytes);
+            self.prefixes.prepare_tile(
+                tile,
+                &work,
+                unchanged_prefix,
+                PrefixInputs {
+                    binning,
+                    plan,
+                    camera,
+                    output,
+                },
+            );
             self.work.push(work);
         }
         Ok(())
@@ -754,6 +866,28 @@ impl PixelTileCache {
 
     pub(crate) fn work(&self, tile: usize) -> Option<&TileWork> {
         self.work.get(tile)
+    }
+
+    pub(crate) fn prefix_row(
+        &self,
+        tile: usize,
+        row: usize,
+        width: usize,
+    ) -> Option<(&[fmn_core::color::PremulRgba], usize)> {
+        self.prefixes.row(tile, row, width)
+    }
+
+    pub(crate) fn prefix_capture_commands(&self, tile: usize) -> usize {
+        self.prefixes.capture_commands(tile)
+    }
+
+    pub(crate) fn capture_prefix_row(
+        &self,
+        tile: usize,
+        row: usize,
+        pixels: impl ExactSizeIterator<Item = fmn_core::color::PremulRgba>,
+    ) {
+        self.prefixes.capture_row(tile, row, pixels);
     }
 
     pub(crate) fn restore_reused_tiles(
