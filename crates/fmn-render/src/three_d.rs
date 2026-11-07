@@ -1873,6 +1873,31 @@ pub(crate) struct CameraBandLayout {
 }
 
 impl PreparedThreeDProjection {
+    pub(crate) fn camera(&self) -> &Camera {
+        &self.camera
+    }
+
+    pub(crate) fn tiling(&self) -> Tiling {
+        self.tiling
+    }
+
+    /// Exactly the painter sequence that render_tile can read for this tile.
+    /// Binning is only an acceleration: the same conservative bound rejection
+    /// remains in both paths, including when bin admission falls back to a scan.
+    pub(crate) fn tile_draws(
+        &self,
+        rectangle: [u32; 4],
+    ) -> impl Iterator<Item = usize> + Clone + '_ {
+        let edge = self.tiling.fine_tile.max(1);
+        let indices = match self.draw_bins.as_deref() {
+            Some(bins) => TileDrawIndices::Binned(
+                bins.indices(rectangle[0] / edge, rectangle[1] / edge).iter(),
+            ),
+            None => TileDrawIndices::All(0..self.draws.len()),
+        };
+        indices.filter(move |&index| bounds_intersect(self.draws[index].bounds, rectangle))
+    }
+
     pub(crate) fn prepare_owned_bands(
         &self,
         threads: usize,
@@ -1914,6 +1939,7 @@ impl PreparedThreeDProjection {
         bands: &[Mutex<Vec<u8>>],
         next: &AtomicUsize,
         stride: usize,
+        cache: Option<&crate::PixelTileCache>,
         material: impl Fn(usize) -> TextureMaterial<'texture> + Copy,
     ) {
         let raster = RasterPass {
@@ -1929,7 +1955,34 @@ impl PreparedThreeDProjection {
             let band = next.fetch_add(1, Ordering::Relaxed);
             let Some(bytes) = bands.get(band) else { break };
             let mut bytes = bytes.lock().unwrap_or_else(PoisonError::into_inner);
-            raster.render_band(&mut scratch, band, &mut bytes, stride, |index, ()| {
+            raster.render_band(&mut scratch, band, &mut bytes, stride, cache, |index, ()| {
+                material(index)
+            });
+        }
+    }
+
+    /// Inline cached rasterization uses the caller's surface directly. Scratch
+    /// admission and destination validation have already run in prepare_owned_bands.
+    pub(crate) fn render_cached_into<'texture>(
+        &self,
+        destination: &mut FrameBuffer,
+        cache: &crate::PixelTileCache,
+        material: impl Fn(usize) -> TextureMaterial<'texture> + Copy,
+    ) {
+        let raster = RasterPass {
+            camera: &self.camera,
+            draws: &self.draws,
+            draw_bins: self.draw_bins.as_deref(),
+            triangle_bins: self.triangle_bins.as_deref(),
+            tiling: self.tiling,
+            sample_grid: self.sample_grid,
+        };
+        let stride = destination.layout().stride(0);
+        let rows = (self.tiling.fine_tile.max(1) as usize)
+            .min(destination.layout().height().max(1) as usize);
+        let mut scratch = self.scratch_pool.checkout();
+        for (band, bytes) in destination.plane_mut(0).chunks_mut(stride * rows).enumerate() {
+            raster.render_band(&mut scratch, band, bytes, stride, Some(cache), |index, ()| {
                 material(index)
             });
         }
@@ -2314,7 +2367,7 @@ impl<'a> ThreeDJob<'a> {
             tiling: self.tiling,
             sample_grid: self.sample_grid,
         }
-        .render_band(scratch, band, bytes, stride, |_, material| material);
+        .render_band(scratch, band, bytes, stride, None, |_, material| material);
     }
 }
 
@@ -2347,6 +2400,7 @@ impl<M: Copy> RasterPass<'_, M> {
         band: usize,
         bytes: &mut [u8],
         stride: usize,
+        cache: Option<&crate::PixelTileCache>,
         material: impl Fn(usize, M) -> TextureMaterial<'texture> + Copy,
     ) {
         let tile = self.tiling.fine_tile.max(1);
@@ -2356,6 +2410,10 @@ impl<M: Copy> RasterPass<'_, M> {
         let y1 = (y0 + tile).min(height);
         let columns = width.div_ceil(tile);
         for column in 0..columns {
+            let index = band * columns as usize + column as usize;
+            if cache.is_some_and(|cache| cache.restore_camera_tile(index, bytes, stride)) {
+                continue;
+            }
             let x0 = column * tile;
             let x1 = (x0 + tile).min(width);
             self.render_tile(scratch, [x0, y0, x1, y1], bytes, stride, material);
@@ -5495,7 +5553,7 @@ mod tests {
             std::thread::scope(|scope| {
                 for _ in 0..4 {
                     scope.spawn(|| {
-                        projection.render_owned_bands(&bands, &next, layout.stride, |index| {
+                        projection.render_owned_bands(&bands, &next, layout.stride, None, |index| {
                             match draws[index] {
                                 ThreeDDraw::Surface(SurfaceDraw {
                                     material: SurfaceMaterial::Texture(material),
@@ -5801,6 +5859,7 @@ mod tests {
                         &bands,
                         &next,
                         layout.stride,
+                        None,
                         |index| match draws[index] {
                             ThreeDDraw::Surface(SurfaceDraw {
                                 material: SurfaceMaterial::Texture(material),

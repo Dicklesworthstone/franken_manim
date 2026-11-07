@@ -238,6 +238,7 @@ fn adaptive_workers_replace_camera_tile_policy_without_changing_planar_config() 
         1,
         compiler,
         fmn_render::PixelTileCache::DEFAULT_PREFIX_BUDGET_BYTES,
+        0,
     );
     let emitter = OrderedEmitter::new(
         EmitterConfig::new(

@@ -141,6 +141,7 @@ struct Payload {
     band_layout: Option<(usize, usize, usize)>,
     next: AtomicUsize,
     resumed: bool,
+    cache_camera: bool,
     #[cfg(test)]
     panic_next: std::sync::atomic::AtomicBool,
 }
@@ -153,7 +154,11 @@ impl Payload {
             "injected persistent raster worker panic"
         );
         if let RasterInput::Camera(frame) = &self.input {
-            frame.raster(&self.bands, &self.next);
+            frame.raster(
+                &self.bands,
+                &self.next,
+                self.cache_camera.then_some(&self.cache),
+            );
             return AaStats::default();
         }
         let prepared = self.prepared.expect("published frame is prepared");
@@ -211,6 +216,12 @@ impl Payload {
             self.reserve_bands(layout.stride, layout.band_rows, layout.height)?;
             self.prepared = None;
             self.next.store(0, Ordering::Relaxed);
+            if self.cache_camera {
+                let RasterInput::Camera(frame) = &self.input else {
+                    unreachable!("camera input was validated above");
+                };
+                frame.prepare_cache(&mut self.cache)?;
+            }
             return Ok(());
         }
         let frame = self.input.tables()?;
@@ -262,8 +273,16 @@ impl Payload {
                     output[y * stride..y * stride + layout.stride].copy_from_slice(bytes);
                 }
             }
+            let cache = if self.cache_camera {
+                self.cache
+                    .complete_camera_frame(destination)
+                    .map_err(CachedRenderError::from)?;
+                self.cache.stats()
+            } else {
+                crate::CacheStats::default()
+            };
             return Ok(CachedRenderStats {
-                cache: crate::CacheStats::default(),
+                cache,
                 prefix: crate::PrefixCacheStats::default(),
                 raster,
             });
@@ -473,6 +492,55 @@ impl RasterTeam {
             self.frames_completed = self.frames_completed.saturating_add(1);
         }
         result.map(|_| ())
+    }
+
+    /// Camera tiles borrow the same caller-owned cache as planar frames.
+    /// No second persistent pixel surface is hidden in the raster team.
+    pub(crate) fn render_camera_cached(
+        &mut self,
+        frame: &PreparedCameraFrame,
+        cache: &mut PixelTileCache,
+        destination: &mut FrameBuffer,
+    ) -> Result<CachedRenderStats, RetainedFrameRendererError> {
+        let camera = frame.prepare_owned_bands(self.threads, destination)?;
+        if self.threads == 1 {
+            camera.prepare_cache(cache)?;
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                #[cfg(test)]
+                assert!(
+                    !self.payload.panic_next.swap(false, Ordering::Relaxed),
+                    "injected inline camera raster panic"
+                );
+                camera.raster_direct(destination, cache);
+            }));
+            if result.is_err() {
+                return Err(RetainedFrameRendererError::RasterWorkerPanicked);
+            }
+            cache
+                .complete_camera_frame(destination)
+                .map_err(CachedRenderError::from)?;
+            self.frames_completed = self.frames_completed.saturating_add(1);
+            return Ok(CachedRenderStats {
+                cache: cache.stats(),
+                ..CachedRenderStats::default()
+            });
+        }
+        let payload = Arc::get_mut(&mut self.payload).expect("previous frame was joined");
+        let previous = std::mem::replace(&mut payload.input, RasterInput::Camera(camera));
+        std::mem::swap(&mut payload.cache, cache);
+        payload.cache_camera = true;
+        let result = self.render_owned(destination, None);
+        let payload = Arc::get_mut(&mut self.payload).expect("all camera readers released");
+        // Both errors and success return the caller's cache. Incomplete dirty
+        // entries remain invalid; publish alone admits their completed bytes.
+        std::mem::swap(&mut payload.cache, cache);
+        payload.cache_camera = false;
+        payload.input = previous;
+        payload.prepared = None;
+        if result.is_ok() {
+            self.frames_completed = self.frames_completed.saturating_add(1);
+        }
+        result
     }
 
     /// Synchronous retained rendering uses the same workers and raster kernels
