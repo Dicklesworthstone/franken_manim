@@ -246,6 +246,7 @@ impl FrozenRenderState {
             updater_callbacks: std::rc::Rc::new(()),
             frame_shape: self.frame_shape,
             path_queries: RefCell::default(),
+            linear_bounds: RefCell::default(),
         }
     }
 }

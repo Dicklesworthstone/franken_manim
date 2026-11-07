@@ -7,6 +7,7 @@
 //! changing the dependency graph of the animation layer.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use fmn_core::types::Vec3;
 use fmn_geom::{ArcLengthTable, QuadPath};
@@ -14,14 +15,59 @@ use fmn_geom::{ArcLengthTable, QuadPath};
 use crate::record::StorageIdentity;
 use crate::{Entry, Mob, Placement, Stage, StageError};
 
+/// An immutable, owned observation of one path in world space.
+///
+/// Clones share the path and its true-arclength table without retaining a
+/// Stage, mobject, record buffer or live view. The observation can be sampled
+/// on another thread and remains valid after its source changes or is dropped.
+/// Use [`PathSampler::observe`] again to observe the current source geometry.
+#[derive(Debug, Clone)]
+pub struct PathObservation {
+    geometry: Arc<PathGeometry>,
+}
+
+#[derive(Debug)]
+struct PathGeometry {
+    path: QuadPath,
+    table: ArcLengthTable,
+}
+
+impl PathObservation {
+    /// Sample the captured path by true world-space arc length (BN-03).
+    ///
+    /// This uses the same kernel and clamping as [`PathSampler::sample`].
+    /// Sampling never consults the source Stage or changes the observation.
+    ///
+    /// # Errors
+    /// [`StageError::SchemaMismatch`] if the retained path cannot supply a
+    /// point, matching the ordinary Stage path query.
+    pub fn sample(&self, alpha: f64) -> Result<Vec3, StageError> {
+        self.geometry
+            .path
+            .point_from_proportion_with(&self.geometry.table, alpha)
+            .ok_or(StageError::SchemaMismatch)
+    }
+
+    /// The captured path's total true world-space arc length.
+    #[must_use]
+    pub fn total_length(&self) -> f64 {
+        self.geometry.table.total()
+    }
+
+    /// Number of captured shared-anchor point records.
+    #[must_use]
+    pub fn point_count(&self) -> usize {
+        self.geometry.path.points().len()
+    }
+}
+
 struct CachedPath {
     mob: Mob,
     storage: StorageIdentity,
     point_revision: Option<u64>,
     len: usize,
     placement: Placement,
-    path: QuadPath,
-    table: ArcLengthTable,
+    observation: PathObservation,
 }
 
 impl CachedPath {
@@ -79,7 +125,7 @@ impl PathSampler {
     fn retained_points(&self) -> usize {
         self.current
             .as_ref()
-            .map_or(0, |entry| entry.path.points().len())
+            .map_or(0, |entry| entry.observation.point_count())
     }
 
     /// Observe a point by true world-space arc length (BN-03).
@@ -89,6 +135,26 @@ impl PathSampler {
     /// shared-anchor geometry retains the Stage query's named refusal. A
     /// refused observation never falls back to previously cached geometry.
     pub fn sample(&mut self, stage: &Stage, mob: Mob, alpha: f64) -> Result<Vec3, StageError> {
+        // Ordinary sampling borrows the retained geometry: only observe()
+        // needs to clone the Arc for an independently owned observation.
+        self.ensure_cached(stage, mob)?.sample(alpha)
+    }
+
+    /// Capture an immutable, shareable observation of the current world path.
+    ///
+    /// Unchanged geometry shares the retained path and table. Source edits
+    /// invalidate later observations without changing any already returned
+    /// value; writable point views force a fresh capture on every call.
+    ///
+    /// # Errors
+    /// The same stale-handle, missing-point, empty-path and malformed-geometry
+    /// refusals as [`Self::sample`]. Failure clears the live cache, while any
+    /// previously returned observations remain valid.
+    pub fn observe(&mut self, stage: &Stage, mob: Mob) -> Result<PathObservation, StageError> {
+        Ok(self.ensure_cached(stage, mob)?.clone())
+    }
+
+    fn ensure_cached(&mut self, stage: &Stage, mob: Mob) -> Result<&PathObservation, StageError> {
         let Some(entry) = stage.get(mob) else {
             self.clear();
             return Err(StageError::StaleHandle);
@@ -110,28 +176,41 @@ impl PathSampler {
             // be incorrect, especially under nonuniform scale or shear.
             let path = QuadPath::from_points(points).map_err(StageError::Geometry)?;
             let table = ArcLengthTable::for_path(&path);
-            let current = CachedPath {
-                mob,
-                storage: entry.buffer.storage_identity(),
-                point_revision: entry.buffer.field_revision("point"),
-                len: entry.buffer.len(),
-                placement: entry.placement(),
-                path,
-                table,
-            };
+            let geometry = PathGeometry { path, table };
             self.current = Some(if let Some(mut slot) = old {
-                *slot = current;
+                // Retain both allocations when no owned observation shares
+                // this geometry. An outstanding observation keeps its exact
+                // old path and table; only the live cache receives a new Arc.
+                if let Some(previous) = Arc::get_mut(&mut slot.observation.geometry) {
+                    *previous = geometry;
+                } else {
+                    slot.observation.geometry = Arc::new(geometry);
+                }
+                slot.mob = mob;
+                slot.storage = entry.buffer.storage_identity();
+                slot.point_revision = entry.buffer.field_revision("point");
+                slot.len = entry.buffer.len();
+                slot.placement = entry.placement();
                 slot
             } else {
-                Box::new(current)
+                Box::new(CachedPath {
+                    mob,
+                    storage: entry.buffer.storage_identity(),
+                    point_revision: entry.buffer.field_revision("point"),
+                    len: entry.buffer.len(),
+                    placement: entry.placement(),
+                    observation: PathObservation {
+                        geometry: Arc::new(geometry),
+                    },
+                })
             });
             self.materializations = self.materializations.saturating_add(1);
         }
-        let current = self.current.as_ref().expect("path cache initialized");
-        current
-            .path
-            .point_from_proportion_with(&current.table, alpha)
-            .ok_or(StageError::SchemaMismatch)
+        Ok(&self
+            .current
+            .as_ref()
+            .expect("path cache initialized")
+            .observation)
     }
 }
 

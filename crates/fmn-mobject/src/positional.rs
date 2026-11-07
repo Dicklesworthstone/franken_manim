@@ -36,7 +36,7 @@ use fmn_core::types::Vec3;
 use fmn_geom::{Mat3, QuadPath, space_ops};
 
 use crate::StageError;
-use crate::bbox::{BoundingBox, BoxAccum};
+use crate::bbox::{BoundingBox, BoxAccum, LinearBoundsStats, MemberBounds};
 use crate::stage::{Mob, SURFACE_VALIDITY_FIELD, Stage, surface_sample_is_present};
 use crate::uniforms::Uniforms;
 use crate::{Placement, RecordBuffer, RenderPrimitive};
@@ -180,6 +180,7 @@ impl Stage {
             for &m in family {
                 mix(m.bits());
                 if let Some(e) = self.get(m) {
+                    mix(e.buffer.storage_generation());
                     mix(e.buffer.field_revision("point").unwrap_or(0));
                     if let Some(revision) = e.buffer.field_revision(SURFACE_VALIDITY_FIELD) {
                         mix(1);
@@ -198,6 +199,41 @@ impl Stage {
     /// empty parent or sibling must not contribute an artificial origin to a
     /// family that does contain geometry.
     fn compute_bounding_box(&self, mob: Mob) -> BoundingBox {
+        self.compute_linear_bounding_box(mob)
+            .unwrap_or_else(|| self.compute_bounding_box_uncached(mob))
+    }
+
+    fn compute_linear_bounding_box(&self, mob: Mob) -> Option<BoundingBox> {
+        let mut cache = self.linear_bounds.borrow_mut();
+        let mut acc = BoxAccum::new();
+        let mut has_points = false;
+        let admitted = self.with_family_slice(mob, |family| {
+            for &member in family {
+                if let Some(entry) = self.get(member) {
+                    let Some(bounds) = cache.observe(member, entry) else {
+                        return false;
+                    };
+                    if let MemberBounds::Extrema { min, max } = bounds {
+                        acc.include_extrema(min, max);
+                        has_points = true;
+                    }
+                }
+            }
+            true
+        });
+        if !admitted {
+            cache.note_fallback();
+            return None;
+        }
+        if !has_points && let Some(entry) = self.get(mob) {
+            acc.push(entry.placement().apply_point(ORIGIN));
+        }
+        Some(acc.finish())
+    }
+
+    // Preserve the original point order and floating-point operations for
+    // families refused by the compact-extrema path.
+    fn compute_bounding_box_uncached(&self, mob: Mob) -> BoundingBox {
         let mut acc = BoxAccum::new();
         let mut has_points = false;
         self.with_family_slice(mob, |family| {
@@ -272,6 +308,16 @@ impl Stage {
     pub fn bbox_materializations(&self, mob: Mob) -> u64 {
         self.get(mob)
             .map_or(0, |e| e.bbox_cell().borrow().materializations)
+    }
+
+    /// Work and bounded retention of translation-invariant member bounds.
+    ///
+    /// Unlike `bbox_materializations`, these counters distinguish actual
+    /// geometry scans from reuse after placement translations. They reset when
+    /// this physical Stage restores a snapshot.
+    #[must_use]
+    pub fn linear_bounds_stats(&self) -> LinearBoundsStats {
+        self.linear_bounds.borrow().stats()
     }
 
     /// Install a caller-computed Reference bounding box under the entry's

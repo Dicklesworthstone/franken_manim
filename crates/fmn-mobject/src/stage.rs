@@ -944,6 +944,7 @@ impl Snapshot {
             updater_callbacks: Rc::new(()),
             frame_shape: self.frame_shape,
             path_queries: RefCell::default(),
+            linear_bounds: RefCell::default(),
         };
         stage.restore(self);
         stage
@@ -1048,6 +1049,8 @@ pub struct Stage {
     /// Derived bounded query observations, private to this physical Stage.
     /// Never copied into snapshots, serialized, or sent to frame workers.
     pub(crate) path_queries: RefCell<crate::path_sampling::PathQueryCache>,
+    /// Compact, bounded extrema observations; never semantic scene state.
+    pub(crate) linear_bounds: RefCell<crate::bbox::LinearBoundsCache>,
 }
 
 impl Default for Stage {
@@ -1073,6 +1076,7 @@ impl Stage {
             updater_callbacks: Rc::new(()),
             frame_shape: [FRAME_WIDTH, FRAME_HEIGHT],
             path_queries: RefCell::default(),
+            linear_bounds: RefCell::default(),
         }
     }
 
@@ -3211,6 +3215,7 @@ impl Stage {
              decode to rebind handles"
         );
         *self.path_queries.get_mut() = crate::path_sampling::PathQueryCache::default();
+        *self.linear_bounds.get_mut() = crate::bbox::LinearBoundsCache::default();
         self.generation_high_water.resize(
             self.generation_high_water.len().max(snapshot.slots.len()),
             0,

@@ -13,6 +13,11 @@
 
 use fmn_core::types::Vec3;
 
+mod linear_cache;
+
+pub use linear_cache::{LinearBoundsStats, MAX_LINEAR_BOUND_MEMBERS};
+pub(crate) use linear_cache::{LinearBoundsCache, MemberBounds};
+
 /// An axis-aligned bounding box as the Reference's three rows.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BoundingBox {
@@ -147,6 +152,19 @@ impl BoxAccum {
         for ((mn, mx), &v) in self.min.iter_mut().zip(self.max.iter_mut()).zip(p.iter()) {
             *mn = mn.min(v);
             *mx = mx.max(v);
+        }
+    }
+
+    /// Merge admitted extrema without mixing the minimum and maximum folds.
+    ///
+    /// The linear-bounds cache excludes NaNs and ambiguous signed-zero ties.
+    pub(crate) fn include_extrema(&mut self, min: Vec3, max: Vec3) {
+        self.any = true;
+        for (current, value) in self.min.iter_mut().zip(min) {
+            *current = current.min(value);
+        }
+        for (current, value) in self.max.iter_mut().zip(max) {
+            *current = current.max(value);
         }
     }
 
