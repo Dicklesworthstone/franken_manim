@@ -1,6 +1,8 @@
 //! Textured grids keep topology, durable raster identity, and the one Lumen shader.
 use super::*;
-use crate::{CameraConfig, ScreenMap, Texture, TextureEncoding, TextureMaterial, Viewport};
+use crate::{
+    CameraConfig, ScreenMap, Texture, TextureEncoding, TextureMaterial, ThreeDJob, Viewport,
+};
 use fmn_mobject::{
     ImageColorSpace, ImageResource, ImageSampler, Mobject, RecordBuffer, RecordSchema,
 };

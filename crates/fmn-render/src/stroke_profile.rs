@@ -108,6 +108,14 @@ impl StrokeProfile {
         &self.knots
     }
 
+    /// Account for an immutable shared owner and its full retained capacity.
+    pub(crate) fn shared_storage_bytes(&self) -> Option<usize> {
+        self.knots
+            .capacity()
+            .checked_mul(std::mem::size_of::<StrokeKnot>())?
+            .checked_add(std::mem::size_of::<(Self, [usize; 2])>())
+    }
+
     /// Largest nonnegative full width, including interior extrema.
     #[must_use]
     pub fn maximum_width(&self) -> f32 {

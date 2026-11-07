@@ -30,7 +30,11 @@ impl CameraSourceKey {
         }
     }
 
-    fn matches(&self, other: &Self) -> bool {
+    pub(crate) fn is_volatile(&self) -> bool {
+        self.volatile
+    }
+
+    pub(crate) fn matches(&self, other: &Self) -> bool {
         !self.volatile
             && !other.volatile
             && self.part == other.part
@@ -222,9 +226,7 @@ impl CameraTileCache {
         let columns = width.div_ceil(edge);
         let tile_count = usize::try_from(columns)
             .ok()
-            .and_then(|columns| {
-                columns.checked_mul(usize::try_from(height.div_ceil(edge)).ok()?)
-            })
+            .and_then(|columns| columns.checked_mul(usize::try_from(height.div_ceil(edge)).ok()?))
             .ok_or(PixelTileCacheError::TooLarge)?;
         // Disabled or impossibly small budgets must not scan scene draws.
         if self.max_bytes < std::mem::size_of::<CameraTile>() + SOURCE_BYTES + 8 {
@@ -240,8 +242,7 @@ impl CameraTileCache {
             let (x, y, w, h) = rectangle;
             let draws = projection.tile_draws([x, y, x + w, y + h]);
             let commands = draws.clone().count();
-            let slot = self.tiles[..original_len]
-                .binary_search_by_key(&index, |tile| tile.index);
+            let slot = self.tiles[..original_len].binary_search_by_key(&index, |tile| tile.index);
             if commands == 0 {
                 self.discard(slot, &mut used);
                 self.pending_stats.empty += 1;
@@ -273,9 +274,7 @@ impl CameraTileCache {
             let pixel_bytes = rgba16f_row_bytes(w)?
                 .checked_mul(usize::try_from(h).map_err(|_| PixelTileCacheError::TooLarge)?)
                 .ok_or(PixelTileCacheError::TooLarge)?;
-            let old_bytes = slot
-                .ok()
-                .map_or(0, |slot| self.tiles[slot].payload_bytes());
+            let old_bytes = slot.ok().map_or(0, |slot| self.tiles[slot].payload_bytes());
             let slot_bytes = if slot.is_err() && self.tiles.len() == self.tiles.capacity() {
                 std::mem::size_of::<CameraTile>()
             } else {
@@ -285,7 +284,9 @@ impl CameraTileCache {
                 .checked_mul(SOURCE_BYTES)
                 .and_then(|keys| keys.checked_add(pixel_bytes))
                 .and_then(|payload| payload.checked_add(slot_bytes));
-            let available = self.max_bytes.saturating_sub(used.saturating_sub(old_bytes));
+            let available = self
+                .max_bytes
+                .saturating_sub(used.saturating_sub(old_bytes));
             if required.is_none_or(|required| required > available) {
                 self.discard(slot, &mut used);
                 self.pending_stats.poisoned += 1;
@@ -348,7 +349,9 @@ impl CameraTileCache {
                     position
                 }
             };
-            let allowance = self.max_bytes.saturating_sub(used.saturating_sub(old_bytes));
+            let allowance = self
+                .max_bytes
+                .saturating_sub(used.saturating_sub(old_bytes));
             let tile = &mut self.tiles[position];
             if tile.prepare(
                 commands,
@@ -371,12 +374,7 @@ impl CameraTileCache {
 
     /// Restore directly into the worker's local band (or an inline destination
     /// band). Returning true means no coverage, lighting, depth or AA work runs.
-    pub(super) fn restore_tile(
-        &self,
-        index: usize,
-        destination: &mut [u8],
-        stride: usize,
-    ) -> bool {
+    pub(super) fn restore_tile(&self, index: usize, destination: &mut [u8], stride: usize) -> bool {
         let Ok(slot) = self.tiles.binary_search_by_key(&index, |tile| tile.index) else {
             return false;
         };
@@ -395,10 +393,7 @@ impl CameraTileCache {
         true
     }
 
-    pub(super) fn complete(
-        &mut self,
-        frame: &FrameBuffer,
-    ) -> Result<(), PixelTileCacheError> {
+    pub(super) fn complete(&mut self, frame: &FrameBuffer) -> Result<(), PixelTileCacheError> {
         let stride = frame.layout().stride(0);
         let plane = frame.plane(0);
         // Validate every read and payload before changing any checkpoint. The

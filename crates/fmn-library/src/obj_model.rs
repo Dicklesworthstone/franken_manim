@@ -47,7 +47,9 @@ use std::ops::Range;
 use fmn_core::color::Srgb;
 use fmn_core::constants::GREY;
 use fmn_core::types::Vec3;
-use fmn_geom::{EarClipError, EarClipOptions, MAX_EARCLIP_VERTICES, triangulate_preserving_vertices};
+use fmn_geom::{
+    EarClipError, EarClipOptions, MAX_EARCLIP_VERTICES, triangulate_preserving_vertices,
+};
 use fmn_mobject::record::{RecordBuffer, RecordSchema};
 use fmn_mobject::uniforms::Uniforms;
 use fmn_mobject::{Mobject, RenderPrimitive};
@@ -512,9 +514,7 @@ fn triangulate_face(
             max[axis] = max[axis].max(value);
         }
     }
-    let center = std::array::from_fn::<_, 3, _>(|axis| {
-        min[axis] + (max[axis] - min[axis]) * 0.5
-    });
+    let center = std::array::from_fn::<_, 3, _>(|axis| min[axis] + (max[axis] - min[axis]) * 0.5);
     let span = (max[0] - min[0]).max(max[1] - min[1]).max(max[2] - min[2]);
     if span == 0.0 {
         return Err(fail("all corners coincide"));
@@ -553,7 +553,9 @@ fn triangulate_face(
         let delta = sub(point, origin);
         let distance = delta[0] * normal[0] + delta[1] * normal[1] + delta[2] * normal[2];
         if distance.abs() > 1e-6 {
-            return Err(fail("nonplanar face exceeds the relative 1e-6 tolerance; triangulate it explicitly"));
+            return Err(fail(
+                "nonplanar face exceeds the relative 1e-6 tolerance; triangulate it explicitly",
+            ));
         }
     }
     let axes = match dominant {
@@ -567,13 +569,16 @@ fn triangulate_face(
         .collect();
     let triangles = triangulate_preserving_vertices(&projected)
         .map_err(|cause| ObjError::Triangulation { line, cause })?;
-    let orientation = if area_vector[dominant] > 0.0 { 1.0 } else { -1.0 };
+    let orientation = if area_vector[dominant] > 0.0 {
+        1.0
+    } else {
+        -1.0
+    };
     let turn = |a: usize, b: usize, c: usize| {
         let a = projected[a];
         let b = projected[b];
         let c = projected[c];
-        ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]))
-            * orientation
+        ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])) * orientation
     };
     let mut min2 = [f64::INFINITY; 2];
     let mut max2 = [f64::NEG_INFINITY; 2];

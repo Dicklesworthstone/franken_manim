@@ -100,7 +100,13 @@ fn polygon_source(points: &[[f64; 3]]) -> String {
 }
 
 fn record(child: &Mobject, row: usize, field: &str) -> Vec<f64> {
-    child.buffer.read(row, field).unwrap().into_iter().map(f64::from).collect()
+    child
+        .buffer
+        .read(row, field)
+        .unwrap()
+        .into_iter()
+        .map(f64::from)
+        .collect()
 }
 
 fn area2(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> f64 {
@@ -156,13 +162,21 @@ fn concave_faces_cover_the_authored_region_in_all_dominant_planes_and_windings()
 #[test]
 fn convex_fans_keep_exact_source_triangle_order_in_both_windings() {
     for clockwise in [false, true] {
-        let mut points = [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [2.0, 2.0, 0.0], [0.0, 2.0, 0.0]];
+        let mut points = [
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [2.0, 2.0, 0.0],
+            [0.0, 2.0, 0.0],
+        ];
         if clockwise {
             points.reverse();
         }
         let mesh = ObjMesh::parse(polygon_source(&points).as_bytes()).unwrap();
         assert_eq!(
-            mesh.triangles.iter().map(|triangle| triangle.map(|corner| corner.vertex)).collect::<Vec<_>>(),
+            mesh.triangles
+                .iter()
+                .map(|triangle| triangle.map(|corner| corner.vertex))
+                .collect::<Vec<_>>(),
             vec![[0, 1, 2], [0, 2, 3]]
         );
     }
@@ -180,8 +194,14 @@ fn actual_face_ranges_keep_materials_aligned_after_a_repeated_closing_corner() {
     assert_eq!(doc.runs()[0].triangles, 0..7);
     assert_eq!(doc.runs()[1].material.as_deref(), Some("detail"));
     assert_eq!(doc.runs()[1].triangles, 7..9);
-    assert_eq!(doc.mesh().triangles[7].map(|corner| corner.vertex), [0, 2, 8]);
-    assert_eq!(doc.mesh().triangles[8].map(|corner| corner.vertex), [0, 2, 5]);
+    assert_eq!(
+        doc.mesh().triangles[7].map(|corner| corner.vertex),
+        [0, 2, 8]
+    );
+    assert_eq!(
+        doc.mesh().triangles[8].map(|corner| corner.vertex),
+        [0, 2, 5]
+    );
 }
 
 #[test]
@@ -190,16 +210,30 @@ fn native_textured_children_retain_collinear_uv_and_normal_records() {
     source.push_str("usemtl detail\nf 1/1/1 3/3/3 9/9/9\n");
     let doc = ObjDocument::parse(source.as_bytes()).unwrap();
     let materials = BTreeMap::from([
-        ("polygon".into(), ObjMaterial { texture: Some("map.png".into()), ..ObjMaterial::default() }),
+        (
+            "polygon".into(),
+            ObjMaterial {
+                texture: Some("map.png".into()),
+                ..ObjMaterial::default()
+            },
+        ),
         ("detail".into(), ObjMaterial::default()),
     ]);
     let resource = ImageResource::rgba8(
-        2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255],
-        ImageColorSpace::Srgb, ImageSampler::default(),
-    ).unwrap();
-    let model = doc.to_mobject(
-        4.0, &materials, &BTreeMap::from([("polygon".into(), resource.clone())]),
-    ).unwrap();
+        2,
+        1,
+        vec![255, 0, 0, 255, 0, 0, 255, 255],
+        ImageColorSpace::Srgb,
+        ImageSampler::default(),
+    )
+    .unwrap();
+    let model = doc
+        .to_mobject(
+            4.0,
+            &materials,
+            &BTreeMap::from([("polygon".into(), resource.clone())]),
+        )
+        .unwrap();
     assert_eq!(model.submobjects.len(), 2);
     let child = &model.submobjects[0];
     assert_eq!(child.render_primitive, RenderPrimitive::TriangleMesh);
@@ -217,14 +251,23 @@ fn native_textured_children_retain_collinear_uv_and_normal_records() {
             record(child, row, "d_normal_point"),
             [point[0] + normal[0], point[1] + normal[1], normal[2]]
         );
-        assert_eq!(record(child, row, "im_coords"), [UVS[index][0], 1.0 - UVS[index][1]]);
+        assert_eq!(
+            record(child, row, "im_coords"),
+            [UVS[index][0], 1.0 - UVS[index][1]]
+        );
         collinear_rows += usize::from(index == 1);
     }
     assert!(collinear_rows > 0);
-    let plain: Mobject = ThreeDModel::from_obj(source.as_bytes()).unwrap().with_height(4.0).into();
+    let plain: Mobject = ThreeDModel::from_obj(source.as_bytes())
+        .unwrap()
+        .with_height(4.0)
+        .into();
     assert_eq!(plain.buffer.len(), 24);
     for row in 0..21 {
-        assert_eq!(plain.buffer.read(row, "point"), child.buffer.read(row, "point"));
+        assert_eq!(
+            plain.buffer.read(row, "point"),
+            child.buffer.read(row, "point")
+        );
     }
 }
 
@@ -237,7 +280,8 @@ fn polygon_projection_handles_extreme_finite_scales_and_offsets() {
         base.map(|p| [p[0] * 1e-100, p[1] * 1e-100, 1e300]),
         base.map(|p| [(p[0] - 2.0) * 5e307, (p[1] - 2.0) * 5e307, 0.0]),
     ] {
-        let mesh = ObjMesh::parse(attributed_source(&points, false, true, false).as_bytes()).unwrap();
+        let mesh =
+            ObjMesh::parse(attributed_source(&points, false, true, false).as_bytes()).unwrap();
         assert_eq!(mesh.triangle_count(), 7);
         assert_eq!(mesh.vertices, points);
         let mut seen = [false; 9];
@@ -251,10 +295,25 @@ fn polygon_projection_handles_extreme_finite_scales_and_offsets() {
 #[test]
 fn closed_face_budget_counts_only_the_emitted_triangles() {
     let source = attributed_source(&positions(2), false, true, false);
-    let accepted = ObjLimits { max_triangles: 7, ..ObjLimits::default() };
-    assert_eq!(ObjMesh::parse_with_limits(source.as_bytes(), &accepted).unwrap().triangle_count(), 7);
-    let refused = ObjLimits { max_triangles: 6, ..ObjLimits::default() };
-    let line = source.lines().position(|line| line.starts_with("f ")).unwrap() + 1;
+    let accepted = ObjLimits {
+        max_triangles: 7,
+        ..ObjLimits::default()
+    };
+    assert_eq!(
+        ObjMesh::parse_with_limits(source.as_bytes(), &accepted)
+            .unwrap()
+            .triangle_count(),
+        7
+    );
+    let refused = ObjLimits {
+        max_triangles: 6,
+        ..ObjLimits::default()
+    };
+    let line = source
+        .lines()
+        .position(|line| line.starts_with("f "))
+        .unwrap()
+        + 1;
     assert_eq!(
         ObjMesh::parse_with_limits(source.as_bytes(), &refused),
         Err(ObjError::TooManyTriangles { line, limit: 6 })
@@ -264,11 +323,38 @@ fn closed_face_budget_counts_only_the_emitted_triangles() {
 #[test]
 fn nonplanar_and_nonsimple_polygons_refuse_with_the_source_face_line() {
     let invalid = [
-        vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.1], [0.0, 1.0, 0.0]],
-        vec![[0.0, 0.0, 0.0], [3.0, 0.0, 0.0], [0.0, 2.0, 0.0], [2.0, 2.0, 0.0]],
-        vec![[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [2.0, 2.0, 0.0], [1.0, 0.0, 0.0], [0.0, 2.0, 0.0]],
-        vec![[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 2.0, 0.0], [0.0, 2.0, 0.0]],
-        vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [3.0, 0.0, 0.0]],
+        vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.1],
+            [0.0, 1.0, 0.0],
+        ],
+        vec![
+            [0.0, 0.0, 0.0],
+            [3.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [2.0, 2.0, 0.0],
+        ],
+        vec![
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [2.0, 2.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+        ],
+        vec![
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [2.0, 2.0, 0.0],
+            [0.0, 2.0, 0.0],
+        ],
+        vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [3.0, 0.0, 0.0],
+        ],
     ];
     for points in invalid {
         let source = polygon_source(&points);
@@ -296,7 +382,12 @@ fn coincident_corners_with_distinct_attributes_are_never_silently_dropped() {
 
 #[test]
 fn small_planarity_roundoff_is_admitted_without_moving_original_vertices() {
-    let points = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 1e-7], [0.0, 1.0, 0.0]];
+    let points = [
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 1.0, 1e-7],
+        [0.0, 1.0, 0.0],
+    ];
     let mesh = ObjMesh::parse(polygon_source(&points).as_bytes()).unwrap();
     assert_eq!(mesh.vertices, points);
     assert_eq!(mesh.triangle_count(), 2);
@@ -317,6 +408,9 @@ fn excessive_face_corner_storage_refuses_before_index_resolution() {
     }
     assert_eq!(
         ObjMesh::parse(source.as_bytes()),
-        Err(ObjError::FaceTooLarge { line: 1, limit: fmn_geom::MAX_EARCLIP_VERTICES })
+        Err(ObjError::FaceTooLarge {
+            line: 1,
+            limit: fmn_geom::MAX_EARCLIP_VERTICES
+        })
     );
 }

@@ -33,6 +33,10 @@ use crate::stroke::{aa_coverage, stroke_rgba_at};
 use crate::table::{Segment, Style, reparameterize_arc_length, retains_normalized_arc_length};
 use crate::texture::{SamplerPolicy, Texture};
 
+mod projection_cache;
+pub(crate) use projection_cache::CameraProjectionCache;
+pub use projection_cache::CameraProjectionStats;
+
 /// Surface's kept `(reflectiveness, gloss, shadow)` defaults.
 pub const SURFACE_SHADING: Vec3 = [0.3, 0.2, 0.4];
 /// TexturedSurface light/dark crossfade half-width. Not a lighting term.
@@ -1863,6 +1867,7 @@ pub(crate) struct PreparedThreeDProjection {
     preparation_bytes: u64,
     preparation_limits: ThreeDPreparationLimits,
     scratch_pool: Arc<TileScratchPool>,
+    preparation_stats: CameraProjectionStats,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1891,7 +1896,8 @@ impl PreparedThreeDProjection {
         let edge = self.tiling.fine_tile.max(1);
         let indices = match self.draw_bins.as_deref() {
             Some(bins) => TileDrawIndices::Binned(
-                bins.indices(rectangle[0] / edge, rectangle[1] / edge).iter(),
+                bins.indices(rectangle[0] / edge, rectangle[1] / edge)
+                    .iter(),
             ),
             None => TileDrawIndices::All(0..self.draws.len()),
         };
@@ -1955,9 +1961,14 @@ impl PreparedThreeDProjection {
             let band = next.fetch_add(1, Ordering::Relaxed);
             let Some(bytes) = bands.get(band) else { break };
             let mut bytes = bytes.lock().unwrap_or_else(PoisonError::into_inner);
-            raster.render_band(&mut scratch, band, &mut bytes, stride, cache, |index, ()| {
-                material(index)
-            });
+            raster.render_band(
+                &mut scratch,
+                band,
+                &mut bytes,
+                stride,
+                cache,
+                |index, ()| material(index),
+            );
         }
     }
 
@@ -1981,10 +1992,19 @@ impl PreparedThreeDProjection {
         let rows = (self.tiling.fine_tile.max(1) as usize)
             .min(destination.layout().height().max(1) as usize);
         let mut scratch = self.scratch_pool.checkout();
-        for (band, bytes) in destination.plane_mut(0).chunks_mut(stride * rows).enumerate() {
-            raster.render_band(&mut scratch, band, bytes, stride, Some(cache), |index, ()| {
-                material(index)
-            });
+        for (band, bytes) in destination
+            .plane_mut(0)
+            .chunks_mut(stride * rows)
+            .enumerate()
+        {
+            raster.render_band(
+                &mut scratch,
+                band,
+                bytes,
+                stride,
+                Some(cache),
+                |index, ()| material(index),
+            );
         }
     }
 
@@ -2170,6 +2190,10 @@ impl<'a> ThreeDJob<'a> {
         for draw in self.draws {
             draws.push(draw.share_rows(&mut budget)?.map_material(|_| ()));
         }
+        let preparation_stats = CameraProjectionStats {
+            compiled_draws: draws.len(),
+            reused_draws: 0,
+        };
         Ok(PreparedThreeDProjection {
             camera: self.camera.clone(),
             draws,
@@ -2180,6 +2204,7 @@ impl<'a> ThreeDJob<'a> {
             preparation_bytes: budget.working_bytes,
             preparation_limits: self.preparation_limits,
             scratch_pool: self.scratch_pool,
+            preparation_stats,
         })
     }
 
@@ -5553,15 +5578,19 @@ mod tests {
             std::thread::scope(|scope| {
                 for _ in 0..4 {
                     scope.spawn(|| {
-                        projection.render_owned_bands(&bands, &next, layout.stride, None, |index| {
-                            match draws[index] {
+                        projection.render_owned_bands(
+                            &bands,
+                            &next,
+                            layout.stride,
+                            None,
+                            |index| match draws[index] {
                                 ThreeDDraw::Surface(SurfaceDraw {
                                     material: SurfaceMaterial::Texture(material),
                                     ..
                                 }) => material,
                                 _ => panic!("texture lookup used the wrong source command"),
-                            }
-                        });
+                            },
+                        );
                     });
                 }
             });
@@ -5855,19 +5884,15 @@ mod tests {
         std::thread::scope(|scope| {
             for _ in 0..threads {
                 scope.spawn(|| {
-                    projection.render_owned_bands(
-                        &bands,
-                        &next,
-                        layout.stride,
-                        None,
-                        |index| match draws[index] {
+                    projection.render_owned_bands(&bands, &next, layout.stride, None, |index| {
+                        match draws[index] {
                             ThreeDDraw::Surface(SurfaceDraw {
                                 material: SurfaceMaterial::Texture(material),
                                 ..
                             }) => material,
                             _ => panic!("texture lookup lost the original draw index"),
-                        },
-                    );
+                        }
+                    });
                 });
             }
         });

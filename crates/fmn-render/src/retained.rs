@@ -19,13 +19,16 @@ use fmn_mobject::{
 
 use crate::cache::CameraSourceKey;
 use crate::plan::PlanIdentity;
-use crate::three_d::{CameraBandLayout, PreparedThreeDProjection, same_projection_camera};
+use crate::three_d::{
+    CameraBandLayout, CameraProjectionCache, CameraProjectionStats, PreparedThreeDProjection,
+    ThreeDPreparationLimits, same_projection_camera,
+};
 use crate::vector_frame::RetainedVectorFrame;
 use crate::{
     AllocStats, Binning, BinningError, CachedRenderError, CachedRenderStats, Camera,
     EngineIdentity, FrameArena, FrameConfig, FrameJobError, MonoTable, MonoTableError,
     PixelTileCache, RasterTeam, RasterTeamStats, RenderPlan, SurfaceDraw, SurfaceMaterial,
-    SurfaceMesh, SurfaceVertex, SyncError, ThreeDDraw, ThreeDError, ThreeDJob, Tiling, TrueDotDraw,
+    SurfaceMesh, SurfaceVertex, SyncError, ThreeDDraw, ThreeDError, Tiling, TrueDotDraw,
     VectorDraw,
 };
 
@@ -224,6 +227,9 @@ pub struct RetainedFrameRenderer {
     scratch_draw_items: Vec<DrawItem>,
     camera_scene: Option<CachedCameraScene>,
     camera_preparation_stats: CameraPreparationStats,
+    // Frozen frames share only this bounded projected-resource cache, never
+    // preceding scene captures. The ordinary in-flight budget owns their input.
+    camera_projection_cache: Arc<CameraProjectionCache>,
     camera_plan: Option<Arc<RenderPlan>>,
     camera_projection: Option<PreparedCameraFrame>,
     // Identity of the successful camera raster currently in `frame`, not the
@@ -240,6 +246,12 @@ pub struct RetainedFrameRenderer {
 }
 
 impl RetainedFrameRenderer {
+    /// Default accounted storage for reusable camera projection resources.
+    ///
+    /// This is additional to tile pixels and active capture storage. Native
+    /// composition roots must explicitly admit it or set a zero allowance.
+    pub const DEFAULT_CAMERA_PROJECTION_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+
     /// Construct an empty retained renderer for the declared CPU policy.
     ///
     /// # Errors
@@ -265,6 +277,9 @@ impl RetainedFrameRenderer {
             scratch_draw_items: Vec::new(),
             camera_scene: None,
             camera_preparation_stats: CameraPreparationStats::default(),
+            camera_projection_cache: Arc::new(CameraProjectionCache::new(
+                Self::DEFAULT_CAMERA_PROJECTION_BUDGET_BYTES,
+            )),
             camera_plan: None,
             camera_projection: None,
             camera_pixels: Weak::new(),
@@ -312,6 +327,26 @@ impl RetainedFrameRenderer {
         self.last_frame_reused = false;
     }
 
+    /// Bound accounted retained camera projection resources.
+    ///
+    /// This allowance is separate from the pixel-tile budget and from the
+    /// immutable resources owned by active captures. Zero uses ordinary cold
+    /// projection compilation. Changing the policy retires the renderer's
+    /// whole-projection shortcut; already frozen frames remain valid.
+    pub fn set_camera_projection_cache_budget_bytes(&mut self, max_bytes: usize) {
+        self.camera_projection_cache.set_budget(max_bytes);
+        self.camera_projection = None;
+        self.camera_pixels = Weak::new();
+        self.last_camera_frame_reused = false;
+        self.last_frame_reused = false;
+    }
+
+    /// Accounted storage currently retained by the shared camera projection cache.
+    #[must_use]
+    pub fn retained_camera_projection_bytes(&self) -> usize {
+        self.camera_projection_cache.retained_bytes()
+    }
+
     /// Replace the planar route's background. Cached tiles hold composited
     /// background pixels, so a change discards them; an unchanged background
     /// keeps every cache hit.
@@ -356,6 +391,7 @@ impl RetainedFrameRenderer {
         }
         self.camera_pixels = Weak::new();
         self.camera_scene = None;
+        self.camera_projection_cache.clear();
         self.camera_plan = None;
         self.camera_projection = None;
         self.plan.sync(stage, camera_revision)?;
@@ -442,7 +478,7 @@ impl RetainedFrameRenderer {
     }
 
     /// Synchronize vector records, retain camera-bound surface/dot commands,
-    /// and rasterize their one shared painter sequence through [`ThreeDJob`].
+    /// and rasterize their one shared painter sequence through [`crate::ThreeDJob`].
     ///
     /// Surface topology comes only from [`RenderPrimitive`]; record counts are
     /// never factorized or guessed. The 2D retained plan remains the sole owner
@@ -549,6 +585,7 @@ impl RetainedFrameRenderer {
             projection: Arc::new(CameraProjection {
                 camera: camera.clone(),
                 tiling,
+                cache: Arc::clone(&self.camera_projection_cache),
                 prepared: Mutex::new(None),
             }),
         };
@@ -577,12 +614,7 @@ impl RetainedFrameRenderer {
             return Ok(Arc::clone(&cached.scene));
         }
         let mut entries = camera_scene_entries(stage, &draw_plan, self.camera_scene.as_ref())?;
-        let (scene, stats) = prepare_camera_scene(
-            &mut self.plan,
-            stage,
-            &draw_plan,
-            &mut entries,
-        )?;
+        let (scene, stats) = prepare_camera_scene(&mut self.plan, stage, &draw_plan, &mut entries)?;
         let scene = Arc::new(scene);
         self.plan.commit_image_frame(scene.images.clone());
         self.camera_scene = Some(CachedCameraScene {
@@ -669,6 +701,21 @@ impl PreparedCameraFrame {
         Arc::ptr_eq(&self.projection, &other.projection)
     }
 
+    /// Work performed by this projection's one lazy initialization.
+    ///
+    /// Returns none before the projection has been prepared successfully.
+    /// Captures sharing that projection and later replays observe the same
+    /// initialization counts; this is not a per-raster work counter.
+    #[must_use]
+    pub fn projection_preparation_stats(&self) -> Option<CameraProjectionStats> {
+        self.projection
+            .prepared
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(|projection| projection.preparation_stats())
+    }
+
     /// Frozen raw linear-light RGBA16F layout.
     ///
     /// # Errors
@@ -696,7 +743,7 @@ impl PreparedCameraFrame {
         }
         let draws = camera_draws(&self.plan, &self.scene)?;
         self.projection
-            .get_or_prepare(&draws)
+            .get_or_prepare(&draws, &self.scene.sources)
             .and_then(|projection| projection.bind(&self.projection.camera, &draws))
             .map_err(RetainedFrameRendererError::ThreeD)?
             .render_into(threads, frame)
@@ -759,7 +806,7 @@ impl PreparedCameraFrame {
         } else {
             let draws = camera_draws(&self.plan, &self.scene)?;
             self.projection
-                .get_or_prepare(&draws)
+                .get_or_prepare(&draws, &self.scene.sources)
                 .map_err(RetainedFrameRendererError::ThreeD)?
         };
         let layout = projection
@@ -820,20 +867,13 @@ impl PreparedCameraBands {
         next: &std::sync::atomic::AtomicUsize,
         cache: Option<&PixelTileCache>,
     ) {
-        self.projection.render_owned_bands(
-            bands,
-            next,
-            self.layout.stride,
-            cache,
-            |index| self.material(index),
-        );
+        self.projection
+            .render_owned_bands(bands, next, self.layout.stride, cache, |index| {
+                self.material(index)
+            });
     }
 
-    pub(crate) fn raster_direct(
-        &self,
-        destination: &mut FrameBuffer,
-        cache: &PixelTileCache,
-    ) {
+    pub(crate) fn raster_direct(&self, destination: &mut FrameBuffer, cache: &PixelTileCache) {
         self.projection
             .render_cached_into(destination, cache, |index| self.material(index));
     }
@@ -848,6 +888,7 @@ impl PreparedCameraBands {
 struct CameraProjection {
     camera: Camera,
     tiling: Tiling,
+    cache: Arc<CameraProjectionCache>,
     prepared: Mutex<Option<Arc<PreparedThreeDProjection>>>,
 }
 
@@ -855,13 +896,20 @@ impl CameraProjection {
     fn get_or_prepare(
         &self,
         draws: &[ThreeDDraw<'_>],
+        sources: &[CameraSourceKey],
     ) -> Result<Arc<PreparedThreeDProjection>, ThreeDError> {
         let mut prepared = self.prepared.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(projection) = &*prepared {
             return Ok(Arc::clone(projection));
         }
-        let projection =
-            Arc::new(ThreeDJob::new(&self.camera, draws, self.tiling)?.into_projection()?);
+        let projection = Arc::new(PreparedThreeDProjection::prepare_retained(
+            &self.camera,
+            draws,
+            sources,
+            self.tiling,
+            ThreeDPreparationLimits::default(),
+            &self.cache,
+        )?);
         *prepared = Some(Arc::clone(&projection));
         Ok(projection)
     }
@@ -924,10 +972,7 @@ impl PreparedCameraScene {
             .ok_or(RetainedFrameRendererError::VectorPlanMismatch)
     }
 
-    fn mesh(
-        &self,
-        source: usize,
-    ) -> Result<(&SurfaceMesh, &Uniforms), RetainedFrameRendererError> {
+    fn mesh(&self, source: usize) -> Result<(&SurfaceMesh, &Uniforms), RetainedFrameRendererError> {
         let resource = self.world_resource(source)?;
         let CameraWorldGeometry::Mesh(mesh) = &resource.geometry else {
             return Err(RetainedFrameRendererError::VectorPlanMismatch);
@@ -1101,8 +1146,8 @@ fn camera_scene_entries(
         let cached = previous
             .and_then(|previous| previous.entries.get(index))
             .filter(|cached| cached.item == *item && cached.matches(entry));
-        let generation = cached
-            .map_or_else(|| Arc::new(()), |cached| Arc::clone(&cached.generation));
+        let generation =
+            cached.map_or_else(|| Arc::new(()), |cached| Arc::clone(&cached.generation));
         let world = cached.and_then(|cached| cached.world.as_ref().map(Arc::clone));
         let volatile = entry
             .buffer
@@ -1283,17 +1328,16 @@ fn camera_world_resource(
         RenderPrimitive::SurfaceGrid { resolution } => {
             CameraWorldGeometry::Mesh(surface_mesh(stage, mob, Some(resolution))?)
         }
-        RenderPrimitive::TriangleMesh => {
-            CameraWorldGeometry::Mesh(surface_mesh(stage, mob, None)?)
-        }
+        RenderPrimitive::TriangleMesh => CameraWorldGeometry::Mesh(surface_mesh(stage, mob, None)?),
         RenderPrimitive::DotCloud => CameraWorldGeometry::Dots(dot_draws(stage, mob)?),
         RenderPrimitive::ImageQuad => {
-            let image = entry.image_resource().ok_or(
-                RetainedFrameRendererError::InvalidPrimitive {
-                    mob,
-                    reason: "image primitive has no image resource",
-                },
-            )?;
+            let image =
+                entry
+                    .image_resource()
+                    .ok_or(RetainedFrameRendererError::InvalidPrimitive {
+                        mob,
+                        reason: "image primitive has no image resource",
+                    })?;
             if image.dark_image().is_some() {
                 return Err(RetainedFrameRendererError::InvalidPrimitive {
                     mob,
@@ -1338,9 +1382,7 @@ fn camera_draws<'a>(
                 draw.depth_test = uniforms.depth_test;
                 ThreeDDraw::Surface(draw)
             }
-            PreparedCommand::Dot { source, part } => {
-                ThreeDDraw::TrueDot(scene.dot(source, part)?)
-            }
+            PreparedCommand::Dot { source, part } => ThreeDDraw::TrueDot(scene.dot(source, part)?),
             PreparedCommand::Image { source, .. } => {
                 let (mesh, uniforms) = scene.mesh(source)?;
                 let material = scene
@@ -1861,7 +1903,7 @@ mod tests {
         let (scene, _) = prepare_camera_scene(&mut plan, stage, &draw_plan, &mut entries).unwrap();
         plan.commit_image_frame(scene.images.clone());
         let draws = camera_draws(&plan, &scene).unwrap();
-        ThreeDJob::new(camera, &draws, config(1).tiling)
+        crate::ThreeDJob::new(camera, &draws, config(1).tiling)
             .unwrap()
             .render(1)
             .unwrap()
@@ -2248,8 +2290,14 @@ mod tests {
         let first = renderer.prepare_with_camera(&stage, &camera).unwrap();
         let first_bits = fresh_camera_bits(&stage, &camera);
         let entries = &renderer.camera_scene.as_ref().unwrap().entries;
-        let mesh_index = entries.iter().position(|entry| entry.item.mob == mesh).unwrap();
-        let dot_index = entries.iter().position(|entry| entry.item.mob == dots).unwrap();
+        let mesh_index = entries
+            .iter()
+            .position(|entry| entry.item.mob == mesh)
+            .unwrap();
+        let dot_index = entries
+            .iter()
+            .position(|entry| entry.item.mob == dots)
+            .unwrap();
         let first_scene = Arc::downgrade(&first.scene);
         let first_mesh = Arc::downgrade(first.scene.world[mesh_index].as_ref().unwrap());
         let shared_dots = Arc::downgrade(first.scene.world[dot_index].as_ref().unwrap());
@@ -2295,7 +2343,10 @@ mod tests {
         assert!(shared_dots.upgrade().is_some());
         drop(renderer);
         drop(stage);
-        assert!(shared_dots.upgrade().is_some(), "the last capture owns its dot rows");
+        assert!(
+            shared_dots.upgrade().is_some(),
+            "the last capture owns its dot rows"
+        );
         drop(third);
         assert!(shared_dots.upgrade().is_none());
     }
@@ -2651,7 +2702,10 @@ mod tests {
         assert_ne!(expected, previous);
         renderer.render_with_camera(&stage, &camera).unwrap();
         assert_eq!(renderer.frame().as_bytes(), expected);
-        assert!(renderer.cache().stats().misses > 0, "failed tiles were not published");
+        assert!(
+            renderer.cache().stats().misses > 0,
+            "failed tiles were not published"
+        );
         assert_eq!(renderer.raster_team_stats().frames_completed, 2);
         renderer.render(&stage, camera.revision()).unwrap();
         renderer.render_with_camera(&stage, &camera).unwrap();
