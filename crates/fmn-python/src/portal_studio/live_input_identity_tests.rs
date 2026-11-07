@@ -162,6 +162,7 @@ fn portal_studio_stale_live_worker_leaves_replacement_input_usable() {
         "updater",
         "advance-validator",
         "point-conversion",
+        "handler-lookup",
     ] {
         crate::with_python_test_module("live capture ownership", |py, _module, globals| {
             let source = std::ffi::CString::new(
@@ -197,7 +198,12 @@ class Live(m.Scene):
         events += 1
         if not armed:
             self.box.shift(m.UP)
-    def on_key_press(self, symbol, modifiers):
+    @property
+    def on_key_press(self):
+        if armed and mode == 'handler-lookup':
+            replace()
+        return self._key_press
+    def _key_press(self, symbol, modifiers):
         global events
         events += 1
         if armed and mode == 'callback':
@@ -293,7 +299,10 @@ s.frame.add_updater(update)
                 1,
                 "{mode} did not exercise replacement"
             );
-            if matches!(mode, "validator" | "advance-validator" | "point-conversion") {
+            if matches!(
+                mode,
+                "validator" | "advance-validator" | "point-conversion" | "handler-lookup"
+            ) {
                 assert_eq!(
                     globals
                         .get_item("events")

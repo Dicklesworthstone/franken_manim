@@ -95,6 +95,67 @@ class LiveInputContextTests(unittest.TestCase):
         self.assertFalse(input_key_pressed(self.scene, ord("h")))
         self.assertIsNone(_LIVE_EVENT.get())
 
+    def test_generation_guard_refuses_stale_capture_before_or_during_handler_lookup(self):
+        for invalidated_at in ("before", "lookup"):
+            with self.subTest(invalidated_at=invalidated_at):
+                state = {"valid": invalidated_at != "before"}
+                seen, checked_modifiers = [], []
+
+                class Scene:
+                    def get_window(self):
+                        return None
+
+                    @property
+                    def on_key_press(self):
+                        seen.append(("lookup", input_modifiers(self)))
+                        if invalidated_at == "lookup":
+                            state["valid"] = False
+                        return lambda *args: seen.append(("delivered", args))
+
+                scene = Scene()
+
+                def guard():
+                    checked_modifiers.append(input_modifiers(scene))
+                    if not state["valid"]:
+                        raise RuntimeError("live capture ownership was lost")
+
+                with self.assertRaisesRegex(RuntimeError, "ownership"):
+                    dispatch_live_input(scene, "on_key_press", (ord("a"), 3), 3,
+                                        generation_guard=guard)
+                self.assertEqual(seen, [] if invalidated_at == "before" else [("lookup", 3)])
+                self.assertEqual(checked_modifiers, [3] if invalidated_at == "before" else [3, 3])
+                self.assertIsNone(_LIVE_EVENT.get())
+                self.assertEqual(input_modifiers(scene), 0)
+
+    def test_ephemeral_handler_cleanup_keeps_the_live_modifier_scope(self):
+        seen, checked_modifiers = [], []
+
+        class Scene:
+            def get_window(self):
+                return None
+
+            @property
+            def on_key_press(self):
+                return Handler()
+
+        scene = Scene()
+
+        class Handler:
+            def __call__(self, *args):
+                seen.append(("callback", input_modifiers(scene)))
+
+            def __del__(self):
+                seen.append(("cleanup", input_modifiers(scene)))
+
+        def guard():
+            checked_modifiers.append(input_modifiers(scene))
+
+        dispatch_live_input(scene, "on_key_press", (ord("a"), 3), 3,
+                            generation_guard=guard)
+        self.assertEqual(checked_modifiers, [3, 3])
+        self.assertEqual(seen, [("callback", 3), ("cleanup", 3)])
+        self.assertIsNone(_LIVE_EVENT.get())
+
 
 if __name__ == "__main__":
     unittest.main()

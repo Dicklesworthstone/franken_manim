@@ -19,13 +19,15 @@ _INPUT = ContextVar("fmn_scene_input", default=None)
 _LIVE_EVENT = ContextVar("fmn_live_event", default=None)
 
 
-def dispatch_live_input(scene, method, arguments, modifiers):
+def dispatch_live_input(scene, method, arguments, modifiers, generation_guard=None):
     """Deliver one admitted native event without changing Reference signatures.
 
     Motion and scroll methods do not take modifier bits in manimlib. Keep the
     wire's authoritative snapshot in a scoped context rather than guessing from
     modifier-key presses (browsers do not always deliver those). Nested delivery
     and exceptions restore the previous context; no state crosses scenes.
+    Workers supply a frozen native ownership check around handler lookup.
+    Direct Scene gateways use the same modifier scope without a worker.
     """
     if method not in {"on_mouse_motion", "on_mouse_drag", "on_mouse_press",
                       "on_mouse_release", "on_mouse_scroll", "on_key_press",
@@ -34,9 +36,17 @@ def dispatch_live_input(scene, method, arguments, modifiers):
     if type(modifiers) is not int or modifiers < 0 or modifiers & ~0x47:
         raise ValueError("invalid live input modifier bits")
     token = _LIVE_EVENT.set((scene, modifiers))
+    callback = None
     try:
-        return getattr(scene, method)(*arguments)
+        if generation_guard is not None:
+            generation_guard()
+        callback = getattr(scene, method)
+        if generation_guard is not None:
+            generation_guard()
+        return callback(*arguments)
     finally:
+        # Release temporary handlers while their modifier scope is active.
+        callback = None
         _LIVE_EVENT.reset(token)
 
 

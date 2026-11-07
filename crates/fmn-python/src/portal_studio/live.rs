@@ -6,6 +6,7 @@ use super::*;
 use fmn_scene::{CommandKind, EventPayload, Key, Modifiers, MouseButton};
 use fmn_studio::advance::is_advance_command;
 use fmn_studio::{ServiceError, SupervisorRequest, WorkerErrorCode, WorkerResponse};
+use pyo3::types::{PyCFunction, PyTuple};
 
 fn failure(error: impl std::fmt::Display) -> ServiceError {
     ServiceError::new(WorkerErrorCode::ExecutionFailed, error.to_string())
@@ -164,6 +165,7 @@ fn advance(
 pub(super) struct LiveWorker {
     scene: Py<PyScene>,
     generation: Arc<()>,
+    generation_guard: Py<PyCFunction>,
     input_validator: Option<Py<PyAny>>,
     name: String,
     build: ProtocolDigest,
@@ -215,11 +217,24 @@ impl LiveWorker {
         })
         .map_err(native_error)?;
         refresh(scene, &generation, input_validator.as_ref())?;
+        // Keep native ownership available inside Python's descriptor lookup.
+        let guard_scene = scene.clone().unbind();
+        let guard_generation = Arc::clone(&generation);
+        let generation_guard = PyCFunction::new_closure(
+            scene.py(),
+            Some(c"_fmn_live_generation_guard"),
+            None,
+            move |args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>| {
+                ensure_generation(guard_scene.bind(args.py()), &guard_generation)
+            },
+        )?
+        .unbind();
         let state_hash = with_capture(scene, &generation, |c| Ok(c.recorded.last_state_hash()))
             .map_err(native_error)?;
         Ok(Self {
             scene: scene.clone().unbind(),
             generation,
+            generation_guard,
             input_validator,
             name,
             build,
@@ -291,7 +306,14 @@ impl LiveWorker {
                 // No Rust scene borrow or generation mutex crosses this call.
                 let dispatched = validate_inputs(py, self.input_validator.as_ref())
                     .and_then(|()| ensure_generation(scene, &self.generation))
-                    .and_then(|()| dispatch(scene, &self.generation, input.event))
+                    .and_then(|()| {
+                        dispatch(
+                            scene,
+                            &self.generation,
+                            self.generation_guard.bind(py),
+                            input.event,
+                        )
+                    })
                     .and_then(|()| refresh(scene, &self.generation, self.input_validator.as_ref()));
                 if let Err(error) = dispatched {
                     let message = error.to_string();
@@ -397,7 +419,12 @@ fn key(value: Key) -> u32 {
     }
 }
 
-fn dispatch(scene: &Bound<'_, PyScene>, generation: &Arc<()>, event: EventPayload) -> PyResult<()> {
+fn dispatch(
+    scene: &Bound<'_, PyScene>,
+    generation: &Arc<()>,
+    generation_guard: &Bound<'_, PyCFunction>,
+    event: EventPayload,
+) -> PyResult<()> {
     ensure_generation(scene, generation)?;
     event.validate().map_err(native_error)?;
     // Browser coordinates are down-positive in the advertised fixed plane.
@@ -431,6 +458,7 @@ fn dispatch(scene: &Bound<'_, PyScene>, generation: &Arc<()>, event: EventPayloa
                 "on_mouse_motion",
                 (point(p, false)?, point(delta, true)?),
                 modifiers(m),
+                generation_guard,
             ))?;
         }
         EventPayload::MousePress {
@@ -443,6 +471,7 @@ fn dispatch(scene: &Bound<'_, PyScene>, generation: &Arc<()>, event: EventPayloa
                 "on_mouse_press",
                 (point(p, false)?, button(b), modifiers(m)),
                 modifiers(m),
+                generation_guard,
             ))?;
         }
         EventPayload::MouseRelease {
@@ -455,6 +484,7 @@ fn dispatch(scene: &Bound<'_, PyScene>, generation: &Arc<()>, event: EventPayloa
                 "on_mouse_release",
                 (point(p, false)?, button(b), modifiers(m)),
                 modifiers(m),
+                generation_guard,
             ))?;
         }
         EventPayload::MouseDrag {
@@ -473,6 +503,7 @@ fn dispatch(scene: &Bound<'_, PyScene>, generation: &Arc<()>, event: EventPayloa
                     modifiers(m),
                 ),
                 modifiers(m),
+                generation_guard,
             ))?;
         }
         EventPayload::MouseScroll {
@@ -500,13 +531,20 @@ fn dispatch(scene: &Bound<'_, PyScene>, generation: &Arc<()>, event: EventPayloa
                 "on_mouse_scroll",
                 (point(p, false)?, vector, offset[0], -offset[1]),
                 modifiers(m),
+                generation_guard,
             ))?;
         }
         EventPayload::KeyPress {
             key: k,
             modifiers: m,
         } => {
-            deliver.call1((scene, "on_key_press", (key(k), modifiers(m)), modifiers(m)))?;
+            deliver.call1((
+                scene,
+                "on_key_press",
+                (key(k), modifiers(m)),
+                modifiers(m),
+                generation_guard,
+            ))?;
         }
         EventPayload::KeyRelease {
             key: k,
@@ -517,6 +555,7 @@ fn dispatch(scene: &Bound<'_, PyScene>, generation: &Arc<()>, event: EventPayloa
                 "on_key_release",
                 (key(k), modifiers(m)),
                 modifiers(m),
+                generation_guard,
             ))?;
         }
     }
