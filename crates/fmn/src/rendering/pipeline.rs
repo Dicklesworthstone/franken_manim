@@ -185,13 +185,27 @@ struct RenderWorker {
     camera_pixels: Weak<PreparedCameraFrame>,
 }
 
+// Bound an explicitly admitted camera cache to at most one raw surface.
+// Camera compilers own separate preparation frames; this optional allowance
+// must therefore be reserved in addition to their mandatory resident storage.
+pub(super) fn camera_cache_budget_bytes(viewport: Viewport) -> usize {
+    let surface = u64::from(viewport.width)
+        .saturating_mul(u64::from(viewport.height))
+        .saturating_mul(8);
+    usize::try_from(surface)
+        .unwrap_or(usize::MAX)
+        .min(PixelTileCache::DEFAULT_KEY_BUDGET_BYTES)
+}
+
 impl RenderWorker {
-    fn with_prefix_cache_budget(max_prefix_bytes: usize) -> Self {
+    fn with_cache_budgets(max_prefix_bytes: usize, max_camera_bytes: usize) -> Self {
+        let mut cache = PixelTileCache::with_budgets(
+            PixelTileCache::DEFAULT_KEY_BUDGET_BYTES,
+            max_prefix_bytes,
+        );
+        cache.set_camera_budget_bytes(max_camera_bytes);
         Self {
-            cache: PixelTileCache::with_budgets(
-                PixelTileCache::DEFAULT_KEY_BUDGET_BYTES,
-                max_prefix_bytes,
-            ),
+            cache,
             ..Self::default()
         }
     }
@@ -280,12 +294,13 @@ impl RenderWorker {
                     Some(RasterTeam::new(threads).map_err(NativeFrameError::Renderer)?);
             }
             frame
-                .render_into_with_team(
+                .render_cached_into_with_team(
                     self.raster_team
                         .as_mut()
                         .ok_or(NativeFrameError::WorkerState(
                             "missing persistent camera raster team",
                         ))?,
+                    &mut self.cache,
                     &mut raster,
                 )
                 .map_err(NativeFrameError::Renderer)?;
@@ -312,13 +327,15 @@ impl NativeFrameStages {
         render_teams: usize,
         compiler: NativeCompiler,
         max_prefix_bytes_per_team: usize,
+        max_camera_bytes_per_team: usize,
     ) -> Self {
         Self {
             compiler: Mutex::new(compiler),
             workers: (0..render_teams)
                 .map(|_| {
-                    Mutex::new(RenderWorker::with_prefix_cache_budget(
+                    Mutex::new(RenderWorker::with_cache_budgets(
                         max_prefix_bytes_per_team,
+                        max_camera_bytes_per_team,
                     ))
                 })
                 .collect(),
@@ -592,6 +609,10 @@ fn convert_into(
 /// team that switches routes retains both its vector cache and band surface
 /// alongside its camera compiler. Caller-owned serial renderers and their
 /// caches require a separate allowance when they coexist with this pipeline.
+/// Camera and planar tile payloads replace one another. Camera tile reuse is
+/// opt-in through [`Self::with_cache_budgets`]: its admitted key/pixel allowance
+/// is additional to camera compiler frames, and exhaustion rasterizes uncached.
+/// The ordinary constructors disable this extra camera storage.
 /// Native-resolution planar workers can also retain bounded static-prefix checkpoints,
 /// including adaptive-AA state on the fast CPU route.
 /// The default accounted allowance is [`PixelTileCache::DEFAULT_PREFIX_BUDGET_BYTES`]
@@ -652,6 +673,27 @@ impl NativeFramePipeline {
         camera: Option<Camera>,
         output: EmitterHandle,
         max_prefix_bytes_per_team: usize,
+    ) -> Result<Self, RenderError> {
+        Self::with_cache_budgets(plan, config, camera, output, max_prefix_bytes_per_team, 0)
+    }
+
+    /// Compose with independently admitted prefix and camera tile allowances.
+    ///
+    /// Camera storage includes exact keys, pixel capacities and entry metadata,
+    /// capped to one raw surface per team. It is additional to retained camera
+    /// compiler frames; callers must reserve it and container/allocator headroom.
+    /// Zero disables camera tile reuse while preserving whole-frame reuse.
+    /// Planar and camera tile payloads replace one another on route changes.
+    ///
+    /// # Errors
+    /// As [`Self::new`].
+    pub fn with_cache_budgets(
+        plan: ExecutionPlan,
+        config: RetainedFrameRendererConfig,
+        camera: Option<Camera>,
+        output: EmitterHandle,
+        max_prefix_bytes_per_team: usize,
+        max_camera_bytes_per_team: usize,
     ) -> Result<Self, RenderError> {
         // Source demand is synchronous. A smaller output ring could block
         // its producer while the coordinator awaits that same next source
@@ -725,8 +767,12 @@ impl NativeFramePipeline {
         } else {
             0
         };
-        let stages =
-            NativeFrameStages::new(plan.render_teams.len(), compiler, max_prefix_bytes_per_team);
+        let stages = NativeFrameStages::new(
+            plan.render_teams.len(),
+            compiler,
+            max_prefix_bytes_per_team,
+            max_camera_bytes_per_team.min(camera_cache_budget_bytes(viewport)),
+        );
         let stream = FrameStream::new(plan, stages, |_, output| {
             output.publish().map_err(NativeFrameError::Emitter)
         })
@@ -1307,6 +1353,99 @@ mod handoff_tests {
     }
 
     #[test]
+    fn camera_tiles_reuse_within_native_admission_and_convert_every_output_format() {
+        for threads in [1, 4, 16] {
+            let (_, mut config, _) = camera_fixture();
+            config.frame.viewport = Viewport {
+                width: 96,
+                height: 64,
+            };
+            config.frame.map = fmn_render::ScreenMap {
+                scale: 8.0,
+                origin: [48.0, 32.0],
+                y_up: true,
+            };
+            let mut camera_config = CameraConfig {
+                resolution: (96, 64),
+                background: config.frame.background,
+                ..CameraConfig::default()
+            };
+            camera_config.frame.set_shape([12.0, 8.0]).unwrap();
+            let camera = Camera::new(camera_config).unwrap();
+            let admitted = camera_cache_budget_bytes(config.frame.viewport);
+            assert!(admitted <= 96 * 64 * 8);
+            for budget in [0, 1, admitted] {
+                let (mut stage, _, _) = camera_fixture();
+                let moving = stage.roots()[0];
+                stage.shift(moving, [3.0, 0.0, 0.0]);
+                let cube = stage.add(fmn_library::Cube::new(2.0));
+                stage.add_to_scene(cube).unwrap();
+                stage.shift(cube, [-3.0, 0.0, 0.0]);
+                let mut compiler = CameraCompiler::new(config).unwrap();
+                let mut worker = RenderWorker::with_cache_budgets(0, budget);
+                let mut saw_hit = false;
+                let mut previous_pixels: Option<Vec<u8>> = None;
+                for _ in 0..4 {
+                    stage.shift(moving, [0.125, 0.125, 0.0]);
+                    let frame = compiler.prepare_with_camera(&stage, &camera).unwrap();
+                    let mut fresh = CameraCompiler::new(config).unwrap();
+                    let raw = fresh
+                        .prepare_with_camera(&stage, &camera)
+                        .unwrap()
+                        .render(1)
+                        .unwrap();
+                    for format in [
+                        PixelFormat::Rgba8,
+                        PixelFormat::Bgra8,
+                        PixelFormat::Nv12,
+                        PixelFormat::P010,
+                    ] {
+                        let layout = fmn_frame::FrameLayout::tight(format, 96, 64).unwrap();
+                        let mut expected = FrameBuffer::new(layout.clone());
+                        convert_into(&raw, &mut expected, 1).unwrap();
+                        let mut output = FrameBuffer::new(layout);
+                        output.plane_mut(0).fill(0xA5);
+                        worker.render_camera(&frame, threads, &mut output).unwrap();
+                        assert_eq!(
+                            output.as_bytes(),
+                            expected.as_bytes(),
+                            "camera cache changed {format:?} at {threads} threads, budget {budget}"
+                        );
+                        assert!(worker.cache.retained_camera_bytes() <= budget);
+                        if format == PixelFormat::Rgba8 {
+                            saw_hit |= worker.cache.stats().hits != 0;
+                            if let Some(previous) = &previous_pixels {
+                                assert_ne!(
+                                    output.as_bytes(),
+                                    previous.as_slice(),
+                                    "the animated object must change visible pixels"
+                                );
+                            }
+                            previous_pixels = Some(output.as_bytes().to_vec());
+                        }
+                    }
+                    if threads == 1 {
+                        assert_eq!(
+                            worker
+                                .raster_team
+                                .as_ref()
+                                .unwrap()
+                                .stats()
+                                .band_buffer_bytes,
+                            0,
+                            "inline camera caching must not allocate a second band surface"
+                        );
+                    }
+                }
+                assert_eq!(saw_hit, budget == admitted);
+                if budget <= 1 {
+                    assert_eq!(worker.cache.retained_camera_bytes(), 0);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn render_teams_obey_prefix_caps_without_changing_output_pixels() {
         for (engine, aa, eligible) in [
             (
@@ -1334,6 +1473,7 @@ mod handoff_tests {
                     2,
                     NativeCompiler::Vector(Box::new(VectorFrameCompiler::new(config).unwrap())),
                     budget,
+                    0,
                 );
                 let layout = fmn_frame::FrameLayout::tight(PixelFormat::Rgba8, 16, 16).unwrap();
                 let mut expected = FrameBuffer::new(layout.clone());

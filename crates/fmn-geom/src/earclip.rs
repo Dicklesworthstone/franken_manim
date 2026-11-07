@@ -117,6 +117,13 @@ use std::fmt;
 /// partition them before triangulation.
 pub const MAX_EARCLIP_VERTICES: usize = 4_096;
 
+/// Predicate-scan budget for [`triangulate_preserving_vertices`].
+///
+/// Simplicity checks charge one unit per edge pair; each ear candidate
+/// reserves six complete vertex scans before invoking the shared predicates.
+/// The limit is deterministic and independent of elapsed time or threads.
+pub const MAX_BOUNDARY_EARCLIP_WORK: usize = 1 << 26;
+
 /// Tunables for [`triangulate_with_options`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EarClipOptions {
@@ -221,6 +228,11 @@ pub enum EarClipError {
     },
     /// The requested tolerance was not a positive, finite number.
     InvalidTolerance,
+    /// Boundary-preserving triangulation exceeded its predicate-scan budget.
+    WorkBudgetExceeded {
+        /// The declared maximum number of scan units.
+        limit: usize,
+    },
 }
 
 impl fmt::Display for EarClipError {
@@ -267,6 +279,9 @@ impl fmt::Display for EarClipError {
             }
             Self::InvalidTolerance => {
                 write!(f, "tolerance must be a positive, finite number")
+            }
+            Self::WorkBudgetExceeded { limit } => {
+                write!(f, "boundary-preserving triangulation work budget of {limit} exceeded")
             }
         }
     }
@@ -363,6 +378,182 @@ pub fn triangulate_with_options(
         bridge_hole(&mut points, &mut flat, &mut slit_from, hole, index)?;
     }
     clip_ears(&points, &flat, &slit_from, &material, tol_abs * tol_abs)
+}
+
+/// Triangulate one simple ring without discarding any input vertex.
+///
+/// This entry point is for mesh corners carrying UVs or normals. Unlike
+/// [`triangulate`], it neither merges repeated points nor shortens collinear
+/// boundary runs. Every accepted input index occurs in at least one of exactly
+/// `outer.len() - 2` nondegenerate, counter-clockwise triangles. A repeated
+/// closing point must be removed by the caller only when its attributes agree.
+///
+/// The ring is normalized into the same bounded predicate space as the
+/// general clipper. Nonadjacent edges may not cross or touch within the
+/// default relative tolerance; consecutive points must be distinct and may
+/// not double back. Collinear points between their neighbors are retained.
+/// Ear selection shares the general clipper's strict predicates, but this
+/// simple-ring path never splits recursively or drops a zero-area remnant.
+///
+/// # Errors
+///
+/// Returns [`EarClipError`] for nonfinite, undersized, over-budget, zero-area,
+/// or nonsimple rings, or when no vertex-preserving decomposition exists
+/// under the strict predicates. Both simplicity checks and ear scans are
+/// charged against [`MAX_BOUNDARY_EARCLIP_WORK`] before doing their work.
+pub fn triangulate_preserving_vertices(
+    outer: &[[f64; 2]],
+) -> Result<Vec<[u32; 3]>, EarClipError> {
+    let mut work = BoundaryWork {
+        remaining: MAX_BOUNDARY_EARCLIP_WORK,
+        limit: MAX_BOUNDARY_EARCLIP_WORK,
+    };
+    triangulate_preserving_with_work(outer, &mut work)
+}
+
+struct BoundaryWork {
+    remaining: usize,
+    limit: usize,
+}
+
+impl BoundaryWork {
+    fn charge(&mut self, units: usize) -> Result<(), EarClipError> {
+        self.remaining = self
+            .remaining
+            .checked_sub(units)
+            .ok_or(EarClipError::WorkBudgetExceeded { limit: self.limit })?;
+        Ok(())
+    }
+}
+
+/// Unlike hole bridging, a simple attributed boundary cannot be cleaned:
+/// even a collinear point can carry a distinct interpolation value.
+fn check_preserved_boundary(
+    points: &[[f64; 2]],
+    tolerance: f64,
+    work: &mut BoundaryWork,
+) -> Result<(), EarClipError> {
+    let n = points.len();
+    let tolerance2 = tolerance * tolerance;
+    for i in 0..n {
+        work.charge(1)?;
+        let a = points[i];
+        let b = points[(i + 1) % n];
+        let c = points[(i + 2) % n];
+        if dist2(a, b) <= tolerance2
+            || point_near_segment(a, b, c, tolerance)
+            || point_near_segment(c, a, b, tolerance)
+        {
+            return Err(EarClipError::NoValidTriangulation);
+        }
+        for j in i + 1..n {
+            work.charge(1)?;
+            if j == i + 1 || (i == 0 && j == n - 1) {
+                continue;
+            }
+            let c = points[j];
+            let d = points[(j + 1) % n];
+            if segments_cross(a, b, c, d)
+                || point_near_segment(a, c, d, tolerance)
+                || point_near_segment(b, c, d, tolerance)
+                || point_near_segment(c, a, b, tolerance)
+                || point_near_segment(d, a, b, tolerance)
+            {
+                return Err(EarClipError::NoValidTriangulation);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn triangulate_preserving_with_work(
+    outer: &[[f64; 2]],
+    work: &mut BoundaryWork,
+) -> Result<Vec<[u32; 3]>, EarClipError> {
+    let n = outer.len();
+    if n > MAX_EARCLIP_VERTICES {
+        return Err(EarClipError::TooManyVertices { total: n });
+    }
+    if n < 3 {
+        return Err(EarClipError::TooFewPoints {
+            role: RingRole::Outer,
+            ring_index: 0,
+            points: n,
+        });
+    }
+    check_finite(outer, RingRole::Outer, 0)?;
+    let mut points = normalize_predicate_space(outer, &[])?.outer;
+    let tolerance = EarClipOptions::default().tolerance * bbox_diagonal(&points);
+    check_preserved_boundary(&points, tolerance, work)?;
+    let sliver_eps = tolerance * tolerance;
+    let area = signed_area(&points);
+    if area.abs() <= sliver_eps {
+        return Err(EarClipError::ZeroAreaRing {
+            role: RingRole::Outer,
+            ring_index: 0,
+        });
+    }
+    let mut flat: Vec<u32> = (0..n)
+        .map(|index| u32::try_from(index).expect("bounded by MAX_EARCLIP_VERTICES"))
+        .collect();
+    if area < 0.0 {
+        points.reverse();
+        flat.reverse();
+    }
+    work.charge(2 * n)?;
+    let convex = (0..n)
+        .all(|i| cross(points[i], points[(i + 1) % n], points[(i + 2) % n]) >= 0.0);
+    if convex
+        && (1..n - 1).all(|i| cross(points[0], points[i], points[i + 1]) > sliver_eps)
+    {
+        return Ok((1..n - 1)
+            .map(|i| [flat[0], flat[i], flat[i + 1]])
+            .collect());
+    }
+    let material = MaterialBoundary {
+        outer: &points,
+        holes: &[],
+    };
+    let mut prev: Vec<usize> = (0..n).map(|i| (i + n - 1) % n).collect();
+    let mut next: Vec<usize> = (0..n).map(|i| (i + 1) % n).collect();
+    let mut alive = vec![true; n];
+    let slit_from = vec![false; n];
+    let mut out = Vec::with_capacity(n - 2);
+    let mut remaining = n;
+    let mut cursor = 0;
+    while remaining > 3 {
+        let mut ear = None;
+        let mut v = cursor;
+        for _ in 0..remaining {
+            // is_ear's five linear loops plus its constant predicates fit
+            // within six scans; reserve the entire cost before evaluation.
+            work.charge(6 * n)?;
+            if cross(points[prev[v]], points[v], points[next[v]]) > sliver_eps
+                && is_ear(v, &points, &prev, &next, &alive, &slit_from, &material)
+            {
+                ear = Some(v);
+                break;
+            }
+            v = next[v];
+        }
+        let v = ear.ok_or(EarClipError::NoValidTriangulation)?;
+        let a = prev[v];
+        let b = next[v];
+        out.push([flat[a], flat[v], flat[b]]);
+        next[a] = b;
+        prev[b] = a;
+        alive[v] = false;
+        remaining -= 1;
+        cursor = b;
+    }
+    let a = cursor;
+    let b = next[a];
+    let c = next[b];
+    if cross(points[a], points[b], points[c]) <= sliver_eps {
+        return Err(EarClipError::NoValidTriangulation);
+    }
+    out.push([flat[a], flat[b], flat[c]]);
+    Ok(out)
 }
 
 /// Twice the signed area of a triangle corner: `(b − a) × (c − a)`.
@@ -1454,6 +1645,124 @@ mod tests {
         }
         let rel = (got - want).abs() / want.abs().max(1e-300);
         assert!(rel < 1e-9, "area not preserved: got {got}, want {want}");
+    }
+
+    const PRESERVED_NOTCH: [[f64; 2]; 9] = [
+        [0.0, 0.0],
+        [2.0, 0.0],
+        [4.0, 0.0],
+        [4.0, 4.0],
+        [3.0, 4.0],
+        [3.0, 1.0],
+        [1.0, 1.0],
+        [1.0, 4.0],
+        [0.0, 4.0],
+    ];
+
+    #[test]
+    fn preserved_boundary_covers_a_notch_and_keeps_every_collinear_corner() {
+        for clockwise in [false, true] {
+            let mut ring = PRESERVED_NOTCH;
+            if clockwise {
+                ring.reverse();
+            }
+            let triangles = triangulate_preserving_vertices(&ring).unwrap();
+            assert_eq!(triangles.len(), 7);
+            let mut seen = [false; 9];
+            let mut area = 0.0;
+            for triangle in &triangles {
+                let [a, b, c] = triangle.map(|index| ring[index as usize]);
+                let twice_area = cross(a, b, c);
+                assert!(twice_area > 0.0);
+                area += twice_area * 0.5;
+                for &index in triangle {
+                    seen[index as usize] = true;
+                }
+            }
+            assert!(seen.into_iter().all(|value| value));
+            assert!((area - 10.0).abs() < 1e-12);
+            // Independent rectangular union: a 4x1 base and two 1x3 arms.
+            // This catches a fan that fills the missing 2x3 notch.
+            for x in 0..16 {
+                for y in 0..16 {
+                    let point = [(f64::from(x) + 0.5) / 4.0, (f64::from(y) + 0.5) / 4.0];
+                    let expected = point[1] < 1.0 || point[0] < 1.0 || point[0] > 3.0;
+                    let covered = triangles.iter().any(|triangle| {
+                        let [a, b, c] = triangle.map(|index| ring[index as usize]);
+                        cross(a, b, point) >= 0.0
+                            && cross(b, c, point) >= 0.0
+                            && cross(c, a, point) >= 0.0
+                    });
+                    assert_eq!(covered, expected, "{clockwise}: {point:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn preserved_boundary_normalization_handles_tiny_and_translated_coordinates() {
+        let expected = triangulate_preserving_vertices(&PRESERVED_NOTCH).unwrap();
+        let tiny = PRESERVED_NOTCH.map(|p| [p[0] * 1e-150, p[1] * 1e-150]);
+        assert_eq!(triangulate_preserving_vertices(&tiny).unwrap(), expected);
+        let translated = PRESERVED_NOTCH.map(|p| {
+            [1e150 + p[0] * 1e140, -1e150 + p[1] * 1e140]
+        });
+        let result = triangulate_preserving_vertices(&translated).unwrap();
+        assert_eq!(result.len(), 7);
+        let mut seen = [false; 9];
+        for triangle in result {
+            for index in triangle {
+                seen[index as usize] = true;
+            }
+        }
+        assert!(seen.into_iter().all(|value| value));
+    }
+
+    #[test]
+    fn preserved_boundary_keeps_attribute_vertices_without_changing_default_cleaning() {
+        let ring = [[0.0, 0.0], [1.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]];
+        assert_eq!(triangulate(&ring, &[]).unwrap().len(), 2);
+        let preserved = triangulate_preserving_vertices(&ring).unwrap();
+        assert_eq!(preserved.len(), 3);
+        assert!((0..5).all(|index| preserved.iter().any(|triangle| triangle.contains(&index))));
+    }
+
+    #[test]
+    fn preserved_boundary_refuses_crossing_touching_duplicate_and_backtracking_rings() {
+        let invalid = [
+            vec![[0.0, 0.0], [3.0, 0.0], [0.0, 2.0], [2.0, 2.0]],
+            vec![[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [1.0, 0.0], [0.0, 2.0]],
+            vec![[0.0, 0.0], [1.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            vec![[0.0, 0.0], [2.0, 0.0], [1.0, 0.0], [2.0, 2.0], [0.0, 2.0]],
+            vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, 0.0]],
+        ];
+        for ring in invalid {
+            assert_eq!(
+                triangulate_preserving_vertices(&ring),
+                Err(EarClipError::NoValidTriangulation),
+                "{ring:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn preserved_boundary_charges_simplicity_and_ear_work_before_scanning() {
+        for limit in [3, 63] {
+            let mut work = BoundaryWork { remaining: limit, limit };
+            assert_eq!(
+                triangulate_preserving_with_work(&PRESERVED_NOTCH, &mut work),
+                Err(EarClipError::WorkBudgetExceeded { limit })
+            );
+        }
+        let too_many = vec![[0.0, 0.0]; MAX_EARCLIP_VERTICES + 1];
+        assert_eq!(
+            triangulate_preserving_vertices(&too_many),
+            Err(EarClipError::TooManyVertices { total: too_many.len() })
+        );
+        assert!(matches!(
+            triangulate_preserving_vertices(&[[0.0, 0.0], [f64::INFINITY, 1.0], [0.0, 1.0]]),
+            Err(EarClipError::NonFiniteCoordinate { vertex: 1, .. })
+        ));
     }
 
     #[test]

@@ -134,7 +134,7 @@ impl PrefixCache {
     }
 
     pub fn clear(&mut self) {
-        self.tiles.clear();
+        self.tiles = HashMap::new();
         self.stats = PrefixCacheStats::default();
     }
 

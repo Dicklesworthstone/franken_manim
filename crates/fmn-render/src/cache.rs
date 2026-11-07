@@ -68,7 +68,10 @@ use fmn_frame::{FrameBuffer, PixelFormat};
 use fmn_hash::Digest;
 use std::collections::HashMap;
 
+mod camera;
 mod prefix;
+pub(crate) use camera::CameraSourceKey;
+use camera::CameraTileCache;
 pub use prefix::PrefixCacheStats;
 use prefix::{PrefixCache, PrefixInputs, PrefixMode, PrefixRow};
 
@@ -627,6 +630,7 @@ impl From<TilePlanError> for PixelTileCacheError {
 pub struct PixelTileCache {
     tiles: TileCache<Vec<u8>>,
     prefixes: PrefixCache,
+    camera: CameraTileCache,
     work: Vec<TileWork>,
     render_state: Option<Digest>,
     /// Identity, config, and tiling that produced `render_state`. Unchanged
@@ -697,6 +701,7 @@ impl PixelTileCache {
         Self {
             tiles: TileCache::new(),
             prefixes: PrefixCache::new(max_prefix_bytes),
+            camera: CameraTileCache::new(max_key_bytes),
             work: Vec::new(),
             render_state: None,
             last_journal_inputs: None,
@@ -705,9 +710,30 @@ impl PixelTileCache {
         }
     }
 
-    /// Bytes of exact command/revision storage, including pending raster work.
+    /// Set the camera route's total accounted key and pixel capacity.
+    ///
+    /// The initial cap equals the key budget passed to [Self::with_budgets].
+    /// It includes retained and pending tile pixels, key-vector capacities,
+    /// source-identity owners and entry-table capacity, excluding allocator
+    /// bookkeeping. Allocation refusal or a zero budget uses ordinary raster.
+    /// Camera and planar caches release one another on route changes.
+    pub fn set_camera_budget_bytes(&mut self, max_bytes: usize) {
+        self.camera.set_budget(max_bytes);
+        self.serial = self.serial.wrapping_add(1);
+    }
+
+    /// Accounted retained and pending camera-cache storage, including metadata.
+    #[must_use]
+    pub fn retained_camera_bytes(&self) -> usize {
+        self.camera.retained_bytes()
+    }
+
+    /// Bytes of exact key/entry storage, including pending raster work.
     #[must_use]
     pub fn retained_key_bytes(&self) -> usize {
+        if self.camera.active() {
+            return self.camera.key_bytes();
+        }
         let retained = self
             .tiles
             .entries
@@ -731,7 +757,11 @@ impl PixelTileCache {
     /// This frame's key-planning counters.
     #[must_use]
     pub fn stats(&self) -> CacheStats {
-        self.tiles.stats()
+        if self.camera.active() {
+            self.camera.stats()
+        } else {
+            self.tiles.stats()
+        }
     }
 
     /// Prefix work from the most recent successful render; zero after a failed
@@ -751,19 +781,24 @@ impl PixelTileCache {
     /// Number of retained non-empty tiles.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.tiles.len()
+        if self.camera.active() {
+            self.camera.len()
+        } else {
+            self.tiles.len()
+        }
     }
 
     /// Whether no tile payload is retained.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.tiles.is_empty()
+        self.len() == 0
     }
 
     /// Forget all pixels and renderer identity.
     pub fn clear(&mut self) {
         self.tiles.clear();
         self.prefixes.clear();
+        self.camera.clear();
         self.work.clear();
         self.render_state = None;
         self.last_journal_inputs = None;
@@ -790,6 +825,40 @@ impl PixelTileCache {
     pub(crate) fn complete_render(&mut self) {
         self.prefixes.complete_frame();
         self.serial = self.serial.wrapping_add(1);
+    }
+
+    pub(crate) fn prepare_camera_frame(
+        &mut self,
+        projection: &crate::three_d::PreparedThreeDProjection,
+        sources: &[CameraSourceKey],
+    ) -> Result<(), PixelTileCacheError> {
+        // Both raster routes share the caller's one retained-pixel allowance.
+        // Release the opposite representation before admitting camera storage.
+        self.tiles = TileCache::new();
+        self.prefixes.clear();
+        self.work = Vec::new();
+        self.render_state = None;
+        self.last_journal_inputs = None;
+        self.begin_render(None);
+        self.camera.prepare(projection, sources)
+    }
+
+    pub(crate) fn restore_camera_tile(
+        &self,
+        tile: usize,
+        destination: &mut [u8],
+        stride: usize,
+    ) -> bool {
+        self.camera.restore_tile(tile, destination, stride)
+    }
+
+    pub(crate) fn complete_camera_frame(
+        &mut self,
+        frame: &FrameBuffer,
+    ) -> Result<(), PixelTileCacheError> {
+        self.camera.complete(frame)?;
+        self.serial = self.serial.wrapping_add(1);
+        Ok(())
     }
 
     pub(crate) fn prepare_frame_with_inputs(
@@ -819,6 +888,8 @@ impl PixelTileCache {
         camera: u64,
         render_state: Digest,
     ) -> Result<(), PixelTileCacheError> {
+        // No camera payload survives a switch back to planar rendering.
+        self.camera.clear();
         // Background, AA policy, engine/tier, semantic renderer version and
         // tiling all affect raw bytes but are intentionally not scene
         // revisions. The engine's journal digest already names that complete
