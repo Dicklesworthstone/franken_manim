@@ -81,7 +81,7 @@ pub use plan::{
     SyncStats,
 };
 pub use retained::{
-    PreparedCameraFrame, RetainedFrameRenderer, RetainedFrameRendererConfig,
+    CameraPreparationStats, PreparedCameraFrame, RetainedFrameRenderer, RetainedFrameRendererConfig,
     RetainedFrameRendererError,
 };
 pub use revision::{Axis, Dependency, Revisions};
