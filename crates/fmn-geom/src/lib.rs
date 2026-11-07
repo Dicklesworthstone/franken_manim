@@ -49,8 +49,8 @@ pub use boolean::{
     BooleanResult, BooleanRoute, BooleanStats, FillRule, path_boolean, path_boolean_flattened,
 };
 pub use earclip::{
-    EarClipError, EarClipOptions, MAX_EARCLIP_VERTICES, RingRole, triangulate,
-    triangulate_with_options,
+    EarClipError, EarClipOptions, MAX_BOUNDARY_EARCLIP_WORK, MAX_EARCLIP_VERTICES, RingRole,
+    triangulate, triangulate_preserving_vertices, triangulate_with_options,
 };
 pub use isolines::{
     IsolineConfig, IsolineError, IsolineStats, MAX_ISOLINE_EVALUATIONS, MAX_ISOLINE_LEAVES,

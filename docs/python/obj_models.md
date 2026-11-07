@@ -36,6 +36,38 @@ dissolve alpha with the existing native lighting; `Kd` is not multiplied into
 the image. This is the existing manim-facing lighting model, not a new MTL/PBR
 shader. Texture sampling uses the existing native image sampler.
 
+## Convex and concave polygon faces
+
+OBJ faces may be planar simple polygons, including concave outlines and
+collinear boundary corners with distinct UV or normal indices. The importer
+triangulates these faces in their original 3D winding. A U-shaped face keeps
+its cutout; triangulation does not fill the polygon's convex hull. Every
+accepted boundary corner participates in a nondegenerate triangle, so a UV
+value on a straight boundary segment is retained.
+
+The geometry reader projects a normalized copy onto the plane perpendicular
+to the largest component of the face normal. It keeps the original vertex
+coordinates and per-corner indices in the resulting triangles. Exact valid
+convex fans retain their established triangle order. Concave faces and convex
+faces whose fan would discard a collinear corner use Chisel's deterministic,
+boundary-preserving ear clipper.
+
+A source face can repeat its first corner at the end only with the same
+vertex, UV and normal indices. That closing repetition adds no triangle.
+Coincident corners carrying different indices are refused rather than merged.
+Material runs use the geometry parser's actual emitted face intervals, so a
+closing repetition never shifts the material attached to the following face.
+
+Faces with more than three corners must be planar within `1e-6` of their
+largest 3D bounding-box extent. This tolerance admits coordinate roundoff; it
+does not flatten or repair the model. Self-intersecting, touching, backtracking,
+zero-area or numerically ambiguous polygon boundaries refuse with the source
+face's line. Explicit three-corner faces retain their existing behavior,
+including defined zero-area, unlit triangles. Nonplanar surfaces should be
+triangulated in the authoring tool with the intended diagonal choices.
+See [BN-22](../behavior_notes/BN-22-surface-construction-admission.md#planar-obj-polygon-admission)
+for the admission contract.
+
 ## Texture placement and addressing
 
 `map_Kd` and the `map_Ka` fallback accept these options before the filename:
@@ -118,14 +150,18 @@ Options precede the path; prefix a numeric or option-like filename with `./`
 to distinguish it from an optional component or a flag. Map options other
 than `-s`, `-o`, and `-clamp`, non-RGB `Kd`, and out-of-range RGB/dissolve values
 explicitly refuse.
-Other MTL reflectance properties are ignored, not emulated. OBJ polygon fan
-triangulation and its geometry-subset limitations remain those of the original
-parser; this feature does not add concave-polygon tessellation or free-form
-surfaces.
+Other MTL reflectance properties are ignored, not emulated. A face may name at
+most 4096 source corners, including an optional repeated closing corner.
+The boundary-preserving triangulator also enforces a deterministic per-face
+predicate-scan budget of 67,108,864 units. Simplicity checks and unsuccessful
+ear searches both consume that budget; exhausting it is a named refusal.
+Partition larger or pathological polygons before import. Free-form OBJ
+curves/surfaces and faces containing separate hole contours remain unsupported.
 
 ## Native Rust composition
 
-The original geometry-only `ThreeDModel::from_obj` behavior is unchanged.
+`ThreeDModel::from_obj` and `ObjMesh::parse` use the same polygon triangulation
+as the material-aware importer, without opening any files.
 For material-aware construction, use `fmn_library::obj_materials::ObjDocument`
 and `parse_mtl`, then supply material-name-to-`ImageResource` bindings to
 `ObjDocument::to_mobject`. That library layer performs no filesystem access;
@@ -138,6 +174,8 @@ can replace a native resource's policy while sharing its immutable pixel
 storage; install the resulting resource through `Stage` to update retained
 render state.
 
-The independent Rust tests are `fmn-library/tests/obj_materials.rs`. Native
+The independent Rust tests are `fmn-library/tests/obj_materials.rs` and
+`fmn-library/tests/obj_polygons.rs`. They verify exact corner records, signed
+area, independent cutout coverage, material ranges, and named refusals. Native
 portal acceptance is `fmn-python/tests/obj_materials.py`; host input policy is
 `test_obj_inputs.py`, whose parser doubles are explicitly not geometry evidence.

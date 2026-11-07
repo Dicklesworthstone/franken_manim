@@ -148,8 +148,9 @@ impl ObjDocument {
     /// Parse using explicit host admission limits.
     pub fn parse_with_limits(bytes: &[u8], limits: &ObjAssetLimits) -> Result<Self, ObjAssetError> {
         let source = text(bytes, limits)?;
-        let mesh = ObjMesh::parse_with_limits(bytes, &limits.geometry)
+        let (mesh, faces) = ObjMesh::parse_with_face_ranges(bytes, &limits.geometry)
             .map_err(|cause| error(0, cause.to_string()))?;
+        let mut faces = faces.into_iter();
         let mut libraries = Vec::new();
         let mut runs: Vec<ObjMaterialRun> = Vec::new();
         let mut current = None;
@@ -179,13 +180,16 @@ impl ObjDocument {
                     };
                 }
                 "f" => {
-                    let count = rest.split_whitespace().count().saturating_sub(2);
-                    let end = cursor
-                        .checked_add(count)
-                        .filter(|&end| end <= mesh.triangle_count())
+                    let (face_line, triangles) = faces
+                        .next()
+                        .filter(|(face_line, triangles)| {
+                            *face_line == line && triangles.start == cursor
+                        })
                         .ok_or_else(|| {
                             error(line, "material/geometry face accounting disagrees")
                         })?;
+                    debug_assert_eq!(face_line, line);
+                    let end = triangles.end;
                     if let Some(last) = runs.last_mut().filter(|run| run.material == current) {
                         last.triangles.end = end;
                     } else {
@@ -202,7 +206,7 @@ impl ObjDocument {
                 _ => {}
             }
         }
-        if cursor != mesh.triangle_count() {
+        if faces.next().is_some() || cursor != mesh.triangle_count() {
             return Err(error(0, "material/geometry triangle accounting disagrees"));
         }
         Ok(Self {

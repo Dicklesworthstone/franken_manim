@@ -8577,6 +8577,190 @@ fn dot_cloud_affine_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenar
 /// Retained camera captures stay immutable while later poses and overlay
 /// edits reuse the same renderer. A fresh serial renderer supplies each
 /// expected frame; replay then reverses capture order on 1, 4, and 16 threads.
+fn obj_concave_faces_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use fmn_library::{ObjAssetLimits, ObjDocument, parse_mtl};
+    use fmn_mobject::{ImageColorSpace, ImageResource, ImageSampler, Snapshot};
+    use fmn_render::{Camera, CameraConfig, RetainedFrameRenderer, RetainedFrameRendererConfig, Tiling};
+
+    // A U with a collinear left-edge corner whose UV is deliberately not
+    // the interpolation of its neighbours. The repeated closing corner must
+    // not add a triangle or shift the following material's face interval.
+    let geometry = concat!(
+        "v -2 -2 0\nv 2 -2 0\nv 2 2 0\nv 1 2 0\nv 1 -1 0\n",
+        "v -1 -1 0\nv -1 2 0\nv -2 2 0\nv -2 0 0\n",
+        "vt 0 0\nvt 1 0\nvt 1 1\nvt .75 1\nvt .75 .25\n",
+        "vt .25 .25\nvt .25 1\nvt 0 1\nvt .125 .5\nvn 0 0 1\n",
+    );
+    let materials = parse_mtl(
+        b"newmtl A\nmap_Kd -s 1.5 -o .125 -clamp off tiles.png\n\
+          newmtl B\nKd .15 .65 .9\n",
+        &ObjAssetLimits::default(),
+    )
+    .map_err(|error| fail(format!("parse concave materials: {error}")))?;
+    let image = ImageResource::rgba8(
+        1,
+        1,
+        vec![255, 80, 40, 255],
+        ImageColorSpace::Srgb,
+        ImageSampler::default(),
+    )
+    .map_err(|error| fail(format!("construct concave texture: {error}")))?;
+    let background = fmn_core::color::LinearRgba {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 0.0,
+    };
+    let viewport = Viewport { width: 96, height: 96 };
+    let config = RetainedFrameRendererConfig {
+        frame: FrameConfig::new(
+            viewport,
+            ScreenMap { scale: 12.0, origin: [48.0, 48.0], y_up: true },
+            background,
+        ),
+        tiling: Tiling { macro_tile: 32, fine_tile: 8 },
+        engine: EngineIdentity::certified(),
+        threads: 1,
+    };
+    let mut outcome = RunOutcome::ok();
+    let mut frames = 0_u64;
+    for reversed in [false, true] {
+        let mut order: Vec<usize> = (1..=9).collect();
+        if reversed {
+            order.reverse();
+        }
+        order.push(order[0]);
+        let corners = order.iter()
+            .map(|index| format!("{index}/{index}/1"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let source = format!("{geometry}usemtl A\nf {corners}\nusemtl B\nf 2/2/1 3/3/1 4/4/1\n");
+        let document = ObjDocument::parse(source.as_bytes())
+            .map_err(|error| fail(format!("parse concave OBJ: {error}")))?;
+        if document.mesh().triangles.len() != 8
+            || document.runs().len() != 2
+            || document.runs()[0].triangles != (0..7)
+            || document.runs()[1].triangles != (7..8)
+        {
+            return Err(fail("concave triangulation shifted a material face interval"));
+        }
+        let mut retained_corners = BTreeSet::new();
+        let mut area = 0.0;
+        for triangle in &document.mesh().triangles[..7] {
+            let [a, b, c] = triangle.map(|corner| document.mesh().vertices[corner.vertex]);
+            let signed = (b[0] - a[0]) * (c[1] - a[1])
+                - (b[1] - a[1]) * (c[0] - a[0]);
+            if signed == 0.0 || (signed < 0.0) != reversed {
+                return Err(fail("concave triangles lost the original face winding"));
+            }
+            area += signed.abs() * 0.5;
+            for corner in triangle {
+                retained_corners.insert((corner.vertex, corner.tex_coord, corner.normal));
+            }
+        }
+        let expected_corners: BTreeSet<_> = (0..9)
+            .map(|index| (index, Some(index), Some(0)))
+            .collect();
+        if area != 10.0 || retained_corners != expected_corners {
+            return Err(fail("concave face area or per-corner attributes changed"));
+        }
+        let model = document.to_mobject(
+            4.0,
+            &materials,
+            &BTreeMap::from([("A".to_owned(), image.clone())]),
+        )
+        .map_err(|error| fail(format!("build concave material model: {error}")))?;
+        let mut stage = Stage::new();
+        let root = stage.add(model);
+        stage.add_to_scene(root)
+            .map_err(|error| fail(format!("admit concave model: {error}")))?;
+        let saved = stage.snapshot_bytes()
+            .map_err(|error| fail(format!("serialize concave model: {error}")))?;
+        let mut restored = Stage::new();
+        let decoded = Snapshot::from_bytes(&saved, &restored)
+            .map_err(|error| fail(format!("decode concave model: {error}")))?;
+        restored.restore(&decoded.snapshot);
+        if restored.snapshot_bytes().map_err(|error| fail(error.to_string()))? != saved {
+            return Err(fail("concave model snapshot changed bytes"));
+        }
+        for pose in 0..2 {
+            let mut camera_config = CameraConfig {
+                resolution: (96, 96),
+                background,
+                ..CameraConfig::default()
+            };
+            camera_config.frame.set_shape([8.0, 8.0])
+                .map_err(|error| fail(error.to_string()))?;
+            camera_config.frame.set_euler_angles(
+                Some(f64::from(pose) * 0.35),
+                Some(f64::from(pose) * 0.3),
+                None,
+            )
+            .map_err(|error| fail(error.to_string()))?;
+            let camera = Camera::new(camera_config)
+                .map_err(|error| fail(format!("construct concave camera: {error}")))?;
+            let mut fresh = RetainedFrameRenderer::new(config)
+                .map_err(|error| fail(error.to_string()))?;
+            let reference = fresh.prepare_with_camera(&stage, &camera)
+                .map_err(|error| fail(error.to_string()))?
+                .render(1)
+                .map_err(|error| fail(error.to_string()))?;
+            // Independent interior/exterior probes, safely away from edges.
+            for (point, filled) in [
+                ([-1.5, 1.0, 0.0], true),
+                ([1.5, 1.0, 0.0], true),
+                ([0.0, -1.5, 0.0], true),
+                ([0.0, 1.0, 0.0], false),
+                ([0.0, 0.0, 0.0], false),
+            ] {
+                let pixel = camera.project(point, 0.0).pixel((96, 96))
+                    .ok_or_else(|| fail("concave probe did not project"))?;
+                if !(0.0..96.0).contains(&pixel[0]) || !(0.0..96.0).contains(&pixel[1]) {
+                    return Err(fail("concave probe left the viewport"));
+                }
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let (x, y) = (pixel[0] as usize, pixel[1] as usize);
+                let offset = y * reference.layout().stride(0) + x * 8 + 6;
+                let bytes = reference.plane(0);
+                let alpha = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
+                if (alpha != 0) != filled {
+                    return Err(fail("concave cutout or interior has incorrect coverage"));
+                }
+            }
+            for threads in [1, 4, 16] {
+                let mut renderer = RetainedFrameRenderer::new(
+                    RetainedFrameRendererConfig { threads, ..config },
+                )
+                .map_err(|error| fail(error.to_string()))?;
+                for state in [&stage, &restored] {
+                    renderer.render_with_camera(state, &camera)
+                        .map_err(|error| fail(error.to_string()))?;
+                    if renderer.frame().as_bytes() != reference.as_bytes() {
+                        return Err(fail("concave frame changed across threads or restoration"));
+                    }
+                    frames += 1;
+                }
+            }
+            if pose == 1 {
+                outcome = outcome.with_artifact(
+                    if reversed { "obj-concave-cw.frame" } else { "obj-concave-ccw.frame" },
+                    encode_frame(&reference).map_err(|error| fail(error.to_string()))?,
+                );
+            }
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.obj.concave_faces")
+            .field("frames", frames)
+            .field("face_area", 10_u64)
+            .field("corners_preserved", 9_u64)
+            .field("cutout_preserved", "true"),
+    );
+    Ok(outcome.with_counter("obj_concave_frames", frames))
+}
+
 fn retained_camera_frames_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     use fmn::prelude::{Cube, RuntimeConfig, Scene};
     use fmn_render::{Camera, CameraConfig, RetainedFrameRenderer, RetainedFrameRendererConfig};
@@ -14164,6 +14348,25 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.obj_concave_faces.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(obj_concave_faces_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("obj_concave_frames", 24),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.obj.concave_faces",
+            vec![
+                FieldPred::u64_eq("frames", 24),
+                FieldPred::u64_eq("face_area", 10),
+                FieldPred::u64_eq("corners_preserved", 9),
+                FieldPred::str_eq("cutout_preserved", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.obj_texture_options.v1",
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
@@ -16947,6 +17150,16 @@ fn adaptive_static_prefix_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.adaptive_static_prefix.v1")
         .expect("adaptive static-prefix scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn obj_concave_faces_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.obj_concave_faces.v1")
+        .expect("OBJ concave-face scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

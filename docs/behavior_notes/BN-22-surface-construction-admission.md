@@ -70,6 +70,45 @@ materializing an unbounded result vector. Scene-bound construction is refused
 before sampling. The host adapter remains responsible for Python input conversion
 and aggregate multi-face solid admission; it is not a second native sampler.
 
+## Planar OBJ polygon admission
+
+The owned OBJ reader formerly fan-triangulated every polygon. A concave face
+could therefore cover an authored cutout or overlap itself. It now accepts
+simple planar polygons through Chisel's boundary-preserving triangulator.
+This is an intentional geometry correction: concave output may change
+triangle order and visible coverage. Valid nondegenerate convex fans keep
+their original order, and original three-corner statements retain their
+direct behavior, including defined zero-area triangles.
+
+The reader first normalizes finite 3D coordinates into bounded predicate
+space, accumulates the face area vector in source order, and chooses its
+largest absolute component with a fixed X/Y/Z tie-break. The cyclic projected
+axis pairs retain the sign of that component; emitted triangles restore the
+source face's 3D winding. Every accepted polygon remains within `1e-6` of the
+largest bounding-box extent from the face plane through its first corner.
+Original 3D coordinates are never flattened or otherwise repaired.
+
+The narrow `triangulate_preserving_vertices` entry point shares Chisel's
+normalization, boundary predicates and strict ear checks. It does not clean
+collinear vertices, merge positions, split recursively, or discard a remnant.
+Every accepted input index participates; the output contains exactly `n - 2`
+nondegenerate triangles. This retains authored UV/normal values on straight boundary runs.
+The existing general `triangulate` cleanup and hole behavior are unchanged.
+
+Only an exactly repeated closing `(v, vt, vn)` tuple is redundant. Other
+coincident, touching, crossing or backtracking polygon boundaries refuse.
+The material layer consumes the geometry parser's actual source-face triangle
+intervals; it no longer estimates face size from token count. A closing tuple
+cannot shift subsequent material bindings.
+
+Before face storage is collected, each source face is bounded to 4096 corners.
+The triangulator's additional 67,108,864-unit work budget charges every
+simplicity pair and reserves six full vertex scans per ear candidate, including
+failed candidates. Budget exhaustion and geometric refusal include the source
+face line. The total emitted triangle limit is checked before triangulation,
+after removing an exactly repeated closing tuple.
+No dependency, wire-format, renderer arithmetic or host file authority changes.
+
 ## Explicit limitations
 
 The native fallible API applies to rectangular UV sampling, not every specialized
@@ -96,3 +135,12 @@ control.
 `crates/fmn-python/tests/native_surface_sampling.py` bypasses the host callback
 guard and tests the raw bridge's admission, each derivative-probe failure,
 original exception identity, and unchanged target records/views after refusal.
+
+`crates/fmn-geom/src/earclip.rs` verifies the preserving entry point's area,
+cutout coverage, collinear indices, numerical normalization, topology refusals,
+and both simplicity/ear work accounting. `crates/fmn-library/tests/obj_polygons.rs`
+checks all dominant planes and windings, negative indices, actual material
+ranges, exact native UV/normal records, tight budgets, and source-line refusals.
+The registered `render_matrix.obj_concave_faces.v1` scenario exercises native
+textured model composition, independent cutout probes, durable restoration,
+and camera rendering at 1/4/16 threads.

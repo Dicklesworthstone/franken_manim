@@ -13,18 +13,25 @@
 //! | `v x y z [w]` | yes; the homogeneous `w` is accepted and ignored |
 //! | `vn i j k` | yes; stored raw, normalized at mobject conversion |
 //! | `vt u [v [w]]` | yes; `v` defaults to 0, `w` ignored |
-//! | `f c₁ c₂ …` | yes; corner forms `v`, `v/vt`, `v//vn`, `v/vt/vn`; 1-based and negative (relative) indices; polygons fan-triangulated |
+//! | `f c₁ c₂ …` | yes; corner forms `v`, `v/vt`, `v//vn`, `v/vt/vn`; 1-based and negative (relative) indices; planar simple convex/concave polygons |
 //! | `o`, `g`, `s`, `usemtl`, `mtllib`, `l`, `p`, `vp` | parsed over (no effect) |
 //! | anything else | skipped (trimesh-compatible tolerance) |
 //! | `#` comments, blank lines, CRLF | handled |
 //!
-//! **Not supported:** MTL material/texture resolution (the Reference's
-//! pywavefront pass) — there is no texture carriage channel in the
-//! detached mobject yet (the same seam [`crate::image`] documents), so
-//! `usemtl`/`mtllib` are parsed over and the model converts as a
-//! plain-colored, lit triangle mesh. Free-form curves/surfaces (`cstype`
-//! etc.) are skipped like every unknown statement. There is no axis
-//! remap: OBJ coordinates are used as-is (trimesh behavior).
+//! This geometry-only reader ignores material directives; [`crate::ObjDocument`]
+//! resolves material runs over the same parsed triangles. Free-form curves and
+//! surfaces (`cstype` etc.) remain skipped. There is no axis remap.
+//!
+//! Polygons preserve every distinct corner's UV/normal indices, including
+//! collinear boundary corners. An identical repeated closing corner is
+//! accepted once; coincident corners with different attributes are refused.
+//! Valid convex fans retain their original triangle order. Other simple
+//! polygons use Chisel's bounded, boundary-preserving ear clipper after a
+//! stable dominant-plane projection. Faces must be planar within `1e-6` of
+//! their largest 3D bounding-box extent; admission never moves their original
+//! positions. Self-intersections, touching/backtracking boundaries, excessive
+//! work, and ambiguous degeneracies are named refusals. Existing explicit
+//! three-corner faces, including zero-area ones, retain their direct behavior.
 //!
 //! # Untrusted input (§16.5/R14)
 //!
@@ -35,9 +42,12 @@
 //! target of the W10 fuzz campaign (`obj_model` in fmn-conformance's
 //! `tests/fuzz_campaign.rs`).
 
+use std::ops::Range;
+
 use fmn_core::color::Srgb;
 use fmn_core::constants::GREY;
 use fmn_core::types::Vec3;
+use fmn_geom::{EarClipError, EarClipOptions, MAX_EARCLIP_VERTICES, triangulate_preserving_vertices};
 use fmn_mobject::record::{RecordBuffer, RecordSchema};
 use fmn_mobject::uniforms::Uniforms;
 use fmn_mobject::{Mobject, RenderPrimitive};
@@ -96,6 +106,27 @@ pub enum ObjError {
         /// How many corners the face named.
         corners: usize,
     },
+    /// A polygon named more corners than the bounded geometry kernel accepts.
+    FaceTooLarge {
+        /// 1-based line number.
+        line: usize,
+        /// The maximum number of source face corners.
+        limit: usize,
+    },
+    /// A polygon has no stable plane or exceeds the planarity tolerance.
+    InvalidPolygon {
+        /// 1-based line number.
+        line: usize,
+        /// The geometric admission failure.
+        reason: &'static str,
+    },
+    /// The projected boundary cannot be triangulated without losing corners.
+    Triangulation {
+        /// 1-based line number.
+        line: usize,
+        /// The geometry kernel's typed refusal.
+        cause: EarClipError,
+    },
     /// The vertex budget refused.
     TooManyVertices {
         /// 1-based line number.
@@ -117,7 +148,7 @@ pub enum ObjError {
         /// The configured budget.
         limit: usize,
     },
-    /// The triangle budget refused (fan triangulation counts).
+    /// The emitted triangle budget refused.
     TooManyTriangles {
         /// 1-based line number.
         line: usize,
@@ -155,6 +186,15 @@ impl std::fmt::Display for ObjError {
                 f,
                 "line {line}: face names {corners} corner(s); at least 3 are required"
             ),
+            Self::FaceTooLarge { line, limit } => {
+                write!(f, "line {line}: face corner budget of {limit} exceeded")
+            }
+            Self::InvalidPolygon { line, reason } => {
+                write!(f, "line {line}: invalid polygon: {reason}")
+            }
+            Self::Triangulation { line, cause } => {
+                write!(f, "line {line}: polygon triangulation refused: {cause}")
+            }
             Self::TooManyVertices { line, limit } => {
                 write!(f, "line {line}: vertex budget of {limit} exceeded")
             }
@@ -188,7 +228,7 @@ pub struct ObjLimits {
     pub max_tex_coords: usize,
     /// Maximum `vn` statements.
     pub max_normals: usize,
-    /// Maximum emitted triangles (fan triangulation counts against this).
+    /// Maximum emitted triangles (after any identical closing corner is removed).
     pub max_triangles: usize,
 }
 
@@ -217,8 +257,7 @@ pub struct ObjCorner {
     pub normal: Option<usize>,
 }
 
-/// A parsed OBJ mesh: the declared attribute lists and the fan-triangulated
-/// faces.
+/// A parsed OBJ mesh: the declared attribute lists and triangulated faces.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObjMesh {
     /// `v` statements, in declaration order.
@@ -227,7 +266,7 @@ pub struct ObjMesh {
     pub tex_coords: Vec<[f64; 2]>,
     /// `vn` statements, raw as declared (normalized at conversion).
     pub normals: Vec<Vec3>,
-    /// Fan-triangulated faces.
+    /// Triangulated faces, retaining source face order and original winding.
     pub triangles: Vec<[ObjCorner; 3]>,
 }
 
@@ -239,6 +278,27 @@ impl ObjMesh {
 
     /// Parse OBJ bytes under explicit budgets (the untrusted-input path).
     pub fn parse_with_limits(bytes: &[u8], limits: &ObjLimits) -> Result<Self, ObjError> {
+        Self::parse_with_face_sink(bytes, limits, |_, _| {})
+    }
+
+    /// Material bindings consume the geometry parser's actual face intervals,
+    /// never a second guess at how many triangles a source polygon emitted.
+    pub(crate) fn parse_with_face_ranges(
+        bytes: &[u8],
+        limits: &ObjLimits,
+    ) -> Result<(Self, Vec<(usize, Range<usize>)>), ObjError> {
+        let mut faces = Vec::new();
+        let mesh = Self::parse_with_face_sink(bytes, limits, |line, triangles| {
+            faces.push((line, triangles));
+        })?;
+        Ok((mesh, faces))
+    }
+
+    fn parse_with_face_sink(
+        bytes: &[u8],
+        limits: &ObjLimits,
+        mut on_face: impl FnMut(usize, Range<usize>),
+    ) -> Result<Self, ObjError> {
         let text = std::str::from_utf8(bytes).map_err(|e| ObjError::NotUtf8 {
             offset: e.valid_up_to(),
         })?;
@@ -257,7 +317,14 @@ impl ObjMesh {
             }
             let mut tokens = content.split_whitespace();
             let statement = tokens.next().unwrap_or("");
-            let args: Vec<&str> = tokens.collect();
+            // Bound corner storage before allocation; ignored directives and
+            // optional coordinates never require collecting an unbounded line.
+            let args: Vec<&str> = match statement {
+                "f" => tokens.take(MAX_EARCLIP_VERTICES + 1).collect(),
+                "v" | "vn" => tokens.take(3).collect(),
+                "vt" => tokens.take(2).collect(),
+                _ => Vec::new(),
+            };
             match statement {
                 "v" => {
                     if mesh.vertices.len() >= limits.max_vertices {
@@ -307,22 +374,38 @@ impl ObjMesh {
                             corners: args.len(),
                         });
                     }
+                    if args.len() > MAX_EARCLIP_VERTICES {
+                        return Err(ObjError::FaceTooLarge {
+                            line,
+                            limit: MAX_EARCLIP_VERTICES,
+                        });
+                    }
                     let mut corners = Vec::with_capacity(args.len());
                     for token in &args {
                         corners.push(parse_corner(token, line, &mesh)?);
                     }
-                    // Fan triangulation: (0, i, i+1), matching trimesh's
-                    // handling of convex OBJ polygons.
-                    for i in 1..corners.len() - 1 {
-                        if mesh.triangles.len() >= limits.max_triangles {
-                            return Err(ObjError::TooManyTriangles {
-                                line,
-                                limit: limits.max_triangles,
-                            });
-                        }
-                        mesh.triangles
-                            .push([corners[0], corners[i], corners[i + 1]]);
+                    // Only a fully identical closing corner is redundant.
+                    // Different UV/normal indices must never disappear.
+                    if corners.len() > 3 && corners.first() == corners.last() {
+                        corners.pop();
                     }
+                    let start = mesh.triangles.len();
+                    let end = start
+                        .checked_add(corners.len() - 2)
+                        .filter(|&end| end <= limits.max_triangles)
+                        .ok_or(ObjError::TooManyTriangles {
+                            line,
+                            limit: limits.max_triangles,
+                        })?;
+                    if args.len() == 3 {
+                        mesh.triangles.push([corners[0], corners[1], corners[2]]);
+                    } else {
+                        for triangle in triangulate_face(&mesh, &corners, line)? {
+                            mesh.triangles.push(triangle.map(|index| corners[index]));
+                        }
+                    }
+                    debug_assert_eq!(mesh.triangles.len(), end);
+                    on_face(line, start..end);
                 }
                 // Known no-ops for the geometry subset (grouping, smoothing,
                 // materials, lines, points, parameter-space vertices).
@@ -390,6 +473,137 @@ impl ObjMesh {
             None => face,
         }
     }
+}
+
+/// Project a planar source polygon into bounded predicate coordinates. The
+/// cyclic axis pairs preserve the sign of the corresponding 3D normal.
+fn triangulate_face(
+    mesh: &ObjMesh,
+    corners: &[ObjCorner],
+    line: usize,
+) -> Result<Vec<[usize; 3]>, ObjError> {
+    let fail = |reason| ObjError::InvalidPolygon { line, reason };
+    let source_origin = mesh.vertices[corners[0].vertex];
+    let mut points: Vec<Vec3> = corners
+        .iter()
+        .map(|corner| sub(mesh.vertices[corner.vertex], source_origin))
+        .collect();
+    if points.iter().flatten().any(|value| !value.is_finite()) {
+        // Opposite finite extremes can overflow subtraction. Scale absolute
+        // coordinates first only in that case; ordinary translation preserves
+        // tiny in-plane detail beside a huge constant orthogonal coordinate.
+        for (point, corner) in points.iter_mut().zip(corners) {
+            *point = mesh.vertices[corner.vertex];
+        }
+    }
+    let mut magnitude = 0.0_f64;
+    for value in points.iter().flatten() {
+        magnitude = magnitude.max(value.abs());
+    }
+    if magnitude == 0.0 {
+        return Err(fail("all corners coincide"));
+    }
+    let mut min = [f64::INFINITY; 3];
+    let mut max = [f64::NEG_INFINITY; 3];
+    for point in &points {
+        for axis in 0..3 {
+            let value = point[axis] / magnitude;
+            min[axis] = min[axis].min(value);
+            max[axis] = max[axis].max(value);
+        }
+    }
+    let center = std::array::from_fn::<_, 3, _>(|axis| {
+        min[axis] + (max[axis] - min[axis]) * 0.5
+    });
+    let span = (max[0] - min[0]).max(max[1] - min[1]).max(max[2] - min[2]);
+    if span == 0.0 {
+        return Err(fail("all corners coincide"));
+    }
+    for point in &mut points {
+        for axis in 0..3 {
+            point[axis] = (point[axis] / magnitude - center[axis]) / span;
+        }
+    }
+    let origin = points[0];
+    let mut area_vector = [0.0; 3];
+    for i in 0..points.len() {
+        let area = cross(
+            sub(points[i], origin),
+            sub(points[(i + 1) % points.len()], origin),
+        );
+        for axis in 0..3 {
+            area_vector[axis] += area[axis];
+        }
+    }
+    let mut dominant = 0;
+    for axis in 1..3 {
+        if area_vector[axis].abs() > area_vector[dominant].abs() {
+            dominant = axis;
+        }
+    }
+    if area_vector[dominant].abs() <= 1e-24 {
+        return Err(fail("no stable nonzero polygon area"));
+    }
+    let length = (area_vector[0] * area_vector[0]
+        + area_vector[1] * area_vector[1]
+        + area_vector[2] * area_vector[2])
+        .sqrt();
+    let normal = area_vector.map(|component| component / length);
+    for &point in &points {
+        let delta = sub(point, origin);
+        let distance = delta[0] * normal[0] + delta[1] * normal[1] + delta[2] * normal[2];
+        if distance.abs() > 1e-6 {
+            return Err(fail("nonplanar face exceeds the relative 1e-6 tolerance; triangulate it explicitly"));
+        }
+    }
+    let axes = match dominant {
+        0 => [1, 2],
+        1 => [2, 0],
+        _ => [0, 1],
+    };
+    let projected: Vec<[f64; 2]> = points
+        .iter()
+        .map(|point| [point[axes[0]], point[axes[1]]])
+        .collect();
+    let triangles = triangulate_preserving_vertices(&projected)
+        .map_err(|cause| ObjError::Triangulation { line, cause })?;
+    let orientation = if area_vector[dominant] > 0.0 { 1.0 } else { -1.0 };
+    let turn = |a: usize, b: usize, c: usize| {
+        let a = projected[a];
+        let b = projected[b];
+        let c = projected[c];
+        ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]))
+            * orientation
+    };
+    let mut min2 = [f64::INFINITY; 2];
+    let mut max2 = [f64::NEG_INFINITY; 2];
+    for point in &projected {
+        for axis in 0..2 {
+            min2[axis] = min2[axis].min(point[axis]);
+            max2[axis] = max2[axis].max(point[axis]);
+        }
+    }
+    let tolerance = EarClipOptions::default().tolerance;
+    let dx = max2[0] - min2[0];
+    let dy = max2[1] - min2[1];
+    let sliver_eps = tolerance * tolerance * (dx * dx + dy * dy);
+    let n = corners.len();
+    let convex = (0..n).all(|i| turn(i, (i + 1) % n, (i + 2) % n) >= 0.0);
+    if convex && (1..n - 1).all(|i| turn(0, i, i + 1) > sliver_eps) {
+        // Keep the established source-order fan, including clockwise input,
+        // whenever that fan represents every boundary corner nondegenerately.
+        return Ok((1..n - 1).map(|i| [0, i, i + 1]).collect());
+    }
+    Ok(triangles
+        .into_iter()
+        .map(|triangle| {
+            let mut triangle = triangle.map(|index| index as usize);
+            if orientation < 0.0 {
+                triangle.swap(1, 2);
+            }
+            triangle
+        })
+        .collect())
 }
 
 /// Parse the first three tokens of a statement as finite f64s; a short

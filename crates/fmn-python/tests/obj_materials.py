@@ -234,6 +234,44 @@ class ObjMaterialTests(unittest.TestCase):
             for threads in (1, 4, 16):
                 self.assertEqual(self.capture(model[0], threads=threads).png(), pixels)
 
+    def test_concave_faces_preserve_winding_attributes_and_material_boundaries(self):
+        points = np.array([[-2., -2., 0.], [2., -2., 0.], [2., 2., 0.],
+                           [1., 2., 0.], [1., -1., 0.], [-1., -1., 0.],
+                           [-1., 2., 0.], [-2., 2., 0.], [-2., 0., 0.]])
+        geometry = ''.join('v %s %s %s\n' % tuple(point) for point in points)
+        geometry += ('vt 0 0\nvt 1 0\nvt 1 1\nvt .75 1\nvt .75 .25\n'
+                     'vt .25 .25\nvt .25 1\nvt 0 1\nvt .125 .5\nvn 0 0 1\n')
+        for reversed_face in (False, True):
+            order = list(range(1, 10))
+            if reversed_face:
+                order.reverse()
+            order.append(order[0])
+            corners = ' '.join(f'{index}/{index}/1' for index in order)
+            path = self.write(
+                'concave.obj', 'mtllib materials/scene.mtl\n' + geometry
+                + f'usemtl painted\nf {corners}\n'
+                + 'usemtl plain\nf 2/2/1 3/3/1 4/4/1\n')
+            model = m.ThreeDModel(path, height=4)
+            self.assertEqual([child.material_name for child in model], ['painted', 'plain'])
+            self.assertEqual(model[0].get_num_points(), 21)
+            self.assertEqual(model[1].get_num_points(), 3)
+            triangles = model[0].get_points().reshape((-1, 3, 3))
+            signed = np.cross(triangles[:, 1] - triangles[:, 0],
+                              triangles[:, 2] - triangles[:, 0])[:, 2]
+            self.assertTrue(np.all(signed < 0) if reversed_face else np.all(signed > 0))
+            self.assertEqual(np.abs(signed).sum() * .5, 10)
+            # This collinear corner carries a UV that cannot be recovered
+            # by removing it and interpolating its two boundary neighbours.
+            rows = np.all(model[0].get_points() == [-2., 0., 0.], axis=1)
+            self.assertTrue(rows.any())
+            np.testing.assert_array_equal(
+                model[0].data['im_coords'][rows],
+                np.tile([.125, .5], (np.count_nonzero(rows), 1)))
+            expected = self.capture(model).png()
+            for copied in (model.copy(), pickle.loads(pickle.dumps(model))):
+                for threads in (1, 4, 16):
+                    self.assertEqual(self.capture(copied, threads=threads).png(), expected)
+
     def test_unsupported_map_option_is_an_explicit_import_error(self):
         self.write('materials/scene.mtl', 'newmtl painted\nmap_Kd -t 2 2 1 maps/tiles.png\n')
         with self.assertRaisesRegex(ValueError, 'unsupported diffuse texture map option'):
