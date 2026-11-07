@@ -60,6 +60,8 @@
 //! regression drill (`RegressionKind`): the runner drives the scenario
 //! red, and the repro bundle plus log artifact must appear.
 
+#[path = "support/path_observation.rs"]
+mod path_observation;
 #[allow(dead_code)]
 #[path = "support/semantic_routes.rs"]
 mod semantic_routes;
@@ -14099,6 +14101,29 @@ fn spec(
 pub fn catalog() -> Vec<ScenarioSpec> {
     let mut specs = vec![
         spec(
+            "lifecycle.owned_path_observations.v1",
+            ScenarioClass::LifecycleDrill,
+            Surface::RustApi,
+            Invocation::new(path_observation::run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("path_observation_generations", 3),
+                counter_eq("path_observation_thread_configs", 3),
+                counter_eq("path_observation_samples", 441),
+                counter_eq("path_observation_materializations", 3),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.lifecycle.owned_path_observations",
+                vec![
+                    FieldPred::str_eq("owner_dropped", "true"),
+                    FieldPred::str_eq("exact_bits", "true"),
+                    FieldPred::u64_eq("generations", 3),
+                    FieldPred::u64_eq("samples", 441),
+                    FieldPred::u64_eq("materializations", 3),
+                ],
+            )],
+        ),
+        spec(
             "lifecycle.documented_config_effects.v1",
             ScenarioClass::LifecycleDrill,
             Surface::CliInProcess,
@@ -18320,6 +18345,16 @@ fn python_portal_png_still_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.python_portal_png_still.v1")
         .expect("Python portal still scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn owned_path_observation_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.owned_path_observations.v1")
+        .expect("owned path observation scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }
