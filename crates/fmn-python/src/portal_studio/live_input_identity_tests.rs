@@ -3,6 +3,7 @@ use super::*;
 use fmn_studio::advance::{StudioAdvance, studio_advance_command};
 use fmn_studio::protocol::{StudioInput, studio_input_command};
 
+#[cfg(test)]
 fn frame(worker: &mut LiveWorker) -> Vec<u8> {
     let WorkerResponse::Frame(FrameStream {
         payload: FramePayload::Pipe { bytes, .. },
@@ -150,4 +151,172 @@ fn portal_studio_live_validator_refuses_noncallable_or_success_shaped_false() {
         let valid = py.eval(c"lambda: None", None, None).unwrap().unbind();
         validate_inputs(py, Some(&valid)).unwrap();
     });
+}
+
+#[test]
+fn portal_studio_stale_live_worker_leaves_replacement_input_usable() {
+    for mode in [
+        "stale",
+        "validator",
+        "callback",
+        "updater",
+        "advance-validator",
+    ] {
+        crate::with_python_test_module("live capture ownership", |py, _module, globals| {
+            let source = std::ffi::CString::new(
+                r#"
+import manimlib as m
+mode, armed, replacements, events = 'idle', False, 0, 0
+def replace():
+    global armed, replacement, replacements
+    assert s.time == 0, 'replacement requires a pristine paused scene'
+    armed = False
+    s._abort_render()
+    s._begin_studio_capture('Live', '33'*32, '44'*32, 96, 54, 8, 1, 0, 8, 1024*1024)
+    s.camera._core.set_pixel_shape(96, 54)
+    s.camera.fps = 8
+    s.box = m.Square(fill_opacity=1).shift(m.RIGHT)
+    s.add(s.box)
+    s.wait(0.25)
+    replacement = s._prepare_studio_live()
+    replacements += 1
+def validate():
+    if armed and mode in ('validator', 'advance-validator'):
+        replace()
+class Live(m.Scene):
+    def on_key_press(self, symbol, modifiers):
+        global events
+        events += 1
+        if armed and mode == 'callback':
+            replace()
+        elif not armed:
+            self.box.shift(m.UP)
+s = Live()
+s._fmn_studio_validate_inputs = validate
+s._begin_studio_capture('Live', '11'*32, '22'*32, 96, 54, 8, 1, 0, 8, 1024*1024)
+s.camera._core.set_pixel_shape(96, 54)
+s.camera.fps = 8
+def update(box, dt):
+    if armed and mode == 'updater' and dt == 0:
+        replace()
+# Keep only the carried camera frame until replacement. A paused refresh
+# captures without advancing the clock or violating pristine-scene admission.
+s.frame.add_updater(update)
+"#,
+            )
+            .unwrap();
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .unwrap();
+            let scene = globals
+                .get_item("s")
+                .unwrap()
+                .unwrap()
+                .cast_into::<PyScene>()
+                .unwrap();
+            let mut stale = LiveWorker::new(&scene).unwrap();
+            assert_eq!(stale.frame_count().unwrap(), 1);
+            globals.set_item("mode", mode).unwrap();
+            globals.set_item("armed", true).unwrap();
+            let input = |frame| {
+                studio_input_command(
+                    "Live",
+                    &StudioInput {
+                        frame,
+                        revision: 0,
+                        target: None,
+                        event: EventPayload::KeyPress {
+                            key: Key::Character('a'),
+                            modifiers: Modifiers::NONE,
+                        },
+                    },
+                )
+                .unwrap()
+            };
+            if mode == "stale" {
+                py.run(c"replace()", Some(globals), Some(globals)).unwrap();
+            } else {
+                let command = if mode == "advance-validator" {
+                    studio_advance_command(
+                        "Live",
+                        StudioAdvance {
+                            frame: 0,
+                            revision: 0,
+                            frames: 2,
+                        },
+                    )
+                    .unwrap()
+                } else {
+                    input(0)
+                };
+                let error = stale
+                    .handle(SupervisorRequest::Play {
+                        scene: "Live".into(),
+                        command,
+                    })
+                    .unwrap_err();
+                assert!(error.to_string().contains("ownership"), "{mode}: {error}");
+                assert!(stale.failed.is_some(), "{mode}");
+            }
+            assert_eq!(
+                globals
+                    .get_item("replacements")
+                    .unwrap()
+                    .unwrap()
+                    .extract::<u32>()
+                    .unwrap(),
+                1,
+                "{mode} did not exercise replacement"
+            );
+            if matches!(mode, "validator" | "advance-validator") {
+                assert_eq!(
+                    globals
+                        .get_item("events")
+                        .unwrap()
+                        .unwrap()
+                        .extract::<u32>()
+                        .unwrap(),
+                    0,
+                    "stale input reached the replacement after validation"
+                );
+            }
+            let error = stale.frame_count().unwrap_err();
+            assert!(error.to_string().contains("ownership"), "{mode}: {error}");
+            let error = stale
+                .begin_session(
+                    ProtocolDigest::from_hex(&"55".repeat(32)).unwrap(),
+                    1024 * 1024,
+                )
+                .unwrap_err();
+            assert!(error.to_string().contains("ownership"), "{mode}: {error}");
+            let error = stale
+                .handle(SupervisorRequest::Scrub {
+                    scene: "Live".into(),
+                    frame: 1,
+                })
+                .unwrap_err();
+            assert!(error.to_string().contains("ownership"), "{mode}: {error}");
+
+            let replacement = globals
+                .get_item("replacement")
+                .unwrap()
+                .unwrap()
+                .cast_into::<Recording>()
+                .unwrap();
+            let mut recording = replacement.borrow_mut();
+            let Some(CapturedWorker::Live(worker)) = recording.worker.as_mut() else {
+                panic!("expected the replacement live worker");
+            };
+            assert_eq!(worker.frame_count().unwrap(), 2);
+            let before = frame(worker);
+            worker
+                .handle(SupervisorRequest::Play {
+                    scene: "Live".into(),
+                    command: input(1),
+                })
+                .unwrap();
+            assert_ne!(before, frame(worker), "{mode} froze replacement input");
+            assert!(worker.failed.is_none(), "{mode}");
+            scene.call_method0("_abort_render").unwrap();
+        });
+    }
 }

@@ -9363,7 +9363,7 @@ fn native_surface_holes_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErro
     let empty = render_certified_camera_doc(&Stage::new());
     let matches_triangle = hole_frame == render_certified_camera_doc(&oracle);
     let visible = hole_frame != empty;
-    let target = stage.add(complete.clone());
+    let target = stage.add(spec.sample(|u, v| [u, v, 0.0]));
     let mut morph = fmn_anim::Transform::new(source, target).with_config(fmn_anim::AnimConfig {
         rate_func: RateFunc::linear(),
         ..fmn_anim::AnimConfig::default()

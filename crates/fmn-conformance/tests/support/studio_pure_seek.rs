@@ -37,7 +37,7 @@ fn program_with_updater(stateful: bool) -> Result<NativeSceneProgram, ServiceErr
     )
     .map_err(service_error)?;
     let root = scene
-        .add_mobject(fmn_library::Circle::new().radius(0.5).build().into())
+        .add_mobject(fmn_library::Circle::new().radius(0.5).build())
         .map_err(service_error)?;
     if stateful {
         scene

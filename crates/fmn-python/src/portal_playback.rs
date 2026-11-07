@@ -271,8 +271,18 @@ pub(super) fn requested_skip(scene: &Bound<'_, PyScene>) -> PyResult<bool> {
 /// Called at segment boundaries, after Python pre_play/range hooks and before
 /// any animation begins. No Scene borrow survives Python attribute dispatch.
 pub(super) fn synchronize(scene: &Bound<'_, PyScene>) -> PyResult<()> {
-    let skipping = requested_skip(scene)?;
     let engine = Rc::clone(&scene.borrow().engine);
+    let generation = Arc::clone(&scene.borrow().render_generation);
+    let skipping = requested_skip(scene)?;
+    // The public skip flag can be an authored descriptor. Its callback must
+    // not redirect this boundary into a newly installed output generation.
+    if !Rc::ptr_eq(&engine, &scene.borrow().engine)
+        || !Arc::ptr_eq(&generation, &scene.borrow().render_generation)
+    {
+        return Err(PyRuntimeError::new_err(
+            "portal render ownership changed during playback synchronization",
+        ));
+    }
     let frame = engine.borrow().time().frames();
     let slot = Arc::clone(&scene.borrow().render);
     if let Some(session) = slot

@@ -11,10 +11,21 @@ fn failure(error: impl std::fmt::Display) -> ServiceError {
     ServiceError::new(WorkerErrorCode::ExecutionFailed, error.to_string())
 }
 
+fn ensure_generation(scene: &Bound<'_, PyScene>, generation: &Arc<()>) -> PyResult<()> {
+    if !Arc::ptr_eq(generation, &scene.try_borrow()?.render_generation) {
+        return Err(PyRuntimeError::new_err(
+            "live Studio capture ownership was lost; reload the scene",
+        ));
+    }
+    Ok(())
+}
+
 fn with_capture<T>(
     scene: &Bound<'_, PyScene>,
+    generation: &Arc<()>,
     f: impl FnOnce(&mut Capture) -> Result<T, ServiceError>,
 ) -> Result<T, ServiceError> {
+    ensure_generation(scene, generation).map_err(failure)?;
     let render = Arc::clone(&scene.try_borrow().map_err(failure)?.render);
     let mut slot = render.lock().map_err(failure)?;
     let Some(PortalRenderSession::Preview(capture)) = slot.as_mut() else {
@@ -40,8 +51,14 @@ fn validate_inputs(py: Python<'_>, validator: Option<&Py<PyAny>>) -> PyResult<()
 
 /// Snapshot after synchronization, never while a Python callback has an engine
 /// borrow. The original engine/generation must survive all camera descriptors.
-fn refresh(scene: &Bound<'_, PyScene>, validator: Option<&Py<PyAny>>) -> PyResult<()> {
+fn refresh(
+    scene: &Bound<'_, PyScene>,
+    generation: &Arc<()>,
+    validator: Option<&Py<PyAny>>,
+) -> PyResult<()> {
+    ensure_generation(scene, generation)?;
     validate_inputs(scene.py(), validator)?;
+    ensure_generation(scene, generation)?;
     let engine = Rc::clone(&scene.try_borrow()?.engine);
     portal_playback::synchronize(scene)?;
     // Match Scene.update_mobjects at the ordinary release boundary. Native
@@ -49,6 +66,7 @@ fn refresh(scene: &Bound<'_, PyScene>, validator: Option<&Py<PyAny>>) -> PyResul
     // Run the Python half while unborrowed so followers, controls and camera
     // updaters reflect an input edit even when its callback did not play/wait.
     run_python_updaters(scene, 0.0)?;
+    ensure_generation(scene, generation)?;
     synchronize_portal_camera(scene)?;
     if !Rc::ptr_eq(&engine, &scene.try_borrow()?.engine) {
         return Err(PyRuntimeError::new_err(
@@ -58,7 +76,7 @@ fn refresh(scene: &Bound<'_, PyScene>, validator: Option<&Py<PyAny>>) -> PyResul
     // Includes lazy imports and input edits made by zero-dt updaters and
     // camera descriptors. No frame has replaced the healthy recording yet.
     validate_inputs(scene.py(), validator)?;
-    with_capture(scene, |capture| {
+    with_capture(scene, generation, |capture| {
         capture.live_refresh = true;
         Ok(())
     })
@@ -69,7 +87,7 @@ fn refresh(scene: &Bound<'_, PyScene>, validator: Option<&Py<PyAny>>) -> PyResul
         ..PortalSceneSink::default()
     };
     let result = engine.borrow_mut().show(&mut sink).map_err(native_error);
-    with_capture(scene, |capture| {
+    with_capture(scene, generation, |capture| {
         capture.live_refresh = false;
         Ok(())
     })
@@ -81,8 +99,15 @@ fn refresh(scene: &Bound<'_, PyScene>, validator: Option<&Py<PyAny>>) -> PyResul
 /// authored waits or consuming play indices. No borrow spans host callbacks.
 /// Intermediate steps are deliberately not published: a command either yields
 /// its completed final view or freezes input with the last good view retained.
-fn advance(scene: &Bound<'_, PyScene>, frames: u32, validator: Option<&Py<PyAny>>) -> PyResult<()> {
+fn advance(
+    scene: &Bound<'_, PyScene>,
+    generation: &Arc<()>,
+    frames: u32,
+    validator: Option<&Py<PyAny>>,
+) -> PyResult<()> {
+    ensure_generation(scene, generation)?;
     validate_inputs(scene.py(), validator)?;
+    ensure_generation(scene, generation)?;
     let engine = Rc::clone(&scene.try_borrow()?.engine);
     let render = Arc::clone(&scene.try_borrow()?.render);
     let mut sink = PortalSceneSink {
@@ -101,6 +126,7 @@ fn advance(scene: &Bound<'_, PyScene>, frames: u32, validator: Option<&Py<PyAny>
             .prepare_idle_frame(&mut sink)
             .map_err(native_error)?;
         portal_playback::run_python_frame_updaters(scene, frame.dt(), frame.time().fps())?;
+        ensure_generation(scene, generation)?;
         synchronize_portal_camera(scene)?;
         if !Rc::ptr_eq(&engine, &scene.try_borrow()?.engine) {
             return Err(PyRuntimeError::new_err(
@@ -116,7 +142,7 @@ fn advance(scene: &Bound<'_, PyScene>, frames: u32, validator: Option<&Py<PyAny>
         // Complete the normal updater pass, capturing only the final step.
         // Do not call refresh/show afterwards: its zero-dt updater pass would
         // execute unconditional user callbacks twice for every live frame.
-        with_capture(scene, |c| {
+        with_capture(scene, generation, |c| {
             c.live_refresh = index + 1 == frames;
             Ok(())
         })
@@ -125,7 +151,7 @@ fn advance(scene: &Bound<'_, PyScene>, frames: u32, validator: Option<&Py<PyAny>
             .borrow_mut()
             .complete_idle_frame(frame, &mut sink)
             .map_err(native_error);
-        with_capture(scene, |c| {
+        with_capture(scene, generation, |c| {
             c.live_refresh = false;
             Ok(())
         })
@@ -137,6 +163,7 @@ fn advance(scene: &Bound<'_, PyScene>, frames: u32, validator: Option<&Py<PyAny>
 
 pub(super) struct LiveWorker {
     scene: Py<PyScene>,
+    generation: Arc<()>,
     input_validator: Option<Py<PyAny>>,
     name: String,
     build: ProtocolDigest,
@@ -147,12 +174,16 @@ pub(super) struct LiveWorker {
 impl LiveWorker {
     pub(super) fn frame_count(&self) -> PyResult<usize> {
         Python::attach(|py| {
-            with_capture(self.scene.bind(py), |c| Ok(c.recorded.frame_count()))
-                .map_err(native_error)
+            with_capture(self.scene.bind(py), &self.generation, |c| {
+                Ok(c.recorded.frame_count())
+            })
+            .map_err(native_error)
         })
     }
 
     fn new(scene: &Bound<'_, PyScene>) -> PyResult<Self> {
+        // Freeze ownership before any authored attribute access or validator.
+        let generation = Arc::clone(&scene.try_borrow()?.render_generation);
         let input_validator = scene
             .getattr("__dict__")?
             .cast::<PyDict>()?
@@ -166,7 +197,7 @@ impl LiveWorker {
                 "Studio input validator must be callable",
             ));
         }
-        let empty = with_capture(scene, |capture| {
+        let empty = with_capture(scene, &generation, |capture| {
             if capture.live {
                 return Err(failure("live Studio is already serving this scene"));
             }
@@ -174,20 +205,21 @@ impl LiveWorker {
         })
         .map_err(native_error)?;
         if empty {
-            refresh(scene, input_validator.as_ref())?;
+            refresh(scene, &generation, input_validator.as_ref())?;
         }
-        let (name, build) = with_capture(scene, |capture| {
+        let (name, build) = with_capture(scene, &generation, |capture| {
             capture.recorded.enable_live_input()?;
             capture.recorded.enable_live_advance()?;
             capture.live = true;
             Ok((capture.scene.clone(), capture.recorded.build_id()))
         })
         .map_err(native_error)?;
-        refresh(scene, input_validator.as_ref())?;
-        let state_hash =
-            with_capture(scene, |c| Ok(c.recorded.last_state_hash())).map_err(native_error)?;
+        refresh(scene, &generation, input_validator.as_ref())?;
+        let state_hash = with_capture(scene, &generation, |c| Ok(c.recorded.last_state_hash()))
+            .map_err(native_error)?;
         Ok(Self {
             scene: scene.clone().unbind(),
+            generation,
             input_validator,
             name,
             build,
@@ -202,6 +234,7 @@ impl LiveWorker {
         request: SupervisorRequest,
     ) -> Result<WorkerResponse, ServiceError> {
         let scene = self.scene.bind(py);
+        ensure_generation(scene, &self.generation).map_err(failure)?;
         let result = match request {
             SupervisorRequest::Play {
                 scene: name,
@@ -212,12 +245,18 @@ impl LiveWorker {
                         "live input is frozen after callback failure; reload: {error}"
                     )));
                 }
-                let request =
-                    with_capture(scene, |c| c.recorded.prepare_live_advance(&name, &command))?;
-                if let Err(error) = advance(scene, request.frames, self.input_validator.as_ref()) {
+                let request = with_capture(scene, &self.generation, |c| {
+                    c.recorded.prepare_live_advance(&name, &command)
+                })?;
+                if let Err(error) = advance(
+                    scene,
+                    &self.generation,
+                    request.frames,
+                    self.input_validator.as_ref(),
+                ) {
                     let message = error.to_string();
                     self.failed = Some(message.clone());
-                    let _ = with_capture(scene, |c| {
+                    let _ = with_capture(scene, &self.generation, |c| {
                         c.recorded.disable_live_input();
                         Ok(())
                     });
@@ -225,10 +264,12 @@ impl LiveWorker {
                         "live updater failed; input frozen until reload: {message}"
                     )));
                 }
-                let committed = with_capture(scene, |c| c.recorded.commit_live_advance(command));
+                let committed = with_capture(scene, &self.generation, |c| {
+                    c.recorded.commit_live_advance(command)
+                });
                 if let Err(error) = &committed {
                     self.failed = Some(error.to_string());
-                    let _ = with_capture(scene, |c| {
+                    let _ = with_capture(scene, &self.generation, |c| {
                         c.recorded.disable_live_input();
                         Ok(())
                     });
@@ -244,16 +285,18 @@ impl LiveWorker {
                         "live input is frozen after callback failure; reload: {error}"
                     )));
                 }
-                let input =
-                    with_capture(scene, |c| c.recorded.prepare_live_input(&name, &command))?;
+                let input = with_capture(scene, &self.generation, |c| {
+                    c.recorded.prepare_live_input(&name, &command)
+                })?;
                 // No Rust scene borrow or generation mutex crosses this call.
                 let dispatched = validate_inputs(py, self.input_validator.as_ref())
-                    .and_then(|()| dispatch(scene, input.event))
-                    .and_then(|()| refresh(scene, self.input_validator.as_ref()));
+                    .and_then(|()| ensure_generation(scene, &self.generation))
+                    .and_then(|()| dispatch(scene, &self.generation, input.event))
+                    .and_then(|()| refresh(scene, &self.generation, self.input_validator.as_ref()));
                 if let Err(error) = dispatched {
                     let message = error.to_string();
                     self.failed = Some(message.clone());
-                    let _ = with_capture(scene, |c| {
+                    let _ = with_capture(scene, &self.generation, |c| {
                         c.recorded.disable_live_input();
                         Ok(())
                     });
@@ -261,19 +304,23 @@ impl LiveWorker {
                         "live callback failed; input frozen until reload: {message}"
                     )));
                 }
-                let committed = with_capture(scene, |c| c.recorded.commit_live_input(command));
+                let committed = with_capture(scene, &self.generation, |c| {
+                    c.recorded.commit_live_input(command)
+                });
                 if let Err(error) = &committed {
                     self.failed = Some(error.to_string());
-                    let _ = with_capture(scene, |c| {
+                    let _ = with_capture(scene, &self.generation, |c| {
                         c.recorded.disable_live_input();
                         Ok(())
                     });
                 }
                 committed
             }
-            request => with_capture(scene, |c| c.recorded.handle(request)),
+            request => with_capture(scene, &self.generation, |c| c.recorded.handle(request)),
         };
-        self.state_hash = with_capture(scene, |c| Ok(c.recorded.last_state_hash()))?;
+        self.state_hash = with_capture(scene, &self.generation, |c| {
+            Ok(c.recorded.last_state_hash())
+        })?;
         result
     }
 }
@@ -294,7 +341,7 @@ impl WorkerService for LiveWorker {
         max_bytes: usize,
     ) -> Result<(), ServiceError> {
         Python::attach(|py| {
-            with_capture(self.scene.bind(py), |c| {
+            with_capture(self.scene.bind(py), &self.generation, |c| {
                 c.recorded.begin_session(supervisor, max_bytes)
             })
         })
@@ -306,7 +353,10 @@ impl WorkerService for LiveWorker {
 
 pub(crate) fn prepare(scene: &Bound<'_, PyScene>) -> PyResult<Recording> {
     let worker = LiveWorker::new(scene)?;
-    let tuning = with_capture(scene, |capture| Ok(capture.tuning.clone())).map_err(native_error)?;
+    let tuning = with_capture(scene, &worker.generation, |capture| {
+        Ok(capture.tuning.clone())
+    })
+    .map_err(native_error)?;
     Ok(Recording {
         worker: Some(CapturedWorker::Live(worker)),
         tuning,
@@ -347,7 +397,8 @@ fn key(value: Key) -> u32 {
     }
 }
 
-fn dispatch(scene: &Bound<'_, PyScene>, event: EventPayload) -> PyResult<()> {
+fn dispatch(scene: &Bound<'_, PyScene>, generation: &Arc<()>, event: EventPayload) -> PyResult<()> {
+    ensure_generation(scene, generation)?;
     event.validate().map_err(native_error)?;
     // Browser coordinates are down-positive in the advertised fixed plane.
     // The native camera performs the inverse rotation, translation and zoom;
@@ -360,6 +411,7 @@ fn dispatch(scene: &Bound<'_, PyScene>, event: EventPayload) -> PyResult<()> {
         .py()
         .import("fmn_python.interaction")?
         .getattr("dispatch_live_input")?;
+    ensure_generation(scene, generation)?;
     let point = |p: [f64; 3], relative| {
         let p = camera.from_fixed_frame_point([p[0], -p[1], p[2]], relative);
         np.call_method1("array", (p,))
@@ -430,6 +482,7 @@ fn dispatch(scene: &Bound<'_, PyScene>, event: EventPayload) -> PyResult<()> {
                 .getattr("camera")?
                 .call_method0("get_pixel_height")?
                 .extract::<u32>()?;
+            ensure_generation(scene, generation)?;
             if height == 0 {
                 return Err(PyValueError::new_err("live camera has zero pixel height"));
             }

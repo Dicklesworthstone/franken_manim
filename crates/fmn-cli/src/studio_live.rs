@@ -555,7 +555,24 @@ mod tests {
                 .handle(fmn_studio::SupervisorRequest::Scrub { scene, frame: 61 })
                 .is_err()
         );
-        assert_eq!(source_reads(&fs, &command).unwrap().len(), 4);
+        let reads = source_reads(&fs, &command).unwrap();
+        assert_eq!(
+            reads
+                .iter()
+                .map(|read| read.path.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "native/source-closure",
+                "native/worker-build",
+                "native/capture-contract",
+                "native/input-track-semantics",
+                "native/effect-inventory-semantics",
+            ]
+        );
+        assert_eq!(
+            reads[4].digest,
+            fmn_studio::protocol_digest(b"cumulative-native-prefix-effects-v1")
+        );
     }
     #[test]
     fn live_factory_rejects_offline_skip_before_execution() {
@@ -959,7 +976,24 @@ mod tests {
                 let mut selected = command.clone();
                 selected.render.common.threads = Some(threads);
                 let expected_reads = source_reads(&fs, &selected).unwrap();
-                assert_eq!(expected_reads.len(), 5);
+                assert_eq!(
+                    expected_reads
+                        .iter()
+                        .map(|read| read.path.as_str())
+                        .collect::<Vec<_>>(),
+                    [
+                        "native/source-closure",
+                        "native/worker-build",
+                        "native/capture-contract",
+                        "native/input-track-semantics",
+                        "native/effect-inventory-semantics",
+                        "native/camera-capture-policy",
+                    ]
+                );
+                assert_eq!(
+                    expected_reads[4].digest,
+                    fmn_studio::protocol_digest(b"cumulative-native-prefix-effects-v1")
+                );
                 let mut service = worker(&fs, &selected).unwrap();
                 for frame in [8, 1, 4, 8, 1] {
                     assert_eq!(

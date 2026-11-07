@@ -1285,6 +1285,9 @@ struct PyScene {
     roots_projection: RefCell<Option<RootsProjection>>,
     /// Optional production output session shared by every play/wait sink.
     render: Arc<Mutex<Option<PortalRenderSession>>>,
+    /// Output identity, including recordings that keep the same scene arena.
+    /// Retaining a token across callbacks prevents allocator-address reuse.
+    render_generation: Arc<()>,
     render_invocations: Vec<fmn_output::InvocationReport>,
     render_audio_inputs: Vec<portal_audio::PortalAudioInput>,
     render_image_inputs: Vec<portal_raster::PortalImageInput>,
@@ -1929,6 +1932,7 @@ pub(crate) fn install_pristine_arena(
     {
         let mut owner = scene.try_borrow_mut()?;
         owner.engine = Rc::clone(&replacement);
+        owner.render_generation = Arc::new(());
         owner.render_invocations.clear();
         owner.render_audio_inputs.clear();
         owner.render_image_inputs.clear();
@@ -8674,6 +8678,8 @@ fn synchronize_portal_camera(scene: &Bound<'_, PyScene>) -> PyResult<()> {
     if !portal_has_frame_render(scene)? {
         return Ok(());
     }
+    let engine = Rc::clone(&scene.borrow().engine);
+    let generation = Arc::clone(&scene.borrow().render_generation);
     let camera = scene.getattr("camera")?;
     // Use the same validated capture policy as Camera.capture_snapshot.
     // File and Studio sessions start before the scene camera is synchronized.
@@ -8711,7 +8717,15 @@ fn synchronize_portal_camera(scene: &Bound<'_, PyScene>) -> PyResult<()> {
         .is_ok_and(|method| method.is(&default_center));
     // A light in this Scene can still move in the native updater phase after
     // this release. Resolve its position from the immutable captured Stage.
-    let engine = Rc::clone(&scene.borrow().engine);
+    // Camera and light descriptors can cancel this generation and install
+    // another. Never bind the old camera snapshot into that replacement.
+    if !Rc::ptr_eq(&engine, &scene.borrow().engine)
+        || !Arc::ptr_eq(&generation, &scene.borrow().render_generation)
+    {
+        return Err(PyRuntimeError::new_err(
+            "portal render ownership changed during camera synchronization",
+        ));
+    }
     let light_mob = light
         .extract::<PyRef<'_, BridgeMobject>>()
         .ok()
@@ -8844,6 +8858,7 @@ impl PyScene {
             proxy_generation: Cell::new(0),
             roots_projection: RefCell::new(None),
             render: Arc::new(Mutex::new(None)),
+            render_generation: Arc::new(()),
             render_invocations: Vec::new(),
             render_audio_inputs: Vec::new(),
             render_image_inputs: Vec::new(),
@@ -9007,6 +9022,8 @@ impl PyScene {
         camera: Option<PyRef<'_, PyCameraFrameCore>>,
         light_position: Option<[f64; 3]>,
     ) -> PyResult<(String, u64, u64, String, String, usize)> {
+        let engine = Rc::clone(&slf.borrow().engine);
+        let generation = Arc::clone(&slf.borrow().render_generation);
         if matches!(
             slf.borrow()
                 .render
@@ -9021,7 +9038,13 @@ impl PyScene {
         }
         portal_playback::synchronize(slf)?;
         synchronize_portal_camera(slf)?;
-        let engine = Rc::clone(&slf.borrow().engine);
+        if !Rc::ptr_eq(&engine, &slf.borrow().engine)
+            || !Arc::ptr_eq(&generation, &slf.borrow().render_generation)
+        {
+            return Err(PyRuntimeError::new_err(
+                "portal render ownership changed during finish",
+            ));
+        }
         let render = Arc::clone(&slf.borrow().render);
         match (camera, light_position) {
             (Some(camera), Some(light_position)) => render
@@ -15168,9 +15191,11 @@ mod tests {
             let source = CString::new(concat!(
                 include_str!("../tests/camera_configuration.py"),
                 "\n_suite = unittest.TestSuite([CameraConfigurationTests(",
-                "'test_configured_frame_animation_matches_manual_pose_at_one_four_threads')])\n",
+                "'test_configured_frame_animation_matches_manual_pose_at_one_four_threads'), ",
+                "CameraConfigurationTests(",
+                "'test_finish_rejects_callbacks_replacing_render_generation')])\n",
                 "_result = unittest.TextTestRunner(verbosity=2).run(_suite)\n",
-                "assert _result.testsRun == 1 and _result.wasSuccessful(), ",
+                "assert _result.testsRun == 2 and _result.wasSuccessful(), ",
                 "'configured camera capture acceptance failed'\n",
             ))
             .expect("camera configuration suite contains no NUL");

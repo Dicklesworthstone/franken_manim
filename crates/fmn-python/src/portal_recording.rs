@@ -322,6 +322,7 @@ fn begin_recording(
     }
     {
         let mut owner = scene.borrow_mut();
+        owner.render_generation = Arc::new(());
         owner.render_invocations.clear();
         owner.render_audio_inputs.clear();
         owner.render_image_inputs.clear();

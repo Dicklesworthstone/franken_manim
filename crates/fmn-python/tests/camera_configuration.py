@@ -583,6 +583,74 @@ class CameraConfigurationTests(unittest.TestCase):
                         root/f'samples-{samples}-four', 4, True, samples=samples))
 
 
+    def test_finish_rejects_callbacks_replacing_render_generation(self):
+        class CallbackScene(m.Scene):
+            @property
+            def skip_animations(self):
+                callback = vars(self).pop('_replace_on_skip', None)
+                if callback is not None:
+                    callback()
+                return vars(self).get('_skip_animations', False)
+
+            @skip_animations.setter
+            def skip_animations(self, value):
+                self._skip_animations = value
+
+        cases = (('camera', 'render'), ('playback', 'render'),
+                 ('camera', 'recording'), ('playback', 'recording'))
+        for trigger, replacement_kind in cases:
+            with (
+                self.subTest(trigger=trigger, replacement_kind=replacement_kind),
+                tempfile.TemporaryDirectory(prefix='fmn-camera-generation-') as temporary,
+            ):
+                root = Path(temporary)
+                first = root/'first.png'
+                replacement = root / (
+                    'replacement.png' if replacement_kind == 'render' else 'replacement')
+                scene = CallbackScene(camera_config={'resolution': (32, 18)})
+                scene._begin_png(str(first), 32, 18, 4, 1, 0)
+                original_light = scene.camera.light_source
+                calls = []
+
+                def replace():
+                    calls.append(trigger)
+                    scene._abort_render()
+                    if replacement_kind == 'render':
+                        scene._begin_png(str(replacement), 32, 18, 4, 1, 0)
+                    else:
+                        # Live recording installs output without replacing the
+                        # Scene arena, so checking only the engine misses it.
+                        m._native._portal_begin_recording(
+                            scene, str(replacement), 'png_sequence', 32, 18, 4, 1)
+
+                class ReplacingLight(m.Mobject):
+                    def get_center(self):
+                        if not calls:
+                            replace()
+                        return m.ORIGIN.copy()
+
+                if trigger == 'camera':
+                    scene.camera.light_source = ReplacingLight()
+                else:
+                    scene._replace_on_skip = replace
+                try:
+                    with self.assertRaisesRegex(RuntimeError, 'ownership changed'):
+                        scene._finish_render()
+                    self.assertEqual(calls, [trigger])
+                    self.assertFalse(first.exists())
+                    self.assertFalse(replacement.exists())
+                    # The stale finish must leave the replacement with its
+                    # owner. A later ordinary finish can still publish it.
+                    receipt = scene._finish_render()
+                    self.assertEqual(Path(receipt[0]), replacement)
+                    self.assertEqual(receipt[1], 1)
+                    self.assertTrue(replacement.exists())
+                    self.assertFalse(first.exists())
+                finally:
+                    scene._abort_render()
+                    scene.camera.light_source = original_light
+                    vars(scene).pop('_replace_on_skip', None)
+
     def test_lazy_camera_does_not_evaluate_frame_recipe_twice(self):
         class Once:
             def __init__(self, value):
