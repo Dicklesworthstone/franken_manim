@@ -337,3 +337,54 @@ fn persistent_raster_bands_are_charged_before_scene_construction() {
     ));
     assert!(!fs.exists(Path::new("/insufficient")));
 }
+
+#[test]
+fn optional_prefix_storage_keeps_minimum_budget_exports_byte_identical() {
+    struct LayeredMoving;
+    impl SceneConstruct for LayeredMoving {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            let background = stage.add(Circle::new().radius(1.5).color(GREEN))?;
+            stage.set_fill(background, Some(GREEN), Some(0.6), None, true);
+            Moving.construct(stage)
+        }
+    }
+
+    for mode in [DeterminismMode::Certified, DeterminismMode::Standard] {
+        let fs = Arc::new(VirtualFs::new());
+        let mut roomy = options("/roomy", RenderFormat::PngSequence, 1, 1);
+        roomy.config.determinism.mode = mode;
+        let report = render_with_fs(&mut LayeredMoving, roomy, fs.clone()).unwrap();
+        let plan = &report.execution_plan;
+        let band_surfaces = plan
+            .render_teams
+            .iter()
+            .filter(|team| team.threads() > 1)
+            .count();
+        let required_bytes = plan.estimated_in_flight_bytes as u64
+            + (plan.render_teams.len() + band_surfaces) as u64 * 48 * 32 * 8
+            + 64 * 1024 * 1024;
+        let expected: Vec<_> = (0..report.artifact.frame_count)
+            .map(|sequence| {
+                fs.read(&Path::new("/roomy").join(format!("frame_{sequence:06}.png")))
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(expected.len(), 4);
+        for (path, extra_bytes) in [
+            ("/tight", 0),
+            ("/bounded", 2 * 64 * 1024 * plan.render_teams.len() as u64),
+        ] {
+            let mut constrained = options(path, RenderFormat::PngSequence, 1, 1);
+            constrained.config.determinism.mode = mode;
+            constrained.max_resident_bytes = required_bytes + extra_bytes;
+            let actual = render_with_fs(&mut LayeredMoving, constrained, fs.clone()).unwrap();
+            assert_eq!(actual.artifact.frame_count, report.artifact.frame_count);
+            for (sequence, expected) in expected.iter().enumerate() {
+                let bytes = fs
+                    .read(&Path::new(path).join(format!("frame_{sequence:06}.png")))
+                    .unwrap();
+                assert_eq!(&bytes, expected);
+            }
+        }
+    }
+}

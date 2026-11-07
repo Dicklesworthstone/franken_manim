@@ -49,7 +49,7 @@ use fmn_core::types::Vec3;
 
 use fnx_classes::Graph;
 
-use crate::arc::Dot;
+use crate::arc::{Circle, Dot};
 use crate::line::Line;
 use crate::style::Style;
 use crate::vmobject::{VMobject, v_group};
@@ -230,7 +230,10 @@ impl NetworkGraph {
     }
 
     /// Build the family: edges first (underneath), then vertex dots —
-    /// painter order keeps ink off the dots' rims.
+    /// painter order keeps ink off the dots' rims. A self-loop is a circle
+    /// above its vertex, with three times the vertex radius and its lowest
+    /// point tangent to the vertex's top rim. Its path begins at that contact
+    /// point so edge-flow animations depart from and return to the vertex.
     ///
     /// # Errors
     /// [`NetworkGraphError`] for unpositioned endpoints or refused
@@ -244,11 +247,21 @@ impl NetworkGraph {
                     to: to.to_owned(),
                 });
             };
-            let line = Line::new(*start, *end)
-                .style(Style::default().stroke(GREY_B, EDGE_STROKE_WIDTH, 1.0))
-                .build()
-                .map_err(|error| NetworkGraphError::Geometry(error.to_string()))?;
-            edges.push(line);
+            let style = Style::default().stroke(GREY_B, EDGE_STROKE_WIDTH, 1.0);
+            let edge = if from == to {
+                Circle::new()
+                    .start_angle(-TAU / 4.0)
+                    .radius(3.0 * VERTEX_RADIUS)
+                    .arc_center([start[0], start[1] + 4.0 * VERTEX_RADIUS, start[2]])
+                    .style(style)
+                    .build()
+            } else {
+                Line::new(*start, *end)
+                    .style(style)
+                    .build()
+                    .map_err(|error| NetworkGraphError::Geometry(error.to_string()))?
+            };
+            edges.push(edge);
         }
         let mut vertices: Vec<VMobject> = Vec::new();
         for label in &self.labels {

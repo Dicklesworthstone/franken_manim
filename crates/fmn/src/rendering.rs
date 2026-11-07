@@ -42,7 +42,7 @@ use fmn_platform::fs::{FileSystem, FsError, StdFs};
 use fmn_platform::process::{FfmpegLocator, FfmpegLocatorError, ProcessRunner};
 use fmn_platform::topology::HardwareTopology;
 use fmn_render::{
-    Camera, CameraError, EngineIdentity, FrameConfig, RetainedFrameRendererConfig,
+    Camera, CameraError, EngineIdentity, FrameConfig, PixelTileCache, RetainedFrameRendererConfig,
     RetainedFrameRendererError, ScreenMap, Tiling, Viewport,
 };
 use fmn_runtime::{
@@ -340,6 +340,8 @@ pub struct RenderOptions {
     pub max_output_bytes: u64,
     /// Budget for planned frame storage and sink resident buffers, not for the
     /// caller's scene graph or geometry. The sink also enforces its own bound.
+    /// Optional static-prefix caches share only the remaining allowance; a
+    /// tight budget disables that reuse without increasing the minimum plan.
     pub max_resident_bytes: u64,
     /// Upper bound on the output ring and frozen frame-job count; the scheduler
     /// may lower it. Does not change frame sampling or pixels.
@@ -803,6 +805,21 @@ struct VideoSession {
     audio_decodes: Vec<InvocationReport>,
 }
 
+// Reserve an equal amount for prefix containers/allocator overhead in addition
+// to the cache's accounted key, accumulator and entry storage. Optional reuse
+// never raises the minimum accepted plan or consumes its existing headroom.
+fn prefix_cache_budget_per_team(remaining_bytes: u64, render_teams: usize) -> usize {
+    u64::try_from(render_teams)
+        .ok()
+        .and_then(|teams| teams.checked_mul(2))
+        .and_then(|shares| remaining_bytes.checked_div(shares))
+        .map_or(0, |bytes| {
+            usize::try_from(bytes)
+                .unwrap_or(usize::MAX)
+                .min(PixelTileCache::DEFAULT_PREFIX_BUDGET_BYTES)
+        })
+}
+
 struct RenderSink {
     pipeline: Option<NativeFramePipeline>,
     emitter: Option<OrderedEmitter>,
@@ -1024,6 +1041,16 @@ impl RenderSink {
                 .first()
                 .map_or(1, fmn_runtime::TeamPlan::threads),
         };
+        let prefix_cache_bytes = if camera.is_none()
+            && PixelTileCache::supports_prefix_cache(renderer_config.engine, frame.aa)
+        {
+            prefix_cache_budget_per_team(
+                options.max_resident_bytes - planned,
+                plan.render_teams.len(),
+            )
+        } else {
+            0
+        };
         let mut video = None;
         let (binding, receipt) = match options.format {
             RenderFormat::Png | RenderFormat::PngSequence => {
@@ -1179,16 +1206,20 @@ impl RenderSink {
             vec![binding],
         )
         .map_err(RenderError::Emitter)?;
-        let pipeline =
-            match NativeFramePipeline::new(plan.clone(), renderer_config, camera, emitter.handle())
-            {
-                Ok(pipeline) => pipeline,
-                Err(error) => {
-                    emitter.cancel();
-                    let _ = emitter.finish();
-                    return Err(error);
-                }
-            };
+        let pipeline = match NativeFramePipeline::with_prefix_cache_budget(
+            plan.clone(),
+            renderer_config,
+            camera,
+            emitter.handle(),
+            prefix_cache_bytes,
+        ) {
+            Ok(pipeline) => pipeline,
+            Err(error) => {
+                emitter.cancel();
+                let _ = emitter.finish();
+                return Err(error);
+            }
+        };
         Ok(Self {
             pipeline: Some(pipeline),
             emitter: Some(emitter),
@@ -1585,6 +1616,31 @@ impl Drop for RenderSink {
         if let Some(emitter) = self.emitter.take() {
             let _ = emitter.finish();
         }
+    }
+}
+
+#[cfg(test)]
+mod prefix_budget_tests {
+    use super::*;
+
+    #[test]
+    fn optional_prefix_storage_shares_only_uncommitted_memory() {
+        let default = PixelTileCache::DEFAULT_PREFIX_BUDGET_BYTES;
+        for (remaining, teams, expected) in [
+            (0, 1, 0),
+            (5, 3, 0),
+            (11, 3, 1),
+            (default as u64 * 6 - 1, 3, default - 1),
+            (default as u64 * 6, 3, default),
+            (u64::MAX, 1, default),
+            (u64::MAX, 0, 0),
+        ] {
+            let admitted = prefix_cache_budget_per_team(remaining, teams);
+            assert_eq!(admitted, expected);
+            assert!(admitted <= default);
+            assert!(admitted as u128 * teams as u128 * 2 <= u128::from(remaining));
+        }
+        assert_eq!(prefix_cache_budget_per_team(7, usize::MAX), 0);
     }
 }
 

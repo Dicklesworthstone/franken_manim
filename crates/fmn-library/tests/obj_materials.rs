@@ -2,8 +2,13 @@
 use std::collections::BTreeMap;
 
 use fmn_core::color::Srgb;
-use fmn_library::obj_materials::{ObjAssetLimits, ObjDocument, ObjMaterial, parse_mtl};
-use fmn_mobject::{ImageColorSpace, ImageResource, ImageSampler, RenderPrimitive};
+use fmn_library::obj_materials::{
+    ObjAssetLimits, ObjDocument, ObjMaterial, ObjTextureOptions, parse_mtl,
+};
+use fmn_mobject::{
+    ImageColorSpace, ImageResource, ImageSampler, ImageWrap, Mobject, RenderPrimitive,
+    Snapshot, Stage,
+};
 
 const GEOMETRY: &str =
     "v -2 -1 0\nv 0 -1 0\nv 0 1 0\nv 2 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nvn 0 0 4\n";
@@ -26,6 +31,7 @@ fn material() -> ObjMaterial {
         },
         opacity: 0.6,
         texture: None,
+        texture_options: ObjTextureOptions::default(),
     }
 }
 
@@ -190,7 +196,7 @@ fn malformed_mtl_and_unsupported_diffuse_options_are_named_errors() {
         "newmtl A\nKd 1 2 0\n",
         "newmtl A\nd -1\n",
         "newmtl A\nKd spectral a.rfl\n",
-        "newmtl A\nmap_Kd -s 2 2 1 a.png\n",
+        "newmtl A\nmap_Kd -t 2 2 1 a.png\n",
         "newmtl A\nmap_Kd\n",
     ] {
         assert!(
@@ -254,4 +260,353 @@ fn failed_conversion_never_changes_a_parsed_document_or_bound_resources() {
             .to_mobject(3.0, &BTreeMap::new(), &BTreeMap::new())
             .is_err()
     );
+}
+
+#[test]
+fn map_options_keep_defaults_signed_values_and_exact_filename_spelling() {
+    let materials = parse_mtl(
+        b"newmtl A\nmap_Kd -o -.25 -s -2 -clamp on maps/two  spaces.png\n\
+          newmtl B\nmap_Kd -s 2 .5 1 -o .125 -.25 0 -clamp off ./-label.png\n\
+          newmtl C\nmap_Kd -s 2 -s .5 -o 3 4 -o -1 ./4 5.png\n",
+        &ObjAssetLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(materials["A"].texture.as_deref(), Some("maps/two  spaces.png"));
+    assert_eq!(
+        materials["A"].texture_options,
+        ObjTextureOptions {
+            offset: [-0.25, 0.0],
+            scale: [-2.0, 1.0],
+            clamp: Some(true),
+        }
+    );
+    assert_eq!(materials["B"].texture.as_deref(), Some("./-label.png"));
+    assert_eq!(
+        materials["B"].texture_options,
+        ObjTextureOptions {
+            offset: [0.125, -0.25],
+            scale: [2.0, 0.5],
+            clamp: Some(false),
+        }
+    );
+    assert_eq!(materials["C"].texture.as_deref(), Some("./4 5.png"));
+    assert_eq!(materials["C"].texture_options.offset, [-1.0, 0.0]);
+    assert_eq!(materials["C"].texture_options.scale, [0.5, 1.0]);
+    assert_eq!(materials["C"].texture_options.clamp, None);
+}
+
+#[test]
+fn selected_map_replaces_its_complete_transform_and_addressing_policy() {
+    let materials = parse_mtl(
+        b"newmtl A\nmap_Ka -o 2 3 -clamp on fallback.png\n\
+          map_Kd -s 2 selected.png\nmap_Ka -s 8 -clamp on ignored.png\n\
+          newmtl B\nmap_Ka -o -.5 .25 -clamp on fallback.png\n\
+          newmtl C\nmap_Kd -s 2 -clamp on first.png\nmap_Kd final.png\n",
+        &ObjAssetLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(materials["A"].texture.as_deref(), Some("selected.png"));
+    assert_eq!(
+        materials["A"].texture_options,
+        ObjTextureOptions {
+            scale: [2.0, 1.0],
+            ..ObjTextureOptions::default()
+        }
+    );
+    assert_eq!(materials["B"].texture.as_deref(), Some("fallback.png"));
+    assert_eq!(materials["B"].texture_options.offset, [-0.5, 0.25]);
+    assert_eq!(materials["B"].texture_options.clamp, Some(true));
+    assert_eq!(materials["C"].texture.as_deref(), Some("final.png"));
+    assert_eq!(materials["C"].texture_options, ObjTextureOptions::default());
+}
+
+#[test]
+fn malformed_map_options_report_the_source_line_before_binding_assets() {
+    for (map, expected) in [
+        ("-o tiles.png", "numeric U"),
+        ("-s -clamp on tiles.png", "numeric U"),
+        ("-s 1 1 1 2 tiles.png", "at most three"),
+        ("-o 0 0 1 tiles.png", "depth component"),
+        ("-s 1 1 0 tiles.png", "depth component"),
+        ("-o nan tiles.png", "finite"),
+        ("-s 1 inf tiles.png", "finite"),
+        ("-o 0 0 -inf tiles.png", "finite"),
+        ("-clamp", "on or off"),
+        ("-clamp yes tiles.png", "on or off"),
+        ("-clamp on -mm 0 1 tiles.png", "unsupported"),
+        ("-s 1 -t 0 0 0 tiles.png", "unsupported"),
+        ("-unknown 1 tiles.png", "unsupported"),
+        ("-s 1 1 1", "empty"),
+        ("-clamp on", "empty"),
+    ] {
+        let source = format!("# material\nnewmtl A\nmap_Kd {map}\n");
+        let failure = parse_mtl(source.as_bytes(), &ObjAssetLimits::default()).unwrap_err();
+        assert_eq!(failure.line, 3, "{map}");
+        assert!(failure.reason.contains(expected), "{map}: {failure}");
+    }
+    let limits = ObjAssetLimits {
+        max_name_bytes: 5,
+        ..ObjAssetLimits::default()
+    };
+    assert!(
+        parse_mtl(b"newmtl A\nmap_Kd -s 2 -o 0 -clamp off a.png", &limits).is_ok()
+    );
+    assert!(
+        parse_mtl(b"newmtl A\nmap_Kd -s 2 -o 0 -clamp off ab.png", &limits)
+            .unwrap_err()
+            .reason
+            .contains("name/path")
+    );
+    let limits = ObjAssetLimits {
+        max_line_bytes: 20,
+        ..ObjAssetLimits::default()
+    };
+    assert!(
+        parse_mtl(b"newmtl A\nmap_Kd -o 0 -o 0 -o 0 a.png", &limits)
+            .unwrap_err()
+            .reason
+            .contains("line byte budget")
+    );
+}
+
+#[test]
+fn map_transform_is_applied_before_v_flip_and_preserves_per_corner_seams() {
+    let source = format!("{GEOMETRY}usemtl A\nf 1/1/1 2/2/1 3/3/1\nf 1/4/1 3/3/1 4/2/1\n");
+    let doc = ObjDocument::parse(source.as_bytes()).unwrap();
+    let materials = parse_mtl(
+        b"newmtl A\nmap_Kd -s -2 .5 -o .25 -.125 -clamp on tiles.png\n",
+        &ObjAssetLimits::default(),
+    )
+    .unwrap();
+    let resource = image();
+    let model = doc
+        .to_mobject(2.0, &materials, &BTreeMap::from([("A".into(), resource.clone())]))
+        .unwrap();
+    let child = &model.submobjects[0];
+    let expected: [[f32; 2]; 6] = [
+        [0.25, 1.125],
+        [-1.75, 1.125],
+        [-1.75, 0.625],
+        [0.25, 0.625],
+        [-1.75, 0.625],
+        [-1.75, 1.125],
+    ];
+    for (index, uv) in expected.iter().enumerate() {
+        assert_eq!(child.buffer.read(index, "im_coords").unwrap(), uv.to_vec());
+    }
+    let bound = child.image.as_ref().unwrap();
+    assert_eq!(bound.sampler().wrap_u, ImageWrap::ClampToEdge);
+    assert_eq!(bound.sampler().wrap_v, ImageWrap::ClampToEdge);
+    assert_eq!(bound.pixels().as_ptr(), resource.pixels().as_ptr());
+    assert_eq!(bound.content_digest(), resource.content_digest());
+    assert_eq!(resource.sampler(), ImageSampler::default());
+}
+
+#[test]
+fn unspecified_map_sampler_is_preserved_but_explicit_off_overrides_both_axes() {
+    let doc = ObjDocument::parse(format!("{GEOMETRY}usemtl A\nf 1/1 2/2 3/3\n").as_bytes()).unwrap();
+    let sampler = ImageSampler {
+        wrap_u: ImageWrap::MirroredRepeat,
+        wrap_v: ImageWrap::ClampToEdge,
+    };
+    let resource = image().with_sampler(sampler);
+    for (statement, expected) in [
+        ("-s 2 tiles.png", sampler),
+        ("-clamp off tiles.png", ImageSampler::default()),
+    ] {
+        let materials = parse_mtl(
+            format!("newmtl A\nmap_Kd {statement}\n").as_bytes(),
+            &ObjAssetLimits::default(),
+        )
+        .unwrap();
+        let model = doc
+            .to_mobject(2.0, &materials, &BTreeMap::from([("A".into(), resource.clone())]))
+            .unwrap();
+        assert_eq!(model.submobjects[0].image.as_ref().unwrap().sampler(), expected);
+    }
+    assert_eq!(resource.sampler(), sampler);
+}
+
+#[test]
+fn zero_scale_is_valid_and_transformed_overflow_refuses_without_mutation() {
+    let doc = ObjDocument::parse(format!("{GEOMETRY}usemtl A\nf 1/1 2/2 3/3\n").as_bytes()).unwrap();
+    let resource = image();
+    let images = BTreeMap::from([("A".into(), resource.clone())]);
+    let mut materials = parse_mtl(
+        b"newmtl A\nmap_Kd -s 0 0 -o .25 .75 tiles.png\n",
+        &ObjAssetLimits::default(),
+    )
+    .unwrap();
+    let model = doc.to_mobject(2.0, &materials, &images).unwrap();
+    for index in 0..3 {
+        assert_eq!(model.submobjects[0].buffer.read(index, "im_coords").unwrap(), [0.25; 2]);
+    }
+    let mesh = doc.mesh().clone();
+    for invalid in [f64::NAN, f64::INFINITY] {
+        materials.get_mut("A").unwrap().texture_options.scale[0] = invalid;
+        assert!(doc.to_mobject(2.0, &materials, &images).err().unwrap().reason.contains("finite"));
+    }
+    materials.get_mut("A").unwrap().texture_options.scale[0] = f64::MAX;
+    assert!(doc.to_mobject(2.0, &materials, &images).err().unwrap().reason.contains("transformed texture coordinates"));
+    materials.get_mut("A").unwrap().texture_options.offset[0] = f64::MAX;
+    assert!(doc.to_mobject(2.0, &materials, &images).is_err());
+    let overflowing = ObjDocument::parse(
+        format!("{GEOMETRY}vt 2 0\nusemtl A\nf 1/5 2/2 3/3\n").as_bytes(),
+    ).unwrap();
+    materials.get_mut("A").unwrap().texture_options.offset[0] = 0.0;
+    assert!(
+        overflowing
+            .to_mobject(2.0, &materials, &images)
+            .err()
+            .unwrap()
+            .reason
+            .contains("transformed texture coordinates")
+    );
+    assert_eq!(doc.mesh(), &mesh);
+    assert_eq!(images["A"], resource);
+}
+
+const MAP_QUAD: &str = "v -2 -1 0\nv 2 -1 0\nv 2 1 0\nv -2 1 0\n\
+    vt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nvn 0 0 1\nusemtl A\nf 1/1/1 2/2/1 3/3/1 4/4/1\n";
+
+fn map_image(sampler: ImageSampler) -> ImageResource {
+    ImageResource::rgba8(
+        2,
+        2,
+        vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 128],
+        ImageColorSpace::Srgb,
+        sampler,
+    )
+    .unwrap()
+}
+
+fn independently_mapped_quad(sampler: ImageSampler) -> Mobject {
+    use fmn_mobject::record::RecordBuffer;
+    use fmn_mobject::uniforms::Uniforms;
+    let corners = [
+        ([-2.0, -1.0, 0.0], [-0.25, 0.875]),
+        ([2.0, -1.0, 0.0], [1.75, 0.875]),
+        ([2.0, 1.0, 0.0], [1.75, 0.375]),
+        ([-2.0, -1.0, 0.0], [-0.25, 0.875]),
+        ([2.0, 1.0, 0.0], [1.75, 0.375]),
+        ([-2.0, 1.0, 0.0], [-0.25, 0.375]),
+    ];
+    let mut buffer = RecordBuffer::new(fmn_library::textured_surface_schema(), 6).unwrap();
+    for (index, (point, uv)) in corners.iter().enumerate() {
+        buffer.write(index, "point", point);
+        buffer.write(index, "d_normal_point", &[point[0], point[1], 1.0]);
+        buffer.write(index, "im_coords", uv);
+        buffer.write(index, "opacity", &[1.0]);
+    }
+    Mobject::from_buffer(buffer)
+        .with_uniforms(Uniforms {
+            shading: fmn_library::MODEL_SHADING,
+            depth_test: true,
+            ..Uniforms::default()
+        })
+        .with_image_resource(map_image(sampler))
+        .with_render_primitive(RenderPrimitive::TriangleMesh)
+}
+
+fn map_camera_renderer(threads: usize) -> (fmn_render::Camera, fmn_render::RetainedFrameRenderer) {
+    use fmn_core::color::LinearRgba;
+    use fmn_render::{
+        Camera, CameraConfig, EngineIdentity, FrameConfig, RetainedFrameRenderer,
+        RetainedFrameRendererConfig, ScreenMap, Tiling, Viewport,
+    };
+    let background = LinearRgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+    let camera = Camera::new(CameraConfig {
+        resolution: (96, 64),
+        background,
+        ..CameraConfig::default()
+    })
+    .unwrap();
+    let renderer = RetainedFrameRenderer::new(RetainedFrameRendererConfig {
+        frame: FrameConfig::new(
+            Viewport { width: 96, height: 64 },
+            ScreenMap { scale: 8.0, origin: [48.0, 32.0], y_up: false },
+            background,
+        ),
+        tiling: Tiling { macro_tile: 32, fine_tile: 8 },
+        engine: EngineIdentity::certified(),
+        threads,
+    })
+    .unwrap();
+    (camera, renderer)
+}
+
+fn render_model(stage: &Stage, threads: usize) -> Vec<u8> {
+    let (camera, mut renderer) = map_camera_renderer(threads);
+    renderer.render_with_camera(stage, &camera).unwrap();
+    renderer.frame().plane(0).to_vec()
+}
+
+#[test]
+fn imported_map_options_match_independent_camera_pixels_and_durable_restore() {
+    let doc = ObjDocument::parse(MAP_QUAD.as_bytes()).unwrap();
+    let mut policy_frames = Vec::new();
+    for (clamp, wrap) in [("off", ImageWrap::Repeat), ("on", ImageWrap::ClampToEdge)] {
+        let materials = parse_mtl(
+            format!("newmtl A\nmap_Kd -s 2 .5 1 -o -.25 .125 0 -clamp {clamp} tiles.png\n").as_bytes(),
+            &ObjAssetLimits::default(),
+        )
+        .unwrap();
+        let model = doc.to_mobject(
+            2.0,
+            &materials,
+            &BTreeMap::from([("A".into(), map_image(ImageSampler::default()))]),
+        ).unwrap();
+        let mut actual = Stage::new();
+        let root = actual.add(model);
+        actual.add_to_scene(root).unwrap();
+        let mut oracle = Stage::new();
+        let root = oracle.add(independently_mapped_quad(ImageSampler { wrap_u: wrap, wrap_v: wrap }));
+        oracle.add_to_scene(root).unwrap();
+        let bytes = actual.snapshot_bytes().unwrap();
+        let mut restored = Stage::new();
+        let decoded = Snapshot::from_bytes(&bytes, &restored).unwrap();
+        restored.restore(&decoded.snapshot);
+        assert_eq!(restored.snapshot_bytes().unwrap(), bytes);
+        let expected = render_model(&oracle, 1);
+        assert!(expected.iter().any(|&byte| byte != 0));
+        for threads in [1, 4, 16] {
+            assert_eq!(render_model(&actual, threads), expected, "{clamp}, {threads}");
+            assert_eq!(render_model(&restored, threads), expected, "restored {clamp}, {threads}");
+        }
+        policy_frames.push(expected);
+    }
+    assert_ne!(policy_frames[0], policy_frames[1], "addressing must affect rendered pixels");
+}
+
+#[test]
+fn changing_only_sampler_refreshes_retained_pixels_and_snapshot_restore() {
+    let repeat = ImageSampler::default();
+    let clamp = ImageSampler {
+        wrap_u: ImageWrap::ClampToEdge,
+        wrap_v: ImageWrap::ClampToEdge,
+    };
+    let mut oracle = Stage::new();
+    let oracle_mob = oracle.add(independently_mapped_quad(clamp));
+    oracle.add_to_scene(oracle_mob).unwrap();
+    let clamped_pixels = render_model(&oracle, 1);
+    for threads in [1, 4, 16] {
+        let mut stage = Stage::new();
+        let mob = stage.add(independently_mapped_quad(repeat));
+        stage.add_to_scene(mob).unwrap();
+        let before = stage.snapshot();
+        let before_bytes = stage.snapshot_bytes().unwrap();
+        let resource = stage.get(mob).unwrap().image_resource().unwrap().clone();
+        let (camera, mut renderer) = map_camera_renderer(threads);
+        renderer.render_with_camera(&stage, &camera).unwrap();
+        let repeated_pixels = renderer.frame().plane(0).to_vec();
+        assert_ne!(repeated_pixels, clamped_pixels);
+        assert!(stage.set_image_resource(mob, Some(resource.with_sampler(clamp))).unwrap());
+        assert_ne!(stage.snapshot_bytes().unwrap(), before_bytes);
+        renderer.render_with_camera(&stage, &camera).unwrap();
+        assert_eq!(renderer.frame().plane(0), clamped_pixels);
+        stage.restore(&before);
+        assert_eq!(stage.snapshot_bytes().unwrap(), before_bytes);
+        renderer.render_with_camera(&stage, &camera).unwrap();
+        assert_eq!(renderer.frame().plane(0), repeated_pixels);
+    }
 }

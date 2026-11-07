@@ -234,7 +234,11 @@ fn adaptive_workers_replace_camera_tile_policy_without_changing_planar_config() 
     let compiler = super::super::NativeCompiler::Vector(Box::new(
         fmn_render::VectorFrameCompiler::new(config).unwrap(),
     ));
-    let stages = super::super::NativeFrameStages::new(1, compiler);
+    let stages = super::super::NativeFrameStages::new(
+        1,
+        compiler,
+        fmn_render::PixelTileCache::DEFAULT_PREFIX_BUDGET_BYTES,
+    );
     let emitter = OrderedEmitter::new(
         EmitterConfig::new(
             FrameLayout::tight(PixelFormat::Rgba8, 32, 18).unwrap(),

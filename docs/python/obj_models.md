@@ -36,6 +36,41 @@ dissolve alpha with the existing native lighting; `Kd` is not multiplied into
 the image. This is the existing manim-facing lighting model, not a new MTL/PBR
 shader. Texture sampling uses the existing native image sampler.
 
+## Texture placement and addressing
+
+`map_Kd` and the `map_Ka` fallback accept these options before the filename:
+
+| Option | Native import behavior |
+|---|---|
+| `-o u [v [w]]` | UV offset; omitted components default to zero. |
+| `-s u [v [w]]` | UV scale; omitted components default to one. Negative and zero scales are supported. |
+| `-clamp on` | Clamp both sampling axes to edge texels. |
+| `-clamp off` | Repeat the image on both sampling axes. |
+
+For example, `map_Kd -s 2 .5 1 -o -.25 .125 0 -clamp off maps/tiles.png`
+samples the map at `(2*u - .25, .5*v + .125)` in OBJ UV space. The native V
+conversion happens after this transform, exactly once. Coordinates outside
+the unit square stay in the records: wrapping is evaluated after perspective
+interpolation, and bilinear filtering crosses repeat seams correctly. Options
+can appear in any order; the last occurrence of a repeated option wins. Each
+new map declaration starts with fresh defaults, so an ignored `map_Ka` does
+not change a selected `map_Kd`'s placement or sampler.
+
+The third component describes 3D texture depth or displacement-map behavior in
+the original format. These diffuse maps are 2D rasters, so this importer admits
+only neutral third components: `0` for offset and `1` for scale. Other values
+raise a named import error. Nonfinite components and transformed coordinates
+that cannot be represented by native records also refuse.
+
+The explicit clamp contract is the native image sampler's **clamp to edge**.
+It does not implement Advanced Visualizer's material-preserving decal behavior
+outside the unit UV square. This distinction is recorded in
+[BN-17](../behavior_notes/BN-17-image-input-and-sampling.md). When no `-clamp`
+option is present, the supplied image's sampler is preserved. Host-decoded
+images use Repeat by default. Material bindings share decoded pixel bytes even
+when their sampler policies differ; copy, pickle and scene restoration preserve
+the selected policy without reopening the image.
+
 ## Failure and ownership
 
 The host reads local files, while all geometry, material parsing, image decoding
@@ -78,8 +113,11 @@ symlinks are supported; paths are not confined to the OBJ's directory.
 
 Sources must be UTF-8. `mtllib` accepts whitespace-separated library paths;
 quoted library filenames and continued lines are not supported. Texture-map
-filenames may contain spaces. Diffuse map options such as `-s`, `-o`, or
-`-clamp`, non-RGB `Kd`, and out-of-range RGB/dissolve values explicitly refuse.
+filenames may contain spaces, and their internal whitespace is preserved.
+Options precede the path; prefix a numeric or option-like filename with `./`
+to distinguish it from an optional component or a flag. Map options other
+than `-s`, `-o`, and `-clamp`, non-RGB `Kd`, and out-of-range RGB/dissolve values
+explicitly refuse.
 Other MTL reflectance properties are ignored, not emulated. OBJ polygon fan
 triangulation and its geometry-subset limitations remain those of the original
 parser; this feature does not add concave-polygon tessellation or free-form
@@ -92,6 +130,13 @@ For material-aware construction, use `fmn_library::obj_materials::ObjDocument`
 and `parse_mtl`, then supply material-name-to-`ImageResource` bindings to
 `ObjDocument::to_mobject`. That library layer performs no filesystem access;
 asset authority stays with the host.
+
+`ObjMaterial::texture_options` is an `ObjTextureOptions` value with `offset`,
+`scale` and optional `clamp` fields. Programmatic materials follow the same
+finite-coordinate checks as parsed MTL input. `ImageResource::with_sampler`
+can replace a native resource's policy while sharing its immutable pixel
+storage; install the resulting resource through `Stage` to update retained
+render state.
 
 The independent Rust tests are `fmn-library/tests/obj_materials.rs`. Native
 portal acceptance is `fmn-python/tests/obj_materials.py`; host input policy is

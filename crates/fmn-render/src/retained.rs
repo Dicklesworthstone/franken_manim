@@ -399,6 +399,7 @@ impl RetainedFrameRenderer {
                 poisoned: 0,
                 empty: rasterized.empty,
             },
+            prefix: crate::PrefixCacheStats::default(),
             raster: crate::AaStats::default(),
         }
     }

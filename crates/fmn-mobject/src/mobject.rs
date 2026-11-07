@@ -215,6 +215,21 @@ impl ImageResource {
         self
     }
 
+    /// Replace the addressing policy without copying or rehashing pixels.
+    ///
+    /// A paired material uses one sampler, so this also updates its dark-side
+    /// descriptor. Existing copies keep their policy and share both immutable
+    /// pixel buffers. Install the returned resource through `Stage` to advance
+    /// the image revision and invalidate retained sampling state.
+    #[must_use]
+    pub fn with_sampler(mut self, sampler: ImageSampler) -> Self {
+        self.sampler = sampler;
+        if let Some(dark) = &mut self.dark_image {
+            Arc::make_mut(dark).sampler = sampler;
+        }
+        self
+    }
+
     /// Width in texels.
     #[must_use]
     pub const fn width(&self) -> u32 {

@@ -98,7 +98,7 @@
 
 use crate::arena::{AllocStats, FrameArena, PoolRange, PoolRangeError};
 use crate::bin::{Binning, CLASS_INTERIOR, ScreenMap, Tiling, Viewport};
-use crate::cache::{CacheStats, PixelTileCache, PixelTileCacheError, TileWork};
+use crate::cache::{CacheStats, PixelTileCache, PixelTileCacheError, PrefixCacheStats, TileWork};
 use crate::fill::{
     self, FillKernel, GradientField, RowScratch, fill_is_flat, fill_rgba_at, fill_rgba_with_border,
 };
@@ -678,6 +678,8 @@ pub struct AaStats {
 pub struct CachedRenderStats {
     /// Fine-tile reuse and invalidation counts.
     pub cache: CacheStats,
+    /// Exact leading-command checkpoints captured or reused by dirty tiles.
+    pub prefix: PrefixCacheStats,
     /// Coverage and sampling work that actually executed. Reused tiles do not
     /// contribute to these counters because their rasterizer was bypassed.
     pub raster: AaStats,
@@ -2131,6 +2133,7 @@ impl<'a> FrameJob<'a> {
         cache.complete_render();
         Ok(CachedRenderStats {
             cache: cache.stats(),
+            prefix: cache.prefix_stats(),
             raster,
         })
     }
@@ -2368,8 +2371,26 @@ impl<'a> FrameJob<'a> {
                     // worker fan-out. A hit's only worker action is to skip.
                     continue;
                 }
-                worker.acc[..w].fill(bg);
-                worker.edges[..w].fill(0);
+                let prefix = if CACHED && !matches!(aa, RenderAa::Forced(_)) {
+                    cache.and_then(|cache| cache.prefix_row(t, (py - y0) as usize, w))
+                } else {
+                    None
+                };
+                let first_command = if let Some(prefix) = prefix {
+                    for (target, &pixel) in worker.acc[..w].iter_mut().zip(prefix.pixels) {
+                        *target = K::from_premul(pixel);
+                    }
+                    if let Some(edges) = prefix.edges {
+                        worker.edges[..w].copy_from_slice(edges);
+                    } else {
+                        worker.edges[..w].fill(0);
+                    }
+                    prefix.commands
+                } else {
+                    worker.acc[..w].fill(bg);
+                    worker.edges[..w].fill(0);
+                    0
+                };
                 worker.stats.output_cells = worker.stats.output_cells.saturating_add(w as u64);
 
                 if t < self.binning.tile_count() {
@@ -2393,10 +2414,45 @@ impl<'a> FrameJob<'a> {
                         }
                         RenderAa::Canonical | RenderAa::Adaptive => {
                             let classify = aa == RenderAa::Adaptive;
-                            self.composite_row::<K>(worker, t, py, x_lo, x_hi, classify);
+                            let checkpoint = if CACHED {
+                                cache.map_or(0, |cache| cache.prefix_capture_commands(t))
+                            } else {
+                                0
+                            };
+                            if checkpoint != 0 {
+                                self.composite_row::<K>(
+                                    worker,
+                                    t,
+                                    py,
+                                    x_lo..x_hi,
+                                    0..checkpoint,
+                                    classify,
+                                );
+                                if let Some(cache) = cache {
+                                    cache.capture_prefix_row(
+                                        t,
+                                        (py - y0) as usize,
+                                        worker.acc[..w].iter().map(|&pixel| K::to_premul(pixel)),
+                                        classify.then_some(&worker.edges[..w]),
+                                    );
+                                }
+                            }
+                            self.composite_row::<K>(
+                                worker,
+                                t,
+                                py,
+                                x_lo..x_hi,
+                                first_command.max(checkpoint)..usize::MAX,
+                                classify,
+                            );
                             worker.stats.native_cells =
                                 worker.stats.native_cells.saturating_add(w as u64);
                             if classify {
+                                // Prefix checkpoints preserve the complete
+                                // native classifier. Complex cells rerasterize
+                                // every command at each subpixel sample: a
+                                // resolved prefix cannot be blended with just
+                                // the supersampled tail without changing AA.
                                 for i in 0..w {
                                     let crossings = worker.edges[i];
                                     let samples = if crossings >= AA_COMPLEX_4X_CROSSINGS {
@@ -2487,17 +2543,23 @@ impl<'a> FrameJob<'a> {
         worker: &mut Worker<K>,
         tile: usize,
         py: u32,
-        x_lo: u32,
-        x_hi: u32,
+        x: std::ops::Range<u32>,
+        commands: std::ops::Range<usize>,
         classify: bool,
     ) {
+        let (x_lo, x_hi) = (x.start, x.end);
         let Some(draws) = self.binning.tile(tile) else {
             return;
         };
         let Some(flags) = self.binning.tile_flags(tile) else {
             return;
         };
-        for (k, &d) in draws.iter().enumerate() {
+        for (k, &d) in draws
+            .iter()
+            .enumerate()
+            .skip(commands.start)
+            .take(commands.end.saturating_sub(commands.start))
+        {
             // `d` is an instance index, and `draws` is indexed by instance
             // index. A `None` is an instance with no pass; an out-of-range index
             // would be a binning built against a different plan.
@@ -3803,6 +3865,446 @@ mod tests {
         Tiling {
             macro_tile: 64,
             fine_tile: 16,
+        }
+    }
+
+    struct PrefixFixture {
+        stage: Stage,
+        mobs: [Mob; 3],
+        plan: RenderPlan,
+        cfg: FrameConfig,
+        tiling: Tiling,
+        identity: EngineIdentity,
+        camera: u64,
+    }
+
+    impl PrefixFixture {
+        fn new() -> Self {
+            let mut stage = Stage::new();
+            let colors = [
+                [0.14, 0.32, 0.73, 0.37],
+                [0.78, 0.19, 0.43, 0.41],
+                [0.17, 0.51, 0.93, 0.23],
+            ];
+            let mobs = colors.map(|fill| {
+                let mob = stage.add(vmob(
+                    &rect_points(-8.0, -8.0, 40.0, 32.0),
+                    fill,
+                    [0.0; 4],
+                    0.0,
+                ));
+                stage.add_to_scene(mob).expect("prefix layer");
+                mob
+            });
+            Self {
+                stage,
+                mobs,
+                plan: RenderPlan::new(),
+                cfg: FrameConfig::new(
+                    Viewport {
+                        width: 32,
+                        height: 16,
+                    },
+                    ScreenMap {
+                        scale: 1.0,
+                        origin: [0.0, 0.0],
+                        y_up: false,
+                    },
+                    LinearRgba {
+                        r: 0.04,
+                        g: 0.04,
+                        b: 0.06,
+                        a: 0.63,
+                    },
+                ),
+                tiling: Tiling {
+                    macro_tile: 32,
+                    fine_tile: 8,
+                },
+                identity: EngineIdentity::certified(),
+                camera: 0,
+            }
+        }
+
+        fn fill(&mut self, layer: usize, rgba: [f32; 4]) {
+            let buffer = &mut self.stage.get_mut(self.mobs[layer]).expect("layer").buffer;
+            for row in 0..buffer.len() {
+                assert!(buffer.write(row, "fill_rgba", &rgba));
+            }
+        }
+
+        fn tail_alpha(&mut self, alpha: f32) {
+            self.fill(2, [0.17, 0.51, 0.93, alpha]);
+        }
+
+        fn render(
+            &mut self,
+            cache: &mut PixelTileCache,
+            threads: usize,
+        ) -> (CachedRenderStats, FrameBuffer) {
+            self.plan
+                .sync(&self.stage, self.camera)
+                .expect("retained plan");
+            let mono = MonoTable::build(&self.plan, self.cfg.map).expect("retained fill");
+            let mut binning =
+                Binning::build(&self.plan, self.cfg.viewport, self.tiling, self.cfg.map)
+                    .expect("retained bins");
+            binning
+                .prune_occluded(&self.plan)
+                .expect("retained pruning");
+
+            // The reference has no retained keys, prefixes or derived tables.
+            let (reference_plan, reference_mono, mut reference_bins) =
+                derive(&self.stage, self.cfg, self.tiling);
+            reference_bins
+                .prune_occluded(&reference_plan)
+                .expect("reference pruning");
+            let (reference, reference_stats) = FrameJob::with_identity(
+                &reference_plan,
+                &reference_mono,
+                &reference_bins,
+                self.cfg,
+                self.identity,
+            )
+            .expect("reference job")
+            .render_with_stats(1)
+            .expect("uncached reference");
+
+            let mut frame = FrameBuffer::new(self.cfg.layout().expect("prefix frame layout"));
+            let stats =
+                FrameJob::with_identity(&self.plan, &mono, &binning, self.cfg, self.identity)
+                    .expect("retained job")
+                    .render_into_cached(threads, &mut frame, self.camera, cache)
+                    .expect("retained frame");
+            assert_frames_equal(&frame, &reference, "prefix cache changed uncached pixels");
+            if stats.cache.hits == 0 {
+                assert_eq!(
+                    stats.raster, reference_stats,
+                    "prefix cache changed native or adaptive AA classification"
+                );
+            }
+            assert_eq!(stats.prefix, cache.prefix_stats());
+            (stats, frame)
+        }
+
+        fn warm(
+            &mut self,
+            cache: &mut PixelTileCache,
+            threads: usize,
+        ) -> (CachedRenderStats, FrameBuffer) {
+            let (cold, _) = self.render(cache, threads);
+            assert_eq!(cold.prefix, PrefixCacheStats::default());
+            self.tail_alpha(0.27);
+            let (captured, _) = self.render(cache, threads);
+            assert!(captured.prefix.captures > 0);
+            assert_eq!(captured.prefix.hits, 0);
+            self.tail_alpha(0.31);
+            let (reused, frame) = self.render(cache, threads);
+            assert!(reused.prefix.hits > 0);
+            assert_eq!(reused.prefix.commands_skipped, 2 * reused.prefix.hits);
+            (reused, frame)
+        }
+    }
+
+    #[test]
+    fn static_prefix_keeps_unquantized_accumulators() {
+        for threads in [1, 4, 16] {
+            let mut fixture = PrefixFixture::new();
+            let mut cache = PixelTileCache::new();
+            let (_, frame) = fixture.warm(&mut cache, threads);
+            let (plan, mono, binning) = derive(&fixture.stage, fixture.cfg, fixture.tiling);
+            let job = FrameJob::new(&plan, &mono, &binning, fixture.cfg).expect("layer oracle");
+            let layers: Vec<_> = job
+                .draws()
+                .iter()
+                .flatten()
+                .map(|draw| draw.flat_fill.expect("constant fill"))
+                .collect();
+            assert_eq!(layers.len(), 3);
+            let prefix = layers[..2]
+                .iter()
+                .fold(fixture.cfg.background.premultiply(), |pixel, &rgba| {
+                    source_over(rgba, 1.0, pixel)
+                });
+            let expected = source_over(layers[2], 1.0, prefix);
+            let mut expected_bytes = [0; 8];
+            write_row(&[expected], &mut expected_bytes);
+            assert_eq!(&expected_bytes, &frame.plane(0)[..8]);
+
+            // A decoded RGBA16F prefix is a tempting but incorrect cache payload.
+            // This fixture straddles actual output rounding boundaries, so an
+            // implementation that narrows its checkpoint cannot pass by chance.
+            let mut prefix_bytes = [0; 8];
+            write_row(&[prefix], &mut prefix_bytes);
+            let channels: [f64; 4] = std::array::from_fn(|channel| {
+                fmn_frame::half::f16_to_f64(u16::from_le_bytes([
+                    prefix_bytes[2 * channel],
+                    prefix_bytes[2 * channel + 1],
+                ]))
+            });
+            let rounded_prefix = LinearRgba {
+                r: channels[0],
+                g: channels[1],
+                b: channels[2],
+                a: channels[3],
+            }
+            .premultiply();
+            let rounded = source_over(layers[2], 1.0, rounded_prefix);
+            let mut rounded_bytes = [0; 8];
+            write_row(&[rounded], &mut rounded_bytes);
+            assert_ne!(
+                expected_bytes, rounded_bytes,
+                "rounding fixture lost sensitivity"
+            );
+        }
+    }
+
+    #[test]
+    fn static_prefix_invalidates_render_closure_and_table_epoch() {
+        for identity in [EngineIdentity::certified(), EngineIdentity::fast()] {
+            for change in 0..7 {
+                let mut fixture = PrefixFixture::new();
+                fixture.identity = identity;
+                let mut cache = PixelTileCache::new();
+                fixture.warm(&mut cache, 4);
+                match change {
+                    0 => fixture.cfg.background.a = 0.47,
+                    // Certified normalizes every requested AA policy to canonical,
+                    // but the recorded rendering closure still invalidates safely.
+                    1 => fixture.cfg.aa = AaPolicy::Ssaa4x,
+                    2 => fixture.tiling.fine_tile = 16,
+                    3 => fixture.cfg.map.origin[0] = 0.25,
+                    4 => fixture.camera = 7,
+                    5 => {
+                        fixture.cfg.viewport.width = 31;
+                        fixture.cfg.viewport.height = 19;
+                    }
+                    6 => {
+                        let epoch = fixture.plan.epoch();
+                        let limits = crate::RenderPlanLimits {
+                            max_unreachable_styles: 0,
+                            ..crate::RenderPlanLimits::default()
+                        };
+                        let sync = fixture
+                            .plan
+                            .sync_with_limits(&fixture.stage, fixture.camera, limits)
+                            .expect("table reclamation");
+                        assert!(sync.compaction.is_some());
+                        assert_ne!(fixture.plan.epoch(), epoch);
+                    }
+                    _ => unreachable!(),
+                }
+                let (changed, _) = fixture.render(&mut cache, 4);
+                assert_eq!(
+                    changed.prefix,
+                    PrefixCacheStats::default(),
+                    "render closure change {change} reused stale prefix state"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn static_prefix_budgets_bound_both_cpu_engines_and_forced_fast_aa_falls_back() {
+        for identity in [EngineIdentity::certified(), EngineIdentity::fast()] {
+            for budget in [0, 1, 3_000, 1 << 20] {
+                let mut fixture = PrefixFixture::new();
+                fixture.identity = identity;
+                let mut cache = PixelTileCache::with_budgets(1 << 20, budget);
+                for alpha in [0.23, 0.27, 0.31, 0.35] {
+                    fixture.tail_alpha(alpha);
+                    let (stats, _) = fixture.render(&mut cache, 4);
+                    assert!(cache.retained_prefix_bytes() <= budget);
+                    if budget <= 1 {
+                        assert_eq!(stats.prefix, PrefixCacheStats::default());
+                        assert_eq!(cache.retained_prefix_bytes(), 0);
+                    }
+                }
+                if budget == 1 << 20 {
+                    assert!(cache.prefix_stats().hits > 0);
+                }
+            }
+        }
+        for aa in [AaPolicy::Ssaa2x, AaPolicy::Ssaa4x] {
+            let mut fixture = PrefixFixture::new();
+            fixture.identity = EngineIdentity::fast();
+            let mut cache = PixelTileCache::new();
+            fixture.warm(&mut cache, 4);
+            fixture.cfg.aa = aa;
+            for alpha in [0.35, 0.39, 0.43] {
+                fixture.tail_alpha(alpha);
+                let (stats, _) = fixture.render(&mut cache, 4);
+                assert_eq!(stats.prefix, PrefixCacheStats::default());
+                assert_eq!(cache.retained_prefix_bytes(), 0);
+            }
+            fixture.cfg.aa = AaPolicy::Adaptive;
+            fixture.warm(&mut cache, 4);
+        }
+    }
+
+    #[test]
+    fn static_prefix_adaptive_retains_fill_and_stroke_crossings_at_both_thresholds() {
+        for tier in [Tier::Scalar, Tier::COMPILED] {
+            for threads in [1, 4, 16] {
+                let (mut stage, mobs) = corpus();
+                // A translucent foreground reaches every tile. Changing it
+                // dirties all tiles, so a checkpoint must preserve the static
+                // discs, winding hole, stroke edges and dense four-edge stems.
+                let tail = stage.add(vmob(
+                    &rect_points(-8.0, -8.0, 120.0, 120.0),
+                    [0.17, 0.51, 0.93, 0.23],
+                    [0.0; 4],
+                    0.0,
+                ));
+                stage.add_to_scene(tail).expect("animated foreground");
+                let mut fixture = PrefixFixture {
+                    stage,
+                    mobs: [mobs[0], mobs[1], tail],
+                    plan: RenderPlan::new(),
+                    cfg: config(),
+                    tiling: default_tiling(),
+                    identity: EngineIdentity {
+                        tier,
+                        ..EngineIdentity::fast()
+                    },
+                    camera: 0,
+                };
+                let budget = 1 << 20;
+                let mut cache = PixelTileCache::with_budgets(1 << 20, budget);
+                for (step, alpha) in [0.23, 0.27, 0.31, 0.35, 0.27].into_iter().enumerate() {
+                    fixture.tail_alpha(alpha);
+                    let (stats, _) = fixture.render(&mut cache, threads);
+                    assert_eq!(stats.cache.hits, 0, "the foreground dirties every tile");
+                    assert!(stats.raster.ssaa2x_cells > 0, "the corpus needs 2x AA");
+                    assert!(stats.raster.ssaa4x_cells > 0, "the corpus needs 4x AA");
+                    assert!(cache.retained_prefix_bytes() <= budget);
+                    match step {
+                        0 => assert_eq!(stats.prefix, PrefixCacheStats::default()),
+                        1 => assert!(stats.prefix.captures > 0),
+                        _ => {
+                            assert!(stats.prefix.hits > 0);
+                            assert!(stats.prefix.commands_skipped > 0);
+                        }
+                    }
+                }
+
+                // A changed middle layer shortens some prefixes. Their new AA
+                // counts must come from that shorter capture, while unaffected
+                // tiles can keep using their existing checkpoints.
+                fixture.stage.shift(mobs[1], [0.125, 0.0625, 0.0]);
+                fixture.tail_alpha(0.39);
+                let (shortened, _) = fixture.render(&mut cache, threads);
+                assert!(shortened.prefix.captures > 0);
+                fixture.tail_alpha(0.43);
+                let (resumed, _) = fixture.render(&mut cache, threads);
+                assert!(resumed.prefix.hits > 0);
+                assert!(resumed.raster.ssaa2x_cells > 0);
+                assert!(resumed.raster.ssaa4x_cells > 0);
+            }
+        }
+    }
+
+    #[test]
+    fn static_prefix_live_views_stop_at_the_first_volatile_command() {
+        for identity in [EngineIdentity::certified(), EngineIdentity::fast()] {
+            for field in ["fill_rgba", "point"] {
+                for layer in 0..3 {
+                    let mut fixture = PrefixFixture::new();
+                    fixture.identity = identity;
+                    let mut cache = PixelTileCache::new();
+                    let view = fixture
+                        .stage
+                        .get_mut(fixture.mobs[layer])
+                        .expect("live layer")
+                        .buffer
+                        .export_field_view(field, true)
+                        .expect("writable field");
+                    let revision = fixture
+                        .stage
+                        .get(fixture.mobs[layer])
+                        .expect("live layer")
+                        .buffer
+                        .field_revision(field);
+                    let (_, before) = fixture.render(&mut cache, 4);
+                    if field == "fill_rgba" {
+                        for record in 0..view.len() {
+                            assert!(view.write_foreign(record, field, &[0.9, 0.2, 0.1, 0.51]));
+                        }
+                    } else {
+                        assert!(view.write_foreign(1, field, &[16.0, 20.0, 0.0]));
+                    }
+                    assert_eq!(
+                        fixture
+                            .stage
+                            .get(fixture.mobs[layer])
+                            .expect("live layer")
+                            .buffer
+                            .field_revision(field),
+                        revision,
+                        "foreign mutation unexpectedly advanced a revision"
+                    );
+                    let (changed, after) = fixture.render(&mut cache, 4);
+                    assert_ne!(before.as_bytes(), after.as_bytes());
+                    assert!(changed.cache.poisoned > 0);
+                    if layer == 0 {
+                        assert_eq!(changed.prefix.hits, 0);
+                    } else {
+                        assert!(changed.prefix.hits > 0);
+                        assert_eq!(
+                            changed.prefix.commands_skipped,
+                            layer * changed.prefix.hits,
+                            "volatile command entered a retained prefix"
+                        );
+                    }
+                    drop(view);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn static_prefix_respects_painter_reordering_occlusion_and_empty_tiles() {
+        for identity in [EngineIdentity::certified(), EngineIdentity::fast()] {
+            let mut fixture = PrefixFixture::new();
+            fixture.identity = identity;
+            let mut cache = PixelTileCache::new();
+            let (_, before) = fixture.warm(&mut cache, 4);
+            fixture.stage.set_z_index(fixture.mobs[0], 10, false);
+            fixture
+                .stage
+                .add_to_scene(fixture.mobs[0])
+                .expect("apply the scene's z-index ordering");
+            let (reordered, after) = fixture.render(&mut cache, 4);
+            assert_eq!(reordered.prefix.hits, 0);
+            assert_ne!(before.as_bytes(), after.as_bytes());
+
+            fixture.stage.set_z_index(fixture.mobs[0], 0, false);
+            fixture
+                .stage
+                .add_many_to_scene(&fixture.mobs)
+                .expect("restore the original painter order");
+            for alpha in [0.35, 0.39, 0.43] {
+                fixture.tail_alpha(alpha);
+                fixture.render(&mut cache, 4);
+            }
+            assert!(cache.prefix_stats().hits > 0);
+            fixture.tail_alpha(1.0);
+            let (opaque, opaque_frame) = fixture.render(&mut cache, 4);
+            assert_eq!(opaque.prefix.hits, 0);
+            fixture.tail_alpha(0.31);
+            let (_, transparent_frame) = fixture.render(&mut cache, 4);
+            assert_ne!(opaque_frame.as_bytes(), transparent_frame.as_bytes());
+
+            for mob in fixture.mobs {
+                fixture.stage.shift(mob, [1_000.0, 1_000.0, 0.0]);
+            }
+            let (empty, _) = fixture.render(&mut cache, 4);
+            assert_eq!(empty.prefix, PrefixCacheStats::default());
+            assert_eq!(cache.retained_prefix_bytes(), 0);
+            for mob in fixture.mobs {
+                fixture.stage.shift(mob, [-1_000.0, -1_000.0, 0.0]);
+            }
+            fixture.render(&mut cache, 4);
         }
     }
 

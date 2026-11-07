@@ -8681,6 +8681,341 @@ fn retained_camera_frames_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioEr
     Ok(RunOutcome::ok().with_counter("retained_camera_replays", 12))
 }
 
+/// Dirty foreground tiles reuse exact static-prefix accumulators through the
+/// production persistent renderer; a fresh renderer supplies every pixel oracle.
+fn retained_static_prefix_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    retained_prefix_run(ctx, EngineIdentity::certified())
+}
+
+fn adaptive_static_prefix_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    retained_prefix_run(ctx, EngineIdentity::fast())
+}
+
+fn retained_prefix_run(
+    ctx: &mut RunCtx,
+    engine: EngineIdentity,
+) -> Result<RunOutcome, ScenarioError> {
+    use fmn_render::{RetainedFrameRenderer, RetainedFrameRendererConfig, Tiling};
+
+    let adaptive = engine == EngineIdentity::fast();
+    let rectangle = |width: f64, height: f64| {
+        let x = width / 2.0;
+        let y = height / 2.0;
+        Mobject::vector_from_points(&[
+            [-x, -y, 0.0],
+            [0.0, -y, 0.0],
+            [x, -y, 0.0],
+            [x, 0.0, 0.0],
+            [x, y, 0.0],
+            [0.0, y, 0.0],
+            [-x, y, 0.0],
+            [-x, 0.0, 0.0],
+            [-x, -y, 0.0],
+        ])
+    };
+    let mut stage = Stage::new();
+    let mut background = Vec::new();
+    for index in 0..4 {
+        let inset = f64::from(index) * 0.125;
+        let mob = stage.add(rectangle(6.0 - inset, 4.0 - inset));
+        stage.set_fill(mob, Some(BLUE_C), Some(0.25), Some(0.0), true);
+        stage.set_stroke(mob, None, Some(0.0), None, None, true);
+        background.push(mob);
+    }
+    if adaptive {
+        // Coincident diagonal boundaries cross the moving foreground's tiles.
+        // The checkpoint must retain their AA complexity as well as color:
+        // otherwise reuse would silently stop refining these edge pixels.
+        for index in 0..4 {
+            let mob = stage.add(Mobject::vector_from_points(&[
+                [-2.0, -1.5, 0.0],
+                [0.0, 0.0, 0.0],
+                [2.0, 1.5, 0.0],
+                [0.0, 1.5, 0.0],
+                [-2.0, 1.5, 0.0],
+                [-2.0, 0.0, 0.0],
+                [-2.0, -1.5, 0.0],
+            ]));
+            stage.shift(mob, [f64::from(index) * 0.02, 0.0, 0.0]);
+            stage.set_fill(mob, Some(BLUE_C), Some(0.25), Some(0.0), true);
+            stage.set_stroke(mob, None, Some(0.0), None, None, true);
+            background.push(mob);
+        }
+    }
+    let mover = stage.add(rectangle(1.5, 1.25));
+    stage.set_fill(mover, Some(RED_C), Some(0.6), Some(0.0), true);
+    stage.set_stroke(mover, None, Some(0.0), None, None, true);
+    stage
+        .add_many_to_scene(&background)
+        .and_then(|()| stage.add_to_scene(mover))
+        .map_err(|error| fail(format!("admit static-prefix scene: {error}")))?;
+
+    let config = RetainedFrameRendererConfig {
+        frame: FrameConfig::new(
+            Viewport {
+                width: 64,
+                height: 48,
+            },
+            ScreenMap {
+                scale: 8.0,
+                origin: [32.0, 24.0],
+                y_up: true,
+            },
+            fmn_core::color::LinearRgba {
+                r: 0.02,
+                g: 0.03,
+                b: 0.04,
+                a: 0.8,
+            },
+        ),
+        tiling: Tiling {
+            macro_tile: 32,
+            fine_tile: 8,
+        },
+        engine,
+        threads: 1,
+    };
+    let mut captures = Vec::new();
+    for index in 0..6 {
+        if index != 0 {
+            stage.shift(mover, [0.125, 0.0, 0.0]);
+        }
+        if index == 4 {
+            stage.set_fill(background[0], Some(YELLOW), Some(0.375), None, true);
+        }
+        let mut fresh = RetainedFrameRenderer::new(config)
+            .map_err(|error| fail(format!("fresh prefix control renderer: {error}")))?;
+        fresh
+            .render(&stage, 0)
+            .map_err(|error| fail(format!("fresh prefix control frame: {error}")))?;
+        captures.push((stage.snapshot(), fresh.frame().as_bytes().to_vec()));
+    }
+    if captures.windows(2).any(|pair| pair[0].1 == pair[1].1) {
+        return Err(fail(
+            "static-prefix scene did not visibly change every frame",
+        ));
+    }
+
+    let mut hits = 0_u64;
+    let mut skipped = 0_u64;
+    let mut refined = 0_u64;
+    let mut artifact = Vec::new();
+    for threads in [1, 4, 16] {
+        let mut renderer = RetainedFrameRenderer::new(RetainedFrameRendererConfig {
+            threads,
+            ..config
+        })
+        .map_err(|error| fail(format!("persistent prefix renderer: {error}")))?;
+        let mut schedule_hits = 0_u64;
+        let mut schedule_skipped = 0_u64;
+        let mut schedule_refined = 0_u64;
+        for (snapshot, expected) in &captures {
+            let stats = renderer
+                .render(&snapshot.materialize(), 0)
+                .map_err(|error| fail(format!("persistent prefix frame: {error}")))?;
+            if renderer.frame().as_bytes() != expected {
+                return Err(fail(format!(
+                    "static-prefix reuse changed fresh-render pixels at {threads} threads"
+                )));
+            }
+            schedule_hits += stats.prefix.hits as u64;
+            schedule_skipped += stats.prefix.commands_skipped as u64;
+            if stats.prefix.hits != 0 {
+                schedule_refined += stats.raster.ssaa2x_cells + stats.raster.ssaa4x_cells;
+            }
+        }
+        if schedule_hits == 0 || schedule_skipped == 0 {
+            return Err(fail(format!(
+                "static-prefix raster work was not bypassed at {threads} threads"
+            )));
+        }
+        if adaptive && schedule_refined == 0 {
+            return Err(fail(format!(
+                "adaptive prefix fixture did not refine a resumed frame at {threads} threads"
+            )));
+        }
+        hits += schedule_hits;
+        skipped += schedule_skipped;
+        refined += schedule_refined;
+        if threads == 1 {
+            artifact = encode_frame(renderer.frame())
+                .map_err(|error| fail(format!("encode static-prefix frame: {error}")))?;
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.render.static_prefix")
+            .field("frames", 18_u64)
+            .field("prefix_hits", hits)
+            .field("commands_skipped", skipped)
+            .field("adaptive_refined_cells", refined)
+            .field("mode", if adaptive { "adaptive" } else { "certified" })
+            .field("fresh_pixels_match", "true"),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact(
+            if adaptive {
+                "adaptive-static-prefix.frame"
+            } else {
+                "retained-static-prefix.frame"
+            },
+            artifact,
+        )
+        .with_counter("static_prefix_frames", 18)
+        .with_counter("static_prefix_hits", hits)
+        .with_counter("static_prefix_commands_skipped", skipped)
+        .with_counter("static_prefix_adaptive_cells", refined))
+}
+
+fn obj_texture_options_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use std::collections::BTreeMap;
+
+    use fmn_library::{MODEL_SHADING, ObjAssetLimits, ObjDocument, parse_mtl};
+    use fmn_mobject::uniforms::Uniforms;
+    use fmn_mobject::{
+        ImageColorSpace, ImageResource, ImageSampler, ImageWrap, RecordBuffer, RenderPrimitive,
+        Snapshot,
+    };
+    use fmn_render::{Camera, CameraConfig, RetainedFrameRenderer, RetainedFrameRendererConfig, Tiling};
+
+    let document = ObjDocument::parse(
+        b"v -2 -1 0\nv 2 -1 0\nv 2 1 0\nv -2 1 0\n\
+          vt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nvn 0 0 1\n\
+          usemtl A\nf 1/1/1 2/2/1 3/3/1 4/4/1\n",
+    )
+    .map_err(|error| fail(format!("parse textured OBJ: {error}")))?;
+    let image = ImageResource::rgba8(
+        2,
+        2,
+        vec![
+            255, 0, 0, 255, 0, 255, 0, 255,
+            0, 0, 255, 255, 255, 255, 0, 128,
+        ],
+        ImageColorSpace::Srgb,
+        ImageSampler::default(),
+    )
+    .map_err(|error| fail(format!("construct OBJ texture: {error}")))?;
+    let background = fmn_core::color::LinearRgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+    let camera = Camera::new(CameraConfig {
+        resolution: (64, 48),
+        background,
+        ..CameraConfig::default()
+    })
+    .map_err(|error| fail(format!("construct OBJ camera: {error}")))?;
+    let config = RetainedFrameRendererConfig {
+        frame: FrameConfig::new(
+            Viewport { width: 64, height: 48 },
+            ScreenMap { scale: 6.0, origin: [32.0, 24.0], y_up: false },
+            background,
+        ),
+        tiling: Tiling { macro_tile: 32, fine_tile: 8 },
+        engine: EngineIdentity::certified(),
+        threads: 1,
+    };
+    let mut outcomes = RunOutcome::ok();
+    let mut policy_pixels = Vec::new();
+    let mut frames = 0_u64;
+    for (policy, wrap) in [("off", ImageWrap::Repeat), ("on", ImageWrap::ClampToEdge)] {
+        let materials = parse_mtl(
+            format!(
+                "newmtl A\nmap_Kd -s 2 .5 1 -o -.25 .125 0 -clamp {policy} tiles.png\n"
+            )
+            .as_bytes(),
+            &ObjAssetLimits::default(),
+        )
+        .map_err(|error| fail(format!("parse OBJ map options: {error}")))?;
+        let model = document
+            .to_mobject(2.0, &materials, &BTreeMap::from([("A".to_owned(), image.clone())]))
+            .map_err(|error| fail(format!("bind OBJ material: {error}")))?;
+        let mut stage = Stage::new();
+        let root = stage.add(model);
+        stage.add_to_scene(root)
+            .map_err(|error| fail(format!("admit OBJ model: {error}")))?;
+
+        // This reference bypasses the OBJ/MTL parser and importer. Its records
+        // state the final triangle coordinates, UVs and sampler explicitly.
+        let corners: [([f32; 3], [f32; 2]); 6] = [
+            ([-2.0, -1.0, 0.0], [-0.25, 0.875]),
+            ([2.0, -1.0, 0.0], [1.75, 0.875]),
+            ([2.0, 1.0, 0.0], [1.75, 0.375]),
+            ([-2.0, -1.0, 0.0], [-0.25, 0.875]),
+            ([2.0, 1.0, 0.0], [1.75, 0.375]),
+            ([-2.0, 1.0, 0.0], [-0.25, 0.375]),
+        ];
+        let mut buffer = RecordBuffer::new(fmn_library::textured_surface_schema(), corners.len())
+            .map_err(|error| fail(format!("allocate reference texture records: {error}")))?;
+        for (row, (point, uv)) in corners.iter().enumerate() {
+            buffer.write(row, "point", point);
+            buffer.write(row, "d_normal_point", &[point[0], point[1], 1.0]);
+            buffer.write(row, "im_coords", uv);
+            buffer.write(row, "opacity", &[1.0]);
+        }
+        let reference = Mobject::from_buffer(buffer)
+            .with_uniforms(Uniforms {
+                shading: MODEL_SHADING,
+                depth_test: true,
+                ..Uniforms::default()
+            })
+            .with_image_resource(image.clone().with_sampler(ImageSampler { wrap_u: wrap, wrap_v: wrap }))
+            .with_render_primitive(RenderPrimitive::TriangleMesh);
+        let mut oracle = Stage::new();
+        let root = oracle.add(reference);
+        oracle.add_to_scene(root)
+            .map_err(|error| fail(format!("admit OBJ reference: {error}")))?;
+        let mut fresh = RetainedFrameRenderer::new(config)
+            .map_err(|error| fail(format!("construct OBJ reference renderer: {error}")))?;
+        fresh.render_with_camera(&oracle, &camera)
+            .map_err(|error| fail(format!("render OBJ reference: {error}")))?;
+        let expected = fresh.frame().as_bytes().to_vec();
+        if !expected.iter().any(|&byte| byte != 0) {
+            return Err(fail("OBJ texture reference is invisible"));
+        }
+
+        let saved = stage.snapshot_bytes()
+            .map_err(|error| fail(format!("serialize OBJ material: {error}")))?;
+        let mut restored = Stage::new();
+        let decoded = Snapshot::from_bytes(&saved, &restored)
+            .map_err(|error| fail(format!("decode OBJ material: {error}")))?;
+        restored.restore(&decoded.snapshot);
+        if restored.snapshot_bytes().map_err(|error| fail(error.to_string()))? != saved {
+            return Err(fail("OBJ UV/sampler snapshot bytes did not round-trip"));
+        }
+        for threads in [1, 4, 16] {
+            let mut renderer = RetainedFrameRenderer::new(
+                RetainedFrameRendererConfig { threads, ..config },
+            )
+            .map_err(|error| fail(format!("construct OBJ renderer: {error}")))?;
+            for state in [&stage, &restored] {
+                renderer.render_with_camera(state, &camera)
+                    .map_err(|error| fail(format!("render OBJ map options: {error}")))?;
+                if renderer.frame().as_bytes() != expected {
+                    return Err(fail(format!(
+                        "OBJ map {policy} differs from literal geometry at {threads} threads"
+                    )));
+                }
+                frames += 1;
+            }
+        }
+        outcomes = outcomes.with_artifact(
+            if policy == "on" { "obj-map-clamp.frame" } else { "obj-map-repeat.frame" },
+            encode_frame(fresh.frame()).map_err(|error| fail(error.to_string()))?,
+        );
+        policy_pixels.push(expected);
+    }
+    if policy_pixels[0] == policy_pixels[1] {
+        return Err(fail("OBJ repeat/clamp fixture lost addressing sensitivity"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.obj.texture_options")
+            .field("frames", frames)
+            .field("snapshots", 2_u64)
+            .field("literal_pixels_match", "true")
+            .field("addressing_changes_pixels", "true"),
+    );
+    Ok(outcomes
+        .with_counter("obj_texture_frames", frames)
+        .with_counter("obj_texture_snapshots", 2))
+}
+
 /// A graph generated after native plane placement must occupy that plane's
 /// chart. The independent drawing oracle translates the original geometry;
 /// the negative witness leaves the graph at the old origin.
@@ -8980,6 +9315,96 @@ fn native_positional_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scena
     Ok(RunOutcome::ok()
         .with_counter("native_positional_samples", 2)
         .with_counter("native_positional_restores", 1))
+}
+
+/// Rollback retires discarded identities without changing explicitly frozen branches.
+fn snapshot_handle_safety_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let mut stage = Stage::new();
+    let keeper = stage.add(Mobject::from_points(&[[0.0; 3]]));
+    stage
+        .add_to_scene(keeper)
+        .map_err(|error| fail(format!("admit rollback survivor: {error}")))?;
+    let removed = stage.add(Mobject::new());
+    stage
+        .delete(removed)
+        .map_err(|error| fail(format!("prepare recycled rollback slot: {error}")))?;
+    let checkpoint = stage.snapshot();
+    let calls = Rc::new(Cell::new(0_u64));
+    let mut retired = vec![removed];
+    let mut retired_updaters = Vec::new();
+    let mut branches = Vec::new();
+
+    for cycle in 0..4_u64 {
+        stage.restore(&checkpoint);
+        let recycled = stage.add(Mobject::from_points(&[[cycle as f64 + 1.0, 0.0, 0.0]]));
+        let appended = stage.add(Mobject::from_points(&[[0.0, cycle as f64 + 1.0, 0.0]]));
+        stage
+            .add_many_to_scene(&[recycled, appended])
+            .map_err(|error| fail(format!("admit restored branch objects: {error}")))?;
+        for &old in &retired {
+            if stage.contains(old)
+                || stage.pin(old) != Err(fmn_mobject::StageError::StaleHandle)
+                || stage.delete(old) != Err(fmn_mobject::StageError::StaleHandle)
+            {
+                return Err(fail(
+                    "discarded handle resolved after rollback and allocation",
+                ));
+            }
+        }
+
+        let observed_calls = Rc::clone(&calls);
+        let updater = stage
+            .add_updater(
+                keeper,
+                move |_, _| observed_calls.set(observed_calls.get() + 1),
+                false,
+            )
+            .map_err(|error| fail(format!("register restored branch updater: {error}")))?;
+        for &old in &retired_updaters {
+            if old == updater {
+                return Err(fail("rollback reused a discarded updater identity"));
+            }
+            stage.remove_updater(keeper, old);
+        }
+        stage.update(1.0 / f64::from(FPS));
+        if calls.get() != cycle + 1 || stage.get_points(keeper) != Some(vec![[0.0; 3]]) {
+            return Err(fail(
+                "a stale updater identity changed the restored live object",
+            ));
+        }
+        branches.push((stage.snapshot(), [recycled, appended]));
+        retired.extend([recycled, appended]);
+        retired_updaters.push(updater);
+    }
+
+    stage.restore(&checkpoint);
+    if retired.iter().any(|&mob| stage.contains(mob)) || !stage.contains(keeper) {
+        return Err(fail(
+            "rollback did not preserve exactly its surviving identities",
+        ));
+    }
+    for (branch, members) in &branches {
+        let frozen = branch.materialize();
+        if !frozen.contains(keeper) || members.iter().any(|&mob| !frozen.contains(mob)) {
+            return Err(fail(
+                "later rollback invalidated an explicitly frozen branch",
+            ));
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.snapshot_handles")
+            .field("restores", 5_u64)
+            .field("discarded_objects", 8_u64)
+            .field("updater_calls", calls.get())
+            .field("frozen_branches", branches.len() as u64),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("snapshot_handle_restores", 5)
+        .with_counter("snapshot_handle_updater_calls", calls.get())
+        .with_counter("snapshot_handle_frozen_branches", branches.len() as u64))
 }
 
 /// Construct → snapshot → transform → snapshot: the scene_goldens
@@ -10115,7 +10540,8 @@ fn network_graph_layout_determinism_run(ctx: &mut RunCtx) -> Result<RunOutcome, 
 }
 
 /// Graph authoring through the public native facade, including layout motion,
-/// ordered traversal and weighted directed flow, at three worker counts.
+/// ordered traversal and weighted directed flow (including a self-loop), at
+/// three worker counts.
 fn graph_animations_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     use fmn::prelude::{
         AnimConfig, FlowAlongEdges, GraphFlowConfig, GraphLayout, GraphTraversal,
@@ -10127,12 +10553,14 @@ fn graph_animations_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
             let graph = NetworkGraph::from_edge_list(
                 &["a", "b", "c", "d"],
-                &[("a", "b"), ("a", "c"), ("b", "d"), ("c", "d")],
+                &[("a", "b"), ("a", "c"), ("b", "d"), ("c", "d"), ("d", "d")],
             )
             .laid_out(&GraphLayout::Circular)?;
             let raw = stage.scene_mut().stage_mut();
             let binding = graph.add_to(raw)?;
             raw.add_to_scene(binding.mobject())?;
+            let self_loop = binding.edge("d", "d").expect("authored self-loop");
+            assert!(raw.length_over_dim(self_loop, 0) > 0.5);
             let layout = LayoutTransition::new(
                 raw,
                 &binding,
@@ -10146,6 +10574,7 @@ fn graph_animations_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
                 ..AnimConfig::default()
             });
             stage.play_prepared(vec![Box::new(layout)])?;
+            assert!(stage.scene_mut().stage_mut().length_over_dim(self_loop, 0) > 0.5);
             let traversal = TraverseGraph::with_config(
                 stage.scene_mut().stage_mut(),
                 &binding,
@@ -10161,7 +10590,7 @@ fn graph_animations_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
             let flow = FlowAlongEdges::with_config(
                 stage.scene_mut().stage_mut(),
                 &binding,
-                &[("b", "a", 1.0), ("a", "c", 3.0)],
+                &[("b", "a", 1.0), ("d", "d", 3.0)],
                 GraphFlowConfig {
                     run_time: 1.0,
                     color: RED_C,
@@ -10215,6 +10644,11 @@ fn graph_animations_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
                 "layout, traversal or directed flow did not change rendered pixels",
             ));
         }
+        if frames[14] == frames[17] || frames[16] == frames[19] {
+            return Err(fail(
+                "self-loop flow did not travel around the visible loop",
+            ));
+        }
         if frames[11] != frames[19] || frames[19] != frames[20] || frames[20] != frames[21] {
             return Err(fail(
                 "flow changed its underlying graph or leaked a visible pulse",
@@ -10240,8 +10674,102 @@ fn graph_animations_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     Ok(RunOutcome::ok()
         .with_artifact("graph-layout.png", frames[3].clone())
         .with_artifact("graph-flow.png", frames[12].clone())
+        .with_artifact("graph-loop-flow.png", frames[16].clone())
         .with_counter("graph_animation_thread_counts", 3)
         .with_counter("graph_animation_frames", rendered_frames))
+}
+
+/// Partial reveals must never rasterize the move between separate contours.
+fn partial_reveal_contours_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_library::style::Style;
+
+    let style = Style::default().stroke(WHITE, 8.0, 1.0);
+    let source = [
+        [-1.5, -0.5, 0.0],
+        [-1.0, -0.5, 0.0],
+        [-0.5, -0.5, 0.0],
+        [-0.5, -0.5, 0.0],
+        [0.5, 0.5, 0.0],
+        [1.0, 0.5, 0.0],
+        [1.5, 0.5, 0.0],
+    ];
+    let mut stage = Stage::new();
+    let mob = stage.add(VMobject::from_points(source.to_vec()).with_style(style));
+    stage.add_to_scene(mob).map_err(|e| fail(e.to_string()))?;
+    let mut flash = fmn_anim::show_passing_flash(mob, 0.25);
+    flash.state_mut().config.rate_func = RateFunc::linear();
+    flash.begin(&mut stage).map_err(|e| fail(e.to_string()))?;
+
+    let render = |stage: &Stage, threads| -> Result<Vec<u8>, ScenarioError> {
+        let config = scene_goldens::frame_config();
+        let mut plan = RenderPlan::new();
+        plan.sync(stage, 0).map_err(|e| fail(e.to_string()))?;
+        let mono = MonoTable::build(&plan, config.map).map_err(|e| fail(e.to_string()))?;
+        let binning = Binning::build(&plan, config.viewport, TILING, config.map)
+            .map_err(|e| fail(e.to_string()))?;
+        let frame =
+            FrameJob::with_identity(&plan, &mono, &binning, config, EngineIdentity::certified())
+                .map_err(|e| fail(e.to_string()))?
+                .render(threads)
+                .map_err(|e| fail(e.to_string()))?;
+        encode_frame(&frame).map_err(|e| fail(e.to_string()))
+    };
+    let blank = render(&Stage::new(), 1)?;
+    // At alpha=5/8, the window starts inside the move and reveals 11/32
+    // of the right-hand straight contour. The oracle is authored directly,
+    // without calling any partial-path operation.
+    let mut oracle = Stage::new();
+    let expected = oracle.add(
+        VMobject::from_points(vec![
+            [0.5, 0.5, 0.0],
+            [0.671875, 0.5, 0.0],
+            [0.84375, 0.5, 0.0],
+        ])
+        .with_style(style),
+    );
+    oracle
+        .add_to_scene(expected)
+        .map_err(|e| fail(e.to_string()))?;
+    let visible = render(&oracle, 1)?;
+    if visible == blank {
+        return Err(fail("the partial-reveal oracle must draw visible ink"));
+    }
+    let mut cases = 0;
+    for alpha in [0.5, 0.625, 0.5] {
+        flash.interpolate(&mut stage, alpha);
+        if let Some(error) = flash.deferred_error() {
+            return Err(fail(format!("partial-reveal interpolation: {error}")));
+        }
+        let expected = if alpha == 0.5 { &blank } else { &visible };
+        for threads in [1, 4, 16] {
+            let actual = render(&stage, threads)?;
+            if &actual != expected {
+                return Err(fail(format!(
+                    "partial reveal bridged a contour or changed pixels at alpha={alpha}, threads={threads}"
+                )));
+            }
+            cases += 1;
+        }
+    }
+    flash.finish(&mut stage);
+    if stage.get_points(mob).as_deref() != Some(source.as_slice()) {
+        return Err(fail(
+            "partial flash failed to restore the full compound path",
+        ));
+    }
+    flash.clean_up_from_scene(&mut stage);
+    if !stage.roots().is_empty() {
+        return Err(fail("partial flash leaked its scene root"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.partial_reveal_contours")
+            .field("thread_counts", 3_u64)
+            .field("frame_comparisons", cases),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("partial_reveal_frame_comparisons", cases)
+        .with_artifact("partial-reveal-visible.frame", visible)
+        .with_artifact("partial-reveal-gap.frame", blank))
 }
 
 /// NeuralNetworkMobject end-to-end drill (fm-74z): introspects an MLP with
@@ -13596,6 +14124,66 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.retained_static_prefix.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(retained_static_prefix_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("static_prefix_frames", 18),
+            counter_ge("static_prefix_hits", 3),
+            counter_ge("static_prefix_commands_skipped", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render.static_prefix",
+            vec![
+                FieldPred::u64_eq("frames", 18),
+                FieldPred::str_eq("fresh_pixels_match", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.adaptive_static_prefix.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(adaptive_static_prefix_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("static_prefix_frames", 18),
+            counter_ge("static_prefix_hits", 3),
+            counter_ge("static_prefix_commands_skipped", 3),
+            counter_ge("static_prefix_adaptive_cells", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render.static_prefix",
+            vec![
+                FieldPred::u64_eq("frames", 18),
+                FieldPred::str_eq("mode", "adaptive"),
+                FieldPred::str_eq("fresh_pixels_match", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.obj_texture_options.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(obj_texture_options_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("obj_texture_frames", 12),
+            counter_eq("obj_texture_snapshots", 2),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.obj.texture_options",
+            vec![
+                FieldPred::u64_eq("frames", 12),
+                FieldPred::u64_eq("snapshots", 2),
+                FieldPred::str_eq("literal_pixels_match", "true"),
+                FieldPred::str_eq("addressing_changes_pixels", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.retained_camera_frames.v1",
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
@@ -15242,6 +15830,27 @@ pub fn catalog() -> Vec<ScenarioSpec> {
 
     // LIFECYCLE DRILLS.
     specs.push(spec(
+        "lifecycle.snapshot_handle_safety.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(snapshot_handle_safety_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("snapshot_handle_restores", 5),
+            counter_eq("snapshot_handle_updater_calls", 4),
+            counter_eq("snapshot_handle_frozen_branches", 4),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.lifecycle.snapshot_handles",
+            vec![
+                FieldPred::u64_eq("restores", 5),
+                FieldPred::u64_eq("discarded_objects", 8),
+                FieldPred::u64_eq("updater_calls", 4),
+                FieldPred::u64_eq("frozen_branches", 4),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.native_positional_wag.v1",
         ScenarioClass::LifecycleDrill,
         Surface::RustApi,
@@ -15748,6 +16357,26 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 vec![
                     FieldPred::u64_eq("thread_counts", 3),
                     FieldPred::u64_eq("rendered_frames", 66),
+                ],
+            )],
+        )
+        .tier(Tier::Fast),
+    );
+    specs.push(
+        spec(
+            "lifecycle.partial_reveal_contours.v1",
+            ScenarioClass::LifecycleDrill,
+            Surface::RustApi,
+            Invocation::new(partial_reveal_contours_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("partial_reveal_frame_comparisons", 9),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.lifecycle.partial_reveal_contours",
+                vec![
+                    FieldPred::u64_eq("thread_counts", 3),
+                    FieldPred::u64_eq("frame_comparisons", 9),
                 ],
             )],
         )
@@ -16298,6 +16927,46 @@ fn native_y4m_conversion_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.native_y4m_conversion.v1")
         .expect("native Y4M conversion scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn retained_static_prefix_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.retained_static_prefix.v1")
+        .expect("retained static-prefix scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn adaptive_static_prefix_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.adaptive_static_prefix.v1")
+        .expect("adaptive static-prefix scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn obj_texture_options_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.obj_texture_options.v1")
+        .expect("OBJ texture-options scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn snapshot_handle_safety_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.snapshot_handle_safety.v1")
+        .expect("snapshot handle safety scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }
@@ -16886,6 +17555,16 @@ fn graph_animations_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.graph_animations.v1")
         .expect("native graph animation lifecycle is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn partial_reveal_contours_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.partial_reveal_contours.v1")
+        .expect("partial-reveal contour lifecycle is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

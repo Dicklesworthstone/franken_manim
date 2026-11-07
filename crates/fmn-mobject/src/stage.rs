@@ -900,6 +900,11 @@ struct Slot {
     entry: Option<Entry>,
 }
 
+// Reserve the last generation as a retired free-slot marker. A checkpoint
+// may still explicitly restore a live handle with this generation, but no
+// allocation may wrap around it and revive a stale identity.
+const RETIRED_GENERATION: u32 = u32::MAX;
+
 /// A CoW snapshot of the whole stage: begin-states for §9.5's frame-parallel
 /// pure segments, Studio undo, and replay barriers.
 pub struct Snapshot {
@@ -928,10 +933,12 @@ impl Snapshot {
         let mut stage = Stage {
             id: self.stage_id,
             slots: Vec::new(),
+            generation_high_water: Vec::new(),
             free: ArcVec::new(),
             roots: ArcVec::new(),
             time: 0.0,
             next_updater_id: self.next_updater_id,
+            updater_id_high_water: self.next_updater_id,
             topology_epoch: fresh_epoch(),
             updater_failure: None,
             updater_callbacks: Rc::new(()),
@@ -1017,10 +1024,17 @@ impl CopyMap {
 pub struct Stage {
     id: u64,
     slots: Vec<Slot>,
+    // Next unissued generation for each slot in this physical arena, including
+    // slots removed by rollback. Deliberately outside the snapshot: restoring
+    // content must not make a discarded handle name a newly allocated object.
+    generation_high_water: Vec<u32>,
     free: ArcVec<u32>,
     roots: ArcVec<Mob>,
     time: f64,
     next_updater_id: u64,
+    // As above, preserve issued removal tokens across rollback while keeping
+    // the checkpoint's serialized next_updater_id unchanged.
+    updater_id_high_water: u64,
     topology_epoch: u64,
     // Physical execution state, deliberately outside Snapshot/SnapshotEntry.
     // A stack clone of this token prevents acknowledgment during callbacks;
@@ -1048,10 +1062,12 @@ impl Stage {
         Self {
             id: NEXT_STAGE_ID.fetch_add(1, Ordering::Relaxed),
             slots: Vec::new(),
+            generation_high_water: Vec::new(),
             free: ArcVec::new(),
             roots: ArcVec::new(),
             time: 0.0,
             next_updater_id: 1,
+            updater_id_high_water: 1,
             topology_epoch: fresh_epoch(),
             updater_failure: None,
             updater_callbacks: Rc::new(()),
@@ -1153,26 +1169,66 @@ impl Stage {
 
     // ------------------------------------------------------------ handles
 
+    fn available_generation(&self, index: usize, recorded: u32) -> Option<u32> {
+        let generation = recorded.max(self.generation_high_water.get(index).copied().unwrap_or(0));
+        (generation < RETIRED_GENERATION).then_some(generation)
+    }
+
+    fn record_issued_generation(&mut self, index: usize, generation: u32) {
+        if self.generation_high_water.len() <= index {
+            self.generation_high_water.resize(index + 1, 0);
+        }
+        // available_generation excludes the retired marker, so this cannot
+        // overflow. The cursor records issuance, not only eventual deletion.
+        self.generation_high_water[index] = generation + 1;
+    }
+
     fn alloc(&mut self, entry: Entry) -> Mob {
-        if let Some(index) = self.free.pop() {
+        if let Some(position) = self.free.iter().rposition(|&index| {
+            self.available_generation(index as usize, self.slots[index as usize].generation)
+                .is_some()
+        }) {
+            let index = if position + 1 == self.free.len() {
+                self.free.pop().expect("free slot was preflighted")
+            } else {
+                self.free.vec_mut().remove(position)
+            };
+            let generation = self
+                .available_generation(index as usize, self.slots[index as usize].generation)
+                .expect("free slot generation was preflighted");
+            self.record_issued_generation(index as usize, generation);
             let slot = &mut self.slots[index as usize];
+            slot.generation = generation;
             slot.entry = Some(entry);
-            Mob {
+            return Mob {
                 stage_id: self.id,
                 index,
-                generation: slot.generation,
-            }
-        } else {
+                generation,
+            };
+        }
+        loop {
             let index = u32::try_from(self.slots.len()).expect("arena slot count exceeds u32");
+            let Some(generation) = self.available_generation(index as usize, 0) else {
+                // A rollback may have truncated a slot that already exhausted
+                // its generations. Keep a valid free-ledger entry and advance
+                // to a fresh index rather than reissuing one of its handles.
+                self.slots.push(Slot {
+                    generation: RETIRED_GENERATION,
+                    entry: None,
+                });
+                self.free.push(index);
+                continue;
+            };
+            self.record_issued_generation(index as usize, generation);
             self.slots.push(Slot {
-                generation: 0,
+                generation,
                 entry: Some(entry),
             });
-            Mob {
+            return Mob {
                 stage_id: self.id,
                 index,
-                generation: 0,
-            }
+                generation,
+            };
         }
     }
 
@@ -1729,7 +1785,10 @@ impl Stage {
         self.remove_from_scene(mob);
         let slot = &mut self.slots[mob.index as usize];
         slot.entry = None;
-        slot.generation = slot.generation.wrapping_add(1);
+        let next_generation = self.generation_high_water[mob.index as usize]
+            .max(slot.generation.saturating_add(1));
+        self.generation_high_water[mob.index as usize] = next_generation;
+        slot.generation = next_generation;
         self.free.push(mob.index);
         self.touch_topology();
     }
@@ -2214,7 +2273,10 @@ impl Stage {
         for old in members {
             let slot = &mut self.slots[old.index as usize];
             let mut entry = slot.entry.take().expect("family members are live");
-            slot.generation = slot.generation.wrapping_add(1);
+            let next_generation = self.generation_high_water[old.index as usize]
+                .max(slot.generation.saturating_add(1));
+            self.generation_high_water[old.index as usize] = next_generation;
+            slot.generation = next_generation;
             self.free.push(old.index);
             entry.target = None;
             entry.saved_state = None;
@@ -2297,10 +2359,14 @@ impl Stage {
         if let Some(failure) = &self.updater_failure {
             return Err(failure.error.clone());
         }
-        self.next_updater_id
+        self.next_updater_identity()
             .checked_add(1)
             .ok_or(StageError::UpdaterIdExhausted)?;
         Ok(())
+    }
+
+    fn next_updater_identity(&self) -> u64 {
+        self.next_updater_id.max(self.updater_id_high_water)
     }
 
     /// Guard a redraw's initial factory, before it has a registered identity.
@@ -2360,11 +2426,10 @@ impl Stage {
         if !self.contains(mob) {
             return Err(StageError::StaleHandle);
         }
-        let id = UpdaterId(self.next_updater_id);
-        self.next_updater_id = self
-            .next_updater_id
-            .checked_add(1)
-            .ok_or(StageError::UpdaterIdExhausted)?;
+        let id = UpdaterId(self.next_updater_identity());
+        let next = id.0.checked_add(1).ok_or(StageError::UpdaterIdExhausted)?;
+        self.next_updater_id = next;
+        self.updater_id_high_water = next;
         let entry = self.get_mut(mob).expect("handle was checked above");
         let slot = UpdaterSlot { id, func };
         match index {
@@ -2443,7 +2508,7 @@ impl Stage {
     ) -> Result<UpdaterId, UpdaterError> {
         self.check_updater_registration()?;
         self.try_get(mob)?;
-        let id = UpdaterId(self.next_updater_id);
+        let id = UpdaterId(self.next_updater_identity());
         self.register_try_updater(
             mob,
             UpdaterFn::NonDt(Rc::new(RefCell::new(move |stage: &mut Stage, me| {
@@ -2478,7 +2543,7 @@ impl Stage {
     ) -> Result<UpdaterId, UpdaterError> {
         self.check_updater_registration()?;
         self.try_get(mob)?;
-        let id = UpdaterId(self.next_updater_id);
+        let id = UpdaterId(self.next_updater_identity());
         self.register_try_updater(
             mob,
             UpdaterFn::Dt(Rc::new(RefCell::new(move |stage: &mut Stage, me, dt| {
@@ -2527,7 +2592,7 @@ impl Stage {
         mut updater: impl FnMut(&mut Stage, Mob, UpdaterId, f64) + 'static,
         call: bool,
     ) -> Result<UpdaterId, StageError> {
-        let id = UpdaterId(self.next_updater_id);
+        let id = UpdaterId(self.next_updater_identity());
         self.register_updater(
             mob,
             UpdaterFn::Dt(Rc::new(RefCell::new(move |stage: &mut Stage, mob, dt| {
@@ -2569,7 +2634,7 @@ impl Stage {
     ) -> Result<UpdaterId, UpdaterError> {
         // No user code runs between reserving the next identity and installing
         // the state. The ordinary fallible registration performs every guard.
-        let id = UpdaterId(self.next_updater_id);
+        let id = UpdaterId(self.next_updater_identity());
         self.add_try_dt_updater(
             mob,
             move |stage, receiver, dt| updater(stage, receiver, id, dt),
@@ -3133,9 +3198,11 @@ impl Stage {
         }
     }
 
-    /// Restore a snapshot. Handles minted after the snapshot go stale
-    /// (generation discipline); outstanding views detach exactly as under
-    /// resize (view-protocol rule V6).
+    /// Restore a snapshot. Explicitly recorded handles keep their identities;
+    /// handles minted after the snapshot go stale and cannot alias a later
+    /// allocation in this physical arena. Updater removal identities follow
+    /// the same rule. Outstanding views detach exactly as under resize
+    /// (view-protocol rule V6).
     pub fn restore(&mut self, snapshot: &Snapshot) {
         assert_eq!(
             self.id, snapshot.stage_id,
@@ -3144,6 +3211,18 @@ impl Stage {
              decode to rebind handles"
         );
         *self.path_queries.get_mut() = crate::path_sampling::PathQueryCache::default();
+        self.generation_high_water.resize(
+            self.generation_high_water.len().max(snapshot.slots.len()),
+            0,
+        );
+        for (index, (generation, entry)) in snapshot.slots.iter().enumerate() {
+            let next = generation.saturating_add(u32::from(entry.is_some()));
+            self.generation_high_water[index] = self.generation_high_water[index].max(next);
+        }
+        self.updater_id_high_water = self
+            .updater_id_high_water
+            .max(self.next_updater_id)
+            .max(snapshot.next_updater_id);
         self.slots = snapshot
             .slots
             .iter()
@@ -3315,6 +3394,148 @@ pub use surface_grid::{
     prepare_surface_grid_alignment, surface_sample_is_present, surface_validity,
     with_surface_validity,
 };
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_max_generation_restores_but_deletion_retires_its_slot() {
+        let mut source = Stage::new();
+        let original = source.add(Mobject::new());
+        let mut checkpoint = source.snapshot();
+        checkpoint.slots[original.index as usize].0 = u32::MAX;
+        let restored = Mob::from_parts(source.id, original.index, u32::MAX);
+        let bytes = checkpoint.to_bytes().unwrap();
+        let decoded = Snapshot::from_bytes(&bytes, &source).unwrap();
+        source.restore(&decoded.snapshot);
+        assert!(source.contains(restored));
+
+        let frozen = source.freeze_render_state().materialize();
+        let replay = source.snapshot().materialize();
+        for mut stage in [source, frozen, replay] {
+            assert!(stage.contains(restored));
+            stage.delete(restored).unwrap();
+            let replacement = stage.add(Mobject::new());
+            assert_ne!(replacement.index, restored.index);
+            assert!(!stage.contains(restored));
+            assert_eq!(stage.slots[restored.index as usize].generation, u32::MAX);
+            Snapshot::from_bytes(&stage.snapshot_bytes().unwrap(), &stage).unwrap();
+        }
+    }
+
+    #[test]
+    fn rollback_past_the_last_usable_generation_retires_truncated_slots() {
+        let mut stage = Stage::new();
+        let empty = stage.snapshot();
+        stage.generation_high_water.push(u32::MAX - 1);
+        let last = stage.add(Mobject::new());
+        assert_eq!(last.parts(), (0, u32::MAX - 1));
+        stage.restore(&empty);
+        assert!(stage.slots.is_empty());
+
+        let replacement = stage.add(Mobject::new());
+        assert_eq!(replacement.parts(), (1, 0));
+        assert!(!stage.contains(last));
+        assert_eq!(&*stage.free, &[0]);
+        assert_eq!(stage.slots[0].generation, u32::MAX);
+        assert!(stage.slots[0].entry.is_none());
+        let decoded = Snapshot::from_bytes(&stage.snapshot_bytes().unwrap(), &stage).unwrap();
+        let mut fork = decoded.snapshot.materialize();
+        assert_eq!(fork.add(Mobject::new()).parts(), (2, 0));
+    }
+
+    #[test]
+    fn a_retired_free_slot_does_not_hide_usable_free_slots_below_it() {
+        let mut stage = Stage::new();
+        let usable = stage.add(Mobject::new());
+        let retired = stage.add(Mobject::new());
+        stage.delete(usable).unwrap();
+        stage.delete(retired).unwrap();
+        let mut checkpoint = stage.snapshot();
+        checkpoint.slots[retired.index as usize].0 = u32::MAX;
+        stage.restore(&checkpoint);
+
+        let replacement = stage.add(Mobject::new());
+        assert_eq!(replacement.parts(), (usable.index, usable.generation + 1));
+        assert_eq!(&*stage.free, &[retired.index]);
+        assert_eq!(stage.slots[retired.index as usize].generation, u32::MAX);
+        Snapshot::from_bytes(&stage.snapshot_bytes().unwrap(), &stage).unwrap();
+        let mut fork = stage.freeze_render_state().materialize();
+        assert_eq!(fork.add(Mobject::new()).index, 2);
+    }
+
+    #[test]
+    fn moving_a_max_generation_entry_retires_the_source_slot() {
+        let mut source = Stage::new();
+        let original = source.add(Mobject::from_points(&[[3.0, 4.0, 0.0]]));
+        let mut checkpoint = source.snapshot();
+        checkpoint.slots[original.index as usize].0 = u32::MAX;
+        source.restore(&checkpoint);
+        let restored = Mob::from_parts(source.id, original.index, u32::MAX);
+        let mut target = Stage::new();
+        let moved = source.move_into(restored, &mut target).unwrap();
+        assert_eq!(
+            target.get(moved).unwrap().buffer.read(0, "point").unwrap(),
+            [3.0, 4.0, 0.0]
+        );
+        assert!(!source.contains(restored));
+        assert_eq!(source.slots[original.index as usize].generation, u32::MAX);
+        let decoded = Snapshot::from_bytes(&source.snapshot_bytes().unwrap(), &source).unwrap();
+        let mut fork = decoded.snapshot.materialize();
+        assert_ne!(fork.add(Mobject::new()).index, original.index);
+        assert_ne!(source.add(Mobject::new()).index, original.index);
+        assert!(target.contains(moved));
+    }
+
+    #[test]
+    fn rollback_cannot_reopen_exhausted_updater_identity_space() {
+        let mut stage = Stage::new();
+        let mob = stage.add(Mobject::new());
+        let checkpoint = stage.snapshot();
+        let before = stage.snapshot_bytes().unwrap();
+        stage.next_updater_id = u64::MAX - 1;
+        let last = stage.add_updater(mob, |_, _| {}, false).unwrap();
+        assert_eq!(last.raw(), u64::MAX - 1);
+        stage.restore(&checkpoint);
+        assert_eq!(stage.snapshot_bytes().unwrap(), before);
+        assert_eq!(
+            stage.add_updater(mob, |_, _| panic!("exhausted callback ran"), true),
+            Err(StageError::UpdaterIdExhausted)
+        );
+        assert_eq!(
+            stage.add_try_dt_updater(
+                mob,
+                |_, _, _| panic!("exhausted fallible callback ran"),
+                true
+            ),
+            Err(UpdaterError::Stage(StageError::UpdaterIdExhausted))
+        );
+        assert_eq!(
+            stage.add_dt_updater_with_state(
+                mob,
+                0_u32,
+                |_, _| {},
+                |_, _, _, _| panic!("exhausted stateful callback ran"),
+                true
+            ),
+            Err(StageError::UpdaterIdExhausted)
+        );
+        assert_eq!(
+            stage.add_try_dt_updater_with_state(
+                mob,
+                0_u32,
+                |_, _| {},
+                |_, _, _, _| panic!("exhausted fallible stateful callback ran"),
+                true
+            ),
+            Err(UpdaterError::Stage(StageError::UpdaterIdExhausted))
+        );
+        assert!(stage.updater_ids(mob).is_empty());
+        assert!(stage.updater_error().is_none());
+        assert_eq!(stage.snapshot_bytes().unwrap(), before);
+    }
+}
 
 #[cfg(test)]
 mod updater_tests {

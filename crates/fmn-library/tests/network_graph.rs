@@ -172,6 +172,109 @@ fn built_family_paints_edges_under_vertices() {
 }
 
 #[test]
+fn self_loop_is_a_visible_closed_circle_tangent_to_its_vertex() {
+    let network = NetworkGraph::from_edge_list(&["a"], &[("a", "a")])
+        .laid_out(&GraphLayout::BreadthFirst { root: "a".into() })
+        .unwrap();
+    let position = network.position("a").unwrap();
+    let relative = |point: Vec3| std::array::from_fn(|axis| point[axis] + position[axis]);
+    let family = network.build().unwrap();
+    assert_eq!(family.children().len(), 2, "one edge, then one vertex");
+    let self_loop = &family.children()[0];
+    let vertex = &family.children()[1];
+
+    let (min, max) = self_loop.extent().unwrap();
+    assert_point_close(min, relative([-0.27, 0.09, 0.0]));
+    assert_point_close(max, relative([0.27, 0.63, 0.0]));
+    let (_, vertex_max) = vertex.extent().unwrap();
+    assert!((min[1] - vertex_max[1]).abs() < 1e-12);
+
+    let path = self_loop.path().unwrap();
+    assert_eq!(path.subpaths().len(), 1);
+    assert!(path.is_closed());
+    let first = self_loop.points()[0];
+    assert_point_close(first, relative([0.0, 0.09, 0.0]));
+    assert_point_close(*self_loop.points().last().unwrap(), first);
+    let handle = self_loop.points()[1];
+    assert!(
+        handle[0] > first[0],
+        "the pulse leaves the node to the right"
+    );
+    assert!((handle[1] - first[1]).abs() < 1e-12, "horizontal tangent");
+    for anchor in self_loop.points().iter().step_by(2) {
+        let radius_squared =
+            (anchor[0] - position[0]).powi(2) + (anchor[1] - position[1] - 0.36).powi(2);
+        assert!((radius_squared - 0.27 * 0.27).abs() < 1e-12);
+        assert_eq!(anchor[2], position[2]);
+    }
+
+    assert_eq!(self_loop.style().stroke_color, fmn_core::constants::GREY_B);
+    assert_eq!(self_loop.style().stroke_width, 2.5);
+    assert_eq!(self_loop.style().stroke_opacity, 1.0);
+    assert_eq!(self_loop.style().fill_opacity, 0.0);
+    assert_eq!(vertex.style().fill_color, fmn_core::constants::BLUE_D);
+    assert_eq!(vertex.style().fill_opacity, 1.0);
+}
+
+#[test]
+fn self_loops_keep_edge_identity_and_deterministic_geometry_in_every_layout() {
+    let nodes = ["z", "a", "m"];
+    let edges = [("a", "a"), ("z", "a"), ("m", "m"), ("a", "m")];
+    for layout in [
+        GraphLayout::Circular,
+        GraphLayout::Shell {
+            shells: vec![vec!["m".into(), "z".into()], vec!["a".into()]],
+        },
+        GraphLayout::BreadthFirst { root: "z".into() },
+        GraphLayout::Spring {
+            seed: 0x5f3759df,
+            iterations: 30,
+            ideal_edge: DEFAULT_SPRING_IDEAL_EDGE,
+        },
+    ] {
+        let build = || {
+            NetworkGraph::from_edge_list(&nodes, &edges)
+                .laid_out(&layout)
+                .unwrap()
+        };
+        let network = build();
+        let family = network.build().unwrap();
+        assert_eq!(family, build().build().unwrap(), "{layout:?}");
+
+        let ordered_edges = network.graph().edges_ordered_borrowed();
+        let edge_count = ordered_edges.len();
+        assert_eq!(edge_count, edges.len());
+        assert_eq!(family.children().len(), edge_count + nodes.len());
+        for ((from, to, _), edge) in ordered_edges.into_iter().zip(family.children()) {
+            let position = network.position(from).unwrap();
+            if from == to {
+                let contact = [position[0], position[1] + 0.09, position[2]];
+                assert_point_close(edge.points()[0], contact);
+                assert_point_close(*edge.points().last().unwrap(), contact);
+                let (min, max) = edge.extent().unwrap();
+                assert!(max[0] - min[0] > 0.5 && max[1] - min[1] > 0.5);
+                assert!(edge.path().unwrap().is_closed());
+            } else {
+                assert_point_close(edge.points()[0], position);
+                assert_point_close(
+                    *edge.points().last().unwrap(),
+                    network.position(to).unwrap(),
+                );
+            }
+        }
+        for (label, vertex) in network.nodes().iter().zip(&family.children()[edge_count..]) {
+            let (min, max) = vertex.extent().unwrap();
+            assert_point_close(
+                std::array::from_fn(|axis| (min[axis] + max[axis]) / 2.0),
+                network.position(label).unwrap(),
+            );
+            assert_eq!(vertex.style().fill_color, fmn_core::constants::BLUE_D);
+            assert_eq!(vertex.style().fill_opacity, 1.0);
+        }
+    }
+}
+
+#[test]
 fn self_golden_locks_the_canonical_build() {
     let mut star = Graph::strict();
     for label in ["hub", "n1", "n2", "n3", "n4"] {
@@ -377,6 +480,124 @@ fn rooted_bytes(stage: &Stage) -> Vec<(Mob, Vec<u8>)> {
         .iter()
         .map(|&root| (root, family_bytes(stage, root)))
         .collect()
+}
+
+#[test]
+fn layout_transition_preserves_authored_self_loops_through_seeks_and_snapshot_replay() {
+    let network = NetworkGraph::from_edge_list(&["a", "b"], &[("a", "a"), ("a", "b")])
+        .laid_out(&GraphLayout::Circular)
+        .unwrap();
+    let layout = GraphLayout::BreadthFirst { root: "b".into() };
+    let destination = network.clone().laid_out(&layout).unwrap();
+    let mut stage = Stage::new();
+    let graph = network.add_to(&mut stage).unwrap();
+    stage.add_to_scene(graph.mobject()).unwrap();
+    let node = graph.node("a").unwrap();
+    let self_loop = graph.edge("a", "a").unwrap();
+    let mut transition = LayoutTransition::new(&stage, &graph, &layout)
+        .unwrap()
+        .with_config(AnimConfig {
+            rate_func: RateFunc::linear(),
+            ..AnimConfig::default()
+        });
+
+    // Author an asymmetric loop after constructing the animation. Its actual
+    // begin-time shape, record profile, and placement must survive the move.
+    let center = stage.get_center(node);
+    let authored: Vec<Vec3> = [
+        [0.0, 0.09, 0.0],
+        [0.45, 0.09, 0.0],
+        [0.45, 0.45, 0.0],
+        [0.45, 0.9, 0.0],
+        [0.0, 0.9, 0.0],
+        [-0.2, 0.9, 0.0],
+        [-0.2, 0.45, 0.0],
+        [-0.2, 0.09, 0.0],
+        [0.0, 0.09, 0.0],
+    ]
+    .into_iter()
+    .map(|point| std::array::from_fn(|axis| point[axis] + center[axis]))
+    .collect();
+    stage.set_points(self_loop, &authored).unwrap();
+    stage.set_color_lanes(
+        self_loop,
+        "stroke_rgba",
+        Some([0.2, 0.6, 0.9]),
+        Some(0.75),
+        false,
+    );
+    let widths = vec![1.0, 2.0, 3.0, 4.0, 5.0, 4.0, 3.0, 2.0, 1.0];
+    stage
+        .get_mut(self_loop)
+        .unwrap()
+        .buffer
+        .write_range("stroke_width", 0, &widths);
+    stage.scale(graph.mobject(), 1.7);
+    stage.shift(graph.mobject(), [2.0, -1.0, 0.25]);
+
+    let start_center = stage.get_center(node);
+    let target_center = destination.position("a").unwrap();
+    let original_points = stage.get_points(self_loop).unwrap();
+    let colors = stage
+        .get(self_loop)
+        .unwrap()
+        .buffer
+        .read_column("stroke_rgba")
+        .unwrap();
+    let handles = stage.get(graph.mobject()).unwrap().submobjects().to_vec();
+    let before = stage.snapshot();
+    transition.begin(&mut stage).unwrap();
+    assert!(transition.freeze_interpolation().is_some());
+    let mut midpoint = None;
+    for alpha in [0.0, 0.25, 0.5, 0.75, 1.0, 0.5, 0.0] {
+        transition.interpolate(&mut stage, alpha);
+        let expected_center: Vec3 = std::array::from_fn(|axis| {
+            (1.0 - alpha) * start_center[axis] + alpha * target_center[axis]
+        });
+        assert_point_close(stage.get_center(node), expected_center);
+        let points = stage.get_points(self_loop).unwrap();
+        assert_eq!(points.len(), original_points.len());
+        for (point, original) in points.iter().zip(&original_points) {
+            assert_point_close(
+                *point,
+                std::array::from_fn(|axis| {
+                    original[axis] + expected_center[axis] - start_center[axis]
+                }),
+            );
+        }
+        let buffer = &stage.get(self_loop).unwrap().buffer;
+        assert_eq!(buffer.read_column("stroke_rgba").as_ref(), Some(&colors));
+        assert_eq!(buffer.read_column("stroke_width").as_ref(), Some(&widths));
+        assert_eq!(stage.get(graph.mobject()).unwrap().submobjects(), &handles);
+        let ordinary_edge = stage.get_points(graph.edge("a", "b").unwrap()).unwrap();
+        assert_point_close(ordinary_edge[0], stage.get_center(node));
+        assert_point_close(
+            *ordinary_edge.last().unwrap(),
+            stage.get_center(graph.node("b").unwrap()),
+        );
+        if alpha == 0.5 {
+            let bytes = family_bytes(&stage, graph.mobject());
+            if let Some(previous) = &midpoint {
+                assert_eq!(&bytes, previous, "seeking must be absolute");
+            } else {
+                midpoint = Some(bytes);
+            }
+        }
+    }
+    transition.finish(&mut stage);
+    transition.clean_up_from_scene(&mut stage);
+    assert_eq!(stage.roots(), &[graph.mobject()]);
+    assert!(!stage.is_animating(graph.mobject()));
+    assert!(!stage.is_updating_suspended(graph.mobject()));
+
+    stage.restore(&before);
+    transition.validate_begin(&stage).unwrap();
+    transition.begin(&mut stage).unwrap();
+    transition.interpolate(&mut stage, 0.5);
+    assert_eq!(family_bytes(&stage, graph.mobject()), midpoint.unwrap());
+    transition.finish(&mut stage);
+    transition.clean_up_from_scene(&mut stage);
+    assert_eq!(stage.roots(), &[graph.mobject()]);
 }
 
 #[test]
@@ -631,6 +852,245 @@ fn weighted_flow_uses_live_directed_paths_and_removes_only_its_overlay() {
     flow.finish(&mut stage);
     flow.clean_up_from_scene(&mut stage);
     assert_eq!(stage.roots(), &[graph.mobject()]);
+}
+
+#[test]
+fn graph_flow_preserves_contours_and_normalizes_reversed_end_handles() {
+    let source = [
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [2.0, 0.0, 0.0],
+        [2.0, 0.0, 0.0],
+        [10.0, 4.0, 0.0],
+        [12.0, 4.0, 0.0],
+        [12.0, 4.0, 0.0],
+    ];
+    let reversed = [
+        [12.0, 4.0, 0.0],
+        [11.0, 4.0, 0.0],
+        [10.0, 4.0, 0.0],
+        [10.0, 4.0, 0.0],
+        [2.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0],
+    ];
+    for (from, to, expected) in [("a", "b", source), ("b", "a", reversed)] {
+        let mut stage = Stage::new();
+        let graph = NetworkGraph::from_edge_list(&["a", "b"], &[("a", "b")])
+            .laid_out(&GraphLayout::Circular)
+            .unwrap()
+            .add_to(&mut stage)
+            .unwrap();
+        stage.add_to_scene(graph.mobject()).unwrap();
+        let edge = graph.edge("a", "b").unwrap();
+        let mut flow = FlowAlongEdges::with_config(
+            &mut stage,
+            &graph,
+            &[(from, to, 1.0)],
+            GraphFlowConfig {
+                time_width: 2.0,
+                ..GraphFlowConfig::default()
+            },
+        )
+        .unwrap();
+        let overlay = flow.state().mobject();
+        stage.add_to_scene(overlay).unwrap();
+        // Use the edge as authored at begin, including the straight segment's
+        // end-coincident handle and the gap between the two contours.
+        stage.set_points(edge, &source).unwrap();
+        let unchanged = family_bytes(&stage, graph.mobject());
+        let pulse = flow.pulses().next().unwrap();
+        flow.begin(&mut stage).unwrap();
+        assert_eq!(opacity(&stage, pulse), 0.0);
+        flow.interpolate(&mut stage, 0.5);
+        assert!(opacity(&stage, pulse) > 0.99);
+        // The wide window exposes the full path here, isolating direction and
+        // contour topology from partial-path clipping.
+        let path = fmn_geom::QuadPath::from_points(stage.get_points(pulse).unwrap()).unwrap();
+        assert_eq!(path.points(), expected.as_slice());
+        let contours = path.subpaths();
+        assert_eq!(contours.len(), 2);
+        assert_eq!(contours[0], &expected[..3]);
+        assert_eq!(contours[1], &expected[4..]);
+        assert_eq!(
+            stage.get_points(edge).unwrap().as_slice(),
+            source.as_slice()
+        );
+        assert_eq!(family_bytes(&stage, graph.mobject()), unchanged);
+
+        flow.finish(&mut stage);
+        assert_eq!(opacity(&stage, pulse), 0.0);
+        flow.clean_up_from_scene(&mut stage);
+        assert_eq!(stage.roots(), &[graph.mobject()]);
+        assert_eq!(family_bytes(&stage, graph.mobject()), unchanged);
+    }
+}
+
+#[test]
+fn certified_raster_preserves_graph_flow_gaps_and_self_loops() {
+    use fmn_core::color::LinearRgba;
+    use fmn_core::constants::WHITE;
+    use fmn_library::{Style, VMobject};
+    use fmn_render::{
+        EngineIdentity, FrameConfig, RetainedFrameRenderer, RetainedFrameRendererConfig, ScreenMap,
+        Tiling, Viewport,
+    };
+
+    let source = [
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [2.0, 0.0, 0.0],
+        [2.0, 0.0, 0.0],
+        [10.0, 4.0, 0.0],
+        [11.0, 4.0, 0.0],
+        [12.0, 4.0, 0.0],
+    ];
+    let mut serial_frames = None;
+    for threads in [1, 4, 16] {
+        let mut renderer = RetainedFrameRenderer::new(RetainedFrameRendererConfig {
+            frame: FrameConfig::new(
+                Viewport {
+                    width: 256,
+                    height: 128,
+                },
+                ScreenMap {
+                    scale: 16.0,
+                    origin: [32.0, 96.0],
+                    y_up: true,
+                },
+                LinearRgba {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+            ),
+            tiling: Tiling {
+                macro_tile: 32,
+                fine_tile: 8,
+            },
+            engine: EngineIdentity::certified(),
+            threads,
+        })
+        .unwrap();
+        let render = |renderer: &mut RetainedFrameRenderer, stage: &Stage| {
+            renderer.render(stage, 0).unwrap();
+            renderer.frame().plane(0).to_vec()
+        };
+        let mut observed = Vec::new();
+        for (from, to, expected_points) in [
+            (
+                "a",
+                "b",
+                [[10.0, 4.0, 0.0], [10.34375, 4.0, 0.0], [10.6875, 4.0, 0.0]],
+            ),
+            (
+                "b",
+                "a",
+                [[2.0, 0.0, 0.0], [1.65625, 0.0, 0.0], [1.3125, 0.0, 0.0]],
+            ),
+        ] {
+            let mut stage = Stage::new();
+            let graph = NetworkGraph::from_edge_list(&["a", "b"], &[("a", "b")])
+                .laid_out(&GraphLayout::Circular)
+                .unwrap()
+                .add_to(&mut stage)
+                .unwrap();
+            stage.add_to_scene(graph.mobject()).unwrap();
+            stage
+                .set_points(graph.edge("a", "b").unwrap(), &source)
+                .unwrap();
+            let graph_before = family_bytes(&stage, graph.mobject());
+            let baseline = render(&mut renderer, &stage);
+
+            // At alpha 5/8 the window is [17/32, 25/32]. Its upper
+            // boundary reveals 11/32 of the third curve. Author that one
+            // straight contour directly, without calling partial_points or
+            // any animation; there_and_back(5/8) = smooth(3/4) = 459/512.
+            let mut expected_stage = stage.snapshot().materialize();
+            let expected_pulse = expected_stage.add(
+                VMobject::from_points(expected_points.to_vec())
+                    .with_style(Style::default().stroke(WHITE, 5.0, 459.0 / 512.0)),
+            );
+            expected_stage.add_to_scene(expected_pulse).unwrap();
+            let expected = render(&mut renderer, &expected_stage);
+            assert!(
+                expected != baseline,
+                "the reference pulse must paint pixels"
+            );
+
+            let mut flow = FlowAlongEdges::with_config(
+                &mut stage,
+                &graph,
+                &[(from, to, 1.0)],
+                GraphFlowConfig {
+                    color: WHITE,
+                    stroke_width: 5.0,
+                    time_width: 0.25,
+                    ..GraphFlowConfig::default()
+                },
+            )
+            .unwrap();
+            stage.add_to_scene(flow.state().mobject()).unwrap();
+            flow.begin(&mut stage).unwrap();
+            for alpha in [0.5, 0.625, 0.5] {
+                flow.interpolate(&mut stage, alpha);
+                let frame = render(&mut renderer, &stage);
+                let reference = if alpha == 0.5 { &baseline } else { &expected };
+                assert!(
+                    &frame == reference,
+                    "threads={threads}, flow={from}->{to}, alpha={alpha}"
+                );
+                assert_eq!(family_bytes(&stage, graph.mobject()), graph_before);
+                observed.push(frame);
+            }
+            flow.finish(&mut stage);
+            flow.clean_up_from_scene(&mut stage);
+            assert_eq!(stage.roots(), &[graph.mobject()]);
+            let finished = render(&mut renderer, &stage);
+            assert!(finished == baseline, "cleanup must restore the graph image");
+            observed.push(finished);
+        }
+
+        let mut stage = Stage::new();
+        let graph = NetworkGraph::from_edge_list(&["a", "b"], &[("a", "a"), ("a", "b")])
+            .laid_out(&GraphLayout::Circular)
+            .unwrap()
+            .add_to(&mut stage)
+            .unwrap();
+        stage.add_to_scene(graph.mobject()).unwrap();
+        let self_loop = graph.edge("a", "a").unwrap();
+        let mut transition = LayoutTransition::new(
+            &stage,
+            &graph,
+            &GraphLayout::BreadthFirst { root: "a".into() },
+        )
+        .unwrap();
+        transition.begin(&mut stage).unwrap();
+        for alpha in [0.0, 1.0] {
+            transition.interpolate(&mut stage, alpha);
+            let visible = render(&mut renderer, &stage);
+            let mut without_loop = stage.snapshot().materialize();
+            without_loop.set_color_lanes(self_loop, "stroke_rgba", None, Some(0.0), false);
+            let hidden = render(&mut renderer, &without_loop);
+            assert!(
+                visible != hidden,
+                "self-loop must paint visible pixels before and after layout, alpha={alpha}"
+            );
+            observed.push(visible);
+            observed.push(hidden);
+        }
+        transition.finish(&mut stage);
+        transition.clean_up_from_scene(&mut stage);
+        if let Some(serial) = &serial_frames {
+            assert!(
+                observed == *serial,
+                "certified bytes differ at {threads} threads"
+            );
+        } else {
+            serial_frames = Some(observed);
+        }
+    }
 }
 
 #[test]

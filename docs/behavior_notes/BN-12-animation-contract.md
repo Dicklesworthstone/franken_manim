@@ -214,3 +214,31 @@ removal policy. Group cleanup semantics themselves are unchanged.
 Evidence: `fmn-anim/tests/broadcast_timing.rs` checks both the analytical
 intervals and actual intermediate positions for unequal member durations,
 plus scene membership after completion.
+
+## Partial reveals preserve contour breaks
+
+The native partial-path operation treats a shared-anchor subpath break as
+a move between contours. When a reveal or flash window begins or ends inside
+that move's curve-index interval, the move retains its original anchors and
+break handle. A window wholly inside the move contains only collapsed,
+non-drawable contours.
+
+Previously, restricting the move as if it were a drawable quadratic could
+create a connecting stroke across the gap, or replace its endpoint with a
+point that belonged to neither contour. This affected native ShowCreation,
+Uncreate, Write, ShowPassingFlash, and graph flow on compound paths.
+
+The original point count, curve-index timing, and joint-angle flank indices
+are preserved. Drawable quadratics use the same restriction arithmetic,
+including curves with tiny initial tangents, end-coincident handles, and
+null curves. This does not reallocate time by arc length or by contour.
+
+**Migration:** no change is needed for disconnected paths. If a scene needs
+a visible connector, author it as a drawable segment instead of depending
+on interpolation of a move marker.
+
+Regression coverage: `fmn-geom/src/quadpath.rs` checks analytical clipped
+coordinates and unchanged drawable-curve bits; `fmn-anim/tests/creation.rs`
+checks live reveals, reverse seeks, and flash teardown; the registered
+`lifecycle.partial_reveal_contours.v1` scenario compares certified frames
+with independently authored geometry at one, four, and sixteen threads.

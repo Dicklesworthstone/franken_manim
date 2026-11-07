@@ -186,6 +186,16 @@ struct RenderWorker {
 }
 
 impl RenderWorker {
+    fn with_prefix_cache_budget(max_prefix_bytes: usize) -> Self {
+        Self {
+            cache: PixelTileCache::with_budgets(
+                PixelTileCache::DEFAULT_KEY_BUDGET_BYTES,
+                max_prefix_bytes,
+            ),
+            ..Self::default()
+        }
+    }
+
     // Render into the recycled raster, convert into the output slot on the
     // same team, then keep the raster for the next frame. A raster from a
     // failed render is dropped, so a stale surface can never be resumed.
@@ -298,11 +308,17 @@ pub(super) struct NativeFrameStages {
 }
 
 impl NativeFrameStages {
-    fn new(render_teams: usize, compiler: NativeCompiler) -> Self {
+    fn new(
+        render_teams: usize,
+        compiler: NativeCompiler,
+        max_prefix_bytes_per_team: usize,
+    ) -> Self {
         Self {
             compiler: Mutex::new(compiler),
             workers: (0..render_teams)
-                .map(|_| Mutex::new(RenderWorker::default()))
+                .map(|_| {
+                    Mutex::new(RenderWorker::with_prefix_cache_budget(max_prefix_bytes_per_team))
+                })
                 .collect(),
         }
     }
@@ -574,6 +590,12 @@ fn convert_into(
 /// team that switches routes retains both its vector cache and band surface
 /// alongside its camera compiler. Caller-owned serial renderers and their
 /// caches require a separate allowance when they coexist with this pipeline.
+/// Native-resolution planar workers can also retain bounded static-prefix checkpoints,
+/// including adaptive-AA state on the fast CPU route.
+/// The default accounted allowance is [`PixelTileCache::DEFAULT_PREFIX_BUDGET_BYTES`]
+/// per team, with additional container/allocator overhead. Call
+/// [`Self::with_prefix_cache_budget`] to lower or disable that optional storage.
+/// Forced-SSAA fast CPU and fixed-camera pipelines disable it.
 /// Output conversion runs directly from the RGBA16F raster into the reserved output
 /// slot; no per-frame intermediate surface is allocated. Frozen graph/record
 /// storage is additional to that pixel budget, with at most one input per
@@ -603,6 +625,31 @@ impl NativeFramePipeline {
         config: RetainedFrameRendererConfig,
         camera: Option<Camera>,
         output: EmitterHandle,
+    ) -> Result<Self, RenderError> {
+        Self::with_prefix_cache_budget(
+            plan,
+            config,
+            camera,
+            output,
+            PixelTileCache::DEFAULT_PREFIX_BUDGET_BYTES,
+        )
+    }
+
+    /// Compose a pipeline with an explicit static-prefix cache allowance per team.
+    ///
+    /// `max_prefix_bytes_per_team` bounds accounted key, accumulator and entry
+    /// storage; callers must separately allow for container/allocator overhead.
+    /// Zero disables prefix reuse without changing pixels or frame admission.
+    /// Forced-SSAA fast CPU and fixed-camera routes use zero regardless of this allowance.
+    ///
+    /// # Errors
+    /// As [`Self::new`].
+    pub fn with_prefix_cache_budget(
+        plan: ExecutionPlan,
+        config: RetainedFrameRendererConfig,
+        camera: Option<Camera>,
+        output: EmitterHandle,
+        max_prefix_bytes_per_team: usize,
     ) -> Result<Self, RenderError> {
         // Source demand is synchronous. A smaller output ring could block
         // its producer while the coordinator awaits that same next source
@@ -669,7 +716,18 @@ impl NativeFramePipeline {
                 VectorFrameCompiler::new(config).map_err(RenderError::Renderer)?,
             )),
         };
-        let stages = NativeFrameStages::new(plan.render_teams.len(), compiler);
+        let max_prefix_bytes_per_team = if camera.is_none()
+            && PixelTileCache::supports_prefix_cache(config.engine, config.frame.aa)
+        {
+            max_prefix_bytes_per_team
+        } else {
+            0
+        };
+        let stages = NativeFrameStages::new(
+            plan.render_teams.len(),
+            compiler,
+            max_prefix_bytes_per_team,
+        );
         let stream = FrameStream::new(plan, stages, |_, output| {
             output.publish().map_err(NativeFrameError::Emitter)
         })
@@ -1247,6 +1305,66 @@ mod handoff_tests {
             worker.spare.is_some(),
             "only reusable pixel storage remains"
         );
+    }
+
+    #[test]
+    fn render_teams_obey_prefix_caps_without_changing_output_pixels() {
+        for (engine, aa, eligible) in [
+            (
+                EngineIdentity::certified(),
+                fmn_render::AaPolicy::Adaptive,
+                true,
+            ),
+            (EngineIdentity::fast(), fmn_render::AaPolicy::Adaptive, true),
+            (EngineIdentity::fast(), fmn_render::AaPolicy::Ssaa2x, false),
+            (EngineIdentity::fast(), fmn_render::AaPolicy::Ssaa4x, false),
+        ] {
+            for budget in [0, 1, 64 * 1024] {
+                let (mut stage, mut config, _) = camera_fixture();
+                config.engine = engine;
+                config.frame.aa = aa;
+                let moving = stage.copy_family(stage.roots()[0]).unwrap();
+                stage.get_mut(moving).unwrap().buffer.write_range(
+                    "fill_rgba",
+                    0,
+                    &[1.0, 0.1, 0.2, 0.5].repeat(3),
+                );
+                stage.add_to_scene(moving).unwrap();
+                let mut compiler = VectorFrameCompiler::new(config).unwrap();
+                let stages = NativeFrameStages::new(
+                    2,
+                    NativeCompiler::Vector(Box::new(VectorFrameCompiler::new(config).unwrap())),
+                    budget,
+                );
+                let layout = fmn_frame::FrameLayout::tight(PixelFormat::Rgba8, 16, 16).unwrap();
+                let mut expected = FrameBuffer::new(layout.clone());
+                let mut output = FrameBuffer::new(layout);
+                let mut retained_prefix = false;
+                for _ in 0..4 {
+                    stage.shift(moving, [0.125, 0.0, 0.0]);
+                    let frame = compiler.capture(&stage, 0).unwrap();
+                    let (raw, _) = frame
+                        .render_cached(
+                            1,
+                            &mut FrameArena::default(),
+                            &mut PixelTileCache::with_budgets(0, 0),
+                        )
+                        .unwrap();
+                    convert_into(&raw, &mut expected, 1).unwrap();
+                    for (index, worker) in stages.workers.iter().enumerate() {
+                        let mut worker = worker.lock().unwrap();
+                        worker
+                            .render_vector(&frame, if index == 0 { 1 } else { 4 }, &mut output)
+                            .unwrap();
+                        assert_eq!(output.as_bytes(), expected.as_bytes());
+                        let bytes = worker.cache.retained_prefix_bytes();
+                        assert!(bytes <= budget);
+                        retained_prefix |= bytes != 0;
+                    }
+                }
+                assert_eq!(retained_prefix, eligible && budget == 64 * 1024);
+            }
+        }
     }
 
     #[test]
