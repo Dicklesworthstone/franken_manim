@@ -60,6 +60,8 @@
 //! regression drill (`RegressionKind`): the runner drives the scenario
 //! red, and the repro bundle plus log artifact must appear.
 
+#[path = "support/path_motion.rs"]
+mod path_motion;
 #[path = "support/path_observation.rs"]
 mod path_observation;
 #[allow(dead_code)]
@@ -14101,6 +14103,27 @@ fn spec(
 pub fn catalog() -> Vec<ScenarioSpec> {
     let mut specs = vec![
         spec(
+            "parity.retained_path_motion.v1",
+            ScenarioClass::ParityDrill,
+            Surface::RustApi,
+            Invocation::new(path_motion::run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("retained_motion_frames", 65),
+                counter_eq("retained_motion_warm_geometry_scans", 0),
+                counter_eq("retained_motion_path_materializations", 3),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.parity.retained_path_motion",
+                vec![
+                    FieldPred::str_eq("exact_placements", "true"),
+                    FieldPred::u64_eq("frames", 65),
+                    FieldPred::u64_eq("warm_geometry_scans", 0),
+                    FieldPred::u64_eq("path_materializations", 3),
+                ],
+            )],
+        ),
+        spec(
             "lifecycle.owned_path_observations.v1",
             ScenarioClass::LifecycleDrill,
             Surface::RustApi,
@@ -18345,6 +18368,16 @@ fn python_portal_png_still_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.python_portal_png_still.v1")
         .expect("Python portal still scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn retained_path_motion_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "parity.retained_path_motion.v1")
+        .expect("retained path motion scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

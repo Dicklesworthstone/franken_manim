@@ -242,9 +242,23 @@ struct DirtySpan {
     max: usize,
 }
 
+// Process-local identity, independent of allocator address reuse. It is derived
+// state only: snapshots share it with shared storage, while every actual copy
+// obtains a new token. Never serialize it or use its order as scene content.
+static NEXT_STORAGE_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+fn fresh_storage_generation() -> u64 {
+    NEXT_STORAGE_GENERATION
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            value.checked_add(1)
+        })
+        .expect("record storage generation space exhausted")
+}
+
 /// One fixed-capacity storage generation (V1).
 #[derive(Debug)]
 struct Storage {
+    generation: u64,
     cells: RwLock<Box<[f32]>>,
     /// V4: bumped on every write through any path.
     revision: AtomicU64,
@@ -270,6 +284,7 @@ struct Storage {
 impl Storage {
     fn new(cells: Box<[f32]>, n_fields: usize) -> Arc<Self> {
         Arc::new(Self {
+            generation: fresh_storage_generation(),
             cells: RwLock::new(cells),
             revision: AtomicU64::new(0),
             field_revisions: (0..n_fields).map(|_| AtomicU64::new(0)).collect(),
@@ -430,6 +445,18 @@ impl RecordBuffer {
     #[must_use]
     pub fn storage_id(&self) -> usize {
         Arc::as_ptr(&self.storage) as usize
+    }
+
+    /// Process-local identity of the current storage allocation, never reused.
+    ///
+    /// Unlike an address, this distinguishes replacement buffers after an old
+    /// allocation has been freed. A shared snapshot retains the same identity;
+    /// copy-on-write, deep copies, and resize detachments receive a new one.
+    /// This is an in-memory cache key, not serialized scene content, and its
+    /// ordering carries no semantic meaning.
+    #[must_use]
+    pub fn storage_generation(&self) -> u64 {
+        self.storage.generation
     }
 
     /// A non-owning witness of this buffer's storage generation.
