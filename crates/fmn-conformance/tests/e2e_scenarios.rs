@@ -8684,8 +8684,20 @@ fn retained_camera_frames_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioEr
 /// Dirty foreground tiles reuse exact static-prefix accumulators through the
 /// production persistent renderer; a fresh renderer supplies every pixel oracle.
 fn retained_static_prefix_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    retained_prefix_run(ctx, EngineIdentity::certified())
+}
+
+fn adaptive_static_prefix_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    retained_prefix_run(ctx, EngineIdentity::fast())
+}
+
+fn retained_prefix_run(
+    ctx: &mut RunCtx,
+    engine: EngineIdentity,
+) -> Result<RunOutcome, ScenarioError> {
     use fmn_render::{RetainedFrameRenderer, RetainedFrameRendererConfig, Tiling};
 
+    let adaptive = engine == EngineIdentity::fast();
     let rectangle = |width: f64, height: f64| {
         let x = width / 2.0;
         let y = height / 2.0;
@@ -8709,6 +8721,26 @@ fn retained_static_prefix_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioEr
         stage.set_fill(mob, Some(BLUE_C), Some(0.25), Some(0.0), true);
         stage.set_stroke(mob, None, Some(0.0), None, None, true);
         background.push(mob);
+    }
+    if adaptive {
+        // Coincident diagonal boundaries cross the moving foreground's tiles.
+        // The checkpoint must retain their AA complexity as well as color:
+        // otherwise reuse would silently stop refining these edge pixels.
+        for index in 0..4 {
+            let mob = stage.add(Mobject::vector_from_points(&[
+                [-2.0, -1.5, 0.0],
+                [0.0, 0.0, 0.0],
+                [2.0, 1.5, 0.0],
+                [0.0, 1.5, 0.0],
+                [-2.0, 1.5, 0.0],
+                [-2.0, 0.0, 0.0],
+                [-2.0, -1.5, 0.0],
+            ]));
+            stage.shift(mob, [f64::from(index) * 0.02, 0.0, 0.0]);
+            stage.set_fill(mob, Some(BLUE_C), Some(0.25), Some(0.0), true);
+            stage.set_stroke(mob, None, Some(0.0), None, None, true);
+            background.push(mob);
+        }
     }
     let mover = stage.add(rectangle(1.5, 1.25));
     stage.set_fill(mover, Some(RED_C), Some(0.6), Some(0.0), true);
@@ -8740,7 +8772,7 @@ fn retained_static_prefix_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioEr
             macro_tile: 32,
             fine_tile: 8,
         },
-        engine: EngineIdentity::certified(),
+        engine,
         threads: 1,
     };
     let mut captures = Vec::new();
@@ -8766,6 +8798,7 @@ fn retained_static_prefix_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioEr
 
     let mut hits = 0_u64;
     let mut skipped = 0_u64;
+    let mut refined = 0_u64;
     let mut artifact = Vec::new();
     for threads in [1, 4, 16] {
         let mut renderer = RetainedFrameRenderer::new(RetainedFrameRendererConfig {
@@ -8775,25 +8808,35 @@ fn retained_static_prefix_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioEr
         .map_err(|error| fail(format!("persistent prefix renderer: {error}")))?;
         let mut schedule_hits = 0_u64;
         let mut schedule_skipped = 0_u64;
+        let mut schedule_refined = 0_u64;
         for (snapshot, expected) in &captures {
             let stats = renderer
                 .render(&snapshot.materialize(), 0)
                 .map_err(|error| fail(format!("persistent prefix frame: {error}")))?;
             if renderer.frame().as_bytes() != expected {
                 return Err(fail(format!(
-                    "static-prefix reuse changed certified pixels at {threads} threads"
+                    "static-prefix reuse changed fresh-render pixels at {threads} threads"
                 )));
             }
             schedule_hits += stats.prefix.hits as u64;
             schedule_skipped += stats.prefix.commands_skipped as u64;
+            if stats.prefix.hits != 0 {
+                schedule_refined += stats.raster.ssaa2x_cells + stats.raster.ssaa4x_cells;
+            }
         }
         if schedule_hits == 0 || schedule_skipped == 0 {
             return Err(fail(format!(
                 "static-prefix raster work was not bypassed at {threads} threads"
             )));
         }
+        if adaptive && schedule_refined == 0 {
+            return Err(fail(format!(
+                "adaptive prefix fixture did not refine a resumed frame at {threads} threads"
+            )));
+        }
         hits += schedule_hits;
         skipped += schedule_skipped;
+        refined += schedule_refined;
         if threads == 1 {
             artifact = encode_frame(renderer.frame())
                 .map_err(|error| fail(format!("encode static-prefix frame: {error}")))?;
@@ -8804,13 +8847,23 @@ fn retained_static_prefix_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioEr
             .field("frames", 18_u64)
             .field("prefix_hits", hits)
             .field("commands_skipped", skipped)
+            .field("adaptive_refined_cells", refined)
+            .field("mode", if adaptive { "adaptive" } else { "certified" })
             .field("fresh_pixels_match", "true"),
     );
     Ok(RunOutcome::ok()
-        .with_artifact("retained-static-prefix.frame", artifact)
+        .with_artifact(
+            if adaptive {
+                "adaptive-static-prefix.frame"
+            } else {
+                "retained-static-prefix.frame"
+            },
+            artifact,
+        )
         .with_counter("static_prefix_frames", 18)
         .with_counter("static_prefix_hits", hits)
-        .with_counter("static_prefix_commands_skipped", skipped))
+        .with_counter("static_prefix_commands_skipped", skipped)
+        .with_counter("static_prefix_adaptive_cells", refined))
 }
 
 /// A graph generated after native plane placement must occupy that plane's
@@ -13940,6 +13993,27 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.adaptive_static_prefix.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(adaptive_static_prefix_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("static_prefix_frames", 18),
+            counter_ge("static_prefix_hits", 3),
+            counter_ge("static_prefix_commands_skipped", 3),
+            counter_ge("static_prefix_adaptive_cells", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render.static_prefix",
+            vec![
+                FieldPred::u64_eq("frames", 18),
+                FieldPred::str_eq("mode", "adaptive"),
+                FieldPred::str_eq("fresh_pixels_match", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.retained_camera_frames.v1",
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
@@ -16693,6 +16767,16 @@ fn retained_static_prefix_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.retained_static_prefix.v1")
         .expect("retained static-prefix scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn adaptive_static_prefix_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.adaptive_static_prefix.v1")
+        .expect("adaptive static-prefix scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

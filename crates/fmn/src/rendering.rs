@@ -998,16 +998,6 @@ impl RenderSink {
                 "render plan exceeds max_resident_bytes",
             ));
         }
-        let prefix_cache_bytes = if plan.engine == ExecutionEngine::CertifiedCpu
-            && options.camera.is_none()
-        {
-            prefix_cache_budget_per_team(
-                options.max_resident_bytes - planned,
-                plan.render_teams.len(),
-            )
-        } else {
-            0
-        };
         let background = Srgb::from_hex(&config.camera.background_color)
             .map_err(RenderError::Color)?
             .to_linear(config.camera.background_opacity);
@@ -1050,6 +1040,16 @@ impl RenderSink {
                 .render_teams
                 .first()
                 .map_or(1, fmn_runtime::TeamPlan::threads),
+        };
+        let prefix_cache_bytes = if camera.is_none()
+            && PixelTileCache::supports_prefix_cache(renderer_config.engine, frame.aa)
+        {
+            prefix_cache_budget_per_team(
+                options.max_resident_bytes - planned,
+                plan.render_teams.len(),
+            )
+        } else {
+            0
         };
         let mut video = None;
         let (binding, receipt) = match options.format {

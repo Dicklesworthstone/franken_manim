@@ -39,13 +39,15 @@
 //!
 //! ## Static leading commands keep their exact accumulator
 //!
-//! Certified CPU additionally retains bounded f64 premultiplied checkpoints for
+//! CPU engines additionally retain bounded exact premultiplied checkpoints for
 //! unchanged leading commands inside dirty tiles. A changed frame discovers
-//! the common prefix; a later changed frame can resume it without repeating its
-//! coverage or compositing. Prefix matching uses the same exact key inputs as
-//! whole-tile reuse. No decoded RGBA16F pixels or regrouped suffix composites
-//! enter the accumulator, and pending captures publish only after a successful
-//! frame. Adaptive/forced-sampling engines keep their ordinary raster path.
+//! the common prefix; a later changed frame resumes its native-resolution pass.
+//! Fast adaptive AA also retains cumulative boundary counts and rerasterizes
+//! the complete command run at pixels requiring subpixel samples. Prefix
+//! matching uses the same exact key inputs as whole-tile reuse. No decoded
+//! RGBA16F pixels or regrouped suffix composites enter the accumulator, and
+//! pending captures publish only after a successful frame. Fast forced-sampling
+//! engines keep their ordinary raster path.
 //!
 //! ## Live views are never traded for reuse
 //!
@@ -68,7 +70,7 @@ use std::collections::HashMap;
 
 mod prefix;
 pub use prefix::PrefixCacheStats;
-use prefix::{PrefixCache, PrefixInputs};
+use prefix::{PrefixCache, PrefixInputs, PrefixMode, PrefixRow};
 
 /// Everything about the output that can change a tile's bytes without changing
 /// the scene.
@@ -654,6 +656,24 @@ impl PixelTileCache {
     /// Native frame-pipeline admission includes this per-render-team budget.
     pub const DEFAULT_PREFIX_BUDGET_BYTES: usize = 32 * 1024 * 1024;
 
+    /// Whether this effective CPU arithmetic/AA path can resume exact prefixes.
+    ///
+    /// Certified CPU always uses canonical AA regardless of the requested
+    /// policy. Fast adaptive AA retains native boundary counts as well as the
+    /// accumulator. Forced fast SSAA would require per-subsample checkpoints;
+    /// it and annex engines deliberately keep the ordinary raster path.
+    #[must_use]
+    pub const fn supports_prefix_cache(
+        identity: crate::engine::EngineIdentity,
+        aa: crate::engine::AaPolicy,
+    ) -> bool {
+        match identity.engine {
+            crate::engine::EngineKind::CertifiedCpu => true,
+            crate::engine::EngineKind::FastCpu => matches!(aa, crate::engine::AaPolicy::Adaptive),
+            crate::engine::EngineKind::Metal | crate::engine::EngineKind::Cuda => false,
+        }
+    }
+
     /// An empty cache with a bound on retained exact command/revision storage.
     ///
     /// This does not bound pixel payloads or instantaneous allocation peaks
@@ -667,11 +687,11 @@ impl PixelTileCache {
     /// Bound whole-tile keys and exact static-prefix checkpoints independently.
     ///
     /// Prefix storage includes exact command/revision keys, f64 premultiplied
-    /// pixels and per-entry storage, excluding hash-table spare buckets and
-    /// allocator overhead. A zero prefix budget disables checkpoint
-    /// reuse. Allocation refusal falls back to ordinary rasterization. Only
-    /// certified CPU's canonical analytic path admits checkpoints; adaptive and
-    /// forced-supersampling paths require different intermediate state.
+    /// pixels, adaptive boundary counts and per-entry storage, excluding
+    /// hash-table spare buckets and allocator overhead. Fast f32 accumulator
+    /// lanes widen exactly into the same f64 checkpoint carrier. A zero prefix
+    /// budget disables reuse. Allocation refusal falls back to ordinary
+    /// rasterization. See [`Self::supports_prefix_cache`] for supported paths.
     #[must_use]
     pub fn with_budgets(max_key_bytes: usize, max_prefix_bytes: usize) -> Self {
         Self {
@@ -721,7 +741,7 @@ impl PixelTileCache {
         self.prefixes.stats()
     }
 
-    /// Accounted key/accumulator capacities and per-entry storage in the prefix cache.
+    /// Accounted key/accumulator/AA capacities and per-entry storage in the prefix cache.
     /// Hash-table spare buckets and allocator overhead are not included.
     #[must_use]
     pub fn retained_prefix_bytes(&self) -> usize {
@@ -811,8 +831,15 @@ impl PixelTileCache {
 
         self.prefixes.begin_frame(
             binning.tile_count(),
-            self.last_journal_inputs
-                .is_some_and(|(identity, _, _)| identity.engine.certifiable()),
+            self.last_journal_inputs.and_then(|(identity, config, _)| {
+                Self::supports_prefix_cache(identity, config.aa).then_some(
+                    if identity.engine.certifiable() {
+                        PrefixMode::Canonical
+                    } else {
+                        PrefixMode::Adaptive
+                    },
+                )
+            }),
         );
 
         self.tiles.begin_frame();
@@ -873,7 +900,7 @@ impl PixelTileCache {
         tile: usize,
         row: usize,
         width: usize,
-    ) -> Option<(&[fmn_core::color::PremulRgba], usize)> {
+    ) -> Option<PrefixRow<'_>> {
         self.prefixes.row(tile, row, width)
     }
 
@@ -886,8 +913,9 @@ impl PixelTileCache {
         tile: usize,
         row: usize,
         pixels: impl ExactSizeIterator<Item = fmn_core::color::PremulRgba>,
+        edges: Option<&[u8]>,
     ) {
-        self.prefixes.capture_row(tile, row, pixels);
+        self.prefixes.capture_row(tile, row, pixels, edges);
     }
 
     pub(crate) fn restore_reused_tiles(

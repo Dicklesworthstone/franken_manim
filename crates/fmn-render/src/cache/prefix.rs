@@ -4,6 +4,9 @@
 //! it loses the f64 accumulator bits before the next source-over operation.
 //! These checkpoints retain that accumulator, including the background, and
 //! resume the original painter-ordered command run without regrouping it.
+//! Adaptive AA also retains cumulative boundary counts. Its complex pixels
+//! still supersample the complete command run; a resolved prefix is never
+//! composited with a supersampled tail.
 
 use super::{OutputTransform, TileKey, TileWork, tile_rect};
 use crate::{Binning, RenderPlan};
@@ -16,16 +19,29 @@ use std::sync::{Mutex, PoisonError};
 ///
 /// Whole-tile hits are counted separately by [`super::CacheStats`]. A prefix
 /// hit means every row resumed an exact accumulator and skipped the leading
-/// commands' coverage, stroke and compositing work. Failed renders publish no
-/// prefix counters or newly captured checkpoints.
+/// commands' native-resolution coverage, stroke and compositing work. Adaptive
+/// AA may still rerasterize those commands at complex pixels' subpixel samples.
+/// Failed renders publish no prefix counters or newly captured checkpoints.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PrefixCacheStats {
     /// Dirty tiles that resumed a previously completed prefix checkpoint.
     pub hits: usize,
     /// Newly completed checkpoints admitted after all raster workers succeed.
     pub captures: usize,
-    /// Painter commands skipped, summed once per resumed tile (not per row).
+    /// Native-pass painter commands skipped, once per resumed tile (not per row).
     pub commands_skipped: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PrefixMode {
+    Canonical,
+    Adaptive,
+}
+
+pub(crate) struct PrefixRow<'a> {
+    pub pixels: &'a [PremulRgba],
+    pub edges: Option<&'a [u8]>,
+    pub commands: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -36,16 +52,31 @@ pub(super) struct PrefixInputs<'a> {
     pub output: OutputTransform,
 }
 
+#[derive(Debug, Default)]
+struct PrefixPixels {
+    pixels: Vec<PremulRgba>,
+    edges: Vec<u8>,
+}
+
+impl PrefixPixels {
+    fn retained_bytes(&self) -> usize {
+        self.pixels
+            .capacity()
+            .saturating_mul(std::mem::size_of::<PremulRgba>())
+            .saturating_add(self.edges.capacity())
+    }
+}
+
 #[derive(Debug)]
 struct PendingPixels {
-    pixels: Vec<PremulRgba>,
+    state: PrefixPixels,
     rows: usize,
     valid: bool,
 }
 
 #[derive(Debug)]
 enum Pixels {
-    Ready(Vec<PremulRgba>),
+    Ready(PrefixPixels),
     Pending(Mutex<PendingPixels>),
 }
 
@@ -61,17 +92,17 @@ struct PrefixTile {
 
 impl PrefixTile {
     fn retained_bytes(&self) -> usize {
-        let capacity = match &self.pixels {
-            Pixels::Ready(pixels) => pixels.capacity(),
+        let bytes = match &self.pixels {
+            Pixels::Ready(state) => state.retained_bytes(),
             Pixels::Pending(pixels) => pixels
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .pixels
-                .capacity(),
+                .state
+                .retained_bytes(),
         };
         self.key
             .retained_bytes()
-            .saturating_add(capacity.saturating_mul(std::mem::size_of::<PremulRgba>()))
+            .saturating_add(bytes)
             .saturating_add(std::mem::size_of::<(usize, Self)>())
     }
 }
@@ -87,7 +118,7 @@ pub(super) struct PrefixCache {
     tiles: HashMap<usize, PrefixTile>,
     max_bytes: usize,
     remaining_bytes: usize,
-    enabled: bool,
+    mode: Option<PrefixMode>,
     stats: PrefixCacheStats,
 }
 
@@ -97,7 +128,7 @@ impl PrefixCache {
             tiles: HashMap::new(),
             max_bytes,
             remaining_bytes: max_bytes,
-            enabled: false,
+            mode: None,
             stats: PrefixCacheStats::default(),
         }
     }
@@ -117,10 +148,14 @@ impl PrefixCache {
         })
     }
 
-    pub fn begin_frame(&mut self, tile_count: usize, enabled: bool) {
+    pub fn begin_frame(&mut self, tile_count: usize, mode: Option<PrefixMode>) {
         self.stats = PrefixCacheStats::default();
-        self.enabled = enabled && self.max_bytes != 0;
-        if !self.enabled {
+        let mode = mode.filter(|_| self.max_bytes != 0);
+        if self.mode != mode {
+            self.tiles.clear();
+            self.mode = mode;
+        }
+        if self.mode.is_none() {
             self.tiles.clear();
             self.remaining_bytes = self.max_bytes;
             return;
@@ -141,7 +176,7 @@ impl PrefixCache {
         unchanged_prefix: Option<usize>,
         inputs: PrefixInputs<'_>,
     ) {
-        if !self.enabled {
+        if self.mode.is_none() {
             return;
         }
         let previous = self.tiles.remove(&tile);
@@ -233,26 +268,24 @@ impl PrefixCache {
         let Some(cells) = width.checked_mul(height) else {
             return;
         };
+        let adaptive = self.mode == Some(PrefixMode::Adaptive);
+        let pixel_bytes = std::mem::size_of::<PremulRgba>() + usize::from(adaptive);
         let key_cell_bytes =
             std::mem::size_of::<[u64; 15]>() + std::mem::size_of::<crate::revision::Revisions>();
         let required = commands
             .checked_mul(key_cell_bytes)
-            .and_then(|keys| {
-                cells
-                    .checked_mul(std::mem::size_of::<PremulRgba>())?
-                    .checked_add(keys)
-            })
+            .and_then(|keys| cells.checked_mul(pixel_bytes)?.checked_add(keys))
             .and_then(|bytes| bytes.checked_add(std::mem::size_of::<(usize, PrefixTile)>()));
         if required.is_none_or(|bytes| bytes > self.remaining_bytes) {
             return;
         }
-        let (previous_key, mut pixels) = match previous {
+        let (previous_key, mut state) = match previous {
             Some(PrefixTile {
                 key,
-                pixels: Pixels::Ready(pixels),
+                pixels: Pixels::Ready(state),
                 ..
-            }) => (Some(key), pixels),
-            _ => (None, Vec::new()),
+            }) => (Some(key), state),
+            _ => (None, PrefixPixels::default()),
         };
         let Some(key) = TileKey::build_prefix_reusing(
             previous_key,
@@ -265,13 +298,14 @@ impl PrefixCache {
         ) else {
             return;
         };
-        if pixels
-            .try_reserve_exact(cells.saturating_sub(pixels.len()))
+        if state
+            .pixels
+            .try_reserve_exact(cells.saturating_sub(state.pixels.len()))
             .is_err()
         {
             return;
         }
-        pixels.resize(
+        state.pixels.resize(
             cells,
             PremulRgba {
                 r: 0.0,
@@ -280,6 +314,16 @@ impl PrefixCache {
                 a: 0.0,
             },
         );
+        if adaptive {
+            if state
+                .edges
+                .try_reserve_exact(cells.saturating_sub(state.edges.len()))
+                .is_err()
+            {
+                return;
+            }
+            state.edges.resize(cells, 0);
+        }
         self.admit(
             tile,
             PrefixTile {
@@ -287,7 +331,7 @@ impl PrefixCache {
                 width,
                 height,
                 pixels: Pixels::Pending(Mutex::new(PendingPixels {
-                    pixels,
+                    state,
                     rows: 0,
                     valid: true,
                 })),
@@ -305,18 +349,28 @@ impl PrefixCache {
         }
     }
 
-    pub fn row(&self, tile: usize, row: usize, width: usize) -> Option<(&[PremulRgba], usize)> {
+    pub fn row(&self, tile: usize, row: usize, width: usize) -> Option<PrefixRow<'_>> {
         let tile = self.tiles.get(&tile)?;
         if !tile.reuse || row >= tile.height || width != tile.width {
             return None;
         }
-        let Pixels::Ready(pixels) = &tile.pixels else {
+        let Pixels::Ready(state) = &tile.pixels else {
             return None;
         };
         let start = row.checked_mul(tile.width)?;
-        let pixels = pixels.get(start..start.checked_add(tile.width)?)?;
+        let end = start.checked_add(tile.width)?;
+        let pixels = state.pixels.get(start..end)?;
+        let edges = if self.mode == Some(PrefixMode::Adaptive) {
+            Some(state.edges.get(start..end)?)
+        } else {
+            None
+        };
         tile.rows_reused.fetch_add(1, Ordering::Relaxed);
-        Some((pixels, tile.key.command_words.len()))
+        Some(PrefixRow {
+            pixels,
+            edges,
+            commands: tile.key.command_words.len(),
+        })
     }
 
     pub fn capture_commands(&self, tile: usize) -> usize {
@@ -334,6 +388,7 @@ impl PrefixCache {
         tile: usize,
         row: usize,
         pixels: impl ExactSizeIterator<Item = PremulRgba>,
+        edges: Option<&[u8]>,
     ) {
         let Some(tile) = self.tiles.get(&tile) else {
             return;
@@ -344,20 +399,29 @@ impl PrefixCache {
         let Ok(mut pending) = pending.lock() else {
             return;
         };
+        let edges_valid = match (self.mode, edges) {
+            (Some(PrefixMode::Canonical), None) => true,
+            (Some(PrefixMode::Adaptive), Some(edges)) => edges.len() == tile.width,
+            _ => false,
+        };
         if !pending.valid
             || row != pending.rows
             || row >= tile.height
             || pixels.len() != tile.width
+            || !edges_valid
         {
             pending.valid = false;
             return;
         }
         let start = row * tile.width;
-        for (target, pixel) in pending.pixels[start..start + tile.width]
+        for (target, pixel) in pending.state.pixels[start..start + tile.width]
             .iter_mut()
             .zip(pixels)
         {
             *target = pixel;
+        }
+        if let Some(edges) = edges {
+            pending.state.edges[start..start + tile.width].copy_from_slice(edges);
         }
         pending.rows += 1;
     }
@@ -375,7 +439,7 @@ impl PrefixCache {
                 return true;
             }
             let Pixels::Pending(pending) =
-                std::mem::replace(&mut tile.pixels, Pixels::Ready(Vec::new()))
+                std::mem::replace(&mut tile.pixels, Pixels::Ready(PrefixPixels::default()))
             else {
                 return false;
             };
@@ -385,7 +449,7 @@ impl PrefixCache {
             if !pending.valid || pending.rows != tile.height {
                 return false;
             }
-            tile.pixels = Pixels::Ready(pending.pixels);
+            tile.pixels = Pixels::Ready(pending.state);
             stats.captures = stats.captures.saturating_add(1);
             true
         });
