@@ -659,11 +659,11 @@ impl Dyadic {
         let ratio = numerator / denominator;
         let exponent = numerator_exponent - denominator_exponent;
         if exponent > 1023 {
-            (ratio * 2.0_f64.powi(1023)) * 2.0_f64.powi(exponent - 1023)
+            (ratio * fmn_dmath::powi(2.0, 1023)) * fmn_dmath::powi(2.0, exponent - 1023)
         } else if exponent < -1022 {
-            (ratio * 2.0_f64.powi(-1022)) * 2.0_f64.powi(exponent + 1022)
+            (ratio * fmn_dmath::powi(2.0, -1022)) * fmn_dmath::powi(2.0, exponent + 1022)
         } else {
-            ratio * 2.0_f64.powi(exponent)
+            ratio * fmn_dmath::powi(2.0, exponent)
         }
     }
 

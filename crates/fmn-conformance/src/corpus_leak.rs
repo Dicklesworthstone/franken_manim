@@ -55,7 +55,7 @@ use fmn_hash::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fmt;
 use std::fs::{File, Metadata};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::SystemTime;
@@ -1212,24 +1212,187 @@ fn parse_git_paths(bytes: &[u8]) -> Result<Vec<String>, LeakError> {
     Ok(paths)
 }
 
-/// The git-tracked file set, repository-relative with forward slashes —
-/// the ground truth of what a commit (and therefore any package built
-/// from one) carries.
-pub fn git_tracked_files(root: &Path) -> Result<Vec<String>, LeakError> {
-    let mut child = Command::new("git")
-        .args(["ls-files", "-z"])
-        .current_dir(root)
+struct PinnedGitInput {
+    directory: PathBuf,
+    index_digest: Digest,
+    head: String,
+}
+
+struct RepositoryGit {
+    root: PathBuf,
+    external: Option<PinnedGitInput>,
+}
+
+impl RepositoryGit {
+    fn new(root: &Path) -> Result<Self, LeakError> {
+        // Remote source transport may omit .git. Only these audit queries
+        // may use separately transported, genuine metadata: never change
+        // Cargo's Git context or replace ls-files/check-ignore with fixtures.
+        let external = if let Some(directory) = std::env::var_os("FMN_CORPUS_GIT_DIR") {
+            if directory.is_empty() {
+                return Err(LeakError::Git {
+                    what: "FMN_CORPUS_GIT_DIR must not be empty".to_owned(),
+                });
+            }
+            let directory = std::fs::canonicalize(directory).map_err(|error| LeakError::Git {
+                what: format!("opening FMN_CORPUS_GIT_DIR: {error}"),
+            })?;
+            let digest =
+                std::env::var("FMN_CORPUS_GIT_INDEX_SHA256").map_err(|error| LeakError::Git {
+                    what: format!(
+                        "external Git metadata requires FMN_CORPUS_GIT_INDEX_SHA256: {error}"
+                    ),
+                })?;
+            let index_digest = Digest::from_hex(&digest).map_err(|error| LeakError::Git {
+                what: format!("invalid FMN_CORPUS_GIT_INDEX_SHA256: {error}"),
+            })?;
+            let build_id = std::env::var("FMN_BUILD_ID").map_err(|error| LeakError::Git {
+                what: format!("external Git metadata requires FMN_BUILD_ID: {error}"),
+            })?;
+            let head = build_id
+                .strip_prefix("git:")
+                .and_then(|identity| identity.split('+').next())
+                .filter(|head| {
+                    matches!(head.len(), 40 | 64)
+                        && head.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+                .ok_or_else(|| LeakError::Git {
+                    what: "FMN_BUILD_ID must identify the source Git HEAD".to_owned(),
+                })?
+                .to_owned();
+            Some(PinnedGitInput {
+                directory,
+                index_digest,
+                head,
+            })
+        } else {
+            if std::env::var_os("FMN_CORPUS_GIT_INDEX_SHA256").is_some() {
+                return Err(LeakError::Git {
+                    what: "FMN_CORPUS_GIT_INDEX_SHA256 requires FMN_CORPUS_GIT_DIR".to_owned(),
+                });
+            }
+            None
+        };
+        let root = if external.is_some() {
+            std::fs::canonicalize(root).map_err(|error| LeakError::Git {
+                what: format!("opening Git audit work tree: {error}"),
+            })?
+        } else {
+            root.to_owned()
+        };
+        let repository = Self { root, external };
+        repository.validate()?;
+        Ok(repository)
+    }
+
+    fn command(&self) -> Command {
+        let mut command = Command::new("git");
+        command.current_dir(&self.root);
+        if let Some(input) = &self.external {
+            // Scope metadata selection to this child. Ambient Git overrides
+            // must not redirect a pinned audit to a different index or tree.
+            for variable in [
+                "GIT_DIR",
+                "GIT_WORK_TREE",
+                "GIT_COMMON_DIR",
+                "GIT_INDEX_FILE",
+                "GIT_OBJECT_DIRECTORY",
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                "GIT_NAMESPACE",
+            ] {
+                command.env_remove(variable);
+            }
+            command
+                .arg("--git-dir")
+                .arg(&input.directory)
+                .arg("--work-tree")
+                .arg(&self.root)
+                .env("GIT_OPTIONAL_LOCKS", "0");
+        }
+        command
+    }
+
+    fn validate(&self) -> Result<(), LeakError> {
+        let Some(input) = &self.external else {
+            return Ok(());
+        };
+        let path = input.directory.join("index");
+        let mut budget = ScanBudget::new("external Git index", 1);
+        let (mut file, snapshot) =
+            open_regular_file(&input.directory, &path, "index", &mut budget)?;
+        let (digest, bytes_read) = stream_digest(&mut file, "external Git index")?;
+        validate_regular_file_postflight(
+            &input.directory,
+            &path,
+            "index",
+            &file,
+            &snapshot,
+            bytes_read,
+        )?;
+        if digest != input.index_digest {
+            return Err(LeakError::Git {
+                what: format!(
+                    "external Git index digest {digest} differs from pinned {}",
+                    input.index_digest
+                ),
+            });
+        }
+        let head = git_stdout(
+            self.command().args(["rev-parse", "--verify", "HEAD"]),
+            "rev-parse HEAD",
+            65,
+            None,
+        )?;
+        if head != format!("{}\n", input.head).as_bytes() {
+            return Err(LeakError::Git {
+                what: format!("external Git HEAD differs from source {}", input.head),
+            });
+        }
+        Ok(())
+    }
+}
+
+fn git_stdout(
+    command: &mut Command,
+    operation: &str,
+    max_bytes: usize,
+    input: Option<&str>,
+) -> Result<Vec<u8>, LeakError> {
+    if let Some(input) = input {
+        validate_relative_path(input)?;
+        command.stdin(Stdio::piped());
+    }
+    let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .spawn()
         .map_err(|e| LeakError::Git {
-            what: format!("spawning git ls-files: {e}"),
+            what: format!("spawning git {operation}: {e}"),
         })?;
+    if let Some(input) = input {
+        // Only one bounded private-directory query is written, then EOF.
+        // Git requires --stdin when -z is used for unquoted provenance.
+        let result = child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("Git did not provide its requested stdin pipe"))
+            .and_then(|mut stdin| {
+                stdin.write_all(input.as_bytes())?;
+                stdin.write_all(&[0])
+            });
+        if let Err(error) = result {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(LeakError::Git {
+                what: format!("writing git {operation} input: {error}"),
+            });
+        }
+    }
     let mut stdout = child.stdout.take().ok_or_else(|| LeakError::Git {
-        what: "git ls-files did not provide its requested stdout pipe".to_owned(),
+        what: format!("git {operation} did not provide its requested stdout pipe"),
     })?;
     let mut bytes = Vec::new();
-    let output_limit = u64::try_from(MAX_GIT_PATH_OUTPUT_BYTES)
+    let output_limit = u64::try_from(max_bytes)
         .map_err(|error| LeakError::Resource {
             what: format!("git-output limit conversion failed: {error}"),
         })?
@@ -1243,30 +1406,119 @@ pub fn git_tracked_files(root: &Path) -> Result<Vec<String>, LeakError> {
         let _ = child.kill();
         let _ = child.wait();
         return Err(LeakError::Git {
-            what: format!("reading git ls-files output: {error}"),
+            what: format!("reading git {operation} output: {error}"),
         });
     }
-    if bytes.len() > MAX_GIT_PATH_OUTPUT_BYTES {
+    if bytes.len() > max_bytes {
         let _ = child.kill();
         let _ = child.wait();
         return Err(LeakError::Resource {
-            what: format!("git ls-files output exceeds {MAX_GIT_PATH_OUTPUT_BYTES} bytes"),
+            what: format!("git {operation} output exceeds {max_bytes} bytes"),
         });
     }
     let status = child.wait().map_err(|error| LeakError::Git {
-        what: format!("waiting for git ls-files: {error}"),
+        what: format!("waiting for git {operation}: {error}"),
     })?;
     if !status.success() {
         return Err(LeakError::Git {
-            what: format!("git ls-files exited with {status}"),
+            what: format!("git {operation} exited with {status}"),
         });
     }
+    Ok(bytes)
+}
+
+/// The git-tracked file set, repository-relative with forward slashes —
+/// the ground truth of what a commit (and therefore any package built
+/// from one) carries. A source archive may supply `FMN_CORPUS_GIT_DIR`
+/// with its genuine index pinned by `FMN_CORPUS_GIT_INDEX_SHA256` and its
+/// HEAD matched to `FMN_BUILD_ID`; the real Git queries remain mandatory.
+pub fn git_tracked_files(root: &Path) -> Result<Vec<String>, LeakError> {
+    let repository = RepositoryGit::new(root)?;
+    let bytes = git_stdout(
+        repository.command().args(["ls-files", "-z"]),
+        "ls-files",
+        MAX_GIT_PATH_OUTPUT_BYTES,
+        None,
+    )?;
+    repository.validate()?;
     parse_git_paths(&bytes)
 }
 
+fn gitignore_is_repository_owned(repository: &RepositoryGit, dir: &str) -> Result<bool, LeakError> {
+    let output = git_stdout(
+        repository.command().args([
+            "-c",
+            "core.excludesFile=",
+            "check-ignore",
+            "--verbose",
+            "-z",
+            "--stdin",
+        ]),
+        "check-ignore provenance",
+        MAX_GIT_PATH_OUTPUT_BYTES,
+        Some(dir),
+    )?;
+    let fields: Vec<_> = output.splitn(6, |byte| *byte == 0).collect();
+    let [source, line, pattern, path, end] = fields.as_slice() else {
+        return Err(LeakError::Git {
+            what: format!("git check-ignore for {dir} returned malformed provenance"),
+        });
+    };
+    if !end.is_empty()
+        || *path != dir.as_bytes()
+        || pattern.is_empty()
+        || pattern.starts_with(b"!")
+        || std::str::from_utf8(line)
+            .ok()
+            .and_then(|line| line.parse::<u64>().ok())
+            .is_none_or(|line| line == 0)
+    {
+        return Err(LeakError::Git {
+            what: format!("git check-ignore for {dir} returned inconsistent provenance"),
+        });
+    }
+    let source = std::str::from_utf8(source).map_err(|error| LeakError::Git {
+        what: format!("git check-ignore source for {dir} is not UTF-8: {error}"),
+    })?;
+    let source_path = Path::new(source);
+    // .git/info/exclude and operator-wide excludes do not travel with source.
+    // A nested .gitignore is valid only for its own descendants.
+    if source_path
+        .file_name()
+        .is_none_or(|name| name != ".gitignore")
+    {
+        return Ok(false);
+    }
+    validate_relative_path(source)?;
+    if source_path
+        .parent()
+        .is_none_or(|parent| !Path::new(dir).starts_with(parent))
+    {
+        return Ok(false);
+    }
+    let source_path = validated_regular_path(&repository.root, source)?;
+    let metadata = std::fs::symlink_metadata(source_path).map_err(|error| LeakError::Io {
+        path: source.to_owned(),
+        what: format!("validating ignore source: {error}"),
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(LeakError::Policy {
+            path: source.to_owned(),
+            what: "ignore source must be a regular repository file".to_owned(),
+        });
+    }
+    Ok(true)
+}
+
 /// Tooth 2: every private-fixture directory must be reported ignored by
-/// the real `.gitignore` matcher.
+/// the real matcher using a repository `.gitignore`, independently of
+/// operator-wide excludes and `.git/info/exclude`.
 pub fn gitignore_violations(root: &Path) -> Result<Vec<Leak>, LeakError> {
+    let repository = RepositoryGit::new(root)?;
+    gitignore_violations_in(&repository)
+}
+
+fn gitignore_violations_in(repository: &RepositoryGit) -> Result<Vec<Leak>, LeakError> {
     let mut leaks = Vec::new();
     for &dir in PRIVATE_FIXTURE_DIRS {
         // Keep the trailing slash on the query: git only applies dir-only
@@ -1275,15 +1527,24 @@ pub fn gitignore_violations(root: &Path) -> Result<Vec<Leak>, LeakError> {
         // exist on disk (fresh clones, CI checkouts), while a bare query
         // matches only when git can stat a real directory, which would
         // make this gate vacuous exactly where it matters most.
-        let status = Command::new("git")
-            .args(["check-ignore", "-q", "--", dir])
-            .current_dir(root)
+        let status = repository
+            .command()
+            .args(["-c", "core.excludesFile=", "check-ignore", "-q", "--", dir])
             .status()
             .map_err(|e| LeakError::Git {
                 what: format!("spawning git check-ignore: {e}"),
             })?;
         match status.code() {
-            Some(0) => {}
+            Some(0) => {
+                if !gitignore_is_repository_owned(repository, dir)? {
+                    leaks.push(Leak {
+                        kind: LeakKind::PrivateDirNotIgnored,
+                        path: dir.to_owned(),
+                        detail: "ignored only by local metadata, not a repository .gitignore"
+                            .to_owned(),
+                    });
+                }
+            }
             Some(1) => leaks.push(Leak {
                 kind: LeakKind::PrivateDirNotIgnored,
                 path: dir.to_string(),
@@ -1298,6 +1559,7 @@ pub fn gitignore_violations(root: &Path) -> Result<Vec<Leak>, LeakError> {
             }
         }
     }
+    repository.validate()?;
     Ok(leaks)
 }
 
@@ -1491,6 +1753,192 @@ pub fn run(root: &Path) -> Result<Vec<Leak>, LeakError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ignore_test_repository() -> RepositoryGit {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_REPOSITORY: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "fmn-corpus-ignore-{}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .expect("fixture clock")
+                .as_nanos(),
+            NEXT_REPOSITORY.fetch_add(1, Ordering::Relaxed),
+        ));
+        // Retain the real Git fixtures for diagnosis; do not delete them.
+        std::fs::create_dir(&root).expect("new fixture directory");
+        let root = root.canonicalize().expect("canonical fixture root");
+        let mut repository = RepositoryGit {
+            external: Some(PinnedGitInput {
+                directory: root.join(".git"),
+                index_digest: fmn_hash::sha256(b""),
+                head: String::new(),
+            }),
+            root,
+        };
+        assert!(
+            repository
+                .command()
+                .args(["init", "--quiet", "--template="])
+                .status()
+                .expect("real Git init")
+                .success()
+        );
+        std::fs::write(repository.root.join("public.txt"), "public fixture\n")
+            .expect("fixture file");
+        assert!(
+            repository
+                .command()
+                .args(["add", "--", "public.txt"])
+                .status()
+                .expect("real Git add")
+                .success()
+        );
+        assert!(
+            repository
+                .command()
+                .arg("-c")
+                .arg(format!(
+                    "core.hooksPath={}",
+                    repository.root.join("absent-hooks").display()
+                ))
+                .args([
+                    "-c",
+                    "user.name=Corpus fixture",
+                    "-c",
+                    "user.email=corpus-fixture@example.invalid",
+                    "-c",
+                    "commit.gpgSign=false",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "Public fixture",
+                ])
+                .status()
+                .expect("real Git commit")
+                .success()
+        );
+        let head = git_stdout(
+            repository.command().args(["rev-parse", "--verify", "HEAD"]),
+            "fixture HEAD",
+            65,
+            None,
+        )
+        .expect("real fixture HEAD");
+        let input = repository
+            .external
+            .as_mut()
+            .expect("explicit fixture metadata");
+        input.head = String::from_utf8(head)
+            .expect("ASCII Git object ID")
+            .trim_end_matches('\n')
+            .to_owned();
+        input.index_digest = fmn_hash::sha256(
+            &std::fs::read(input.directory.join("index")).expect("actual fixture index"),
+        );
+        repository.validate().expect("genuine fixture metadata");
+        repository
+    }
+
+    fn private_ignore_rules() -> String {
+        PRIVATE_FIXTURE_DIRS
+            .iter()
+            .map(|dir| format!("/{dir}\n"))
+            .collect()
+    }
+
+    fn assert_all_private_directories_rejected(repository: &RepositoryGit) {
+        let leaks = gitignore_violations_in(repository).expect("real Git audit");
+        assert_eq!(leaks.len(), PRIVATE_FIXTURE_DIRS.len());
+        for (leak, dir) in leaks.iter().zip(PRIVATE_FIXTURE_DIRS) {
+            assert_eq!(leak.kind, LeakKind::PrivateDirNotIgnored);
+            assert_eq!(&leak.path, dir);
+        }
+    }
+
+    #[test]
+    fn gitignore_tooth_rejects_operator_excludes_as_repository_protection() {
+        let repository = ignore_test_repository();
+        let excludes = repository.root.join("operator-excludes");
+        std::fs::write(&excludes, private_ignore_rules()).expect("operator ignore rules");
+        assert!(
+            repository
+                .command()
+                .args(["config", "core.excludesFile"])
+                .arg(excludes)
+                .status()
+                .expect("configure real operator excludes")
+                .success()
+        );
+        for dir in PRIVATE_FIXTURE_DIRS {
+            assert!(
+                repository
+                    .command()
+                    .args(["check-ignore", "-q", "--", dir])
+                    .status()
+                    .expect("old real Git matcher")
+                    .success(),
+                "the old matcher would incorrectly accept {dir}"
+            );
+        }
+        assert_all_private_directories_rejected(&repository);
+    }
+
+    #[test]
+    fn gitignore_tooth_rejects_local_metadata_as_repository_protection() {
+        let repository = ignore_test_repository();
+        let info = repository.root.join(".git/info");
+        std::fs::create_dir_all(&info).expect("local Git info directory");
+        std::fs::write(info.join("exclude"), private_ignore_rules())
+            .expect("local metadata ignore rules");
+        for dir in PRIVATE_FIXTURE_DIRS {
+            assert!(
+                repository
+                    .command()
+                    .args(["check-ignore", "-q", "--", dir])
+                    .status()
+                    .expect("old real Git matcher")
+                    .success(),
+                "the old matcher would incorrectly accept {dir}"
+            );
+        }
+        assert_all_private_directories_rejected(&repository);
+    }
+
+    #[test]
+    fn gitignore_tooth_accepts_root_and_nested_repository_rules() {
+        let repository = ignore_test_repository();
+        std::fs::write(repository.root.join(".gitignore"), "/corpus/\n")
+            .expect("root ignore rules");
+        for (parent, rules) in [
+            ("gallery", "/reference_captures/\n"),
+            ("scripts", "/manim_ref/\n/videos_ref/\n"),
+        ] {
+            let directory = repository.root.join(parent);
+            std::fs::create_dir(&directory).expect("nested fixture directory");
+            std::fs::write(directory.join(".gitignore"), rules).expect("nested ignore rules");
+        }
+        assert!(
+            gitignore_violations_in(&repository)
+                .expect("real Git audit")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn gitignore_tooth_preserves_negated_rule_failures() {
+        let repository = ignore_test_repository();
+        std::fs::write(
+            repository.root.join(".gitignore"),
+            format!("{}!/corpus/\n", private_ignore_rules()),
+        )
+        .expect("negated repository ignore rule");
+        let leaks = gitignore_violations_in(&repository).expect("real Git audit");
+        assert_eq!(leaks.len(), 1);
+        assert_eq!(leaks[0].kind, LeakKind::PrivateDirNotIgnored);
+        assert_eq!(leaks[0].path, "corpus/");
+    }
 
     struct ShortReader<'a> {
         remaining: &'a [u8],

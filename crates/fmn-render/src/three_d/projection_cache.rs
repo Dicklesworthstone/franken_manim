@@ -248,16 +248,11 @@ impl CameraProjectionCache {
             .binary_search_by_key(&index, |entry| entry.index)
             .ok()?;
         let entry = &mut state.entries[slot];
-        if entry.projected.is_some()
+        if let Some(projected) = entry.projected.as_ref()
             && entry.source.matches(source)
             && entry.charge.admit(budget).is_ok()
         {
-            let projected = entry
-                .projected
-                .as_ref()
-                .expect("checked projected rows")
-                .clone();
-            return Some((projected, entry.charge));
+            return Some((projected.clone(), entry.charge));
         }
 
         // Do not retain an incompatible or unaffordable historical payload

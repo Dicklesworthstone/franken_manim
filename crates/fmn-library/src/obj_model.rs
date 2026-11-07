@@ -272,6 +272,9 @@ pub struct ObjMesh {
     pub triangles: Vec<[ObjCorner; 3]>,
 }
 
+/// A source face's one-based line and its emitted triangle interval.
+type ObjFaceRange = (usize, Range<usize>);
+
 impl ObjMesh {
     /// Parse OBJ bytes under the default budgets.
     pub fn parse(bytes: &[u8]) -> Result<Self, ObjError> {
@@ -288,7 +291,7 @@ impl ObjMesh {
     pub(crate) fn parse_with_face_ranges(
         bytes: &[u8],
         limits: &ObjLimits,
-    ) -> Result<(Self, Vec<(usize, Range<usize>)>), ObjError> {
+    ) -> Result<(Self, Vec<ObjFaceRange>), ObjError> {
         let mut faces = Vec::new();
         let mesh = Self::parse_with_face_sink(bytes, limits, |line, triangles| {
             faces.push((line, triangles));

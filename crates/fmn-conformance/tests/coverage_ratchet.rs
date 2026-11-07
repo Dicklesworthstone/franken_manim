@@ -13,7 +13,9 @@
 //! `corpus/tex_corpus.jsonl` present): recompute all four counts against
 //! the frozen denominator, fail on any decrease, and bless deliberate
 //! advances with `RATCHET_UPDATE=1` (regenerating baseline, trend, and
-//! dashboard in one stroke).
+//! dashboard in one stroke). `FMN_RATCHET_OUTPUT_DIR` optionally sends generated
+//! files to a review directory (relative paths use the workspace root), while
+//! committed baselines and trend history remain the inputs.
 
 use fmn_conformance::ratchet::{
     Baseline, CENSUS_FIXTURE, CorpusCounts, DynamicExclusion, FallbackSummary, HARVEST_MANIFEST,
@@ -64,6 +66,35 @@ fn file_utf8_bounded(path: &Path, label: &str, max_bytes: u64) -> Result<String,
 fn repo_file(name: &str, max_bytes: u64) -> Result<String, String> {
     let path = repo_path(name);
     file_utf8_bounded(&path, name, max_bytes)
+}
+
+fn blessing_dir() -> Result<PathBuf, String> {
+    let dir = match std::env::var_os("FMN_RATCHET_OUTPUT_DIR") {
+        None => repo_path("docs/ratchet"),
+        Some(value) if value.is_empty() => {
+            return Err("FMN_RATCHET_OUTPUT_DIR must not be empty".to_owned());
+        }
+        Some(value) => {
+            let path = PathBuf::from(value);
+            if path.is_absolute() {
+                path
+            } else {
+                repo_path("").join(path)
+            }
+        }
+    };
+    std::fs::create_dir_all(&dir).map_err(|error| format!("ratchet output directory: {error}"))?;
+    Ok(dir)
+}
+
+fn blessing_dashboard(dir: &Path) -> Result<String, String> {
+    match File::open(dir.join("dashboard.md")) {
+        Ok(file) => read_utf8_bounded(file, "generated coverage dashboard", MAX_DASHBOARD_BYTES),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            repo_file("docs/ratchet/dashboard.md", MAX_DASHBOARD_BYTES)
+        }
+        Err(error) => Err(format!("cannot read generated coverage dashboard: {error}")),
+    }
 }
 
 fn suite_lock_franken_markdown_rev() -> Result<String, String> {
@@ -421,11 +452,10 @@ fn bless(
     parse_pending: &BTreeMap<String, u64>,
     layout_pending: &BTreeMap<String, u64>,
 ) -> Result<(), String> {
-    let dir = repo_path("docs/ratchet");
-    std::fs::create_dir_all(&dir).map_err(|error| format!("mkdir: {error}"))?;
+    let dir = blessing_dir()?;
     // Trend: append (or start) — keyed by rev; re-blessing the same rev
     // replaces its row.
-    let trend_path = dir.join("trend.tsv");
+    let trend_path = repo_path("docs/ratchet/trend.tsv");
     let mut trend = match File::open(&trend_path) {
         Ok(file) => parse_trend_tsv(&read_utf8_bounded(
             file,
@@ -456,7 +486,7 @@ fn bless(
             b.layout_occurrences,
         ));
     }
-    std::fs::write(&trend_path, trend_out).map_err(|error| format!("trend: {error}"))?;
+    std::fs::write(dir.join("trend.tsv"), trend_out).map_err(|error| format!("trend: {error}"))?;
     std::fs::write(dir.join("baseline.tsv"), current.to_tsv())
         .map_err(|error| format!("baseline: {error}"))?;
     let to_pending = |m: &BTreeMap<String, u64>| -> Vec<Pending> {
@@ -536,15 +566,17 @@ fn the_dashboard_discloses_the_dynamic_arguments_outside_its_denominator() -> Re
     let _guard = DASHBOARD_WRITE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let dashboard = repo_file("docs/ratchet/dashboard.md", MAX_DASHBOARD_BYTES)?;
     if std::env::var("RATCHET_UPDATE").is_ok() {
+        let dir = blessing_dir()?;
+        let dashboard = blessing_dashboard(&dir)?;
         std::fs::write(
-            repo_path("docs/ratchet/dashboard.md"),
+            dir.join("dashboard.md"),
             with_dynamic_exclusion_section(&dashboard, &section),
         )
         .map_err(|error| format!("dashboard: {error}"))?;
         return Ok(());
     }
+    let dashboard = repo_file("docs/ratchet/dashboard.md", MAX_DASHBOARD_BYTES)?;
     assert!(
         dashboard.contains(&section),
         "docs/ratchet/dashboard.md lacks the dynamic-argument disclosure generated from \
@@ -561,15 +593,27 @@ fn the_dashboard_discloses_the_dynamic_arguments_outside_its_denominator() -> Re
 fn the_second_corpus_never_regresses_and_is_published() -> Result<(), String> {
     let engine = fmd_math::Engine::bundled().map_err(|error| format!("bundled faces: {error}"))?;
     let current = measure_corpus(SECOND_CORPUS, &engine)?;
+    let committed =
+        CorpusCounts::parse_tsv(&repo_file(SECOND_CORPUS_BASELINE, MAX_BASELINE_BYTES)?)?;
+    let violations = current.violations(&committed);
+    assert!(
+        violations.is_empty(),
+        "THE SECOND CORPUS RATCHET: coverage regressed:\n{}",
+        violations.join("\n")
+    );
     if std::env::var("RATCHET_UPDATE").is_ok() {
-        std::fs::write(repo_path(SECOND_CORPUS_BASELINE), current.to_tsv())
+        let dir = blessing_dir()?;
+        let baseline_name = Path::new(SECOND_CORPUS_BASELINE)
+            .strip_prefix("docs/ratchet")
+            .map_err(|error| format!("second corpus baseline path: {error}"))?;
+        std::fs::write(dir.join(baseline_name), current.to_tsv())
             .map_err(|error| format!("second corpus baseline: {error}"))?;
         let _guard = DASHBOARD_WRITE
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let dashboard = repo_file("docs/ratchet/dashboard.md", MAX_DASHBOARD_BYTES)?;
+        let dashboard = blessing_dashboard(&dir)?;
         std::fs::write(
-            repo_path("docs/ratchet/dashboard.md"),
+            dir.join("dashboard.md"),
             with_second_corpus_section(&dashboard, &current.dashboard_section()),
         )
         .map_err(|error| format!("dashboard: {error}"))?;
@@ -579,14 +623,6 @@ fn the_second_corpus_never_regresses_and_is_published() -> Result<(), String> {
         );
         return Ok(());
     }
-    let committed =
-        CorpusCounts::parse_tsv(&repo_file(SECOND_CORPUS_BASELINE, MAX_BASELINE_BYTES)?)?;
-    let violations = current.violations(&committed);
-    assert!(
-        violations.is_empty(),
-        "THE SECOND CORPUS RATCHET: coverage regressed:\n{}",
-        violations.join("\n")
-    );
     if current.committed_form() != committed {
         return Err(format!(
             "the second corpus advanced ({} -> {} occurrences typeset): bless with \

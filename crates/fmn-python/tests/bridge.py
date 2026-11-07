@@ -2122,8 +2122,10 @@ else:
 # fm-5wq.4: time-progression helpers are host-free numpy grids (no tqdm);
 # skip collapses to a single terminal sample; pre_play/post_play bump
 # num_plays without a file writer.
+# BN-02 adds the explicit keyword-only frame-count front door.
 assert str(inspect.signature(scene_module.Scene.get_time_progression)) == (
-    "(self, run_time, n_iterations=None, desc='', override_skip_animations=False)"
+    "(self, run_time=None, n_iterations=None, desc='', "
+    "override_skip_animations=False, *, run_time_frames=None)"
 )
 assert str(inspect.signature(scene_module.Scene.get_run_time)) == (
     "(self, animations)"
@@ -2132,7 +2134,7 @@ assert str(inspect.signature(scene_module.Scene.get_animation_time_progression))
     "(self, animations)"
 )
 assert str(inspect.signature(scene_module.Scene.get_wait_time_progression)) == (
-    "(self, duration, stop_condition=None)"
+    "(self, duration=None, stop_condition=None, *, run_time_frames=None)"
 )
 assert str(inspect.signature(scene_module.Scene.pre_play)) == "(self)"
 assert str(inspect.signature(scene_module.Scene.post_play)) == "(self)"

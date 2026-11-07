@@ -92,6 +92,27 @@ fn compiled_definitions_accept_only_their_exact_baseline_identity() {
             .validate_baseline(&baseline)
             .expect("exact compiled identity");
 
+        // The pre-wide-hat provider's real baselines must not be reused after
+        // refreshing the compiled definition hashes for the new provider.
+        let old_formula_definition = match scenario {
+            Pg7Scenario::FormulaCold => {
+                Some("122e55a19cf14b1c289f4e8d1634407e9b4f9d8a51af6734b9cdd9b5c0e3c647")
+            }
+            Pg7Scenario::FormulaCached => {
+                Some("234b5c586cee167d2ce54ea5d38b11e4d1afe0ce1aacd9a57e96e906ad80b508")
+            }
+            Pg7Scenario::Text10kGlyph => None,
+        };
+        if let Some(old) = old_formula_definition {
+            let mut stale = baseline.clone();
+            stale.key.benchmark_definition =
+                fmn_hash::Digest::from_hex(old).expect("pre-wide-hat definition digest");
+            let error = definition
+                .validate_baseline(&stale)
+                .expect_err("the old provider baseline must fail before timing");
+            assert!(error.to_string().contains("benchmark_definition"));
+        }
+
         let mut wrong = baseline;
         wrong.key.benchmark_definition = sha256(b"other-definition");
         let error = definition

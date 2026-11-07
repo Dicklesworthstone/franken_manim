@@ -377,6 +377,25 @@ fn shift_onto_screen_pulls_back_only_the_edges_beyond_the_inset_frame() {
 }
 
 #[test]
+fn snapshot_restore_keeps_live_frame_configuration() {
+    let mut stage = Stage::new();
+    stage.set_frame_shape([4.5, 8.0]).unwrap();
+    let mob = stage.add(Mobject::from_points(&[[0.0; 3]]));
+    let snapshot = stage.snapshot();
+
+    stage.set_frame_shape([12.0, 8.0]).unwrap();
+    stage.shift(mob, [1.0, 2.0, 0.0]);
+    stage.restore(&snapshot);
+
+    assert_eq!(stage.get_points(mob).unwrap(), vec![[0.0; 3]]);
+    assert_eq!(stage.frame_shape(), [12.0, 8.0]);
+    assert_eq!(snapshot.materialize().frame_shape(), [4.5, 8.0]);
+    // Verify that positional work consumes the retained configuration too.
+    stage.to_edge(mob, RIGHT, 0.0);
+    assert_eq!(stage.get_right(mob)[0], 6.0);
+}
+
+#[test]
 fn border_alignment_follows_the_stage_frame_shape() {
     // A portrait 1080x1920 render has the Reference frame (4.5, 8): to_edge,
     // to_corner and shift_onto_screen align on it, not on the 16:9 default

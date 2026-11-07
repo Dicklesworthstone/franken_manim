@@ -5,7 +5,7 @@ real 3b1b formula corpus typesets natively. The denominator is **frozen**
 (G0-4: `9269` distinct strings, `17711` occurrences, corpus hash
 `a8325e49e0ce78fcc735533952740e9adeaaa5cb10f9c13d73aaa3ba4bf883fc`, rules_version 1); the numbers may only rise.
 
-**Computed against franken_markdown `3ca2ebac7e2d`.**
+**Computed against franken_markdown `26b268f601a9`.**
 
 | Plane | Occurrence-weighted | Unique-string |
 |---|---|---|
@@ -105,6 +105,7 @@ The denominator holds fully literal Tex-family arguments. The G0-4 harvest also 
 | `222c3d4a8c29` | 99.994 | 99.989 | 99.994 | 99.989 |
 | `5aa9e44f09e4` | 99.994 | 99.989 | 99.994 | 99.989 |
 | `3ca2ebac7e2d` | 99.994 | 99.989 | 99.994 | 99.989 |
+| `26b268f601a9` | 99.994 | 99.989 | 99.994 | 99.989 |
 
 ## How this is enforced
 
@@ -133,6 +134,7 @@ The corpus strings are 3b1b-authored course material and stay in the
 private fixture; this dashboard publishes **numbers, construct names,
 and hashes only**. Anyone with the pinned trees can reproduce the
 denominator byte-for-byte via `scripts/harvest_tex_corpus.py`.
+
 
 ## A second corpus: ManimCommunity/manim
 

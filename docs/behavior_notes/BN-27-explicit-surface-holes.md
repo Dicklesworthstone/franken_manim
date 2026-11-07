@@ -1,6 +1,6 @@
 # BN-27: Explicit holes in native parametric surfaces
 
-**Status:** Implemented.
+**Status:** Draft. Implementation is present; subsystem gate and migration review are pending.
 
 ## Native opt-in policy
 

@@ -10069,14 +10069,25 @@ fn native_positional_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scena
         ));
     }
     stage.restore(&initial);
-    if stage.frame_shape() != [4.5, 8.0]
+    // Arena rollback preserves the receiver's live scene configuration.
+    // A separately materialized snapshot keeps its captured frame (BN-25).
+    let snapshot_frame = initial.materialize().frame_shape();
+    if stage.frame_shape() != [12.0, 8.0]
+        || snapshot_frame != [4.5, 8.0]
         || stage.get_points(child).as_deref() != Some(original.as_slice())
         || stage.is_fixed_in_frame(root)
         || stage.is_fixed_in_frame(child)
         || stage.is_off_screen(root)
     {
         return Err(fail(
-            "snapshot restore lost positional geometry, flags, or frame shape",
+            "snapshot restore lost geometry, flags, or configured frame semantics",
+        ));
+    }
+    let border_probe = stage.add(Mobject::from_points(&[[0.0; 3]]));
+    stage.to_edge(border_probe, [1.0, 0.0, 0.0], 0.0);
+    if stage.get_right(border_probe)[0] != 6.0 {
+        return Err(fail(
+            "restored positional operations ignored the live configured frame",
         ));
     }
     stage
@@ -10089,6 +10100,14 @@ fn native_positional_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scena
         LogEvent::new("e2e.lifecycle.native_positional")
             .field("portrait_width_milli", 4_500_u64)
             .field("seek_samples", 2_u64)
+            .field(
+                "live_frame_width_milli",
+                (stage.frame_shape()[0] * 1_000.0) as u64,
+            )
+            .field(
+                "snapshot_frame_width_milli",
+                (snapshot_frame[0] * 1_000.0) as u64,
+            )
             .field("frame_restored", "true"),
     );
     Ok(RunOutcome::ok()
@@ -16721,6 +16740,8 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             vec![
                 FieldPred::u64_eq("portrait_width_milli", 4_500),
                 FieldPred::u64_eq("seek_samples", 2),
+                FieldPred::u64_eq("live_frame_width_milli", 12_000),
+                FieldPred::u64_eq("snapshot_frame_width_milli", 4_500),
                 FieldPred::str_eq("frame_restored", "true"),
             ],
         )],

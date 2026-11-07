@@ -1,6 +1,29 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** the latest timing/audio merge (`fd50648d`) was also attempted through
+**Status:** the current `main` source (`e84d3546`, with eight reviewed source/note
+edits) was audited on 2026-11-07 through the original four commands, owned-host
+DSR `20261107T055826-2902599/1`. The locked normal tree, WASM target build and
+release Node smoke exit 0. Node `v22.22.1` reports digest `1f248a71347b82aa`,
+`process=capability-absent`, `topology=1-cpu`, `semantic_oracles=111111`, and
+`mirrored=101000`.
+
+The original package command now runs with its exact required tools:
+wasm-pack 0.15.0, wasm-bindgen 0.2.127, wasm-opt 117, webpack 5.109.2 and
+webpack-cli 7.2.2. It builds both serial and shared-memory artifacts, then
+exits 1: the serial bundler WASM is **1,015,022 bytes**, over the unchanged
+**514,521-byte** budget. npm packaging and browser checks are **unreached**.
+The complete four-command gate remains **failed**; this dirty-source diagnostic
+does not qualify a release.
+
+All 4,471 input files, executable bits, HEAD and index remain unchanged across
+execution, as does DSR's source fingerprint. The input manifest is
+`/run/user/1000/fmn-execute-20261107-review2-main-wasm-inputs.json` (SHA-256
+`1b73c2ae8c77e9d6f8449fb521504c3b97a38e87a72857d1409616ce273ee106`).
+Logs are in the named DSR run; actual artifacts remain at
+`/data/ssd/tmp/fmn-execute-20261107-review2-main-wasm-package`.
+The older isolated native candidate's WASM results are separate evidence.
+
+Earlier, the timing/audio merge (`fd50648d`) was also attempted through
 the original four commands, DSR `20261105T152601-24491/1`. Its frozen 4,413-entry
 source is `b27d0bb7489b4aa53d8aca30f4b8279a0a2765f68901242f8d04bee3d0cfde23`;
 all source, 19,163 SDK/test inputs and audited tools stayed unchanged. Locked
@@ -908,8 +931,8 @@ The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
-- `SUITE.lock` SHA-256: `463ee0b730a1ceaa7acad9e0fe4b6636704e1409ae35353f61b3164aef2fec4f`
-- `Cargo.lock` SHA-256: `0125bee5c868cc181a620ae7cc754fef6cb7ee06880171f7c312a00ab3e3548e`
+- `SUITE.lock` SHA-256: `f855c38e716f19e65bcde167eca924d576ccf1bf9237809f8c24d734b074b64f`
+- `Cargo.lock` SHA-256: `19af6e49e1f512c572a026938b4a899158f52a8e7a2327d28238f5e9b8a9c77a`
 - Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `93a7c2dc6acf3dfef88a4a490efbfda7970bd963b4740aa7f879a08fff395061`
 
 The earlier 0.5.0 release bump re-bound the lock identities at that revision.

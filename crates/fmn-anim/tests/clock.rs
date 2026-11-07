@@ -129,6 +129,53 @@ fn exact_position_signs_zero_and_transport_limits_are_explicit() {
 }
 
 #[test]
+fn exact_position_projection_preserves_extreme_binary_scaling_and_ties() {
+    fn shifted(value: u8, bits: usize) -> Vec<u8> {
+        let mut bytes = vec![0; bits / 8 + 2];
+        let value = u16::from(value) << (bits % 8);
+        bytes[bits / 8] = value as u8;
+        bytes[bits / 8 + 1] = (value >> 8) as u8;
+        bytes
+    }
+
+    // Odd denominators survive import, so these exercise quotient scaling
+    // instead of the direct dyadic projection. The reduced values are exact
+    // multiples of powers of two, with ties rounded to even at underflow.
+    let cases = [
+        (21, 0, 0, 0x4008_0000_0000_0000_u64),
+        (21, 1022, 0, 0x7fe8_0000_0000_0000),
+        (21, 1023, 0, 0x7ff0_0000_0000_0000),
+        (21, 0, 1024, 0x000c_0000_0000_0000),
+        (21, 0, 1025, 0x0006_0000_0000_0000),
+        (21, 0, 1074, 3),
+        (21, 0, 1075, 2),
+        (21, 0, 1076, 1),
+        (21, 0, 1077, 0),
+        (35, 0, 1075, 2),
+        (49, 0, 1075, 4),
+        (105, 0, 1075, 8),
+        (21, 2048, 0, 0x7ff0_0000_0000_0000),
+        (21, 0, 2048, 0),
+    ];
+    for (numerator, numerator_shift, denominator_shift, magnitude) in cases {
+        for negative in [false, true] {
+            let position = FramePosition::from_ratio_bytes(
+                &shifted(numerator, numerator_shift),
+                &shifted(7, denominator_shift),
+                negative,
+            )
+            .unwrap();
+            let expected = magnitude | (u64::from(negative) << 63);
+            assert_eq!(
+                position.to_f64().to_bits(),
+                expected,
+                "{numerator} * 2^{numerator_shift} / (7 * 2^{denominator_shift}), negative={negative}"
+            );
+        }
+    }
+}
+
+#[test]
 fn frame_native_seconds_descriptor_does_not_overflow_before_dividing_by_fps() {
     for fps in [1, 24, 30, 60, u32::MAX] {
         let duration = FrameDuration::new(f64::MAX, fps)

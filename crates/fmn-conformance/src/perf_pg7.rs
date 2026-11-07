@@ -1800,11 +1800,14 @@ mod tests {
         // The canonical q^7+z/text outputs, workload and budgets pass unchanged.
         // 3ca2ebac (TeX underline depth) moves the provider identity; the
         // unchanged canonical output test passed before this identity refresh.
+        // 26b268f6 (CMEX/MSBM wide-hat metrics) moves the provider identity
+        // and its wide-hat probe. Both result self-goldens passed unchanged
+        // before refreshing these definitions; workloads and budgets stay fixed.
         assert_eq!(
             [cold.digest(), cached.digest(), text.digest()].map(|digest| digest.to_string()),
             [
-                "122e55a19cf14b1c289f4e8d1634407e9b4f9d8a51af6734b9cdd9b5c0e3c647",
-                "234b5c586cee167d2ce54ea5d38b11e4d1afe0ce1aacd9a57e96e906ad80b508",
+                "8ac9437552ca427c73f57d42a67ca2f66a12392f62ca679d453e872f0d89aed0",
+                "9f2232372fb73b0fe0a38436a9a0cf27bcf80a9b112f2b0ea366ce307b3b9bdb",
                 "0fa22e64fe9e1901eea58a596899ec843bc0d6db46f1cd91607925a50fea3e6f",
             ]
         );
