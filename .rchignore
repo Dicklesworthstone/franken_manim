@@ -1,0 +1,5 @@
+# Local Reference tooling is not the governed qualification SDK. Its
+# interpreter links point outside the checkout and cannot travel with source.
+/refenv/
+# Untracked G0 build output; keep the spike's source and Python fixtures.
+/spikes/g0-5-python-ext/py/fmn_spike_bridge.so
