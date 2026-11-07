@@ -19,13 +19,16 @@ use fmn_mobject::{
 
 use crate::cache::CameraSourceKey;
 use crate::plan::PlanIdentity;
-use crate::three_d::{CameraBandLayout, PreparedThreeDProjection, same_projection_camera};
+use crate::three_d::{
+    CameraBandLayout, CameraProjectionCache, CameraProjectionStats, PreparedThreeDProjection,
+    ThreeDPreparationLimits, same_projection_camera,
+};
 use crate::vector_frame::RetainedVectorFrame;
 use crate::{
     AllocStats, Binning, BinningError, CachedRenderError, CachedRenderStats, Camera,
     EngineIdentity, FrameArena, FrameConfig, FrameJobError, MonoTable, MonoTableError,
     PixelTileCache, RasterTeam, RasterTeamStats, RenderPlan, SurfaceDraw, SurfaceMaterial,
-    SurfaceMesh, SurfaceVertex, SyncError, ThreeDDraw, ThreeDError, ThreeDJob, Tiling, TrueDotDraw,
+    SurfaceMesh, SurfaceVertex, SyncError, ThreeDDraw, ThreeDError, Tiling, TrueDotDraw,
     VectorDraw,
 };
 
@@ -40,6 +43,27 @@ pub struct RetainedFrameRendererConfig {
     pub engine: EngineIdentity,
     /// Fixed worker-team width selected by the composition root.
     pub threads: usize,
+}
+
+/// World-resource work performed by one camera preparation attempt.
+///
+/// These counts describe surface/image meshes and dot-cloud record conversion,
+/// before camera projection or tile rasterization. Reused resources are shared
+/// immutably with earlier captures; they are not reconstructed or deep-cloned.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct CameraPreparationStats {
+    /// Surface and image meshes constructed from authoritative records.
+    pub meshes_built: usize,
+    /// Surface and image meshes shared from the preceding source capture.
+    pub meshes_reused: usize,
+    /// Dot-cloud row buffers constructed from authoritative records.
+    pub dot_clouds_built: usize,
+    /// Dot-cloud row buffers shared from the preceding source capture.
+    pub dot_clouds_reused: usize,
+    /// Rows converted into newly constructed dot-cloud buffers.
+    pub dot_rows_built: usize,
+    /// Rows retained without record conversion or a deep buffer copy.
+    pub dot_rows_reused: usize,
 }
 
 /// Construction or frame-preparation failure at the shared Lumen boundary.
@@ -202,6 +226,10 @@ pub struct RetainedFrameRenderer {
     last_cache_serial: Option<u64>,
     scratch_draw_items: Vec<DrawItem>,
     camera_scene: Option<CachedCameraScene>,
+    camera_preparation_stats: CameraPreparationStats,
+    // Frozen frames share only this bounded projected-resource cache, never
+    // preceding scene captures. The ordinary in-flight budget owns their input.
+    camera_projection_cache: Arc<CameraProjectionCache>,
     camera_plan: Option<Arc<RenderPlan>>,
     camera_projection: Option<PreparedCameraFrame>,
     // Identity of the successful camera raster currently in `frame`, not the
@@ -218,6 +246,12 @@ pub struct RetainedFrameRenderer {
 }
 
 impl RetainedFrameRenderer {
+    /// Default accounted storage for reusable camera projection resources.
+    ///
+    /// This is additional to tile pixels and active capture storage. Native
+    /// composition roots must explicitly admit it or set a zero allowance.
+    pub const DEFAULT_CAMERA_PROJECTION_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+
     /// Construct an empty retained renderer for the declared CPU policy.
     ///
     /// # Errors
@@ -242,6 +276,10 @@ impl RetainedFrameRenderer {
             last_cache_serial: None,
             scratch_draw_items: Vec::new(),
             camera_scene: None,
+            camera_preparation_stats: CameraPreparationStats::default(),
+            camera_projection_cache: Arc::new(CameraProjectionCache::new(
+                Self::DEFAULT_CAMERA_PROJECTION_BUDGET_BYTES,
+            )),
             camera_plan: None,
             camera_projection: None,
             camera_pixels: Weak::new(),
@@ -289,6 +327,26 @@ impl RetainedFrameRenderer {
         self.last_frame_reused = false;
     }
 
+    /// Bound accounted retained camera projection resources.
+    ///
+    /// This allowance is separate from the pixel-tile budget and from the
+    /// immutable resources owned by active captures. Zero uses ordinary cold
+    /// projection compilation. Changing the policy retires the renderer's
+    /// whole-projection shortcut; already frozen frames remain valid.
+    pub fn set_camera_projection_cache_budget_bytes(&mut self, max_bytes: usize) {
+        self.camera_projection_cache.set_budget(max_bytes);
+        self.camera_projection = None;
+        self.camera_pixels = Weak::new();
+        self.last_camera_frame_reused = false;
+        self.last_frame_reused = false;
+    }
+
+    /// Accounted storage currently retained by the shared camera projection cache.
+    #[must_use]
+    pub fn retained_camera_projection_bytes(&self) -> usize {
+        self.camera_projection_cache.retained_bytes()
+    }
+
     /// Replace the planar route's background. Cached tiles hold composited
     /// background pixels, so a change discards them; an unchanged background
     /// keeps every cache hit.
@@ -317,6 +375,7 @@ impl RetainedFrameRenderer {
     ) -> Result<CachedRenderStats, RetainedFrameRendererError> {
         self.last_camera_frame_reused = false;
         self.last_frame_reused = false;
+        self.camera_preparation_stats = CameraPreparationStats::default();
         // Retire the successful surface before any fallible preparation or
         // write. An error must not leave a reuse assertion for partial pixels.
         let previous_pixels = self.planar_pixels.take();
@@ -332,6 +391,7 @@ impl RetainedFrameRenderer {
         }
         self.camera_pixels = Weak::new();
         self.camera_scene = None;
+        self.camera_projection_cache.clear();
         self.camera_plan = None;
         self.camera_projection = None;
         self.plan.sync(stage, camera_revision)?;
@@ -418,7 +478,7 @@ impl RetainedFrameRenderer {
     }
 
     /// Synchronize vector records, retain camera-bound surface/dot commands,
-    /// and rasterize their one shared painter sequence through [`ThreeDJob`].
+    /// and rasterize their one shared painter sequence through [`crate::ThreeDJob`].
     ///
     /// Surface topology comes only from [`RenderPrimitive`]; record counts are
     /// never factorized or guessed. The 2D retained plan remains the sole owner
@@ -525,6 +585,7 @@ impl RetainedFrameRenderer {
             projection: Arc::new(CameraProjection {
                 camera: camera.clone(),
                 tiling,
+                cache: Arc::clone(&self.camera_projection_cache),
                 prepared: Mutex::new(None),
             }),
         };
@@ -539,6 +600,7 @@ impl RetainedFrameRenderer {
         stage: &Stage,
         camera: &Camera,
     ) -> Result<Arc<PreparedCameraScene>, RetainedFrameRendererError> {
+        self.camera_preparation_stats = CameraPreparationStats::default();
         // Always synchronize the authoritative plan, including its latest
         // revision diagnostics. Camera motion does not change world geometry.
         self.plan.sync(stage, camera.revision())?;
@@ -546,20 +608,20 @@ impl RetainedFrameRenderer {
         if let Some(cached) = &self.camera_scene
             && cached.matches(stage, &draw_plan)
         {
+            for resource in cached.scene.world.iter().flatten() {
+                self.camera_preparation_stats.observe(resource, true);
+            }
             return Ok(Arc::clone(&cached.scene));
         }
-        let entries = camera_scene_entries(stage, &draw_plan, self.camera_scene.as_ref())?;
-        let scene = Arc::new(prepare_camera_scene(
-            &mut self.plan,
-            stage,
-            &draw_plan,
-            &entries,
-        )?);
+        let mut entries = camera_scene_entries(stage, &draw_plan, self.camera_scene.as_ref())?;
+        let (scene, stats) = prepare_camera_scene(&mut self.plan, stage, &draw_plan, &mut entries)?;
+        let scene = Arc::new(scene);
         self.plan.commit_image_frame(scene.images.clone());
         self.camera_scene = Some(CachedCameraScene {
             entries,
             scene: Arc::clone(&scene),
         });
+        self.camera_preparation_stats = stats;
         Ok(scene)
     }
 
@@ -582,6 +644,16 @@ impl RetainedFrameRenderer {
     #[must_use]
     pub const fn cache(&self) -> &PixelTileCache {
         &self.cache
+    }
+
+    /// World-resource work from the latest camera preparation attempt.
+    ///
+    /// Whole-scene hits count their resources as reused for this call. The
+    /// counters are zero before any capture, after failed preparation, and
+    /// after entering the planar route. Rasterization does not change them.
+    #[must_use]
+    pub const fn camera_preparation_stats(&self) -> CameraPreparationStats {
+        self.camera_preparation_stats
     }
 
     /// The PG-6 per-frame allocation ledger for the most recent 2D frame.
@@ -629,6 +701,21 @@ impl PreparedCameraFrame {
         Arc::ptr_eq(&self.projection, &other.projection)
     }
 
+    /// Work performed by this projection's one lazy initialization.
+    ///
+    /// Returns none before the projection has been prepared successfully.
+    /// Captures sharing that projection and later replays observe the same
+    /// initialization counts; this is not a per-raster work counter.
+    #[must_use]
+    pub fn projection_preparation_stats(&self) -> Option<CameraProjectionStats> {
+        self.projection
+            .prepared
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(|projection| projection.preparation_stats())
+    }
+
     /// Frozen raw linear-light RGBA16F layout.
     ///
     /// # Errors
@@ -656,7 +743,7 @@ impl PreparedCameraFrame {
         }
         let draws = camera_draws(&self.plan, &self.scene)?;
         self.projection
-            .get_or_prepare(&draws)
+            .get_or_prepare(&draws, &self.scene.sources)
             .and_then(|projection| projection.bind(&self.projection.camera, &draws))
             .map_err(RetainedFrameRendererError::ThreeD)?
             .render_into(threads, frame)
@@ -719,7 +806,7 @@ impl PreparedCameraFrame {
         } else {
             let draws = camera_draws(&self.plan, &self.scene)?;
             self.projection
-                .get_or_prepare(&draws)
+                .get_or_prepare(&draws, &self.scene.sources)
                 .map_err(RetainedFrameRendererError::ThreeD)?
         };
         let layout = projection
@@ -780,20 +867,13 @@ impl PreparedCameraBands {
         next: &std::sync::atomic::AtomicUsize,
         cache: Option<&PixelTileCache>,
     ) {
-        self.projection.render_owned_bands(
-            bands,
-            next,
-            self.layout.stride,
-            cache,
-            |index| self.material(index),
-        );
+        self.projection
+            .render_owned_bands(bands, next, self.layout.stride, cache, |index| {
+                self.material(index)
+            });
     }
 
-    pub(crate) fn raster_direct(
-        &self,
-        destination: &mut FrameBuffer,
-        cache: &PixelTileCache,
-    ) {
+    pub(crate) fn raster_direct(&self, destination: &mut FrameBuffer, cache: &PixelTileCache) {
         self.projection
             .render_cached_into(destination, cache, |index| self.material(index));
     }
@@ -808,6 +888,7 @@ impl PreparedCameraBands {
 struct CameraProjection {
     camera: Camera,
     tiling: Tiling,
+    cache: Arc<CameraProjectionCache>,
     prepared: Mutex<Option<Arc<PreparedThreeDProjection>>>,
 }
 
@@ -815,13 +896,20 @@ impl CameraProjection {
     fn get_or_prepare(
         &self,
         draws: &[ThreeDDraw<'_>],
+        sources: &[CameraSourceKey],
     ) -> Result<Arc<PreparedThreeDProjection>, ThreeDError> {
         let mut prepared = self.prepared.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(projection) = &*prepared {
             return Ok(Arc::clone(projection));
         }
-        let projection =
-            Arc::new(ThreeDJob::new(&self.camera, draws, self.tiling)?.into_projection()?);
+        let projection = Arc::new(PreparedThreeDProjection::prepare_retained(
+            &self.camera,
+            draws,
+            sources,
+            self.tiling,
+            ThreeDPreparationLimits::default(),
+            &self.cache,
+        )?);
         *prepared = Some(Arc::clone(&projection));
         Ok(projection)
     }
@@ -830,12 +918,77 @@ impl CameraProjection {
 #[derive(Debug)]
 struct PreparedCameraScene {
     images: crate::ImageTable,
-    meshes: Vec<SurfaceMesh>,
+    // One optional owner per draw-plan source, rather than a deep copy of all
+    // meshes/dot rows whenever any other source changes. Vectors remain in
+    // the retained plan and therefore need no second world-geometry owner.
+    world: Vec<Option<Arc<CameraWorldResource>>>,
     commands: Vec<PreparedCommand>,
     sources: Vec<CameraSourceKey>,
 }
 
+#[derive(Debug)]
+struct CameraWorldResource {
+    geometry: CameraWorldGeometry,
+    uniforms: Uniforms,
+}
+
+#[derive(Debug)]
+enum CameraWorldGeometry {
+    Mesh(SurfaceMesh),
+    Dots(Vec<TrueDotDraw>),
+}
+
+impl CameraPreparationStats {
+    fn observe(&mut self, resource: &CameraWorldResource, reused: bool) {
+        match &resource.geometry {
+            CameraWorldGeometry::Mesh(_) => {
+                if reused {
+                    self.meshes_reused += 1;
+                } else {
+                    self.meshes_built += 1;
+                }
+            }
+            CameraWorldGeometry::Dots(rows) => {
+                if reused {
+                    self.dot_clouds_reused += 1;
+                    self.dot_rows_reused += rows.len();
+                } else {
+                    self.dot_clouds_built += 1;
+                    self.dot_rows_built += rows.len();
+                }
+            }
+        }
+    }
+}
+
 impl PreparedCameraScene {
+    fn world_resource(
+        &self,
+        source: usize,
+    ) -> Result<&CameraWorldResource, RetainedFrameRendererError> {
+        self.world
+            .get(source)
+            .and_then(Option::as_deref)
+            .ok_or(RetainedFrameRendererError::VectorPlanMismatch)
+    }
+
+    fn mesh(&self, source: usize) -> Result<(&SurfaceMesh, &Uniforms), RetainedFrameRendererError> {
+        let resource = self.world_resource(source)?;
+        let CameraWorldGeometry::Mesh(mesh) = &resource.geometry else {
+            return Err(RetainedFrameRendererError::VectorPlanMismatch);
+        };
+        Ok((mesh, &resource.uniforms))
+    }
+
+    fn dot(&self, source: usize, part: usize) -> Result<TrueDotDraw, RetainedFrameRendererError> {
+        let CameraWorldGeometry::Dots(rows) = &self.world_resource(source)?.geometry else {
+            return Err(RetainedFrameRendererError::VectorPlanMismatch);
+        };
+        rows.get(part)
+            .copied()
+            .ok_or(RetainedFrameRendererError::VectorPlanMismatch)
+    }
+
     fn texture_material(
         &self,
         index: usize,
@@ -924,6 +1077,7 @@ impl CachedCameraScene {
 struct CameraSceneEntry {
     item: DrawItem,
     generation: Arc<()>,
+    world: Option<Arc<CameraWorldResource>>,
     volatile: bool,
     storage: StorageIdentity,
     record_revision: u64,
@@ -989,10 +1143,12 @@ fn camera_scene_entries(
         // Keep a source identity only after every immutable dependency matches.
         // The same slot is a linear-time conservative lookup: reordered sources
         // receive new identities, never an accidental match through an index.
-        let generation = previous
+        let cached = previous
             .and_then(|previous| previous.entries.get(index))
-            .filter(|cached| cached.item == *item && cached.matches(entry))
-            .map_or_else(|| Arc::new(()), |cached| Arc::clone(&cached.generation));
+            .filter(|cached| cached.item == *item && cached.matches(entry));
+        let generation =
+            cached.map_or_else(|| Arc::new(()), |cached| Arc::clone(&cached.generation));
+        let world = cached.and_then(|cached| cached.world.as_ref().map(Arc::clone));
         let volatile = entry
             .buffer
             .schema()
@@ -1002,6 +1158,7 @@ fn camera_scene_entries(
         entries.push(CameraSceneEntry {
             item: *item,
             generation,
+            world,
             volatile,
             storage: entry.buffer.storage_identity(),
             record_revision: entry.buffer.revision(),
@@ -1020,14 +1177,14 @@ fn prepare_camera_scene(
     plan: &mut RenderPlan,
     stage: &Stage,
     draw_plan: &DrawPlan,
-    entries: &[CameraSceneEntry],
-) -> Result<PreparedCameraScene, RetainedFrameRendererError> {
+    entries: &mut [CameraSceneEntry],
+) -> Result<(PreparedCameraScene, CameraPreparationStats), RetainedFrameRendererError> {
     let mut image_frame = plan.prepare_image_frame()?;
-    let mut meshes = Vec::new();
+    let mut world = Vec::new();
     let mut commands = Vec::new();
     let mut sources = Vec::new();
+    let mut stats = CameraPreparationStats::default();
     let mut command_count = 0usize;
-    let mut mesh_count = 0usize;
     for item in draw_plan.items() {
         let entry = stage
             .get(item.mob)
@@ -1045,25 +1202,11 @@ fn prepare_camera_scene(
                 reason: "camera draw count overflows usize",
             },
         )?;
-        if matches!(
-            entry.render_primitive(),
-            RenderPrimitive::SurfaceGrid { .. }
-                | RenderPrimitive::TriangleMesh
-                | RenderPrimitive::ImageQuad
-        ) {
-            mesh_count =
-                mesh_count
-                    .checked_add(1)
-                    .ok_or(RetainedFrameRendererError::InvalidPrimitive {
-                        mob: item.mob,
-                        reason: "surface mesh count overflows usize",
-                    })?;
-        }
     }
-    meshes.try_reserve_exact(mesh_count).map_err(|_| {
+    world.try_reserve_exact(entries.len()).map_err(|_| {
         RetainedFrameRendererError::AllocationFailed {
-            resource: "surface-mesh",
-            requested: mesh_count,
+            resource: "camera-world-resource",
+            requested: entries.len(),
         }
     })?;
     commands.try_reserve_exact(command_count).map_err(|_| {
@@ -1080,7 +1223,7 @@ fn prepare_camera_scene(
     })?;
     let mut vector_instance = 0u32;
     for (source_index, item) in draw_plan.items().iter().enumerate() {
-        let source = &entries[source_index];
+        let source = &mut entries[source_index];
         let first_command = commands.len();
         let entry = stage
             .get(item.mob)
@@ -1088,6 +1231,14 @@ fn prepare_camera_scene(
                 mob: item.mob,
                 reason: "draw-plan handle is stale",
             })?;
+        let reused = source.world.is_some();
+        if !reused {
+            source.world = camera_world_resource(stage, item.mob, entry)?;
+        }
+        if let Some(resource) = &source.world {
+            stats.observe(resource, reused);
+        }
+        world.push(source.world.as_ref().map(Arc::clone));
         match entry.render_primitive() {
             RenderPrimitive::Vector => {
                 commands.push(PreparedCommand::Vector(vector_instance));
@@ -1099,10 +1250,6 @@ fn prepare_camera_scene(
                 )?;
             }
             RenderPrimitive::SurfaceGrid { .. } | RenderPrimitive::TriangleMesh => {
-                let resolution = match entry.render_primitive() {
-                    RenderPrimitive::SurfaceGrid { resolution } => Some(resolution),
-                    _ => None,
-                };
                 // Raster resources do not change a surface's topology.
                 let image = entry
                     .image_resource()
@@ -1113,22 +1260,20 @@ fn prepare_camera_scene(
                     .and_then(fmn_mobject::ImageResource::dark_image)
                     .map(|resource| image_frame.intern(resource).map_err(SyncError::from))
                     .transpose()?;
-                let mesh = surface_mesh(stage, item.mob, resolution)?;
-                let mesh_index = meshes.len();
-                meshes.push(mesh);
                 commands.push(PreparedCommand::Surface {
-                    mesh: mesh_index,
+                    source: source_index,
                     image,
                     dark_image,
-                    uniforms: *entry.uniforms(),
                 });
             }
             RenderPrimitive::DotCloud => {
-                commands.extend(
-                    dot_draws(stage, item.mob)?
-                        .into_iter()
-                        .map(PreparedCommand::Dot),
-                );
+                // Keep the immutable dot rows in their shared world resource.
+                // A changed neighbor adds only small source/part references,
+                // rather than copying every dot's coordinates and uniforms.
+                commands.extend((0..entry.buffer.len()).map(|part| PreparedCommand::Dot {
+                    source: source_index,
+                    part,
+                }));
             }
             RenderPrimitive::ImageQuad => {
                 let resource =
@@ -1145,13 +1290,9 @@ fn prepare_camera_scene(
                     });
                 }
                 let image = image_frame.intern(resource).map_err(SyncError::from)?;
-                let mesh = image_mesh(stage, item.mob)?;
-                let mesh_index = meshes.len();
-                meshes.push(mesh);
                 commands.push(PreparedCommand::Image {
-                    mesh: mesh_index,
+                    source: source_index,
                     image,
-                    uniforms: *entry.uniforms(),
                 });
             }
         }
@@ -1166,21 +1307,57 @@ fn prepare_camera_scene(
     if usize::try_from(vector_instance).ok() != Some(plan.shapes().instances().len()) {
         return Err(RetainedFrameRendererError::VectorPlanMismatch);
     }
-    Ok(PreparedCameraScene {
-        images: image_frame,
-        meshes,
-        commands,
-        sources,
-    })
+    Ok((
+        PreparedCameraScene {
+            images: image_frame,
+            world,
+            commands,
+            sources,
+        },
+        stats,
+    ))
+}
+
+fn camera_world_resource(
+    stage: &Stage,
+    mob: Mob,
+    entry: &Entry,
+) -> Result<Option<Arc<CameraWorldResource>>, RetainedFrameRendererError> {
+    let geometry = match entry.render_primitive() {
+        RenderPrimitive::Vector => return Ok(None),
+        RenderPrimitive::SurfaceGrid { resolution } => {
+            CameraWorldGeometry::Mesh(surface_mesh(stage, mob, Some(resolution))?)
+        }
+        RenderPrimitive::TriangleMesh => CameraWorldGeometry::Mesh(surface_mesh(stage, mob, None)?),
+        RenderPrimitive::DotCloud => CameraWorldGeometry::Dots(dot_draws(stage, mob)?),
+        RenderPrimitive::ImageQuad => {
+            let image =
+                entry
+                    .image_resource()
+                    .ok_or(RetainedFrameRendererError::InvalidPrimitive {
+                        mob,
+                        reason: "image primitive has no image resource",
+                    })?;
+            if image.dark_image().is_some() {
+                return Err(RetainedFrameRendererError::InvalidPrimitive {
+                    mob,
+                    reason: "light/dark textures require a surface or triangle mesh",
+                });
+            }
+            CameraWorldGeometry::Mesh(image_mesh(stage, mob)?)
+        }
+    };
+    Ok(Some(Arc::new(CameraWorldResource {
+        geometry,
+        uniforms: *entry.uniforms(),
+    })))
 }
 
 fn camera_draws<'a>(
     plan: &'a RenderPlan,
     scene: &'a PreparedCameraScene,
 ) -> Result<Vec<ThreeDDraw<'a>>, RetainedFrameRendererError> {
-    let PreparedCameraScene {
-        meshes, commands, ..
-    } = scene;
+    let commands = &scene.commands;
     let mut draws = Vec::new();
     draws.try_reserve_exact(commands.len()).map_err(|_| {
         RetainedFrameRendererError::AllocationFailed {
@@ -1193,10 +1370,8 @@ fn camera_draws<'a>(
             PreparedCommand::Vector(instance) => {
                 ThreeDDraw::Vector(VectorDraw::new(plan, instance))
             }
-            PreparedCommand::Surface { mesh, uniforms, .. } => {
-                let mesh = meshes
-                    .get(mesh)
-                    .ok_or(RetainedFrameRendererError::VectorPlanMismatch)?;
+            PreparedCommand::Surface { source, .. } => {
+                let (mesh, uniforms) = scene.mesh(source)?;
                 let mut draw = SurfaceDraw::new(mesh);
                 if let Some(material) = scene.texture_material(index)? {
                     draw.material = SurfaceMaterial::Texture(material);
@@ -1207,11 +1382,9 @@ fn camera_draws<'a>(
                 draw.depth_test = uniforms.depth_test;
                 ThreeDDraw::Surface(draw)
             }
-            PreparedCommand::Dot(dot) => ThreeDDraw::TrueDot(dot),
-            PreparedCommand::Image { mesh, uniforms, .. } => {
-                let mesh = meshes
-                    .get(mesh)
-                    .ok_or(RetainedFrameRendererError::VectorPlanMismatch)?;
+            PreparedCommand::Dot { source, part } => ThreeDDraw::TrueDot(scene.dot(source, part)?),
+            PreparedCommand::Image { source, .. } => {
+                let (mesh, uniforms) = scene.mesh(source)?;
                 let material = scene
                     .texture_material(index)?
                     .ok_or(RetainedFrameRendererError::VectorPlanMismatch)?;
@@ -1231,16 +1404,17 @@ fn camera_draws<'a>(
 enum PreparedCommand {
     Vector(u32),
     Surface {
-        mesh: usize,
+        source: usize,
         image: Option<u32>,
         dark_image: Option<u32>,
-        uniforms: fmn_mobject::Uniforms,
     },
-    Dot(TrueDotDraw),
+    Dot {
+        source: usize,
+        part: usize,
+    },
     Image {
-        mesh: usize,
+        source: usize,
         image: u32,
-        uniforms: fmn_mobject::Uniforms,
     },
 }
 
@@ -1725,11 +1899,11 @@ mod tests {
         let mut plan = RenderPlan::new();
         plan.sync(stage, camera.revision()).unwrap();
         let draw_plan = stage.draw_plan();
-        let entries = camera_scene_entries(stage, &draw_plan, None).unwrap();
-        let scene = prepare_camera_scene(&mut plan, stage, &draw_plan, &entries).unwrap();
+        let mut entries = camera_scene_entries(stage, &draw_plan, None).unwrap();
+        let (scene, _) = prepare_camera_scene(&mut plan, stage, &draw_plan, &mut entries).unwrap();
         plan.commit_image_frame(scene.images.clone());
         let draws = camera_draws(&plan, &scene).unwrap();
-        ThreeDJob::new(camera, &draws, config(1).tiling)
+        crate::ThreeDJob::new(camera, &draws, config(1).tiling)
             .unwrap()
             .render(1)
             .unwrap()
@@ -2105,6 +2279,79 @@ mod tests {
     }
 
     #[test]
+    fn camera_local_edits_share_world_resources_without_retaining_old_scenes() {
+        let camera = camera();
+        let mut stage = Stage::new();
+        let vector = stage.add(vector());
+        let mesh = stage.add(surface((2, 2)));
+        let dots = stage.add(dot_cloud());
+        stage.add_many_to_scene(&[vector, mesh, dots]).unwrap();
+        let mut renderer = RetainedFrameRenderer::new(config(1)).unwrap();
+        let first = renderer.prepare_with_camera(&stage, &camera).unwrap();
+        let first_bits = fresh_camera_bits(&stage, &camera);
+        let entries = &renderer.camera_scene.as_ref().unwrap().entries;
+        let mesh_index = entries
+            .iter()
+            .position(|entry| entry.item.mob == mesh)
+            .unwrap();
+        let dot_index = entries
+            .iter()
+            .position(|entry| entry.item.mob == dots)
+            .unwrap();
+        let first_scene = Arc::downgrade(&first.scene);
+        let first_mesh = Arc::downgrade(first.scene.world[mesh_index].as_ref().unwrap());
+        let shared_dots = Arc::downgrade(first.scene.world[dot_index].as_ref().unwrap());
+        assert_eq!(renderer.camera_preparation_stats().meshes_built, 1);
+        assert_eq!(renderer.camera_preparation_stats().dot_rows_built, 1);
+
+        stage.shift(vector, [0.5, 0.0, 0.0]);
+        let second = renderer.prepare_with_camera(&stage, &camera).unwrap();
+        let second_bits = fresh_camera_bits(&stage, &camera);
+        assert!(!Arc::ptr_eq(&first.scene, &second.scene));
+        for index in [mesh_index, dot_index] {
+            assert!(Arc::ptr_eq(
+                first.scene.world[index].as_ref().unwrap(),
+                second.scene.world[index].as_ref().unwrap(),
+            ));
+        }
+        assert_eq!(renderer.camera_preparation_stats().meshes_built, 0);
+        assert_eq!(renderer.camera_preparation_stats().meshes_reused, 1);
+        assert_eq!(renderer.camera_preparation_stats().dot_rows_reused, 1);
+
+        stage.shift(mesh, [-0.5, 0.0, 0.0]);
+        let third = renderer.prepare_with_camera(&stage, &camera).unwrap();
+        let third_bits = fresh_camera_bits(&stage, &camera);
+        assert!(!Arc::ptr_eq(
+            second.scene.world[mesh_index].as_ref().unwrap(),
+            third.scene.world[mesh_index].as_ref().unwrap(),
+        ));
+        assert!(Arc::ptr_eq(
+            second.scene.world[dot_index].as_ref().unwrap(),
+            third.scene.world[dot_index].as_ref().unwrap(),
+        ));
+        assert_eq!(renderer.camera_preparation_stats().meshes_built, 1);
+        assert_eq!(renderer.camera_preparation_stats().dot_rows_reused, 1);
+        for threads in [1, 4, 16] {
+            assert_eq!(first.render(threads).unwrap().as_bytes(), first_bits);
+            assert_eq!(second.render(threads).unwrap().as_bytes(), second_bits);
+            assert_eq!(third.render(threads).unwrap().as_bytes(), third_bits);
+        }
+        drop(first);
+        drop(second);
+        assert!(first_scene.upgrade().is_none());
+        assert!(first_mesh.upgrade().is_none());
+        assert!(shared_dots.upgrade().is_some());
+        drop(renderer);
+        drop(stage);
+        assert!(
+            shared_dots.upgrade().is_some(),
+            "the last capture owns its dot rows"
+        );
+        drop(third);
+        assert!(shared_dots.upgrade().is_none());
+    }
+
+    #[test]
     fn camera_resource_cache_observes_records_uniforms_placement_and_order() {
         let camera = camera();
         let mut stage = Stage::new();
@@ -2455,7 +2702,10 @@ mod tests {
         assert_ne!(expected, previous);
         renderer.render_with_camera(&stage, &camera).unwrap();
         assert_eq!(renderer.frame().as_bytes(), expected);
-        assert!(renderer.cache().stats().misses > 0, "failed tiles were not published");
+        assert!(
+            renderer.cache().stats().misses > 0,
+            "failed tiles were not published"
+        );
         assert_eq!(renderer.raster_team_stats().frames_completed, 2);
         renderer.render(&stage, camera.revision()).unwrap();
         renderer.render_with_camera(&stage, &camera).unwrap();

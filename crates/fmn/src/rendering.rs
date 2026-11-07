@@ -818,10 +818,43 @@ fn optional_cache_budget_per_team(
         .and_then(|teams| teams.checked_mul(2))
         .and_then(|shares| remaining_bytes.checked_div(shares))
         .map_or(0, |bytes| {
-            usize::try_from(bytes)
-                .unwrap_or(usize::MAX)
-                .min(maximum)
+            usize::try_from(bytes).unwrap_or(usize::MAX).min(maximum)
         })
+}
+
+// Share optional camera memory across raster teams and the preparation plus
+// fallback compilers. Each allowance gets an equal metadata/allocator reserve.
+// Small tile surfaces leave their unused share available for projected rows.
+fn optional_camera_cache_budgets(
+    remaining_bytes: u64,
+    render_teams: usize,
+    viewport: Viewport,
+) -> (usize, usize) {
+    if render_teams == 0 {
+        return (0, 0);
+    }
+    let Some(compilers) = render_teams.checked_add(1) else {
+        return (0, 0);
+    };
+    let Some(owners) = render_teams.checked_add(compilers) else {
+        return (0, 0);
+    };
+    let tiles = optional_cache_budget_per_team(
+        remaining_bytes,
+        owners,
+        pipeline::camera_cache_budget_bytes(viewport),
+    );
+    let reserved_tiles = u64::try_from(render_teams)
+        .ok()
+        .and_then(|teams| teams.checked_mul(2))
+        .and_then(|shares| shares.checked_mul(u64::try_from(tiles).ok()?))
+        .unwrap_or(remaining_bytes);
+    let projections = optional_cache_budget_per_team(
+        remaining_bytes.saturating_sub(reserved_tiles),
+        compilers,
+        fmn_render::RetainedFrameRenderer::DEFAULT_CAMERA_PROJECTION_BUDGET_BYTES,
+    );
+    (tiles, projections)
 }
 
 struct RenderSink {
@@ -1056,14 +1089,14 @@ impl RenderSink {
         } else {
             0
         };
-        let camera_cache_bytes = if camera.is_some() {
-            optional_cache_budget_per_team(
+        let (camera_cache_bytes, projection_cache_bytes) = if camera.is_some() {
+            optional_camera_cache_budgets(
                 options.max_resident_bytes - planned,
                 plan.render_teams.len(),
-                pipeline::camera_cache_budget_bytes(frame.viewport),
+                frame.viewport,
             )
         } else {
-            0
+            (0, 0)
         };
         let mut video = None;
         let (binding, receipt) = match options.format {
@@ -1220,13 +1253,14 @@ impl RenderSink {
             vec![binding],
         )
         .map_err(RenderError::Emitter)?;
-        let pipeline = match NativeFramePipeline::with_cache_budgets(
+        let pipeline = match NativeFramePipeline::with_projection_cache_budget(
             plan.clone(),
             renderer_config,
             camera,
             emitter.handle(),
             prefix_cache_bytes,
             camera_cache_bytes,
+            projection_cache_bytes,
         ) {
             Ok(pipeline) => pipeline,
             Err(error) => {
@@ -1637,6 +1671,37 @@ impl Drop for RenderSink {
 #[cfg(test)]
 mod optional_cache_budget_tests {
     use super::*;
+
+    #[test]
+    fn camera_caches_fit_remaining_memory_with_every_compiler_and_publication_reserve() {
+        let viewport = Viewport {
+            width: 96,
+            height: 64,
+        };
+        let max_projection =
+            fmn_render::RetainedFrameRenderer::DEFAULT_CAMERA_PROJECTION_BUDGET_BYTES;
+        for teams in [0, 1, 4, 16, usize::MAX] {
+            for remaining in [0, 1, 13, 1024, 64 * 1024 * 1024, u64::MAX] {
+                let (tiles, projections) =
+                    optional_camera_cache_budgets(remaining, teams, viewport);
+                assert!(tiles <= pipeline::camera_cache_budget_bytes(viewport));
+                assert!(projections <= max_projection);
+                let accounted = tiles as u128 * teams as u128 * 2
+                    + projections as u128 * (teams as u128 + 1) * 2;
+                assert!(accounted <= u128::from(remaining));
+                if remaining == 0 || teams == 0 || teams == usize::MAX {
+                    assert_eq!((tiles, projections), (0, 0));
+                }
+            }
+        }
+        assert_eq!(
+            optional_camera_cache_budgets(u64::MAX, 4, viewport),
+            (
+                pipeline::camera_cache_budget_bytes(viewport),
+                max_projection
+            ),
+        );
+    }
 
     #[test]
     fn optional_cache_storage_shares_only_uncommitted_memory() {

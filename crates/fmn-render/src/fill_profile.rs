@@ -86,6 +86,14 @@ impl FillProfile {
     pub fn knots(&self) -> &[FillKnot] {
         &self.knots
     }
+
+    /// Account for an immutable shared owner and its full retained capacity.
+    pub(crate) fn shared_storage_bytes(&self) -> Option<usize> {
+        self.knots
+            .capacity()
+            .checked_mul(std::mem::size_of::<FillKnot>())?
+            .checked_add(std::mem::size_of::<(Self, [usize; 2])>())
+    }
     /// Whether any record can contribute visible fill.
     #[must_use]
     pub fn has_visible_alpha(&self) -> bool {

@@ -8582,7 +8582,9 @@ fn obj_concave_faces_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> 
 
     use fmn_library::{ObjAssetLimits, ObjDocument, parse_mtl};
     use fmn_mobject::{ImageColorSpace, ImageResource, ImageSampler, Snapshot};
-    use fmn_render::{Camera, CameraConfig, RetainedFrameRenderer, RetainedFrameRendererConfig, Tiling};
+    use fmn_render::{
+        Camera, CameraConfig, RetainedFrameRenderer, RetainedFrameRendererConfig, Tiling,
+    };
 
     // A U with a collinear left-edge corner whose UV is deliberately not
     // the interpolation of its neighbours. The repeated closing corner must
@@ -8613,14 +8615,24 @@ fn obj_concave_faces_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> 
         b: 0.0,
         a: 0.0,
     };
-    let viewport = Viewport { width: 96, height: 96 };
+    let viewport = Viewport {
+        width: 96,
+        height: 96,
+    };
     let config = RetainedFrameRendererConfig {
         frame: FrameConfig::new(
             viewport,
-            ScreenMap { scale: 12.0, origin: [48.0, 48.0], y_up: true },
+            ScreenMap {
+                scale: 12.0,
+                origin: [48.0, 48.0],
+                y_up: true,
+            },
             background,
         ),
-        tiling: Tiling { macro_tile: 32, fine_tile: 8 },
+        tiling: Tiling {
+            macro_tile: 32,
+            fine_tile: 8,
+        },
         engine: EngineIdentity::certified(),
         threads: 1,
     };
@@ -8632,7 +8644,8 @@ fn obj_concave_faces_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> 
             order.reverse();
         }
         order.push(order[0]);
-        let corners = order.iter()
+        let corners = order
+            .iter()
             .map(|index| format!("{index}/{index}/1"))
             .collect::<Vec<_>>()
             .join(" ");
@@ -8644,14 +8657,15 @@ fn obj_concave_faces_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> 
             || document.runs()[0].triangles != (0..7)
             || document.runs()[1].triangles != (7..8)
         {
-            return Err(fail("concave triangulation shifted a material face interval"));
+            return Err(fail(
+                "concave triangulation shifted a material face interval",
+            ));
         }
         let mut retained_corners = BTreeSet::new();
         let mut area = 0.0;
         for triangle in &document.mesh().triangles[..7] {
             let [a, b, c] = triangle.map(|corner| document.mesh().vertices[corner.vertex]);
-            let signed = (b[0] - a[0]) * (c[1] - a[1])
-                - (b[1] - a[1]) * (c[0] - a[0]);
+            let signed = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
             if signed == 0.0 || (signed < 0.0) != reversed {
                 return Err(fail("concave triangles lost the original face winding"));
             }
@@ -8660,29 +8674,35 @@ fn obj_concave_faces_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> 
                 retained_corners.insert((corner.vertex, corner.tex_coord, corner.normal));
             }
         }
-        let expected_corners: BTreeSet<_> = (0..9)
-            .map(|index| (index, Some(index), Some(0)))
-            .collect();
+        let expected_corners: BTreeSet<_> =
+            (0..9).map(|index| (index, Some(index), Some(0))).collect();
         if area != 10.0 || retained_corners != expected_corners {
             return Err(fail("concave face area or per-corner attributes changed"));
         }
-        let model = document.to_mobject(
-            4.0,
-            &materials,
-            &BTreeMap::from([("A".to_owned(), image.clone())]),
-        )
-        .map_err(|error| fail(format!("build concave material model: {error}")))?;
+        let model = document
+            .to_mobject(
+                4.0,
+                &materials,
+                &BTreeMap::from([("A".to_owned(), image.clone())]),
+            )
+            .map_err(|error| fail(format!("build concave material model: {error}")))?;
         let mut stage = Stage::new();
         let root = stage.add(model);
-        stage.add_to_scene(root)
+        stage
+            .add_to_scene(root)
             .map_err(|error| fail(format!("admit concave model: {error}")))?;
-        let saved = stage.snapshot_bytes()
+        let saved = stage
+            .snapshot_bytes()
             .map_err(|error| fail(format!("serialize concave model: {error}")))?;
         let mut restored = Stage::new();
         let decoded = Snapshot::from_bytes(&saved, &restored)
             .map_err(|error| fail(format!("decode concave model: {error}")))?;
         restored.restore(&decoded.snapshot);
-        if restored.snapshot_bytes().map_err(|error| fail(error.to_string()))? != saved {
+        if restored
+            .snapshot_bytes()
+            .map_err(|error| fail(error.to_string()))?
+            != saved
+        {
             return Err(fail("concave model snapshot changed bytes"));
         }
         for pose in 0..2 {
@@ -8691,19 +8711,24 @@ fn obj_concave_faces_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> 
                 background,
                 ..CameraConfig::default()
             };
-            camera_config.frame.set_shape([8.0, 8.0])
+            camera_config
+                .frame
+                .set_shape([8.0, 8.0])
                 .map_err(|error| fail(error.to_string()))?;
-            camera_config.frame.set_euler_angles(
-                Some(f64::from(pose) * 0.35),
-                Some(f64::from(pose) * 0.3),
-                None,
-            )
-            .map_err(|error| fail(error.to_string()))?;
+            camera_config
+                .frame
+                .set_euler_angles(
+                    Some(f64::from(pose) * 0.35),
+                    Some(f64::from(pose) * 0.3),
+                    None,
+                )
+                .map_err(|error| fail(error.to_string()))?;
             let camera = Camera::new(camera_config)
                 .map_err(|error| fail(format!("construct concave camera: {error}")))?;
-            let mut fresh = RetainedFrameRenderer::new(config)
-                .map_err(|error| fail(error.to_string()))?;
-            let reference = fresh.prepare_with_camera(&stage, &camera)
+            let mut fresh =
+                RetainedFrameRenderer::new(config).map_err(|error| fail(error.to_string()))?;
+            let reference = fresh
+                .prepare_with_camera(&stage, &camera)
                 .map_err(|error| fail(error.to_string()))?
                 .render(1)
                 .map_err(|error| fail(error.to_string()))?;
@@ -8715,7 +8740,9 @@ fn obj_concave_faces_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> 
                 ([0.0, 1.0, 0.0], false),
                 ([0.0, 0.0, 0.0], false),
             ] {
-                let pixel = camera.project(point, 0.0).pixel((96, 96))
+                let pixel = camera
+                    .project(point, 0.0)
+                    .pixel((96, 96))
                     .ok_or_else(|| fail("concave probe did not project"))?;
                 if !(0.0..96.0).contains(&pixel[0]) || !(0.0..96.0).contains(&pixel[1]) {
                     return Err(fail("concave probe left the viewport"));
@@ -8730,12 +8757,12 @@ fn obj_concave_faces_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> 
                 }
             }
             for threads in [1, 4, 16] {
-                let mut renderer = RetainedFrameRenderer::new(
-                    RetainedFrameRendererConfig { threads, ..config },
-                )
-                .map_err(|error| fail(error.to_string()))?;
+                let mut renderer =
+                    RetainedFrameRenderer::new(RetainedFrameRendererConfig { threads, ..config })
+                        .map_err(|error| fail(error.to_string()))?;
                 for state in [&stage, &restored] {
-                    renderer.render_with_camera(state, &camera)
+                    renderer
+                        .render_with_camera(state, &camera)
                         .map_err(|error| fail(error.to_string()))?;
                     if renderer.frame().as_bytes() != reference.as_bytes() {
                         return Err(fail("concave frame changed across threads or restoration"));
@@ -8745,7 +8772,11 @@ fn obj_concave_faces_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> 
             }
             if pose == 1 {
                 outcome = outcome.with_artifact(
-                    if reversed { "obj-concave-cw.frame" } else { "obj-concave-ccw.frame" },
+                    if reversed {
+                        "obj-concave-cw.frame"
+                    } else {
+                        "obj-concave-ccw.frame"
+                    },
                     encode_frame(&reference).map_err(|error| fail(error.to_string()))?,
                 );
             }
@@ -8761,6 +8792,386 @@ fn obj_concave_faces_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> 
     Ok(outcome.with_counter("obj_concave_frames", frames))
 }
 
+fn camera_projection_resources_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_library::Sphere;
+    use fmn_render::{
+        Camera, CameraConfig, RetainedFrameRenderer, RetainedFrameRendererConfig, Tiling,
+    };
+
+    let background = fmn_core::color::LinearRgba {
+        r: 0.04,
+        g: 0.06,
+        b: 0.08,
+        a: 1.0,
+    };
+    let config = RetainedFrameRendererConfig {
+        frame: FrameConfig::new(
+            Viewport {
+                width: 96,
+                height: 64,
+            },
+            ScreenMap {
+                scale: 8.0,
+                origin: [48.0, 32.0],
+                y_up: true,
+            },
+            background,
+        ),
+        tiling: Tiling {
+            macro_tile: 32,
+            fine_tile: 8,
+        },
+        engine: EngineIdentity::certified(),
+        threads: 1,
+    };
+    let mut settings = CameraConfig {
+        resolution: (96, 64),
+        background,
+        ..CameraConfig::default()
+    };
+    settings
+        .frame
+        .set_shape([12.0, 8.0])
+        .map_err(|error| fail(error.to_string()))?;
+    let original_camera = Camera::new(settings).map_err(|error| fail(error.to_string()))?;
+    let mut frames = 0_u64;
+    let mut compiled_draws = 0_u64;
+    let mut reused_draws = 0_u64;
+    let mut partial_frames = 0_u64;
+    let mut artifact = Vec::new();
+    for budget in [0, 1, 4 * 1024 * 1024] {
+        let mut stage = Stage::new();
+        let fixed = stage.add(Sphere::new(0.9).resolution(17, 9));
+        let moving = stage.add(Sphere::new(0.7).resolution(13, 9));
+        let overlay = stage.add(Circle::new().radius(0.3));
+        stage
+            .add_many_to_scene(&[fixed, moving, overlay])
+            .map_err(|error| fail(error.to_string()))?;
+        stage.shift(fixed, [-2.0, 0.0, 0.0]);
+        stage.shift(moving, [1.0, 0.0, 0.0]);
+        stage.shift(overlay, [0.0, -1.6, 0.0]);
+        let checkpoint = stage.snapshot();
+        let mut camera = original_camera.clone();
+        let mut compiler =
+            RetainedFrameRenderer::new(config).map_err(|error| fail(error.to_string()))?;
+        compiler.set_camera_projection_cache_budget_bytes(budget);
+        let mut captures = Vec::new();
+        for step in 0..8 {
+            match step {
+                1 => {
+                    stage.shift(overlay, [0.5, 0.0, 0.0]);
+                }
+                2 => {
+                    stage.shift(moving, [0.5, 0.0, 0.0]);
+                }
+                3 => {
+                    camera
+                        .frame_mut()
+                        .set_center([0.25, 0.0, 0.0])
+                        .map_err(|error| fail(error.to_string()))?;
+                }
+                4 => {
+                    camera
+                        .set_light_source_position([5.0, -5.0, 10.0])
+                        .map_err(|error| fail(error.to_string()))?;
+                }
+                5 => {
+                    stage.shift(fixed, [0.0, 0.35, 0.0]);
+                }
+                6 => {
+                    stage.restore(&checkpoint);
+                    camera = original_camera.clone();
+                }
+                _ => {}
+            }
+            let capture = compiler
+                .prepare_with_camera(&stage, &camera)
+                .map_err(|error| fail(format!("capture projected camera resources: {error}")))?;
+            if step != 7 && capture.projection_preparation_stats().is_some() {
+                return Err(fail(
+                    "a changed camera capture projected on the stage owner",
+                ));
+            }
+            // A separate zero-budget compiler uses the unchanged cold projection
+            // constructor, without reusing the candidate's world or projected rows.
+            let mut fresh =
+                RetainedFrameRenderer::new(config).map_err(|error| fail(error.to_string()))?;
+            fresh.set_camera_projection_cache_budget_bytes(0);
+            let reference = fresh
+                .prepare_with_camera(&stage, &camera)
+                .map_err(|error| fail(error.to_string()))?
+                .render(1)
+                .map_err(|error| fail(error.to_string()))?;
+            let actual = capture
+                .render(1)
+                .map_err(|error| fail(format!("prepare retained projection: {error}")))?;
+            if actual.as_bytes() != reference.as_bytes() {
+                return Err(fail("retained projection changed cold camera pixels"));
+            }
+            let stats = capture
+                .projection_preparation_stats()
+                .ok_or_else(|| fail("successful raster did not publish projection counters"))?;
+            if stats.compiled_draws + stats.reused_draws != 3 {
+                return Err(fail("projection accounting lost a mixed-scene draw"));
+            }
+            if budget <= 1 || matches!(step, 0 | 3 | 4 | 6) {
+                if stats.reused_draws != 0 {
+                    return Err(fail(
+                        "projection rows survived an incompatible camera or disabled budget",
+                    ));
+                }
+            } else if matches!(step, 1 | 2 | 5) {
+                if stats.compiled_draws != 1 || stats.reused_draws != 2 {
+                    return Err(fail(
+                        "a local edit failed to reuse the two unaffected projected draws",
+                    ));
+                }
+                partial_frames += 1;
+            }
+            if step != 7 {
+                compiled_draws += u64::try_from(stats.compiled_draws)
+                    .map_err(|_| fail("compiled draw count exceeds u64"))?;
+                reused_draws += u64::try_from(stats.reused_draws)
+                    .map_err(|_| fail("reused draw count exceeds u64"))?;
+            }
+            let retained_bytes = compiler.retained_camera_projection_bytes();
+            if retained_bytes > budget || (budget <= 1 && retained_bytes != 0) {
+                return Err(fail(
+                    "camera projection cache exceeded its admitted allowance",
+                ));
+            }
+            if budget > 1 && step == 0 && retained_bytes == 0 {
+                return Err(fail(
+                    "the positive-budget control did not retain projected resources",
+                ));
+            }
+            if budget > 1 && step == 1 {
+                artifact = encode_frame(&actual).map_err(|error| fail(error.to_string()))?;
+            }
+            captures.push((capture, reference.as_bytes().to_vec()));
+            frames += 1;
+        }
+        for index in 1..6 {
+            if captures[index - 1].1 == captures[index].1 {
+                return Err(fail(format!(
+                    "projection edit {index} did not change visible pixels"
+                )));
+            }
+        }
+        if captures[6].1 != captures[0].1 || captures[7].1 != captures[6].1 {
+            return Err(fail("retained projections did not restore snapshot pixels"));
+        }
+        drop(stage);
+        drop(compiler);
+        drop(checkpoint);
+        for threads in [1, 4, 16] {
+            for index in [7, 2, 5, 0] {
+                let actual = captures[index]
+                    .0
+                    .render(threads)
+                    .map_err(|error| fail(format!("replay frozen projection: {error}")))?;
+                if actual.as_bytes() != captures[index].1 {
+                    return Err(fail(
+                        "frozen projection replay changed after scene teardown",
+                    ));
+                }
+                frames += 1;
+            }
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.camera.projection_resources")
+            .field("frames", frames)
+            .field("compiled_draws", compiled_draws)
+            .field("reused_draws", reused_draws)
+            .field("partial_frames", partial_frames)
+            .field("cold_pixels_match", "true")
+            .field("cache_bounded", "true"),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("retained-camera-projection.frame", artifact)
+        .with_counter("camera_projection_frames", frames)
+        .with_counter("camera_projection_reused_draws", reused_draws)
+        .with_counter("camera_projection_partial_frames", partial_frames))
+}
+
+fn camera_world_resources_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_library::Sphere;
+    use fmn_render::{
+        Camera, CameraConfig, RetainedFrameRenderer, RetainedFrameRendererConfig, Tiling,
+    };
+
+    let mut stage = Stage::new();
+    let fixed = stage.add(Sphere::new(0.9).resolution(17, 9));
+    let moving = stage.add(Sphere::new(0.7).resolution(13, 9));
+    let overlay = stage.add(Circle::new().radius(0.3));
+    stage
+        .add_many_to_scene(&[fixed, moving, overlay])
+        .map_err(|error| fail(error.to_string()))?;
+    stage.shift(fixed, [-2.0, 0.0, 0.0]);
+    stage.shift(moving, [1.0, 0.0, 0.0]);
+    stage.shift(overlay, [0.0, -1.6, 0.0]);
+    let checkpoint = stage.snapshot();
+    let background = fmn_core::color::LinearRgba {
+        r: 0.04,
+        g: 0.06,
+        b: 0.08,
+        a: 1.0,
+    };
+    let config = RetainedFrameRendererConfig {
+        frame: FrameConfig::new(
+            Viewport {
+                width: 96,
+                height: 64,
+            },
+            ScreenMap {
+                scale: 8.0,
+                origin: [48.0, 32.0],
+                y_up: true,
+            },
+            background,
+        ),
+        tiling: Tiling {
+            macro_tile: 32,
+            fine_tile: 8,
+        },
+        engine: EngineIdentity::certified(),
+        threads: 1,
+    };
+    let mut settings = CameraConfig {
+        resolution: (96, 64),
+        background,
+        ..CameraConfig::default()
+    };
+    settings
+        .frame
+        .set_shape([12.0, 8.0])
+        .map_err(|error| fail(error.to_string()))?;
+    let original_camera = Camera::new(settings).map_err(|error| fail(error.to_string()))?;
+    let mut camera = original_camera.clone();
+    let mut compiler =
+        RetainedFrameRenderer::new(config).map_err(|error| fail(error.to_string()))?;
+    let mut captures = Vec::new();
+    let mut mesh_builds = 0_u64;
+    let mut mesh_reuses = 0_u64;
+    let mut unchanged_captures = 0_u64;
+    for step in 0..8 {
+        match step {
+            1 => {
+                stage.shift(overlay, [0.5, 0.0, 0.0]);
+            }
+            2 => {
+                stage.shift(moving, [0.5, 0.0, 0.0]);
+            }
+            3 => {
+                camera
+                    .frame_mut()
+                    .set_center([0.25, 0.0, 0.0])
+                    .map_err(|error| fail(error.to_string()))?;
+            }
+            4 => {
+                camera
+                    .set_light_source_position([5.0, -5.0, 10.0])
+                    .map_err(|error| fail(error.to_string()))?;
+            }
+            5 => {
+                stage.shift(fixed, [0.0, 0.35, 0.0]);
+            }
+            6 => {
+                stage.restore(&checkpoint);
+                camera = original_camera.clone();
+            }
+            _ => {}
+        }
+        let capture = compiler
+            .prepare_with_camera(&stage, &camera)
+            .map_err(|error| fail(format!("prepare retained world resources: {error}")))?;
+        let stats = compiler.camera_preparation_stats();
+        if stats.meshes_built + stats.meshes_reused != 2 {
+            return Err(fail("camera resource accounting lost a surface"));
+        }
+        if step == 0 && (stats.meshes_built != 2 || stats.meshes_reused != 0) {
+            return Err(fail("cold camera preparation did not build both surfaces"));
+        }
+        if matches!(step, 1 | 3 | 4 | 7) {
+            if stats.meshes_built != 0 || stats.meshes_reused != 2 {
+                return Err(fail(
+                    "an overlay, camera, light or identical capture rebuilt world meshes",
+                ));
+            }
+            unchanged_captures += 1;
+        }
+        if matches!(step, 2 | 5) && (stats.meshes_built != 1 || stats.meshes_reused != 1) {
+            return Err(fail(
+                "a local mesh edit rebuilt an unaffected world resource",
+            ));
+        }
+        mesh_builds +=
+            u64::try_from(stats.meshes_built).map_err(|_| fail("mesh build count exceeds u64"))?;
+        mesh_reuses +=
+            u64::try_from(stats.meshes_reused).map_err(|_| fail("mesh reuse count exceeds u64"))?;
+
+        // A new compiler and direct raster provide a cold control for each
+        // capture. Neither retained world resources nor tile pixels are shared.
+        let mut fresh =
+            RetainedFrameRenderer::new(config).map_err(|error| fail(error.to_string()))?;
+        fresh.set_camera_projection_cache_budget_bytes(0);
+        let reference = fresh
+            .prepare_with_camera(&stage, &camera)
+            .map_err(|error| fail(error.to_string()))?
+            .render(1)
+            .map_err(|error| fail(error.to_string()))?;
+        captures.push((capture, reference.as_bytes().to_vec()));
+    }
+    for index in 1..6 {
+        if captures[index - 1].1 == captures[index].1 {
+            return Err(fail(format!(
+                "camera resource edit {index} did not change visible pixels"
+            )));
+        }
+    }
+    if captures[6].1 != captures[0].1 || captures[7].1 != captures[6].1 {
+        return Err(fail(
+            "camera world resources did not restore snapshot pixels",
+        ));
+    }
+    drop(stage);
+    drop(compiler);
+    drop(checkpoint);
+    let mut frames = 0_u64;
+    let mut artifact = Vec::new();
+    for threads in [1, 4, 16] {
+        for index in [0, 1, 2, 3, 4, 5, 6, 7, 2, 0] {
+            let actual = captures[index]
+                .0
+                .render(threads)
+                .map_err(|error| fail(format!("replay retained world resources: {error}")))?;
+            if actual.as_bytes() != captures[index].1 {
+                return Err(fail(
+                    "retained camera world resources changed cold-render pixels",
+                ));
+            }
+            if threads == 1 && frames == 0 {
+                artifact = encode_frame(&actual).map_err(|error| fail(error.to_string()))?;
+            }
+            frames += 1;
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.camera.world_resources")
+            .field("frames", frames)
+            .field("mesh_builds", mesh_builds)
+            .field("mesh_reuses", mesh_reuses)
+            .field("unchanged_captures", unchanged_captures)
+            .field("cold_pixels_match", "true"),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("retained-camera-world.frame", artifact)
+        .with_counter("camera_world_frames", frames)
+        .with_counter("camera_world_mesh_reuses", mesh_reuses)
+        .with_counter("camera_world_unchanged_captures", unchanged_captures))
+}
+
 fn camera_tile_reuse_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     use fmn_library::Cube;
     use fmn_render::{
@@ -8770,10 +9181,14 @@ fn camera_tile_reuse_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> 
 
     let mut stage = Stage::new();
     let cube = stage.add(Cube::new(2.0));
-    stage.add_to_scene(cube).map_err(|error| fail(error.to_string()))?;
+    stage
+        .add_to_scene(cube)
+        .map_err(|error| fail(error.to_string()))?;
     stage.shift(cube, [-2.5, 0.0, 0.0]);
     let moving = stage.add(Circle::new().radius(0.45));
-    stage.add_to_scene(moving).map_err(|error| fail(error.to_string()))?;
+    stage
+        .add_to_scene(moving)
+        .map_err(|error| fail(error.to_string()))?;
     stage.shift(moving, [1.5, 0.0, 0.0]);
     let background = fmn_core::color::LinearRgba {
         r: 0.04,
@@ -8783,11 +9198,21 @@ fn camera_tile_reuse_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> 
     };
     let config = RetainedFrameRendererConfig {
         frame: FrameConfig::new(
-            Viewport { width: 96, height: 64 },
-            ScreenMap { scale: 8.0, origin: [48.0, 32.0], y_up: true },
+            Viewport {
+                width: 96,
+                height: 64,
+            },
+            ScreenMap {
+                scale: 8.0,
+                origin: [48.0, 32.0],
+                y_up: true,
+            },
             background,
         ),
-        tiling: Tiling { macro_tile: 32, fine_tile: 8 },
+        tiling: Tiling {
+            macro_tile: 32,
+            fine_tile: 8,
+        },
         engine: EngineIdentity::certified(),
         threads: 1,
     };
@@ -8796,13 +9221,14 @@ fn camera_tile_reuse_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> 
         background,
         ..CameraConfig::default()
     };
-    camera_config.frame.set_shape([12.0, 8.0])
+    camera_config
+        .frame
+        .set_shape([12.0, 8.0])
         .map_err(|error| fail(error.to_string()))?;
-    let original_camera = Camera::new(camera_config)
-        .map_err(|error| fail(error.to_string()))?;
+    let original_camera = Camera::new(camera_config).map_err(|error| fail(error.to_string()))?;
     let mut camera = original_camera.clone();
-    let mut compiler = RetainedFrameRenderer::new(config)
-        .map_err(|error| fail(error.to_string()))?;
+    let mut compiler =
+        RetainedFrameRenderer::new(config).map_err(|error| fail(error.to_string()))?;
     let mut captures = Vec::new();
     for step in 0..6 {
         match step {
@@ -8813,7 +9239,8 @@ fn camera_tile_reuse_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> 
                 stage.shift(moving, [0.0, 0.4, 0.0]);
             }
             3 => {
-                camera.set_light_source_position([8.0, -4.0, 6.0])
+                camera
+                    .set_light_source_position([8.0, -4.0, 6.0])
                     .map_err(|error| fail(error.to_string()))?;
             }
             4 => camera = original_camera.clone(),
@@ -8822,11 +9249,13 @@ fn camera_tile_reuse_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> 
             }
             _ => {}
         }
-        let capture = compiler.prepare_with_camera(&stage, &camera)
+        let capture = compiler
+            .prepare_with_camera(&stage, &camera)
             .map_err(|error| fail(format!("prepare camera tile fixture: {error}")))?;
-        let mut fresh = RetainedFrameRenderer::new(config)
-            .map_err(|error| fail(error.to_string()))?;
-        let reference = fresh.prepare_with_camera(&stage, &camera)
+        let mut fresh =
+            RetainedFrameRenderer::new(config).map_err(|error| fail(error.to_string()))?;
+        let reference = fresh
+            .prepare_with_camera(&stage, &camera)
             .map_err(|error| fail(error.to_string()))?
             .render(1)
             .map_err(|error| fail(error.to_string()))?;
@@ -8837,24 +9266,29 @@ fn camera_tile_reuse_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> 
         || captures[3].1 == captures[4].1
         || captures[4].1 == captures[5].1
     {
-        return Err(fail("camera tile fixture lost object or lighting sensitivity"));
+        return Err(fail(
+            "camera tile fixture lost object or lighting sensitivity",
+        ));
     }
     let mut frames = 0_u64;
     let mut hits = 0_u64;
     let mut partial_frames = 0_u64;
     let budget = 1024 * 1024;
     for threads in [1, 4, 16] {
-        let mut team = RasterTeam::new(threads)
-            .map_err(|error| fail(error.to_string()))?;
+        let mut team = RasterTeam::new(threads).map_err(|error| fail(error.to_string()))?;
         let mut cache = PixelTileCache::with_budgets(budget, 0);
         cache.set_camera_budget_bytes(budget);
-        let layout = captures[0].0.layout().map_err(|error| fail(error.to_string()))?;
+        let layout = captures[0]
+            .0
+            .layout()
+            .map_err(|error| fail(error.to_string()))?;
         let mut output = FrameBuffer::new(layout);
         for (position, index) in [0, 1, 2, 2, 1, 3, 4, 5].into_iter().enumerate() {
             // Every call receives overwritten destination bytes: tile hits
             // must restore their saved pixels, not depend on the old surface.
             output.plane_mut(0).fill(0xA5);
-            let stats = captures[index].0
+            let stats = captures[index]
+                .0
                 .render_cached_into_with_team(&mut team, &mut cache, &mut output)
                 .map_err(|error| fail(format!("render retained camera tiles: {error}")))?;
             if output.as_bytes() != captures[index].1 {
@@ -14513,10 +14947,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
         Invocation::new(obj_concave_faces_run),
-        vec![
-            Assertion::ExitCode(0),
-            counter_eq("obj_concave_frames", 24),
-        ],
+        vec![Assertion::ExitCode(0), counter_eq("obj_concave_frames", 24)],
         vec![LogExpect::span_present(
             "e2e.obj.concave_faces",
             vec![
@@ -14544,6 +14975,47 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 FieldPred::u64_eq("snapshots", 2),
                 FieldPred::str_eq("literal_pixels_match", "true"),
                 FieldPred::str_eq("addressing_changes_pixels", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.camera_projection_resources.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(camera_projection_resources_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("camera_projection_frames", 60),
+            counter_eq("camera_projection_reused_draws", 6),
+            counter_eq("camera_projection_partial_frames", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.camera.projection_resources",
+            vec![
+                FieldPred::u64_eq("frames", 60),
+                FieldPred::u64_eq("partial_frames", 3),
+                FieldPred::str_eq("cold_pixels_match", "true"),
+                FieldPred::str_eq("cache_bounded", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.camera_world_resources.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(camera_world_resources_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("camera_world_frames", 30),
+            counter_ge("camera_world_mesh_reuses", 8),
+            counter_eq("camera_world_unchanged_captures", 4),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.camera.world_resources",
+            vec![
+                FieldPred::u64_eq("frames", 30),
+                FieldPred::u64_eq("unchanged_captures", 4),
+                FieldPred::str_eq("cold_pixels_match", "true"),
             ],
         )],
     ));
@@ -17341,6 +17813,26 @@ fn obj_concave_faces_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.obj_concave_faces.v1")
         .expect("OBJ concave-face scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn camera_projection_resources_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.camera_projection_resources.v1")
+        .expect("camera projection-resource scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn camera_world_resources_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.camera_world_resources.v1")
+        .expect("camera world-resource scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

@@ -137,9 +137,19 @@ struct CameraCompiler {
 }
 
 impl CameraCompiler {
+    #[cfg(test)]
     fn new(config: RetainedFrameRendererConfig) -> Result<Self, RetainedFrameRendererError> {
+        Self::with_projection_cache_budget(config, 0)
+    }
+
+    fn with_projection_cache_budget(
+        config: RetainedFrameRendererConfig,
+        max_projection_bytes: usize,
+    ) -> Result<Self, RetainedFrameRendererError> {
+        let mut renderer = RetainedFrameRenderer::new(config)?;
+        renderer.set_camera_projection_cache_budget_bytes(max_projection_bytes);
         Ok(Self {
-            renderer: RetainedFrameRenderer::new(config)?,
+            renderer,
             latest: None,
         })
     }
@@ -320,6 +330,9 @@ pub(super) struct NativeFrameStages {
     // One independent arena/cache per real render team. No global raster lock:
     // nonconsecutive frame contents and cache identities decide reuse.
     workers: Vec<Mutex<RenderWorker>>,
+    // The preparation compiler and each optional compiled-camera worker own
+    // distinct projection caches; frozen packets share their compiler's cache.
+    max_projection_bytes_per_compiler: usize,
 }
 
 impl NativeFrameStages {
@@ -328,9 +341,11 @@ impl NativeFrameStages {
         compiler: NativeCompiler,
         max_prefix_bytes_per_team: usize,
         max_camera_bytes_per_team: usize,
+        max_projection_bytes_per_compiler: usize,
     ) -> Self {
         Self {
             compiler: Mutex::new(compiler),
+            max_projection_bytes_per_compiler,
             workers: (0..render_teams)
                 .map(|_| {
                     Mutex::new(RenderWorker::with_cache_budgets(
@@ -367,8 +382,13 @@ impl NativeFrameStages {
             .map_err(|_| NativeFrameError::WorkerState("compiled worker state was poisoned"))?;
         if let Some(camera) = camera {
             if worker.compiled_camera.is_none() {
-                worker.compiled_camera =
-                    Some(CameraCompiler::new(config).map_err(NativeFrameError::Renderer)?);
+                worker.compiled_camera = Some(
+                    CameraCompiler::with_projection_cache_budget(
+                        config,
+                        self.max_projection_bytes_per_compiler,
+                    )
+                    .map_err(NativeFrameError::Renderer)?,
+                );
             }
             let compiler = worker
                 .compiled_camera
@@ -612,7 +632,12 @@ fn convert_into(
 /// Camera and planar tile payloads replace one another. Camera tile reuse is
 /// opt-in through [`Self::with_cache_budgets`]: its admitted key/pixel allowance
 /// is additional to camera compiler frames, and exhaustion rasterizes uncached.
-/// The ordinary constructors disable this extra camera storage.
+/// Projected draw retention has a separate allowance for each camera compiler:
+/// the preparation compiler plus at most one fallback compiler per render team.
+/// Its shared rows, profiles and metadata are accounted, with separate space
+/// needed for bounded publication metadata and allocator overhead. Frozen
+/// packets share that cache instead of adding a budget owner.
+/// The ordinary constructors disable both extra camera caches.
 /// Native-resolution planar workers can also retain bounded static-prefix checkpoints,
 /// including adaptive-AA state on the fast CPU route.
 /// The default accounted allowance is [`PixelTileCache::DEFAULT_PREFIX_BUDGET_BYTES`]
@@ -684,6 +709,7 @@ impl NativeFramePipeline {
     /// compiler frames; callers must reserve it and container/allocator headroom.
     /// Zero disables camera tile reuse while preserving whole-frame reuse.
     /// Planar and camera tile payloads replace one another on route changes.
+    /// This constructor preserves the ordinary cold projection compiler.
     ///
     /// # Errors
     /// As [`Self::new`].
@@ -694,6 +720,42 @@ impl NativeFramePipeline {
         output: EmitterHandle,
         max_prefix_bytes_per_team: usize,
         max_camera_bytes_per_team: usize,
+    ) -> Result<Self, RenderError> {
+        Self::with_projection_cache_budget(
+            plan,
+            config,
+            camera,
+            output,
+            max_prefix_bytes_per_team,
+            max_camera_bytes_per_team,
+            0,
+        )
+    }
+
+    /// Compose with independently admitted prefix, camera tile and projection allowances.
+    ///
+    /// Camera storage includes exact keys, pixel capacities and entry metadata,
+    /// capped to one raw surface per team. It is additional to retained camera
+    /// compiler frames; callers must reserve it and container/allocator headroom.
+    /// Zero disables camera tile reuse while preserving whole-frame reuse.
+    /// Planar and camera tile payloads replace one another on route changes.
+    ///
+    /// Projection retention is bounded separately per camera compiler, capped
+    /// at the renderer's default allowance. Reserve for the preparation
+    /// compiler and one possible compiled-camera compiler per render team.
+    /// Pending publication metadata and allocator overhead need additional
+    /// headroom. Zero preserves the ordinary projection compiler.
+    ///
+    /// # Errors
+    /// As [`Self::new`].
+    pub fn with_projection_cache_budget(
+        plan: ExecutionPlan,
+        config: RetainedFrameRendererConfig,
+        camera: Option<Camera>,
+        output: EmitterHandle,
+        max_prefix_bytes_per_team: usize,
+        max_camera_bytes_per_team: usize,
+        max_projection_bytes_per_compiler: usize,
     ) -> Result<Self, RenderError> {
         // Source demand is synchronous. A smaller output ring could block
         // its producer while the coordinator awaits that same next source
@@ -752,9 +814,15 @@ impl NativeFramePipeline {
                 "camera dimensions and certified CPU identity must match the plan",
             ));
         }
+        let max_projection_bytes_per_compiler = max_projection_bytes_per_compiler
+            .min(RetainedFrameRenderer::DEFAULT_CAMERA_PROJECTION_BUDGET_BYTES);
         let compiler = match &camera {
             Some(_) => NativeCompiler::Camera(Box::new(
-                CameraCompiler::new(config).map_err(RenderError::Renderer)?,
+                CameraCompiler::with_projection_cache_budget(
+                    config,
+                    max_projection_bytes_per_compiler,
+                )
+                .map_err(RenderError::Renderer)?,
             )),
             None => NativeCompiler::Vector(Box::new(
                 VectorFrameCompiler::new(config).map_err(RenderError::Renderer)?,
@@ -772,6 +840,7 @@ impl NativeFramePipeline {
             compiler,
             max_prefix_bytes_per_team,
             max_camera_bytes_per_team.min(camera_cache_budget_bytes(viewport)),
+            max_projection_bytes_per_compiler,
         );
         let stream = FrameStream::new(plan, stages, |_, output| {
             output.publish().map_err(NativeFrameError::Emitter)
@@ -1353,6 +1422,78 @@ mod handoff_tests {
     }
 
     #[test]
+    fn camera_projection_reuse_respects_compiler_budgets_and_output_slots() {
+        for threads in [1, 4, 16] {
+            for budget in [0, 1, 64 * 1024] {
+                let (mut stage, mut config, _) = camera_fixture();
+                config.frame.viewport = Viewport {
+                    width: 96,
+                    height: 64,
+                };
+                config.frame.map = fmn_render::ScreenMap {
+                    scale: 8.0,
+                    origin: [48.0, 32.0],
+                    y_up: true,
+                };
+                let mut settings = CameraConfig {
+                    resolution: (96, 64),
+                    background: config.frame.background,
+                    ..CameraConfig::default()
+                };
+                settings.frame.set_shape([12.0, 8.0]).unwrap();
+                let camera = Camera::new(settings).unwrap();
+                let moving = stage.roots()[0];
+                stage.shift(moving, [3.0, 0.0, 0.0]);
+                let fixed = stage.add(fmn_library::Cube::new(2.0));
+                stage.add_to_scene(fixed).unwrap();
+                stage.shift(fixed, [-3.0, 0.0, 0.0]);
+                let mut compiler =
+                    CameraCompiler::with_projection_cache_budget(config, budget).unwrap();
+                // Disable tile reuse so this test observes projection retention
+                // through the real raster and conversion path on every edit.
+                let mut worker = RenderWorker::with_cache_budgets(0, 0);
+                for step in 0..3 {
+                    stage.shift(moving, [0.125, 0.125, 0.0]);
+                    let prepared = compiler.prepare_with_camera(&stage, &camera).unwrap();
+                    assert!(prepared.projection_preparation_stats().is_none());
+                    let mut cold = CameraCompiler::new(config).unwrap();
+                    let raw = cold
+                        .prepare_with_camera(&stage, &camera)
+                        .unwrap()
+                        .render(1)
+                        .unwrap();
+                    let layout = fmn_frame::FrameLayout::tight(PixelFormat::Rgba8, 96, 64).unwrap();
+                    let mut expected = FrameBuffer::new(layout.clone());
+                    convert_into(&raw, &mut expected, 1).unwrap();
+                    let mut actual = FrameBuffer::new(layout);
+                    actual.plane_mut(0).fill(0xA5);
+                    assert!(
+                        !worker
+                            .render_camera(&prepared, threads, &mut actual)
+                            .unwrap()
+                    );
+                    assert_eq!(actual.as_bytes(), expected.as_bytes());
+                    let stats = prepared.projection_preparation_stats().unwrap();
+                    assert!(stats.compiled_draws > 0);
+                    if step == 0 || budget <= 1 {
+                        assert_eq!(stats.reused_draws, 0);
+                    } else {
+                        assert!(
+                            stats.reused_draws > 0,
+                            "unchanged native sources must skip compilation"
+                        );
+                    }
+                    assert!(compiler.renderer.retained_camera_projection_bytes() <= budget);
+                    assert_eq!(worker.cache.retained_camera_bytes(), 0);
+                    if budget <= 1 {
+                        assert_eq!(compiler.renderer.retained_camera_projection_bytes(), 0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn camera_tiles_reuse_within_native_admission_and_convert_every_output_format() {
         for threads in [1, 4, 16] {
             let (_, mut config, _) = camera_fixture();
@@ -1473,6 +1614,7 @@ mod handoff_tests {
                     2,
                     NativeCompiler::Vector(Box::new(VectorFrameCompiler::new(config).unwrap())),
                     budget,
+                    0,
                     0,
                 );
                 let layout = fmn_frame::FrameLayout::tight(PixelFormat::Rgba8, 16, 16).unwrap();

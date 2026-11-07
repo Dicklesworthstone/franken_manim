@@ -281,7 +281,10 @@ impl fmt::Display for EarClipError {
                 write!(f, "tolerance must be a positive, finite number")
             }
             Self::WorkBudgetExceeded { limit } => {
-                write!(f, "boundary-preserving triangulation work budget of {limit} exceeded")
+                write!(
+                    f,
+                    "boundary-preserving triangulation work budget of {limit} exceeded"
+                )
             }
         }
     }
@@ -401,9 +404,7 @@ pub fn triangulate_with_options(
 /// or nonsimple rings, or when no vertex-preserving decomposition exists
 /// under the strict predicates. Both simplicity checks and ear scans are
 /// charged against [`MAX_BOUNDARY_EARCLIP_WORK`] before doing their work.
-pub fn triangulate_preserving_vertices(
-    outer: &[[f64; 2]],
-) -> Result<Vec<[u32; 3]>, EarClipError> {
+pub fn triangulate_preserving_vertices(outer: &[[f64; 2]]) -> Result<Vec<[u32; 3]>, EarClipError> {
     let mut work = BoundaryWork {
         remaining: MAX_BOUNDARY_EARCLIP_WORK,
         limit: MAX_BOUNDARY_EARCLIP_WORK,
@@ -501,11 +502,8 @@ fn triangulate_preserving_with_work(
         flat.reverse();
     }
     work.charge(2 * n)?;
-    let convex = (0..n)
-        .all(|i| cross(points[i], points[(i + 1) % n], points[(i + 2) % n]) >= 0.0);
-    if convex
-        && (1..n - 1).all(|i| cross(points[0], points[i], points[i + 1]) > sliver_eps)
-    {
+    let convex = (0..n).all(|i| cross(points[i], points[(i + 1) % n], points[(i + 2) % n]) >= 0.0);
+    if convex && (1..n - 1).all(|i| cross(points[0], points[i], points[i + 1]) > sliver_eps) {
         return Ok((1..n - 1)
             .map(|i| [flat[0], flat[i], flat[i + 1]])
             .collect());
@@ -1704,9 +1702,7 @@ mod tests {
         let expected = triangulate_preserving_vertices(&PRESERVED_NOTCH).unwrap();
         let tiny = PRESERVED_NOTCH.map(|p| [p[0] * 1e-150, p[1] * 1e-150]);
         assert_eq!(triangulate_preserving_vertices(&tiny).unwrap(), expected);
-        let translated = PRESERVED_NOTCH.map(|p| {
-            [1e150 + p[0] * 1e140, -1e150 + p[1] * 1e140]
-        });
+        let translated = PRESERVED_NOTCH.map(|p| [1e150 + p[0] * 1e140, -1e150 + p[1] * 1e140]);
         let result = triangulate_preserving_vertices(&translated).unwrap();
         assert_eq!(result.len(), 7);
         let mut seen = [false; 9];
@@ -1748,7 +1744,10 @@ mod tests {
     #[test]
     fn preserved_boundary_charges_simplicity_and_ear_work_before_scanning() {
         for limit in [3, 63] {
-            let mut work = BoundaryWork { remaining: limit, limit };
+            let mut work = BoundaryWork {
+                remaining: limit,
+                limit,
+            };
             assert_eq!(
                 triangulate_preserving_with_work(&PRESERVED_NOTCH, &mut work),
                 Err(EarClipError::WorkBudgetExceeded { limit })
@@ -1757,7 +1756,9 @@ mod tests {
         let too_many = vec![[0.0, 0.0]; MAX_EARCLIP_VERTICES + 1];
         assert_eq!(
             triangulate_preserving_vertices(&too_many),
-            Err(EarClipError::TooManyVertices { total: too_many.len() })
+            Err(EarClipError::TooManyVertices {
+                total: too_many.len()
+            })
         );
         assert!(matches!(
             triangulate_preserving_vertices(&[[0.0, 0.0], [f64::INFINITY, 1.0], [0.0, 1.0]]),
