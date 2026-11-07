@@ -10115,7 +10115,8 @@ fn network_graph_layout_determinism_run(ctx: &mut RunCtx) -> Result<RunOutcome, 
 }
 
 /// Graph authoring through the public native facade, including layout motion,
-/// ordered traversal and weighted directed flow, at three worker counts.
+/// ordered traversal and weighted directed flow (including a self-loop), at
+/// three worker counts.
 fn graph_animations_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     use fmn::prelude::{
         AnimConfig, FlowAlongEdges, GraphFlowConfig, GraphLayout, GraphTraversal,
@@ -10127,12 +10128,20 @@ fn graph_animations_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
             let graph = NetworkGraph::from_edge_list(
                 &["a", "b", "c", "d"],
-                &[("a", "b"), ("a", "c"), ("b", "d"), ("c", "d")],
+                &[
+                    ("a", "b"),
+                    ("a", "c"),
+                    ("b", "d"),
+                    ("c", "d"),
+                    ("d", "d"),
+                ],
             )
             .laid_out(&GraphLayout::Circular)?;
             let raw = stage.scene_mut().stage_mut();
             let binding = graph.add_to(raw)?;
             raw.add_to_scene(binding.mobject())?;
+            let self_loop = binding.edge("d", "d").expect("authored self-loop");
+            assert!(raw.length_over_dim(self_loop, 0) > 0.5);
             let layout = LayoutTransition::new(
                 raw,
                 &binding,
@@ -10146,6 +10155,7 @@ fn graph_animations_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
                 ..AnimConfig::default()
             });
             stage.play_prepared(vec![Box::new(layout)])?;
+            assert!(stage.scene_mut().stage_mut().length_over_dim(self_loop, 0) > 0.5);
             let traversal = TraverseGraph::with_config(
                 stage.scene_mut().stage_mut(),
                 &binding,
@@ -10161,7 +10171,7 @@ fn graph_animations_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
             let flow = FlowAlongEdges::with_config(
                 stage.scene_mut().stage_mut(),
                 &binding,
-                &[("b", "a", 1.0), ("a", "c", 3.0)],
+                &[("b", "a", 1.0), ("d", "d", 3.0)],
                 GraphFlowConfig {
                     run_time: 1.0,
                     color: RED_C,
@@ -10215,6 +10225,9 @@ fn graph_animations_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
                 "layout, traversal or directed flow did not change rendered pixels",
             ));
         }
+        if frames[14] == frames[17] || frames[16] == frames[19] {
+            return Err(fail("self-loop flow did not travel around the visible loop"));
+        }
         if frames[11] != frames[19] || frames[19] != frames[20] || frames[20] != frames[21] {
             return Err(fail(
                 "flow changed its underlying graph or leaked a visible pulse",
@@ -10240,6 +10253,7 @@ fn graph_animations_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     Ok(RunOutcome::ok()
         .with_artifact("graph-layout.png", frames[3].clone())
         .with_artifact("graph-flow.png", frames[12].clone())
+        .with_artifact("graph-loop-flow.png", frames[16].clone())
         .with_counter("graph_animation_thread_counts", 3)
         .with_counter("graph_animation_frames", rendered_frames))
 }

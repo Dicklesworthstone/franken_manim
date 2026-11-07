@@ -434,6 +434,15 @@ impl Animation for LayoutTransition {
         }
         for ((from, to, _), &edge) in self.binding.edges.iter().zip(&children[..offset]) {
             let start = centers[from.as_str()];
+            if from == to {
+                // A self-loop has no distinct endpoint pair to rebuild from.
+                // Translate its live shape with the vertex, preserving authored
+                // curvature, subdivisions, and per-record styling.
+                let source_center = stage.get_center(self.binding.nodes[from]);
+                let delta = std::array::from_fn(|axis| start[axis] - source_center[axis]);
+                stage.shift(edge, delta);
+                continue;
+            }
             let end = centers[to.as_str()];
             // Keep the live edge's record count, including author-created
             // subdivisions, so per-record colors and width profiles survive.
@@ -786,11 +795,14 @@ impl Animation for FlowAlongEdges {
     fn begin(&mut self, stage: &mut Stage) -> Result<(), AnimError> {
         self.validate_begin(stage)?;
         for &(source, pulse, reverse) in &self.pulses {
-            let mut points = stage.get_points(source).ok_or(AnimError::EmptyMobject)?;
+            let points = stage.get_points(source).ok_or(AnimError::EmptyMobject)?;
+            let mut path = fmn_geom::QuadPath::from_points(points).map_err(StageError::Geometry)?;
             if reverse {
-                points.reverse();
+                // A raw reversal moves contour-break handles onto the wrong
+                // anchor and turns end-handle lines into spurious breaks.
+                path.reverse_points();
             }
-            stage.set_points(pulse, &points)?;
+            stage.set_points(pulse, path.points())?;
             stage.set_color_lanes(pulse, "fill_rgba", None, Some(0.0), false);
             stage.set_color_lanes(
                 pulse,
