@@ -188,10 +188,67 @@ class ObjMaterialTests(unittest.TestCase):
         self.assertEqual(scene.time, clock)
         self.assertEqual(len(ticks), count)
 
-    def test_unsupported_map_transform_is_an_explicit_import_error(self):
-        self.write('materials/scene.mtl', 'newmtl painted\nmap_Kd -s 2 2 1 maps/tiles.png\n')
-        with self.assertRaisesRegex(ValueError, 'map options'):
+    def test_map_transform_pixels_match_independent_uv_mesh_and_keep_spaced_paths(self):
+        self.write('materials/maps/tiles  copy.png', png(self.colors))
+        self.write('materials/scene.mtl',
+                   'newmtl painted\nmap_Kd -s 2 .5 1 -o -.25 .125 0 '
+                   '-clamp off maps/tiles  copy.png\n'
+                   'newmtl plain\nKd 0.1 0.7 0.2\nd 0.8\n')
+        model = m.ThreeDModel(self.path, height=2)
+        geometry = SimpleNamespace(
+            vertices=VERTICES[:4], faces=np.array([[0, 1, 2], [0, 2, 3]]),
+            visual=SimpleNamespace(uv=np.array([
+                [-.25, .125], [1.75, .125], [1.75, .625], [-.25, .625]])))
+        expected = m.TexturedGeometry(
+            geometry, str(self.root / 'materials/maps/tiles.png'), shading=(.3, .2, .4))
+        np.testing.assert_array_equal(model[0].data, expected.data)
+        self.assertIn(str((self.root / 'materials/maps/tiles  copy.png').resolve()),
+                      model.asset_paths)
+        pixels = self.capture(expected).png()
+        for threads in (1, 4, 16):
+            self.assertEqual(self.capture(model[0], threads=threads).png(), pixels)
+
+    def test_explicit_clamp_changes_pixels_and_survives_copy_pickle_and_restore(self):
+        # All UVs land at (-.25, .25) in native image space. Edge clamping
+        # selects the red top-left texel; repeating selects green top-right.
+        def load(clamp):
+            self.write('materials/scene.mtl',
+                       'newmtl painted\nmap_Kd -s 0 0 -o -.25 .75 '
+                       f'-clamp {clamp} maps/tiles.png\nnewmtl plain\n')
+            return m.ThreeDModel(self.path, height=2)
+        clamped, repeated = load('on'), load('off')
+        self.write('red.png', png(np.array([[[255, 0, 0, 255]]], dtype=np.uint8)))
+        geometry = SimpleNamespace(
+            vertices=VERTICES[:4], faces=np.array([[0, 1, 2], [0, 2, 3]]),
+            visual=SimpleNamespace(uv=np.full((4, 2), .5)))
+        expected = m.TexturedGeometry(geometry, str(self.root / 'red.png'), shading=(.3, .2, .4))
+        pixels = self.capture(expected).png()
+        self.assertNotEqual(self.capture(repeated[0]).png(), pixels)
+        copies = [clamped.copy(), pickle.loads(pickle.dumps(clamped))]
+        scene = m.Scene(); scene.add(clamped)
+        checkpoint = scene.get_state()
+        clamped[0].set_pixel_array(np.full((2, 2, 4), 255, dtype=np.uint8))
+        scene.restore_state(checkpoint)
+        (self.root / 'materials').rename(self.root / 'moved-materials')
+        for model in [clamped, *copies]:
+            for threads in (1, 4, 16):
+                self.assertEqual(self.capture(model[0], threads=threads).png(), pixels)
+
+    def test_unsupported_map_option_is_an_explicit_import_error(self):
+        self.write('materials/scene.mtl', 'newmtl painted\nmap_Kd -t 2 2 1 maps/tiles.png\n')
+        with self.assertRaisesRegex(ValueError, 'unsupported diffuse texture map option'):
             m.ThreeDModel(self.path)
+
+    def test_failed_map_transform_reinitialization_preserves_existing_model(self):
+        model = m.ThreeDModel(self.path, height=2)
+        child, pixels = model[0], self.capture(model).png()
+        for options in ('-s nan', '-o 0 0 1', '-clamp yes', '-s 1e308'):
+            self.write('materials/scene.mtl',
+                       f'newmtl painted\nmap_Kd {options} maps/tiles.png\nnewmtl plain\n')
+            with self.assertRaises(ValueError):
+                m.ThreeDModel.__init__(model, self.path, height=2)
+            self.assertIs(model[0], child)
+            self.assertEqual(self.capture(model).png(), pixels)
 
 
 result = unittest.TextTestRunner(verbosity=2).run(

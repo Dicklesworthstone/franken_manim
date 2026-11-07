@@ -8866,6 +8866,156 @@ fn retained_prefix_run(
         .with_counter("static_prefix_adaptive_cells", refined))
 }
 
+fn obj_texture_options_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use std::collections::BTreeMap;
+
+    use fmn_library::{MODEL_SHADING, ObjAssetLimits, ObjDocument, parse_mtl};
+    use fmn_mobject::uniforms::Uniforms;
+    use fmn_mobject::{
+        ImageColorSpace, ImageResource, ImageSampler, ImageWrap, RecordBuffer, RenderPrimitive,
+        Snapshot,
+    };
+    use fmn_render::{Camera, CameraConfig, RetainedFrameRenderer, RetainedFrameRendererConfig, Tiling};
+
+    let document = ObjDocument::parse(
+        b"v -2 -1 0\nv 2 -1 0\nv 2 1 0\nv -2 1 0\n\
+          vt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nvn 0 0 1\n\
+          usemtl A\nf 1/1/1 2/2/1 3/3/1 4/4/1\n",
+    )
+    .map_err(|error| fail(format!("parse textured OBJ: {error}")))?;
+    let image = ImageResource::rgba8(
+        2,
+        2,
+        vec![
+            255, 0, 0, 255, 0, 255, 0, 255,
+            0, 0, 255, 255, 255, 255, 0, 128,
+        ],
+        ImageColorSpace::Srgb,
+        ImageSampler::default(),
+    )
+    .map_err(|error| fail(format!("construct OBJ texture: {error}")))?;
+    let background = fmn_core::color::LinearRgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+    let camera = Camera::new(CameraConfig {
+        resolution: (64, 48),
+        background,
+        ..CameraConfig::default()
+    })
+    .map_err(|error| fail(format!("construct OBJ camera: {error}")))?;
+    let config = RetainedFrameRendererConfig {
+        frame: FrameConfig::new(
+            Viewport { width: 64, height: 48 },
+            ScreenMap { scale: 6.0, origin: [32.0, 24.0], y_up: false },
+            background,
+        ),
+        tiling: Tiling { macro_tile: 32, fine_tile: 8 },
+        engine: EngineIdentity::certified(),
+        threads: 1,
+    };
+    let mut outcomes = RunOutcome::ok();
+    let mut policy_pixels = Vec::new();
+    let mut frames = 0_u64;
+    for (policy, wrap) in [("off", ImageWrap::Repeat), ("on", ImageWrap::ClampToEdge)] {
+        let materials = parse_mtl(
+            format!(
+                "newmtl A\nmap_Kd -s 2 .5 1 -o -.25 .125 0 -clamp {policy} tiles.png\n"
+            )
+            .as_bytes(),
+            &ObjAssetLimits::default(),
+        )
+        .map_err(|error| fail(format!("parse OBJ map options: {error}")))?;
+        let model = document
+            .to_mobject(2.0, &materials, &BTreeMap::from([("A".to_owned(), image.clone())]))
+            .map_err(|error| fail(format!("bind OBJ material: {error}")))?;
+        let mut stage = Stage::new();
+        let root = stage.add(model);
+        stage.add_to_scene(root)
+            .map_err(|error| fail(format!("admit OBJ model: {error}")))?;
+
+        // This reference bypasses the OBJ/MTL parser and importer. Its records
+        // state the final triangle coordinates, UVs and sampler explicitly.
+        let corners: [([f32; 3], [f32; 2]); 6] = [
+            ([-2.0, -1.0, 0.0], [-0.25, 0.875]),
+            ([2.0, -1.0, 0.0], [1.75, 0.875]),
+            ([2.0, 1.0, 0.0], [1.75, 0.375]),
+            ([-2.0, -1.0, 0.0], [-0.25, 0.875]),
+            ([2.0, 1.0, 0.0], [1.75, 0.375]),
+            ([-2.0, 1.0, 0.0], [-0.25, 0.375]),
+        ];
+        let mut buffer = RecordBuffer::new(fmn_library::textured_surface_schema(), corners.len())
+            .map_err(|error| fail(format!("allocate reference texture records: {error}")))?;
+        for (row, (point, uv)) in corners.iter().enumerate() {
+            buffer.write(row, "point", point);
+            buffer.write(row, "d_normal_point", &[point[0], point[1], 1.0]);
+            buffer.write(row, "im_coords", uv);
+            buffer.write(row, "opacity", &[1.0]);
+        }
+        let reference = Mobject::from_buffer(buffer)
+            .with_uniforms(Uniforms {
+                shading: MODEL_SHADING,
+                depth_test: true,
+                ..Uniforms::default()
+            })
+            .with_image_resource(image.clone().with_sampler(ImageSampler { wrap_u: wrap, wrap_v: wrap }))
+            .with_render_primitive(RenderPrimitive::TriangleMesh);
+        let mut oracle = Stage::new();
+        let root = oracle.add(reference);
+        oracle.add_to_scene(root)
+            .map_err(|error| fail(format!("admit OBJ reference: {error}")))?;
+        let mut fresh = RetainedFrameRenderer::new(config)
+            .map_err(|error| fail(format!("construct OBJ reference renderer: {error}")))?;
+        fresh.render_with_camera(&oracle, &camera)
+            .map_err(|error| fail(format!("render OBJ reference: {error}")))?;
+        let expected = fresh.frame().as_bytes().to_vec();
+        if !expected.iter().any(|&byte| byte != 0) {
+            return Err(fail("OBJ texture reference is invisible"));
+        }
+
+        let saved = stage.snapshot_bytes()
+            .map_err(|error| fail(format!("serialize OBJ material: {error}")))?;
+        let mut restored = Stage::new();
+        let decoded = Snapshot::from_bytes(&saved, &restored)
+            .map_err(|error| fail(format!("decode OBJ material: {error}")))?;
+        restored.restore(&decoded.snapshot);
+        if restored.snapshot_bytes().map_err(|error| fail(error.to_string()))? != saved {
+            return Err(fail("OBJ UV/sampler snapshot bytes did not round-trip"));
+        }
+        for threads in [1, 4, 16] {
+            let mut renderer = RetainedFrameRenderer::new(
+                RetainedFrameRendererConfig { threads, ..config },
+            )
+            .map_err(|error| fail(format!("construct OBJ renderer: {error}")))?;
+            for state in [&stage, &restored] {
+                renderer.render_with_camera(state, &camera)
+                    .map_err(|error| fail(format!("render OBJ map options: {error}")))?;
+                if renderer.frame().as_bytes() != expected {
+                    return Err(fail(format!(
+                        "OBJ map {policy} differs from literal geometry at {threads} threads"
+                    )));
+                }
+                frames += 1;
+            }
+        }
+        outcomes = outcomes.with_artifact(
+            if policy == "on" { "obj-map-clamp.frame" } else { "obj-map-repeat.frame" },
+            encode_frame(fresh.frame()).map_err(|error| fail(error.to_string()))?,
+        );
+        policy_pixels.push(expected);
+    }
+    if policy_pixels[0] == policy_pixels[1] {
+        return Err(fail("OBJ repeat/clamp fixture lost addressing sensitivity"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.obj.texture_options")
+            .field("frames", frames)
+            .field("snapshots", 2_u64)
+            .field("literal_pixels_match", "true")
+            .field("addressing_changes_pixels", "true"),
+    );
+    Ok(outcomes
+        .with_counter("obj_texture_frames", frames)
+        .with_counter("obj_texture_snapshots", 2))
+}
+
 /// A graph generated after native plane placement must occupy that plane's
 /// chart. The independent drawing oracle translates the original geometry;
 /// the negative witness leaves the graph at the old origin.
@@ -14014,6 +14164,26 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.obj_texture_options.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(obj_texture_options_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("obj_texture_frames", 12),
+            counter_eq("obj_texture_snapshots", 2),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.obj.texture_options",
+            vec![
+                FieldPred::u64_eq("frames", 12),
+                FieldPred::u64_eq("snapshots", 2),
+                FieldPred::str_eq("literal_pixels_match", "true"),
+                FieldPred::str_eq("addressing_changes_pixels", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.retained_camera_frames.v1",
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
@@ -16777,6 +16947,16 @@ fn adaptive_static_prefix_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.adaptive_static_prefix.v1")
         .expect("adaptive static-prefix scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn obj_texture_options_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.obj_texture_options.v1")
+        .expect("OBJ texture-options scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

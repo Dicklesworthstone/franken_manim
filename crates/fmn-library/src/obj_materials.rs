@@ -12,7 +12,7 @@ use fmn_core::color::Srgb;
 use fmn_core::constants::GREY;
 use fmn_mobject::record::{RecordBuffer, RecordSchema};
 use fmn_mobject::uniforms::Uniforms;
-use fmn_mobject::{ImageResource, Mobject, RenderPrimitive};
+use fmn_mobject::{ImageResource, ImageSampler, ImageWrap, Mobject, RenderPrimitive};
 
 use super::obj_model::{MODEL_SHADING, ObjLimits, ObjMesh};
 
@@ -333,7 +333,10 @@ impl ObjDocument {
                     if image.is_some() {
                         let uv = self.mesh.tex_coords
                             [corner.tex_coord.ok_or_else(|| error(0, "missing UV"))?];
-                        buffer.write(record, "im_coords", &narrow([uv[0], 1.0 - uv[1]])?);
+                        let options = material
+                            .map(|value| value.texture_options)
+                            .unwrap_or_default();
+                        buffer.write(record, "im_coords", &options.image_coords(uv)?);
                         buffer.write(record, "opacity", &narrow([opacity])?);
                     } else {
                         buffer.write(
@@ -351,7 +354,23 @@ impl ObjDocument {
                     depth_test: true,
                     ..Uniforms::default()
                 });
-            child.image = image.cloned();
+            child.image = image.map(|image| {
+                let image = image.clone();
+                match material.and_then(|value| value.texture_options.clamp) {
+                    Some(clamp) => {
+                        let wrap = if clamp {
+                            ImageWrap::ClampToEdge
+                        } else {
+                            ImageWrap::Repeat
+                        };
+                        image.with_sampler(ImageSampler {
+                            wrap_u: wrap,
+                            wrap_v: wrap,
+                        })
+                    }
+                    None => image,
+                }
+            });
             children.push(child);
         }
         Ok(Mobject::group(children))
@@ -395,6 +414,66 @@ fn narrow<const N: usize>(values: [f64; N]) -> Result<[f32; N], ObjAssetError> {
     Ok(values.map(|value| value as f32))
 }
 
+/// Native two-dimensional diffuse-map placement and addressing.
+///
+/// Mapping uses `(u * scale[0] + offset[0], v * scale[1] + offset[1])` in
+/// OBJ's bottom-left UV convention, followed by the native image's one V flip.
+/// Coordinates remain unwrapped so perspective interpolation and bilinear
+/// filtering can address repeated tiles correctly at fragment time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ObjTextureOptions {
+    /// MTL `-o u [v [w]]`; omitted U/V components default to zero.
+    pub offset: [f64; 2],
+    /// MTL `-s u [v [w]]`; omitted U/V components default to one.
+    pub scale: [f64; 2],
+    /// Explicit MTL addressing override: `on` clamps to edge texels and `off`
+    /// repeats on both axes. `None` preserves the supplied image's sampler.
+    /// This importer uses native edge clamping, not Advanced Visualizer's
+    /// material-preserving decal behavior outside the unit UV square.
+    pub clamp: Option<bool>,
+}
+
+impl Default for ObjTextureOptions {
+    fn default() -> Self {
+        Self {
+            offset: [0.0; 2],
+            scale: [1.0; 2],
+            clamp: None,
+        }
+    }
+}
+
+impl ObjTextureOptions {
+    fn validate(&self) -> Result<(), ObjAssetError> {
+        if !self
+            .offset
+            .iter()
+            .chain(&self.scale)
+            .all(|value| value.is_finite())
+        {
+            return Err(error(0, "texture map offset and scale must be finite"));
+        }
+        Ok(())
+    }
+
+    fn image_coords(self, uv: [f64; 2]) -> Result<[f32; 2], ObjAssetError> {
+        let mapped = std::array::from_fn::<_, 2, _>(|axis| {
+            // Keep the existing no-option path bit-for-bit, including -0.0.
+            if self.scale[axis] == 1.0 && self.offset[axis] == 0.0 {
+                uv[axis]
+            } else {
+                uv[axis] * self.scale[axis] + self.offset[axis]
+            }
+        });
+        narrow([mapped[0], 1.0 - mapped[1]]).map_err(|_| {
+            error(
+                0,
+                "transformed texture coordinates must be finite and f32-representable",
+            )
+        })
+    }
+}
+
 /// The supported MTL appearance subset. Texture maps use existing native
 /// image sampling and lighting; unknown reflectance models are not emulated.
 #[derive(Debug, Clone, PartialEq)]
@@ -405,6 +484,8 @@ pub struct ObjMaterial {
     pub opacity: f64,
     /// Diffuse map path; map_Ka is a fallback only when map_Kd is absent.
     pub texture: Option<String>,
+    /// Placement and addressing for the selected diffuse map.
+    pub texture_options: ObjTextureOptions,
 }
 
 impl Default for ObjMaterial {
@@ -417,6 +498,7 @@ impl Default for ObjMaterial {
             },
             opacity: 1.0,
             texture: None,
+            texture_options: ObjTextureOptions::default(),
         }
     }
 }
@@ -432,13 +514,102 @@ impl ObjMaterial {
                 "material RGB and dissolve must be finite in 0..=1",
             ));
         }
-        Ok(())
+        self.texture_options.validate()
+    }
+}
+
+fn word(source: &str) -> (&str, &str) {
+    let source = source.trim_start();
+    let end = source.find(char::is_whitespace).unwrap_or(source.len());
+    (&source[..end], source[end..].trim_start())
+}
+
+fn texture_map(
+    mut rest: &str,
+    line: usize,
+    limits: &ObjAssetLimits,
+) -> Result<(String, ObjTextureOptions), ObjAssetError> {
+    let mut options = ObjTextureOptions::default();
+    loop {
+        let (option, tail) = word(rest);
+        if !option.starts_with('-') {
+            return Ok((name(rest, line, limits)?, options));
+        }
+        rest = tail;
+        match option {
+            "-o" | "-s" => {
+                let neutral = if option == "-o" { 0.0 } else { 1.0 };
+                let mut values = [neutral; 3];
+                for (axis, value) in values.iter_mut().enumerate() {
+                    let (component, tail) = word(rest);
+                    let Ok(number) = component.parse::<f64>() else {
+                        if axis == 0 {
+                            return Err(error(
+                                line,
+                                format!("texture map {option} requires a numeric U component"),
+                            ));
+                        }
+                        break;
+                    };
+                    if !number.is_finite() {
+                        return Err(error(
+                            line,
+                            format!("texture map {option} components must be finite"),
+                        ));
+                    }
+                    *value = number;
+                    rest = tail;
+                }
+                if values[2] != neutral {
+                    return Err(error(
+                        line,
+                        format!(
+                            "texture map {option} depth component must be {neutral} for a 2D raster"
+                        ),
+                    ));
+                }
+                if word(rest).0.parse::<f64>().is_ok() {
+                    return Err(error(
+                        line,
+                        format!(
+                            "texture map {option} accepts at most three components; prefix a numeric filename with ./"
+                        ),
+                    ));
+                }
+                if option == "-o" {
+                    options.offset = [values[0], values[1]];
+                } else {
+                    options.scale = [values[0], values[1]];
+                }
+            }
+            "-clamp" => {
+                let (value, tail) = word(rest);
+                options.clamp = Some(match value {
+                    "on" => true,
+                    "off" => false,
+                    _ => return Err(error(line, "texture map -clamp requires on or off")),
+                });
+                rest = tail;
+            }
+            _ => {
+                return Err(error(
+                    line,
+                    format!("unsupported diffuse texture map option {option:?}"),
+                ));
+            }
+        }
     }
 }
 
 /// Parse native MTL newmtl/Kd/d/Tr/map_Kd/map_Ka under explicit limits.
-/// Unsupported diffuse map options and non-RGB Kd are refused rather than
-/// silently rendering a different material. No paths are opened here.
+///
+/// Diffuse maps support `-o u [v [w]]`, `-s u [v [w]]`, and `-clamp on|off`
+/// before the filename. Missing V components retain their zero/one defaults;
+/// W must be neutral (zero for offset, one for scale) for these 2D rasters.
+/// Repeated options use their last declaration. The remaining filename keeps
+/// its internal whitespace; prefix numeric or option-like names with `./` to
+/// distinguish them from arguments. Unknown options and non-RGB Kd are refused.
+/// No paths are opened here. See [`ObjTextureOptions`] for mapping semantics.
 pub fn parse_mtl(
     bytes: &[u8],
     limits: &ObjAssetLimits,
@@ -502,15 +673,10 @@ pub fn parse_mtl(
                 }
             }
             "map_Kd" | "map_Ka" => {
-                if rest.starts_with('-') {
-                    return Err(error(
-                        line,
-                        "diffuse texture map options are unsupported; bake the map transform into UVs",
-                    ));
-                }
-                let path = name(rest, line, limits)?;
+                let (path, options) = texture_map(rest, line, limits)?;
                 if key == "map_Kd" || !has_diffuse_map {
                     material.texture = Some(path);
+                    material.texture_options = options;
                 }
                 has_diffuse_map |= key == "map_Kd";
             }

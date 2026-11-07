@@ -63,6 +63,46 @@ fn pairs_refuse_nesting_and_conflicting_sampler_policies() {
 }
 
 #[test]
+fn sampler_replacement_shares_pixels_and_preserves_pair_and_copy_invariants() {
+    let original = image([255, 0, 0])
+        .with_dark_image(image([0, 0, 255]))
+        .unwrap();
+    let sampler = ImageSampler {
+        wrap_u: ImageWrap::ClampToEdge,
+        wrap_v: ImageWrap::MirroredRepeat,
+    };
+    let changed = original.clone().with_sampler(sampler);
+    assert_eq!(original.sampler(), ImageSampler::default());
+    assert_eq!(original.dark_image().unwrap().sampler(), ImageSampler::default());
+    assert_eq!(changed.sampler(), sampler);
+    assert_eq!(changed.dark_image().unwrap().sampler(), sampler);
+    for (before, after) in [
+        (&original, &changed),
+        (original.dark_image().unwrap(), changed.dark_image().unwrap()),
+    ] {
+        assert_eq!(before.pixels().as_ptr(), after.pixels().as_ptr());
+        assert_eq!(before.content_digest(), after.content_digest());
+    }
+    let mut stage = Stage::new();
+    let mob = stage.add(Mobject::new().with_image_resource(original.clone()));
+    let before = stage.snapshot();
+    let before_bytes = stage.snapshot_bytes().unwrap();
+    let revision = stage.get(mob).unwrap().image_revision();
+    assert!(stage.set_image_resource(mob, Some(changed.clone())).unwrap());
+    assert_eq!(stage.get(mob).unwrap().image_revision(), revision.wrapping_add(1));
+    assert_ne!(stage.snapshot_bytes().unwrap(), before_bytes);
+    let copied = stage.copy_family(mob).unwrap();
+    assert_eq!(stage.get(copied).unwrap().image_resource(), Some(&changed));
+    let bytes = stage.snapshot_bytes().unwrap();
+    let mut restored = Stage::new();
+    let decoded = Snapshot::from_bytes(&bytes, &restored).unwrap();
+    restored.restore(&decoded.snapshot);
+    assert_eq!(restored.snapshot_bytes().unwrap(), bytes);
+    stage.restore(&before);
+    assert_eq!(stage.get(mob).unwrap().image_resource(), Some(&original));
+}
+
+#[test]
 fn pair_preserves_independent_dimensions_and_transfer_functions() {
     let dark = ImageResource::rgba8(
         2,
