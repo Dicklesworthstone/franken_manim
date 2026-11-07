@@ -161,11 +161,14 @@ fn portal_studio_stale_live_worker_leaves_replacement_input_usable() {
         "callback",
         "updater",
         "advance-validator",
+        "point-conversion",
     ] {
         crate::with_python_test_module("live capture ownership", |py, _module, globals| {
             let source = std::ffi::CString::new(
                 r#"
 import manimlib as m
+import numpy as np
+original_array = np.array
 mode, armed, replacements, events = 'idle', False, 0, 0
 def replace():
     global armed, replacement, replacements
@@ -183,7 +186,17 @@ def replace():
 def validate():
     if armed and mode in ('validator', 'advance-validator'):
         replace()
+def replacing_array(*args, **kwargs):
+    if armed and mode == 'point-conversion':
+        np.array = original_array
+        replace()
+    return original_array(*args, **kwargs)
 class Live(m.Scene):
+    def on_mouse_press(self, point, button, modifiers):
+        global events
+        events += 1
+        if not armed:
+            self.box.shift(m.UP)
     def on_key_press(self, symbol, modifiers):
         global events
         events += 1
@@ -224,9 +237,17 @@ s.frame.add_updater(update)
                         frame,
                         revision: 0,
                         target: None,
-                        event: EventPayload::KeyPress {
-                            key: Key::Character('a'),
-                            modifiers: Modifiers::NONE,
+                        event: if mode == "point-conversion" {
+                            EventPayload::MousePress {
+                                point: [0.0; 3],
+                                button: MouseButton::Left,
+                                modifiers: Modifiers::NONE,
+                            }
+                        } else {
+                            EventPayload::KeyPress {
+                                key: Key::Character('a'),
+                                modifiers: Modifiers::NONE,
+                            }
                         },
                     },
                 )
@@ -248,12 +269,17 @@ s.frame.add_updater(update)
                 } else {
                     input(0)
                 };
-                let error = stale
-                    .handle(SupervisorRequest::Play {
-                        scene: "Live".into(),
-                        command,
-                    })
-                    .unwrap_err();
+                if mode == "point-conversion" {
+                    py.run(c"np.array = replacing_array", Some(globals), Some(globals))
+                        .unwrap();
+                }
+                let result = stale.handle(SupervisorRequest::Play {
+                    scene: "Live".into(),
+                    command,
+                });
+                py.run(c"np.array = original_array", Some(globals), Some(globals))
+                    .unwrap();
+                let error = result.unwrap_err();
                 assert!(error.to_string().contains("ownership"), "{mode}: {error}");
                 assert!(stale.failed.is_some(), "{mode}");
             }
@@ -267,7 +293,7 @@ s.frame.add_updater(update)
                 1,
                 "{mode} did not exercise replacement"
             );
-            if matches!(mode, "validator" | "advance-validator") {
+            if matches!(mode, "validator" | "advance-validator" | "point-conversion") {
                 assert_eq!(
                     globals
                         .get_item("events")
@@ -276,7 +302,7 @@ s.frame.add_updater(update)
                         .extract::<u32>()
                         .unwrap(),
                     0,
-                    "stale input reached the replacement after validation"
+                    "{mode}: stale ownership was not rejected before event delivery"
                 );
             }
             let error = stale.frame_count().unwrap_err();

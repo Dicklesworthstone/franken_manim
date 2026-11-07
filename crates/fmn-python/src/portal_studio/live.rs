@@ -413,8 +413,12 @@ fn dispatch(scene: &Bound<'_, PyScene>, generation: &Arc<()>, event: EventPayloa
         .getattr("dispatch_live_input")?;
     ensure_generation(scene, generation)?;
     let point = |p: [f64; 3], relative| {
+        ensure_generation(scene, generation)?;
         let p = camera.from_fixed_frame_point([p[0], -p[1], p[2]], relative);
-        np.call_method1("array", (p,))
+        // Host NumPy conversion can replace the capture before event delivery.
+        let array = np.call_method1("array", (p,))?;
+        ensure_generation(scene, generation)?;
+        Ok::<_, PyErr>(array)
     };
     match event {
         EventPayload::MouseMotion {

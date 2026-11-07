@@ -793,18 +793,22 @@ fn unknown_keys_survive_in_the_raw_tree() {
 }
 
 // ---------------------------------------------------------------------------
-// The actual shipped files, when the pinned Reference checkout is present
-// (scripts/manim_ref is gitignored, so this self-skips in CI; on dev
-// machines it proves "the actual shipped file shapes exactly" literally)
+// The actual shipped files from the pinned Reference checkout. Remote tests
+// can use an existing checkout via FMN_MANIM_REF; local runs default to the
+// gitignored scripts/manim_ref. Missing inputs still fail the full-input gate.
 // ---------------------------------------------------------------------------
 
 #[test]
 fn the_actual_reference_files_parse_when_checked_out() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/manim_ref");
+    let root = std::env::var_os("FMN_MANIM_REF")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/manim_ref")
+        });
     let Ok(default_yml) = std::fs::read_to_string(root.join("manimlib/default_config.yml")) else {
         fmn_core::test_inputs::skip_or_fail(
             "fmn-config::the_actual_reference_files_parse_when_checked_out",
-            "scripts/manim_ref (pinned Reference checkout)",
+            &format!("{} (pinned Reference checkout)", root.display()),
         );
         return;
     };
