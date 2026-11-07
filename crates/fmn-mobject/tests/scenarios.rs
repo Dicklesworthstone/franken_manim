@@ -291,7 +291,6 @@ fn generational_safety() {
     assert_eq!(stage.copy_family(old).err(), Some(StageError::StaleHandle));
 }
 
-
 // Rollback changes scene contents, not the identities already handed to callers.
 #[test]
 fn rollback_never_reissues_appended_or_recycled_handles() {
@@ -338,7 +337,10 @@ fn restored_live_identity_does_not_reissue_its_discarded_replacements() {
         assert!(discarded.iter().all(|&old| !stage.contains(old)));
         discarded.push(replacement);
         stage.restore(&checkpoint);
-        assert!(stage.contains(original), "an explicit restore preserves the handle");
+        assert!(
+            stage.contains(original),
+            "an explicit restore preserves the handle"
+        );
         assert!(discarded.iter().all(|&old| !stage.contains(old)));
         assert_eq!(stage.snapshot_bytes().unwrap(), before);
     }
@@ -363,7 +365,12 @@ fn discarded_proxy_pins_and_live_views_cannot_touch_a_new_allocation() {
     assert_eq!(stage.delete(discarded), Err(StageError::StaleHandle));
     assert!(view.write(0, "point", &[99.0, 0.0, 0.0]));
     assert_eq!(
-        stage.get(replacement).unwrap().buffer.read(0, "point").unwrap(),
+        stage
+            .get(replacement)
+            .unwrap()
+            .buffer
+            .read(0, "point")
+            .unwrap(),
         [42.0, 0.0, 0.0]
     );
     stage.unpin(replacement);
@@ -400,7 +407,10 @@ fn materialized_forks_mint_deterministically_without_sharing_rollback_history() 
     let first_updater_right = right.add_updater(kept, |_, _| {}, false).unwrap();
     assert_eq!(first_left, first_right);
     assert_eq!(first_updater_left, first_updater_right);
-    assert_eq!(left.snapshot_bytes().unwrap(), right.snapshot_bytes().unwrap());
+    assert_eq!(
+        left.snapshot_bytes().unwrap(),
+        right.snapshot_bytes().unwrap()
+    );
 
     left.restore(&checkpoint);
     let second_left = left.add(square());
@@ -416,8 +426,15 @@ fn materialized_forks_mint_deterministically_without_sharing_rollback_history() 
         right.add_updater(kept, |_, _| {}, false).unwrap(),
         second_updater_left
     );
-    assert_eq!(left.snapshot_bytes().unwrap(), right.snapshot_bytes().unwrap());
-    assert_eq!(source.add(square()), first_left, "forks do not advance the source");
+    assert_eq!(
+        left.snapshot_bytes().unwrap(),
+        right.snapshot_bytes().unwrap()
+    );
+    assert_eq!(
+        source.add(square()),
+        first_left,
+        "forks do not advance the source"
+    );
 }
 
 #[test]
@@ -438,7 +455,11 @@ fn restoring_another_branch_observes_both_live_and_deleted_generations() {
     assert!(stage.contains(branch_live));
     stage.restore(&empty);
     let replacement = stage.add(Mobject::new());
-    assert!(history.iter().all(|&old| old != replacement && !stage.contains(old)));
+    assert!(
+        history
+            .iter()
+            .all(|&old| old != replacement && !stage.contains(old))
+    );
 
     branch.delete(branch_live).unwrap();
     let deleted_checkpoint = branch.snapshot();
@@ -498,7 +519,10 @@ fn imported_updater_cursors_survive_a_later_rollback() {
     let imported = branch.snapshot();
     stage.restore(&imported);
     stage.restore(&checkpoint);
-    assert_eq!(stage.snapshot_bytes().unwrap(), checkpoint.to_bytes().unwrap());
+    assert_eq!(
+        stage.snapshot_bytes().unwrap(),
+        checkpoint.to_bytes().unwrap()
+    );
     let current = stage.add_updater(mob, |_, _| {}, false).unwrap();
     for old in discarded {
         assert_ne!(current, old);

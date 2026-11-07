@@ -8801,11 +8801,9 @@ fn retained_prefix_run(
     let mut refined = 0_u64;
     let mut artifact = Vec::new();
     for threads in [1, 4, 16] {
-        let mut renderer = RetainedFrameRenderer::new(RetainedFrameRendererConfig {
-            threads,
-            ..config
-        })
-        .map_err(|error| fail(format!("persistent prefix renderer: {error}")))?;
+        let mut renderer =
+            RetainedFrameRenderer::new(RetainedFrameRendererConfig { threads, ..config })
+                .map_err(|error| fail(format!("persistent prefix renderer: {error}")))?;
         let mut schedule_hits = 0_u64;
         let mut schedule_skipped = 0_u64;
         let mut schedule_refined = 0_u64;
@@ -8875,7 +8873,9 @@ fn obj_texture_options_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
         ImageColorSpace, ImageResource, ImageSampler, ImageWrap, RecordBuffer, RenderPrimitive,
         Snapshot,
     };
-    use fmn_render::{Camera, CameraConfig, RetainedFrameRenderer, RetainedFrameRendererConfig, Tiling};
+    use fmn_render::{
+        Camera, CameraConfig, RetainedFrameRenderer, RetainedFrameRendererConfig, Tiling,
+    };
 
     let document = ObjDocument::parse(
         b"v -2 -1 0\nv 2 -1 0\nv 2 1 0\nv -2 1 0\n\
@@ -8887,14 +8887,18 @@ fn obj_texture_options_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
         2,
         2,
         vec![
-            255, 0, 0, 255, 0, 255, 0, 255,
-            0, 0, 255, 255, 255, 255, 0, 128,
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 128,
         ],
         ImageColorSpace::Srgb,
         ImageSampler::default(),
     )
     .map_err(|error| fail(format!("construct OBJ texture: {error}")))?;
-    let background = fmn_core::color::LinearRgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+    let background = fmn_core::color::LinearRgba {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 0.0,
+    };
     let camera = Camera::new(CameraConfig {
         resolution: (64, 48),
         background,
@@ -8903,11 +8907,21 @@ fn obj_texture_options_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
     .map_err(|error| fail(format!("construct OBJ camera: {error}")))?;
     let config = RetainedFrameRendererConfig {
         frame: FrameConfig::new(
-            Viewport { width: 64, height: 48 },
-            ScreenMap { scale: 6.0, origin: [32.0, 24.0], y_up: false },
+            Viewport {
+                width: 64,
+                height: 48,
+            },
+            ScreenMap {
+                scale: 6.0,
+                origin: [32.0, 24.0],
+                y_up: false,
+            },
             background,
         ),
-        tiling: Tiling { macro_tile: 32, fine_tile: 8 },
+        tiling: Tiling {
+            macro_tile: 32,
+            fine_tile: 8,
+        },
         engine: EngineIdentity::certified(),
         threads: 1,
     };
@@ -8916,19 +8930,22 @@ fn obj_texture_options_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
     let mut frames = 0_u64;
     for (policy, wrap) in [("off", ImageWrap::Repeat), ("on", ImageWrap::ClampToEdge)] {
         let materials = parse_mtl(
-            format!(
-                "newmtl A\nmap_Kd -s 2 .5 1 -o -.25 .125 0 -clamp {policy} tiles.png\n"
-            )
-            .as_bytes(),
+            format!("newmtl A\nmap_Kd -s 2 .5 1 -o -.25 .125 0 -clamp {policy} tiles.png\n")
+                .as_bytes(),
             &ObjAssetLimits::default(),
         )
         .map_err(|error| fail(format!("parse OBJ map options: {error}")))?;
         let model = document
-            .to_mobject(2.0, &materials, &BTreeMap::from([("A".to_owned(), image.clone())]))
+            .to_mobject(
+                2.0,
+                &materials,
+                &BTreeMap::from([("A".to_owned(), image.clone())]),
+            )
             .map_err(|error| fail(format!("bind OBJ material: {error}")))?;
         let mut stage = Stage::new();
         let root = stage.add(model);
-        stage.add_to_scene(root)
+        stage
+            .add_to_scene(root)
             .map_err(|error| fail(format!("admit OBJ model: {error}")))?;
 
         // This reference bypasses the OBJ/MTL parser and importer. Its records
@@ -8941,8 +8958,9 @@ fn obj_texture_options_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
             ([2.0, 1.0, 0.0], [1.75, 0.375]),
             ([-2.0, 1.0, 0.0], [-0.25, 0.375]),
         ];
-        let mut buffer = RecordBuffer::new(fmn_library::textured_surface_schema(), corners.len())
-            .map_err(|error| fail(format!("allocate reference texture records: {error}")))?;
+        let mut buffer =
+            RecordBuffer::new(fmn_library::textured_surface_schema(), corners.len())
+                .map_err(|error| fail(format!("allocate reference texture records: {error}")))?;
         for (row, (point, uv)) in corners.iter().enumerate() {
             buffer.write(row, "point", point);
             buffer.write(row, "d_normal_point", &[point[0], point[1], 1.0]);
@@ -8955,37 +8973,47 @@ fn obj_texture_options_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
                 depth_test: true,
                 ..Uniforms::default()
             })
-            .with_image_resource(image.clone().with_sampler(ImageSampler { wrap_u: wrap, wrap_v: wrap }))
+            .with_image_resource(image.clone().with_sampler(ImageSampler {
+                wrap_u: wrap,
+                wrap_v: wrap,
+            }))
             .with_render_primitive(RenderPrimitive::TriangleMesh);
         let mut oracle = Stage::new();
         let root = oracle.add(reference);
-        oracle.add_to_scene(root)
+        oracle
+            .add_to_scene(root)
             .map_err(|error| fail(format!("admit OBJ reference: {error}")))?;
         let mut fresh = RetainedFrameRenderer::new(config)
             .map_err(|error| fail(format!("construct OBJ reference renderer: {error}")))?;
-        fresh.render_with_camera(&oracle, &camera)
+        fresh
+            .render_with_camera(&oracle, &camera)
             .map_err(|error| fail(format!("render OBJ reference: {error}")))?;
         let expected = fresh.frame().as_bytes().to_vec();
         if !expected.iter().any(|&byte| byte != 0) {
             return Err(fail("OBJ texture reference is invisible"));
         }
 
-        let saved = stage.snapshot_bytes()
+        let saved = stage
+            .snapshot_bytes()
             .map_err(|error| fail(format!("serialize OBJ material: {error}")))?;
         let mut restored = Stage::new();
         let decoded = Snapshot::from_bytes(&saved, &restored)
             .map_err(|error| fail(format!("decode OBJ material: {error}")))?;
         restored.restore(&decoded.snapshot);
-        if restored.snapshot_bytes().map_err(|error| fail(error.to_string()))? != saved {
+        if restored
+            .snapshot_bytes()
+            .map_err(|error| fail(error.to_string()))?
+            != saved
+        {
             return Err(fail("OBJ UV/sampler snapshot bytes did not round-trip"));
         }
         for threads in [1, 4, 16] {
-            let mut renderer = RetainedFrameRenderer::new(
-                RetainedFrameRendererConfig { threads, ..config },
-            )
-            .map_err(|error| fail(format!("construct OBJ renderer: {error}")))?;
+            let mut renderer =
+                RetainedFrameRenderer::new(RetainedFrameRendererConfig { threads, ..config })
+                    .map_err(|error| fail(format!("construct OBJ renderer: {error}")))?;
             for state in [&stage, &restored] {
-                renderer.render_with_camera(state, &camera)
+                renderer
+                    .render_with_camera(state, &camera)
                     .map_err(|error| fail(format!("render OBJ map options: {error}")))?;
                 if renderer.frame().as_bytes() != expected {
                     return Err(fail(format!(
@@ -8996,7 +9024,11 @@ fn obj_texture_options_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
             }
         }
         outcomes = outcomes.with_artifact(
-            if policy == "on" { "obj-map-clamp.frame" } else { "obj-map-repeat.frame" },
+            if policy == "on" {
+                "obj-map-clamp.frame"
+            } else {
+                "obj-map-repeat.frame"
+            },
             encode_frame(fresh.frame()).map_err(|error| fail(error.to_string()))?,
         );
         policy_pixels.push(expected);

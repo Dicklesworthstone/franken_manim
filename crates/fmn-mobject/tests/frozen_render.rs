@@ -218,5 +218,8 @@ fn every_render_handoff_seeds_independent_allocation_history() {
         branch_identities.push((first, second, updater));
     }
     assert!(branch_identities.windows(2).all(|pair| pair[0] == pair[1]));
-    assert!(source.contains(live), "materialized branches leave the source intact");
+    assert!(
+        source.contains(live),
+        "materialized branches leave the source intact"
+    );
 }

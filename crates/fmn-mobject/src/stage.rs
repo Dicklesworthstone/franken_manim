@@ -1785,8 +1785,8 @@ impl Stage {
         self.remove_from_scene(mob);
         let slot = &mut self.slots[mob.index as usize];
         slot.entry = None;
-        let next_generation = self.generation_high_water[mob.index as usize]
-            .max(slot.generation.saturating_add(1));
+        let next_generation =
+            self.generation_high_water[mob.index as usize].max(slot.generation.saturating_add(1));
         self.generation_high_water[mob.index as usize] = next_generation;
         slot.generation = next_generation;
         self.free.push(mob.index);

@@ -317,7 +317,9 @@ impl NativeFrameStages {
             compiler: Mutex::new(compiler),
             workers: (0..render_teams)
                 .map(|_| {
-                    Mutex::new(RenderWorker::with_prefix_cache_budget(max_prefix_bytes_per_team))
+                    Mutex::new(RenderWorker::with_prefix_cache_budget(
+                        max_prefix_bytes_per_team,
+                    ))
                 })
                 .collect(),
         }
@@ -723,11 +725,8 @@ impl NativeFramePipeline {
         } else {
             0
         };
-        let stages = NativeFrameStages::new(
-            plan.render_teams.len(),
-            compiler,
-            max_prefix_bytes_per_team,
-        );
+        let stages =
+            NativeFrameStages::new(plan.render_teams.len(), compiler, max_prefix_bytes_per_team);
         let stream = FrameStream::new(plan, stages, |_, output| {
             output.publish().map_err(NativeFrameError::Emitter)
         })

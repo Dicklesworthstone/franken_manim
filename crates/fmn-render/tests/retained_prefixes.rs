@@ -186,7 +186,10 @@ fn retained_prefixes_match_uncached_pixels_sampling_and_replays() {
                     assert!(cache.retained_prefix_bytes() <= budget);
                     assert_eq!(stats.prefix, cache.prefix_stats());
                     if position == 7 {
-                        assert!(stats.cache.hits > 0, "identical frames reuse complete tiles");
+                        assert!(
+                            stats.cache.hits > 0,
+                            "identical frames reuse complete tiles"
+                        );
                         assert_eq!(stats.prefix, PrefixCacheStats::default());
                     } else {
                         assert_eq!(stats.cache.hits, 0, "the foreground dirties every tile");
