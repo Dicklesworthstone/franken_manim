@@ -180,3 +180,43 @@ fn live_views_are_isolated_and_checkpoint_projection_keeps_replay_bindings() {
         [9.0, 8.0, 7.0]
     );
 }
+
+#[test]
+fn every_render_handoff_seeds_independent_allocation_history() {
+    let mut source = Stage::new();
+    let empty = source.snapshot();
+    let mut discarded = Vec::new();
+    for _ in 0..3 {
+        let first = source.add(Mobject::new());
+        let second = source.add(Mobject::new());
+        discarded.extend([first, second]);
+        source.delete(first).unwrap();
+        source.delete(second).unwrap();
+    }
+    let live = source.add(Mobject::from_points(&[[1.0, 2.0, 0.0]]));
+    source.add_to_scene(live).unwrap();
+    let removed_updater = source.add_updater(live, |_, _| {}, false).unwrap();
+    source.remove_updater(live, removed_updater);
+    let handoffs = [
+        source.freeze_render_state(),
+        source.snapshot().render_state(0.0),
+        source.snapshot().into_render_state(0.0),
+    ];
+    let mut branch_identities = Vec::new();
+    for handoff in handoffs {
+        let mut frame = handoff.materialize();
+        assert!(frame.contains(live));
+        assert_eq!(frame.roots(), &[live]);
+        frame.restore(&empty);
+        let first = frame.add(Mobject::new());
+        let second = frame.add(Mobject::new());
+        assert_ne!(first, live);
+        assert_ne!(second, live);
+        assert!(discarded.iter().all(|&old| !frame.contains(old)));
+        let updater = frame.add_updater(first, |_, _| {}, false).unwrap();
+        assert_ne!(updater, removed_updater);
+        branch_identities.push((first, second, updater));
+    }
+    assert!(branch_identities.windows(2).all(|pair| pair[0] == pair[1]));
+    assert!(source.contains(live), "materialized branches leave the source intact");
+}

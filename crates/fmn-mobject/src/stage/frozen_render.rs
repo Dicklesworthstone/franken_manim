@@ -216,22 +216,31 @@ impl FrozenRenderState {
     /// No callback runs here, and no updater callable or native updater state
     /// is installed. Record buffers and graph vectors move rather than clone;
     /// writes in either arena still obey the usual copy-on-write protocol.
+    /// Allocation cursors belong to this new physical arena and begin after
+    /// every identity recorded in the handoff, including deleted slots.
     #[must_use]
     pub fn materialize(self) -> Stage {
-        Stage {
-            id: self.stage_id,
-            slots: self
-                .slots
-                .into_iter()
-                .map(|(generation, entry)| Slot {
+        let mut generation_high_water = Vec::with_capacity(self.slots.len());
+        let slots = self
+            .slots
+            .into_iter()
+            .map(|(generation, entry)| {
+                generation_high_water.push(generation.saturating_add(u32::from(entry.is_some())));
+                Slot {
                     generation,
                     entry: entry.map(FrozenRenderEntry::into_entry),
-                })
-                .collect(),
+                }
+            })
+            .collect();
+        Stage {
+            id: self.stage_id,
+            slots,
+            generation_high_water,
             free: self.free,
             roots: self.roots,
             time: self.time,
             next_updater_id: self.next_updater_id,
+            updater_id_high_water: self.next_updater_id,
             topology_epoch: fresh_epoch(),
             updater_failure: None,
             updater_callbacks: std::rc::Rc::new(()),

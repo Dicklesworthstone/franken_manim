@@ -8982,6 +8982,96 @@ fn native_positional_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scena
         .with_counter("native_positional_restores", 1))
 }
 
+/// Rollback retires discarded identities without changing explicitly frozen branches.
+fn snapshot_handle_safety_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let mut stage = Stage::new();
+    let keeper = stage.add(Mobject::from_points(&[[0.0; 3]]));
+    stage
+        .add_to_scene(keeper)
+        .map_err(|error| fail(format!("admit rollback survivor: {error}")))?;
+    let removed = stage.add(Mobject::new());
+    stage
+        .delete(removed)
+        .map_err(|error| fail(format!("prepare recycled rollback slot: {error}")))?;
+    let checkpoint = stage.snapshot();
+    let calls = Rc::new(Cell::new(0_u64));
+    let mut retired = vec![removed];
+    let mut retired_updaters = Vec::new();
+    let mut branches = Vec::new();
+
+    for cycle in 0..4_u64 {
+        stage.restore(&checkpoint);
+        let recycled = stage.add(Mobject::from_points(&[[cycle as f64 + 1.0, 0.0, 0.0]]));
+        let appended = stage.add(Mobject::from_points(&[[0.0, cycle as f64 + 1.0, 0.0]]));
+        stage
+            .add_many_to_scene(&[recycled, appended])
+            .map_err(|error| fail(format!("admit restored branch objects: {error}")))?;
+        for &old in &retired {
+            if stage.contains(old)
+                || stage.pin(old) != Err(fmn_mobject::StageError::StaleHandle)
+                || stage.delete(old) != Err(fmn_mobject::StageError::StaleHandle)
+            {
+                return Err(fail(
+                    "discarded handle resolved after rollback and allocation",
+                ));
+            }
+        }
+
+        let observed_calls = Rc::clone(&calls);
+        let updater = stage
+            .add_updater(
+                keeper,
+                move |_, _| observed_calls.set(observed_calls.get() + 1),
+                false,
+            )
+            .map_err(|error| fail(format!("register restored branch updater: {error}")))?;
+        for &old in &retired_updaters {
+            if old == updater {
+                return Err(fail("rollback reused a discarded updater identity"));
+            }
+            stage.remove_updater(keeper, old);
+        }
+        stage.update(1.0 / f64::from(FPS));
+        if calls.get() != cycle + 1 || stage.get_points(keeper) != Some(vec![[0.0; 3]]) {
+            return Err(fail(
+                "a stale updater identity changed the restored live object",
+            ));
+        }
+        branches.push((stage.snapshot(), [recycled, appended]));
+        retired.extend([recycled, appended]);
+        retired_updaters.push(updater);
+    }
+
+    stage.restore(&checkpoint);
+    if retired.iter().any(|&mob| stage.contains(mob)) || !stage.contains(keeper) {
+        return Err(fail(
+            "rollback did not preserve exactly its surviving identities",
+        ));
+    }
+    for (branch, members) in &branches {
+        let frozen = branch.materialize();
+        if !frozen.contains(keeper) || members.iter().any(|&mob| !frozen.contains(mob)) {
+            return Err(fail(
+                "later rollback invalidated an explicitly frozen branch",
+            ));
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.snapshot_handles")
+            .field("restores", 5_u64)
+            .field("discarded_objects", 8_u64)
+            .field("updater_calls", calls.get())
+            .field("frozen_branches", branches.len() as u64),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("snapshot_handle_restores", 5)
+        .with_counter("snapshot_handle_updater_calls", calls.get())
+        .with_counter("snapshot_handle_frozen_branches", branches.len() as u64))
+}
+
 /// Construct → snapshot → transform → snapshot: the scene_goldens
 /// lifecycle form with geometry assertions (member/point counts move with
 /// the lifecycle points, never silently empty).
@@ -15345,6 +15435,27 @@ pub fn catalog() -> Vec<ScenarioSpec> {
 
     // LIFECYCLE DRILLS.
     specs.push(spec(
+        "lifecycle.snapshot_handle_safety.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(snapshot_handle_safety_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("snapshot_handle_restores", 5),
+            counter_eq("snapshot_handle_updater_calls", 4),
+            counter_eq("snapshot_handle_frozen_branches", 4),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.lifecycle.snapshot_handles",
+            vec![
+                FieldPred::u64_eq("restores", 5),
+                FieldPred::u64_eq("discarded_objects", 8),
+                FieldPred::u64_eq("updater_calls", 4),
+                FieldPred::u64_eq("frozen_branches", 4),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.native_positional_wag.v1",
         ScenarioClass::LifecycleDrill,
         Surface::RustApi,
@@ -16421,6 +16532,16 @@ fn native_y4m_conversion_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.native_y4m_conversion.v1")
         .expect("native Y4M conversion scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn snapshot_handle_safety_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.snapshot_handle_safety.v1")
+        .expect("snapshot handle safety scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

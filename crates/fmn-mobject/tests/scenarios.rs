@@ -291,6 +291,289 @@ fn generational_safety() {
     assert_eq!(stage.copy_family(old).err(), Some(StageError::StaleHandle));
 }
 
+
+// Rollback changes scene contents, not the identities already handed to callers.
+#[test]
+fn rollback_never_reissues_appended_or_recycled_handles() {
+    let mut stage = Stage::new();
+    let kept = stage.add(square());
+    stage.add_to_scene(kept).unwrap();
+    let freed = stage.add(square());
+    stage.delete(freed).unwrap();
+    let checkpoint = stage.snapshot();
+    let before = stage.snapshot_bytes().unwrap();
+    let mut discarded = vec![freed];
+
+    for _ in 0..4 {
+        let recycled = stage.add(square());
+        let appended = stage.add(Mobject::from_points(&[[42.0, 0.0, 0.0]]));
+        stage.add_to_scene(recycled).unwrap();
+        stage.add_to_scene(appended).unwrap();
+        for &old in &discarded {
+            assert!(stage.get(old).is_none());
+            assert_eq!(stage.pin(old), Err(StageError::StaleHandle));
+            assert_eq!(stage.delete(old), Err(StageError::StaleHandle));
+            assert_eq!(stage.copy_family(old).err(), Some(StageError::StaleHandle));
+        }
+        discarded.extend([recycled, appended]);
+        stage.restore(&checkpoint);
+        assert_eq!(stage.snapshot_bytes().unwrap(), before);
+        assert_eq!(stage.roots(), &[kept]);
+        assert!(discarded.iter().all(|&old| !stage.contains(old)));
+    }
+}
+
+#[test]
+fn restored_live_identity_does_not_reissue_its_discarded_replacements() {
+    let mut stage = Stage::new();
+    let original = stage.add(square());
+    stage.add_to_scene(original).unwrap();
+    let checkpoint = stage.snapshot();
+    let before = stage.snapshot_bytes().unwrap();
+    let mut discarded = Vec::new();
+
+    for _ in 0..4 {
+        stage.delete(original).unwrap();
+        let replacement = stage.add(Mobject::new());
+        assert!(discarded.iter().all(|&old| !stage.contains(old)));
+        discarded.push(replacement);
+        stage.restore(&checkpoint);
+        assert!(stage.contains(original), "an explicit restore preserves the handle");
+        assert!(discarded.iter().all(|&old| !stage.contains(old)));
+        assert_eq!(stage.snapshot_bytes().unwrap(), before);
+    }
+}
+
+#[test]
+fn discarded_proxy_pins_and_live_views_cannot_touch_a_new_allocation() {
+    let mut stage = Stage::new();
+    let empty = stage.snapshot();
+    let discarded = stage.add(square());
+    stage.pin(discarded).unwrap();
+    let view = stage.get_mut(discarded).unwrap().buffer.export_view(true);
+    stage.delete(discarded).unwrap();
+    assert!(stage.contains(discarded), "the proxy defers deletion");
+    stage.restore(&empty);
+
+    let replacement = stage.add(Mobject::from_points(&[[42.0, 0.0, 0.0]]));
+    stage.pin(replacement).unwrap();
+    stage.delete(replacement).unwrap();
+    stage.unpin(discarded);
+    assert_eq!(stage.get(replacement).unwrap().pins(), 1);
+    assert_eq!(stage.delete(discarded), Err(StageError::StaleHandle));
+    assert!(view.write(0, "point", &[99.0, 0.0, 0.0]));
+    assert_eq!(
+        stage.get(replacement).unwrap().buffer.read(0, "point").unwrap(),
+        [42.0, 0.0, 0.0]
+    );
+    stage.unpin(replacement);
+    assert!(!stage.contains(replacement));
+}
+
+#[test]
+fn durable_rollback_preserves_bytes_without_reissuing_discarded_handles() {
+    let mut stage = Stage::new();
+    let kept = stage.add(square());
+    stage.add_to_scene(kept).unwrap();
+    let bytes = stage.snapshot_bytes().unwrap();
+    let discarded = stage.add(square());
+    let decoded = fmn_mobject::Snapshot::from_bytes(&bytes, &stage).unwrap();
+
+    stage.restore(&decoded.snapshot);
+    assert_eq!(stage.snapshot_bytes().unwrap(), bytes);
+    let replacement = stage.add(Mobject::new());
+    assert_ne!(replacement, discarded);
+    assert!(stage.get(discarded).is_none());
+    assert!(stage.contains(kept));
+}
+
+#[test]
+fn materialized_forks_mint_deterministically_without_sharing_rollback_history() {
+    let mut source = Stage::new();
+    let kept = source.add(Mobject::new());
+    let checkpoint = source.snapshot();
+    let mut left = checkpoint.materialize();
+    let mut right = checkpoint.materialize();
+    let first_left = left.add(square());
+    let first_right = right.add(square());
+    let first_updater_left = left.add_updater(kept, |_, _| {}, false).unwrap();
+    let first_updater_right = right.add_updater(kept, |_, _| {}, false).unwrap();
+    assert_eq!(first_left, first_right);
+    assert_eq!(first_updater_left, first_updater_right);
+    assert_eq!(left.snapshot_bytes().unwrap(), right.snapshot_bytes().unwrap());
+
+    left.restore(&checkpoint);
+    let second_left = left.add(square());
+    let second_updater_left = left.add_updater(kept, |_, _| {}, false).unwrap();
+    assert_ne!(second_left, first_left);
+    assert_ne!(second_updater_left, first_updater_left);
+    assert!(right.contains(first_right));
+    assert_eq!(right.updater_ids(kept), [first_updater_right]);
+
+    right.restore(&checkpoint);
+    assert_eq!(right.add(square()), second_left);
+    assert_eq!(
+        right.add_updater(kept, |_, _| {}, false).unwrap(),
+        second_updater_left
+    );
+    assert_eq!(left.snapshot_bytes().unwrap(), right.snapshot_bytes().unwrap());
+    assert_eq!(source.add(square()), first_left, "forks do not advance the source");
+}
+
+#[test]
+fn restoring_another_branch_observes_both_live_and_deleted_generations() {
+    let mut stage = Stage::new();
+    let empty = stage.snapshot();
+    let mut branch = empty.materialize();
+    let mut history = Vec::new();
+    for _ in 0..4 {
+        let mob = branch.add(square());
+        history.push(mob);
+        branch.delete(mob).unwrap();
+    }
+    let branch_live = branch.add(square());
+    history.push(branch_live);
+    let live_checkpoint = branch.snapshot();
+    stage.restore(&live_checkpoint);
+    assert!(stage.contains(branch_live));
+    stage.restore(&empty);
+    let replacement = stage.add(Mobject::new());
+    assert!(history.iter().all(|&old| old != replacement && !stage.contains(old)));
+
+    branch.delete(branch_live).unwrap();
+    let deleted_checkpoint = branch.snapshot();
+    let mut deleted_fork = deleted_checkpoint.materialize();
+    deleted_fork.restore(&empty);
+    let next_in_fork = deleted_fork.add(Mobject::new());
+    assert!(history.iter().all(|&old| old != next_in_fork));
+    stage.restore(&deleted_checkpoint);
+    stage.restore(&empty);
+    let next_in_stage = stage.add(Mobject::new());
+    assert_ne!(next_in_stage, replacement);
+    assert!(history.iter().all(|&old| old != next_in_stage));
+}
+
+#[test]
+fn discarded_updater_removal_tokens_cannot_remove_new_registrations() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let mut stage = Stage::new();
+    let mob = stage.add(Mobject::new());
+    let kept = stage.add_updater(mob, |_, _| {}, false).unwrap();
+    let checkpoint = stage.snapshot();
+    let before = stage.snapshot_bytes().unwrap();
+    let mut discarded = Vec::new();
+    for _ in 0..4 {
+        let calls = Rc::new(Cell::new(0));
+        let seen = Rc::clone(&calls);
+        let current = stage
+            .add_updater(mob, move |_, _| seen.set(seen.get() + 1), false)
+            .unwrap();
+        for &old in &discarded {
+            stage.remove_updater(mob, old);
+        }
+        assert_eq!(stage.updater_ids(mob), [kept, current]);
+        stage.update_mobject(mob, 0.0);
+        assert_eq!(calls.get(), 1);
+        discarded.push(current);
+        stage.restore(&checkpoint);
+        assert_eq!(stage.updater_ids(mob), [kept]);
+        assert_eq!(stage.snapshot_bytes().unwrap(), before);
+    }
+}
+
+#[test]
+fn imported_updater_cursors_survive_a_later_rollback() {
+    let mut stage = Stage::new();
+    let mob = stage.add(Mobject::new());
+    let checkpoint = stage.snapshot();
+    let mut branch = checkpoint.materialize();
+    let mut discarded = Vec::new();
+    for _ in 0..4 {
+        let id = branch.add_updater(mob, |_, _| {}, false).unwrap();
+        branch.remove_updater(mob, id);
+        discarded.push(id);
+    }
+    let imported = branch.snapshot();
+    stage.restore(&imported);
+    stage.restore(&checkpoint);
+    assert_eq!(stage.snapshot_bytes().unwrap(), checkpoint.to_bytes().unwrap());
+    let current = stage.add_updater(mob, |_, _| {}, false).unwrap();
+    for old in discarded {
+        assert_ne!(current, old);
+        stage.remove_updater(mob, old);
+    }
+    assert_eq!(stage.updater_ids(mob), [current]);
+}
+
+#[test]
+fn stateful_and_fallible_callbacks_receive_their_post_rollback_identity() {
+    use fmn_mobject::UpdaterError;
+
+    let mut stage = Stage::new();
+    let mob = stage.add(Mobject::new());
+    let checkpoint = stage.snapshot();
+    let discarded = stage.add_updater(mob, |_, _| {}, false).unwrap();
+    stage.restore(&checkpoint);
+
+    let stateful = stage
+        .add_dt_updater_with_state(
+            mob,
+            40_u32,
+            |_, _| {},
+            |stage, me, id, _| *stage.updater_state_mut::<u32>(me, id).unwrap() += 1,
+            true,
+        )
+        .unwrap();
+    assert_ne!(stateful, discarded);
+    assert_eq!(stage.updater_state::<u32>(mob, stateful), Some(&41));
+    stage.restore(&checkpoint);
+
+    let expected = UpdaterError::callback("rollback identity", "refused");
+    let callback_error = expected.clone();
+    let non_dt = stage
+        .add_try_updater(mob, move |_, _| Err(callback_error.clone()), false)
+        .unwrap();
+    stage.update_mobject(mob, 0.0);
+    let failure = stage.take_updater_error().unwrap().unwrap();
+    assert_eq!(failure.updater, non_dt);
+    assert_eq!(failure.error, expected);
+    assert_ne!(non_dt, stateful);
+    stage.restore(&checkpoint);
+
+    let dt = stage
+        .add_try_dt_updater(
+            mob,
+            |_, _, _| Err(UpdaterError::callback("dt identity", "refused")),
+            false,
+        )
+        .unwrap();
+    stage.update_mobject(mob, 0.25);
+    assert_eq!(stage.take_updater_error().unwrap().unwrap().updater, dt);
+    assert_ne!(dt, non_dt);
+    stage.restore(&checkpoint);
+
+    let fallible_state = stage
+        .add_try_dt_updater_with_state(
+            mob,
+            7_u32,
+            |_, _| {},
+            |stage, me, id, _| {
+                assert_eq!(stage.updater_state::<u32>(me, id), Some(&7));
+                Err(UpdaterError::callback("state identity", "refused"))
+            },
+            false,
+        )
+        .unwrap();
+    stage.update_mobject(mob, 0.5);
+    assert_eq!(
+        stage.take_updater_error().unwrap().unwrap().updater,
+        fallible_state
+    );
+    assert_ne!(fallible_state, dt);
+}
+
 // Snapshot cost is O(touched), not O(scene): untouched entries share
 // storage with the snapshot; only written entries diverge.
 #[test]
