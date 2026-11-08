@@ -51,8 +51,7 @@ fn box_bits(value: BoundingBox) -> [[u64; 3]; 3] {
 fn placement_bits(stage: &Stage, mob: Mob) -> [[u64; 3]; 4] {
     let placement = stage.get(mob).unwrap().placement();
     let linear = placement.linear();
-    [linear[0], linear[1], linear[2], placement.translation()]
-        .map(|row| row.map(f64::to_bits))
+    [linear[0], linear[1], linear[2], placement.translation()].map(|row| row.map(f64::to_bits))
 }
 
 fn assert_raw(stage: &Stage, mob: Mob) {
@@ -333,7 +332,11 @@ fn empty_anchors_and_caller_installed_boxes_keep_their_existing_lifetimes() {
     let parent = stage.add(Mobject::new());
     let child = stage.add(Mobject::new());
     stage.attach(parent, child).unwrap();
-    assert!(stage.set_point_free_anchor(parent, [4.0, 5.0, 6.0]).unwrap());
+    assert!(
+        stage
+            .set_point_free_anchor(parent, [4.0, 5.0, 6.0])
+            .unwrap()
+    );
     assert!(stage.set_point_free_anchor(child, [7.0, 8.0, 9.0]).unwrap());
     assert_raw(&stage, parent);
     assert_eq!(stage.get_bounding_box(parent).mid, [4.0, 5.0, 6.0]);

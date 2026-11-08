@@ -55,7 +55,7 @@ use fmn_hash::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fmt;
 use std::fs::{File, Metadata};
-use std::io::{self, Read, Write};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::SystemTime;
@@ -1370,6 +1370,8 @@ fn git_stdout(
             what: format!("spawning git {operation}: {e}"),
         })?;
     if let Some(input) = input {
+        use std::io::Write;
+
         // Only one bounded private-directory query is written, then EOF.
         // Git requires --stdin when -z is used for unquoted provenance.
         let result = child

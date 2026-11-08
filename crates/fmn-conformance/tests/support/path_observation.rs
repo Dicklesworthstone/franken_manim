@@ -39,7 +39,9 @@ fn capture(
     if observation.point_count() != 5
         || observation.total_length().to_bits() != path.get_arc_length().to_bits()
     {
-        return Err(super::fail("path observation changed its geometry or length"));
+        return Err(super::fail(
+            "path observation changed its geometry or length",
+        ));
     }
     Ok(CapturedPath {
         observation,
@@ -77,10 +79,11 @@ pub(super) fn run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         return Err(super::fail("path point edit failed"));
     }
     captured.push(capture(&stage, mob, &mut sampler)?);
-    if captured[0].expected == captured[1].expected
-        || captured[1].expected == captured[2].expected
+    if captured[0].expected == captured[1].expected || captured[1].expected == captured[2].expected
     {
-        return Err(super::fail("path observation mutation drill did not discriminate"));
+        return Err(super::fail(
+            "path observation mutation drill did not discriminate",
+        ));
     }
     let materializations = sampler.materializations();
     if materializations != 3 {

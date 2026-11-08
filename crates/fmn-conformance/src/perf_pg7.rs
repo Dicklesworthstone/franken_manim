@@ -1803,11 +1803,15 @@ mod tests {
         // 26b268f6 (CMEX/MSBM wide-hat metrics) moves the provider identity
         // and its wide-hat probe. Both result self-goldens passed unchanged
         // before refreshing these definitions; workloads and budgets stay fixed.
+        // c1754278 (native arrow/tilde metrics and fresh accent alphabets)
+        // changes the provider identity. Actual native pg7-definitions supplies
+        // these formula identities after both canonical result goldens pass
+        // unchanged; the text definition, workloads and budgets stay fixed.
         assert_eq!(
             [cold.digest(), cached.digest(), text.digest()].map(|digest| digest.to_string()),
             [
-                "8ac9437552ca427c73f57d42a67ca2f66a12392f62ca679d453e872f0d89aed0",
-                "9f2232372fb73b0fe0a38436a9a0cf27bcf80a9b112f2b0ea366ce307b3b9bdb",
+                "304cdd198dd14672f3d2974daca5b5639aeb7529244c0b02f696c9804083aee4",
+                "829ff22083b65ec5c5ae379ea82b2931dd864f433cfbd72f8f8a401d7a7987a3",
                 "0fa22e64fe9e1901eea58a596899ec843bc0d6db46f1cd91607925a50fea3e6f",
             ]
         );

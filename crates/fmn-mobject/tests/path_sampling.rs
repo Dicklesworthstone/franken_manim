@@ -329,10 +329,7 @@ fn failed_observations_clear_the_sampler_without_invalidating_owned_paths() {
         (foreign, StageError::StaleHandle),
     ] {
         let before = sampler.materializations();
-        assert_eq!(
-            stage.point_from_proportion(mob, 0.5).unwrap_err(),
-            expected,
-        );
+        assert_eq!(stage.point_from_proportion(mob, 0.5).unwrap_err(), expected,);
         assert_eq!(
             sampler
                 .observe(&stage, mob)
@@ -343,7 +340,10 @@ fn failed_observations_clear_the_sampler_without_invalidating_owned_paths() {
         let repaired = sampler.observe(&stage, valid).unwrap();
         assert_eq!(sampler.materializations(), before + 1);
         assert_eq!(bits(repaired.sample(0.5).unwrap()), kept.expected[6]);
-        assert_eq!(bits(kept.observation.sample(0.5).unwrap()), kept.expected[6]);
+        assert_eq!(
+            bits(kept.observation.sample(0.5).unwrap()),
+            kept.expected[6]
+        );
     }
 
     let before = sampler.materializations();
@@ -360,7 +360,10 @@ fn failed_observations_clear_the_sampler_without_invalidating_owned_paths() {
         StageError::Geometry(GeomError::EvenPointCount { len: 2 }),
     );
     assert_eq!(sampler.materializations(), before);
-    assert_eq!(bits(kept.observation.sample(0.5).unwrap()), kept.expected[6]);
+    assert_eq!(
+        bits(kept.observation.sample(0.5).unwrap()),
+        kept.expected[6]
+    );
     let points = CURVE.map(|point| point.map(f64::from));
     stage.set_points(valid, &points).unwrap();
     let repaired = sampler.observe(&stage, valid).unwrap();
@@ -404,7 +407,10 @@ fn owned_observations_preserve_cache_invalidation_and_clone_rules() {
     let styled = sampler.observe(&stage, mob).unwrap();
     assert_eq!(sampler.materializations(), 1);
     assert_eq!(bits(styled.sample(0.5).unwrap()), bits(expected));
-    assert_eq!(bits(sampler.sample(&stage, mob, 0.5).unwrap()), bits(expected));
+    assert_eq!(
+        bits(sampler.sample(&stage, mob, 0.5).unwrap()),
+        bits(expected)
+    );
     assert_eq!(sampler.materializations(), 1);
 
     let mut independent = sampler.clone();

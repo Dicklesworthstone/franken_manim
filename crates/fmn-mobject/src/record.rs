@@ -249,7 +249,7 @@ static NEXT_STORAGE_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 fn fresh_storage_generation() -> u64 {
     NEXT_STORAGE_GENERATION
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
             value.checked_add(1)
         })
         .expect("record storage generation space exhausted")

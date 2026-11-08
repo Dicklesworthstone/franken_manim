@@ -726,12 +726,12 @@ dependencies = [
 [[package]]
 name = "fmd-font"
 version = "0.3.4"
-source = "git+https://github.com/Dicklesworthstone/franken_markdown?rev=26b268f601a915bf407263223bd1706540fee3c2#26b268f601a915bf407263223bd1706540fee3c2"
+source = "git+https://github.com/Dicklesworthstone/franken_markdown?rev=c1754278a74810729825ea38f18a07a648b974b2#c1754278a74810729825ea38f18a07a648b974b2"
 
 [[package]]
 name = "fmd-math"
 version = "0.2.0"
-source = "git+https://github.com/Dicklesworthstone/franken_markdown?rev=26b268f601a915bf407263223bd1706540fee3c2#26b268f601a915bf407263223bd1706540fee3c2"
+source = "git+https://github.com/Dicklesworthstone/franken_markdown?rev=c1754278a74810729825ea38f18a07a648b974b2#c1754278a74810729825ea38f18a07a648b974b2"
 dependencies = [
  "fmd-font",
 ]
@@ -1241,7 +1241,7 @@ dependencies = [
 [[package]]
 name = "franken_markdown"
 version = "0.6.0"
-source = "git+https://github.com/Dicklesworthstone/franken_markdown?rev=26b268f601a915bf407263223bd1706540fee3c2#26b268f601a915bf407263223bd1706540fee3c2"
+source = "git+https://github.com/Dicklesworthstone/franken_markdown?rev=c1754278a74810729825ea38f18a07a648b974b2#c1754278a74810729825ea38f18a07a648b974b2"
 dependencies = [
  "clap",
  "fmd-font",

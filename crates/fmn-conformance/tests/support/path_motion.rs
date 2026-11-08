@@ -41,8 +41,7 @@ fn placement_bits(stage: &Stage, mob: Mob) -> Result<[[u64; 3]; 4], ScenarioErro
         .ok_or_else(|| super::fail("motion family member disappeared"))?
         .placement();
     let linear = placement.linear();
-    Ok([linear[0], linear[1], linear[2], placement.translation()]
-        .map(|row| row.map(f64::to_bits)))
+    Ok([linear[0], linear[1], linear[2], placement.translation()].map(|row| row.map(f64::to_bits)))
 }
 
 pub(super) fn run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -55,10 +54,7 @@ pub(super) fn run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         [5.0, 0.0, 0.0],
     ]));
     let moving = stage.add(Mobject::new());
-    let fraction = stage.add(Mobject::from_points(&[
-        [0.1, 0.0, 0.0],
-        [0.3, 0.0, 0.0],
-    ]));
+    let fraction = stage.add(Mobject::from_points(&[[0.1, 0.0, 0.0], [0.3, 0.0, 0.0]]));
     let dense_points: Vec<_> = (0..257_u16)
         .map(|index| {
             let x = f64::from(index) / 257.0;
@@ -123,7 +119,9 @@ pub(super) fn run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
             return Err(super::fail(format!("motion frame {frame}: {error}")));
         }
         if box_bits(stage.get_bounding_box(moving)) != box_bits(raw_bounds(&oracle, moving)) {
-            return Err(super::fail(format!("motion bounds changed bits at frame {frame}")));
+            return Err(super::fail(format!(
+                "motion bounds changed bits at frame {frame}"
+            )));
         }
         for &member in &family {
             if placement_bits(&stage, member)? != placement_bits(&oracle, member)? {
@@ -175,7 +173,9 @@ pub(super) fn run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         || stats.geometry_materializations != warm
         || stats.fallback_queries != 0
     {
-        return Err(super::fail("motion finish lost retained geometry or path reuse"));
+        return Err(super::fail(
+            "motion finish lost retained geometry or path reuse",
+        ));
     }
 
     ctx.event(
@@ -189,5 +189,8 @@ pub(super) fn run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     Ok(RunOutcome::ok()
         .with_counter("retained_motion_frames", frames)
         .with_counter("retained_motion_warm_geometry_scans", 0)
-        .with_counter("retained_motion_path_materializations", path_materializations))
+        .with_counter(
+            "retained_motion_path_materializations",
+            path_materializations,
+        ))
 }

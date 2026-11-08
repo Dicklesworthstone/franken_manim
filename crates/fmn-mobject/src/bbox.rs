@@ -15,8 +15,8 @@ use fmn_core::types::Vec3;
 
 mod linear_cache;
 
-pub use linear_cache::{LinearBoundsStats, MAX_LINEAR_BOUND_MEMBERS};
 pub(crate) use linear_cache::{LinearBoundsCache, MemberBounds};
+pub use linear_cache::{LinearBoundsStats, MAX_LINEAR_BOUND_MEMBERS};
 
 /// An axis-aligned bounding box as the Reference's three rows.
 #[derive(Clone, Copy, Debug, PartialEq)]

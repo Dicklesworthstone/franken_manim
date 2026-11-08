@@ -7127,7 +7127,6 @@ fn tex_underline_metrics_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
 /// fm-widehat-height-r12-v3jj: independently measured wide-hat boxes and
 /// every accent path survive native builders and certified rasterization.
 fn tex_widehat_metrics_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
-    let engine = &scene_goldens::corpus().tex;
     // The ruled-Reference 10pt oracle also used by the upstream regression.
     // Cover the CMEX and AMS variants, optical sizes, nesting, an empty
     // nucleus, a fraction and the TexText math-island front door.
@@ -7170,16 +7169,238 @@ fn tex_widehat_metrics_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
         ),
         (true, r"$\widehat{P}$", [0.780_904, 0.975_000, 0.0], 1),
     ];
+    tex_accent_metrics_run(ctx, &cases, "tex_widehat")
+}
+
+/// fm-ifgjb: actual optical tilde metrics and every accent path survive
+/// native builders and certified rendering, including the two-text-em branch.
+fn tex_widetilde_metrics_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    // The independent ruled-Reference table predates the provider repair.
+    let cases = [
+        (false, r"\widetilde{P}", [0.780_904, 0.975_000, 0.0], 1),
+        (false, r"\widetilde{8}", [0.500_002, 0.936_113, 0.0], 1),
+        (false, r"\widetilde{AB}", [1.558_682, 1.002_777, 0.0], 1),
+        (false, r"\widetilde{ABC}", [2.344_931, 1.120_366, 0.0], 1),
+        (false, r"\widetilde{ABCD}", [3.200_626, 1.120_366, 0.0], 1),
+        (false, r"\widetilde{}", [0.0, 0.722_223, 0.0], 1),
+        (
+            false,
+            r"\widetilde{\frac{a}{b}}",
+            [0.768_588, 1.398_730, 0.685_951],
+            1,
+        ),
+        (
+            false,
+            r"\widetilde{\widetilde{x}}",
+            [0.571_527, 1.013_892, 0.0],
+            2,
+        ),
+        (
+            false,
+            r"\scriptstyle\widetilde{P}",
+            [0.616_771, 0.682_500, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\scriptscriptstyle\widetilde{P}",
+            [0.524_484, 0.487_500, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\scriptscriptstyle\widetilde{ABCD}",
+            [2.164_229, 0.561_388, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\scriptstyle\widetilde{\hspace{2em}}",
+            [1.999_512, 0.525_000, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\scriptstyle\widetilde{\hspace{2.0001em}}",
+            [1.999_617, 0.629_999, 0.0],
+            1,
+        ),
+        (true, r"$\widetilde{P}$", [0.780_904, 0.975_000, 0.0], 1),
+        // Outer/inner alphabets distinguish the fresh text-style
+        // measurement from the actual nucleus. Keep hat controls alongside
+        // tildes because both primitives share that measurement path.
+        (
+            false,
+            r"\mathrm{\widetilde{AP\hspace{0.48em}}}",
+            [1.910_437, 1.045_372, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\widetilde{\mathrm{AP\hspace{0.48em}}}",
+            [1.910_437, 1.002_777, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\mathrm{\widehat{AP\hspace{0.48em}}}",
+            [1.910_437, 1.045_372, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\widehat{\mathrm{AP\hspace{0.48em}}}",
+            [1.910_437, 1.002_777, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\widetilde{AP\hspace{0.48em}}",
+            [2.010_783, 1.045_372, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\widehat{AP\hspace{0.48em}}",
+            [2.010_783, 1.045_372, 0.0],
+            1,
+        ),
+    ];
+    tex_accent_metrics_run(ctx, &cases, "tex_widetilde")
+}
+
+/// fm-7xc7q: arrow minimum widths, row placement and uncramped nuclei
+/// survive both native front doors and contribute actual certified pixels.
+fn tex_over_arrow_metrics_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    // Independent ruled-Reference boxes captured before the upstream fix.
+    // Short and empty nuclei expose the fill minimum, wide/deep/nested
+    // nuclei expose alignment, and x^2 distinguishes uncramped layout.
+    let cases = [
+        (false, r"\overrightarrow{P}", [1.000_023, 1.050_206, 0.0], 1),
+        (false, r"\overrightarrow{}", [1.000_023, 0.366_875, 0.0], 1),
+        (
+            false,
+            r"\overrightarrow{y}",
+            [1.000_023, 0.797_429, 0.194_444],
+            1,
+        ),
+        (
+            false,
+            r"\overrightarrow{ABCD}",
+            [3.200_626, 1.050_206, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\mathrm{\overrightarrow{ABCD}}",
+            [3.200_626, 1.050_206, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\overrightarrow{\mathrm{ABCD}}",
+            [2.944_450, 1.050_206, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\scriptstyle\mathrm{\overrightarrow{ABCD}}",
+            [2.537_666, 0.747_190, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\mathrm{\overleftarrow{ABCD}}",
+            [3.200_626, 1.050_206, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\overrightarrow{\frac{1}{2}}",
+            [1.000_023, 1.687_827, 0.685_951],
+            1,
+        ),
+        (
+            false,
+            r"\overrightarrow{\overrightarrow{P}}",
+            [1.000_023, 1.417_080, 0.0],
+            2,
+        ),
+        (
+            false,
+            r"\overrightarrow{x^2}",
+            [1.020_140, 1.230_878, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\overrightarrow{P}^{2}",
+            [1.448_636, 1.050_206, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\overrightarrow{y}_{i}",
+            [1.332_951, 0.797_429, 0.194_444],
+            1,
+        ),
+        (
+            false,
+            r"{\overrightarrow{P}}^{2}",
+            [1.448_636, 1.254_097, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"{\overrightarrow{y}}_{i}",
+            [1.332_951, 0.797_429, 0.244_443],
+            1,
+        ),
+        (
+            false,
+            r"\scriptstyle\overrightarrow{P}",
+            [0.784_882, 0.747_190, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\scriptscriptstyle\overrightarrow{P}",
+            [0.649_707, 0.539_870, 0.0],
+            1,
+        ),
+        (false, r"\overleftarrow{P}", [1.000_023, 1.050_206, 0.0], 1),
+        (
+            false,
+            r"\overleftarrow{y}",
+            [1.000_023, 0.797_429, 0.194_444],
+            1,
+        ),
+        (
+            true,
+            r"$\overrightarrow{P}$",
+            [1.000_023, 1.050_206, 0.0],
+            1,
+        ),
+    ];
+    tex_accent_metrics_run(ctx, &cases, "tex_over_arrow")
+}
+
+fn tex_accent_metrics_run(
+    ctx: &mut RunCtx,
+    cases: &[(bool, &str, [f64; 3], usize)],
+    metric: &str,
+) -> Result<RunOutcome, ScenarioError> {
+    let engine = &scene_goldens::corpus().tex;
     let blank = render_certified_doc(&Stage::new());
     let mut visible_paths = 0;
     let mut formulas = 0;
-    for (text_mode, source, expected, expected_paths) in cases {
+    for &(text_mode, source, expected, expected_paths) in cases {
         let built = if text_mode {
             fmn_library::TexText::new(source).build(engine)
         } else {
             fmn_library::Tex::new(source).build(engine)
         }
-        .map_err(|error| fail(format!("{source}: wide-hat builder: {error}")))?;
+        .map_err(|error| fail(format!("{source}: {metric} builder: {error}")))?;
         let layout = &built.typeset.layout;
         let measured = [layout.width, layout.height, layout.depth];
         if measured
@@ -7188,27 +7409,27 @@ fn tex_widehat_metrics_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
             .any(|(actual, want)| !actual.is_finite() || (actual - want).abs() >= 1e-4)
         {
             return Err(fail(format!(
-                "{source}: wide-hat box {measured:?}, real TeX {expected:?}"
+                "{source}: {metric} box {measured:?}, real TeX {expected:?}"
             )));
         }
         if layout.paths.len() != expected_paths
             || built.vmob.children().len() != built.typeset.subs.len()
         {
-            return Err(fail(format!("{source}: wide-hat paths or family lost")));
+            return Err(fail(format!("{source}: {metric} paths or family lost")));
         }
         let centered = built.vmob.moved_to([0.0; 3]);
         let mut stage = Stage::new();
         let formula = stage.add(centered.clone());
         stage
             .add_to_scene(formula)
-            .map_err(|error| fail(format!("{source}: show wide hat: {error}")))?;
+            .map_err(|error| fail(format!("{source}: show accent: {error}")))?;
         let rendered = render_certified_doc(&stage);
         if rendered == blank {
-            return Err(fail(format!("{source}: blank certified wide-hat frame")));
+            return Err(fail(format!("{source}: blank certified {metric} frame")));
         }
         let mut case_paths = 0;
         // Preserve all geometry and centering while hiding each accent in
-        // isolation. Neither glyph ink nor another nested hat can stand in
+        // isolation. Neither glyph ink nor another nested accent can stand in
         // for the individual path's actual pixel contribution.
         for (ordinal, sub) in built.typeset.subs.iter().enumerate() {
             if !matches!(sub.prim, Prim::Path(_)) {
@@ -7249,7 +7470,7 @@ fn tex_widehat_metrics_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
         visible_paths += case_paths as u64;
         formulas += 1;
         ctx.event(
-            LogEvent::new("e2e.parity.tex_widehat_metric")
+            LogEvent::new(&format!("e2e.parity.{metric}_metric"))
                 .field("source", source)
                 .field("mode", if text_mode { "text" } else { "math" })
                 .field("box_em", format!("{measured:?}"))
@@ -7258,8 +7479,8 @@ fn tex_widehat_metrics_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
         );
     }
     Ok(RunOutcome::ok()
-        .with_counter("tex_widehat_formulas", formulas)
-        .with_counter("tex_widehat_visible_paths", visible_paths))
+        .with_counter(&format!("{metric}_formulas"), formulas)
+        .with_counter(&format!("{metric}_visible_paths"), visible_paths))
 }
 
 /// fm-j4tni: an inline cross retains its path, source colour and primitive
@@ -14543,6 +14764,36 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "parity.tex_widetilde_metrics.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(tex_widetilde_metrics_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tex_widetilde_formulas", 20),
+            counter_eq("tex_widetilde_visible_paths", 21),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.parity.tex_widetilde_metric",
+            vec![FieldPred::str_eq("visible", "true")],
+        )],
+    ));
+    specs.push(spec(
+        "parity.tex_over_arrow_metrics.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(tex_over_arrow_metrics_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tex_over_arrow_formulas", 20),
+            counter_eq("tex_over_arrow_visible_paths", 21),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.parity.tex_over_arrow_metric",
+            vec![FieldPred::str_eq("visible", "true")],
+        )],
+    ));
+    specs.push(spec(
         "parity.tex_pifont_cross.v1",
         ScenarioClass::ParityDrill,
         Surface::RustApi,
@@ -17662,6 +17913,26 @@ fn tex_widehat_metrics_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "parity.tex_widehat_metrics.v1")
         .expect("the wide-hat metrics scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn tex_widetilde_metrics_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "parity.tex_widetilde_metrics.v1")
+        .expect("the wide-tilde metrics scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn tex_over_arrow_metrics_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "parity.tex_over_arrow_metrics.v1")
+        .expect("the over-arrow metrics scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }
