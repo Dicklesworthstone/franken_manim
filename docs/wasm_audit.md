@@ -57,6 +57,64 @@ clean-source release qualification is claimed. The earlier November 7 run
 (`20261107T055826-2902599/1`) separately failed the same size budget at
 1,015,022 bytes. Neither failure is waived; fm-8j70 remains open.
 
+Re-run, 2026-11-08, against `Cargo.lock` `553d4849`, `SUITE.lock` `bab43ba6` and
+`wasm-smoke/Cargo.lock` `e307b83a`, for the franken_numpy repin from `a15d5c32` (fnp 0.2.0)
+to `6492ff31` (fnp 0.5.0). Every governed lock's delta is exactly its fnp packages
+(`fnp-dtype`, `fnp-ndarray`, `fnp-random-core`, and `fnp-io` in `Cargo.lock`) moving
+0.2.0 -> 0.5.0, plus `fnp-io`'s new edge to `fnp-dtype`; no other package, version,
+source or checksum changes. fnp is in the wasm graph, so this re-run covers it.
+
+- **VERIFIED (mechanical):** `cargo tree -p fmn-wasm --target wasm32-unknown-unknown -e
+  normal --prefix none --locked` gives 134 lines; against the asupersync re-run below,
+  the path-normalized difference is exactly the `fnp-random-core`, `fnp-dtype` and
+  `fnp-ndarray` lines (0.2.0 at `a15d5c32` -> 0.5.0 at `6492ff31`).
+- **VERIFIED (build):** `cargo build --locked -p fmn-wasm --target wasm32-unknown-unknown`
+  exits 0 on the macos-aarch64 dev host.
+- **VERIFIED (execution):** `wasm-smoke/run.sh` exits 0 under Node `v26.8.1` with the
+  unchanged digest `1f248a71347b82aa`, `process=capability-absent`, `topology=1-cpu`,
+  `semantic_oracles=111111`, `mirrored=101000`.
+- Not re-run: the package/browser gate (`wasm-pack` is not installed on this host). This
+  is no package, browser or size-budget pass.
+
+Earlier re-run, 2026-11-08, against `Cargo.lock` `8067eb7d` and `SUITE.lock` `68c4edc4`, for the
+frankentorch repin from `523aaf82` to `c611501c` (ft-kernel-metal 0.1.0 -> 0.1.1). The
+`Cargo.lock` delta is that one package plus its new edge to `half` 2.7.1, which the lock
+already held; `wasm-smoke/Cargo.lock` is unchanged. ft-kernel-metal enters only through
+fmn-render's `metal` feature, which no wasm graph enables.
+
+- **VERIFIED (mechanical):** the path-normalized `cargo tree -p fmn-wasm --target
+  wasm32-unknown-unknown -e normal --prefix none --locked` is byte-identical to the
+  asupersync re-run below (134 lines).
+- **VERIFIED (build):** `cargo build --locked -p fmn-wasm --target wasm32-unknown-unknown`
+  exits 0 on the macos-aarch64 dev host.
+- Not re-run: the wasm-smoke Node execution (its lock and graph are unchanged) and the
+  package/browser gate. This is no fresh smoke, package, browser or size-budget pass.
+
+Earlier re-run, 2026-11-08, against `Cargo.lock` `94d01d32`, `SUITE.lock` `56b01581` and
+`wasm-smoke/Cargo.lock` `1a623bb7`, for the asupersync repin from `c48399f2` (0.3.10)
+to the `v0.6.2` tag `a5d23e8d`. Both lock deltas are exactly the four asupersync-repo
+packages (`asupersync` 0.3.10 -> 0.6.2; `franken-decision`, `franken-evidence` and
+`franken-kernel` 0.3.10 -> 0.6.0) with no other package, version, source or checksum
+change. asupersync is gated to `cfg(not(target_arch = "wasm32"))` in fmn-platform,
+so none of the four is reachable from a wasm graph. Run on the macos-aarch64 dev host
+(Apple M5 Ultra) with the pinned nightly.
+
+- **VERIFIED (mechanical):** `cargo tree -p fmn-wasm --target wasm32-unknown-unknown -e
+  normal --prefix none --locked` gives 134 lines with no asupersync-repo package, and
+  the wasm-smoke tree likewise contains none.
+- **VERIFIED (build):** `cargo build --locked -p fmn-wasm --target wasm32-unknown-unknown`
+  exits 0.
+- **VERIFIED (execution):** `wasm-smoke/run.sh` exits 0 under Node `v26.8.1` with the
+  unchanged digest `1f248a71347b82aa`, `process=capability-absent`, `topology=1-cpu`,
+  `semantic_oracles=111111`, `mirrored=101000`.
+- Not re-run: the package/browser gate (`wasm-pack` is not installed on this host, and
+  the gate already fails its size budget as recorded above). This is no package,
+  browser or size-budget pass.
+- Before this re-run the lock markers at the foot of this audit had not been re-bound
+  since `SUITE.lock` `f855c38e` / `Cargo.lock` `19af6e49`; the HEAD it starts from
+  (`20f6db41`, `SUITE.lock` `5b4792e2`, `Cargo.lock` `896d4a40`) already failed
+  `wasm_audit_is_bound_to_current_locks`. This re-run re-bound the markers to its locks.
+
 Earlier, the timing/audio merge (`fd50648d`) was also attempted through
 the original four commands, DSR `20261105T152601-24491/1`. Its frozen 4,413-entry
 source is `b27d0bb7489b4aa53d8aca30f4b8279a0a2765f68901242f8d04bee3d0cfde23`;
@@ -965,9 +1023,9 @@ The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
-- `SUITE.lock` SHA-256: `1b8f0d81ae4db8a6a859bd2299fb6876d3117d505c5fae6a0377a2a61068f614`
-- `Cargo.lock` SHA-256: `fe180da63f0dc590e314fa067353d51ea2ac44fba2f3d2855cb27353901c6d98`
-- Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `93a7c2dc6acf3dfef88a4a490efbfda7970bd963b4740aa7f879a08fff395061`
+- `SUITE.lock` SHA-256: `e9670cf8bd437d12352deb191afed6a437d55bfa6b2b333fd572fb2fd9283c93`
+- `Cargo.lock` SHA-256: `37f6231804430a71d1bedece0a8f00278d5327fc792655a396eb17edd52d5e41`
+- Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `e307b83ae1686cb4369dcc2e8e6a7edc421c08b3b46de209a0bc073406401739`
 
 The earlier 0.5.0 release bump re-bound the lock identities at that revision.
 That bump changed
