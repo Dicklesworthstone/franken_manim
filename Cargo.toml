@@ -41,7 +41,7 @@ repository = "https://github.com/Dicklesworthstone/franken_manim"
 # repo's SUITE.lock pin (governed_closure.rs enforces the equality); nothing
 # else enters.
 [workspace.dependencies]
-asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "c48399f20a9780ef420de64fe504ff922e5afe5e", default-features = false }
+asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "a5d23e8dd2c8d776bd02e2da8e38e6296600e84c", default-features = false }
 fmd-font = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "c1754278a74810729825ea38f18a07a648b974b2", features = ["bundled-faces"] }
 fmd-math = { git = "https://github.com/Dicklesworthstone/franken_markdown", rev = "c1754278a74810729825ea38f18a07a648b974b2" }
 fnp-dtype = { git = "https://github.com/Dicklesworthstone/franken_numpy", rev = "a15d5c32e9330b555b0a653058bcfcff22fcb4ec" }

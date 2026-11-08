@@ -34,7 +34,7 @@ franken_markdown	c1754278a74810729825ea38f18a07a648b974b2	workspace since fm-ydw
 franken_networkx	9d710b1c33e99412c94de7fa4de2f7ce4954110f	enhanced-tier Graph mobjects; never blocks core gates
 frankenpandas	da85cf65df48965e027b2f5aa21b7d0ce6a7e29c	enhanced-tier Data mobjects; never blocks core gates
 frankentorch	523aaf827faf538aa541126ee222fcd7af348410	the only GPU gateway; includes checked Metal compute, native CAMetalLayer presentation, and the governed block-runtime patch consumed by the standard-only Accelerator Annex
-asupersync	c48399f20a9780ef420de64fe504ff922e5afe5e	batch farms + scheduler lab plus the exact-image host process primitive; never in the frame loop; pin rides branch fmn/darwin-exact-image-spawn (333981298 + the Darwin spawn/killpg fix only)
+asupersync	a5d23e8dd2c8d776bd02e2da8e38e6296600e84c	batch farms + scheduler lab plus the exact-image host process primitive; never in the frame loop; the v0.6.2 release tag (crates.io 0.6.2), which carries the Darwin exact-image spawn/killpg fix upstream (58b5db88b) so the fmn/darwin-exact-image-spawn branch pin retires; repinned from c48399f2 (0.3.10) -> a5d23e8d (0.6.2) so every FrankenSuite consumer shares one runtime
 
 [patches]
 # repo	commit	notes
