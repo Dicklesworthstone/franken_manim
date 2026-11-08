@@ -188,6 +188,16 @@ def measure_text(text: str, preamble: str) -> tuple[float, float, float] | str:
     text = text.strip()
     if MULTILINE.search(text):
         return "multi-line"
+    # An sbox is restricted horizontal mode: adjacent dollars are empty
+    # inline shifts there, so a real display can masquerade as one line.
+    # Probe the actual paragraph for possible display syntax; boxed or
+    # escaped dollars and ordinary inline math still keep their one line.
+    if "$$" in text or r"\[" in text or r"\begin" in text:
+        paragraph = measure_paragraph(text, preamble)
+        if isinstance(paragraph, str):
+            return paragraph
+        if paragraph[0] > 1:
+            return "multi-line"
     document = (
         "\\documentclass[preview]{standalone}\n" + preamble + "\n"
         "\\newsavebox\\fmnbox\n\\begin{document}\n"
@@ -234,7 +244,7 @@ def write_text_census(items: list[dict], measured: dict) -> None:
         "# Preamble: the pinned Reference's default template (3b1b/manim 6199a00d); TeX Live",
         "# 2025 on the dev host.",
         f"# Census: every text-mode string of the frozen G0-4 corpus, {len(items)} candidates.",
-        f"# Omitted: {omitted['multi-line']} multi-line (\\\\, \\par or a blank line), {omitted['wraps']}",
+        f"# Omitted: {omitted['multi-line']} multi-line (explicit breaks, blank lines or displays), {omitted['wraps']}",
         f"# wider than the line (the Reference breaks them), {omitted['fragment']} TeX could not typeset alone.",
         "# The multi-line and wider strings are measured as paragraphs in tex_text_paragraphs_census.v1.tsv.",
         "# Regenerate only with scripts/capture_tex_corpus_boxes.py; never edit by hand.",
@@ -273,7 +283,7 @@ LINE = re.compile(r"FMNLINE ([0-9.]+)pt ?/ ?([0-9.]+)pt ?/ ?([0-9.]+)pt")
 PARAGRAPH = re.compile(r"FMNPAR ([0-9.]+)pt ?/ ?([0-9.]+)pt")
 GAPS = re.compile(r"FMNGAPS (-?[0-9.]+)pt ?/ ?(-?[0-9.]+)pt")
 OVERFULL = re.compile(r"Overfull \\hbox \(([0-9.]+)pt too wide\) in paragraph")
-SET_LINE = re.compile(r"^\.\\[hv]box\([^)]*\)x[0-9.]+(?:, glue set (- )?([0-9.]+)(fil+)?)?", re.M)
+SET_LINE = re.compile(r"^\.\\[hv]box\([^)]*\)x[0-9.]+(?:, glue set (- )?([0-9.]+)(fil+)?)?", re.MULTILINE)
 
 
 def measure_paragraph(text: str, preamble: str) -> tuple[int, float, float, float] | str:
@@ -356,7 +366,7 @@ def write_paragraph_census(items: list[dict], measured: dict) -> None:
         "# line and below the last (a list's \\topsep, a display's skips), in ems at 10 pt.",
         "# Preamble: the pinned Reference's default template (3b1b/manim 6199a00d); TeX Live",
         "# 2025 on the dev host.",
-        f"# Census: every text-mode string of the frozen G0-4 corpus with \\\\, \\par or a blank line, or",
+        "# Census: every text-mode string of the frozen G0-4 corpus with explicit breaks, blank lines, displays, or",
         f"# wider than the line: {len(items)} candidates, {fragments} TeX could not typeset alone.",
         "# Regenerate only with scripts/capture_tex_corpus_boxes.py; never edit by hand.",
         "# sha256\tlines\twidth\theight\tdepth\tcount\tclasses (|-separated construct names)",

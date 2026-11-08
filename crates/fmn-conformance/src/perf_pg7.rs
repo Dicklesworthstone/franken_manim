@@ -1755,63 +1755,16 @@ mod tests {
         assert!(text.to_tsv().contains("markup\ttrue\n"));
         assert!(text.to_tsv().contains("cache_state\tnone\n"));
         assert!(!text.to_tsv().contains("memory_front"));
-        // The compiled definitions. fm-pg7-honest-mn4b moved all three: the
-        // cold formula takes a fresh engine per repetition, the cached one
-        // names its single engine, and the text is the marked-up, wrapped
-        // paragraph. The formula pair moves with the TeX engine's fingerprint,
-        // which names the franken_markdown pin, and with q^7+z's result digest.
-        // The 439a910 pin and the fingerprint's new \iint and tall-radical
-        // probe move the formula definitions' engine identity (fm-zxxy).
-        // Their q^7+z result and the complete text definition remain
-        // unchanged; no workload, timing budget or result golden moves.
-        // The c81208f1 provider, AMS faces and structured macro overlays
-        // change the formula definitions' declared engine/inputs (fm-0byq).
-        // Both result goldens and the complete text definition stay fixed.
-        // The e6da6ee1 pin (fm-tex-constructs-t2-1wfq: \TeX, \LaTeX and
-        // \mathchoice) moves the formula definitions' engine identity again,
-        // and so does 2d820c52 (Euler Fraktur's three faces join the roster),
-        // and 37632d2d (fm-0byq: fractions as Ords, amssymb on the AMS faces;
-        // the identity names the provider revision, so a test-only provider
-        // commit moves it too), 4b705d14 (fm-eo8l: amsmath's \mod), and
-        // 1ffcadc9 and 8667819a (fm-ew7o: \dddot as amsmath's operator over a
-        // period row; \ex@ without powf), d99fee96 (the long arrows from CM
-        // pieces, \binrel@'s class for \overset, amsmath's dots look-ahead),
-        // cc470d1a (physics' function arguments in the default pack, whose
-        // macro identity gains the physics flag), 450111a4 (TexText line
-        // breaking, whose macro identity gains the pack's line width),
-        // 04d811db (TeX's delimiter size chain), 4f2bcc95 (script Greek
-        // capitals in cmr7's and cmr5's designs), and e7b4309d
-        // (fm-fmd-math-fuzz-budgets-k8fe: named resource budgets, physics
-        // arguments parsed once; no layout changes, so only the revision moves
-        // the identity). bde70a76 (fm-jefi: declared math sizes and optical
-        // font cuts) moves the formula engine identity again; the canonical
-        // formula outputs and the complete text definition remain unchanged.
-        // d2450292 (fm-q364: EC text metrics and caller-specific font controls)
-        // changes that revision identity too. Both canonical output goldens,
-        // the text definition, all workload axes and budgets remain unchanged.
-        // cafe18b3 (fm-dbinom-in-scripts-r12-x6zi: forced fraction styles)
-        // changes only that revision identity for these formula workloads;
-        // the unchanged canonical output goldens pass on the new provider.
-        // 222c3d4a (fm-j4tni: native inline pifont crosses) changes only
-        // that revision identity here. Both canonical result goldens and
-        // the text definition pass unchanged before these identities move.
-        // 5aa9e44f (accent scripts and exact prime metrics) changes the
-        // provider identity and the engine's double-prime fingerprint probe.
-        // The canonical q^7+z/text outputs, workload and budgets pass unchanged.
-        // 3ca2ebac (TeX underline depth) moves the provider identity; the
-        // unchanged canonical output test passed before this identity refresh.
-        // 26b268f6 (CMEX/MSBM wide-hat metrics) moves the provider identity
-        // and its wide-hat probe. Both result self-goldens passed unchanged
-        // before refreshing these definitions; workloads and budgets stay fixed.
-        // c1754278 (native arrow/tilde metrics and fresh accent alphabets)
-        // changes the provider identity. Actual native pg7-definitions supplies
-        // these formula identities after both canonical result goldens pass
-        // unchanged; the text definition, workloads and budgets stay fixed.
+        // Formula definitions include the pinned provider and engine fingerprint;
+        // even a provider change that preserves layout changes their identities.
+        // Refresh from native pg7-definitions only after both canonical result
+        // self-goldens pass unchanged. Keep workloads, budgets and text identity
+        // fixed; provider qualification history belongs in UPSTREAM_LEDGER.md.
         assert_eq!(
             [cold.digest(), cached.digest(), text.digest()].map(|digest| digest.to_string()),
             [
-                "304cdd198dd14672f3d2974daca5b5639aeb7529244c0b02f696c9804083aee4",
-                "829ff22083b65ec5c5ae379ea82b2931dd864f433cfbd72f8f8a401d7a7987a3",
+                "e92ae4afbbd8c0afd46a83f6bc2497dfcf4b2d172cd4a6c08475f4f304350394",
+                "29e90d9c93cb090cb1771d22597ed2873866fab677c7dee3a22c0df69a8ce6f7",
                 "0fa22e64fe9e1901eea58a596899ec843bc0d6db46f1cd91607925a50fea3e6f",
             ]
         );

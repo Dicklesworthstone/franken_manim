@@ -7553,6 +7553,365 @@ fn tex_pifont_cross_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     Ok(RunOutcome::ok().with_counter("tex_pifont_cross_formulas", 8))
 }
 
+/// fm-mathml-text-islands-ame8a: the public MathML and native library
+/// paths retain the same inline mathematics inside text arguments.
+fn tex_mathml_text_islands_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let engine = &scene_goldens::corpus().tex;
+    let cases = [
+        (true, r"\textbf{a $\pi$ b}", 'π', "<mi>π</mi>"),
+        (false, r"\text{a $\pi$ b}", 'π', "<mi>π</mi>"),
+        (
+            true,
+            r"\textbf{\TeX~$\pi$}",
+            'π',
+            r#"<mtext mathvariant="bold">TeX</mtext>"#,
+        ),
+        (false, r"\textbf{a $\frac{1}{2}+x^2$ b}", 'x', "<mfrac>"),
+        (false, r"x_{\textbf{a $\pi$ b}}", 'π', "<msub>"),
+        (
+            false,
+            r"\text{\underline{a $\pi$ b}}",
+            'π',
+            r#"<menclose notation="bottom">"#,
+        ),
+        (
+            false,
+            r"\textbf{a $\mathbf{x}$ \textit{b} \color{red}c}z",
+            'z',
+            r#"<mstyle mathvariant="bold">"#,
+        ),
+    ];
+    for (text_mode, source, atom, structure) in cases {
+        let node = if text_mode {
+            fmd_math::parse_text(source)
+        } else {
+            fmd_math::parse(source)
+        }
+        .map_err(|error| fail(format!("{source}: public MathML parse: {error}")))?;
+        let xml = fmd_math::to_mathml(&node, !text_mode);
+        let built = if text_mode {
+            fmn_library::TexText::new(source).build(engine)
+        } else {
+            fmn_library::Tex::new(source).build(engine)
+        }
+        .map_err(|error| fail(format!("{source}: native formula builder: {error}")))?;
+        if fmd_math::mathml_well_formed(&xml).is_err()
+            || !xml.contains(structure)
+            || !xml.contains(atom)
+            || !built
+                .typeset
+                .layout
+                .glyphs
+                .iter()
+                .any(|glyph| glyph.ch == atom)
+        {
+            return Err(fail(format!(
+                "{source}: native/MathML atom or structure lost: {xml}"
+            )));
+        }
+        if source.contains(r"\textit")
+            && (!xml.contains(r#"<mtext mathvariant="italic">b</mtext>"#)
+                || !xml.contains(r#"mathcolor="red""#)
+                || !xml.contains("<mi>x</mi>"))
+        {
+            return Err(fail(format!("{source}: text or math scope leaked: {xml}")));
+        }
+        if source.contains(r"\TeX") && !xml.contains("<mtext mathvariant=\"bold\">\u{00A0}</mtext>")
+        {
+            return Err(fail(format!(
+                "{source}: nonbreaking space face lost: {xml}"
+            )));
+        }
+        let mut rest = xml.as_str();
+        while let Some(start) = rest.find("<mtext") {
+            let token = &rest[start..];
+            let body = &token[token.find('>').ok_or_else(|| fail("unclosed mtext"))? + 1..];
+            let end = body
+                .find("</mtext>")
+                .ok_or_else(|| fail("unclosed mtext body"))?;
+            if body[..end].contains('<') {
+                return Err(fail(format!(
+                    "{source}: MathML structure inside mtext: {xml}"
+                )));
+            }
+            rest = &body[end + "</mtext>".len()..];
+        }
+        ctx.event(
+            LogEvent::new("e2e.parity.tex_mathml_text_islands")
+                .field("source", source)
+                .field("text_mode", text_mode)
+                .field("mathml", xml)
+                .field("preserved", "true"),
+        );
+    }
+    Ok(RunOutcome::ok().with_counter("tex_mathml_text_islands", 7))
+}
+
+/// fm-text-ellipsis-r11-52jw: text periods, font stretch and amsmath's
+/// distinct text dotso spacing reach the native builder and certified pixels.
+fn tex_text_ellipsis_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let engine = &scene_goldens::corpus().tex;
+    // Independent default-template T1/amsmath showboxes, in ems. The math
+    // controls prevent a text correction from changing ordinary math dots.
+    let cases = [
+        (r"\dots", [1.333_008, 0.105_530, 0.0]),
+        (r"\ldots", [1.333_008, 0.105_530, 0.0]),
+        (r"\textellipsis", [1.333_008, 0.105_530, 0.0]),
+        (r"a\dots b", [2.388_306, 0.688_720, 0.0]),
+        (r"a\dots{} b", [2.832_642, 0.688_720, 0.0]),
+        (r"$\pi$\dots''", [2.494_330, 0.688_720, 0.0]),
+        (r"\texttt{\dots}", [1.574_615, 0.124_970, 0.0]),
+        (r"\small\dots", [1.233_028, 0.097_197, 0.0]),
+        (r"\Large\dots", [1.827_365, 0.128_172, 0.0]),
+        (r"\underline{\dots}", [1.333_008, 0.105_530, 0.199_990]),
+        (r"\dotso", [1.666_576, 0.105_554, 0.0]),
+        (r"{\dotso}", [1.999_828, 0.105_554, 0.0]),
+        (r"\dotso,", [2.110_948, 0.105_554, 0.194_397]),
+        (r"$\dots$", [1.333_324, 0.105_554, 0.0]),
+        (r"$a\ldots b$", [2.457_741, 0.694_444, 0.0]),
+        (r"$\textellipsis$", [1.333_214, 0.105_554, 0.0]),
+    ];
+    let blank = render_certified_doc(&Stage::new());
+    for (source, expected) in cases {
+        let built = fmn_library::TexText::new(source)
+            .build(engine)
+            .map_err(|error| fail(format!("{source}: native text ellipsis: {error}")))?;
+        let layout = &built.typeset.layout;
+        let measured = [layout.width, layout.height, layout.depth];
+        if measured
+            .into_iter()
+            .zip(expected)
+            .any(|(actual, want)| !actual.is_finite() || (actual - want).abs() >= 1e-4)
+        {
+            return Err(fail(format!(
+                "{source}: text box {measured:?}, independent TeX {expected:?}"
+            )));
+        }
+        if !source.contains(r"\dotso") {
+            let command = [r"\textellipsis", r"\ldots", r"\dots"]
+                .into_iter()
+                .find(|command| source.contains(*command))
+                .ok_or_else(|| fail(format!("{source}: missing ellipsis command")))?;
+            if built.occurrences(command).iter().flatten().count() != 3
+                || layout.glyphs.iter().filter(|glyph| glyph.ch == '.').count() != 3
+            {
+                return Err(fail(format!(
+                    "{source}: three periods or command spans lost"
+                )));
+            }
+        }
+        if built.vmob.children().len() != built.typeset.subs.len()
+            || built.vmob.children().is_empty()
+        {
+            return Err(fail(format!("{source}: ellipsis primitive family lost")));
+        }
+        let mut stage = Stage::new();
+        let text = stage.add(built.vmob.moved_to([0.0; 3]));
+        stage
+            .add_to_scene(text)
+            .map_err(|error| fail(format!("{source}: show ellipsis: {error}")))?;
+        if render_certified_doc(&stage) == blank {
+            return Err(fail(format!("{source}: blank certified frame")));
+        }
+        ctx.event(
+            LogEvent::new("e2e.parity.tex_text_ellipsis")
+                .field("source", source)
+                .field("box_em", format!("{measured:?}"))
+                .field("visible", "true"),
+        );
+    }
+    Ok(RunOutcome::ok().with_counter("tex_text_ellipsis_formulas", 16))
+}
+
+/// fm-texttext-display-math-r11-193h: display boundaries, skips, scoped
+/// declarations and boxed dollar shifts reach native geometry and pixels.
+fn textext_display_paragraphs_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    // Independently captured TeX paragraph boxes, in ems. The ordinary
+    // inline and boxed cases prevent a display-style/paragraph conflation.
+    let cases = [
+        (
+            r"Before $$x$$ After",
+            [2.793_762, 0.688_720, 4.400_000],
+            'x',
+        ),
+        (
+            r"Before $$\frac{a}{b}$$ After",
+            [2.793_762, 0.688_720, 4.674_673],
+            'a',
+        ),
+        (
+            r"Before \begin{equation*}x=y\end{equation*} After",
+            [2.793_762, 0.688_720, 4.400_000],
+            'x',
+        ),
+        (
+            r"Before \begin{gather*}x\\y\end{gather*} After",
+            [17.535_764, 0.688_720, 5.900_000],
+            'x',
+        ),
+        (
+            r"Before \begin{align*}x &= y\\z &= w\end{align*} After",
+            [18.573_837, 0.688_720, 5.900_000],
+            'x',
+        ),
+        (
+            r"\small Before $$x$$ After",
+            [2.584_369, 0.619_849, 3.900_000],
+            'x',
+        ),
+        (
+            r"Before {\small inner $$x$$ middle} After",
+            [5.336_545, 0.688_720, 4.000_000],
+            'x',
+        ),
+        (
+            r"Before $$x$$ $$y$$ After",
+            [2.793_762, 0.688_720, 6.200_000],
+            'x',
+        ),
+        (
+            r"\doublespacing Before $$x$$ After",
+            [2.793_762, 0.688_720, 7.334_833],
+            'x',
+        ),
+        (
+            r"\underline{Before $$x$$ After}",
+            [6.267_914, 0.688_720, 0.199_990],
+            'x',
+        ),
+        (r"Before $x$ After", [6.311_792, 0.688_720, 0.0], 'x'),
+        (
+            r"Before $\displaystyle x$ After",
+            [6.311_792, 0.688_720, 0.0],
+            'x',
+        ),
+    ];
+    let engine = &scene_goldens::corpus().tex;
+    let blank = render_certified_doc(&Stage::new());
+    let mut paragraphs = 0;
+    for (source, expected, expected_atom) in cases {
+        let built = fmn_library::TexText::new(source)
+            .build(engine)
+            .map_err(|error| fail(format!("{source}: display paragraph builder: {error}")))?;
+        let layout = &built.typeset.layout;
+        let measured = [layout.width, layout.height, layout.depth];
+        if measured
+            .into_iter()
+            .zip(expected)
+            .any(|(actual, want)| !actual.is_finite() || (actual - want).abs() >= 1e-4)
+        {
+            return Err(fail(format!(
+                "{source}: paragraph box {measured:?}, real TeX {expected:?}"
+            )));
+        }
+        if !layout.glyphs.iter().any(|glyph| glyph.ch == expected_atom)
+            || built.occurrences(&expected_atom.to_string()).is_empty()
+            || built.vmob.children().len() != built.typeset.subs.len()
+            || built
+                .vmob
+                .children()
+                .iter()
+                .any(|child| child.points().is_empty())
+        {
+            return Err(fail(format!("{source}: paragraph source or geometry lost")));
+        }
+        let mut stage = Stage::new();
+        let paragraph = stage.add(built.vmob.moved_to([0.0; 3]));
+        stage
+            .add_to_scene(paragraph)
+            .map_err(|error| fail(format!("{source}: show paragraph: {error}")))?;
+        if render_certified_doc(&stage) == blank {
+            return Err(fail(format!("{source}: blank certified paragraph frame")));
+        }
+        ctx.event(
+            LogEvent::new("e2e.parity.textext_display_paragraph")
+                .field("source", source)
+                .field("box_em", format!("{measured:?}"))
+                .field("visible", "true"),
+        );
+        paragraphs += 1;
+    }
+    // The scoped display flow must preserve the ordinary closing italic
+    // kern. Compare offsets within the final line to remove centering;
+    // the period is TeX's independent \nocorrlist negative control.
+    let source = r"\textit{B $$y$$ c}ZZZZ";
+    let built = fmn_library::TexText::new(source)
+        .build(engine)
+        .map_err(|error| fail(format!("italic display builder: {error}")))?;
+    let period = fmn_library::TexText::new(r"\textit{B $$y$$ c}.ZZZZ")
+        .build(engine)
+        .map_err(|error| fail(format!("italic punctuation control: {error}")))?;
+    let x_of = |layout: &fmd_math::Layout, ch| {
+        layout
+            .glyphs
+            .iter()
+            .find(|glyph| glyph.ch == ch)
+            .map(|glyph| glyph.x)
+            .ok_or_else(|| fail(format!("italic display lost {ch}")))
+    };
+    let layout = &built.typeset.layout;
+    let uncorrected = &period.typeset.layout;
+    let correction = (x_of(layout, 'Z')? - x_of(layout, 'c')?)
+        - (x_of(uncorrected, '.')? - x_of(uncorrected, 'c')?);
+    if !correction.is_finite()
+        || !layout.width.is_finite()
+        || (correction - 0.056_528).abs() >= 1e-5
+        || (layout.width - 2.960_246).abs() >= 1e-4
+    {
+        return Err(fail(format!(
+            "italic display correction {correction}, width {}",
+            layout.width
+        )));
+    }
+    let mut stage = Stage::new();
+    let paragraph = stage.add(built.vmob.moved_to([0.0; 3]));
+    stage
+        .add_to_scene(paragraph)
+        .map_err(|error| fail(format!("show italic paragraph: {error}")))?;
+    if render_certified_doc(&stage) == blank {
+        return Err(fail("blank certified italic paragraph frame"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.parity.textext_display_paragraph")
+            .field("source", source)
+            .field("italic_correction", correction.to_string())
+            .field("visible", "true"),
+    );
+    paragraphs += 1;
+    let mut boxed_display_refusals = 0;
+    for environment in ["equation*", "gather*", "align*"] {
+        for command in ["underline", "text", "cancel"] {
+            let source = format!(
+                r"Before \{command}{{inside \begin{{{environment}}}x\end{{{environment}}} after}} After"
+            );
+            let reason = match fmn_library::TexText::new(&source).build(engine) {
+                Ok(_) => {
+                    return Err(fail(format!(
+                        "{source}: a display escaped its restricted text box"
+                    )));
+                }
+                Err(error) => error.to_string(),
+            };
+            if !reason.contains(&format!("env:{environment}")) || !reason.contains("boxed text") {
+                return Err(fail(format!(
+                    "{source}: imprecise boxed display error: {reason}"
+                )));
+            }
+            ctx.event(
+                LogEvent::new("e2e.parity.textext_boxed_display")
+                    .field("environment", environment)
+                    .field("command", command)
+                    .field("error", reason)
+                    .field("refused", "true"),
+            );
+            boxed_display_refusals += 1;
+        }
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("textext_display_paragraphs", paragraphs)
+        .with_counter("textext_boxed_display_refusals", boxed_display_refusals))
+}
+
 /// The paragraph `parity.textext_paragraph_lines.v1` sets. It is wider
 /// than the Reference's 345 pt line, and TeX breaks it after "of", the 63rd
 /// of its 128 glyphs. fmd-math's placement tests pin that break, the line
@@ -14808,6 +15167,55 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "parity.tex_mathml_text_islands.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(tex_mathml_text_islands_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tex_mathml_text_islands", 7),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.parity.tex_mathml_text_islands",
+            vec![FieldPred::str_eq("preserved", "true")],
+        )],
+    ));
+    specs.push(spec(
+        "parity.tex_text_ellipsis.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(tex_text_ellipsis_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tex_text_ellipsis_formulas", 16),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.parity.tex_text_ellipsis",
+            vec![FieldPred::str_eq("visible", "true")],
+        )],
+    ));
+    specs.push(spec(
+        "parity.textext_display_paragraphs.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(textext_display_paragraphs_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("textext_display_paragraphs", 13),
+            counter_eq("textext_boxed_display_refusals", 9),
+        ],
+        vec![
+            LogExpect::span_present(
+                "e2e.parity.textext_display_paragraph",
+                vec![FieldPred::str_eq("visible", "true")],
+            ),
+            LogExpect::span_present(
+                "e2e.parity.textext_boxed_display",
+                vec![FieldPred::str_eq("refused", "true")],
+            ),
+        ],
+    ));
+    specs.push(spec(
         "parity.textext_paragraph_lines.v1",
         ScenarioClass::ParityDrill,
         Surface::RustApi,
@@ -17943,6 +18351,36 @@ fn tex_pifont_cross_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "parity.tex_pifont_cross.v1")
         .expect("the inline pifont cross scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn tex_mathml_text_islands_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "parity.tex_mathml_text_islands.v1")
+        .expect("the mixed text/MathML scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn tex_text_ellipsis_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "parity.tex_text_ellipsis.v1")
+        .expect("the native text ellipsis scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn textext_display_paragraphs_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "parity.textext_display_paragraphs.v1")
+        .expect("the TexText display paragraph scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

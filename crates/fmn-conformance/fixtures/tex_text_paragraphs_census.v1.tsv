@@ -9,8 +9,8 @@
 # line and below the last (a list's \topsep, a display's skips), in ems at 10 pt.
 # Preamble: the pinned Reference's default template (3b1b/manim 6199a00d); TeX Live
 # 2025 on the dev host.
-# Census: every text-mode string of the frozen G0-4 corpus with \\, \par or a blank line, or
-# wider than the line: 944 candidates, 19 TeX could not typeset alone.
+# Census: every text-mode string of the frozen G0-4 corpus with explicit breaks, blank lines, displays, or
+# wider than the line: 946 candidates, 19 TeX could not typeset alone.
 # Regenerate only with scripts/capture_tex_corpus_boxes.py; never edit by hand.
 # sha256	lines	width	height	depth	count	classes (|-separated construct names)
 279bd5d4bb1d55c3b0074080595f0544a8e9e389d893b655871c0f55d4ecf1aa	1	5.19318	0.68872	0.00000	4	\\
@@ -430,6 +430,7 @@ f26bd2527acfc1253423c2229a935fcdee56a465aa2463b08b76e3c6ab765035	2	4.69330	0.688
 6e1856b7e0470a18d983b4b8969bb5f74113f1d23cbe9ce4a7dbe664edd5ccd5	2	6.10962	0.68872	1.39440	1	\\
 6e3abeeec8eadbc73b7abc15c5018c220a53d1027761ca926a8f06edc51e8e6d	2	5.74860	0.68872	1.20000	1	\\
 6e4c2b6be330982f8b9afcb286a6796bd7bc83f6b3b6431914ff4183f43393fa	2	8.80618	0.68872	1.39440	1	\\
+6e7197e159b01818850ee5196d2f7defec5f69302c97b5f8fc9413af514007ae	4	32.39749	0.84500	7.03315	1	\choose|\text|math-island|script:sup
 6ed88a6701fddfa27433845959d934eed827e601194bc14def4a2bf226bbcb24	2	4.14066	0.68872	1.20000	1	\\
 6ef4e804f579a9c29b55dae26d17cc2409a72f861357b7394e733973e4ae6000	2	8.77841	0.68872	1.39440	1	\\
 6f0c37bf7f66520cb9d132d60ea1c4aeacfb63f959e22f6cec2f15525244f116	2	11.01120	0.68872	1.20000	1	\\
@@ -482,6 +483,7 @@ f26bd2527acfc1253423c2229a935fcdee56a465aa2463b08b76e3c6ab765035	2	4.69330	0.688
 7c03595131edceb97cea91f1f7ba643d8ae26f1b080e682147dc734798e6b0f0	2	4.38782	0.68872	1.20000	1	\\
 7c1b33eda6600af592f1b52d19b2106bc6debb2fdb15eab2e3a65f570419a71a	2	9.06445	0.68872	1.44994	1	\\
 7c279533200cbaacbf4d1845e18856f27169b582eba780029ded4e2f27c057a4	2	8.89227	0.68872	1.39440	1	\\
+7c3ad7b4e920bccfca3d6b44ef22fd27b130d77601f907e25bd0c61a086a5008	2	5.11264	0.68872	2.28333	1	math-island
 7c606b24cce32a57b1c932913ad6f208978c01bcd9d0b34c8ea9cb70416ad351	2	12.94406	0.74982	1.20000	1	\\
 7c654acfc14217b6ed2dbc8dfd62dc94abb8ea71eb05f8dee4410cc6da949134	2	6.18738	0.68872	1.20000	1	\\
 7defe6e4de0ef526b1454fc160bd6a695fce76bf0493090ad2db10679b7bc6b0	3	3.40195	0.68872	2.40000	1	\\

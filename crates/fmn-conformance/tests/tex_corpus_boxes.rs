@@ -95,34 +95,44 @@ const CENSUS_WITHIN_5_PERCENT_FLOOR: usize = 4166;
 /// 4167 at 04d811db, 4171 without tipa (C-41).
 const CENSUS_WITHIN_10_PERCENT_FLOOR: usize = 4171;
 
-/// Text-mode census strings within 5% of TeX's box, of the 3747 text-mode
+/// Text-mode census strings within 5% of TeX's box, of the 3746 text-mode
 /// corpus strings the Reference sets on one line
-/// (fm-texttext-box-oracle-r11-hkdv): 3733 when first measured (franken_markdown
-/// cc470d1a), covering 4666 of their 4689 occurrences. Of the 14 misses, six
+/// (fm-texttext-box-oracle-r11-hkdv). The original 3747-row census had 3733
+/// matches at franken_markdown cc470d1a, covering 4666 of 4689 occurrences.
+/// Of those original 14 misses, six
 /// are C-27's tipa `\;` and `\!` (deliberately not replicated), two are the
 /// EC text fonts' kerning (fm-q364), and two are text-mode `\dots`
 /// (`\textellipsis`). With T1 EC text metrics and the actual default font
 /// control (d2450292, fm-q364), 3736 match within 5%, covering 4675
-/// occurrences. Raise it when layout improves; never lower it to land a change.
-const TEXT_CENSUS_WITHIN_5_PERCENT_FLOOR: usize = 3736;
-/// The same at 10%: 3743 at cc470d1a; 3744 at d2450292.
-const TEXT_CENSUS_WITHIN_10_PERCENT_FLOOR: usize = 3744;
+/// occurrences. The display audit moves one falsely boxed display into the
+/// paragraph census, retaining all 3736 matches and 4675 verified occurrences.
+/// Text periods and font stretch (b6cc942, fm-text-ellipsis-r11-52jw) bring
+/// both ellipsis misses into the band: 3738 strings and 4678 occurrences,
+/// with no passing row lost and every original paragraph still retained.
+/// Raise it when layout improves; never lower it to land a change.
+const TEXT_CENSUS_WITHIN_5_PERCENT_FLOOR: usize = 3738;
+/// The same at 10%: 3743 at cc470d1a; 3744 at d2450292; 3745 at b6cc942.
+const TEXT_CENSUS_WITHIN_10_PERCENT_FLOOR: usize = 3745;
 
 /// Paragraph census strings within 5% of TeX (the widest line, the first
-/// line's height and the depth to the last line), of the 925 text-mode corpus
+/// line's height and the depth to the last line), of the 927 text-mode corpus
 /// strings that are multi-line or wider than the Reference's 345 pt line and
-/// that TeX typesets alone (fm-texttext-line-breaking-r11-bfdx): 915 when
-/// first measured (franken_markdown 450111a4), covering 946 of their 956
+/// that TeX typesets alone (fm-texttext-line-breaking-r11-bfdx). The original
+/// 925-row census had 915 matches at franken_markdown 450111a4, covering 946 of 956
 /// occurrences. Of the 10 misses, eight set display mathematics (`$$…$$`,
 /// `align*`) inside the paragraph, which TeX sets between display skips and
 /// fmd-math sets inline; one is `\Large`'s optical size and one the EC fonts'
 /// kerning (fm-q364). T1 EC text metrics at the declared optical size
 /// (d2450292, fm-q364) raise the counts to 917 at both thresholds, covering
-/// 948 occurrences within 5%. Raise it when layout improves; never lower it
-/// to land a change.
-const PARAGRAPH_CENSUS_WITHIN_5_PERCENT_FLOOR: usize = 917;
-/// The same at 10%: 916 at 450111a4; 917 at d2450292.
-const PARAGRAPH_CENSUS_WITHIN_10_PERCENT_FLOOR: usize = 917;
+/// 948 occurrences within 5%. Native display paragraphs and scoped italic
+/// correction (aa432cf2, fm-texttext-display-math-r11-193h) fix the original
+/// eight misses. Independent Reference paragraph capture also moves a falsely
+/// boxed display and restores a rejected display environment: all 925 original
+/// rows remain byte-identical, and all 927 rows (958 occurrences) now match at
+/// both thresholds. Raise it when layout improves; never lower it to land a change.
+const PARAGRAPH_CENSUS_WITHIN_5_PERCENT_FLOOR: usize = 927;
+/// The same at 10%: 916 at 450111a4; 917 at d2450292; 927 at aa432cf2.
+const PARAGRAPH_CENSUS_WITHIN_10_PERCENT_FLOOR: usize = 927;
 
 fn rows() -> Vec<OracleRow> {
     parse_oracle_fixture(ORACLE_FIXTURE).expect("the oracle fixture parses")

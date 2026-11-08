@@ -8,8 +8,8 @@
 # Preamble: the pinned Reference's default template (3b1b/manim 6199a00d); TeX Live
 # 2025 on the dev host.
 # Census: every text-mode string of the frozen G0-4 corpus, 4705 candidates.
-# Omitted: 919 multi-line (\\, \par or a blank line), 25
-# wider than the line (the Reference breaks them), 14 TeX could not typeset alone.
+# Omitted: 921 multi-line (explicit breaks, blank lines or displays), 25
+# wider than the line (the Reference breaks them), 13 TeX could not typeset alone.
 # The multi-line and wider strings are measured as paragraphs in tex_text_paragraphs_census.v1.tsv.
 # Regenerate only with scripts/capture_tex_corpus_boxes.py; never edit by hand.
 # sha256	width	height	depth	count	classes (|-separated construct names)
@@ -2078,7 +2078,6 @@ ff4853c23c66a1992f515448ae5f357f7328cc1fe3327c7902ed065b32e40e15	9.38104	0.68872
 7bf40f6c92528232e057e6c8bd669467d97ed59d48b991c00b0f0dabc5cf0ed4	5.22650	0.74982	0.24994	1	(plain)
 7c0dce0518f3efca86a273e9e883a5bd22c3aac7275dd9e3638aa64df1967601	8.30353	0.68872	0.19440	1	(plain)
 7c0f99f43e127296df9cbe84c72656d4c3bfba87157ed9a5508fad34dfbc65b8	3.52692	0.68872	0.00000	1	(plain)
-7c3ad7b4e920bccfca3d6b44ef22fd27b130d77601f907e25bd0c61a086a5008	10.37524	0.68872	0.19440	1	math-island
 7c570107af4d019106e778cb2a9ddb863df67d013d309a99c48e87f1e690e7ca	4.27951	0.68872	0.19440	1	(plain)
 7c64309d1a53f7e0e0e1e568d6908222f3243dfa1f5960f397e8ca918d906768	4.47668	0.68872	0.19440	1	(plain)
 7c6cc477bba2947f255a6a2aacdd354fa83178f0ad9196ad2b4a71c7c9f65bf8	4.37671	0.68872	0.00000	1	(plain)
