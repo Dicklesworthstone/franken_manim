@@ -1,28 +1,34 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** the final MathML consumer snapshot (`3312ad47` plus the reviewed
-patch, provider `33ff7d7db9a671b92c34fb8e55f79e498797cb28`) was audited on
+**Status:** joined main `28a0cd52` plus the two retained OBJ regression inputs,
+with provider `33ff7d7db9a671b92c34fb8e55f79e498797cb28`, asupersync 0.6.2,
+fnp 0.5.0 and ft-kernel-metal 0.1.1, was audited on
 2026-11-08 through all four original commands, owned-host DSR/RCH
-`20261108T131544-3352414`. The locked normal tree, WASM target build and
+`20261108T145103-104814`. The locked normal tree, WASM target build and
 release Node smoke exit 0. Node retains digest `1f248a71347b82aa`,
 `process=capability-absent`, `topology=1-cpu`, `semantic_oracles=111111`,
 and `mirrored=101000`.
 
 The original package command builds the serial and shared-memory artifacts
 with its required tools, then exits 1: the serial bundler WASM is
-**1,021,982 bytes**, over the unchanged **514,521-byte** budget. npm and
+**1,021,980 bytes**, over the unchanged **514,521-byte** budget. npm and
 browser checks are **unreached**. The combined four-command gate remains
 **failed**; fm-8j70 remains open. This dirty-source diagnostic does not qualify
 a release, an installed Python portal, or browser-native typography.
 
 The frozen input manifest is
-`/run/user/1000/fmn-execute-20261108-review8-mathml-consumer-inputs-v4.json`,
-SHA-256 `890ddc36d3f88c7fe7bde5756f64d9ec5d90ddd6922c3956da7a7ab74606b64b`.
-All 8,116 input rows, executable bits, HEAD and index stay unchanged across
+`/run/user/1000/fmn-execute-20261108-review8-joined-consumer-inputs-v1.json`,
+SHA-256 `e26ce545285549d4aefdb33f4912fd55f96cc3a0291ea75f4de946ee552dfc77`.
+All 4,440 input rows and executable bits stay unchanged across
 execution, as does DSR's source fingerprint. The actual package artifacts are
-under `/data/ssd/tmp/fmn-execute-20261108-review8-mathml-consumer-wasm-package-v2`.
+under `/data/ssd/tmp/fmn-execute-20261108-review8-joined-consumer-wasm-package-v1`.
 The current three lock hashes below bind this audit; the auxiliary smoke lock
-is unchanged. This audit does not qualify native typography in the browser.
+is `e307b83a`. This audit does not qualify native typography in the browser.
+
+The pre-merge MathML snapshot, with the older asupersync/fnp/ft pins, was audited
+as DSR `20261108T131544-3352414` on manifest `890ddc36d3f88c7fe7bde5756f64d9ec5d90ddd6922c3956da7a7ab74606b64b`.
+It exited 0/0/0/1 at 1,021,982 bytes. Its results remain historical and do not
+qualify the dependency closure of the joined main.
 
 The preceding ellipsis audit (`b6cc942`, DSR `20261108T111527-2370711`)
 also exited 0/0/0/1 with the same package size. Its frozen manifest
