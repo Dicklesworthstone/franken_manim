@@ -106,7 +106,8 @@ metal	0.33.0	crates-io	c7047791b5bc903b8cd963014b355f71dc9864a9a0b727057676c1dca
 objc	0.2.7	crates-io	915b1b472bc21c53464d6c8461c9d3af805ba1ef837e1cac254428f4a77177b1	-	MIT	no	no	objc	no	expansion	ffi	fm-xsz Objective-C runtime FFI through the pinned ft gateway	fm	with-ft-pin
 paste	1.0.15	crates-io	57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a	-	MIT/Apache-2.0	yes	yes	no	no	forbid	build	fm-xsz Metal paste proc-macro build closure	fm	with-ft-pin
 syn	3.0.3	crates-io	53e9bae58849f64dfa4f5d5ae372c8341f7305f82a3868709269343628b659a3	-	MIT/Apache-2.0	yes	no	no	no	expansion	build	fm-xsz Metal foreign-types macro parser; G0-5 independently pins syn 2.0.119	fm	with-ft-pin
-ft-kernel-metal	0.1.0	git+frankentorch@SUITE.lock	-	-	MIT+rider	no	no	Metal	no	expansion	ffi	fm-xsz sanctioned Metal compute gateway; rev must equal the SUITE.lock frankentorch pin	fm	suite-lock-ritual
+ft-kernel-metal	0.1.1	git+frankentorch@SUITE.lock	-	-	MIT+rider	no	no	Metal	no	expansion	ffi	fm-xsz sanctioned Metal compute gateway; rev must equal the SUITE.lock frankentorch pin	fm	suite-lock-ritual
+ft-kernel-metal	0.1.0	git+frankentorch@SUITE.lock	-	-	MIT+rider	no	no	Metal	no	expansion	ffi	G0-8 accelerator spike only: spikes/g0-8-accelerator/Cargo.lock retains this historical ft-kernel-metal proof revision by design (docs/planning/UPGRADE_LOG.md); the shipped closure resolves 0.1.1 at the SUITE.lock frankentorch pin	fm	suite-lock-ritual
 
 # --- frankenscipy closure: fsci-integrate adaptive RK45 + dense output (fm-2u6, §12.4) ---
 # The first suite-foundation runtime expansion since the closure froze:

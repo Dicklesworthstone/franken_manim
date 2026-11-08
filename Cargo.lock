@@ -1316,11 +1316,12 @@ dependencies = [
 
 [[package]]
 name = "ft-kernel-metal"
-version = "0.1.0"
-source = "git+https://github.com/Dicklesworthstone/frankentorch?rev=523aaf827faf538aa541126ee222fcd7af348410#523aaf827faf538aa541126ee222fcd7af348410"
+version = "0.1.1"
+source = "git+https://github.com/Dicklesworthstone/frankentorch?rev=c611501c0280ed09a796c517e071ff78ecb61c5a#c611501c0280ed09a796c517e071ff78ecb61c5a"
 dependencies = [
  "core-graphics-types",
  "foreign-types",
+ "half",
  "metal",
  "objc",
 ]

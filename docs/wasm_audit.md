@@ -23,7 +23,21 @@ Logs are in the named DSR run; actual artifacts remain at
 `/data/ssd/tmp/fmn-execute-20261107-review2-main-wasm-package`.
 The older isolated native candidate's WASM results are separate evidence.
 
-Re-run, 2026-11-08, against `Cargo.lock` `94d01d32`, `SUITE.lock` `56b01581` and
+Re-run, 2026-11-08, against `Cargo.lock` `8067eb7d` and `SUITE.lock` `68c4edc4`, for the
+frankentorch repin from `523aaf82` to `c611501c` (ft-kernel-metal 0.1.0 -> 0.1.1). The
+`Cargo.lock` delta is that one package plus its new edge to `half` 2.7.1, which the lock
+already held; `wasm-smoke/Cargo.lock` is unchanged. ft-kernel-metal enters only through
+fmn-render's `metal` feature, which no wasm graph enables.
+
+- **VERIFIED (mechanical):** the path-normalized `cargo tree -p fmn-wasm --target
+  wasm32-unknown-unknown -e normal --prefix none --locked` is byte-identical to the
+  asupersync re-run below (134 lines).
+- **VERIFIED (build):** `cargo build --locked -p fmn-wasm --target wasm32-unknown-unknown`
+  exits 0 on the macos-aarch64 dev host.
+- Not re-run: the wasm-smoke Node execution (its lock and graph are unchanged) and the
+  package/browser gate. This is no fresh smoke, package, browser or size-budget pass.
+
+Earlier re-run, 2026-11-08, against `Cargo.lock` `94d01d32`, `SUITE.lock` `56b01581` and
 `wasm-smoke/Cargo.lock` `1a623bb7`, for the asupersync repin from `c48399f2` (0.3.10)
 to the `v0.6.2` tag `a5d23e8d`. Both lock deltas are exactly the four asupersync-repo
 packages (`asupersync` 0.3.10 -> 0.6.2; `franken-decision`, `franken-evidence` and
@@ -46,7 +60,7 @@ so none of the four is reachable from a wasm graph. Run on the macos-aarch64 dev
 - Before this re-run the lock markers at the foot of this audit had not been re-bound
   since `SUITE.lock` `f855c38e` / `Cargo.lock` `19af6e49`; the HEAD it starts from
   (`20f6db41`, `SUITE.lock` `5b4792e2`, `Cargo.lock` `896d4a40`) already failed
-  `wasm_audit_is_bound_to_current_locks`. The markers now name this re-run's locks.
+  `wasm_audit_is_bound_to_current_locks`. This re-run re-bound the markers to its locks.
 
 Earlier, the timing/audio merge (`fd50648d`) was also attempted through
 the original four commands, DSR `20261105T152601-24491/1`. Its frozen 4,413-entry
@@ -956,8 +970,8 @@ The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
-- `SUITE.lock` SHA-256: `56b015810741d7ac5926eb39f4a7f9259a726ff1612d63a13aa46168acc8f9c2`
-- `Cargo.lock` SHA-256: `94d01d3216eda4f81c422688d0d61f185b36c0ac1d37504acdd3566922bdd12b`
+- `SUITE.lock` SHA-256: `68c4edc46cf94fe9e79531200d11ddb1596f97f3ce027d701ba662dbf6aa411e`
+- `Cargo.lock` SHA-256: `8067eb7de9209b3d252a6a11ed793de4d63e51c84c25cbd744d17f3b256d9174`
 - Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `1a623bb7c44ca1eb8195c6e19f89058626daea0aa13ee8865a68faf3fcdf2ef6`
 
 The earlier 0.5.0 release bump re-bound the lock identities at that revision.
