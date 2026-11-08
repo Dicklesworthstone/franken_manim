@@ -648,21 +648,21 @@ dependencies = [
 
 [[package]]
 name = "fnp-dtype"
-version = "0.2.0"
-source = "git+https://github.com/Dicklesworthstone/franken_numpy?rev=a15d5c32e9330b555b0a653058bcfcff22fcb4ec#a15d5c32e9330b555b0a653058bcfcff22fcb4ec"
+version = "0.5.0"
+source = "git+https://github.com/Dicklesworthstone/franken_numpy?rev=6492ff310c45ad72abf27e4394f68b9059770193#6492ff310c45ad72abf27e4394f68b9059770193"
 dependencies = [
  "half",
 ]
 
 [[package]]
 name = "fnp-ndarray"
-version = "0.2.0"
-source = "git+https://github.com/Dicklesworthstone/franken_numpy?rev=a15d5c32e9330b555b0a653058bcfcff22fcb4ec#a15d5c32e9330b555b0a653058bcfcff22fcb4ec"
+version = "0.5.0"
+source = "git+https://github.com/Dicklesworthstone/franken_numpy?rev=6492ff310c45ad72abf27e4394f68b9059770193#6492ff310c45ad72abf27e4394f68b9059770193"
 
 [[package]]
 name = "fnp-random-core"
-version = "0.2.0"
-source = "git+https://github.com/Dicklesworthstone/franken_numpy?rev=a15d5c32e9330b555b0a653058bcfcff22fcb4ec#a15d5c32e9330b555b0a653058bcfcff22fcb4ec"
+version = "0.5.0"
+source = "git+https://github.com/Dicklesworthstone/franken_numpy?rev=6492ff310c45ad72abf27e4394f68b9059770193#6492ff310c45ad72abf27e4394f68b9059770193"
 
 [[package]]
 name = "foldhash"
