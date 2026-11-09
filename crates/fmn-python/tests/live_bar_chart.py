@@ -3,6 +3,7 @@ import copy
 import itertools
 from pathlib import Path
 import tempfile
+from types import MethodType
 import unittest
 
 import manimlib as m
@@ -27,6 +28,100 @@ def snapshots(obj):
 
 
 class LiveBarChartTests(unittest.TestCase):
+    def test_stock_updates_use_one_native_crossing_for_detached_and_bound_charts(self):
+        for count in (2, 64):
+            for bound in (False, True):
+                with self.subTest(bars=count, bound=bound):
+                    obj = chart((.5,) * count)
+                    if bound:
+                        scene = m.Scene()
+                        scene.add(obj)
+                    for bar in obj.bars:
+                        bar.needs_new_unit_normal = False
+                    m._crossing_stats_reset()
+                    self.assertIsNone(obj.change_bar_values((-.5,) * count))
+                    counts = m._crossing_stats_snapshot()
+                    self.assertEqual(counts['field_write'], 1, counts)
+                    self.assertEqual(counts['total'], 1, counts)
+                    self.assertTrue(all(bar.needs_new_unit_normal for bar in obj.bars))
+
+    def test_native_batch_records_match_authored_fallback_after_affine_and_signed_updates(self):
+        matrix = np.array(((-1.3, .27, 0), (.15, .73, 0), (.21, -.19, 1.)))
+        for bound in (False, True):
+            with self.subTest(bound=bound):
+                fast, reference = chart(), chart()
+                for obj in (fast, reference):
+                    if bound:
+                        scene = m.Scene()
+                        scene.add(obj)
+                    # Keep native lazy f64 placements until the update itself.
+                    obj.apply_matrix(matrix).shift((.123456789, -.987654321, .333333333))
+                calls = []
+                for bar in reference.bars:
+                    original = bar.get_points
+
+                    def authored(self, original=original):
+                        calls.append(self)
+                        return original()
+
+                    bar.get_points = MethodType(authored, bar)
+                for values in ((0., -.5), (.75, 0.), (-.25, .5), (.5, .25)):
+                    fast.change_bar_values(values)
+                    reference.change_bar_values(values)
+                    for actual, expected in zip(fast.bars, reference.bars):
+                        # Includes point, joint-angle, fill and stroke lanes:
+                        # the f32 publication/metadata order must also agree.
+                        self.assertEqual(actual.data.tobytes(), expected.data.tobytes())
+                    np.testing.assert_array_equal(fast.y_axis.get_start(), reference.y_axis.get_start())
+                    np.testing.assert_array_equal(fast.y_axis.get_end(), reference.y_axis.get_end())
+                self.assertEqual(len(calls), 8)
+
+    def test_native_prefix_does_not_validate_or_read_malformed_untouched_suffix(self):
+        obj = chart((.5, .25, .75))
+        obj.bars[2].insert_n_curves(1)
+        before = obj.bars[2].data.tobytes()
+        obj.bars[2].get_points = lambda: self.fail('untouched suffix was read')
+        m._crossing_stats_reset()
+        obj.change_bar_values((-.5,))
+        counts = m._crossing_stats_snapshot()
+        self.assertEqual(counts['total'], 1, counts)
+        self.assertEqual(obj.bars[2].data.tobytes(), before)
+
+    def test_authored_resize_and_parent_refresh_hooks_remain_observable(self):
+        obj = chart()
+        calls = []
+        bar = obj.bars[0]
+        original_resize = bar.resize_points
+        original_refresh = obj.refresh_bounding_box
+
+        def resize(self, *args, **kwargs):
+            calls.append('resize')
+            return original_resize(*args, **kwargs)
+
+        def refresh(self, *args, **kwargs):
+            calls.append('parent')
+            return original_refresh(*args, **kwargs)
+
+        bar.resize_points = MethodType(resize, bar)
+        obj.refresh_bounding_box = MethodType(refresh, obj)
+        obj.change_bar_values((-.5,))
+        self.assertEqual(calls, ['resize', 'parent'])
+
+    def test_degenerate_authored_axis_and_bar_width_keep_existing_fallback(self):
+        for collapse in ('axis', 'width'):
+            with self.subTest(collapse=collapse):
+                obj = chart()
+                if collapse == 'axis':
+                    start = obj.y_axis.get_start().copy()
+                    obj.y_axis.set_points(np.tile(start, (3, 1)))
+                else:
+                    obj.bars[0].stretch(0., 0)
+                before = obj.bars[0].get_points().copy()
+                height = (obj.y_axis.get_end() - obj.y_axis.get_start()) * obj._fmn_bar_height_fraction
+                obj.change_bar_values((-.5,))
+                np.testing.assert_array_equal(obj.bars[0].get_points(),
+                    geometry(before[4], before[6], height, -.5).astype(np.float32))
+
     def test_bars_recover_from_zero_and_cross_sign_without_baseline_drift(self):
         obj = chart()
         before = snapshots(obj)

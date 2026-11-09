@@ -93,9 +93,41 @@ frame jobs as other supported transforms. Updaters, live views, aliases, and
 other effects continue to control admission through the existing classifier.
 No new animation loop or callback-purity inference is introduced.
 
-## Admission and failures
+## Python charts
 
-Charts admit at most 4,096 bars and 4,096 value-axis tick intervals.
+The existing Python API uses the same native value-update kernel for ordinary
+rectangles and axes:
+
+```python
+from manimlib import BarChart, Scene, linear
+
+class Results(Scene):
+    def construct(self):
+        chart = BarChart([0.25, 0.0, -0.5], label_y_axis=False)
+        self.add(chart)
+        self.play(chart.animate.change_bar_values([0.75, -0.5, 0.0]),
+                  run_time=1, rate_func=linear)
+        chart.change_bar_values([0.0, 0.5])  # Update only the first two bars.
+        self.wait(0.5)
+```
+
+A stock update crosses into native code once for the selected bars, including
+when called from an updater or on a detached chart. Numeric inputs are admitted
+before geometry planning; all targets are ready before the first live write.
+Bar identities, exported point views, style records, children, and updater
+registrations remain attached. The normal Python f32 point-publication and
+joint-angle refresh order is preserved, including after affine transforms.
+
+Authored point getters, setters, resize hooks, axis descriptors, ancestor
+refresh hooks, and custom schemas retain the existing Python dispatch path.
+Degenerate authored geometry also uses that path when the native binding
+cannot represent it. The existing animation builder and Transform lifecycle
+continue to own animated updates, and updater callbacks retain their ordinary
+execution and purity rules.
+
+## Native admission and failures
+
+Native charts admit at most 4,096 bars and 4,096 value-axis tick intervals.
 Values must be finite; height, width, and
 `max_value` must be finite and positive; generated coordinates must fit finite
 f32 records. A replacement slice may be shorter than the bar count but cannot
@@ -125,7 +157,14 @@ zero/sign changes.
 cargo test --locked -p fmn-library --test data_mobjects
 cargo test --locked -p fmn --test native_bar_chart
 cargo test --locked -p fmn-conformance --test e2e_scenarios live_bar_chart_scenario_passes
+cargo test --locked -p fmn-python --lib portal_bar_chart::tests::native_bar_chart_batch
+python3 -m unittest discover -s crates/fmn-python/tests -p test_bar_chart_batch_protocol.py
 ```
+
+The Python bridge suite checks complete record bytes against the authored
+fallback, live views, one-crossing updates, prefix isolation, hook dispatch,
+and rendered tracker transitions. The host-only protocol tests exercise
+admission and callback ordering without requiring the compiled extension.
 
 These are validation entry points. The execution report for a change must
 separately state which commands ran and which were blocked.

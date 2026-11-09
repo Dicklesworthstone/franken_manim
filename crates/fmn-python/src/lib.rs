@@ -25,6 +25,7 @@ pub mod perf_harness;
 mod portal_assignment;
 mod portal_audio;
 mod portal_autotune;
+mod portal_bar_chart;
 #[cfg(any(test, feature = "gauntlet"))]
 mod portal_console;
 mod portal_network;
@@ -13719,6 +13720,7 @@ fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<(
     )?;
     portal_typography::install(module)?;
     portal_network::install(module)?;
+    portal_bar_chart::install(module)?;
     portal_texture::install(module)?;
     execute_bootstrap(py, module)?;
     portal_recording::install(module)?;

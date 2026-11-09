@@ -7,9 +7,12 @@ import itertools
 import math
 
 from .graphing import _bind_method
+from .movement import _changed, _class_implementation, _implementation, _protocols
 
 _MAX_BARS = 4096
+_MAX_PARENTS = 65_536
 _BUSY = '_fmn_bar_chart_updating'
+_UNSET = object()
 
 
 def _values(values, limit):
@@ -38,6 +41,105 @@ def install_bar_chart(native):
     right = int(np.flatnonzero(np.all(uv == (1, 0), axis=1))[0])
     xs, ys = uv[:, :1].copy(), uv[:, 1:2].copy()
     pad = float(g['_MED_LARGE_BUFF'])
+    Mobject, Rectangle, Line = g['Mobject'], g['Rectangle'], g['Line']
+    native_change = g.get('_change_bar_values')
+    resize_order = g['resize_preserving_order']
+    # Only these shipping line/rectangle protocols match the native kernel.
+    # A different shipped shape is still entitled to its own get/set hooks.
+    bar_protocols = _protocols({'Rectangle': Rectangle}, Mobject, (
+        'get_points', 'set_points', 'resize_points', 'refresh_bounding_box',
+        'get_family', '_is_bound', '_refresh_point_free_anchors',
+        '_refresh_vmobject_path_metadata', '_bake_placement', '_data_array',
+        'data', 'points', '__getattribute__', '__getattr__', '__setattr__', '__dict__',
+    ))
+    axis_protocols = _protocols({'Line': Line}, Mobject, (
+        'get_start', 'get_end', '_get_start', '_get_end', 'has_tip', 'has_start_tip',
+        '__getattribute__', '__getattr__', '__dict__',
+    ))
+    parent_protocols = _protocols({'Mobject': Mobject}, Mobject, (
+        'refresh_bounding_box', 'get_family', '_is_bound', '_refresh_point_free_anchors',
+        '__getattribute__', '__getattr__', '__dict__',
+    ))
+    chart_protocols = _protocols({'BarChart': Chart}, Mobject, (
+        '__getattribute__', '__getattr__', '__dict__',
+    ))
+
+    def native_parents(selected, memo):
+        # refresh_bounding_box walks Python parent links even for detached
+        # objects. Admit that entire protocol without invoking descriptors,
+        # then let the same native crossing reset their point-free anchors.
+        if len(selected) > _MAX_PARENTS:
+            return None
+        stack = [(bar, False) for bar in reversed(selected)]
+        seen, active, parents = set(), set(), {}
+        while stack:
+            member, leaving = stack.pop()
+            marker = id(member)
+            if leaving:
+                active.remove(marker)
+                seen.add(marker)
+                continue
+            if marker in active:
+                return None
+            if marker in seen:
+                continue
+            if (len(seen) + len(active) >= _MAX_PARENTS
+                    or not isinstance(member, Mobject)
+                    or _changed(member, parent_protocols, memo)
+                    or _class_implementation(type(member), 'parents', memo) is not None):
+                return None
+            owners = vars(member).get('parents')
+            if type(owners) is not list:
+                return None
+            # Bound the pending expansion before enqueueing an authored broad
+            # parent list. Counting duplicates conservatively keeps admission
+            # allocation bounded without traversing that list first.
+            if (len(stack) + len(owners) + 1 > _MAX_PARENTS
+                    or len(parents) + len(owners) > _MAX_PARENTS):
+                return None
+            active.add(marker)
+            stack.append((member, True))
+            for parent in reversed(owners):
+                parents[id(parent)] = parent
+                stack.append((parent, False))
+        return tuple(parents.values())
+
+    def try_native(self, bars, numbers, maximum):
+        if not numbers or native_change is None or g['resize_preserving_order'] is not resize_order:
+            return False
+        memo = {}
+        if (_changed(self, chart_protocols, memo)
+                or _class_implementation(type(self), 'y_axis', memo) is not None
+                or _class_implementation(type(self), '_fmn_bar_height_fraction', memo) is not None):
+            return False
+        axis = vars(self).get('y_axis')
+        fraction = vars(self).get('_fmn_bar_height_fraction')
+        if (not isinstance(axis, Line) or _changed(axis, axis_protocols, memo)
+                or inspect.getattr_static(axis, 'tip', _UNSET) is not _UNSET
+                or inspect.getattr_static(axis, 'start_tip', _UNSET) is not _UNSET
+                or type(fraction) is not float or not math.isfinite(fraction) or fraction <= 0):
+            return False
+        selected = bars[:len(numbers)]
+        for bar in selected:
+            if (not isinstance(bar, Rectangle) or _changed(bar, bar_protocols, memo)
+                    or _class_implementation(type(bar), 'pointlike_data_keys', memo)
+                       is not _class_implementation(Rectangle, 'pointlike_data_keys', memo)
+                    or vars(bar).get('_data_defaults') is None
+                    or _class_implementation(type(bar), 'needs_new_unit_normal', memo) is not None):
+                return False
+            keys = _implementation(bar, 'pointlike_data_keys')
+            if (type(keys) not in (list, tuple) or len(keys) != 1
+                    or type(keys[0]) is not str or keys[0] != 'point'):
+                return False
+        parents = native_parents(selected, memo)
+        if parents is None or not native_change(axis, selected, numbers, parents, maximum, fraction):
+            return False
+        for bar in selected:
+            # Stock VMobject.set_points sets this ordinary cache flag after
+            # native joint-angle maintenance. Descriptor/setattr overrides
+            # already selected the authored path above.
+            vars(bar)['needs_new_unit_normal'] = True
+        return True
 
     @wraps(original)
     def initialize(self, *args, **kwargs):
@@ -87,6 +189,8 @@ def install_bar_chart(native):
             maximum = float(self.max_value)
             if not math.isfinite(maximum) or maximum <= 0:
                 raise ValueError('bar chart max_value must be finite and positive')
+            if try_native(self, bars, numbers, maximum):
+                return None
             height = (np.asarray(self.y_axis.get_end(), dtype=float)
                       - np.asarray(self.y_axis.get_start(), dtype=float))
             height *= self._fmn_bar_height_fraction
