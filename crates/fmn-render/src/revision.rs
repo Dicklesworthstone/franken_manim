@@ -36,8 +36,8 @@
 //! depends on differs from the axis value it was built at. Monotonicity is
 //! therefore not required, and this matters — `RecordBuffer::swap_in` bumps
 //! every counter past the old ones on a resize, and a *different* buffer
-//! generation can legitimately restart. [`Revisions`] folds the storage identity
-//! into the axes for exactly that reason.
+//! generation can legitimately restart. [`Revisions`] folds the non-reused
+//! storage generation into the axes for exactly that reason.
 
 use fmn_mobject::{Entry, ImageColorSpace, ImageWrap, Mob, Stage, Uniforms};
 
@@ -169,8 +169,10 @@ impl Revisions {
         // generation and restarts nothing — but a *snapshot restore* can install
         // an older generation whose counters are lower than the ones an artifact
         // was built at, and comparison-not-ordering only saves us if the
-        // identity is in the key.
-        let generation = buffer.storage_id() as u64;
+        // identity is in the key. Public Dependency values can outlive the
+        // allocation without retaining a Weak witness, so an allocator address
+        // is insufficient: it may already belong to an unrelated new buffer.
+        let generation = buffer.storage_generation();
 
         let field = |name: &str| buffer.field_revision(name).unwrap_or(0);
 

@@ -272,6 +272,118 @@ fn mirror_laziness_untouched_fields_never_rematerialize() {
     assert_eq!(mirrors.materializations(), settled);
 }
 
+#[test]
+fn cloned_mirrors_track_replacement_buffers_after_old_storage_is_dropped() {
+    let mut mirrors = MirrorSet::new();
+    let mut previous = None;
+    let mut address_reuses = 0;
+    for step in 1_u16..=256 {
+        let mut buffer = RecordBuffer::new(RecordSchema::mobject(), 2).unwrap();
+        let point = f32::from(step);
+        let color = point / 512.0;
+        assert!(buffer.write_range(
+            "point",
+            0,
+            &[
+                point,
+                point + 1.0,
+                point + 2.0,
+                point + 3.0,
+                point + 4.0,
+                point + 5.0
+            ],
+        ));
+        assert!(buffer.write_range("rgba", 0, &[color, 0.25, 0.5, 1.0, 0.5, color, 0.25, 1.0]));
+        // Every replacement has exactly the same shape and field revisions.
+        // No live view, snapshot or Weak witness keeps the previous allocation.
+        assert_eq!(buffer.field_revision("point"), Some(1));
+        assert_eq!(buffer.field_revision("rgba"), Some(1));
+        let identity = (buffer.storage_id(), buffer.storage_generation());
+        if let Some((address, generation)) = previous {
+            address_reuses += usize::from(address == identity.0);
+            assert_ne!(generation, identity.1);
+        }
+        assert_eq!(
+            mirrors.read_point(&buffer, 1),
+            Some([
+                f64::from(point + 3.0),
+                f64::from(point + 4.0),
+                f64::from(point + 5.0)
+            ]),
+            "replacement {step}; allocator address reuse observed {address_reuses} times",
+        );
+        assert_eq!(
+            mirrors.read_rgba(&buffer, "rgba", 0),
+            [color, 0.25, 0.5, 1.0]
+        );
+        assert_eq!(
+            mirrors.read_rgba(&buffer, "rgba", 1),
+            [0.5, color, 0.25, 1.0]
+        );
+        assert_eq!(mirrors.materializations(), 2 * u64::from(step));
+
+        // A standalone render-mirror clone retains cached lanes, not buffer
+        // ownership. Let the old buffer actually die before creating the next.
+        mirrors = mirrors.clone();
+        previous = Some(identity);
+        drop(buffer);
+    }
+    // Address reuse is an allocator decision, never a portability requirement.
+    // Each public replacement must be coherent whether or not reuse occurred.
+    eprintln!("replacement lifecycle observed {address_reuses} allocator address reuses");
+}
+
+#[test]
+fn mirror_generation_changes_preserve_shared_snapshot_laziness() {
+    let mut buffer = RecordBuffer::new(RecordSchema::mobject(), 2).unwrap();
+    assert!(buffer.write_range("point", 0, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]));
+    assert!(buffer.write_range("rgba", 0, &[0.25; 8]));
+    let mut mirrors = MirrorSet::new();
+    for field in ["point", "rgba"] {
+        mirrors.sync(&buffer, field).unwrap();
+    }
+    let shared = buffer.snapshot_clone();
+    let mut cloned_mirrors = mirrors.clone();
+    assert_eq!(shared.storage_generation(), buffer.storage_generation());
+    for field in ["point", "rgba"] {
+        assert_eq!(
+            cloned_mirrors.sync(&shared, field),
+            mirrors.sync(&buffer, field)
+        );
+    }
+    assert_eq!(mirrors.materializations(), 2);
+    assert_eq!(cloned_mirrors.materializations(), 2);
+
+    let independent = shared.deep_clone();
+    assert_ne!(
+        independent.storage_generation(),
+        shared.storage_generation()
+    );
+    for field in ["point", "rgba"] {
+        assert_eq!(
+            independent.field_revision(field),
+            shared.field_revision(field)
+        );
+        assert_eq!(
+            cloned_mirrors.sync(&independent, field),
+            mirrors.sync(&shared, field)
+        );
+    }
+    assert_eq!(cloned_mirrors.materializations(), 4);
+    // A deep copy refreshes once per field; repeatedly reading that same
+    // generation remains lazy even after the original buffers are released.
+    drop(buffer);
+    drop(shared);
+    for _ in 0..4 {
+        assert_eq!(
+            cloned_mirrors.read_point(&independent, 1),
+            Some([4.0, 5.0, 6.0])
+        );
+        assert_eq!(cloned_mirrors.read_rgba(&independent, "rgba", 0), [0.25; 4]);
+    }
+    assert_eq!(cloned_mirrors.materializations(), 4);
+}
+
 // ------------------------------------------------------------ custom dtype
 
 #[test]

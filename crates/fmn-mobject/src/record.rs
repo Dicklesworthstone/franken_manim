@@ -439,9 +439,10 @@ impl RecordBuffer {
         Some(self.storage.field_revisions[index].load(Ordering::Acquire))
     }
 
-    /// Stable identity of the current storage generation. Test hook for
-    /// CoW / detach / O(touched) assertions; mirrors also use it to detect
-    /// generation swaps.
+    /// Address of the current storage allocation, useful for CoW / detach /
+    /// O(touched) assertions while the compared allocations remain alive.
+    /// Allocators can reuse this address after release; retained cache keys
+    /// must use [`Self::storage_generation`] or [`Self::storage_identity`].
     #[must_use]
     pub fn storage_id(&self) -> usize {
         Arc::as_ptr(&self.storage) as usize
@@ -1415,7 +1416,7 @@ struct FieldMirror {
     lanes: Vec<f32>,
     len: usize,
     seen_revision: u64,
-    seen_storage: usize,
+    seen_generation: u64,
 }
 
 /// The lazy revisioned render mirrors (§8.2 Rev 4, D-20): what the hot
@@ -1454,12 +1455,12 @@ impl MirrorSet {
         let width = buffer.schema().field_width(field)?;
         let stride = buffer.schema().stride();
         let len = buffer.len();
-        let storage = buffer.storage_id();
+        let generation = buffer.storage_generation();
         let forced = buffer.writable_view_affects(field);
 
         if let Some(mirror) = self.fields.get_mut(field) {
             if mirror.seen_revision != revision
-                || mirror.seen_storage != storage
+                || mirror.seen_generation != generation
                 || mirror.len != len
                 || forced
             {
@@ -1473,7 +1474,7 @@ impl MirrorSet {
                 }
                 mirror.len = len;
                 mirror.seen_revision = revision;
-                mirror.seen_storage = storage;
+                mirror.seen_generation = generation;
                 self.materializations += 1;
             }
         } else {
@@ -1491,7 +1492,7 @@ impl MirrorSet {
                     lanes,
                     len,
                     seen_revision: revision,
-                    seen_storage: storage,
+                    seen_generation: generation,
                 },
             );
             self.materializations += 1;
