@@ -1108,6 +1108,8 @@ pub(crate) struct StrokeRef {
     pub(crate) slab: [f64; 4],
     /// Optional fine-tile CSR ranges (starts, segment indices), in outline order.
     pub(crate) bins: Option<(PoolRange, PoolRange)>,
+    /// Optional proved circular-distance bound in the frame arena.
+    pub(crate) circular: Option<u32>,
 }
 
 /// The arena coordinates of a draw's [`GradientField`] stations.
@@ -1840,6 +1842,28 @@ impl<'a> FrameJob<'a> {
                 let segments = arena
                     .stroke_segments
                     .range_from("prepared stroke rows", start)?;
+                let circular = if identity.engine == EngineKind::FastCpu {
+                    if let Some(proof) = stroke::CircularStroke::from_shape(
+                        shape,
+                        effective_segments,
+                        &style,
+                        map,
+                        translate,
+                    ) {
+                        let start = arena.circular_strokes.len();
+                        arena.circular_strokes.put(proof);
+                        Some(
+                            arena
+                                .circular_strokes
+                                .range_from("circular stroke bounds", start)?
+                                .start,
+                        )
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
                 let bins = if matches!(
                     identity.engine,
                     EngineKind::CertifiedCpu | EngineKind::FastCpu
@@ -1860,6 +1884,7 @@ impl<'a> FrameJob<'a> {
                     segments,
                     slab,
                     bins,
+                    circular,
                 })
             } else {
                 None
@@ -1984,6 +2009,20 @@ impl<'a> FrameJob<'a> {
         self.draws().iter().flatten().count()
     }
 
+    /// How many styled occurrences carry a proved circular-stroke bound.
+    ///
+    /// This counts admission, not shaded pixels: only points whose complete
+    /// distance interval saturates the AA profile bypass the general solver.
+    /// The certified engine does not select this acceleration.
+    #[must_use]
+    pub fn circular_stroke_count(&self) -> usize {
+        self.draws()
+            .iter()
+            .flatten()
+            .filter(|draw| draw.stroke.is_some_and(|stroke| stroke.circular.is_some()))
+            .count()
+    }
+
     /// The draw list, index-aligned with the instance list.
     ///
     /// The list lives in the arena; this resolves its range. Every engine
@@ -2010,6 +2049,11 @@ impl<'a> FrameJob<'a> {
                         self.arena().stroke_bin_entries.slice(entries),
                     )
                 }),
+            )
+            .with_circular(
+                stroke
+                    .circular
+                    .map(|index| &self.arena().circular_strokes[index as usize]),
             )
         })
     }
@@ -3727,6 +3771,10 @@ fn hull_slab(segments: &[Segment], map: ScreenMap, translate: [f64; 2]) -> [f64;
     }
     slab
 }
+
+#[cfg(test)]
+#[path = "engine/circular_stroke_tests.rs"]
+mod circular_stroke_tests;
 
 #[cfg(test)]
 mod tests {

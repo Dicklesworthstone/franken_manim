@@ -21,7 +21,7 @@ fn midpoint(a: Point, b: Point) -> Point {
 /// Its five coefficients enclose the complete curve's squared radius. Splitting
 /// a doubtful enclosure tightens it without replacing the curve by samples.
 /// Four subdivisions bound work even for an adversarial almost-admitted path.
-fn radial_enclosure(points: [Point; 3], lower: f64, upper: f64, depth: u8) -> bool {
+pub(crate) fn radial_enclosure(points: [Point; 3], lower: f64, upper: f64, depth: u8) -> bool {
     let [a, h, b] = points;
     let coefficients = [
         dot(a, a),

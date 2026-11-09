@@ -89,6 +89,9 @@
 use crate::bin::ScreenMap;
 use crate::table::{Segment, Style};
 
+mod circular;
+pub(crate) use circular::CircularStroke;
+
 /// Convert a stroke width from manim's width units to screen pixels.
 ///
 /// `STROKE_WIDTH_CONVERSION = 0.01` scene units per width unit
@@ -465,6 +468,7 @@ pub(crate) struct PreparedStroke<'a> {
     segments: &'a [PreparedSegment],
     slab: [f64; 4],
     bins: Option<StrokeBins<'a>>,
+    circular: Option<&'a CircularStroke>,
 }
 
 impl<'a> PreparedStroke<'a> {
@@ -477,6 +481,7 @@ impl<'a> PreparedStroke<'a> {
             segments,
             slab,
             bins: None,
+            circular: None,
         }
     }
 
@@ -490,6 +495,13 @@ impl<'a> PreparedStroke<'a> {
         let mut stroke = Self::from_parts(segments, slab);
         stroke.bins = bins;
         stroke
+    }
+
+    /// Attach a proof over this occurrence's frozen geometry and style.
+    /// Only fully saturated coverage can bypass the existing distance solver.
+    pub(crate) fn with_circular(mut self, circular: Option<&'a CircularStroke>) -> Self {
+        self.circular = circular;
+        self
     }
 
     /// Derive every segment's slab and total arc length into `out`, returning
@@ -726,6 +738,12 @@ impl<'a> PreparedStroke<'a> {
         if style.maximum_stroke_width() <= 0.0 {
             return (0.0, 0.0);
         }
+        if let Some(coverage) = self
+            .circular
+            .and_then(|circular| circular.coverage_if_saturated(p))
+        {
+            return (coverage, 0.0);
+        }
         match self.nearest(segments, style, map, translate, p) {
             Some((round, s)) => (
                 aa_coverage(
@@ -755,6 +773,12 @@ impl<'a> PreparedStroke<'a> {
         }
         if style.maximum_stroke_width() <= 0.0 {
             return (0.0, 0.0);
+        }
+        if let Some(coverage) = self
+            .circular
+            .and_then(|circular| circular.coverage_if_saturated(p))
+        {
+            return (coverage, 0.0);
         }
         match self.nearest_in_tile(tile, segments, style, map, translate, p) {
             Some((round, s)) => (

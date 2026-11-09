@@ -104,6 +104,7 @@ mod color_field;
 mod recovery;
 mod rounded_rect;
 
+pub(crate) use recovery::radial_enclosure;
 pub use rounded_rect::QuadraticRoundedRect;
 pub(crate) use rounded_rect::RoundedRectData;
 

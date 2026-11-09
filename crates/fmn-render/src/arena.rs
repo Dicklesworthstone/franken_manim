@@ -32,7 +32,7 @@
 
 use crate::engine::{Draw, WorkerPool};
 use crate::fill::{MonoPiece, RoundedRectData};
-use crate::stroke::{JoinWedge, PreparedSegment};
+use crate::stroke::{CircularStroke, JoinWedge, PreparedSegment};
 use crate::table::Segment;
 use std::collections::TryReserveError;
 use std::ops::Deref;
@@ -367,6 +367,8 @@ pub struct FrameArena {
     pub(crate) rounded_rects: Pool<RoundedRectData>,
     /// Per-draw prepared stroke segments (slabs and arc lengths).
     pub(crate) stroke_segments: Pool<PreparedSegment>,
+    /// Circular distance bounds for the occurrences that admit them.
+    pub(crate) circular_strokes: Pool<CircularStroke>,
     /// Per-draw fine-tile CSR start offsets for large strokes.
     pub(crate) stroke_bin_starts: Pool<u32>,
     /// Per-draw fine-tile CSR segment indices for large strokes.
@@ -402,6 +404,7 @@ impl Default for FrameArena {
             pieces: Pool::default(),
             rounded_rects: Pool::default(),
             stroke_segments: Pool::default(),
+            circular_strokes: Pool::default(),
             stroke_bin_starts: Pool::default(),
             stroke_bin_entries: Pool::default(),
             gradient_points: Pool::default(),
@@ -432,6 +435,7 @@ impl FrameArena {
         self.pieces.begin_frame();
         self.rounded_rects.begin_frame();
         self.stroke_segments.begin_frame();
+        self.circular_strokes.begin_frame();
         self.stroke_bin_starts.begin_frame();
         self.stroke_bin_entries.begin_frame();
         self.gradient_points.begin_frame();
@@ -453,6 +457,7 @@ impl FrameArena {
             + self.pieces.allocs()
             + self.rounded_rects.allocs()
             + self.stroke_segments.allocs()
+            + self.circular_strokes.allocs()
             + self.stroke_bin_starts.allocs()
             + self.stroke_bin_entries.allocs()
             + self.gradient_points.allocs()
@@ -470,6 +475,7 @@ impl FrameArena {
                 + self.pieces.buffer_bytes()
                 + self.rounded_rects.buffer_bytes()
                 + self.stroke_segments.buffer_bytes()
+                + self.circular_strokes.buffer_bytes()
                 + self.stroke_bin_starts.buffer_bytes()
                 + self.stroke_bin_entries.buffer_bytes()
                 + self.gradient_points.buffer_bytes()

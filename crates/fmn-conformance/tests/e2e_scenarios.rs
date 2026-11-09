@@ -15029,6 +15029,170 @@ fn frozen_render_packet_pipeline_run(ctx: &mut RunCtx) -> Result<RunOutcome, Sce
         .with_counter("steady_clean", 1))
 }
 
+/// Actual Atlas constructors reach conservative circular stroke saturation;
+/// all sampling policies preserve worker-independent bytes after live edits.
+fn circular_stroke_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_render::{AaPolicy, Tiling};
+
+    let mut stage = Stage::new();
+    let circle = stage.add(
+        Circle::new()
+            .radius(0.9)
+            .arc_center([-0.6, 0.0, 0.0])
+            .build()
+            .into(),
+    );
+    let arc = stage.add(
+        fmn_library::Arc::new()
+            .start_angle(5.7)
+            .angle(-4.8)
+            .radius(0.9)
+            .arc_center([0.6, 0.1, 0.0])
+            .build()
+            .map_err(|error| fail(format!("circular stroke constructor: {error}")))?
+            .into(),
+    );
+    stage
+        .add_many_to_scene(&[circle, arc])
+        .map_err(|error| fail(error.to_string()))?;
+    let points = stage
+        .get_mut(circle)
+        .ok_or_else(|| fail("missing circular stroke"))?
+        .buffer
+        .export_field_view("point", true)
+        .ok_or_else(|| fail("missing circle points"))?;
+    let revision = stage
+        .get(circle)
+        .ok_or_else(|| fail("missing circle"))?
+        .buffer
+        .field_revision("point");
+    let base = FrameConfig::new(
+        Viewport {
+            width: 144,
+            height: 112,
+        },
+        ScreenMap {
+            scale: 36.0,
+            origin: [72.125, 56.375],
+            y_up: true,
+        },
+        fmn_core::color::LinearRgba {
+            r: 0.02,
+            g: 0.03,
+            b: 0.05,
+            a: 1.0,
+        },
+    );
+    let tiling = Tiling {
+        macro_tile: 32,
+        fine_tile: 16,
+    };
+    let mut previous: [Vec<u8>; 3] = std::array::from_fn(|_| Vec::new());
+    let mut frames = 0_u64;
+    let mut admitted_frames = 0_u64;
+    let mut last_digest = None;
+    for edit in 0..3 {
+        if edit > 0 {
+            for index in 0..points.len() {
+                let mut point = points
+                    .read(index, "point")
+                    .ok_or_else(|| fail("circle point missing"))?;
+                if edit == 1 {
+                    point[0] += 0.125;
+                } else if index == 1 {
+                    point[1] += 0.3;
+                }
+                if !points.write_foreign(index, "point", &point) {
+                    return Err(fail("circle foreign write refused"));
+                }
+            }
+        }
+        if stage
+            .get(circle)
+            .ok_or_else(|| fail("circle removed"))?
+            .buffer
+            .field_revision("point")
+            != revision
+        {
+            return Err(fail(
+                "foreign-write witness unexpectedly advanced its revision",
+            ));
+        }
+        for (aa_index, aa) in [AaPolicy::Adaptive, AaPolicy::Ssaa2x, AaPolicy::Ssaa4x]
+            .into_iter()
+            .enumerate()
+        {
+            let config = base.with_aa_policy(aa);
+            let mut plan = RenderPlan::new();
+            plan.sync(&stage, 0)
+                .map_err(|error| fail(error.to_string()))?;
+            let mono =
+                MonoTable::build(&plan, config.map).map_err(|error| fail(error.to_string()))?;
+            let bins = Binning::build(&plan, config.viewport, tiling, config.map)
+                .map_err(|error| fail(error.to_string()))?;
+            let job = FrameJob::with_identity(&plan, &mono, &bins, config, EngineIdentity::fast())
+                .map_err(|error| fail(error.to_string()))?;
+            if edit < 2 {
+                if job.circular_stroke_count() != 2 {
+                    return Err(fail(
+                        "ordinary Atlas Circle/Arc did not reach the circular stroke route",
+                    ));
+                }
+                admitted_frames += 1;
+            }
+            let certified =
+                FrameJob::with_identity(&plan, &mono, &bins, config, EngineIdentity::certified())
+                    .map_err(|error| fail(error.to_string()))?;
+            if certified.circular_stroke_count() != 0 {
+                return Err(fail(
+                    "certified rendering admitted a standard-only stroke accelerator",
+                ));
+            }
+            let (first, first_stats) = job
+                .render_with_stats(1)
+                .map_err(|error| fail(error.to_string()))?;
+            frames += 1;
+            if edit > 0 && previous[aa_index] == first.as_bytes() {
+                return Err(fail("a live point edit left stale circular stroke pixels"));
+            }
+            for threads in [4, 16] {
+                let (frame, stats) = job
+                    .render_with_stats(threads)
+                    .map_err(|error| fail(error.to_string()))?;
+                if frame.as_bytes() != first.as_bytes() || stats != first_stats {
+                    return Err(fail(format!(
+                        "circular stroke pixels or AA changed at {threads} workers"
+                    )));
+                }
+                frames += 1;
+            }
+            previous[aa_index] = first.as_bytes().to_vec();
+            last_digest = Some(frame_digest(&first).map_err(|error| fail(error.to_string()))?);
+        }
+    }
+    drop(points);
+    ctx.event(
+        LogEvent::new("e2e.render.circular_strokes")
+            .field("engine", "fast_cpu")
+            .field("frames", frames)
+            .field("admitted_frames", admitted_frames)
+            .field("thread_counts", 3_u64)
+            .field("aa_policies", 3_u64)
+            .field("live_edits", 2_u64)
+            .field(
+                "last_digest",
+                last_digest
+                    .ok_or_else(|| fail("no circular stroke frame"))?
+                    .to_string(),
+            ),
+    );
+    ctx.counter("circular_stroke_frames", frames);
+    ctx.counter("circular_stroke_admitted_frames", admitted_frames);
+    Ok(RunOutcome::ok()
+        .with_counter("circular_stroke_frames", frames)
+        .with_counter("circular_stroke_admitted_frames", admitted_frames))
+}
+
 /// Long native strokes exercise the production tile index across repeated
 /// export frames, worker counts, and style/geometry invalidation.
 fn tile_binned_stroke_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -18858,6 +19022,28 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         .tier(Tier::Fast),
     );
     specs.push(spec(
+        "render_matrix.circular_strokes.standard.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(circular_stroke_render_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("circular_stroke_frames", 27),
+            counter_eq("circular_stroke_admitted_frames", 6),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render.circular_strokes",
+            vec![
+                FieldPred::str_eq("engine", "fast_cpu"),
+                FieldPred::u64_eq("frames", 27),
+                FieldPred::u64_eq("admitted_frames", 6),
+                FieldPred::u64_eq("thread_counts", 3),
+                FieldPred::u64_eq("aa_policies", 3),
+                FieldPred::u64_eq("live_edits", 2),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.tile_binned_stroke_render.v1",
         ScenarioClass::LifecycleDrill,
         Surface::RustApi,
@@ -20530,6 +20716,16 @@ fn phase2_and_phase3_e2e_scenarios_pass() {
         let report = Runner::from_env().run(scenario);
         assert!(report.is_pass(), "{}", report.summary());
     }
+}
+
+#[test]
+fn circular_stroke_render_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.circular_strokes.standard.v1")
+        .expect("native circular stroke scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
 }
 
 #[test]
