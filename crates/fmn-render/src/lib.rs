@@ -60,8 +60,8 @@ pub use cache::{
 };
 pub use camera::{
     CAMERA_FRAME_Z_INDEX, Camera, CameraConfig, CameraError, CameraFrame, ClipPoint,
-    ClippedQuadratic, DEFAULT_FOVY, DEFAULT_LIGHT_POSITION, EdgeSampleLimit,
-    THREE_D_CAMERA_SAMPLES, ThreeDCamera,
+    ClippedQuadratic, DEFAULT_FOVY, DEFAULT_LIGHT_POSITION, EdgeSampleLimit, PlanarCapturePolicy,
+    THREE_D_CAMERA_SAMPLES, ThreeDCamera, planar_stage_refusal,
 };
 pub use engine::{
     AA_COMPLEX_2X_CROSSINGS, AA_COMPLEX_4X_CROSSINGS, AA_STROKE_COMPLEX_MIN_WIDTH_BANDS,

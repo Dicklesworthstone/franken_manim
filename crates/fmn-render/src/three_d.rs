@@ -2589,7 +2589,7 @@ fn compile_vector<'a>(
         .shapes()
         .shape(instance.shape)
         .ok_or(ThreeDError::InvalidVectorInstance)?;
-    let style = draw
+    let mut style = draw
         .plan
         .styles()
         .get(instance.style)
@@ -2642,6 +2642,33 @@ fn compile_vector<'a>(
         segment.p0 = add(segment.p0, translation);
         segment.p1 = add(segment.p1, translation);
         segment.p2 = add(segment.p2, translation);
+    }
+
+    // The canonical XY view has the same affine stroke construction as
+    // FrameJob, even when a mixed scene makes this vector use the camera
+    // route. Point-facing billboard offsets tilt out of that plane and
+    // spuriously widen off-axis strokes after perspective division. Prove
+    // the entire transformed vector and its camera/style here, then reuse
+    // the existing flat construction in this private prepared style only.
+    // True perspective, lighting, depth and clipping keep their authored
+    // construction, and the retained Style/Stage uniform is never rewritten.
+    if !style.flat_stroke
+        && !style.depth_test
+        && style.shading == [0.0; 3]
+        && style.clip_planes == [[0.0; 4]; 4]
+        && style.is_fixed_in_frame == 0.0
+        && !style.scale_stroke_with_zoom
+        && world_segments
+            .iter()
+            .flat_map(|segment| [segment.p0, segment.p1, segment.p2])
+            .all(|point| point[2] == 0.0)
+        && crate::PlanarCapturePolicy::for_output(
+            camera.pixel_shape(),
+            fmn_core::constants::FRAME_HEIGHT,
+        )
+        .is_ok_and(|policy| policy.camera_refusal(camera).is_none())
+    {
+        style.flat_stroke = true;
     }
 
     let draws_fill = style.draws_fill();
@@ -7083,6 +7110,174 @@ mod tests {
         let center = pixel(&frame, 16, 12);
         assert!(center[1] > center[0], "painter overlay must remain on top");
         assert!(center[2] > center[0], "far red must fail against near blue");
+    }
+
+    fn canonical_xy_stroke_stage() -> (Stage, fmn_mobject::Mob) {
+        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), 3).unwrap();
+        buffer.write_range(
+            "point",
+            0,
+            &[0.75, -0.25, 0.0, 0.75, 0.0, 0.0, 0.75, 0.25, 0.0],
+        );
+        buffer.write_range("stroke_rgba", 0, &[0.8, 0.9, 1.0, 1.0].repeat(3));
+        buffer.write_range("stroke_width", 0, &[4.0; 3]);
+        let mut stage = Stage::new();
+        let mob = stage.add(Mobject::from_buffer(buffer));
+        stage.add_to_scene(mob).unwrap();
+        stage.apply_affine(
+            mob,
+            fmn_mobject::Placement::new(
+                [[2.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 1.0]],
+                [0.25, 0.0, 0.0],
+            ),
+        );
+        (stage, mob)
+    }
+
+    #[test]
+    fn canonical_xy_camera_strokes_use_affine_widths_without_mutating_authored_style() {
+        let camera = Camera::new(crate::CameraConfig {
+            resolution: (480, 854),
+            ..crate::CameraConfig::default()
+        })
+        .unwrap();
+        let (stage, mob) = canonical_xy_stroke_stage();
+        let authored_uniforms = *stage.get(mob).unwrap().uniforms();
+        assert!(!authored_uniforms.flat_stroke);
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, camera.revision()).unwrap();
+        let instance = &plan.shapes().instances()[0];
+        let authored_style = plan.styles().get(instance.style).unwrap().clone();
+        let authored_segments = plan.segments().to_vec();
+        let job = ThreeDJob::new(
+            &camera,
+            &[ThreeDDraw::Vector(VectorDraw::new(&plan, 0))],
+            Tiling::default(),
+        )
+        .unwrap();
+        let vector = compiled_vector(&job);
+        let map = ScreenMap {
+            scale: f64::from(camera.pixel_height()) / fmn_core::constants::FRAME_HEIGHT,
+            origin: [240.0, 427.0],
+            y_up: true,
+        };
+        let expected = crate::stroke::half_width_px(&authored_style, map, 0.5);
+        assert!(
+            expected > 2.0,
+            "the portrait witness has a real stroke width"
+        );
+        let widths = projected_half_widths(
+            &camera,
+            &vector.style,
+            vector.normal,
+            vector.curves[0].world,
+            0.5,
+            0.5,
+        );
+        for width in widths {
+            assert!(
+                (width - expected).abs() < 1e-11,
+                "off-axis canonical XY width {width} differs from affine width {expected}"
+            );
+        }
+        let mut prepared_style = authored_style.clone();
+        prepared_style.flat_stroke = true;
+        assert_eq!(vector.style, prepared_style);
+        assert_eq!(plan.styles().get(instance.style), Some(&authored_style));
+        assert_eq!(plan.segments(), authored_segments);
+        assert_eq!(*stage.get(mob).unwrap().uniforms(), authored_uniforms);
+    }
+
+    #[test]
+    fn canonical_xy_camera_stroke_proof_preserves_real_camera_semantics() {
+        for case in [
+            "camera translation",
+            "camera zoom",
+            "camera rotation",
+            "camera field of view",
+            "camera width",
+            "pixel reset",
+            "depth",
+            "shading",
+            "user clip",
+            "fixed frame",
+            "zoom-scaled stroke",
+            "off-plane control",
+            "off-plane translation",
+            "affine tilt",
+        ] {
+            let mut camera = Camera::new(crate::CameraConfig {
+                resolution: (480, 854),
+                ..crate::CameraConfig::default()
+            })
+            .unwrap();
+            let (mut stage, mob) = canonical_xy_stroke_stage();
+            match case {
+                "camera translation" => {
+                    camera.frame_mut().set_center([0.25, 0.0, 0.0]).unwrap();
+                }
+                "camera zoom" => {
+                    camera.frame_mut().set_height(4.0).unwrap();
+                }
+                "camera rotation" => {
+                    camera
+                        .frame_mut()
+                        .set_orientation([0.0, 0.0, 0.6, 0.8])
+                        .unwrap();
+                }
+                "camera field of view" => {
+                    camera.frame_mut().set_field_of_view(0.9).unwrap();
+                }
+                "camera width" => {
+                    let width = camera.frame().width();
+                    camera.frame_mut().set_width(width * 1.1).unwrap();
+                }
+                "pixel reset" => camera.set_pixel_shape(481, 854).unwrap(),
+                "depth" => stage.uniforms_mut(mob).unwrap().depth_test = true,
+                "shading" => stage.uniforms_mut(mob).unwrap().shading = [0.2, 0.0, 0.0],
+                "user clip" => {
+                    stage.uniforms_mut(mob).unwrap().clip_planes[0] = [1.0, 0.0, 0.0, -1.0];
+                }
+                "fixed frame" => stage.uniforms_mut(mob).unwrap().is_fixed_in_frame = 0.5,
+                "zoom-scaled stroke" => {
+                    stage.uniforms_mut(mob).unwrap().scale_stroke_with_zoom = true;
+                }
+                "off-plane control" => {
+                    stage
+                        .set_points(
+                            mob,
+                            &[[1.75, -0.5, 0.0], [1.75, 0.0, 0.25], [1.75, 0.5, 0.0]],
+                        )
+                        .unwrap();
+                }
+                "off-plane translation" => {
+                    stage.shift(mob, [0.0, 0.0, 0.25]);
+                }
+                "affine tilt" => {
+                    stage.apply_affine(
+                        mob,
+                        fmn_mobject::Placement::new(
+                            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.25, 1.0]],
+                            [0.0; 3],
+                        ),
+                    );
+                }
+                _ => unreachable!("the fixture names every exclusion"),
+            }
+            let mut plan = RenderPlan::new();
+            plan.sync(&stage, camera.revision()).unwrap();
+            let instance = &plan.shapes().instances()[0];
+            let authored_style = plan.styles().get(instance.style).unwrap().clone();
+            assert!(!authored_style.flat_stroke);
+            let job = ThreeDJob::new(
+                &camera,
+                &[ThreeDDraw::Vector(VectorDraw::new(&plan, 0))],
+                Tiling::default(),
+            )
+            .unwrap();
+            assert_eq!(compiled_vector(&job).style, authored_style, "{case}");
+            assert!(!stage.get(mob).unwrap().uniforms().flat_stroke, "{case}");
+        }
     }
 
     #[test]

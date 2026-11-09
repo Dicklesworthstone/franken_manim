@@ -13,7 +13,9 @@
 //! no second generic "projection" abstraction beside the camera.
 
 mod capture;
+mod planar;
 pub use capture::{CameraSample, CameraSampleError};
+pub use planar::{PlanarCapturePolicy, planar_stage_refusal};
 
 use fmn_core::AaPolicy;
 use fmn_core::color::{LinearRgba, Srgb};
@@ -34,6 +36,8 @@ pub const CAMERA_FRAME_Z_INDEX: i32 = -1;
 pub const DEFAULT_LIGHT_POSITION: Vec3 = [-10.0, 10.0, 10.0];
 /// ThreeDCamera's compatibility sample count.
 pub const THREE_D_CAMERA_SAMPLES: u8 = 4;
+const DEFAULT_FRAME_CENTER: Vec3 = [0.0; 3];
+const DEFAULT_FRAME_SHAPE: [f64; 2] = [FRAME_WIDTH, FRAME_HEIGHT];
 
 /// A camera construction or mutation was not finite and meaningful.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,8 +136,8 @@ pub struct CameraFrame {
 impl Default for CameraFrame {
     fn default() -> Self {
         Self {
-            center: [0.0; 3],
-            shape: [FRAME_WIDTH, FRAME_HEIGHT],
+            center: DEFAULT_FRAME_CENTER,
+            shape: DEFAULT_FRAME_SHAPE,
             fovy: DEFAULT_FOVY,
             orientation: IDENTITY_QUAT,
             default_orientation: IDENTITY_QUAT,
@@ -563,6 +567,25 @@ impl Default for Camera {
     }
 }
 
+/// The constructor's one aspect-fit rule, also used to freeze planar output
+/// admission without constructing mutable camera-frame state. `None` preserves
+/// the original shape and its revision when it already has this aspect.
+fn shape_at_output_aspect(
+    shape: [f64; 2],
+    resolution: (u32, u32),
+) -> Result<Option<[f64; 2]>, CameraError> {
+    let (width, height) = resolution;
+    if width == 0 || height == 0 {
+        return Err(CameraError::ZeroDimension);
+    }
+    let aspect = f64::from(width) / f64::from(height);
+    if (shape[0] / shape[1] - aspect).abs() > 1e-12 * aspect {
+        Ok(Some([aspect * shape[1], shape[1]]))
+    } else {
+        Ok(None)
+    }
+}
+
 impl Camera {
     /// Construct a camera whose frame has the pixel aspect ratio.
     ///
@@ -595,9 +618,8 @@ impl Camera {
             return Err(CameraError::NonFinite);
         }
         let mut frame = config.frame;
-        let aspect = f64::from(width) / f64::from(height);
-        if (frame.aspect_ratio() - aspect).abs() > 1e-12 * aspect {
-            frame.resize_to_aspect_ratio(aspect, true)?;
+        if let Some(shape) = shape_at_output_aspect(frame.shape(), config.resolution)? {
+            frame.set_shape(shape)?;
         }
         Ok(Self {
             frame,
