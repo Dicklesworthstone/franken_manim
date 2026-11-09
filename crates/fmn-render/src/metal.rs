@@ -19,10 +19,14 @@ use fmn_hash::{Digest, Schema, Writer, sha256};
 use fmn_mobject::JointType;
 use ft_kernel_metal::Error as GatewayError;
 use ft_kernel_metal::compute::{Gateway, Grid, MathMode, Pipeline, SharedBuffer};
-use ft_kernel_metal::presentation::{NativePresenter, PresentationConfig};
+#[cfg(feature = "synthetic-input")]
+pub use ft_kernel_metal::presentation::SyntheticInput;
 pub use ft_kernel_metal::presentation::{
-    PresentOutcome, PresentationError, PresentationPipelineInfo, PresentationState,
+    ButtonSet, INPUT_QUEUE_CAPACITY, InputEvent, LogicalPoint, Modifiers, PointerButton,
+    PresentOutcome, PresentationError, PresentationPipelineInfo, PresentationState, ScrollUnit,
+    SurfaceMetrics,
 };
+use ft_kernel_metal::presentation::{NativePresenter, PresentationConfig};
 
 use crate::engine::{AaPolicy, Draw, EngineIdentity, FrameConfig, FrameJob, FrameJobError};
 use crate::fill::MonoTable;
@@ -1312,8 +1316,45 @@ impl NativePreviewRenderer {
     }
 
     /// Drain pending AppKit events and report the native surface state.
+    /// Typed input stays queued for the next [`Self::poll_input`].
     pub fn poll_events(&mut self) -> Result<PresentationState, NativePreviewError> {
         self.presenter.poll_events().map_err(Into::into)
+    }
+
+    /// Drain pending AppKit events, append the typed native input queued
+    /// since the last drain (pointer, buttons, scroll, keys, modifiers,
+    /// focus, capture loss, resize) to `events` in delivery order, and
+    /// report the native surface state.
+    pub fn poll_input(
+        &mut self,
+        events: &mut Vec<InputEvent>,
+    ) -> Result<PresentationState, NativePreviewError> {
+        self.presenter.poll_input(events).map_err(Into::into)
+    }
+
+    /// Input events the presenter dropped because its bounded queue was
+    /// full between polls.
+    #[must_use]
+    pub fn input_dropped(&self) -> u64 {
+        self.presenter.input_dropped()
+    }
+
+    /// Current logical and drawable geometry of the native surface.
+    pub fn surface_metrics(&self) -> Result<SurfaceMetrics, NativePreviewError> {
+        self.presenter.surface_metrics().map_err(Into::into)
+    }
+
+    /// Let the user resize the native window. Render the next frame at the
+    /// reported logical size to follow it.
+    pub fn set_resizable(&mut self, resizable: bool) -> Result<(), NativePreviewError> {
+        self.presenter.set_resizable(resizable).map_err(Into::into)
+    }
+
+    /// Post one real AppKit event for this window into the application
+    /// queue (test seam; see [`SyntheticInput`]).
+    #[cfg(feature = "synthetic-input")]
+    pub fn post_synthetic(&mut self, input: &SyntheticInput) -> Result<(), NativePreviewError> {
+        self.presenter.post_synthetic(input).map_err(Into::into)
     }
 
     /// Render and present a 2D Studio frame without copying frame pixels back
