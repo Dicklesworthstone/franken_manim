@@ -1069,10 +1069,10 @@ pub(crate) struct Draw {
     pub(crate) style: Style,
     /// The hinted fill route, or [`FillKernel::General`].
     pub(crate) kernel: FillKernel,
-    /// Recovering a rectangle from current geometry keeps the previous general
+    /// Recovering a primitive from current geometry keeps the previous general
     /// native row and edge classifier. Only subcell integration uses the
     /// recovered closed form: hinted edge probes count corners differently.
-    pub(crate) recovered_rectangle: bool,
+    pub(crate) recovered_geometry: bool,
     /// The joint overrides, as a range into the frame arena's wedge pool;
     /// empty for the round settings (ADR-0012).
     pub(crate) joins: PoolRange,
@@ -1768,18 +1768,22 @@ impl<'a> FrameJob<'a> {
             } else {
                 FillKernel::select(shape, segs, map, translate)
             };
-            let mut recovered_rectangle = false;
+            let mut recovered_geometry = false;
             if kernel == FillKernel::General
                 && identity.engine == EngineKind::FastCpu
                 && inst.placement.is_translation()
             {
                 // A stale constructor tag is not evidence, but the current
-                // owned outline can prove an exact rectangle. Live views still
+                // owned outline can prove an exact rectangle or a disc within
+                // the existing screen-space bound. Live views still
                 // force a fresh plan observation and poison tile-cache reuse;
                 // no mutable records or hint payloads enter this proof. Keep
                 // certified's ordered coverage arithmetic unchanged.
                 kernel = FillKernel::from_exact_rectangle(shape, segs, map, translate);
-                recovered_rectangle = matches!(kernel, FillKernel::Rect { .. });
+                if kernel == FillKernel::General && draws_fill {
+                    kernel = FillKernel::from_bounded_disc(shape, segs, map, translate);
+                }
+                recovered_geometry = kernel != FillKernel::General;
             }
             let joins = {
                 let start = arena.joins.len();
@@ -1887,7 +1891,7 @@ impl<'a> FrameJob<'a> {
                 straight_segments,
                 style: style.clone(),
                 kernel,
-                recovered_rectangle,
+                recovered_geometry,
                 joins,
                 stroke,
                 field,
@@ -2604,7 +2608,7 @@ impl<'a> FrameJob<'a> {
         }
 
         // Exactly one of three sources fills the row: a classified interior,
-        // a trusted primitive hint, or the general machinery. A rectangle
+        // a trusted primitive hint, or the general machinery. A primitive
         // recovered from current geometry deliberately keeps the general row's
         // coverage and corner counts; its closed form accelerates the expensive
         // subcell integrations without changing which pixels are supersampled.
@@ -2612,7 +2616,7 @@ impl<'a> FrameJob<'a> {
         let mut general_classified = false;
         if interior {
             worker.cov[..w].copy_from_slice(worker.scratch.interior_row(x_lo, x_hi));
-        } else if rec.recovered_rectangle || !rec.kernel.row(py, x_lo, x_hi, &mut worker.cov[..w]) {
+        } else if rec.recovered_geometry || !rec.kernel.row(py, x_lo, x_hi, &mut worker.cov[..w]) {
             if classify {
                 let (coverage, crossings) =
                     worker
@@ -6541,14 +6545,14 @@ mod tests {
 
     /// Exercise the former general route in the same renderer, without a
     /// product switch or a second implementation of the reference pixels.
-    fn without_rectangle_recovery(mut job: FrameJob<'_>) -> FrameJob<'_> {
+    fn without_geometry_recovery(mut job: FrameJob<'_>) -> FrameJob<'_> {
         let ArenaStorage::Owned(arena) = &mut job.arena else {
             panic!("the general reference must own its preparation");
         };
         for draw in arena.draws.slice_mut(job.draws).iter_mut().flatten() {
-            if matches!(draw.kernel, FillKernel::Rect { .. }) {
+            if draw.recovered_geometry {
                 draw.kernel = FillKernel::General;
-                draw.recovered_rectangle = false;
+                draw.recovered_geometry = false;
             }
         }
         job
@@ -6594,7 +6598,7 @@ mod tests {
                     },
                     "production recovery admission"
                 );
-                let reference = without_rectangle_recovery(
+                let reference = without_geometry_recovery(
                     FrameJob::with_identity(&plan, &mono, &bins, cfg, identity)
                         .expect("general job"),
                 );
@@ -6613,6 +6617,195 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn bounded_disc_recovery_observes_foreign_points_without_changing_certified_admission() {
+        let mut stage = Stage::new();
+        let points = ring(32.25, 30.5, 10.8, 16, true);
+        let mob = stage.add(vmob(&points, [0.8, 0.2, 0.7, 0.75], [0.0; 4], 0.0));
+        stage.add_to_scene(mob).expect("disc root");
+        let view = stage
+            .get_mut(mob)
+            .expect("live")
+            .buffer
+            .export_field_view("point", true)
+            .expect("foreign writable point view");
+        let cfg = config();
+        let first_snapshot = stage.snapshot();
+        let mut first_pixels = None;
+        for changed in [false, true] {
+            if changed {
+                let revision = stage.get(mob).unwrap().buffer.field_revision("point");
+                assert!(view.write_foreign(1, "point", &[45.0, 36.0, 0.0]));
+                assert_eq!(
+                    stage.get(mob).unwrap().buffer.field_revision("point"),
+                    revision,
+                    "the negative must bypass revision tracking"
+                );
+            }
+            let frozen = stage.snapshot().materialize();
+            let (plan, mono, bins) = derive(&frozen, cfg, default_tiling());
+            assert!(plan.shapes().instances()[0].volatile);
+            assert!(plan.shapes().instances()[0].hint_unsafe);
+            for identity in [EngineIdentity::certified(), EngineIdentity::fast()] {
+                let job = FrameJob::with_identity(&plan, &mono, &bins, cfg, identity)
+                    .expect("current job");
+                let draw = job.draws()[0].as_ref().expect("visible disc");
+                assert_eq!(
+                    matches!(draw.kernel, FillKernel::Disc { .. }),
+                    !changed && identity.engine == EngineKind::FastCpu,
+                    "identity={identity:?}, changed={changed}: {:?}",
+                    draw.kernel
+                );
+                let expected = job.render(1).expect("one worker");
+                for threads in [4, 16] {
+                    assert_frames_equal(
+                        &expected,
+                        &job.render(threads).expect("parallel frame"),
+                        "disc recovery depends on worker count",
+                    );
+                }
+                if identity.engine == EngineKind::FastCpu {
+                    if changed {
+                        assert_ne!(
+                            expected.as_bytes(),
+                            first_pixels.as_ref().expect("initial frame")
+                        );
+                    } else {
+                        first_pixels = Some(expected.as_bytes().to_vec());
+                    }
+                }
+            }
+        }
+        // A later untracked edit cannot alter a previously captured frame or
+        // make its proved outline inherit the current record's deformation.
+        let frozen = first_snapshot.materialize();
+        let (plan, mono, bins) = derive(&frozen, cfg, default_tiling());
+        let job =
+            FrameJob::with_identity(&plan, &mono, &bins, cfg, EngineIdentity::fast()).unwrap();
+        assert!(matches!(
+            job.draws()[0].as_ref().unwrap().kernel,
+            FillKernel::Disc { .. }
+        ));
+        assert_eq!(job.render(1).unwrap().as_bytes(), first_pixels.unwrap());
+    }
+
+    fn small_disc_field() -> Stage {
+        let mut stage = Stage::new();
+        for row in 0..8 {
+            for column in 0..8 {
+                let points = ring(
+                    7.3 + f64::from(column) * 13.5,
+                    6.7 + f64::from(row) * 13.5,
+                    3.1,
+                    16,
+                    (row + column) % 2 == 0,
+                );
+                let mob = stage.add(vmob(&points, [0.2, 0.6, 0.9, 0.8], [0.0; 4], 0.0));
+                stage.add_to_scene(mob).expect("disc root");
+            }
+        }
+        stage
+    }
+
+    #[test]
+    fn bounded_disc_recovery_preserves_sampling_and_the_existing_error_budget() {
+        let stage = small_disc_field();
+        let cfg = config();
+        let (plan, mono, bins) = derive(&stage, cfg, default_tiling());
+        for identity in [EngineIdentity::certified(), EngineIdentity::fast()] {
+            for aa in [AaPolicy::Adaptive, AaPolicy::Ssaa2x, AaPolicy::Ssaa4x] {
+                let cfg = cfg.with_aa_policy(aa);
+                let job = FrameJob::with_identity(&plan, &mono, &bins, cfg, identity).unwrap();
+                assert_eq!(
+                    job.draws()
+                        .iter()
+                        .flatten()
+                        .filter(|draw| matches!(draw.kernel, FillKernel::Disc { .. }))
+                        .count(),
+                    if identity.engine == EngineKind::FastCpu {
+                        64
+                    } else {
+                        0
+                    }
+                );
+                let general = without_geometry_recovery(
+                    FrameJob::with_identity(&plan, &mono, &bins, cfg, identity).unwrap(),
+                );
+                let (expected, expected_stats) = general.render_with_stats(1).unwrap();
+                let (first, stats) = job.render_with_stats(1).unwrap();
+                assert_eq!(
+                    stats, expected_stats,
+                    "primitive recovery changed adaptive choices"
+                );
+                if identity.engine == EngineKind::CertifiedCpu {
+                    assert_frames_equal(&first, &expected, "certified disc admission changed");
+                } else {
+                    let (maximum, _) = visual_error(&first, &expected);
+                    assert!(
+                        maximum <= 3.0 * fill::HINT_BUDGET_PX,
+                        "recovered disc exceeded existing coverage bound: {maximum}"
+                    );
+                }
+                for threads in [4, 16] {
+                    let (frame, parallel_stats) = job.render_with_stats(threads).unwrap();
+                    assert_frames_equal(&frame, &first, "recovered disc changed with worker count");
+                    assert_eq!(parallel_stats, stats);
+                }
+            }
+        }
+    }
+
+    /// The original general solver remains live in the same invocation. This
+    /// measures only native raster work, including the ordinary general first
+    /// pass, and is not an end-to-end portal or incumbent-renderer speed claim.
+    #[test]
+    #[ignore = "run in release mode for interleaved native raster timings"]
+    fn bounded_disc_recovery_interleaved_raster_timing() {
+        let stage = small_disc_field();
+        for aa in [AaPolicy::Adaptive, AaPolicy::Ssaa4x] {
+            let cfg = config().with_aa_policy(aa);
+            let (plan, mono, bins) = derive(&stage, cfg, default_tiling());
+            let recovered =
+                FrameJob::with_identity(&plan, &mono, &bins, cfg, EngineIdentity::fast()).unwrap();
+            assert_eq!(
+                recovered
+                    .draws()
+                    .iter()
+                    .flatten()
+                    .filter(|draw| matches!(draw.kernel, FillKernel::Disc { .. }))
+                    .count(),
+                64
+            );
+            let general = without_geometry_recovery(
+                FrameJob::with_identity(&plan, &mono, &bins, cfg, EngineIdentity::fast()).unwrap(),
+            );
+            let mut frame = FrameBuffer::new(cfg.layout().unwrap());
+            for _ in 0..3 {
+                general.render_into(1, &mut frame).unwrap();
+                recovered.render_into(1, &mut frame).unwrap();
+            }
+            let mut elapsed = [std::time::Duration::ZERO; 2];
+            for iteration in 0..12 {
+                for index in if iteration % 2 == 0 { [0, 1] } else { [1, 0] } {
+                    let start = std::time::Instant::now();
+                    if index == 0 {
+                        general.render_into(1, &mut frame).unwrap();
+                    } else {
+                        recovered.render_into(1, &mut frame).unwrap();
+                    }
+                    elapsed[index] += start.elapsed();
+                    std::hint::black_box(frame.as_bytes());
+                }
+            }
+            println!(
+                "disc raster {aa:?}: general_ms={:.3}, recovered_ms={:.3}, ratio={:.4}, draws=64, paired_frames=12",
+                elapsed[0].as_secs_f64() * 1000.0 / 12.0,
+                elapsed[1].as_secs_f64() * 1000.0 / 12.0,
+                elapsed[1].as_secs_f64() / elapsed[0].as_secs_f64()
+            );
         }
     }
 

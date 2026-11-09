@@ -5247,6 +5247,25 @@ fn python_rectangle_recovery_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenari
         .with_counter("rectangle_recovery_frames", frames))
 }
 
+/// Bounded circle and dot recovery uses the live portal's immutable geometry;
+/// large or deformed curves must remain on the general standard CPU route.
+fn python_disc_recovery_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let (candidates, frames, digest) = manimlib::run_portal_gauntlet_disc_recovery()
+        .map_err(|error| fail(format!("Python disc recovery: {error}")))?;
+    ctx.event(
+        LogEvent::new("e2e.python.disc_recovery")
+            .field("mode", "standard")
+            .field("engine", "fast_cpu")
+            .field("candidates", candidates)
+            .field("frames", frames)
+            .field("thread_counts", 3_u64)
+            .field("sha256", digest),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("disc_recovery_candidates", candidates)
+        .with_counter("disc_recovery_frames", frames))
+}
+
 /// Structural parity (fm-5wq.36): the fixed construction set, extracted in
 /// the embedded portal by the same `structural_facts.py` the Reference ran,
 /// matches the checked-in Reference facts except for BN-keyed and open-bead
@@ -16472,6 +16491,27 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.python_disc_recovery.standard.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_disc_recovery_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("disc_recovery_candidates", 61),
+            counter_eq("disc_recovery_frames", 13),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.disc_recovery",
+            vec![
+                FieldPred::str_eq("mode", "standard"),
+                FieldPred::str_eq("engine", "fast_cpu"),
+                FieldPred::u64_eq("candidates", 61),
+                FieldPred::u64_eq("frames", 13),
+                FieldPred::u64_eq("thread_counts", 3),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "parity.structural_facts.v1",
         ScenarioClass::ParityDrill,
         Surface::PythonInProcess,
@@ -19628,6 +19668,16 @@ fn python_rectangle_recovery_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.python_rectangle_recovery.standard.v1")
         .expect("standard portal rectangle recovery is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn python_disc_recovery_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.python_disc_recovery.standard.v1")
+        .expect("standard portal disc recovery is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

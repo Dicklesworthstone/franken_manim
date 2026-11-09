@@ -101,6 +101,7 @@
 //! reopen the decision with evidence rather than folklore.
 
 mod color_field;
+mod recovery;
 
 use crate::bin::ScreenMap;
 use crate::plan::{GeometryIdentity, RenderPlan};
@@ -3039,6 +3040,24 @@ pub enum FillKernel {
 }
 
 impl FillKernel {
+    /// Recover a disc only when the current immutable outline proves the
+    /// existing screen-space approximation bound. Constructor tags and writable
+    /// view revisions are deliberately not evidence for this decision.
+    ///
+    /// Every quadratic and the implicit closing edge must stay inside the
+    /// bounded radial annulus, and the contour must wind around its centre.
+    /// The frame compiler uses this only on the standard CPU route; certified
+    /// admission and the general first-pass coverage remain unchanged.
+    #[must_use]
+    pub fn from_bounded_disc(
+        shape: &crate::table::Shape,
+        segments: &[crate::table::Segment],
+        map: ScreenMap,
+        translate: [f64; 2],
+    ) -> FillKernel {
+        recovery::bounded_disc(shape, segments, map, translate)
+    }
+
     /// Recover an exact rectangle from the current, immutable compiled outline.
     ///
     /// This does not consult a constructor's shape hint or its revisions. A
@@ -5660,6 +5679,209 @@ mod tests {
                 radius * px_per_unit
             );
         }
+    }
+
+    #[test]
+    fn bounded_disc_recovery_uses_current_f32_geometry_at_the_actual_screen_scale() {
+        // This public f64 input is smaller than the engine's widened-f32
+        // domain. Squared-radius underflow formerly admitted a disc whose
+        // midpoint error exceeded the same screen-space budget.
+        let microscopic_radius = 5.844e-161;
+        let path = circle_path(0.0, 0.0, microscopic_radius, 16);
+        let (shape, segments) = shaped(&path, Hint::General);
+        assert_eq!(
+            FillKernel::from_bounded_disc(
+                &shape,
+                &segments,
+                ScreenMap {
+                    scale: 10.8 / microscopic_radius,
+                    ..unit()
+                },
+                [0.0; 2],
+            ),
+            FillKernel::General,
+        );
+        let map = ScreenMap {
+            scale: 135.0,
+            origin: [360.0, 240.0],
+            y_up: true,
+        };
+        for (radius, components, admitted) in [(0.08, 16, true), (2.0, 16, false), (2.0, 64, true)]
+        {
+            for start in [0.0, 0.31, std::f64::consts::FRAC_PI_2] {
+                for direction in [-1.0, 1.0] {
+                    let path = QuadPath::try_arc(
+                        start,
+                        direction * std::f64::consts::TAU,
+                        radius,
+                        [2.5, -0.25, 0.0],
+                        Some(components),
+                    )
+                    .expect("bounded circle fixture");
+                    // The production compiler sees widened record f32 values,
+                    // not the unrounded analytic constructor's coordinates.
+                    let path = QuadPath::from_points(
+                        path.points()
+                            .iter()
+                            .map(|point| point.map(|v| f64::from(v as f32)))
+                            .collect(),
+                    )
+                    .expect("rounded circle points");
+                    let (shape, segments) = shaped(&path, Hint::General);
+                    let kernel =
+                        FillKernel::from_bounded_disc(&shape, &segments, map, [3.25, -1.5]);
+                    assert_eq!(
+                        matches!(kernel, FillKernel::Disc { .. }),
+                        admitted,
+                        "r={radius}, n={components}, start={start}, direction={direction}: {kernel:?}"
+                    );
+                    if let FillKernel::Disc {
+                        center,
+                        radius: measured,
+                    } = kernel
+                    {
+                        let expected = map.to_pixel(2.5, -0.25);
+                        assert!((center[0] - expected[0] - 3.25).abs() < HINT_BUDGET_PX);
+                        assert!((center[1] - expected[1] + 1.5).abs() < HINT_BUDGET_PX);
+                        assert!((measured - radius * map.scale).abs() < HINT_BUDGET_PX);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_disc_recovery_refuses_edited_curves_partial_arcs_and_extra_winding() {
+        let path = circle_path(0.0, 0.0, 0.08, 16);
+        let (shape, segments) = shaped(&path, Hint::General);
+        let map = ScreenMap {
+            scale: 135.0,
+            ..unit()
+        };
+        assert!(matches!(
+            FillKernel::from_bounded_disc(&shape, &segments, map, [0.0; 2]),
+            FillKernel::Disc { .. }
+        ));
+        let mut bowed = segments.clone();
+        bowed[0].p1[0] += 0.01;
+        let mut ellipse = segments.clone();
+        for segment in &mut ellipse {
+            for point in [&mut segment.p0, &mut segment.p1, &mut segment.p2] {
+                point[0] *= 1.25;
+            }
+        }
+        let mut gap = segments.clone();
+        gap[1].p0[0] += 0.01;
+        let mut nonplanar = segments.clone();
+        nonplanar[0].p1[2] = 0.01;
+        let mut nonfinite = segments.clone();
+        nonfinite[0].p1[0] = f64::NAN;
+        let mut doubled = segments.clone();
+        doubled.last_mut().unwrap().p2 = doubled[0].p0;
+        doubled.extend_from_within(..);
+        for (name, candidate) in [
+            ("bowed", bowed),
+            ("ellipse", ellipse),
+            ("gap", gap),
+            ("nonplanar", nonplanar),
+            ("nonfinite", nonfinite),
+            ("double winding", doubled),
+        ] {
+            assert_eq!(
+                FillKernel::from_bounded_disc(&shape, &candidate, map, [0.0; 2]),
+                FillKernel::General,
+                "{name} must retain the actual quadratic boundary"
+            );
+        }
+        let mut ring = shape.clone();
+        ring.subpath_starts.push(8);
+        assert_eq!(
+            FillKernel::from_bounded_disc(&ring, &segments, map, [0.0; 2]),
+            FillKernel::General
+        );
+        let partial = QuadPath::try_arc(0.0, 1.5 * std::f64::consts::PI, 0.08, [0.0; 3], Some(12))
+            .expect("partial arc");
+        let (partial, segments) = shaped(&partial, Hint::General);
+        assert_eq!(
+            FillKernel::from_bounded_disc(&partial, &segments, map, [0.0; 2]),
+            FillKernel::General
+        );
+    }
+
+    #[test]
+    fn bounded_disc_recovery_checks_excursions_between_circle_midpoints() {
+        let radius = 0.08;
+        let path = circle_path(0.0, 0.0, radius, 16);
+        let (mut shape, mut segments) = shaped(&path, Hint::General);
+        let map = ScreenMap {
+            scale: 135.0,
+            ..unit()
+        };
+        // Keep both anchors on the circle and move this curve's midpoint to a
+        // different point on that same circle. Its unseen quarter-points wander
+        // far outside the bound: a midpoint-only recognizer cannot prove it.
+        let angle = 0.6;
+        let middle = [
+            radius * fmn_dmath::cos(angle),
+            radius * fmn_dmath::sin(angle),
+        ];
+        for (axis, value) in middle.into_iter().enumerate() {
+            segments[0].p1[axis] =
+                2.0 * value - 0.5 * (segments[0].p0[axis] + segments[0].p2[axis]);
+        }
+        shape.hint = Hint::Circle {
+            center: [0.0; 3],
+            radius,
+        };
+        assert!(
+            matches!(
+                FillKernel::select(&shape, &segments, map, [0.0; 2]),
+                FillKernel::Disc { .. }
+            ),
+            "the trusted-arc midpoint test alone would admit this stale hint"
+        );
+        assert_eq!(
+            FillKernel::from_bounded_disc(&shape, &segments, map, [0.0; 2]),
+            FillKernel::General
+        );
+    }
+
+    #[test]
+    fn recovered_disc_coverage_respects_the_existing_hint_budget() {
+        let path = circle_path(16.4, 15.6, 10.8, 16);
+        let (shape, segments) = shaped(&path, Hint::General);
+        let kernel = FillKernel::from_bounded_disc(&shape, &segments, unit(), [0.0; 2]);
+        let FillKernel::Disc { center, radius } = kernel else {
+            panic!("default Dot must recover");
+        };
+        // Independent dense curve evaluations check the full-bound enclosure,
+        // including every segment's interior, rather than reproducing its
+        // Bernstein coefficient calculation.
+        for segment in &segments {
+            for index in 0..=1000 {
+                let t = f64::from(index) / 1000.0;
+                let u = 1.0 - t;
+                let point: [f64; 2] = std::array::from_fn(|axis| {
+                    u * u * segment.p0[axis]
+                        + 2.0 * u * t * segment.p1[axis]
+                        + t * t * segment.p2[axis]
+                        - center[axis]
+                });
+                let actual = (point[0] * point[0] + point[1] * point[1]).sqrt();
+                assert!((actual - radius).abs() <= HINT_BUDGET_PX);
+            }
+        }
+        let approximate = kernel_grid(kernel, 34, 32);
+        let general = general_grid(&pieces_of_path(&path, unit()), 34, 32);
+        let worst = approximate
+            .iter()
+            .zip(&general)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            worst <= 3.0 * HINT_BUDGET_PX,
+            "existing disc coverage bound: {worst}"
+        );
     }
 
     #[test]
