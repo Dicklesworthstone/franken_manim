@@ -14315,10 +14315,10 @@ pub fn run_portal_gauntlet_planar_aspects(
                     .map_err(|error| format!("planar aspect report {name}: {error}"))
             };
             let resolution: (u32, u32) = get("resolution")?
-                .extract()
+                .extract::<(u32, u32)>()
                 .map_err(|error| error.to_string())?;
             let frame_count: u64 = get("frame_count")?
-                .extract()
+                .extract::<u64>()
                 .map_err(|error| error.to_string())?;
             let root = directory.join(format!("{}x{}", resolution.0, resolution.1));
             let mut serial_matches_parallel = true;
@@ -14340,15 +14340,15 @@ pub fn run_portal_gauntlet_planar_aspects(
                 ));
             }
             let readback: Vec<u8> = get("readback")?
-                .extract()
+                .extract::<Vec<u8>>()
                 .map_err(|error| error.to_string())?;
             let mut readback_matches_file = readback == last_pixels;
             let camera_mutation_routes: Vec<(String, u64, u64, Option<String>)> =
                 get("camera_mutation_routes")?
-                    .extract()
+                    .extract::<Vec<(String, u64, u64, Option<String>)>>()
                     .map_err(|error| error.to_string())?;
             let mutation_readbacks: Vec<Vec<u8>> = get("camera_mutation_readbacks")?
-                .extract()
+                .extract::<Vec<Vec<u8>>>()
                 .map_err(|error| error.to_string())?;
             if camera_mutation_routes.len() != mutation_readbacks.len() {
                 return Err("planar aspect mutation report omitted a readback".to_owned());
@@ -14364,13 +14364,13 @@ pub fn run_portal_gauntlet_planar_aspects(
                 resolution,
                 frame_count,
                 serial_routes: get("serial_routes")?
-                    .extract()
+                    .extract::<(u64, u64, Option<String>)>()
                     .map_err(|error| error.to_string())?,
                 parallel_routes: get("parallel_routes")?
-                    .extract()
+                    .extract::<(u64, u64, Option<String>)>()
                     .map_err(|error| error.to_string())?,
                 parallel_teams_used: get("parallel_teams_used")?
-                    .extract()
+                    .extract::<u64>()
                     .map_err(|error| error.to_string())?,
                 readback_matches_file,
                 serial_matches_parallel,
